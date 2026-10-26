@@ -7,7 +7,7 @@ import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from 
 import { randomUUID } from "node:crypto";
 import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext, readWorksceneTaskContext } from "@zhixing/core/workscene/application";
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
-import { parseConversationId } from "@zhixing/core/conversation";
+import { parseConversationId, parseLocalConversationId } from "@zhixing/core/conversation";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
 import type {
   AuthorityCapability,
@@ -304,6 +304,15 @@ class RetryableRunEndPreparation extends Error {
   constructor(error: unknown) { super("Run end preparation remains pending", { cause: error }); }
 }
 
+/** 本 Anchor 已提交收编的迁移：按会话精确定位，在首次触及该会话时装入，启动不遍历全部收编。 */
+export interface CommittedConversationTransferPort {
+  /** 该会话已提交（含已转出）的迁移编号，按编号排序。 */
+  readonly committedFor: (conversationId: string) => Promise<readonly string[]>;
+  /** 全部已提交收编的会话，供目录类列举。 */
+  readonly conversations: () => Promise<readonly string[]>;
+  readonly load: (transferId: string) => Promise<ConversationTransferPublication>;
+}
+
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
   readonly #authority: ConversationOwnerRuntimeStack;
@@ -317,6 +326,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
   readonly #unavailableTransfers = new Map<string, { transferId: string; error: Error }>();
+  #committedTransfers: CommittedConversationTransferPort | undefined;
+  readonly #adopting = new Map<string, Promise<void>>();
   readonly #adoptedConversations = new Map<string, {
     readonly transferId: string;
     readonly ownerEpoch: number;
@@ -408,7 +419,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#storedIdentityExists = options.storedIdentityExists;
     const protocol = this;
     this.deferredIntentAuthority = Object.freeze({
-      transact<Value>(input: DeferredIntentConversationTransaction<Value>) {
+      async transact<Value>(input: DeferredIntentConversationTransaction<Value>) {
+        await protocol.#adopt(input.conversationId);
         return protocol.#journal(input.conversationId).transactDeferredIntent(input);
       },
     });
@@ -486,6 +498,58 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         this.#mutationPublisher = undefined;
       }
     };
+  }
+
+  /** 绑定本 Anchor 的已提交收编来源；之后收编会话在首次触及时按键装入。返回解绑函数。 */
+  bindCommittedConversationTransfers(port: CommittedConversationTransferPort): () => void {
+    if (this.#committedTransfers && this.#committedTransfers !== port) {
+      throw new Error("Committed conversation transfers are already bound");
+    }
+    this.#committedTransfers = port;
+    return () => {
+      if (this.#committedTransfers === port) this.#committedTransfers = undefined;
+    };
+  }
+
+  #needsAdoption(conversationId: string): boolean {
+    return this.#committedTransfers !== undefined &&
+      !this.#authority.acceptsConversationId(conversationId) &&
+      !this.#adoptedConversations.has(conversationId) &&
+      !this.#unavailableTransfers.has(conversationId) &&
+      !!parseLocalConversationId(conversationId);
+  }
+
+  /**
+   * 收编会话按键就地装入：读这个会话已提交的迁移并安装基线，与原先启动时逐个安装的顺序与校验相同；
+   * 来源证据缺失按已提交缺证隔离保留。同一会话的并发触及共享一次装入；不是收编会话则什么也不做。
+   */
+  #adopt(conversationId: string): Promise<void> {
+    if (!this.#needsAdoption(conversationId)) return Promise.resolve();
+    let adopting = this.#adopting.get(conversationId);
+    if (!adopting) {
+      adopting = this.#installAdoption(conversationId).finally(() => this.#adopting.delete(conversationId));
+      this.#adopting.set(conversationId, adopting);
+    }
+    return adopting;
+  }
+
+  async #installAdoption(conversationId: string): Promise<void> {
+    const port = this.#committedTransfers!;
+    for (const transferId of await port.committedFor(conversationId)) {
+      // 现场提交已装入同一代际时不再替换它的日志视图
+      if (this.#adoptedConversations.get(conversationId)?.transferId === transferId && !this.#unavailableTransfers.has(conversationId)) continue;
+      let publication: ConversationTransferPublication;
+      try {
+        publication = await port.load(transferId);
+      } catch (error) {
+        if (!isConversationSourceEvidenceError(error)) throw error;
+        await this.retainUnavailableCommittedConversationTransfer(transferId, error as Error);
+        continue;
+      }
+      const prepared = await this.prepareCommittedConversationTransfer({ manifest: publication.manifest, source: publication.source });
+      if (this.#adoptedConversations.get(conversationId)?.transferId === transferId && !this.#unavailableTransfers.has(conversationId)) continue;
+      prepared.publish();
+    }
   }
 
   /** Installs a committed immutable source prefix before exposing the adopted session. */
@@ -574,28 +638,31 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     readonly submission: RunSubmissionPort;
     readonly submissionGuard: AssignmentSubmissionPreflightPort;
   } {
-    const journalFor = (context: AuthorityCallContext) =>
-      this.#journal(conversationIdFromSubmissionContext(context));
+    const journalFor = async (context: AuthorityCallContext) => {
+      const conversationId = conversationIdFromSubmissionContext(context);
+      await this.#adopt(conversationId);
+      return this.#journal(conversationId);
+    };
     return {
       submission: {
-        reportStarted: (assignmentId, context) =>
-          journalFor(context).reportStarted(assignmentId, context),
-        submitBundle: (bundle, context) =>
-          journalFor(context).submitBundle(bundle, context),
-        submitCancelProof: (assignmentId, proof, context) =>
-          journalFor(context).submitCancelProof(assignmentId, proof, context),
-        mirrorInteractions: (assignmentId, batch, context) =>
-          journalFor(context).mirrorInteractions(
+        reportStarted: async (assignmentId, context) =>
+          (await journalFor(context)).reportStarted(assignmentId, context),
+        submitBundle: async (bundle, context) =>
+          (await journalFor(context)).submitBundle(bundle, context),
+        submitCancelProof: async (assignmentId, proof, context) =>
+          (await journalFor(context)).submitCancelProof(assignmentId, proof, context),
+        mirrorInteractions: async (assignmentId, batch, context) =>
+          (await journalFor(context)).mirrorInteractions(
             assignmentId,
             asConversationMirrorBatch(batch),
             context,
           ),
       },
       submissionGuard: {
-        preflightSubmission: (
+        preflightSubmission: async (
           context: AuthorityCallContext,
           identity: AssignmentSubmissionIdentity,
-        ) => journalFor(context).preflightSubmission(context, identity),
+        ) => (await journalFor(context)).preflightSubmission(context, identity),
       },
     };
   }
@@ -733,6 +800,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   /** 远端执行方仍通过当前 Owner 消费输入；设备身份须匹配已分配的执行者。 */
   async remoteRunInput(address: { conversationId: string; runId: string; assignmentId: string }, executorId: string) {
+    await this.#adopt(address.conversationId);
     const journal = this.#journal(address.conversationId);
     await journal.assertInputExecutor(address.runId, address.assignmentId, executorId);
     return {
@@ -755,6 +823,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   async recoveryPage(request: import('@zhixing/core/contracts').ConversationRecoveryRequest) {
     const id = request.conversationId;
+    await this.#adopt(id);
     if (!this.#acceptsConversationId(id)) throw Error('Conversation recovery owner is unavailable');
     // Empty legacy conversations already have a stored identity before their
     // first authority write. Reading them must neither create facts nor replay
@@ -772,6 +841,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    * concurrent activation replay the original authority decision.
    */
   ensureSession(conversationId: string): Promise<void> {
+    if (this.#needsAdoption(conversationId)) {
+      return this.#adopt(conversationId).then(() => this.#ensureAcceptedSession(conversationId));
+    }
+    return this.#ensureAcceptedSession(conversationId);
+  }
+
+  #ensureAcceptedSession(conversationId: string): Promise<void> {
     if (!this.#acceptsConversationId(conversationId)) {
       return Promise.reject(
         new Error("Conversation identity does not belong to this owner domain"),
@@ -852,6 +928,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       runId,
       requestId: `cancel:pending:${runId}`,
     };
+    await this.#adopt(conversationId);
     const journal = this.#journal(conversationId);
     try {
       await this.#terminalOperations.run(() =>
@@ -883,10 +960,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     ingressId: string,
     source: ConversationInvocation["source"],
   ) {
+    await this.#adopt(conversationId);
     return this.#journal(conversationId).runByIngress(ingressId, source);
   }
 
   async findInteractionOutcome(conversationId: string, requestId: string) {
+    await this.#adopt(conversationId);
     return this.#journal(conversationId).interactionOutcome(requestId);
   }
 
@@ -910,7 +989,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     { readonly revision: number; readonly at: string } | undefined
   > {
     const { conversationId, ...activity } = input;
-    return this.#journal(conversationId).deleteWorksceneSession(activity);
+    return this.#adopt(conversationId).then(() => this.#journal(conversationId).deleteWorksceneSession(activity));
   }
 
   async cancel(
@@ -920,6 +999,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     // Re-enter only after the serial owner and recovery claim have unwound;
     // replay reads the original durable batch, never a new candidate set.
     input = structuredClone(input);
+    await this.#adopt(input.conversationId);
     const source = { principal: { ...input.principal } };
     const localResults = new Map<string, ReturnType<ConversationManager["applyDurableCancellation"]>>();
     const applyLocal = (runId: string) => {
@@ -997,7 +1077,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     let count = 0;
     for (const envelope of envelopes) {
       const body = envelope.body;
-      if ((body.t !== "cancel" && body.t !== "cancel-batch") || !this.#acceptsConversationId(body.conversationId)) continue;
+      if (body.t !== "cancel" && body.t !== "cancel-batch") continue;
+      await this.#adopt(body.conversationId);
+      if (!this.#acceptsConversationId(body.conversationId)) continue;
       if (this.#recoveryStopped) break;
       try { await this.#terminalOperations.run(() => this.#withRecoveryClaim(body.conversationId, async () => {
         const journal = this.#journal(body.conversationId);
@@ -1122,6 +1204,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     input: DurableConversationResolveInput,
   ): Promise<DurableConversationResolutionResult> {
     const source = { principal: { ...input.principal } };
+    await this.#adopt(input.conversationId);
     const journal = this.#journal(input.conversationId);
     const outcome = await this.#applyAuthorityControl(input.conversationId, journal, {
       admission: this.#authority.controlAdmission,
@@ -1175,6 +1258,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async writeSession(
     input: DurableConversationSessionWriteInput,
   ): Promise<DurableConversationSessionWriteResult> {
+    await this.#adopt(input.conversationId);
     const journal = this.#journal(input.conversationId);
     const lifecycleMutation =
       input.mutation.kind === "conversation-delete" ||
@@ -1242,6 +1326,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async projectSession(
     input: DurableConversationSessionProjectionInput,
   ): Promise<void> {
+    await this.#adopt(input.conversationId);
     const journal = this.#journal(input.conversationId);
     const fact = await journal.lifecycleRequest(input.requestId);
     if (
@@ -2002,6 +2087,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     input: DurableConversationAdmissionInput,
     allowPendingReplay = false,
   ): Promise<AppliedConversationAdmission> {
+    await this.#adopt(input.conversationId);
     const at = this.#clock();
     const ingress = ingressForTurn(input, this.#authority.deviceId, at);
     const requestId = inputControlRequestId(ingress);
@@ -2240,8 +2326,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async listSessions(): Promise<readonly string[]> {
     const ids = new Set(await this.#authority.controlAdmission.listCreatedConversationIds());
     for (const conversationId of this.#adoptedConversations.keys()) ids.add(conversationId);
+    for (const conversationId of await this.#committedTransfers?.conversations() ?? []) ids.add(conversationId);
     const active: string[] = [];
     for (const conversationId of ids) {
+      await this.#adopt(conversationId);
       if (!this.#acceptsConversationId(conversationId)) continue;
       if (!await this.#journalForQuery(conversationId).recoveryDeleted()) active.push(conversationId);
     }
@@ -2249,6 +2337,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async sessionExists(conversationId: string): Promise<boolean> {
+    await this.#adopt(conversationId);
     if (!this.#acceptsConversationId(conversationId)) return false;
     if (!this.#adoptedConversations.has(conversationId)) {
       if (!await this.#authority.controlAdmission.hasCreatedConversation(conversationId)) return false;
@@ -2364,7 +2453,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#recoveryStopped) return 0;
     if (this.#recoveryDiscoveryAfter) {
       const page = await conversationRecoveryPage(this.#authority.authorityLog, this.#authority.artifacts, this.#recoveryDiscoveryAfter);
-      for (const id of page.conversationIds) if (this.#acceptsConversationId(id)) this.#markRecovery(id);
+      for (const id of page.conversationIds) {
+        await this.#adopt(id);
+        if (this.#acceptsConversationId(id)) this.#markRecovery(id);
+      }
       this.#recoveryDiscoveryAfter = page.after;
     }
     const queue = [...this.#recoveryConversations.entries()].slice(0, 32);
@@ -2490,6 +2582,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async #prepareConversationBasis(conversationId: string): Promise<void> {
+    await this.#adopt(conversationId);
     const unavailable = this.#unavailableTransfers.get(conversationId);
     if (unavailable) {
       const publication = await loadCommittedConversationBase(this.#authority.authorityLog, this.#authority.artifacts,
@@ -2503,6 +2596,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
 
   async completeLifecycleProjections(conversationId: string): Promise<number> {
+    await this.#adopt(conversationId);
     return this.#resumeLifecycleProjections(
       conversationId,
       this.#journal(conversationId),
@@ -2511,6 +2605,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   async publishPendingFinals(conversationId: string): Promise<number> {
     try {
+      await this.#adopt(conversationId);
       const journal = this.#journal(conversationId);
       await journal.resumeCommittedProjections();
       if (!this.#onFinal) return 0;
@@ -2557,6 +2652,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ? await this.listSessions()
       : [conversationId];
     for (const currentConversationId of conversations) {
+      await this.#adopt(currentConversationId);
       const journal = this.#journal(currentConversationId);
       for (const final of await journal.pendingFinalFrames()) {
         finals.push({
@@ -2578,6 +2674,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const leases: Array<{ id: string; revision: string }> = [];
     for (const reservation of
       await this.#authority.resourceRecovery.activeConversationReservations()) {
+      await this.#adopt(reservation.conversationId);
       if (
         reservation.ownerEpoch === this.#ownerEpochFor(reservation.conversationId) &&
         this.#acceptsConversationId(reservation.conversationId) &&
@@ -2619,7 +2716,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   sessionAuthorityState(conversationId: string) {
-    return this.#journal(conversationId).authorityState();
+    return this.#adopt(conversationId).then(() => this.#journal(conversationId).authorityState());
   }
 
   async statusHistory(
@@ -2637,6 +2734,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }[];
   }> {
     for (const request of requests) {
+      await this.#adopt(request.conversationId);
       if (!this.#acceptsConversationId(request.conversationId)) {
         throw new Error("Conversation identity does not belong to this owner domain");
       }
@@ -2692,26 +2790,32 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    * 惰性创建，journal 访问走缓存实例（查询侧不再每次重建）。
    */
   taskListBeforeMutation(conversationId: string, requestId: string) {
-    return this.#journal(conversationId).taskListBeforeMutation(requestId);
+    return this.#adopt(conversationId).then(() => this.#journal(conversationId).taskListBeforeMutation(requestId));
   }
 
   /** Local owner-only recovery port; no metadata directory or surface authority. */
   get advancementPending() {
     return {
       list: (after?: string) => pendingAdvancementConversations(this.#authority.authorityLog, this.#authority.artifacts, this.#authority.verifier, after),
-      cleanup: (conversationId: string, after?: string) => this.#journal(conversationId).pendingAdvancementCleanup(after),
-      run: (conversationId: string, sessionId: string, before?: number) => this.#journal(conversationId).pendingAdvancementRun(sessionId, before),
+      cleanup: (conversationId: string, after?: string) =>
+        this.#adopt(conversationId).then(() => this.#journal(conversationId).pendingAdvancementCleanup(after)),
+      run: (conversationId: string, sessionId: string, before?: number) =>
+        this.#adopt(conversationId).then(() => this.#journal(conversationId).pendingAdvancementRun(sessionId, before)),
     };
   }
 
   get sessionState(): SessionStatePort {
     if (!this.#sessionState) {
       this.#sessionState = new ConversationSessionStateAdapter({
-        journalFor: (conversationId) => this.#journal(conversationId),
+        journalFor: async (conversationId) => {
+          await this.#adopt(conversationId);
+          return this.#journal(conversationId);
+        },
         sessionExists: async (conversationId) => await this.sessionExists(conversationId) ||
           (await this.#storedIdentityExists?.(conversationId)) === true,
         establishIdentity: (conversationId) => this.ensureSession(conversationId),
         mutateControl: async (conversationId, mutation, ctx) => {
+          await this.#adopt(conversationId);
           const principal = ctx.principal.kind === "surface"
             ? {
                 surfacePrincipal: ctx.principal.surfacePrincipal,
@@ -2762,6 +2866,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           return { revision: result.domainRevision };
         },
         stageAssignment: async (conversationId, mutation, ctx) => {
+          await this.#adopt(conversationId);
           if (ctx.principal.kind !== "assignment") {
             throw new Error("Staged session mutation requires an assignment principal");
           }
@@ -3238,6 +3343,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     // Read one current obligation page. Further pages belong to the recovery
     // worker; unrelated conversations are not a service-readiness barrier.
     const page = await conversationRecoveryPage(this.#authority.authorityLog, this.#authority.artifacts);
+    for (const conversationId of page.conversationIds) await this.#adopt(conversationId);
     const conversationIds = new Set(
       page.conversationIds.filter((conversationId) =>
         this.#acceptsConversationId(conversationId),
@@ -3466,11 +3572,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     conversationId: string,
     afterCommitRevision: number,
   ): Promise<CommittedConversationResult[]> {
+    await this.#adopt(conversationId);
     return this.#journal(conversationId).finalHistory(afterCommitRevision);
   }
 
   /** 推进取证目标只由 accepted run 的冻结 manifest 与已验签能力目录决定。 */
   async advancementEvidenceTarget(conversationId: string, runId: string) {
+    await this.#adopt(conversationId);
     const dispatch = await this.#journal(conversationId).advancementEvidenceDispatch(runId);
     if (!dispatch) return undefined;
     const descriptor = this.#authority.executorCapabilities.snapshotFor(
@@ -3502,9 +3610,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async worksceneContinuationSources(conversationId: string, query?: import("@zhixing/core/workscene/application").WorksceneContinuationQuery) {
+    await this.#adopt(conversationId);
     if (query && 'root' in query) {
       const frontiers = await this.#journal(conversationId).worksceneContinuationFrontiers(query.root);
-      return (await Promise.all(frontiers.map(ref => this.#journal(ref.conversationId).worksceneContinuationSources({ runId: ref.runId })))).flat();
+      return (await Promise.all(frontiers.map(async ref => {
+        await this.#adopt(ref.conversationId);
+        return this.#journal(ref.conversationId).worksceneContinuationSources({ runId: ref.runId });
+      }))).flat();
     }
     return this.#journal(conversationId).worksceneContinuationSources(query);
   }

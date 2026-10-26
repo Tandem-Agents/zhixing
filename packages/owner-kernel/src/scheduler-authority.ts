@@ -10,7 +10,6 @@ import {
 import type { AgentTurnResult, ScheduledTask, SchedulerEventMap, SchedulerControlSource, SystemHandler, TaskPatch, TaskSpec, TaskPriority, TaskSchedule } from "@zhixing/core/scheduler";
 import type { IEventBus } from "@zhixing/core";
 import {
-  countScheduleConsecutiveFailures,
   isScheduleFailure,
   decideScheduleTrigger,
   deriveScheduleNextRun,
@@ -50,7 +49,10 @@ export interface AnchorSchedulerOptions {
   readonly deviceId: string;
   readonly admission: ControlAdmissionJournal;
   readonly eventBus: IEventBus<SchedulerEventMap>;
+  /** 启动要恢复的任务：当前（未删除）定义，以及仍有未完义务的任务。 */
   readonly listTaskIds: () => Promise<readonly string[]>;
+  /** 本进程没见过的 run 按持久索引精确找所属任务。 */
+  readonly findTaskForRun?: (jobRunId: string) => Promise<string | undefined>;
   readonly journalFor: (taskId: string) => JobJournal;
   readonly activateUserJob: (input: {
     readonly journal: JobJournal;
@@ -90,7 +92,11 @@ export interface AnchorSystemTaskSpec {
 
 interface TaskRuntimeProjection {
   readonly definition: TaskDefinition;
-  readonly occurrences: readonly ScheduleOccurrence[];
+  /** 非错过 occurrence 的总数。 */
+  readonly runCount: number;
+  /** 最近一次起向前的连续失败次数。 */
+  readonly consecutiveFailures: number;
+  readonly last?: ScheduleOccurrence;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -245,7 +251,7 @@ export class AnchorScheduler {
     }
     for (const [taskId, definition] of this.#definitions) {
       if (definition.definition.kind === "system") continue;
-      for (const occurrence of await this.#journal(taskId).occurrences()) {
+      for (const occurrence of await this.#journal(taskId).openOccurrences()) {
         if (!TERMINAL_STATES.has(occurrence.state as never)) {
           this.#trackCompletion(taskId, occurrence.jobRunId);
         }
@@ -268,7 +274,7 @@ export class AnchorScheduler {
         group = { ...(target ? { target } : {}), members: [] };
         groups.set(groupKey, group);
       }
-      for (const occurrence of await this.#journal(taskId).occurrences()) {
+      for (const occurrence of await this.#journal(taskId).pendingMissedOccurrences()) {
         if (occurrence.state !== "missed") continue;
         group.members.push({
           taskId,
@@ -328,8 +334,7 @@ export class AnchorScheduler {
     )) {
       const taskId = this.#taskByRun.get(jobRunId);
       if (!taskId) continue;
-      const occurrence = (await this.#journal(taskId).occurrences())
-        .find((item) => item.jobRunId === jobRunId);
+      const occurrence = await this.#journal(taskId).scheduleOccurrence(jobRunId);
       if (!occurrence || TERMINAL_STATES.has(occurrence.state as never)) continue;
       items.push(Object.freeze({
         id: jobRunId,
@@ -355,7 +360,7 @@ export class AnchorScheduler {
     for (const [taskId, definition] of this.#definitions) {
       const journal = this.#journal(taskId);
       const accepted = new Set<string>();
-      for (const occurrence of await journal.occurrences()) {
+      for (const occurrence of await journal.openOccurrences()) {
         if (TERMINAL_STATES.has(occurrence.state as never)) continue;
         const revision = protocolDigest("SchedulerAcceptedWork", 1, {
           taskId: occurrence.taskId,
@@ -566,7 +571,7 @@ export class AnchorScheduler {
     );
     if (applied?.replayed) return;
     const cancellationFailures: unknown[] = [];
-    for (const occurrence of await journal.occurrences()) {
+    for (const occurrence of await journal.openOccurrences()) {
       if (TERMINAL_STATES.has(occurrence.state as never)) continue;
       try {
         const cancelRequestId = `schedule-delete-cancel:${protocolDigest(
@@ -756,7 +761,7 @@ export class AnchorScheduler {
     controlSource?: SchedulerControlSource,
   ): Promise<boolean> {
     this.#requireAccepting();
-    const taskId = this.#taskForRun(jobRunId);
+    const taskId = this.#taskForRun(jobRunId) ?? await this.#options.findTaskForRun?.(jobRunId);
     if (!taskId) return false;
     const journal = this.#journal(taskId);
     const at = this.#now().toISOString();
@@ -1025,7 +1030,7 @@ export class AnchorScheduler {
     if (!state) return;
     await this.#refreshTask(taskId);
     const view = this.#requiredView(taskId);
-    const occurrence = (await this.#journal(taskId).occurrences()).find(item => item.jobRunId === jobRunId);
+    const occurrence = await this.#journal(taskId).scheduleOccurrence(jobRunId);
     if (state === "committed" && !isScheduleFailure({ state, outcome: occurrence?.outcome })) {
       await this.#options.eventBus.emit("scheduler:task-completed", {
         taskId,
@@ -1051,7 +1056,7 @@ export class AnchorScheduler {
     startedAt: number,
   ): Promise<AgentTurnResult> {
     const state = await this.#waitForTerminalState(taskId, jobRunId);
-    const occurrence = state && (await this.#journal(taskId).occurrences()).find(item => item.jobRunId === jobRunId);
+    const occurrence = state ? await this.#journal(taskId).scheduleOccurrence(jobRunId) : undefined;
     if (state === "committed" && !isScheduleFailure({ state, outcome: occurrence?.outcome })) {
       return {
         status: "ok",
@@ -1158,20 +1163,19 @@ export class AnchorScheduler {
     } = {},
   ): Promise<void> {
     const journal = this.#journal(taskId);
-    const { definition, occurrences } = await journal.schedulerReadView();
+    // 调度视图只含当前事实：未结束的 occurrence、运行次数、连续失败与最近一次
+    const { definition, open, runCount, consecutiveFailures, last } = await journal.schedulerReadView();
     if (!definition) return;
     this.#activeRunCountByTask.set(
       taskId,
-      occurrences.filter((item) => !TERMINAL_STATES.has(item.state as never)).length,
+      open.filter((item) => !TERMINAL_STATES.has(item.state as never)).length,
     );
     this.#queuedRunsByTask.set(
       taskId,
-      occurrences.filter((item) => item.state === "queued"),
+      open.filter((item) => item.state === "queued"),
     );
-    for (const [jobRunId, ownerTaskId] of this.#taskByRun) {
-      if (ownerTaskId === taskId) this.#taskByRun.delete(jobRunId);
-    }
-    for (const occurrence of occurrences) {
+    // 本进程见过的 run 一直可按 run 找到所属任务；更早的由持久投影精确查
+    for (const occurrence of open) {
       this.#taskByRun.set(occurrence.jobRunId, taskId);
     }
     const previousDefinition = this.#definitions.get(taskId);
@@ -1195,7 +1199,9 @@ export class AnchorScheduler {
     const now = this.#now().toISOString();
     const projection: TaskRuntimeProjection = {
       definition,
-      occurrences,
+      runCount,
+      consecutiveFailures,
+      ...(last ? { last } : {}),
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     };
@@ -1211,8 +1217,7 @@ export class AnchorScheduler {
       ? projectUserTask(projection)
       : projectSystemTask(projection, options.systemView, previous);
     this.#views.set(taskId, view);
-    const policy = await this.#schedulerPolicyFor(journal);
-    const last = occurrences.at(-1);
+    const policy = await this.#schedulerPolicyFor(journal, last ? [last.jobRunId] : []);
     const frozen = last?.state === "missed"
       ? policy.missedNextFireByRun.get(last.jobRunId)?.nextFire
       : last && isScheduleFailure(last)
@@ -1229,7 +1234,7 @@ export class AnchorScheduler {
       ? undefined
       : frozen ?? legacyNext ??
         (unchangedDefinition ? this.#nextRunByTask.get(taskId) : undefined) ??
-        deriveScheduleNextRun(view.schedule, occurrences, new Date(projection.updatedAt));
+        deriveScheduleNextRun(view.schedule, last ? [last] : [], new Date(projection.updatedAt));
     if (definition.state === "enabled" && next) this.#nextRunByTask.set(taskId, next);
     else this.#nextRunByTask.delete(taskId);
     view.state.nextRunAt = this.#nextRunByTask.get(taskId);
@@ -1246,8 +1251,8 @@ export class AnchorScheduler {
     await this.#refreshTask(event.ref.taskId);
   }
 
-  async #schedulerPolicyFor(journal: JobJournal): ReturnType<JobJournal["schedulerPolicy"]> {
-    if (typeof journal.schedulerPolicy === "function") return journal.schedulerPolicy();
+  async #schedulerPolicyFor(journal: JobJournal, jobRunIds: readonly string[] = []): ReturnType<JobJournal["schedulerPolicy"]> {
+    if (typeof journal.schedulerPolicy === "function") return journal.schedulerPolicy(jobRunIds);
     // Test-only legacy journal doubles do not carry scheduler policy facts.
     return Promise.resolve({
       missedNextFireByRun: new Map(),
@@ -1422,8 +1427,8 @@ function projectUserTask(input: TaskRuntimeProjection): ScheduledTask {
   const definition = input.definition as TaskDefinition & {
     definition: Extract<TaskDefinition["definition"], { kind: "user" }>;
   };
-  const last = input.occurrences.at(-1);
-  const failures = countScheduleConsecutiveFailures(input.occurrences);
+  const last = input.last;
+  const failures = input.consecutiveFailures;
   return {
     id: definition.taskId,
     taskRevision: definition.taskRevision,
@@ -1444,7 +1449,7 @@ function projectUserTask(input: TaskRuntimeProjection): ScheduledTask {
       : {}),
     state: {
       consecutiveErrors: failures,
-      runCount: input.occurrences.filter((occurrence) => occurrence.state !== "missed").length,
+      runCount: input.runCount,
       ...(last ? { lastRunAt: last.scheduledFor } : {}),
       ...(last?.state === "committed" && !isScheduleFailure(last)
         ? { lastStatus: "ok" as const, lastSummary: last.outcome?.summary ?? "Scheduled job completed." }
@@ -1476,7 +1481,7 @@ function projectSystemTask(
   const definition = input.definition as TaskDefinition & {
     definition: Extract<TaskDefinition["definition"], { kind: "system" }>;
   };
-  const last = input.occurrences.at(-1);
+  const last = input.last;
   const name = supplied?.name ?? previous?.name ?? definition.definition.handler;
   const schedule = supplied?.schedule ?? previous?.schedule;
   if (!schedule) {
@@ -1501,8 +1506,8 @@ function projectSystemTask(
     },
     system: true,
     state: {
-      consecutiveErrors: countScheduleConsecutiveFailures(input.occurrences),
-      runCount: input.occurrences.filter((occurrence) => occurrence.state !== "missed").length,
+      consecutiveErrors: input.consecutiveFailures,
+      runCount: input.runCount,
       ...(last ? { lastRunAt: last.scheduledFor } : {}),
       ...(last?.state === "committed"
         ? { lastStatus: "ok" as const }

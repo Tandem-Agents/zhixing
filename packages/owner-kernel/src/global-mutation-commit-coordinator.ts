@@ -1,4 +1,3 @@
-import { projectionCheckpointKey } from "@zhixing/core/authority";
 import { Buffer } from "node:buffer";
 import { assertArtifactRef, collectArtifactRefs } from "@zhixing/core/authority";
 import type {
@@ -32,46 +31,33 @@ import {
 } from "./scheduler-mutation-commit.js";
 
 export const SCHEDULE_AUTHORITY_PROJECTION_ID = "global-schedule-authority-v1";
-export const SCHEDULE_AUTHORITY_REDUCER_VERSION = 2;
+export const SCHEDULE_AUTHORITY_REDUCER_VERSION = 3;
 
 const SCHEDULE_DEFINITION_PREFIX = "definition:";
 const SCHEDULE_PENDING_PREFIX = "pending:";
+/** 当前（未删除）定义的目录：启动只恢复这些任务与仍有未完义务的任务。 */
+const SCHEDULE_CURRENT_PREFIX = "current:";
 const SCHEDULE_MATERIALIZATION_STREAM = "job:schedule-materialization";
 
-/** Enumerate task journals without treating the schedule coordinator's own stream as a task. */
-/**
- * 全部定时任务标识（`job:` 流名）。结果随检查点保存：重启后只续读其后的尾部，不为枚举流名
- * 解析整份历史；没有检查点时完整读取一次。
- */
-export async function listScheduleTaskIds(log: AuthorityCommitLog): Promise<readonly string[]> {
-  const restored = await log.loadProjectionCheckpoint?.<readonly string[]>(SCHEDULE_TASK_IDS_CHECKPOINT);
-  const initial = new Set<string>(Array.isArray(restored?.state) ? restored.state : []);
-  const read = await log.readProjection<Set<string>, unknown>(
-    initial,
-    (current, entry) => {
-      const taskId = scheduleTaskIdOf(entry.stream);
-      if (taskId === undefined || current.has(taskId)) return current;
-      // 日志内部重试时从未改动的起点重新收集。
-      const next = current === initial ? new Set(current) : current;
-      next.add(taskId);
-      return next;
-    },
-    restored ? { cursor: restored.cursor } : {},
-  );
-  const taskIds = [...read.state].sort();
-  if (read.cursor.lsn > (restored?.cursor.lsn ?? 0)) {
-    await log.saveProjectionCheckpoint?.(SCHEDULE_TASK_IDS_CHECKPOINT, read.cursor, taskIds);
-  }
+/** 当前（未删除）定义的任务 id，按页读取定义目录；不读日志，不随已删除任务增长。 */
+export async function listCurrentScheduleTaskIds(
+  log: AuthorityCommitLog,
+  artifacts: ArtifactStore,
+): Promise<readonly string[]> {
+  const index = registerScheduleAuthorityProjection(log, artifacts);
+  const taskIds: string[] = [];
+  let continuation: string | undefined;
+  do {
+    const page = await index.scan({ gte: SCHEDULE_CURRENT_PREFIX, lt: `${SCHEDULE_CURRENT_PREFIX}\uffff` }, 256, continuation);
+    for (const entry of page.entries) {
+      const taskId = entry.key.slice(SCHEDULE_CURRENT_PREFIX.length);
+      if (entry.value !== taskId) throw new Error("Current schedule directory is invalid");
+      taskIds.push(taskId);
+    }
+    continuation = page.continuation;
+  } while (continuation);
   return taskIds;
 }
-
-function scheduleTaskIdOf(stream: string): string | undefined {
-  return stream.startsWith("job:") && stream.length > 4 && stream !== SCHEDULE_MATERIALIZATION_STREAM
-    ? stream.slice(4)
-    : undefined;
-}
-
-const SCHEDULE_TASK_IDS_CHECKPOINT = projectionCheckpointKey("schedule-task-ids", 1, scheduleTaskIdOf);
 
 type CoordinatorOutcome = GlobalMutationPublishOutcome | SchedulePublishOutcome;
 
@@ -400,6 +386,8 @@ async function reduceScheduleProjection(
         taskId: definition.taskId,
         targetRevision: definition.taskRevision,
       });
+      if (definition.state === "deleted") tombstone(scheduleCurrentKey(definition.taskId));
+      else put(scheduleCurrentKey(definition.taskId), definition.taskId);
       continue;
     }
     if (
@@ -523,6 +511,10 @@ function scheduleDefinitionKey(taskId: string): string {
 
 function schedulePendingKey(taskId: string): string {
   return `${SCHEDULE_PENDING_PREFIX}${taskId}`;
+}
+
+function scheduleCurrentKey(taskId: string): string {
+  return `${SCHEDULE_CURRENT_PREFIX}${taskId}`;
 }
 
 function isScheduleMutation(mutation: GlobalStagedMutation): mutation is ScheduleWriteMutation {

@@ -17,6 +17,7 @@ export {
   isScheduleFailure,
   decideScheduleFailurePolicy,
   decideScheduleTrigger,
+  scheduleFailurePolicyForCount,
   deriveScheduleNextRun,
   scheduleAutoDisableOperationId,
   scheduleJobRunId,

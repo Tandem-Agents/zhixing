@@ -210,6 +210,7 @@ export {
   type ArtifactValue,
 } from "./commit.js";
 export {
+  compareJobOccurrences,
   createJobCommitFence,
   jobDeliveryPlanDigest,
   systemJobParamsDigest,
@@ -449,6 +450,7 @@ export {
   ADMISSION_CLASSES,
   DEFAULT_ADMISSION_WEIGHTS,
   GOVERNOR_TERMINAL_RETENTION_MS,
+  RESOURCE_LEASE_MAX_TTL_MS,
   ResourceAdmissionDeferredError,
   addResourceUsage,
   advanceFairReservation,
@@ -472,6 +474,7 @@ export {
   emptyGovernorProjection,
   isAdmissionClass,
   isBusinessOwnedResourceReservation,
+  hasActiveRootForWorkload,
   queuedTerminalDequeueRecord,
   resourceBudgetUsage,
   requiresFormalResourceCoordination,
@@ -483,6 +486,7 @@ export {
   validateSystemJobReservationOrigin,
   validateUsageReport,
   waitForResourceAdmissionCandidate,
+  type GovernorIndexReads,
   type GovernorProjection,
   type ResourceBudgetUsage,
   type ResourceReservationProjection,

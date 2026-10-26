@@ -21,8 +21,9 @@ import { SchedulerConversationMutationPublisher } from "../scheduler-conversatio
 import { SchedulerJobCommitParticipant } from "../scheduler-job-commit.js";
 import {
   GlobalMutationCommitCoordinator,
-  listScheduleTaskIds,
+  listCurrentScheduleTaskIds,
   registerScheduleAuthorityProjection,
+  SCHEDULE_AUTHORITY_REDUCER_VERSION,
 } from "../global-mutation-commit-coordinator.js";
 import { readdir, readFile } from "node:fs/promises";
 import { AuthorityCacheIntegrity, durableProjectionVersionDirectoryName } from "@zhixing/core/authority";
@@ -59,7 +60,7 @@ describe("scheduler mutation commit planning", () => {
       stream: "job:schedule-materialization",
       body: { t: "schedule-materialized", taskId: plan.taskIds[0]!, targetRevision: 1 },
     }]);
-    await expect(listScheduleTaskIds(log)).resolves.toEqual(plan.taskIds);
+    await expect(listCurrentScheduleTaskIds(log, artifacts)).resolves.toEqual(plan.taskIds);
   });
 
   it("binds trusted source and reserves same-batch revisions atomically", () => {
@@ -273,7 +274,7 @@ describe("scheduler mutation owners", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, (
     expect(Object.keys(stored).sort()).toEqual(["definition", "kind", "state", "taskId", "taskRevision"]);
     expect(Object.keys(stored.definition as object)).toEqual(["source"]);
     await index.flushCheckpoint!();
-    const directory = path.join(root, "authority", "projections", durableProjectionVersionDirectoryName("global-schedule-authority-v1", 2));
+    const directory = path.join(root, "authority", "projections", durableProjectionVersionDirectoryName("global-schedule-authority-v1", SCHEDULE_AUTHORITY_REDUCER_VERSION));
     for (const file of await readdir(directory)) {
       expect((await readFile(path.join(directory, file))).includes(marker)).toBe(false);
     }

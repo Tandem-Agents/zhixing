@@ -596,12 +596,14 @@ describe("ConversationAssignmentWorker", () => {
     const abortWithTicket = vi.fn(async () => ({ kind: "accepted" as const }));
     const continueTicketCancellation = vi.fn(async () => proof);
     const submitCancelProof = vi.fn(async () => undefined);
+    const markTicketCancellationProofOwnerAccepted = vi.fn(async () => true);
     const ledger = {
       abortWithTicket,
       conversationAssignmentForRecovery: vi.fn(async () => envelope),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
       continueTicketCancellation,
       hasOpenSideEffects: vi.fn(async () => false),
+      markTicketCancellationProofOwnerAccepted,
     } as unknown as ConversationAssignmentLedger;
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
@@ -634,6 +636,88 @@ describe("ConversationAssignmentWorker", () => {
         requestId: `submission:${assignmentId}`,
       }),
     );
+    // owner 耐久处理证明之后才退休本地重提义务
+    expect(markTicketCancellationProofOwnerAccepted).toHaveBeenCalledWith(assignmentId);
+    expect(markTicketCancellationProofOwnerAccepted.mock.invocationCallOrder[0])
+      .toBeGreaterThan(submitCancelProof.mock.invocationCallOrder[0]!);
+  });
+
+  it("retires the ticket cancellation only after a retried proof submission succeeds", async () => {
+    const assignmentId = "asg-worker-ticket-cancel-retried";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const markTicketCancellationProofOwnerAccepted = vi.fn(async () => true);
+    // 第一次提交断连（结果未知）：保持待重提，按退避重做后成功
+    const submitCancelProof = vi.fn(async () => undefined)
+      .mockRejectedValueOnce(new Error("connection reset before the owner answered"));
+    const ledger = {
+      abortWithTicket: vi.fn(async () => ({ kind: "accepted" as const })),
+      conversationAssignmentForRecovery: vi.fn(async () => envelope),
+      pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      continueTicketCancellation: vi.fn(async () => ({ assignmentId, cause: "abort-ticket" }) as never),
+      hasOpenSideEffects: vi.fn(async () => false),
+      markTicketCancellationProofOwnerAccepted,
+    } as unknown as ConversationAssignmentLedger;
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger,
+      runtimeFactory: {} as RuntimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({ reportStarted: vi.fn(), mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof }),
+      finalizeUsage: vi.fn(),
+      interactions: interactionObserver(),
+    });
+
+    await worker.abortWithTicket({ assignmentId, reason: "owner unavailable" } as unknown as ExecutionAbortRequest);
+    await worker.drain();
+
+    expect(submitCancelProof).toHaveBeenCalledTimes(2);
+    expect(markTicketCancellationProofOwnerAccepted).toHaveBeenCalledTimes(1);
+    expect(markTicketCancellationProofOwnerAccepted.mock.invocationCallOrder[0])
+      .toBeGreaterThan(submitCancelProof.mock.invocationCallOrder[1]!);
+  });
+
+  it("keeps the ticket cancellation obligation when the owner does not accept the proof", async () => {
+    const assignmentId = "asg-worker-ticket-cancel-rejected";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const markTicketCancellationProofOwnerAccepted = vi.fn(async () => true);
+    const onError = vi.fn();
+    const ledger = {
+      abortWithTicket: vi.fn(async () => ({ kind: "accepted" as const })),
+      conversationAssignmentForRecovery: vi.fn(async () => envelope),
+      pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      continueTicketCancellation: vi.fn(async () => ({ assignmentId, cause: "abort-ticket" }) as never),
+      hasOpenSideEffects: vi.fn(async () => false),
+      markTicketCancellationProofOwnerAccepted,
+    } as unknown as ConversationAssignmentLedger;
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger,
+      runtimeFactory: {} as RuntimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({
+        reportStarted: vi.fn(),
+        mirrorInteractions: vi.fn(),
+        submitBundle: vi.fn(),
+        submitCancelProof: vi.fn(async () => { throw new TypeError("Cancel proof names a different assignment"); }),
+      }),
+      finalizeUsage: vi.fn(),
+      interactions: interactionObserver(),
+      onError,
+    });
+
+    await worker.abortWithTicket({ assignmentId, reason: "owner unavailable" } as unknown as ExecutionAbortRequest);
+    await worker.drain();
+
+    expect(onError).toHaveBeenCalledWith(assignmentId, expect.objectContaining({ message: "Cancel proof names a different assignment" }));
+    expect(markTicketCancellationProofOwnerAccepted).not.toHaveBeenCalled();
   });
 
   it("routes an authorized surface answer through the active runtime broker", async () => {

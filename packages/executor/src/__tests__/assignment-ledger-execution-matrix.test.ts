@@ -11,8 +11,9 @@ import { installVerifiedAnchorTenure } from "../../../owner-kernel/src/__tests__
 import { describe, expect, it, onTestFinished } from "vitest";
 import { InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import { selectConversationAuthorityRecords } from "@zhixing/owner-kernel/conversation-transfer";
-import { NOW, EXECUTOR_ID, CONVERSATION_ID, ASSIGNMENT_ID, memoryStagingArea, submission, createHarness, ingress, ownerContext, submissionContext, sealDefaultBundle, ConversationBehaviorRecordType, ConversationRecordBehaviorSpec, CONVERSATION_BEHAVIOR_SCENARIOS, CONVERSATION_RECOVERY_PROBES, ConversationRecoveryProbeId, CONVERSATION_RECORD_BEHAVIOR, expectConversationRejected, expectConversationGuardReplayAccepted, replayFixtureLog } from "./assignment-ledger-fixture.js";
+import { NOW, EXECUTOR_ID, CONVERSATION_ID, ASSIGNMENT_ID, DURABLE_IO_TEST_TIMEOUT_MS, memoryStagingArea, submission, createHarness, ingress, ownerContext, submissionContext, sealDefaultBundle, ConversationBehaviorRecordType, ConversationRecordBehaviorSpec, CONVERSATION_BEHAVIOR_SCENARIOS, CONVERSATION_RECOVERY_PROBES, ConversationRecoveryProbeId, CONVERSATION_RECORD_BEHAVIOR, expectConversationRejected, expectConversationGuardReplayAccepted, replayFixtureLog } from "./assignment-ledger-fixture.js";
 
+// 多本日志的耐久读写：与同文件的迁移用例一样给耐久读写时限，不受全集并行负载下 5 秒默认时限的影响
 it('exports source-bound conversation facts without transferring source delivery effects', async () => {
   const responder = { channelId: 'feishu', platformSubject: 'transfer-fixture-user', tenant: 'fixture' };
   const harness = await createHarness({ ingress: { kind: 'channel', surfacePrincipal: channelSurfacePrincipal(responder), responder,
@@ -31,7 +32,7 @@ it('exports source-bound conversation facts without transferring source delivery
     expect(envelope.entries[record.sourceItem!]).toEqual({ stream: record.stream, body: record.body });
   }
 
-});
+}, DURABLE_IO_TEST_TIMEOUT_MS);
 
 it('adopts authenticated execution facts, restarts, and admits a new target run without replaying source effects', async () => {
   const responder = { channelId: 'feishu', platformSubject: 'adopted-consumer', tenant: 'fixture' };

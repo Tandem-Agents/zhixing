@@ -95,6 +95,27 @@ export interface GovernorProjection {
   readonly admissionQueues: Record<AdmissionClass, string[]>;
   readonly admissionDeficits: Record<AdmissionClass, number>;
   admissionCursor: number;
+  /**
+   * 按键存储的工作集提供的有界查询；整份内存投影没有它，按遍历求得。
+   * 工作集的映射只装已读到的键，不能遍历，归约里需要成组判断的地方都经这里。
+   */
+  readonly index?: GovernorIndexReads;
+}
+
+export interface GovernorIndexReads {
+  /** 该工作负载仍为 active/settled 的根预留。 */
+  activeRootsForWorkload(workloadKey: string): readonly string[];
+  /** 该预留仍为 active/settled 的直接子预留。 */
+  activeChildren(reservationId: string): readonly string[];
+  /** 仍为 reserved、直接绑定该预留的用量预留。 */
+  openUsageByReservation(reservationId: string): readonly string[];
+  /** 仍为 reserved、以该预留为根的用量预留。 */
+  openUsageByRoot(rootReservationId: string): readonly string[];
+  /** 以给定根为根、或直接绑定给定预留的仍为 reserved 的用量预留，按预留的先后。 */
+  openUsageInScope(scope: {
+    readonly rootReservationIds?: ReadonlySet<string>;
+    readonly reservationIds?: ReadonlySet<string>;
+  }): readonly string[];
 }
 
 export const DEFAULT_ADMISSION_WEIGHTS: Readonly<Record<AdmissionClass, number>> = {
@@ -109,6 +130,8 @@ export { ADMISSION_CLASSES };
 const ADMISSION_CLASS_SET: ReadonlySet<string> = new Set(ADMISSION_CLASSES);
 
 export const GOVERNOR_TERMINAL_RETENTION_MS = 27 * 24 * 60 * 60_000;
+/** 调控器接受的租约最长有效期；两个调控器与按键投影的归约共用同一上限。 */
+export const RESOURCE_LEASE_MAX_TTL_MS = 24 * 60 * 60_000;
 
 export function emptyGovernorProjection(): GovernorProjection {
   return {
@@ -135,6 +158,9 @@ export function emptyGovernorProjection(): GovernorProjection {
 export function cloneGovernorProjection(
   state: GovernorProjection,
 ): GovernorProjection {
+  // 按键工作集自带复制：只复制已装入的键
+  const fork = (state as { readonly fork?: () => GovernorProjection }).fork;
+  if (state.index && typeof fork === "function") return fork.call(state);
   return {
     reservations: new Map(
       [...state.reservations].map(([id, value]) => [
@@ -466,9 +492,13 @@ export function conservativeUsageConsumptionRecords(
     readonly reservationIds?: ReadonlySet<string>;
   },
 ): GovernorRecord[] {
-  const nextByRoot = new Map(state.nextUsageSeqByRoot);
   const records: GovernorRecord[] = [];
-  for (const [usageId, reservation] of state.usageReservations) {
+  const nextByRoot = new Map<string, number>();
+  const usageIds = state.index
+    ? state.index.openUsageInScope(scope)
+    : [...state.usageReservations.keys()];
+  for (const usageId of usageIds) {
+    const reservation = state.usageReservations.get(usageId)!;
     if (
       reservation.state !== "reserved" ||
       (!scope.rootReservationIds?.has(reservation.rootReservationId) &&
@@ -476,7 +506,8 @@ export function conservativeUsageConsumptionRecords(
     ) {
       continue;
     }
-    const usageSeq = nextByRoot.get(reservation.rootReservationId) ?? 1;
+    const usageSeq = nextByRoot.get(reservation.rootReservationId) ??
+      state.nextUsageSeqByRoot.get(reservation.rootReservationId) ?? 1;
     nextByRoot.set(reservation.rootReservationId, usageSeq + 1);
     records.push({
       t: "consume",
@@ -709,15 +740,7 @@ function applyValidatedGovernorRecord(
         }
         return state;
       }
-      if (
-        [...state.reservations.values()].some(
-          (reservation) =>
-            reservation.depth === 0 &&
-            (reservation.state === "active" || reservation.state === "settled") &&
-            rootResourceWorkloadKey(reservation.lease.workload as RootResourceWorkload) ===
-              workloadKey,
-        )
-      ) {
+      if (hasActiveRootForWorkload(state, workloadKey)) {
         throw new TypeError("Active resource workload cannot be dequeued");
       }
       const reservationId = state.queuedByWorkload.get(workloadKey);
@@ -1256,7 +1279,8 @@ export function selectFairReservation(
   occupiedClasses: ReadonlySet<AdmissionClass> = new Set(),
   eligibleReservations?: ReadonlySet<string>,
 ): { readonly reservationId: string; readonly admissionClass: AdmissionClass } | undefined {
-  if (state.queued.size === 0) return undefined;
+  // 每个排队项恰在一个类队列里：队列全空即无排队项（工作集的映射不能计数）
+  if (ADMISSION_CLASSES.every((admissionClass) => state.admissionQueues[admissionClass].length === 0)) return undefined;
   for (let offset = 0; offset < ADMISSION_CLASSES.length; offset += 1) {
     const index = (state.admissionCursor + offset) % ADMISSION_CLASSES.length;
     const admissionClass = ADMISSION_CLASSES[index]!;
@@ -1483,12 +1507,31 @@ function assertUsageWithinReservation(
   }
 }
 
+/** 该工作负载是否仍有 active/settled 的根预留。 */
+export function hasActiveRootForWorkload(
+  state: GovernorProjection,
+  workloadKey: string,
+): boolean {
+  if (state.index) return state.index.activeRootsForWorkload(workloadKey).length > 0;
+  return [...state.reservations.values()].some(
+    (reservation) =>
+      reservation.depth === 0 &&
+      (reservation.state === "active" || reservation.state === "settled") &&
+      rootResourceWorkloadKey(reservation.lease.workload as RootResourceWorkload) ===
+        workloadKey,
+  );
+}
+
 function hasOpenUsageReservations(
   state: GovernorProjection,
   reservationId: string,
 ): boolean {
   const reservation = state.reservations.get(reservationId);
   if (!reservation) return false;
+  if (state.index) {
+    return state.index.openUsageByReservation(reservationId).length > 0 ||
+      (reservation.depth === 0 && state.index.openUsageByRoot(reservationId).length > 0);
+  }
   for (const usage of state.usageReservations.values()) {
     if (
       usage.state === "reserved" &&
@@ -1505,6 +1548,7 @@ function hasActiveChildren(
   state: GovernorProjection,
   reservationId: string,
 ): boolean {
+  if (state.index) return state.index.activeChildren(reservationId).length > 0;
   for (const reservation of state.reservations.values()) {
     if (
       reservation.lease.parentId === reservationId &&

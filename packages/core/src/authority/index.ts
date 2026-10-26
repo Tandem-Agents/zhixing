@@ -144,5 +144,21 @@ export type {
   ProjectionTransactionReducer,
 } from "./interfaces.js";
 export { DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "./device-lifecycle-journal.js";
+export {
+  GovernorSession,
+  GovernorStateRequired,
+  GovernorWorkingSet,
+  RESOURCE_CAPABILITY_ACTIVATION_PROJECTION_ID,
+  RESOURCE_GOVERNOR_INDEX_PROJECTION_ID,
+  ResourceGovernorIndexStore,
+  consumedUsageBlock,
+  governorRetentionCutoff,
+  liveGovernorReservations,
+  readCapabilityActivation,
+  readReceivedCapabilityActivation,
+  registerResourceCapabilityActivations,
+  registerResourceGovernorIndex,
+  type GovernorDecision,
+} from "./resource-governor-index.js";
 export { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, AuthorityProjectionUnavailable, awaitAuthorityPreparation, maximumAuthorityRecoveryTailBytes } from "./recovery-work.js";
 export type { AuthorityPreparedWatermark } from "./recovery-work.js";

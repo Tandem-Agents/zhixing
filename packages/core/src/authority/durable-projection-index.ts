@@ -77,7 +77,9 @@ const MAX_SCAN_LIMIT = 256;
 const MAX_READ_VIEWS = 16;
 const READ_VIEW_LEASE_MS = 60_000;
 const MAX_DIRECTORY_HEIGHT = 64;
-const MAX_DIRECTORY_CACHE_PAGES = 64;
+// 目录页缓存按字节限额（不超过原先 64 页 × 单页上限的最坏占用）。目录是每页一个段描述的二叉树，
+// 页很小：按页数限额时树一高过缓存，散列到各叶子的查找就每次都要重读路径上的页
+const MAX_DIRECTORY_CACHE_BYTES = 1024 * 1024;
 const MAX_DIRECTORY_PAGE_BYTES = 64 * 1024;
 const MAX_RETIREMENT_PAGE_FILES = 64;
 const MAX_RETIREMENT_PAGE_BYTES = 64 * 1024;
@@ -140,6 +142,8 @@ export interface DurableProjectionReadContext {
     limit: number,
     continuation?: string,
   ): Promise<DurableProjectionScanPage>;
+  /** 读够一页就不再续读时交还续读：底层的读视图随即释放，不等租期到期（它可能正挡住退役）。 */
+  releaseContinuation?(continuation: string): void;
 }
 
 /** Preserve the existing batch read bound through scoped/legacy read views.
@@ -193,6 +197,8 @@ export function createDurableProjectionOverlay(
         // 续读时以上一页末键为排他下界，取代原范围的下界（gte 与 gt 不能并用）
         const { gte: _gte, gt: _gt, ...upper } = range;
         const page = await current.scan(readAfter === undefined ? range : { ...upper, gt: readAfter }, limit);
+        // 下一页按末键重新起读：底层这一页的续读不再使用，当即交还
+        if (page.continuation) current.releaseContinuation?.(page.continuation);
         const boundary = page.entries.at(-1)?.key;
         if (page.continuation && boundary === undefined) throw new DurableProjectionStorageError("Projection overlay base scan made no progress");
         for (const entry of page.entries) {
@@ -554,6 +560,9 @@ export function createBoundDurableProjectionReadContext(
           : {}),
       };
     },
+    releaseContinuation(continuation) {
+      current.releaseContinuation?.(continuation);
+    },
   };
 }
 
@@ -743,7 +752,8 @@ export class FileDurableProjectionIndex {
     string,
     { readonly view: ReadView; users: number }
   >();
-  readonly #directoryCache = new Map<string, DirectoryPage>();
+  readonly #directoryCache = new Map<string, { readonly page: DirectoryPage; readonly bytes: number }>();
+  #directoryCacheBytes = 0;
   readonly #segmentEntries = new SegmentEntryCache();
   readonly #manifestQueue = new SerialTaskQueue();
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
@@ -800,7 +810,7 @@ export class FileDurableProjectionIndex {
       this.#active = PersistentSortedMap.empty();
       this.#activeBytes = 0;
       this.#resetActiveProgress();
-      this.#directoryCache.clear();
+      this.#clearDirectoryCache();
       this.#resetRebuildCache();
       this.#publicationSequence++;
       this.#seededGeneration = undefined;
@@ -1183,7 +1193,7 @@ export class FileDurableProjectionIndex {
     // A reset discards corrupt snapshots, but active physical reads retain their
     // separate in-use protection until the owning operation leaves its fence.
     this.#readViews.clear();
-    this.#directoryCache.clear();
+    this.#clearDirectoryCache();
     this.#retirementCleanupFailure = undefined;
     this.#clearRetirementRetry();
     this.#publicationSequence += 1;
@@ -2828,8 +2838,8 @@ export class FileDurableProjectionIndex {
     if (staged) return staged.page;
     const cached = this.#directoryCache.get(pointer.id);
     if (cached) {
-      this.#cacheDirectoryPage(pointer.id, cached);
-      return cached;
+      this.#cacheDirectoryPage(pointer.id, cached.page, cached.bytes);
+      return cached.page;
     }
     return this.#readStep("directory-page", () => this.#readDirectoryPage(pointer));
   }
@@ -2876,7 +2886,7 @@ export class FileDurableProjectionIndex {
         throw projectionCorrupt("Projection directory page is not canonical");
       }
       const page = validateDirectoryPage(value, pointer);
-      this.#cacheDirectoryPage(pointer.id, page);
+      this.#cacheDirectoryPage(pointer.id, page, bytes.byteLength);
       return page;
     } finally {
       await handle.close();
@@ -2933,19 +2943,32 @@ export class FileDurableProjectionIndex {
     await handle.close();
     claimStorageIo("ioOperations", 1);
     await rename(temporary, path.join(this.rootDir, file));
-    this.#cacheDirectoryPage(id, page);
+    this.#cacheDirectoryPage(id, page, encoded.byteLength);
   }
 
-  #cacheDirectoryPage(id: string, page: DirectoryPage): void {
-    this.#directoryCache.delete(id);
-    while (this.#directoryCache.size >= MAX_DIRECTORY_CACHE_PAGES) {
+  #cacheDirectoryPage(id: string, page: DirectoryPage, bytes: number): void {
+    this.#forgetDirectoryPage(id);
+    while (this.#directoryCache.size > 0 && this.#directoryCacheBytes + bytes > MAX_DIRECTORY_CACHE_BYTES) {
       const oldest = this.#directoryCache.keys().next().value as
         | string
         | undefined;
       if (oldest === undefined) break;
-      this.#directoryCache.delete(oldest);
+      this.#forgetDirectoryPage(oldest);
     }
-    this.#directoryCache.set(id, page);
+    this.#directoryCache.set(id, { page, bytes });
+    this.#directoryCacheBytes += bytes;
+  }
+
+  #forgetDirectoryPage(id: string): void {
+    const cached = this.#directoryCache.get(id);
+    if (!cached) return;
+    this.#directoryCache.delete(id);
+    this.#directoryCacheBytes -= cached.bytes;
+  }
+
+  #clearDirectoryCache(): void {
+    this.#directoryCache.clear();
+    this.#directoryCacheBytes = 0;
   }
 
   async #setDirectoryDescriptor(
@@ -3341,7 +3364,7 @@ export class FileDurableProjectionIndex {
       await durablyRemoveFile(
         path.join(this.rootDir, manifest.retirementCleanup),
       );
-      this.#directoryCache.delete(
+      this.#forgetDirectoryPage(
         directoryPageIdFromFile(manifest.retirementCleanup) ?? "",
       );
       const next = withoutRetirementCleanup(manifest);
@@ -3396,7 +3419,7 @@ export class FileDurableProjectionIndex {
     );
     this.#segmentEntries.forget(page.files);
     for (const file of page.files) {
-      this.#directoryCache.delete(directoryPageIdFromFile(file) ?? "");
+      this.#forgetDirectoryPage(directoryPageIdFromFile(file) ?? "");
     }
     const next: ProjectionManifest = {
       ...manifest,
@@ -3592,7 +3615,7 @@ export class FileDurableProjectionIndex {
     }
     this.#segmentEntries.forget(files);
     for (const file of files) {
-      this.#directoryCache.delete(directoryPageIdFromFile(file) ?? "");
+      this.#forgetDirectoryPage(directoryPageIdFromFile(file) ?? "");
     }
     this.#writeIntent = undefined;
   }

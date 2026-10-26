@@ -1,5 +1,5 @@
 import type { SchedulerEventMap } from "@zhixing/core/scheduler";
-import type { ScheduleOccurrence } from "@zhixing/core/scheduler/application";
+import { countScheduleConsecutiveFailures, type ScheduleOccurrence } from "@zhixing/core/scheduler/application";
 import { createEventBus } from "@zhixing/core";
 import { currentDeviceCapacityStep, currentMaintenanceAbortSignal, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
   isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceAdmissionError, withDeviceCapacityStep } from "@zhixing/core/resources";
@@ -8,11 +8,13 @@ import type {
   JobRunState,
   TaskDefinition,
 } from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { compareJobOccurrences, protocolDigest } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { ControlAdmissionJournal } from "../control-admission.js";
 import type { JobJournal, JobLifecycleEvent } from "../job-assignment.js";
 import { AnchorScheduler } from "../scheduler-authority.js";
+
+const TERMINAL = new Set<string>(["committed", "failed", "cancelled", "expired", "missed"]);
 
 class MemoryJobJournal {
   definition: TaskDefinition | undefined;
@@ -55,12 +57,32 @@ class MemoryJobJournal {
     return this.definition ? structuredClone(this.definition) : undefined;
   }
 
-  async occurrences() {
-    return structuredClone(this.runs);
+  #ordered() {
+    return structuredClone(this.runs).sort(compareJobOccurrences);
+  }
+
+  async openOccurrences() {
+    return this.#ordered().filter((run) => !TERMINAL.has(run.state));
+  }
+
+  async pendingMissedOccurrences() {
+    return this.#ordered().filter((run) => run.state === "missed");
+  }
+
+  async scheduleOccurrence(jobRunId: string) {
+    return this.#ordered().find((run) => run.jobRunId === jobRunId);
   }
 
   async schedulerReadView() {
-    return { definition: await this.taskDefinition(), occurrences: await this.occurrences() };
+    const ordered = this.#ordered();
+    const last = ordered.at(-1);
+    return {
+      definition: await this.taskDefinition(),
+      runCount: ordered.filter((run) => run.state !== "missed").length,
+      consecutiveFailures: countScheduleConsecutiveFailures(ordered),
+      ...(last ? { last } : {}),
+      open: ordered.filter((run) => !TERMINAL.has(run.state)),
+    };
   }
 
   async define(definition: TaskDefinition) {

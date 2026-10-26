@@ -8,9 +8,9 @@ import {
   decideScheduleCapabilityGapClosure,
   projectSchedulePublishNotices,
   type ScheduleCapabilityGapState,
-  decideScheduleFailurePolicy,
+  isScheduleFailure,
+  scheduleFailurePolicyForCount,
   ScheduleRuntimePolicyError,
-  selectPendingScheduleAutoDisable,
   type ScheduleFailurePolicyDecision,
   type ScheduleOccurrence,
 } from "@zhixing/core/scheduler/application";
@@ -24,9 +24,19 @@ import {
   type ArtifactStore,
   type AuthorityCommitLog,
   type ProjectionCursor,
+  type RebuildableDurableProjectionIndex,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
+  AuthorityPreparationRequired,
+  awaitAuthorityPreparation,
 } from "@zhixing/core/authority";
+import {
+  currentMaintenanceAbortSignal,
+  isHoldingMaintenanceExclusion,
+  maintenanceRetryDelayMs,
+  StorageMaintenanceCancelledError,
+  waitForMaintenanceRetry,
+} from "@zhixing/core/resources";
 import type {
   ArtifactRef,
   AssignmentActivationProof,
@@ -115,6 +125,7 @@ import {
   validateDataPlaneTicket,
   validateExecutionManifest,
   validateJobCommitFence,
+  compareJobOccurrences,
   validateJobActivation,
   validateJobEnvelope,
   validateJobOccurrence,
@@ -213,6 +224,7 @@ import {
 import { abortTicketProofBindsOwnerHistory } from "./data-plane-ticket-proof.js";
 import {
   dataPlaneTicketIssueMatches,
+  dataPlaneTicketSyncBoundary,
   nextDataPlaneTicketSyncFrontier,
   ticketPrecedesSyncFrontier,
 } from "./data-plane-ticket-lifecycle.js";
@@ -236,13 +248,48 @@ import {
   type TrustedControlSource,
 } from "./control-admission.js";
 import {
-  advanceChannelInteractionJournal,
-  createChannelInteractionJournalState,
+  applyChannelInteractionRecord,
   validateChannelInteractionRelayRecord,
   type ChannelInteractionRelayRecord,
   type ChannelInteractionJournalState,
   type JobChannelChallengePreparedRecord,
 } from "./channel-interaction-records.js";
+import {
+  JobStateBinding,
+  JobStateExhausted,
+  JobStateRequired,
+  JobStateSet,
+  loadJobState,
+  MAX_JOB_STATE_ROUNDS,
+  runWithJobState,
+  tallyJobStateNeeds,
+  KeyedMap,
+  KeyedOrder,
+  KeyedSet,
+  jobStateTaskBase,
+  type JobStateField,
+} from "./job-run-state.js";
+import {
+  JOB_RUN_STATE_PROJECTION_ID,
+  jobStateHeadKey,
+  registerJobRunStateProjection,
+} from "./job-run-state-index.js";
+import {
+  failuresBefore,
+  latestFailures,
+  missingFailureSummaryNodes,
+  requireFailureSummaryPaths,
+  setFailureSummaryEntry,
+  type FailureSummaryNode,
+  type FailureSummaryPosition,
+} from "./job-failure-summary.js";
+
+type ChannelTables = Omit<ChannelInteractionJournalState, "domain">;
+/** 作业的频道交互状态：与会话共用同一份规则，按键落盘。 */
+type JobChannelInteractions = { readonly domain: "job" } & {
+  readonly [Name in keyof ChannelTables]: ChannelTables[Name] extends ReadonlyMap<infer K, infer V>
+    ? KeyedMap<K & string, V> : never;
+};
 
 type JobEnvelope = Extract<
   import("@zhixing/core/contracts").DispatchEnvelope,
@@ -285,14 +332,14 @@ type JobStatusHistoryEntry = JobStateEntry & {
 interface JobSubmissionGuardProjection {
   latestDefinitionState: "enabled" | "disabled" | "deleted";
   latestDefinitionRevision: number | undefined;
-  readonly definitionKinds: Map<number, "user" | "system">;
-  readonly taskOperations: Map<
+  readonly definitionKinds: KeyedMap<number, "user" | "system">;
+  readonly taskOperations: KeyedMap<
     string,
     { readonly digest: string; readonly taskRevision: number }
   >;
-  readonly systemMissAliases: Set<string>;
+  readonly systemMissAliases: KeyedSet<string>;
   pendingSystemMissedJobRunId: string | undefined;
-  readonly occurrences: Map<
+  readonly occurrences: KeyedMap<
     string,
     {
       readonly scheduledFor: string;
@@ -301,11 +348,11 @@ interface JobSubmissionGuardProjection {
       readonly deliveryRequired: boolean;
     }
   >;
-  readonly states: Map<string, JobStateEntry>;
-  readonly admittedJobs: Set<string>;
-  readonly ingressByJob: Map<string, IngressContext>;
+  readonly states: KeyedMap<string, JobStateEntry>;
+  readonly admittedJobs: KeyedSet<string>;
+  readonly ingressByJob: KeyedMap<string, IngressContext>;
   activeJobRunId: string | undefined;
-  readonly assignedById: Map<
+  readonly assignedById: KeyedMap<
     string,
     {
       readonly record: Extract<JobJournalRecord, { t: "assigned" }>;
@@ -318,33 +365,33 @@ interface JobSubmissionGuardProjection {
       acked: boolean;
     }
   >;
-  readonly assignmentByJob: Map<string, string>;
-  readonly conflictAssignments: Set<string>;
-  readonly openConflictAssignments: Set<string>;
-  readonly supersedeRequests: Map<
+  readonly assignmentByJob: KeyedMap<string, string>;
+  readonly conflictAssignments: KeyedSet<string>;
+  readonly openConflictAssignments: KeyedSet<string>;
+  readonly supersedeRequests: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "supersede-requested" }>
   >;
-  readonly supersedeStartedAssignments: Set<string>;
-  readonly cancelFences: Map<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
-  readonly interactionSettlementFences: Map<
+  readonly supersedeStartedAssignments: KeyedSet<string>;
+  readonly cancelFences: KeyedMap<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
+  readonly interactionSettlementFences: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "interaction-settlement-fence" }>
   >;
-  readonly completedInteractionSettlements: Map<
+  readonly completedInteractionSettlements: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "interaction-settlement-completed" }>
   >;
-  readonly acceptedCancellations: Set<string>;
-  readonly durableStarted: Set<string>;
-  readonly closedAssignments: Set<string>;
-  readonly revokedCapabilities: Set<string>;
-  readonly ticketsById: Map<string, DataPlaneTicket>;
-  readonly ticketIdsByAssignment: Map<string, Set<string>>;
-  readonly ticketReplacementsById: Map<string, string>;
-  readonly revokedTickets: Set<string>;
+  readonly acceptedCancellations: KeyedSet<string>;
+  readonly durableStarted: KeyedSet<string>;
+  readonly closedAssignments: KeyedSet<string>;
+  readonly revokedCapabilities: KeyedSet<string>;
+  readonly ticketsById: KeyedMap<string, DataPlaneTicket>;
+  readonly ticketIdsByAssignment: KeyedMap<string, Set<string>>;
+  readonly ticketReplacementsById: KeyedMap<string, string>;
+  readonly revokedTickets: KeyedSet<string>;
   ticketSyncFrontier: string | undefined;
-  readonly interactionMirrors: Map<
+  readonly interactionMirrors: KeyedMap<
     string,
     {
       readonly upTo: number;
@@ -357,79 +404,83 @@ interface JobSubmissionGuardProjection {
       >;
     }
   >;
-  readonly interactionMirrorBatches: Set<string>;
-  readonly resolutions: Map<string, JobResolutionFact>;
-  readonly committedByAssignment: Map<
+  readonly interactionMirrorBatches: KeyedSet<string>;
+  readonly resolutions: KeyedMap<string, JobResolutionFact>;
+  readonly committedByAssignment: KeyedMap<
     string,
     { readonly ref: ArtifactRef; readonly jobRevision: number }
   >;
-  readonly bundleAcknowledgements: Map<
+  readonly bundleAcknowledgements: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "bundle-ack-observed" }>
   >;
-  readonly systemFences: Map<string, SystemJobFence>;
-  readonly systemResults: Set<string>;
-  channelInteractions: ChannelInteractionJournalState;
+  readonly systemFences: KeyedMap<string, SystemJobFence>;
+  readonly systemResults: KeyedSet<string>;
+  readonly channelInteractions: JobChannelInteractions;
+  /** 每个 run 已用过的最大派发尝试序号：下一次派发据此取号，不遍历全部派发。 */
+  readonly assignmentAttemptByRun: KeyedMap<string, number>;
+  /** 票据按同步边界排序：前沿推进与在用票据按区间读取。 */
+  readonly ticketExpiry: KeyedOrder<string>;
   nextJobRevision: number;
 }
 
 interface JobProjection {
   definition?: TaskDefinition;
-  readonly definitions: Map<number, TaskDefinition>;
-  readonly taskOperations: Map<
+  readonly definitions: KeyedMap<number, TaskDefinition>;
+  readonly taskOperations: KeyedMap<
     string,
     { readonly digest: string; readonly taskRevision: number }
   >;
-  readonly occurrences: Map<string, JobOccurrence>;
+  readonly occurrences: KeyedMap<string, JobOccurrence>;
   legacyNextFire?: Extract<JobJournalRecord, { t: "legacy-next-fire" }>;
-  readonly missedNextFireByRun: Map<
+  readonly missedNextFireByRun: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "missed-next-fire" }>
   >;
-  readonly failurePolicyByRun: Map<
+  readonly failurePolicyByRun: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "failure-policy" }>
   >;
-  readonly autoDisableSettledRuns: Set<string>;
-  readonly capabilityGapByRun: Map<string, ScheduleCapabilityGapState>;
-  readonly systemMissAliases: Map<
+  readonly autoDisableSettledRuns: KeyedSet<string>;
+  readonly capabilityGapByRun: KeyedMap<string, ScheduleCapabilityGapState>;
+  readonly systemMissAliases: KeyedMap<
     string,
     { readonly scheduledFor: string; readonly coalescedJobRunId: string }
   >;
-  readonly admittedJobs: Set<string>;
-  readonly ingressByJob: Map<string, IngressContext>;
-  readonly states: Map<string, JobStateEntry>;
+  readonly admittedJobs: KeyedSet<string>;
+  readonly ingressByJob: KeyedMap<string, IngressContext>;
+  readonly states: KeyedMap<string, JobStateEntry>;
   activeJobRunId?: string;
   pendingSystemMissedJobRunId?: string;
-  readonly assignedById: Map<string, AssignedJob>;
-  readonly assignmentByJob: Map<string, string>;
-  readonly conflicts: Map<string, Extract<JobJournalRecord, { t: "dispatch-conflict" }>>;
-  readonly containedFacts: Set<string>;
-  readonly superseded: Map<string, Extract<JobJournalRecord, { t: "assignment-superseded" }>>;
-  readonly supersedeRequests: Map<string, Extract<JobJournalRecord, { t: "supersede-requested" }>>;
-  readonly supersedeStarted: Map<
+  readonly assignedById: KeyedMap<string, AssignedJob>;
+  readonly assignmentByJob: KeyedMap<string, string>;
+  readonly conflicts: KeyedMap<string, Extract<JobJournalRecord, { t: "dispatch-conflict" }>>;
+  readonly containedFacts: KeyedSet<string>;
+  readonly superseded: KeyedMap<string, Extract<JobJournalRecord, { t: "assignment-superseded" }>>;
+  readonly supersedeRequests: KeyedMap<string, Extract<JobJournalRecord, { t: "supersede-requested" }>>;
+  readonly supersedeStarted: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "supersede-started-observed" }>
   >;
-  readonly cancelFences: Map<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
-  readonly interactionSettlementFences: Map<
+  readonly cancelFences: KeyedMap<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
+  readonly interactionSettlementFences: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "interaction-settlement-fence" }>
   >;
-  readonly completedInteractionSettlements: Map<
+  readonly completedInteractionSettlements: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "interaction-settlement-completed" }>
   >;
-  readonly acceptedCancellations: Map<string, Extract<JobJournalRecord, { t: "cancel-proof-accepted" }>>;
-  readonly rejectedNotStarted: Map<string, Extract<JobJournalRecord, { t: "not-started-rejected" }>>;
-  readonly durableStarted: Set<string>;
-  readonly revokedCapabilities: Set<string>;
-  readonly ticketsById: Map<string, DataPlaneTicket>;
-  readonly ticketIdsByAssignment: Map<string, Set<string>>;
-  readonly ticketReplacementsById: Map<string, string>;
-  readonly revokedTickets: Set<string>;
+  readonly acceptedCancellations: KeyedMap<string, Extract<JobJournalRecord, { t: "cancel-proof-accepted" }>>;
+  readonly rejectedNotStarted: KeyedMap<string, Extract<JobJournalRecord, { t: "not-started-rejected" }>>;
+  readonly durableStarted: KeyedSet<string>;
+  readonly revokedCapabilities: KeyedSet<string>;
+  readonly ticketsById: KeyedMap<string, DataPlaneTicket>;
+  readonly ticketIdsByAssignment: KeyedMap<string, Set<string>>;
+  readonly ticketReplacementsById: KeyedMap<string, string>;
+  readonly revokedTickets: KeyedSet<string>;
   ticketSyncFrontier: string | undefined;
-  readonly interactionMirrors: Map<
+  readonly interactionMirrors: KeyedMap<
     string,
     {
       readonly upTo: number;
@@ -442,29 +493,593 @@ interface JobProjection {
       >;
     }
   >;
-  readonly interactionMirrorBatches: Set<string>;
-  readonly containments: Map<
+  readonly interactionMirrorBatches: KeyedSet<string>;
+  readonly containments: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "dispatch-conflict-contained" | "cancel-contained" }>
   >;
-  readonly resolutions: Map<string, JobResolutionFact>;
-  readonly statusHistoryByRun: Map<string, JobStatusHistoryEntry[]>;
-  readonly committed: Map<string, Extract<JobJournalRecord, { t: "committed" }>>;
-  readonly outcomeByRun: Map<string, JobBundle["body"]["outcome"]>;
-  readonly bundleAcknowledgements: Map<
+  readonly resolutions: KeyedMap<string, JobResolutionFact>;
+  readonly statusHistoryByRun: KeyedMap<string, JobStatusHistoryEntry[]>;
+  readonly committed: KeyedMap<string, Extract<JobJournalRecord, { t: "committed" }>>;
+  readonly outcomeByRun: KeyedMap<string, JobBundle["body"]["outcome"]>;
+  readonly bundleAcknowledgements: KeyedMap<
     string,
     Extract<JobJournalRecord, { t: "bundle-ack-observed" }>
   >;
-  readonly recoveryAssignments: Set<string>;
-  readonly bundleAcknowledgementOutbox: Set<string>;
+  readonly recoveryAssignments: KeyedSet<string>;
+  readonly bundleAcknowledgementOutbox: KeyedSet<string>;
   nextJobRevision: number;
-  readonly systemFences: Map<string, SystemJobFence>;
-  readonly systemResults: Map<
+  readonly systemFences: KeyedMap<string, SystemJobFence>;
+  readonly systemResults: KeyedMap<
     string,
     MaterializedSystemJobResult
   >;
-  channelInteractions: ChannelInteractionJournalState;
+  readonly channelInteractions: JobChannelInteractions;
+  readonly assignmentAttemptByRun: KeyedMap<string, number>;
+  readonly ticketExpiry: KeyedOrder<string>;
+  /** occurrence 按计划时间倒序：最近一次与历史分页按区间读取。 */
+  readonly occurrenceOrder: KeyedOrder<string>;
+  /**
+   * 连续失败的可合并摘要（job-failure-summary.ts）：非错过的 occurrence 按完整次序成树，错过的不计也不打断。
+   * 是否错过在 occurrence 写入时就定了（错过没有后继状态，也没有状态迁入错过），成员此后不变。
+   * 调度视图与失败策略由定位路径上的摘要合成计数，不倒扫失败历史。
+   */
+  readonly failureSummaryNodes: KeyedMap<number, FailureSummaryNode>;
+  failureSummaryRoot: number | undefined;
+  failureSummaryNextNode: number;
+  /** 摘要里记下的这一条是否失败；不在即尚未进摘要。状态推进而失败与否不变时，只读这一行。 */
+  readonly failureFlagByRun: KeyedMap<string, boolean>;
+  /** 已有的非错过 occurrence 数：调度视图的运行次数。 */
+  runCount: number;
+  // 当前义务目录：由同一归约在每条记录后维护，只含仍未完成的主体
+  readonly openRuns: KeyedSet<string>;
+  readonly openAssignments: KeyedSet<string>;
+  readonly pendingSettlements: KeyedSet<string>;
+  readonly openChallenges: KeyedSet<string>;
+  readonly pendingGrants: KeyedSet<string>;
+  readonly pendingAutoDisable: KeyedSet<string>;
+  /** 错过且尚未汇总通知的用户任务 run；汇总通知提交时由持久投影移出。 */
+  readonly pendingMissed: KeyedSet<string>;
 }
+
+// ---- 按键工作集上的两份投影 ----
+
+interface JobStateLayout {
+  readonly maps: readonly string[];
+  readonly sets: readonly string[];
+  /** 只含当前义务、可整体列出的集合。 */
+  readonly enumerable: readonly string[];
+  readonly orders: readonly string[];
+  /** 根行里的标量字段及其缺省值。 */
+  readonly root: Readonly<Record<string, unknown>>;
+}
+
+const JOB_CHANNEL_FIELDS = {
+  preparedByChallenge: "chPrepared",
+  challengeByInteraction: "chInteraction",
+  deliveredByChallenge: "chDelivered",
+  closedByChallenge: "chClosed",
+  grantByChallenge: "chGranted",
+  cursorByAssignment: "chCursor",
+} as const;
+
+const JOB_MAIN_LAYOUT: JobStateLayout = {
+  maps: [
+    "definitions", "taskOperations", "occurrences", "missedNextFireByRun", "failurePolicyByRun", "failureFlagByRun",
+    "failureSummaryNodes", "capabilityGapByRun", "systemMissAliases", "ingressByJob", "states", "assignedById", "assignmentByJob",
+    "conflicts", "superseded", "supersedeRequests", "supersedeStarted", "cancelFences",
+    "interactionSettlementFences", "completedInteractionSettlements", "acceptedCancellations",
+    "rejectedNotStarted", "ticketsById", "ticketIdsByAssignment", "ticketReplacementsById",
+    "interactionMirrors", "containments", "resolutions", "statusHistoryByRun", "committed", "outcomeByRun",
+    "bundleAcknowledgements", "systemFences", "systemResults", "assignmentAttemptByRun",
+  ],
+  sets: [
+    "autoDisableSettledRuns", "admittedJobs", "containedFacts", "durableStarted", "revokedCapabilities",
+    "revokedTickets", "interactionMirrorBatches",
+  ],
+  enumerable: [
+    "recoveryAssignments", "bundleAcknowledgementOutbox", "openRuns", "openAssignments", "pendingSettlements",
+    "openChallenges", "pendingGrants", "pendingAutoDisable", "pendingMissed",
+  ],
+  orders: ["ticketExpiry", "occurrenceOrder"],
+  root: {
+    definition: undefined, legacyNextFire: undefined, activeJobRunId: undefined,
+    pendingSystemMissedJobRunId: undefined, ticketSyncFrontier: undefined, nextJobRevision: 1, runCount: 0,
+    failureSummaryRoot: undefined, failureSummaryNextNode: 1,
+  },
+};
+
+const JOB_GUARD_LAYOUT: JobStateLayout = {
+  maps: [
+    "definitionKinds", "taskOperations", "occurrences", "states", "ingressByJob", "assignedById",
+    "assignmentByJob", "supersedeRequests", "cancelFences", "interactionSettlementFences",
+    "completedInteractionSettlements", "ticketsById", "ticketIdsByAssignment", "ticketReplacementsById",
+    "interactionMirrors", "resolutions", "committedByAssignment", "bundleAcknowledgements", "systemFences",
+    "assignmentAttemptByRun",
+  ],
+  sets: [
+    "systemMissAliases", "admittedJobs", "conflictAssignments", "openConflictAssignments",
+    "supersedeStartedAssignments", "acceptedCancellations", "durableStarted", "closedAssignments",
+    "revokedCapabilities", "revokedTickets", "interactionMirrorBatches", "systemResults",
+  ],
+  enumerable: [],
+  orders: ["ticketExpiry"],
+  root: {
+    latestDefinitionState: "enabled", latestDefinitionRevision: undefined, pendingSystemMissedJobRunId: undefined,
+    activeJobRunId: undefined, ticketSyncFrontier: undefined, nextJobRevision: 1,
+  },
+};
+
+const layoutFields = (layout: JobStateLayout): ReadonlyMap<string, JobStateField> => new Map<string, JobStateField>([
+  ...layout.maps.map((name) => [name, { name, kind: "map" }] as const),
+  ...Object.values(JOB_CHANNEL_FIELDS).map((name) => [name, { name, kind: "map" }] as const),
+  ...layout.sets.map((name) => [name, { name, kind: "set" }] as const),
+  ...layout.enumerable.map((name) => [name, { name, kind: "set", enumerable: true }] as const),
+  ...layout.orders.map((name) => [name, { name, kind: "order" }] as const),
+]);
+const JOB_MAIN_FIELDS = layoutFields(JOB_MAIN_LAYOUT);
+const JOB_GUARD_FIELDS = layoutFields(JOB_GUARD_LAYOUT);
+
+export function jobMainStatePrefix(taskId: string): string { return `${jobStateTaskBase(taskId)}m/`; }
+export function jobGuardStatePrefix(taskId: string): string { return `${jobStateTaskBase(taskId)}g/`; }
+
+/** 主投影的工作集；complete 用于从零重放（未装入即不存在）。 */
+export function createJobMainState(taskId: string, complete = false): JobStateSet {
+  return new JobStateSet(jobMainStatePrefix(taskId), JOB_MAIN_FIELDS, complete);
+}
+
+export function createJobGuardState(taskId: string, complete = false): JobStateSet {
+  return new JobStateSet(jobGuardStatePrefix(taskId), JOB_GUARD_FIELDS, complete);
+}
+
+function buildJobView(binding: JobStateBinding, layout: JobStateLayout): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  for (const name of layout.maps) view[name] = new KeyedMap(binding, name);
+  for (const name of [...layout.sets, ...layout.enumerable]) view[name] = new KeyedSet(binding, name);
+  for (const name of layout.orders) view[name] = new KeyedOrder(binding, name);
+  view.channelInteractions = {
+    domain: "job",
+    ...Object.fromEntries(Object.entries(JOB_CHANNEL_FIELDS).map(([property, field]) => [property, new KeyedMap(binding, field)])),
+  };
+  for (const [name, fallback] of Object.entries(layout.root)) {
+    Object.defineProperty(view, name, {
+      enumerable: true,
+      get: () => {
+        const root = binding.store.root;
+        return name in root ? root[name] : fallback;
+      },
+      set: (value: unknown) => { binding.store.root[name] = value; },
+    });
+  }
+  return view;
+}
+
+/** 绑定之上的主投影对象：读写都落到绑定当前持有的工作集。 */
+export function jobProjectionView(binding: JobStateBinding): JobProjection {
+  return buildJobView(binding, JOB_MAIN_LAYOUT) as unknown as JobProjection;
+}
+
+export function jobSubmissionGuardView(binding: JobStateBinding): JobSubmissionGuardProjection {
+  return buildJobView(binding, JOB_GUARD_LAYOUT) as unknown as JobSubmissionGuardProjection;
+}
+
+/** 投影对象所在的工作集（目录维护按它查改动）。 */
+function jobViewStore(state: { readonly states: KeyedMap<string, unknown> }): JobStateSet {
+  return state.states.binding.store;
+}
+
+// ---- 当前义务目录 ----
+
+/** occurrence 的倒序时间键：计划时间越晚越靠前。 */
+export function occurrenceSortKey(scheduledFor: string): string {
+  const at = Date.parse(scheduledFor);
+  if (!Number.isFinite(at) || at < 0) throw new TypeError("Occurrence time is invalid");
+  return String(8_640_000_000_000_000 - at).padStart(16, "0");
+}
+
+const ORDER_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/**
+ * occurrence 在次序索引里的键：倒序时间键，加 jobRunId 的倒序定宽编码与终止符 `~`，正向读取即
+ * compareJobOccurrences 的逆序（新到旧，同一时间 id 大的在前）。每个码元编成 3 位 base-62，取 65535 减码元，
+ * 字母表按码元升序，于是同一时间里 id 大的键小；一个 id 是另一个的前缀时，长者多出的首字符不大于 `z`，
+ * 小于终止符，长者在前。各键以 `~` 结尾、内部没有 `~`，整条存储键的次序就是次序键的次序。
+ * 最长 480 码元的 id 编成 1440 字符，加前缀与主体哈希仍在投影键上限内。
+ */
+export function occurrenceOrderKey(occurrence: Pick<JobOccurrence, "scheduledFor" | "jobRunId">): string {
+  let encoded = "";
+  for (let index = 0; index < occurrence.jobRunId.length; index += 1) {
+    const value = 65535 - occurrence.jobRunId.charCodeAt(index);
+    encoded += ORDER_DIGITS[Math.floor(value / 3844)]! + ORDER_DIGITS[Math.floor(value / 62) % 62]! + ORDER_DIGITS[value % 62]!;
+  }
+  return `${occurrenceSortKey(occurrence.scheduledFor)}${encoded}~`;
+}
+
+/**
+ * 每条记录归约后，按本工作集里改动过的主体重算各当前义务目录。只看改动过的主体，
+ * 目录与原遍历判定逐条一致：run 未结束、当前派发未结束、结算未完成、挑战未关闭、
+ * 授权未镜像、自动停用未落定。
+ */
+function refreshJobDirectories(state: JobProjection): void {
+  const store = jobViewStore(state);
+  const changed = (field: string) => store.changedSubjects(field).map(String);
+  const toggle = (directory: KeyedSet<string>, subject: string, present: boolean) => {
+    if (directory.has(subject) === present) return;
+    if (present) directory.add(subject);
+    else directory.delete(subject);
+  };
+  const runOpen = (jobRunId: string) => {
+    const current = state.states.get(jobRunId);
+    return current !== undefined && !isTerminal(current.state);
+  };
+  const runs = new Set(changed("states"));
+  for (const jobRunId of runs) toggle(state.openRuns, jobRunId, runOpen(jobRunId));
+  const assignments = new Set(changed("assignedById"));
+  for (const jobRunId of new Set([...runs, ...changed("assignmentByJob")])) {
+    const current = state.assignmentByJob.get(jobRunId);
+    if (current) assignments.add(current);
+    const previous = store.baseOf("assignmentByJob", jobRunId);
+    if (previous?.present) assignments.add(previous.value as string);
+  }
+  for (const assignmentId of assignments) {
+    const assigned = state.assignedById.get(assignmentId);
+    toggle(state.openAssignments, assignmentId, assigned !== undefined &&
+      state.assignmentByJob.get(assigned.record.jobRunId) === assignmentId && runOpen(assigned.record.jobRunId));
+  }
+  for (const assignmentId of new Set([...changed("interactionSettlementFences"), ...changed("completedInteractionSettlements")])) {
+    toggle(state.pendingSettlements, assignmentId,
+      state.interactionSettlementFences.has(assignmentId) && !state.completedInteractionSettlements.has(assignmentId));
+  }
+  const channel = state.channelInteractions;
+  for (const challengeId of new Set([...changed(JOB_CHANNEL_FIELDS.preparedByChallenge), ...changed(JOB_CHANNEL_FIELDS.closedByChallenge)])) {
+    toggle(state.openChallenges, challengeId,
+      channel.preparedByChallenge.get(challengeId)?.ref.execution === "job" && !channel.closedByChallenge.has(challengeId));
+  }
+  const grants = new Set(changed(JOB_CHANNEL_FIELDS.grantByChallenge));
+  for (const assignmentId of changed("interactionMirrors")) {
+    const previous = store.baseOf("interactionMirrors", assignmentId)?.value as
+      { readonly outcomes: ReadonlyMap<string, unknown> } | undefined;
+    for (const outcomes of [state.interactionMirrors.get(assignmentId)?.outcomes, previous?.outcomes]) {
+      for (const interactionRequestId of outcomes?.keys() ?? []) {
+        const challengeId = channel.challengeByInteraction.get(`${assignmentId}\u0000${interactionRequestId}`);
+        if (challengeId) grants.add(challengeId);
+      }
+    }
+  }
+  for (const challengeId of grants) toggle(state.pendingGrants, challengeId, jobGrantPending(state, challengeId));
+  for (const jobRunId of new Set([...changed("failurePolicyByRun"), ...changed("autoDisableSettledRuns")])) {
+    toggle(state.pendingAutoDisable, jobRunId,
+      state.failurePolicyByRun.get(jobRunId)?.autoDisableRequired === true && !state.autoDisableSettledRuns.has(jobRunId));
+  }
+}
+
+/** 频道授权尚未由交互镜像落定；镜像的回答与授权不符即日志损坏。 */
+function jobGrantPending(state: JobProjection, challengeId: string): boolean {
+  const granted = state.channelInteractions.grantByChallenge.get(challengeId);
+  if (!granted || granted.grant.ref.execution !== "job") return false;
+  const outcome = state.interactionMirrors
+    .get(granted.grant.assignmentId)
+    ?.outcomes.get(granted.grant.interactionRequestId);
+  if (!outcome) return true;
+  if (outcome.t !== "answered") return false;
+  if (
+    outcome.authority.via !== "channel-grant" ||
+    canonicalize(outcome.authority.grant) !== canonicalize(granted.grant)
+  ) {
+    throw corruptJobJournal("Mirrored job answer conflicts with its durable channel grant");
+  }
+  return false;
+}
+
+/**
+ * 按完整次序（compareJobOccurrences）从后往前逐条给出 occurrence，accept 返回 false 即停。
+ * 给了 before 时从它之前那一条开始。次序键已含 id，同一时间的多条也逐条按页读，不整组装入。
+ */
+function walkOccurrencesBackward(
+  state: Pick<JobProjection, "occurrenceOrder" | "occurrences">,
+  before: Pick<JobOccurrence, "jobRunId" | "scheduledFor"> | undefined,
+  accept: (occurrence: JobOccurrence) => boolean,
+): void {
+  let after = before ? occurrenceOrderKey(before) : undefined;
+  let limit = 16;
+  for (;;) {
+    const rows = state.occurrenceOrder.range({ ...(after === undefined ? {} : { after }), limit });
+    for (const row of rows) {
+      const occurrence = state.occurrences.get(row.subject);
+      if (!occurrence) throw corruptJobJournal("Occurrence order names an unknown occurrence");
+      if (!accept(occurrence)) return;
+    }
+    if (rows.length < limit) return;
+    after = rows.at(-1)!.sortKey;
+    // 长的倒扫逐页放大，减少装入往返
+    limit = Math.min(limit * 2, 256);
+  }
+}
+
+/** 一条 occurrence 当前的调度事实：最新状态与结果。 */
+function scheduleOccurrenceOf(state: Pick<JobProjection, "states" | "outcomeByRun">, occurrence: JobOccurrence): ScheduleOccurrence {
+  const current = state.states.get(occurrence.jobRunId);
+  const projected = validateJobOccurrence({ ...snapshot(occurrence), state: current?.state ?? occurrence.state });
+  const outcome = state.outcomeByRun.get(occurrence.jobRunId);
+  return { ...projected, ...(outcome ? { outcome: snapshot(outcome) } : {}) };
+}
+
+/**
+ * 每条作业流记录后维护连续失败摘要。对本信封里改动过的非错过 occurrence，比较它现在是否失败与摘要里记下的值，
+ * 不同才写摘要（不在摘要里即插入）。按完整次序逐条写：同样的记录与归约前状态总得出同样的节点，
+ * 持久投影、会话工作集与完整重放三处逐行一致（会话会从持久行补装未装入的节点）。
+ * 状态推进而失败与否不变时只读 failureFlagByRun 一行，不碰摘要。
+ */
+function refreshFailureSummary(state: JobProjection): void {
+  const store = jobViewStore(state);
+  const changed = new Set(["occurrences", "states", "outcomeByRun"].flatMap((field) => store.changedSubjects(field).map(String)));
+  const updates = [...changed]
+    .map((jobRunId) => state.occurrences.get(jobRunId))
+    .filter((occurrence): occurrence is JobOccurrence => occurrence !== undefined && occurrence.state !== "missed")
+    .map((occurrence) => ({ occurrence, failed: isScheduleFailure(scheduleOccurrenceOf(state, occurrence)) }))
+    .filter(({ occurrence, failed }) => state.failureFlagByRun.get(occurrence.jobRunId) !== failed)
+    .sort((left, right) => compareJobOccurrences(left.occurrence, right.occurrence));
+  // 先把各条的定位路径按层一并装入，再逐条写
+  requireFailureSummaryPaths(state, updates.map(({ occurrence }) => occurrence));
+  for (const { occurrence, failed } of updates) {
+    setFailureSummaryEntry(state, occurrence, failed);
+    state.failureFlagByRun.set(occurrence.jobRunId, failed);
+  }
+}
+
+const SCHEDULE_FAILURE_STATES: ReadonlySet<unknown> = new Set(["failed", "expired", "committed"]);
+
+/**
+ * 这些作业流记录可能改动连续失败摘要的位置：新的非错过 occurrence，以及进入 failed、expired、committed 的 run
+ * （只有这三种状态能让 isScheduleFailure 成立；终态不再改变）。普通状态推进不在其中。
+ * 只用已装入的 occurrence：没装入的留给归约时的逐层报缺。
+ */
+function failureSummaryCandidates(
+  state: Pick<JobProjection, "occurrences">,
+  bodies: readonly unknown[],
+): FailureSummaryPosition[] {
+  const positions: FailureSummaryPosition[] = [];
+  for (const raw of bodies) {
+    const body = raw as { readonly t?: unknown; readonly occ?: JobOccurrence; readonly state?: unknown; readonly jobRunId?: unknown };
+    if (body.t === "occurrence" && body.occ && body.occ.state !== "missed") positions.push(body.occ);
+    if (body.t !== "state" || typeof body.jobRunId !== "string" || !SCHEDULE_FAILURE_STATES.has(body.state)) continue;
+    const occurrence = state.occurrences.peek(body.jobRunId);
+    if (occurrence && occurrence.state !== "missed") positions.push(occurrence);
+  }
+  return positions;
+}
+
+/**
+ * 归约这些记录之前，把它们在连续失败摘要里的定位路径按层成批装入：每层一次读取，
+ * 归约时不再逐层缺键重做（重做会再走一遍整封信封，committed 记录还要重读密封包）。
+ */
+export async function preloadFailureSummaryPaths(
+  set: JobStateSet,
+  bodies: readonly unknown[],
+  read: import("@zhixing/core/authority").DurableProjectionReadContext,
+): Promise<void> {
+  // 根行由按主体预装一并装入；没有根行就没有可定位的路径
+  if (!set.isLoaded(set.rootKey)) return;
+  const view = jobProjectionView(new JobStateBinding(set));
+  const positions = failureSummaryCandidates(view, bodies);
+  for (;;) {
+    const missing = missingFailureSummaryNodes(view, positions);
+    if (!missing.length) return;
+    await loadJobState(set, missing.map((key) => ({ key })), read);
+  }
+}
+
+/** 最近一次 occurrence：次序索引的第一行。 */
+function latestOccurrence(state: Pick<JobProjection, "occurrenceOrder" | "occurrences">): JobOccurrence | undefined {
+  const row = state.occurrenceOrder.range({ limit: 1 })[0];
+  if (!row) return undefined;
+  const occurrence = state.occurrences.get(row.subject);
+  if (!occurrence) throw corruptJobJournal("Occurrence order names an unknown occurrence");
+  return occurrence;
+}
+
+/** 派发按提交位置排序（与原先按写入次序列出一致）。 */
+function byAssignmentCommit(
+  state: { readonly assignedById: Pick<KeyedMap<string, { readonly commit: { readonly lsn: number } }>, "get"> },
+  assignmentIds: readonly string[],
+): string[] {
+  return assignmentIds
+    .map((assignmentId) => {
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned) throw corruptJobJournal("Assignment directory names an unknown assignment");
+      return { assignmentId, lsn: assigned.commit.lsn };
+    })
+    .sort((left, right) => left.lsn - right.lsn || left.assignmentId.localeCompare(right.assignmentId))
+    .map(({ assignmentId }) => assignmentId);
+}
+
+/** run 按 occurrence 次序（计划时间、id 升序）排序。 */
+function byOccurrenceOrder(
+  state: Pick<JobProjection, "occurrences">,
+  jobRunIds: readonly string[],
+): string[] {
+  return jobRunIds
+    .map((jobRunId) => {
+      const occurrence = state.occurrences.get(jobRunId);
+      if (!occurrence) throw corruptJobJournal("Run directory names an unknown occurrence");
+      return occurrence;
+    })
+    .sort(compareJobOccurrences)
+    .map((occurrence) => occurrence.jobRunId);
+}
+
+/** 调度读取的当前视图：不含历史 run 的全集。 */
+export interface JobSchedulerReadView {
+  readonly definition?: TaskDefinition;
+  /** 非错过 occurrence 的总数。 */
+  readonly runCount: number;
+  /** 最近一次起向前的连续失败次数。 */
+  readonly consecutiveFailures: number;
+  readonly last?: ScheduleOccurrence;
+  /** 未结束的 occurrence，按计划时间、id 升序。 */
+  readonly open: readonly ScheduleOccurrence[];
+}
+
+// ---- 按主体预先装入：一条记录或一次决定通常只碰到少数 run/派发/票据/挑战 ----
+
+type JobSubjectKind = "run" | "assignment" | "ticket" | "challenge" | "revision" | "operation";
+
+const JOB_MAIN_SUBJECTS: Readonly<Record<string, JobSubjectKind>> = {
+  occurrences: "run", missedNextFireByRun: "run", failurePolicyByRun: "run", failureFlagByRun: "run", capabilityGapByRun: "run",
+  systemMissAliases: "run", ingressByJob: "run", states: "run", assignmentByJob: "run", resolutions: "run",
+  statusHistoryByRun: "run", outcomeByRun: "run", systemFences: "run", systemResults: "run",
+  assignmentAttemptByRun: "run", autoDisableSettledRuns: "run", admittedJobs: "run", openRuns: "run",
+  pendingAutoDisable: "run", pendingMissed: "run",
+  assignedById: "assignment", superseded: "assignment", supersedeRequests: "assignment",
+  supersedeStarted: "assignment", cancelFences: "assignment", interactionSettlementFences: "assignment",
+  completedInteractionSettlements: "assignment", acceptedCancellations: "assignment",
+  ticketIdsByAssignment: "assignment", interactionMirrors: "assignment", committed: "assignment",
+  bundleAcknowledgements: "assignment", durableStarted: "assignment", recoveryAssignments: "assignment",
+  bundleAcknowledgementOutbox: "assignment", openAssignments: "assignment", pendingSettlements: "assignment",
+  [JOB_CHANNEL_FIELDS.cursorByAssignment]: "assignment",
+  ticketsById: "ticket", ticketReplacementsById: "ticket", revokedTickets: "ticket",
+  [JOB_CHANNEL_FIELDS.preparedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.deliveredByChallenge]: "challenge",
+  [JOB_CHANNEL_FIELDS.closedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.grantByChallenge]: "challenge",
+  openChallenges: "challenge", pendingGrants: "challenge",
+  definitions: "revision", taskOperations: "operation",
+};
+
+const JOB_GUARD_SUBJECTS: Readonly<Record<string, JobSubjectKind>> = {
+  occurrences: "run", states: "run", ingressByJob: "run", assignmentByJob: "run", resolutions: "run",
+  systemFences: "run", systemResults: "run", assignmentAttemptByRun: "run", admittedJobs: "run",
+  systemMissAliases: "run",
+  assignedById: "assignment", supersedeRequests: "assignment", cancelFences: "assignment",
+  interactionSettlementFences: "assignment", completedInteractionSettlements: "assignment",
+  ticketIdsByAssignment: "assignment", interactionMirrors: "assignment", committedByAssignment: "assignment",
+  bundleAcknowledgements: "assignment", conflictAssignments: "assignment", openConflictAssignments: "assignment",
+  supersedeStartedAssignments: "assignment", acceptedCancellations: "assignment", durableStarted: "assignment",
+  closedAssignments: "assignment", [JOB_CHANNEL_FIELDS.cursorByAssignment]: "assignment",
+  ticketsById: "ticket", ticketReplacementsById: "ticket", revokedTickets: "ticket",
+  [JOB_CHANNEL_FIELDS.preparedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.deliveredByChallenge]: "challenge",
+  [JOB_CHANNEL_FIELDS.closedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.grantByChallenge]: "challenge",
+  definitionKinds: "revision", taskOperations: "operation",
+};
+
+/** 一次归约或决定涉及的主体。 */
+export interface JobScope {
+  readonly runs: Set<string>;
+  readonly assignments: Set<string>;
+  readonly tickets: Set<string>;
+  readonly challenges: Set<string>;
+  readonly revisions: Set<number>;
+  readonly operations: Set<string>;
+}
+
+const JOB_SCOPE_NAMES: Readonly<Record<string, Exclude<keyof JobScope, "revisions">>> = {
+  jobRunId: "runs", requestedJobRunId: "runs", coalescedJobRunId: "runs", assignmentId: "assignments",
+  ticketId: "tickets", replacesTicketId: "tickets", challengeId: "challenges", operationId: "operations",
+};
+
+/** 从记录或请求里收集主体标识：只看协议标识字段，不进入正文与载荷。 */
+export function jobScopeOf(...inputs: unknown[]): JobScope {
+  const scope: JobScope = {
+    runs: new Set(), assignments: new Set(), tickets: new Set(), challenges: new Set(),
+    revisions: new Set(), operations: new Set(),
+  };
+  let visited = 0;
+  const visit = (value: unknown, depth: number) => {
+    if (++visited > 4096 || depth > 8 || !value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return;
+    for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
+      const target = JOB_SCOPE_NAMES[name];
+      if (target && typeof item === "string") scope[target].add(item);
+      if ((name === "taskRevision" || name === "disabledTaskRevision") && typeof item === "number") scope.revisions.add(item);
+      if (name !== "input" && name !== "output" && name !== "display" && name !== "spec") visit(item, depth + 1);
+    }
+  };
+  for (const input of inputs) visit(input, 0);
+  return scope;
+}
+
+function scopeKeys(set: JobStateSet, subjects: Readonly<Record<string, JobSubjectKind>>, scope: JobScope): string[] {
+  const values: Record<JobSubjectKind, Iterable<string | number>> = {
+    run: scope.runs, assignment: scope.assignments, ticket: scope.tickets, challenge: scope.challenges,
+    revision: scope.revisions, operation: scope.operations,
+  };
+  const keys = [set.rootKey];
+  for (const [field, kind] of Object.entries(subjects)) {
+    for (const subject of values[kind]) keys.push(set.storageKey(field, subject));
+  }
+  return keys.filter((key) => !set.isLoaded(key));
+}
+
+/** 本作业流上的记录正文。 */
+function jobStreamBodies(entries: readonly LogicalRecord<unknown>[], taskId: string): unknown[] {
+  return entries.filter((entry) => entry.stream === jobStream(taskId)).map((entry) => entry.body);
+}
+
+/** 这些记录归约时会读、而本工作集还没装入的主体行。 */
+function candidateStateNeeds(
+  set: JobStateSet,
+  entries: readonly LogicalRecord<unknown>[],
+  taskId: string,
+): { readonly key: string }[] {
+  const scope = jobScopeOf(entries.filter((entry) => entry.stream === jobStream(taskId)).map((entry) => entry.body));
+  return scopeKeys(set, JOB_MAIN_SUBJECTS, scope).map((key) => ({ key }));
+}
+
+/**
+ * 按主体成批装入两份投影的行：先装记录直接涉及的主体，再按装入的结果补齐它们连带的
+ * run、当前派发与定义版本（第二轮）。之后仍缺的由重做补齐。
+ */
+export async function preloadJobScope(
+  sets: { readonly main?: JobStateSet; readonly guard?: JobStateSet },
+  scope: JobScope,
+  read: import("@zhixing/core/authority").DurableProjectionReadContext,
+): Promise<void> {
+  const load = async () => {
+    for (const [set, subjects] of [[sets.main, JOB_MAIN_SUBJECTS], [sets.guard, JOB_GUARD_SUBJECTS]] as const) {
+      if (!set) continue;
+      await loadJobState(set, scopeKeys(set, subjects, scope).map((key) => ({ key })), read);
+    }
+  };
+  await load();
+  const grown = { runs: scope.runs.size, assignments: scope.assignments.size, revisions: scope.revisions.size };
+  for (const set of [sets.main, sets.guard]) {
+    if (!set) continue;
+    const view = (set === sets.main ? jobProjectionView : jobSubmissionGuardView)(new JobStateBinding(set)) as unknown as {
+      readonly activeJobRunId?: string; readonly pendingSystemMissedJobRunId?: string;
+      readonly assignedById: KeyedMap<string, { readonly record: { readonly jobRunId: string } }>;
+      readonly assignmentByJob: KeyedMap<string, string>;
+      readonly occurrences: KeyedMap<string, { readonly taskRevision: number }>;
+    };
+    for (const jobRunId of [view.activeJobRunId, view.pendingSystemMissedJobRunId]) if (jobRunId) scope.runs.add(jobRunId);
+    for (const assignmentId of scope.assignments) {
+      const jobRunId = view.assignedById.peek(assignmentId)?.record.jobRunId;
+      if (jobRunId) scope.runs.add(jobRunId);
+    }
+    for (const jobRunId of scope.runs) {
+      const assignmentId = view.assignmentByJob.peek(jobRunId);
+      if (assignmentId) scope.assignments.add(assignmentId);
+      const revision = view.occurrences.peek(jobRunId)?.taskRevision;
+      if (revision !== undefined) scope.revisions.add(revision);
+    }
+  }
+  if (scope.runs.size !== grown.runs || scope.assignments.size !== grown.assignments || scope.revisions.size !== grown.revisions) await load();
+}
+
+/** 作业日志的工作集会话。 */
+interface JobJournalSession {
+  main: JobStateSet;
+  guard: JobStateSet;
+  /** 已装入的行对应的持久头位置（最后一封触及本作业的信封）；undefined 表示尚无写入。 */
+  head: number | undefined;
+  /** 上一次事务结束时的日志游标：下一次事务只续读其后的尾部。 */
+  cursor: ProjectionCursor | undefined;
+}
+
+/** 会话复用的工作集上限：超过后换新会话，进程内常驻的已装入行有界。 */
+const MAX_JOB_SESSION_ROWS = 4096;
 
 export interface PendingJobDispatch {
   readonly assignmentId: string;
@@ -547,16 +1162,6 @@ export type InProcessJobDispatcherOptions = InProcessJobDispatcherBaseOptions &
         readonly bundleSubmission: InProcessJobBundleSubmission;
       }
   );
-
-export interface JobCompatibilityProjection {
-  project(input: {
-    readonly definition: TaskDefinition & {
-      readonly definition: Extract<TaskDefinitionBody, { kind: "user" }>;
-    };
-    readonly occurrences: readonly JobOccurrence[];
-  }): Promise<void>;
-  remove(taskId: string): Promise<void>;
-}
 
 export interface JobCommitParticipant {
   readonly readProjectionIds?: readonly string[];
@@ -672,7 +1277,6 @@ export interface JobJournalOptions {
   readonly submission: AssignmentSubmissionAuthorizer;
   readonly ingress: JobIngressAuthorizer;
   readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
-  readonly compatibility?: JobCompatibilityProjection;
   readonly delivery: JobDeliveryParticipant;
   readonly commitParticipant?: JobCommitParticipant;
   readonly resources?: AssignmentResourceCoordinator;
@@ -729,6 +1333,3012 @@ export type JobCancelResult =
   | { readonly state: Exclude<JobRunState, "cancelled" | "cancel-requested"> };
 
 /** Anchor-owned durable authority for one task and all of its immutable occurrences. */
+export interface JobReductionOptions {
+  readonly taskId: string;
+  readonly anchorEpoch: number;
+  readonly artifacts: ArtifactStore;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
+  readonly delivery: JobDeliveryParticipant;
+  readonly resources?: AssignmentResourceCoordinator;
+  readonly systemResources?: SystemJobResourceCoordinator;
+  readonly localExecutorId?: string;
+}
+
+/**
+ * 作业日志的归约规则：作业日志自身、按键持久投影与对照用例共用这一份。
+ * 只持有校验所需的协议与资源服务，不持有任何状态。
+ */
+export class JobReduction {
+  readonly #taskId: string;
+  readonly #anchorEpoch: number;
+  readonly #artifacts: ArtifactStore;
+  readonly #verifier: ProtocolSignatureVerifier;
+  readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
+  readonly #delivery: JobDeliveryParticipant;
+  readonly #resources: AssignmentResourceCoordinator | undefined;
+  readonly #systemResources: SystemJobResourceCoordinator | undefined;
+  readonly #localExecutorId: string | undefined;
+
+  constructor(options: JobReductionOptions) {
+    this.#taskId = options.taskId;
+    this.#anchorEpoch = options.anchorEpoch;
+    this.#artifacts = options.artifacts;
+    this.#verifier = options.verifier;
+    this.#legacyAbortTickets = options.legacyAbortTickets;
+    this.#delivery = options.delivery;
+    this.#resources = options.resources;
+    this.#systemResources = options.systemResources;
+    this.#localExecutorId = options.localExecutorId;
+  }
+
+  get taskId(): string { return this.#taskId; }
+
+  /** 同一组协议与资源服务下另一个作业的归约（持久投影为任意作业归约）。 */
+  forTask(taskId: string): JobReduction {
+    return new JobReduction({
+      taskId,
+      anchorEpoch: this.#anchorEpoch,
+      artifacts: this.#artifacts,
+      verifier: this.#verifier,
+      delivery: this.#delivery,
+      ...(this.#legacyAbortTickets ? { legacyAbortTickets: this.#legacyAbortTickets } : {}),
+      ...(this.#resources ? { resources: this.#resources } : {}),
+      ...(this.#systemResources ? { systemResources: this.#systemResources } : {}),
+      ...(this.#localExecutorId ? { localExecutorId: this.#localExecutorId } : {}),
+    });
+  }
+
+  /** 一条记录的归约；作业流上的记录之后重算当前义务目录。 */
+  readonly reduce = async (
+    state: JobProjection,
+    raw: LogicalRecord<unknown>,
+    envelope: CommitEnvelope<unknown>,
+  ): Promise<JobProjection> => {
+    const next = await this.#reduceRecord(state, raw, envelope);
+    if (raw.stream === jobStream(this.#taskId)) {
+      refreshJobDirectories(next);
+      refreshFailureSummary(next);
+    }
+    return next;
+  };
+
+  readonly #reduceRecord = async (
+    state: JobProjection,
+    raw: LogicalRecord<unknown>,
+    envelope: CommitEnvelope<unknown>,
+  ): Promise<JobProjection> => {
+    if (raw.stream !== jobStream(this.#taskId)) {
+      return state;
+    }
+    const body = await verifyProtocolStep(() => validateJobJournalRecord(raw.body, this.#verifier));
+    const envelopeRecords = envelope.entries
+      .filter((entry) => entry.stream === jobStream(this.#taskId))
+      .map((entry) => entry.body as JobJournalRecord);
+    switch (body.t) {
+      case "task-revision": {
+        const definition = validateTaskDefinition(
+          await loadJobStored(body.def, this.#artifacts, "TaskDefinition"),
+        );
+        if (
+          body.taskId !== this.#taskId ||
+          definition.taskId !== body.taskId ||
+          definition.taskRevision !== body.taskRevision ||
+          definition.state !== body.state ||
+          definition.definition.kind !== body.kind
+        ) {
+          throw corruptJobJournal("Task revision belongs to a different stream");
+        }
+        const current = state.definition;
+        if (current && !taskCreationProvenanceMatches(current, definition)) {
+          throw corruptJobJournal("Task creation provenance is immutable");
+        }
+        const activeJobRunId = state.activeJobRunId;
+        const active = activeJobRunId
+          ? state.states.get(activeJobRunId)
+          : undefined;
+        assertTaskRevisionReplayContract({
+          taskIdMatches: body.taskId === this.#taskId,
+          taskRevision: body.taskRevision,
+          state: body.state,
+          kind: body.kind,
+          previousRevision: current?.taskRevision,
+          previousState: current?.state,
+          previousKind: current?.definition.kind,
+          activeState: active?.state,
+          ...taskRevisionAtomicFacts({
+            records: envelopeRecords,
+            taskRevision: body.taskRevision,
+            activeJobRunId,
+            active,
+            assignmentId: activeJobRunId
+              ? state.assignmentByJob.get(activeJobRunId)
+              : undefined,
+            cancelFences: state.cancelFences,
+            envelopeLsn: envelope.lsn,
+          }),
+        });
+        if (body.operationId !== undefined) {
+          if (state.taskOperations.has(body.operationId)) {
+            throw corruptJobJournal("Task mutation operation is duplicated");
+          }
+          state.taskOperations.set(body.operationId, {
+            digest: body.operationDigest!,
+            taskRevision: body.taskRevision,
+          });
+        }
+        state.definition = snapshot(definition);
+        state.definitions.set(definition.taskRevision, snapshot(definition));
+        return state;
+      }
+      case "occurrence": {
+        const definition = state.definition;
+        const active = state.activeJobRunId
+          ? state.states.get(state.activeJobRunId)
+          : undefined;
+        assertJobOccurrenceReplayContract({
+          taskIdMatches: body.occ.taskId === this.#taskId,
+          definitionPresent: definition !== undefined,
+          definitionState: definition?.state,
+          definitionRevisionMatches:
+            definition !== undefined &&
+            body.occ.taskRevision === definition.taskRevision,
+          definitionKind: definition?.definition.kind,
+          identifierUnused:
+            !state.occurrences.has(body.occ.jobRunId) &&
+            !state.systemMissAliases.has(body.occ.jobRunId),
+          occurrenceState: body.occ.state,
+          activeState: active?.state,
+          hasAtomicAdmission: envelopeRecords.some(
+            (record) =>
+              record.t === "admitted" && record.jobRunId === body.occ.jobRunId,
+          ),
+          hasAtomicOfflineMissPolicy: envelopeRecords.some(
+            (record) =>
+              record.t === "missed-next-fire" &&
+              record.jobRunId === body.occ.jobRunId,
+          ),
+        });
+        if (
+          !definition ||
+          canonicalize(body.occ.deliveryPlan) !==
+            canonicalize(deliveryPlan(definition.definition))
+        ) {
+          throw corruptJobJournal("Job occurrence does not bind the current task definition");
+        }
+        state.occurrences.set(body.occ.jobRunId, snapshot(body.occ));
+        state.occurrenceOrder.add(occurrenceOrderKey(body.occ), body.occ.jobRunId);
+        if (body.occ.state !== "missed") state.runCount += 1;
+        else if (definition.definition.kind === "user") state.pendingMissed.add(body.occ.jobRunId);
+        state.states.set(body.occ.jobRunId, {
+          state: body.occ.state,
+          statusRevision: 1,
+        });
+        if (state.statusHistoryByRun.has(body.occ.jobRunId)) {
+          throw corruptJobJournal("Job occurrence duplicates its status history");
+        }
+        state.statusHistoryByRun.set(body.occ.jobRunId, [
+          { state: body.occ.state, statusRevision: 1, at: envelope.at },
+        ]);
+        if (body.occ.state === "queued") state.activeJobRunId = body.occ.jobRunId;
+        state.pendingSystemMissedJobRunId = registerPendingSystemMiss({
+          currentPendingJobRunId: state.pendingSystemMissedJobRunId,
+          jobRunId: body.occ.jobRunId,
+          definitionKind: definition.definition.kind,
+          occurrenceState: body.occ.state,
+        });
+        return state;
+      }
+      case "legacy-next-fire": {
+        const definitionRecord = envelopeRecords.find(
+          (record) =>
+            record.t === "task-revision" &&
+            record.taskRevision === body.taskRevision,
+        );
+        if (!definitionRecord || state.legacyNextFire) {
+          throw corruptJobJournal("Legacy next-fire lacks its atomic imported definition");
+        }
+        state.legacyNextFire = body;
+        return state;
+      }
+      case "missed-next-fire": {
+        const occurrence = envelopeRecords.find(
+          (record) =>
+            record.t === "occurrence" &&
+            record.occ.jobRunId === body.jobRunId &&
+            record.occ.state === "missed",
+        );
+        if (!occurrence || state.missedNextFireByRun.has(body.jobRunId)) {
+          throw corruptJobJournal("Missed next-fire lacks its atomic missed occurrence");
+        }
+        state.missedNextFireByRun.set(body.jobRunId, body);
+        return state;
+      }
+      case "failure-policy": {
+        const terminal = envelopeRecords.find(
+          (record) =>
+            record.t === "state" &&
+            record.jobRunId === body.jobRunId &&
+            (record.state === "failed" || record.state === "expired" ||
+              (record.state === "committed" && state.outcomeByRun.get(body.jobRunId)?.status === "failed")) &&
+            record.statusRevision === body.statusRevision,
+        );
+        const occurrence = state.occurrences.get(body.jobRunId);
+        if (
+          !terminal ||
+          !occurrence ||
+          occurrence.taskRevision !== body.taskRevision ||
+          state.failurePolicyByRun.has(body.jobRunId)
+        ) {
+          throw corruptJobJournal("Failure policy lacks its atomic failed terminal");
+        }
+        state.failurePolicyByRun.set(body.jobRunId, body);
+        return state;
+      }
+      case "auto-disable-settled": {
+        const policy = state.failurePolicyByRun.get(body.jobRunId);
+        if (
+          !policy?.autoDisableRequired ||
+          state.definition?.state !== "disabled" ||
+          state.definition.taskRevision !== body.disabledTaskRevision ||
+          state.autoDisableSettledRuns.has(body.jobRunId)
+        ) {
+          throw corruptJobJournal("Auto-disable settlement is invalid or duplicated");
+        }
+        state.autoDisableSettledRuns.add(body.jobRunId);
+        return state;
+      }
+      case "capability-gap-opened":
+      case "capability-gap-updated": {
+        if (!envelope.entries.some((entry) =>
+          entry.stream === SCHEDULER_USER_NOTICE_STREAM &&
+          typeof entry.body === "object" && entry.body !== null &&
+          (entry.body as { noticeId?: unknown }).noticeId === body.noticeId,
+        )) {
+          throw corruptJobJournal("Capability gap lacks its atomic user notice");
+        }
+        const current = state.states.get(body.jobRunId);
+        if (current?.state !== "queued") {
+          throw corruptJobJournal("Capability gap does not bind a queued occurrence");
+        }
+        const previous = state.capabilityGapByRun.get(body.jobRunId);
+        if (body.t === "capability-gap-opened") {
+          if (previous?.open || body.round !== (previous?.round ?? 0) + 1) {
+            throw corruptJobJournal("Capability gap opening round is invalid");
+          }
+        } else if (
+          !previous?.open ||
+          previous.round !== body.round ||
+          previous.noticeId !== body.noticeId
+        ) {
+          throw corruptJobJournal("Capability gap update does not bind the open round");
+        }
+        state.capabilityGapByRun.set(body.jobRunId, {
+          round: body.round,
+          noticeId: body.noticeId,
+          capabilityRevision: body.capabilityRevision,
+          reasonDigest: body.reasonDigest,
+          reason: body.reason,
+          open: true,
+        });
+        return state;
+      }
+      case "capability-gap-closed": {
+        if (!envelope.entries.some((entry) =>
+          entry.stream === SCHEDULER_USER_NOTICE_STREAM &&
+          typeof entry.body === "object" && entry.body !== null &&
+          (entry.body as { noticeId?: unknown }).noticeId === body.noticeId,
+        )) {
+          throw corruptJobJournal("Capability gap close lacks its atomic notice update");
+        }
+        const previous = state.capabilityGapByRun.get(body.jobRunId);
+        if (
+          !previous?.open ||
+          previous.round !== body.round ||
+          previous.noticeId !== body.noticeId
+        ) {
+          throw corruptJobJournal("Capability gap close does not bind the open round");
+        }
+        state.capabilityGapByRun.set(body.jobRunId, { ...previous, open: false });
+        return state;
+      }
+      case "system-miss-coalesced": {
+        const definition = state.definition;
+        const coalesced = state.occurrences.get(body.coalescedJobRunId);
+        const active = state.activeJobRunId
+          ? state.states.get(state.activeJobRunId)
+          : undefined;
+        assertSystemMissCoalescedReplayContract({
+          definitionKind: definition?.definition.kind,
+          requestedIdentifierUnused:
+            !state.occurrences.has(body.requestedJobRunId) &&
+            !state.systemMissAliases.has(body.requestedJobRunId),
+          pendingMatchesCoalesced:
+            state.pendingSystemMissedJobRunId === body.coalescedJobRunId,
+          coalescedState: coalesced?.state,
+          activeState: active?.state,
+        });
+        state.systemMissAliases.set(body.requestedJobRunId, {
+          scheduledFor: body.scheduledFor,
+          coalescedJobRunId: body.coalescedJobRunId,
+        });
+        return state;
+      }
+      case "admitted": {
+        const occurrence = state.occurrences.get(body.jobRunId);
+        const definition = occurrence
+          ? state.definitions.get(occurrence.taskRevision)
+          : undefined;
+        assertJobAdmissionReplayContract({
+          taskIdMatches: body.taskId === this.#taskId,
+          occurrencePresent: occurrence !== undefined,
+          scheduleMatches: occurrence?.scheduledFor === body.scheduledFor,
+          occurrenceState: occurrence?.state,
+          definitionKind: definition?.definition.kind,
+          admissionAlreadyExists: state.admittedJobs.has(body.jobRunId),
+          ingressPresent: body.ingress !== undefined,
+          hasAtomicManualControlResult: envelopeHasManualJobRunApplied(
+            envelope,
+            body.jobRunId,
+          ),
+        });
+        state.admittedJobs.add(body.jobRunId);
+        if (body.ingress) state.ingressByJob.set(body.jobRunId, body.ingress);
+        return state;
+      }
+      case "assigned": {
+        const occurrence = state.occurrences.get(body.jobRunId);
+        const current = state.states.get(body.jobRunId);
+        assertAssignmentReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          runAlreadyAssigned: state.assignmentByJob.has(body.jobRunId),
+          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
+          isEarliestQueuedRun: state.activeJobRunId === body.jobRunId,
+          hasAtomicDispatchedState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              "dispatched",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        if (
+          !occurrence ||
+          body.taskId !== this.#taskId ||
+          body.anchorEpoch !== this.#anchorEpoch ||
+          body.taskRevision !== occurrence.taskRevision ||
+          body.deliveryPlanDigest !== occurrence.deliveryPlan.planDigest
+        ) {
+          throw corruptJobJournal("Job assignment is invalid or lacks its atomic state");
+        }
+        const bytes = await this.#artifacts.get(body.dispatchRef);
+        const dispatch = await verifyProtocolStep(() => validateJobEnvelope(
+          JSON.parse(Buffer.from(bytes).toString("utf8")) as JobEnvelope,
+          this.#verifier,
+        ));
+        await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
+        const dispatchArtifact = dispatchEnvelopeArtifact(dispatch);
+        if (
+          canonicalize(dispatchArtifact.ref) !== canonicalize(body.dispatchRef) ||
+          dispatch.assignmentId !== body.assignmentId ||
+          dispatch.executorId !== body.executorId ||
+          dispatchEnvelopeDigest(dispatch) !== body.dispatchDigest ||
+          dispatch.manifest.digest !== body.manifestDigest ||
+          permissionSnapshotLeaseDigest(dispatch) !== body.permissionLeaseDigest ||
+          canonicalize(dispatch.capabilities.map((capability) => capability.capId)) !==
+            canonicalize(body.capIds) ||
+          dispatch.resourceLease.reservationId !== body.reservation.reservationId ||
+          dispatch.resourceLease.workload.attempt !== body.reservation.attempt
+        ) {
+          throw corruptJobJournal("Job assignment dispatch artifact is inconsistent");
+        }
+        assertDispatchMatchesOccurrence(
+          dispatch,
+          occurrence,
+          requireDefinitionRevision(state, occurrence.taskRevision),
+          this.#anchorEpoch,
+        );
+        if (requiresFormalResourceCoordination(dispatch.resourceLease)) {
+          if (!this.#resources) {
+            throw corruptJobJournal("Job assignment has no resource coordinator");
+          }
+          this.#resources.assertActivationRecords({
+            lease: dispatch.resourceLease,
+            records: envelope.entries,
+            acceptedAt: envelope.at,
+          });
+        }
+        state.assignedById.set(body.assignmentId, {
+          record: body,
+          envelope: dispatch,
+          commit: {
+            lsn: envelope.lsn,
+            envelopeDigest: envelope.envelopeDigest,
+            at: envelope.at,
+          },
+          acked: false,
+        });
+        state.assignmentByJob.set(body.jobRunId, body.assignmentId);
+        state.assignmentAttemptByRun.set(body.jobRunId,
+          Math.max(state.assignmentAttemptByRun.get(body.jobRunId) ?? 0, body.reservation.attempt));
+        state.recoveryAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "dispatch-acked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertDispatchAcknowledgementReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.superseded.has(body.assignmentId),
+          assignmentClosed: state.superseded.has(body.assignmentId),
+        });
+        if (!assigned) {
+          throw corruptJobJournal("Dispatch acknowledgement is missing or duplicated");
+        }
+        assigned.acked = true;
+        return state;
+      }
+      case "dispatch-conflict": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertDispatchConflictReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsAssignment:
+            assigned !== undefined &&
+            body.proof.assignmentId === body.assignmentId &&
+            body.proof.executorId === assigned.record.executorId,
+          handling: body.handling,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.superseded.has(body.assignmentId),
+          assignmentClosed: state.superseded.has(body.assignmentId),
+          conflictAlreadySeen: state.conflicts.has(body.assignmentId),
+        });
+        if (!assigned || !current) {
+          throw corruptJobJournal("Dispatch conflict identity is invalid or duplicated");
+        }
+        const expectedActivationDigest = assignedActivationDigest(assigned);
+        const acceptedMatches =
+          canonicalize(body.proof.acceptedDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          body.proof.acceptedActivationDigest === expectedActivationDigest;
+        const conflictingMatches =
+          canonicalize(body.proof.conflictingDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          body.proof.conflictingActivationDigest === expectedActivationDigest;
+        assertDispatchConflictHandlingReplayContract({
+          handling: body.handling,
+          acceptedMatches,
+          conflictingMatches,
+          atomicHandling:
+            body.handling === "acked-original"
+              ? envelopeRecords.some(
+                  (record) =>
+                    record.t === "dispatch-acked" &&
+                    record.assignmentId === body.assignmentId,
+                )
+              : envelopeRecords.some(
+                  (record) =>
+                    record.t === "resolution" &&
+                    record.jobRunId === assigned.record.jobRunId &&
+                    record.fact.subject.assignmentId === body.assignmentId &&
+                    record.fact.cause === "dispatch-conflict" &&
+                    record.fact.resolution === undefined,
+                ) &&
+                recordsHaveJobState(
+                  envelopeRecords,
+                  assigned.record.jobRunId,
+                  "uncertain",
+                  current.statusRevision + 1,
+                  body.assignmentId,
+                ) &&
+                envelopeRecords.some(
+                  (record) =>
+                    record.t === "cancel-fence" &&
+                    record.assignmentId === body.assignmentId,
+                ) &&
+                allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
+        });
+        state.conflicts.set(body.assignmentId, body);
+        return state;
+      }
+      case "dispatch-conflict-contained":
+      case "cancel-contained": {
+        const assigned = requireReplayAssignment(state, body.assignmentId);
+        const open = state.resolutions.get(assigned.record.jobRunId);
+        if (
+          state.assignmentByJob.get(assigned.record.jobRunId) !== body.assignmentId ||
+          !proofBindsJobSource(
+            state,
+            assigned,
+            body.proof,
+            this.#anchorEpoch,
+            this.#legacyAbortTickets,
+          ) ||
+          !open ||
+          open.resolution ||
+          open.openFactDigest !== body.openFactDigest ||
+          state.containedFacts.has(body.openFactDigest) ||
+          (body.t === "dispatch-conflict-contained" &&
+            (open.cause !== "dispatch-conflict" ||
+              !state.conflicts.has(body.assignmentId) ||
+              body.proof.lastRecordSeq <=
+                state.conflicts.get(body.assignmentId)!.proof.receivedRecordSeq)) ||
+          (body.t === "cancel-contained" &&
+            (open.cause === "dispatch-conflict" || body.proof.decision !== "halted"))
+        ) {
+          throw corruptJobJournal("Containment does not bind one open uncertain fact");
+        }
+        if (body.t === "dispatch-conflict-contained") {
+          const current = state.states.get(assigned.record.jobRunId);
+          const targetState = current
+            ? notStartedTargetState(state, current)
+            : "queued";
+          const notStartedProof =
+            body.proof.decision === "halted" ? undefined : body.proof;
+          assertJobConflictContainmentReplayContract({
+            proofDecision: notStartedProof ? "not-started" : "halted",
+            conflictOpen: open.cause === "dispatch-conflict",
+            hasAtomicSupersedeWithSameProof:
+              notStartedProof !== undefined &&
+              envelopeRecords.some(
+                (record) =>
+                  record.t === "assignment-superseded" &&
+                  record.assignmentId === body.assignmentId &&
+                  sameTerminationProofIdentity(record.proof, notStartedProof),
+              ),
+            hasAtomicResolutionClose: envelopeRecords.some(
+              (record) =>
+                record.t === "resolution" &&
+                record.jobRunId === assigned.record.jobRunId &&
+                record.fact.openFactDigest === open.openFactDigest &&
+                (record.fact.resolution?.kind ===
+                  "proven-not-started-redispatched" ||
+                  record.fact.resolution?.kind ===
+                    "proven-not-started-cancelled"),
+            ),
+            hasAtomicTargetState:
+              current !== undefined &&
+              recordsHaveJobState(
+                envelopeRecords,
+                assigned.record.jobRunId,
+                targetState,
+                current.statusRevision + 1,
+                body.assignmentId,
+              ),
+            allCapabilitiesRevoked: allJobCapabilitiesRevoked(
+              envelopeRecords,
+              state,
+              assigned,
+            ),
+          });
+        }
+        state.containedFacts.add(body.openFactDigest);
+        state.containments.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "assignment-superseded": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        const open = assigned
+          ? state.resolutions.get(assigned.record.jobRunId)
+          : undefined;
+        const targetState = current
+          ? notStartedTargetState(state, current)
+          : "queued";
+        assertAssignmentSupersededReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          assignmentAlreadyClosed: state.superseded.has(body.assignmentId),
+          currentState: current?.state,
+          durableStartedObserved: state.durableStarted.has(body.assignmentId),
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
+          proofKind: assignmentTerminationProofKind(body.proof),
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              targetState,
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
+          hasAtomicResolutionClose:
+            assigned !== undefined &&
+            open !== undefined &&
+            open.resolution === undefined &&
+            envelopeRecords.some(
+              (record) =>
+                record.t === "resolution" &&
+                record.jobRunId === assigned.record.jobRunId &&
+                record.fact.openFactDigest === open.openFactDigest &&
+                (record.fact.resolution?.kind === "proven-not-started-redispatched" ||
+                  record.fact.resolution?.kind === "proven-not-started-cancelled"),
+            ),
+          conflictOpen:
+            open !== undefined &&
+            open.resolution === undefined &&
+            open.cause === "dispatch-conflict",
+          hasAtomicConflictContainment:
+            open !== undefined &&
+            envelopeRecords.some(
+              (record) =>
+                record.t === "dispatch-conflict-contained" &&
+                record.assignmentId === body.assignmentId &&
+                record.openFactDigest === open.openFactDigest &&
+                record.proof.decision !== "halted" &&
+                sameTerminationProofIdentity(record.proof, body.proof),
+            ),
+        });
+        if (!assigned) throw corruptJobJournal("Assignment supersede has no assignment");
+        this.assertAssignmentResourceTerminal(
+          assigned.record,
+          "release",
+          envelope.entries,
+        );
+        state.superseded.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "supersede-requested": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        assertSupersedeRequestReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+        });
+        state.supersedeRequests.set(body.assignmentId, body);
+        return state;
+      }
+      case "supersede-started-observed": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        assertSupersedeStartedObservationReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
+          observationAlreadyExists: state.supersedeStarted.has(body.assignmentId),
+        });
+        state.supersedeStarted.set(body.assignmentId, body);
+        state.durableStarted.add(body.assignmentId);
+        return state;
+      }
+      case "cancel-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertJobCancelFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+          hasAtomicCancelRequestedState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "cancel-requested",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          hasAtomicOpenedConflict:
+            assigned !== undefined &&
+            state.resolutions.get(assigned.record.jobRunId)?.cause ===
+              "dispatch-conflict" &&
+            envelopeRecords.some(
+              (record) =>
+                record.t === "dispatch-conflict" &&
+                record.assignmentId === body.assignmentId &&
+                record.handling === "opened-uncertain",
+            ),
+          hasAtomicDeletedTaskRevision: envelopeRecords.some(
+            (record) =>
+              record.t === "task-revision" &&
+              record.state === "deleted" &&
+              body.requestId === `task-revision:${record.taskRevision}`,
+          ),
+        });
+        state.cancelFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-settlement-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          "v" in body &&
+          body.v === 2 &&
+          assigned?.record.executorId !== body.executorId
+        ) {
+          throw corruptJobJournal(
+            "Versioned interaction settlement names a different executor",
+          );
+        }
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertJobInteractionSettlementFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.interactionSettlementFences.has(
+            body.assignmentId,
+          ),
+          hasAtomicUncertainState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "uncertain",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          hasAtomicUnknownCancellationResolution:
+            assigned !== undefined &&
+            ((
+              state.resolutions.get(assigned.record.jobRunId)?.cause ===
+                "job-cancel-unknown" &&
+              state.resolutions.get(assigned.record.jobRunId)?.resolution ===
+                undefined
+            ) ||
+              envelopeRecords.some(
+                (record) =>
+                  record.t === "resolution" &&
+                  record.jobRunId === assigned.record.jobRunId &&
+                  record.fact.subject.assignmentId === body.assignmentId &&
+                  record.fact.cause === "job-cancel-unknown" &&
+                  record.fact.resolution === undefined,
+              )),
+        });
+        state.interactionSettlementFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-settlement-completed": {
+        assertJobInteractionSettlementCompletionReplayContract({
+          fence: state.interactionSettlementFences.get(body.assignmentId),
+          completion: body,
+          completionAlreadyExists:
+            state.completedInteractionSettlements.has(body.assignmentId),
+          mirrored: state.interactionMirrors.get(body.assignmentId),
+          ...("v" in body && body.v === 2
+            ? { streamProof: body.streamProof }
+            : {}),
+        });
+        state.completedInteractionSettlements.set(body.assignmentId, body);
+        return state;
+      }
+      case "cancel-proof-accepted": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertCancelProofAcceptedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
+          durableStartedObserved: state.durableStarted.has(body.assignmentId),
+          proofDecision: body.proof.decision,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
+          hasAtomicCancelledState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "cancelled",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
+        });
+        if (!assigned) throw corruptJobJournal("Accepted cancellation has no assignment");
+        this.assertAssignmentUsageFinal(assigned.record, body.proof.usageFinal);
+        this.assertAssignmentResourceTerminal(
+          assigned.record,
+          body.proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        );
+        state.acceptedCancellations.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "not-started-rejected": {
+        const assigned = requireReplayAssignment(state, body.assignmentId);
+        const current = state.states.get(assigned.record.jobRunId);
+        const open = state.resolutions.get(assigned.record.jobRunId);
+        const contradictory =
+          state.durableStarted.has(body.assignmentId) ||
+          ("dispatchDigest" in body.proof && open?.cause === "dispatch-conflict");
+        const expectedCause = "cause" in body.proof
+          ? "job-cancel-unknown"
+          : "ledger-unknown";
+        if (
+          state.assignmentByJob.get(assigned.record.jobRunId) !== body.assignmentId ||
+          !proofBindsJobSource(
+            state,
+            assigned,
+            body.proof,
+            this.#anchorEpoch,
+            this.#legacyAbortTickets,
+          ) ||
+          !current ||
+          !contradictory ||
+          (current.state !== "uncertain" &&
+            (!envelopeRecords.some(
+              (record) =>
+                record.t === "resolution" &&
+                record.jobRunId === assigned.record.jobRunId &&
+                record.fact.subject.assignmentId === body.assignmentId &&
+                record.fact.cause === expectedCause &&
+                record.fact.resolution === undefined,
+            ) ||
+              !envelopeRecords.some(
+                (record) =>
+                  record.t === "state" &&
+                  record.jobRunId === assigned.record.jobRunId &&
+                  record.assignmentId === body.assignmentId &&
+                  record.state === "uncertain" &&
+                  record.statusRevision === current.statusRevision + 1,
+              ) ||
+              !allJobCapabilitiesRevoked(envelopeRecords, state, assigned)))
+        ) {
+          throw corruptJobJournal("Rejected not-started proof is historical");
+        }
+        const key = notStartedRejectionKey(
+          body.assignmentId,
+          terminationProofKind(body.proof),
+        );
+        if (state.rejectedNotStarted.has(key)) {
+          throw corruptJobJournal("Rejected not-started proof is duplicated");
+        }
+        state.rejectedNotStarted.set(key, body);
+        return state;
+      }
+      case "capability-revoked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const key = revokedCapabilityKey(body.assignmentId, body.capId);
+        assertCapabilityRevocationReplayContract({
+          assignmentExists: assigned !== undefined,
+          capabilityBelongsToAssignment:
+            assigned?.record.capIds.includes(body.capId) ?? false,
+          alreadyRevoked: state.revokedCapabilities.has(key),
+        });
+        state.revokedCapabilities.add(key);
+        return state;
+      }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        await applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: false,
+          assignmentActive:
+            assigned !== undefined &&
+            (state.states.get(assigned.record.jobRunId)?.state ===
+              "dispatched" ||
+              state.states.get(assigned.record.jobRunId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: assigned
+            ? state.ingressByJob.get(assigned.record.jobRunId)?.surfacePrincipal
+            : undefined,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeRecords.some(
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        await applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyJobTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
+      case "interaction-mirror": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
+          body.batch,
+          this.#verifier,
+        ));
+        const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
+        const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
+          upTo: 0,
+          ordinal: 0,
+          digest: interactionMirrorSeed(body.assignmentId),
+          requestIds: new Set<string>(),
+          outcomes: new Map(),
+        };
+        const first = batch.entries[0]!;
+        const last = batch.entries.at(-1)!;
+        const auditSettlement =
+          state.completedInteractionSettlements.has(body.assignmentId)
+            ? undefined
+            : state.interactionSettlementFences.get(body.assignmentId);
+        assertJobMirrorReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          executorMatches: assigned?.record.executorId === batch.executorId,
+          batchBindsRecord: batch.assignmentId === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          hasDurableCancelFence: state.cancelFences.has(body.assignmentId),
+          ...(auditSettlement
+            ? {
+                auditSettlementTarget: {
+                  upTo: auditSettlement.targetUpTo,
+                  ordinal: auditSettlement.targetOrdinal,
+                  mirrorDigest: auditSettlement.targetMirrorDigest,
+                },
+              }
+            : {}),
+          batchTarget: {
+            upTo: last.seq,
+            ordinal: last.ordinal,
+            mirrorDigest: batch.mirrorDigest,
+          },
+          batchAlreadyMirrored: state.interactionMirrorBatches.has(batchKey),
+          extendsCursor:
+            batch.previousDigest === mirrored.digest &&
+            first.ordinal === mirrored.ordinal + 1 &&
+            first.seq > mirrored.upTo,
+          repeatsRequestId: batchRepeatsRequestId(batch, mirrored.requestIds),
+        });
+        state.interactionMirrorBatches.add(batchKey);
+        state.interactionMirrors.set(body.assignmentId, {
+          upTo: last.seq,
+          ordinal: last.ordinal,
+          digest: batch.mirrorDigest,
+          requestIds: new Set([
+            ...mirrored.requestIds,
+            ...batch.entries.map((entry) => entry.requestId),
+          ]),
+          outcomes: new Map([
+            ...mirrored.outcomes,
+            ...batch.entries.map(
+              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
+            ),
+          ]),
+        });
+        return state;
+      }
+      case "channel-challenge-prepared": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const occurrence = assigned
+          ? state.occurrences.get(assigned.record.jobRunId)
+          : undefined;
+        const definition = occurrence
+          ? requireDefinitionRevision(state, occurrence.taskRevision)
+          : undefined;
+        if (
+          !assigned ||
+          !definition ||
+          definition.definition.kind !== "user" ||
+          !definition.definition.origin ||
+          !definition.definition.interactionResponder ||
+          body.ref.taskId !== this.#taskId ||
+          body.ref.jobRunId !== assigned.record.jobRunId ||
+          body.ref.anchorEpoch !== assigned.record.anchorEpoch ||
+          canonicalize(body.responder) !==
+            canonicalize(definition.definition.interactionResponder) ||
+          canonicalize(body.token.route) !==
+            canonicalize(definition.definition.origin)
+        ) {
+          throw corruptJobJournal(
+            "Job channel challenge does not bind its assignment source",
+          );
+        }
+        try {
+          await verifyProtocolStep(() => applyChannelInteractionRecord(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          ));
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+      case "channel-challenge-granted":
+        try {
+          await verifyProtocolStep(() => applyChannelInteractionRecord(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          ));
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      case "channel-relay-cursor": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
+          throw corruptJobJournal(
+            "Channel relay cursor does not bind its assignment",
+          );
+        }
+        if (
+          body.checkpoint.ref.execution !== "job" ||
+          body.checkpoint.ref.taskId !== this.#taskId ||
+          body.checkpoint.ref.jobRunId !== assigned.record.jobRunId ||
+          body.checkpoint.ref.anchorEpoch !== assigned.record.anchorEpoch
+        ) {
+          throw corruptJobJournal(
+            "Channel relay checkpoint does not bind its assignment authority",
+          );
+        }
+        const preparedInEnvelope = envelopeRecords.find(
+          (
+            candidate,
+          ): candidate is Extract<
+            JobJournalRecord,
+            { t: "channel-challenge-prepared" }
+          > =>
+            candidate.t === "channel-challenge-prepared" &&
+            candidate.assignmentId === body.assignmentId,
+        );
+        if (
+          preparedInEnvelope &&
+          preparedInEnvelope.frameSeq !== body.upToSeq
+        ) {
+          throw corruptJobJournal(
+            "Prepared challenge and relay cursor must adopt the same frame",
+          );
+        }
+        try {
+          await verifyProtocolStep(() => applyChannelInteractionRecord(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          ));
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "resolution": {
+        const fact = validateResolutionFact(body.fact);
+        if (fact.subject.execution !== "job") {
+          throw corruptJobJournal("Job resolution contains a conversation subject");
+        }
+        const jobFact = fact as JobResolutionFact;
+        assertJobResolutionBinding({
+          execution: jobFact.subject.execution,
+          subjectTaskId: jobFact.subject.taskId,
+          subjectJobRunId: jobFact.subject.jobRunId,
+          recordJobRunId: body.jobRunId,
+          authorityTaskId: this.#taskId,
+          subjectAnchorEpoch: jobFact.subject.anchorEpoch,
+          authorityAnchorEpoch: this.#anchorEpoch,
+        });
+        const current = state.resolutions.get(body.jobRunId);
+        const assigned = state.assignedById.get(jobFact.subject.assignmentId);
+        const runState = state.states.get(body.jobRunId);
+        if (!jobFact.resolution) {
+          assertResolutionOpenReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
+            assignmentIsCurrent:
+              state.assignmentByJob.get(body.jobRunId) ===
+              jobFact.subject.assignmentId,
+            currentState: runState?.state,
+            alreadyOpen: isOpenResolutionFact(current),
+            cause: jobFact.cause,
+            hasAtomicUncertainState:
+              runState !== undefined &&
+              recordsHaveJobState(
+                envelopeRecords,
+                body.jobRunId,
+                "uncertain",
+                runState.statusRevision + 1,
+                jobFact.subject.assignmentId,
+              ),
+            hasAtomicDispatchConflict: envelopeRecords.some(
+              (record) =>
+                record.t === "dispatch-conflict" &&
+                record.assignmentId === jobFact.subject.assignmentId &&
+                record.handling === "opened-uncertain",
+            ),
+          });
+        } else {
+          const resolution = jobFact.resolution;
+          if (!current || jobFact.openFactDigest !== current.openFactDigest) {
+            throw corruptJobJournal("Job resolution does not close its current open fact");
+          }
+          const closesEarlierInEnvelope =
+            state.assignmentByJob.get(body.jobRunId) === undefined &&
+            recordsCloseJobAssignment(
+              envelopeRecords,
+              body.jobRunId,
+              jobFact.subject.assignmentId,
+            );
+          assertResolutionClosureReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
+            assignmentIsCurrentOrAtomicallyClosed:
+              state.assignmentByJob.get(body.jobRunId) ===
+                jobFact.subject.assignmentId || closesEarlierInEnvelope,
+            conflictOpen: current.cause === "dispatch-conflict",
+            resolutionKind: resolution.kind,
+          });
+          const targetState = resolutionTargetState(resolution.kind);
+          assertResolutionCloseAtomicReplayContract({
+            cause: current.cause,
+            kind: resolution.kind,
+            existingOpenMatches:
+              current.openFactDigest === jobFact.openFactDigest &&
+              current.resolution === undefined,
+            hasAtomicTargetState:
+              runState !== undefined &&
+              recordsHaveJobState(
+                envelopeRecords,
+                body.jobRunId,
+                targetState,
+                runState.statusRevision +
+                  (runState.state === "uncertain" ? 1 : 0),
+                jobFact.subject.assignmentId,
+              ),
+            allCapabilitiesRevoked:
+              assigned !== undefined &&
+              allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
+            hasRequiredCompanion:
+              resolution.kind === "late-bundle-committed"
+                ? envelopeRecords.some(
+                    (record) =>
+                      record.t === "committed" &&
+                      record.jobRunId === body.jobRunId &&
+                      record.assignmentId === jobFact.subject.assignmentId,
+                  )
+                : resolution.kind === "proven-not-started-redispatched" ||
+                    resolution.kind === "proven-not-started-cancelled"
+                  ? envelopeRecords.some(
+                      (record) =>
+                        record.t === "assignment-superseded" &&
+                        record.assignmentId === jobFact.subject.assignmentId,
+                    )
+                  : envelopeHasSuccessfulJobUncertainControl(
+                      envelope,
+                      targetState,
+                      resolution.factDigest,
+                    ),
+          });
+        }
+        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
+          throw corruptJobJournal("Job resolution sequence is invalid");
+        }
+        if (jobFact.resolution?.kind.startsWith("user-")) {
+          this.assertAssignmentResourceTerminal(
+            assigned.record,
+            "reclaim",
+            envelope.entries,
+          );
+        }
+        state.resolutions.set(body.jobRunId, snapshot(jobFact));
+        return state;
+      }
+      case "committed": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = state.states.get(body.jobRunId);
+        const open = state.resolutions.get(body.jobRunId);
+        const occurrence = state.occurrences.get(body.jobRunId);
+        assertCommittedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
+          assignmentIsCurrent:
+            state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyCommitted: state.committed.has(body.assignmentId),
+          conflictOpen:
+            open?.cause === "dispatch-conflict" && open.resolution === undefined,
+          commitRevisionMatchesAssignedBase:
+            body.jobRevision === state.nextJobRevision,
+          hasAtomicCommittedState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              "committed",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
+        });
+        if (
+          !assigned ||
+          !occurrence ||
+          !current ||
+          (current.state !== "dispatched" &&
+            current.state !== "running" &&
+            current.state !== "cancel-requested" &&
+            current.state !== "uncertain")
+        ) {
+          throw corruptJobJournal("Job commit is invalid or lacks its atomic state");
+        }
+        try {
+          const bytes = await this.#artifacts.get(body.bundle.ref);
+          const bundle = validateJobSealedBundle(
+            JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
+          );
+          const closure = await validateJobBundleClosure(bundle, this.#artifacts);
+          if (
+            canonicalize(closure.artifact.ref) !== canonicalize(body.bundle.ref) ||
+            !jobBundleBindsAssignedOccurrence(bundle, assigned, occurrence)
+          ) {
+            throw new Error("bundle identity does not match");
+          }
+          this.assertAssignmentUsageFinal(assigned.record, bundle.usageFinal);
+          state.outcomeByRun.set(body.jobRunId, snapshot(bundle.body.outcome));
+          this.#delivery.assertJobCommit(
+            {
+              at: envelope.at,
+              occurrence,
+              definition: requireDefinitionRevision(state, occurrence.taskRevision),
+              bundle,
+              assignmentLifecycleSource: {
+                owner: "assignment",
+                id: `${assigned.record.executorId === this.#localExecutorId ? "local" : "relay"}:${body.assignmentId}`,
+                revision: assigned.record.dispatchDigest,
+              },
+              ...(closure.batch ? { mutationBatch: closure.batch } : {}),
+            },
+            envelope,
+          );
+        } catch (error) {
+          // 调控状态待装入是可重做的准备，不是日志损坏
+          if (error instanceof AuthorityPreparationRequired) throw error;
+          throw corruptJobJournal(
+            error instanceof Error
+              ? `Committed job bundle is invalid: ${error.message}`
+              : "Committed job bundle is invalid",
+          );
+        }
+        this.assertAssignmentResourceTerminal(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        );
+        state.committed.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        state.bundleAcknowledgementOutbox.add(body.assignmentId);
+        state.nextJobRevision += 1;
+        return state;
+      }
+      case "bundle-ack-observed": {
+        const committed = state.committed.get(body.assignmentId);
+        if (
+          !committed ||
+          state.bundleAcknowledgements.has(body.assignmentId) ||
+          !bundleAcknowledgementBindsCommitted({
+            observedBundleRef: body.bundleRef,
+            observedCommitRevision: body.jobRevision,
+            expectedBundleRef: committed.bundle.ref,
+            expectedCommitRevision: committed.jobRevision,
+          })
+        ) {
+          throw corruptJobJournal(
+            "Bundle acknowledgement observation does not bind one committed job bundle",
+          );
+        }
+        state.bundleAcknowledgements.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        state.bundleAcknowledgementOutbox.delete(body.assignmentId);
+        return state;
+      }
+      case "system-started": {
+        const occurrence = state.occurrences.get(body.jobRunId);
+        const current = state.states.get(body.jobRunId);
+        const previous = state.systemFences.get(body.jobRunId);
+        const definition = occurrence
+          ? requireDefinitionRevision(state, occurrence.taskRevision)
+          : undefined;
+        assertSystemJobActivationReplayContract({
+          taskId: this.#taskId,
+          jobRunId: body.jobRunId,
+          anchorEpoch: this.#anchorEpoch,
+          definitionKind: definition?.definition.kind,
+          occurrence,
+          currentState: current?.state,
+          previousFence: previous,
+          fence: body.fence,
+          hasForeignRecords: envelope.entries.some(
+            (record) => record.stream !== jobStream(this.#taskId),
+          ),
+          hasAtomicRunningState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              "running",
+              current.statusRevision + 1,
+              undefined,
+            ),
+        });
+        assertSystemJobDefinitionReplayContract({ definition, fence: body.fence });
+        this.assertReplayedSystemActivation(previous, body.fence, envelope);
+        state.systemFences.set(body.jobRunId, snapshot(body.fence));
+        return state;
+      }
+      case "system-result": {
+        const detail = validateSystemJobResultDetail(
+          await loadJobStored(body.detail, this.#artifacts, "SystemJobResultDetail"),
+          body.outcome,
+        );
+        const current = state.states.get(body.jobRunId);
+        const fence = state.systemFences.get(body.jobRunId);
+        const occurrence = state.occurrences.get(body.jobRunId);
+        const definition = occurrence
+          ? requireDefinitionRevision(state, occurrence.taskRevision)
+          : undefined;
+        assertSystemJobTerminalReplayContract({
+          jobRunId: body.jobRunId,
+          definitionKind: definition?.definition.kind,
+          currentState: current?.state,
+          currentFence: fence,
+          resultFence: body.fence,
+          resultAlreadyExists: state.systemResults.has(body.jobRunId),
+          hasForeignRecords: envelope.entries.some(
+            (record) => record.stream !== jobStream(this.#taskId),
+          ),
+          hasAtomicTerminalState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              body.outcome,
+              current.statusRevision + 1,
+              undefined,
+            ),
+        });
+        this.assertReplayedSystemTerminal(body.fence, body.outcome, envelope);
+        state.systemResults.set(body.jobRunId, {
+          t: "system-result",
+          jobRunId: body.jobRunId,
+          fence: snapshot(body.fence),
+          outcome: body.outcome,
+          ...detail,
+        });
+        return state;
+      }
+      case "state": {
+        const previous = state.states.get(body.jobRunId);
+        const occurrence = state.occurrences.get(body.jobRunId);
+        if (!previous || !occurrence) {
+          throw corruptJobJournal("Job state transition is invalid");
+        }
+        const definition = requireDefinitionRevision(state, occurrence.taskRevision);
+        try {
+          this.#delivery.assertJobStatuses(
+            jobStatusDeliveryInputs(this.#taskId, state, envelope.entries, envelope.at),
+            envelope,
+          );
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+          throw corruptJobJournal(
+            error instanceof Error
+              ? `Job status delivery is invalid: ${error.message}`
+              : "Job status delivery is invalid",
+          );
+        }
+        const assigned = body.assignmentId
+          ? state.assignedById.get(body.assignmentId)
+          : undefined;
+        assertJobStateReplayContract({
+          currentState: previous.state,
+          currentRevision: previous.statusRevision,
+          nextState: body.state,
+          nextRevision: body.statusRevision,
+          assignmentId: body.assignmentId,
+          assignmentBindingValid:
+            assigned !== undefined &&
+            assigned.record.jobRunId === body.jobRunId &&
+            state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
+          systemFencePresent: state.systemFences.has(body.jobRunId),
+          definitionKind: definition.definition.kind,
+          hasAtomicAssignment:
+            body.state !== "dispatched" ||
+            envelopeRecords.some(
+              (record) =>
+                record.t === "assigned" &&
+                record.jobRunId === body.jobRunId &&
+                record.assignmentId === body.assignmentId,
+            ),
+          hasAtomicSystemActivation: envelopeRecords.some(
+            (record) =>
+              record.t === "system-started" && record.jobRunId === body.jobRunId,
+          ),
+          hasAtomicSystemResult: envelopeRecords.some(
+            (record) =>
+              record.t === "system-result" &&
+              record.jobRunId === body.jobRunId &&
+              record.outcome === body.state,
+          ),
+        });
+        if (
+          previous.state === "queued" &&
+          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "job",
+                id: body.jobRunId,
+                attempt: nextJobAssignmentAttempt(state, body.jobRunId),
+              },
+              body.state,
+            );
+          } catch (error) {
+            if (error instanceof AuthorityPreparationRequired) throw error;
+            throw corruptJobJournal(
+              error instanceof Error ? error.message : "Queued job resource dequeue is invalid",
+            );
+          }
+        }
+        assertStateAtomicReplayContract({
+          currentState: previous.state,
+          nextState: body.state,
+          hasAtomicCancelFence: envelopeRecords.some(
+            (record) =>
+              record.t === "cancel-fence" &&
+              record.assignmentId === body.assignmentId,
+          ),
+          hasAtomicOpenResolution: envelopeRecords.some(
+            (record) =>
+              record.t === "resolution" &&
+              record.jobRunId === body.jobRunId &&
+              record.fact.subject.assignmentId === body.assignmentId &&
+              record.fact.resolution === undefined,
+          ),
+          hasAtomicSupersede: envelopeRecords.some(
+            (record) =>
+              record.t === "assignment-superseded" &&
+              record.assignmentId === body.assignmentId,
+          ),
+          hasAtomicTermination: envelopeRecords.some(
+            (record) =>
+              (record.t === "cancel-proof-accepted" ||
+                record.t === "assignment-superseded") &&
+              record.assignmentId === body.assignmentId,
+          ),
+          hasAtomicResolutionClose: envelopeRecords.some(
+            (record) =>
+              record.t === "resolution" &&
+              record.jobRunId === body.jobRunId &&
+              record.fact.resolution !== undefined,
+          ),
+          hasAtomicCommit:
+            body.assignmentId === undefined ||
+            envelopeRecords.some(
+              (record) =>
+                record.t === "committed" &&
+                record.jobRunId === body.jobRunId &&
+                record.assignmentId === body.assignmentId,
+            ),
+        });
+        if (body.state === "failed" && assigned) {
+          if (!allJobCapabilitiesRevoked(envelopeRecords, state, assigned)) {
+            throw corruptJobJournal("Assigned job failure is not atomic with revocation");
+          }
+          if (body.usageFinal) {
+            this.assertAssignmentUsageFinal(assigned.record, body.usageFinal);
+          }
+          this.assertAssignmentResourceTerminal(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          );
+        }
+        state.states.set(body.jobRunId, {
+          state: body.state,
+          statusRevision: body.statusRevision,
+        });
+        const history = state.statusHistoryByRun.get(body.jobRunId);
+        if (!history || history.length + 1 !== body.statusRevision) {
+          throw corruptJobJournal("Job status history index is not contiguous");
+        }
+        const uncertainStatus = projectUncertainStatusTransition({
+          currentState: previous.state,
+          nextState: body.state,
+          resolutionFacts: envelopeRecords.flatMap((record) =>
+            record.t === "resolution" && record.jobRunId === body.jobRunId
+              ? [record.fact]
+              : [],
+          ),
+        });
+        history.push({
+          state: body.state,
+          statusRevision: body.statusRevision,
+          at: envelope.at,
+          ...(uncertainStatus.kind === "opened"
+            ? {
+                uncertainTransition: "opened" as const,
+                openFactDigest: uncertainStatus.openFactDigest,
+              }
+            : uncertainStatus.kind === "closed"
+              ? {
+                  uncertainTransition: "closed" as const,
+                  openFactDigest: uncertainStatus.openFactDigest,
+                  ...jobUncertainClosure(uncertainStatus.resolutionKind),
+                }
+              : {}),
+        });
+        if (body.state === "running" && body.assignmentId) {
+          state.durableStarted.add(body.assignmentId);
+        }
+        if (body.state === "queued") {
+          if (body.assignmentId) state.assignmentByJob.delete(body.jobRunId);
+          if (body.assignmentId) state.recoveryAssignments.delete(body.assignmentId);
+          state.activeJobRunId = body.jobRunId;
+        } else if (isTerminal(body.state)) {
+          if (body.assignmentId) state.assignmentByJob.delete(body.jobRunId);
+          if (body.assignmentId && body.state !== "committed") {
+            state.recoveryAssignments.delete(body.assignmentId);
+          }
+          if (state.activeJobRunId === body.jobRunId) {
+            state.activeJobRunId = undefined;
+            state.pendingSystemMissedJobRunId = undefined;
+          }
+        } else {
+          state.activeJobRunId = body.jobRunId;
+        }
+        return state;
+      }
+      default:
+        return assertNever(body);
+    }
+  };
+
+  readonly reduceSubmissionGuard = async (
+    state: JobSubmissionGuardProjection,
+    raw: LogicalRecord<unknown>,
+    envelope: CommitEnvelope<unknown>,
+  ): Promise<JobSubmissionGuardProjection> => {
+    if (raw.stream !== jobStream(this.#taskId)) {
+      throw corruptJobJournal("Job submission guard received a different stream");
+    }
+    const body = await verifyProtocolStep(() => validateJobJournalRecord(raw.body, this.#verifier));
+    const envelopeRecords = envelope.entries
+      .filter((entry) => entry.stream === jobStream(this.#taskId))
+      .map((entry) => entry.body as JobJournalRecord);
+    switch (body.t) {
+      case "task-revision": {
+        const previousRevision = state.latestDefinitionRevision;
+        const activeJobRunId = state.activeJobRunId;
+        const active = activeJobRunId
+          ? state.states.get(activeJobRunId)
+          : undefined;
+        assertTaskRevisionReplayContract({
+          taskIdMatches: body.taskId === this.#taskId,
+          taskRevision: body.taskRevision,
+          state: body.state,
+          kind: body.kind,
+          previousRevision,
+          previousState:
+            previousRevision === undefined
+              ? undefined
+              : state.latestDefinitionState,
+          previousKind:
+            previousRevision === undefined
+              ? undefined
+              : state.definitionKinds.get(previousRevision),
+          activeState: active?.state,
+          ...taskRevisionAtomicFacts({
+            records: envelopeRecords,
+            taskRevision: body.taskRevision,
+            activeJobRunId,
+            active,
+            assignmentId: activeJobRunId
+              ? state.assignmentByJob.get(activeJobRunId)
+              : undefined,
+            cancelFences: state.cancelFences,
+            envelopeLsn: envelope.lsn,
+          }),
+        });
+        if (body.operationId !== undefined) {
+          if (state.taskOperations.has(body.operationId)) {
+            throw corruptJobJournal("Task mutation operation is duplicated");
+          }
+          state.taskOperations.set(body.operationId, {
+            digest: body.operationDigest!,
+            taskRevision: body.taskRevision,
+          });
+        }
+        state.definitionKinds.set(body.taskRevision, body.kind);
+        state.latestDefinitionState = body.state;
+        state.latestDefinitionRevision = body.taskRevision;
+        return state;
+      }
+      case "occurrence": {
+        const active = state.activeJobRunId
+          ? state.states.get(state.activeJobRunId)
+          : undefined;
+        const definitionKind = state.definitionKinds.get(body.occ.taskRevision);
+        assertJobOccurrenceReplayContract({
+          taskIdMatches: body.occ.taskId === this.#taskId,
+          definitionPresent: state.latestDefinitionRevision !== undefined,
+          definitionState: state.latestDefinitionState,
+          definitionRevisionMatches:
+            body.occ.taskRevision === state.latestDefinitionRevision,
+          definitionKind,
+          identifierUnused:
+            !state.states.has(body.occ.jobRunId) &&
+            !state.systemMissAliases.has(body.occ.jobRunId),
+          occurrenceState: body.occ.state,
+          activeState: active?.state,
+          hasAtomicAdmission: envelopeRecords.some(
+            (record) =>
+              record.t === "admitted" && record.jobRunId === body.occ.jobRunId,
+          ),
+          hasAtomicOfflineMissPolicy: envelopeRecords.some(
+            (record) =>
+              record.t === "missed-next-fire" &&
+              record.jobRunId === body.occ.jobRunId,
+          ),
+        });
+        state.occurrences.set(body.occ.jobRunId, {
+          scheduledFor: body.occ.scheduledFor,
+          taskRevision: body.occ.taskRevision,
+          deliveryPlanDigest: body.occ.deliveryPlan.planDigest,
+          deliveryRequired: body.occ.deliveryPlan.delivery.kind !== "none",
+        });
+        state.states.set(body.occ.jobRunId, {
+          state: body.occ.state,
+          statusRevision: 1,
+        });
+        if (body.occ.state === "queued") state.activeJobRunId = body.occ.jobRunId;
+        state.pendingSystemMissedJobRunId = registerPendingSystemMiss({
+          currentPendingJobRunId: state.pendingSystemMissedJobRunId,
+          jobRunId: body.occ.jobRunId,
+          definitionKind,
+          occurrenceState: body.occ.state,
+        });
+        return state;
+      }
+      case "legacy-next-fire":
+      case "missed-next-fire":
+      case "failure-policy":
+      case "auto-disable-settled":
+      case "capability-gap-opened":
+      case "capability-gap-updated":
+      case "capability-gap-closed":
+        return state;
+      case "system-miss-coalesced": {
+        const coalesced = state.occurrences.get(body.coalescedJobRunId);
+        const active = state.activeJobRunId
+          ? state.states.get(state.activeJobRunId)
+          : undefined;
+        assertSystemMissCoalescedReplayContract({
+          definitionKind: coalesced
+            ? state.definitionKinds.get(coalesced.taskRevision)
+            : undefined,
+          requestedIdentifierUnused:
+            !state.states.has(body.requestedJobRunId) &&
+            !state.systemMissAliases.has(body.requestedJobRunId),
+          pendingMatchesCoalesced:
+            state.pendingSystemMissedJobRunId === body.coalescedJobRunId,
+          coalescedState: state.states.get(body.coalescedJobRunId)?.state,
+          activeState: active?.state,
+        });
+        state.systemMissAliases.add(body.requestedJobRunId);
+        return state;
+      }
+      case "admitted": {
+        const occurrence = state.occurrences.get(body.jobRunId);
+        assertJobAdmissionReplayContract({
+          taskIdMatches: body.taskId === this.#taskId,
+          occurrencePresent: occurrence !== undefined,
+          scheduleMatches: occurrence?.scheduledFor === body.scheduledFor,
+          occurrenceState: state.states.get(body.jobRunId)?.state,
+          definitionKind: occurrence
+            ? state.definitionKinds.get(occurrence.taskRevision)
+            : undefined,
+          admissionAlreadyExists: state.admittedJobs.has(body.jobRunId),
+          ingressPresent: body.ingress !== undefined,
+          hasAtomicManualControlResult: envelopeHasManualJobRunApplied(
+            envelope,
+            body.jobRunId,
+          ),
+        });
+        state.admittedJobs.add(body.jobRunId);
+        if (body.ingress) state.ingressByJob.set(body.jobRunId, body.ingress);
+        return state;
+      }
+      case "assigned": {
+        const current = state.states.get(body.jobRunId);
+        const occurrence = state.occurrences.get(body.jobRunId);
+        assertAssignmentReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          runAlreadyAssigned: state.assignmentByJob.has(body.jobRunId),
+          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
+          isEarliestQueuedRun: state.activeJobRunId === body.jobRunId,
+          hasAtomicDispatchedState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              "dispatched",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        if (
+          !occurrence ||
+          body.taskId !== this.#taskId ||
+          body.anchorEpoch !== this.#anchorEpoch ||
+          body.taskRevision !== occurrence.taskRevision ||
+          body.deliveryPlanDigest !== occurrence.deliveryPlanDigest
+        ) {
+          throw corruptJobJournal("Job assignment is invalid or lacks its atomic state");
+        }
+        state.assignedById.set(body.assignmentId, {
+          record: body,
+          commit: {
+            lsn: envelope.lsn,
+            envelopeDigest: envelope.envelopeDigest,
+            at: envelope.at,
+          },
+          capIds: new Set(body.capIds),
+          acked: false,
+        });
+        state.assignmentByJob.set(body.jobRunId, body.assignmentId);
+        state.assignmentAttemptByRun.set(body.jobRunId,
+          Math.max(state.assignmentAttemptByRun.get(body.jobRunId) ?? 0, body.reservation.attempt));
+        return state;
+      }
+      case "dispatch-acked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertDispatchAcknowledgementReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+        });
+        if (!assigned) {
+          throw corruptJobJournal("Dispatch acknowledgement is missing or duplicated");
+        }
+        assigned.acked = true;
+        return state;
+      }
+      case "dispatch-conflict": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertDispatchConflictReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsAssignment:
+            assigned !== undefined &&
+            body.proof.assignmentId === body.assignmentId &&
+            body.proof.executorId === assigned.record.executorId,
+          handling: body.handling,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+          conflictAlreadySeen: state.conflictAssignments.has(body.assignmentId),
+        });
+        if (!assigned || !current) {
+          throw corruptJobJournal("Dispatch conflict identity is invalid or duplicated");
+        }
+        const expectedActivationDigest = assignedActivationDigest(assigned);
+        const acceptedMatches =
+          canonicalize(body.proof.acceptedDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          body.proof.acceptedActivationDigest === expectedActivationDigest;
+        const conflictingMatches =
+          canonicalize(body.proof.conflictingDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          body.proof.conflictingActivationDigest === expectedActivationDigest;
+        assertDispatchConflictHandlingReplayContract({
+          handling: body.handling,
+          acceptedMatches,
+          conflictingMatches,
+          atomicHandling:
+            body.handling === "acked-original"
+              ? envelopeRecords.some(
+                  (record) =>
+                    record.t === "dispatch-acked" &&
+                    record.assignmentId === body.assignmentId,
+                )
+              : envelopeRecords.some(
+                  (record) =>
+                    record.t === "resolution" &&
+                    record.jobRunId === assigned.record.jobRunId &&
+                    record.fact.subject.assignmentId === body.assignmentId &&
+                    record.fact.cause === "dispatch-conflict" &&
+                    record.fact.resolution === undefined,
+                ) &&
+                recordsHaveJobState(
+                  envelopeRecords,
+                  assigned.record.jobRunId,
+                  "uncertain",
+                  current.statusRevision + 1,
+                  body.assignmentId,
+                ) &&
+                envelopeRecords.some(
+                  (record) =>
+                    record.t === "cancel-fence" &&
+                    record.assignmentId === body.assignmentId,
+                ) &&
+                allJobCapabilitiesRevoked(envelopeRecords, state, {
+                  record: assigned.record,
+                }),
+        });
+        state.conflictAssignments.add(body.assignmentId);
+        if (body.handling === "opened-uncertain") {
+          state.openConflictAssignments.add(body.assignmentId);
+        }
+        return state;
+      }
+      case "assignment-superseded": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        const open = assigned
+          ? state.resolutions.get(assigned.record.jobRunId)
+          : undefined;
+        const targetState =
+          current !== undefined &&
+          (current.state === "cancel-requested" ||
+            state.latestDefinitionState !== "enabled")
+            ? "cancelled"
+            : "queued";
+        assertAssignmentSupersededReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          assignmentAlreadyClosed: state.closedAssignments.has(body.assignmentId),
+          currentState: current?.state,
+          durableStartedObserved: state.durableStarted.has(body.assignmentId),
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
+          proofKind: assignmentTerminationProofKind(body.proof),
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              targetState,
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            allJobCapabilitiesRevoked(envelopeRecords, state, {
+              record: assigned.record,
+            }),
+          hasAtomicResolutionClose:
+            assigned !== undefined &&
+            open !== undefined &&
+            open.resolution === undefined &&
+            envelopeRecords.some(
+              (record) =>
+                record.t === "resolution" &&
+                record.jobRunId === assigned.record.jobRunId &&
+                record.fact.openFactDigest === open.openFactDigest &&
+                (record.fact.resolution?.kind === "proven-not-started-redispatched" ||
+                  record.fact.resolution?.kind === "proven-not-started-cancelled"),
+            ),
+          conflictOpen:
+            open !== undefined &&
+            open.resolution === undefined &&
+            open.cause === "dispatch-conflict",
+          hasAtomicConflictContainment:
+            open !== undefined &&
+            envelopeRecords.some(
+              (record) =>
+                record.t === "dispatch-conflict-contained" &&
+                record.assignmentId === body.assignmentId &&
+                record.openFactDigest === open.openFactDigest &&
+                record.proof.decision !== "halted" &&
+                sameTerminationProofIdentity(record.proof, body.proof),
+            ),
+        });
+        if (!assigned) throw corruptJobJournal("Assignment supersede is historical or duplicated");
+        this.assertAssignmentResourceTerminal(
+          assigned.record,
+          "release",
+          envelope.entries,
+        );
+        state.assignmentByJob.delete(assigned.record.jobRunId);
+        state.closedAssignments.add(body.assignmentId);
+        state.openConflictAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "supersede-requested": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        assertSupersedeRequestReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+        });
+        state.supersedeRequests.set(body.assignmentId, body);
+        return state;
+      }
+      case "supersede-started-observed": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        assertSupersedeStartedObservationReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
+          observationAlreadyExists: state.supersedeStartedAssignments.has(
+            body.assignmentId,
+          ),
+        });
+        state.supersedeStartedAssignments.add(body.assignmentId);
+        state.durableStarted.add(body.assignmentId);
+        return state;
+      }
+      case "cancel-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertJobCancelFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+          hasAtomicCancelRequestedState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "cancel-requested",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          hasAtomicOpenedConflict:
+            assigned !== undefined &&
+            state.resolutions.get(assigned.record.jobRunId)?.cause ===
+              "dispatch-conflict" &&
+            envelopeRecords.some(
+              (record) =>
+                record.t === "dispatch-conflict" &&
+                record.assignmentId === body.assignmentId &&
+                record.handling === "opened-uncertain",
+            ),
+          hasAtomicDeletedTaskRevision: envelopeRecords.some(
+            (record) =>
+              record.t === "task-revision" &&
+              record.state === "deleted" &&
+              body.requestId === `task-revision:${record.taskRevision}`,
+          ),
+        });
+        state.cancelFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-settlement-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          "v" in body &&
+          body.v === 2 &&
+          assigned?.record.executorId !== body.executorId
+        ) {
+          throw corruptJobJournal(
+            "Versioned interaction settlement names a different executor",
+          );
+        }
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertJobInteractionSettlementFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.interactionSettlementFences.has(
+            body.assignmentId,
+          ),
+          hasAtomicUncertainState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "uncertain",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          hasAtomicUnknownCancellationResolution:
+            assigned !== undefined &&
+            ((
+              state.resolutions.get(assigned.record.jobRunId)?.cause ===
+                "job-cancel-unknown" &&
+              state.resolutions.get(assigned.record.jobRunId)?.resolution ===
+                undefined
+            ) ||
+              envelopeRecords.some(
+                (record) =>
+                  record.t === "resolution" &&
+                  record.jobRunId === assigned.record.jobRunId &&
+                  record.fact.subject.assignmentId === body.assignmentId &&
+                  record.fact.cause === "job-cancel-unknown" &&
+                  record.fact.resolution === undefined,
+              )),
+        });
+        state.interactionSettlementFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-settlement-completed": {
+        assertJobInteractionSettlementCompletionReplayContract({
+          fence: state.interactionSettlementFences.get(body.assignmentId),
+          completion: body,
+          completionAlreadyExists:
+            state.completedInteractionSettlements.has(body.assignmentId),
+          mirrored: state.interactionMirrors.get(body.assignmentId),
+          ...("v" in body && body.v === 2
+            ? { streamProof: body.streamProof }
+            : {}),
+        });
+        state.completedInteractionSettlements.set(body.assignmentId, body);
+        return state;
+      }
+      case "interaction-mirror": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
+          body.batch,
+          this.#verifier,
+        ));
+        const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
+        const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
+          upTo: 0,
+          ordinal: 0,
+          digest: interactionMirrorSeed(body.assignmentId),
+          requestIds: new Set<string>(),
+          outcomes: new Map(),
+        };
+        const first = batch.entries[0]!;
+        const last = batch.entries.at(-1)!;
+        const auditSettlement =
+          state.completedInteractionSettlements.has(body.assignmentId)
+            ? undefined
+            : state.interactionSettlementFences.get(body.assignmentId);
+        assertJobMirrorReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              body.assignmentId,
+          executorMatches: assigned?.record.executorId === batch.executorId,
+          batchBindsRecord: batch.assignmentId === body.assignmentId,
+          currentState: assigned
+            ? state.states.get(assigned.record.jobRunId)?.state
+            : undefined,
+          hasDurableCancelFence: state.cancelFences.has(body.assignmentId),
+          ...(auditSettlement
+            ? {
+                auditSettlementTarget: {
+                  upTo: auditSettlement.targetUpTo,
+                  ordinal: auditSettlement.targetOrdinal,
+                  mirrorDigest: auditSettlement.targetMirrorDigest,
+                },
+              }
+            : {}),
+          batchTarget: {
+            upTo: last.seq,
+            ordinal: last.ordinal,
+            mirrorDigest: batch.mirrorDigest,
+          },
+          batchAlreadyMirrored: state.interactionMirrorBatches.has(batchKey),
+          extendsCursor:
+            batch.previousDigest === mirrored.digest &&
+            first.ordinal === mirrored.ordinal + 1 &&
+            first.seq > mirrored.upTo,
+          repeatsRequestId: batchRepeatsRequestId(batch, mirrored.requestIds),
+        });
+        state.interactionMirrorBatches.add(batchKey);
+        state.interactionMirrors.set(body.assignmentId, {
+          upTo: last.seq,
+          ordinal: last.ordinal,
+          digest: batch.mirrorDigest,
+          requestIds: new Set([
+            ...mirrored.requestIds,
+            ...batch.entries.map((entry) => entry.requestId),
+          ]),
+          outcomes: new Map([
+            ...mirrored.outcomes,
+            ...batch.entries.map(
+              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
+            ),
+          ]),
+        });
+        return state;
+      }
+      case "channel-challenge-prepared": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          !assigned ||
+          body.ref.taskId !== this.#taskId ||
+          body.ref.jobRunId !== assigned.record.jobRunId ||
+          body.ref.anchorEpoch !== assigned.record.anchorEpoch
+        ) {
+          throw corruptJobJournal(
+            "Job channel challenge does not bind its assignment source",
+          );
+        }
+        try {
+          await verifyProtocolStep(() => applyChannelInteractionRecord(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          ));
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+      case "channel-challenge-granted":
+        try {
+          await verifyProtocolStep(() => applyChannelInteractionRecord(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          ));
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      case "channel-relay-cursor": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        if (
+          !assigned ||
+          assigned.record.jobRunId !== body.jobRunId ||
+          body.checkpoint.ref.execution !== "job" ||
+          body.checkpoint.ref.taskId !== this.#taskId ||
+          body.checkpoint.ref.jobRunId !== assigned.record.jobRunId ||
+          body.checkpoint.ref.anchorEpoch !== assigned.record.anchorEpoch
+        ) {
+          throw corruptJobJournal(
+            "Channel relay cursor does not bind its assignment authority",
+          );
+        }
+        const preparedInEnvelope = envelopeRecords.find(
+          (
+            candidate,
+          ): candidate is Extract<
+            JobJournalRecord,
+            { t: "channel-challenge-prepared" }
+          > =>
+            candidate.t === "channel-challenge-prepared" &&
+            candidate.assignmentId === body.assignmentId,
+        );
+        if (
+          preparedInEnvelope &&
+          preparedInEnvelope.frameSeq !== body.upToSeq
+        ) {
+          throw corruptJobJournal(
+            "Prepared challenge and relay cursor must adopt the same frame",
+          );
+        }
+        try {
+          await verifyProtocolStep(() => applyChannelInteractionRecord(
+            state.channelInteractions,
+            body,
+            this.#verifier,
+          ));
+        } catch (error) {
+          if (error instanceof AuthorityPreparationRequired) throw error;
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptJobJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "cancel-proof-accepted": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.states.get(assigned.record.jobRunId)
+          : undefined;
+        assertCancelProofAcceptedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
+          durableStartedObserved: state.durableStarted.has(body.assignmentId),
+          proofDecision: body.proof.decision,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsJobSource(
+              state,
+              assigned,
+              body.proof,
+              this.#anchorEpoch,
+              this.#legacyAbortTickets,
+            ),
+          hasAtomicCancelledState:
+            assigned !== undefined &&
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              assigned.record.jobRunId,
+              "cancelled",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            allJobCapabilitiesRevoked(envelopeRecords, state, {
+              record: assigned.record,
+            }),
+        });
+        if (!assigned) throw corruptJobJournal("Submission guard cancellation has no assignment");
+        this.assertAssignmentUsageFinal(assigned.record, body.proof.usageFinal);
+        this.assertAssignmentResourceTerminal(
+          assigned.record,
+          body.proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        );
+        state.acceptedCancellations.add(body.assignmentId);
+        return state;
+      }
+      case "capability-revoked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const key = revokedCapabilityKey(body.assignmentId, body.capId);
+        assertCapabilityRevocationReplayContract({
+          assignmentExists: assigned !== undefined,
+          capabilityBelongsToAssignment: assigned?.capIds.has(body.capId) ?? false,
+          alreadyRevoked: state.revokedCapabilities.has(key),
+        });
+        state.revokedCapabilities.add(key);
+        return state;
+      }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        await applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByJob.get(assigned.record.jobRunId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: state.closedAssignments.has(
+            body.ticket.assignmentId,
+          ),
+          assignmentActive:
+            assigned !== undefined &&
+            (state.states.get(assigned.record.jobRunId)?.state ===
+              "dispatched" ||
+              state.states.get(assigned.record.jobRunId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: assigned
+            ? state.ingressByJob.get(assigned.record.jobRunId)?.surfacePrincipal
+            : undefined,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeRecords.some(
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        await applyJobTicketRecord({
+          state,
+          record: body,
+          verifier: this.#verifier,
+          envelopeAt: envelope.at,
+          taskId: this.#taskId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyJobTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
+      case "resolution": {
+        const fact = validateResolutionFact(body.fact);
+        if (fact.subject.execution !== "job") {
+          throw corruptJobJournal("Job resolution contains a conversation subject");
+        }
+        const jobFact = fact as JobResolutionFact;
+        assertJobResolutionBinding({
+          execution: jobFact.subject.execution,
+          subjectTaskId: jobFact.subject.taskId,
+          subjectJobRunId: jobFact.subject.jobRunId,
+          recordJobRunId: body.jobRunId,
+          authorityTaskId: this.#taskId,
+          subjectAnchorEpoch: jobFact.subject.anchorEpoch,
+          authorityAnchorEpoch: this.#anchorEpoch,
+        });
+        const current = state.resolutions.get(body.jobRunId);
+        const assigned = state.assignedById.get(jobFact.subject.assignmentId);
+        const runState = state.states.get(body.jobRunId);
+        if (!jobFact.resolution) {
+          assertResolutionOpenReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
+            assignmentIsCurrent:
+              state.assignmentByJob.get(body.jobRunId) ===
+              jobFact.subject.assignmentId,
+            currentState: runState?.state,
+            alreadyOpen: isOpenResolutionFact(current),
+            cause: jobFact.cause,
+            hasAtomicUncertainState:
+              runState !== undefined &&
+              recordsHaveJobState(
+                envelopeRecords,
+                body.jobRunId,
+                "uncertain",
+                runState.statusRevision + 1,
+                jobFact.subject.assignmentId,
+              ),
+            hasAtomicDispatchConflict: envelopeRecords.some(
+              (record) =>
+                record.t === "dispatch-conflict" &&
+                record.assignmentId === jobFact.subject.assignmentId &&
+                record.handling === "opened-uncertain",
+            ),
+          });
+        } else {
+          const resolution = jobFact.resolution;
+          if (!current || jobFact.openFactDigest !== current.openFactDigest) {
+            throw corruptJobJournal("Job resolution does not close its current open fact");
+          }
+          const closesEarlierInEnvelope =
+            state.assignmentByJob.get(body.jobRunId) === undefined &&
+            recordsCloseJobAssignment(
+              envelopeRecords,
+              body.jobRunId,
+              jobFact.subject.assignmentId,
+            );
+          assertResolutionClosureReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
+            assignmentIsCurrentOrAtomicallyClosed:
+              state.assignmentByJob.get(body.jobRunId) ===
+                jobFact.subject.assignmentId || closesEarlierInEnvelope,
+            conflictOpen: current.cause === "dispatch-conflict",
+            resolutionKind: resolution.kind,
+          });
+          const targetState = resolutionTargetState(resolution.kind);
+          assertResolutionCloseAtomicReplayContract({
+            cause: current.cause,
+            kind: resolution.kind,
+            existingOpenMatches:
+              current.openFactDigest === jobFact.openFactDigest &&
+              current.resolution === undefined,
+            hasAtomicTargetState:
+              runState !== undefined &&
+              recordsHaveJobState(
+                envelopeRecords,
+                body.jobRunId,
+                targetState,
+                runState.statusRevision +
+                  (runState.state === "uncertain" ? 1 : 0),
+                jobFact.subject.assignmentId,
+              ),
+            allCapabilitiesRevoked:
+              assigned !== undefined &&
+              allJobCapabilitiesRevoked(envelopeRecords, state, {
+                record: assigned.record,
+              }),
+            hasRequiredCompanion:
+              resolution.kind === "late-bundle-committed"
+                ? envelopeRecords.some(
+                    (record) =>
+                      record.t === "committed" &&
+                      record.jobRunId === body.jobRunId &&
+                      record.assignmentId === jobFact.subject.assignmentId,
+                  )
+                : resolution.kind === "proven-not-started-redispatched" ||
+                    resolution.kind === "proven-not-started-cancelled"
+                  ? envelopeRecords.some(
+                      (record) =>
+                        record.t === "assignment-superseded" &&
+                        record.assignmentId === jobFact.subject.assignmentId,
+                    )
+                  : envelopeHasSuccessfulJobUncertainControl(
+                      envelope,
+                      targetState,
+                      resolution.factDigest,
+                    ),
+          });
+        }
+        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
+          throw corruptJobJournal("Job resolution sequence is invalid");
+        }
+        if (jobFact.resolution?.kind.startsWith("user-")) {
+          this.assertAssignmentResourceTerminal(
+            assigned.record,
+            "reclaim",
+            envelope.entries,
+          );
+        }
+        state.resolutions.set(body.jobRunId, snapshot(jobFact));
+        if (jobFact.resolution) {
+          state.assignmentByJob.delete(body.jobRunId);
+          state.closedAssignments.add(jobFact.subject.assignmentId);
+          state.openConflictAssignments.delete(jobFact.subject.assignmentId);
+        }
+        return state;
+      }
+      case "committed": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = state.states.get(body.jobRunId);
+        const open = state.resolutions.get(body.jobRunId);
+        assertCommittedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
+          assignmentIsCurrent:
+            state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyCommitted: state.committedByAssignment.has(body.assignmentId),
+          conflictOpen:
+            open?.cause === "dispatch-conflict" && open.resolution === undefined,
+          commitRevisionMatchesAssignedBase:
+            body.jobRevision === state.nextJobRevision,
+          hasAtomicCommittedState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              "committed",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            allJobCapabilitiesRevoked(envelopeRecords, state, {
+              record: assigned.record,
+            }),
+        });
+        if (!assigned) throw corruptJobJournal("Submission guard commit has no assignment");
+        this.assertAssignmentResourceTerminal(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        );
+        state.committedByAssignment.set(body.assignmentId, {
+          ref: body.bundle.ref,
+          jobRevision: body.jobRevision,
+        });
+        state.nextJobRevision += 1;
+        return state;
+      }
+      case "bundle-ack-observed": {
+        const committed = state.committedByAssignment.get(body.assignmentId);
+        if (
+          !committed ||
+          state.bundleAcknowledgements.has(body.assignmentId) ||
+          !bundleAcknowledgementBindsCommitted({
+            observedBundleRef: body.bundleRef,
+            observedCommitRevision: body.jobRevision,
+            expectedBundleRef: committed.ref,
+            expectedCommitRevision: committed.jobRevision,
+          })
+        ) {
+          throw corruptJobJournal(
+            "Submission guard bundle acknowledgement is invalid or duplicated",
+          );
+        }
+        state.bundleAcknowledgements.set(body.assignmentId, body);
+        return state;
+      }
+      case "system-started": {
+        const occurrence = state.occurrences.get(body.jobRunId);
+        const current = state.states.get(body.jobRunId);
+        const previous = state.systemFences.get(body.jobRunId);
+        assertSystemJobActivationReplayContract({
+          taskId: this.#taskId,
+          jobRunId: body.jobRunId,
+          anchorEpoch: this.#anchorEpoch,
+          definitionKind: occurrence
+            ? state.definitionKinds.get(occurrence.taskRevision)
+            : undefined,
+          occurrence,
+          currentState: current?.state,
+          previousFence: previous,
+          fence: body.fence,
+          hasForeignRecords: envelope.entries.some(
+            (record) => record.stream !== jobStream(this.#taskId),
+          ),
+          hasAtomicRunningState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              "running",
+              current.statusRevision + 1,
+              undefined,
+            ),
+        });
+        this.assertReplayedSystemActivation(previous, body.fence, envelope);
+        state.systemFences.set(body.jobRunId, snapshot(body.fence));
+        return state;
+      }
+      case "system-result": {
+        const current = state.states.get(body.jobRunId);
+        const fence = state.systemFences.get(body.jobRunId);
+        const occurrence = state.occurrences.get(body.jobRunId);
+        assertSystemJobTerminalReplayContract({
+          jobRunId: body.jobRunId,
+          definitionKind: occurrence
+            ? state.definitionKinds.get(occurrence.taskRevision)
+            : undefined,
+          currentState: current?.state,
+          currentFence: fence,
+          resultFence: body.fence,
+          resultAlreadyExists: state.systemResults.has(body.jobRunId),
+          hasForeignRecords: envelope.entries.some(
+            (record) => record.stream !== jobStream(this.#taskId),
+          ),
+          hasAtomicTerminalState:
+            current !== undefined &&
+            recordsHaveJobState(
+              envelopeRecords,
+              body.jobRunId,
+              body.outcome,
+              current.statusRevision + 1,
+              undefined,
+            ),
+        });
+        this.assertReplayedSystemTerminal(body.fence, body.outcome, envelope);
+        state.systemResults.add(body.jobRunId);
+        return state;
+      }
+      case "state": {
+        const previous = state.states.get(body.jobRunId);
+        const occurrence = state.occurrences.get(body.jobRunId);
+        if (!previous || !occurrence) {
+          throw corruptJobJournal("Job state transition is invalid");
+        }
+        const assigned = body.assignmentId
+          ? state.assignedById.get(body.assignmentId)
+          : undefined;
+        const closedEarlierInEnvelope =
+          body.assignmentId !== undefined &&
+          state.assignmentByJob.get(body.jobRunId) === undefined &&
+          state.closedAssignments.has(body.assignmentId) &&
+          recordsCloseJobAssignment(
+            envelopeRecords,
+            body.jobRunId,
+            body.assignmentId,
+          );
+        assertJobStateReplayContract({
+          currentState: previous.state,
+          currentRevision: previous.statusRevision,
+          nextState: body.state,
+          nextRevision: body.statusRevision,
+          assignmentId: body.assignmentId,
+          assignmentBindingValid:
+            assigned !== undefined &&
+            assigned.record.jobRunId === body.jobRunId &&
+            (state.assignmentByJob.get(body.jobRunId) === body.assignmentId ||
+              closedEarlierInEnvelope),
+          systemFencePresent: state.systemFences.has(body.jobRunId),
+          definitionKind: state.definitionKinds.get(occurrence.taskRevision),
+          hasAtomicAssignment:
+            body.state !== "dispatched" ||
+            envelopeRecords.some(
+              (record) =>
+                record.t === "assigned" &&
+                record.jobRunId === body.jobRunId &&
+                record.assignmentId === body.assignmentId,
+            ),
+          hasAtomicSystemActivation: envelopeRecords.some(
+            (record) =>
+              record.t === "system-started" && record.jobRunId === body.jobRunId,
+          ),
+          hasAtomicSystemResult: envelopeRecords.some(
+            (record) =>
+              record.t === "system-result" &&
+              record.jobRunId === body.jobRunId &&
+              record.outcome === body.state,
+          ),
+        });
+        if (
+          previous.state === "queued" &&
+          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "job",
+                id: body.jobRunId,
+                attempt: nextJobAssignmentAttempt(state, body.jobRunId),
+              },
+              body.state,
+            );
+          } catch (error) {
+            if (error instanceof AuthorityPreparationRequired) throw error;
+            throw corruptJobJournal(
+              error instanceof Error ? error.message : "Queued job resource dequeue is invalid",
+            );
+          }
+        }
+        assertStateAtomicReplayContract({
+          currentState: previous.state,
+          nextState: body.state,
+          hasAtomicCancelFence: envelopeRecords.some(
+            (record) =>
+              record.t === "cancel-fence" &&
+              record.assignmentId === body.assignmentId,
+          ),
+          hasAtomicOpenResolution: envelopeRecords.some(
+            (record) =>
+              record.t === "resolution" &&
+              record.jobRunId === body.jobRunId &&
+              record.fact.subject.assignmentId === body.assignmentId &&
+              record.fact.resolution === undefined,
+          ),
+          hasAtomicSupersede: envelopeRecords.some(
+            (record) =>
+              record.t === "assignment-superseded" &&
+              record.assignmentId === body.assignmentId,
+          ),
+          hasAtomicTermination: envelopeRecords.some(
+            (record) =>
+              (record.t === "cancel-proof-accepted" ||
+                record.t === "assignment-superseded") &&
+              record.assignmentId === body.assignmentId,
+          ),
+          hasAtomicResolutionClose: envelopeRecords.some(
+            (record) =>
+              record.t === "resolution" &&
+              record.jobRunId === body.jobRunId &&
+              record.fact.resolution !== undefined,
+          ),
+          hasAtomicCommit:
+            body.assignmentId === undefined ||
+            envelopeRecords.some(
+              (record) =>
+                record.t === "committed" &&
+                record.jobRunId === body.jobRunId &&
+                record.assignmentId === body.assignmentId,
+            ),
+        });
+        if (body.state === "failed" && assigned) {
+          if (!allJobCapabilitiesRevoked(envelopeRecords, state, assigned)) {
+            throw corruptJobJournal("Assigned job failure is not atomic with revocation");
+          }
+          if (body.usageFinal) {
+            this.assertAssignmentUsageFinal(assigned.record, body.usageFinal);
+          }
+          this.assertAssignmentResourceTerminal(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          );
+        }
+        state.states.set(body.jobRunId, {
+          state: body.state,
+          statusRevision: body.statusRevision,
+        });
+        if (body.state === "running" && body.assignmentId) {
+          state.durableStarted.add(body.assignmentId);
+        }
+        if (body.state === "queued") {
+          state.activeJobRunId = body.jobRunId;
+        } else if (isTerminal(body.state)) {
+          if (state.activeJobRunId === body.jobRunId) {
+            state.activeJobRunId = undefined;
+            state.pendingSystemMissedJobRunId = undefined;
+          }
+        } else {
+          state.activeJobRunId = body.jobRunId;
+        }
+        return state;
+      }
+      default:
+        return state;
+    }
+  };
+
+  assertReplayedSystemActivation(
+    previousFence: SystemJobFence | undefined,
+    fence: SystemJobFence,
+    envelope: CommitEnvelope<unknown>,
+  ): void {
+    const records = envelope.entries.filter(
+      (record) => record.stream !== jobStream(this.#taskId),
+    );
+    try {
+      if (!this.#systemResources) {
+        throw new Error("System job resource coordination is not configured");
+      }
+      assertForeignRecords(records, jobStream(this.#taskId));
+      this.#systemResources.assertActivationRecords({
+        ...(previousFence ? { previousFence } : {}),
+        fence,
+        records,
+      });
+    } catch (error) {
+      if (error instanceof AuthorityPreparationRequired) throw error;
+      throw corruptJobJournal(
+        error instanceof Error
+          ? `System activation resource records are invalid: ${error.message}`
+          : "System activation resource records are invalid",
+      );
+    }
+  }
+
+  assertReplayedSystemTerminal(
+    fence: SystemJobFence,
+    outcome: "committed" | "failed",
+    envelope: CommitEnvelope<unknown>,
+  ): void {
+    const records = envelope.entries.filter(
+      (record) => record.stream !== jobStream(this.#taskId),
+    );
+    try {
+      if (!this.#systemResources) {
+        throw new Error("System job resource coordination is not configured");
+      }
+      assertForeignRecords(records, jobStream(this.#taskId));
+      this.#systemResources.assertTerminalRecords({ fence, outcome, records });
+    } catch (error) {
+      if (error instanceof AuthorityPreparationRequired) throw error;
+      throw corruptJobJournal(
+        error instanceof Error
+          ? `System terminal resource records are invalid: ${error.message}`
+          : "System terminal resource records are invalid",
+      );
+    }
+  }
+
+  assertAssignmentResourceTerminal(
+    assigned: Extract<JobJournalRecord, { t: "assigned" }>,
+    mode: "settle-release" | "release" | "reclaim",
+    records: readonly LogicalRecord<unknown>[],
+  ): void {
+    if (!requiresFormalResourceCoordination({
+      reservationId: assigned.reservation.reservationId,
+      assignmentId: assigned.assignmentId,
+    })) return;
+    if (!this.#resources) {
+      throw corruptJobJournal("Governed job assignment has no resource coordinator");
+    }
+    try {
+      this.#resources.assertTerminalRecords({
+        reservationId: assigned.reservation.reservationId,
+        mode,
+        records,
+      });
+    } catch (error) {
+      if (error instanceof AuthorityPreparationRequired) throw error;
+      throw corruptJobJournal(
+        error instanceof Error
+          ? `Job assignment resource terminal is invalid: ${error.message}`
+          : "Job assignment resource terminal is invalid",
+      );
+    }
+  }
+
+  assertAssignmentUsageFinal(
+    assigned: Extract<JobJournalRecord, { t: "assigned" }>,
+    usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number },
+  ): void {
+    if (!requiresFormalResourceCoordination({
+      reservationId: assigned.reservation.reservationId,
+      assignmentId: assigned.assignmentId,
+    })) return;
+    if (!this.#resources) {
+      throw corruptJobJournal("Governed job assignment has no resource coordinator");
+    }
+    try {
+      this.#resources.assertUsageFinal({
+        reservationId: assigned.reservation.reservationId,
+        assignmentId: assigned.assignmentId,
+        executorId: assigned.executorId,
+        usageFinal,
+      });
+    } catch (error) {
+      // 调控状态待装入是可重做的准备，不是日志损坏
+      if (error instanceof AuthorityPreparationRequired) throw error;
+      throw corruptJobJournal(
+        error instanceof Error
+          ? `Job assignment final usage is invalid: ${error.message}`
+          : "Job assignment final usage is invalid",
+      );
+    }
+  }
+}
+
+/**
+ * 为日志登记作业域持久投影。同一运行时的作业日志共用这组协议与资源服务；在任何作业日志
+ * 建立之前（例如启动时列出要恢复的任务）也可先登记。
+ */
+export function registerJobJournalProjection(
+  log: AuthorityCommitLog,
+  services: Omit<JobReductionOptions, "taskId">,
+): RebuildableDurableProjectionIndex {
+  return registerJobRunStateProjection(log, (taskId) => new JobReduction({ ...services, taskId }));
+}
+
 export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #taskId: string;
   readonly #anchorEpoch: number;
@@ -740,7 +4350,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #submission: AssignmentSubmissionAuthorizer;
   readonly #ingress: JobIngressAuthorizer;
   readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
-  readonly #compatibility: JobCompatibilityProjection | undefined;
   readonly #delivery: JobDeliveryParticipant;
   readonly #commitParticipant: JobCommitParticipant | undefined;
   readonly #resources: AssignmentResourceCoordinator | undefined;
@@ -750,6 +4359,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #schedulerFailureThreshold: number;
   readonly #schedulerNotices: SchedulerUserNoticeJournal | undefined;
   readonly #localExecutorId: string | undefined;
+  readonly #reduction: JobReduction;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
     (notice: JobStatusNotice) => void | Promise<void>
@@ -758,13 +4368,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     (event: JobLifecycleEvent) => void | Promise<void>
   >();
   readonly #systemRuns = new Map<string, Promise<"committed" | "failed">>();
-  #projection: { readonly state: JobProjection; readonly cursor: ProjectionCursor } | undefined;
-  #submissionGuard:
-    | {
-        readonly state: JobSubmissionGuardProjection;
-        readonly cursor: ProjectionCursor;
-      }
-    | undefined;
+  readonly #index: RebuildableDurableProjectionIndex;
+  #session: JobJournalSession | undefined;
 
   constructor(options: JobJournalOptions) {
     assertIdentifier(options.taskId, "Task id");
@@ -779,7 +4384,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     this.#submission = options.submission;
     this.#ingress = options.ingress;
     this.#legacyAbortTickets = options.legacyAbortTickets;
-    this.#compatibility = options.compatibility;
     this.#delivery = options.delivery;
     this.#commitParticipant = options.commitParticipant;
     this.#resources = options.resources;
@@ -790,6 +4394,19 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       options.schedulerFailureThreshold ?? DEFAULT_SCHEDULE_FAILURE_THRESHOLD;
     this.#schedulerNotices = options.schedulerNotices;
     this.#localExecutorId = options.localExecutorId;
+    this.#reduction = new JobReduction({
+      taskId: this.#taskId,
+      anchorEpoch: this.#anchorEpoch,
+      artifacts: this.#artifacts,
+      verifier: this.#verifier,
+      delivery: this.#delivery,
+      ...(this.#legacyAbortTickets ? { legacyAbortTickets: this.#legacyAbortTickets } : {}),
+      ...(this.#resources ? { resources: this.#resources } : {}),
+      ...(this.#systemResources ? { systemResources: this.#systemResources } : {}),
+      ...(this.#localExecutorId ? { localExecutorId: this.#localExecutorId } : {}),
+    });
+    const services = this.#reduction;
+    this.#index = registerJobRunStateProjection(this.#log, (taskId) => services.forTask(taskId));
     assertPositive(this.#schedulerFailureThreshold, "Scheduler failure threshold");
   }
 
@@ -1209,7 +4826,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
-  async schedulerPolicy(): Promise<{
+  /**
+   * 调度策略事实：给定 run 的错过/失败策略（调度器传最近一次 occurrence），以及尚待自动停用的策略
+   * （按 occurrence 次序）。不遍历历史 run。
+   */
+  async schedulerPolicy(jobRunIds: readonly string[] = []): Promise<{
     readonly legacyNextFire?: Extract<JobJournalRecord, { t: "legacy-next-fire" }>;
     readonly missedNextFireByRun: ReadonlyMap<
       string,
@@ -1224,22 +4845,27 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       { t: "failure-policy" }
     >[];
   }> {
-    return this.#select((state) => ({
-      ...(state.legacyNextFire
-        ? { legacyNextFire: structuredClone(state.legacyNextFire) }
-        : {}),
-      missedNextFireByRun: new Map(
-        [...state.missedNextFireByRun].map(([key, value]) => [key, structuredClone(value)]),
-      ),
-      failurePolicyByRun: new Map(
-        [...state.failurePolicyByRun].map(([key, value]) => [key, structuredClone(value)]),
-      ),
-      pendingAutoDisable: selectPendingScheduleAutoDisable(
-        state.failurePolicyByRun.values(),
-        state.autoDisableSettledRuns,
-      )
-        .map((policy) => structuredClone(policy)),
-    }));
+    for (const jobRunId of jobRunIds) assertIdentifier(jobRunId, "Scheduler policy jobRunId");
+    return this.#select((state) => {
+      const exact = <V>(map: KeyedMap<string, V>) => new Map(jobRunIds.flatMap((jobRunId) => {
+        const value = map.get(jobRunId);
+        return value === undefined ? [] : [[jobRunId, structuredClone(value)] as const];
+      }));
+      const pending = state.pendingAutoDisable.values().map((jobRunId) => {
+        const policy = state.failurePolicyByRun.get(jobRunId);
+        const occurrence = state.occurrences.get(jobRunId);
+        if (!policy || !occurrence) throw corruptJobJournal("Pending auto-disable has no durable policy");
+        return { policy, occurrence };
+      }).sort((left, right) => compareJobOccurrences(left.occurrence, right.occurrence));
+      return {
+        ...(state.legacyNextFire
+          ? { legacyNextFire: structuredClone(state.legacyNextFire) }
+          : {}),
+        missedNextFireByRun: exact(state.missedNextFireByRun),
+        failurePolicyByRun: exact(state.failurePolicyByRun),
+        pendingAutoDisable: pending.map(({ policy }) => structuredClone(policy)),
+      };
+    });
   }
 
   async noteCapabilityGap(input: {
@@ -1322,30 +4948,19 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   async pendingChannelGrantDeliveries(): Promise<
     readonly ChannelInteractionGrant[]
   > {
-    return this.#select((state) => {
-      const pending: ChannelInteractionGrant[] = [];
-      for (const granted of state.channelInteractions.grantByChallenge.values()) {
-        if (granted.grant.ref.execution !== "job") continue;
-        const outcome = state.interactionMirrors
-          .get(granted.grant.assignmentId)
-          ?.outcomes.get(granted.grant.interactionRequestId);
-        if (!outcome) {
-          pending.push(structuredClone(granted.grant));
-          continue;
-        }
-        if (outcome.t !== "answered") continue;
-        if (
-          outcome.authority.via !== "channel-grant" ||
-          canonicalize(outcome.authority.grant) !==
-            canonicalize(granted.grant)
-        ) {
-          throw corruptJobJournal(
-            "Mirrored job answer conflicts with its durable channel grant",
-          );
-        }
-      }
-      return pending;
-    });
+    // 待镜像目录与原判定一致：授权仍没有镜像结果；镜像与授权不符在写入时已被拒绝
+    return this.#select((state) =>
+      state.pendingGrants.values()
+        .map((challengeId) => {
+          const granted = state.channelInteractions.grantByChallenge.get(challengeId);
+          if (!granted) throw corruptJobJournal("Pending channel grant has no durable grant");
+          return granted.grant;
+        })
+        .sort((left, right) =>
+          left.assignmentId.localeCompare(right.assignmentId) ||
+          left.challengeToken.challengeId.localeCompare(right.challengeToken.challengeId))
+        .map((grant) => structuredClone(grant)),
+    );
   }
 
   async interactionRoute(assignmentId: string): Promise<JobInteractionRoute> {
@@ -1377,14 +4992,16 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
 
   async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
     return this.#select((state) =>
-      [...state.channelInteractions.preparedByChallenge.values()]
-        .filter(
-          (prepared): prepared is JobChannelChallengePreparedRecord =>
-            prepared.ref.execution === "job" &&
-            !state.channelInteractions.closedByChallenge.has(
-              prepared.token.challengeId,
-            ),
-        )
+      state.openChallenges.values()
+        .map((challengeId) => {
+          const prepared = state.channelInteractions.preparedByChallenge.get(challengeId);
+          if (prepared?.ref.execution !== "job") {
+            throw corruptJobJournal("Open channel challenge has no durable job preparation");
+          }
+          return prepared as JobChannelChallengePreparedRecord;
+        })
+        .sort((left, right) =>
+          left.assignmentId.localeCompare(right.assignmentId) || left.frameSeq - right.frameSeq)
         .map((prepared) => {
           const delivered =
             state.channelInteractions.deliveredByChallenge.get(
@@ -1640,7 +5257,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         value: { taskRevision: candidate.taskRevision, replayed: false },
       };
     }, prepared.references);
-    await this.resumeCompatibilityProjection();
     return revision.value;
   }
 
@@ -1690,11 +5306,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         throw new Error("Disabled or deleted tasks cannot create occurrences");
       }
       if (
-        [...state.failurePolicyByRun.values()].some(
-          (policy) =>
-            policy.autoDisableRequired &&
-            !state.autoDisableSettledRuns.has(policy.jobRunId),
-        )
+        state.pendingAutoDisable.values().length > 0
       ) {
         throw new Error("Task is pending automatic disablement");
       }
@@ -1831,7 +5443,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       return { kind: "append", entries, value: occurrence };
     });
-    await this.resumeCompatibilityProjection();
     return transaction.value;
   }
 
@@ -1984,7 +5595,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     );
     const assigned = transaction.state.assignedById.get(transaction.value);
     if (!assigned) throw corruptJobJournal("Assigned job did not replay its outbox fact");
-    await this.resumeCompatibilityProjection();
     return materializeDispatch(assigned, this.#signer);
   }
 
@@ -2007,13 +5617,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       throw new Error("Durable job assignment does not match the replay request");
     }
     const dispatch = materializeDispatch(current, this.#signer);
-    await this.resumeCompatibilityProjection();
     return dispatch;
   }
 
   async pendingDispatches(): Promise<PendingJobDispatch[]> {
     const assignments = await this.#select((state) =>
-      [...state.assignedById.values()]
+      byAssignmentCommit(state, state.openAssignments.values())
+        .map((assignmentId) => state.assignedById.get(assignmentId)!)
         .filter((assigned) => {
           const current = state.states.get(assigned.record.jobRunId);
           return (
@@ -2031,7 +5641,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
 
   async dispatchesAwaitingStarted(): Promise<PendingJobDispatch[]> {
     const assignments = await this.#select((state) =>
-      [...state.assignedById.values()]
+      byAssignmentCommit(state, state.openAssignments.values())
+        .map((assignmentId) => state.assignedById.get(assignmentId)!)
         .filter((assigned) => {
           const assignmentId = assigned.record.assignmentId;
           return (
@@ -2070,10 +5681,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       readonly assigned: AssignedJob;
     };
     const assignments = await this.#select((state): RecoveryCandidate[] =>
-      [...new Set([
-        ...state.recoveryAssignments,
-        ...state.bundleAcknowledgementOutbox,
-      ])]
+      byAssignmentCommit(state, [...new Set([
+        ...state.recoveryAssignments.values(),
+        ...state.bundleAcknowledgementOutbox.values(),
+      ])])
         .flatMap<RecoveryCandidate>((assignmentId) => {
           const assigned = state.assignedById.get(assignmentId);
           if (!assigned) {
@@ -2226,7 +5837,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         value: undefined,
       };
     });
-    await this.resumeCompatibilityProjection();
   }
 
   async reconcileCancellationEvidence(
@@ -2581,21 +6191,23 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   async dataPlaneTicketFacts(): Promise<DataPlaneTicketFacts> {
     const transaction = await this.#transact<DataPlaneTicketFacts>(
       (state, authorityPrefix) => {
+        // 只读同步边界在前沿之后的票据：已过前沿的不再同步，读量不随历史票据增长
         const nextFrontier = nextDataPlaneTicketSyncFrontier(
-          state.ticketsById.values(),
+          ticketsBetween(state, state.ticketSyncFrontier, authorityPrefix.at).map((row) => row.ticket),
           state.ticketSyncFrontier,
           authorityPrefix.at,
         );
         const frontier = nextFrontier ?? state.ticketSyncFrontier;
-        const issued = [...state.ticketsById.values()]
+        const issued = ticketsBetween(state, frontier, undefined)
+          .map((row) => row.ticket)
           .filter((ticket) => !ticketPrecedesSyncFrontier(ticket, frontier))
           .sort((left, right) => left.ticketId.localeCompare(right.ticketId))
           .map((ticket) => snapshot(ticket));
-        const retainedIds = new Set(issued.map((ticket) => ticket.ticketId));
         const value = {
           issued,
-          revokedTicketIds: [...state.revokedTickets]
-            .filter((ticketId) => retainedIds.has(ticketId))
+          revokedTicketIds: issued
+            .map((ticket) => ticket.ticketId)
+            .filter((ticketId) => state.revokedTickets.has(ticketId))
             .sort(),
         };
         return nextFrontier === undefined
@@ -2705,7 +6317,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         value: undefined,
       };
     });
-    await this.resumeCompatibilityProjection();
   }
 
   async mirrorInteractions(
@@ -2940,7 +6551,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     >[]
   > {
     return this.#select((state) =>
-      [...state.interactionSettlementFences.values()]
+      state.pendingSettlements.values().sort()
+        .map((assignmentId) => state.interactionSettlementFences.get(assignmentId)!)
         .filter(
           (fence) =>
             !state.completedInteractionSettlements.has(fence.assignmentId),
@@ -3098,7 +6710,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         }
         return { kind: "return", value: { state: current.state } };
       });
-    await this.resumeCompatibilityProjection();
     return result.value;
   }
 
@@ -3107,15 +6718,34 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     readonly envelope: JobControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
+    // 控制目标的工作集取自同一锁内的持久投影：只归约本次候选，不重放作业流；
+    // 锁外装入的行在重做之间保留
+    const base = createJobMainState(this.#taskId);
+    base.bindLoader((needs) => loadJobState(base, needs, this.#index));
+    const binding = new JobStateBinding(base);
+    const target = jobProjectionView(binding);
+    const scope = jobScopeOf(input.envelope.body);
+    const outcome = await this.#repeatState(async () => {
     await input.admission.prepareRecovery();
-    const outcome = await this.#delivery.coordinate(() => input.admission.applyAuthority<
+    const cursor = await this.#headCursor();
+    return this.#delivery.coordinate(() => input.admission.applyAuthority<
       JobProjection,
       JobControlEnvelope
     >({
       envelope: input.envelope,
       source: input.source,
       stream: jobStream(this.#taskId),
-      initial: emptyProjection(),
+      initial: target,
+      onProjected: () => undefined,
+      targetBase: {
+        state: target,
+        cursor,
+        createState: () => target,
+        readProjectionIds: [JOB_RUN_STATE_PROJECTION_ID],
+        validateAtPrefix: async (context) => {
+          await preloadJobScope({ main: base }, scope, context.readProjection(JOB_RUN_STATE_PROJECTION_ID));
+        },
+      },
       reducer: (state, record, commit) => this.#reduce(state, record, commit),
       companionStreams: ["delivery", "governor", ...(this.#schedulerNotices ? [SCHEDULER_NOTICE_STREAM] : [])],
       prepareCompanions: (state, context, plan) => {
@@ -3152,7 +6782,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           ),
         );
       },
-      decide: (state, context) => {
+      decide: (state, context) => runWithJobState(
+        [[binding, base]], context.authorityPrefix.readProjection(JOB_RUN_STATE_PROJECTION_ID), () => {
         const body = context.envelope.body;
         const definition = state.definition;
         if (!definition) {
@@ -3179,11 +6810,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             return { result: rejectedControl("fence-rejected", "Task is not enabled") };
           }
           if (
-            [...state.failurePolicyByRun.values()].some(
-              (policy) =>
-                policy.autoDisableRequired &&
-                !state.autoDisableSettledRuns.has(policy.jobRunId),
-            )
+            state.pendingAutoDisable.values().length > 0
           ) {
             return {
               result: rejectedControl(
@@ -3423,16 +7050,20 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             ),
           ],
         };
-      },
+      }),
     }));
+    });
     await this.#schedulerNotices?.publishNew();
-    await this.resumeCompatibilityProjection();
     return outcome;
   }
 
   async pendingCancellations(): Promise<PendingJobFence[]> {
     return this.#select((state) =>
-      [...state.cancelFences.values()]
+      byAssignmentCommit(state, state.openAssignments.values())
+        .flatMap((assignmentId) => {
+          const fence = state.cancelFences.get(assignmentId);
+          return fence ? [fence] : [];
+        })
         .filter((fence) => {
           const assigned = state.assignedById.get(fence.assignmentId);
           const current = assigned
@@ -3502,7 +7133,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
 
   async pendingSupersedes(): Promise<PendingJobFence[]> {
     return this.#select((state) =>
-      [...state.supersedeRequests.values()]
+      byAssignmentCommit(state, state.openAssignments.values())
+        .flatMap((assignmentId) => {
+          const request = state.supersedeRequests.get(assignmentId);
+          return request ? [request] : [];
+        })
         .filter((request) => {
           const assigned = state.assignedById.get(request.assignmentId);
           const current = assigned
@@ -3578,7 +7213,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           value: fact,
         };
       });
-    await this.resumeCompatibilityProjection();
     return transaction.value;
   }
 
@@ -3675,7 +7309,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         current.state === "uncertain" ? open : undefined,
       );
     });
-    await this.resumeCompatibilityProjection();
   }
 
   async acceptDispatchRejection(
@@ -3731,7 +7364,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         current.state === "uncertain" ? open : undefined,
       );
     });
-    await this.resumeCompatibilityProjection();
   }
 
   async submitCancelProof(
@@ -3877,7 +7509,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       this.#assertAssignmentUsageFinal(assigned.record, proof.usageFinal);
       return this.#acceptCancellation(state, assigned, proof, current);
     });
-    await this.resumeCompatibilityProjection();
   }
 
   async recordDispatchConflict(
@@ -4002,7 +7633,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         },
         conflictReferences,
       );
-    await this.resumeCompatibilityProjection();
     return transaction.value;
   }
 
@@ -4110,7 +7740,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         method: "submission.submitBundle",
         assignmentId,
       }));
-      this.#assertAssignmentUsageFinal(guardAssigned.record, bundle.usageFinal);
+      // 已提交的重放在日志事务之外核对用量终值：调控状态待装入时补齐后重做
+      for (let rounds = 0; ; rounds++) {
+        try {
+          this.#assertAssignmentUsageFinal(guardAssigned.record, bundle.usageFinal);
+          break;
+        } catch (error) {
+          if (rounds >= 64 || !(await awaitAuthorityPreparation(error))) throw error;
+        }
+      }
       this.#commitParticipant?.wakePendingPublishing?.(this.#taskId);
       return { committed: true, commitRevision: guardCommitted.jobRevision };
     }
@@ -4394,8 +8032,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
     if (transaction.value.committed) {
       this.#commitParticipant?.wakePendingPublishing?.(this.#taskId);
-      await this.resumeCompatibilityProjection();
-    }
+      }
     return transaction.value;
   }
 
@@ -4733,13 +8370,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         value: undefined,
       };
     }, preparedDetail.references);
-    await this.resumeCompatibilityProjection();
     return outcome;
   }
 
   async resumeSystemJobs(context: AuthorityCallContext): Promise<number> {
     const resumable = await this.#select((state) =>
-      [...state.states.entries()]
+      byOccurrenceOrder(state, state.openRuns.values())
+        .map((jobRunId) => [jobRunId, state.states.get(jobRunId)!] as const)
         .filter(([jobRunId, value]) => {
           if (value.state === "running") return state.systemFences.has(jobRunId);
           if (value.state !== "queued") return false;
@@ -4758,34 +8395,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     return completed;
   }
 
-  async resumeCompatibilityProjection(): Promise<void> {
-    if (!this.#compatibility) return;
-    const snapshotState = await this.#select((state) => ({
-      definition: state.definition ? snapshot(state.definition) : undefined,
-      occurrences: [...state.occurrences.values()].map((occurrence) => {
-        const current = state.states.get(occurrence.jobRunId);
-        return validateJobOccurrence({
-          ...snapshot(occurrence),
-          state: current?.state ?? occurrence.state,
-        });
-      }),
-    }));
-    if (!snapshotState.definition) return;
-    if (
-      snapshotState.definition.definition.kind === "system" ||
-      snapshotState.definition.state === "deleted"
-    ) {
-      await this.#compatibility.remove(this.#taskId);
-      return;
-    }
-    await this.#compatibility.project({
-      definition: snapshotState.definition as TaskDefinition & {
-        readonly definition: Extract<TaskDefinitionBody, { kind: "user" }>;
-      },
-      occurrences: snapshotState.occurrences,
-    });
-  }
-
   async occurrence(jobRunId: string): Promise<JobOccurrence | undefined> {
     return this.#select((state) => {
       const occurrence = state.occurrences.get(jobRunId);
@@ -4799,26 +8408,62 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
-  /** One owner snapshot supplies both scheduler decisions and occurrence state. */
-  async schedulerReadView(): Promise<{ readonly definition?: TaskDefinition; readonly occurrences: readonly ScheduleOccurrence[] }> {
-    return this.#select(state => ({
-      ...(state.definition ? { definition: snapshot(state.definition) } : {}),
-      occurrences: this.#projectOccurrences(state),
-    }));
+  /** 一条 occurrence 的调度事实（含结果），精确读取。 */
+  async scheduleOccurrence(jobRunId: string): Promise<ScheduleOccurrence | undefined> {
+    return this.#select((state) => {
+      const occurrence = state.occurrences.get(jobRunId);
+      return occurrence ? scheduleOccurrenceOf(state, occurrence) : undefined;
+    });
   }
 
-  /** Rebuildable task-local occurrence projection for scheduler/query recovery. */
-  async occurrences(): Promise<readonly ScheduleOccurrence[]> {
-    return this.#select(state => this.#projectOccurrences(state));
+  /**
+   * 调度视图：当前定义，运行次数、连续失败、最近一次 occurrence，以及全部未结束的 occurrence（按次序）。
+   * 同一份投影快照，不读历史 run。
+   */
+  async schedulerReadView(): Promise<JobSchedulerReadView> {
+    return this.#select((state) => {
+      const last = latestOccurrence(state);
+      return {
+        ...(state.definition ? { definition: snapshot(state.definition) } : {}),
+        runCount: state.runCount,
+        consecutiveFailures: latestFailures(state),
+        ...(last ? { last: scheduleOccurrenceOf(state, last) } : {}),
+        open: byOccurrenceOrder(state, state.openRuns.values())
+          .map((jobRunId) => scheduleOccurrenceOf(state, state.occurrences.get(jobRunId)!)),
+      };
+    });
   }
 
-  #projectOccurrences(state: JobProjection): readonly ScheduleOccurrence[] {
-    return [...state.occurrences.values()].map(occurrence => {
-      const current = state.states.get(occurrence.jobRunId);
-      const projected = validateJobOccurrence({ ...snapshot(occurrence), state: current?.state ?? occurrence.state });
-      const outcome = state.outcomeByRun.get(occurrence.jobRunId);
-      return { ...projected, ...(outcome ? { outcome: snapshot(outcome) } : {}) };
-    }).sort((left, right) => left.scheduledFor.localeCompare(right.scheduledFor) || left.jobRunId.localeCompare(right.jobRunId));
+  /** 错过且尚未汇总通知的 occurrence，按计划时间、id 升序。 */
+  async pendingMissedOccurrences(): Promise<readonly ScheduleOccurrence[]> {
+    return this.#select((state) =>
+      byOccurrenceOrder(state, state.pendingMissed.values())
+        .map((jobRunId) => scheduleOccurrenceOf(state, state.occurrences.get(jobRunId)!)));
+  }
+
+  /** 未结束的 occurrence，按计划时间、id 升序。 */
+  async openOccurrences(): Promise<readonly ScheduleOccurrence[]> {
+    return (await this.schedulerReadView()).open;
+  }
+
+  /**
+   * 历史 occurrence 分页：从最近一次（或 before 这条之前）往前，至多 limit 条，按从近到远。
+   */
+  async occurrencesPage(input: { readonly before?: string; readonly limit: number }): Promise<readonly ScheduleOccurrence[]> {
+    if (!Number.isSafeInteger(input.limit) || input.limit <= 0 || input.limit > 256) {
+      throw new TypeError("Occurrence page limit must be 1-256");
+    }
+    if (input.before !== undefined) assertIdentifier(input.before, "Occurrence page cursor");
+    return this.#select((state) => {
+      const before = input.before === undefined ? undefined : state.occurrences.get(input.before);
+      if (input.before !== undefined && !before) throw new TypeError("Occurrence page cursor is unknown");
+      const page: ScheduleOccurrence[] = [];
+      walkOccurrencesBackward(state, before, (occurrence) => {
+        page.push(scheduleOccurrenceOf(state, occurrence));
+        return page.length < input.limit;
+      });
+      return page;
+    });
   }
 
   async currentState(jobRunId: string): Promise<JobRunState | undefined> {
@@ -4903,7 +8548,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         value: true,
       };
     });
-    await this.resumeCompatibilityProjection();
     return result.value;
   }
 
@@ -5190,81 +8834,83 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     );
   }
 
-  #assertReplayedSystemActivation(
-    previousFence: SystemJobFence | undefined,
-    fence: SystemJobFence,
-    envelope: CommitEnvelope<unknown>,
-  ): void {
-    const records = envelope.entries.filter(
-      (record) => record.stream !== jobStream(this.#taskId),
-    );
-    try {
-      if (!this.#systemResources) {
-        throw new Error("System job resource coordination is not configured");
-      }
-      assertForeignRecords(records, jobStream(this.#taskId));
-      this.#systemResources.assertActivationRecords({
-        ...(previousFence ? { previousFence } : {}),
-        fence,
-        records,
-      });
-    } catch (error) {
-      throw corruptJobJournal(
-        error instanceof Error
-          ? `System activation resource records are invalid: ${error.message}`
-          : "System activation resource records are invalid",
-      );
-    }
+  /**
+   * 本作业的工作集会话：两份投影已装入的行与它们对应的持久头位置。头位置没变（期间没有别的写入
+   * 触及本作业）就沿用已装入的行，否则换新会话；行数超过上限也换新，常驻工作集有界。
+   */
+  async #sessionAt(view: import("@zhixing/core/authority").DurableProjectionReadContext): Promise<JobJournalSession> {
+    const head = await view.get(jobStateHeadKey(this.#taskId)) as number | undefined;
+    const current = this.#session;
+    if (current && current.head === head &&
+        current.main.loadedRows + current.guard.loadedRows < MAX_JOB_SESSION_ROWS) return current;
+    const session: JobJournalSession = { main: this.#loadableSet("main"), guard: this.#loadableSet("guard"), head, cursor: current?.cursor };
+    this.#session = session;
+    return session;
   }
 
-  #assertReplayedSystemTerminal(
-    fence: SystemJobFence,
-    outcome: "committed" | "failed",
-    envelope: CommitEnvelope<unknown>,
-  ): void {
-    const records = envelope.entries.filter(
-      (record) => record.stream !== jobStream(this.#taskId),
-    );
-    try {
-      if (!this.#systemResources) {
-        throw new Error("System job resource coordination is not configured");
-      }
-      assertForeignRecords(records, jobStream(this.#taskId));
-      this.#systemResources.assertTerminalRecords({ fence, outcome, records });
-    } catch (error) {
-      throw corruptJobJournal(
-        error instanceof Error
-          ? `System terminal resource records are invalid: ${error.message}`
-          : "System terminal resource records are invalid",
-      );
-    }
+  /** 一份新的工作集：锁外缺键时经持久投影成批装入。 */
+  #loadableSet(kind: "main" | "guard"): JobStateSet {
+    const set = kind === "main" ? createJobMainState(this.#taskId) : createJobGuardState(this.#taskId);
+    set.bindLoader((needs) => loadJobState(set, needs, this.#index));
+    return set;
   }
 
-  async #select<Value>(select: (state: JobProjection) => Value): Promise<Value> {
-    return this.#operations.run(async () => {
-      const cached = this.#projection;
+  /**
+   * 在本作业的串行队列之外重做：工作集缺的行装入后重来；持久投影仍在准备时等它完成；
+   * 暂时的容量背压在有限窗口内重试。持有别的互斥区时不在这里等待，交给外层所有者重驱。
+   */
+  async #repeatState<Value>(operation: () => Promise<Value>): Promise<Value> {
+    const abort = currentMaintenanceAbortSignal();
+    let deadline: number | undefined;
+    // 缺键装入的轮数单独计：准备等待与背压重试不占用它
+    let loads = 0;
+    const loaded: Record<string, number> = {};
+    for (;;) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
       try {
-        const replay = () => this.#log.readProjection<
-          JobProjection,
-          unknown
-        >(
-          cached?.state ?? emptyProjection(),
-          (state, record, envelope) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, envelope),
-          {
-            stream: jobStream(this.#taskId),
-            ...(cached ? { cursor: cached.cursor } : {}),
-          },
-        );
-        const transaction = await (
-          this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
-        );
-        this.#projection = { state: transaction.state, cursor: transaction.cursor };
-        return select(transaction.state);
+        return await operation();
       } catch (error) {
-        this.#projection = undefined;
-        throw error;
+        if (error instanceof JobStateRequired && error.prepareOutside) {
+          // 装了上限轮仍缺即耗尽：不再交给外层准备循环原样重开
+          if (loads >= MAX_JOB_STATE_ROUNDS) throw new JobStateExhausted("rounds", loads + 1, loaded, error.needs);
+          loads += 1;
+          tallyJobStateNeeds(error.needs, loaded);
+          await error.prepareOutside();
+          continue;
+        }
+        if (await awaitAuthorityPreparation(error)) continue;
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        deadline ??= performance.now() + 5_000;
+        if (performance.now() >= deadline) throw error;
+        await waitForMaintenanceRetry(Math.min(delay, deadline - performance.now()));
       }
-    });
+    }
+  }
+
+  async #select<Value>(select: (state: JobProjection) => Value, scope?: JobScope): Promise<Value> {
+    return this.#repeatState(() => this.#operations.run(async () => {
+      const read = () => this.#log.transactDurableProjection<never, Value>(JOB_RUN_STATE_PROJECTION_ID, async (view) => {
+        const session = await this.#sessionAt(view);
+        if (scope) await preloadJobScope({ main: session.main }, scope, view);
+        const binding = new JobStateBinding(session.main);
+        // 读取不改动工作集：成功后已装入的行留在会话里，尝试用的复制直接丢弃
+        const value = await runWithJobState([[binding, session.main]], view, () => select(jobProjectionView(binding)));
+        return { kind: "return", value };
+      });
+      const result = await (this.#resources ? this.#resources.coordinate(read, { readOnly: true }) : read());
+      return result.value;
+    }));
+  }
+
+  /** 日志当前头部的游标：之后的事务只续读其后的尾部。 */
+  async #headCursor(): Promise<ProjectionCursor> {
+    const cursor = this.#session?.cursor;
+    if (cursor) return cursor;
+    return (await this.#log.transactDurableProjection<never, undefined>(
+      JOB_RUN_STATE_PROJECTION_ID,
+      async () => ({ kind: "return", value: undefined }),
+    )).cursor;
   }
 
   async #transact<Value>(
@@ -5274,93 +8920,116 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     ) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
     candidateReferences: readonly ArtifactRef[] = [],
     readProjectionIds: readonly string[] = [],
+    scope?: JobScope,
   ) {
-    return this.#operations.run(async () => {
-      const cached = this.#projection;
-      try {
-        const transact = () => this.#delivery.coordinate(() =>
-          this.#log.transactProjection<
-          JobProjection,
-          unknown,
-          Value
-        >(
-          cached?.state ?? emptyProjection(),
-          this.#reduce,
-          async (state, context) => {
-            const decision = await decide(state, context);
-            if (decision.kind !== "append") return decision;
-            const resourceRecords = this.#prepareAssignmentResourceTerminalRecords(
-              state,
-              decision.entries,
-            );
-            const policyRecords = await this.#prepareSchedulerPolicyRecords(
-              state,
-              decision.entries,
-              context.at,
-            );
-            const statuses = jobStatusDeliveryInputs(
-              this.#taskId,
-              state,
-              decision.entries,
-              context.at,
-            );
-            const prepared = this.#delivery.prepareJobStatuses(statuses);
-            if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
-            return {
-              ...decision,
-              entries: [
+    const transaction = await this.#repeatState(() => this.#operations.run(async () => {
+      const cursor = await this.#headCursor();
+      const binding = new JobStateBinding(createJobMainState(this.#taskId));
+      const state = jobProjectionView(binding);
+      let session: JobJournalSession | undefined;
+      let candidateLsn: number | undefined;
+      const transact = () => this.#delivery.coordinate(() =>
+        this.#log.transactProjection<JobProjection, unknown, Value>(
+          state,
+          // 工作集取自同一锁内的持久投影：游标之后的尾部不再重放，只归约本次候选
+          (current, record, envelope) => envelope.lsn === candidateLsn ? this.#reduce(current, record, envelope) : current,
+          async (_current, context) => {
+            const view = context.readProjection(JOB_RUN_STATE_PROJECTION_ID);
+            const active = session = await this.#sessionAt(view);
+            await preloadJobScope({ main: active.main }, scope ?? jobScopeOf(), view);
+            candidateLsn = context.nextLsn;
+            return runWithJobState([[binding, active.main]], view, async () => {
+              const decision = await decide(state, context);
+              if (decision.kind !== "append") return decision;
+              const resourceRecords = this.#prepareAssignmentResourceTerminalRecords(
+                state,
+                decision.entries,
+              );
+              const policyRecords = await this.#prepareSchedulerPolicyRecords(
+                state,
+                decision.entries,
+                context.at,
+              );
+              const statuses = jobStatusDeliveryInputs(
+                this.#taskId,
+                state,
+                decision.entries,
+                context.at,
+              );
+              const prepared = this.#delivery.prepareJobStatuses(statuses);
+              if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
+              const entries = [
                 ...resourceRecords,
                 ...decision.entries,
                 ...policyRecords,
                 ...prepared.records,
-              ],
-            };
+              ];
+              // 候选归约要读的行在锁内一并装入，免得归约时才缺而整笔事务重来
+              const needs = candidateStateNeeds(active.main, entries, this.#taskId);
+              if (needs.length) throw new JobStateRequired(needs);
+              // 候选会改动连续失败摘要时，它的定位路径也在锁内按层装入
+              requireFailureSummaryPaths(state, failureSummaryCandidates(state, jobStreamBodies(entries, this.#taskId)));
+              return { ...decision, entries };
+            });
           },
           {
             stream: jobStream(this.#taskId),
-            ...(cached ? { cursor: cached.cursor } : {}),
+            cursor,
             candidateReferences,
-            readProjectionIds,
+            readProjectionIds: [...new Set([JOB_RUN_STATE_PROJECTION_ID, ...readProjectionIds])],
+            createState: () => {
+              candidateLsn = undefined;
+              return state;
+            },
           },
         ));
-        const coordinateSystem = () =>
-          this.#systemResources ? this.#systemResources.coordinate(transact) : transact();
-        const sameCoordinator =
-          this.#resources !== undefined &&
-          (this.#resources as unknown) === (this.#systemResources as unknown);
-        const transaction = await (
-          sameCoordinator
-            ? this.#resources!.coordinate(transact)
-            : this.#resources
-              ? this.#resources.coordinate(coordinateSystem)
-              : coordinateSystem()
-        );
-        this.#projection = { state: transaction.state, cursor: transaction.cursor };
+      const coordinateSystem = () =>
+        this.#systemResources ? this.#systemResources.coordinate(transact) : transact();
+      const sameCoordinator =
+        this.#resources !== undefined &&
+        (this.#resources as unknown) === (this.#systemResources as unknown);
+      const transaction = await (
+        sameCoordinator
+          ? this.#resources!.coordinate(transact)
+          : this.#resources
+            ? this.#resources.coordinate(coordinateSystem)
+            : coordinateSystem()
+      );
+      if (session && this.#session === session) {
         if (transaction.commit) {
-          this.#publishStatusNotices(
-            jobStatusNoticesForCommit(
-              transaction.state,
-              transaction.commit,
-              this.#taskId,
-              this.#anchorEpoch,
-            ),
-          );
-          this.#publishLifecycleEvents(
-            jobLifecycleEventsForCommit(
-              transaction.state,
-              transaction.commit,
-              this.#taskId,
-              this.#anchorEpoch,
-            ),
-          );
-          await this.#schedulerNotices?.publishNew();
+          // 提交后的主投影工作集正是持久归约写下的行：采纳并作为新的基准；守卫另由持久投影更新，换新
+          session.main.adopt(binding.store);
+          session.main.settle();
+          session.guard = this.#loadableSet("guard");
+          session.head = transaction.commit.lsn;
         }
-        return transaction;
-      } catch (error) {
-        this.#projection = undefined;
-        throw error;
+        session.cursor = transaction.cursor;
       }
-    });
+      return transaction;
+    }));
+    // 提交已持久：通知只读候选归约装入过的行，不再重做事务
+    {
+      if (transaction.commit) {
+        this.#publishStatusNotices(
+          jobStatusNoticesForCommit(
+            transaction.state,
+            transaction.commit,
+            this.#taskId,
+            this.#anchorEpoch,
+          ),
+        );
+        this.#publishLifecycleEvents(
+          jobLifecycleEventsForCommit(
+            transaction.state,
+            transaction.commit,
+            this.#taskId,
+            this.#anchorEpoch,
+          ),
+        );
+        await this.#schedulerNotices?.publishNew();
+      }
+    }
+    return transaction;
   }
 
   #prepareAssignmentResourceTerminalRecords(
@@ -5412,58 +9081,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
-  #assertAssignmentResourceTerminal(
-    assigned: Extract<JobJournalRecord, { t: "assigned" }>,
-    mode: "settle-release" | "release" | "reclaim",
-    records: readonly LogicalRecord<unknown>[],
-  ): void {
-    if (!requiresFormalResourceCoordination({
-      reservationId: assigned.reservation.reservationId,
-      assignmentId: assigned.assignmentId,
-    })) return;
-    if (!this.#resources) {
-      throw corruptJobJournal("Governed job assignment has no resource coordinator");
-    }
-    try {
-      this.#resources.assertTerminalRecords({
-        reservationId: assigned.reservation.reservationId,
-        mode,
-        records,
-      });
-    } catch (error) {
-      throw corruptJobJournal(
-        error instanceof Error
-          ? `Job assignment resource terminal is invalid: ${error.message}`
-          : "Job assignment resource terminal is invalid",
-      );
-    }
-  }
-
   #assertAssignmentUsageFinal(
     assigned: Extract<JobJournalRecord, { t: "assigned" }>,
     usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number },
   ): void {
-    if (!requiresFormalResourceCoordination({
-      reservationId: assigned.reservation.reservationId,
-      assignmentId: assigned.assignmentId,
-    })) return;
-    if (!this.#resources) {
-      throw corruptJobJournal("Governed job assignment has no resource coordinator");
-    }
-    try {
-      this.#resources.assertUsageFinal({
-        reservationId: assigned.reservation.reservationId,
-        assignmentId: assigned.assignmentId,
-        executorId: assigned.executorId,
-        usageFinal,
-      });
-    } catch (error) {
-      throw corruptJobJournal(
-        error instanceof Error
-          ? `Job assignment final usage is invalid: ${error.message}`
-          : "Job assignment final usage is invalid",
-      );
-    }
+    this.#reduction.assertAssignmentUsageFinal(assigned, usageFinal);
   }
 
   #publishStatusNotices(notices: readonly JobStatusNotice[]): void {
@@ -5476,1633 +9098,47 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     }
   }
 
-  readonly #reduce = async (
+  readonly #reduce = (
     state: JobProjection,
     raw: LogicalRecord<unknown>,
     envelope: CommitEnvelope<unknown>,
-  ): Promise<JobProjection> => {
-    if (raw.stream !== jobStream(this.#taskId)) {
-      return state;
-    }
-    const body = await verifyProtocolStep(() => validateJobJournalRecord(raw.body, this.#verifier));
-    const envelopeRecords = envelope.entries
-      .filter((entry) => entry.stream === jobStream(this.#taskId))
-      .map((entry) => entry.body as JobJournalRecord);
-    switch (body.t) {
-      case "task-revision": {
-        const definition = validateTaskDefinition(
-          await loadJobStored(body.def, this.#artifacts, "TaskDefinition"),
-        );
-        if (
-          body.taskId !== this.#taskId ||
-          definition.taskId !== body.taskId ||
-          definition.taskRevision !== body.taskRevision ||
-          definition.state !== body.state ||
-          definition.definition.kind !== body.kind
-        ) {
-          throw corruptJobJournal("Task revision belongs to a different stream");
-        }
-        const current = state.definition;
-        if (current && !taskCreationProvenanceMatches(current, definition)) {
-          throw corruptJobJournal("Task creation provenance is immutable");
-        }
-        const activeJobRunId = state.activeJobRunId;
-        const active = activeJobRunId
-          ? state.states.get(activeJobRunId)
-          : undefined;
-        assertTaskRevisionReplayContract({
-          taskIdMatches: body.taskId === this.#taskId,
-          taskRevision: body.taskRevision,
-          state: body.state,
-          kind: body.kind,
-          previousRevision: current?.taskRevision,
-          previousState: current?.state,
-          previousKind: current?.definition.kind,
-          activeState: active?.state,
-          ...taskRevisionAtomicFacts({
-            records: envelopeRecords,
-            taskRevision: body.taskRevision,
-            activeJobRunId,
-            active,
-            assignmentId: activeJobRunId
-              ? state.assignmentByJob.get(activeJobRunId)
-              : undefined,
-            cancelFences: state.cancelFences,
-            envelopeLsn: envelope.lsn,
-          }),
-        });
-        if (body.operationId !== undefined) {
-          if (state.taskOperations.has(body.operationId)) {
-            throw corruptJobJournal("Task mutation operation is duplicated");
-          }
-          state.taskOperations.set(body.operationId, {
-            digest: body.operationDigest!,
-            taskRevision: body.taskRevision,
-          });
-        }
-        state.definition = snapshot(definition);
-        state.definitions.set(definition.taskRevision, snapshot(definition));
-        return state;
-      }
-      case "occurrence": {
-        const definition = state.definition;
-        const active = state.activeJobRunId
-          ? state.states.get(state.activeJobRunId)
-          : undefined;
-        assertJobOccurrenceReplayContract({
-          taskIdMatches: body.occ.taskId === this.#taskId,
-          definitionPresent: definition !== undefined,
-          definitionState: definition?.state,
-          definitionRevisionMatches:
-            definition !== undefined &&
-            body.occ.taskRevision === definition.taskRevision,
-          definitionKind: definition?.definition.kind,
-          identifierUnused:
-            !state.occurrences.has(body.occ.jobRunId) &&
-            !state.systemMissAliases.has(body.occ.jobRunId),
-          occurrenceState: body.occ.state,
-          activeState: active?.state,
-          hasAtomicAdmission: envelopeRecords.some(
-            (record) =>
-              record.t === "admitted" && record.jobRunId === body.occ.jobRunId,
-          ),
-          hasAtomicOfflineMissPolicy: envelopeRecords.some(
-            (record) =>
-              record.t === "missed-next-fire" &&
-              record.jobRunId === body.occ.jobRunId,
-          ),
-        });
-        if (
-          !definition ||
-          canonicalize(body.occ.deliveryPlan) !==
-            canonicalize(deliveryPlan(definition.definition))
-        ) {
-          throw corruptJobJournal("Job occurrence does not bind the current task definition");
-        }
-        state.occurrences.set(body.occ.jobRunId, snapshot(body.occ));
-        state.states.set(body.occ.jobRunId, {
-          state: body.occ.state,
-          statusRevision: 1,
-        });
-        if (state.statusHistoryByRun.has(body.occ.jobRunId)) {
-          throw corruptJobJournal("Job occurrence duplicates its status history");
-        }
-        state.statusHistoryByRun.set(body.occ.jobRunId, [
-          { state: body.occ.state, statusRevision: 1, at: envelope.at },
-        ]);
-        if (body.occ.state === "queued") state.activeJobRunId = body.occ.jobRunId;
-        state.pendingSystemMissedJobRunId = registerPendingSystemMiss({
-          currentPendingJobRunId: state.pendingSystemMissedJobRunId,
-          jobRunId: body.occ.jobRunId,
-          definitionKind: definition.definition.kind,
-          occurrenceState: body.occ.state,
-        });
-        return state;
-      }
-      case "legacy-next-fire": {
-        const definitionRecord = envelopeRecords.find(
-          (record) =>
-            record.t === "task-revision" &&
-            record.taskRevision === body.taskRevision,
-        );
-        if (!definitionRecord || state.legacyNextFire) {
-          throw corruptJobJournal("Legacy next-fire lacks its atomic imported definition");
-        }
-        state.legacyNextFire = body;
-        return state;
-      }
-      case "missed-next-fire": {
-        const occurrence = envelopeRecords.find(
-          (record) =>
-            record.t === "occurrence" &&
-            record.occ.jobRunId === body.jobRunId &&
-            record.occ.state === "missed",
-        );
-        if (!occurrence || state.missedNextFireByRun.has(body.jobRunId)) {
-          throw corruptJobJournal("Missed next-fire lacks its atomic missed occurrence");
-        }
-        state.missedNextFireByRun.set(body.jobRunId, body);
-        return state;
-      }
-      case "failure-policy": {
-        const terminal = envelopeRecords.find(
-          (record) =>
-            record.t === "state" &&
-            record.jobRunId === body.jobRunId &&
-            (record.state === "failed" || record.state === "expired" ||
-              (record.state === "committed" && state.outcomeByRun.get(body.jobRunId)?.status === "failed")) &&
-            record.statusRevision === body.statusRevision,
-        );
-        const occurrence = state.occurrences.get(body.jobRunId);
-        if (
-          !terminal ||
-          !occurrence ||
-          occurrence.taskRevision !== body.taskRevision ||
-          state.failurePolicyByRun.has(body.jobRunId)
-        ) {
-          throw corruptJobJournal("Failure policy lacks its atomic failed terminal");
-        }
-        state.failurePolicyByRun.set(body.jobRunId, body);
-        return state;
-      }
-      case "auto-disable-settled": {
-        const policy = state.failurePolicyByRun.get(body.jobRunId);
-        if (
-          !policy?.autoDisableRequired ||
-          state.definition?.state !== "disabled" ||
-          state.definition.taskRevision !== body.disabledTaskRevision ||
-          state.autoDisableSettledRuns.has(body.jobRunId)
-        ) {
-          throw corruptJobJournal("Auto-disable settlement is invalid or duplicated");
-        }
-        state.autoDisableSettledRuns.add(body.jobRunId);
-        return state;
-      }
-      case "capability-gap-opened":
-      case "capability-gap-updated": {
-        if (!envelope.entries.some((entry) =>
-          entry.stream === SCHEDULER_USER_NOTICE_STREAM &&
-          typeof entry.body === "object" && entry.body !== null &&
-          (entry.body as { noticeId?: unknown }).noticeId === body.noticeId,
-        )) {
-          throw corruptJobJournal("Capability gap lacks its atomic user notice");
-        }
-        const current = state.states.get(body.jobRunId);
-        if (current?.state !== "queued") {
-          throw corruptJobJournal("Capability gap does not bind a queued occurrence");
-        }
-        const previous = state.capabilityGapByRun.get(body.jobRunId);
-        if (body.t === "capability-gap-opened") {
-          if (previous?.open || body.round !== (previous?.round ?? 0) + 1) {
-            throw corruptJobJournal("Capability gap opening round is invalid");
-          }
-        } else if (
-          !previous?.open ||
-          previous.round !== body.round ||
-          previous.noticeId !== body.noticeId
-        ) {
-          throw corruptJobJournal("Capability gap update does not bind the open round");
-        }
-        state.capabilityGapByRun.set(body.jobRunId, {
-          round: body.round,
-          noticeId: body.noticeId,
-          capabilityRevision: body.capabilityRevision,
-          reasonDigest: body.reasonDigest,
-          reason: body.reason,
-          open: true,
-        });
-        return state;
-      }
-      case "capability-gap-closed": {
-        if (!envelope.entries.some((entry) =>
-          entry.stream === SCHEDULER_USER_NOTICE_STREAM &&
-          typeof entry.body === "object" && entry.body !== null &&
-          (entry.body as { noticeId?: unknown }).noticeId === body.noticeId,
-        )) {
-          throw corruptJobJournal("Capability gap close lacks its atomic notice update");
-        }
-        const previous = state.capabilityGapByRun.get(body.jobRunId);
-        if (
-          !previous?.open ||
-          previous.round !== body.round ||
-          previous.noticeId !== body.noticeId
-        ) {
-          throw corruptJobJournal("Capability gap close does not bind the open round");
-        }
-        state.capabilityGapByRun.set(body.jobRunId, { ...previous, open: false });
-        return state;
-      }
-      case "system-miss-coalesced": {
-        const definition = state.definition;
-        const coalesced = state.occurrences.get(body.coalescedJobRunId);
-        const active = state.activeJobRunId
-          ? state.states.get(state.activeJobRunId)
-          : undefined;
-        assertSystemMissCoalescedReplayContract({
-          definitionKind: definition?.definition.kind,
-          requestedIdentifierUnused:
-            !state.occurrences.has(body.requestedJobRunId) &&
-            !state.systemMissAliases.has(body.requestedJobRunId),
-          pendingMatchesCoalesced:
-            state.pendingSystemMissedJobRunId === body.coalescedJobRunId,
-          coalescedState: coalesced?.state,
-          activeState: active?.state,
-        });
-        state.systemMissAliases.set(body.requestedJobRunId, {
-          scheduledFor: body.scheduledFor,
-          coalescedJobRunId: body.coalescedJobRunId,
-        });
-        return state;
-      }
-      case "admitted": {
-        const occurrence = state.occurrences.get(body.jobRunId);
-        const definition = occurrence
-          ? state.definitions.get(occurrence.taskRevision)
-          : undefined;
-        assertJobAdmissionReplayContract({
-          taskIdMatches: body.taskId === this.#taskId,
-          occurrencePresent: occurrence !== undefined,
-          scheduleMatches: occurrence?.scheduledFor === body.scheduledFor,
-          occurrenceState: occurrence?.state,
-          definitionKind: definition?.definition.kind,
-          admissionAlreadyExists: state.admittedJobs.has(body.jobRunId),
-          ingressPresent: body.ingress !== undefined,
-          hasAtomicManualControlResult: envelopeHasManualJobRunApplied(
-            envelope,
-            body.jobRunId,
-          ),
-        });
-        state.admittedJobs.add(body.jobRunId);
-        if (body.ingress) state.ingressByJob.set(body.jobRunId, body.ingress);
-        return state;
-      }
-      case "assigned": {
-        const occurrence = state.occurrences.get(body.jobRunId);
-        const current = state.states.get(body.jobRunId);
-        assertAssignmentReplayContract({
-          currentState: current?.state,
-          currentRevision: current?.statusRevision,
-          runAlreadyAssigned: state.assignmentByJob.has(body.jobRunId),
-          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
-          isEarliestQueuedRun: state.activeJobRunId === body.jobRunId,
-          hasAtomicDispatchedState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              "dispatched",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-        });
-        if (
-          !occurrence ||
-          body.taskId !== this.#taskId ||
-          body.anchorEpoch !== this.#anchorEpoch ||
-          body.taskRevision !== occurrence.taskRevision ||
-          body.deliveryPlanDigest !== occurrence.deliveryPlan.planDigest
-        ) {
-          throw corruptJobJournal("Job assignment is invalid or lacks its atomic state");
-        }
-        const bytes = await this.#artifacts.get(body.dispatchRef);
-        const dispatch = await verifyProtocolStep(() => validateJobEnvelope(
-          JSON.parse(Buffer.from(bytes).toString("utf8")) as JobEnvelope,
-          this.#verifier,
-        ));
-        await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
-        const dispatchArtifact = dispatchEnvelopeArtifact(dispatch);
-        if (
-          canonicalize(dispatchArtifact.ref) !== canonicalize(body.dispatchRef) ||
-          dispatch.assignmentId !== body.assignmentId ||
-          dispatch.executorId !== body.executorId ||
-          dispatchEnvelopeDigest(dispatch) !== body.dispatchDigest ||
-          dispatch.manifest.digest !== body.manifestDigest ||
-          permissionSnapshotLeaseDigest(dispatch) !== body.permissionLeaseDigest ||
-          canonicalize(dispatch.capabilities.map((capability) => capability.capId)) !==
-            canonicalize(body.capIds) ||
-          dispatch.resourceLease.reservationId !== body.reservation.reservationId ||
-          dispatch.resourceLease.workload.attempt !== body.reservation.attempt
-        ) {
-          throw corruptJobJournal("Job assignment dispatch artifact is inconsistent");
-        }
-        assertDispatchMatchesOccurrence(
-          dispatch,
-          occurrence,
-          requireDefinitionRevision(state, occurrence.taskRevision),
-          this.#anchorEpoch,
-        );
-        if (requiresFormalResourceCoordination(dispatch.resourceLease)) {
-          if (!this.#resources) {
-            throw corruptJobJournal("Job assignment has no resource coordinator");
-          }
-          this.#resources.assertActivationRecords({
-            lease: dispatch.resourceLease,
-            records: envelope.entries,
-            acceptedAt: envelope.at,
-          });
-        }
-        state.assignedById.set(body.assignmentId, {
-          record: body,
-          envelope: dispatch,
-          commit: {
-            lsn: envelope.lsn,
-            envelopeDigest: envelope.envelopeDigest,
-            at: envelope.at,
-          },
-          acked: false,
-        });
-        state.assignmentByJob.set(body.jobRunId, body.assignmentId);
-        state.recoveryAssignments.add(body.assignmentId);
-        return state;
-      }
-      case "dispatch-acked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertDispatchAcknowledgementReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.superseded.has(body.assignmentId),
-          assignmentClosed: state.superseded.has(body.assignmentId),
-        });
-        if (!assigned) {
-          throw corruptJobJournal("Dispatch acknowledgement is missing or duplicated");
-        }
-        assigned.acked = true;
-        return state;
-      }
-      case "dispatch-conflict": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertDispatchConflictReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          proofBindsAssignment:
-            assigned !== undefined &&
-            body.proof.assignmentId === body.assignmentId &&
-            body.proof.executorId === assigned.record.executorId,
-          handling: body.handling,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.superseded.has(body.assignmentId),
-          assignmentClosed: state.superseded.has(body.assignmentId),
-          conflictAlreadySeen: state.conflicts.has(body.assignmentId),
-        });
-        if (!assigned || !current) {
-          throw corruptJobJournal("Dispatch conflict identity is invalid or duplicated");
-        }
-        const expectedActivationDigest = assignedActivationDigest(assigned);
-        const acceptedMatches =
-          canonicalize(body.proof.acceptedDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          body.proof.acceptedActivationDigest === expectedActivationDigest;
-        const conflictingMatches =
-          canonicalize(body.proof.conflictingDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          body.proof.conflictingActivationDigest === expectedActivationDigest;
-        assertDispatchConflictHandlingReplayContract({
-          handling: body.handling,
-          acceptedMatches,
-          conflictingMatches,
-          atomicHandling:
-            body.handling === "acked-original"
-              ? envelopeRecords.some(
-                  (record) =>
-                    record.t === "dispatch-acked" &&
-                    record.assignmentId === body.assignmentId,
-                )
-              : envelopeRecords.some(
-                  (record) =>
-                    record.t === "resolution" &&
-                    record.jobRunId === assigned.record.jobRunId &&
-                    record.fact.subject.assignmentId === body.assignmentId &&
-                    record.fact.cause === "dispatch-conflict" &&
-                    record.fact.resolution === undefined,
-                ) &&
-                recordsHaveJobState(
-                  envelopeRecords,
-                  assigned.record.jobRunId,
-                  "uncertain",
-                  current.statusRevision + 1,
-                  body.assignmentId,
-                ) &&
-                envelopeRecords.some(
-                  (record) =>
-                    record.t === "cancel-fence" &&
-                    record.assignmentId === body.assignmentId,
-                ) &&
-                allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
-        });
-        state.conflicts.set(body.assignmentId, body);
-        return state;
-      }
-      case "dispatch-conflict-contained":
-      case "cancel-contained": {
-        const assigned = requireReplayAssignment(state, body.assignmentId);
-        const open = state.resolutions.get(assigned.record.jobRunId);
-        if (
-          state.assignmentByJob.get(assigned.record.jobRunId) !== body.assignmentId ||
-          !proofBindsJobSource(
-            state,
-            assigned,
-            body.proof,
-            this.#anchorEpoch,
-            this.#legacyAbortTickets,
-          ) ||
-          !open ||
-          open.resolution ||
-          open.openFactDigest !== body.openFactDigest ||
-          state.containedFacts.has(body.openFactDigest) ||
-          (body.t === "dispatch-conflict-contained" &&
-            (open.cause !== "dispatch-conflict" ||
-              !state.conflicts.has(body.assignmentId) ||
-              body.proof.lastRecordSeq <=
-                state.conflicts.get(body.assignmentId)!.proof.receivedRecordSeq)) ||
-          (body.t === "cancel-contained" &&
-            (open.cause === "dispatch-conflict" || body.proof.decision !== "halted"))
-        ) {
-          throw corruptJobJournal("Containment does not bind one open uncertain fact");
-        }
-        if (body.t === "dispatch-conflict-contained") {
-          const current = state.states.get(assigned.record.jobRunId);
-          const targetState = current
-            ? notStartedTargetState(state, current)
-            : "queued";
-          const notStartedProof =
-            body.proof.decision === "halted" ? undefined : body.proof;
-          assertJobConflictContainmentReplayContract({
-            proofDecision: notStartedProof ? "not-started" : "halted",
-            conflictOpen: open.cause === "dispatch-conflict",
-            hasAtomicSupersedeWithSameProof:
-              notStartedProof !== undefined &&
-              envelopeRecords.some(
-                (record) =>
-                  record.t === "assignment-superseded" &&
-                  record.assignmentId === body.assignmentId &&
-                  sameTerminationProofIdentity(record.proof, notStartedProof),
-              ),
-            hasAtomicResolutionClose: envelopeRecords.some(
-              (record) =>
-                record.t === "resolution" &&
-                record.jobRunId === assigned.record.jobRunId &&
-                record.fact.openFactDigest === open.openFactDigest &&
-                (record.fact.resolution?.kind ===
-                  "proven-not-started-redispatched" ||
-                  record.fact.resolution?.kind ===
-                    "proven-not-started-cancelled"),
-            ),
-            hasAtomicTargetState:
-              current !== undefined &&
-              recordsHaveJobState(
-                envelopeRecords,
-                assigned.record.jobRunId,
-                targetState,
-                current.statusRevision + 1,
-                body.assignmentId,
-              ),
-            allCapabilitiesRevoked: allJobCapabilitiesRevoked(
-              envelopeRecords,
-              state,
-              assigned,
-            ),
-          });
-        }
-        state.containedFacts.add(body.openFactDigest);
-        state.containments.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "assignment-superseded": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        const open = assigned
-          ? state.resolutions.get(assigned.record.jobRunId)
-          : undefined;
-        const targetState = current
-          ? notStartedTargetState(state, current)
-          : "queued";
-        assertAssignmentSupersededReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          assignmentAlreadyClosed: state.superseded.has(body.assignmentId),
-          currentState: current?.state,
-          durableStartedObserved: state.durableStarted.has(body.assignmentId),
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsJobSource(
-              state,
-              assigned,
-              body.proof,
-              this.#anchorEpoch,
-              this.#legacyAbortTickets,
-            ),
-          proofKind: assignmentTerminationProofKind(body.proof),
-          hasAtomicTargetState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              targetState,
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
-          hasAtomicResolutionClose:
-            assigned !== undefined &&
-            open !== undefined &&
-            open.resolution === undefined &&
-            envelopeRecords.some(
-              (record) =>
-                record.t === "resolution" &&
-                record.jobRunId === assigned.record.jobRunId &&
-                record.fact.openFactDigest === open.openFactDigest &&
-                (record.fact.resolution?.kind === "proven-not-started-redispatched" ||
-                  record.fact.resolution?.kind === "proven-not-started-cancelled"),
-            ),
-          conflictOpen:
-            open !== undefined &&
-            open.resolution === undefined &&
-            open.cause === "dispatch-conflict",
-          hasAtomicConflictContainment:
-            open !== undefined &&
-            envelopeRecords.some(
-              (record) =>
-                record.t === "dispatch-conflict-contained" &&
-                record.assignmentId === body.assignmentId &&
-                record.openFactDigest === open.openFactDigest &&
-                record.proof.decision !== "halted" &&
-                sameTerminationProofIdentity(record.proof, body.proof),
-            ),
-        });
-        if (!assigned) throw corruptJobJournal("Assignment supersede has no assignment");
-        this.#assertAssignmentResourceTerminal(
-          assigned.record,
-          "release",
-          envelope.entries,
-        );
-        state.superseded.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "supersede-requested": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        assertSupersedeRequestReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: assigned
-            ? state.states.get(assigned.record.jobRunId)?.state
-            : undefined,
-          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-        });
-        state.supersedeRequests.set(body.assignmentId, body);
-        return state;
-      }
-      case "supersede-started-observed": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        assertSupersedeStartedObservationReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: assigned
-            ? state.states.get(assigned.record.jobRunId)?.state
-            : undefined,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsJobSource(
-              state,
-              assigned,
-              body.proof,
-              this.#anchorEpoch,
-              this.#legacyAbortTickets,
-            ),
-          observationAlreadyExists: state.supersedeStarted.has(body.assignmentId),
-        });
-        state.supersedeStarted.set(body.assignmentId, body);
-        state.durableStarted.add(body.assignmentId);
-        return state;
-      }
-      case "cancel-fence": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertJobCancelFenceReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-          hasAtomicCancelRequestedState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              "cancel-requested",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          hasAtomicOpenedConflict:
-            assigned !== undefined &&
-            state.resolutions.get(assigned.record.jobRunId)?.cause ===
-              "dispatch-conflict" &&
-            envelopeRecords.some(
-              (record) =>
-                record.t === "dispatch-conflict" &&
-                record.assignmentId === body.assignmentId &&
-                record.handling === "opened-uncertain",
-            ),
-          hasAtomicDeletedTaskRevision: envelopeRecords.some(
-            (record) =>
-              record.t === "task-revision" &&
-              record.state === "deleted" &&
-              body.requestId === `task-revision:${record.taskRevision}`,
-          ),
-        });
-        state.cancelFences.set(body.assignmentId, body);
-        return state;
-      }
-      case "interaction-settlement-fence": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        if (
-          "v" in body &&
-          body.v === 2 &&
-          assigned?.record.executorId !== body.executorId
-        ) {
-          throw corruptJobJournal(
-            "Versioned interaction settlement names a different executor",
-          );
-        }
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertJobInteractionSettlementFenceReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) ===
-              body.assignmentId,
-          currentState: current?.state,
-          fenceAlreadyExists: state.interactionSettlementFences.has(
-            body.assignmentId,
-          ),
-          hasAtomicUncertainState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              "uncertain",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          hasAtomicUnknownCancellationResolution:
-            assigned !== undefined &&
-            ((
-              state.resolutions.get(assigned.record.jobRunId)?.cause ===
-                "job-cancel-unknown" &&
-              state.resolutions.get(assigned.record.jobRunId)?.resolution ===
-                undefined
-            ) ||
-              envelopeRecords.some(
-                (record) =>
-                  record.t === "resolution" &&
-                  record.jobRunId === assigned.record.jobRunId &&
-                  record.fact.subject.assignmentId === body.assignmentId &&
-                  record.fact.cause === "job-cancel-unknown" &&
-                  record.fact.resolution === undefined,
-              )),
-        });
-        state.interactionSettlementFences.set(body.assignmentId, body);
-        return state;
-      }
-      case "interaction-settlement-completed": {
-        assertJobInteractionSettlementCompletionReplayContract({
-          fence: state.interactionSettlementFences.get(body.assignmentId),
-          completion: body,
-          completionAlreadyExists:
-            state.completedInteractionSettlements.has(body.assignmentId),
-          mirrored: state.interactionMirrors.get(body.assignmentId),
-          ...("v" in body && body.v === 2
-            ? { streamProof: body.streamProof }
-            : {}),
-        });
-        state.completedInteractionSettlements.set(body.assignmentId, body);
-        return state;
-      }
-      case "cancel-proof-accepted": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertCancelProofAcceptedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
-          durableStartedObserved: state.durableStarted.has(body.assignmentId),
-          proofDecision: body.proof.decision,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsJobSource(
-              state,
-              assigned,
-              body.proof,
-              this.#anchorEpoch,
-              this.#legacyAbortTickets,
-            ),
-          hasAtomicCancelledState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              "cancelled",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
-        });
-        if (!assigned) throw corruptJobJournal("Accepted cancellation has no assignment");
-        this.#assertAssignmentUsageFinal(assigned.record, body.proof.usageFinal);
-        this.#assertAssignmentResourceTerminal(
-          assigned.record,
-          body.proof.decision === "not-started" ? "release" : "settle-release",
-          envelope.entries,
-        );
-        state.acceptedCancellations.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "not-started-rejected": {
-        const assigned = requireReplayAssignment(state, body.assignmentId);
-        const current = state.states.get(assigned.record.jobRunId);
-        const open = state.resolutions.get(assigned.record.jobRunId);
-        const contradictory =
-          state.durableStarted.has(body.assignmentId) ||
-          ("dispatchDigest" in body.proof && open?.cause === "dispatch-conflict");
-        const expectedCause = "cause" in body.proof
-          ? "job-cancel-unknown"
-          : "ledger-unknown";
-        if (
-          state.assignmentByJob.get(assigned.record.jobRunId) !== body.assignmentId ||
-          !proofBindsJobSource(
-            state,
-            assigned,
-            body.proof,
-            this.#anchorEpoch,
-            this.#legacyAbortTickets,
-          ) ||
-          !current ||
-          !contradictory ||
-          (current.state !== "uncertain" &&
-            (!envelopeRecords.some(
-              (record) =>
-                record.t === "resolution" &&
-                record.jobRunId === assigned.record.jobRunId &&
-                record.fact.subject.assignmentId === body.assignmentId &&
-                record.fact.cause === expectedCause &&
-                record.fact.resolution === undefined,
-            ) ||
-              !envelopeRecords.some(
-                (record) =>
-                  record.t === "state" &&
-                  record.jobRunId === assigned.record.jobRunId &&
-                  record.assignmentId === body.assignmentId &&
-                  record.state === "uncertain" &&
-                  record.statusRevision === current.statusRevision + 1,
-              ) ||
-              !allJobCapabilitiesRevoked(envelopeRecords, state, assigned)))
-        ) {
-          throw corruptJobJournal("Rejected not-started proof is historical");
-        }
-        const key = notStartedRejectionKey(
-          body.assignmentId,
-          terminationProofKind(body.proof),
-        );
-        if (state.rejectedNotStarted.has(key)) {
-          throw corruptJobJournal("Rejected not-started proof is duplicated");
-        }
-        state.rejectedNotStarted.set(key, body);
-        return state;
-      }
-      case "capability-revoked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const key = revokedCapabilityKey(body.assignmentId, body.capId);
-        assertCapabilityRevocationReplayContract({
-          assignmentExists: assigned !== undefined,
-          capabilityBelongsToAssignment:
-            assigned?.record.capIds.includes(body.capId) ?? false,
-          alreadyRevoked: state.revokedCapabilities.has(key),
-        });
-        state.revokedCapabilities.add(key);
-        return state;
-      }
-      case "ticket-issued": {
-        const assigned = state.assignedById.get(body.ticket.assignmentId);
-        await applyJobTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          taskId: this.#taskId,
-          assigned: assigned?.record,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) ===
-              assigned.record.assignmentId,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentClosed: false,
-          assignmentActive:
-            assigned !== undefined &&
-            (state.states.get(assigned.record.jobRunId)?.state ===
-              "dispatched" ||
-              state.states.get(assigned.record.jobRunId)?.state ===
-                "running") &&
-            !state.cancelFences.has(body.ticket.assignmentId),
-          originalSurfacePrincipal: assigned
-            ? state.ingressByJob.get(assigned.record.jobRunId)?.surfacePrincipal
-            : undefined,
-          hasAtomicReplacementRevocation:
-            body.replacesTicketId === undefined ||
-            envelopeRecords.some(
-              (candidate) =>
-                candidate.t === "ticket-revoked" &&
-                candidate.ticketId === body.replacesTicketId,
-            ),
-        });
-        return state;
-      }
-      case "ticket-revoked":
-        await applyJobTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          taskId: this.#taskId,
-          assignmentIsCurrent: false,
-          assignmentAcknowledged: false,
-          assignmentClosed: false,
-          assignmentActive: false,
-        });
-        return state;
-      case "ticket-sync-frontier":
-        applyJobTicketSyncFrontier(
-          state,
-          body.expiresThrough,
-          envelope.at,
-        );
-        return state;
-      case "interaction-mirror": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
-          body.batch,
-          this.#verifier,
-        ));
-        const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
-        const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
-          upTo: 0,
-          ordinal: 0,
-          digest: interactionMirrorSeed(body.assignmentId),
-          requestIds: new Set<string>(),
-          outcomes: new Map(),
-        };
-        const first = batch.entries[0]!;
-        const last = batch.entries.at(-1)!;
-        const auditSettlement =
-          state.completedInteractionSettlements.has(body.assignmentId)
-            ? undefined
-            : state.interactionSettlementFences.get(body.assignmentId);
-        assertJobMirrorReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          executorMatches: assigned?.record.executorId === batch.executorId,
-          batchBindsRecord: batch.assignmentId === body.assignmentId,
-          currentState: assigned
-            ? state.states.get(assigned.record.jobRunId)?.state
-            : undefined,
-          hasDurableCancelFence: state.cancelFences.has(body.assignmentId),
-          ...(auditSettlement
-            ? {
-                auditSettlementTarget: {
-                  upTo: auditSettlement.targetUpTo,
-                  ordinal: auditSettlement.targetOrdinal,
-                  mirrorDigest: auditSettlement.targetMirrorDigest,
-                },
-              }
-            : {}),
-          batchTarget: {
-            upTo: last.seq,
-            ordinal: last.ordinal,
-            mirrorDigest: batch.mirrorDigest,
-          },
-          batchAlreadyMirrored: state.interactionMirrorBatches.has(batchKey),
-          extendsCursor:
-            batch.previousDigest === mirrored.digest &&
-            first.ordinal === mirrored.ordinal + 1 &&
-            first.seq > mirrored.upTo,
-          repeatsRequestId: batchRepeatsRequestId(batch, mirrored.requestIds),
-        });
-        state.interactionMirrorBatches.add(batchKey);
-        state.interactionMirrors.set(body.assignmentId, {
-          upTo: last.seq,
-          ordinal: last.ordinal,
-          digest: batch.mirrorDigest,
-          requestIds: new Set([
-            ...mirrored.requestIds,
-            ...batch.entries.map((entry) => entry.requestId),
-          ]),
-          outcomes: new Map([
-            ...mirrored.outcomes,
-            ...batch.entries.map(
-              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
-            ),
-          ]),
-        });
-        return state;
-      }
-      case "channel-challenge-prepared": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const occurrence = assigned
-          ? state.occurrences.get(assigned.record.jobRunId)
-          : undefined;
-        const definition = occurrence
-          ? requireDefinitionRevision(state, occurrence.taskRevision)
-          : undefined;
-        if (
-          !assigned ||
-          !definition ||
-          definition.definition.kind !== "user" ||
-          !definition.definition.origin ||
-          !definition.definition.interactionResponder ||
-          body.ref.taskId !== this.#taskId ||
-          body.ref.jobRunId !== assigned.record.jobRunId ||
-          body.ref.anchorEpoch !== assigned.record.anchorEpoch ||
-          canonicalize(body.responder) !==
-            canonicalize(definition.definition.interactionResponder) ||
-          canonicalize(body.token.route) !==
-            canonicalize(definition.definition.origin)
-        ) {
-          throw corruptJobJournal(
-            "Job channel challenge does not bind its assignment source",
-          );
-        }
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptJobJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      }
-      case "channel-challenge-delivered":
-      case "channel-challenge-closed":
-      case "channel-challenge-granted":
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptJobJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      case "channel-relay-cursor": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
-          throw corruptJobJournal(
-            "Channel relay cursor does not bind its assignment",
-          );
-        }
-        if (
-          body.checkpoint.ref.execution !== "job" ||
-          body.checkpoint.ref.taskId !== this.#taskId ||
-          body.checkpoint.ref.jobRunId !== assigned.record.jobRunId ||
-          body.checkpoint.ref.anchorEpoch !== assigned.record.anchorEpoch
-        ) {
-          throw corruptJobJournal(
-            "Channel relay checkpoint does not bind its assignment authority",
-          );
-        }
-        const preparedInEnvelope = envelopeRecords.find(
-          (
-            candidate,
-          ): candidate is Extract<
-            JobJournalRecord,
-            { t: "channel-challenge-prepared" }
-          > =>
-            candidate.t === "channel-challenge-prepared" &&
-            candidate.assignmentId === body.assignmentId,
-        );
-        if (
-          preparedInEnvelope &&
-          preparedInEnvelope.frameSeq !== body.upToSeq
-        ) {
-          throw corruptJobJournal(
-            "Prepared challenge and relay cursor must adopt the same frame",
-          );
-        }
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptJobJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      }
-      case "resolution": {
-        const fact = validateResolutionFact(body.fact);
-        if (fact.subject.execution !== "job") {
-          throw corruptJobJournal("Job resolution contains a conversation subject");
-        }
-        const jobFact = fact as JobResolutionFact;
-        assertJobResolutionBinding({
-          execution: jobFact.subject.execution,
-          subjectTaskId: jobFact.subject.taskId,
-          subjectJobRunId: jobFact.subject.jobRunId,
-          recordJobRunId: body.jobRunId,
-          authorityTaskId: this.#taskId,
-          subjectAnchorEpoch: jobFact.subject.anchorEpoch,
-          authorityAnchorEpoch: this.#anchorEpoch,
-        });
-        const current = state.resolutions.get(body.jobRunId);
-        const assigned = state.assignedById.get(jobFact.subject.assignmentId);
-        const runState = state.states.get(body.jobRunId);
-        if (!jobFact.resolution) {
-          assertResolutionOpenReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
-            assignmentIsCurrent:
-              state.assignmentByJob.get(body.jobRunId) ===
-              jobFact.subject.assignmentId,
-            currentState: runState?.state,
-            alreadyOpen: isOpenResolutionFact(current),
-            cause: jobFact.cause,
-            hasAtomicUncertainState:
-              runState !== undefined &&
-              recordsHaveJobState(
-                envelopeRecords,
-                body.jobRunId,
-                "uncertain",
-                runState.statusRevision + 1,
-                jobFact.subject.assignmentId,
-              ),
-            hasAtomicDispatchConflict: envelopeRecords.some(
-              (record) =>
-                record.t === "dispatch-conflict" &&
-                record.assignmentId === jobFact.subject.assignmentId &&
-                record.handling === "opened-uncertain",
-            ),
-          });
-        } else {
-          const resolution = jobFact.resolution;
-          if (!current || jobFact.openFactDigest !== current.openFactDigest) {
-            throw corruptJobJournal("Job resolution does not close its current open fact");
-          }
-          const closesEarlierInEnvelope =
-            state.assignmentByJob.get(body.jobRunId) === undefined &&
-            recordsCloseJobAssignment(
-              envelopeRecords,
-              body.jobRunId,
-              jobFact.subject.assignmentId,
-            );
-          assertResolutionClosureReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
-            assignmentIsCurrentOrAtomicallyClosed:
-              state.assignmentByJob.get(body.jobRunId) ===
-                jobFact.subject.assignmentId || closesEarlierInEnvelope,
-            conflictOpen: current.cause === "dispatch-conflict",
-            resolutionKind: resolution.kind,
-          });
-          const targetState = resolutionTargetState(resolution.kind);
-          assertResolutionCloseAtomicReplayContract({
-            cause: current.cause,
-            kind: resolution.kind,
-            existingOpenMatches:
-              current.openFactDigest === jobFact.openFactDigest &&
-              current.resolution === undefined,
-            hasAtomicTargetState:
-              runState !== undefined &&
-              recordsHaveJobState(
-                envelopeRecords,
-                body.jobRunId,
-                targetState,
-                runState.statusRevision +
-                  (runState.state === "uncertain" ? 1 : 0),
-                jobFact.subject.assignmentId,
-              ),
-            allCapabilitiesRevoked:
-              assigned !== undefined &&
-              allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
-            hasRequiredCompanion:
-              resolution.kind === "late-bundle-committed"
-                ? envelopeRecords.some(
-                    (record) =>
-                      record.t === "committed" &&
-                      record.jobRunId === body.jobRunId &&
-                      record.assignmentId === jobFact.subject.assignmentId,
-                  )
-                : resolution.kind === "proven-not-started-redispatched" ||
-                    resolution.kind === "proven-not-started-cancelled"
-                  ? envelopeRecords.some(
-                      (record) =>
-                        record.t === "assignment-superseded" &&
-                        record.assignmentId === jobFact.subject.assignmentId,
-                    )
-                  : envelopeHasSuccessfulJobUncertainControl(
-                      envelope,
-                      targetState,
-                      resolution.factDigest,
-                    ),
-          });
-        }
-        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
-          throw corruptJobJournal("Job resolution sequence is invalid");
-        }
-        if (jobFact.resolution?.kind.startsWith("user-")) {
-          this.#assertAssignmentResourceTerminal(
-            assigned.record,
-            "reclaim",
-            envelope.entries,
-          );
-        }
-        state.resolutions.set(body.jobRunId, snapshot(jobFact));
-        return state;
-      }
-      case "committed": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = state.states.get(body.jobRunId);
-        const open = state.resolutions.get(body.jobRunId);
-        const occurrence = state.occurrences.get(body.jobRunId);
-        assertCommittedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
-          assignmentIsCurrent:
-            state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyCommitted: state.committed.has(body.assignmentId),
-          conflictOpen:
-            open?.cause === "dispatch-conflict" && open.resolution === undefined,
-          commitRevisionMatchesAssignedBase:
-            body.jobRevision === state.nextJobRevision,
-          hasAtomicCommittedState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              "committed",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            allJobCapabilitiesRevoked(envelopeRecords, state, assigned),
-        });
-        if (
-          !assigned ||
-          !occurrence ||
-          !current ||
-          (current.state !== "dispatched" &&
-            current.state !== "running" &&
-            current.state !== "cancel-requested" &&
-            current.state !== "uncertain")
-        ) {
-          throw corruptJobJournal("Job commit is invalid or lacks its atomic state");
-        }
-        try {
-          const bytes = await this.#artifacts.get(body.bundle.ref);
-          const bundle = validateJobSealedBundle(
-            JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
-          );
-          const closure = await validateJobBundleClosure(bundle, this.#artifacts);
-          if (
-            canonicalize(closure.artifact.ref) !== canonicalize(body.bundle.ref) ||
-            !jobBundleBindsAssignedOccurrence(bundle, assigned, occurrence)
-          ) {
-            throw new Error("bundle identity does not match");
-          }
-          this.#assertAssignmentUsageFinal(assigned.record, bundle.usageFinal);
-          state.outcomeByRun.set(body.jobRunId, snapshot(bundle.body.outcome));
-          this.#delivery.assertJobCommit(
-            {
-              at: envelope.at,
-              occurrence,
-              definition: requireDefinitionRevision(state, occurrence.taskRevision),
-              bundle,
-              assignmentLifecycleSource: {
-                owner: "assignment",
-                id: `${assigned.record.executorId === this.#localExecutorId ? "local" : "relay"}:${body.assignmentId}`,
-                revision: assigned.record.dispatchDigest,
-              },
-              ...(closure.batch ? { mutationBatch: closure.batch } : {}),
-            },
-            envelope,
-          );
-        } catch (error) {
-          throw corruptJobJournal(
-            error instanceof Error
-              ? `Committed job bundle is invalid: ${error.message}`
-              : "Committed job bundle is invalid",
-          );
-        }
-        this.#assertAssignmentResourceTerminal(
-          assigned.record,
-          "settle-release",
-          envelope.entries,
-        );
-        state.committed.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        state.bundleAcknowledgementOutbox.add(body.assignmentId);
-        state.nextJobRevision += 1;
-        return state;
-      }
-      case "bundle-ack-observed": {
-        const committed = state.committed.get(body.assignmentId);
-        if (
-          !committed ||
-          state.bundleAcknowledgements.has(body.assignmentId) ||
-          !bundleAcknowledgementBindsCommitted({
-            observedBundleRef: body.bundleRef,
-            observedCommitRevision: body.jobRevision,
-            expectedBundleRef: committed.bundle.ref,
-            expectedCommitRevision: committed.jobRevision,
-          })
-        ) {
-          throw corruptJobJournal(
-            "Bundle acknowledgement observation does not bind one committed job bundle",
-          );
-        }
-        state.bundleAcknowledgements.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        state.bundleAcknowledgementOutbox.delete(body.assignmentId);
-        return state;
-      }
-      case "system-started": {
-        const occurrence = state.occurrences.get(body.jobRunId);
-        const current = state.states.get(body.jobRunId);
-        const previous = state.systemFences.get(body.jobRunId);
-        const definition = occurrence
-          ? requireDefinitionRevision(state, occurrence.taskRevision)
-          : undefined;
-        assertSystemJobActivationReplayContract({
-          taskId: this.#taskId,
-          jobRunId: body.jobRunId,
-          anchorEpoch: this.#anchorEpoch,
-          definitionKind: definition?.definition.kind,
-          occurrence,
-          currentState: current?.state,
-          previousFence: previous,
-          fence: body.fence,
-          hasForeignRecords: envelope.entries.some(
-            (record) => record.stream !== jobStream(this.#taskId),
-          ),
-          hasAtomicRunningState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              "running",
-              current.statusRevision + 1,
-              undefined,
-            ),
-        });
-        assertSystemJobDefinitionReplayContract({ definition, fence: body.fence });
-        this.#assertReplayedSystemActivation(previous, body.fence, envelope);
-        state.systemFences.set(body.jobRunId, snapshot(body.fence));
-        return state;
-      }
-      case "system-result": {
-        const detail = validateSystemJobResultDetail(
-          await loadJobStored(body.detail, this.#artifacts, "SystemJobResultDetail"),
-          body.outcome,
-        );
-        const current = state.states.get(body.jobRunId);
-        const fence = state.systemFences.get(body.jobRunId);
-        const occurrence = state.occurrences.get(body.jobRunId);
-        const definition = occurrence
-          ? requireDefinitionRevision(state, occurrence.taskRevision)
-          : undefined;
-        assertSystemJobTerminalReplayContract({
-          jobRunId: body.jobRunId,
-          definitionKind: definition?.definition.kind,
-          currentState: current?.state,
-          currentFence: fence,
-          resultFence: body.fence,
-          resultAlreadyExists: state.systemResults.has(body.jobRunId),
-          hasForeignRecords: envelope.entries.some(
-            (record) => record.stream !== jobStream(this.#taskId),
-          ),
-          hasAtomicTerminalState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              body.outcome,
-              current.statusRevision + 1,
-              undefined,
-            ),
-        });
-        this.#assertReplayedSystemTerminal(body.fence, body.outcome, envelope);
-        state.systemResults.set(body.jobRunId, {
-          t: "system-result",
-          jobRunId: body.jobRunId,
-          fence: snapshot(body.fence),
-          outcome: body.outcome,
-          ...detail,
-        });
-        return state;
-      }
-      case "state": {
-        const previous = state.states.get(body.jobRunId);
-        const occurrence = state.occurrences.get(body.jobRunId);
-        if (!previous || !occurrence) {
-          throw corruptJobJournal("Job state transition is invalid");
-        }
-        const definition = requireDefinitionRevision(state, occurrence.taskRevision);
-        try {
-          this.#delivery.assertJobStatuses(
-            jobStatusDeliveryInputs(this.#taskId, state, envelope.entries, envelope.at),
-            envelope,
-          );
-        } catch (error) {
-          throw corruptJobJournal(
-            error instanceof Error
-              ? `Job status delivery is invalid: ${error.message}`
-              : "Job status delivery is invalid",
-          );
-        }
-        const assigned = body.assignmentId
-          ? state.assignedById.get(body.assignmentId)
-          : undefined;
-        assertJobStateReplayContract({
-          currentState: previous.state,
-          currentRevision: previous.statusRevision,
-          nextState: body.state,
-          nextRevision: body.statusRevision,
-          assignmentId: body.assignmentId,
-          assignmentBindingValid:
-            assigned !== undefined &&
-            assigned.record.jobRunId === body.jobRunId &&
-            state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
-          systemFencePresent: state.systemFences.has(body.jobRunId),
-          definitionKind: definition.definition.kind,
-          hasAtomicAssignment:
-            body.state !== "dispatched" ||
-            envelopeRecords.some(
-              (record) =>
-                record.t === "assigned" &&
-                record.jobRunId === body.jobRunId &&
-                record.assignmentId === body.assignmentId,
-            ),
-          hasAtomicSystemActivation: envelopeRecords.some(
-            (record) =>
-              record.t === "system-started" && record.jobRunId === body.jobRunId,
-          ),
-          hasAtomicSystemResult: envelopeRecords.some(
-            (record) =>
-              record.t === "system-result" &&
-              record.jobRunId === body.jobRunId &&
-              record.outcome === body.state,
-          ),
-        });
-        if (
-          previous.state === "queued" &&
-          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
-        ) {
-          try {
-            assertQueuedTerminalDequeue(
-              envelope.entries,
-              {
-                kind: "job",
-                id: body.jobRunId,
-                attempt: nextJobAssignmentAttempt(state, body.jobRunId),
-              },
-              body.state,
-            );
-          } catch (error) {
-            throw corruptJobJournal(
-              error instanceof Error ? error.message : "Queued job resource dequeue is invalid",
-            );
-          }
-        }
-        assertStateAtomicReplayContract({
-          currentState: previous.state,
-          nextState: body.state,
-          hasAtomicCancelFence: envelopeRecords.some(
-            (record) =>
-              record.t === "cancel-fence" &&
-              record.assignmentId === body.assignmentId,
-          ),
-          hasAtomicOpenResolution: envelopeRecords.some(
-            (record) =>
-              record.t === "resolution" &&
-              record.jobRunId === body.jobRunId &&
-              record.fact.subject.assignmentId === body.assignmentId &&
-              record.fact.resolution === undefined,
-          ),
-          hasAtomicSupersede: envelopeRecords.some(
-            (record) =>
-              record.t === "assignment-superseded" &&
-              record.assignmentId === body.assignmentId,
-          ),
-          hasAtomicTermination: envelopeRecords.some(
-            (record) =>
-              (record.t === "cancel-proof-accepted" ||
-                record.t === "assignment-superseded") &&
-              record.assignmentId === body.assignmentId,
-          ),
-          hasAtomicResolutionClose: envelopeRecords.some(
-            (record) =>
-              record.t === "resolution" &&
-              record.jobRunId === body.jobRunId &&
-              record.fact.resolution !== undefined,
-          ),
-          hasAtomicCommit:
-            body.assignmentId === undefined ||
-            envelopeRecords.some(
-              (record) =>
-                record.t === "committed" &&
-                record.jobRunId === body.jobRunId &&
-                record.assignmentId === body.assignmentId,
-            ),
-        });
-        if (body.state === "failed" && assigned) {
-          if (!allJobCapabilitiesRevoked(envelopeRecords, state, assigned)) {
-            throw corruptJobJournal("Assigned job failure is not atomic with revocation");
-          }
-          if (body.usageFinal) {
-            this.#assertAssignmentUsageFinal(assigned.record, body.usageFinal);
-          }
-          this.#assertAssignmentResourceTerminal(
-            assigned.record,
-            body.usageFinal ? "settle-release" : "reclaim",
-            envelope.entries,
-          );
-        }
-        state.states.set(body.jobRunId, {
-          state: body.state,
-          statusRevision: body.statusRevision,
-        });
-        const history = state.statusHistoryByRun.get(body.jobRunId);
-        if (!history || history.length + 1 !== body.statusRevision) {
-          throw corruptJobJournal("Job status history index is not contiguous");
-        }
-        const uncertainStatus = projectUncertainStatusTransition({
-          currentState: previous.state,
-          nextState: body.state,
-          resolutionFacts: envelopeRecords.flatMap((record) =>
-            record.t === "resolution" && record.jobRunId === body.jobRunId
-              ? [record.fact]
-              : [],
-          ),
-        });
-        history.push({
-          state: body.state,
-          statusRevision: body.statusRevision,
-          at: envelope.at,
-          ...(uncertainStatus.kind === "opened"
-            ? {
-                uncertainTransition: "opened" as const,
-                openFactDigest: uncertainStatus.openFactDigest,
-              }
-            : uncertainStatus.kind === "closed"
-              ? {
-                  uncertainTransition: "closed" as const,
-                  openFactDigest: uncertainStatus.openFactDigest,
-                  ...jobUncertainClosure(uncertainStatus.resolutionKind),
-                }
-              : {}),
-        });
-        if (body.state === "running" && body.assignmentId) {
-          state.durableStarted.add(body.assignmentId);
-        }
-        if (body.state === "queued") {
-          if (body.assignmentId) state.assignmentByJob.delete(body.jobRunId);
-          if (body.assignmentId) state.recoveryAssignments.delete(body.assignmentId);
-          state.activeJobRunId = body.jobRunId;
-        } else if (isTerminal(body.state)) {
-          if (body.assignmentId) state.assignmentByJob.delete(body.jobRunId);
-          if (body.assignmentId && body.state !== "committed") {
-            state.recoveryAssignments.delete(body.assignmentId);
-          }
-          if (state.activeJobRunId === body.jobRunId) {
-            state.activeJobRunId = undefined;
-            state.pendingSystemMissedJobRunId = undefined;
-          }
-        } else {
-          state.activeJobRunId = body.jobRunId;
-        }
-        return state;
-      }
-      default:
-        return assertNever(body);
-    }
-  };
+  ): Promise<JobProjection> => this.#reduction.reduce(state, raw, envelope);
 
   async #loadSubmissionGuard(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
   ): Promise<JobSubmissionGuardProjection> {
     this.#assertSubmissionContextIdentity(context, identity);
-    return this.#operations.run(async () => {
-      const cached = this.#submissionGuard;
-      const replay = async () => {
-        try {
-          return await this.#log.transactProjection<
-            JobSubmissionGuardProjection,
-            unknown,
-            void
-          >(
-            cached?.state ?? emptyJobSubmissionGuard(),
-            this.#reduceSubmissionGuard,
-            () => ({ kind: "return", value: undefined }),
-            {
-              stream: jobStream(this.#taskId),
-              ...(cached ? { cursor: cached.cursor } : {}),
-            },
-          );
-        } catch (error) {
-          this.#submissionGuard = undefined;
-          throw error;
-        }
-      };
+    return this.#repeatState(() => this.#operations.run(async () => {
+      const read = () => this.#log.transactDurableProjection<never, JobStateSet>(JOB_RUN_STATE_PROJECTION_ID, async (view) => {
+        const session = await this.#sessionAt(view);
+        // 提交守卫只按这一派发与它的 run 读取，不重放作业流
+        await preloadJobScope({ guard: session.guard }, jobScopeOf({ assignmentId: identity.assignmentId }), view);
+        const binding = new JobStateBinding(session.guard);
+        // 守卫的使用者会读的行一并在锁内装入：派发、它的 run、提交与冲突、本能力的撤销
+        await runWithJobState([[binding, session.guard]], view, () => {
+          const guard = jobSubmissionGuardView(binding);
+          const assigned = guard.assignedById.get(identity.assignmentId);
+          guard.committedByAssignment.has(identity.assignmentId);
+          guard.openConflictAssignments.has(identity.assignmentId);
+          if (context.principal.kind === "assignment") {
+            guard.revokedCapabilities.has(revokedCapabilityKey(identity.assignmentId, context.principal.capability.capId));
+          }
+          if (!assigned) return;
+          guard.occurrences.has(assigned.record.jobRunId);
+          guard.states.get(assigned.record.jobRunId);
+          guard.assignmentByJob.get(assigned.record.jobRunId);
+        });
+        return { kind: "return", value: session.guard };
+      });
       const transaction = await (
-        this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
+        this.#resources ? this.#resources.coordinate(read, { readOnly: true }) : read()
       );
-      this.#submissionGuard = {
-        state: transaction.state,
-        cursor: transaction.cursor,
-      };
-      if (context.principal.kind !== "assignment") return transaction.state;
+      // 守卫是只读视图：之后读到未装入的行时抛出待装入，由调用方在锁外装入后重来
+      const guard = jobSubmissionGuardView(new JobStateBinding(transaction.value));
+      if (context.principal.kind !== "assignment") return guard;
       const capability = context.principal.capability;
-      const assigned = transaction.state.assignedById.get(identity.assignmentId);
+      const assigned = guard.assignedById.get(identity.assignmentId);
       await verifyProtocolStep(() => assertActivatedAssignmentCapability({
         capability,
         activation: assigned
@@ -7125,8 +9161,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         now: this.#clock(),
         deadlineAt: context.deadlineAt,
       }));
-      return transaction.state;
-    });
+      return guard;
+    }));
   }
 
   #authorizeGuardSubmission(
@@ -7171,1212 +9207,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
-  readonly #reduceSubmissionGuard = async (
-    state: JobSubmissionGuardProjection,
-    raw: LogicalRecord<unknown>,
-    envelope: CommitEnvelope<unknown>,
-  ): Promise<JobSubmissionGuardProjection> => {
-    if (raw.stream !== jobStream(this.#taskId)) {
-      throw corruptJobJournal("Job submission guard received a different stream");
-    }
-    const body = await verifyProtocolStep(() => validateJobJournalRecord(raw.body, this.#verifier));
-    const envelopeRecords = envelope.entries
-      .filter((entry) => entry.stream === jobStream(this.#taskId))
-      .map((entry) => entry.body as JobJournalRecord);
-    switch (body.t) {
-      case "task-revision": {
-        const previousRevision = state.latestDefinitionRevision;
-        const activeJobRunId = state.activeJobRunId;
-        const active = activeJobRunId
-          ? state.states.get(activeJobRunId)
-          : undefined;
-        assertTaskRevisionReplayContract({
-          taskIdMatches: body.taskId === this.#taskId,
-          taskRevision: body.taskRevision,
-          state: body.state,
-          kind: body.kind,
-          previousRevision,
-          previousState:
-            previousRevision === undefined
-              ? undefined
-              : state.latestDefinitionState,
-          previousKind:
-            previousRevision === undefined
-              ? undefined
-              : state.definitionKinds.get(previousRevision),
-          activeState: active?.state,
-          ...taskRevisionAtomicFacts({
-            records: envelopeRecords,
-            taskRevision: body.taskRevision,
-            activeJobRunId,
-            active,
-            assignmentId: activeJobRunId
-              ? state.assignmentByJob.get(activeJobRunId)
-              : undefined,
-            cancelFences: state.cancelFences,
-            envelopeLsn: envelope.lsn,
-          }),
-        });
-        if (body.operationId !== undefined) {
-          if (state.taskOperations.has(body.operationId)) {
-            throw corruptJobJournal("Task mutation operation is duplicated");
-          }
-          state.taskOperations.set(body.operationId, {
-            digest: body.operationDigest!,
-            taskRevision: body.taskRevision,
-          });
-        }
-        state.definitionKinds.set(body.taskRevision, body.kind);
-        state.latestDefinitionState = body.state;
-        state.latestDefinitionRevision = body.taskRevision;
-        return state;
-      }
-      case "occurrence": {
-        const active = state.activeJobRunId
-          ? state.states.get(state.activeJobRunId)
-          : undefined;
-        const definitionKind = state.definitionKinds.get(body.occ.taskRevision);
-        assertJobOccurrenceReplayContract({
-          taskIdMatches: body.occ.taskId === this.#taskId,
-          definitionPresent: state.latestDefinitionRevision !== undefined,
-          definitionState: state.latestDefinitionState,
-          definitionRevisionMatches:
-            body.occ.taskRevision === state.latestDefinitionRevision,
-          definitionKind,
-          identifierUnused:
-            !state.states.has(body.occ.jobRunId) &&
-            !state.systemMissAliases.has(body.occ.jobRunId),
-          occurrenceState: body.occ.state,
-          activeState: active?.state,
-          hasAtomicAdmission: envelopeRecords.some(
-            (record) =>
-              record.t === "admitted" && record.jobRunId === body.occ.jobRunId,
-          ),
-          hasAtomicOfflineMissPolicy: envelopeRecords.some(
-            (record) =>
-              record.t === "missed-next-fire" &&
-              record.jobRunId === body.occ.jobRunId,
-          ),
-        });
-        state.occurrences.set(body.occ.jobRunId, {
-          scheduledFor: body.occ.scheduledFor,
-          taskRevision: body.occ.taskRevision,
-          deliveryPlanDigest: body.occ.deliveryPlan.planDigest,
-          deliveryRequired: body.occ.deliveryPlan.delivery.kind !== "none",
-        });
-        state.states.set(body.occ.jobRunId, {
-          state: body.occ.state,
-          statusRevision: 1,
-        });
-        if (body.occ.state === "queued") state.activeJobRunId = body.occ.jobRunId;
-        state.pendingSystemMissedJobRunId = registerPendingSystemMiss({
-          currentPendingJobRunId: state.pendingSystemMissedJobRunId,
-          jobRunId: body.occ.jobRunId,
-          definitionKind,
-          occurrenceState: body.occ.state,
-        });
-        return state;
-      }
-      case "legacy-next-fire":
-      case "missed-next-fire":
-      case "failure-policy":
-      case "auto-disable-settled":
-      case "capability-gap-opened":
-      case "capability-gap-updated":
-      case "capability-gap-closed":
-        return state;
-      case "system-miss-coalesced": {
-        const coalesced = state.occurrences.get(body.coalescedJobRunId);
-        const active = state.activeJobRunId
-          ? state.states.get(state.activeJobRunId)
-          : undefined;
-        assertSystemMissCoalescedReplayContract({
-          definitionKind: coalesced
-            ? state.definitionKinds.get(coalesced.taskRevision)
-            : undefined,
-          requestedIdentifierUnused:
-            !state.states.has(body.requestedJobRunId) &&
-            !state.systemMissAliases.has(body.requestedJobRunId),
-          pendingMatchesCoalesced:
-            state.pendingSystemMissedJobRunId === body.coalescedJobRunId,
-          coalescedState: state.states.get(body.coalescedJobRunId)?.state,
-          activeState: active?.state,
-        });
-        state.systemMissAliases.add(body.requestedJobRunId);
-        return state;
-      }
-      case "admitted": {
-        const occurrence = state.occurrences.get(body.jobRunId);
-        assertJobAdmissionReplayContract({
-          taskIdMatches: body.taskId === this.#taskId,
-          occurrencePresent: occurrence !== undefined,
-          scheduleMatches: occurrence?.scheduledFor === body.scheduledFor,
-          occurrenceState: state.states.get(body.jobRunId)?.state,
-          definitionKind: occurrence
-            ? state.definitionKinds.get(occurrence.taskRevision)
-            : undefined,
-          admissionAlreadyExists: state.admittedJobs.has(body.jobRunId),
-          ingressPresent: body.ingress !== undefined,
-          hasAtomicManualControlResult: envelopeHasManualJobRunApplied(
-            envelope,
-            body.jobRunId,
-          ),
-        });
-        state.admittedJobs.add(body.jobRunId);
-        if (body.ingress) state.ingressByJob.set(body.jobRunId, body.ingress);
-        return state;
-      }
-      case "assigned": {
-        const current = state.states.get(body.jobRunId);
-        const occurrence = state.occurrences.get(body.jobRunId);
-        assertAssignmentReplayContract({
-          currentState: current?.state,
-          currentRevision: current?.statusRevision,
-          runAlreadyAssigned: state.assignmentByJob.has(body.jobRunId),
-          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
-          isEarliestQueuedRun: state.activeJobRunId === body.jobRunId,
-          hasAtomicDispatchedState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              "dispatched",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-        });
-        if (
-          !occurrence ||
-          body.taskId !== this.#taskId ||
-          body.anchorEpoch !== this.#anchorEpoch ||
-          body.taskRevision !== occurrence.taskRevision ||
-          body.deliveryPlanDigest !== occurrence.deliveryPlanDigest
-        ) {
-          throw corruptJobJournal("Job assignment is invalid or lacks its atomic state");
-        }
-        state.assignedById.set(body.assignmentId, {
-          record: body,
-          commit: {
-            lsn: envelope.lsn,
-            envelopeDigest: envelope.envelopeDigest,
-            at: envelope.at,
-          },
-          capIds: new Set(body.capIds),
-          acked: false,
-        });
-        state.assignmentByJob.set(body.jobRunId, body.assignmentId);
-        return state;
-      }
-      case "dispatch-acked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertDispatchAcknowledgementReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
-          assignmentClosed: state.closedAssignments.has(body.assignmentId),
-        });
-        if (!assigned) {
-          throw corruptJobJournal("Dispatch acknowledgement is missing or duplicated");
-        }
-        assigned.acked = true;
-        return state;
-      }
-      case "dispatch-conflict": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertDispatchConflictReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          proofBindsAssignment:
-            assigned !== undefined &&
-            body.proof.assignmentId === body.assignmentId &&
-            body.proof.executorId === assigned.record.executorId,
-          handling: body.handling,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
-          assignmentClosed: state.closedAssignments.has(body.assignmentId),
-          conflictAlreadySeen: state.conflictAssignments.has(body.assignmentId),
-        });
-        if (!assigned || !current) {
-          throw corruptJobJournal("Dispatch conflict identity is invalid or duplicated");
-        }
-        const expectedActivationDigest = assignedActivationDigest(assigned);
-        const acceptedMatches =
-          canonicalize(body.proof.acceptedDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          body.proof.acceptedActivationDigest === expectedActivationDigest;
-        const conflictingMatches =
-          canonicalize(body.proof.conflictingDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          body.proof.conflictingActivationDigest === expectedActivationDigest;
-        assertDispatchConflictHandlingReplayContract({
-          handling: body.handling,
-          acceptedMatches,
-          conflictingMatches,
-          atomicHandling:
-            body.handling === "acked-original"
-              ? envelopeRecords.some(
-                  (record) =>
-                    record.t === "dispatch-acked" &&
-                    record.assignmentId === body.assignmentId,
-                )
-              : envelopeRecords.some(
-                  (record) =>
-                    record.t === "resolution" &&
-                    record.jobRunId === assigned.record.jobRunId &&
-                    record.fact.subject.assignmentId === body.assignmentId &&
-                    record.fact.cause === "dispatch-conflict" &&
-                    record.fact.resolution === undefined,
-                ) &&
-                recordsHaveJobState(
-                  envelopeRecords,
-                  assigned.record.jobRunId,
-                  "uncertain",
-                  current.statusRevision + 1,
-                  body.assignmentId,
-                ) &&
-                envelopeRecords.some(
-                  (record) =>
-                    record.t === "cancel-fence" &&
-                    record.assignmentId === body.assignmentId,
-                ) &&
-                allJobCapabilitiesRevoked(envelopeRecords, state, {
-                  record: assigned.record,
-                }),
-        });
-        state.conflictAssignments.add(body.assignmentId);
-        if (body.handling === "opened-uncertain") {
-          state.openConflictAssignments.add(body.assignmentId);
-        }
-        return state;
-      }
-      case "assignment-superseded": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        const open = assigned
-          ? state.resolutions.get(assigned.record.jobRunId)
-          : undefined;
-        const targetState =
-          current !== undefined &&
-          (current.state === "cancel-requested" ||
-            state.latestDefinitionState !== "enabled")
-            ? "cancelled"
-            : "queued";
-        assertAssignmentSupersededReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          assignmentAlreadyClosed: state.closedAssignments.has(body.assignmentId),
-          currentState: current?.state,
-          durableStartedObserved: state.durableStarted.has(body.assignmentId),
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsJobSource(
-              state,
-              assigned,
-              body.proof,
-              this.#anchorEpoch,
-              this.#legacyAbortTickets,
-            ),
-          proofKind: assignmentTerminationProofKind(body.proof),
-          hasAtomicTargetState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              targetState,
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            allJobCapabilitiesRevoked(envelopeRecords, state, {
-              record: assigned.record,
-            }),
-          hasAtomicResolutionClose:
-            assigned !== undefined &&
-            open !== undefined &&
-            open.resolution === undefined &&
-            envelopeRecords.some(
-              (record) =>
-                record.t === "resolution" &&
-                record.jobRunId === assigned.record.jobRunId &&
-                record.fact.openFactDigest === open.openFactDigest &&
-                (record.fact.resolution?.kind === "proven-not-started-redispatched" ||
-                  record.fact.resolution?.kind === "proven-not-started-cancelled"),
-            ),
-          conflictOpen:
-            open !== undefined &&
-            open.resolution === undefined &&
-            open.cause === "dispatch-conflict",
-          hasAtomicConflictContainment:
-            open !== undefined &&
-            envelopeRecords.some(
-              (record) =>
-                record.t === "dispatch-conflict-contained" &&
-                record.assignmentId === body.assignmentId &&
-                record.openFactDigest === open.openFactDigest &&
-                record.proof.decision !== "halted" &&
-                sameTerminationProofIdentity(record.proof, body.proof),
-            ),
-        });
-        if (!assigned) throw corruptJobJournal("Assignment supersede is historical or duplicated");
-        this.#assertAssignmentResourceTerminal(
-          assigned.record,
-          "release",
-          envelope.entries,
-        );
-        state.assignmentByJob.delete(assigned.record.jobRunId);
-        state.closedAssignments.add(body.assignmentId);
-        state.openConflictAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "supersede-requested": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        assertSupersedeRequestReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: assigned
-            ? state.states.get(assigned.record.jobRunId)?.state
-            : undefined,
-          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-        });
-        state.supersedeRequests.set(body.assignmentId, body);
-        return state;
-      }
-      case "supersede-started-observed": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        assertSupersedeStartedObservationReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: assigned
-            ? state.states.get(assigned.record.jobRunId)?.state
-            : undefined,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsJobSource(
-              state,
-              assigned,
-              body.proof,
-              this.#anchorEpoch,
-              this.#legacyAbortTickets,
-            ),
-          observationAlreadyExists: state.supersedeStartedAssignments.has(
-            body.assignmentId,
-          ),
-        });
-        state.supersedeStartedAssignments.add(body.assignmentId);
-        state.durableStarted.add(body.assignmentId);
-        return state;
-      }
-      case "cancel-fence": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertJobCancelFenceReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-          hasAtomicCancelRequestedState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              "cancel-requested",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          hasAtomicOpenedConflict:
-            assigned !== undefined &&
-            state.resolutions.get(assigned.record.jobRunId)?.cause ===
-              "dispatch-conflict" &&
-            envelopeRecords.some(
-              (record) =>
-                record.t === "dispatch-conflict" &&
-                record.assignmentId === body.assignmentId &&
-                record.handling === "opened-uncertain",
-            ),
-          hasAtomicDeletedTaskRevision: envelopeRecords.some(
-            (record) =>
-              record.t === "task-revision" &&
-              record.state === "deleted" &&
-              body.requestId === `task-revision:${record.taskRevision}`,
-          ),
-        });
-        state.cancelFences.set(body.assignmentId, body);
-        return state;
-      }
-      case "interaction-settlement-fence": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        if (
-          "v" in body &&
-          body.v === 2 &&
-          assigned?.record.executorId !== body.executorId
-        ) {
-          throw corruptJobJournal(
-            "Versioned interaction settlement names a different executor",
-          );
-        }
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertJobInteractionSettlementFenceReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) ===
-              body.assignmentId,
-          currentState: current?.state,
-          fenceAlreadyExists: state.interactionSettlementFences.has(
-            body.assignmentId,
-          ),
-          hasAtomicUncertainState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              "uncertain",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          hasAtomicUnknownCancellationResolution:
-            assigned !== undefined &&
-            ((
-              state.resolutions.get(assigned.record.jobRunId)?.cause ===
-                "job-cancel-unknown" &&
-              state.resolutions.get(assigned.record.jobRunId)?.resolution ===
-                undefined
-            ) ||
-              envelopeRecords.some(
-                (record) =>
-                  record.t === "resolution" &&
-                  record.jobRunId === assigned.record.jobRunId &&
-                  record.fact.subject.assignmentId === body.assignmentId &&
-                  record.fact.cause === "job-cancel-unknown" &&
-                  record.fact.resolution === undefined,
-              )),
-        });
-        state.interactionSettlementFences.set(body.assignmentId, body);
-        return state;
-      }
-      case "interaction-settlement-completed": {
-        assertJobInteractionSettlementCompletionReplayContract({
-          fence: state.interactionSettlementFences.get(body.assignmentId),
-          completion: body,
-          completionAlreadyExists:
-            state.completedInteractionSettlements.has(body.assignmentId),
-          mirrored: state.interactionMirrors.get(body.assignmentId),
-          ...("v" in body && body.v === 2
-            ? { streamProof: body.streamProof }
-            : {}),
-        });
-        state.completedInteractionSettlements.set(body.assignmentId, body);
-        return state;
-      }
-      case "interaction-mirror": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
-          body.batch,
-          this.#verifier,
-        ));
-        const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
-        const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
-          upTo: 0,
-          ordinal: 0,
-          digest: interactionMirrorSeed(body.assignmentId),
-          requestIds: new Set<string>(),
-          outcomes: new Map(),
-        };
-        const first = batch.entries[0]!;
-        const last = batch.entries.at(-1)!;
-        const auditSettlement =
-          state.completedInteractionSettlements.has(body.assignmentId)
-            ? undefined
-            : state.interactionSettlementFences.get(body.assignmentId);
-        assertJobMirrorReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) ===
-              body.assignmentId,
-          executorMatches: assigned?.record.executorId === batch.executorId,
-          batchBindsRecord: batch.assignmentId === body.assignmentId,
-          currentState: assigned
-            ? state.states.get(assigned.record.jobRunId)?.state
-            : undefined,
-          hasDurableCancelFence: state.cancelFences.has(body.assignmentId),
-          ...(auditSettlement
-            ? {
-                auditSettlementTarget: {
-                  upTo: auditSettlement.targetUpTo,
-                  ordinal: auditSettlement.targetOrdinal,
-                  mirrorDigest: auditSettlement.targetMirrorDigest,
-                },
-              }
-            : {}),
-          batchTarget: {
-            upTo: last.seq,
-            ordinal: last.ordinal,
-            mirrorDigest: batch.mirrorDigest,
-          },
-          batchAlreadyMirrored: state.interactionMirrorBatches.has(batchKey),
-          extendsCursor:
-            batch.previousDigest === mirrored.digest &&
-            first.ordinal === mirrored.ordinal + 1 &&
-            first.seq > mirrored.upTo,
-          repeatsRequestId: batchRepeatsRequestId(batch, mirrored.requestIds),
-        });
-        state.interactionMirrorBatches.add(batchKey);
-        state.interactionMirrors.set(body.assignmentId, {
-          upTo: last.seq,
-          ordinal: last.ordinal,
-          digest: batch.mirrorDigest,
-          requestIds: new Set([
-            ...mirrored.requestIds,
-            ...batch.entries.map((entry) => entry.requestId),
-          ]),
-          outcomes: new Map([
-            ...mirrored.outcomes,
-            ...batch.entries.map(
-              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
-            ),
-          ]),
-        });
-        return state;
-      }
-      case "channel-challenge-prepared": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        if (
-          !assigned ||
-          body.ref.taskId !== this.#taskId ||
-          body.ref.jobRunId !== assigned.record.jobRunId ||
-          body.ref.anchorEpoch !== assigned.record.anchorEpoch
-        ) {
-          throw corruptJobJournal(
-            "Job channel challenge does not bind its assignment source",
-          );
-        }
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptJobJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      }
-      case "channel-challenge-delivered":
-      case "channel-challenge-closed":
-      case "channel-challenge-granted":
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptJobJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      case "channel-relay-cursor": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        if (
-          !assigned ||
-          assigned.record.jobRunId !== body.jobRunId ||
-          body.checkpoint.ref.execution !== "job" ||
-          body.checkpoint.ref.taskId !== this.#taskId ||
-          body.checkpoint.ref.jobRunId !== assigned.record.jobRunId ||
-          body.checkpoint.ref.anchorEpoch !== assigned.record.anchorEpoch
-        ) {
-          throw corruptJobJournal(
-            "Channel relay cursor does not bind its assignment authority",
-          );
-        }
-        const preparedInEnvelope = envelopeRecords.find(
-          (
-            candidate,
-          ): candidate is Extract<
-            JobJournalRecord,
-            { t: "channel-challenge-prepared" }
-          > =>
-            candidate.t === "channel-challenge-prepared" &&
-            candidate.assignmentId === body.assignmentId,
-        );
-        if (
-          preparedInEnvelope &&
-          preparedInEnvelope.frameSeq !== body.upToSeq
-        ) {
-          throw corruptJobJournal(
-            "Prepared challenge and relay cursor must adopt the same frame",
-          );
-        }
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptJobJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      }
-      case "cancel-proof-accepted": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.states.get(assigned.record.jobRunId)
-          : undefined;
-        assertCancelProofAcceptedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
-          durableStartedObserved: state.durableStarted.has(body.assignmentId),
-          proofDecision: body.proof.decision,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsJobSource(
-              state,
-              assigned,
-              body.proof,
-              this.#anchorEpoch,
-              this.#legacyAbortTickets,
-            ),
-          hasAtomicCancelledState:
-            assigned !== undefined &&
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              assigned.record.jobRunId,
-              "cancelled",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            allJobCapabilitiesRevoked(envelopeRecords, state, {
-              record: assigned.record,
-            }),
-        });
-        if (!assigned) throw corruptJobJournal("Submission guard cancellation has no assignment");
-        this.#assertAssignmentUsageFinal(assigned.record, body.proof.usageFinal);
-        this.#assertAssignmentResourceTerminal(
-          assigned.record,
-          body.proof.decision === "not-started" ? "release" : "settle-release",
-          envelope.entries,
-        );
-        state.acceptedCancellations.add(body.assignmentId);
-        return state;
-      }
-      case "capability-revoked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const key = revokedCapabilityKey(body.assignmentId, body.capId);
-        assertCapabilityRevocationReplayContract({
-          assignmentExists: assigned !== undefined,
-          capabilityBelongsToAssignment: assigned?.capIds.has(body.capId) ?? false,
-          alreadyRevoked: state.revokedCapabilities.has(key),
-        });
-        state.revokedCapabilities.add(key);
-        return state;
-      }
-      case "ticket-issued": {
-        const assigned = state.assignedById.get(body.ticket.assignmentId);
-        await applyJobTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          taskId: this.#taskId,
-          assigned: assigned?.record,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByJob.get(assigned.record.jobRunId) ===
-              assigned.record.assignmentId,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentClosed: state.closedAssignments.has(
-            body.ticket.assignmentId,
-          ),
-          assignmentActive:
-            assigned !== undefined &&
-            (state.states.get(assigned.record.jobRunId)?.state ===
-              "dispatched" ||
-              state.states.get(assigned.record.jobRunId)?.state ===
-                "running") &&
-            !state.cancelFences.has(body.ticket.assignmentId),
-          originalSurfacePrincipal: assigned
-            ? state.ingressByJob.get(assigned.record.jobRunId)?.surfacePrincipal
-            : undefined,
-          hasAtomicReplacementRevocation:
-            body.replacesTicketId === undefined ||
-            envelopeRecords.some(
-              (candidate) =>
-                candidate.t === "ticket-revoked" &&
-                candidate.ticketId === body.replacesTicketId,
-            ),
-        });
-        return state;
-      }
-      case "ticket-revoked":
-        await applyJobTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          taskId: this.#taskId,
-          assignmentIsCurrent: false,
-          assignmentAcknowledged: false,
-          assignmentClosed: false,
-          assignmentActive: false,
-        });
-        return state;
-      case "ticket-sync-frontier":
-        applyJobTicketSyncFrontier(
-          state,
-          body.expiresThrough,
-          envelope.at,
-        );
-        return state;
-      case "resolution": {
-        const fact = validateResolutionFact(body.fact);
-        if (fact.subject.execution !== "job") {
-          throw corruptJobJournal("Job resolution contains a conversation subject");
-        }
-        const jobFact = fact as JobResolutionFact;
-        assertJobResolutionBinding({
-          execution: jobFact.subject.execution,
-          subjectTaskId: jobFact.subject.taskId,
-          subjectJobRunId: jobFact.subject.jobRunId,
-          recordJobRunId: body.jobRunId,
-          authorityTaskId: this.#taskId,
-          subjectAnchorEpoch: jobFact.subject.anchorEpoch,
-          authorityAnchorEpoch: this.#anchorEpoch,
-        });
-        const current = state.resolutions.get(body.jobRunId);
-        const assigned = state.assignedById.get(jobFact.subject.assignmentId);
-        const runState = state.states.get(body.jobRunId);
-        if (!jobFact.resolution) {
-          assertResolutionOpenReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
-            assignmentIsCurrent:
-              state.assignmentByJob.get(body.jobRunId) ===
-              jobFact.subject.assignmentId,
-            currentState: runState?.state,
-            alreadyOpen: isOpenResolutionFact(current),
-            cause: jobFact.cause,
-            hasAtomicUncertainState:
-              runState !== undefined &&
-              recordsHaveJobState(
-                envelopeRecords,
-                body.jobRunId,
-                "uncertain",
-                runState.statusRevision + 1,
-                jobFact.subject.assignmentId,
-              ),
-            hasAtomicDispatchConflict: envelopeRecords.some(
-              (record) =>
-                record.t === "dispatch-conflict" &&
-                record.assignmentId === jobFact.subject.assignmentId &&
-                record.handling === "opened-uncertain",
-            ),
-          });
-        } else {
-          const resolution = jobFact.resolution;
-          if (!current || jobFact.openFactDigest !== current.openFactDigest) {
-            throw corruptJobJournal("Job resolution does not close its current open fact");
-          }
-          const closesEarlierInEnvelope =
-            state.assignmentByJob.get(body.jobRunId) === undefined &&
-            recordsCloseJobAssignment(
-              envelopeRecords,
-              body.jobRunId,
-              jobFact.subject.assignmentId,
-            );
-          assertResolutionClosureReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
-            assignmentIsCurrentOrAtomicallyClosed:
-              state.assignmentByJob.get(body.jobRunId) ===
-                jobFact.subject.assignmentId || closesEarlierInEnvelope,
-            conflictOpen: current.cause === "dispatch-conflict",
-            resolutionKind: resolution.kind,
-          });
-          const targetState = resolutionTargetState(resolution.kind);
-          assertResolutionCloseAtomicReplayContract({
-            cause: current.cause,
-            kind: resolution.kind,
-            existingOpenMatches:
-              current.openFactDigest === jobFact.openFactDigest &&
-              current.resolution === undefined,
-            hasAtomicTargetState:
-              runState !== undefined &&
-              recordsHaveJobState(
-                envelopeRecords,
-                body.jobRunId,
-                targetState,
-                runState.statusRevision +
-                  (runState.state === "uncertain" ? 1 : 0),
-                jobFact.subject.assignmentId,
-              ),
-            allCapabilitiesRevoked:
-              assigned !== undefined &&
-              allJobCapabilitiesRevoked(envelopeRecords, state, {
-                record: assigned.record,
-              }),
-            hasRequiredCompanion:
-              resolution.kind === "late-bundle-committed"
-                ? envelopeRecords.some(
-                    (record) =>
-                      record.t === "committed" &&
-                      record.jobRunId === body.jobRunId &&
-                      record.assignmentId === jobFact.subject.assignmentId,
-                  )
-                : resolution.kind === "proven-not-started-redispatched" ||
-                    resolution.kind === "proven-not-started-cancelled"
-                  ? envelopeRecords.some(
-                      (record) =>
-                        record.t === "assignment-superseded" &&
-                        record.assignmentId === jobFact.subject.assignmentId,
-                    )
-                  : envelopeHasSuccessfulJobUncertainControl(
-                      envelope,
-                      targetState,
-                      resolution.factDigest,
-                    ),
-          });
-        }
-        if (!assigned || assigned.record.jobRunId !== body.jobRunId) {
-          throw corruptJobJournal("Job resolution sequence is invalid");
-        }
-        if (jobFact.resolution?.kind.startsWith("user-")) {
-          this.#assertAssignmentResourceTerminal(
-            assigned.record,
-            "reclaim",
-            envelope.entries,
-          );
-        }
-        state.resolutions.set(body.jobRunId, snapshot(jobFact));
-        if (jobFact.resolution) {
-          state.assignmentByJob.delete(body.jobRunId);
-          state.closedAssignments.add(jobFact.subject.assignmentId);
-          state.openConflictAssignments.delete(jobFact.subject.assignmentId);
-        }
-        return state;
-      }
-      case "committed": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = state.states.get(body.jobRunId);
-        const open = state.resolutions.get(body.jobRunId);
-        assertCommittedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentBindsRun: assigned?.record.jobRunId === body.jobRunId,
-          assignmentIsCurrent:
-            state.assignmentByJob.get(body.jobRunId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyCommitted: state.committedByAssignment.has(body.assignmentId),
-          conflictOpen:
-            open?.cause === "dispatch-conflict" && open.resolution === undefined,
-          commitRevisionMatchesAssignedBase:
-            body.jobRevision === state.nextJobRevision,
-          hasAtomicCommittedState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              "committed",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            allJobCapabilitiesRevoked(envelopeRecords, state, {
-              record: assigned.record,
-            }),
-        });
-        if (!assigned) throw corruptJobJournal("Submission guard commit has no assignment");
-        this.#assertAssignmentResourceTerminal(
-          assigned.record,
-          "settle-release",
-          envelope.entries,
-        );
-        state.committedByAssignment.set(body.assignmentId, {
-          ref: body.bundle.ref,
-          jobRevision: body.jobRevision,
-        });
-        state.nextJobRevision += 1;
-        return state;
-      }
-      case "bundle-ack-observed": {
-        const committed = state.committedByAssignment.get(body.assignmentId);
-        if (
-          !committed ||
-          state.bundleAcknowledgements.has(body.assignmentId) ||
-          !bundleAcknowledgementBindsCommitted({
-            observedBundleRef: body.bundleRef,
-            observedCommitRevision: body.jobRevision,
-            expectedBundleRef: committed.ref,
-            expectedCommitRevision: committed.jobRevision,
-          })
-        ) {
-          throw corruptJobJournal(
-            "Submission guard bundle acknowledgement is invalid or duplicated",
-          );
-        }
-        state.bundleAcknowledgements.set(body.assignmentId, body);
-        return state;
-      }
-      case "system-started": {
-        const occurrence = state.occurrences.get(body.jobRunId);
-        const current = state.states.get(body.jobRunId);
-        const previous = state.systemFences.get(body.jobRunId);
-        assertSystemJobActivationReplayContract({
-          taskId: this.#taskId,
-          jobRunId: body.jobRunId,
-          anchorEpoch: this.#anchorEpoch,
-          definitionKind: occurrence
-            ? state.definitionKinds.get(occurrence.taskRevision)
-            : undefined,
-          occurrence,
-          currentState: current?.state,
-          previousFence: previous,
-          fence: body.fence,
-          hasForeignRecords: envelope.entries.some(
-            (record) => record.stream !== jobStream(this.#taskId),
-          ),
-          hasAtomicRunningState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              "running",
-              current.statusRevision + 1,
-              undefined,
-            ),
-        });
-        this.#assertReplayedSystemActivation(previous, body.fence, envelope);
-        state.systemFences.set(body.jobRunId, snapshot(body.fence));
-        return state;
-      }
-      case "system-result": {
-        const current = state.states.get(body.jobRunId);
-        const fence = state.systemFences.get(body.jobRunId);
-        const occurrence = state.occurrences.get(body.jobRunId);
-        assertSystemJobTerminalReplayContract({
-          jobRunId: body.jobRunId,
-          definitionKind: occurrence
-            ? state.definitionKinds.get(occurrence.taskRevision)
-            : undefined,
-          currentState: current?.state,
-          currentFence: fence,
-          resultFence: body.fence,
-          resultAlreadyExists: state.systemResults.has(body.jobRunId),
-          hasForeignRecords: envelope.entries.some(
-            (record) => record.stream !== jobStream(this.#taskId),
-          ),
-          hasAtomicTerminalState:
-            current !== undefined &&
-            recordsHaveJobState(
-              envelopeRecords,
-              body.jobRunId,
-              body.outcome,
-              current.statusRevision + 1,
-              undefined,
-            ),
-        });
-        this.#assertReplayedSystemTerminal(body.fence, body.outcome, envelope);
-        state.systemResults.add(body.jobRunId);
-        return state;
-      }
-      case "state": {
-        const previous = state.states.get(body.jobRunId);
-        const occurrence = state.occurrences.get(body.jobRunId);
-        if (!previous || !occurrence) {
-          throw corruptJobJournal("Job state transition is invalid");
-        }
-        const assigned = body.assignmentId
-          ? state.assignedById.get(body.assignmentId)
-          : undefined;
-        const closedEarlierInEnvelope =
-          body.assignmentId !== undefined &&
-          state.assignmentByJob.get(body.jobRunId) === undefined &&
-          state.closedAssignments.has(body.assignmentId) &&
-          recordsCloseJobAssignment(
-            envelopeRecords,
-            body.jobRunId,
-            body.assignmentId,
-          );
-        assertJobStateReplayContract({
-          currentState: previous.state,
-          currentRevision: previous.statusRevision,
-          nextState: body.state,
-          nextRevision: body.statusRevision,
-          assignmentId: body.assignmentId,
-          assignmentBindingValid:
-            assigned !== undefined &&
-            assigned.record.jobRunId === body.jobRunId &&
-            (state.assignmentByJob.get(body.jobRunId) === body.assignmentId ||
-              closedEarlierInEnvelope),
-          systemFencePresent: state.systemFences.has(body.jobRunId),
-          definitionKind: state.definitionKinds.get(occurrence.taskRevision),
-          hasAtomicAssignment:
-            body.state !== "dispatched" ||
-            envelopeRecords.some(
-              (record) =>
-                record.t === "assigned" &&
-                record.jobRunId === body.jobRunId &&
-                record.assignmentId === body.assignmentId,
-            ),
-          hasAtomicSystemActivation: envelopeRecords.some(
-            (record) =>
-              record.t === "system-started" && record.jobRunId === body.jobRunId,
-          ),
-          hasAtomicSystemResult: envelopeRecords.some(
-            (record) =>
-              record.t === "system-result" &&
-              record.jobRunId === body.jobRunId &&
-              record.outcome === body.state,
-          ),
-        });
-        if (
-          previous.state === "queued" &&
-          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
-        ) {
-          try {
-            assertQueuedTerminalDequeue(
-              envelope.entries,
-              {
-                kind: "job",
-                id: body.jobRunId,
-                attempt: nextJobAssignmentAttempt(state, body.jobRunId),
-              },
-              body.state,
-            );
-          } catch (error) {
-            throw corruptJobJournal(
-              error instanceof Error ? error.message : "Queued job resource dequeue is invalid",
-            );
-          }
-        }
-        assertStateAtomicReplayContract({
-          currentState: previous.state,
-          nextState: body.state,
-          hasAtomicCancelFence: envelopeRecords.some(
-            (record) =>
-              record.t === "cancel-fence" &&
-              record.assignmentId === body.assignmentId,
-          ),
-          hasAtomicOpenResolution: envelopeRecords.some(
-            (record) =>
-              record.t === "resolution" &&
-              record.jobRunId === body.jobRunId &&
-              record.fact.subject.assignmentId === body.assignmentId &&
-              record.fact.resolution === undefined,
-          ),
-          hasAtomicSupersede: envelopeRecords.some(
-            (record) =>
-              record.t === "assignment-superseded" &&
-              record.assignmentId === body.assignmentId,
-          ),
-          hasAtomicTermination: envelopeRecords.some(
-            (record) =>
-              (record.t === "cancel-proof-accepted" ||
-                record.t === "assignment-superseded") &&
-              record.assignmentId === body.assignmentId,
-          ),
-          hasAtomicResolutionClose: envelopeRecords.some(
-            (record) =>
-              record.t === "resolution" &&
-              record.jobRunId === body.jobRunId &&
-              record.fact.resolution !== undefined,
-          ),
-          hasAtomicCommit:
-            body.assignmentId === undefined ||
-            envelopeRecords.some(
-              (record) =>
-                record.t === "committed" &&
-                record.jobRunId === body.jobRunId &&
-                record.assignmentId === body.assignmentId,
-            ),
-        });
-        if (body.state === "failed" && assigned) {
-          if (!allJobCapabilitiesRevoked(envelopeRecords, state, assigned)) {
-            throw corruptJobJournal("Assigned job failure is not atomic with revocation");
-          }
-          if (body.usageFinal) {
-            this.#assertAssignmentUsageFinal(assigned.record, body.usageFinal);
-          }
-          this.#assertAssignmentResourceTerminal(
-            assigned.record,
-            body.usageFinal ? "settle-release" : "reclaim",
-            envelope.entries,
-          );
-        }
-        state.states.set(body.jobRunId, {
-          state: body.state,
-          statusRevision: body.statusRevision,
-        });
-        if (body.state === "running" && body.assignmentId) {
-          state.durableStarted.add(body.assignmentId);
-        }
-        if (body.state === "queued") {
-          state.activeJobRunId = body.jobRunId;
-        } else if (isTerminal(body.state)) {
-          if (state.activeJobRunId === body.jobRunId) {
-            state.activeJobRunId = undefined;
-            state.pendingSystemMissedJobRunId = undefined;
-          }
-        } else {
-          state.activeJobRunId = body.jobRunId;
-        }
-        return state;
-      }
-      default:
-        return state;
-    }
-  };
 
   async #prepareSchedulerPolicyRecords(
     state: JobProjection,
@@ -8386,6 +9216,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     const definition = state.definition;
     if (!definition || definition.definition.kind !== "user") return [];
     const result: LogicalRecord<unknown>[] = [];
+    // 一批里可能有多条失败终态（例如较新的触发让多条排队者过期）：先把它们的定位路径按层一并装入
+    requireFailureSummaryPaths(state, failureSummaryCandidates(state, jobStreamBodies(entries, this.#taskId)));
     for (const entry of entries) {
       if (entry.stream !== jobStream(this.#taskId)) continue;
       const body = entry.body as Partial<JobJournalRecord>;
@@ -8413,20 +9245,18 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       let policy: ScheduleFailurePolicyDecision;
       try {
-        policy = decideScheduleFailurePolicy({
+        // 连续失败数 = 这一次 + 完整次序里它之前的连续失败数（由摘要的定位路径合成，不倒扫失败历史）
+        policy = scheduleFailurePolicyForCount({
           taskId: this.#taskId,
           jobRunId: occurrence.jobRunId,
           schedule: definition.definition.spec.schedule,
-          occurrences: [...state.occurrences.values()].map((item) => ({
-            jobRunId: item.jobRunId,
-            scheduledFor: item.scheduledFor,
-            state: state.states.get(item.jobRunId)?.state,
-            outcome: state.outcomeByRun.get(item.jobRunId),
-          })),
+          scheduledFor: occurrence.scheduledFor,
+          failureCount: 1 + failuresBefore(state, occurrence),
           threshold: this.#schedulerFailureThreshold,
           decidedAt: at,
         });
       } catch (error) {
+        if (error instanceof AuthorityPreparationRequired) throw error;
         if (error instanceof ScheduleRuntimePolicyError) {
           throw corruptJobJournal(error.message);
         }
@@ -8489,48 +9319,6 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   }
 }
 
-function emptyJobSubmissionGuard(): JobSubmissionGuardProjection {
-  return {
-    latestDefinitionState: "enabled",
-    latestDefinitionRevision: undefined,
-    definitionKinds: new Map(),
-    taskOperations: new Map(),
-    systemMissAliases: new Set(),
-    pendingSystemMissedJobRunId: undefined,
-    occurrences: new Map(),
-    states: new Map(),
-    admittedJobs: new Set(),
-    ingressByJob: new Map(),
-    activeJobRunId: undefined,
-    assignedById: new Map(),
-    assignmentByJob: new Map(),
-    conflictAssignments: new Set(),
-    openConflictAssignments: new Set(),
-    supersedeRequests: new Map(),
-    supersedeStartedAssignments: new Set(),
-    cancelFences: new Map(),
-    interactionSettlementFences: new Map(),
-    completedInteractionSettlements: new Map(),
-    acceptedCancellations: new Set(),
-    durableStarted: new Set(),
-    closedAssignments: new Set(),
-    revokedCapabilities: new Set(),
-    ticketsById: new Map(),
-    ticketIdsByAssignment: new Map(),
-    ticketReplacementsById: new Map(),
-    revokedTickets: new Set(),
-    ticketSyncFrontier: undefined,
-    interactionMirrors: new Map(),
-    interactionMirrorBatches: new Set(),
-    resolutions: new Map(),
-    committedByAssignment: new Map(),
-    bundleAcknowledgements: new Map(),
-    systemFences: new Map(),
-    systemResults: new Set(),
-    channelInteractions: createChannelInteractionJournalState("job"),
-    nextJobRevision: 1,
-  };
-}
 
 /** Explicitly gated same-process transport for user jobs. */
 export class InProcessJobDispatcher {
@@ -9007,54 +9795,6 @@ class JobBundleClosureError extends Error {
   }
 }
 
-function emptyProjection(): JobProjection {
-  return {
-    definitions: new Map(),
-    taskOperations: new Map(),
-    occurrences: new Map(),
-    missedNextFireByRun: new Map(),
-    failurePolicyByRun: new Map(),
-    autoDisableSettledRuns: new Set(),
-    capabilityGapByRun: new Map(),
-    systemMissAliases: new Map(),
-    admittedJobs: new Set(),
-    ingressByJob: new Map(),
-    states: new Map(),
-    assignedById: new Map(),
-    assignmentByJob: new Map(),
-    conflicts: new Map(),
-    containedFacts: new Set(),
-    superseded: new Map(),
-    supersedeRequests: new Map(),
-    supersedeStarted: new Map(),
-    cancelFences: new Map(),
-    interactionSettlementFences: new Map(),
-    completedInteractionSettlements: new Map(),
-    acceptedCancellations: new Map(),
-    rejectedNotStarted: new Map(),
-    durableStarted: new Set(),
-    revokedCapabilities: new Set(),
-    ticketsById: new Map(),
-    ticketIdsByAssignment: new Map(),
-    ticketReplacementsById: new Map(),
-    revokedTickets: new Set(),
-    ticketSyncFrontier: undefined,
-    interactionMirrors: new Map(),
-    interactionMirrorBatches: new Set(),
-    containments: new Map(),
-    resolutions: new Map(),
-    statusHistoryByRun: new Map(),
-    committed: new Map(),
-    outcomeByRun: new Map(),
-    bundleAcknowledgements: new Map(),
-    recoveryAssignments: new Set(),
-    bundleAcknowledgementOutbox: new Set(),
-    nextJobRevision: 1,
-    systemFences: new Map(),
-    systemResults: new Map(),
-    channelInteractions: createChannelInteractionJournalState("job"),
-  };
-}
 
 function jobStatusNotice(
   taskId: string,
@@ -9296,25 +10036,12 @@ function prepareJobQueuedTerminal(
 
 function nextJobAssignmentAttempt(
   state: {
-    readonly assignedById: ReadonlyMap<
-      string,
-      {
-        readonly record: {
-          readonly jobRunId: string;
-          readonly reservation: { readonly attempt: number };
-        };
-      }
-    >;
-    readonly systemFences: ReadonlyMap<string, SystemJobFence>;
+    readonly assignmentAttemptByRun: Pick<ReadonlyMap<string, number>, "get">;
+    readonly systemFences: Pick<ReadonlyMap<string, SystemJobFence>, "get">;
   },
   jobRunId: string,
 ): number {
-  let latest = 0;
-  for (const assigned of state.assignedById.values()) {
-    if (assigned.record.jobRunId === jobRunId) {
-      latest = Math.max(latest, assigned.record.reservation.attempt);
-    }
-  }
+  let latest = state.assignmentAttemptByRun.get(jobRunId) ?? 0;
   const systemFence = state.systemFences.get(jobRunId);
   if (systemFence !== undefined) latest = Math.max(latest, systemFence.attempt);
   if (latest >= Number.MAX_SAFE_INTEGER) {
@@ -9332,7 +10059,7 @@ function jobRecord(
 }
 
 function relayAdoptionAtCursor(
-  state: ChannelInteractionJournalState,
+  state: JobChannelInteractions,
   assignmentId: string,
   frame: StreamFrame,
   checkpoint: StreamVerifierCheckpoint,
@@ -9568,7 +10295,7 @@ function taskRevisionAtomicFacts(input: {
   readonly activeJobRunId: string | undefined;
   readonly active: JobStateEntry | undefined;
   readonly assignmentId: string | undefined;
-  readonly cancelFences: ReadonlyMap<string, unknown>;
+  readonly cancelFences: Pick<ReadonlyMap<string, unknown>, "has">;
   readonly envelopeLsn: number;
 }): {
   readonly hasAtomicQueuedCancellation: boolean;
@@ -9861,9 +10588,9 @@ function dataPlaneTicketRevocations(
 function allJobCapabilitiesRevoked(
   envelopeRecords: readonly JobJournalRecord[],
   state: {
-    readonly revokedCapabilities: ReadonlySet<string>;
-    readonly ticketIdsByAssignment: ReadonlyMap<string, ReadonlySet<string>>;
-    readonly revokedTickets: ReadonlySet<string>;
+    readonly revokedCapabilities: Pick<ReadonlySet<string>, "has">;
+    readonly ticketIdsByAssignment: Pick<ReadonlyMap<string, ReadonlySet<string>>, "get">;
+    readonly revokedTickets: Pick<ReadonlySet<string>, "has">;
   },
   assigned: {
     readonly record: {
@@ -9919,6 +10646,7 @@ async function applyJobTicketRecord(input: {
     | "ticketReplacementsById"
     | "revokedTickets"
     | "ticketSyncFrontier"
+    | "ticketExpiry"
   >;
   readonly record: Extract<
     JobJournalRecord,
@@ -9997,15 +10725,17 @@ async function applyJobTicketRecord(input: {
     state.ticketIdsByAssignment.get(ticket.assignmentId) ?? new Set<string>();
   byAssignment.add(ticket.ticketId);
   state.ticketIdsByAssignment.set(ticket.assignmentId, byAssignment);
+  state.ticketExpiry.add(dataPlaneTicketSyncBoundary(ticket), ticket.ticketId);
 }
 
 function applyJobTicketSyncFrontier(
-  state: Pick<JobProjection, "ticketsById" | "ticketSyncFrontier">,
+  state: Pick<JobProjection, "ticketsById" | "ticketSyncFrontier" | "ticketExpiry">,
   expiresThrough: string,
   envelopeAt: string,
 ): void {
+  const passed = ticketsBetween(state, state.ticketSyncFrontier, envelopeAt);
   const expected = nextDataPlaneTicketSyncFrontier(
-    state.ticketsById.values(),
+    passed.map((row) => row.ticket),
     state.ticketSyncFrontier,
     envelopeAt,
   );
@@ -10013,6 +10743,23 @@ function applyJobTicketSyncFrontier(
     throw corruptJobJournal("Ticket sync frontier is not the next durable boundary");
   }
   state.ticketSyncFrontier = expiresThrough;
+  // 前沿之前的票据不再参与同步：索引行一并删除，在用票据的区间读取不随历史增长
+  for (const row of passed) {
+    if (row.sortKey <= expiresThrough) state.ticketExpiry.remove(row.sortKey, row.ticket.ticketId);
+  }
+}
+
+/** 同步边界在 (after, through] 内的票据，按边界升序。 */
+function ticketsBetween(
+  state: Pick<JobProjection, "ticketsById" | "ticketExpiry">,
+  after: string | undefined,
+  through: string | undefined,
+): { readonly sortKey: string; readonly ticket: DataPlaneTicket }[] {
+  return state.ticketExpiry.range({ ...(after ? { after } : {}), ...(through ? { through } : {}) }).map((row) => {
+    const ticket = state.ticketsById.get(row.subject);
+    if (!ticket) throw corruptJobJournal("Ticket expiry index names an unknown ticket");
+    return { sortKey: row.sortKey, ticket };
+  });
 }
 
 function recordsHaveJobState(

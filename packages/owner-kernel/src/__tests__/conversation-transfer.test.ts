@@ -22,6 +22,8 @@ import {
   ConversationTransferTarget,
   assertConversationTransferWriteAuthority,
   readConversationTransferState,
+  listCommittedConversationIds,
+  listCommittedConversationTransferIds,
   type ConversationTransferStaging,
   type ConversationTransferStagingArea,
   type ConversationTransferSourceOptions,
@@ -240,9 +242,13 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       })).state.phase,
     ).toBe("imported");
     expect((await readConversationTransferState(targetLog, TRANSFER_ID, verifier))?.phase).toBe("imported");
+    // 已提交收编按会话定位：提交前不出现，提交后只这一项
+    expect(await listCommittedConversationTransferIds(targetLog, verifier, CONVERSATION)).toEqual([]);
 
     const committed = await target.commit(TRANSFER_ID);
     expect(committed.state.phase).toBe("committed");
+    expect(await listCommittedConversationTransferIds(targetLog, verifier, CONVERSATION)).toEqual([TRANSFER_ID]);
+    expect(await listCommittedConversationIds(targetLog, verifier)).toEqual([CONVERSATION]);
     expect(committed.commit.signature.keyId).toBe("device-target");
     await source.source.acceptCommit({
       manifest: frozen.manifest,

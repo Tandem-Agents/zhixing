@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
+  GovernorStateRequired,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
@@ -362,9 +363,9 @@ describe("ExecutorResourceGovernor", {
     )).toHaveLength(1);
   });
 
-  it("rejects polluted local governor records during replay", async () => {
+  it("rejects polluted local governor records at write time and during replay", async () => {
     const fixture = await createHarness();
-    await fixture.log.append([{
+    const polluted = {
       stream: "governor",
       body: {
         t: "queued",
@@ -373,8 +374,15 @@ describe("ExecutorResourceGovernor", {
         workload: { kind: "control", id: "polluted", attempt: 1 },
         unknown: true,
       },
-    }]);
-    await expect(fixture.restart().snapshot()).rejects.toThrow("fields");
+    };
+    // 调控投影登记后，污染记录在写入时即被同一归约拒绝
+    await expect(fixture.log.append([polluted])).rejects.toThrow("fields");
+    // 没有登记调控投影的写者留下的污染记录，在重放时同样被拒
+    const writer = new FileAuthorityCommitLog(fixture.logRoot, fixture.artifacts, { clock: () => NOW });
+    await writer.append([polluted]);
+    await writer.stopStorageMaintenance();
+    const reopened = await createHarness(undefined, undefined, undefined, undefined, fixture.root);
+    await expect(reopened.governor.snapshot()).rejects.toThrow("fields");
   });
 
   it("rejects unsupported local job roots before durable enqueue", async () => {
@@ -433,9 +441,9 @@ describe("ExecutorResourceGovernor", {
     const fixture = await createHarness(1);
     await accept(fixture, assignmentLease("assignment-1", "run-1", 2));
     await fixture.governor.coordinate(async () => {
-      expect(() => fixture.governor.prepareReceipt(
+      await expect(settled(() => fixture.governor.prepareReceipt(
         assignmentLease("assignment-2", "run-2", 2),
-      )).toThrow(ExecutorResourceBackpressureError);
+      ))).rejects.toThrow(ExecutorResourceBackpressureError);
     });
   });
 
@@ -958,7 +966,7 @@ describe("ExecutorResourceGovernor", {
     }).flat());
     const restarted = fixture.restart();
     await restarted.snapshot();
-    const beforeFlush = restarted.usageFinal("assignment-batched");
+    const beforeFlush = await settled(() => restarted.usageFinal("assignment-batched"));
     expect(beforeFlush.upToUsageSeq).toBe(257);
 
     let watermark = 0;
@@ -980,13 +988,29 @@ describe("ExecutorResourceGovernor", {
   });
 });
 
+/**
+ * 同步调控判断缺键时抛出可重做的准备；正式路径里由日志（锁内调用）或协调层装入后重做，
+ * 用例直接调用同步方法时同样装入后重做。
+ */
+async function settled<T>(call: () => T): Promise<T> {
+  for (let rounds = 0; ; rounds++) {
+    try {
+      return call();
+    } catch (error) {
+      if (!(error instanceof GovernorStateRequired) || !error.prepareOutside || rounds >= 64) throw error;
+      await error.prepareOutside();
+    }
+  }
+}
+
 async function createHarness(
   maxActiveRoots = 4,
   clock: () => string = () => NOW,
   leaseTtlMs = 60_000,
   monotonicClock: () => number = () => performance.now(),
+  existingRoot?: string,
 ) {
-  const root = await createTempDir("executor-resource-governor");
+  const root = existingRoot ?? await createTempDir("executor-resource-governor");
   let log: FileAuthorityCommitLog | undefined;
   onTestFinished(() => log?.stopStorageMaintenance());
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -994,6 +1018,8 @@ async function createHarness(
     clock,
   });
   return {
+    root,
+    logRoot: path.join(root, "authority"),
     log,
     artifacts,
     governor: createGovernor(),

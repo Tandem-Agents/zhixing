@@ -1,9 +1,13 @@
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
-import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime } from "./assignment-lease-clock.js";
+import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime,
+  leaseClockProjectionId, readLeaseClockSummary, registerLeaseClockProjection, type LeaseClockSummary } from "./assignment-lease-clock.js";
+import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentIdFromStream, readAssignmentEnvelopes, readRecoveryCandidates,
+  registerAssignmentLedgerIndex } from "./assignment-ledger-index.js";
 import { Buffer } from "node:buffer";
 import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
 import {
   AuthorityStorageError,
+  awaitAuthorityPreparation,
   DurableProjectionStorageError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   collectArtifactRefs,
@@ -17,6 +21,7 @@ import {
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
   type RebuildableDurableProjectionIndex,
+  AuthorityPreparationRequired,
   projectionCheckpointKey,
 } from "@zhixing/core/authority";
 import type {
@@ -580,6 +585,8 @@ const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
 const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
 /** 一次绑定查询的分派数上限（票据恢复一次查询全部有效票据）。 */
 export const DATA_PLANE_BINDING_BATCH_LIMIT = 4096;
+/** 冷恢复绑定时每次在领域索引上读取的分派数，单次持锁的读取量因此有界。 */
+const BINDING_RECOVERY_CHUNK = 64;
 
 /** 票据恢复保存的分派绑定：观察用与主动使用（中止等）各一份。 */
 interface StoredDataPlaneBinding {
@@ -614,6 +621,7 @@ export class ConversationAssignmentLedger implements
   readonly #assignmentRecordV2Writes: boolean;
   readonly #operations = new SerialTaskQueue();
   readonly #jobRecoveryIndex: RebuildableDurableProjectionIndex;
+  readonly #leaseClockProjectionId: string;
   readonly #projections = new Map<
     string,
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
@@ -644,6 +652,9 @@ export class ConversationAssignmentLedger implements
     this.#assignmentRecordV2Writes =
       options.assignmentRecordV2Writes ?? false;
     this.#jobRecoveryIndex = registerExecutorJobRecoveryProjection(this.#log, this.#verifier);
+    registerAssignmentLedgerIndex(this.#log, this.#verifier);
+    registerLeaseClockProjection(this.#log, this.#executorId);
+    this.#leaseClockProjectionId = leaseClockProjectionId(this.#executorId);
     this.#maxPendingInteractions =
       options.maxPendingInteractions ?? DEFAULT_MAX_PENDING_INTERACTIONS;
     if (
@@ -962,6 +973,8 @@ export class ConversationAssignmentLedger implements
           try {
             resourceRecords = this.#resources.prepareReceipt(envelope.resourceLease);
           } catch (cause) {
+            // 调控状态待装入是可重做的准备，不是资源拒绝
+            if (cause instanceof AuthorityPreparationRequired) throw cause;
             const error: AuthorityError = {
               code: "lease-exhausted",
               message: cause instanceof Error
@@ -1804,7 +1817,7 @@ export class ConversationAssignmentLedger implements
     }
     for (const request of requests) assertIdentifier(request.assignmentId, "Data-plane assignment id");
     if (requests.length === 0) return [];
-    return this.#operations.run(async () => {
+    return this.#repeatPrepared(() => this.#operations.run(async () => {
       const wanted = [...new Set(requests.map(request => request.assignmentId))];
       const key = this.#bindingCheckpointKey();
       const saved = await this.#log.loadProjectionCheckpoint?.<ReadonlyMap<string, StoredDataPlaneBinding>>(key);
@@ -1822,34 +1835,21 @@ export class ConversationAssignmentLedger implements
         for (const id of reusable) if (!tail.state.has(assignmentStream(id))) bindings.set(id, known.get(id)!);
       }
       const fresh = wanted.filter(id => !bindings.has(id));
-      if (fresh.length > 0) {
-        const clock = leaseClockStream(this.#executorId);
-        const states = new Map(fresh.map(id => [assignmentStream(id), emptyProjection(id)]));
-        const read = await this.#log.readProjection(states, async (candidate, record, commit) => {
-          if (record.stream === clock) {
-            // 时钟记录只解析一次，再按与 #reduce 相同的规则施加到每个分派状态。
-            const next = readLeaseClockRecord(record.body, this.#executorId);
-            for (const state of candidate.values()) applyLeaseClock(state, next);
-            return candidate;
-          }
-          const state = candidate.get(record.stream);
-          if (!state) throw corruptLedger("Binding batch received an unselected stream");
-          await this.#reduce(state, record, commit);
-          return candidate;
-        }, { streams: [...states.keys(), clock] });
-        cursor ??= read.cursor;
-        for (const id of fresh) {
-          const state = read.state.get(assignmentStream(id))!;
+      for (let offset = 0; offset < fresh.length; offset += BINDING_RECOVERY_CHUNK) {
+        // 只读这些分派在领域索引里的行：绑定不取决于租约时钟，跨分派的时钟规则已在写入时校验
+        const recovered = await this.#recoverProjections(fresh.slice(offset, offset + BINDING_RECOVERY_CHUNK));
+        cursor ??= recovered.cursor;
+        for (const [id, state] of recovered.states) {
           bindings.set(id, { observe: this.#dataPlaneBinding(state, "observe"), active: this.#dataPlaneBinding(state) });
         }
       }
-      // 以较早的那个游标保存：沿用的绑定截至该游标成立，从头归约的绑定此后若再有记录，下次即被识别并重算。
+      // 以最早的那个游标保存：沿用的绑定截至该游标成立，之后恢复的绑定此后若再有记录，下次即被识别并重算。
       if (cursor) await this.#log.saveProjectionCheckpoint?.(key, cursor, bindings);
       return requests.map(request => {
         const binding = bindings.get(request.assignmentId)!;
         return request.use === "observe" ? binding.observe : binding.active;
       });
-    });
+    }));
   }
 
   /** 绑定检查点的键带归约与绑定规则的指纹：规则改变后旧绑定不再被沿用。 */
@@ -2672,9 +2672,11 @@ export class ConversationAssignmentLedger implements
   async recoverableConversationCancellations(): Promise<
     readonly ConversationEnvelope[]
   > {
+    // owner 已耐久处理取消证明的不再重提
     return this.#conversationAssignmentsMatching(
       (state) =>
         state.aborts.some((abort) => abort.via === "abort-ticket") &&
+        !state.validation.cancelProofOwnerAccepted &&
         (state.phase === "received" ||
           state.phase === "started" ||
           state.phase === "halted"),
@@ -2840,8 +2842,10 @@ export class ConversationAssignmentLedger implements
   }
 
   /**
-   * owner 已耐久接受 abort-ticket proof 后，在同一 assignment 日志退休本地重提义务。
-   * 响应丢失时允许重提同一 proof；只有本记录落盘后恢复枚举才会停止。
+   * owner 已耐久处理 abort-ticket proof 后，在同一 assignment 日志退休本地重提义务（对话与作业同一口径）。
+   * owner 的提交只在耐久处理了同一份证明（本次追加，或已有记录里正是这份证明）时成功返回；
+   * 响应丢失时允许重提同一 proof；只有本记录落盘后恢复枚举才会停止。未结的运行、交互、资源
+   * 与待定义务仍由 owner 侧各自的耐久目录承担。
    */
   async markTicketCancellationProofOwnerAccepted(
     assignmentId: string,
@@ -2852,7 +2856,7 @@ export class ConversationAssignmentLedger implements
         return { kind: "return", value: true };
       }
       if (
-        state.received?.body.activation.ref.execution !== "job" ||
+        state.received === undefined ||
         state.phase !== "halted" ||
         !state.halted ||
         !state.aborts.some((abort) => abort.via === "abort-ticket")
@@ -3003,14 +3007,11 @@ export class ConversationAssignmentLedger implements
       readonly envelopeRef: ArtifactRef;
     }[]
   > {
-    const assignmentIds = new Set<string>();
-    for (const commit of await this.#log.readAll<unknown>()) {
-      for (const record of commit.entries) {
-        const assignmentId = assignmentIdFromStream(record.stream);
-        if (!assignmentId) continue;
-        assignmentIds.add(assignmentId);
-      }
-    }
+    // 只遍历对话恢复候选目录（三个恢复查询的并集），候选再按调用方的原条件逐个核对
+    const assignmentIds = (await this.#repeatPrepared(() => this.#log.transactDurableProjection<unknown, readonly string[]>(
+      ASSIGNMENT_LEDGER_INDEX_ID,
+      async current => ({ kind: "return", value: await readRecoveryCandidates(current) }),
+    ))).value;
     const refs: Array<{
       readonly assignmentId: string;
       readonly envelopeRef: ArtifactRef;
@@ -3744,21 +3745,29 @@ export class ConversationAssignmentLedger implements
     select: (state: LedgerProjection) => Value,
   ): Promise<Value> {
     assertIdentifier(assignmentId, "Assignment id");
-    return this.#operations.run(async () => {
-      const cached = this.#takeCachedProjection(assignmentId);
+    return this.#repeatPrepared(() => this.#operations.run(async () => {
       let state: LedgerProjection;
       try {
-        const transaction = await this.#log.readProjection<
+        const cached = this.#takeCachedProjection(assignmentId) ?? await this.#recoverProjection(assignmentId);
+        // 只重放这个分派自己的流；当前租约时钟在同一位置从时钟投影读出
+        const transaction = await this.#log.transactProjection<
           LedgerProjection,
-          AssignmentEntry
+          AssignmentEntry,
+          LeaseClockSummary
         >(
-          cached?.state ?? emptyProjection(assignmentId),
-          (state, record, envelope) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, envelope),
+          cached.state,
+          (state, record, envelope) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, envelope),
+          async (_state, context) => ({
+            kind: "return",
+            value: await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)),
+          }),
           {
-            streams: [assignmentStream(assignmentId), leaseClockStream(this.#executorId)],
-            ...(cached ? { cursor: cached.cursor } : {}),
+            streams: [assignmentStream(assignmentId)],
+            cursor: cached.cursor,
+            readProjectionIds: [this.#leaseClockProjectionId],
           },
         );
+        withLeaseClock(transaction.state, transaction.value);
         this.#cacheProjection(assignmentId, {
           state: transaction.state,
           cursor: transaction.cursor,
@@ -3769,7 +3778,59 @@ export class ConversationAssignmentLedger implements
         throw error;
       }
       return select(state);
-    });
+    }));
+  }
+
+  /**
+   * 账本串行段之外的准备后重做：依赖的派生状态（例如首次使用时尚未初建的租约时钟投影）在准备中时，
+   * 在段外等准备完成再重做；调用方仍处在别的排他段内时照原样交出，由外层重做。
+   */
+  async #repeatPrepared<Value>(operation: () => Promise<Value>): Promise<Value> {
+    for (let rounds = 0; ; rounds++) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (rounds >= 64 || !(await awaitAuthorityPreparation(error))) throw error;
+      }
+    }
+  }
+
+  async #recoverProjection(
+    assignmentId: string,
+    receiptRetirement = false,
+  ): Promise<{ readonly state: LedgerProjection; readonly cursor: ProjectionCursor }> {
+    const recovered = await this.#recoverProjections([assignmentId], receiptRetirement);
+    return { state: recovered.states.get(assignmentId)!, cursor: recovered.cursor };
+  }
+
+  /**
+   * 冷实例上恢复若干分派的投影：从领域索引读出各自触及过的信封，用同一份归约逐条重放，
+   * 只读这些分派自己的行；返回的游标标出索引所在的位置，此后的记录由调用方按流从这里续读。
+   */
+  async #recoverProjections(
+    assignmentIds: readonly string[],
+    receiptRetirement = false,
+  ): Promise<{ readonly states: ReadonlyMap<string, LedgerProjection>; readonly cursor: ProjectionCursor }> {
+    const read = await this.#log.transactDurableProjection<unknown, ReadonlyMap<string, readonly CommitEnvelope<unknown>[]>>(
+      ASSIGNMENT_LEDGER_INDEX_ID,
+      async current => {
+        const envelopes = new Map<string, readonly CommitEnvelope<unknown>[]>();
+        for (const assignmentId of assignmentIds) envelopes.set(assignmentId, await readAssignmentEnvelopes(current, assignmentId));
+        return { kind: "return", value: envelopes };
+      },
+    );
+    const states = new Map<string, LedgerProjection>();
+    for (const assignmentId of assignmentIds) {
+      const stream = assignmentStream(assignmentId);
+      let state = emptyProjection(assignmentId);
+      for (const envelope of read.value.get(assignmentId)!) {
+        for (const record of envelope.entries) {
+          if (record.stream === stream) state = await this.#reduce(state, record, envelope, receiptRetirement);
+        }
+      }
+      states.set(assignmentId, state);
+    }
+    return { states, cursor: read.cursor };
   }
 
   async #transact<Value>(
@@ -3783,17 +3844,20 @@ export class ConversationAssignmentLedger implements
     readProjectionIds: readonly string[] = [],
   ) {
     assertIdentifier(assignmentId, "Assignment id");
-    return this.#operations.run(async () => {
-      const cached = receiptRetirement ? undefined : this.#takeCachedProjection(assignmentId);
+    return this.#repeatPrepared(() => this.#operations.run(async () => {
       try {
+        // 退休视图不沿用缓存：它不核对执行制品闭包，归约结果与正常视图不同
+        const cached = (receiptRetirement ? undefined : this.#takeCachedProjection(assignmentId)) ??
+          await this.#recoverProjection(assignmentId, receiptRetirement);
         const transact = () => this.#log.transactProjection<
           LedgerProjection,
           unknown,
           Value
         >(
-          cached?.state ?? emptyProjection(assignmentId),
-          (state, record, commit) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, commit, receiptRetirement),
+          cached.state,
+          (state, record, commit) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, commit, receiptRetirement),
           async (state, context) => {
+            withLeaseClock(state, await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)));
             const decision = await decide(state, context);
             if (decision.kind !== "append") return decision;
             const resourceRecords = this.#prepareResourceTerminalRecords(
@@ -3806,10 +3870,10 @@ export class ConversationAssignmentLedger implements
             };
           },
           {
-            streams: [assignmentStream(assignmentId), leaseClockStream(this.#executorId)],
-            ...(cached ? { cursor: cached.cursor } : {}),
+            streams: [assignmentStream(assignmentId)],
+            cursor: cached.cursor,
             candidateReferences,
-            readProjectionIds,
+            readProjectionIds: [...readProjectionIds, this.#leaseClockProjectionId],
           },
         );
         const transaction = await (
@@ -3827,7 +3891,7 @@ export class ConversationAssignmentLedger implements
         }
         throw error;
       }
-    });
+    }));
   }
 
   #leaseCompanions(entries: readonly LogicalRecord<unknown>[]): readonly LogicalRecord<unknown>[] {
@@ -3899,10 +3963,6 @@ export class ConversationAssignmentLedger implements
     commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
     receiptRetirement = false,
   ): Promise<LedgerProjection> => {
-    if (record.stream === leaseClockStream(this.#executorId)) {
-      applyLeaseClock(state, readLeaseClockRecord(record.body, this.#executorId));
-      return state;
-    }
     if (record.stream !== assignmentStream(state.assignmentId)) {
       throw corruptLedger("Assignment projection received a different stream");
     }
@@ -4849,6 +4909,8 @@ export class InProcessAssignmentSubmission {
     const proof = await this.#ledger.cancelProof(assignmentId);
     if (!proof) return false;
     await this.#owner.submitCancelProof(assignmentId, proof, ctx);
+    // 成功返回即 owner 已耐久处理这份证明：票据取消的重提义务随之退休
+    if (proof.cause === "abort-ticket") await this.#ledger.markTicketCancellationProofOwnerAccepted(assignmentId);
     return true;
   }
 
@@ -4959,22 +5021,6 @@ function assignmentRecord(
 
 function assignmentStream(assignmentId: string): string {
   return `assignment:${assignmentId}`;
-}
-
-/**
- * 与 assignment 日志共用同一提交日志、同享 `assignment:` 前缀,但由各自
- * reducer 拥有的子流。assignmentId 自身含冒号,无法按分段区分,只能按子流
- * 后缀排除;新增子流若漏登记,枚举与派生索引会以校验失败 fail-closed。
- */
-const ASSIGNMENT_SUB_STREAM_SUFFIXES = [":data-plane-tickets"] as const;
-
-/** 只认本 ledger 自己写入的 assignment 流,子流一律让位给其所有者。 */
-function assignmentIdFromStream(stream: string): string | undefined {
-  if (!stream.startsWith("assignment:")) return undefined;
-  for (const suffix of ASSIGNMENT_SUB_STREAM_SUFFIXES) {
-    if (stream.endsWith(suffix)) return undefined;
-  }
-  return stream.slice("assignment:".length) || undefined;
 }
 
 async function interactionRequested(
@@ -5334,11 +5380,10 @@ function assertFence(
   assertIdentifier(value.requestId, `${label} requestId`);
 }
 
-/** 施加一条执行器租约时间前沿：只能前进，此后的旧式租约写入一律拒绝。 */
-function applyLeaseClock(state: LedgerProjection, next: number): void {
-  if (next < state.leaseTimeFrontier) throw corruptLedger("Executor lease time frontier regressed");
-  state.leaseTimeFrontier = next;
-  state.leaseClockActivated = true;
+/** 把同一位置读出的当前租约时钟带进分派状态：与从起点重放时钟流得到的前沿相同（前沿只前进）。 */
+function withLeaseClock(state: LedgerProjection, summary: LeaseClockSummary): void {
+  state.leaseTimeFrontier = Math.max(state.leaseTimeFrontier, summary.frontier);
+  if (summary.activated) state.leaseClockActivated = true;
 }
 
 function corruptLedger(message: string): AuthorityStorageError {

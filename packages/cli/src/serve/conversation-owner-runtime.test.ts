@@ -132,30 +132,23 @@ describe("conversation owner domain composition", () => {
   it("projects recovery and accepted-work leases without exposing governor state", async () => {
     const primaryReclaim = vi.fn(async () => 2);
     const executionReclaim = vi.fn(async () => 3);
-    const executionSnapshot = vi.fn(async () => ({
-      reservations: new Map([
-        [
-          "reservation-active",
-          {
-            state: "active",
-            lease: {
-              scopeBinding: {
-                kind: "conversation",
-                conversationId: "conversation-1",
-                ownerEpoch: 7,
-              },
-            },
+    const executionActive = vi.fn(async () => [
+      {
+        state: "active",
+        lease: {
+          reservationId: "reservation-active",
+          scopeBinding: {
+            kind: "conversation",
+            conversationId: "conversation-1",
+            ownerEpoch: 7,
           },
-        ],
-        [
-          "reservation-job",
-          {
-            state: "active",
-            lease: { scopeBinding: { kind: "job", taskId: "task-1" } },
-          },
-        ],
-      ]),
-    }));
+        },
+      },
+      {
+        state: "active",
+        lease: { reservationId: "reservation-job", scopeBinding: { kind: "job", taskId: "task-1" } },
+      },
+    ]);
     const recovery = createConversationResourceRecoveryPort({
       primary: {
         reclaimExpired: primaryReclaim,
@@ -167,7 +160,7 @@ describe("conversation owner domain composition", () => {
         reclaimExpired: executionReclaim,
       },
       acceptedWork: {
-        snapshot: executionSnapshot,
+        activeReservations: executionActive,
       },
     } as never);
 
@@ -182,7 +175,7 @@ describe("conversation owner domain composition", () => {
     ]);
     expect(primaryReclaim).toHaveBeenCalledTimes(1);
     expect(executionReclaim).toHaveBeenCalledTimes(1);
-    expect(executionSnapshot).toHaveBeenCalledTimes(1);
+    expect(executionActive).toHaveBeenCalledTimes(1);
     expect("snapshot" in recovery).toBe(false);
 
     const localReclaim = vi.fn(async () => 1);
@@ -193,7 +186,7 @@ describe("conversation owner domain composition", () => {
       primary: localRecovery,
       additionalRecovery: localRecovery,
       acceptedWork: {
-        snapshot: vi.fn(async () => ({ reservations: new Map() })),
+        activeReservations: vi.fn(async () => []),
       },
     } as never);
     await expect(local.reclaimExpired()).resolves.toBe(1);

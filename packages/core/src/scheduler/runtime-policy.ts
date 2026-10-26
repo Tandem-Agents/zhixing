@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { JobOccurrence, TaskDefinition } from "../contracts/state.js";
 import { protocolDigest } from "../protocol/canonical.js";
+import { compareJobOccurrences } from "../protocol/job.js";
 import { nextScheduleTime } from "./schedule-time.js";
 import type { TaskSchedule } from "./types.js";
 
@@ -167,11 +168,7 @@ export function decideScheduleFailurePolicy(input: {
       "Schedule failure threshold must be a positive safe integer",
     );
   }
-  const ordered = [...input.occurrences].sort(
-    (left, right) =>
-      left.scheduledFor.localeCompare(right.scheduledFor) ||
-      left.jobRunId.localeCompare(right.jobRunId),
-  );
+  const ordered = [...input.occurrences].sort(compareJobOccurrences);
   const index = ordered.findIndex((occurrence) =>
     occurrence.jobRunId === input.jobRunId
   );
@@ -184,19 +181,51 @@ export function decideScheduleFailurePolicy(input: {
     if (isScheduleFailure(previous)) failureCount += 1;
     else if (previous.state !== "missed") break;
   }
-  const nextFire = frozenScheduleFailureNextFire({
+  return scheduleFailurePolicyForCount({
     taskId: input.taskId,
     jobRunId: input.jobRunId,
     schedule: input.schedule,
     scheduledFor: ordered[index]!.scheduledFor,
     failureCount,
+    threshold: input.threshold,
+    decidedAt: input.decidedAt,
+  });
+}
+
+/**
+ * 已知连续失败数（含这一次）时的失败策略：退避时刻与是否自动停用。与 decideScheduleFailurePolicy
+ * 同一口径，供已增量维护连续失败数的权威直接使用，不必交出整段失败历史。
+ */
+export function scheduleFailurePolicyForCount(input: {
+  readonly taskId: string;
+  readonly jobRunId: string;
+  readonly schedule: TaskSchedule;
+  readonly scheduledFor: string;
+  readonly failureCount: number;
+  readonly threshold: number;
+  readonly decidedAt: string;
+}): ScheduleFailurePolicyDecision {
+  if (!Number.isSafeInteger(input.threshold) || input.threshold <= 0) {
+    throw new ScheduleRuntimePolicyError(
+      "Schedule failure threshold must be a positive safe integer",
+    );
+  }
+  if (!Number.isSafeInteger(input.failureCount) || input.failureCount <= 0) {
+    throw new ScheduleRuntimePolicyError("Schedule failure count must be a positive safe integer");
+  }
+  const nextFire = frozenScheduleFailureNextFire({
+    taskId: input.taskId,
+    jobRunId: input.jobRunId,
+    schedule: input.schedule,
+    scheduledFor: input.scheduledFor,
+    failureCount: input.failureCount,
     decidedAt: input.decidedAt,
   });
   return Object.freeze({
-    failureCount,
+    failureCount: input.failureCount,
     threshold: input.threshold,
     ...(nextFire ? { nextFire } : {}),
-    autoDisableRequired: failureCount >= input.threshold,
+    autoDisableRequired: input.failureCount >= input.threshold,
   });
 }
 

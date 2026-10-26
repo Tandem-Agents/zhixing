@@ -74,6 +74,7 @@ import {
   type ProjectionCursor,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
+  AuthorityPreparationRequired,
   awaitAuthorityPreparation,
 } from "@zhixing/core/authority";
 import type {
@@ -4905,7 +4906,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         method: "submission.submitBundle",
         assignmentId,
       }));
-      this.#assertResourceUsageFinal(guardAssigned.record, bundle.usageFinal);
+      // 已提交的重放在日志事务之外核对用量终值：调控状态待装入时补齐后重做
+      await this.#withPreparedState(() => this.#assertResourceUsageFinal(guardAssigned.record, bundle.usageFinal));
       return { committed: true, commitRevision: guardCommitted.commitRevision };
     }
 
@@ -7028,6 +7030,18 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
   }
 
+  /** 日志事务之外的同步核对：所需派生状态尚未装入时，在此补齐后重做（排他段内照原样交出）。 */
+  async #withPreparedState(check: () => void): Promise<void> {
+    for (let rounds = 0; ; rounds++) {
+      try {
+        check();
+        return;
+      } catch (error) {
+        if (rounds >= 64 || !(await awaitAuthorityPreparation(error))) throw error;
+      }
+    }
+  }
+
   #assertResourceUsageFinal(
     assigned: {
       readonly assignmentId: string;
@@ -7051,6 +7065,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         usageFinal,
       });
     } catch (error) {
+      // 调控状态待装入是可重做的准备，不是日志损坏
+      if (error instanceof AuthorityPreparationRequired) throw error;
       throw corruptRunJournal(
         error instanceof Error
           ? `Assignment final usage is invalid: ${error.message}`

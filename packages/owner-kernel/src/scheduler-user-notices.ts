@@ -3,7 +3,13 @@ import type {
   LogicalRecord,
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
+import { createHash } from "node:crypto";
+import {
+  readDurableProjectionKeys,
+  type AuthorityCommitLog,
+  type DurableProjectionMutation,
+  type RebuildableDurableProjectionIndex,
+} from "@zhixing/core/authority";
 import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { decideScheduleMissedSummary, type SchedulerNoticeDraft, type MissedSummaryGroup } from "@zhixing/core/scheduler/application";
@@ -26,9 +32,31 @@ export interface SchedulerNoticeFact {
 }
 
 
-interface NoticeProjection {
-  readonly noticeIds: Set<string>;
-  readonly missedMembers: Set<string>;
+/**
+ * 已汇总过的错过成员按键落盘：判定一组错过成员只读这些成员各自的一行，不重放通知流。
+ */
+export const SCHEDULER_NOTICE_INDEX_PROJECTION_ID = "scheduler-notice-index-v1";
+
+const missedMemberKey = (member: string) =>
+  `m/${createHash("sha256").update(member, "utf8").digest("hex").slice(0, 32)}`;
+
+export function registerSchedulerNoticeIndex(log: AuthorityCommitLog): RebuildableDurableProjectionIndex {
+  return log.durableProjection({
+    projectionId: SCHEDULER_NOTICE_INDEX_PROJECTION_ID,
+    reducerVersion: 1,
+    authenticated: true,
+    inputs: { streams: [SCHEDULER_NOTICE_STREAM] },
+    reduce: (envelope) => {
+      const mutations: DurableProjectionMutation[] = [];
+      for (const entry of envelope.entries) {
+        if (entry.stream !== SCHEDULER_NOTICE_STREAM) continue;
+        for (const member of validateNoticeFact(entry.body).missedMembers ?? []) {
+          mutations.push({ kind: "put", key: missedMemberKey(member), value: member });
+        }
+      }
+      return mutations;
+    },
+  });
 }
 
 /**
@@ -49,6 +77,7 @@ export class SchedulerUserNoticeJournal {
   }) {
     this.#log = options.log;
     this.#delivery = options.delivery;
+    registerSchedulerNoticeIndex(options.log);
   }
 
   prepareRecords(draft: SchedulerNoticeDraft): readonly LogicalRecord<unknown>[] {
@@ -90,16 +119,22 @@ export class SchedulerUserNoticeJournal {
     at: string,
   ): Promise<void> {
     for (const group of [...groups].sort((a, b) => a.groupKey.localeCompare(b.groupKey))) {
-      await this.#delivery.coordinate(() => this.#log.transactProjection<NoticeProjection, unknown, void>(
-        emptyProjection(),
-        noticeReducer,
-        (state) => {
-          const draft = decideScheduleMissedSummary(group, state.missedMembers, at);
+      await this.#delivery.coordinate(() => this.#log.transactDurableProjection<unknown, void>(
+        SCHEDULER_NOTICE_INDEX_PROJECTION_ID,
+        async (view) => {
+          // 只读这一组成员各自是否已汇总
+          const members = [...new Set(group.members.map((member) => `${member.taskId}\u0000${member.jobRunId}`))];
+          const summarized = new Set<string>();
+          for (let offset = 0; offset < members.length; offset += 256) {
+            const chunk = members.slice(offset, offset + 256);
+            const values = await readDurableProjectionKeys(view, chunk.map(missedMemberKey));
+            chunk.forEach((member, index) => { if (values[index] === member) summarized.add(member); });
+          }
+          const draft = decideScheduleMissedSummary(group, summarized, at);
           return draft
             ? { kind: "append", entries: this.prepareRecords(draft), value: undefined }
             : { kind: "return", value: undefined };
         },
-        { stream: SCHEDULER_NOTICE_STREAM },
       ));
     }
     await this.publishNew();
@@ -144,24 +179,6 @@ export class SchedulerUserNoticeJournal {
       }
     }
   }
-}
-
-function emptyProjection(): NoticeProjection {
-  return {
-    noticeIds: new Set(),
-    missedMembers: new Set(),
-  };
-}
-
-function noticeReducer(
-  state: NoticeProjection,
-  raw: LogicalRecord<unknown>,
-): NoticeProjection {
-  if (raw.stream !== SCHEDULER_NOTICE_STREAM) return state;
-  const fact = validateNoticeFact(raw.body);
-  state.noticeIds.add(fact.noticeId);
-  for (const member of fact.missedMembers ?? []) state.missedMembers.add(member);
-  return state;
 }
 
 function validateNoticeFact(value: unknown): SchedulerNoticeFact {

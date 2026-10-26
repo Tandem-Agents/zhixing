@@ -20,6 +20,7 @@ import { createLiveTrustedDeviceProtocolVerifier } from "./trusted-device-protoc
 import { loadAuthorityCacheIntegrity } from "./authority-cache-integrity.js";
 import { artifactReadCapacity, projectionReadCapacity } from "./artifact-read-capacity.js";
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
+import { executorIdForDevice } from "./executor-identity.js";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 
 export interface HomeAuthoritySourcesOptions {
@@ -52,14 +53,15 @@ const writers = new Map<string, OwnerSlot>();
 // Short-lived writers register all definitions but prepare only what they use.
 const CORE_WRITE_REQUIRED = ["authority-retained-references"] as const;
 const SHARED_REQUIRED = [...CORE_WRITE_REQUIRED, "device-lifecycle-state-v1", "control-admission-v1", "conversation-identities-v1",
-  "deferred-global-intents-v1", "conversation-transfer-current-v1"] as const;
+  "deferred-global-intents-v1", "conversation-transfer-current-v1", "resource-governor-index-v1",
+  "resource-capability-activation-v1"] as const;
 const AUTHORITY_REQUIRED = [CURRENT_TRUST_PROJECTION_ID, ...SHARED_REQUIRED, "credential-exposures-v1",
   "global-skill-authority-v1", "global-workscene-authority-v1", "global-rubric-authority-v1",
   "workscene-session-activity-v2", "global-schedule-authority-v1", "job-publish-pending-v1",
   "conversation-read-directory", "conversation-recovery-pending-v1", "conversation-run-state-v1", "advancement-recovery-v1",
   "surface-asset-grants"] as const;
 const EXECUTOR_REQUIRED = [...SHARED_REQUIRED, "conversation-recovery-pending-v1", "workspace-binding-state-v1", "workspace-probe-state-v1",
-  "executor-job-interaction-obligations"] as const;
+  "executor-job-interaction-obligations", "executor-assignment-ledger-v1"] as const;
 
 /**
  * 统一的 home 权威入口。同一进程内同一 home 的可写物理日志只有一个生命周期 owner（按引用
@@ -129,6 +131,8 @@ export class HomeAuthoritySources {
   #knownAnchorTenure: VerifiedAnchorTenure | undefined;
   #trustKnown = false;
   #trustUnavailable = false;
+  // 本机执行端的固定投影（按执行端身份分区，已知设备身份时在首次写入前登记）
+  #executorRequired: readonly string[] = EXECUTOR_REQUIRED;
 
   private constructor(
     readonly home: string,
@@ -182,15 +186,18 @@ export class HomeAuthoritySources {
         const current = await sources.currentTrust();
         if (current) sources.rememberCurrentTrust(current);
       }
+      let localExecutorId: string | undefined;
       if (localKey) {
-        sources.bindLocalIdentity(enrollDeviceIdentity(localKey, {
+        const identity = enrollDeviceIdentity(localKey, {
           displayName: "local-device",
           platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux",
           enrolledAt: "1970-01-01T00:00:00.000Z",
-        }));
+        });
+        sources.bindLocalIdentity(identity);
+        localExecutorId = executorIdForDevice(identity.deviceId);
       }
       if (!readOnly) {
-        await sources.#registerDefinitions();
+        await sources.#registerDefinitions(localExecutorId);
         // Core registers retention in the FileLog constructor. Every write
         // consumes it, including short management commands and unrelated streams.
         // Prepare it before any caller can enter a domain queue.
@@ -210,22 +217,24 @@ export class HomeAuthoritySources {
    * 写者的固定领域定义：在首次写入前全部登记。只读访问者不写入，也不加载这些领域模块，
    * 由其消费者按需登记所读的投影。
    */
-  async #registerDefinitions(): Promise<void> {
-    const [core, owner, executorDefinitions, mesh, surfaceAssets] = await Promise.all([
+  async #registerDefinitions(localExecutorId: string | undefined): Promise<void> {
+    const [core, owner, executorDefinitions, mesh, surfaceAssets, protocol] = await Promise.all([
       import("@zhixing/core/authority/startup-definitions"),
       import("@zhixing/owner-kernel/startup-definitions"),
       import("@zhixing/executor/startup-definitions"),
       import("@zhixing/mesh/credential-exposure"),
       import("./surface-asset-authority.js"),
+      import("@zhixing/core/protocol"),
     ]);
     const { registerDeviceLifecycleProjection, registerSkillAuthorityProjection, registerWorksceneAuthorityProjection,
       registerRubricAuthorityProjection, registerWorksceneActivityProjection, registerWorkspaceBindingProjection,
-      registerWorkspaceProbeProjection } = core;
+      registerWorkspaceProbeProjection, registerResourceGovernorIndex, registerResourceCapabilityActivations } = core;
     const { registerControlAdmissionProjection, registerConversationIdentityProjection, registerScheduleAuthorityProjection,
       registerJobPublishPendingProjection, registerDeferredIntentProjection, registerConversationReadProjection,
       registerConversationTransferProjection, registerConversationRecoveryProjection, registerConversationRunProjection,
       registerAdvancementRecoveryProjection } = owner;
-    const { registerExecutorJobRecoveryProjection } = executorDefinitions;
+    const { registerExecutorJobRecoveryProjection, registerDataPlaneTicketProjection, dataPlaneTicketProjectionId,
+      registerLeaseClockProjection, leaseClockProjectionId, registerAssignmentLedgerIndex } = executorDefinitions;
     const { credentialExposureIndex } = mesh;
     const { registerSurfaceAssetProjection } = surfaceAssets;
     const { authority, executor, artifacts, verifier } = this;
@@ -238,6 +247,9 @@ export class HomeAuthoritySources {
       // Global recovery discovery reads both sources before a local conversation
       // kernel is mounted. Prepare this fixed discovery index at Host.ready.
       registerConversationRecoveryProjection(log, artifacts);
+      // 两本日志各有一个资源调控器：按键投影与分配能力激活在首次写入前登记，就绪前准备
+      registerResourceGovernorIndex(log, verifier, protocol.RESOURCE_LEASE_MAX_TTL_MS);
+      registerResourceCapabilityActivations(log);
     }
     credentialExposureIndex(authority);
     registerSkillAuthorityProjection(authority);
@@ -254,6 +266,14 @@ export class HomeAuthoritySources {
     registerWorkspaceBindingProjection(executor);
     registerWorkspaceProbeProjection(executor, verifier);
     registerExecutorJobRecoveryProjection(executor, verifier);
+    // 派发账本的领域索引：冷读一个派发只读它自己的行，启动恢复只遍历候选目录；首次写入前登记
+    registerAssignmentLedgerIndex(executor, verifier);
+    if (localExecutorId !== undefined) {
+      registerDataPlaneTicketProjection(executor, verifier, localExecutorId);
+      // 分派重放不再读租约时钟流：当前时钟与跨分派的时钟规则由这个投影承担，首次写入前登记
+      registerLeaseClockProjection(executor, localExecutorId);
+      this.#executorRequired = [...EXECUTOR_REQUIRED, dataPlaneTicketProjectionId(localExecutorId), leaseClockProjectionId(localExecutorId)];
+    }
   }
 
   /** 只读访问者打开时 home 是否已有权威日志；写者总是 true（首次使用即建立）。 */
@@ -314,7 +334,7 @@ export class HomeAuthoritySources {
     return Promise.all([
       this.authority.prepareProjections(executorOnly ? [CURRENT_TRUST_PROJECTION_ID, ...SHARED_REQUIRED,
         "credential-exposures-v1"] : AUTHORITY_REQUIRED, boundary),
-      this.executor.prepareProjections(EXECUTOR_REQUIRED, boundary),
+      this.executor.prepareProjections(this.#executorRequired, boundary),
     ]);
   }
 

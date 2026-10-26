@@ -56,6 +56,10 @@
       "types": "./dist/job-assignment.d.ts",
       "import": "./dist/job-assignment.js"
     },
+    "./job-run-state-index": {
+      "types": "./dist/job-run-state-index.d.ts",
+      "import": "./dist/job-run-state-index.js"
+    },
     "./delivery": {
       "types": "./dist/delivery.d.ts",
       "import": "./dist/delivery.js"

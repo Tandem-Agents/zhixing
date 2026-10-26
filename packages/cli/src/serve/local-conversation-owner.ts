@@ -39,7 +39,7 @@ import {
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import {
   ConversationTransferSource,
-  listConversationTransferStates,
+  listOpenConversationTransfers,
   resolveCurrentConversationAuthority,
   type CurrentConversationAuthority,
 } from "@zhixing/owner-kernel/conversation-transfer";
@@ -1092,16 +1092,12 @@ export class LocalConversationOwnerAssembly {
           }
           this.#protocol.beginShutdownDrain();
         }
-        for (const transfer of await listConversationTransferStates(
+        // 只读未终结迁移的二级键，不遍历已终结的迁移历史
+        for (const transfer of await listOpenConversationTransfers(
           this.#owner.executorLog,
           this.#owner.verifier,
         )) {
-          if (
-            transfer.phase !== "aborted" &&
-            transfer.phase !== "tombstoned"
-          ) {
-            this.#transferringConversations.add(transfer.identity.conversationId);
-          }
+          this.#transferringConversations.add(transfer.conversationId);
         }
         // Preparing derived owner state is read-only business work, even while
         // lifecycle admission is frozen. Never defer this scan to the first send.

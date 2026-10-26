@@ -21,6 +21,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFERRED_INTENT_PROJECTION_ID,
   DeferredGlobalIntentRepository,
+  listPendingDeferredIntentConversations,
   type DeferredIntentConversationAuthority,
 } from "../deferred-global-intents.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
@@ -222,6 +223,8 @@ describe("DeferredGlobalIntentRepository", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
       context("request-a"),
     )).rejects.toThrow("another operation");
     expect((await log.readAll()).length).toBe(1);
+    // 待决意图按会话单列；决定之后不再出现
+    expect(await listPendingDeferredIntentConversations(log)).toEqual([CONVERSATION]);
 
     const surface = context("discard-a", {
       kind: "surface",
@@ -237,6 +240,7 @@ describe("DeferredGlobalIntentRepository", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
       status: "discarded",
       reviewedAt: NOW,
     }));
+    expect(await listPendingDeferredIntentConversations(log)).toEqual([]);
     await expect(repository.decide(
       intentId,
       "confirmed",

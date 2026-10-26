@@ -18,7 +18,7 @@ import { advancementSubmissionRequestId } from "@zhixing/core/advancement";
 import type { ConversationRunJournal } from "./conversation-assignment.js";
 
 export interface ConversationSessionStateAdapterOptions {
-  readonly journalFor: (conversationId: string) => ConversationRunJournal;
+  readonly journalFor: (conversationId: string) => ConversationRunJournal | Promise<ConversationRunJournal>;
   readonly sessionExists?: (conversationId: string) => Promise<boolean>;
   /** Establish the known owner's durable identity before its first dependent write. */
   readonly establishIdentity?: (conversationId: string) => Promise<void>;
@@ -57,9 +57,9 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     );
     if (sessionId !== undefined) {
       assertProtocolIdentifier(sessionId, "Advancement sessionId");
-      return this.#journal(conversationId).advancementSession(sessionId);
+      return (await this.#journal(conversationId)).advancementSession(sessionId);
     }
-    return this.#journal(conversationId).advancementHead();
+    return (await this.#journal(conversationId)).advancementHead();
   }
 
   async readAdvancementSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }, ctx: AuthorityCallContext) {
@@ -67,7 +67,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.readAdvancementSubmission");
     assertProtocolIdentifier(identity.surfacePrincipal, "Submission principal");
     assertProtocolIdentifier(identity.submissionId, "Submission id");
-    const write = await this.#journal(conversationId).advancementWriteRequest(advancementSubmissionRequestId(conversationId, identity.surfacePrincipal, identity.submissionId));
+    const write = await (await this.#journal(conversationId)).advancementWriteRequest(advancementSubmissionRequestId(conversationId, identity.surfacePrincipal, identity.submissionId));
     const receipt = write?.receipt;
     return receipt && receipt.identity.surfacePrincipal === identity.surfacePrincipal && receipt.identity.submissionId === identity.submissionId ? receipt : null;
   }
@@ -76,7 +76,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     assertProtocolIdentifier(conversationId, "Session conversationId");
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.listPendingAdvancementOriginalTasks");
     if (after !== undefined) assertProtocolIdentifier(after, "Advancement cursor");
-    return this.#journal(conversationId).pendingAdvancementOriginalTasks(after);
+    return (await this.#journal(conversationId)).pendingAdvancementOriginalTasks(after);
   }
 
   async mutate(
@@ -91,7 +91,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
       if (ctx.principal.kind !== "host") {
         throw authorityError("unauthorized", "Advancement events are host-only");
       }
-      const journal = this.#journal(conversationId);
+      const journal = await this.#journal(conversationId);
       const existing = await journal.advancementWriteRequest(ctx.requestId);
       if (!existing) {
         const authority = await journal.authorityState();
@@ -132,8 +132,8 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     return this.#options.mutateControl(conversationId, mutation, ctx);
   }
 
-  #journal(conversationId: string): ConversationRunJournal {
-    const journal = this.#options.journalFor(conversationId);
+  async #journal(conversationId: string): Promise<ConversationRunJournal> {
+    const journal = await this.#options.journalFor(conversationId);
     if (journal.conversationId !== conversationId) {
       throw authorityError(
         "invalid",
@@ -148,7 +148,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     ctx: AuthorityCallContext,
   ): Promise<SessionMeta> {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.readSessionMeta");
-    return this.#journal(conversationId).sessionMeta();
+    return (await this.#journal(conversationId)).sessionMeta();
   }
 
   async readTranscriptTail(
@@ -160,7 +160,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind,
       "session.readTranscriptTail",
     );
-    return this.#journal(conversationId).transcriptTail(_cursor, _limit);
+    return (await this.#journal(conversationId)).transcriptTail(_cursor, _limit);
   }
 
   async readTaskList(
@@ -168,7 +168,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     ctx: AuthorityCallContext,
   ): Promise<TaskListState> {
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.readTaskList");
-    return this.#journal(conversationId).taskList();
+    return (await this.#journal(conversationId)).taskList();
   }
 }
 

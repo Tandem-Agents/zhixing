@@ -2,6 +2,7 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
+  ResourceGovernorIndexStore,
 } from "@zhixing/core/authority";
 import type {
   AssignmentResourceLease,
@@ -504,9 +505,9 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
-  it("rejects polluted governor records during authoritative replay", async () => {
+  it("rejects polluted governor records at write time and during authoritative replay", async () => {
     const fixture = await createHarness();
-    await fixture.log.append([{
+    const polluted = {
       stream: "governor",
       body: {
         t: "queued",
@@ -515,8 +516,15 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
         workload: { kind: "control", id: "polluted", attempt: 1 },
         unknown: true,
       },
-    }]);
-    await expect(fixture.restart().snapshot()).rejects.toThrow("fields");
+    };
+    // 调控投影登记后，污染记录在写入时即被同一归约拒绝
+    await expect(fixture.log.append([polluted])).rejects.toThrow("fields");
+    // 没有登记调控投影的写者留下的污染记录，在权威重放时同样被拒
+    const writer = trackAuthorityLog(new FileAuthorityCommitLog(fixture.logRoot, fixture.artifacts, { clock: () => NOW }));
+    await writer.append([polluted]);
+    await writer.stopStorageMaintenance();
+    const reopened = await createHarness(() => NOW, undefined, undefined, fixture.root);
+    await expect(reopened.governor.snapshot()).rejects.toThrow("fields");
   });
 
   it("rebuilds usage idempotency and terminal state after restart", async () => {
@@ -938,8 +946,9 @@ async function createHarness(
   clock: () => string = () => NOW,
   leaseTtlMs = 15 * 60_000,
   monotonicClock: () => number = () => performance.now(),
+  existingRoot?: string,
 ) {
-  const root = await createTempDir("anchor-resource-governor");
+  const root = existingRoot ?? await createTempDir("anchor-resource-governor");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock,
@@ -957,6 +966,8 @@ async function createHarness(
     monotonicClock,
   });
   return {
+    root,
+    logRoot: path.join(root, "authority"),
     artifacts,
     log,
     governor: createGovernor(),
@@ -1213,8 +1224,9 @@ function usageReport(input: {
 }
 
 it('verifies a read-only coordination once and refreshes after a mutating decision', async () => {
-  const fixture = await createHarness(), read = vi.spyOn(fixture.log, 'readProjection');
+  const fixture = await createHarness(), read = vi.spyOn(ResourceGovernorIndexStore.prototype, 'refresh');
   try {
+    // 只读协调只在进入时核对一次会话；会改动的协调结束后再核对一次，之后的判断看到提交后的状态
     await fixture.governor.coordinate(async () => {}, { readOnly: true });
     expect(read).toHaveBeenCalledOnce(); read.mockClear();
     await fixture.governor.coordinate(async () => {

@@ -14,6 +14,7 @@ export default defineConfig({
     "src/control-admission.ts",
     "src/conversation-assignment.ts",
     "src/job-assignment.ts",
+    "src/job-run-state-index.ts",
     "src/delivery.ts",
     "src/resource-governor.ts",
     "src/scheduler-authority.ts",

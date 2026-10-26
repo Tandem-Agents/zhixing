@@ -60,7 +60,7 @@ export type { ConversationAnchorTenurePort } from './conversation-owner-authorit
 
 export const CONVERSATION_TRANSFER_PROJECTION_ID =
   "conversation-transfer-current-v1";
-const TRANSFER_PROJECTION_REDUCER_VERSION = 3;
+const TRANSFER_PROJECTION_REDUCER_VERSION = 5;
 
 interface ConversationTransferCommittedBaseRecord {
   readonly v: 1 | 2;
@@ -946,12 +946,75 @@ async function reduceConversationTransferProjection(
     }
     overlay.set(transferKey, next);
     overlay.set(conversationKey, next);
+    const conversationId = next.identity.conversationId, transferId = next.identity.transferId;
+    // 二级定位：按会话列出它的全部迁移；未终结（非 aborted/tombstoned）的迁移单列，启动只读这批；
+    // 已提交（含已转出）的迁移另列，目标端按会话找它收编的迁移，不遍历迁移历史
+    const open = `${OPEN_TRANSFER_PREFIX}${conversationId}:${transferId}`;
     mutations.push(
       { kind: "put", key: transferKey, value: next as unknown as JsonValue },
       { kind: "put", key: conversationKey, value: next as unknown as JsonValue },
+      { kind: "put", key: `${CONVERSATION_TRANSFERS_PREFIX}${conversationId}:${transferId}`, value: { transferId } },
+      next.phase === "aborted" || next.phase === "tombstoned"
+        ? { kind: "tombstone", key: open }
+        : { kind: "put", key: open, value: { conversationId, transferId } },
     );
+    if (next.phase === "committed" || next.phase === "tombstoned") {
+      mutations.push({ kind: "put", key: `${COMMITTED_TRANSFER_PREFIX}${conversationId}:${transferId}`, value: { conversationId, transferId } });
+    }
   }
   return mutations;
+}
+
+const OPEN_TRANSFER_PREFIX = "open:";
+const CONVERSATION_TRANSFERS_PREFIX = "by-conversation:";
+const COMMITTED_TRANSFER_PREFIX = "committed:";
+
+async function scanTransferIndex(
+  index: DurableProjectionReadContext,
+  prefix: string,
+): Promise<readonly { readonly conversationId?: string; readonly transferId: string }[]> {
+  const values: { conversationId?: string; transferId: string }[] = [];
+  let continuation: string | undefined;
+  do {
+    const page = await index.scan({ gte: prefix, lt: `${prefix}￿` }, 64, continuation);
+    for (const entry of page.entries) values.push(entry.value as unknown as { conversationId?: string; transferId: string });
+    continuation = page.continuation;
+  } while (continuation);
+  return values;
+}
+
+/** 未终结（非 aborted/tombstoned）的迁移：只读这批二级键，不遍历已终结的迁移历史。 */
+export async function listOpenConversationTransfers(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier):
+  Promise<readonly { readonly conversationId: string; readonly transferId: string }[]> {
+  const index = registerConversationTransferProjection(log, verifier);
+  return (await scanTransferIndex(index, OPEN_TRANSFER_PREFIX)) as readonly { conversationId: string; transferId: string }[];
+}
+
+/** 一个会话的全部迁移，按迁移 id 精确读取状态。 */
+export async function listConversationTransfersFor(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier,
+  conversationId: string): Promise<readonly ConversationTransferState[]> {
+  const index = registerConversationTransferProjection(log, verifier);
+  const states: ConversationTransferState[] = [];
+  for (const { transferId } of await scanTransferIndex(index, `${CONVERSATION_TRANSFERS_PREFIX}${conversationId}:`)) {
+    const state = await index.get(`transfer:${transferId}`);
+    if (state === undefined) throw new Error("Conversation transfer index has no matching transfer");
+    states.push(state as unknown as ConversationTransferState);
+  }
+  return states.sort((a, b) => a.identity.transferId.localeCompare(b.identity.transferId));
+}
+
+/** 一个会话已提交（含已转出）的迁移编号，按编号排序；只读这个会话的二级键。 */
+export async function listCommittedConversationTransferIds(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier,
+  conversationId: string): Promise<readonly string[]> {
+  const index = registerConversationTransferProjection(log, verifier);
+  return (await scanTransferIndex(index, `${COMMITTED_TRANSFER_PREFIX}${conversationId}:`)).map(entry => entry.transferId);
+}
+
+/** 全部已提交收编的会话，按会话编号排序；供目录类列举按需调用，启动路径不读。 */
+export async function listCommittedConversationIds(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier):
+  Promise<readonly string[]> {
+  const index = registerConversationTransferProjection(log, verifier);
+  return [...new Set((await scanTransferIndex(index, COMMITTED_TRANSFER_PREFIX)).map(entry => entry.conversationId!))];
 }
 
 async function projectedConversationTransferState(

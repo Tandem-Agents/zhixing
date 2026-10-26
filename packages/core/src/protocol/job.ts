@@ -161,6 +161,22 @@ export function validateTaskDefinition(input: TaskDefinition): TaskDefinition {
   return definition;
 }
 
+/**
+ * occurrence 的完整次序：计划时间升序，同一时间按 jobRunId 的码元升序。计划时间已校验为规范时间串，
+ * 码元次序即时间次序。不用 localeCompare：它随宿主区域变化（如立陶宛语把 Y 排在 I 与 J 之间），
+ * 不同设备会排出不同次序；持久次序索引也只能按码元编码。
+ */
+export function compareJobOccurrences(
+  left: { readonly scheduledFor: string; readonly jobRunId: string },
+  right: { readonly scheduledFor: string; readonly jobRunId: string },
+): number {
+  return compareCodeUnits(left.scheduledFor, right.scheduledFor) || compareCodeUnits(left.jobRunId, right.jobRunId);
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export function validateJobOccurrence(input: JobOccurrence): JobOccurrence {
   const occurrence = snapshot(input) as JobOccurrence;
   assertExactKeys(

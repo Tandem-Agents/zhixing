@@ -85,7 +85,7 @@ export function decideScheduleCapabilityGap(input: {
 export function decideScheduleCapabilityGapClosure(input: {
   readonly taskId: string;
   readonly events: readonly { readonly kind: "assigned" | "terminal"; readonly jobRunId: string }[];
-  readonly gaps: ReadonlyMap<string, ScheduleCapabilityGapState>;
+  readonly gaps: Pick<ReadonlyMap<string, ScheduleCapabilityGapState>, "get">;
   readonly at: string;
 }) {
   const jobRunId = input.events[0]?.jobRunId;

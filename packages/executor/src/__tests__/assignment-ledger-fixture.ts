@@ -398,6 +398,7 @@ export async function createUnassignedHarness(
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
     clock?: () => string;
     monotonicClock?: () => number;
+    assignmentRecordV2Writes?: boolean;
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
@@ -484,6 +485,7 @@ export async function createUnassignedHarness(
     clock,
     monotonicClock: options.monotonicClock,
     maxPendingInteractions: options.maxPendingInteractions,
+    ...(options.assignmentRecordV2Writes === undefined ? {} : { assignmentRecordV2Writes: options.assignmentRecordV2Writes }),
     surfaceAbort: {
       authorize(assignmentId, input) {
         if (
@@ -538,6 +540,7 @@ export async function createHarness(
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
     clock?: () => string;
     monotonicClock?: () => number;
+    assignmentRecordV2Writes?: boolean;
   } = {},
 ) {
   const harness = await createUnassignedHarness(options);

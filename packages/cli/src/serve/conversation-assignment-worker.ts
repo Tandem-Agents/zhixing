@@ -617,6 +617,9 @@ export class ConversationAssignmentWorker {
             throw new Error("Ticket cancellation proof is not yet available");
           }
           await owner.submitCancelProof(envelope.assignmentId, proof, context);
+          // 成功返回即 owner 已耐久处理这份证明：退休本地重提义务，此后冷启动不再选中它。
+          // 落盘失败时整段按退避重做：重提同一证明由 owner 按耐久重放幂等处理
+          await this.options.ledger.markTicketCancellationProofOwnerAccepted(envelope.assignmentId);
         },
         this.#abort.signal,
       );

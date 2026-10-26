@@ -7,7 +7,7 @@ import { dataPlaneTicketDigest } from "@zhixing/core/protocol";
 export function hasOwnerIssuedAbortTicketProof(input: {
   readonly assignmentId: string;
   readonly ticketIds: ReadonlySet<string>;
-  readonly ticketsById: ReadonlyMap<string, DataPlaneTicket>;
+  readonly ticketsById: Pick<ReadonlyMap<string, DataPlaneTicket>, "get">;
   readonly proof: Extract<CancelProofBody, { cause: "abort-ticket" }>;
 }): boolean {
   return [...input.ticketIds].some((ticketId) => {
@@ -25,7 +25,7 @@ export function hasOwnerIssuedAbortTicketProof(input: {
 export function abortTicketProofBindsOwnerHistory(input: {
   readonly assignmentId: string;
   readonly ticketIds: ReadonlySet<string>;
-  readonly ticketsById: ReadonlyMap<string, DataPlaneTicket>;
+  readonly ticketsById: Pick<ReadonlyMap<string, DataPlaneTicket>, "get">;
   readonly proof: Extract<CancelProofBody, { cause: "abort-ticket" }>;
   readonly legacy?: {
     authorize(authority: {

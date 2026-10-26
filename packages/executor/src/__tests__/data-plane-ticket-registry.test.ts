@@ -233,7 +233,7 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     await log.stopStorageMaintenance();
   });
 
-  it("skips historical expiry, binds the active owner, and fails closed on rollback", async () => {
+  it("skips historical expiry, binds the active owner, and keeps the log time frontier across a wall-clock rollback", async () => {
     const root = await createTempDir("data-plane-ticket-registry-lifecycle");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
     let now = "2026-07-23T00:10:00.000Z";
@@ -324,6 +324,7 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     );
     await expect(registry.accept(foreign)).rejects.toThrow(/active assignment owner/);
 
+    // 墙钟回拨到接纳之前再新开：有效时钟不早于日志时间前沿（接纳时刻 00:10），未到期的票据与热用时一致可用
     now = "2026-07-23T00:09:30.000Z";
     const restarted = new DataPlaneTicketRegistry(options);
     await expect(
@@ -333,7 +334,17 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
         active.assignmentId,
         active.surfacePrincipal,
       ),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ ticket: active });
+    // 本地有效期按签发者 TTL 与偏差窗换算：00:10 接纳、签发后 1 分钟在偏差窗内，有效 5 分钟到 00:15，之后拒绝
+    now = "2026-07-23T00:15:30.000Z";
+    await expect(
+      restarted.authorizeSurface(
+        active.ticketId,
+        "observe",
+        active.assignmentId,
+        active.surfacePrincipal,
+      ),
+    ).rejects.toThrow(/retired/);
   });
 
   it("replays durable ticket identities before consulting the current assignment", async () => {
@@ -876,6 +887,12 @@ it('rejects a revocation completion whose durable retirement binds another assig
     assignments: { async dataPlaneBinding() { return { ref, executorId: 'executor-fixed', ownerKeyId: 'owner-fixed' }; } } };
   const registry = new DataPlaneTicketRegistry(options), ticket = createTicket('run-observe');
   await registry.accept(ticket); await registry.revoke({ assignmentId: ticket.assignmentId, ticketId: ticket.ticketId });
-  await log.append([{ stream: 'assignment:another-assignment:data-plane-tickets', body: { t: 'data-plane-ticket-revocation-completed', assignmentId: 'another-assignment', ticketId: ticket.ticketId, streamEpoch: null } }]);
-  await expect(new DataPlaneTicketRegistry(options).recover()).rejects.toThrow('no matching retirement');
+  const corrupt = { stream: 'assignment:another-assignment:data-plane-tickets', body: { t: 'data-plane-ticket-revocation-completed', assignmentId: 'another-assignment', ticketId: ticket.ticketId, streamEpoch: null } };
+  // 登记了票据投影的日志在写入时即拒绝这条历史
+  await expect(log.append([corrupt])).rejects.toThrow('no matching retirement');
+  // 未登记投影的写者留下的同样历史，在恢复时被拒绝
+  const replayLog = new FileAuthorityCommitLog(path.join(root, 'replay-authority'), artifacts, { clock });
+  for (const envelope of await log.readAll()) await replayLog.append(envelope.entries);
+  await replayLog.append([corrupt]);
+  await expect(new DataPlaneTicketRegistry({ ...options, log: replayLog }).recover()).rejects.toThrow('no matching retirement');
 });

@@ -33,6 +33,7 @@ const INTENT_PREFIX = "intent:";
 const LOCATOR_PREFIX = "locator:";
 const ORDER_PREFIX = "order:";
 const REQUEST_PREFIX = "request:";
+const PENDING_PREFIX = "pending:";
 
 interface StoredIntent {
   readonly intent: DeferredGlobalIntent;
@@ -357,6 +358,10 @@ async function reduceIntentProjection(
     if (!previous) {
       put(orderKey(intent.conversationId, firstLsn, intent.intentId), intent.intentId);
     }
+    // 仍待决的意图单列，按会话归组：启动复核只读这批，不遍历已决的意图历史
+    const pending = pendingKey(intent.conversationId, intent.intentId);
+    if (intent.status === "pending") put(pending, intent.intentId);
+    else mutations.push({ kind: "tombstone", key: pending });
   }
   return mutations;
 }
@@ -437,6 +442,26 @@ function orderKey(conversationId: string, lsn: number, intentId: string): string
   return `${orderPrefix(conversationId)}${String(lsn).padStart(16, "0")}:${intentId}`;
 }
 
+function pendingKey(conversationId: string, intentId: string): string {
+  return `${PENDING_PREFIX}${Buffer.from(conversationId, "utf8").toString("base64url")}:${intentId}`;
+}
+
+/** 仍有待决延期意图的会话，按会话编号的编码顺序；只读待决意图这一批二级键。 */
+export async function listPendingDeferredIntentConversations(log: AuthorityCommitLog): Promise<readonly string[]> {
+  const projection = registerDeferredIntentProjection(log);
+  const conversations = new Set<string>();
+  let continuation: string | undefined;
+  do {
+    const page = await projection.scan({ gte: PENDING_PREFIX, lt: `${PENDING_PREFIX}￿` }, 128, continuation);
+    for (const entry of page.entries) {
+      const encoded = entry.key.slice(PENDING_PREFIX.length, entry.key.indexOf(":", PENDING_PREFIX.length));
+      conversations.add(Buffer.from(encoded, "base64url").toString("utf8"));
+    }
+    continuation = page.continuation;
+  } while (continuation);
+  return [...conversations];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -489,7 +514,7 @@ export function registerDeferredIntentProjection(log: AuthorityCommitLog) {
   return log.durableProjection<IntentStreamRecord>({
       projectionId: DEFERRED_INTENT_PROJECTION_ID,
       inputs: { families: ["intent:"] },
-      reducerVersion: 1,
+      reducerVersion: 2,
       reduce: reduceIntentProjection,
     });
 }

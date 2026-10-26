@@ -14,7 +14,8 @@ import { DurableConversationInteractionObserver } from "../conversation-protocol
 import { FileMeshBootstrapStore } from "../mesh-bootstrap-store.js";
 import { registerConversationReadProjection } from "../../../../owner-kernel/src/conversation-read-index.js";
 import { stagingArea } from "../../../../owner-kernel/src/__tests__/imported-base-fixture.js";
-import { ConversationTransferTarget, selectConversationAuthorityRecords, loadCommittedConversationBase } from "@zhixing/owner-kernel/conversation-transfer";
+import { ConversationTransferTarget, selectConversationAuthorityRecords, loadCommittedConversationBase, listCommittedConversationIds,
+  listCommittedConversationTransferIds } from "@zhixing/owner-kernel/conversation-transfer";
 import { canonicalize, prepareConversationTransferManifest, createSignedSourceFreezeProof } from "@zhixing/core/protocol";
 import { createLocalOwnerAssemblyFixture, fixtureLocalOwnerRuntime } from "./local-owner-assembly-fixture.js";
 import { TEST_RUNTIME_AUTHORITY_FACTS, setupAuthorityRuntime, createProtocol, registerActiveConversation, expectSettled, MemorySecretStore, worksceneContinuationHarness } from "./conversation-protocol-runtime-fixture.js";
@@ -158,6 +159,8 @@ it.each(['current', 'legacy'] as const)('continues a truly metered local convers
 
   console.log('METERED_ADOPTION_PHASE', format, 'target restart');
   const authority = await setupAuthorityRuntime({ zhixingHome: f.home, secretStore: f.secretStore });
+  // 与正式启动相同：服务就绪前准备执行端日志已登记的投影（本机票据索引在这里首次建立）
+  await authority.executorLog.prepareProjections();
   let manager!: ConversationManager;
   const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
   const factory: RuntimeFactory = { create: async id => ({ ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: id, run, abort: () => false, async dispose() {} }) };
@@ -165,8 +168,18 @@ it.each(['current', 'legacy'] as const)('continues a truly metered local convers
     appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: 'owner-log', appended: true }) });
   onTestFinished(async () => { await protocol.stopRecoveryLoop(); await manager.disposeAll(); });
   console.log('METERED_ADOPTION_PHASE', format, 'target base');
-  const restored = await loadCommittedConversationBase(authority.authorityLog, authority.artifacts, authority.verifier, transferId);
-  await protocol.installCommittedConversationTransfer(restored);
+  // 与 Anchor 装配相同：已提交收编按会话就地装入，重启时不预装
+  const loads: string[] = [];
+  protocol.bindCommittedConversationTransfers({
+    committedFor: id => listCommittedConversationTransferIds(authority.authorityLog, authority.verifier, id),
+    conversations: () => listCommittedConversationIds(authority.authorityLog, authority.verifier),
+    load: async id => { loads.push(id); return loadCommittedConversationBase(authority.authorityLog, authority.artifacts, authority.verifier, id); },
+  });
+  expect(loads).toEqual([]);
+  expect(await protocol.sessionExists(conversationId)).toBe(true);
+  expect(await protocol.sessionExists(conversationId)).toBe(true);
+  expect(loads).toEqual([transferId]);
+  expect(await protocol.listSessions()).toContain(conversationId);
   const asset = await authority.artifacts.put(Buffer.from('target upload'));
   const grant = { kind: 'asset-upload' as const, scope: { domain: 'conversation' as const, conversationId, ownerEpoch: 2 },
     surfacePrincipal: 'surface:local:first-party', requestId: 'adopted-surface-upload', assets: [asset],
@@ -194,6 +207,16 @@ it.each(['current', 'legacy'] as const)('continues a truly metered local convers
   expect(tail.records).toHaveLength(2);
   const after = (await authority.executorLog.readAll()).flatMap(c => c.entries).filter(e => e.stream === 'governor' && (e.body as { t?: string }).t === 'consume');
   expect(after).toHaveLength(2);
+
+  // 来源证据缺失时，首次触及按已提交缺证隔离：依赖缺失事实的读取被拒绝，不回退代际
+  const isolated = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+  onTestFinished(() => isolated.stopRecoveryLoop());
+  isolated.bindCommittedConversationTransfers({
+    committedFor: id => listCommittedConversationTransferIds(authority.authorityLog, authority.verifier, id),
+    conversations: () => listCommittedConversationIds(authority.authorityLog, authority.verifier),
+    load: async () => { throw new TypeError('Conversation source evidence is missing'); },
+  });
+  await expect(isolated.sessionState.readSessionMeta(conversationId, context)).rejects.toThrow('source evidence is missing');
 }, 120_000);
 
 it.each([{kind:'single',fault:'none'},{kind:'single',fault:'pressure'},{kind:'batch',fault:'permanent'}] as const)('fences page-two $kind cancellation with $fault while another conversation progresses', async ({kind,fault}) => {

@@ -1,6 +1,16 @@
 import { assertAssignmentUsageEvidence, assertAssignmentTerminalEvidence } from "./conversation-resource-witness.js";
 import { verifyProtocolStep } from "@zhixing/core/protocol";
-import { projectionCheckpointKey } from "@zhixing/core/authority";
+import {
+  GovernorStateRequired,
+  ResourceGovernorIndexStore,
+  consumedUsageBlock,
+  governorRetentionCutoff,
+  liveGovernorReservations,
+  readCapabilityActivation,
+  registerResourceCapabilityActivations,
+  type GovernorDecision,
+  type GovernorSession,
+} from "@zhixing/core/authority";
 import type {
   AdmissionClass,
   AssignmentReservationRequest,
@@ -25,14 +35,10 @@ import type {
   UsageReport,
 } from "@zhixing/core/contracts";
 import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
-import type {
-  AuthorityCommitLog,
-  ProjectionCursor,
-} from "@zhixing/core/authority";
+import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   applyGovernorRecord,
-  applyGovernorRecordAt,
   acceptedRemoteIntervalRemainingMs,
   assertAcceptedResourceCapabilityBinding,
   assertActivatedResourceCapability,
@@ -43,10 +49,9 @@ import {
   assertSystemJobReservationRequest,
   canonicalize,
   cloneGovernorProjection,
-  compactGovernorProjection,
   conservativeUsageConsumptionRecords,
-  GOVERNOR_TERMINAL_RETENTION_MS,
-  emptyGovernorProjection,
+  hasActiveRootForWorkload,
+  RESOURCE_LEASE_MAX_TTL_MS,
   isBusinessOwnedResourceReservation,
   protocolDigest,
   queuedTerminalDequeueRecord,
@@ -67,11 +72,8 @@ import {
 import type { SystemJobResourceCoordinator } from "./job-assignment.js";
 
 const GOVERNOR_STREAM = "governor";
-// 资源治理投影在进程内本就以“较早截止点压缩后的状态 + 后续尾部”续算；持久化检查点
-// 与该缓存等价，只让冷启动不必从头回放全部治理记录。推进足够多时后台刷新。
-const GOVERNOR_CHECKPOINT_INTERVAL_LSN = 256;
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
-const MAX_LEASE_TTL_MS = 24 * 60 * 60_000;
+const MAX_LEASE_TTL_MS = RESOURCE_LEASE_MAX_TTL_MS;
 const DEFAULT_CANDIDATE_TTL_MS = 5_000;
 const MAX_CANDIDATE_TTL_MS = 60_000;
 
@@ -151,7 +153,6 @@ export class AnchorResourceGovernor
     AssignmentResourceCoordinator,
     SystemJobResourceCoordinator
 {
-  readonly #log: AuthorityCommitLog;
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #guard: ResourceAuthorityGuard;
@@ -175,12 +176,13 @@ export class AnchorResourceGovernor
     readonly deadline: number;
     readonly rootReservationId: string;
   }>();
-  #projection: { readonly state: GovernorProjection; readonly cursor: ProjectionCursor } | undefined;
+  /** 按键持久投影；每次协调或调控操作开始时取新会话，只装入所需的键。 */
+  readonly #store: ResourceGovernorIndexStore;
+  readonly #activations;
+  #session: GovernorSession | undefined;
+  #retention: Promise<void> | undefined;
 
   constructor(options: AnchorResourceGovernorOptions) {
-    this.#log = options.log;
-    // 正式停止前补存检查点：重启后只续算停止前最后一段尾部。
-    options.log.registerCheckpointFlush?.(() => this.#checkpoint(true));
     this.#signer = options.signer;
     this.#verifier = options.verifier;
     this.#guard = options.guard;
@@ -206,16 +208,26 @@ export class AnchorResourceGovernor
     const shared = sharedGovernorOperations.get(options.log) ?? new SerialTaskQueue();
     sharedGovernorOperations.set(options.log, shared);
     this.#operations = shared;
+    this.#store = new ResourceGovernorIndexStore(options.log, options.verifier, MAX_LEASE_TTL_MS, this.#clock);
+    this.#activations = registerResourceCapabilityActivations(options.log);
   }
 
   async coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T> {
     return this.#operations.run(async () => {
-      await this.#synchronizeUnlocked();
+      await this.#refreshSession();
       try {
-        return await operation();
+        // 协调期内的同步判断缺键时抛出待装入：装入本会话后重做（日志层已在锁外重做的不会到这里）
+        for (let rounds = 0; ; rounds++) {
+          try {
+            return await operation();
+          } catch (error) {
+            if (!(error instanceof GovernorStateRequired) || !error.prepareOutside || rounds >= 64) throw error;
+            await error.prepareOutside();
+          }
+        }
       } finally {
-        if (!options?.readOnly) await this.#synchronizeUnlocked();
-        this.#pruneCandidates();
+        if (!options?.readOnly) await this.#refreshSession();
+        await this.#pruneCandidatesResolved();
       }
     });
   }
@@ -437,30 +449,31 @@ export class AnchorResourceGovernor
     workload: ImmediateRootWorkload,
   ): Promise<ImmediateRootReservationInspection> {
     assertResourceAdmissionRequest(workload);
-    const state = await this.#state();
-    const reservationId = immediateReservationId(workload);
-    const reservation = state.reservations.get(reservationId);
-    if (reservation) {
-      if (
-        reservation.depth !== 0 ||
-        reservation.lease.workload.kind !== "control" ||
-        canonicalize(reservation.lease.workload) !== canonicalize(workload)
-      ) {
-        throw new TypeError("Immediate resource inspection found a conflicting root");
+    return this.#read((state): ImmediateRootReservationInspection => {
+      const reservationId = immediateReservationId(workload);
+      const reservation = state.reservations.get(reservationId);
+      if (reservation) {
+        if (
+          reservation.depth !== 0 ||
+          reservation.lease.workload.kind !== "control" ||
+          canonicalize(reservation.lease.workload) !== canonicalize(workload)
+        ) {
+          throw new TypeError("Immediate resource inspection found a conflicting root");
+        }
+        return {
+          kind: "reservation",
+          state: reservation.state,
+          lease: structuredClone(reservation.lease as ImmediateRootResourceLease),
+        };
       }
-      return {
-        kind: "reservation",
-        state: reservation.state,
-        lease: structuredClone(reservation.lease as ImmediateRootResourceLease),
-      };
-    }
-    if (state.queued.has(reservationId)) {
-      return { kind: "queued", reservationId };
-    }
-    const dequeued = state.dequeued.get(rootResourceWorkloadKey(workload));
-    return dequeued === undefined
-      ? { kind: "absent" }
-      : { kind: "dequeued", reason: dequeued };
+      if (state.queued.has(reservationId)) {
+        return { kind: "queued", reservationId };
+      }
+      const dequeued = state.dequeued.get(rootResourceWorkloadKey(workload));
+      return dequeued === undefined
+        ? { kind: "absent" }
+        : { kind: "dequeued", reason: dequeued };
+    });
   }
 
   async acquireChild(
@@ -670,8 +683,8 @@ export class AnchorResourceGovernor
 
   async reclaimExpired(): Promise<number> {
     canonicalTime(this.#clock(), "Anchor resource reclaim time");
-    return this.#transact<number>((state) => {
-      const expiring = [...state.reservations.values()]
+    const reclaimed = await this.#transact<number>((state) => {
+      const expiring = liveGovernorReservations(state)
         .filter((reservation) =>
           (reservation.state === "active" || reservation.state === "settled") &&
           !isBusinessOwnedResourceReservation(state, reservation) &&
@@ -699,6 +712,16 @@ export class AnchorResourceGovernor
         ? { kind: "return", value: 0 }
         : { kind: "append", entries, value: expiring.length };
     });
+    this.#maintainRetention();
+    return reclaimed;
+  }
+
+  /** 保留期外的终态行物理清理：一次至多一步、有界，不阻塞调用方；失败保留进度，下次续做。 */
+  #maintainRetention(): void {
+    if (this.#retention) return;
+    this.#retention = this.#store.maintainRetention()
+      .then(() => undefined, () => undefined)
+      .finally(() => { this.#retention = undefined; });
   }
 
   async submitUsageReport(
@@ -835,8 +858,7 @@ export class AnchorResourceGovernor
       readonly upToUsageSeq: number;
     };
   }): void{
-    const state = this.#projection?.state;
-    if (!state) throw new Error("Resource governor projection is unavailable");
+    const state = this.#currentState();
     const watermark = (state.nextUsageSeqByRoot.get(input.reservationId) ?? 1) - 1;
     assertAssignmentUsageEvidence({ root: state.reservations.get(input.reservationId), watermark,
       block: () => usageReportEntriesAtWatermark(state, input.reservationId, watermark),
@@ -873,7 +895,7 @@ export class AnchorResourceGovernor
       budget: { maxCalls: 1 },
     }, origin, ctx);
     const records = [governorRecord({ t: "reserve", lease })];
-    this.#preflight(records);
+    await this.#preflightResolved(records);
     return { lease, records };
   }
 
@@ -887,16 +909,17 @@ export class AnchorResourceGovernor
         readonly records: readonly LogicalRecord<unknown>[];
       }
   > {
-    const state = await this.#state();
-    const current = state.reservations.get(input.fence.reservationId);
-    if (!current) throw new TypeError("System job fence has no resource reservation");
-    const lease = current.lease as SystemJobResourceLease;
-    if (current.state === "active" && !this.#leaseIsExpired(state, lease)) {
-      return { kind: "reuse", lease };
-    }
-    if (current.state !== "active") {
-      throw new TypeError("Running system job has a terminal resource reservation");
-    }
+    const { lease, reuse } = await this.#read((state) => {
+      const current = state.reservations.get(input.fence.reservationId);
+      if (!current) throw new TypeError("System job fence has no resource reservation");
+      const lease = current.lease as SystemJobResourceLease;
+      if (current.state === "active" && !this.#leaseIsExpired(state, lease)) return { lease, reuse: true };
+      if (current.state !== "active") {
+        throw new TypeError("Running system job has a terminal resource reservation");
+      }
+      return { lease, reuse: false };
+    });
+    if (reuse) return { kind: "reuse", lease };
     const nextAttempt = input.fence.attempt + 1;
     const prepared = await this.prepare({
       taskId: input.fence.taskId,
@@ -912,7 +935,7 @@ export class AnchorResourceGovernor
       governorRecord({ t: "reclaim", reservationId: lease.reservationId }),
       ...preparedRecords,
     ];
-    this.#preflight(records);
+    await this.#preflightResolved(records);
     return {
       kind: "replace",
       lease: prepared.lease,
@@ -1024,14 +1047,19 @@ export class AnchorResourceGovernor
     );
   }
 
+  /** 整份逻辑状态（诊断与用例用）。 */
   async snapshot(): Promise<GovernorProjection> {
-    return cloneGovernorProjection(await this.#state());
+    return this.#store.snapshot();
   }
 
-  #preflight(entries: readonly LogicalRecord<GovernorRecord>[]): void {
-    const current = this.#projection?.state;
-    if (!current) throw new Error("Resource governor projection is unavailable");
-    let candidate = cloneGovernorProjection(current);
+  /** 异步入口的预检：缺键在锁外装入后重做。 */
+  async #preflightResolved(entries: readonly LogicalRecord<GovernorRecord>[]): Promise<void> {
+    this.#session ??= await this.#store.session();
+    await this.#session.resolve((state) => this.#preflight(entries, state));
+  }
+
+  #preflight(entries: readonly LogicalRecord<GovernorRecord>[], state: GovernorProjection = this.#currentState()): void {
+    let candidate = cloneGovernorProjection(state);
     for (const entry of entries) {
       if (entry.stream !== GOVERNOR_STREAM) {
         throw new TypeError("Anchor governor transaction contains a foreign stream");
@@ -1114,26 +1142,35 @@ export class AnchorResourceGovernor
     create: () => Lease,
   ): Promise<Lease> {
     return this.#operations.run(async () => {
-      await this.#synchronizeUnlocked();
-      this.#pruneCandidates();
-      const state = this.#projection!.state;
-      const active = state.reservations.get(reservationId);
-      if (active) {
-        if (
-          active.depth !== 0 ||
-          active.state !== "active" ||
-          active.lease.admissionClass !== admissionClass ||
-          !matches(active.lease as RootResourceCandidate)
-        ) {
-          throw new TypeError("Resource candidate retry changed its frozen request");
+      await this.#refreshSession();
+      await this.#pruneCandidatesResolved();
+      const decision = await this.#session!.resolve((state) => {
+        const active = state.reservations.get(reservationId);
+        if (active) {
+          if (
+            active.depth !== 0 ||
+            active.state !== "active" ||
+            active.lease.admissionClass !== admissionClass ||
+            !matches(active.lease as RootResourceCandidate)
+          ) {
+            throw new TypeError("Resource candidate retry changed its frozen request");
+          }
+          return { kind: "active" as const, lease: active.lease as Lease };
         }
-        return active.lease as Lease;
-      }
-      if (state.queued.get(reservationId) !== admissionClass) {
-        throw new TypeError("Resource candidate is not durably queued");
-      }
-      const occupied = this.#candidates.get(admissionClass);
-      if (occupied) {
+        if (state.queued.get(reservationId) !== admissionClass) {
+          throw new TypeError("Resource candidate is not durably queued");
+        }
+        const occupied = this.#candidates.get(admissionClass);
+        if (occupied) return { kind: "occupied" as const, occupied };
+        return { kind: "select" as const, selected: selectFairReservation(
+          state,
+          new Set(this.#candidates.keys()),
+          new Set(this.#candidateWaiters.keys()),
+        ) };
+      });
+      if (decision.kind === "active") return decision.lease;
+      if (decision.kind === "occupied") {
+        const occupied = decision.occupied;
         if (occupied.lease.reservationId !== reservationId) {
           throw new ResourceAdmissionPendingError(reservationId);
         }
@@ -1142,11 +1179,7 @@ export class AnchorResourceGovernor
         }
         return occupied.lease as Lease;
       }
-      const selected = selectFairReservation(
-        state,
-        new Set(this.#candidates.keys()),
-        new Set(this.#candidateWaiters.keys()),
-      );
+      const selected = decision.selected;
       if (
         selected?.reservationId !== reservationId ||
         selected.admissionClass !== admissionClass
@@ -1191,9 +1224,8 @@ export class AnchorResourceGovernor
 
   #assertCurrentCandidate(
     lease: ResourceLease,
-    state = this.#projection?.state,
+    state: GovernorProjection = this.#currentState(),
   ): void {
-    if (!state) throw new Error("Resource governor projection is unavailable");
     const previous = this.#candidates.get(lease.admissionClass);
     this.#pruneCandidates();
     if (state.queued.get(lease.reservationId) !== lease.admissionClass) {
@@ -1214,31 +1246,38 @@ export class AnchorResourceGovernor
     }
   }
 
-  #pruneCandidates(): void {
-    const state = this.#projection?.state;
+  /** 按会话状态精确清理内存里的候选与期限；判定所需的键在锁外装入。 */
+  async #pruneCandidatesResolved(): Promise<void> {
+    const session = this.#session;
+    if (!session) return;
+    await session.resolve((state) => this.#pruneCandidates(state));
+  }
+
+  #pruneCandidates(resolved?: GovernorProjection): void {
+    const state = this.#session?.state;
     const now = this.#monotonicClock();
+    // 给了已装入的状态就按它精确判定（缺键抛出待装入）；否则只按已装入的键判定
+    const queuedClass = (reservationId: string) => resolved
+      ? { known: true, value: resolved.queued.get(reservationId) }
+      : state?.peekQueued(reservationId);
     for (const [admissionClass, candidate] of this.#candidates) {
-      if (
-        candidate.expiresAt <= now ||
-        state?.queued.get(candidate.lease.reservationId) !== admissionClass
-      ) {
+      const queued = queuedClass(candidate.lease.reservationId);
+      if (candidate.expiresAt <= now || (queued?.known === true && queued.value !== admissionClass)) {
         this.#candidates.delete(admissionClass);
       }
     }
+    const ended = (reservationId: string) => {
+      const reservation = resolved
+        ? { known: true, value: resolved.reservations.get(reservationId) }
+        : state?.peekReservation(reservationId);
+      return reservation?.known === true &&
+        (!reservation.value || (reservation.value.state !== "active" && reservation.value.state !== "settled"));
+    };
     for (const reservationId of this.#leaseDeadlines.keys()) {
-      const reservation = state?.reservations.get(reservationId);
-      if (
-        !reservation ||
-        (reservation.state !== "active" && reservation.state !== "settled")
-      ) {
-        this.#leaseDeadlines.delete(reservationId);
-      }
+      if (ended(reservationId)) this.#leaseDeadlines.delete(reservationId);
     }
     for (const [capId, deadline] of this.#capabilityDeadlines) {
-      const root = state?.reservations.get(deadline.rootReservationId);
-      if (!root || (root.state !== "active" && root.state !== "settled")) {
-        this.#capabilityDeadlines.delete(capId);
-      }
+      if (ended(deadline.rootReservationId)) this.#capabilityDeadlines.delete(capId);
     }
   }
 
@@ -1248,15 +1287,7 @@ export class AnchorResourceGovernor
   ): Promise<void> {
     await this.#transact<void>((state) => {
       const workloadKey = rootResourceWorkloadKey(workload);
-      if (
-        [...state.reservations.values()].some(
-          (reservation) =>
-            reservation.depth === 0 &&
-            (reservation.state === "active" || reservation.state === "settled") &&
-            rootResourceWorkloadKey(reservation.lease.workload as RootResourceWorkload) ===
-              workloadKey,
-        )
-      ) {
+      if (hasActiveRootForWorkload(state, workloadKey)) {
         return { kind: "return", value: undefined };
       }
       const existing = state.dequeued.get(workloadKey);
@@ -1300,9 +1331,21 @@ export class AnchorResourceGovernor
     } as ResourceLease;
   }
 
-  async #state(): Promise<GovernorProjection> {
-    await this.#synchronizeUnlocked();
-    return this.#projection!.state;
+  /** 取新会话后在锁外做只读判断，缺什么装什么。 */
+  async #read<Value>(operation: (state: GovernorProjection) => Value): Promise<Value> {
+    await this.#refreshSession();
+    return this.#session!.resolve(operation);
+  }
+
+  /** 同步判断所用的当前会话状态；缺键时抛出可在锁外准备的待装入。 */
+  #currentState(): GovernorProjection {
+    this.#session ??= this.#store.sessionAt(governorRetentionCutoff(this.#clock()));
+    return this.#session.state;
+  }
+
+  /** 没有新调控信封时沿用已装入的会话，否则取新会话。 */
+  async #refreshSession(): Promise<void> {
+    this.#session = await this.#store.refresh(this.#session);
   }
 
   async #withAuthorizedResourceCall<Value>(
@@ -1325,12 +1368,13 @@ export class AnchorResourceGovernor
         },
   ): Promise<Value> {
     return this.#operations.run(async () => {
-      await this.#synchronizeUnlocked();
-      const state = this.#projection?.state;
-      if (!state) throw new Error("Anchor resource projection is unavailable");
+      await this.#refreshSession();
+      const session = this.#session!;
       this.#guard.assert(ctx.principal, method);
-      const reservation = state.reservations.get(lease.reservationId);
-      const root = reservation && state.reservations.get(reservation.rootReservationId);
+      const { reservation, root } = await session.resolve((state) => {
+        const reservation = state.reservations.get(lease.reservationId);
+        return { reservation, root: reservation && state.reservations.get(reservation.rootReservationId) };
+      });
       const assignmentRoot = root &&
         "activation" in root.lease &&
         root.lease.activation.kind === "assignment";
@@ -1360,9 +1404,9 @@ export class AnchorResourceGovernor
           verifier: this.#verifier,
         })));
       }
-      const preview = decide(state);
+      const preview = await session.resolve(decide);
       if (preview.kind === "return") return preview.value;
-      this.#assertLeaseDeadline(state, lease, ctx.deadlineAt);
+      await session.resolve((state) => this.#assertLeaseDeadline(state, lease, ctx.deadlineAt));
       if (ctx.principal.kind === "assignment") {
         if (!root || !activation) {
           throw new Error("Assignment resource root disappeared during authorization");
@@ -1403,38 +1447,17 @@ export class AnchorResourceGovernor
     if (!stream) {
       throw new TypeError("Assignment resource root has an invalid authority scope");
     }
-    const records = await this.#log.readStream<unknown>(stream);
-    let assignedCapIds: readonly string[] | undefined;
-    let acceptedAt: string | undefined;
-    const revoked = new Set<string>();
-    for (const record of records) {
-      const body = asRecord(record.body);
-      if (
-        body?.t === "assigned" &&
-        body.assignmentId === assignmentId &&
-        body.executorId === lease.audience.executorId &&
-        asRecord(body.reservation)?.reservationId === lease.reservationId &&
-        Array.isArray(body.capIds) &&
-        body.capIds.every((capId) => typeof capId === "string")
-      ) {
-        assignedCapIds = body.capIds as string[];
-        acceptedAt = record.at;
-      }
-      if (
-        body?.t === "capability-revoked" &&
-        body.assignmentId === assignmentId &&
-        typeof body.capId === "string"
-      ) {
-        revoked.add(body.capId);
-      }
-    }
-    if (!assignedCapIds || !acceptedAt) {
+    // 按 (流, assignment, 执行方, 预留) 精确读取最后一次授予与其后的撤销，不读整条会话/作业流
+    const activation = await readCapabilityActivation(this.#activations, {
+      stream, assignmentId, executorId: lease.audience.executorId!, reservationId: lease.reservationId,
+    });
+    if (!activation) {
       throw new TypeError("Assignment resource capability has no durable assigned activation");
     }
     return {
-      acceptedCapIds: new Set(assignedCapIds),
-      activeCapIds: new Set(assignedCapIds.filter((capId) => !revoked.has(capId))),
-      acceptedAt,
+      acceptedCapIds: new Set(activation.capIds),
+      activeCapIds: new Set(activation.capIds.filter((capId) => !activation.revoked.has(capId))),
+      acceptedAt: activation.acceptedAt,
     };
   }
 
@@ -1529,168 +1552,28 @@ export class AnchorResourceGovernor
   #leaseIsExpired(state: GovernorProjection, lease: ResourceLease): boolean {
     try {
       this.#rememberLeaseDeadline(state, lease);
-    } catch {
+    } catch (error) {
+      // 缺键不是“已过期”：交给调用方装入后重做
+      if (error instanceof GovernorStateRequired) throw error;
       return true;
     }
     return this.#monotonicClock() >= this.#leaseDeadlines.get(lease.reservationId)!.deadline;
   }
 
-  #checkpointedThrough = 0;
-
-  /** 本进程首次需要投影时，先从与已核验前缀一致的检查点恢复，只回放其后的记录。 */
-  async #restoreCheckpoint(): Promise<void> {
-    if (this.#projection || !this.#log.loadProjectionCheckpoint) return;
-    const restored = await this.#log.loadProjectionCheckpoint<GovernorProjection>(this.#checkpointKey());
-    if (!restored || this.#projection) return;
-    this.#projection = { state: restored.state, cursor: restored.cursor };
-    this.#checkpointedThrough = restored.cursor.lsn;
-  }
-
-  /** 键带归约版本与归约函数指纹：归约或保留规则改变后旧检查点不再被采用，只多回放一次。 */
-  #checkpointKey(): string {
-    return projectionCheckpointKey("anchor-resource-governor-projection", 1, this.#applyRetainedRecord, this.#compactProjection);
-  }
-
-  #checkpoint(force = false): Promise<void> | undefined {
-    const current = this.#projection;
-    if (!current || !this.#log.saveProjectionCheckpoint ||
-        current.cursor.lsn - this.#checkpointedThrough < (force ? 1 : GOVERNOR_CHECKPOINT_INTERVAL_LSN)) return undefined;
-    this.#checkpointedThrough = current.cursor.lsn;
-    return this.#log.saveProjectionCheckpoint(this.#checkpointKey(), current.cursor, current.state);
-  }
-
-  async #synchronizeUnlocked(): Promise<void> {
-    await this.#restoreCheckpoint();
-    const cached = this.#projection;
-    const retentionCutoff = this.#retentionCutoff();
-    const initial = cached?.state ?? emptyGovernorProjection();
-    let retentionApplied = false;
-    const transaction = await this.#log.readProjection<GovernorProjection, unknown>(
-      initial,
-      async (state, record, envelope) => {
-        if (record.stream !== GOVERNOR_STREAM) return state;
-        const next = await this.#applyRetainedRecord(
-          state === cached?.state ? cloneGovernorProjection(state) : state,
-          record.body,
-          envelope.at,
-          retentionCutoff,
-          retentionApplied,
-        );
-        retentionApplied = true;
-        return next;
-      },
-      {
-        stream: GOVERNOR_STREAM,
-        createState: () => { retentionApplied = false; return cached?.state ?? emptyGovernorProjection(); },
-        ...(cached ? { cursor: cached.cursor } : {}),
-      },
-    );
-    this.#projection = {
-      state: this.#compactProjection(transaction.state),
-      cursor: transaction.cursor,
-    };
-    this.#checkpoint();
-  }
-
   async #transact<Value>(
-    decide: (
-      state: GovernorProjection,
-    ) =>
-      | { readonly kind: "return"; readonly value: Value }
-      | {
-          readonly kind: "append";
-          readonly entries: readonly LogicalRecord<GovernorRecord>[];
-          readonly value: Value;
-        },
+    decide: (state: GovernorProjection) => GovernorDecision<Value>,
   ): Promise<Value> {
     return this.#operations.run(() => this.#transactUnlocked(decide));
   }
 
+  /** 在按键持久投影事务里决定；追加的记录在同一事务里先按同一归约在工作集上验证。 */
   async #transactUnlocked<Value>(
-    decide: (
-      state: GovernorProjection,
-    ) =>
-      | { readonly kind: "return"; readonly value: Value }
-      | {
-          readonly kind: "append";
-          readonly entries: readonly LogicalRecord<GovernorRecord>[];
-          readonly value: Value;
-        },
+    decide: (state: GovernorProjection) => GovernorDecision<Value>,
   ): Promise<Value> {
-      await this.#restoreCheckpoint();
-      const cached = this.#projection;
-      const retentionCutoff = this.#retentionCutoff();
-      // 只在第一次写入前复制缓存基线：没有新记录、也不追加的事务不复制整份投影；日志内部
-      // 重试时从未改动的基线重新归约。
-      const initial = cached?.state ?? emptyGovernorProjection();
-      let retentionApplied = false;
-      const transaction = await this.#log.transactProjection<GovernorProjection, unknown, Value>(
-        initial,
-        async (state, record, envelope) => {
-          if (record.stream !== GOVERNOR_STREAM) return state;
-          const next = await this.#applyRetainedRecord(
-            state === cached?.state ? cloneGovernorProjection(state) : state,
-            record.body,
-            envelope.at,
-            retentionCutoff,
-            retentionApplied,
-          );
-          retentionApplied = true;
-          return next;
-        },
-        (state) => {
-          const decision = decide(state);
-          if (decision.kind === "return") return decision;
-          let candidate = cloneGovernorProjection(state);
-          for (const entry of decision.entries) {
-            if (entry.stream !== GOVERNOR_STREAM) {
-              throw new TypeError("Anchor governor transaction contains a foreign stream");
-            }
-            candidate = applyGovernorRecord(candidate, entry.body, this.#verifier);
-          }
-          return decision;
-        },
-        {
-          stream: GOVERNOR_STREAM,
-          createState: () => { retentionApplied = false; return cached?.state ?? emptyGovernorProjection(); },
-          ...(cached ? { cursor: cached.cursor } : {}),
-        },
-      );
-      this.#projection = {
-        state: this.#compactProjection(transaction.state),
-        cursor: transaction.cursor,
-      };
-      this.#checkpoint();
-      this.#pruneCandidates();
-      return transaction.value;
-  }
-
-  #compactProjection(state: GovernorProjection): GovernorProjection {
-    return compactGovernorProjection(state, this.#retentionCutoff());
-  }
-
-  async #applyRetainedRecord(
-    state: GovernorProjection,
-    record: unknown,
-    envelopeAt: string,
-    retentionCutoff: string,
-    retentionApplied: boolean,
-  ): Promise<GovernorProjection> {
-    const next = (await verifyProtocolStep(() => applyGovernorRecordAt(
-      state, record, envelopeAt, MAX_LEASE_TTL_MS, this.#verifier,
-    )));
-    // The cutoff is frozen for this replay. Once pruned, only these records
-    // can introduce another terminal timestamp. Every record is still fully
-    // validated and reduced; the first record and final projection always prune.
-    const kind = (record as GovernorRecord).t;
-    return !retentionApplied || kind === "release" || kind === "reclaim" || kind === "dequeue"
-      ? compactGovernorProjection(next, retentionCutoff)
-      : next;
-  }
-
-  #retentionCutoff(): string {
-    const now = Date.parse(canonicalTime(this.#clock(), "Resource retention clock"));
-    return new Date(now - GOVERNOR_TERMINAL_RETENTION_MS).toISOString();
+    this.#session ??= await this.#store.session();
+    const value = await this.#store.transact(this.#session, decide);
+    await this.#pruneCandidatesResolved();
+    return value;
   }
 }
 
@@ -1835,14 +1718,8 @@ function assertUsageReportWorkload(
 
 function usageReportEntriesAtWatermark(state: GovernorProjection, reservationId: string, watermark: number): UsageReport["usages"] {
   const fromUsageSeq = Math.floor((watermark - 1) / 256) * 256 + 1;
-  const usages = [...state.usages.entries()]
-    .filter(
-      ([, usage]) =>
-        usage.rootReservationId === reservationId &&
-        usage.usageSeq >= fromUsageSeq &&
-        usage.usageSeq <= watermark,
-    )
-    .sort((left, right) => left[1].usageSeq - right[1].usageSeq)
+  // 至多 256 条的一段，经按根与序号排序的索引读取
+  const usages = consumedUsageBlock(state, reservationId, fromUsageSeq, watermark)
     .map(([usageId, entry]) => ({
       usageSeq: entry.usageSeq,
       reservationId: entry.reservationId,
@@ -1852,12 +1729,6 @@ function usageReportEntriesAtWatermark(state: GovernorProjection, reservationId:
       ...(entry.usage.costMinor === 0 ? {} : { costMinor: entry.usage.costMinor }),
     }));
   return usages;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 function childReservationId(

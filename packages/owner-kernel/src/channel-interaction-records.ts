@@ -149,13 +149,66 @@ export function advanceChannelInteractionJournal(
   input: unknown,
   verifier: ProtocolSignatureVerifier,
 ): ChannelInteractionJournalState {
-  const record = validateRecord(input, verifier, current.domain);
-  const preparedByChallenge = new Map(current.preparedByChallenge);
-  const challengeByInteraction = new Map(current.challengeByInteraction);
-  const deliveredByChallenge = new Map(current.deliveredByChallenge);
-  const closedByChallenge = new Map(current.closedByChallenge);
-  const grantByChallenge = new Map(current.grantByChallenge);
-  const cursorByAssignment = new Map(current.cursorByAssignment);
+  const next = {
+    domain: current.domain,
+    preparedByChallenge: new Map(current.preparedByChallenge),
+    challengeByInteraction: new Map(current.challengeByInteraction),
+    deliveredByChallenge: new Map(current.deliveredByChallenge),
+    closedByChallenge: new Map(current.closedByChallenge),
+    grantByChallenge: new Map(current.grantByChallenge),
+    cursorByAssignment: new Map(current.cursorByAssignment),
+  };
+  applyChannelInteractionRecord(next, input, verifier);
+  return next;
+}
+
+/** 交互记录可写入的映射：只用到按键读写，按键落盘的工作集与内存 Map 都满足。 */
+interface ChannelInteractionTable<K, V> {
+  get(key: K): V | undefined;
+  has(key: K): boolean;
+  set(key: K, value: V): unknown;
+}
+
+export interface MutableChannelInteractionState {
+  readonly domain: "conversation" | "job";
+  readonly preparedByChallenge: ChannelInteractionTable<
+    string,
+    ConversationChannelChallengePreparedRecord | JobChannelChallengePreparedRecord
+  >;
+  readonly challengeByInteraction: ChannelInteractionTable<string, string>;
+  readonly deliveredByChallenge: ChannelInteractionTable<
+    string,
+    Extract<ChannelChallengeLifecycleRecord, { t: "channel-challenge-delivered" }>
+  >;
+  readonly closedByChallenge: ChannelInteractionTable<
+    string,
+    Extract<ChannelChallengeLifecycleRecord, { t: "channel-challenge-closed" }>
+  >;
+  readonly grantByChallenge: ChannelInteractionTable<
+    string,
+    Extract<ChannelInteractionRelayRecord, { t: "channel-challenge-granted" }>
+  >;
+  readonly cursorByAssignment: ChannelInteractionTable<
+    string,
+    Extract<ChannelInteractionRelayRecord, { t: "channel-relay-cursor" }>
+  >;
+}
+
+/** 校验一条交互记录并原地写入；与 advanceChannelInteractionJournal 同一份规则。 */
+export function applyChannelInteractionRecord(
+  target: MutableChannelInteractionState,
+  input: unknown,
+  verifier: ProtocolSignatureVerifier,
+): void {
+  const record = validateRecord(input, verifier, target.domain);
+  const {
+    preparedByChallenge,
+    challengeByInteraction,
+    deliveredByChallenge,
+    closedByChallenge,
+    grantByChallenge,
+    cursorByAssignment,
+  } = target;
 
   switch (record.t) {
     case "channel-challenge-prepared": {
@@ -200,7 +253,7 @@ export function advanceChannelInteractionJournal(
       break;
     }
     case "channel-relay-cursor": {
-      if (current.domain !== "job") {
+      if (target.domain !== "job") {
         throw new TypeError("Conversation journal cannot contain relay cursor");
       }
       const previous = cursorByAssignment.get(record.assignmentId);
@@ -220,7 +273,7 @@ export function advanceChannelInteractionJournal(
       break;
     }
     case "channel-challenge-granted": {
-      if (current.domain !== "job") {
+      if (target.domain !== "job") {
         throw new TypeError("Conversation journal cannot contain channel grant");
       }
       const prepared = requirePrepared(
@@ -252,16 +305,6 @@ export function advanceChannelInteractionJournal(
       break;
     }
   }
-
-  return {
-    domain: current.domain,
-    preparedByChallenge,
-    challengeByInteraction,
-    deliveredByChallenge,
-    closedByChallenge,
-    grantByChallenge,
-    cursorByAssignment,
-  };
 }
 
 function validateRecord(
@@ -408,10 +451,10 @@ function validateRecord(
 }
 
 function requirePrepared(
-  prepared: ReadonlyMap<
+  prepared: Pick<ChannelInteractionTable<
     string,
     ConversationChannelChallengePreparedRecord | JobChannelChallengePreparedRecord
-  >,
+  >, "get">,
   challengeId: string,
 ):
   | ConversationChannelChallengePreparedRecord

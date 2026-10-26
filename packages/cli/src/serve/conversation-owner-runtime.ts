@@ -14,9 +14,9 @@ import type {
 } from "@zhixing/core/authority";
 import type {
   ExecutorCapabilityDirectory,
-  GovernorProjection,
   ProtocolSignatureVerifier,
   ProtocolSigner,
+  ResourceReservationProjection,
 } from "@zhixing/core/protocol";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
@@ -60,7 +60,8 @@ interface ConversationResourceReclaimer {
 }
 
 interface ConversationResourceReservationReader {
-  snapshot(): Promise<GovernorProjection>;
+  /** 仍为 active 的预留，经活跃目录定位；读量只随当前占用，不随保留期内的历史。 */
+  activeReservations(): Promise<readonly ResourceReservationProjection[]>;
 }
 
 /** Correctness adapter for owner recovery; consumers never receive a governor snapshot. */
@@ -78,19 +79,18 @@ export function createConversationResourceRecoveryPort(options: {
     },
     activeConversationReservations: async () => {
       if (!options.acceptedWork) return [];
-      const projection = await options.acceptedWork.snapshot();
-      return [...projection.reservations.entries()]
-        .filter(([, reservation]) =>
+      return (await options.acceptedWork.activeReservations())
+        .filter((reservation) =>
           reservation.state === "active" &&
           reservation.lease.scopeBinding.kind === "conversation"
         )
-        .map(([reservationId, reservation]) => {
+        .map((reservation) => {
           const scope = reservation.lease.scopeBinding;
           if (scope.kind !== "conversation") {
             throw new Error("Conversation resource projection changed during filtering");
           }
           return Object.freeze({
-            reservationId,
+            reservationId: reservation.lease.reservationId,
             conversationId: scope.conversationId,
             ownerEpoch: scope.ownerEpoch,
             revision: protocolDigest("ActiveLocalLeaseClosure", 1, reservation),

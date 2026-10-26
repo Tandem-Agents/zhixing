@@ -45,8 +45,9 @@ import {
 } from "@zhixing/owner-kernel/scheduler-conversation-publisher";
 import {
   GlobalMutationCommitCoordinator,
-  listScheduleTaskIds,
+  listCurrentScheduleTaskIds,
 } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
+import { findJobTaskForRun, openJobTaskIds } from "@zhixing/owner-kernel/job-run-state-index";
 import { SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
 import {
   DeferredGlobalIntentAnchorReviewService,
@@ -56,6 +57,7 @@ import { assignmentReservationId } from "@zhixing/owner-kernel/resource-governor
 import {
   InProcessJobDispatcher,
   JobJournal,
+  registerJobJournalProjection,
   type JobIngressAuthorizer,
   type JobLifecycleEvent,
   type PendingJobDispatch,
@@ -511,12 +513,23 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       log: options.authority.authorityLog,
       delivery: options.authority.participant,
     });
+    // 作业域持久投影与作业日志用同一组服务：启动列出任务前就要可读
+    registerJobJournalProjection(options.authority.authorityLog, {
+      anchorEpoch: options.authority.anchorEpoch,
+      artifacts: options.authority.artifacts,
+      verifier: options.authority.verifier,
+      delivery: options.authority.participant,
+      resources: options.authority.resourceGovernor,
+      systemResources: options.authority.resourceGovernor,
+      localExecutorId: options.authority.executorId,
+    });
     this.#scheduler = new AnchorScheduler({
       anchorEpoch: options.authority.anchorEpoch,
       deviceId: options.authority.deviceId,
       admission: options.authority.controlAdmission,
       eventBus: options.eventBus,
       listTaskIds: () => this.#listTaskIds(),
+      findTaskForRun: (jobRunId) => findJobTaskForRun(options.authority.authorityLog, jobRunId),
       journalFor: (taskId) => this.#journal(taskId),
       activateUserJob: (input) => this.#activate(input),
       recoverUserJobs: (journal, acceptedJobRunIds) =>
@@ -1190,8 +1203,14 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     this.#generationBound = false;
   }
 
+  /** 启动要恢复的任务：当前定义目录 ∪ 作业域持久投影里仍有未完义务的任务，不读全部历史任务。 */
   async #listTaskIds(): Promise<readonly string[]> {
-    return listScheduleTaskIds(this.#options.authority.authorityLog);
+    const log = this.#options.authority.authorityLog;
+    const [current, open] = await Promise.all([
+      listCurrentScheduleTaskIds(log, this.#options.authority.artifacts),
+      openJobTaskIds(log),
+    ]);
+    return [...new Set([...current, ...open])].sort();
   }
 }
 

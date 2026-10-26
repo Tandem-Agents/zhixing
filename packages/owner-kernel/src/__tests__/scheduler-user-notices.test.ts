@@ -141,7 +141,9 @@ describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
 
   it("fails closed on an unknown notice field", async () => {
     const harness = await createHarness();
-    await harness.log.append([
+    // 写入时的索引归约会拒绝它：另开不登记投影的日志实例写下，模拟日志里出现未经校验的记录
+    const raw = new FileAuthorityCommitLog(harness.log.rootDir, harness.log.artifactStore, { clock: () => NOW });
+    await raw.append([
       {
         stream: SCHEDULER_USER_NOTICE_STREAM,
         body: {
@@ -161,6 +163,7 @@ describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
         },
       },
     ]);
+    await raw.stopStorageMaintenance();
     await expect(harness.notices.history(0)).rejects.toThrow(
       "Scheduler notice fact is invalid",
     );

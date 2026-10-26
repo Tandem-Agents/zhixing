@@ -1,15 +1,19 @@
 import { verifyProtocolStep } from "@zhixing/core/protocol";
-import type {
-  AuthorityCommitLog,
-  PhysicalStorageStepRunner,
-  ProjectionCursor,
-  ProjectionTransactionContext,
-  ProjectionTransactionDecision,
+import {
+  createDurableProjectionOverlay,
+  readDurableProjectionKeys,
+  type AuthorityCommitLog,
+  type DurableProjectionMutation,
+  type DurableProjectionReadContext,
+  type PhysicalStorageStepRunner,
+  type ProjectionTransactionContext,
+  type ProjectionTransactionDecision,
 } from "@zhixing/core/authority";
 import type {
   CommitEnvelope,
   DataPlaneTicket,
   ExecutionRef,
+  JsonValue,
   LogicalRecord,
   StreamConsumerAuth,
 } from "@zhixing/core/contracts";
@@ -32,6 +36,15 @@ import { SerialTaskQueue } from "@zhixing/core/persistence";
 import type { AssignmentStreamSpool } from "./assignment-stream-spool.js";
 
 const MAINTENANCE_REVOCATION_BATCH = 8;
+/** 一次退休追加至多这么多张过期票据；更多的分批，每批一笔事务。 */
+const EXPIRY_RETIREMENT_BATCH = 32;
+/** 退休前沿一步剪除的票据数；周期维护一轮至多推进这么多步，余量下一轮按耐久前沿续做。 */
+const RETIREMENT_FRONTIER_BATCH = 32;
+const MAINTENANCE_FRONTIER_STEPS = 8;
+// 周期维护每轮至多退休这么多批过期票据（每批 EXPIRY_RETIREMENT_BATCH 张），余量下一轮续做
+const MAINTENANCE_EXPIRY_BATCHES = 8;
+/** 归约接受的单步上限（不小于写入方的批量），一条前沿记录的校验与剪除都不超过它。 */
+const MAX_RETIREMENT_FRONTIER_BATCH = 128;
 
 type TicketRegistryRecord =
   | {
@@ -57,9 +70,20 @@ type TicketRegistryRecord =
       readonly retainUntil: string;
     }
   | {
+      /** 恢复据以把已过期票据排除在外的时刻：耐久的时间下界，冷重开后“现在”不早于它。 */
+      readonly t: "data-plane-ticket-observed-time";
+      readonly executorId: string;
+      readonly observedAt: string;
+    }
+  | {
       readonly t: "data-plane-ticket-retirement-frontier";
       readonly executorId: string;
       readonly retiredThrough: string;
+      /**
+       * 前沿停在 retiredThrough 这一保留期里的这张票据之后：同一保留期的大批票据分多步剪除。
+       * 缺省表示这一保留期的票据全部剪除（只有时间的前沿）。
+       */
+      readonly throughTicketId?: string;
     };
 
 interface AcceptedTicket {
@@ -77,10 +101,29 @@ interface RetiredTicket {
   readonly revocation?: { readonly streamEpoch: number | null };
 }
 
-interface TicketRegistryProjection {
-  readonly accepted: Map<string, AcceptedTicket>;
-  readonly retired: Map<string, RetiredTicket>;
-  retiredThrough: string | undefined;
+/** 投影中一张票据的当前状态：在用（a）或已退休（r）。 */
+type StoredTicket =
+  | ({ readonly s: "a" } & AcceptedTicket)
+  | ({ readonly s: "r" } & RetiredTicket);
+
+/** 某一已验证位置上的票据视图：按 id 精确读取，退休前沿单独一键。 */
+interface TicketView {
+  ticket(ticketId: string): Promise<StoredTicket | undefined>;
+  tickets(ticketIds: readonly string[]): Promise<readonly (StoredTicket | undefined)[]>;
+  frontier(): Promise<string | undefined>;
+  /** 全部在用票据（经到期索引定位）。 */
+  accepted(): Promise<readonly AcceptedTicket[]>;
+  /** 到期晚于 at 的在用票据（恢复只需要它们）。 */
+  acceptedAfter(at: string): Promise<readonly AcceptedTicket[]>;
+  /** 到期不晚于 at 的在用票据中，按到期时刻的前 limit 张。 */
+  expiredThrough(at: string, limit: number): Promise<readonly AcceptedTicket[]>;
+  /** 本日志重放出的时间前沿：已接纳票据的接纳时刻、恢复记下的观测时刻与退休前沿中最晚者。 */
+  timeFrontier(): Promise<string | undefined>;
+  /** 第一条满足条件、尚未完成资格撤销的退休票据。 */
+  unrevoked(select: (entry: TicketIndexEntry) => boolean): Promise<TicketIndexEntry | undefined>;
+  /** 截至 at 的下一个退休前沿（至多推进一批）；没有保留期已满的退休票据时为 undefined。 */
+  nextFrontier(at: string): Promise<RetirementPosition | undefined>;
+  retainedThrough(at: string): Promise<readonly RetainedTicketEntry[]>;
 }
 
 /** Signed ticket matches durable activation, but the assignment no longer permits active use. */
@@ -142,14 +185,15 @@ export class DataPlaneTicketRegistry {
   readonly #clock: () => string;
   readonly #monotonicClock: () => number;
   readonly #operations = new SerialTaskQueue();
-  readonly #deadlines = new Map<string, number>();
   readonly #pendingRevocations = new Map<string, { assignmentId: string; streamEpoch: number | null }>();
-  // Completed physical effects only. Authorization always reads the durable
-  // retirement; a new registry replays every outstanding consumer revocation.
+  // 物理撤销已成功、完成回执尚未耐久的票据（票据 → 派发）。回执耐久后即淘汰，之后的幂等由退休行的
+  // revocation 与未撤销目录承担；授权始终读耐久退休，新的登记表会补做全部未完成的撤销
   readonly #revokedConsumers = new Map<string, string>();
-  #projection:
-    | { readonly state: TicketRegistryProjection; readonly cursor: ProjectionCursor }
-    | undefined;
+  readonly #projectionId: string;
+  // 不可回退有效时钟的锚定：本进程任一次有效时钟观测值与当时的单调钟读数。“现在”取
+  // max(墙钟, 锚定 + 单调流逝, 日志时间前沿)，日志时间前沿在每次读写时于锁内同一位置读取；
+  // 墙钟回拨（包括先前跳再回拨）不让时间倒退，也不冻结在线时间
+  #floor: { readonly wall: number; readonly monotonic: number };
 
   constructor(options: DataPlaneTicketRegistryOptions) {
     assertProtocolIdentifier(options.executorId, "Data-plane registry executor id");
@@ -160,31 +204,35 @@ export class DataPlaneTicketRegistry {
     this.#spool = options.spool;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
+    this.#floor = { wall: Date.parse(this.#clock()), monotonic: this.#monotonicClock() };
+    // 生产装配在首次写入前已登记同一定义；直接构造（测试、新 home）在此登记，重复登记幂等
+    registerDataPlaneTicketProjection(this.#log, this.#verifier, this.#executorId);
+    this.#projectionId = dataPlaneTicketProjectionId(this.#executorId);
   }
 
   async accept(input: unknown): Promise<DataPlaneTicket> {
-    await this.maintain(undefined, 0);
+    await this.maintain(undefined, 0, 0, 0);
     const ticket = (await verifyProtocolStep(() => validateDataPlaneTicket(input, this.#verifier)));
     if (ticket.executorId !== this.#executorId) {
       throw new TypeError("Data-plane ticket targets a different executor");
     }
     await this.#operations.run(async () => {
-      const projected = await this.#load();
-      const existing = projected.state.accepted.get(ticket.ticketId);
-      if (existing) {
+      const projected = await this.#read(async view => ({ existing: await view.ticket(ticket.ticketId), frontier: await view.frontier(), at: this.#nowIso() }));
+      const existing = projected.existing;
+      if (existing?.s === "a") {
         if (canonicalize(existing.ticket) !== canonicalize(ticket)) {
           throw new Error("Data-plane ticket id has conflicting signed payloads");
         }
         await this.#restoreAcceptedConsumer(existing, true);
         return;
       }
-      const retired = projected.state.retired.get(ticket.ticketId);
-      if (retired) {
-        assertRetiredTicketIdentity(retired, ticket);
+      if (existing?.s === "r") {
+        assertRetiredTicketIdentity(existing, ticket);
         if (ticket.kind !== "abort") await this.#revokeConsumer(ticket);
         return;
       }
-      const observedAt = projectionTime(projected.state, this.#clock());
+      // 有效时钟（不早于退休前沿与时间前沿），跨端的签发时间与 TTL 照偏差窗换算
+      const observedAt = projected.at;
       const interval = acceptedRemoteIntervalStatus({
         issuedAt: ticket.issuedAt,
         expiry: ticket.expiry,
@@ -193,9 +241,9 @@ export class DataPlaneTicketRegistry {
       });
       if (
         interval.kind === "expired" ||
-        ticketPrecedesRetirementFrontier(ticket, projected.state)
+        ticketPrecedesRetirementFrontier(ticket, projected.frontier)
       ) {
-        if (!ticketPrecedesRetirementFrontier(ticket, projected.state)) {
+        if (!ticketPrecedesRetirementFrontier(ticket, projected.frontier)) {
           await this.#appendRetirement(
             ticket.assignmentId,
             ticket.ticketId,
@@ -220,32 +268,32 @@ export class DataPlaneTicketRegistry {
       }
       assertTicketActivation(ticket, binding);
       const transaction = await this.#transact<{
-        readonly ticket: DataPlaneTicket;
+        readonly accepted?: AcceptedTicket;
         readonly existing: boolean;
         readonly retired: boolean;
-      }>((state, context) => {
-        const accepted = state.accepted.get(ticket.ticketId);
-        if (accepted) {
+      }>(async (view) => {
+        const current = await view.ticket(ticket.ticketId), frontier = await view.frontier();
+        if (current?.s === "a") {
           if (
-            canonicalize(accepted.ticket) !== canonicalize(ticket) ||
-            canonicalize(accepted.activation) !== canonicalize(binding)
+            canonicalize(current.ticket) !== canonicalize(ticket) ||
+            canonicalize(current.activation) !== canonicalize(binding)
           ) {
             throw new Error("Data-plane ticket id has conflicting signed payloads");
           }
           return {
             kind: "return",
-            value: { ticket: accepted.ticket, existing: true, retired: false },
+            value: { accepted: acceptedOf(current), existing: true, retired: false },
           };
         }
-        const alreadyRetired = state.retired.get(ticket.ticketId);
-        if (alreadyRetired) {
-          assertRetiredTicketIdentity(alreadyRetired, ticket);
+        if (current?.s === "r") {
+          assertRetiredTicketIdentity(current, ticket);
           return {
             kind: "return",
-            value: { ticket, existing: true, retired: true },
+            value: { existing: true, retired: true },
           };
         }
-        const acceptedAt = projectionTime(state, context.at);
+        // 锁内同一位置的有效时钟：落盘的接纳时刻就是这次决定所用的时间，归约把它并入时间前沿
+        const acceptedAt = this.#nowIso();
         const currentInterval = acceptedRemoteIntervalStatus({
           issuedAt: ticket.issuedAt,
           expiry: ticket.expiry,
@@ -254,12 +302,12 @@ export class DataPlaneTicketRegistry {
         });
         if (
           currentInterval.kind === "expired" ||
-          ticketPrecedesRetirementFrontier(ticket, state)
+          ticketPrecedesRetirementFrontier(ticket, frontier)
         ) {
-          if (ticketPrecedesRetirementFrontier(ticket, state)) {
+          if (ticketPrecedesRetirementFrontier(ticket, frontier)) {
             return {
               kind: "return",
-              value: { ticket, existing: false, retired: true },
+              value: { existing: false, retired: true },
             };
           }
           return {
@@ -274,33 +322,35 @@ export class DataPlaneTicketRegistry {
                 retainUntil: retentionDeadline(acceptedAt),
               }),
             ],
-            value: { ticket, existing: false, retired: true },
+            value: { existing: false, retired: true },
           };
         }
+        const accepted: AcceptedTicket = {
+          ticket,
+          activation: binding,
+          acceptedAt,
+          validForMs: currentInterval.remainingMs,
+        };
         return {
           kind: "append",
           entries: [
             ticketRecord(ticket.assignmentId, {
               t: "data-plane-ticket-accepted",
-              ticket,
-              activation: binding,
-              acceptedAt,
-              validForMs: currentInterval.remainingMs,
+              ...accepted,
             }),
           ],
-          value: { ticket, existing: false, retired: false },
+          value: { accepted, existing: false, retired: false },
         };
       });
       if (transaction.value.retired) {
         if (ticket.kind !== "abort") await this.#revokeConsumer(ticket);
         return;
       }
-      const accepted = transaction.state.accepted.get(ticket.ticketId)!;
+      const accepted = transaction.value.accepted!;
       if (!transaction.value.existing) {
         this.#revokedConsumers.delete(ticket.ticketId);
         this.#pendingRevocations.delete(ticket.ticketId);
       }
-      this.#deadlineFor(ticket.ticketId, accepted);
       await this.#restoreAcceptedConsumer(
         accepted,
         transaction.value.existing,
@@ -313,19 +363,19 @@ export class DataPlaneTicketRegistry {
     readonly assignmentId: string;
     readonly ticketId: string;
   }): Promise<boolean> {
-    await this.maintain(undefined, 0);
+    await this.maintain(undefined, 0, 0, 0);
     assertProtocolIdentifier(input.assignmentId, "Ticket revocation assignment id");
     assertProtocolIdentifier(input.ticketId, "Ticket revocation ticket id");
     return this.#operations.run(async () => {
       let ticket: DataPlaneTicket | undefined;
-      const transaction = await this.#transact<boolean>((state, context) => {
-        ticket = state.accepted.get(input.ticketId)?.ticket;
+      const transaction = await this.#transact<boolean>(async (view) => {
+        const current = await view.ticket(input.ticketId);
+        ticket = current?.s === "a" ? current.ticket : undefined;
         if (ticket && ticket.assignmentId !== input.assignmentId) {
           throw new Error("Ticket revocation binds a different assignment");
         }
-        const retired = state.retired.get(input.ticketId);
-        if (retired) {
-          if (retired.assignmentId !== input.assignmentId) {
+        if (current?.s === "r") {
+          if (current.assignmentId !== input.assignmentId) {
             throw new Error("Ticket revocation binds a different assignment");
           }
           return { kind: "return", value: false };
@@ -341,13 +391,12 @@ export class DataPlaneTicketRegistry {
                 ? {}
                 : { ticketDigest: dataPlaneTicketDigest(ticket) }),
               reason: "revoked",
-              retainUntil: retentionDeadline(projectionTime(state, context.at)),
+              retainUntil: retentionDeadline(this.#nowIso()),
             }),
           ],
           value: true,
         };
       });
-      this.#deadlines.delete(input.ticketId);
       if (ticket?.kind !== "abort") {
         await this.#revokeConsumerIdentity(
           input.assignmentId,
@@ -383,13 +432,7 @@ export class DataPlaneTicketRegistry {
     assignmentId: string,
     surfacePrincipal: string,
   ): Promise<AuthorizedDataPlaneTicket> {
-    const ticket = await this.#operations.run(async () => {
-      const projection = await this.#load();
-      if (projection.state.retired.has(ticketId)) {
-        throw new Error("Data-plane ticket is retired");
-      }
-      return projection.state.accepted.get(ticketId)?.ticket;
-    });
+    const ticket = await this.#operations.run(() => this.#currentTicket(ticketId));
     if (!ticket) throw new Error("Data-plane ticket is unknown");
     return this.authorize(ticketId, use, {
       assignmentId,
@@ -411,13 +454,7 @@ export class DataPlaneTicketRegistry {
     use: DataPlaneTicketUse,
     assignmentId: string,
   ): Promise<AuthorizedDataPlaneTicket> {
-    const ticket = await this.#operations.run(async () => {
-      const projection = await this.#load();
-      if (projection.state.retired.has(ticketId)) {
-        throw new Error("Data-plane ticket is retired");
-      }
-      return projection.state.accepted.get(ticketId)?.ticket;
-    });
+    const ticket = await this.#operations.run(() => this.#currentTicket(ticketId));
     if (!ticket) throw new Error("Data-plane ticket is unknown");
     return this.authorize(ticketId, use, {
       assignmentId,
@@ -427,11 +464,22 @@ export class DataPlaneTicketRegistry {
     });
   }
 
+  /** 精确读取一张票据：已退休即拒绝，未知返回 undefined。 */
+  async #currentTicket(ticketId: string): Promise<DataPlaneTicket | undefined> {
+    const current = await this.#read(view => view.ticket(ticketId));
+    if (current?.s === "r") throw new Error("Data-plane ticket is retired");
+    return current?.ticket;
+  }
+
   async recover(): Promise<void> {
-    await this.maintain(undefined, 0);
+    await this.maintain(undefined, 0, 0, 0);
     await this.#operations.run(async () => {
-      const projection = await this.#load();
-      const entries = [...projection.state.accepted.values()];
+      // 只读尚未到期的在用票据（经到期索引定位），不回放历史；已过期未退休的积压不进恢复，
+      // 对它的访问由授权按有效时钟判过期拒绝，退休由周期维护按批续做。排除所依据的时刻先耐久记下
+      const at = await this.#read(async () => this.#nowIso());
+      await this.#recordObservedTime(at);
+      const entries = await this.#read(view => view.acceptedAfter(at));
+      const recovered = new Map<string, StoredTicket>(entries.map(entry => [entry.ticket.ticketId, { s: "a", ...entry }]));
       const pending = new Set<Promise<void>>();
       let failed = false;
       let failure: unknown;
@@ -463,6 +511,7 @@ export class DataPlaneTicketRegistry {
               // The registry queue owns this immutable binding batch. Publish
               // its retirements in one authority transaction before effects.
               await this.#appendRetirements(retirements);
+              for (const { assignmentId, ticketId, reason } of retirements) recovered.set(ticketId, recoveryRetired(assignmentId, reason));
             }
           }
           const groups = new Map<string, { ticket: DataPlaneTicket; expiresAt: string }[]>();
@@ -482,7 +531,7 @@ export class DataPlaneTicketRegistry {
             const authorization = await this.#authorizeUnlocked(entry.ticket.ticketId,
               entry.ticket.kind === "abort" ? "abort" : "observe",
               { assignmentId: entry.ticket.assignmentId, ref: entry.ticket.ref, executorId: entry.ticket.executorId,
-                surfacePrincipal: entry.ticket.surfacePrincipal }, this.#projection!.state,
+                surfacePrincipal: entry.ticket.surfacePrincipal }, recovered,
               bindings ? { value: bindings[index] } : undefined);
             if (entry.ticket.kind === "abort") continue;
             // 授权已失效的票据不在启动路径上做物理撤销：访问一律以耐久退休为准拒绝，
@@ -503,86 +552,86 @@ export class DataPlaneTicketRegistry {
   }
 
   /**
-   * 退休已过期票据并推进退休前沿；`physicalRevocations` 限定本轮补做的 spool 资格撤销数。
-   * 签发、撤销与恢复路径内联调用时传 0：访问一律以耐久退休为准拒绝，资格撤销只影响
-   * 保留回收，交给有界的周期维护，不随过期票据数拖慢就绪或首次签发。
+   * 退休已过期票据并推进退休前沿：`expiryBatches` 限定本轮过期退休的批数（每批至多 EXPIRY_RETIREMENT_BATCH 张），
+   * `physicalRevocations` 限定本轮补做的 spool 资格撤销数，`frontierSteps` 限定本轮推进前沿的步数（每步至多剪除
+   * RETIREMENT_FRONTIER_BATCH 张）。签发、撤销与恢复路径内联调用时都传 0：访问由授权按有效时钟与耐久退休判定，
+   * 过期票据即时拒绝；过期退休、资格撤销与已退休历史的剪除只影响回收，交给有界的周期维护按耐久状态续做，
+   * 不随过期或已退休票据数拖慢就绪或首次签发。
    */
   async maintain(
     runPhysicalStep?: PhysicalStorageStepRunner,
     physicalRevocations = MAINTENANCE_REVOCATION_BATCH,
+    frontierSteps = MAINTENANCE_FRONTIER_STEPS,
+    expiryBatches = MAINTENANCE_EXPIRY_BATCHES,
   ): Promise<number> {
     // 容量准入由调用方经 runPhysicalStep 提供,在 registry 串行段内、退休
     // 事务批(耐久追加 + 前沿推进)前取得;permit 绝不横跨串行队列等待。
     const step = runPhysicalStep ?? ((operation) => operation());
-    const expired = await this.#operations.run(() => step(async () => {
-      const monotonicNow = this.#monotonicClock();
-      const transaction = await this.#transact<readonly DataPlaneTicket[]>(
-        (state, context) => {
-        const tickets = [...state.accepted.values()]
-          .filter(
-            (accepted) =>
-              this.#deadlineFor(accepted.ticket.ticketId, accepted) <=
-              monotonicNow,
-          )
-          .map((accepted) => accepted.ticket);
-        if (tickets.length === 0) {
-          return { kind: "return", value: [] };
-        }
-        return {
-          kind: "append",
-          entries: tickets.map((ticket) =>
-            ticketRecord(ticket.assignmentId, {
-              t: "data-plane-ticket-retired",
-              assignmentId: ticket.assignmentId,
-              ticketId: ticket.ticketId,
-              ticketDigest: dataPlaneTicketDigest(ticket),
-              reason: "expired",
-              retainUntil: retentionDeadline(
-                projectionTime(state, context.at),
-              ),
-            }),
-          ),
-          value: tickets,
-        };
-        },
-      );
-      for (const ticket of transaction.value) {
-        this.#deadlines.delete(ticket.ticketId);
-      }
-      return transaction.value.length;
-    }));
+    let expired = 0;
+    for (let batches = 0; batches < expiryBatches; batches += 1) {
+      // 过期票据分批退休：一笔事务至多 EXPIRY_RETIREMENT_BATCH 张，批与批之间让出登记表队列
+      const retired = await this.#operations.run(() => step(() => this.#retireExpiredBatch()));
+      if (retired === undefined) break;
+      expired += retired;
+    }
     // 物理撤销逐个排入登记表队列：前台签发与授权最多等一次撤销，不等整批；余量留给下一轮。
     for (let revocations = 0; revocations < physicalRevocations; revocations += 1) {
       const revoked = await this.#operations.run(() => step(async () => {
-        for (const [ticketId, retired] of this.#projection?.state.retired ?? []) {
-          if (retired.revocation || this.#revokedConsumers.get(ticketId) === retired.assignmentId) continue;
-          await this.#revokeConsumerIdentity(retired.assignmentId, ticketId, true);
-          return true;
-        }
-        return false;
+        const next = await this.#read(view => view.unrevoked(entry => this.#revokedConsumers.get(entry.ticketId) !== entry.assignmentId));
+        if (!next) return false;
+        await this.#revokeConsumerIdentity(next.assignmentId, next.ticketId, true);
+        return true;
       }));
       if (!revoked) break;
     }
-    await this.#operations.run(() => step(async () => {
-      await this.#flushRevocations();
-      await this.#transact<void>((state, context) => {
-        const retiredThrough = nextRetirementFrontier(state, context.at);
-        if (retiredThrough === undefined) {
-          return { kind: "return", value: undefined };
-        }
-        return {
-          kind: "append",
-          entries: [
-            retirementFrontierRecord(this.#executorId, retiredThrough),
-          ],
-          value: undefined,
-        };
-      });
-      for (const ticketId of this.#revokedConsumers.keys()) {
-        if (!this.#projection!.state.retired.has(ticketId)) this.#revokedConsumers.delete(ticketId);
-      }
-    }));
+    await this.#operations.run(() => step(() => this.#flushRevocations()));
+    // 前沿每步一笔事务、至多剪除一批，按耐久前沿续做；本轮步数用完的余量留给下一轮
+    for (let steps = 0; steps < frontierSteps; steps += 1) {
+      const advanced = await this.#operations.run(() => step(async () => (await this.#transact<boolean>(async (view, context) => {
+        // 只用落盘证据：本交易时间与这一位置的时间前沿（与归约校验同口径，可重放）
+        const next = await view.nextFrontier(laterIso(context.at, await view.timeFrontier()));
+        return next === undefined
+          ? { kind: "return", value: false }
+          : { kind: "append", entries: [retirementFrontierRecord(this.#executorId, next)], value: true };
+      })).value));
+      if (!advanced) break;
+    }
     return expired;
+  }
+
+  /**
+   * 退休一批已过期的票据；没有到期的返回 undefined。候选是到期索引里截至有效时钟“现在”的一页
+   * （按到期时刻升序，不整读在用票据）；有效时钟不回退，墙钟回拨后照样选得到。
+   */
+  async #retireExpiredBatch(): Promise<number | undefined> {
+    const due = (await this.#read(view => view.expiredThrough(this.#nowIso(), EXPIRY_RETIREMENT_BATCH)))
+      .map(accepted => accepted.ticket.ticketId);
+    if (due.length === 0) return undefined;
+    const transaction = await this.#transact<readonly DataPlaneTicket[]>(
+      async (view) => {
+      const tickets = (await view.tickets(due)).flatMap(entry => entry?.s === "a" ? [entry.ticket] : []);
+      if (tickets.length === 0) {
+        return { kind: "return", value: [] };
+      }
+      return {
+        kind: "append",
+        entries: tickets.map((ticket) =>
+          ticketRecord(ticket.assignmentId, {
+            t: "data-plane-ticket-retired",
+            assignmentId: ticket.assignmentId,
+            ticketId: ticket.ticketId,
+            ticketDigest: dataPlaneTicketDigest(ticket),
+            reason: "expired",
+            retainUntil: retentionDeadline(
+              this.#nowIso(),
+            ),
+          }),
+        ),
+        value: tickets,
+      };
+      },
+    );
+    return transaction.value.length;
   }
 
   async #restoreAcceptedConsumer(
@@ -612,16 +661,15 @@ export class DataPlaneTicketRegistry {
     ticketId: string,
     use: DataPlaneTicketUse,
     binding: DataPlaneTicketBinding,
-    recovered?: TicketRegistryProjection,
+    recovered?: Map<string, StoredTicket>,
     recoveredBinding?: { readonly value: DataPlaneAssignmentBinding | undefined },
   ): Promise<TicketAuthorizationDisposition> {
-    // Recovery alone holds the registry queue across the entire batch. Ticket
-    // retirements update #projection; public authorization still reloads.
-    const state = recovered ?? (await this.#load()).state;
-    if (state.retired.has(ticketId)) {
+    // Recovery alone holds the registry queue across the entire batch and keeps
+    // its snapshot current; public authorization reads the verified projection.
+    const accepted = recovered ? recovered.get(ticketId) : await this.#read(view => view.ticket(ticketId));
+    if (accepted?.s === "r") {
       return { kind: "retired" };
     }
-    const accepted = state.accepted.get(ticketId);
     if (!accepted) return { kind: "unknown" };
     assertDataPlaneTicketUse(accepted.ticket, use);
     assertDataPlaneTicketBinding(accepted.ticket, binding);
@@ -632,6 +680,7 @@ export class DataPlaneTicketRegistry {
     const reason = this.#retirementReason(accepted, currentActivation);
     if (reason) {
       await this.#appendRetirement(accepted.ticket.assignmentId, ticketId, reason);
+      recovered?.set(ticketId, recoveryRetired(accepted.ticket.assignmentId, reason));
       return { kind: "retired", ticket: accepted.ticket };
     }
     return {
@@ -646,8 +695,9 @@ export class DataPlaneTicketRegistry {
 
   #retirementReason(accepted: AcceptedTicket, current: DataPlaneAssignmentBinding | undefined): TicketRetirementReason | undefined {
     if (!current || !ticketActivationMatches(accepted.ticket, accepted.activation) || canonicalize(current) !== canonicalize(accepted.activation)) return "invalidated";
-    const deadline = this.#deadlineFor(accepted.ticket.ticketId, accepted);
-    if (this.#monotonicClock() >= deadline) return "expired";
+    // 有效时钟早于接纳时刻（日志证据不足以确认）按过期处理，失败关闭
+    const now = this.#now();
+    if (now < Date.parse(accepted.acceptedAt) || now >= Date.parse(acceptedTicketExpiresAt(accepted))) return "expired";
     return undefined;
   }
 
@@ -660,18 +710,37 @@ export class DataPlaneTicketRegistry {
     });
   }
 
-  #deadlineFor(ticketId: string, accepted: AcceptedTicket): number {
-    const cached = this.#deadlines.get(ticketId);
-    if (cached !== undefined) return cached;
-    const acceptedAt = Date.parse(accepted.acceptedAt);
-    const now = Date.parse(this.#clock());
-    const remainingMs =
-      now < acceptedAt
-        ? 0
-        : Math.max(0, accepted.validForMs - (now - acceptedAt));
-    const deadline = this.#monotonicClock() + remainingMs;
-    this.#deadlines.set(ticketId, deadline);
-    return deadline;
+  /** 截止与到期选择用的“现在”：不早于已观察到的时间下界加单调钟流逝；求值后下界推进到这个值。 */
+  #now(): number {
+    const monotonic = this.#monotonicClock();
+    const now = Math.max(Date.parse(this.#clock()), this.#floor.wall + (monotonic - this.#floor.monotonic));
+    this.#floor = { wall: now, monotonic };
+    return now;
+  }
+
+  /** 在当前读写的已验位置读日志时间前沿，把有效时钟的锚定抬到它。 */
+  async #absorb(view: TicketView): Promise<void> {
+    const frontier = await view.timeFrontier();
+    if (frontier === undefined) return;
+    const at = Date.parse(assertCanonicalIso(frontier));
+    if (at > this.#now()) this.#floor = { wall: at, monotonic: this.#monotonicClock() };
+  }
+
+  /**
+   * 恢复按时刻 at 把已过期票据排除在外时，在票据域记下这一时间下界（固定一行），冷重开后时间不早于它。
+   * 只在确有被排除的过期票据、且 at 晚于已存下界时追加一条，不逐张写退休。
+   */
+  async #recordObservedTime(at: string): Promise<void> {
+    await this.#transact<void>(async view => {
+      const frontier = await view.timeFrontier();
+      if (frontier !== undefined && Date.parse(frontier) >= Date.parse(at)) return { kind: "return", value: undefined };
+      if ((await view.expiredThrough(at, 1)).length === 0) return { kind: "return", value: undefined };
+      return { kind: "append", entries: [observedTimeRecord(this.#executorId, at)], value: undefined };
+    });
+  }
+
+  #nowIso(): string {
+    return new Date(this.#now()).toISOString();
   }
 
   async #appendRetirement(
@@ -685,10 +754,12 @@ export class DataPlaneTicketRegistry {
 
   async #appendRetirements(retirements: readonly { assignmentId: string; ticketId: string; reason: TicketRetirementReason; ticketDigest?: string }[]): Promise<void> {
     if (retirements.length > 32) throw new TypeError("Ticket retirement batch exceeds 32");
-    await this.#transact<void>((state, context) => {
+    await this.#transact<void>(async (view) => {
+      const current = await view.tickets(retirements.map(({ ticketId }) => ticketId));
       const entries: { stream: string; body: TicketRegistryRecord }[] = [];
-      for (const { assignmentId, ticketId, reason, ticketDigest } of retirements) {
-        const accepted = state.accepted.get(ticketId), retired = state.retired.get(ticketId);
+      for (const [index, { assignmentId, ticketId, reason, ticketDigest }] of retirements.entries()) {
+        const stored = current[index];
+        const accepted = stored?.s === "a" ? stored : undefined, retired = stored?.s === "r" ? stored : undefined;
         if (accepted && accepted.ticket.assignmentId !== assignmentId || retired && retired.assignmentId !== assignmentId) {
           throw new Error("Ticket retirement binds a different assignment");
         }
@@ -697,12 +768,11 @@ export class DataPlaneTicketRegistry {
         entries.push(ticketRecord(assignmentId, {
           t: "data-plane-ticket-retired", assignmentId, ticketId,
           ...(digest === undefined ? {} : { ticketDigest: digest }), reason,
-          retainUntil: retentionDeadline(projectionTime(state, context.at)),
+          retainUntil: retentionDeadline(this.#nowIso()),
         }));
       }
       return entries.length ? { kind: "append", entries, value: undefined } : { kind: "return", value: undefined };
     });
-    for (const { ticketId } of retirements) this.#deadlines.delete(ticketId);
   }
 
   async #revokeConsumer(ticket: DataPlaneTicket): Promise<void> {
@@ -714,9 +784,9 @@ export class DataPlaneTicketRegistry {
     ticketId: string,
     deferCompletion = false,
   ): Promise<void> {
-    const retired = this.#projection?.state.retired.get(ticketId);
-    if (retired?.assignmentId === assignmentId && retired.revocation) return;
     if (this.#revokedConsumers.get(ticketId) === assignmentId) return;
+    const retired = await this.#read(view => view.ticket(ticketId));
+    if (retired?.s === "r" && retired.assignmentId === assignmentId && retired.revocation) return;
     const result = await this.#spool.revokeConsumer({
       assignmentId,
       consumer: surfaceConsumer(ticketId),
@@ -727,7 +797,8 @@ export class DataPlaneTicketRegistry {
     }
     // Failed effects retain their obligation; success cannot requalify this
     // ticket because its immutable retirement is already authoritative.
-    if (this.#projection?.state.retired.get(ticketId)?.assignmentId === assignmentId) {
+    const settled = await this.#read(view => view.ticket(ticketId));
+    if (settled?.s === "r" && settled.assignmentId === assignmentId) {
       this.#revokedConsumers.set(ticketId, assignmentId);
       this.#pendingRevocations.set(ticketId, { assignmentId, streamEpoch: consumer?.streamEpoch ?? null });
       if (!deferCompletion) await this.#flushRevocations();
@@ -737,208 +808,438 @@ export class DataPlaneTicketRegistry {
   async #flushRevocations(): Promise<void> {
     while (this.#pendingRevocations.size) {
       const batch = [...this.#pendingRevocations].slice(0, 32);
-      await this.#transact<void>(state => {
-        const entries = batch.flatMap(([ticketId, receipt]) => {
-          const retired = state.retired.get(ticketId);
-          if (!retired || retired.revocation) return [];
+      await this.#transact<void>(async view => {
+        const current = await view.tickets(batch.map(([ticketId]) => ticketId));
+        const entries = batch.flatMap(([ticketId, receipt], index) => {
+          const retired = current[index];
+          if (retired?.s !== "r" || retired.revocation) return [];
           if (retired.assignmentId !== receipt.assignmentId) throw Error('Revocation completion changed assignment');
           return [ticketRecord(receipt.assignmentId, { t: 'data-plane-ticket-revocation-completed', ticketId, ...receipt })];
         });
         return entries.length ? { kind: 'append', entries, value: undefined } : { kind: 'return', value: undefined };
       });
-      for (const [ticketId, receipt] of batch) if (this.#pendingRevocations.get(ticketId) === receipt) this.#pendingRevocations.delete(ticketId);
+      // 交易已提交：这一批的回执要么本次写入，要么此前已耐久，要么票据已不在退休状态，进程标记都不再需要；
+      // 交易抛错（结果未知）时走不到这里，标记与待写回执都保留待重试
+      for (const [ticketId, receipt] of batch) {
+        if (this.#pendingRevocations.get(ticketId) === receipt) this.#pendingRevocations.delete(ticketId);
+        if (this.#revokedConsumers.get(ticketId) === receipt.assignmentId) this.#revokedConsumers.delete(ticketId);
+      }
     }
   }
 
-  async #load(): Promise<{
-    readonly state: TicketRegistryProjection;
-    readonly cursor: ProjectionCursor;
-  }> {
-    const current = this.#projection;
-    const transaction = await this.#log.transactProjection<
-      TicketRegistryProjection,
-      TicketRegistryRecord,
-      void
-    >(
-      current?.state ?? emptyProjection(),
-      (state, logical, envelope) =>
-        reduceTicketRegistry(
-          state === current?.state ? cloneTicketProjection(state) : state,
-          logical,
-          envelope,
-          this.#executorId,
-          this.#verifier,
-        ),
-      () => ({ kind: "return", value: undefined }),
-      { createState: () => current?.state ?? emptyProjection(), ...(current ? { cursor: current.cursor } : {}) },
+  /** 在当前已验证位置读取票据视图，不做追加决定；先按这一位置的时间前沿校准有效时钟。 */
+  async #read<Value>(read: (view: TicketView) => Promise<Value>): Promise<Value> {
+    const result = await this.#log.transactDurableProjection<TicketRegistryRecord, Value>(
+      this.#projectionId,
+      async current => {
+        const view = ticketView(current);
+        await this.#absorb(view);
+        return { kind: "return", value: await read(view) };
+      },
     );
-    this.#projection = { state: transaction.state, cursor: transaction.cursor };
-    return this.#projection;
+    return result.value;
   }
 
+  /** 在同一已验证位置读取票据视图并决定是否追加；记录由投影在提交时一并归约。 */
   async #transact<Value>(
     decide: (
-      state: TicketRegistryProjection,
+      view: TicketView,
       context: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<TicketRegistryRecord, Value>,
+    ) => Promise<ProjectionTransactionDecision<TicketRegistryRecord, Value>>,
   ) {
-    const current = this.#projection;
-    const transaction = await this.#log.transactProjection<
-      TicketRegistryProjection,
-      TicketRegistryRecord,
-      Value
-    >(
-      current?.state ?? emptyProjection(),
-      (state, logical, envelope) =>
-        reduceTicketRegistry(
-          state === current?.state ? cloneTicketProjection(state) : state,
-          logical,
-          envelope,
-          this.#executorId,
-          this.#verifier,
-        ),
-      decide,
-      { createState: () => current?.state ?? emptyProjection(), ...(current ? { cursor: current.cursor } : {}) },
+    return this.#log.transactDurableProjection<TicketRegistryRecord, Value>(
+      this.#projectionId,
+      async (current, context) => {
+        const view = ticketView(current);
+        await this.#absorb(view);
+        return decide(view, context);
+      },
     );
-    this.#projection = { state: transaction.state, cursor: transaction.cursor };
-    return transaction;
   }
 }
 
-function cloneTicketProjection(state: TicketRegistryProjection): TicketRegistryProjection {
-  return { accepted: new Map(state.accepted), retired: new Map(state.retired), retiredThrough: state.retiredThrough };
+const TICKET_PREFIX = "t:";
+const EXPIRY_PREFIX = "x:";
+const RETAIN_PREFIX = "k:";
+const UNREVOKED_PREFIX = "u:";
+const FRONTIER_KEY = "f";
+const TIME_FRONTIER_KEY = "o";
+// 2：归约另维护时间前沿行（接纳时刻、观测时刻、退休前沿取最晚）
+const TICKET_INDEX_REDUCER_VERSION = 2;
+
+/**
+ * 票据登记表投影。按执行端身份各一份（退休前沿只认本执行端的流），与原先每个登记表实例的
+ * 状态口径一致：票据按 id 精确定位；在用票据带到期索引，已退休票据带保留期索引与未完成的
+ * 资格撤销义务。前沿推进时剪除保留期已满的退休票据，投影只含有效期窗口内的票据，不随历史增长。
+ */
+export function dataPlaneTicketProjectionId(executorId: string): string {
+  assertProtocolIdentifier(executorId, "Data-plane registry executor id");
+  return `data-plane-ticket-registry-v1:${executorId}`;
 }
 
-function emptyProjection(): TicketRegistryProjection {
+export function registerDataPlaneTicketProjection(
+  log: AuthorityCommitLog,
+  verifier: ProtocolSignatureVerifier,
+  executorId: string,
+) {
+  return log.durableProjection<TicketRegistryRecord>({
+    projectionId: dataPlaneTicketProjectionId(executorId),
+    reducerVersion: TICKET_INDEX_REDUCER_VERSION,
+    authenticated: true,
+    inputs: { families: ["assignment:"], streams: [retirementFrontierStream(executorId)] },
+    reduce: (envelope, current) => reduceTicketIndex(envelope, current, executorId, verifier),
+  });
+}
+
+interface TicketIndexEntry {
+  readonly ticketId: string;
+  readonly assignmentId: string;
+}
+
+interface RetainedTicketEntry {
+  readonly ticketId: string;
+  readonly retainUntil: string;
+}
+
+/** 退休前沿的位置：保留期，以及（分步剪除时）这一保留期里最后剪除的票据。 */
+interface RetirementPosition {
+  readonly retiredThrough: string;
+  readonly throughTicketId?: string;
+}
+
+function ticketView(current: DurableProjectionReadContext): TicketView & {
+  accepted(): Promise<readonly AcceptedTicket[]>;
+  unrevoked(select: (entry: TicketIndexEntry) => boolean): Promise<TicketIndexEntry | undefined>;
+  nextFrontier(at: string): Promise<RetirementPosition | undefined>;
+  retainedThrough(at: string): Promise<readonly RetainedTicketEntry[]>;
+  retainedUpTo(through: RetirementPosition, limit: number): Promise<readonly RetainedTicketEntry[]>;
+} {
+  const tickets = async (ticketIds: readonly string[]) => {
+    const values: (StoredTicket | undefined)[] = [];
+    for (let offset = 0; offset < ticketIds.length; offset += 256) {
+      const page = await readDurableProjectionKeys(current, ticketIds.slice(offset, offset + 256).map(id => TICKET_PREFIX + id));
+      values.push(...page as unknown as (StoredTicket | undefined)[]);
+    }
+    return values;
+  };
+  type Lower = { readonly gte: string } | { readonly gt: string };
+  const below = (lower: Lower, lt: string) => ("gte" in lower ? lower.gte : lower.gt) < lt;
+  const scanAll = async <T>(lower: Lower, lt: string): Promise<T[]> => {
+    const values: T[] = [];
+    let continuation: string | undefined;
+    do {
+      const page = await current.scan({ ...lower, lt }, 256, continuation);
+      values.push(...page.entries.map(entry => entry.value as unknown as T));
+      continuation = page.continuation;
+    } while (continuation);
+    return values;
+  };
+  const position = async () => (await current.get(FRONTIER_KEY)) as RetirementPosition | undefined;
+  const frontier = async () => (await position())?.retiredThrough;
+  // 在用票据的到期时刻与退休票据的保留期都晚于退休前沿；时间序的键从前沿之后起扫，
+  // 被剪除历史留下的墓碑不进入扫描范围，读取只与保留窗口内的票据有关。前沿停在某一保留期
+  // 中间时，按保留期排序的键（保留、未撤销）从那张票据之后起扫
+  const after = async (prefix: string): Promise<Lower> => {
+    const at = await position();
+    if (at === undefined) return { gte: prefix };
+    return at.throughTicketId !== undefined && prefix !== EXPIRY_PREFIX
+      ? { gt: `${prefix}${at.retiredThrough}:${at.throughTicketId}` }
+      : { gte: `${prefix}${at.retiredThrough};` };
+  };
+  /** 前沿之后、保留期不晚于 at 的退休票据，按保留期与票据 id 升序，至多 limit 条（读够即交还续读）。 */
+  const retainedPage = async (at: string, limit: number) => {
+    const lower = await after(RETAIN_PREFIX), lt = `${RETAIN_PREFIX}${at};`;
+    // 墙钟回拨到前沿之前：没有保留期已满的退休票据
+    if (!below(lower, lt)) return [];
+    const page = await current.scan({ ...lower, lt }, limit);
+    if (page.continuation) current.releaseContinuation?.(page.continuation);
+    return page.entries.map(entry => entry.value as unknown as RetainedTicketEntry);
+  };
+  const retainedThrough = async (at: string) => {
+    const lower = await after(RETAIN_PREFIX), lt = `${RETAIN_PREFIX}${at};`;
+    return below(lower, lt) ? scanAll<RetainedTicketEntry>(lower, lt) : [];
+  };
+  /** 前沿之后直到 through（含）的保留项，按页读、见到 through 即停，至多读 limit 条；through 不在其中时返回读到的全部。 */
+  const retainedUpTo = async (through: RetirementPosition, limit: number) => {
+    const lower = await after(RETAIN_PREFIX), lt = `${RETAIN_PREFIX}${through.retiredThrough};`;
+    if (!below(lower, lt)) return [];
+    const entries: RetainedTicketEntry[] = [];
+    let continuation: string | undefined;
+    do {
+      const page = await current.scan({ ...lower, lt }, Math.min(RETIREMENT_FRONTIER_BATCH, limit - entries.length), continuation);
+      continuation = page.continuation;
+      for (const entry of page.entries) {
+        const value = entry.value as unknown as RetainedTicketEntry;
+        entries.push(value);
+        if (value.retainUntil === through.retiredThrough && value.ticketId === through.throughTicketId) {
+          if (continuation) current.releaseContinuation?.(continuation);
+          return entries;
+        }
+      }
+    } while (continuation && entries.length < limit);
+    if (continuation) current.releaseContinuation?.(continuation);
+    return entries;
+  };
   return {
-    accepted: new Map(),
-    retired: new Map(),
-    retiredThrough: undefined,
+    ticket: async ticketId => (await current.get(TICKET_PREFIX + ticketId)) as unknown as StoredTicket | undefined,
+    tickets,
+    frontier,
+    timeFrontier: async () => (await current.get(TIME_FRONTIER_KEY)) as string | undefined,
+    async accepted() {
+      const ids = (await scanAll<TicketIndexEntry>(await after(EXPIRY_PREFIX), `${EXPIRY_PREFIX}\uffff`)).map(entry => entry.ticketId);
+      return (await tickets(ids)).flatMap(entry => entry?.s === "a" ? [acceptedOf(entry)] : []);
+    },
+    // 到期晚于 at 的在用票据：到期索引按时刻升序，从 at 之后起扫（键 x:<到期>:<id> 在 x:<at>; 之后即晚于 at）
+    async acceptedAfter(at) {
+      assertCanonicalTime(at, "Ticket registry observation time");
+      const lower = await after(EXPIRY_PREFIX);
+      const from = `${EXPIRY_PREFIX}${at};`;
+      const start: Lower = "gte" in lower && lower.gte > from ? lower : { gte: from };
+      const ids = (await scanAll<TicketIndexEntry>(start, `${EXPIRY_PREFIX}\uffff`)).map(entry => entry.ticketId);
+      return (await tickets(ids)).flatMap(entry => entry?.s === "a" ? [acceptedOf(entry)] : []);
+    },
+    // 到期不晚于 at 的在用票据中按到期时刻的前 limit 张（读够即交还续读）
+    async expiredThrough(at, limit) {
+      assertCanonicalTime(at, "Ticket registry observation time");
+      const lower = await after(EXPIRY_PREFIX), lt = `${EXPIRY_PREFIX}${at};`;
+      if (!below(lower, lt)) return [];
+      const page = await current.scan({ ...lower, lt }, limit);
+      if (page.continuation) current.releaseContinuation?.(page.continuation);
+      const ids = page.entries.map(entry => (entry.value as unknown as TicketIndexEntry).ticketId);
+      return (await tickets(ids)).flatMap(entry => entry?.s === "a" ? [acceptedOf(entry)] : []);
+    },
+    async unrevoked(select) {
+      const lower = await after(UNREVOKED_PREFIX);
+      let continuation: string | undefined;
+      do {
+        const page = await current.scan({ ...lower, lt: `${UNREVOKED_PREFIX}\uffff` }, 64, continuation);
+        const found = page.entries.map(entry => entry.value as unknown as TicketIndexEntry).find(select);
+        if (found) {
+          if (page.continuation) current.releaseContinuation?.(page.continuation);
+          return found;
+        }
+        continuation = page.continuation;
+      } while (continuation);
+      return undefined;
+    },
+    // 前沿的下一步：前沿之后、保留期已满（不晚于 at）的退休票据里按次序的前一批，停在这一批的最后一张
+    async nextFrontier(at) {
+      assertCanonicalTime(at, "Ticket registry observation time");
+      const last = (await retainedPage(at, RETIREMENT_FRONTIER_BATCH)).at(-1);
+      return last ? { retiredThrough: last.retainUntil, throughTicketId: last.ticketId } : undefined;
+    },
+    retainedThrough,
+    retainedUpTo,
   };
 }
 
-function reduceTicketRegistry(
-  state: TicketRegistryProjection,
-  logical: LogicalRecord<TicketRegistryRecord>,
+function acceptedOf(entry: AcceptedTicket): AcceptedTicket {
+  return { ticket: entry.ticket, activation: entry.activation, acceptedAt: entry.acceptedAt, validForMs: entry.validForMs };
+}
+
+/** 恢复快照里的退休标记：恢复路径只区分在用与已退休。 */
+function recoveryRetired(assignmentId: string, reason: TicketRetirementReason): StoredTicket {
+  return { s: "r", assignmentId, reason, retainUntil: new Date(0).toISOString() };
+}
+
+async function reduceTicketIndex(
   envelope: CommitEnvelope<TicketRegistryRecord>,
+  current: DurableProjectionReadContext,
   executorId: string,
   verifier: ProtocolSignatureVerifier,
-): TicketRegistryProjection {
-  const frontierStream =
-    `executor:${executorId}:data-plane-ticket-retirement-frontier`;
-  if (
-    !logical.stream.endsWith(":data-plane-tickets") &&
-    logical.stream !== frontierStream
-  ) {
-    return state;
-  }
-  const record = validateTicketRegistryRecord(logical.body, verifier);
-  if (record.t === "data-plane-ticket-retirement-frontier") {
-    if (record.executorId !== executorId || logical.stream !== frontierStream) {
-      throw new TypeError(
-        "Ticket retirement frontier is stored in the wrong logical stream",
-      );
-    }
-    const expected = nextRetirementFrontier(state, envelope.at);
-    if (expected !== record.retiredThrough) {
-      throw new TypeError("Ticket retirement frontier is not the next durable boundary");
-    }
-    state.retiredThrough = record.retiredThrough;
-    compactTicketProjection(state);
-    return state;
-  }
-  const recordAssignmentId =
-    record.t === "data-plane-ticket-accepted"
-      ? record.ticket.assignmentId
-      : record.assignmentId;
-  if (
-    logical.stream !==
-    `assignment:${recordAssignmentId}:data-plane-tickets`
-  ) {
-    throw new TypeError("Ticket registry record is stored in the wrong logical stream");
-  }
-  if (record.t === 'data-plane-ticket-revocation-completed') {
-    const retired = state.retired.get(record.ticketId);
-    if (!retired || retired.assignmentId !== record.assignmentId || state.accepted.has(record.ticketId)) {
-      throw new TypeError('Consumer revocation completion has no matching retirement');
-    }
-    if (retired.revocation && retired.revocation.streamEpoch !== record.streamEpoch) {
-      throw new TypeError('Consumer revocation completion changed its stream generation');
-    }
-    state.retired.set(record.ticketId, { ...retired, revocation: { streamEpoch: record.streamEpoch } });
-    return state;
-  }
-  if (record.t === "data-plane-ticket-accepted") {
+): Promise<readonly DurableProjectionMutation[]> {
+  const frontierStream = retirementFrontierStream(executorId);
+  // 同一信封内的多条记录依次归约，后一条读到前一条的结果
+  const changes = new Map<string, JsonValue | undefined>();
+  const view = ticketView(createDurableProjectionOverlay(current, changes));
+  const put = (key: string, value: unknown) => changes.set(key, value as JsonValue);
+  const drop = (key: string) => changes.set(key, undefined);
+  // 时间前沿只增不减：接纳时刻、观测时刻与退休前沿都是这一权威日志的时间证据
+  const advanceTimeFrontier = async (at: string) => {
+    const stored = await view.timeFrontier();
+    if (stored === undefined || Date.parse(at) > Date.parse(stored)) put(TIME_FRONTIER_KEY, at);
+  };
+  for (const logical of envelope.entries) {
     if (
-      !Number.isSafeInteger(record.validForMs) ||
-      record.validForMs <= 0 ||
-      record.validForMs > MAX_DATA_PLANE_TICKET_TTL_MS
+      !logical.stream.endsWith(":data-plane-tickets") &&
+      logical.stream !== frontierStream
     ) {
-      throw new TypeError("Accepted ticket lifetime is invalid");
+      continue;
     }
-    assertTicketActivation(record.ticket, record.activation);
-    if (ticketPrecedesRetirementFrontier(record.ticket, state)) {
-      throw new Error("Accepted ticket history precedes the retirement frontier");
+    const record = validateTicketRegistryRecord(logical.body, verifier);
+    if (record.t === "data-plane-ticket-observed-time") {
+      if (record.executorId !== executorId || logical.stream !== frontierStream) {
+        throw new TypeError("Ticket observed time is stored in the wrong logical stream");
+      }
+      // 只增不减：较早的时刻不降低时间前沿
+      await advanceTimeFrontier(record.observedAt);
+      continue;
     }
-    const existing = state.accepted.get(record.ticket.ticketId);
-    const retired = state.retired.get(record.ticket.ticketId);
+    if (record.t === "data-plane-ticket-retirement-frontier") {
+      if (record.executorId !== executorId || logical.stream !== frontierStream) {
+        throw new TypeError(
+          "Ticket retirement frontier is stored in the wrong logical stream",
+        );
+      }
+      // 与决定同口径：交易时间与这一位置的时间前沿取晚者
+      const at = laterIso(assertCanonicalIso(envelope.at), await view.timeFrontier());
+      let retained: readonly RetainedTicketEntry[];
+      if (record.throughTicketId === undefined) {
+        // 只有时间的前沿：这一保留期之前的全部剪除
+        retained = await view.retainedThrough(at);
+        if (laterFrontier(retained.at(-1)?.retainUntil, await view.frontier()) !== record.retiredThrough) {
+          throw new TypeError("Ticket retirement frontier is not the next durable boundary");
+        }
+      } else {
+        // 分步前沿：从当前前沿之后到它（含）是一段连续的、保留期已满的退休票据，条数有上限
+        retained = await view.retainedUpTo(record, MAX_RETIREMENT_FRONTIER_BATCH + 1);
+        const last = retained.at(-1);
+        if (!last || retained.length > MAX_RETIREMENT_FRONTIER_BATCH || last.ticketId !== record.throughTicketId ||
+            last.retainUntil !== record.retiredThrough || Date.parse(record.retiredThrough) > Date.parse(at)) {
+          throw new TypeError("Ticket retirement frontier is not the next durable boundary");
+        }
+      }
+      await advanceTimeFrontier(record.retiredThrough);
+      put(FRONTIER_KEY, {
+        retiredThrough: record.retiredThrough,
+        ...(record.throughTicketId === undefined ? {} : { throughTicketId: record.throughTicketId }),
+      });
+      for (const { ticketId, retainUntil } of retained) {
+        drop(TICKET_PREFIX + ticketId);
+        drop(`${RETAIN_PREFIX}${retainUntil}:${ticketId}`);
+        drop(`${UNREVOKED_PREFIX}${retainUntil}:${ticketId}`);
+      }
+      continue;
+    }
+    const recordAssignmentId =
+      record.t === "data-plane-ticket-accepted"
+        ? record.ticket.assignmentId
+        : record.assignmentId;
     if (
-      existing ||
-      (retired &&
-        Date.parse(record.acceptedAt) < Date.parse(retired.retainUntil))
+      logical.stream !==
+      `assignment:${recordAssignmentId}:data-plane-tickets`
     ) {
-      throw new Error("Accepted ticket history is duplicated or still retired");
+      throw new TypeError("Ticket registry record is stored in the wrong logical stream");
     }
-    state.retired.delete(record.ticket.ticketId);
-    state.accepted.set(record.ticket.ticketId, {
-      ticket: record.ticket,
-      activation: record.activation,
-      acceptedAt: record.acceptedAt,
-      validForMs: record.validForMs,
-    });
-    return state;
-  }
-  const accepted = state.accepted.get(record.ticketId);
-  if (accepted && accepted.ticket.assignmentId !== record.assignmentId) {
-    throw new Error("Ticket revocation history binds a different assignment");
-  }
-  const existing = state.retired.get(record.ticketId);
-  if (existing) {
-    if (existing.assignmentId !== record.assignmentId) {
-      throw new Error("Ticket retirement history binds a different assignment");
+    if (record.t === "data-plane-ticket-revocation-completed") {
+      const retired = await view.ticket(record.ticketId);
+      if (retired?.s !== "r" || retired.assignmentId !== record.assignmentId) {
+        throw new TypeError("Consumer revocation completion has no matching retirement");
+      }
+      if (retired.revocation && retired.revocation.streamEpoch !== record.streamEpoch) {
+        throw new TypeError("Consumer revocation completion changed its stream generation");
+      }
+      put(TICKET_PREFIX + record.ticketId, { ...retired, revocation: { streamEpoch: record.streamEpoch } });
+      drop(`${UNREVOKED_PREFIX}${retired.retainUntil}:${record.ticketId}`);
+      continue;
     }
-    if (
-      existing.ticketDigest !== undefined &&
-      record.ticketDigest !== undefined &&
-      existing.ticketDigest !== record.ticketDigest
-    ) {
-      throw new Error("Ticket retirement history has conflicting identities");
+    if (record.t === "data-plane-ticket-accepted") {
+      if (
+        !Number.isSafeInteger(record.validForMs) ||
+        record.validForMs <= 0 ||
+        record.validForMs > MAX_DATA_PLANE_TICKET_TTL_MS
+      ) {
+        throw new TypeError("Accepted ticket lifetime is invalid");
+      }
+      assertTicketActivation(record.ticket, record.activation);
+      if (ticketPrecedesRetirementFrontier(record.ticket, await view.frontier())) {
+        throw new Error("Accepted ticket history precedes the retirement frontier");
+      }
+      const existing = await view.ticket(record.ticket.ticketId);
+      if (
+        existing?.s === "a" ||
+        (existing?.s === "r" &&
+          Date.parse(record.acceptedAt) < Date.parse(existing.retainUntil))
+      ) {
+        throw new Error("Accepted ticket history is duplicated or still retired");
+      }
+      if (existing?.s === "r") {
+        drop(`${RETAIN_PREFIX}${existing.retainUntil}:${record.ticket.ticketId}`);
+        drop(`${UNREVOKED_PREFIX}${existing.retainUntil}:${record.ticket.ticketId}`);
+      }
+      const accepted: AcceptedTicket = {
+        ticket: record.ticket,
+        activation: record.activation,
+        acceptedAt: record.acceptedAt,
+        validForMs: record.validForMs,
+      };
+      put(TICKET_PREFIX + record.ticket.ticketId, { s: "a", ...accepted });
+      await advanceTimeFrontier(record.acceptedAt);
+      put(`${EXPIRY_PREFIX}${acceptedTicketExpiresAt(accepted)}:${record.ticket.ticketId}`,
+        { ticketId: record.ticket.ticketId, assignmentId: record.ticket.assignmentId } satisfies TicketIndexEntry);
+      continue;
     }
-    state.retired.set(record.ticketId, {
+    const stored = await view.ticket(record.ticketId);
+    if (stored?.s === "a" && stored.ticket.assignmentId !== record.assignmentId) {
+      throw new Error("Ticket revocation history binds a different assignment");
+    }
+    if (stored?.s === "r") {
+      if (stored.assignmentId !== record.assignmentId) {
+        throw new Error("Ticket retirement history binds a different assignment");
+      }
+      if (
+        stored.ticketDigest !== undefined &&
+        record.ticketDigest !== undefined &&
+        stored.ticketDigest !== record.ticketDigest
+      ) {
+        throw new Error("Ticket retirement history has conflicting identities");
+      }
+      const retainUntil = Date.parse(record.retainUntil) > Date.parse(stored.retainUntil)
+        ? record.retainUntil
+        : stored.retainUntil;
+      if (retainUntil !== stored.retainUntil) {
+        drop(`${RETAIN_PREFIX}${stored.retainUntil}:${record.ticketId}`);
+        put(`${RETAIN_PREFIX}${retainUntil}:${record.ticketId}`, { ticketId: record.ticketId, retainUntil } satisfies RetainedTicketEntry);
+        if (!stored.revocation) {
+          drop(`${UNREVOKED_PREFIX}${stored.retainUntil}:${record.ticketId}`);
+          put(`${UNREVOKED_PREFIX}${retainUntil}:${record.ticketId}`, { ticketId: record.ticketId, assignmentId: record.assignmentId } satisfies TicketIndexEntry);
+        }
+      }
+      put(TICKET_PREFIX + record.ticketId, {
+        s: "r",
+        assignmentId: record.assignmentId,
+        ...(stored.ticketDigest === undefined &&
+        record.ticketDigest === undefined
+          ? {}
+          : { ticketDigest: stored.ticketDigest ?? record.ticketDigest }),
+        reason: record.reason,
+        retainUntil,
+        ...(stored.revocation ? { revocation: stored.revocation } : {}),
+      });
+      continue;
+    }
+    if (stored?.s === "a") {
+      drop(`${EXPIRY_PREFIX}${acceptedTicketExpiresAt(stored)}:${record.ticketId}`);
+    }
+    put(TICKET_PREFIX + record.ticketId, {
+      s: "r",
       assignmentId: record.assignmentId,
-      ...(existing.ticketDigest === undefined &&
-      record.ticketDigest === undefined
+      ...(record.ticketDigest === undefined
         ? {}
-        : { ticketDigest: existing.ticketDigest ?? record.ticketDigest }),
+        : { ticketDigest: record.ticketDigest }),
       reason: record.reason,
-      retainUntil:
-        Date.parse(record.retainUntil) > Date.parse(existing.retainUntil)
-          ? record.retainUntil
-          : existing.retainUntil,
-      ...(existing.revocation ? { revocation: existing.revocation } : {}),
+      retainUntil: record.retainUntil,
     });
-    return state;
+    put(`${RETAIN_PREFIX}${record.retainUntil}:${record.ticketId}`, { ticketId: record.ticketId, retainUntil: record.retainUntil } satisfies RetainedTicketEntry);
+    put(`${UNREVOKED_PREFIX}${record.retainUntil}:${record.ticketId}`, { ticketId: record.ticketId, assignmentId: record.assignmentId } satisfies TicketIndexEntry);
   }
-  state.accepted.delete(record.ticketId);
-  state.retired.set(record.ticketId, {
-    assignmentId: record.assignmentId,
-    ...(record.ticketDigest === undefined
-      ? {}
-      : { ticketDigest: record.ticketDigest }),
-    reason: record.reason,
-    retainUntil: record.retainUntil,
-  });
-  return state;
+  return [...changes].map(([key, value]): DurableProjectionMutation =>
+    value === undefined ? { kind: "tombstone", key } : { kind: "put", key, value });
+}
+
+/** 候选保留期晚于当前前沿时成为下一个前沿，否则前沿不动（undefined）。 */
+function laterFrontier(candidate: string | undefined, retiredThrough: string | undefined): string | undefined {
+  if (candidate === undefined) return undefined;
+  return retiredThrough === undefined || Date.parse(candidate) > Date.parse(retiredThrough) ? candidate : undefined;
+}
+
+function retirementFrontierStream(executorId: string): string {
+  return `executor:${executorId}:data-plane-ticket-retirement-frontier`;
+}
+
+function assertCanonicalIso(value: string): string {
+  assertCanonicalTime(value, "Ticket registry observation time");
+  return value;
 }
 
 function ticketRecord(
@@ -953,15 +1254,23 @@ function ticketRecord(
 
 function retirementFrontierRecord(
   executorId: string,
-  retiredThrough: string,
+  position: RetirementPosition,
 ): LogicalRecord<TicketRegistryRecord> {
   return {
-    stream: `executor:${executorId}:data-plane-ticket-retirement-frontier`,
+    stream: retirementFrontierStream(executorId),
     body: {
       t: "data-plane-ticket-retirement-frontier",
       executorId,
-      retiredThrough,
+      retiredThrough: position.retiredThrough,
+      ...(position.throughTicketId === undefined ? {} : { throughTicketId: position.throughTicketId }),
     },
+  };
+}
+
+function observedTimeRecord(executorId: string, observedAt: string): LogicalRecord<TicketRegistryRecord> {
+  return {
+    stream: retirementFrontierStream(executorId),
+    body: { t: "data-plane-ticket-observed-time", executorId, observedAt },
   };
 }
 
@@ -1061,8 +1370,17 @@ function validateTicketRegistryRecord(
       retainUntil: record.retainUntil,
     };
   }
+  if (record.t === "data-plane-ticket-observed-time") {
+    assertKeys(record, ["executorId", "observedAt", "t"]);
+    assertProtocolIdentifier(record.executorId, "Ticket observed time executor id");
+    if (typeof record.observedAt !== "string") throw new TypeError("Ticket observed time is invalid");
+    assertCanonicalTime(record.observedAt, "Ticket observed time");
+    return { t: "data-plane-ticket-observed-time", executorId: record.executorId, observedAt: record.observedAt };
+  }
   if (record.t === "data-plane-ticket-retirement-frontier") {
-    assertKeys(record, ["executorId", "retiredThrough", "t"]);
+    assertKeys(record, record.throughTicketId === undefined
+      ? ["executorId", "retiredThrough", "t"]
+      : ["executorId", "retiredThrough", "t", "throughTicketId"]);
     assertProtocolIdentifier(
       record.executorId,
       "Ticket retirement frontier executor id",
@@ -1071,10 +1389,14 @@ function validateTicketRegistryRecord(
       throw new TypeError("Ticket retirement frontier time is invalid");
     }
     assertCanonicalTime(record.retiredThrough, "Ticket retirement frontier time");
+    if (record.throughTicketId !== undefined) {
+      assertProtocolIdentifier(record.throughTicketId, "Ticket retirement frontier ticket id");
+    }
     return {
       t: "data-plane-ticket-retirement-frontier",
       executorId: record.executorId,
       retiredThrough: record.retiredThrough,
+      ...(record.throughTicketId === undefined ? {} : { throughTicketId: record.throughTicketId }),
     };
   }
   throw new TypeError("Ticket registry record type is invalid");
@@ -1139,60 +1461,17 @@ function ticketActivationMatches(
   }
 }
 
-function compactTicketProjection(state: TicketRegistryProjection): void {
-  const retiredThrough = state.retiredThrough;
-  if (retiredThrough === undefined) return;
-  const frontier = assertCanonicalTime(
-    retiredThrough,
-    "Ticket registry retirement frontier",
-  );
-  for (const [ticketId, retired] of state.retired) {
-    if (Date.parse(retired.retainUntil) <= frontier) {
-      state.retired.delete(ticketId);
-    }
-  }
-}
-
-function nextRetirementFrontier(
-  state: TicketRegistryProjection,
-  at: string,
-): string | undefined {
-  const observedAt = assertCanonicalTime(at, "Ticket registry observation time");
-  let next = state.retiredThrough;
-  for (const retired of state.retired.values()) {
-    const retainUntil = Date.parse(retired.retainUntil);
-    if (
-      retainUntil <= observedAt &&
-      (next === undefined || retainUntil > Date.parse(next))
-    ) {
-      next = retired.retainUntil;
-    }
-  }
-  return next === state.retiredThrough ? undefined : next;
-}
-
-function projectionTime(
-  state: TicketRegistryProjection,
-  at: string,
-): string {
-  const observedAt = assertCanonicalTime(at, "Ticket registry observation time");
-  const frontier =
-    state.retiredThrough === undefined
-      ? Number.NEGATIVE_INFINITY
-      : assertCanonicalTime(
-          state.retiredThrough,
-          "Ticket registry retirement frontier",
-        );
-  return new Date(Math.max(observedAt, frontier)).toISOString();
+function laterIso(at: string, other: string | undefined): string {
+  return other !== undefined && Date.parse(other) > Date.parse(at) ? other : at;
 }
 
 function ticketPrecedesRetirementFrontier(
   ticket: DataPlaneTicket,
-  state: TicketRegistryProjection,
+  retiredThrough: string | undefined,
 ): boolean {
   return (
-    state.retiredThrough !== undefined &&
-    Date.parse(ticket.expiry) <= Date.parse(state.retiredThrough)
+    retiredThrough !== undefined &&
+    Date.parse(ticket.expiry) <= Date.parse(retiredThrough)
   );
 }
 

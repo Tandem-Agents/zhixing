@@ -7,3 +7,9 @@ export { registerRubricAuthorityProjection } from "../rubrics/global-state-adapt
 export { registerWorksceneActivityProjection } from "../workscene/activity-projection.js";
 export { registerWorkspaceBindingProjection } from "../environment/workspace-bindings.js";
 export { registerWorkspaceProbeProjection } from "../environment/workspace-probe.js";
+export {
+  RESOURCE_CAPABILITY_ACTIVATION_PROJECTION_ID,
+  RESOURCE_GOVERNOR_INDEX_PROJECTION_ID,
+  registerResourceCapabilityActivations,
+  registerResourceGovernorIndex,
+} from "./resource-governor-index.js";

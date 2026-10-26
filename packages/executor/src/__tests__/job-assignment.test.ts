@@ -4,10 +4,12 @@ import {
   AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
+  GovernorStateRequired,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type ArtifactStore,
 } from "@zhixing/core/authority";
 import { DeliveryAuthority } from "@zhixing/core/delivery";
+import { countScheduleConsecutiveFailures } from "@zhixing/core/scheduler/application";
 import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
 import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
 import { SchedulerJobCommitParticipant } from "@zhixing/owner-kernel/scheduler-job-commit";
@@ -80,7 +82,6 @@ import {
   JOB_JOURNAL_RECORD_SHAPES,
   JobJournal,
   type JobAssignmentPlan,
-  type JobCompatibilityProjection,
   type JobJournalRecordType,
   type PendingJobDispatch,
   type SystemJobHandler,
@@ -88,6 +89,8 @@ import {
 } from "@zhixing/owner-kernel/job-assignment";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { expectJobStateParity } from "./job-state-parity.js";
+import { jobRunStateIndex } from "@zhixing/owner-kernel/job-run-state-index";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -115,6 +118,22 @@ const FROZEN_MISSED_NEXT_FIRE = {
   readyBoundary: "2026-07-15T09:06:00.000Z",
   nextFire: "2026-07-15T09:07:00.000Z",
 } as const;
+
+/** 写入过未校验记录的日志：按设计应失败关闭，不再做新旧对照。 */
+const unvalidatedLogs = new Set<string>();
+
+/** 用例结束时核对该日志上作业域持久投影与从零重放的完整状态一致。 */
+function verifyJobStateParityAtFinish(log: FileAuthorityCommitLog): void {
+  onTestFinished(async () => {
+    if (unvalidatedLogs.has(log.rootDir)) return;
+    try {
+      jobRunStateIndex(log);
+    } catch {
+      return;
+    }
+    await expectJobStateParity(log, TASK_ID);
+  });
+}
 
 function trackTestAuthorityLogs(): (
   log: FileAuthorityCommitLog,
@@ -465,6 +484,7 @@ async function createUserHarness(
       lockWaitMs: 2_000,
     }),
   );
+  verifyJobStateParityAtFinish(log);
   const identity = new TestProtocolIdentity();
   const executorIdentity = new TestProtocolIdentity(EXECUTOR_ID);
   const createGovernor = () => new AnchorResourceGovernor({
@@ -473,16 +493,6 @@ async function createUserHarness(
   });
   const resources = options.governed ? createGovernor() : undefined;
   const ownerArtifacts = options.ownerArtifacts?.(artifacts) ?? artifacts;
-  const compatibilityFacts: Array<{ definition: TaskDefinition; occurrences: unknown[] }> = [];
-  const compatibility: JobCompatibilityProjection = {
-    async project(input) {
-      compatibilityFacts.push({
-        definition: structuredClone(input.definition),
-        occurrences: structuredClone(input.occurrences),
-      });
-    },
-    async remove() {},
-  };
   const delivery = deliveryParticipant(log);
   const schedulerNotices = options.schedulerNotices
     ? new SchedulerUserNoticeJournal({ log, delivery })
@@ -496,7 +506,6 @@ async function createUserHarness(
     verifier: identity,
     delivery,
     submission,
-    compatibility,
     ingress: {
       authorize(context, action, definition) {
         if (definition.definition.kind === "system" || action.startsWith("system")) {
@@ -578,7 +587,6 @@ async function createUserHarness(
     artifacts,
     log,
     identity,
-    compatibilityFacts,
     resources,
     createGovernor,
     journal,
@@ -625,11 +633,28 @@ function reopenUserJournal(
   });
 }
 
+/**
+ * 绕过写入时校验追加原始记录：另开一个不登记任何持久投影的日志实例写入，模拟日志里出现未经
+ * 校验的记录（例如别的写者写下的）。原日志实例之后追平作业域投影时按同一归约拒绝。
+ */
+async function appendUnvalidated(
+  log: FileAuthorityCommitLog,
+  entries: readonly LogicalRecord<unknown>[],
+): Promise<void> {
+  unvalidatedLogs.add(log.rootDir);
+  const raw = new FileAuthorityCommitLog(log.rootDir, log.artifactStore, { clock: () => NOW, lockWaitMs: 2_000 });
+  try {
+    await raw.append([...entries]);
+  } finally {
+    await raw.stopStorageMaintenance();
+  }
+}
+
 async function appendRawTaskRevision(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
   definition: TaskDefinition,
 ): Promise<void> {
-  await harness.log.append([
+  await appendUnvalidated(harness.log, [
     {
       stream: `job:${TASK_ID}`,
       body: {
@@ -841,7 +866,7 @@ describe("user job durable protocol", {
       (entry.body as { keyBody?: { kind?: string } }).keyBody?.kind === "job-status-delivery");
     expect(statusDeliveries).toHaveLength(withOrigin ? 1 : 0);
     const recovered = reopenUserJournal(harness);
-    expect((await recovered.occurrences()).find((run) => run.jobRunId === JOB_RUN_ID)?.state).toBe(action === "cancel" ? "cancelled" : "expired");
+    expect((await recovered.scheduleOccurrence(JOB_RUN_ID))?.state).toBe(action === "cancel" ? "cancelled" : "expired");
     const replay = await recovered.applyControl({ admission: new ControlAdmissionJournal(harness.log, harness.artifacts), envelope, source });
     expect(replay).toMatchObject({ kind: "replayed", result: result.result });
     expect(await harness.log.readAll()).toHaveLength(commits.length);
@@ -1112,7 +1137,7 @@ describe("user job durable protocol", {
 
   it("rejects surface ingress without an atomic manual control result", async () => {
     const harness = await createUserHarness({ assign: false, trigger: false });
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {
@@ -1187,7 +1212,7 @@ describe("user job durable protocol", {
     );
     const jobRunId = "job-run-disabled-definition";
     const scheduledFor = "2026-07-15T09:01:00.000Z";
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {
@@ -1221,7 +1246,7 @@ describe("user job durable protocol", {
     const first = await harness.journal.occurrence(JOB_RUN_ID);
     if (!first) throw new Error("initial occurrence is missing");
     const jobRunId = "job-run-illegal-user-miss";
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {
@@ -1252,7 +1277,7 @@ describe("user job durable protocol", {
         "utf8",
       );
       const ref = await harness.artifacts.put(bytes);
-      await harness.log.append([
+      await appendUnvalidated(harness.log, [
         {
           stream: `job:${TASK_ID}`,
           body: {
@@ -2005,11 +2030,11 @@ describe("user job durable protocol", {
     ).resolves.toEqual({ committed: true, commitRevision: 1 });
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
     for (const journal of [harness.journal, reopenUserJournal(harness)]) {
-      expect(await journal.occurrences()).toEqual(expect.arrayContaining([
+      expect(await journal.scheduleOccurrence(JOB_RUN_ID)).toEqual(
         expect.objectContaining({ jobRunId: JOB_RUN_ID, state: "committed",
           outcome: { status, summary: "model result" } }),
-      ]));
-      const policy = (await journal.schedulerPolicy()).failurePolicyByRun.get(JOB_RUN_ID);
+      );
+      const policy = (await journal.schedulerPolicy([JOB_RUN_ID])).failurePolicyByRun.get(JOB_RUN_ID);
       if (status === "failed") expect(policy).toMatchObject({ failureCount: 1, autoDisableRequired: false });
       else expect(policy).toBeUndefined();
     }
@@ -2596,9 +2621,7 @@ describe("user job durable protocol", {
   it("pauses a task on uncertain and records later clock occurrences as missed", async () => {
     const harness = await createUserHarness();
     await harness.journal.markUncertain(ASSIGNMENT_ID, "ledger-unknown");
-    expect(harness.compatibilityFacts.at(-1)?.occurrences).toContainEqual(
-      expect.objectContaining({ jobRunId: JOB_RUN_ID, state: "uncertain" }),
-    );
+    expect(await harness.journal.occurrence(JOB_RUN_ID)).toMatchObject({ jobRunId: JOB_RUN_ID, state: "uncertain" });
     const missed = await harness.journal.trigger({
       jobRunId: "job-run-missed",
       scheduledFor: "2026-07-15T09:01:00.000Z",
@@ -2607,6 +2630,70 @@ describe("user job durable protocol", {
       missedNextFire: FROZEN_MISSED_NEXT_FIRE,
     });
     expect(missed.state).toBe("missed");
+  });
+
+  it("counts consecutive failures across missed occurrences exactly as over the whole history", async () => {
+    const harness = await createUserHarness({ assign: false, schedulerFailureThreshold: 5 });
+    const minute = (offset: number) => new Date(Date.parse(NOW) + offset * 60_000).toISOString();
+    const trigger = (jobRunId: string, offset: number, missed: boolean) => harness.journal.trigger({
+      jobRunId, scheduledFor: minute(offset), context: surfaceContext(`trigger-${jobRunId}`), source: "user",
+      ...(missed ? { disposition: "missed-offline" as const, missedNextFire: { readyBoundary: minute(offset), nextFire: minute(offset + 1) } } : {}),
+    });
+    // 失败、两次错过、失败、错过：错过的不计数也不打断
+    await harness.journal.failQueued(JOB_RUN_ID);
+    await trigger("missed-a", 1, true);
+    await trigger("missed-b", 2, true);
+    await trigger("second", 3, false);
+    await harness.journal.failQueued("second");
+    await trigger("missed-c", 4, true);
+    const reopened = reopenUserJournal(harness);
+    const history = [...await reopened.occurrencesPage({ limit: 256 })].reverse();
+    expect(history.map((occurrence) => occurrence.jobRunId)).toEqual([JOB_RUN_ID, "missed-a", "missed-b", "second", "missed-c"]);
+    const view = await reopened.schedulerReadView();
+    expect(view.consecutiveFailures).toBe(countScheduleConsecutiveFailures(history));
+    expect(view.consecutiveFailures).toBe(2);
+    expect(view.runCount).toBe(2);
+    expect((await reopened.schedulerPolicy(["second"])).failurePolicyByRun.get("second"))
+      .toMatchObject({ failureCount: 2, autoDisableRequired: false });
+  });
+
+  it("keeps the consecutive failure count exact when an earlier trigger or a late result lands inside a failure streak", async () => {
+    const harness = await createUserHarness({ assign: false, schedulerFailureThreshold: 100 });
+    const minute = (offset: number) => new Date(Date.parse(NOW) + offset * 60_000).toISOString();
+    const trigger = (jobRunId: string, offset: number) => harness.journal.trigger({
+      jobRunId, scheduledFor: minute(offset), context: surfaceContext(`trigger-${jobRunId}`), source: "user",
+    });
+    // 每一步都与在完整历史上按参考函数算出的值一致（新旧对照另在结束钩子里逐个核对存储值）
+    const expectView = async (expected: number) => {
+      const reopened = reopenUserJournal(harness);
+      const history = [...await reopened.occurrencesPage({ limit: 256 })].reverse();
+      const view = await reopened.schedulerReadView();
+      expect(view.consecutiveFailures).toBe(countScheduleConsecutiveFailures(history));
+      expect(view.consecutiveFailures).toBe(expected);
+    };
+    const policyCount = async (jobRunId: string) =>
+      (await reopenUserJournal(harness).schedulerPolicy([jobRunId])).failurePolicyByRun.get(jobRunId)?.failureCount;
+    await harness.journal.failQueued(JOB_RUN_ID);
+    await trigger("b", 2);
+    await harness.journal.failQueued("b");
+    await trigger("d", 4);
+    await harness.journal.failQueued("d");
+    await expectView(3);
+    // 宽限内后到的触发排在已失败的 d 之前：打断 d 之前的连续失败
+    await trigger("c", 3);
+    await expectView(1);
+    // 它随后失败（迟到结果）：前后两段合并
+    await harness.journal.failQueued("c");
+    expect(await policyCount("c")).toBe(3);
+    await expectView(4);
+    // 较新的触发让仍在排队的 e 过期（过期算失败）：这是较早 occurrence 的状态变化，之后的计数随之延续
+    await trigger("e", 5);
+    await expectView(0);
+    await trigger("f", 6);
+    await expectView(0);
+    await harness.journal.failQueued("f");
+    expect(await policyCount("f")).toBe(6);
+    await expectView(6);
   });
 
   it("accepts only a durable not-started fence before redispatch", async () => {
@@ -3873,7 +3960,7 @@ describe("system job local protocol", {
 
   it("rejects a system occurrence carrying surface ingress during full replay", async () => {
     const harness = await createSystemHarness();
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {
@@ -4096,9 +4183,12 @@ describe("system job local protocol", {
         hostContext("system-run-missing-replay-coordinator"),
       ),
     ).rejects.toThrow("simulated process loss");
+    // 资源记录只在归约时校验：没有协调者的实例从日志重建作业域投影时拒绝
+    const rebuilt = new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, { clock: () => NOW, lockWaitMs: 2_000 });
     await expect(
-      harness.createJournal({ omitSystemResources: true }).currentState(JOB_RUN_ID),
+      harness.createJournal({ omitSystemResources: true, log: rebuilt }).currentState(JOB_RUN_ID),
     ).rejects.toThrow("resource coordination is not configured");
+    await rebuilt.stopStorageMaintenance();
   });
 
   it("redrives a running system occurrence with an incremented replacement attempt", async () => {
@@ -4205,7 +4295,7 @@ describe("system job local protocol", {
       context: hostContext("system-pending-miss"),
       source: "system",
     });
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {
@@ -4462,7 +4552,7 @@ describe("job submission guard preflight", {
       reservationId: "system-reservation-1",
       attempt: 1,
     };
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       resourceRecord("reserve", 1),
       {
         stream: `job:${TASK_ID}`,
@@ -4584,9 +4674,26 @@ describe("job submission guard preflight", {
     // No snapshot, coordinate, or write prewarms this new governor before the read.
     expect(await cold.currentState(JOB_RUN_ID)).toBe("committed");
     const final = {reservationId:harness.unsigned.resourceLease.reservationId,assignmentId:ASSIGNMENT_ID,executorId:EXECUTOR_ID};
-    expect(()=>coldResources.assertUsageFinal({...final,usageFinal:{reportDigest:reportDigest,upToUsageSeq:0}})).not.toThrow();
-    expect(()=>coldResources.assertUsageFinal({...final,usageFinal:{reportDigest:SHA256_ZERO,upToUsageSeq:0}})).toThrow("digest");
-    expect(()=>coldResources.assertUsageFinal({...final,usageFinal:{reportDigest:reportDigest,upToUsageSeq:1}})).toThrow("watermark");
+    // 同步校验在协调期内进行：缺的调控状态由协调层装入后重做
+    const check = (usageFinal: { reportDigest: string; upToUsageSeq: number }) => coldResources.coordinate(async () => {
+      try {
+        coldResources.assertUsageFinal({ ...final, usageFinal });
+        return "accepted";
+      } catch (error) {
+        if (error instanceof GovernorStateRequired) throw error;
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(await check({ reportDigest, upToUsageSeq: 0 })).toBe("accepted");
+    expect(await check({ reportDigest: SHA256_ZERO, upToUsageSeq: 0 })).toContain("digest");
+    expect(await check({ reportDigest, upToUsageSeq: 1 })).toContain("watermark");
+    // 已提交的重放经另一个冷实例：用量终值核对在日志事务之外，缺的调控状态补齐后重做
+    const replayResources = harness.createGovernor();
+    const replay = new JobJournal({taskId:TASK_ID,anchorEpoch:3,log:harness.log,artifacts:harness.artifacts,
+      signer:harness.identity,verifier:harness.identity,delivery:deliveryParticipant(harness.log),submission,
+      snapshotFor:matchingSnapshotFor,ingress:{authorize(){}},resources:replayResources,clock:()=>NOW});
+    expect(await new InProcessAssignmentSubmission({ ledger: harness.ledger, owner: replay })
+      .submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned))).toMatchObject({ committed: true });
   });
 
   it("replays an exact committed bundle through a cold journal instance", async () => {
@@ -4637,7 +4744,7 @@ describe("job submission guard preflight", {
           : kind === "wrong-revision"
             ? { ...valid, jobRevision: committed.commitRevision + 1 }
             : valid;
-      await harness.log.append(
+      await appendUnvalidated(harness.log,
         (kind === "duplicate" ? [body, body] : [body]).map((record) => ({
           stream: `job:${TASK_ID}`,
           body: record,
@@ -4879,7 +4986,7 @@ describe("job cancel proof durable replay", {
     if (!proof || proof.decision !== "not-started" || !open) {
       throw new Error("not-started conflict fixture is incomplete");
     }
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {
@@ -5339,6 +5446,7 @@ async function createSystemHarness(
       lockWaitMs: 2_000,
     }),
   );
+  verifyJobStateParityAtFinish(log);
   const identity = new TestProtocolIdentity();
   const crashAfterStart = { value: options.crashAfterStart ?? false };
   let prepareCalls = 0;
@@ -5453,15 +5561,15 @@ async function createSystemHarness(
     ],
   ]);
   const createJournal = (
-    journalOptions: { readonly omitSystemResources?: boolean } = {},
+    journalOptions: { readonly omitSystemResources?: boolean; readonly log?: FileAuthorityCommitLog } = {},
   ) => new JobJournal({
       taskId: TASK_ID,
       anchorEpoch: 3,
-      log,
+      log: journalOptions.log ?? log,
       artifacts,
       signer: identity,
       verifier: identity,
-      delivery: deliveryParticipant(log),
+      delivery: deliveryParticipant(journalOptions.log ?? log),
       submission,
       snapshotFor: matchingSnapshotFor,
       ingress: {
@@ -7032,7 +7140,7 @@ const JOB_RECOVERY_PROBES = {
         nextFire: "2026-07-15T09:03:00.000Z",
       },
     });
-    const missedPolicy = await reopenUserJournal(missed).schedulerPolicy();
+    const missedPolicy = await reopenUserJournal(missed).schedulerPolicy([JOB_RUN_ID]);
     expect(missedPolicy.missedNextFireByRun.get(JOB_RUN_ID)).toMatchObject({
       nextFire: "2026-07-15T09:03:00.000Z",
     });
@@ -7042,7 +7150,7 @@ const JOB_RECOVERY_PROBES = {
       schedulerFailureThreshold: 1,
     });
     await failure.journal.failQueued(JOB_RUN_ID);
-    const pending = await reopenUserJournal(failure).schedulerPolicy();
+    const pending = await reopenUserJournal(failure).schedulerPolicy([JOB_RUN_ID]);
     expect(pending.failurePolicyByRun.get(JOB_RUN_ID)).toMatchObject({
       autoDisableRequired: true,
     });
@@ -7600,7 +7708,7 @@ describe("scheduler mutation and automatic-disable fences", {
         },
       },
     });
-    await expect(harness.journal.occurrences()).resolves.toHaveLength(1);
+    await expect(harness.journal.occurrencesPage({ limit: 256 })).resolves.toHaveLength(1);
   });
 });
 
@@ -7645,7 +7753,7 @@ describe("job record execution-point behavior matrix", () => {
       const vector = spec.corrupt
         ? spec.corrupt(structuredClone(target.body))
         : structuredClone(target.body);
-      await behavior.log.append([{ stream: `job:${TASK_ID}`, body: vector }]);
+      await appendUnvalidated(behavior.log, [{ stream: `job:${TASK_ID}`, body: vector }]);
       await expectBehaviorRejected(behavior.fullProbe);
       if (behavior.guardProbe) {
         const guardBehavior = await JOB_BEHAVIOR_SCENARIOS[spec.scenario]();
@@ -7662,7 +7770,7 @@ describe("job record execution-point behavior matrix", () => {
         const guardVector = spec.corrupt
           ? spec.corrupt(structuredClone(guardTarget.body))
           : structuredClone(guardTarget.body);
-        await guardBehavior.log.append([
+        await appendUnvalidated(guardBehavior.log, [
           { stream: `job:${TASK_ID}`, body: guardVector },
         ]);
         await expectBehaviorRejected(guardBehavior.guardProbe);
@@ -7678,7 +7786,7 @@ describe("user assigned state edges are closed by domain", {
   it("rejects a raw assigned edge outside the user state machine in full and guard replay", async () => {
     const harness = await createUserHarness();
     await start(harness);
-    await harness.log.append([
+    await appendUnvalidated(harness.log, [
       {
         stream: `job:${TASK_ID}`,
         body: {

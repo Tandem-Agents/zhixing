@@ -1469,8 +1469,9 @@ export function applyValidatedAssignmentEntry(
       break;
     }
     case "cancel-proof-owner-accepted":
+      // 对话与作业同一口径：owner 已耐久处理这份已停止证明（一个派发只有一份），退休本地重提义务
       if (
-        state.ref?.execution !== "job" ||
+        state.ref === undefined ||
         state.phase !== "halted" ||
         state.cancelProofOwnerAccepted ||
         ![...state.aborts.values()].some(

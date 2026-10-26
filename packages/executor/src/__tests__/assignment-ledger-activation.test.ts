@@ -1,7 +1,7 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：activation。
 import path from "node:path";
 import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import { FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "@zhixing/core/authority";
+import { AuthorityCacheIntegrity, FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "@zhixing/core/authority";
 import type { AssignmentActivationPayload, AssignmentActivationProof, AssignmentEntry, LedgerEvidencePage, IngressContext } from "@zhixing/core/contracts";
 import { assignmentActivationDigest, canonicalize, dataPlaneTicketDigest, dispatchEnvelopeArtifact } from "@zhixing/core/protocol";
 import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing/owner-kernel/conversation-assignment";
@@ -10,6 +10,7 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import { AssignmentStreamSpool } from "../assignment-stream-spool.js";
 import { DataPlaneTicketRegistry } from "../data-plane-ticket-registry.js";
+import { ExecutorResourceGovernor } from "../resource-governor.js";
 import { NOW, EXECUTOR_ID, CONVERSATION_ID, RUN_ID, ASSIGNMENT_ID, SHA256_ZERO, DURABLE_IO_TEST_TIMEOUT_MS, matchingSnapshotFor, matchingPermissionSnapshotFor, allowOnceDecisionDigest, deliveryParticipant, CountingArtifactStore, FaultingArtifactStore, ownerControl, submission, createHarness, createFormalReceiptHarness, ingress, ownerContext, submissionContext, sealDefaultBundle, createCancellationSubmission, createBundleSubmission, reopenJournal, withoutSignature } from "./assignment-ledger-fixture.js";
 
 describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
@@ -142,11 +143,17 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     if (ctx.principal.kind !== "owner-control") throw new Error("fixture principal");
     const clock = { stream: `executor:${EXECUTOR_ID}:assignment-lease-clock`, body: { v: 1, t: "assignment-lease-time-frontier", executorId: EXECUTOR_ID,
       frontier: mode === "mismatched" ? "2026-07-13T09:00:01.000Z" : NOW, ...(mode === "malformed" ? { extra: true } : {}) } };
-    await h.log.append<unknown>([
+    const append = h.log.append<unknown>([
       ...(mode === "missing" ? [] : mode === "duplicate" ? [clock, clock] : [clock]),
       { stream: `assignment:${ASSIGNMENT_ID}`, body: { recordSeq: 1, body: { v: 3, t: "control-lease-renewed",
         effectiveAcceptedAt: NOW, lease: ctx.principal.grant.controlLease } } },
     ]);
+    // 格式不对的时钟记录由租约时钟投影在写入时拒绝；其余情形由分派重放拒绝
+    if (mode === "malformed") {
+      await expect(append).rejects.toThrow("Executor lease time frontier identity is invalid");
+      return;
+    }
+    await append;
     await expect(h.ledger.dataPlaneBinding(ASSIGNMENT_ID, "observe")).rejects.toThrow();
   });
 
@@ -159,15 +166,45 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     await expect(h.ledger.dataPlaneBinding(ASSIGNMENT_ID, "observe")).resolves.toBeUndefined();
     await h.log.append<unknown>([{ stream: `executor:${EXECUTOR_ID}:assignment-lease-clock`, body: {
       v: 1, t: "assignment-lease-time-frontier", executorId: EXECUTOR_ID, frontier: NOW } }]);
-    await h.log.append<unknown>([{ stream: "assignment:legacy-other", body: record }]);
-    await expect(h.ledger.dataPlaneBinding("legacy-other", "observe")).rejects.toThrow("Legacy lease writer");
+    // 跨分派的时钟规则在写入时校验：登记了租约时钟投影的日志直接拒绝
+    await expect(h.log.append<unknown>([{ stream: "assignment:legacy-other", body: record }])).rejects.toThrow("Legacy lease writer");
+    // 不登记该投影的写者写下同样的记录：投影追平时按同一规则失败关闭。时钟跨分派共享，
+    // 任一分派的决定都先在同一位置追平它，所以原分派的读取也随之拒绝
+    const raw = new FileAuthorityCommitLog(h.log.rootDir, h.artifacts, { clock: () => NOW, lockWaitMs: 2_000 });
+    try { await raw.append<unknown>([{ stream: "assignment:legacy-other", body: record }]); } finally { await raw.stopStorageMaintenance(); }
+    await expect(h.ledger.dataPlaneBinding(ASSIGNMENT_ID, "observe")).rejects.toThrow("Legacy lease writer");
   });
+
+  it("prepares the lease clock outside the ledger queue when a cold instance first reads an assignment", async () => {
+    // 单调时钟固定：派发写下的时钟前沿恰为 NOW，造出的历史从其后严格递增，不随负载下的真实耗时漂移
+    const h = await createFormalReceiptHarness({ startupProofs: true, monotonicClock: () => 0 });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.log.stopStorageMaintenance();
+    // 一个不登记租约时钟投影的写者写下较长的时钟历史：冷实例首次读分派时，这个投影要先在段外追平
+    const logRoot = path.join(h.root, "formal-executor"), integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 5));
+    const writer = new FileAuthorityCommitLog(logRoot, h.artifacts, { clock: () => NOW, integrity });
+    try {
+      for (let index = 1; index <= 300; index++) {
+        await writer.append<unknown>([{ stream: `executor:${EXECUTOR_ID}:assignment-lease-clock`, body: {
+          v: 1, t: "assignment-lease-time-frontier", executorId: EXECUTOR_ID, frontier: new Date(Date.parse(NOW) + index * 1_000).toISOString() } }]);
+      }
+    } finally { await writer.stopStorageMaintenance(); }
+    const cold = new FileAuthorityCommitLog(logRoot, h.artifacts, { clock: () => NOW, integrity });
+    onTestFinished(() => cold.stopStorageMaintenance());
+    const governor = new ExecutorResourceGovernor({ log: cold, signer: h.identity, verifier: h.identity, guard: { assert() {} },
+      executorId: EXECUTOR_ID, localDomainId: "local:device-1", localGovernorEpoch: 1, maxActiveRoots: 1, clock: () => NOW });
+    const ledger = new ConversationAssignmentLedger({ log: cold, artifacts: h.artifacts, executorId: EXECUTOR_ID,
+      signer: h.identity, verifier: h.identity, ownerControl, snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: digest => matchingPermissionSnapshotFor(h.identity, digest), resources: governor, clock: () => NOW });
+    await expect(ledger.dataPlaneBinding(ASSIGNMENT_ID, "observe")).resolves.toMatchObject({ executorId: EXECUTOR_ID });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("reads binding batches once and preserves each requested use and missing entry", async () => {
     const h = await createFormalReceiptHarness();
     await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
     await h.ledger.supersede(ASSIGNMENT_ID, { fenceSeq: 1, requestId: "batch-supersede" }, ownerContext(ASSIGNMENT_ID, "executor.supersede"));
-    const read = vi.spyOn(h.log, "readProjection");
+    // 冷恢复从领域索引读取：一批只读一次
+    const read = vi.spyOn(h.log, "transactDurableProjection");
     try {
       const batch = await h.ledger.dataPlaneBindings([
         { assignmentId: ASSIGNMENT_ID, use: "observe" }, { assignmentId: ASSIGNMENT_ID, use: "abort" },

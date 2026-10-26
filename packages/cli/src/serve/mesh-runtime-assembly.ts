@@ -43,11 +43,14 @@ import type {
 import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import {
   ConversationTransferTarget,
-  listConversationTransferStates,
-  isConversationSourceEvidenceError,
+  listCommittedConversationIds,
+  listCommittedConversationTransferIds,
+  listConversationTransfersFor,
+  readConversationTransferState,
   type ConversationTransferPublication,
   type ConversationTransferStagingArea,
 } from "@zhixing/owner-kernel/conversation-transfer";
+import { listPendingDeferredIntentConversations } from "@zhixing/owner-kernel/deferred-global-intents";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -175,6 +178,7 @@ import {
   registerDeviceRemovalIssuerMeshService,
   registerDeviceRemovalTargetMeshService,
 } from "./device-removal-mesh.js";
+import { executorIdForDevice } from "./executor-identity.js";
 
 type AnchorPostInstallDescriptor =
   | PlannedAnchorPostInstallDescriptor
@@ -676,6 +680,15 @@ export class MeshRuntimeAssembly
             options.protocol!.prepareCommittedConversationTransfer(base),
         })
       : undefined;
+    if (this.#transferTarget && options.protocol) {
+      // 收编会话按键就地装入：启动不遍历全部已提交收编
+      const target = this.#transferTarget, log = options.authority.authorityLog, verifier = options.authority.verifier;
+      this.#disposers.push(options.protocol.bindCommittedConversationTransfers({
+        committedFor: (conversationId) => listCommittedConversationTransferIds(log, verifier, conversationId),
+        conversations: () => listCommittedConversationIds(log, verifier),
+        load: (transferId) => target.committedBaseSource(transferId),
+      }));
+    }
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
       connections: this.connections,
@@ -1478,11 +1491,13 @@ export class MeshRuntimeAssembly
       throw new Error("Current duty device is unavailable for conversation transfer");
     }
     await this.#adoptLocalConversations(input.targetDeviceId, input.conversationIds);
-    const states = await listConversationTransferStates(
-      this.options.authority.executorLog,
-      this.options.authority.verifier,
-    );
     for (const conversationId of input.conversationIds) {
+      // 按会话精确读取它的迁移，不遍历全部迁移
+      const states = await listConversationTransfersFor(
+        this.options.authority.executorLog,
+        this.options.authority.verifier,
+        conversationId,
+      );
       if (!states.some((state) =>
         state.identity.conversationId === conversationId &&
         state.identity.targetDeviceId === input.targetDeviceId &&
@@ -2111,7 +2126,7 @@ export class MeshRuntimeAssembly
         await this.#plannedAnchorOwner?.recoverBeforeAdmission();
       });
       await this.#deviceRemovalAuthority?.resumeActive();
-      await this.#restoreCommittedTransfers();
+      await this.#reviewPendingAdoptions();
       if (lifecycleAdmissionClosed) {
         await this.#worker?.recoverAcceptedWorkForLifecycle();
       } else {
@@ -2170,23 +2185,18 @@ export class MeshRuntimeAssembly
     });
   }
 
-  async #restoreCommittedTransfers(): Promise<void> {
+  /**
+   * 收编后复核在启动时只作用于仍有待决延期意图的会话：复核的全部效果都落在待决意图上，
+   * 其余收编会话无事可做，按需装入即可。
+   */
+  async #reviewPendingAdoptions(): Promise<void> {
     if (!this.#transferTarget || !this.options.protocol) return;
-    const states = await listConversationTransferStates(
-      this.options.authority.authorityLog,
-      this.options.authority.verifier,
-    );
-    for (const state of states) {
-      if (state.phase !== "committed" && state.phase !== "tombstoned") continue;
-      let base: ConversationTransferPublication;
-      try {
-        base = await this.#transferTarget.committedBaseSource(state.identity.transferId);
-      } catch (error) {
-        if (!isConversationSourceEvidenceError(error)) throw error;
-        await this.options.protocol.retainUnavailableCommittedConversationTransfer(state.identity.transferId, error);
-        continue;
-      }
-      await this.#installCommittedTransfer(base);
+    const lifecycle = this.#postAdoptionReviewLifecycle;
+    if (lifecycle.kind !== "anchor") {
+      throw new TypeError("Executor-only Mesh cannot review an adopted conversation");
+    }
+    for (const conversationId of await listPendingDeferredIntentConversations(this.options.authority.authorityLog)) {
+      await lifecycle.review.reviewAfterAdoption(conversationId);
     }
   }
 
@@ -2220,13 +2230,15 @@ export class MeshRuntimeAssembly
       this.options.authority.signer,
       this.options.authority.verifier,
     );
-    const states = await listConversationTransferStates(
-      this.options.authority.executorLog,
-      this.options.authority.verifier,
-    );
     for (const conversationId of exactCandidates ?? await owner.transferCandidates()) {
       const parsed = parseLocalConversationId(conversationId);
       if (!parsed) continue;
+      // 按会话精确读取它的迁移（与原先全量列表同序），不遍历全部迁移
+      const states = await listConversationTransfersFor(
+        this.options.authority.executorLog,
+        this.options.authority.verifier,
+        conversationId,
+      );
       const prior = states.find((state) =>
         state.identity.conversationId === conversationId &&
         state.identity.targetDeviceId === peerDeviceId &&
@@ -2274,10 +2286,11 @@ export class MeshRuntimeAssembly
         const commit = await client.importAndCommit(frozen);
         await source.acceptCommit({ manifest: frozen.manifest, commit });
       } catch (error) {
-        const durable = await listConversationTransferStates(
+        const durable = await readConversationTransferState(
           this.options.authority.executorLog,
+          transferId,
           this.options.authority.verifier,
-        ).then((items) => items.find((item) => item.identity.transferId === transferId));
+        );
         if (!durable) continue;
         const target = await client.status(transferId).catch(() => undefined);
         if (target?.state === "committed" || target?.state === "tombstoned") {
@@ -2358,9 +2371,7 @@ export async function resolveDeviceRemovalStatus(input: {
   return input.issuerStatus();
 }
 
-export function executorIdForDevice(deviceId: string): string {
-  return `executor:${deviceId}`;
-}
+export { executorIdForDevice };
 
 function usageReporterContext(
   executorId: string,
