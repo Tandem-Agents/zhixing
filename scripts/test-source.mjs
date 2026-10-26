@@ -7,11 +7,12 @@
 // - slow：只跑慢车道清单（规模、耐久与重集成用例），三级任务收尾时运行。
 // - all：两条车道一起跑。
 // - --profile：额外输出逐文件耗时，并按阈值重写慢车道清单（scripts/test-lanes.json）。
+// - 运行期间受测源码（各包 src、scripts/*.mjs）被改动时，结尾列出改动的文件；用例全过也以 3 退出。
 //
 // 运行器固定为仓库锁定的 vitest（取自 packages/core/node_modules），不经 npx：
 // 仓库根目录没有 vitest，npx 会落到全局缓存的其他大版本。
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -286,6 +287,32 @@ const result = spawnSync(process.execPath, [vitest, "run", "--config", configFil
 const wallSeconds = Math.round((performance.now() - started) / 1000);
 console.log(`[test-source] lane=${lane} wall=${wallSeconds}s exit=${result.status}`);
 
+// 测试从源码按需加载：运行期间改过受测源码，结果就混合了两个候选，不能作证据。
+// 范围是各包 src（含用例）与 scripts 下的脚本；--profile 自动改写的 test-lanes.json 不算。
+const changedDuringRun = [];
+const walkChanged = (dir) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === "dist") continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkChanged(full);
+    else if (statSync(full).mtimeMs > startedAt.getTime()) changedDuringRun.push(path.relative(root, full).split(path.sep).join("/"));
+  }
+};
+for (const base of [path.join(root, "packages"), path.join(root, "packages", "channels")]) {
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    const src = path.join(base, entry.name, "src");
+    if (entry.isDirectory() && existsSync(src)) walkChanged(src);
+  }
+}
+for (const entry of readdirSync(path.join(root, "scripts"), { withFileTypes: true })) {
+  const full = path.join(root, "scripts", entry.name);
+  if (entry.isFile() && entry.name.endsWith(".mjs") && statSync(full).mtimeMs > startedAt.getTime()) changedDuringRun.push(`scripts/${entry.name}`);
+}
+if (changedDuringRun.length > 0) {
+  console.log(`[test-source] 运行期间受测源码被改动（${changedDuringRun.length} 个），本次结果混合了两个候选，不作证据：`);
+  for (const file of changedDuringRun.slice(0, 10)) console.log(`  ${file}`);
+}
+
 // profile 运行归档到带时间戳的独立目录，last-*.json 只是“最近一次”的入口，不作证据锚点。
 if (profile) {
   const runDir = path.join(cacheDir, "runs", `${startedAt.toISOString().replace(/[-:]/g, "").replace(/\..*$/, "")}-${lane}`);
@@ -324,4 +351,5 @@ if (profile && existsSync(reportFile)) {
   console.log(`[test-source] slow lane now ${next.length} files; slowest this run:`);
   for (const entry of top) console.log(`  ${(entry.ms / 1000).toFixed(1)}s  ${entry.file}`);
 }
-process.exit(result.status ?? 1);
+// 用例全过但源码中途变了，以 3 退出，避免验证链把它当成通过
+process.exit(result.status === 0 && changedDuringRun.length > 0 ? 3 : result.status ?? 1);
