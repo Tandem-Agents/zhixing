@@ -21,7 +21,10 @@ import {
   type FirstPartyIngressConnection,
 } from "../serve/first-party-conversation-mesh.js";
 import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
-import { createMeshBootstrapProjectionPorts } from "../serve/mesh-bootstrap-projection.js";
+import {
+  createMeshBootstrapProjectionPorts,
+  loadActiveMemberTransportPeers,
+} from "../serve/mesh-bootstrap-projection.js";
 import { ProductionMeshControlPlane } from "../serve/mesh-control-plane.js";
 import { loadExistingDeviceKey } from "../serve/mesh-device-key.js";
 import { CoreHostUnavailableError } from "./core-host-connection.js";
@@ -79,7 +82,11 @@ export async function createCurrentAnchorSurfaceRpcClient(options: {
       trust,
       configuration: validateMeshRoleBootConfig(configuration),
       endpoints: await bootstrapProjection.endpoints.loadEndpoints(),
-      transportPeers: await bootstrapProjection.transportPeers.loadTransportPeers(),
+      transportPeers: await loadActiveMemberTransportPeers(
+        bootstrapProjection.transportPeers,
+        trust.members,
+        deviceKey.deviceId,
+      ),
       secretStore,
       endpointDirectory: bootstrapProjection.endpoints,
       transportPeerDirectory: bootstrapProjection.transportPeers,

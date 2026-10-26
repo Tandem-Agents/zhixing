@@ -196,6 +196,34 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     ]);
   });
 
+  it("runs only the dedicated removal retrieval before the retirement path, never the resident topology", async () => {
+    const removed = new Error("This device was removed; pair it again to create a new identity");
+    const harness = createHarness({
+      roles: ["executor"],
+      removalRetrieval: true,
+      secondBootstrapFailure: removed,
+    });
+
+    await expect(new PersistentApplicationHost(
+      createInput("managed"),
+      harness.dependencies,
+    ).run()).rejects.toBe(removed);
+
+    // 宿主两次准备都允许专用取回；取回只拿到取回模式的 bootstrap，跑完先释放再重新准备
+    expect(harness.prepareMesh).toHaveBeenCalledTimes(2);
+    expect(harness.prepareMesh.mock.calls.map(([options]) =>
+      (options as { allowRemovalRetrieval?: boolean }).allowRemovalRetrieval)).toEqual([true, true]);
+    expect(harness.runRemovalRetrieval).toHaveBeenCalledOnce();
+    expect(harness.runRemovalRetrieval.mock.calls[0]?.[0]).toMatchObject({
+      mesh: { mode: "removal-retrieval", operationId: "remove-local" },
+      secretStore: { marker: "secret-store" },
+    });
+    expect(harness.runRecoveryRoot).not.toHaveBeenCalled();
+    expect(harness.roleInvocations()).toBe(0);
+    expect(harness.releaseLease).not.toHaveBeenCalled();
+    expect(harness.events).toEqual(["capacity", "mesh:1", "removal-retrieval", "stop:1", "mesh:2"]);
+  });
+
   it("uses the common termination path when recovery-root establishment fails", async () => {
     const failure = new Error("recovery failed");
     const harness = createHarness({
@@ -377,6 +405,7 @@ function createInput(
 function createHarness(input: {
   readonly roles: readonly DeviceRole[];
   readonly recoveryRequired?: boolean;
+  readonly removalRetrieval?: boolean;
   readonly recoveryFailure?: Error;
   readonly secondBootstrapFailure?: Error;
   readonly roleFailure?: Error;
@@ -410,9 +439,11 @@ function createHarness(input: {
     close: closeDisasterRecoveryStaging,
   } as never;
   const createDisasterRecoveryStaging = vi.fn(() => disasterRecoveryStaging);
-  const meshes = input.recoveryRequired
-    ? [createMesh(false), createMesh(true)]
-    : [createMesh(true)];
+  const meshes = input.removalRetrieval
+    ? [createRetrievalMesh(), createMesh(true)]
+    : input.recoveryRequired
+      ? [createMesh(false), createMesh(true)]
+      : [createMesh(true)];
   let meshIndex = 0;
   let rolePlan: unknown;
   let roleBootstrap:
@@ -430,6 +461,9 @@ function createHarness(input: {
   const runRecoveryRoot = vi.fn(async () => {
     events.push("recovery");
     if (input.recoveryFailure) throw input.recoveryFailure;
+  });
+  const runRemovalRetrieval = vi.fn(async () => {
+    events.push("removal-retrieval");
   });
   const runAnchorRole = vi.fn(async (_options, bootstrap, _executor, plan) => {
     roleBootstrap = bootstrap;
@@ -478,6 +512,7 @@ function createHarness(input: {
     createDisasterRecoveryStaging,
     createRecoveryRootPairedCheckpointReceiver,
     runRecoveryRoot: runRecoveryRoot as never,
+    runRemovalRetrieval: runRemovalRetrieval as never,
     acquireLocalWorkspaceOwner: (async (_home, roles) => {
       if (!roles.includes("executor")) return undefined;
       events.push("lease");
@@ -506,6 +541,7 @@ function createHarness(input: {
     pairedCheckpointReceiver,
     releaseLease,
     runRecoveryRoot,
+    runRemovalRetrieval,
     importAnchorRole,
     importExecutorRole,
     importExecutorModule,
@@ -547,6 +583,22 @@ function createHarness(input: {
       },
       bootstrapStore: { stopStorageMaintenance: stop },
       plannedAnchorTransferStaging,
+      disasterRecoveryStaging,
+    } as unknown as MeshRuntimeBootstrap;
+  }
+
+  function createRetrievalMesh(): MeshRuntimeBootstrap {
+    const ordinal = meshStops.length + 1;
+    const stop = vi.fn(async () => {
+      events.push(`stop:${ordinal}`);
+    });
+    meshStops.push(stop);
+    return {
+      mode: "removal-retrieval",
+      operationId: "remove-local",
+      deviceKey: { deviceId: "target" },
+      bootstrapStore: { stopStorageMaintenance: stop },
+      verifier: {},
       disasterRecoveryStaging,
     } as unknown as MeshRuntimeBootstrap;
   }

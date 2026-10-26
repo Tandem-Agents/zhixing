@@ -12,7 +12,7 @@ import {
   validateMeshRoleBootConfig,
   type MeshEndpointDirectory,
 } from "@zhixing/mesh/bootstrap";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
 import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
@@ -21,8 +21,10 @@ import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { settleExecutorRemovalBeforeBootstrap } from "./device-removal.js";
 import {
   createMeshBootstrapProjectionPorts,
+  loadActiveMemberTransportPeers,
   type MeshBootstrapProjectionPorts,
 } from "./mesh-bootstrap-projection.js";
 import {
@@ -71,8 +73,20 @@ export type MeshRuntimeBootstrap =
         | DisasterRecoveryPostInstallDescriptor;
     };
 
-/** Resolves durable trust before loading any role-specific production listener. */
-export async function prepareMeshRuntimeBootstrap(input: {
+/**
+ * 本机处于撤销阶段、仍需联网取回终态的移除：只开放专用取回，不进入普通身份与角色装配。
+ * 只有宿主在显式允许时拿到它；其他命令遇到这种状态直接失败关闭。
+ */
+export interface ExecutorRemovalRetrievalBootstrap {
+  readonly mode: "removal-retrieval";
+  readonly operationId: string;
+  readonly deviceKey: DeviceKey;
+  readonly bootstrapStore: FileMeshBootstrapStore;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
+}
+
+export interface PrepareMeshRuntimeBootstrapInput {
   readonly records?: import("@zhixing/core/logging").LogRecordPort;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
@@ -84,7 +98,18 @@ export async function prepareMeshRuntimeBootstrap(input: {
   readonly configuration?: MeshRoleBootConfig;
   readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
   readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
-}): Promise<MeshRuntimeBootstrap> {
+  /** 宿主才允许拿到专用取回状态并负责运行它。 */
+  readonly allowRemovalRetrieval?: boolean;
+}
+
+/** Resolves durable trust before loading any role-specific production listener. */
+export function prepareMeshRuntimeBootstrap(
+  input: PrepareMeshRuntimeBootstrapInput & { readonly allowRemovalRetrieval: true },
+): Promise<MeshRuntimeBootstrap | ExecutorRemovalRetrievalBootstrap>;
+export function prepareMeshRuntimeBootstrap(input: PrepareMeshRuntimeBootstrapInput): Promise<MeshRuntimeBootstrap>;
+export async function prepareMeshRuntimeBootstrap(
+  input: PrepareMeshRuntimeBootstrapInput,
+): Promise<MeshRuntimeBootstrap | ExecutorRemovalRetrievalBootstrap> {
   const configuration = input.configuration === undefined
     ? undefined
     : validateMeshRoleBootConfig(input.configuration);
@@ -104,10 +129,10 @@ export async function prepareMeshRuntimeBootstrap(input: {
 }
 
 async function prepareWithBootstrapStore(
-  input: Parameters<typeof prepareMeshRuntimeBootstrap>[0],
+  input: PrepareMeshRuntimeBootstrapInput,
   configuration: MeshRoleBootConfig | undefined,
   bootstrapStore: FileMeshBootstrapStore,
-): Promise<MeshRuntimeBootstrap> {
+): Promise<MeshRuntimeBootstrap | ExecutorRemovalRetrievalBootstrap> {
   const sources = bootstrapStore.authoritySources()!;
   const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
   // 普通启动只读取已验当前视图；历史身份在既有异步校验边界按 keyId 精确补齐。
@@ -116,6 +141,28 @@ async function prepareWithBootstrapStore(
     await sources.prepareRuntime("runtime-prepare", configuration !== undefined && !configuration.enabledRoles.includes("anchor"));
   }
   const existingDeviceKey = await loadExistingDeviceKey(input.secretStore);
+  // 撤销阶段的本机移除先于普通身份与角色装配处理：已有终态依据就本地终结，零网络；否则只开放专用取回。
+  const removal = await settleExecutorRemovalBeforeBootstrap({
+    log: bootstrapStore.authorityLog(),
+    verifier: sources.verifier,
+    secretStore: input.secretStore,
+  });
+  if (removal.kind === "retrieval") {
+    if (!input.allowRemovalRetrieval) {
+      throw new Error("This device is finishing its removal; start the local service so it can reach the duty device");
+    }
+    if (!existingDeviceKey || existingDeviceKey.deviceId !== removal.targetDeviceId) {
+      throw new Error("Device removal retrieval requires this device's existing identity");
+    }
+    return Object.freeze({
+      mode: "removal-retrieval" as const,
+      operationId: removal.operationId,
+      deviceKey: existingDeviceKey,
+      bootstrapStore,
+      verifier: sources.verifier,
+      disasterRecoveryStaging: input.disasterRecoveryStaging,
+    });
+  }
   const [authorityLifecycle, executorLifecycle] = await Promise.all([
     new DeviceLifecycleJournal(sources.authority).startupState(existingDeviceKey?.deviceId),
     new DeviceLifecycleJournal(sources.executor).startupState(existingDeviceKey?.deviceId),
@@ -193,6 +240,8 @@ async function prepareWithBootstrapStore(
       throw new Error("Current duty device is missing its active issuer key");
     }
     bootstrapStore.bindIssuerKey(anchorIssuerKey);
+    // 开发资料的一次性接续：链头只由 v1 历史帧闭合时补签 v2，其他设备对齐时即可取回当前快照
+    await bootstrapStore.continueCurrentTrustRecord(anchorIssuerKey);
   }
   if (!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey) {
     throw new Error("Trusted-home recovery root identity is inconsistent");
@@ -229,7 +278,12 @@ async function prepareWithBootstrapStore(
     trust,
     configuration,
     endpoints,
-    transportPeers: await bootstrapProjection.transportPeers.loadTransportPeers(),
+    // 只为当前 active 成员精确读传输身份；已不是成员的设备经终态入口按请求解析。
+    transportPeers: await loadActiveMemberTransportPeers(
+      bootstrapProjection.transportPeers,
+      trust.members,
+      deviceKey.deviceId,
+    ),
     // Only live members are materialized here. Revoked signers remain available
     // through the source-bound exact identity resolver, without active authority.
     trustedIdentities: trust.members.map((member) => member.device),

@@ -381,6 +381,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryRunning: Promise<number> | undefined;
   #readinessRecovery: Promise<number> | undefined;
   #recoveryStopped = false;
+  /** 收束核对等稳定检查进行中：计时器到点不开新的一轮，只记下欠一轮。 */
+  #recoveryPauses = 0;
+  #recoveryDeferred = false;
+  /** 当前循环的一次调度（startRecoveryLoop 设置）：暂停结束时据此补上欠下的一轮。 */
+  #recoveryRun: (() => void) | undefined;
   #recoveryDiscovered = false;
   #recoveryDiscoveryAfter: string | undefined;
   #shutdownDraining = false;
@@ -705,6 +710,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoveryStopped = false;
     const run = () => {
       if (this.#recoveryStopped) return;
+      if (this.#recoveryPauses > 0) {
+        this.#recoveryDeferred = true;
+        return;
+      }
       const active = this.recover();
       this.#recoveryRunning = active;
       void active.catch(() => 0).finally(() => {
@@ -718,7 +727,27 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         }
       });
     };
+    this.#recoveryRun = run;
     run();
+  }
+
+  /**
+   * 稳定检查边界：期间不发起新的一轮恢复，先等正在跑的一轮结束，再执行 operation。
+   * 结束时若欠下一轮、循环没有被停止、也没有计时器或在跑的一轮，就补上这一轮；循环已停（停止、
+   * 关闭、生命周期接管）则不重启。不持任何日志或领域锁等待，只在排他段外调用。
+   */
+  async whileRecoveryPaused<Value>(operation: () => Promise<Value>): Promise<Value> {
+    this.#recoveryPauses += 1;
+    try {
+      await this.#recoveryRunning?.catch(() => 0);
+      return await operation();
+    } finally {
+      this.#recoveryPauses -= 1;
+      if (this.#recoveryPauses === 0 && this.#recoveryDeferred) {
+        this.#recoveryDeferred = false;
+        if (!this.#recoveryStopped && !this.#recoveryTimer && !this.#recoveryRunning) this.#recoveryRun?.();
+      }
+    }
   }
 
   async stopRecoveryLoop(): Promise<void> {

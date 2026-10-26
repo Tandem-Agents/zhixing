@@ -22,6 +22,8 @@ import {
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
+import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
 import {
   INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
   setupAuthorityRuntime,
@@ -827,9 +829,50 @@ describe("setupDelivery — Channel effect binding", () => {
   ])("rebinds every fixed authority owner to installed generations in the $profile profile", async ({
     enableLocalExecutor,
   }) => {
+    // 已安装代际必须等于经验证的本机任期：先用真实签名信任链建 home，登记另一台 anchor
+    const at = "2026-08-12T00:00:00.000Z";
+    const secretStore = new MemorySecretStore();
+    const key = await DeviceKey.generate();
+    const peer = await DeviceKey.generate();
+    const store = await FileMeshBootstrapStore.open(home, key, { secretStore });
+    let trust = (await store.initializeLocalHome({
+      key,
+      identity: enrollDeviceIdentity(key, { displayName: "local-anchor", platform: "headless", enrolledAt: at }),
+      roles: ["anchor", "executor"],
+      homeId: "home-installed-generation",
+      at,
+    })).projection;
+    trust = await store.appendTrustEvent({
+      event: createSignedTrustEvent({
+        current: trust,
+        body: { t: "enroll", device: enrollDeviceIdentity(peer, { displayName: "peer-anchor", platform: "headless", enrolledAt: at }), roles: ["anchor"] },
+        signer: key,
+        at,
+      }),
+      issuerKey: key,
+    });
+    // 迁出到另一台再迁回本机：本机取得新的任期，代际取它的 anchorEpoch
+    const roundTrip = async (): Promise<number> => {
+      for (const [from, to] of [[key, peer], [peer, key]] as const) {
+        trust = await store.appendTrustEvent({
+          event: createSignedTrustEvent({
+            current: trust, signer: from, at,
+            body: {
+              t: "issuer-transition", reason: "migration", signedBy: "issuer", nextTrustEpoch: trust.trustEpoch + 1,
+              fromIssuerKeyId: trust.issuer.issuerKeyId, toIssuerKeyId: to.deviceId, toDeviceId: to.deviceId,
+            },
+          }),
+          issuerKey: to,
+        });
+      }
+      const tenure = (await store.authoritySources()!.currentAnchorAuthorization(key.deviceId)).tenure;
+      expect(tenure?.deviceId).toBe(key.deviceId);
+      return tenure!.anchorEpoch;
+    };
     const runtime = await setupAuthorityRuntime({
       zhixingHome: home,
-      secretStore: new MemorySecretStore(),
+      secretStore,
+      deviceKey: key,
       executorReadiness: TEST_EXECUTOR_READINESS,
       enableAnchor: true,
       enableLocalExecutor,
@@ -861,7 +904,8 @@ describe("setupDelivery — Channel effect binding", () => {
         },
       });
 
-      const second = generation(2);
+      const secondEpoch = await roundTrip();
+      const second = generation(secondEpoch);
       const receipt = await runtime.rebindInstalledAuthority(second);
       expect(INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS).toEqual([
         "runtime-epoch",
@@ -877,7 +921,7 @@ describe("setupDelivery — Channel effect binding", () => {
         generation: second,
         participants: INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
       });
-      expect(runtime.anchorEpoch).toBe(2);
+      expect(runtime.anchorEpoch).toBe(secondEpoch);
       expect(runtime.authority).not.toBe(initial.authority);
       expect(runtime.controlAdmission).not.toBe(initial.controlAdmission);
       expect(runtime.resourceGovernor).not.toBe(initial.resourceGovernor);
@@ -894,13 +938,16 @@ describe("setupDelivery — Channel effect binding", () => {
       await expect(runtime.authority.list()).resolves.toEqual([]);
       expect(await runtime.rebindInstalledAuthority(structuredClone(second))).toEqual(receipt);
 
-      const third = generation(3);
+      const thirdEpoch = await roundTrip();
+      expect(thirdEpoch).toBeGreaterThan(secondEpoch);
+      const third = generation(thirdEpoch);
       await expect(runtime.rebindInstalledAuthority(third)).resolves.toMatchObject({
-        generation: { anchorEpoch: 3, trustEpoch: 3 },
+        generation: { anchorEpoch: thirdEpoch, trustEpoch: thirdEpoch },
       });
-      expect(runtime.anchorEpoch).toBe(3);
+      expect(runtime.anchorEpoch).toBe(thirdEpoch);
     } finally {
       await runtime.startupCleanup.run().catch(() => undefined);
+      await store.stopStorageMaintenance().catch(() => undefined);
     }
   });
 

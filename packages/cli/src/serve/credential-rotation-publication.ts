@@ -8,7 +8,6 @@ import {
   resolveProvider,
   type ProviderCredentialProjection,
 } from "@zhixing/providers";
-import type { CredentialExposureRecord } from "@zhixing/core/contracts";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
 import type { RuntimeCredentialRotationConfigurationProjection } from "../runtime/runtime-configuration-projections.js";
@@ -49,6 +48,7 @@ export interface CredentialRotationPublicationOptions {
  * Completes only the finite credential rotations already demanded by the
  * durable exposure projection. It neither rotates third-party credentials nor
  * creates a second readiness source.
+ * 从待轮换索引起步，修订号按受影响绑定精确读聚合：读取随待轮换数，不扫描全部过往身份。
  */
 export async function publishRequiredCredentialRotations(
   options: CredentialRotationPublicationOptions,
@@ -56,9 +56,7 @@ export async function publishRequiredCredentialRotations(
   const bindings = currentCredentialBindings(options);
   if (bindings.length === 0) return;
 
-  let projection = await options.authority.projection();
-  const compromised = projection.records.filter((record) =>
-    record.state === "compromised");
+  const compromised = await options.authority.compromisedRecords();
   if (compromised.length === 0) return;
   if (!options.credentialGeneration) {
     throw new Error("Credential rotation requires a committed SecretStore generation");
@@ -73,7 +71,11 @@ export async function publishRequiredCredentialRotations(
       throw new Error("Credential rotation binding is ambiguous");
     }
     const binding = matches[0]!;
-    const revision = nextBindingRevision(projection.records, binding, old);
+    // 同一绑定、同一服务的全部记录与这条旧记录里最大的修订号，再加一
+    const revision = Math.max(
+      await options.authority.bindingRevision(binding.bindingId, binding.service),
+      old.bindingRevision ?? 0,
+    ) + 1;
     const requestId = protocolDigest("CredentialRotationRequest", 1, {
       credentialGeneration: options.credentialGeneration,
       deviceId: options.deviceId,
@@ -84,7 +86,7 @@ export async function publishRequiredCredentialRotations(
       revision,
     });
     const readiness = readinessFor(binding, options);
-    projection = await options.authority.publishRotation({
+    await options.authority.publishRotation({
       requestId,
       oldDeviceId: old.deviceId,
       oldBindingId: old.bindingId,
@@ -158,20 +160,6 @@ function binding(
 function logicalBindingId(bindingId: string): string {
   const match = /^user-alias:[^:]+:(.+)$/u.exec(bindingId);
   return match?.[1] ?? bindingId;
-}
-
-function nextBindingRevision(
-  records: readonly CredentialExposureRecord[],
-  binding: CurrentCredentialBinding,
-  old?: CredentialExposureRecord,
-): number {
-  const revisions = records
-    .filter((record) =>
-      record.bindingId === binding.bindingId &&
-      record.service === binding.service)
-    .map((record) => record.bindingRevision ?? 0);
-  if (old?.bindingRevision !== undefined) revisions.push(old.bindingRevision);
-  return Math.max(0, ...revisions) + (old ? 1 : revisions.length === 0 ? 1 : 0);
 }
 
 function credentialValue(

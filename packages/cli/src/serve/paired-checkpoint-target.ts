@@ -1,4 +1,5 @@
-import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing/core/contracts";
+import type { HomeTrustEvent } from "@zhixing/core/contracts";
+import type { RootActivationRecord } from "@zhixing/mesh/paired-checkpoint-target";
 import type {
   InventoryPublishedRecoveryCheckpointTarget,
   PublishedRecoveryCheckpointTargetSession,
@@ -17,7 +18,7 @@ export interface PairedRecoveryRootActivation {
     input: {
       readonly checkpointId: string;
       readonly event: HomeTrustEvent;
-      readonly record: HomeTrustRecord;
+      readonly record: RootActivationRecord;
     },
     signal?: AbortSignal,
   ) => Promise<void>;

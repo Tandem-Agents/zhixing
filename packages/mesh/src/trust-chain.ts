@@ -494,6 +494,16 @@ export function createDomainResetEventFromApproval(input: {
   return event;
 }
 
+/**
+ * 链上较早写入的 v1 快照（列全成员，含已撤销与待重新配对）。只作为已入链的权威历史帧按原规则验证，
+ * 当前快照一律是 v2。
+ */
+export type HistoricalHomeTrustRecord = Omit<HomeTrustRecord, "v" | "members"> & {
+  readonly v: 1;
+  members: Array<{ device: DeviceIdentity; roles: DeviceRole[]; state: "active" | "revoked" | "pending-reenroll" }>;
+};
+
+/** 当前授权快照：只签链头处的 active 成员，按 deviceId 升序；输入可以是整链投影或只含 active 的当前视图。 */
 export function buildHomeTrustRecord(
   projection: TrustProjection,
   signer: DeviceTrustSigner,
@@ -501,38 +511,60 @@ export function buildHomeTrustRecord(
   if (signer.deviceId !== projection.issuer.issuerKeyId) {
     throw new TypeError("Only the current issuer can sign a trust projection");
   }
-  const unsigned = {
-    v: 1 as const,
-    homeId: projection.homeId,
-    trustEpoch: projection.trustEpoch,
-    chainHead: { ...projection.chainHead },
-    issuer: { ...projection.issuer },
-    ...(projection.recoveryRootPublicKey
-      ? { recoveryRootPublicKey: projection.recoveryRootPublicKey }
-      : {}),
-    ...(projection.recoveryBackupPublicKey
-      ? { recoveryBackupPublicKey: projection.recoveryBackupPublicKey }
-      : {}),
+  const unsigned = buildComparableProjection(projection);
+  return { ...unsigned, signature: signer.sign("HomeTrustRecord", 2, unsigned) };
+}
+
+/** 当前快照的验证：只收 v2，与投影在同一链头处的 active 成员逐项全等（漏、重、多、错角色或公钥都不等）。 */
+export function verifyHomeTrustRecord(
+  record: HomeTrustRecord,
+  projection: TrustProjection,
+): void {
+  if ((record as { readonly v: unknown }).v !== 2) {
+    throw new TypeError("Trust record is not a current snapshot");
+  }
+  const issuer = issuerSigningIdentity(projection);
+  const { signature, ...unsigned } = record;
+  verifyDeviceSignature(issuer, "HomeTrustRecord", 2, unsigned, signature);
+  const expected = buildComparableProjection(projection);
+  if (canonicalize(unsigned) !== canonicalize(expected)) {
+    throw new TypeError("Trust record does not match its event-chain projection");
+  }
+}
+
+/**
+ * 已入链历史帧的验证：v2 同当前规则；v1 按原规则与同一位置的全部成员逐项比对。
+ * 只供重建当前信任投影与核对历史元组使用，当前快照的读者不接收 v1。
+ */
+export function verifyHistoricalHomeTrustRecord(
+  record: HomeTrustRecord | HistoricalHomeTrustRecord,
+  projection: TrustProjection,
+): void {
+  if (record.v === 2) {
+    verifyHomeTrustRecord(record, projection);
+    return;
+  }
+  if (record.v !== 1) throw new TypeError("Trust record version is unsupported");
+  const issuer = issuerSigningIdentity(projection);
+  const { signature, ...unsigned } = record;
+  verifyDeviceSignature(issuer, "HomeTrustRecord", 1, unsigned, signature);
+  const expected = {
+    ...buildComparableProjection(projection),
+    v: 1,
     members: projection.members.map((member) => ({
       device: member.device,
       roles: [...member.roles],
       state: member.state,
     })),
   };
-  return { ...unsigned, signature: signer.sign("HomeTrustRecord", 1, unsigned) };
-}
-
-export function verifyHomeTrustRecord(
-  record: HomeTrustRecord,
-  projection: TrustProjection,
-): void {
-  const issuer = issuerSigningIdentity(projection);
-  const { signature, ...unsigned } = record;
-  verifyDeviceSignature(issuer, "HomeTrustRecord", 1, unsigned, signature);
-  const expected = buildComparableProjection(projection);
   if (canonicalize(unsigned) !== canonicalize(expected)) {
     throw new TypeError("Trust record does not match its event-chain projection");
   }
+}
+
+/** 记录摘要的版本即记录自身的 v。 */
+export function homeTrustRecordDigest(record: HomeTrustRecord | HistoricalHomeTrustRecord): string {
+  return protocolDigest("HomeTrustRecord", record.v, record);
 }
 
 export function rootProofPayload(event: HomeTrustEvent): unknown {
@@ -706,19 +738,26 @@ function issuerSigningIdentity(projection: TrustProjection): DeviceIdentity {
 
 function buildComparableProjection(projection: TrustProjection): Omit<HomeTrustRecord, "signature"> {
   return {
-    v: 1,
+    v: 2,
     homeId: projection.homeId,
     trustEpoch: projection.trustEpoch,
     chainHead: { ...projection.chainHead },
     issuer: { ...projection.issuer },
     ...(projection.recoveryRootPublicKey ? { recoveryRootPublicKey: projection.recoveryRootPublicKey } : {}),
     ...(projection.recoveryBackupPublicKey ? { recoveryBackupPublicKey: projection.recoveryBackupPublicKey } : {}),
-    members: projection.members.map((member) => ({
-      device: member.device,
-      roles: [...member.roles],
-      state: member.state,
-    })),
+    members: projection.members
+      .filter((member) => member.state === "active")
+      .sort((left, right) => compareDeviceIds(left.device.deviceId, right.device.deviceId))
+      .map((member) => ({
+        device: member.device,
+        roles: [...member.roles],
+        state: "active" as const,
+      })),
   };
+}
+
+function compareDeviceIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export function assertRecoveryKeyPair(rootPublicKey: string, backupPublicKey: string): void {
@@ -732,5 +771,6 @@ export function assertRecoveryKeyPair(rootPublicKey: string, backupPublicKey: st
 }
 export { CURRENT_TRUST_PROJECTION_ID, currentTrustIndex, readCurrentTrust, readCurrentTrustRecord,
   readTrustIdentity, readTrustGenesis, readAnchorTenureAt, readCurrentAnchorTenure, readCurrentTrustMember,
-  readVerifiedTrustProgress, readTrustReconciliationPage } from "./trust-current-index.js";
+  readVerifiedTrustProgress, readTrustReconciliationPage, readTrustEventByDigest, readLegacyClosedTrust,
+  LEGACY_TRUST_RECORD_MESSAGE } from "./trust-current-index.js";
 export type { CurrentTrustProjection, VerifiedTrustIdentity, VerifiedAnchorTenure } from "./trust-current-index.js";

@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   ArtifactRef,
@@ -40,10 +40,11 @@ import {
   createTrustGenesisEvent,
   replayTrustChain,
   type TrustProjection,
+  verifyHistoricalHomeTrustRecord,
   verifyHomeTrustRecord,
-  CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord,
-  readVerifiedTrustProgress, readTrustReconciliationPage,
-  type CurrentTrustProjection,
+  CURRENT_TRUST_PROJECTION_ID, LEGACY_TRUST_RECORD_MESSAGE, readCurrentTrust, readCurrentTrustRecord,
+  readLegacyClosedTrust, readVerifiedTrustProgress, readTrustReconciliationPage, readTrustEventByDigest,
+  type CurrentTrustProjection, type HistoricalHomeTrustRecord,
 } from "@zhixing/mesh/trust-chain";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import type {
@@ -73,9 +74,10 @@ import type {
 import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
 import type { HomeAuthoritySourcesLease } from "./home-authority-sources.js";
 
+// 流里较早的快照可能是 v1 历史帧；新写入的一律是 v2
 type TrustStreamRecord =
   | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
-  | { readonly t: "home-trust-record"; readonly record: HomeTrustRecord };
+  | { readonly t: "home-trust-record"; readonly record: HomeTrustRecord | HistoricalHomeTrustRecord };
 
 const FULL_AUTHORITY_CHECKPOINT_SCOPE = Object.freeze([
   "global-authority",
@@ -90,9 +92,9 @@ interface PersistedEndpointDirectory {
   readonly descriptors: readonly MeshEndpointDescriptor[];
 }
 
-interface PersistedTransportTrust {
+interface PersistedTransportPeer {
   readonly v: 1;
-  readonly peers: readonly TrustedMeshPeer[];
+  readonly peer: TrustedMeshPeer;
 }
 
 import { bindConversationAnchorTenure } from './conversation-anchor-tenure.js';
@@ -106,7 +108,8 @@ export interface FileMeshBootstrapStoreOptions {
 export interface RecoveryRootActivationReplay {
   readonly checkpointId: string;
   readonly event: Extract<RecoveryActivationPlan, { kind: "establish" }>["rootEvent"];
-  readonly record: HomeTrustRecord;
+  /** 激活那一帧入链的签名快照：较早的激活是 v1 历史帧 */
+  readonly record: HomeTrustRecord | HistoricalHomeTrustRecord;
 }
 
 /** Durable device-domain bootstrap state sharing the authority log's trust stream. */
@@ -119,7 +122,7 @@ export class FileMeshBootstrapStore
   readonly #log: FileAuthorityCommitLog;
   readonly #artifacts: FileArtifactStore;
   readonly #endpointFile: string;
-  readonly #peerFile: string;
+  readonly #peerDirectory: string;
   readonly #completionFile: string;
   readonly #checkpointLifecycle: ArtifactLifecycleIndex;
   readonly #endpointWrites = new SerialTaskQueue();
@@ -184,7 +187,7 @@ export class FileMeshBootstrapStore
       ownsSourceLogs: !options.sources,
     });
     this.#endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
-    this.#peerFile = path.join(distributedRoot, "mesh-peers.json");
+    this.#peerDirectory = path.join(distributedRoot, "mesh-peers");
     this.#completionFile = path.join(distributedRoot, "mesh-bootstrap-completions.json");
   }
 
@@ -206,6 +209,12 @@ export class FileMeshBootstrapStore
     if (this.#sources) return this.#sources.sources.currentTrust();
     return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
       async current => ({ kind: "return", value: await readCurrentTrust(current) }))).value;
+  }
+
+  /** 按事件摘要精确读一条已入链的信任事件，不整读信任流。 */
+  async trustEventByDigest(digest: string): Promise<HomeTrustEvent | undefined> {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+      async current => ({ kind: "return", value: await readTrustEventByDigest(current, digest) }))).value;
   }
 
   /** 只读入口在 home 尚未建立权威日志时不创建它，信任状态即为不存在。 */
@@ -241,7 +250,8 @@ export class FileMeshBootstrapStore
     }))).value;
   }
 
-  async reconcileTrustPage(input: { homeId: string; previous: HomeTrustRecord['chainHead']; events: readonly HomeTrustEvent[]; record: HomeTrustRecord }) {
+  async reconcileTrustPage(input: { homeId: string; previous: HomeTrustRecord['chainHead']; events: readonly HomeTrustEvent[];
+    record: HomeTrustRecord | HistoricalHomeTrustRecord }) {
     // One original signed trust group, subject to the existing native WAL
     // frame bound. Never durably expose transport pages without their record.
     if (Buffer.byteLength(canonicalize(input)) > 16 * 1024 * 1024) throw new TypeError('Trust reconciliation group exceeds the native frame bound');
@@ -256,7 +266,10 @@ export class FileMeshBootstrapStore
         previous = { seq: event.seq, eventDigest: homeTrustEventDigest(event) };
       }
       if (input.record.homeId !== input.homeId || canonicalize(input.record.chainHead) !== canonicalize(previous)) throw new TypeError('Signed trust record does not close the delivered prefix');
-      if (!input.events.length && current.complete) return { kind: 'return', value: true };
+      // 同一链头：只有本机只由 v1 历史帧闭合、对端给出 v2 当前快照时才补上（一次性接续）
+      if (!input.events.length && current.complete && (current.currentRecord || input.record.v !== 2)) {
+        return { kind: 'return', value: true };
+      }
       // The existing current-trust reducer verifies every original signature,
       // transition, member change and final signed record before WAL commit.
       return { kind: 'append', entries: [
@@ -292,24 +305,52 @@ export class FileMeshBootstrapStore
     if (this.#authorityAbsent()) return undefined;
     // 只读访问者没有缓存密钥，派生索引只能在内存重建；与 C8 严格路径相同，只按流读取信任记录并整链核对。
     if (this.#sources?.sources.readOnly && !this.#sources.sources.integrity) return this.#loadTrustRecordByReplay();
-    const result = await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
-      async (current, context) => ({
-        kind: "return",
-        value: await readCurrentTrustRecord(current, (checkpoint) => context.readEnvelopeAt!(checkpoint)),
-      }));
+    try {
+      const result = await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+        async (current, context) => ({
+          kind: "return",
+          value: await readCurrentTrustRecord(current, (checkpoint) => context.readEnvelopeAt!(checkpoint)),
+        }));
+      return result.value;
+    } catch (error) {
+      // 链头只由 v1 历史帧闭合：持当前签发密钥时就地补签一次，否则等对齐取回
+      if (!(error instanceof Error) || error.message !== LEGACY_TRUST_RECORD_MESSAGE || !this.issuerKey) throw error;
+      const continued = await this.continueCurrentTrustRecord(this.issuerKey);
+      if (!continued) throw error;
+      return continued;
+    }
+  }
+
+  /**
+   * 开发资料的一次性接续：链头只由 v1 历史帧闭合时，持当前签发密钥的设备为同一链头补签 v2 快照。
+   * 只读当前视图（链头与 active 目录）；已有当前快照或本机不是当前签发者时不写，返回 undefined。
+   */
+  async continueCurrentTrustRecord(issuerKey: DeviceKey): Promise<HomeTrustRecord | undefined> {
+    const result = await this.#log.transactDurableProjection<TrustStreamRecord, HomeTrustRecord | undefined>(
+      CURRENT_TRUST_PROJECTION_ID,
+      async (view) => {
+        const current = await readLegacyClosedTrust(view);
+        if (!current || current.issuer.issuerKeyId !== issuerKey.deviceId) return { kind: "return", value: undefined };
+        const record = buildHomeTrustRecord(current, issuerKey);
+        return { kind: "append", entries: [{ stream: "trust", body: { t: "home-trust-record", record } }], value: record };
+      },
+    );
+    if (result.commit) this.#sources?.sources.invalidateKnownTrust();
     return result.value;
   }
 
   async #loadTrustRecordByReplay(): Promise<HomeTrustRecord | undefined> {
     const records = await this.#log.readStream<TrustStreamRecord>("trust");
     const events: HomeTrustEvent[] = [];
-    let latest: HomeTrustRecord | undefined;
+    let latest: HomeTrustRecord | HistoricalHomeTrustRecord | undefined;
     for (const { body } of records) {
       if (body.t === "home-trust-event") events.push(body.event);
       else if (body.t === "home-trust-record") latest = body.record;
     }
     if (events.length === 0) return undefined;
     const projection = replayTrustChain(events);
+    // 只读访问者不能补签：最新快照仍是 v1 历史帧时与当前快照读者给出同一错误
+    if (latest?.v === 1) throw new Error(LEGACY_TRUST_RECORD_MESSAGE);
     if (
       latest?.homeId === projection.homeId &&
       latest.trustEpoch === projection.trustEpoch &&
@@ -434,7 +475,8 @@ export class FileMeshBootstrapStore
     ) {
       throw new Error("Recovery root activation event is not the committed trust head");
     }
-    verifyHomeTrustRecord(record, historical);
+    // 激活那一帧的快照是历史帧：较早的激活按 v1 原规则验证
+    verifyHistoricalHomeTrustRecord(record, historical);
     return { checkpointId: verification.checkpointId, event, record };
   }
 
@@ -539,13 +581,13 @@ export class FileMeshBootstrapStore
 
   async commitRecoveryRootLifecycle(input: {
     readonly events: readonly HomeTrustEvent[];
-    readonly record: HomeTrustRecord;
+    readonly record: HomeTrustRecord | HistoricalHomeTrustRecord;
   }): Promise<void> {
     if (input.events.length < 1 || input.events.length > 2) {
       throw new TypeError("Recovery root lifecycle requires one or two trust events");
     }
     await this.#log.transactProjection<
-      { readonly events: readonly HomeTrustEvent[]; readonly record?: HomeTrustRecord },
+      { readonly events: readonly HomeTrustEvent[]; readonly record?: HomeTrustRecord | HistoricalHomeTrustRecord },
       TrustStreamRecord,
       void
     >(
@@ -555,11 +597,16 @@ export class FileMeshBootstrapStore
         : { ...state, record: entry.body.record },
       (state) => {
         const exactEvents = state.events.slice(-input.events.length);
-        if (
-          state.record && canonicalize(exactEvents) === canonicalize(input.events) &&
-          canonicalize(state.record) === canonicalize(input.record)
-        ) return { kind: "return", value: undefined };
+        if (state.record && canonicalize(exactEvents) === canonicalize(input.events)) {
+          if (canonicalize(state.record) === canonicalize(input.record)) return { kind: "return", value: undefined };
+          // 一次性接续之前入链的 v1 历史帧：同一链头的签名快照仍是精确重放
+          if (input.record.v === 1) {
+            verifyHistoricalHomeTrustRecord(input.record, replayTrustChain(state.events));
+            return { kind: "return", value: undefined };
+          }
+        }
         if (state.events.length === 0) throw new Error("Recovery root lifecycle trust chain is missing");
+        if (input.record.v !== 2) throw new TypeError("Recovery root lifecycle requires a current trust snapshot");
         let next = replayTrustChain(state.events);
         for (const event of input.events) next = applyTrustEvent(next, event);
         verifyHomeTrustRecord(input.record, next);
@@ -793,48 +840,87 @@ export class FileMeshBootstrapStore
     });
   }
 
-  async loadTransportPeers(): Promise<readonly TrustedMeshPeer[]> {
-    let text: string;
+  /** 按设备精确读一份传输身份：启动、信任变更与终态解析都只读需要的那几份。 */
+  async transportPeer(deviceId: string): Promise<TrustedMeshPeer | undefined> {
+    return await readTransportPeerFile(this.#transportPeerFile(deviceId), deviceId);
+  }
+
+  /** 已知对端清单：只供灾备、备份这类人工命令枚举，启动与常驻路径不调用。 */
+  async listTransportPeers(): Promise<readonly TrustedMeshPeer[]> {
+    let names: string[];
     try {
-      text = await readFile(this.#peerFile, "utf8");
+      names = await readdir(this.#peerDirectory);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
-    let value: unknown;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      throw new Error("Mesh peer transport trust is not valid JSON");
+    const peers: TrustedMeshPeer[] = [];
+    for (const name of names.sort()) {
+      if (!TRANSPORT_PEER_FILE.test(name)) continue;
+      const peer = await readTransportPeerFile(path.join(this.#peerDirectory, name));
+      if (peer) peers.push(peer);
     }
-    if (!isRecord(value) || value.v !== 1 || !Array.isArray(value.peers)) {
-      throw new Error("Mesh peer transport trust is invalid");
-    }
-    if (canonicalize(value) !== text) {
-      throw new Error("Mesh peer transport trust is not canonical");
-    }
-    return value.peers.map(validateTransportPeer);
+    return peers.sort((left, right) =>
+      left.identity.deviceId.localeCompare(right.identity.deviceId, "en-US"));
   }
 
   async acceptTransportPeer(peer: TrustedMeshPeer): Promise<void> {
     await this.#endpointWrites.run(async () => {
       const accepted = validateTransportPeer(peer);
-      const current = await this.loadTransportPeers();
-      const existing = current.find((candidate) =>
-        candidate.identity.deviceId === accepted.identity.deviceId);
+      const file = this.#transportPeerFile(accepted.identity.deviceId);
+      const existing = await readTransportPeerFile(file, accepted.identity.deviceId);
       if (existing && canonicalize(existing) !== canonicalize(accepted)) {
         throw new Error("Authenticated mesh peer transport identity changed");
       }
-      const peers = existing
-        ? current
-        : [...current, accepted].sort((left, right) =>
-            left.identity.deviceId.localeCompare(right.identity.deviceId, "en-US"));
-      await writeDurableJson(this.#peerFile, {
+      if (existing) return;
+      await writeDurableJson(file, {
         v: 1,
-        peers,
-      } satisfies PersistedTransportTrust);
+        peer: accepted,
+      } satisfies PersistedTransportPeer);
     });
   }
+
+  #transportPeerFile(deviceId: string): string {
+    if (typeof deviceId !== "string" || deviceId.length === 0) {
+      throw new TypeError("Mesh transport peer device id is invalid");
+    }
+    return path.join(
+      this.#peerDirectory,
+      `${createHash("sha256").update("zhixing:mesh-transport-peer:v1\0").update(deviceId).digest("hex")}.json`,
+    );
+  }
+}
+
+const TRANSPORT_PEER_FILE = /^[a-f0-9]{64}\.json$/u;
+
+async function readTransportPeerFile(
+  file: string,
+  expectedDeviceId?: string,
+): Promise<TrustedMeshPeer | undefined> {
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("Mesh peer transport trust is not valid JSON");
+  }
+  if (!isRecord(value) || value.v !== 1 || Object.keys(value).sort().join(",") !== "peer,v") {
+    throw new Error("Mesh peer transport trust is invalid");
+  }
+  if (canonicalize(value) !== text) {
+    throw new Error("Mesh peer transport trust is not canonical");
+  }
+  const peer = validateTransportPeer(value.peer);
+  if (expectedDeviceId !== undefined && peer.identity.deviceId !== expectedDeviceId) {
+    throw new Error("Mesh peer transport trust is filed under another device");
+  }
+  return peer;
 }
 
 interface PairingProjection {

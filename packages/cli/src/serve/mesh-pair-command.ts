@@ -1669,7 +1669,7 @@ async function acceptPairingConnection(
   }
   if (relay) {
     candidates.push(createPairingConnectionCandidate(async (signal) => {
-      const socket = await connectRelay(relay, rendezvousKey, signal);
+      const socket = await connectRelay(relay, rendezvousKey, "accept", signal);
       await waitForPairingPeer(socket, signal);
       return socket;
     }, deadline));
@@ -1755,7 +1755,7 @@ async function connectPairingInvitation(
         pairingDeadlines.set(socket, signal);
         return socket;
       }
-      const socket = await connectRelay(transport.relay, invitation.rendezvousKey, signal);
+      const socket = await connectRelay(transport.relay, invitation.rendezvousKey, "connect", signal);
       pairingDeadlines.set(socket, signal);
       return socket;
     } catch (error) {
@@ -1768,12 +1768,14 @@ async function connectPairingInvitation(
 async function connectRelay(
   relay: { host: string; port: number },
   rendezvousKey: string,
+  role: "accept" | "connect",
   signal: AbortSignal,
 ): Promise<Socket> {
   const socket = await connectSocket(relay, signal);
   await writeSocket(socket, encodeBlindRendezvousHello({
     v: 1,
     key: validateRendezvousKey(rendezvousKey),
+    role,
     ttlMs: Math.min(PAIRING_TIMEOUT_MS, 3_600_000),
   }), signal);
   return socket;

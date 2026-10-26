@@ -1,12 +1,14 @@
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
+import { protocolDigest } from "@zhixing/core/protocol";
+import { createMeshEndpointDescriptor } from "@zhixing/mesh/bootstrap";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import {
   MeshServiceRegistry,
   type MeshServiceDefinition,
 } from "@zhixing/mesh/service-registry";
-import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
+import { createSignedTrustEvent, replayTrustChain } from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -16,7 +18,10 @@ import {
   cleanupRemovedDeviceSecrets,
 } from "./device-removal.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
-import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
+import {
+  createLiveTrustedDeviceProtocolVerifier,
+  createTrustedDeviceProtocolVerifier,
+} from "./trusted-device-protocol-verifier.js";
 import {
   DEVICE_REMOVAL_ISSUER_SERVICE,
   DEVICE_REMOVAL_TARGET_SERVICE,
@@ -72,7 +77,10 @@ describe("current issuer device removal", () => {
       "trust",
       "device-lifecycle",
     ]));
-    expect((await fixture.store.loadTrustRecord())?.members.find((member) =>
+    // 当前快照只列 active 成员；撤销由事件链证明
+    expect((await fixture.store.loadTrustRecord())?.members.some((member) =>
+      member.device.deviceId === fixture.targetKey.deviceId)).toBe(false);
+    expect(replayTrustChain(await fixture.store.loadTrustEvents()).members.find((member) =>
       member.device.deviceId === fixture.targetKey.deviceId)?.state).toBe("revoked");
     await expect(authority.terminal("remove-1")).resolves.toBeUndefined();
     const { signature: _readySignature, ...readyUnsigned } = receipt;
@@ -94,9 +102,10 @@ describe("current issuer device removal", () => {
     await expect(authority.commitCleanupReady(cleanupReady)).resolves.toEqual(removed);
     await expect(authority.terminal("remove-1")).resolves.toEqual(removed);
     const restarted = fixture.authority();
-    expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).toBe(false);
+    // 访问时按持久状态精确核验：已终结的目标不必等启动恢复也仍可重试终端服务
+    await expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(true);
     await restarted.resumeActive();
-    expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).toBe(true);
+    await expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(true);
     await expect(restarted.terminal("remove-1")).resolves.toEqual(removed);
   }, 120_000);
 
@@ -107,12 +116,199 @@ describe("current issuer device removal", () => {
       operationId: "remove-2",
       targetName: "工作电脑",
     });
+    // 接受、冻结准入、绑定终态定位三条；重启恢复不再追加
+    expect((await fixture.store.authorityLog().readStream("device-lifecycle")).length).toBe(3);
     const restarted = fixture.authority();
-    expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).toBe(false);
+    await expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(true);
     await restarted.resumeActive();
-    expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).toBe(true);
-    expect((await fixture.store.authorityLog().readStream("device-lifecycle")).length).toBe(2);
+    await expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(true);
+    expect((await fixture.store.authorityLog().readStream("device-lifecycle")).length).toBe(3);
   });
+
+  it("restores removal guards from the removal targets alone, whatever the number of host stops", async () => {
+    const digest = protocolDigest("DeviceRemovalScaleEvidence", 1, {});
+    const rows: { stops: number; keys: number; scanned: number }[] = [];
+    for (const stops of [8, 64, 256]) {
+      const fixture = await createFixture();
+      const accepted = await fixture.authority().accept({
+        requestId: `request-scale-${stops}`,
+        operationId: `remove-scale-${stops}`,
+        targetName: "工作电脑",
+      });
+      // 每次宿主启停在同一生命周期日志里留下一条终结的 stop 操作：与宿主停止同一份校验与归约
+      const journal = new DeviceLifecycleJournal(fixture.store.authorityLog());
+      for (let index = 0; index < stops; index++) {
+        const operationId = `stop-${index}`;
+        await journal.accept({
+          v: 1, kind: "stop", requestId: `request-stop-${index}`, operationId, homeId: "home-1",
+          localDeviceId: fixture.issuerKey.deviceId, strategy: "immediate",
+          host: { kind: "managed", serviceId: "zhixing-home-1", definitionDigest: digest, instanceId: `instance-${index}` },
+        });
+        for (const phase of ["gate-closed", "work-settled", "flushed", "ready-to-stop"] as const) {
+          await journal.advance(operationId, phase);
+        }
+        await journal.terminal(operationId, "stopped", [{ kind: "supervisor", digest }]);
+      }
+      const guards: (readonly [string, string | undefined])[] = [];
+      const restarted = new CurrentIssuerDeviceRemovalAuthority({
+        store: fixture.store,
+        issuerKey: fixture.issuerKey,
+        secretStore: fixture.secrets,
+        verifier: fixture.verifier,
+        isReachable: () => true,
+        now: () => "2026-08-12T00:00:03.000Z",
+        onGuardChanged: (deviceId, operationId) => guards.push([deviceId, operationId]),
+      });
+      const counts = { keys: 0, scanned: 0 };
+      const prototype = FileDurableProjectionIndex.prototype;
+      const { get, getMany, scan } = prototype;
+      const spies = [
+        vi.spyOn(prototype, "get").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+          counts.keys += 1;
+          return get.apply(this, args);
+        }),
+        vi.spyOn(prototype, "getMany").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+          counts.keys += args[0].length;
+          return getMany.apply(this, args);
+        }),
+        vi.spyOn(prototype, "scan").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+          const page = await scan.apply(this, args);
+          counts.scanned += page.entries.length;
+          return page;
+        }),
+      ];
+      try {
+        await restarted.resumeActive();
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+      await expect(restarted.authorizesTarget(accepted.targetDeviceId)).resolves.toBe(true);
+      expect(guards).toEqual([[accepted.targetDeviceId, accepted.operationId]]);
+      rows.push({ stops, ...counts });
+    }
+    // allow-direct-stdout：规模用例的读数输出；测试文件不是运行时输出面
+    console.log("REMOVAL_RESUME_ROWS", JSON.stringify(rows));
+    // 读取只随移除数：三档相同（整扫全部生命周期操作时随启停次数增长）
+    expect(rows.map(({ keys, scanned }) => [keys, scanned]))
+      .toEqual(rows.map(() => [rows[0]!.keys, rows[0]!.scanned]));
+  }, 600_000);
+
+  it("resumes only pending removals and authorizes completed targets by an exact lookup, whatever the number of completed removals", async () => {
+    const rows: { completed: number; resume: ProjectionReads; lookup: ProjectionReads }[] = [];
+    for (const completed of [4, 12, 48]) {
+      const fixture = await createDynamicFixture();
+      const authority = fixture.authority();
+      const targets: string[] = [];
+      // 每个旧目标都真实走完：目标签名的 revocation-ready 与 cleanup-ready，生产活验签器核验
+      for (let index = 0; index < completed; index++) {
+        const targetKey = await DeviceKey.generate();
+        const identity = enrollDeviceIdentity(targetKey, {
+          displayName: `old-target-${index}`,
+          platform: "headless",
+          enrolledAt: "2026-08-12T00:00:02.000Z",
+        });
+        const trust = replayTrustChain(await fixture.store.loadTrustEvents());
+        await fixture.store.appendTrustEvent({
+          event: createSignedTrustEvent({
+            current: trust,
+            body: {
+              t: "enroll",
+              device: identity,
+              roles: ["executor"],
+              pairingTranscriptDigest: protocolDigest("RevocationScalePairing", 1, { deviceId: identity.deviceId }),
+            },
+            signer: fixture.issuerKey,
+            at: "2026-08-12T00:00:02.000Z",
+          }),
+          issuerKey: fixture.issuerKey,
+        });
+        fixture.identities.set(identity.deviceId, identity);
+        const { signature: _signature, ...accepted } = await authority.accept({
+          requestId: `remove-request-${index}`,
+          operationId: `old-remove-${index}`,
+          targetName: `old-target-${index}`,
+        });
+        const ready = { ...accepted, phase: "revocation-ready" as const };
+        await authority.commitReady({ ...ready, signature: targetKey.sign("ExecutorRemovalReceipt", 1, ready) });
+        const cleanup = {
+          ...accepted,
+          phase: "cleanup-ready" as const,
+          evidenceDigest: protocolDigest("RemovalScaleCleanup", 1, { index }),
+        };
+        expect((await authority.commitCleanupReady({
+          ...cleanup,
+          signature: targetKey.sign("ExecutorRemovalReceipt", 1, cleanup),
+        })).phase).toBe("removed");
+        targets.push(identity.deviceId);
+      }
+      const guards: (readonly [string, string | undefined])[] = [];
+      const restarted = new CurrentIssuerDeviceRemovalAuthority({
+        store: fixture.store,
+        issuerKey: fixture.issuerKey,
+        secretStore: fixture.secrets,
+        verifier: fixture.verifier,
+        isReachable: () => true,
+        now: () => "2026-08-12T00:00:03.000Z",
+        onGuardChanged: (deviceId, operationId) => guards.push([deviceId, operationId]),
+      });
+      const counter = countProjectionReads();
+      try {
+        await restarted.resumeActive();
+        const resume = counter.take();
+        await expect(restarted.authorizesTarget(targets[0]!)).resolves.toBe(true);
+        rows.push({ completed, resume, lookup: counter.take() });
+      } finally {
+        counter.restore();
+      }
+      // 没有未终结的移除：启动不恢复任何守卫；从未被移除的设备不放行
+      expect(guards).toEqual([]);
+      await expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(false);
+      await fixture.store.authorityLog().stopStorageMaintenance();
+    }
+    // allow-direct-stdout：规模用例的读数输出；测试文件不是运行时输出面
+    console.log("COMPLETED_REMOVAL_ROWS", JSON.stringify(rows));
+    // 启动恢复与一次精确核验的读取都与已完成移除数无关
+    expect(rows.map(({ resume, lookup }) => [resume, lookup]))
+      .toEqual(rows.map(() => [rows[0]!.resume, rows[0]!.lookup]));
+  }, 600_000);
+
+  it("terminates a lost device removal with its own terminal evidence and redrives from any phase", async () => {
+    for (const interruptAtTerminal of [false, true]) {
+      const fixture = await createFixture();
+      const authority = new CurrentIssuerDeviceRemovalAuthority({
+        store: fixture.store,
+        issuerKey: fixture.issuerKey,
+        secretStore: fixture.secrets,
+        verifier: fixture.verifier,
+        isReachable: () => false,
+        now: () => "2026-08-12T00:00:03.000Z",
+      });
+      const accepted = await authority.accept({
+        requestId: `request-lost-${interruptAtTerminal}`,
+        operationId: `remove-lost-${interruptAtTerminal}`,
+        targetName: "工作电脑",
+      });
+      if (interruptAtTerminal) {
+        // 中断在终结之前：停在 cleanup-complete，再调用时从这里续做
+        const terminal = vi.spyOn(DeviceLifecycleJournal.prototype, "terminal")
+          .mockRejectedValueOnce(new Error("interrupted before terminal"));
+        await expect(authority.commitLost(accepted.operationId)).rejects.toThrow("interrupted before terminal");
+        terminal.mockRestore();
+        const journal = new DeviceLifecycleJournal(fixture.store.authorityLog());
+        expect((await journal.state(accepted.operationId))?.phase).toBe("cleanup-complete");
+      }
+      const lost = await authority.commitLost(accepted.operationId);
+      expect(lost.phase).toBe("lost");
+      // 重复调用：已终结即返回同一份回执，不再追加任何生命周期事实
+      const before = (await fixture.store.authorityLog().readStream("device-lifecycle")).length;
+      await expect(authority.commitLost(accepted.operationId)).resolves.toEqual(lost);
+      expect((await fixture.store.authorityLog().readStream("device-lifecycle")).length).toBe(before);
+      const journal = new DeviceLifecycleJournal(fixture.store.authorityLog());
+      expect((await journal.state(accepted.operationId))?.phase).toBe("terminal");
+      await expect(authority.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(true);
+      await fixture.store.authorityLog().stopStorageMaintenance();
+    }
+  }, 120_000);
 
   it("projects pending and abort-waiting states from the issuer journal after restart", async () => {
     const fixture = await createFixture();
@@ -156,7 +352,7 @@ describe("current issuer device removal", () => {
       releaseAdmission,
     };
     const target = new ExecutorRemovalTarget(targetOptions);
-    await target.accept(accepted);
+    await target.accept(accepted, await authority.terminalRoute(accepted.operationId));
 
     const [abort, concurrentAbort] = await Promise.all([
       authority.abort(accepted.operationId),
@@ -165,7 +361,7 @@ describe("current issuer device removal", () => {
     expect(concurrentAbort).toEqual(abort);
     const restartedAuthority = fixture.authority();
     await restartedAuthority.resumeActive();
-    expect(restartedAuthority.authorizesTarget(fixture.targetKey.deviceId)).toBe(true);
+    await expect(restartedAuthority.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(true);
     await expect(restartedAuthority.pendingAbortForTarget(fixture.targetKey.deviceId)).resolves.toEqual({
       operationId: accepted.operationId,
       abort,
@@ -188,8 +384,12 @@ describe("current issuer device removal", () => {
       .rejects.toThrow("does not own external admission");
     expect(conflictingRelease).toHaveBeenCalledWith(accepted.operationId);
     await restartedAuthority.acceptTargetAborted(aborted);
-    expect(restartedAuthority.authorizesTarget(fixture.targetKey.deviceId)).toBe(false);
+    await expect(restartedAuthority.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(false);
     await expect(restartedAuthority.abort(accepted.operationId)).resolves.toEqual(abort);
+    // 已中止的移除在重启恢复时不再放行目标
+    const afterAbort = fixture.authority();
+    await afterAbort.resumeActive();
+    await expect(afterAbort.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(false);
   }, 120_000);
 
   it("returns the frozen ready winner when cancel reaches a target after its durable decision", async () => {
@@ -201,7 +401,7 @@ describe("current issuer device removal", () => {
       targetName: "工作电脑",
     });
     const target = new ExecutorRemovalTarget(createTargetOptions(fixture, "target-ready-wins"));
-    await target.accept(accepted);
+    await target.accept(accepted, await authority.terminalRoute(accepted.operationId));
     const decision = await target.decide({
       operationId: accepted.operationId,
       mode: "transfer",
@@ -243,7 +443,7 @@ describe("current issuer device removal", () => {
         revision,
       }],
     });
-    await target.accept(accepted);
+    await target.accept(accepted, await authority.terminalRoute(accepted.operationId));
     revision = `sha256:${"2".repeat(64)}`;
 
     const changed = await target.decide({
@@ -308,10 +508,10 @@ describe("current issuer device removal", () => {
       operationId: "remove-mesh-abort",
       targetName: "工作电脑",
     });
-    await targetClient.accept(accepted);
+    await targetClient.accept(accepted, await authority.terminalRoute(accepted.operationId));
     const state = await targetClient.abort(accepted.operationId, await authority.abort(accepted.operationId));
     expect(state.phase).toBe("cancelled");
-    expect(authority.authorizesTarget(fixture.targetKey.deviceId)).toBe(false);
+    await expect(authority.authorizesTarget(fixture.targetKey.deviceId)).resolves.toBe(false);
   }, 120_000);
 
   it("rejects every non-canonical removal mesh command before lifecycle effects", async () => {
@@ -396,6 +596,8 @@ describe("current issuer device removal", () => {
       homeId: "home-1",
       deviceKey: fixture.targetKey,
       verifier: fixture.verifier,
+      secretStore: new MemorySecretStore(),
+      issuerRoute: async () => issuerReachability(fixture.issuerKey),
       closeAdmission,
       settleAcceptedWork: async () => undefined,
       releaseAdmission: async () => undefined,
@@ -409,7 +611,7 @@ describe("current issuer device removal", () => {
       now: () => "2026-08-12T00:00:04.000Z",
     };
     const target = new ExecutorRemovalTarget(options);
-    await target.accept(accepted);
+    await target.accept(accepted, await authority.terminalRoute(accepted.operationId));
     const decision = await target.decide({
       operationId: accepted.operationId,
       mode: "transfer",
@@ -444,6 +646,9 @@ describe("current issuer device removal", () => {
     const fixture = await createFixture();
     await fixture.secrets.put({ kind: "device-key", bindingId: `device/v1/${fixture.targetKey.deviceId}` }, "key");
     await fixture.secrets.put({ kind: "channel", bindingId: "channel-a" }, "token");
+    // 本机移除的终态路由副本留到本机终结；本机若曾是 issuer，它自有的终态路由秘密照删
+    await fixture.secrets.put({ kind: "terminal-route", bindingId: "removal/0123" }, "route-copy");
+    await fixture.secrets.put({ kind: "terminal-route", bindingId: `issuer/${fixture.targetKey.deviceId}` }, "own-route");
     await cleanupRemovedDeviceSecrets({
       store: fixture.secrets,
       deviceKey: fixture.targetKey,
@@ -454,6 +659,11 @@ describe("current issuer device removal", () => {
       bindingId: `device/v1/${fixture.targetKey.deviceId}`,
     })).toBe("key");
     expect(await fixture.secrets.get({ kind: "channel", bindingId: "channel-a" })).toBeNull();
+    expect(await fixture.secrets.get({ kind: "terminal-route", bindingId: "removal/0123" })).toBe("route-copy");
+    expect(await fixture.secrets.get({
+      kind: "terminal-route",
+      bindingId: `issuer/${fixture.targetKey.deviceId}`,
+    })).toBeNull();
   });
 });
 
@@ -507,6 +717,69 @@ async function createFixture() {
   };
 }
 
+/** 目标设备可在用例中动态登记：验签器按当前身份表实时取用。 */
+async function createDynamicFixture() {
+  const fixture = await createFixture();
+  const issuer = enrollDeviceIdentity(fixture.issuerKey, {
+    displayName: "值班电脑",
+    platform: "headless",
+    enrolledAt: "2026-08-12T00:00:00.000Z",
+  });
+  const target = enrollDeviceIdentity(fixture.targetKey, {
+    displayName: "工作电脑",
+    platform: "headless",
+    enrolledAt: "2026-08-12T00:00:01.000Z",
+  });
+  const identities = new Map([issuer, target].map((item) => [item.deviceId, item] as const));
+  const verifier = createLiveTrustedDeviceProtocolVerifier((deviceId) => identities.get(deviceId));
+  return {
+    ...fixture,
+    identities,
+    verifier,
+    authority: () => new CurrentIssuerDeviceRemovalAuthority({
+      store: fixture.store,
+      issuerKey: fixture.issuerKey,
+      secretStore: fixture.secrets,
+      verifier,
+      isReachable: () => true,
+      now: () => "2026-08-12T00:00:03.000Z",
+    }),
+  };
+}
+
+type ProjectionReads = { readonly keys: number; readonly scanned: number };
+
+/** 持久投影的读取：按键读取的键数与扫描返回的行数。 */
+function countProjectionReads() {
+  const counts = { keys: 0, scanned: 0 };
+  const prototype = FileDurableProjectionIndex.prototype;
+  const { get, getMany, scan } = prototype;
+  const spies = [
+    vi.spyOn(prototype, "get").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+      counts.keys += 1;
+      return get.apply(this, args);
+    }),
+    vi.spyOn(prototype, "getMany").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+      counts.keys += args[0].length;
+      return getMany.apply(this, args);
+    }),
+    vi.spyOn(prototype, "scan").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+      const page = await scan.apply(this, args);
+      counts.scanned += page.entries.length;
+      return page;
+    }),
+  ];
+  return {
+    take(): ProjectionReads {
+      const value = { ...counts };
+      counts.keys = 0;
+      counts.scanned = 0;
+      return value;
+    },
+    restore() { for (const spy of spies) spy.mockRestore(); },
+  };
+}
+
 function createTargetOptions(
   fixture: Awaited<ReturnType<typeof createFixture>>,
   directory: string,
@@ -519,6 +792,8 @@ function createTargetOptions(
     homeId: "home-1",
     deviceKey: fixture.targetKey,
     verifier: fixture.verifier,
+    secretStore: new MemorySecretStore(),
+    issuerRoute: async () => issuerReachability(fixture.issuerKey),
     closeAdmission: async () => undefined,
     settleAcceptedWork: async () => undefined,
     releaseAdmission: async () => undefined,
@@ -532,6 +807,27 @@ function createTargetOptions(
       digest: `sha256:${"e".repeat(64)}`,
     }],
     now: () => "2026-08-12T00:00:04.000Z",
+  };
+}
+
+/** target 在 accept 时冻结的 issuer 传输身份与端点。 */
+function issuerReachability(issuerKey: DeviceKey) {
+  const identity = enrollDeviceIdentity(issuerKey, {
+    displayName: "值班电脑",
+    platform: "headless",
+    enrolledAt: "2026-08-12T00:00:00.000Z",
+  });
+  return {
+    peer: { identity, rootCertificatePem: issuerKey.rootCertificatePem },
+    endpoint: createMeshEndpointDescriptor({
+      deviceId: issuerKey.deviceId,
+      configuration: {
+        enabledRoles: ["anchor"],
+        anchorListen: { bind: { host: "127.0.0.1", port: 7443 } },
+      },
+      revision: 1,
+      at: "2026-08-12T00:00:00.000Z",
+    }),
   };
 }
 

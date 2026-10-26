@@ -6,7 +6,10 @@ import {
   type VerifiedAnchorTenure,
 } from "@zhixing/core/authority";
 import { canonicalize, protocolDigest } from "./canonical.js";
-import { applyTrustEvent, initializeTrustChain, verifyHomeTrustRecord, type TrustProjection } from "./trust-chain.js";
+import {
+  applyTrustEvent, homeTrustEventDigest, homeTrustRecordDigest, initializeTrustChain, verifyHistoricalHomeTrustRecord,
+  verifyHomeTrustRecord, type HistoricalHomeTrustRecord, type TrustProjection,
+} from "./trust-chain.js";
 
 export const CURRENT_TRUST_PROJECTION_ID = "home-current-trust";
 type Member = TrustProjection["members"][number];
@@ -16,14 +19,20 @@ interface RecordLocator {
   readonly checkpoint: DurableLogCheckpoint;
   readonly entry: number;
   readonly digest: string;
+  readonly v: 1 | 2;
 }
 interface Head {
   readonly genesis: DurableLogCheckpoint;
   readonly projection: Omit<TrustProjection, "members">;
+  /** 全部登记过的成员数（成员行序号与 v1 历史帧用） */
   readonly count: number;
+  /** 当前 reset 代 active 目录的成员数：v2 快照与当前视图按它闭合 */
+  readonly active: number;
   readonly reset: number;
   readonly recordHead?: TrustProjection["chainHead"];
   readonly record?: RecordLocator;
+  /** 链上已核验过的最新快照版本；出现 v2 之后不再接受 v1 */
+  readonly recordVersion?: 1 | 2;
 }
 export interface VerifiedTrustIdentity {
   readonly identity: DeviceIdentity;
@@ -44,11 +53,14 @@ function object(value: unknown): value is Record<string, unknown> { return value
 function readHead(value: unknown): Head | undefined {
   if (value === undefined) return;
   if (!object(value) || !object(value.genesis) || !Number.isSafeInteger(value.genesis.lsn) || !object(value.projection) || !Number.isSafeInteger(value.count) || (value.count as number) < 1 ||
+      !Number.isSafeInteger(value.active) || (value.active as number) < 1 || (value.active as number) > (value.count as number) ||
       !Number.isSafeInteger(value.reset) || (value.reset as number) < 0 ||
+      (value.recordVersion !== undefined && value.recordVersion !== 1 && value.recordVersion !== 2) ||
       typeof value.projection.homeId !== "string" || !Number.isSafeInteger(value.projection.anchorEpoch) || (value.projection.anchorEpoch as number) < 1 || !object(value.projection.chainHead) || !object(value.projection.issuer)) throw invalid();
   if (value.record !== undefined && (!object(value.record) || !object(value.record.checkpoint) ||
       !Number.isSafeInteger(value.record.checkpoint.lsn) || (value.record.checkpoint.lsn as number) < 1 ||
-      !Number.isSafeInteger(value.record.entry) || (value.record.entry as number) < 0 || typeof value.record.digest !== "string")) throw invalid();
+      !Number.isSafeInteger(value.record.entry) || (value.record.entry as number) < 0 || typeof value.record.digest !== "string" ||
+      (value.record.v !== 1 && value.record.v !== 2))) throw invalid();
   return value as unknown as Head;
 }
 function readMember(id: string, value: unknown, reset: number): MemberRow | undefined {
@@ -82,7 +94,7 @@ export function decodeTrustIdentity(keyId: string, value: unknown): VerifiedTrus
 }
 
 export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurableProjectionIndex {
-  return log.durableProjection({ projectionId: CURRENT_TRUST_PROJECTION_ID, reducerVersion: 2, authenticated: true,
+  return log.durableProjection({ projectionId: CURRENT_TRUST_PROJECTION_ID, reducerVersion: 4, authenticated: true,
     inputs: { streams: ["trust"] },
     async reduce(envelope, current, source) {
       const changes = new Map<string, JsonValue | undefined>();
@@ -99,7 +111,7 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
           const touched = new Map<string, MemberRow>();
           if (!head) {
             next = initializeTrustChain(event);
-            head = { projection: omitMembers(next), count: 0, reset: 0, genesis: source.checkpoint };
+            head = { projection: omitMembers(next), count: 0, active: 0, reset: 0, genesis: source.checkpoint };
           } else {
             const ids = new Set([head.projection.issuer.deviceId]);
             switch (event.body.t) {
@@ -118,13 +130,21 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
           }
           const reset = head.reset + Number(event.body.t === "domain-reset");
           let count = head.count;
+          // active 计数只算当前 reset 代的目录：换代后从 0 起，旧代的 active 行读出即为待重新配对
+          let active = reset === head.reset ? head.active : 0;
           for (const member of next.members) {
             const old = touched.get(member.device.deviceId);
             if (old && reset === head.reset && canonicalize(old.member) === canonicalize(member)) continue;
-            if (old && old.member.state === "active") changes.set(activePrefix(head.reset) + member.device.deviceId, undefined);
+            if (old && old.member.state === "active") {
+              changes.set(activePrefix(head.reset) + member.device.deviceId, undefined);
+              if (reset === head.reset) active -= 1;
+            }
             const ordinal = old?.ordinal ?? count++;
             write(changes, memberKey(member.device.deviceId), { member, ordinal, reset });
-            if (member.state === "active") write(changes, activePrefix(reset) + member.device.deviceId, member.device.deviceId);
+            if (member.state === "active") {
+              write(changes, activePrefix(reset) + member.device.deviceId, member.device.deviceId);
+              active += 1;
+            }
             await rememberIdentity(view, changes, member.device, source.checkpoint);
           }
           if (next.issuer.issuerPublicKey) {
@@ -133,9 +153,12 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
             await rememberIdentity(view, changes, { ...issuer.device, deviceId: next.issuer.issuerKeyId,
               publicKey: next.issuer.issuerPublicKey }, source.checkpoint);
           }
-          write(changes, HEAD, { projection: omitMembers(next), count, reset, genesis: head.genesis,
-            ...(head.recordHead ? { recordHead: head.recordHead } : {}) });
+          write(changes, HEAD, { projection: omitMembers(next), count, active, reset, genesis: head.genesis,
+            ...(head.recordHead ? { recordHead: head.recordHead } : {}),
+            ...(head.recordVersion ? { recordVersion: head.recordVersion } : {}) });
           write(changes, 'trust/event/' + String(event.seq).padStart(16, '0'), event);
+          // 事件摘要 → 序号：需要某条原信任事件的地方按摘要精确读这一条，不整读信任流。
+          write(changes, eventDigestKey(homeTrustEventDigest(event)), event.seq);
           if (event.body.t === 'genesis' || event.body.t === 'issuer-transition') {
             write(changes, 'trust/tenure/' + String(next.anchorEpoch).padStart(16, '0'), {
               homeId: next.homeId, anchorEpoch: next.anchorEpoch, deviceId: next.issuer.deviceId,
@@ -145,20 +168,29 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
           }
         } else if (body.t === "home-trust-record") {
           if (!head || !object(body.record) || !Array.isArray(body.record.members)) throw new TypeError("Trust record has no valid chain");
-          const record = body.record as unknown as HomeTrustRecord;
-          if (record.members.length !== head.count) throw new TypeError("Trust record member set does not match its chain");
-          const members: Member[] = [];
-          for (let ordinal = 0; ordinal < record.members.length; ordinal++) {
-            const declared = record.members[ordinal]!;
-            const row = readMember(declared.device.deviceId, await view.get(memberKey(declared.device.deviceId)), head.reset);
-            if (!row || row.ordinal !== ordinal || canonicalize(row.member) !== canonicalize(declared)) throw new TypeError("Trust record member does not match its chain");
-            members.push(row.member);
-          }
-          verifyHomeTrustRecord(record, { ...head.projection, members });
-          write(changes, HEAD, { ...head, recordHead: head.projection.chainHead,
-            record: { checkpoint: source.checkpoint, entry: position, digest: protocolDigest("HomeTrustRecord", 1, record) } });
-          write(changes, 'trust/record/' + String(record.chainHead.seq).padStart(16, '0'),
-            { checkpoint: source.checkpoint, entry: position, digest: protocolDigest('HomeTrustRecord', 1, record) });
+          let record: HomeTrustRecord | HistoricalHomeTrustRecord;
+          if (body.record.v === 2) {
+            // 当前快照：只按 active 目录与 active 计数闭合，读取随当前成员数
+            record = body.record as unknown as HomeTrustRecord;
+            verifyHomeTrustRecord(record, { ...head.projection, members: await readActiveMembers(view, head) });
+          } else if (body.record.v === 1) {
+            // 权威历史帧：按原规则与同一位置的全部成员逐序号核对；链上出现 v2 之后不再接受
+            if (head.recordVersion === 2) throw new TypeError("Trust record v1 cannot follow a current snapshot");
+            const historical = body.record as unknown as HistoricalHomeTrustRecord;
+            if (historical.members.length !== head.count) throw new TypeError("Trust record member set does not match its chain");
+            const members: Member[] = [];
+            for (let ordinal = 0; ordinal < historical.members.length; ordinal++) {
+              const declared = historical.members[ordinal]!;
+              const row = readMember(declared.device.deviceId, await view.get(memberKey(declared.device.deviceId)), head.reset);
+              if (!row || row.ordinal !== ordinal || canonicalize(row.member) !== canonicalize(declared)) throw new TypeError("Trust record member does not match its chain");
+              members.push(row.member);
+            }
+            verifyHistoricalHomeTrustRecord(historical, { ...head.projection, members });
+            record = historical;
+          } else throw new TypeError("Trust record version is unsupported");
+          const locator = { checkpoint: source.checkpoint, entry: position, digest: homeTrustRecordDigest(record), v: record.v };
+          write(changes, HEAD, { ...head, recordHead: head.projection.chainHead, recordVersion: record.v, record: locator });
+          write(changes, 'trust/record/' + String(record.chainHead.seq).padStart(16, '0'), locator);
         } else throw new TypeError("Trust stream record type is unsupported");
       }
       return [...changes].map(([key, value]) => value === undefined ? { kind: "tombstone" as const, key } : { kind: "put" as const, key, value });
@@ -192,6 +224,39 @@ export async function readCurrentAnchorTenure(view: DurableProjectionReadContext
   return { ...tenure, chainHead: head.projection.chainHead };
 }
 
+/** 当前 reset 代 active 目录列出的成员，按键读各自的成员行；数目必须等于 head 的 active 计数。读取随当前成员数。 */
+async function readActiveMembers(view: DurableProjectionReadContext, head: Head): Promise<Member[]> {
+  const members: Member[] = [];
+  const prefix = activePrefix(head.reset);
+  let continuation: string | undefined;
+  do {
+    const page = await view.scan({ gte: prefix, lt: prefix + "￿" }, 256, continuation);
+    for (const entry of page.entries) {
+      if (typeof entry.value !== "string" || entry.key !== prefix + entry.value) throw invalid();
+      const row = readMember(entry.value, await view.get(memberKey(entry.value)), head.reset);
+      if (!row || row.member.state !== "active") throw invalid();
+      members.push(row.member);
+    }
+    continuation = page.continuation;
+  } while (continuation);
+  if (members.length !== head.active) throw invalid();
+  return members;
+}
+
+function eventDigestKey(digest: string): string {
+  return "trust/event-digest/" + digest;
+}
+
+/** 按事件摘要精确读一条已入链的信任事件：两次按键读，摘要不符即视为投影损坏。 */
+export async function readTrustEventByDigest(view: DurableProjectionReadContext, digest: string): Promise<HomeTrustEvent | undefined> {
+  const seq = await view.get(eventDigestKey(digest));
+  if (seq === undefined) return undefined;
+  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) throw invalid();
+  const event = await view.get('trust/event/' + String(seq).padStart(16, '0')) as unknown as HomeTrustEvent | undefined;
+  if (!event || !object(event) || event.seq !== seq || homeTrustEventDigest(event) !== digest) throw invalid();
+  return event;
+}
+
 export async function readCurrentTrustMember(view: DurableProjectionReadContext, deviceId: string): Promise<Member | undefined> {
   const head = readHead(await view.get(HEAD));
   return head ? readMember(deviceId, await view.get(memberKey(deviceId)), head.reset)?.member : undefined;
@@ -200,8 +265,10 @@ export async function readCurrentTrustMember(view: DurableProjectionReadContext,
 /** Incomplete suffixes are verified chain progress, not a ready trust view. */
 export async function readVerifiedTrustProgress(view: DurableProjectionReadContext) {
   const head = readHead(await view.get(HEAD));
-  return head ? { homeId: head.projection.homeId, chainHead: head.projection.chainHead,
-    complete: !!head.recordHead && canonicalize(head.recordHead) === canonicalize(head.projection.chainHead),
+  const complete = !!head?.recordHead && canonicalize(head.recordHead) === canonicalize(head.projection.chainHead);
+  return head ? { homeId: head.projection.homeId, chainHead: head.projection.chainHead, complete,
+    // 链头已闭合但只由 v1 历史帧闭合：需要从值班设备取回同一链头的 v2 快照
+    currentRecord: complete && head.record?.v === 2,
     ...(head.recordHead ? { completeHead: head.recordHead } : {}) } : undefined;
 }
 
@@ -232,14 +299,16 @@ export async function readTrustReconciliationPage(view: DurableProjectionReadCon
   const events: HomeTrustEvent[] = [];
   for (let seq = input.chainHead.seq + 1; seq <= target.seq && events.length < 16; seq++) events.push(await eventAt(seq));
   const done = (events.at(-1)?.seq ?? input.chainHead.seq) === target.seq;
-  let record: HomeTrustRecord | undefined;
+  // 组边界上的原始签名快照；较早的边界可能是 v1 历史帧，接收方的归约器按版本核对
+  let record: HomeTrustRecord | HistoricalHomeTrustRecord | undefined;
   if (done && (events.length || input.needRecord)) {
     const locator = await view.get('trust/record/' + String(target.seq).padStart(16, '0')) as unknown as RecordLocator | undefined;
     if (!locator) throw new Error('Signed trust record for the requested prefix is unavailable');
     const envelope = await readEnvelopeAt(locator.checkpoint), entry = envelope.entries[locator.entry];
     if (entry?.stream !== 'trust' || !object(entry.body) || entry.body.t !== 'home-trust-record' || !object(entry.body.record) ||
-        protocolDigest('HomeTrustRecord', 1, entry.body.record) !== locator.digest) throw invalid();
-    record = entry.body.record as unknown as HomeTrustRecord;
+        entry.body.record.v !== locator.v ||
+        homeTrustRecordDigest(entry.body.record as unknown as HomeTrustRecord | HistoricalHomeTrustRecord) !== locator.digest) throw invalid();
+    record = entry.body.record as unknown as HomeTrustRecord | HistoricalHomeTrustRecord;
   }
   return { target, latest, events, done, ...(record ? { record } : {}) };
 }
@@ -249,24 +318,25 @@ export async function readCurrentTrust(view: DurableProjectionReadContext): Prom
   const head = readHead(await view.get(HEAD));
   if (!head) return;
   if (!head.recordHead || canonicalize(head.recordHead) !== canonicalize(head.projection.chainHead)) throw new Error("Home trust projection record is missing or stale");
-  const members: Member[] = [];
-  const prefix = activePrefix(head.reset);
-  let continuation: string | undefined;
-  do {
-    const page = await view.scan({ gte: prefix, lt: prefix + "\uffff" }, 256, continuation);
-    for (const entry of page.entries) {
-      if (typeof entry.value !== "string" || entry.key !== prefix + entry.value) throw invalid();
-      const row = readMember(entry.value, await view.get(memberKey(entry.value)), head.reset);
-      if (!row || row.member.state !== "active") throw invalid();
-      members.push(row.member);
-    }
-    continuation = page.continuation;
-  } while (continuation);
-  return { ...head.projection, members };
+  return { ...head.projection, members: await readActiveMembers(view, head) };
 }
+/** 链头只由 v1 历史帧闭合、还没有当前快照时的错误；值班设备补签或对齐取回同一链头的 v2 之后消失。 */
+export const LEGACY_TRUST_RECORD_MESSAGE = "Home trust record predates the current snapshot format";
+
 /**
- * 当前签名信任记录（含已撤销成员，与旧整链读取返回同一份记录）：按索引定位精确读取一帧并核对摘要。
- * 没有信任链时为 undefined；记录缺失或落后于链头时与旧实现同样拒绝。
+ * 一次性接续：链头只由 v1 历史帧闭合时，由当前签发者为同一链头补签 v2 快照。
+ * 只读当前视图（链头与 active 目录），已有当前快照时返回 undefined。
+ */
+export async function readLegacyClosedTrust(view: DurableProjectionReadContext): Promise<CurrentTrustProjection | undefined> {
+  const head = readHead(await view.get(HEAD));
+  if (!head?.record || head.record.v === 2 || !head.recordHead ||
+      canonicalize(head.recordHead) !== canonicalize(head.projection.chainHead)) return undefined;
+  return { ...head.projection, members: await readActiveMembers(view, head) };
+}
+
+/**
+ * 当前签名信任记录（v2，只列 active 成员）：按索引定位精确读取一帧并核对摘要。
+ * 没有信任链时为 undefined；记录缺失或落后于链头时拒绝；链头只由 v1 历史帧闭合时拒绝。
  */
 export async function readCurrentTrustRecord(view: DurableProjectionReadContext,
   readEnvelopeAt: (checkpoint: DurableLogCheckpoint) => Promise<CommitEnvelope<JsonValue>>): Promise<HomeTrustRecord | undefined> {
@@ -275,11 +345,12 @@ export async function readCurrentTrustRecord(view: DurableProjectionReadContext,
   if (!head.record || !head.recordHead || canonicalize(head.recordHead) !== canonicalize(head.projection.chainHead)) {
     throw new Error("Home trust projection record is missing or stale");
   }
+  if (head.record.v !== 2) throw new Error(LEGACY_TRUST_RECORD_MESSAGE);
   const envelope = await readEnvelopeAt(head.record.checkpoint);
   const entry = envelope.entries[head.record.entry];
   const body = entry?.body;
   if (entry?.stream !== "trust" || !object(body) || body.t !== "home-trust-record" || !object(body.record) ||
-      protocolDigest("HomeTrustRecord", 1, body.record) !== head.record.digest) throw invalid();
+      body.record.v !== 2 || homeTrustRecordDigest(body.record as unknown as HomeTrustRecord) !== head.record.digest) throw invalid();
   return body.record as unknown as HomeTrustRecord;
 }
 

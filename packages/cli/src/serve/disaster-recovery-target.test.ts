@@ -21,6 +21,8 @@ import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import {
   createRecoveryRootEvent,
   createSignedTrustEvent,
+  homeTrustRecordDigest,
+  replayTrustChain,
 } from "@zhixing/mesh/trust-chain";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 import { createPlannedAnchorReadinessCoordinator } from "../setup-delivery.js";
@@ -80,7 +82,10 @@ describe("disaster recovery target", () => {
     expect(committed.state.phase).toBe("committed");
     expect(committed.trustRecord.issuer.deviceId).toBe(fixture.targetIdentity.deviceId);
     expect(committed.trustRecord.anchorEpoch).toBeUndefined();
-    expect(committed.trustRecord.members.find((member) =>
+    // 当前快照只列 active 成员；源设备的撤销由事件链证明
+    expect(committed.trustRecord.members.some((member) =>
+      member.device.deviceId === fixture.sourceIdentity.deviceId)).toBe(false);
+    expect(replayTrustChain(await fixture.targetStore.loadTrustEvents()).members.find((member) =>
       member.device.deviceId === fixture.sourceIdentity.deviceId)?.state).toBe("revoked");
     expect((await loadCurrentDisasterRecoveryInstallation(
       fixture.targetStore.authorityLog(),
@@ -518,7 +523,7 @@ async function localTrustEvidence(fixture: Awaited<ReturnType<typeof createFixtu
         deviceId: item.deviceId,
         chainHead: item.record.chainHead,
         trustEpoch: item.record.trustEpoch,
-        recordDigest: protocolDigest("HomeTrustRecord", 1, item.record),
+        recordDigest: homeTrustRecordDigest(item.record),
       })),
     }),
   });

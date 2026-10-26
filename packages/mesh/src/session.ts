@@ -16,6 +16,16 @@ export interface AuthenticatedSessionOptions {
   readonly localProtocolRange: MeshProtocolRange;
   readonly peerProtocolRange: MeshProtocolRange;
   readonly peer: DeviceIdentity;
+  readonly route?: MeshConnectionRoute;
+}
+
+/**
+ * 连接的入口用途：经终态定位握手进入的连接固定为 terminal，binding 是解析端口给出的不透明绑定
+ * （设备移除里是 operationId）；成员入口的连接没有 route。
+ */
+export interface MeshConnectionRoute {
+  readonly kind: "terminal";
+  readonly binding: string;
 }
 
 const AUTHENTICATED_SESSION_TOKEN = Symbol("authenticated-mesh-session");
@@ -33,6 +43,7 @@ export class SecureMeshConnection {
   readonly #compatibility: MeshProtocolCompatibility;
   readonly #localProtocolRange: MeshProtocolRange;
   readonly #peerProtocolRange: MeshProtocolRange;
+  readonly #route: MeshConnectionRoute | undefined;
   readonly #closed: Promise<void>;
   #sendQueue: Promise<void> = Promise.resolve();
   #receiving = false;
@@ -68,6 +79,7 @@ export class SecureMeshConnection {
     this.#compatibility = Object.freeze({ ...options.compatibility });
     this.#localProtocolRange = localProtocolRange;
     this.#peerProtocolRange = peerProtocolRange;
+    this.#route = options.route ? Object.freeze({ kind: options.route.kind, binding: options.route.binding }) : undefined;
     this.#closed = options.transport.closed;
     Object.freeze(this);
     void this.#closed.then(() => {
@@ -98,6 +110,10 @@ export class SecureMeshConnection {
 
   get peerProtocolRange(): MeshProtocolRange {
     return this.#peerProtocolRange;
+  }
+
+  get route(): MeshConnectionRoute | undefined {
+    return this.#route;
   }
 
   get closed(): Promise<void> {

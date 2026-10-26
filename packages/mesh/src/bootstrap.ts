@@ -1,4 +1,4 @@
-import { createHmac, hkdfSync } from "node:crypto";
+import { createHmac, hkdfSync, randomBytes } from "node:crypto";
 import type {
   BlindRendezvousHello,
   DeviceRole,
@@ -8,7 +8,7 @@ import type {
   RendezvousKey,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import { canonicalize } from "./canonical.js";
+import { canonicalize, protocolDigest } from "./canonical.js";
 import type { TrustProjection } from "./trust-chain.js";
 import { MeshProtocolError } from "./errors.js";
 import type { MeshServiceClient } from "./request-channel.js";
@@ -28,6 +28,10 @@ const DEVICE_ID = /^[^\u0000-\u001f\u007f]{1,480}$/u;
 const HOST = /^[^\u0000-\u001f\u007f]{1,255}$/u;
 const PAIRWISE_INFO = Buffer.from("zhixing:rendezvous:pairwise:v1", "utf8");
 const CONTROL_KEY_DOMAIN = Buffer.from("zhixing:rendezvous:v1", "utf8");
+const TERMINAL_KEY_DOMAIN = Buffer.from("zhixing:rendezvous:terminal:v1", "utf8");
+const TERMINAL_LOCATOR_DOMAIN = Buffer.from("zhixing:terminal-route:locator:v1", "utf8");
+const TERMINAL_ROUTE_LOCATOR = /^[a-z2-7]{52}$/u;
+const BASE32_LOWER = "abcdefghijklmnopqrstuvwxyz234567";
 
 export interface EffectiveMeshRoles {
   readonly mode: "single-machine" | "trusted-home";
@@ -383,6 +387,87 @@ export function currentAndPreviousRendezvousKeys(
   ]) as readonly [RendezvousKey, RendezvousKey];
 }
 
+/** issuer 自有的终态路由秘密：与 pairwise secret 同一编码，但是独立材料，不随成员撤销删除。 */
+export function createTerminalRouteSecret(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+export function assertTerminalRouteSecret(value: string): void {
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(value)) {
+    throw new TypeError("Terminal route secret is invalid");
+  }
+}
+
+/** 终态接入的会合键：当前 issuer 固定数量的接入注册与历史 target 共用，按 UTC 日轮换。 */
+export function deriveTerminalRendezvousKey(
+  secret: string,
+  windowAt: number | Date = Date.now(),
+): RendezvousKey {
+  assertTerminalRouteSecret(secret);
+  const timestamp = windowAt instanceof Date ? windowAt.getTime() : windowAt;
+  if (!Number.isFinite(timestamp)) throw new TypeError("Rendezvous window time is invalid");
+  const date = new Date(timestamp).toISOString().slice(0, 10);
+  const mac = createHmac("sha256", Buffer.from(secret, "base64url"))
+    .update(TERMINAL_KEY_DOMAIN)
+    .update(Buffer.from([0]))
+    .update(date, "utf8")
+    .digest("hex");
+  return `rzv:${mac}`;
+}
+
+export function currentAndPreviousTerminalRendezvousKeys(
+  secret: string,
+  now = Date.now(),
+): readonly [RendezvousKey, RendezvousKey] {
+  return Object.freeze([
+    deriveTerminalRendezvousKey(secret, now),
+    deriveTerminalRendezvousKey(secret, now - RENDEZVOUS_WINDOW_MS),
+  ]) as readonly [RendezvousKey, RendezvousKey];
+}
+
+/**
+ * 某个 operation 的终态定位：由终态路由秘密派生的不透明高熵值，作为握手 SNI。
+ * 中继没有秘密，不能把它对应到设备，也不能跨 operation 关联；重复派生得到同一值。
+ */
+export function deriveTerminalRouteLocator(secret: string, operationId: string): string {
+  assertTerminalRouteSecret(secret);
+  if (typeof operationId !== "string" || operationId.length === 0) {
+    throw new TypeError("Terminal route operation is invalid");
+  }
+  const mac = createHmac("sha256", Buffer.from(secret, "base64url"))
+    .update(TERMINAL_LOCATOR_DOMAIN)
+    .update(Buffer.from([0]))
+    .update(operationId, "utf8")
+    .digest();
+  return encodeBase32Lower(mac);
+}
+
+export function isTerminalRouteLocator(value: unknown): value is string {
+  return typeof value === "string" && TERMINAL_ROUTE_LOCATOR.test(value);
+}
+
+/** 定位在本机目录里的键：只存摘要，不存定位本身。 */
+export function terminalRouteDigest(locator: string): string {
+  if (!isTerminalRouteLocator(locator)) throw new TypeError("Terminal route locator is invalid");
+  return protocolDigest("TerminalRouteLocator", 1, { locator });
+}
+
+function encodeBase32Lower(bytes: Uint8Array): string {
+  let bits = 0;
+  let value = 0;
+  let output = "";
+  for (const byte of bytes) {
+    value = ((value << 8) | byte) & 0xffff;
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_LOWER[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += BASE32_LOWER[(value << (5 - bits)) & 31];
+  return output;
+}
+
 export function validateRendezvousKey(value: unknown): RendezvousKey {
   if (typeof value !== "string" || !RENDEZVOUS_KEY.test(value)) {
     throw invalidFrame("Rendezvous key format is invalid");
@@ -394,9 +479,10 @@ export function validateBlindRendezvousHello(
   value: unknown,
 ): BlindRendezvousHello {
   if (!isRecord(value)) throw invalidFrame("Blind rendezvous hello must be an object");
-  assertExactKeys(value, ["key", "ttlMs", "v"]);
+  assertExactKeys(value, ["key", "role", "ttlMs", "v"]);
   if (
     value.v !== 1 ||
+    (value.role !== "accept" && value.role !== "connect") ||
     !Number.isSafeInteger(value.ttlMs) ||
     (value.ttlMs as number) < 1 ||
     (value.ttlMs as number) > MAX_RENDEZVOUS_TTL_MS
@@ -406,6 +492,7 @@ export function validateBlindRendezvousHello(
   return Object.freeze({
     v: 1 as const,
     key: validateRendezvousKey(value.key),
+    role: value.role as BlindRendezvousHello["role"],
     ttlMs: value.ttlMs as number,
   });
 }

@@ -16,7 +16,8 @@ export const DURABLE_SCHEMA_INVENTORY = Object.freeze([
   row("DeviceLifecycleRecord"),
   row("FinalAuthorityRecord"),
   row("GlobalStateRecord"),
-  row("HomeTrustRecord"),
+  // 链上较早的 v1 快照是只读历史帧；当前写出 v2
+  Object.freeze({ schemaId: "HomeTrustRecord", readMin: "1", readMax: "2", writeVersion: "2" }),
   row("IntentAuthorityRecord"),
   row("ResourceLeaseRecord"),
   row("SchedulerAuthorityRecord"),

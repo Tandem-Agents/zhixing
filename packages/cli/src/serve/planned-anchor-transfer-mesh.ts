@@ -69,6 +69,8 @@ interface TrustReconciliationRequest {
   readonly homeId: string;
   readonly chainHead: HomeTrustRecord["chainHead"];
   readonly through?: HomeTrustRecord["chainHead"];
+  /** 本机链头只由 v1 历史帧闭合：链头相同也要带回对端的签名快照 */
+  readonly needRecord?: true;
 }
 
 interface TrustReconciliationResult {
@@ -382,6 +384,8 @@ async function reconcileTrustFromPeer(client: MeshServiceClient,
     currentMaintenanceAbortSignal().throwIfAborted();
     const local = await options.store.trustReconciliationProgress();
     if (!local?.complete) throw new Error('Local complete trust prefix is unavailable');
+    // 本机链头只由 v1 历史帧闭合（开发资料一次性接续）：同一链头也取回对端的签名快照
+    const needRecord = !local.currentRecord;
     let cursor = local.chainHead;
     let through: HomeTrustRecord['chainHead'] | undefined;
     let bytes = 0;
@@ -389,7 +393,8 @@ async function reconcileTrustFromPeer(client: MeshServiceClient,
     for (;;) {
       const page = trustReconciliationPage(decode(await client.request(
         PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE,
-        encode({ v: 2, homeId: local.homeId, chainHead: cursor, ...(through ? { through } : {}) }),
+        encode({ v: 2, homeId: local.homeId, chainHead: cursor, ...(through ? { through } : {}),
+          ...(needRecord ? { needRecord: true } : {}) }),
         currentMaintenanceAbortSignal(),
       )));
       if (through && canonicalize(page.target) !== canonicalize(through)) throw new TypeError('Trust reconciliation changed its signed target');
@@ -411,6 +416,9 @@ async function reconcileTrustFromPeer(client: MeshServiceClient,
       if (!page.done) { if (page.record) throw new TypeError('Trust record arrived before its chain'); continue; }
       if (events.length) {
         if (!page.record) throw new TypeError('Trust reconciliation has no closing signed record');
+        await options.store.reconcileTrustPage({ homeId: local.homeId, previous: local.chainHead, events, record: page.record });
+      } else if (needRecord && page.record) {
+        // 同一链头的签名快照：本机只由 v1 闭合时补上对端的 v2，其余情形无事可做
         await options.store.reconcileTrustPage({ homeId: local.homeId, previous: local.chainHead, events, record: page.record });
       }
       if (page.latest.seq === cursor.seq) return requireCurrentTrust(options.store);
@@ -490,9 +498,11 @@ function trustHead(value: unknown): asserts value is HomeTrustRecord['chainHead'
 function trustReconciliationRequest(input: unknown): TrustReconciliationRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError('Invalid trust reconciliation request');
   const value = input as Record<string, unknown>;
-  const keys = ['chainHead', 'homeId', 'v', ...(value.through !== undefined ? ['through'] : [])].sort();
+  const keys = ['chainHead', 'homeId', 'v', ...(value.through !== undefined ? ['through'] : []),
+    ...(value.needRecord !== undefined ? ['needRecord'] : [])].sort();
   if (canonicalize(Object.keys(value).sort()) !== canonicalize(keys) || (value.v !== 1 && value.v !== 2) ||
-      typeof value.homeId !== 'string' || (value.v === 1 && value.through !== undefined)) throw new TypeError('Invalid trust reconciliation request fields');
+      typeof value.homeId !== 'string' || (value.v === 1 && (value.through !== undefined || value.needRecord !== undefined)) ||
+      (value.needRecord !== undefined && value.needRecord !== true)) throw new TypeError('Invalid trust reconciliation request fields');
   trustHead(value.chainHead);
   if (value.through !== undefined) trustHead(value.through);
   return value as unknown as TrustReconciliationRequest;

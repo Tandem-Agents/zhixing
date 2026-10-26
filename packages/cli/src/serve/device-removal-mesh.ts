@@ -11,7 +11,9 @@ import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
+  validateExecutorRemovalTerminalRoute,
   type ExecutorRemovalPublicState,
+  type ExecutorRemovalTerminalRoute,
 } from "./device-removal.js";
 
 export const DEVICE_REMOVAL_TARGET_SERVICE = "device.removal.target";
@@ -20,11 +22,12 @@ export const DEVICE_REMOVAL_ISSUER_SERVICE = "device.removal.issuer";
 export class DeviceRemovalTargetMeshClient {
   constructor(private readonly client: MeshServiceClient) {}
 
-  async accept(receipt: ExecutorRemovalReceipt): Promise<{
+  /** route 只经这条已认证、绑定本次移除的成员连接交付。 */
+  async accept(receipt: ExecutorRemovalReceipt, route: ExecutorRemovalTerminalRoute): Promise<{
     readonly conversations: readonly string[];
     readonly hasAcceptedWork: boolean;
   }> {
-    const result = await this.#request({ v: 1, op: "accept", receipt }, ["conversations", "hasAcceptedWork", "v"]);
+    const result = await this.#request({ v: 1, op: "accept", receipt, route }, ["conversations", "hasAcceptedWork", "v"]);
     return {
       conversations: requiredStrings(result.conversations, "Removal conversations"),
       hasAcceptedWork: result.hasAcceptedWork === true,
@@ -68,15 +71,16 @@ export class DeviceRemovalIssuerMeshClient {
   async acceptSelf(input: {
     readonly requestId: string;
     readonly operationId: string;
-  }): Promise<ExecutorRemovalReceipt> {
+  }): Promise<{ readonly receipt: ExecutorRemovalReceipt; readonly route: ExecutorRemovalTerminalRoute }> {
     const response = await this.client.request(
       DEVICE_REMOVAL_ISSUER_SERVICE,
       Buffer.from(canonicalize({ v: 1, op: "accept-self", ...input }), "utf8"),
     );
-    return validateExecutorRemovalReceipt(
-      decodeExactObject(response, "Device removal issuer response", ["receipt", "v"]).receipt,
-      this.verifier,
-    );
+    const decoded = decodeExactObject(response, "Device removal issuer response", ["receipt", "route", "v"]);
+    return Object.freeze({
+      receipt: validateExecutorRemovalReceipt(decoded.receipt, this.verifier),
+      route: validateExecutorRemovalTerminalRoute(decoded.route),
+    });
   }
 
   async ready(receipt: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt> {
@@ -125,8 +129,23 @@ export function registerDeviceRemovalTargetMeshService(
     readonly target: ExecutorRemovalTarget;
     readonly issuerFor: (deviceId: string) => DeviceRemovalIssuerMeshClient;
     readonly authorizeIssuer: (deviceId: string) => boolean;
+    /** 已产生 revocation-ready 之后内联续做中断：交给专用取回接续，不等用户重启。 */
+    readonly onCompletionInterrupted?: (operationId: string) => void;
   },
 ): () => void {
+  // 不可逆之后的内联续做：成员连接上 issuer 撤销后会断开，失败即交给专用取回
+  const completeInline = async (operationId: string, ready: ExecutorRemovalReceipt, issuer: DeviceRemovalIssuerMeshClient) => {
+    try {
+      const cleanupReady = await input.target.finish(await issuer.ready(ready));
+      if (cleanupReady) await input.target.finish(await issuer.cleanupReady(cleanupReady));
+      else if (!await input.target.isRetired(operationId)) {
+        throw new Error("Device removal did not produce cleanup-ready");
+      }
+    } catch (error) {
+      input.onCompletionInterrupted?.(operationId);
+      throw error;
+    }
+  };
   return registry.register(DEVICE_REMOVAL_TARGET_SERVICE, {
     access: "write",
     availability: "negotiated-version",
@@ -135,8 +154,11 @@ export function registerDeviceRemovalTargetMeshService(
       const command = decodeObject(payload, "Device removal target command");
       if (command.v !== 1) throw new TypeError("Device removal target command version is invalid");
       if (command.op === "accept") {
-        assertExactCommand(command, ["op", "receipt", "v"], "Device removal target accept");
-        const snapshot = await input.target.accept(command.receipt as ExecutorRemovalReceipt);
+        assertExactCommand(command, ["op", "receipt", "route", "v"], "Device removal target accept");
+        const snapshot = await input.target.accept(
+          command.receipt as ExecutorRemovalReceipt,
+          validateExecutorRemovalTerminalRoute(command.route),
+        );
         return encode({ v: 1,
           conversations: snapshot.conversations.map((item) => item.displayName),
           hasAcceptedWork: Object.values(snapshot.acceptedWork).some((count) => count > 0),
@@ -160,10 +182,7 @@ export function registerDeviceRemovalTargetMeshService(
         if (decision.kind === "preflight-changed") {
           return encode({ v: 1, state: await input.target.state(operationId) });
         }
-        const issuer = input.issuerFor(connection.peer.deviceId);
-        const cleanupReady = await input.target.finish(await issuer.ready(decision.receipt));
-        if (!cleanupReady) throw new Error("Device removal did not produce cleanup-ready");
-        await input.target.finish(await issuer.cleanupReady(cleanupReady));
+        await completeInline(operationId, decision.receipt, input.issuerFor(connection.peer.deviceId));
         return encode({ v: 1, state: await input.target.state(operationId) });
       }
       if (command.op === "status") {
@@ -187,8 +206,7 @@ export function registerDeviceRemovalTargetMeshService(
         if (receipt.phase === "aborted") {
           await issuer.targetAborted(receipt);
         } else if (receipt.phase === "revocation-ready") {
-          const cleanupReady = await input.target.finish(await issuer.ready(receipt));
-          if (cleanupReady) await input.target.finish(await issuer.cleanupReady(cleanupReady));
+          await completeInline(operationId, receipt, issuer);
         } else {
           throw new Error("Device removal abort did not return a durable target winner");
         }
@@ -203,25 +221,36 @@ export function registerDeviceRemovalIssuerMeshService(
   registry: MeshServiceRegistry,
   input: {
     readonly authority: CurrentIssuerDeviceRemovalAuthority;
-    readonly authorizeTarget: (deviceId: string) => boolean;
+    readonly authorizeTarget: (deviceId: string) => boolean | Promise<boolean>;
     readonly terminalOnly?: boolean;
   },
 ): () => void {
   return registry.register(DEVICE_REMOVAL_ISSUER_SERVICE, {
     access: "write",
     availability: "negotiated-version",
-    authorize: (connection) => input.authorizeTarget(connection.peer.deviceId),
+    // 终态入口的连接以握手绑定的 operation 为准，不看对端是否仍是成员。
+    authorize: (connection) => input.terminalOnly === true
+      ? connection.route?.kind === "terminal"
+      : input.authorizeTarget(connection.peer.deviceId),
     handler: async (payload, connection) => {
       const command = decodeObject(payload, "Device removal issuer command");
       if (command.v !== 1) throw new TypeError("Device removal issuer command version is invalid");
-      if (
-        input.terminalOnly === true &&
-        command.op !== "ready" &&
-        command.op !== "cleanup-ready" &&
-        command.op !== "target-aborted" &&
-        command.op !== "terminal"
-      ) {
-        throw new TypeError("Historical device removal transport only accepts terminal effects");
+      if (input.terminalOnly === true) {
+        if (
+          command.op !== "ready" &&
+          command.op !== "cleanup-ready" &&
+          command.op !== "target-aborted" &&
+          command.op !== "terminal"
+        ) {
+          throw new TypeError("Historical device removal transport only accepts terminal effects");
+        }
+        const binding = connection.route?.kind === "terminal" ? connection.route.binding : undefined;
+        const commandOperation = command.op === "terminal"
+          ? command.operationId
+          : (command.receipt as { readonly operationId?: unknown } | undefined)?.operationId;
+        if (!binding || commandOperation !== binding) {
+          throw new TypeError("Terminal removal command does not match the connection's operation");
+        }
       }
       if (command.op === "accept-self") {
         assertExactCommand(
@@ -236,7 +265,7 @@ export function registerDeviceRemovalIssuerMeshService(
           operationId,
           targetDeviceId: connection.peer.deviceId,
         });
-        return encode({ v: 1, receipt });
+        return encode({ v: 1, receipt, route: await input.authority.terminalRoute(operationId) });
       }
       if (command.op === "ready") {
         assertExactCommand(command, ["op", "receipt", "v"], "Device removal issuer ready");

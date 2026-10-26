@@ -30,6 +30,23 @@ export function readExposureProjection(key: string, value: unknown): CredentialE
   } catch { throw invalid(); }
 }
 function routeKey(route: Route): string { return "route/" + protocolDigest("CredentialExposureRoute", 1, route); }
+/** 同一绑定、同一服务在全部设备与状态的记录里最大的修订号：一行聚合，轮换据此取下一修订号。 */
+function revisionKey(bindingId: string, service: string): string {
+  return "revision/" + protocolDigest("CredentialExposureBindingRevision", 1, [bindingId, service]);
+}
+function readRevision(bindingId: string, service: string, value: JsonValue | undefined): number {
+  if (value === undefined) return 0;
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== "bindingId,revision,service" ||
+      value.bindingId !== bindingId || value.service !== service ||
+      typeof value.revision !== "number" || !Number.isSafeInteger(value.revision) || value.revision < 1) throw invalid();
+  return value.revision;
+}
+/** 修订号聚合的精确读取；没有带修订号的记录为 0。 */
+export async function readExposureBindingRevision(current: DurableProjectionReadContext,
+  bindingId: string, service: string): Promise<number> {
+  return readRevision(bindingId, service, await current.get(revisionKey(bindingId, service)));
+}
 function routes(record: CredentialExposureRecord): Route[] {
   return Array.from({ length: 16 }, (_, n) => ({ bindingId: record.bindingId, service: record.service,
     mask: n % 8, deviceId: n < 8 ? null : record.deviceId,
@@ -77,6 +94,14 @@ async function upsert(record: CredentialExposureRecord, current: DurableProjecti
   if (prior) for (const key of secondaryKeys(prior)) changes.set(key, undefined);
   for (const key of secondaryKeys(next)) changes.set(key, exposureProjectionKey(next));
   changes.set(key, next as unknown as JsonValue);
+  // 修订号只增不减（归约拒绝同一身份回退，写者都带上或原样复制修订号）：取历来最大即当前最大
+  const revision = next.bindingRevision ?? 0;
+  if (revision > 0) {
+    const aggregate = revisionKey(next.bindingId, next.service);
+    if (revision > readRevision(next.bindingId, next.service, await view.get(aggregate))) {
+      changes.set(aggregate, { bindingId: next.bindingId, service: next.service, revision });
+    }
+  }
   const priorRoutes = prior && routes(prior);
   for (const [index, route] of routes(next).entries()) {
     if (priorRoutes && canonicalize(priorRoutes[index]) !== canonicalize(route)) throw invalid();
@@ -97,7 +122,7 @@ function mutations(changes: ReadonlyMap<string, JsonValue | undefined>): Durable
 }
 export function credentialExposureIndex(log: AuthorityCommitLog) {
   return log.durableProjection<CredentialExposureRecord>({
-    projectionId: CREDENTIAL_EXPOSURE_PROJECTION_ID, reducerVersion: 2, authenticated: true,
+    projectionId: CREDENTIAL_EXPOSURE_PROJECTION_ID, reducerVersion: 3, authenticated: true,
     inputs: { streams: ["exposure"] },
     reduce: async (envelope, current) => {
       const changes = new Map<string, JsonValue | undefined>();

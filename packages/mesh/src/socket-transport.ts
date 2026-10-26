@@ -87,7 +87,8 @@ export class SocketFrameTransport implements MeshFrameTransport {
       }
       if (!socket.writableEnded) socket.end();
     });
-    socket.once("error", (error) => {
+    // 一个套接字可以发出不止一个 error（TLS 还会转发父套接字的错误），只按第一个失败，其余吸收
+    socket.on("error", (error) => {
       this.fail(error);
       if (!socket.destroyed) socket.destroy();
     });

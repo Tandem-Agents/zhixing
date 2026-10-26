@@ -273,6 +273,121 @@ describe("local conversation owner lifecycle", () => {
   );
 
   it(
+    "waits for the running recovery pass before checking a destroy removal instead of reporting its worker as backlog",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      const snapshot = await fixture.assembly.freezeForDeviceRemoval("remove-during-recovery");
+      const ids = snapshot.conversations.map((item) => item.conversationId);
+      expect(ids).toEqual([conversationId]);
+      await fixture.assembly.destroyFrozenConversations("remove-during-recovery", ids);
+      // 让恢复循环的下一轮停在途中（拦在它开头的就绪投影恢复处，不重入本轮）：这一轮在跑期间，按会话的收束读数会多一条全局 worker
+      const original = ConversationProtocolRuntime.prototype.recoverReadinessProjections;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let started!: () => void;
+      const passStarted = new Promise<void>((resolve) => { started = resolve; });
+      const spy = vi.spyOn(ConversationProtocolRuntime.prototype, "recoverReadinessProjections").mockImplementation(
+        async function (this: ConversationProtocolRuntime) {
+          started();
+          await gate;
+          return original.call(this);
+        },
+      );
+      try {
+        await passStarted;
+        const settled = fixture.assembly.assertDeviceRemovalSettled(
+          "remove-during-recovery",
+          "destroy",
+          snapshot.ownerItems,
+        );
+        const early = await Promise.race([
+          settled.then(() => "settled", (error: unknown) => error),
+          new Promise((resolve) => setTimeout(() => resolve("waiting"), 200)),
+        ]);
+        // 这一轮还在跑：核对等它结束，不把它当成本会话的积压
+        expect(early).toBe("waiting");
+        release();
+        await expect(settled).resolves.toBeUndefined();
+      } finally {
+        release();
+        spy.mockRestore();
+      }
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it.each([
+    { stopDuringCheck: false },
+    { stopDuringCheck: true },
+  ])(
+    "starts no recovery pass while a destroy removal is being checked, then resumes as before (stop during check: $stopDuringCheck)",
+    async ({ stopDuringCheck }) => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      const snapshot = await fixture.assembly.freezeForDeviceRemoval("remove-check-boundary");
+      await fixture.assembly.destroyFrozenConversations("remove-check-boundary", [conversationId]);
+      // 核对中的会话权威读取停在途中；数一数这期间恢复循环开了几轮（只计数、立即调用原方法）
+      const readState = ConversationProtocolRuntime.prototype.sessionAuthorityState;
+      const recover = ConversationProtocolRuntime.prototype.recover;
+      let runtime!: ConversationProtocolRuntime;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let reading!: () => void;
+      const checkReading = new Promise<void>((resolve) => { reading = resolve; });
+      let held = false;
+      let passes = 0;
+      const spies = [
+        vi.spyOn(ConversationProtocolRuntime.prototype, "sessionAuthorityState").mockImplementation(
+          async function (this: ConversationProtocolRuntime, ...args) {
+            if (!held) {
+              held = true;
+              runtime = this;
+              reading();
+              await gate;
+            }
+            return readState.apply(this, args);
+          },
+        ),
+        vi.spyOn(ConversationProtocolRuntime.prototype, "recover").mockImplementation(
+          function (this: ConversationProtocolRuntime) {
+            passes += 1;
+            return recover.call(this);
+          },
+        ),
+      ];
+      try {
+        const settled = fixture.assembly.assertDeviceRemovalSettled(
+          "remove-check-boundary",
+          "destroy",
+          snapshot.ownerItems,
+        );
+        await checkReading;
+        passes = 0;
+        // 默认间隔 5 秒：等过一个间隔，计时器到点也不开新的一轮
+        await new Promise((resolve) => setTimeout(resolve, 5_600));
+        expect(passes).toBe(0);
+        if (stopDuringCheck) await runtime.stopRecoveryLoop();
+        release();
+        await expect(settled).resolves.toBeUndefined();
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        // 边界结束：照原状态补上欠下的一轮；循环已被停止的不重启
+        expect(passes).toBe(stopDuringCheck ? 0 : 1);
+      } finally {
+        release();
+        for (const spy of spies) spy.mockRestore();
+      }
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
     "settles one frozen host-stop exact-set across all local owner ports",
     async () => {
       const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });

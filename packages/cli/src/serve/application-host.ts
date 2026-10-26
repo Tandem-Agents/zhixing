@@ -15,9 +15,11 @@ import {
 } from "./device-capacity-runtime.js";
 import {
   prepareMeshRuntimeBootstrap,
+  type ExecutorRemovalRetrievalBootstrap,
   type MeshRuntimeBootstrap,
 } from "./mesh-runtime-bootstrap.js";
 import type { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
+import type { runExecutorRemovalRetrieval } from "./device-removal-retrieval.js";
 import { createRecoveryRootPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import {
   createPlannedAnchorTransferStagingInfrastructure,
@@ -92,6 +94,7 @@ export interface PersistentApplicationHostDependencies<Options> {
   readonly createRecoveryRootPairedCheckpointReceiver:
     typeof createRecoveryRootPairedCheckpointCommandReceiverInfrastructure;
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
+  readonly runRemovalRetrieval: typeof runExecutorRemovalRetrieval;
   readonly acquireLocalWorkspaceOwner: typeof acquireExecutorLocalWorkspaceOwner;
   readonly defineLocalWorkspaceIdentity: typeof defineLocalWorkspaceAssemblyIdentity;
   readonly importAnchorRole: () => Promise<AnchorRoleModule<Options>>;
@@ -116,7 +119,7 @@ export class PersistentApplicationHost<Options> {
   readonly #input: Readonly<PersistentApplicationHostInput<Options>>;
   readonly #dependencies: PersistentApplicationHostDependencies<Options>;
   readonly #configuration: RuntimeConfigurationProjections;
-  #mesh: (OwnedResource & { readonly value: MeshRuntimeBootstrap }) | undefined;
+  #mesh: (OwnedResource & { readonly value: MeshRuntimeBootstrap | ExecutorRemovalRetrievalBootstrap }) | undefined;
   #plannedAnchorTransferStaging:
     | (OwnedResource & { readonly value: PlannedAnchorTransferStagingArea })
     | undefined;
@@ -202,11 +205,30 @@ export class PersistentApplicationHost<Options> {
       disasterRecoveryStaging,
       () => disasterRecoveryStaging.close(),
     );
-    let mesh = await this.#prepareMesh(
+    let prepared = await this.#prepareMesh(
       deviceCapacity,
       plannedAnchorTransferStaging,
       disasterRecoveryStaging,
     );
+    if (prepared.mode === "removal-retrieval") {
+      // 撤销阶段的本机移除只运行专用取回，不装配普通业务；完成后重新准备，落到既有退休路径。
+      await this.#dependencies.runRemovalRetrieval({
+        mesh: prepared,
+        secretStore: this.#input.secretStore,
+        zhixingHome: this.#input.zhixingHome,
+        storageGovernor: deviceCapacity.storage,
+      });
+      await this.#releaseCurrentMesh();
+      prepared = await this.#prepareMesh(
+        deviceCapacity,
+        plannedAnchorTransferStaging,
+        disasterRecoveryStaging,
+      );
+    }
+    if (prepared.mode === "removal-retrieval") {
+      throw new Error("Device removal retrieval did not reach its local terminal");
+    }
+    let mesh: MeshRuntimeBootstrap = prepared;
 
     if (requiresRecoveryRootEstablishment(mesh)) {
       this.#input.onRecoveryRootRequired();
@@ -224,11 +246,15 @@ export class PersistentApplicationHost<Options> {
         pairedCheckpointReceiver,
       });
       await this.#releaseCurrentMesh();
-      mesh = await this.#prepareMesh(
+      const reprepared = await this.#prepareMesh(
         deviceCapacity,
         plannedAnchorTransferStaging,
         disasterRecoveryStaging,
       );
+      if (reprepared.mode === "removal-retrieval") {
+        throw new Error("恢复根激活后未形成可运行的耐久信任状态");
+      }
+      mesh = reprepared;
       if (!hasEstablishedRecoveryRoot(mesh)) {
         throw new Error("恢复根激活后未形成可运行的耐久信任状态");
       }
@@ -322,7 +348,7 @@ export class PersistentApplicationHost<Options> {
     deviceCapacity: DeviceCapacityRuntime,
     plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea,
     disasterRecoveryStaging: DisasterRecoveryStagingArea,
-  ): Promise<MeshRuntimeBootstrap> {
+  ): Promise<MeshRuntimeBootstrap | ExecutorRemovalRetrievalBootstrap> {
     const mesh = await observeLogPhase(this.#input.logRecords, "prepare-mesh", () => this.#dependencies.prepareMesh({
       records: this.#input.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome: this.#input.zhixingHome,
@@ -330,6 +356,7 @@ export class PersistentApplicationHost<Options> {
       storageMaintenance: deviceCapacity.storage,
       deviceCapacity: deviceCapacity.arbiter,
       prepareRuntimeBeforeDomains: true,
+      allowRemovalRetrieval: true,
       plannedAnchorTransferStaging,
       disasterRecoveryStaging,
       ...(this.#configuration.topology.mesh
@@ -401,6 +428,10 @@ export function createPersistentApplicationHost(
     runRecoveryRoot: async (options) => {
       const { runRecoveryRootEstablishmentTopology } = await import("./recovery-root-establishment-runtime.js");
       return runRecoveryRootEstablishmentTopology(options);
+    },
+    runRemovalRetrieval: async (options) => {
+      const { runExecutorRemovalRetrieval } = await import("./device-removal-retrieval.js");
+      return runExecutorRemovalRetrieval(options);
     },
     acquireLocalWorkspaceOwner: acquireExecutorLocalWorkspaceOwner,
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,

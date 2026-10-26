@@ -593,7 +593,9 @@ async function openRecoveryEvidenceMesh(
   if (bootstrap.mode !== "trusted-home") {
     throw new Error("认证设备网络尚未建立");
   }
-  const peerIds = Object.freeze(bootstrap.transportPeers
+  // 灾备的证据清单是全部已知对端，属于人工命令的显式枚举，不经启动路径。
+  const knownPeers = await bootstrap.bootstrapProjection.transportPeers.listTransportPeers();
+  const peerIds = Object.freeze(knownPeers
     .map((peer) => peer.identity.deviceId)
     .filter((deviceId) => deviceId !== context.key.deviceId)
     .sort((left, right) => left.localeCompare(right, "en-US")));
@@ -606,7 +608,7 @@ async function openRecoveryEvidenceMesh(
     trust: bootstrap.trust,
     configuration: bootstrap.configuration,
     endpoints: bootstrap.endpoints,
-    transportPeers: bootstrap.transportPeers,
+    transportPeers: knownPeers,
     secretStore: context.secretStore,
     endpointDirectory: bootstrap.bootstrapProjection.endpoints,
     transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,

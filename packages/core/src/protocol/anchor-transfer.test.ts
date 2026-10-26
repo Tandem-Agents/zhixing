@@ -303,7 +303,7 @@ function trustRecord(): HomeTrustRecord {
   const event = transition();
   const { signature: _eventSignature, ...unsignedEvent } = event;
   const unsigned = {
-    v: 1 as const,
+    v: 2 as const,
     homeId: "home-1",
     trustEpoch: 4,
     chainHead: {
@@ -329,7 +329,7 @@ function trustRecord(): HomeTrustRecord {
   };
   return {
     ...unsigned,
-    signature: targetIssuer.sign("HomeTrustRecord", 1, unsigned),
+    signature: targetIssuer.sign("HomeTrustRecord", 2, unsigned),
   };
 }
 

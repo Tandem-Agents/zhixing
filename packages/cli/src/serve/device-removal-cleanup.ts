@@ -34,7 +34,7 @@ export async function cleanupExecutorDeviceLocalState(input: {
     path.join(distributed, "mesh-artifact-partials"),
     path.join(distributed, "mesh-bootstrap-completions.json"),
     path.join(distributed, "mesh-endpoints.json"),
-    path.join(distributed, "mesh-peers.json"),
+    path.join(distributed, "mesh-peers"),
     path.join(distributed, "permission-snapshots"),
     path.join(distributed, "recovery-checkpoint-incoming"),
     path.join(distributed, "surface-asset-partials"),

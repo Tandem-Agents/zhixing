@@ -1664,37 +1664,41 @@ export class LocalConversationOwnerAssembly {
       frozen.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
       "device-removal durable ownerItems",
     );
-    for (const conversationId of snapshot.conversations.map((item) => item.conversationId)) {
-      const session = await this.#protocol.sessionAuthorityState(conversationId);
-      if (mode === "destroy") {
-        if (!session.deleted || session.pendingLifecycleProjections !== 0) {
-          throw new Error("Device removal did not durably delete the frozen conversation");
+    // 恢复循环在跑的一轮会给每个会话记一条积压：整段核对（逐会话与最后的 preflight 读回）都在
+    // 不发起新一轮的稳定边界内进行
+    await this.#protocol.whileRecoveryPaused(async () => {
+      for (const conversationId of snapshot.conversations.map((item) => item.conversationId)) {
+        const session = await this.#protocol.sessionAuthorityState(conversationId);
+        if (mode === "destroy") {
+          if (!session.deleted || session.pendingLifecycleProjections !== 0) {
+            throw new Error("Device removal did not durably delete the frozen conversation");
+          }
+        } else if (!session.deleted) {
+          const authority = await this.#currentAuthority(conversationId);
+          if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
+            throw new Error("Device removal still owns a local conversation authority");
+          }
         }
-      } else if (!session.deleted) {
-        const authority = await this.#currentAuthority(conversationId);
-        if (authority.state === "current" || authority.state === "frozen" || authority.state === "importing") {
-          throw new Error("Device removal still owns a local conversation authority");
+        const closure = await this.#protocol.pendingClosureWork(conversationId);
+        if (
+          closure.pendingFinals !== 0 ||
+          closure.pendingAssignments !== 0 ||
+          closure.recoveryBacklog !== 0 ||
+          closure.activeLocalLeases !== 0
+        ) {
+          throw new Error("Device removal still has accepted conversation work");
         }
       }
-      const closure = await this.#protocol.pendingClosureWork(conversationId);
-      if (
-        closure.pendingFinals !== 0 ||
-        closure.pendingAssignments !== 0 ||
-        closure.recoveryBacklog !== 0 ||
-        closure.activeLocalLeases !== 0
-      ) {
-        throw new Error("Device removal still has accepted conversation work");
+      const current = await this.preflightForDeviceRemoval(operationId);
+      if (current.ownerItems.length !== 0) {
+        assertCurrentAcceptedWorkBelongsToFrozen(
+          current.ownerItems.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+          frozen.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
+          "device-removal owner read-back",
+        );
+        throw new Error("Device removal still owns frozen accepted work");
       }
-    }
-    const current = await this.preflightForDeviceRemoval(operationId);
-    if (current.ownerItems.length !== 0) {
-      assertCurrentAcceptedWorkBelongsToFrozen(
-        current.ownerItems.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
-        frozen.map((item) => ({ id: `${item.owner}:${item.id}`, revision: item.revision })),
-        "device-removal owner read-back",
-      );
-      throw new Error("Device removal still owns frozen accepted work");
-    }
+    });
   }
 
   #requireRemovalSnapshot(operationId: string): LocalConversationRemovalSnapshot {

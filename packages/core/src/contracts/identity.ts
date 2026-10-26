@@ -7,7 +7,7 @@ import type {
   Signature,
   Ulid,
 } from "./foundation.js";
-import type { WireSchemaV1 } from "../types/distributed.js";
+import type { WireSchemaIdentity, WireSchemaV1 } from "../types/distributed.js";
 
 export interface DeviceIdentity {
   deviceId: string;
@@ -47,6 +47,8 @@ export type RendezvousKey = `rzv:${string}`;
 export interface BlindRendezvousHello {
   v: 1;
   key: RendezvousKey;
+  /** 撮合提示：同一 key 下只跨角色配对；不是认证，身份由隧道内握手保证。 */
+  role: "accept" | "connect";
   ttlMs: number;
 }
 
@@ -116,7 +118,12 @@ export type HomeTrustEventWithBody<Body extends HomeTrustEventBody> = Omit<
   "body"
 > & { body: Body };
 
-export interface HomeTrustRecord extends WireSchemaV1<"HomeTrustRecord"> {
+/**
+ * 当前授权的签名快照：只列链头处的 active 成员（按 deviceId 升序），签名域与摘要版本为 2。
+ * 已撤销、待重新配对与旧签发身份由事件链和当前信任投影的按键目录证明，不在快照里。
+ */
+export interface HomeTrustRecord extends WireSchemaIdentity<"HomeTrustRecord"> {
+  readonly v: 2;
   homeId: Ulid;
   trustEpoch: number;
   chainHead: { seq: number; eventDigest: Digest };
@@ -126,7 +133,7 @@ export interface HomeTrustRecord extends WireSchemaV1<"HomeTrustRecord"> {
   members: Array<{
     device: DeviceIdentity;
     roles: DeviceRole[];
-    state: "active" | "revoked" | "pending-reenroll";
+    state: "active";
   }>;
   signature: Signature;
 }
@@ -970,7 +977,7 @@ export interface CheckpointEnvelope extends WireSchemaV1<"CheckpointEnvelope"> {
 }
 
 export type SecretRef = {
-  kind: "provider" | "channel" | "mcp" | "device-key" | "webhook" | "rendezvous" | "authority-integrity";
+  kind: "provider" | "channel" | "mcp" | "device-key" | "webhook" | "rendezvous" | "authority-integrity" | "terminal-route";
   bindingId: string;
 };
 

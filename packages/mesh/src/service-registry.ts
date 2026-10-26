@@ -14,13 +14,13 @@ export type MeshServiceDefinition =
   | {
       readonly access: "read";
       readonly availability: "negotiated-version" | "version-independent";
-      readonly authorize?: (connection: SecureMeshConnection) => boolean;
+      readonly authorize?: (connection: SecureMeshConnection) => boolean | Promise<boolean>;
       readonly handler: MeshServiceHandler;
     }
   | {
       readonly access: "write";
       readonly availability: "negotiated-version";
-      readonly authorize?: (connection: SecureMeshConnection) => boolean;
+      readonly authorize?: (connection: SecureMeshConnection) => boolean | Promise<boolean>;
       readonly handler: MeshServiceHandler;
     };
 
@@ -79,7 +79,8 @@ export class MeshServiceRegistry {
         `Mesh service is not registered: ${serviceId}`,
       );
     }
-    if (service.authorize && !service.authorize(connection)) {
+    // 授权可以是异步的精确核验：等到结果再放行，不把 Promise 当放行值
+    if (service.authorize && !(await service.authorize(connection))) {
       throw new MeshProtocolError(
         "unauthorized-peer",
         `Mesh peer is not authorized for service: ${serviceId}`,

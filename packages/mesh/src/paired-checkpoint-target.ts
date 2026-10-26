@@ -14,6 +14,7 @@ import type {
   RecoveryActivationPlan,
 } from "@zhixing/core/contracts";
 import { byteDigest, canonicalize } from "./canonical.js";
+import type { HistoricalHomeTrustRecord } from "./trust-chain.js";
 import {
   assertCheckpointEnvelopeShape,
   readCheckpointChunkRange,
@@ -92,8 +93,11 @@ export type PairedCheckpointCommand =
       readonly t: "checkpoint.activate-root";
       readonly checkpointId: string;
       readonly event: HomeTrustEvent;
-      readonly record: HomeTrustRecord;
+      readonly record: RootActivationRecord;
     };
+
+/** 激活元组里当时入链的签名快照：新激活是 v2，较早的激活是 v1 历史帧（只在重放时出现）。 */
+export type RootActivationRecord = HomeTrustRecord | HistoricalHomeTrustRecord;
 
 interface PairedBinding {
   readonly v: 1;
@@ -176,7 +180,7 @@ export type PairedCheckpointReceiverConfiguration = {
         input: {
           readonly checkpointId: string;
           readonly event: HomeTrustEvent;
-          readonly record: HomeTrustRecord;
+          readonly record: RootActivationRecord;
           readonly plan: RecoveryActivationPlan;
         },
         signal?: AbortSignal,
@@ -190,7 +194,7 @@ export type PairedCheckpointReceiverConfiguration = {
         input: {
           readonly checkpointId: string;
           readonly event: HomeTrustEvent;
-          readonly record: HomeTrustRecord;
+          readonly record: RootActivationRecord;
           readonly plan: RecoveryActivationPlan;
         },
         signal?: AbortSignal,
@@ -204,7 +208,7 @@ export type PairedCheckpointReceiverConfiguration = {
         input: {
           readonly checkpointId: string;
           readonly event: HomeTrustEvent;
-          readonly record: HomeTrustRecord;
+          readonly record: RootActivationRecord;
           readonly plan: RecoveryActivationPlan;
         },
         signal?: AbortSignal,
@@ -406,7 +410,7 @@ export class PairedRecoveryCheckpointTarget implements InventoryRecoveryCheckpoi
   async activateRoot(input: {
     readonly checkpointId: string;
     readonly event: HomeTrustEvent;
-    readonly record: HomeTrustRecord;
+    readonly record: RootActivationRecord;
   }, signal?: AbortSignal): Promise<void> {
     const result = await this.options.transport.request({
       ...this.#binding(),
@@ -1013,6 +1017,7 @@ export class PairedCheckpointReceiver implements PairedCheckpointCommandReceiver
       ) {
         throw new TypeError("Paired root activation does not match the durably stored checkpoint");
       }
+      // 新激活只收当前快照，由提交方在判定不是精确重放之后核对；v1 历史帧只可能来自已完成激活的重放
       const operation = this.options.rootEstablishment || this.options.rootLifecycle
         ? this.options.commitRootActivation
         : this.options.replayRootActivation!;
@@ -1306,7 +1311,7 @@ function assertRootActivationPayload(
   assertHomeTrustRecord(record);
 }
 
-function assertHomeTrustRecord(value: unknown): asserts value is HomeTrustRecord {
+function assertHomeTrustRecord(value: unknown): asserts value is RootActivationRecord {
   if (!isRecord(value)) throw new TypeError("Paired root activation record is invalid");
   assertExactKeys(value, [
     "chainHead",
@@ -1319,8 +1324,9 @@ function assertHomeTrustRecord(value: unknown): asserts value is HomeTrustRecord
     "trustEpoch",
     "v",
   ]);
+  // 激活元组里的记录是当时入链的签名快照：较早的激活是 v1 历史帧，之后的是 v2
   if (
-    value.v !== 1 ||
+    (value.v !== 1 && value.v !== 2) ||
     !nonEmptyString(value.homeId) ||
     !Number.isSafeInteger(value.trustEpoch) || Number(value.trustEpoch) < 1 ||
     !isRecord(value.issuer) ||

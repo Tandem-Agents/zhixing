@@ -22,7 +22,7 @@ import {
   validateDisasterRecoveryAbort,
   validateDisasterRecoveryCommand,
 } from "@zhixing/core/protocol";
-import { replayTrustChain, verifyHomeTrustRecord } from "@zhixing/mesh/trust-chain";
+import { homeTrustRecordDigest, replayTrustChain, verifyHomeTrustRecord } from "@zhixing/mesh/trust-chain";
 import {
   verifyRecoverySignature,
 } from "@zhixing/mesh/recovery-root";
@@ -757,7 +757,7 @@ function validateVerifiedCandidate(
         deviceId: item.deviceId,
         chainHead: item.record.chainHead,
         trustEpoch: item.record.trustEpoch,
-        recordDigest: protocolDigest("HomeTrustRecord", 1, item.record),
+        recordDigest: homeTrustRecordDigest(item.record),
       })),
     }) !== value.trustEvidenceDigest
   ) throw new TypeError("Disaster reachability evidence digest is invalid");

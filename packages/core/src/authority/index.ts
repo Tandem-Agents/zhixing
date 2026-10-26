@@ -143,7 +143,12 @@ export type {
   ProjectionTransactionResult,
   ProjectionTransactionReducer,
 } from "./interfaces.js";
-export { DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "./device-lifecycle-journal.js";
+export {
+  DEVICE_LIFECYCLE_PROJECTION_ID,
+  DeviceLifecycleJournal,
+  readDeviceLifecycleOperation,
+  registerDeviceLifecycleProjection,
+} from "./device-lifecycle-journal.js";
 export {
   GovernorSession,
   GovernorStateRequired,

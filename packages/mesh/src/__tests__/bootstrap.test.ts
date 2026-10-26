@@ -11,10 +11,16 @@ import {
   MeshConnectionRegistry,
   commitMeshEndpointUpdate,
   createMeshEndpointDescriptor,
+  createTerminalRouteSecret,
   currentAndPreviousRendezvousKeys,
+  currentAndPreviousTerminalRendezvousKeys,
   derivePairwiseRendezvousSecret,
+  deriveTerminalRendezvousKey,
+  deriveTerminalRouteLocator,
+  isTerminalRouteLocator,
   persistPairwiseRendezvousSecret,
   resolveEffectiveMeshRoles,
+  terminalRouteDigest,
   resolveHostLaunchPlan,
   validateBlindRendezvousHello,
   validateMeshEndpointDescriptor,
@@ -265,23 +271,49 @@ describe("production mesh bootstrap contracts", () => {
     expect(validateRendezvousKey(current)).toBe(current);
     expect(previous).not.toBe(current);
     expect(() => validateRendezvousKey(`sha256:${"0".repeat(64)}`)).toThrow();
-    expect(validateBlindRendezvousHello({ v: 1, key: current, ttlMs: 60_000 })).toEqual({
+    expect(validateBlindRendezvousHello({ v: 1, key: current, role: "accept", ttlMs: 60_000 })).toEqual({
       v: 1,
       key: current,
+      role: "accept",
       ttlMs: 60_000,
     });
+    // role 是必填的撮合提示，缺失或未知值都拒
+    expect(() => validateBlindRendezvousHello({ v: 1, key: current, ttlMs: 60_000 })).toThrow();
+    expect(() => validateBlindRendezvousHello({ v: 1, key: current, role: "listen", ttlMs: 60_000 })).toThrow();
+  });
+
+  it("derives terminal entry keys and opaque per-operation locators from the issuer's own route secret", () => {
+    const secret = createTerminalRouteSecret();
+    const other = createTerminalRouteSecret();
+    const at = Date.parse("2026-07-22T12:00:00.000Z");
+    const [current, previous] = currentAndPreviousTerminalRendezvousKeys(secret, at);
+    expect(validateRendezvousKey(current)).toBe(current);
+    expect(previous).not.toBe(current);
+    // 与 pairwise 控制面键分域：同一份 32 字节材料派生不出同一个键
+    expect(current).not.toBe(currentAndPreviousRendezvousKeys(secret, at)[0]);
+    expect(deriveTerminalRendezvousKey(other, at)).not.toBe(current);
+
+    const locator = deriveTerminalRouteLocator(secret, "operation-1");
+    expect(locator).toMatch(/^[a-z2-7]{52}$/u);
+    expect(isTerminalRouteLocator(locator)).toBe(true);
+    expect(deriveTerminalRouteLocator(secret, "operation-1")).toBe(locator);
+    expect(deriveTerminalRouteLocator(secret, "operation-2")).not.toBe(locator);
+    expect(deriveTerminalRouteLocator(other, "operation-1")).not.toBe(locator);
+    expect(terminalRouteDigest(locator)).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(() => terminalRouteDigest("zhixing-mesh")).toThrow();
+    expect(isTerminalRouteLocator("zhixing-mesh")).toBe(false);
   });
 
   it("frames canonical rendezvous hellos and cleans waiting entries on close", async () => {
     const key = `rzv:${"a".repeat(64)}` as const;
     const stream = new MemoryDuplex();
     const decoded = readBlindRendezvousHello(stream);
-    stream.push(encodeBlindRendezvousHello({ v: 1, key, ttlMs: 1_000 }));
-    expect(await decoded).toEqual({ v: 1, key, ttlMs: 1_000 });
+    stream.push(encodeBlindRendezvousHello({ v: 1, key, role: "connect", ttlMs: 1_000 }));
+    expect(await decoded).toEqual({ v: 1, key, role: "connect", ttlMs: 1_000 });
 
     const matcher = new BlindRendezvousMatcher();
     const pending = new MemoryDuplex();
-    expect(matcher.accept(pending, { v: 1, key, ttlMs: 1_000 })).toBe("waiting");
+    expect(matcher.accept(pending, { v: 1, key, role: "accept", ttlMs: 1_000 })).toBe("waiting");
     expect(matcher.waiting).toBe(1);
     pending.destroy();
     await new Promise((resolve) => setImmediate(resolve));
@@ -294,17 +326,58 @@ describe("production mesh bootstrap contracts", () => {
     const secondKey = `rzv:${"b".repeat(64)}` as const;
     const matcher = new BlindRendezvousMatcher({ maxPending: 1 });
     const waiting = new MemoryDuplex();
-    expect(matcher.accept(waiting, { v: 1, key: firstKey, ttlMs: 1_000 })).toBe("waiting");
+    expect(matcher.accept(waiting, { v: 1, key: firstKey, role: "accept", ttlMs: 1_000 })).toBe("waiting");
     expect(() => matcher.accept(
       new MemoryDuplex(),
-      { v: 1, key: secondKey, ttlMs: 1_000 },
+      { v: 1, key: secondKey, role: "accept", ttlMs: 1_000 },
     )).toThrow(/pending connection limit/);
     expect(matcher.accept(
       new MemoryDuplex(),
-      { v: 1, key: firstKey, ttlMs: 1_000 },
+      { v: 1, key: firstKey, role: "connect", ttlMs: 1_000 },
     )).toBe("bridged");
     expect(matcher.waiting).toBe(0);
     matcher.close();
+  });
+
+  it("pairs a shared key only across roles, first come first served, and never pairs two requesters", () => {
+    const key = `rzv:${"c".repeat(64)}` as const;
+    const matcher = new BlindRendezvousMatcher({ maxPendingPerRole: 4 });
+    const requesters = [new MemoryDuplex(), new MemoryDuplex(), new MemoryDuplex()];
+    for (const requester of requesters) {
+      // 多个请求方共用同一 key：只排队，不互相桥接
+      expect(matcher.accept(requester, { v: 1, key, role: "connect", ttlMs: 1_000 })).toBe("waiting");
+    }
+    expect(matcher.waiting).toBe(3);
+    const slots = [new MemoryDuplex(), new MemoryDuplex()];
+    expect(matcher.accept(slots[0]!, { v: 1, key, role: "accept", ttlMs: 1_000 })).toBe("bridged");
+    expect(matcher.accept(slots[1]!, { v: 1, key, role: "accept", ttlMs: 1_000 })).toBe("bridged");
+    expect(matcher.waiting).toBe(1);
+    // 先到的两个请求方已配走，剩下的是最后到的那个
+    requesters[2]!.destroy();
+    return new Promise<void>((resolve) => setImmediate(() => {
+      expect(matcher.waiting).toBe(0);
+      matcher.close();
+      resolve();
+    }));
+  });
+
+  it("bounds each role per key and frees a slot held by a self-declared acceptor when it closes", async () => {
+    const key = `rzv:${"d".repeat(64)}` as const;
+    const matcher = new BlindRendezvousMatcher({ maxPendingPerRole: 2 });
+    const genuine = new MemoryDuplex();
+    // 持共享 key 的请求方自报 accept：只占一个排队名额，错配留给端到端握手拒绝
+    const impostor = new MemoryDuplex();
+    expect(matcher.accept(genuine, { v: 1, key, role: "accept", ttlMs: 1_000 })).toBe("waiting");
+    expect(matcher.accept(impostor, { v: 1, key, role: "accept", ttlMs: 1_000 })).toBe("waiting");
+    expect(() => matcher.accept(new MemoryDuplex(), { v: 1, key, role: "accept", ttlMs: 1_000 }))
+      .toThrow(/pending connection limit/);
+    impostor.destroy();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(matcher.waiting).toBe(1);
+    expect(matcher.accept(new MemoryDuplex(), { v: 1, key, role: "accept", ttlMs: 1_000 })).toBe("waiting");
+    expect(matcher.waiting).toBe(2);
+    matcher.close();
+    expect(matcher.waiting).toBe(0);
   });
 
   it("cancels a partial rendezvous hello at the caller deadline", async () => {

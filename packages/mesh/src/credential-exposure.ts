@@ -5,7 +5,7 @@ import type {
 import { protocolDigest } from "./canonical.js";
 export {
   CREDENTIAL_EXPOSURE_PROJECTION_ID, credentialExposureIndex,
-  exposureProjectionKey, readExposureProjection, readExposureRecords, assertIndexedCredentialRoute,
+  exposureProjectionKey, readExposureBindingRevision, readExposureProjection, readExposureRecords, assertIndexedCredentialRoute,
 } from "./credential-exposure-index.js";
 
 export function createCredentialExposureRecord(input: {

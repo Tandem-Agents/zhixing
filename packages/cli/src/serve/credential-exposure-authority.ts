@@ -8,7 +8,7 @@ import { type FileAuthorityCommitLog, type DurableProjectionReadContext, type Pr
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   assertIndexedCredentialRoute, credentialExposureIndex, CREDENTIAL_EXPOSURE_PROJECTION_ID,
-  exposureProjectionKey, readExposureProjection, readExposureRecords,
+  exposureProjectionKey, readExposureBindingRevision, readExposureProjection, readExposureRecords,
   createCredentialExposureRecord,
   createCredentialExposureRecordFromDescriptor,
   projectCredentialExposures,
@@ -18,7 +18,7 @@ import {
 export const CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR = Object.freeze({
   owner: "current-device",
   protectedKinds: Object.freeze(["provider", "channel", "mcp", "webhook", "rendezvous"]),
-  excludedKinds: Object.freeze(["device-key", "authority-integrity"]),
+  excludedKinds: Object.freeze(["device-key", "authority-integrity", "terminal-route"]),
   states: Object.freeze(["active", "compromised", "rotated"]),
 });
 
@@ -48,6 +48,16 @@ export class CredentialExposureAuthority {
 
   async rotationRequired() {
     return projectCredentialExposures(await readExposureRecords(this.#index, { state: "compromised" })).rotationRequired;
+  }
+
+  /** 当前仍待轮换的暴露记录：读 compromised 状态索引，规模随待轮换数，不扫描过往身份。 */
+  async compromisedRecords(): Promise<readonly CredentialExposureRecord[]> {
+    return projectCredentialExposures(await readExposureRecords(this.#index, { state: "compromised" })).records;
+  }
+
+  /** 同一绑定、同一服务在全部设备与状态的记录里最大的修订号（一行聚合；没有记录为 0）。 */
+  bindingRevision(bindingId: string, service: string): Promise<number> {
+    return readExposureBindingRevision(this.#index, bindingId, service);
   }
 
   /** Configuration generations name logical entries; capability publication
@@ -152,6 +162,7 @@ export class CredentialExposureAuthority {
     });
   }
 
+  /** 返回本次受影响的记录，以及从待轮换索引读出的当前待轮换列表：不扫描全部过往身份。 */
   async publishRotation(input: {
     readonly requestId: string;
     readonly oldDeviceId: string;
@@ -196,7 +207,7 @@ export class CredentialExposureAuthority {
       ...(input.rotationHint ? { rotationHint: input.rotationHint } : {}),
       markedAt,
     });
-    await this.#transact(
+    const result = await this.#transact(
       async current => [
         ...await readExposureRecords(current, { state: "compromised", deviceId: input.oldDeviceId,
           bindingId: input.oldBindingId ?? input.ref.bindingId, service: input.service }),
@@ -240,7 +251,7 @@ export class CredentialExposureAuthority {
         };
       },
     );
-    return this.projection();
+    return Object.freeze({ records: result.value.records, rotationRequired: await this.rotationRequired() });
   }
 }
 

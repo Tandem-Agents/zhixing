@@ -95,6 +95,78 @@ describe("production mesh runtime bootstrap", () => {
       .rejects.toThrow("pair it again to create a new identity");
   });
 
+  it("finishes a removal from its durable issuer terminal before ordinary bootstrap, without the network, a private key or a new identity", async () => {
+    for (const keyAlreadyDeleted of [false, true]) {
+      const removal = await removeTargetUntilFinalizeCrash(`local-terminal-${keyAlreadyDeleted}`, {
+        crash: keyAlreadyDeleted ? "after-key-deleted" : "before-key-deleted",
+      });
+      expect((await removal.secrets.list("device-key/")).length).toBe(keyAlreadyDeleted ? 0 : 1);
+      expect(await removal.secrets.list("terminal-route/")).toHaveLength(1);
+      // 值班设备已停、中继端口不可达：完成只能来自本机已耐久的终态回执
+      await expect(prepareMeshRuntimeBootstrap({ zhixingHome: removal.root, secretStore: removal.secrets }))
+        .rejects.toThrow("pair it again to create a new identity");
+      expect(await removal.secrets.list("device-key/")).toEqual([]);
+      expect(await removal.secrets.list("terminal-route/")).toEqual([]);
+      // 重复启动仍停在退休路径，不新建身份
+      await expect(prepareMeshRuntimeBootstrap({ zhixingHome: removal.root, secretStore: removal.secrets }))
+        .rejects.toThrow("pair it again to create a new identity");
+      expect(await removal.secrets.list("device-key/")).toEqual([]);
+    }
+  });
+
+  it("retries a failed route-copy deletion at the next startup because the local terminal comes after it", async () => {
+    const removal = await removeTargetUntilFinalizeCrash("delete-retry", { crash: "before-key-deleted" });
+    const original = removal.secrets.delete.bind(removal.secrets);
+    let pending = true;
+    removal.secrets.delete = async (ref) => {
+      if (pending && ref.kind === "terminal-route") {
+        pending = false;
+        throw new Error("simulated secret store delete failure");
+      }
+      return original(ref);
+    };
+    await expect(prepareMeshRuntimeBootstrap({ zhixingHome: removal.root, secretStore: removal.secrets }))
+      .rejects.toThrow("simulated secret store delete failure");
+    // 删除失败时还没写本机 terminal：副本留着，下一次启动结算会重做
+    expect(await removal.secrets.list("terminal-route/")).toHaveLength(1);
+    await expect(prepareMeshRuntimeBootstrap({ zhixingHome: removal.root, secretStore: removal.secrets }))
+      .rejects.toThrow("pair it again to create a new identity");
+    expect(await removal.secrets.list("terminal-route/")).toEqual([]);
+    expect(await removal.secrets.list("device-key/")).toEqual([]);
+  });
+
+  it("opens only the dedicated retrieval while the duty device's terminal is still missing", async () => {
+    const removal = await removeTargetUntilFinalizeCrash("retrieval-mode", { crash: "before-issuer-terminal" });
+    await expect(prepareMeshRuntimeBootstrap({ zhixingHome: removal.root, secretStore: removal.secrets }))
+      .rejects.toThrow("finishing its removal");
+    const staging = {
+      plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({ zhixingHome: removal.root }),
+      disasterRecoveryStaging: createDisasterRecoveryStagingInfrastructure({ zhixingHome: removal.root }),
+    };
+    const prepared = await prepareProductionMeshRuntimeBootstrap({
+      zhixingHome: removal.root,
+      secretStore: removal.secrets,
+      ...staging,
+      allowRemovalRetrieval: true,
+    });
+    try {
+      expect(prepared).toMatchObject({ mode: "removal-retrieval", operationId: removal.operationId });
+      expect(prepared.deviceKey.deviceId).toBe(removal.targetDeviceId);
+      // 不进入普通装配：没有角色、信任投影与传输对端
+      expect(prepared).not.toHaveProperty("roles");
+      expect(prepared).not.toHaveProperty("transportPeers");
+    } finally {
+      await prepared.bootstrapStore.stopStorageMaintenance();
+    }
+  });
+
+  it("fails closed when the durable issuer terminal is not signed by the accepting duty device", async () => {
+    const removal = await removeTargetUntilFinalizeCrash("forged-terminal", { crash: "forged-issuer-terminal" });
+    await expect(prepareMeshRuntimeBootstrap({ zhixingHome: removal.root, secretStore: removal.secrets }))
+      .rejects.toThrow("does not bind this operation");
+    expect((await removal.secrets.list("device-key/")).length).toBe(1);
+  });
+
   it("keeps a retired anchor home closed to ordinary startup", async () => {
     const root = await createTempDir("mesh-runtime-retired-anchor");
     const secrets = new MemorySecretStore();
@@ -440,5 +512,124 @@ class MemorySecretStore implements SecretStorePort {
 function key(ref: SecretRef): string {
   return `${ref.kind}/${ref.bindingId}`;
 }
+
+const REMOVAL_AT = "2026-08-12T00:00:00.000Z";
+const REMOVAL_LATER = "2026-08-12T00:00:03.000Z";
+
+/**
+ * 两个 home：值班设备与被移除设备持有同一条信任链（配对之后的状态）。按真实协议走到指定落盘点后，
+ * 让被移除设备在那一步“崩溃”，再关闭两边存储；之后不存在任何可达的网络端点。
+ */
+async function removeTargetUntilFinalizeCrash(
+  label: string,
+  input: {
+    readonly crash: "before-key-deleted" | "after-key-deleted" | "before-issuer-terminal" | "forged-issuer-terminal";
+  },
+) {
+  const root = await createTempDir(`mesh-runtime-${label}`);
+  const secrets = new MemorySecretStore();
+  const local = await prepareMeshRuntimeBootstrap({ zhixingHome: root, secretStore: secrets });
+  const targetKey = local.deviceKey;
+  const issuerKey = await DeviceKey.generate();
+  const issuer = enrollDeviceIdentity(issuerKey, { displayName: "值班电脑", platform: "headless", enrolledAt: REMOVAL_AT });
+  const target = enrollDeviceIdentity(targetKey, { displayName: "被移除的电脑", platform: "headless", enrolledAt: REMOVAL_AT });
+  const issuerStore = new FileMeshBootstrapStore(await createTempDir(`mesh-runtime-${label}-issuer`), issuerKey);
+  const genesis = await issuerStore.initializeLocalHome({
+    key: issuerKey, identity: issuer, roles: ["anchor"], homeId: "home-removal", at: REMOVAL_AT,
+  });
+  const enroll = createSignedTrustEvent({
+    current: genesis.projection,
+    body: { t: "enroll", device: target, roles: ["executor"] },
+    signer: issuerKey,
+    at: REMOVAL_AT,
+  });
+  await issuerStore.appendTrustEvent({ event: enroll, issuerKey });
+  await local.bootstrapStore.initializeLocalHome({
+    key: issuerKey, identity: issuer, roles: ["anchor"], homeId: "home-removal", at: REMOVAL_AT,
+  });
+  await local.bootstrapStore.appendTrustEvent({ event: enroll, issuerKey });
+  await local.bootstrapStore.stopStorageMaintenance();
+  // 重新打开：与配对之后的进程一样，打开时就预载当前信任里的 issuer 与本机身份
+  const targetStore = await FileMeshBootstrapStore.open(root, undefined, { secretStore: secrets });
+
+  const identities = new Map([[issuer.deviceId, issuer], [target.deviceId, target]] as const);
+  const authority = new CurrentIssuerDeviceRemovalAuthority({
+    store: issuerStore,
+    issuerKey,
+    secretStore: new MemorySecretStore(),
+    verifier: createLiveTrustedDeviceProtocolVerifier((deviceId) => identities.get(deviceId)),
+    isReachable: () => false,
+    now: () => REMOVAL_LATER,
+  });
+  const operationId = `remove-${label}`;
+  const accepted = await authority.accept({ requestId: `request-${label}`, operationId, targetName: "被移除的电脑" });
+  const log = targetStore.authorityLog();
+  const removed = new ExecutorRemovalTarget({
+    log,
+    homeId: "home-removal",
+    deviceKey: targetKey,
+    verifier: targetStore.authoritySources()!.verifier,
+    secretStore: secrets,
+    issuerRoute: async () => ({
+      peer: { identity: issuer, rootCertificatePem: issuerKey.rootCertificatePem },
+      endpoint: {
+        v: 1,
+        deviceId: issuer.deviceId,
+        transports: [{ kind: "blind-relay", relay: { host: "127.0.0.1", port: 9 } }],
+        revision: 1,
+        at: REMOVAL_AT,
+      },
+    }),
+    closeAdmission: async () => undefined,
+    settleAcceptedWork: async () => undefined,
+    releaseAdmission: async () => undefined,
+    transferToAnchor: async () => undefined,
+    cleanup: async () => [{ kind: "cleanup" as const, digest: protocolDigest("LocalTerminalCleanup", 1, { label }) }],
+    finalizeDeviceKey: async () => {
+      if (input.crash === "after-key-deleted") await deleteDeviceKeyExact(secrets, targetKey);
+      throw new Error("simulated crash around device key deletion");
+    },
+    now: () => REMOVAL_LATER,
+  });
+  await removed.accept(accepted, await authority.terminalRoute(operationId));
+  const decision = await removed.decide({ operationId, mode: "destroy", currentAnchorDeviceId: issuer.deviceId });
+  if (decision.kind !== "ready") throw new Error("removed device did not reach revocation-ready");
+  const cleanupReady = await removed.finish(await authority.commitReady(decision.receipt));
+  if (input.crash === "forged-issuer-terminal") {
+    // 终态回执由错误的设备签发：本机核验必须失败关闭
+    const forged = createSignedExecutorRemovalReceipt({
+      v: 1,
+      operationId,
+      homeId: accepted.homeId,
+      targetDeviceId: accepted.targetDeviceId,
+      targetDeviceKeyGeneration: accepted.targetDeviceKeyGeneration,
+      acceptedIssuerDeviceId: accepted.acceptedIssuerDeviceId,
+      acceptedTrustHeadDigest: accepted.acceptedTrustHeadDigest,
+      phase: "removed",
+      evidenceDigest: protocolDigest("ForgedTerminal", 1, { label }),
+      at: REMOVAL_LATER,
+    }, targetKey);
+    const ref = await log.artifactStore.put(Buffer.from(canonicalize(forged), "utf8"));
+    await new DeviceLifecycleJournal(log).peerEffect(operationId, {
+      kind: "issuer-terminal",
+      digest: protocolDigest("ExecutorRemovalIssuerTerminalReceipt", 1, forged),
+      evidence: [{ kind: "cleanup", digest: ref.digest, artifact: ref }],
+    });
+  } else if (input.crash !== "before-issuer-terminal") {
+    await expect(removed.finish(await authority.commitCleanupReady(cleanupReady!)))
+      .rejects.toThrow("simulated crash");
+  }
+  await targetStore.stopStorageMaintenance();
+  await issuerStore.stopStorageMaintenance();
+  return { root, secrets, operationId, targetDeviceId: targetKey.deviceId };
+}
+
 import path from "node:path";
 import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { createSignedExecutorRemovalReceipt } from "@zhixing/core/protocol";
+import { DeviceKey } from "@zhixing/mesh/device-identity";
+import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
+import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
+import { CurrentIssuerDeviceRemovalAuthority, ExecutorRemovalTarget } from "./device-removal.js";
+import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createLiveTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";

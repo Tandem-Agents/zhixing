@@ -1,4 +1,5 @@
 import { afterEach, expect, it } from "vitest";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import type { HomeTrustEvent, HomeTrustEventBody } from "@zhixing/core/contracts";
@@ -9,7 +10,8 @@ import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
 import { RecoveryRoot } from "../recovery-root.js";
 import { applyTrustEvent, buildHomeTrustRecord, createDomainResetEvent, createRecoveryRootEvent,
   createSignedTrustEvent, createTrustGenesisEvent, initializeTrustChain, replayTrustChain, type TrustProjection } from "../trust-chain.js";
-import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord, readTrustIdentity, readAnchorTenureAt, readCurrentAnchorTenure } from "../trust-current-index.js";
+import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, LEGACY_TRUST_RECORD_MESSAGE, readCurrentTrust, readCurrentTrustRecord,
+  readLegacyClosedTrust, readTrustIdentity, readAnchorTenureAt, readCurrentAnchorTenure } from "../trust-current-index.js";
 
 const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => { await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance())); });
@@ -32,7 +34,16 @@ async function fixture() {
     state = next; return result;
   }
   await append(genesis, state);
-  return { log, root, issuer, genesis, get state() { return state; }, append,
+  /** 多条事件与收尾快照同一次提交（domain-reset 必须与新根同提交）。 */
+  async function appendGroup(events: readonly HomeTrustEvent[], next: TrustProjection, signer = issuer.key) {
+    const entries: { stream: string; body: unknown }[] = [
+      ...events.map(event => ({ stream: "trust", body: { t: "home-trust-event", event } })),
+      { stream: "trust", body: { t: "home-trust-record", record: buildHomeTrustRecord(next, signer) } },
+    ];
+    await log.append(entries as Parameters<typeof log.append>[0]);
+    state = next;
+  }
+  return { log, root, issuer, genesis, get state() { return state; }, append, appendGroup,
     async event(body: HomeTrustEventBody) {
       const event = createSignedTrustEvent({ current: state, body, at, signer: issuer.key });
       return append(event, applyTrustEvent(state, event));
@@ -53,11 +64,6 @@ it("returns only active members while historical identities stay exact and posit
     expect(await readTrustIdentity(view, peer.identity.deviceId, before)).toBeUndefined();
     return { kind: "return", value: undefined };
   });
-  const signed = buildHomeTrustRecord(f.state, f.issuer.key);
-  const { signature: _signature, ...unsigned } = signed;
-  const missing = { ...unsigned, members: unsigned.members.slice(0, 1) };
-  await expect(f.log.append([{ stream: "trust", body: { t: "home-trust-record",
-    record: { ...missing, signature: f.issuer.key.sign("HomeTrustRecord", 1, missing) } } }])).rejects.toThrow("member set");
 }, 20_000);
 
 it("represents reset without rewriting every historical member and re-enrolls by exact key", async () => {
@@ -105,7 +111,8 @@ it("matches a full chain replay at every step and reads the latest signed record
     const record = await f.log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view, context) =>
       ({ kind: "return", value: await readCurrentTrustRecord(view, checkpoint => context.readEnvelopeAt!(checkpoint)) }));
     expect(record.value).toEqual(records.at(-1) ?? record.value);
-    expect(record.value?.members.length).toBe(replayed.members.length);
+    // 当前快照只列 active 成员：与按整链重放构建的记录逐字相同
+    expect(record.value).toEqual(buildHomeTrustRecord(replayed, f.issuer.key));
   };
   const a = await device("member-a"), b = await device("member-b");
   await f.event({ t: "enroll", device: a.identity, roles: ["executor"] }); await assertEquivalent();
@@ -129,6 +136,153 @@ it("matches a full chain replay at every step and reads the latest signed record
 
 function genesisOf(f: Awaited<ReturnType<typeof fixture>>): HomeTrustEvent {
   return f.genesis;
+}
+
+/** 按原 v1 规则签出的旧格式快照（列全成员），只用来构造开发资料里的历史帧。 */
+function legacyRecord(projection: TrustProjection, signer: DeviceKey) {
+  const unsigned = {
+    v: 1 as const,
+    homeId: projection.homeId,
+    trustEpoch: projection.trustEpoch,
+    chainHead: { ...projection.chainHead },
+    issuer: { ...projection.issuer },
+    ...(projection.recoveryRootPublicKey ? { recoveryRootPublicKey: projection.recoveryRootPublicKey } : {}),
+    ...(projection.recoveryBackupPublicKey ? { recoveryBackupPublicKey: projection.recoveryBackupPublicKey } : {}),
+    members: projection.members.map(member => ({ device: member.device, roles: [...member.roles], state: member.state })),
+  };
+  return { ...unsigned, signature: signer.sign("HomeTrustRecord", 1, unsigned) };
+}
+
+async function currentRecord(log: FileAuthorityCommitLog) {
+  return (await log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view, context) =>
+    ({ kind: "return", value: await readCurrentTrustRecord(view, checkpoint => context.readEnvelopeAt!(checkpoint)) }))).value;
+}
+
+it("keeps the signed snapshot equal to the active subset of a full replay through every trust transition", async () => {
+  const f = await fixture();
+  const a = await device("member-a"), b = await device("member-b"), c = await device("member-c");
+  let signer = f.issuer.key;
+  const assertActiveSnapshot = async () => {
+    const current = await f.read();
+    const active = f.state.members.filter(member => member.state === "active");
+    expect(current?.members.map(member => member.device.deviceId).sort()).toEqual(active.map(member => member.device.deviceId).sort());
+    const record = await currentRecord(f.log);
+    expect(record).toEqual(buildHomeTrustRecord(f.state, signer));
+    expect(record?.v).toBe(2);
+    expect(record?.members.map(member => member.device.deviceId)).toEqual(active.map(member => member.device.deviceId).sort());
+    expect(record?.members.every(member => member.state === "active")).toBe(true);
+  };
+  await f.event({ t: "enroll", device: a.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-a" }); await assertActiveSnapshot();
+  await f.event({ t: "enroll", device: b.identity, roles: ["anchor", "executor"], pairingTranscriptDigest: "sha256:pair-b" }); await assertActiveSnapshot();
+  await f.event({ t: "enroll", device: c.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-c" }); await assertActiveSnapshot();
+  await f.event({ t: "role-change", deviceId: b.identity.deviceId, roles: ["anchor"] }); await assertActiveSnapshot();
+  await f.event({ t: "revoke", deviceId: c.identity.deviceId, reason: "device-removed" }); await assertActiveSnapshot();
+  const root = RecoveryRoot.generate();
+  const establish = createRecoveryRootEvent({ current: f.state, op: "establish", candidate: root, outerSigner: f.issuer.key, at });
+  await f.append(establish, applyTrustEvent(f.state, establish)); await assertActiveSnapshot();
+  // domain-reset 与新根原子提交：全部非签发设备转待重新配对，快照只剩签发者
+  const reset = createDomainResetEvent({ current: f.state, issuer: f.issuer.key, coSigner: b.key, at });
+  const resetState = applyTrustEvent(f.state, reset);
+  const nextRoot = createRecoveryRootEvent({ current: resetState, op: "establish", candidate: RecoveryRoot.generate(), outerSigner: f.issuer.key, at });
+  const nextState = applyTrustEvent(resetState, nextRoot);
+  await f.appendGroup([reset, nextRoot], nextState); await assertActiveSnapshot();
+  expect((await f.read())?.members.map(member => member.device.deviceId)).toEqual([f.issuer.identity.deviceId]);
+  // 待重新配对的设备不在快照里，但按链仍可重新入网
+  const reenroll = createSignedTrustEvent({ current: nextState, body: { t: "reenroll", deviceId: b.key.deviceId, pairingTranscriptDigest: "sha256:repair-b" }, signer: f.issuer.key, at });
+  await f.append(reenroll, applyTrustEvent(nextState, reenroll)); await assertActiveSnapshot();
+  // 签发权移交给 b 设备上的独立签发密钥
+  const issuerKey = await DeviceKey.generate();
+  const transition = createSignedTrustEvent({ current: f.state, at, signer: f.issuer.key, body: {
+    t: "issuer-transition", nextTrustEpoch: f.state.trustEpoch + 1, fromIssuerKeyId: f.state.issuer.issuerKeyId,
+    toIssuerKeyId: issuerKey.deviceId, toIssuerPublicKey: issuerKey.publicKey, toDeviceId: b.key.deviceId,
+    reason: "migration", signedBy: "issuer",
+  } });
+  signer = issuerKey;
+  await f.append(transition, applyTrustEvent(f.state, transition), issuerKey); await assertActiveSnapshot();
+}, 30_000);
+
+it("rejects snapshots that omit, duplicate, add or alter current members, or mix versions", async () => {
+  const f = await fixture();
+  const a = await device("member-a"), b = await device("member-b"), c = await device("member-c"), other = await device("other");
+  await f.event({ t: "enroll", device: a.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-a" });
+  await f.event({ t: "enroll", device: b.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-b" });
+  await f.event({ t: "enroll", device: c.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-c" });
+  await f.event({ t: "revoke", deviceId: c.identity.deviceId, reason: "device-removed" });
+  const accepted = await currentRecord(f.log);
+  const { signature: _signature, ...unsigned } = buildHomeTrustRecord(f.state, f.issuer.key);
+  const memberA = unsigned.members.find(member => member.device.deviceId === a.identity.deviceId)!;
+  const revokedC = { device: c.identity, roles: ["executor" as const], state: "active" as const };
+  const forged: { readonly name: string; readonly record: unknown; readonly reason: string }[] = [
+    { name: "missing", record: { ...unsigned, members: unsigned.members.filter(member => member !== memberA) } },
+    { name: "duplicate", record: { ...unsigned, members: [...unsigned.members, memberA] } },
+    { name: "extra revoked", record: { ...unsigned, members: [...unsigned.members, revokedC].sort((x, y) => x.device.deviceId < y.device.deviceId ? -1 : 1) } },
+    { name: "wrong roles", record: { ...unsigned, members: unsigned.members.map(member => member === memberA ? { ...member, roles: ["anchor"] } : member) } },
+    { name: "wrong key", record: { ...unsigned, members: unsigned.members.map(member => member === memberA
+      ? { ...member, device: { ...member.device, publicKey: other.identity.publicKey } } : member) } },
+  ].map(({ name, record }) => ({ name, record: { ...record, signature: f.issuer.key.sign("HomeTrustRecord", 2, record) },
+    reason: "does not match its event-chain projection" }));
+  forged.push({ name: "signed as version 1", record: { ...unsigned, signature: f.issuer.key.sign("HomeTrustRecord", 1, unsigned) },
+    reason: "signature" });
+  const activeOnlyV1 = { ...unsigned, v: 1 };
+  forged.push({ name: "v1 with active members only", record: { ...activeOnlyV1, signature: f.issuer.key.sign("HomeTrustRecord", 1, activeOnlyV1) },
+    reason: "cannot follow a current snapshot" });
+  // 链上已有 v2 当前快照，再来一份按原规则签好的 v1 也拒绝
+  forged.push({ name: "v1 after v2", record: legacyRecord(f.state, f.issuer.key), reason: "cannot follow a current snapshot" });
+  for (const { name, record, reason } of forged) {
+    await expect(f.log.append([{ stream: "trust", body: { t: "home-trust-record", record } }]), name).rejects.toThrow(reason);
+  }
+  expect(await currentRecord(f.log)).toEqual(accepted);
+}, 30_000);
+
+it("reads legacy v1 snapshots as history, continues the head with one v2 snapshot and rebuilds cold", async () => {
+  const root = await createTempDir("b2-trust-legacy");
+  const open = () => {
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")),
+      { integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 83)) });
+    logs.push(log); currentTrustIndex(log); return log;
+  };
+  const log = open();
+  const issuer = await device("issuer"), a = await device("member-a"), revoked = await device("revoked");
+  const genesis = createTrustGenesisEvent({ homeId: "b2-home", issuer: issuer.identity, signer: issuer.key, at });
+  let state = initializeTrustChain(genesis);
+  const appendLegacy = async (event: HomeTrustEvent) => {
+    state = event === genesis ? state : applyTrustEvent(state, event);
+    await log.append([{ stream: "trust", body: { t: "home-trust-event", event } },
+      { stream: "trust", body: { t: "home-trust-record", record: legacyRecord(state, issuer.key) } }]);
+  };
+  await appendLegacy(genesis);
+  const bodies: HomeTrustEventBody[] = [
+    { t: "enroll", device: a.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-a" },
+    { t: "enroll", device: revoked.identity, roles: ["executor"], pairingTranscriptDigest: "sha256:pair-r" },
+    { t: "revoke", deviceId: revoked.identity.deviceId, reason: "device-removed" },
+  ];
+  for (const body of bodies) await appendLegacy(createSignedTrustEvent({ current: state, body, at, signer: issuer.key }));
+  // 历史帧照常闭合链头：当前视图可用，当前快照的读者拒绝 v1
+  expect((await log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async view => ({ kind: "return", value: await readCurrentTrust(view) }))).value
+    ?.members.map(member => member.device.deviceId).sort()).toEqual([issuer.identity.deviceId, a.identity.deviceId].sort());
+  await expect(currentRecord(log)).rejects.toThrow(LEGACY_TRUST_RECORD_MESSAGE);
+  // 一次性接续：当前签发者按当前视图为同一链头补签 v2
+  const legacyView = (await log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async view =>
+    ({ kind: "return", value: await readLegacyClosedTrust(view) }))).value!;
+  const continued = buildHomeTrustRecord(legacyView, issuer.key);
+  expect(continued).toEqual(buildHomeTrustRecord(replayTrustChain([genesis, ...await trustEvents(log)]), issuer.key));
+  await log.append([{ stream: "trust", body: { t: "home-trust-record", record: continued } }]);
+  expect(await currentRecord(log)).toEqual(continued);
+  expect((await log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async view =>
+    ({ kind: "return", value: await readLegacyClosedTrust(view) }))).value).toBeUndefined();
+  await expect(log.append([{ stream: "trust", body: { t: "home-trust-record", record: legacyRecord(state, issuer.key) } }])).rejects.toThrow();
+  // 冷重建：历史 v1 帧与之后的 v2 快照一起重放，结果相同
+  await log.stopStorageMaintenance();
+  await rm(path.join(root, "authority", "projections"), { recursive: true, force: true });
+  const reopened = open();
+  expect(await currentRecord(reopened)).toEqual(continued);
+}, 30_000);
+
+async function trustEvents(log: FileAuthorityCommitLog): Promise<HomeTrustEvent[]> {
+  return (await log.readStream("trust"))
+    .map(entry => entry.body as { t?: string; event?: HomeTrustEvent })
+    .filter(body => body.t === "home-trust-event" && body.event!.seq > 0)
+    .map(body => body.event!);
 }
 
 it('derives distinct A to B to A tenures, historical bases and disaster succession across restart', async () => {

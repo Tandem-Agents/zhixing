@@ -186,15 +186,20 @@ type HomeTrustEventBody =
 interface HomeTrustEvent { homeId: Ulid; seq: number; prevEventDigest: Digest;   // 哈希链接，seq 单调
   trustEpoch: number; body: HomeTrustEventBody; at: IsoTime; signature: Signature }
 
-interface HomeTrustRecord {              // 签名快照 = trust 流投影；全设备缓存、按链重放验证
-  homeId: Ulid; trustEpoch: number;
-  chainHead: { seq: number; eventDigest: Digest };
-  issuer: { deviceId: string; issuerKeyId: string };
+interface HomeTrustRecord {              // 当前授权的签名快照（v2）= trust 流在链头处的 active 投影；全设备缓存、按链重放验证
+  v: 2; homeId: Ulid; trustEpoch: number;
+  chainHead: { seq: number; eventDigest: Digest };   // 链头承诺整条历史；快照本身只表达当前授权
+  issuer: { deviceId: string; issuerKeyId: string; issuerPublicKey?: string };
   recoveryRootPublicKey?: string;        // 纯投影：链上最近一条有效 recovery-root 事件的签名根；主秘密离线在用户手中
   recoveryBackupPublicKey?: string;      // 同事件的备份封装根投影（X25519 收件键）——检查点封装用它，永不用签名键加密
-  members: Array<{ device: DeviceIdentity; roles: DeviceRole[]; state: "active"|"revoked"|"pending-reenroll" }>;   // pending-reenroll = domain-reset 后待重新配对
-  signature: Signature;
+  members: Array<{ device: DeviceIdentity; roles: DeviceRole[]; state: "active" }>;   // 只列链头处 active 成员，按 deviceId 升序
+  signature: Signature;                  // 签名域与摘要版本 = 2
 }
+// 历史证明不在快照里：已撤销、pending-reenroll（domain-reset 后待重新配对）与旧签发身份由事件链和当前信任投影的
+// 成员行、身份目录按键给出——不在快照里不等于从未登记，重新入网与旧签名验证照旧按链判断。
+// 快照闭合：接收方把 members 与同一已验位置的 active 目录全等核对（漏、重、多、错角色或公钥均拒），
+// 读取与验证随当前成员数，不随已撤销或历史成员增长。链上较早写入的 v1 快照（列全成员）是权威历史帧，
+// 按原规则验证、不改写；链上出现 v2 之后不再接受 v1，当前快照的读者只交 v2。
 type AnchorTransferCommit =                      // 锚点切换的唯一提交事实，按模式判别——两种模式的可证明前提不同，不共用一条无法同时满足的合同
   | { mode: "planned"; transferId: string; sourceDeviceId: string; targetDeviceId: string;
       freezeProofDigest: Digest;                 // 绑定源端 SourceFreezeProof（准入已关、在途已收束）
@@ -277,7 +282,7 @@ type PairingFinished =                           // 按配对方式判别——s
 
 `short-pake` 字段冻结可替换 wire 边界，不构成当前生产启用授权。当前公开产品只装配 `qr-secret`：二维码与可复制文本承载同一份高熵一次性邀请。`short-pake` 的精确实现及密码学依赖闭包取得独立不可变审计证据前，相关 adapter 必须仅为开发依赖、零 export、零 build、零 production import，CLI 与第一方 surface 不得展示短码入口；该门禁不得阻断高熵配对旅程。
 
-信任事实的唯一形态是签名、单调、哈希链接的 `HomeTrustEvent`（genesis / enroll / role-change / revoke / recovery-root / domain-reset / issuer-transition），落锚点域 AuthorityCommitLog 的 `trust` 逻辑流；genesis 是 issuer 自签且必须耐久的唯一首事件，后续投影重建不得依赖日志外锚点；`HomeTrustRecord` 只是带链头摘要的签名快照投影（含恢复根——投影链上当前有效根，无独立写路径），任何设备可凭事件链重放验证成员、撤销与恢复根的对象、顺序与当前水位。配对 = offer + join（短码分支另经 PakeRound 通道交替多轮）+ **acceptance 收尾**（transcript 摘要双方一致、双向 finished——设备签名绑身份 + PAKE 密钥确认证共享短码、单次 acceptance 绑链头——离线字典 / 在线爆破 / MITM / 降级 / 重放 / 乱序各有机械拒绝点，随 S2 安全对抗矩阵验收）→ 签发者写 `enroll`（reset 后重入写 `reenroll`）事件入链，事件绑定 pairingTranscriptDigest。恢复根在首次启用网格能力（首次配对 / 加密备份 / 迁居）的同一引导流建立：展示恢复包 → 用户保存 → 回读验证（重输校验段）→ 先完成新根检查点的独立复制与真解封验证，再原子激活 `recovery-root(establish)` 并开放该能力（§七）；轮换（主动换 / 泄露置换）走同一用户仪式与原子激活，切换前旧根持续有效；泄露且暂不换新由旧根签 `invalidate`（灾难恢复随之不可用，直至新根建立）；**丢失恢复包走 `domain-reset + establish` 原子计划**（字段合同与守卫见上——issuer 发起 + 第二设备共签恒必填，计划激活后新根与已验证备份同时生效、全设备逐台重新配对回 active；单设备 home 无链上补救，走重建 home 仪式）；单机开箱不生成。验收（随 S2）：issuer 签 rotate / invalidate 必被拒；无 coSign 或共签设备 = issuer 设备的 domain-reset 必被拒（含单设备 home）；已失效旧根签发 issuer-transition / rotate 必被拒；轮换、丢失 reset、泄露、离线设备追赶（含跨 reset 追赶）各有链重放用例。
+信任事实的唯一形态是签名、单调、哈希链接的 `HomeTrustEvent`（genesis / enroll / role-change / revoke / recovery-root / domain-reset / issuer-transition），落锚点域 AuthorityCommitLog 的 `trust` 逻辑流；genesis 是 issuer 自签且必须耐久的唯一首事件，后续投影重建不得依赖日志外锚点；`HomeTrustRecord` 只是带链头摘要的当前授权签名快照投影（只列 active 成员；含恢复根——投影链上当前有效根，无独立写路径）；成员、撤销、待重新配对与恢复根的对象、顺序与当前水位由事件链证明，任何设备可凭事件链重放验证，快照不承载历史成员。配对 = offer + join（短码分支另经 PakeRound 通道交替多轮）+ **acceptance 收尾**（transcript 摘要双方一致、双向 finished——设备签名绑身份 + PAKE 密钥确认证共享短码、单次 acceptance 绑链头——离线字典 / 在线爆破 / MITM / 降级 / 重放 / 乱序各有机械拒绝点，随 S2 安全对抗矩阵验收）→ 签发者写 `enroll`（reset 后重入写 `reenroll`）事件入链，事件绑定 pairingTranscriptDigest。恢复根在首次启用网格能力（首次配对 / 加密备份 / 迁居）的同一引导流建立：展示恢复包 → 用户保存 → 回读验证（重输校验段）→ 先完成新根检查点的独立复制与真解封验证，再原子激活 `recovery-root(establish)` 并开放该能力（§七）；轮换（主动换 / 泄露置换）走同一用户仪式与原子激活，切换前旧根持续有效；泄露且暂不换新由旧根签 `invalidate`（灾难恢复随之不可用，直至新根建立）；**丢失恢复包走 `domain-reset + establish` 原子计划**（字段合同与守卫见上——issuer 发起 + 第二设备共签恒必填，计划激活后新根与已验证备份同时生效、全设备逐台重新配对回 active；单设备 home 无链上补救，走重建 home 仪式）；单机开箱不生成。验收（随 S2）：issuer 签 rotate / invalidate 必被拒；无 coSign 或共签设备 = issuer 设备的 domain-reset 必被拒（含单设备 home）；已失效旧根签发 issuer-transition / rotate 必被拒；轮换、丢失 reset、泄露、离线设备追赶（含跨 reset 追赶）各有链重放用例。
 
 ### 2.2 凭证族（短租约、签名、可验证；全部按用途判别联合，非法组合在类型层不存在）
 
@@ -490,8 +495,11 @@ interface SecretStorePort {
   delete(ref: SecretRef): Promise<void>; list(prefix: string): Promise<SecretRef[]>;
   unlockState(): Promise<"unlocked"|"locked"|"unavailable">;
 }
-type SecretRef = { kind: "provider"|"channel"|"mcp"|"device-key"|"webhook"|"rendezvous"; bindingId: string };
+type SecretRef = { kind: "provider"|"channel"|"mcp"|"device-key"|"webhook"|"rendezvous"|"terminal-route"; bindingId: string };
 // rendezvous：pairwise 会合秘密（§2.5），bindingId = 对端 deviceId；生命周期与删除时机由 §2.5 约束。
+// terminal-route：设备移除的终态路由秘密（见设备移除的终态取回）。issuer 自有一份（bindingId = "issuer/" + issuer deviceId，
+// 长期保留，不随成员撤销删除）；target 为每次移除保存一份副本（bindingId = "removal/" + operation 摘要），本机终结或中止后删除。
+// 它是本机路由材料，不是外部凭据，不经凭据暴露路由守卫。
 ```
 
 秘密只以 `SecretRef` 出现在一切日志与协议中。`credentials.json` 迁移：检测明文 → 逐条写入 SecretStore 的版本化迁移命名空间 → 逐条回读校验 → 全部通过后**立即删除明文原文件**；回滚只能由迁移助手从 SecretStore 显式导出恢复旧格式；`ready` 预检包含"零明文残留"。
@@ -539,19 +547,21 @@ interface MeshEndpointDescriptor {       // 跨设备 wire 对象：可达性提
 type RendezvousKey = string;             // "rzv:" + 64 位小写 hex（32 字节）；独立会合令牌类型——
                                          // 不是 Digest（不入 §1.2 六类注册表）、不是 KeyConfirmation（非密钥确认语义）；
                                          // contracts lint 对其独立校验格式，冒用 Digest / KeyConfirmation 即失败。
-interface BlindRendezvousHello { v: 1; key: RendezvousKey; ttlMs: number }
-// 首帧；未知字段拒；ttlMs 1..3_600_000（挂起上限与初值 S5 标定）。key 两种来源、同一编码与校验：
+interface BlindRendezvousHello { v: 1; key: RendezvousKey; role: "accept" | "connect"; ttlMs: number }
+// 首帧；未知字段拒；ttlMs 1..3_600_000（挂起上限与初值 S5 标定）。role 是撮合提示，不是认证。
+// key 三种来源、同一编码与校验：
 // 控制面 = "rzv:" + hex(MAC(pairwiseRendezvousSecret, UTF8("zhixing:rendezvous:v1") || 0x00 || UTF8(utcDate)))
 //（secret 住 SecretStore，派生见配对会合段）；配对 = 带外交付的一次性高熵配对 rendezvous id（随机生成，
-// 不由任何低熵值派生）。中继只见令牌与 IP，不见设备身份与明文；能算出 key 者（曾持 secret）至多造成
-// DoS 与关联，身份恒由隧道内端到端握手保证，secret 经认证连接轮换即收束。
+// 不由任何低熵值派生）；终态接入 = "rzv:" + hex(MAC(terminalRouteSecret, UTF8("zhixing:rendezvous:terminal:v1")
+// || 0x00 || UTF8(utcDate)))（issuer 自有，见设备移除的终态取回）。中继只见令牌与 IP，不见设备身份与明文；
+// 能算出 key 者（曾持 secret）至多造成 DoS 与关联，身份恒由隧道内端到端握手保证，secret 经认证连接轮换即收束。
 ```
 
-中继按 key 撮合：首条连接挂起（时长 = min(ttlMs, 中继上限)，超时断开）；第二条同 key 到达即桥接进入 `bridgeBlindRelay` 纯转发并清除表项；挂起中第三条同 key 拒；桥接后同 key 新连接开启新一轮挂起；任一端断开即清除表项并断开对端。会合键是 pairwise 的，故锚点的 `relayRegistration` = **对 trust 链投影中每个需连接锚点的 `active` 远端 peer，同时维护当前与前一时间窗各一条挂起注册连接**（注册数量上界 = 2 × 链投影 active 成员数），每条独立走"被会合消费或断开后立即重注册"的生命周期；进入新时间窗即补注册新窗键，早于前一窗的注册即时撤销（有界清理）；peer 被 `revoke` 或角色移除即撤销其全部注册。拨号方依次尝试当前与前一时间窗——双侧各覆盖两个相邻窗口，任一方向的时钟偏差小于一个窗口长度时键必有交集，不存在窗口切换的确定性断连边界。会合成功只是取得字节通道，S2 认证握手随后在通道内端到端进行，失败即断。
+中继按 key 与 role 撮合：同一 key 下 accept 与 connect 各自先到先排队，只跨角色配对，同角色从不互配；挂起时长 = min(ttlMs, 中继上限)，超时断开；每 key 每角色与全局的挂起数有界，超出即拒，请求方按既有退避重试；配对即桥接进入 `bridgeBlindRelay` 纯转发并移出队列；任一端断开即移出队列或断开对端。role 只是撮合提示：持 key 者可以自报任一角色，至多造成 DoS 与关联，错配由隧道内端到端握手拒绝。锚点的挂起注册与配对出码方用 accept，拨号方与配对入码方用 connect。会合键是 pairwise 的，故锚点的 `relayRegistration` = **对 trust 链投影中每个需连接锚点的 `active` 远端 peer，同时维护当前与前一时间窗各一条挂起注册连接**（注册数量上界 = 2 × 链投影 active 成员数），每条独立走"被会合消费或断开后立即重注册"的生命周期；进入新时间窗即补注册新窗键，早于前一窗的注册即时撤销（有界清理）；peer 被 `revoke` 或角色移除即撤销其全部注册并删除 pairwise secret。已不是成员的设备不占这类注册，设备移除的终态取回走当前 issuer 固定数量的终态接入注册（见设备移除段）。拨号方依次尝试当前与前一时间窗——双侧各覆盖两个相邻窗口，任一方向的时钟偏差小于一个窗口长度时键必有交集，不存在窗口切换的确定性断连边界。会合成功只是取得字节通道，S2 认证握手随后在通道内端到端进行，失败即断。
 
 **端点引导（新增 bootstrap 合同；信任零新增）**：`MeshEndpointDescriptor` 是纯可达性提示——信任只来自 §2.1 设备密钥与 S2 双向认证握手，端点缺失、错误或被篡改只导致连接失败，天然 fail-closed，故不入签名域。交付与更新：① 配对引导流内经已认证配对通道交换（见上）；② 接收方按 deviceId 落设备域本地耐久，`revision` latest-wins、回退拒；③ 后续变更经任一已认证 mesh 连接以 negotiated-version 服务推送，接收方只接受 `descriptor.deviceId = 该连接认证对端` 的自述更新（任何设备不得代改他人端点）；更新不可达时旧端点保留为候选。anchor 的 descriptor：`direct` 项取 `advertised` 配置（bind 为通配地址且未配置 advertised 时不公布 direct 项），`blind-relay` 项取 `relayRegistration`。
 
-**控制面连接所有权与建立序列**：非锚点角色设备（S5 为 executor；后续 surface 同规则）是唯一拨号方，锚点恒不主动拨号——direct 监听与盲中继出站注册二者至少其一承载锚点可达性。拨号方按对方 descriptor 依序尝试：全部 `direct` → 依次经 `blind-relay` 项按上述会合协议会合（握手与 guard 仍端到端，中继零明文——S2 保密性验收覆盖）；全部失败按 `OutboundMeshTunnel` 既有退避策略有界重试。连接不可达不改变任何权威语义：派发滞留由 assigned outbox 承载、产品呈现按 §十一"目标离线→任务已排队"。连接级重连唯一归拨号方；assignment 级重驱恒由各 outbox 谓词（§3.6 / §5.5）驱动——两层解耦，互不假设对方状态。锚点接受连接的授权谓词 = 握手身份属于 trust 链投影的 `active` 成员且角色相容，别无第二来源。
+**控制面连接所有权与建立序列**：非锚点角色设备（S5 为 executor；后续 surface 同规则）是唯一拨号方，锚点恒不主动拨号——direct 监听与盲中继出站注册二者至少其一承载锚点可达性。拨号方按对方 descriptor 依序尝试：全部 `direct` → 依次经 `blind-relay` 项按上述会合协议会合（握手与 guard 仍端到端，中继零明文——S2 保密性验收覆盖）；全部失败按 `OutboundMeshTunnel` 既有退避策略有界重试。连接不可达不改变任何权威语义：派发滞留由 assigned outbox 承载、产品呈现按 §十一"目标离线→任务已排队"。连接级重连唯一归拨号方；assignment 级重驱恒由各 outbox 谓词（§3.6 / §5.5）驱动——两层解耦，互不假设对方状态。锚点经成员入口接受连接的授权谓词 = 握手身份属于 trust 链投影的 `active` 成员且角色相容，别无第二来源；经终态入口（握手携带终态定位）进入的连接按入口用途固定，只开放对应 operation 的终态 exact-set，见设备移除段。
 
 **验收（随第 20 单元前置提交）**：链未建立时单机默认装配零监听，首次出码 `genesis + role-change` 原子入链、建链失败配对不得继续、此后内置默认失效；本地配置声明链外角色启动即拒、链上撤销后重启拒且在线断连；descriptor 未知字段 / 越上界 / revision 回退拒，端点逐字段篡改仅致连接失败、零信任影响、零权威变更；配对在仅 direct、仅 relay 两形态下均能从码走到 acceptance，未认证通道上非配对消息拒，中继可见的配对会合键与短码统计独立（不可作离线枚举校验物）；pairwise secret 两端独立派生结果一致、零传输、只以 `{kind:"rendezvous"}` 落 SecretStore，配对失败 / 引导废弃 / 对端撤销三类删除时机零孤儿驻留；`RendezvousKey` 格式独立校验，冒用 `Digest` / `KeyConfirmation` 被 contracts lint 拒；acceptance 提交时候选 secret 必已耐久，acceptance 后、引导完成前的每个崩溃点重启均凭保留的 rendezvous / pairwise 键幂等续传（不重新配对、不重复入链、不重复消费码），引导完成标记落盘后 rendezvous 失效；会合协议的挂起超时、第三连接拒、断线清理、错 key 不撮合、注册被消费后重注册、多 executor 经各自 pairwise 键并发会合互不干扰、双向时钟偏差一窗内跨窗口切换会合不中断逐项通过；direct 不可达自动经 relay 会合且端到端认证与 guard 语义不变，双侧均 NAT 场景经 relay 建连；拨号方唯一重连、锚点零主动拨号、未启用角色零监听；全端点不可达时零权威变更，任务按排队 / 离线文案呈现。
 
@@ -2626,9 +2636,11 @@ stop 的 `gate-closed` evidence 必须包含固定 `conversation/intent/final/as
 
 executor removal 的 durable decision 必须携带 gate 后冻结的完整 `ownerItems(id,revision)`，target live/replay 只用该 exact-set 驱动 local/external settlement；缺失、同 id 换代或 reader 未能证明所选 transfer/destroy 终态时不得写 `authority-settled`。target durable aborted 是同 operation gate release 的唯一授权：gate 已不存在视为幂等完成，异 operation gate 零副作用，release 完成后 hydrate 或补写同一 authenticated receipt peer-effect。
 
-executor removal 的 accepted receipt 反绑 operation、target member/device-key generation、accepted issuer 与 trust ancestor。target journal 的 authenticated abort 与 ready 是唯一 winner，issuer journal 的 peer-effect 只重投冻结命令和回执；revoked target 的 TLS 历史身份只能调用 terminal-only exact-set，取得或提交该 operation 的 abort、cleanup-ready、issuer terminal，普通能力仍拒绝。preflight 在 accepted 后、任何 gate/transfer/delete 效果前读取全部 owner；确认时关闭准入并重读，digest 漂移只更新展示 snapshot、释放 gate且零 decision，全等才把 snapshot artifact 与 decision 同 transaction 反绑。ready 前逐 owner read-back同一 artifact 的 transfer/destroy 终态，禁止以重算 counts 替代。
+executor removal 的 accepted receipt 反绑 operation、target member/device-key generation、accepted issuer 与 trust ancestor。target journal 的 authenticated abort 与 ready 是唯一 winner，issuer journal 的 peer-effect 只重投冻结命令和回执；经终态入口认证的 target 只能调用该 operation 的终态 exact-set（ready、cleanup-ready、target-aborted、terminal），取得或提交该 operation 的 revoke、abort、cleanup-ready、issuer terminal；即使它仍是 active 成员，普通能力也拒绝。终态取回合同见下文。preflight 在 accepted 后、任何 gate/transfer/delete 效果前读取全部 owner；确认时关闭准入并重读，digest 漂移只更新展示 snapshot、释放 gate且零 decision，全等才把 snapshot artifact 与 decision 同 transaction 反绑。ready 前逐 owner read-back同一 artifact 的 transfer/destroy 终态，禁止以重算 counts 替代。
 
-recovery-backup uninstall 在 accepted 前 strict decode并冻结 recovery package 的 target/root binding。service generation 只绑定 home/authority/trust/target/recipient/root，首个与 final checkpoint 各有独立 id/digest/LSN；两次都调用现有 checkpoint service 从冻结 target 读取并用同一 root 真解封、验证 full binding。首个 checkpoint 后，retirement decision 必须在同一 transaction 反绑 gate 后冻结的十 owner exact artifact；同 operation 随后按 immediate 安全语义逐项 settle/read-back，刷稳 authority/assignment/intent/final/delivery log、outbox、lease/permit 与物理步骤并写 `flushed`。final 的 `upToLsn` 必须覆盖该 `flushed` lifecycle record 所在 commit envelope 的实际 LSN，通过后才可 cleanup；root 不耐久，重启保持 gate 并等待同 operation 重输，禁止创建嵌套 stop。cleanup 对固定 current-home removable roots使用 bottom-up walker，每个 governor step 至多 128 个 dirent；SecretStore 亦以稳定 128 项批次删除非 device-key，随后依次 unregister read-back、cleanup-complete、cleanup-ready、issuer terminal、exact key compare-delete/read-back、本机 terminal。server 与 removal mesh 的每个方法在分派后立即 strict decode exact keys/version，unknown、缺失、错类型和旧 peer 在 journal/gate 前拒绝。
+recovery-backup uninstall 在 accepted 前 strict decode并冻结 recovery package 的 target/root binding。service generation 只绑定 home/authority/trust/target/recipient/root，首个与 final checkpoint 各有独立 id/digest/LSN；两次都调用现有 checkpoint service 从冻结 target 读取并用同一 root 真解封、验证 full binding。首个 checkpoint 后，retirement decision 必须在同一 transaction 反绑 gate 后冻结的十 owner exact artifact；同 operation 随后按 immediate 安全语义逐项 settle/read-back，刷稳 authority/assignment/intent/final/delivery log、outbox、lease/permit 与物理步骤并写 `flushed`。final 的 `upToLsn` 必须覆盖该 `flushed` lifecycle record 所在 commit envelope 的实际 LSN，通过后才可 cleanup；root 不耐久，重启保持 gate 并等待同 operation 重输，禁止创建嵌套 stop。cleanup 对固定 current-home removable roots使用 bottom-up walker，每个 governor step 至多 128 个 dirent；SecretStore 亦以稳定 128 项批次删除 device-key 与本操作 terminal-route 副本以外的秘密，随后依次 unregister read-back、cleanup-complete、cleanup-ready、带回执制品的 issuer terminal、exact key compare-delete/read-back、删除本操作 terminal-route 副本、本机 terminal。server 与 removal mesh 的每个方法在分派后立即 strict decode exact keys/version，unknown、缺失、错类型和旧 peer 在 journal/gate 前拒绝。
+
+executor removal 的终态取回：撤销之后 target 不再是成员，终态事实只能由它向当前 issuer 按 operation 主动取回；issuer 不为历史设备常驻任何连接或注册，只在请求到达时按键解析。**路由材料**：issuer 自有一份 terminalRouteSecret（SecretRef kind `terminal-route`，bindingId = `issuer/<deviceId>`），首次接受移除时生成并回读；它不是 pairwise secret，不随成员撤销删除，不进日志、descriptor、trust 流或公开制品。每个 executor-removal 在 issuer accept 时由它派生不透明定位 `locator = base32lower(MAC(terminalRouteSecret, UTF8("zhixing:terminal-route:locator:v1") || 0x00 || UTF8(operationId)))`（52 字符），issuer journal 以 `terminal-route` peer-effect 耐久绑定其摘要，exact 目录 `removal-route/<摘要>` 指向该 operation；中止即删除目录项，终结保留。issuer 只经已认证、绑定本 operation 的 accept 通道（远端 accept 命令或 accept-self 回应）把 `{locator, secret}` 交给 target，重复 accept 交付同一值。**target 落盘**：accept 时先把 secret 写入本机 SecretStore（kind `terminal-route`，bindingId 绑定该 operation）并回读，再把恢复制品 `{operationId, locator, issuer 传输身份, issuer 端点}` 存入 authority artifact、以 `terminal-route` peer-effect 反绑，然后才回复 accept；副本在写本机 terminal 之前删除，中止时在交回中止回执之前删除；删除失败时操作仍未终结，由重驱、启动结算或 issuer 的待中止重送再删一次。**回执重建**：issuer 的撤销与终结回执由 operation 证据里的撤销事件摘要，经当前信任投影的“事件摘要 → 序号”目录精确读出原信任事件后重建，不整读信任流；首次撤销（含启动恢复 revocation-ready）在生命周期主投影的同一锁定前缀上精确读：生命周期按 operation、当前信任按链头与 active 目录、接受时信任头按事件摘要核为祖先、凭据暴露按目标设备的 active 前缀，不重放 trust、exposure 与生命周期流；随撤销写出的签名信任记录（v2）只列 active 成员，签名前按 active 目录读当前成员，写入时信任投影按同一目录与 active 计数全等核对，读取、物化、验证与写出都随当前成员数，不随已撤销成员与已完成的移除增长；已撤销的重驱只重做幂等的 pairwise secret 删除并精确取回回执。**终态入口**：当前 issuer 的直连监听，以及中继上固定数量的终态接入注册（当前与前一时间窗各 2 条，role = accept，key 见会合协议），数量与历史移除数无关。握手 SNI 为定位时，服务端经窄解析端口按 `removal-route` 精确读出 operation，核对未中止、目标设备代际与传输身份一致，只为这条连接建立 CA = 该设备根的上下文；握手后再次解析并核对出示链的根，新鲜度与重放窗口不变。解析只做本机读，有超时与停止边界，并发数有界。经终态入口的连接按用途固定：只挂终态注册表，命令的 operationId 必须等于连接绑定的 operation；不跑成员信任对齐，不发布端点。**启动**：本机存在处于 revocation-ready 及之后、未终结的 executor-removal 时，bootstrap 在普通身份与角色装配之前处理。已有 issuer-terminal 回执且验签、operation 与代际反绑全过，即按冻结代际 exact 删钥、删除副本、写本机 terminal：零网络，不需私钥，不新建身份。否则只运行专用取回：以恢复制品与设备密钥经直连或中继终态入口连接 issuer，按阶段调用 ready / cleanup-ready / terminal，issuer 按已存事实幂等重算回执；失败按既有退避重试，不设 TTL，不开放普通业务准入，完成后回到既有退休启动路径。**进程不重启**：revocation-ready 之后的内联续做（decide、abort、自退休）一旦中断（成员连接随撤销断开、回执丢失），即交给运行中进程的专用取回 owner；成员连接上发现本机处于撤销阶段的移除时同样交给它。owner 至多一个，随宿主停止取消：握手中与等待请求中的网络等待都被取消、连接被回收，已开始的本机耐久步骤照常走完，被停止的 owner 不再写本机 terminal；不开放普通业务准入；本机收尾按序执行，内联与取回同时到达时逐步幂等。已耐久 issuer 终态回执时先在本机完成，不联网。缺依据、坏签名或错 operation 一律失败关闭。用户主动声明失联保持原语义，不是普通成功流程的前提。
 
 执行顺序不可重排为会产生中间债务的形态：
 

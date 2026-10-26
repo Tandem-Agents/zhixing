@@ -2,6 +2,7 @@ import { constants, createHash, randomBytes, X509Certificate } from "node:crypto
 import type { DeviceIdentity } from "@zhixing/core/contracts";
 import {
   connect as connectTls,
+  createSecureContext,
   createServer as createTlsServer,
   type DetailedPeerCertificate,
   type SecureContextOptions,
@@ -28,7 +29,12 @@ import {
   assertRuntimeTimerDelay,
   MAX_RUNTIME_TIMER_DELAY_MS,
 } from "./runtime-time.js";
-import { createSecureMeshConnection, type SecureMeshConnection } from "./session.js";
+import { isTerminalRouteLocator } from "./bootstrap.js";
+import {
+  createSecureMeshConnection,
+  type MeshConnectionRoute,
+  type SecureMeshConnection,
+} from "./session.js";
 import {
   MESH_ALPN_PROTOCOL,
   SocketFrameTransport,
@@ -41,11 +47,30 @@ export type {
 
 const DEFAULT_MAX_CLOCK_SKEW_MS = 120_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_CONCURRENT_ROUTES = 8;
 
 export interface TrustedMeshPeer {
   readonly identity: DeviceIdentity;
   readonly rootCertificatePem: string;
 }
+
+/** 按请求解析出的对端与入口绑定；binding 对传输层不透明。 */
+export interface MeshRouteResolution {
+  readonly peer: TrustedMeshPeer;
+  readonly binding: string;
+}
+
+/**
+ * 窄身份解析端口：握手 SNI 携带定位时，服务端在验证客户端证书之前按定位精确解析可信身份，
+ * 只为这一条连接信任该身份的根。解析只做本机读；未知或不放行返回 undefined。
+ */
+export interface MeshRouteResolver {
+  readonly resolve: (locator: string, signal: AbortSignal) => Promise<MeshRouteResolution | undefined>;
+  /** 同时在解析中的定位数上限，超出即拒，不占成员入口的资源。 */
+  readonly maxConcurrent?: number;
+}
+
+export type { MeshConnectionRoute } from "./session.js";
 
 export interface MeshDeviceIdentity {
   readonly deviceId: string;
@@ -55,9 +80,11 @@ export interface MeshDeviceIdentity {
 export interface MeshConnectionSecurityOptions {
   readonly identity: MeshDeviceIdentity;
   readonly protocolRange: MeshProtocolRange;
+  /** route 存在表示连接经终态定位进入，授权按入口用途判定。 */
   readonly authorizePeer: (
     identity: DeviceIdentity,
     signal: AbortSignal,
+    route?: MeshConnectionRoute,
   ) => boolean | Promise<boolean>;
   readonly maxClockSkewMs?: number;
   readonly handshakeTimeoutMs?: number;
@@ -71,12 +98,15 @@ export interface MeshClientConnectionOptions extends MeshConnectionSecurityOptio
   readonly socket?: Socket;
   readonly trustedPeer: TrustedMeshPeer;
   readonly signal?: AbortSignal;
+  /** 经终态入口连接时携带的定位，作为 SNI；缺省走成员入口。 */
+  readonly locator?: string;
 }
 
 export interface MeshServerOptions extends MeshConnectionSecurityOptions {
   readonly trustedPeers: readonly TrustedMeshPeer[];
   readonly replayWindow: HandshakeReplayWindow;
   readonly onHandshakeError?: (error: Error) => void | Promise<void>;
+  readonly routes?: MeshRouteResolver;
 }
 
 interface ProtocolHello {
@@ -122,6 +152,9 @@ export async function connectAuthenticatedMesh(
   try {
     const trustedPeer = clientOptions.trustedPeer;
     const peerRoot = validateTrustedPeer(trustedPeer, (clientOptions.now ?? Date.now)());
+    if (clientOptions.locator !== undefined && !isTerminalRouteLocator(clientOptions.locator)) {
+      throw new TypeError("Mesh route locator is invalid");
+    }
     const credential = await deadline.run(
       issueMeshTlsCredential(clientOptions.identity, {
         now: clientOptions.now,
@@ -139,7 +172,7 @@ export async function connectAuthenticatedMesh(
       maxVersion: "TLSv1.3",
       ALPNProtocols: [MESH_ALPN_PROTOCOL],
       rejectUnauthorized: true,
-      servername: MESH_ALPN_PROTOCOL,
+      servername: clientOptions.locator ?? MESH_ALPN_PROTOCOL,
       checkServerIdentity: () => undefined,
       secureOptions: constants.SSL_OP_NO_TICKET,
     });
@@ -187,6 +220,8 @@ export async function connectAuthenticatedMesh(
     deadline.dispose();
     return connection;
   } catch (error) {
+    // 握手已失败、错误抛给调用方；之后转发来的父套接字错误（中继套接字被取消销毁）不再有监听方
+    tlsSocket?.on("error", () => undefined);
     tlsSocket?.destroy();
     throw normalizeTlsError(error);
   } finally {
@@ -242,7 +277,7 @@ async function createAuthenticatedMeshServerInternal(
   maintainCredentials: boolean,
 ): Promise<TlsServer> {
   validateCommonOptions(options);
-  if (options.trustedPeers.length === 0) {
+  if (options.trustedPeers.length === 0 && !options.routes) {
     throw new TypeError("Mesh server requires at least one trusted peer");
   }
   const trustedPeers = validateTrustedPeers(
@@ -250,7 +285,7 @@ async function createAuthenticatedMeshServerInternal(
     (options.now ?? Date.now)(),
   );
   const serverOptions = snapshotServerOptions(options, [...trustedPeers.values()]);
-  const credential = await issueMeshTlsCredential(serverOptions.identity, {
+  let credential = await issueMeshTlsCredential(serverOptions.identity, {
     now: serverOptions.now,
     validityMs: serverOptions.tlsCredentialValidityMs,
   });
@@ -261,6 +296,42 @@ async function createAuthenticatedMeshServerInternal(
     serverOptions.identity.deviceId,
     trustedPeerSnapshot,
   );
+  const stopped = new AbortController();
+  const routes = serverOptions.routes;
+  const maxConcurrentRoutes = routes?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_ROUTES;
+  if (!Number.isSafeInteger(maxConcurrentRoutes) || maxConcurrentRoutes < 1) {
+    throw new TypeError("Mesh route concurrency must be a positive safe integer");
+  }
+  let resolvingRoutes = 0;
+  // 定位连接：在客户端证书验证之前按请求解析身份，只为这条连接信任该身份的根；成员入口仍用默认上下文。
+  const selectRouteContext = (
+    servername: string,
+    callback: (error: Error | null, context?: ReturnType<typeof createSecureContext>) => void,
+  ) => {
+    if (servername === MESH_ALPN_PROTOCOL) {
+      callback(null, undefined);
+      return;
+    }
+    if (!routes || !isTerminalRouteLocator(servername)) {
+      callback(new MeshProtocolError("unauthorized-peer", "Mesh route locator is not resolvable"));
+      return;
+    }
+    if (resolvingRoutes >= maxConcurrentRoutes) {
+      callback(new MeshProtocolError("resource-exhausted", "Mesh route resolution is at capacity"));
+      return;
+    }
+    resolvingRoutes += 1;
+    const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), stopped.signal]);
+    void resolveRoute(routes, servername, signal, serverOptions.now).then(
+      (resolution) => callback(null, createSecureContext(credentialContext(
+        createMeshServerSecurityProfile(serverOptions.identity.deviceId, [resolution.peer]),
+        credential,
+      ))),
+      (error: unknown) => callback(normalizeTlsError(error)),
+    ).finally(() => {
+      resolvingRoutes -= 1;
+    });
+  };
   const server = createTlsServer(
     {
       ...credentialContext(securityProfile, credential),
@@ -268,6 +339,7 @@ async function createAuthenticatedMeshServerInternal(
       requestCert: true,
       rejectUnauthorized: true,
       handshakeTimeout: timeoutMs,
+      ...(routes ? { SNICallback: selectRouteContext } : {}),
     },
     (socket) => {
       const key = connectionKey(socket);
@@ -313,10 +385,35 @@ async function createAuthenticatedMeshServerInternal(
     if (deadline) deadline.report(normalized, serverOptions.onHandshakeError);
     else reportHandshakeError(normalized, serverOptions.onHandshakeError);
   });
+  server.once("close", () => stopped.abort(new MeshProtocolError("connection-closed", "Mesh server closed")));
   if (maintainCredentials) {
-    maintainServerCredential(server, serverOptions, securityProfile, credential.expiresAt);
+    maintainServerCredential(server, serverOptions, securityProfile, credential.expiresAt, (renewed) => {
+      credential = renewed;
+    });
   }
   return server;
+}
+
+/** 解析结果必须是自洽的可信身份与非空绑定；未知即拒，解析失败不放行。 */
+async function resolveRoute(
+  routes: MeshRouteResolver,
+  locator: string,
+  signal: AbortSignal,
+  now: (() => number) | undefined,
+): Promise<MeshRouteResolution> {
+  const resolution = await raceWithSignal(
+    Promise.resolve().then(() => routes.resolve(locator, signal)),
+    signal,
+  );
+  if (!resolution) {
+    throw new MeshProtocolError("unauthorized-peer", "Mesh route locator is not resolvable");
+  }
+  if (typeof resolution.binding !== "string" || resolution.binding.length === 0) {
+    throw new TypeError("Mesh route resolution binding is invalid");
+  }
+  const peer = snapshotTrustedPeer(resolution.peer);
+  validateTrustedPeer(peer, (now ?? Date.now)());
+  return Object.freeze({ peer, binding: resolution.binding });
 }
 
 function maintainServerCredential(
@@ -324,6 +421,7 @@ function maintainServerCredential(
   options: MeshServerOptions,
   securityProfile: MeshServerSecurityProfile,
   expiresAt: string,
+  onRenewed: (credential: DeviceTlsCredential) => void,
 ): void {
   const now = options.now ?? Date.now;
   const validityMs = options.tlsCredentialValidityMs ?? 24 * 60 * 60_000;
@@ -364,6 +462,7 @@ function maintainServerCredential(
       });
       if (stopped) return;
       server.setSecureContext(credentialContext(securityProfile, credential));
+      onRenewed(credential);
       schedule(credential.expiresAt);
     } catch (error) {
       if (stopped) return;
@@ -391,10 +490,21 @@ async function establishInboundConnection(
   signal: AbortSignal,
 ): Promise<SecureMeshConnection> {
   assertTlsState(socket);
-  const peer = resolveAuthenticatedPeer(socket.getPeerCertificate(true), [
-    ...trustedPeers.values(),
-  ]);
-  await authorize(peer.identity, options.authorizePeer, signal);
+  const servername = typeof socket.servername === "string" ? socket.servername : undefined;
+  let peer: TrustedMeshPeer;
+  let route: MeshConnectionRoute | undefined;
+  if (options.routes && servername !== undefined && servername !== MESH_ALPN_PROTOCOL) {
+    // 握手后再按同一定位精确解析一次，出示链的根必须与解析结果一致。
+    const resolution = await resolveRoute(options.routes, servername, signal, options.now);
+    assertCertificateRoot(socket.getPeerCertificate(true), validateTrustedPeer(resolution.peer));
+    peer = resolution.peer;
+    route = Object.freeze({ kind: "terminal" as const, binding: resolution.binding });
+  } else {
+    peer = resolveAuthenticatedPeer(socket.getPeerCertificate(true), [
+      ...trustedPeers.values(),
+    ]);
+  }
+  await authorize(peer.identity, options.authorizePeer, signal, route);
   const transport = new SocketFrameTransport(socket);
   const now = options.now ?? Date.now;
   const hello = parseHello(
@@ -423,6 +533,7 @@ async function establishInboundConnection(
     localProtocolRange: options.protocolRange,
     peerProtocolRange: hello.protocolRange,
     peer: peer.identity,
+    ...(route ? { route } : {}),
   });
 }
 
@@ -601,9 +712,10 @@ async function authorize(
   identity: DeviceIdentity,
   authorizePeer: MeshConnectionSecurityOptions["authorizePeer"],
   signal: AbortSignal,
+  route?: MeshConnectionRoute,
 ): Promise<void> {
   const allowed = await raceWithSignal(
-    Promise.resolve().then(() => authorizePeer(identity, signal)),
+    Promise.resolve().then(() => authorizePeer(identity, signal, route)),
     signal,
   );
   if (!allowed) {

@@ -28,6 +28,7 @@ const SECRET_KINDS = new Set<SecretRef["kind"]>([
   "webhook",
   "rendezvous",
   "authority-integrity",
+  "terminal-route",
 ]);
 
 interface VaultEnvelope {

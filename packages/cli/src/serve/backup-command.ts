@@ -1030,7 +1030,7 @@ async function currentPairedRootActivation(
 ): Promise<{
   readonly checkpointId: string;
   readonly event: Parameters<PairedRecoveryRootActivation["activateRoot"]>[0]["event"];
-  readonly record: HomeTrustRecord;
+  readonly record: Parameters<PairedRecoveryRootActivation["activateRoot"]>[0]["record"];
 } | undefined> {
   if (!context.projection.recoveryActivationDigest) return undefined;
   return context.store.loadRecoveryRootActivationReplay({

@@ -8,10 +8,15 @@ export interface MeshEndpointDirectoryPersistencePort {
   readonly acceptEndpoint: (value: unknown) => Promise<MeshEndpointDescriptor>;
 }
 
-/** Demand-owned access to authenticated transport peer projections. */
+/** 已认证传输身份按设备键存取；启动与常驻路径只做精确读。 */
 export interface MeshTransportPeerDirectoryPersistencePort {
-  readonly loadTransportPeers: () => Promise<readonly TrustedMeshPeer[]>;
+  readonly transportPeer: (deviceId: string) => Promise<TrustedMeshPeer | undefined>;
   readonly acceptTransportPeer: (peer: TrustedMeshPeer) => Promise<void>;
+}
+
+/** 已知对端清单的显式枚举：只给灾备、备份等人工命令。 */
+export interface MeshTransportPeerInventoryPort {
+  readonly listTransportPeers: () => Promise<readonly TrustedMeshPeer[]>;
 }
 
 /** Demand-owned idempotency boundary for completed Mesh bootstrap offers. */
@@ -28,8 +33,23 @@ export interface MeshBootstrapCompletionPersistencePort {
 
 export interface MeshBootstrapProjectionPorts {
   readonly endpoints: MeshEndpointDirectoryPersistencePort;
-  readonly transportPeers: MeshTransportPeerDirectoryPersistencePort;
+  readonly transportPeers: MeshTransportPeerDirectoryPersistencePort & MeshTransportPeerInventoryPort;
   readonly completions: MeshBootstrapCompletionPersistencePort;
+}
+
+/** 当前信任投影里 active 的其他成员：只为它们精确读传输身份，读取随成员数。 */
+export async function loadActiveMemberTransportPeers(
+  directory: Pick<MeshTransportPeerDirectoryPersistencePort, "transportPeer">,
+  members: readonly { readonly device: { readonly deviceId: string }; readonly state: string }[],
+  localDeviceId: string,
+): Promise<readonly TrustedMeshPeer[]> {
+  const peers: TrustedMeshPeer[] = [];
+  for (const member of members) {
+    if (member.state !== "active" || member.device.deviceId === localDeviceId) continue;
+    const peer = await directory.transportPeer(member.device.deviceId);
+    if (peer) peers.push(peer);
+  }
+  return peers;
 }
 
 /** Projects one physical owner into three finite, runtime-narrow capabilities. */
@@ -37,6 +57,7 @@ export function createMeshBootstrapProjectionPorts(
   source:
     & MeshEndpointDirectoryPersistencePort
     & MeshTransportPeerDirectoryPersistencePort
+    & MeshTransportPeerInventoryPort
     & MeshBootstrapCompletionPersistencePort,
 ): MeshBootstrapProjectionPorts {
   return Object.freeze({
@@ -45,7 +66,8 @@ export function createMeshBootstrapProjectionPorts(
       acceptEndpoint: (value: unknown) => source.acceptEndpoint(value),
     }),
     transportPeers: Object.freeze({
-      loadTransportPeers: () => source.loadTransportPeers(),
+      transportPeer: (deviceId: string) => source.transportPeer(deviceId),
+      listTransportPeers: () => source.listTransportPeers(),
       acceptTransportPeer: (peer: TrustedMeshPeer) =>
         source.acceptTransportPeer(peer),
     }),

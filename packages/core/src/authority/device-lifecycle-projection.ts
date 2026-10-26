@@ -13,6 +13,8 @@ import {
 export const LIFECYCLE_PROJECTION_ID = "device-lifecycle-state-v1";
 export const LIFECYCLE_ACTIVE_PREFIX = "active/";
 export const LIFECYCLE_OPERATION_PREFIX = "operation/";
+/** 按目标设备分区的未中止设备移除（终结的也在内）：终端放行在访问时只读分区里的第一条。 */
+export const LIFECYCLE_REMOVAL_TARGET_PREFIX = "removal-target/";
 interface StoredOperation { readonly acceptedLsn: number; readonly acceptedEntry: number; readonly operation: DeviceLifecycleOperation }
 interface Pointer { readonly operationId: string; readonly acceptedLsn: number; readonly acceptedEntry: number }
 export function compareLifecycleAcceptance(a: Pick<Pointer, "acceptedLsn" | "acceptedEntry">, b: Pick<Pointer, "acceptedLsn" | "acceptedEntry">): number {
@@ -30,6 +32,14 @@ export function lifecycleTargetDeviceId(operation: DeviceLifecycleOperation): st
 function activeKey(value: Pointer, prefix = LIFECYCLE_ACTIVE_PREFIX): string { return `${prefix}${value.acceptedLsn.toString().padStart(16, "0")}/${value.acceptedEntry.toString().padStart(16, "0")}/${protocolDigest("LifecycleIndexIdentity", 1, { identity: value.operationId })}`; }
 export function lifecycleLatestKey(kind: DeviceLifecycleOperation["identity"]["kind"], deviceId: string): string { return identityKey(`latest/${kind}/`, deviceId); }
 export function lifecycleRetirementKey(deviceId?: string): string { return deviceId === undefined ? "retirement/latest" : identityKey("retirement/device/", deviceId); }
+export function lifecycleRemovalTargetPrefix(deviceId: string): string { return identityKey(LIFECYCLE_REMOVAL_TARGET_PREFIX, deviceId) + "/"; }
+/** 终态路由定位摘要 → 未中止的设备移除：终态入口按请求精确读这一条，不按历史设备装载。 */
+export function lifecycleRemovalRouteKey(routeDigest: string): string { return identityKey("removal-route/", routeDigest); }
+/** 分区内按接受位置倒排：第一条即这台设备最后一个未中止的移除。 */
+function removalTargetKey(deviceId: string, value: Pointer): string {
+  const inverted = (position: number) => (Number.MAX_SAFE_INTEGER - position).toString().padStart(16, "0");
+  return `${lifecycleRemovalTargetPrefix(deviceId)}${inverted(value.acceptedLsn)}/${inverted(value.acceptedEntry)}/${protocolDigest("LifecycleIndexIdentity", 1, { identity: value.operationId })}`;
+}
 
 function invalid(error?: unknown): DurableProjectionRecordBindingError {
   return new DurableProjectionRecordBindingError(`Lifecycle projection identity is invalid${error instanceof Error ? `: ${error.message}` : ""}`);
@@ -119,6 +129,17 @@ export async function reduceLifecycleIndex(envelope: CommitEnvelope<JsonValue>, 
     for (const prefix of [LIFECYCLE_ACTIVE_PREFIX, lifecycleActivePrefix(deviceId), lifecycleActivePrefix(undefined, operation.identity.kind)]) {
       if (terminal) remove(activeKey(ref, prefix)); else put(activeKey(ref, prefix), ref);
     }
+    if (operation.identity.kind === "executor-removal") {
+      if (operation.phase === "aborted") remove(removalTargetKey(deviceId, ref));
+      else if (!prior) put(removalTargetKey(deviceId, ref), ref);
+      const route = operation.peerEffects.find((effect) => effect.kind === "terminal-route");
+      if (route) {
+        if (operation.phase === "aborted") remove(lifecycleRemovalRouteKey(route.digest));
+        else if (!prior?.operation.peerEffects.some((effect) => effect.kind === "terminal-route")) {
+          put(lifecycleRemovalRouteKey(route.digest), ref);
+        }
+      }
+    }
     const latestKey = lifecycleLatestKey(operation.identity.kind, deviceId);
     const last = await resolveLifecyclePointer(read, await read.get(latestKey));
     if (last && (last.operation.identity.kind !== operation.identity.kind || lifecycleTargetDeviceId(last.operation) !== deviceId)) throw invalid();
@@ -135,6 +156,9 @@ export async function reduceLifecycleIndex(envelope: CommitEnvelope<JsonValue>, 
   return changes;
 }
 
+export function validateLifecycleRemovalTargetPointer(key: string, value: JsonValue, deviceId: string): void {
+  if (key !== removalTargetKey(deviceId, pointer(value))) throw invalid();
+}
 export function validateLifecycleActivePointer(key: string, value: JsonValue, prefix = LIFECYCLE_ACTIVE_PREFIX): void {
   if (key !== activeKey(pointer(value), prefix)) throw invalid();
 }

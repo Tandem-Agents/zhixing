@@ -4,6 +4,7 @@ import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import {
   homeTrustEventDigest,
+  homeTrustRecordDigest,
   replayTrustChain,
   verifyHomeTrustRecord,
 } from "@zhixing/mesh/trust-chain";
@@ -140,7 +141,7 @@ export async function collectDisasterRecoveryTrustEvidence(input: {
         deviceId: item.deviceId,
         chainHead: item.record.chainHead,
         trustEpoch: item.record.trustEpoch,
-        recordDigest: protocolDigest("HomeTrustRecord", 1, item.record),
+        recordDigest: homeTrustRecordDigest(item.record),
       })),
     }),
   });

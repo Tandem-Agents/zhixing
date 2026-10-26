@@ -184,6 +184,22 @@ describe("mesh transport foundation", () => {
     expect(socket.destroyed).toBe(true);
   });
 
+  it("absorbs every error a wrapped socket emits and fails only with the first", async () => {
+    const socket = new AuthenticatedSocketDouble();
+    const transport = new SocketFrameTransport(socket as unknown as TLSSocket, {
+      maxFrameBytes: 64,
+      maxBufferedBytes: 1_024,
+    });
+    const received = transport.receive();
+    const first = new Error("forwarded parent socket error");
+    // TLS 会把父套接字的错误转发过来，自身带错销毁时再发一个：哪个都不能成为未捕获异常
+    socket.emit("error", first);
+    expect(() => socket.emit("error", new Error("own destroy error"))).not.toThrow();
+    await expect(received).rejects.toBe(first);
+    await transport.closed;
+    expect(socket.destroyed).toBe(true);
+  });
+
   it("creates an inert TLS server factory without implicitly opening a listener", async () => {
     const initiator = await createDevice("initiator");
     const responder = await createDevice("responder");

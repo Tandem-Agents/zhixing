@@ -1198,7 +1198,8 @@ function trustRecord(input: unknown, label: string): asserts input is HomeTrustR
   if (Object.hasOwn(input, "recoveryRootPublicKey")) recordKeys.push("recoveryRootPublicKey");
   if (Object.hasOwn(input, "recoveryBackupPublicKey")) recordKeys.push("recoveryBackupPublicKey");
   exact(input, recordKeys, label);
-  version(input.v, label);
+  // 交接结果里的信任记录是当前快照：只收 v2，成员只能是 active
+  if (input.v !== 2) throw new TypeError(`${label} version must be 2`);
   identifier(input.homeId, `${label} homeId`);
   positive(input.trustEpoch, `${label} trustEpoch`);
   chainHead(input.chainHead, `${label} chainHead`);
@@ -1221,7 +1222,7 @@ function trustRecord(input: unknown, label: string): asserts input is HomeTrustR
     for (const field of ["deviceId", "displayName", "platform", "publicKey"] as const) identifier(member.device[field], `${label} member ${index} ${field}`);
     time(member.device.enrolledAt, `${label} member ${index} enrolledAt`);
     canonicalStringArray(member.roles, `${label} member ${index} roles`, new Set(["anchor", "executor", "surface"]));
-    if (!new Set(["active", "revoked", "pending-reenroll"]).has(member.state as string)) {
+    if (member.state !== "active") {
       throw new TypeError(`${label} member ${index} state is invalid`);
     }
   }

@@ -1,6 +1,6 @@
 import path from "node:path";
-import { describe, expect, it, onTestFinished } from "vitest";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
 import type { CredentialExposureRecord, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
@@ -60,6 +60,84 @@ describe("credential rotation publication", { timeout: 30_000 }, () => {
     });
     expect(await fixture.log.readStream("exposure")).toHaveLength(firstEntries.length);
   });
+
+  it("reads only the pending rotations whatever the number of past identities, advancing from the highest binding revision", async () => {
+    const rows: { history: number; keys: number; scanned: number; revision: number | undefined }[] = [];
+    for (const history of [16, 128, 512]) {
+      const fixture = await createFixture([
+        ["provider", "main"],
+        ["channel", "chat"],
+        ["mcp", "docs"],
+      ]);
+      const binding = "user-alias:current-device:credential-provider-main";
+      const principal = (index: number) => ({
+        verification: "service-verified" as const,
+        canonicalProviderPrincipal: `past-principal-${index}@example.invalid`,
+      });
+      // 与本次轮换无关的过往身份：其他设备的同名逻辑绑定，均已轮换
+      const unrelated = Array.from({ length: history }, (_, index) => createCredentialExposureRecord({
+        deviceId: `past-device-${index}`,
+        bindingId: `user-alias:past-device-${index}:credential-provider-main`,
+        bindingRevision: 1 + (index % 4),
+        service: "provider-main",
+        verifiedPrincipal: principal(index),
+        markedAt: "2026-08-10T00:00:10.000Z",
+      }));
+      // 本机同一绑定的过往主体：修订号按 7、3、5 的次序写入，下一修订号应取历来最大的 7 再加一
+      const own = [7, 3, 5].map((revision) => createCredentialExposureRecord({
+        deviceId: "current-device",
+        bindingId: binding,
+        bindingRevision: revision,
+        service: "provider-main",
+        verifiedPrincipal: principal(1000 + revision),
+        markedAt: "2026-08-10T00:00:20.000Z",
+      }));
+      await fixture.log.append([...unrelated, ...own].flatMap((record) => [
+        { stream: "exposure" as const, body: record },
+        { stream: "exposure" as const, body: { ...record, state: "rotated" as const, markedAt: "2026-08-10T00:00:30.000Z" } },
+      ]));
+      const counts = { keys: 0, scanned: 0 };
+      const prototype = FileDurableProjectionIndex.prototype;
+      const { get, getMany, scan } = prototype;
+      const spies = [
+        vi.spyOn(prototype, "get").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+          counts.keys += 1;
+          return get.apply(this, args);
+        }),
+        vi.spyOn(prototype, "getMany").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+          counts.keys += args[0].length;
+          return getMany.apply(this, args);
+        }),
+        vi.spyOn(prototype, "scan").mockImplementation(async function (this: FileDurableProjectionIndex, ...args) {
+          const page = await scan.apply(this, args);
+          counts.scanned += page.entries.length;
+          return page;
+        }),
+      ];
+      try {
+        await publishRequiredCredentialRotations({
+          ...fixture.options,
+          probeProvider: async ({ providerId }) => `provider:${providerId}:https://verified.invalid`,
+          mcpStatuses: () => [{ serverId: "docs", status: "connected", transport: "http", toolCount: 1 }],
+          channelStatuses: () => [{ channelId: "chat", state: "connected" }],
+          waitForChannels: async () => undefined,
+        });
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+      const projection = await fixture.authority.projection();
+      expect(projection.rotationRequired).toEqual([]);
+      const current = projection.records.find((record) =>
+        record.deviceId === "current-device" && record.bindingId === binding && record.state === "active");
+      rows.push({ history, ...counts, revision: current?.bindingRevision });
+    }
+    // allow-direct-stdout：规模用例的读数输出；测试文件不是运行时输出面
+    console.log("ROTATION_PUBLICATION_ROWS", JSON.stringify(rows));
+    for (const row of rows) expect(row.revision).toBe(8);
+    // 读取只随待轮换数：三档相同（从全量投影起步时随过往身份增长）
+    expect(rows.map(({ keys, scanned }) => [keys, scanned]))
+      .toEqual(rows.map(() => [rows[0]!.keys, rows[0]!.scanned]));
+  }, 300_000);
 
   it("keeps the compromised exposure when SecretStore read-back differs", async () => {
     const fixture = await createFixture([["provider", "main"]]);

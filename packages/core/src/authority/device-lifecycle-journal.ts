@@ -12,7 +12,8 @@ import {
   type DurableProjectionReadContext, type RebuildableDurableProjectionIndex,
 } from "./durable-projection-index.js";
 import {
-  LIFECYCLE_PROJECTION_ID, LIFECYCLE_OPERATION_PREFIX, lifecycleActivePrefix,
+  LIFECYCLE_PROJECTION_ID, LIFECYCLE_OPERATION_PREFIX, lifecycleActivePrefix, lifecycleRemovalRouteKey, lifecycleRemovalTargetPrefix,
+  validateLifecycleRemovalTargetPointer,
   lifecycleDecisionState, lifecycleIndexedOperation, lifecycleLatestKey,
   lifecycleOperationKey, lifecycleRetirementKey, readLifecycleStored,
   reduceLifecycleIndex, resolveLifecyclePointer, validateLifecycleActivePointer,
@@ -21,6 +22,17 @@ import {
 } from "./device-lifecycle-projection.js";
 
 type AdvancedPhase = Exclude<DeviceLifecyclePhase, "accepted" | "terminal" | "aborted">;
+
+/** 生命周期持久投影的 id：别的事务以 readProjectionIds 选它，在同一锁定前缀上精确读操作。 */
+export const DEVICE_LIFECYCLE_PROJECTION_ID = LIFECYCLE_PROJECTION_ID;
+
+/** 在给定投影视图上按 operationId 精确读一个生命周期操作，不重放生命周期流。 */
+export async function readDeviceLifecycleOperation(
+  view: DurableProjectionReadContext,
+  operationId: string,
+): Promise<DeviceLifecycleOperation | undefined> {
+  return readLifecycleStored(await view.get(lifecycleOperationKey(operationId)), operationId)?.operation;
+}
 interface SharedLifecycleIndex {
   readonly index: RebuildableDurableProjectionIndex;
   readonly verifier: ProtocolSignatureVerifier;
@@ -36,7 +48,7 @@ export function registerDeviceLifecycleProjection(log: AuthorityCommitLog, verif
     return existing.index;
   }
   const index = log.durableProjection({
-    projectionId: LIFECYCLE_PROJECTION_ID, reducerVersion: 1, authenticated: true,
+    projectionId: LIFECYCLE_PROJECTION_ID, reducerVersion: 4, authenticated: true,
     inputs: { streams: [DEVICE_LIFECYCLE_STREAM] },
     reduce: (envelope, current) => reduceLifecycleIndex(envelope, current, verifier),
   });
@@ -103,6 +115,44 @@ export class DeviceLifecycleJournal {
 
   activeFor(deviceId: string): Promise<readonly DeviceLifecycleOperation[]> {
     return this.#read(current => this.#active(current, deviceId));
+  }
+
+  /** 某一种类的未终结操作：启动只恢复确有重提义务的这些，与已终结的历史无关。 */
+  activeOfKind(kind: DeviceLifecycleOperation["identity"]["kind"]): Promise<readonly DeviceLifecycleOperation[]> {
+    return this.#read(current => this.#active(current, undefined, kind));
+  }
+
+  /**
+   * 目标设备最后一个未中止的移除（终结的也在内）：分区里读一条，再按指针精确读。
+   * 终端专用服务的放行在访问时据此核验，不在启动时预装已移除的设备。
+   */
+  lastRemovalFor(deviceId: string): Promise<DeviceLifecycleOperation | undefined> {
+    return this.#read(async current => {
+      const prefix = lifecycleRemovalTargetPrefix(deviceId);
+      const entry = (await current.scan({ gte: prefix, lt: prefix + "\uffff" }, 1)).entries[0];
+      if (!entry) return undefined;
+      validateLifecycleRemovalTargetPointer(entry.key, entry.value, deviceId);
+      const stored = await resolveLifecyclePointer(current, entry.value);
+      if (!stored || stored.operation.identity.kind !== "executor-removal" || stored.operation.phase === "aborted" ||
+          lifecycleTargetDeviceId(stored.operation) !== deviceId) {
+        throw new DurableProjectionRecordBindingError("Lifecycle removal target directory does not bind a removal");
+      }
+      return this.#checked(stored.operation);
+    });
+  }
+
+  /** 终态路由定位摘要指向的未中止设备移除：终态入口按请求精确读一条，中止即查不到。 */
+  removalForRoute(routeDigest: string): Promise<DeviceLifecycleOperation | undefined> {
+    return this.#read(async current => {
+      const value = await current.get(lifecycleRemovalRouteKey(routeDigest));
+      if (value === undefined) return undefined;
+      const stored = await resolveLifecyclePointer(current, value);
+      if (!stored || stored.operation.identity.kind !== "executor-removal" || stored.operation.phase === "aborted" ||
+          stored.operation.peerEffects.find((effect) => effect.kind === "terminal-route")?.digest !== routeDigest) {
+        throw new DurableProjectionRecordBindingError("Lifecycle removal route directory does not bind its removal");
+      }
+      return this.#checked(stored.operation);
+    });
   }
 
   latest(kind: DeviceLifecycleOperation["identity"]["kind"], deviceId: string): Promise<DeviceLifecycleOperation | undefined> {

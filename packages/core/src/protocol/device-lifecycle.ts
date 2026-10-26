@@ -16,7 +16,9 @@ export type DeviceLifecyclePeerEffectKind =
   | "target-ready"
   | "issuer-revoked"
   | "target-cleanup-ready"
-  | "issuer-terminal";
+  | "issuer-terminal"
+  /** 终态路由：issuer 侧绑定定位摘要，target 侧反绑恢复制品。 */
+  | "terminal-route";
 
 export interface DeviceLifecyclePeerEffect {
   readonly kind: DeviceLifecyclePeerEffectKind;
@@ -558,6 +560,7 @@ export function validateDeviceLifecycleRecord(input: unknown): DeviceLifecycleRe
       "issuer-revoked",
       "target-cleanup-ready",
       "issuer-terminal",
+      "terminal-route",
     ]).has(effect.kind as string)) throw new TypeError("Lifecycle peer effect kind is invalid");
     digest(effect.digest, "Lifecycle peer effect digest");
     return {

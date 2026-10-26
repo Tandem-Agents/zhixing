@@ -170,8 +170,13 @@ import {
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
+  loadOrCreateIssuerTerminalRouteSecret,
+  resolveExecutorRemovalTerminalRoute,
   type ExecutorRemovalPublicState,
+  type ExecutorRemovalTerminalRoute,
 } from "./device-removal.js";
+import type { MeshRouteResolution } from "@zhixing/mesh/handshake";
+import { ExecutorRemovalRetrievalOwner } from "./device-removal-retrieval.js";
 import {
   DeviceRemovalIssuerMeshClient,
   DeviceRemovalTargetMeshClient,
@@ -443,6 +448,7 @@ export class DeviceRemovalTargetEffectAdapter
 {
   constructor(
     private readonly connections: Pick<MeshConnectionRegistry, "has" | "client">,
+    private readonly routeFor: (operationId: string) => Promise<ExecutorRemovalTerminalRoute>,
   ) {}
 
   async accept(input: {
@@ -457,7 +463,7 @@ export class DeviceRemovalTargetEffectAdapter
     }
     const result = await new DeviceRemovalTargetMeshClient(
       this.connections.client(input.targetDeviceId),
-    ).accept(input.accepted);
+    ).accept(input.accepted, await this.routeFor(input.accepted.operationId));
     return Object.freeze({ kind: "completed", result });
   }
 
@@ -528,6 +534,7 @@ export class MeshRuntimeAssembly
   implements AssignmentDataPlaneRemoteDirectory, AdvancementEvidenceRemoteDirectory {
   readonly services = new MeshServiceRegistry();
   readonly #terminalOnlyServices = new MeshServiceRegistry();
+  #removalRetrieval: ExecutorRemovalRetrievalOwner | undefined;
   readonly connections: MeshConnectionRegistry;
   readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter;
   readonly dutyMigrationAdmission: DeviceAdministrationDutyMigrationAdmissionPort;
@@ -563,7 +570,10 @@ export class MeshRuntimeAssembly
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
     this.connections = options.connections;
-    this.deviceRemovalTargetEffects = new DeviceRemovalTargetEffectAdapter(this.connections);
+    this.deviceRemovalTargetEffects = new DeviceRemovalTargetEffectAdapter(
+      this.connections,
+      (operationId) => this.#terminalRouteFor(operationId),
+    );
     this.dutyMigrationAdmission = new DeviceAdministrationDutyMigrationAdmissionAdapter(
       () => this.#readDutyMigrationPhysicalAdmission(),
     );
@@ -934,10 +944,14 @@ export class MeshRuntimeAssembly
         loadCurrentTrust: () => options.bootstrapStore.loadCurrentTrust(),
       }),
       services: this.services,
-      terminalOnly: {
+      terminalRoutes: {
         services: this.#terminalOnlyServices,
-        authorizePeer: (deviceId) =>
-          this.#deviceRemovalAuthority?.authorizesTarget(deviceId) === true,
+        resolve: (locator) => this.#resolveTerminalRoute(locator),
+        secret: async () => {
+          const issuerKeyId = this.#deviceRemovalIssuerKeyId;
+          if (!this.#deviceRemovalAuthority || issuerKeyId === undefined) return undefined;
+          return loadOrCreateIssuerTerminalRouteSecret(options.secretStore, issuerKeyId);
+        },
       },
       connections: this.connections,
       credentialRouteGuard: new CredentialExposureAuthority({
@@ -952,7 +966,7 @@ export class MeshRuntimeAssembly
         for (const deviceId of this.#deviceRemovalGuards.keys()) {
           if (!record.members.some((member) =>
             member.device.deviceId === deviceId && member.state === "active") &&
-            this.#deviceRemovalAuthority?.authorizesTarget(deviceId) !== true) {
+            (await this.#deviceRemovalAuthority?.authorizesTarget(deviceId)) !== true) {
             this.#deviceRemovalGuards.delete(deviceId);
           }
         }
@@ -1008,12 +1022,18 @@ export class MeshRuntimeAssembly
               ).abort(pendingRemovalAbort.operationId, pendingRemovalAbort.abort);
             }
             if (connection.peer.deviceId === this.#currentAnchorDeviceId()) {
-              await this.#deviceRemovalTarget.resumeWithIssuer(
-                new DeviceRemovalIssuerMeshClient(
-                  this.connections.client(connection.peer.deviceId),
-                  options.authority.verifier,
-                ),
-              );
+              // 撤销阶段的移除只由专用取回续做（成员连接随撤销断开），其余阶段照旧在成员连接上恢复
+              const revoking = await this.#deviceRemovalTarget.revokingOperation();
+              if (revoking) {
+                this.#removalRetrieval?.schedule(revoking);
+              } else {
+                await this.#deviceRemovalTarget.resumeWithIssuer(
+                  new DeviceRemovalIssuerMeshClient(
+                    this.connections.client(connection.peer.deviceId),
+                    options.authority.verifier,
+                  ),
+                );
+              }
             }
             await this.#plannedTransferRuntime.run(async () => {
               await this.#plannedAnchorOwner?.recoverBeforeAdmission();
@@ -1188,10 +1208,10 @@ export class MeshRuntimeAssembly
       this.services,
       {
         authority,
-        authorizeTarget: (deviceId) =>
-          authority.authorizesTarget(deviceId) ||
+        authorizeTarget: async (deviceId) =>
           this.#control.currentTrust().members.some((member) =>
-            member.state === "active" && member.device.deviceId === deviceId),
+            member.state === "active" && member.device.deviceId === deviceId) ||
+          await authority.authorizesTarget(deviceId),
       },
     );
     const disposeTerminal = registerDeviceRemovalIssuerMeshService(
@@ -1206,6 +1226,26 @@ export class MeshRuntimeAssembly
       disposeTerminal();
       disposeActive();
     };
+  }
+
+  /**
+   * 终态入口的窄解析：定位 → removal-route 精确读出 operation → 目标设备的传输身份精确读，
+   * 公钥与冻结的密钥代际必须一致；未知、中止或换代都返回空，在 TLS 之前拒绝。
+   */
+  async #resolveTerminalRoute(locator: string): Promise<MeshRouteResolution | undefined> {
+    const authority = this.#deviceRemovalAuthority;
+    if (!authority) return undefined;
+    return resolveExecutorRemovalTerminalRoute({
+      authority,
+      transportPeer: (deviceId) => this.options.bootstrapProjection.transportPeers.transportPeer(deviceId),
+    }, locator);
+  }
+
+  /** 交给 target 的终态路由材料：只给本机接受的、未中止的移除。 */
+  async #terminalRouteFor(operationId: string): Promise<ExecutorRemovalTerminalRoute> {
+    const authority = this.#deviceRemovalAuthority;
+    if (!authority) throw new Error("Only the current duty device can hand out a removal route");
+    return authority.terminalRoute(operationId);
   }
 
   async removableDevices() {
@@ -1318,7 +1358,7 @@ export class MeshRuntimeAssembly
       requestId: `${input.operationId}:retire-request`,
       operationId: removalOperationId,
     });
-    await this.#deviceRemovalTarget.accept(accepted);
+    await this.#deviceRemovalTarget.accept(accepted.receipt, accepted.route);
     const decision = await this.#deviceRemovalTarget.decide({
       operationId: removalOperationId,
       mode: "transfer",
@@ -1327,11 +1367,17 @@ export class MeshRuntimeAssembly
     if (decision.kind === "preflight-changed") {
       throw new Error("Accepted work changed; review and retry local retirement");
     }
-    const cleanupReady = await this.#deviceRemovalTarget.finish(
-      await client.ready(decision.receipt),
-    );
-    if (!cleanupReady) throw new Error("Retiring device did not produce cleanup-ready");
-    await this.#deviceRemovalTarget.finish(await client.cleanupReady(cleanupReady));
+    try {
+      const cleanupReady = await this.#deviceRemovalTarget.finish(
+        await client.ready(decision.receipt),
+      );
+      if (!cleanupReady) throw new Error("Retiring device did not produce cleanup-ready");
+      await this.#deviceRemovalTarget.finish(await client.cleanupReady(cleanupReady));
+    } catch (error) {
+      // 已产生 revocation-ready：内联续做中断时交给专用取回接续
+      this.#removalRetrieval?.schedule(removalOperationId);
+      throw error;
+    }
   }
 
   async plannedAnchorTargets(): Promise<readonly {
@@ -1565,6 +1611,7 @@ export class MeshRuntimeAssembly
     this.#worker?.stopAccepting();
     if (this.#controlStarted) await this.#control.stop();
     this.#controlStarted = false;
+    await this.#removalRetrieval?.stop();
     await this.#worker?.close();
     this.#disposePlannedAnchorTarget?.();
     this.#disposePlannedAnchorSource?.();
@@ -2061,6 +2108,15 @@ export class MeshRuntimeAssembly
       homeId: options.trust.homeId,
       deviceKey: options.authority.identityKey,
       verifier: options.authority.verifier,
+      secretStore: options.secretStore,
+      issuerRoute: async (issuerDeviceId) => {
+        const peer = await options.bootstrapProjection.transportPeers.transportPeer(issuerDeviceId);
+        const endpoint = (await options.bootstrapProjection.endpoints.loadEndpoints()).get(issuerDeviceId);
+        if (!peer || !endpoint) {
+          throw new Error("Device removal cannot freeze the accepting duty device's reachability");
+        }
+        return { peer, endpoint };
+      },
       ...(options.localConversationOwner
         ? { localOwner: options.localConversationOwner }
         : {}),
@@ -2094,6 +2150,12 @@ export class MeshRuntimeAssembly
         lifecycle.finalizeDeviceKey(operationId, identity),
       onRemoved: (operationId) => lifecycle.onRemoved(operationId),
     });
+    this.#removalRetrieval = new ExecutorRemovalRetrievalOwner({
+      target: () => this.#deviceRemovalTarget,
+      deviceKey: options.authority.identityKey,
+      verifier: options.authority.verifier,
+      onError: (error) => options.onError?.(error),
+    });
     this.#disposers.push(registerDeviceRemovalTargetMeshService(
       this.services,
       {
@@ -2104,6 +2166,7 @@ export class MeshRuntimeAssembly
         ),
         authorizeIssuer: (deviceId) =>
           deviceId === this.#control.currentTrust().issuer.deviceId,
+        onCompletionInterrupted: (operationId) => this.#removalRetrieval?.schedule(operationId),
       },
     ));
   }

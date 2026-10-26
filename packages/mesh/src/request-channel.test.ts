@@ -99,6 +99,37 @@ describe("MeshRequestChannel", () => {
     await Promise.all([left.close(), right.close()]);
   });
 
+  it("waits for an asynchronous authorization before invoking a service handler", async () => {
+    for (const allowed of [false, true]) {
+      const [leftConnection, rightConnection] = connections();
+      let handlerCalls = 0;
+      const registry = new MeshServiceRegistry();
+      registry.register("guarded.async", {
+        access: "write",
+        availability: "negotiated-version",
+        // 访问时的异步精确核验：拒绝的结果不能因为 Promise 本身为真而放行
+        authorize: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return allowed;
+        },
+        handler: async () => {
+          handlerCalls += 1;
+          return Buffer.from("ok");
+        },
+      });
+      const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry());
+      const right = new MeshRequestChannel(rightConnection, registry);
+      if (allowed) {
+        await expect(left.request("guarded.async", new Uint8Array())).resolves.toEqual(Buffer.from("ok"));
+        expect(handlerCalls).toBe(1);
+      } else {
+        await expect(left.request("guarded.async", new Uint8Array())).rejects.toMatchObject({ code: "unauthorized-peer" });
+        expect(handlerCalls).toBe(0);
+      }
+      await Promise.all([left.close(), right.close()]);
+    }
+  });
+
   it("rejects over-limit payloads before writing to the connection", async () => {
     const [leftConnection, rightConnection] = connections();
     const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry(), {

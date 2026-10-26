@@ -15,6 +15,7 @@ import type {
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   currentAndPreviousRendezvousKeys,
+  currentAndPreviousTerminalRendezvousKeys,
   MeshConnectionRegistry,
   MeshEndpointDirectory,
   MESH_ENDPOINT_SERVICE_ID,
@@ -27,6 +28,8 @@ import {
   acceptAuthenticatedMeshSocket,
   connectAuthenticatedMesh,
   createAuthenticatedMeshServer,
+  type MeshConnectionRoute,
+  type MeshRouteResolution,
   type TrustedMeshPeer,
 } from "@zhixing/mesh/handshake";
 import { OutboundMeshTunnel } from "@zhixing/mesh/outbound-tunnel";
@@ -41,6 +44,10 @@ import type {
 
 const PROTOCOL_RANGE = { min: "1", max: "1" } as const;
 const RELAY_HELLO_TTL_MS = 60_000;
+/** 中继上的终态接入注册：当前与前一时间窗各 2 条，数量与历史移除数无关。 */
+const TERMINAL_SLOTS_PER_WINDOW = 2;
+const TERMINAL_ROUTE_TASK = "terminal-route";
+const MAX_CONCURRENT_TERMINAL_ROUTES = 8;
 
 function activeTrust(record: CurrentTrustProjection): CurrentTrustProjection {
   const { homeId, trustEpoch, anchorEpoch, chainHead, issuer, recoveryRootPublicKey, recoveryBackupPublicKey,
@@ -69,9 +76,16 @@ export interface ProductionMeshControlPlaneOptions {
   readonly transportPeerDirectory: MeshTransportPeerDirectoryPersistencePort;
   readonly trustProjection: MeshControlPlaneTrustProjectionPort;
   readonly services: MeshServiceRegistry;
-  readonly terminalOnly?: {
+  /**
+   * 终态入口：握手携带终态定位的连接按请求解析身份，只挂这里的注册表；
+   * 命令与连接绑定的 operation 由领域核对。
+   */
+  readonly terminalRoutes?: {
     readonly services: MeshServiceRegistry;
-    readonly authorizePeer: (deviceId: string) => boolean;
+    /** 按定位精确解析可信身份与 operation 绑定，只做本机读。 */
+    readonly resolve: (locator: string, signal: AbortSignal) => Promise<MeshRouteResolution | undefined>;
+    /** issuer 自有的终态路由秘密，用于派生中继终态接入键；本机不是移除 issuer 时为空。 */
+    readonly secret: () => Promise<string | undefined>;
   };
   readonly connections?: MeshConnectionRegistry;
   readonly localEndpoint?: MeshEndpointDescriptor;
@@ -95,6 +109,8 @@ export interface ProductionMeshControlPlaneOptions {
 /** Owns direct listeners, relay registrations and the non-anchor reconnect loop. */
 export class ProductionMeshControlPlane {
   readonly connections: MeshConnectionRegistry;
+  /** 终态入口的连接单独登记，不顶替同一设备的成员连接，也不承载对它的反向调用。 */
+  readonly terminalConnections: MeshConnectionRegistry;
   readonly #abort = new AbortController();
   readonly #tasks = new Set<Promise<void>>();
   readonly #peerControllers = new Map<string, AbortController>();
@@ -108,6 +124,7 @@ export class ProductionMeshControlPlane {
 
   constructor(private readonly options: ProductionMeshControlPlaneOptions) {
     this.connections = options.connections ?? new MeshConnectionRegistry({ logging: options.logging });
+    this.terminalConnections = new MeshConnectionRegistry({ logging: options.logging });
     this.#trust = activeTrust(options.trust);
     for (const peer of options.transportPeers) {
       this.#peers.set(peer.identity.deviceId, peer);
@@ -136,7 +153,7 @@ export class ProductionMeshControlPlane {
     } else if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
     } else {
-      this.#startDialer();
+      await this.#startDialer();
     }
     if (this.options.watchTrust !== false) this.#track(this.#watchTrust());
   }
@@ -171,7 +188,7 @@ export class ProductionMeshControlPlane {
       throw new Error("Mesh trust reconciliation rejected a chain rollback");
     }
     const trustChanged = canonicalize(record) !== canonicalize(this.#trust);
-    const peersChanged = await this.#refreshTransportPeers();
+    const peersChanged = await this.#ensureMemberTransportPeers(record);
     if (!trustChanged && !peersChanged) return;
     this.#trust = record;
     await this.options.onTrustReconciled?.(record);
@@ -193,16 +210,16 @@ export class ProductionMeshControlPlane {
           requiredPeerRoles.some((role) => member.roles.includes(role)))
         .map((member) => member.device.deviceId),
     );
-    for (const peerId of this.#peers.keys()) {
+    // 只有曾是成员的对端在这里：撤销即停窗口、断连接、删 pairwise secret 并移出常驻集合。
+    for (const peerId of [...this.#peers.keys()]) {
       if (!active.has(peerId)) {
         this.#stopPeerTask(peerId, new Error("Mesh peer trust was revoked"));
         await this.connections.disconnect(peerId, new Error("Mesh peer trust was revoked"));
-        if (!this.#isTerminalOnlyPeer(peerId)) {
-          await this.options.secretStore.delete({
-            kind: "rendezvous",
-            bindingId: peerId,
-          });
-        }
+        await this.options.secretStore.delete({
+          kind: "rendezvous",
+          bindingId: peerId,
+        });
+        this.#peers.delete(peerId);
       }
     }
     const requiredPeers = record.members.filter((member) =>
@@ -243,6 +260,7 @@ export class ProductionMeshControlPlane {
       : Promise.resolve();
     server?.close();
     await this.connections.close(reason);
+    await this.terminalConnections.close(reason);
     await closed;
   }
 
@@ -254,29 +272,33 @@ export class ProductionMeshControlPlane {
     if (this.#isCurrentAnchor()) {
       await this.#startAnchor();
     } else {
-      this.#startDialer();
+      await this.#startDialer();
     }
   }
 
-  async #refreshTransportPeers(): Promise<boolean> {
+  /** 只为缺传输身份的 active 成员按设备精确补读；稳态下每次轮询零读取。 */
+  async #ensureMemberTransportPeers(record: CurrentTrustProjection): Promise<boolean> {
     let changed = false;
-    for (const peer of await this.options.transportPeerDirectory.loadTransportPeers()) {
-      const deviceId = peer.identity.deviceId;
-      const current = this.#peers.get(deviceId);
-      if (current && canonicalize(current) !== canonicalize(peer)) {
+    for (const member of record.members) {
+      const deviceId = member.device.deviceId;
+      if (member.state !== "active" || deviceId === this.options.localIdentity.deviceId || this.#peers.has(deviceId)) {
+        continue;
+      }
+      const peer = await this.options.transportPeerDirectory.transportPeer(deviceId);
+      if (!peer) continue;
+      if (peer.identity.deviceId !== deviceId) {
         throw new Error(`Mesh transport identity changed for ${deviceId}`);
       }
-      if (!current) {
-        this.#peers.set(deviceId, peer);
-        changed = true;
-      }
+      this.#peers.set(deviceId, peer);
+      changed = true;
     }
     return changed;
   }
 
   async #startAnchor(): Promise<void> {
-    const trustedPeers = this.#authorizedPeers(["anchor", "executor", "surface"]);
-    if (trustedPeers.length === 0) return;
+    const trustedPeers = await this.#authorizedPeers(["anchor", "executor", "surface"]);
+    const routes = this.options.terminalRoutes;
+    if (trustedPeers.length === 0 && !routes) return;
     const listen = this.options.configuration.anchorListen;
     if (listen) {
       const server = await createAuthenticatedMeshServer(
@@ -289,6 +311,11 @@ export class ProductionMeshControlPlane {
     }
     const relay = this.options.configuration.relayRegistration;
     if (!relay) return;
+    const secret = routes ? await routes.secret() : undefined;
+    if (secret !== undefined) {
+      this.#trackPeerTask(TERMINAL_ROUTE_TASK, (signal) =>
+        this.#maintainTerminalWindows(secret, relay, signal));
+    }
     for (const peer of trustedPeers) {
       const ref = {
         kind: "rendezvous",
@@ -316,7 +343,7 @@ export class ProductionMeshControlPlane {
         open: async (signal) => {
           try {
             const keys = currentAndPreviousRendezvousKeys(secret);
-            const socket = await openRelaySocket(relay, keys[offset]!, signal);
+            const socket = await openRelaySocket(relay, keys[offset]!, "accept", signal);
             return await acceptAuthenticatedMeshSocket(this.#serverSecurity([peer]), socket);
           } catch (error) {
             this.#report(error);
@@ -338,8 +365,48 @@ export class ProductionMeshControlPlane {
     }
   }
 
-  #startDialer(): void {
-    const anchors = this.#authorizedPeers(["anchor"]);
+  /**
+   * 中继上固定数量的终态接入注册：只接经终态定位握手的连接，每条被消费或断开后由出站隧道重挂，
+   * 退避沿用既有策略，槽位随隧道结束释放。
+   */
+  async #maintainTerminalWindows(
+    secret: string,
+    relay: { readonly host: string; readonly port: number },
+    signal: AbortSignal,
+  ): Promise<void> {
+    while (!signal.aborted) {
+      const window = new AbortController();
+      const abortWindow = () => window.abort(signal.reason);
+      signal.addEventListener("abort", abortWindow, { once: true });
+      const offsets = [0, 1].flatMap((offset) => Array.from({ length: TERMINAL_SLOTS_PER_WINDOW }, () => offset));
+      const tunnels = offsets.map((offset) => new OutboundMeshTunnel({
+        open: async (signal) => {
+          try {
+            const keys = currentAndPreviousTerminalRendezvousKeys(secret);
+            const socket = await openRelaySocket(relay, keys[offset]!, "accept", signal);
+            return await acceptAuthenticatedMeshSocket(this.#serverSecurity([]), socket);
+          } catch (error) {
+            this.#report(error);
+            throw error;
+          }
+        },
+        onConnection: (connection) => this.#accept(connection),
+      }).run(window.signal));
+      try {
+        await Promise.race([
+          Promise.all(tunnels),
+          abortableDelay(millisecondsUntilNextUtcDay(), signal),
+        ]);
+      } finally {
+        window.abort(new Error("Mesh terminal rendezvous window rotated"));
+        await Promise.all(tunnels.map((task) => task.catch(() => undefined)));
+        signal.removeEventListener("abort", abortWindow);
+      }
+    }
+  }
+
+  async #startDialer(): Promise<void> {
+    const anchors = await this.#authorizedPeers(["anchor"]);
     const issuerId = this.#trust.issuer.deviceId;
     const anchor = anchors.find((candidate) => candidate.identity.deviceId === issuerId);
     if (!anchor) throw new Error("Mesh executor has no active issuer anchor peer");
@@ -416,7 +483,7 @@ export class ProductionMeshControlPlane {
         if (!secret) throw new Error("Anchor relay rendezvous secret is unavailable");
         for (const key of currentAndPreviousRendezvousKeys(secret)) {
           try {
-            const socket = await openRelaySocket(transport.relay, key, signal);
+            const socket = await openRelaySocket(transport.relay, key, "connect", signal);
             return await connectAuthenticatedMesh({
               socket,
               trustedPeer: peer,
@@ -437,18 +504,22 @@ export class ProductionMeshControlPlane {
   }
 
   async #accept(connection: SecureMeshConnection): Promise<void> {
+    // 入口用途由握手绑定到连接：终态入口只挂终态注册表，不看对端是否仍是成员。
+    if (connection.route) {
+      if (connection.route.kind !== "terminal" || !this.options.terminalRoutes) {
+        await connection.close(new Error("Mesh route is not served here"));
+        return;
+      }
+      this.terminalConnections.attach(connection, this.options.terminalRoutes.services, { diagnosable: false });
+      return;
+    }
     const active = this.#isAuthorized(connection.peer.deviceId, this.#compatiblePeerRoles());
-    const terminalOnly = !active && this.#isTerminalOnlyPeer(connection.peer.deviceId);
-    if (!active && !terminalOnly) {
+    if (!active) {
       await connection.close(new Error("Mesh peer is no longer authorized"));
       return;
     }
-    this.connections.attach(
-      connection,
-      terminalOnly ? this.options.terminalOnly!.services : this.options.services,
-      { diagnosable: active },
-    );
-    if (active && this.options.localEndpoint) {
+    this.connections.attach(connection, this.options.services, { diagnosable: true });
+    if (this.options.localEndpoint) {
       const payload = Buffer.from(canonicalize(this.options.localEndpoint), "utf8");
       this.#track(fulfillConnectionLifetimeObligation({
         connectionClosed: connection.closed,
@@ -464,19 +535,18 @@ export class ProductionMeshControlPlane {
         onError: (error) => this.#report(error),
       }));
     }
-    if (active) await this.options.onConnection?.(connection);
+    await this.options.onConnection?.(connection);
   }
 
-  #authorizedPeers(roles: readonly DeviceRole[]): TrustedMeshPeer[] {
+  async #authorizedPeers(roles: readonly DeviceRole[]): Promise<TrustedMeshPeer[]> {
     const active = this.#trust.members
       .filter((member) =>
         member.state === "active" &&
         member.device.deviceId !== this.options.localIdentity.deviceId &&
         roles.some((role) => member.roles.includes(role)))
       .map((member) => member.device.deviceId);
-    const historical = [...this.#peers.keys()].filter((deviceId) =>
-      deviceId !== this.options.localIdentity.deviceId && this.#isTerminalOnlyPeer(deviceId));
-    return [...new Set([...active, ...historical])].sort().map((deviceId) => {
+    // 成员入口与常驻注册只为当前 active 成员；已不是成员的设备只走终态入口。
+    return [...new Set(active)].sort().map((deviceId) => {
       const peer = this.#peers.get(deviceId);
       if (!peer) {
         throw new Error(
@@ -500,19 +570,21 @@ export class ProductionMeshControlPlane {
     );
   }
 
-  #isTerminalOnlyPeer(deviceId: string): boolean {
-    return this.options.terminalOnly?.authorizePeer(deviceId) === true && this.#peers.has(deviceId);
-  }
-
   #serverSecurity(trustedPeers: readonly TrustedMeshPeer[]) {
+    const routes = this.options.terminalRoutes;
     return {
       identity: this.options.localIdentity,
       protocolRange: PROTOCOL_RANGE,
       trustedPeers,
       replayWindow: this.#replayWindow,
-      authorizePeer: (identity: { deviceId: string }) =>
-        this.#isAuthorized(identity.deviceId, this.#compatiblePeerRoles()) ||
-        this.#isTerminalOnlyPeer(identity.deviceId),
+      ...(routes
+        ? { routes: { resolve: routes.resolve, maxConcurrent: MAX_CONCURRENT_TERMINAL_ROUTES } }
+        : {}),
+      // 终态定位连接的身份与资格已由解析端口在握手前后两次精确核过；成员入口只认当前 active 成员。
+      authorizePeer: (identity: { deviceId: string }, _signal: AbortSignal, route?: MeshConnectionRoute) =>
+        route
+          ? route.kind === "terminal" && routes !== undefined
+          : this.#isAuthorized(identity.deviceId, this.#compatiblePeerRoles()),
       onHandshakeError: (error: Error) => this.#report(error),
     };
   }
@@ -566,12 +638,15 @@ export class ProductionMeshControlPlane {
   }
 }
 
-async function openRelaySocket(
+/** 连上盲中继并发出会合 hello；之后的字节通道交给端到端握手。 */
+export async function openRelaySocket(
   endpoint: { readonly host: string; readonly port: number },
   key: `rzv:${string}`,
+  role: "accept" | "connect",
   signal: AbortSignal,
 ): Promise<Socket> {
   if (signal.aborted) throw asError(signal.reason);
+  // signal 绑住套接字的整个生命周期：各调用方的 abort 都意味着拆掉这条连接（等握手中的入口、已建立的会话）
   const socket = connectNet({
     host: endpoint.host,
     port: endpoint.port,
@@ -581,7 +656,7 @@ async function openRelaySocket(
     await once(socket, "connect");
     await writeSocket(
       socket,
-      encodeBlindRendezvousHello({ v: 1, key, ttlMs: RELAY_HELLO_TTL_MS }),
+      encodeBlindRendezvousHello({ v: 1, key, role, ttlMs: RELAY_HELLO_TTL_MS }),
       signal,
     );
     return socket;

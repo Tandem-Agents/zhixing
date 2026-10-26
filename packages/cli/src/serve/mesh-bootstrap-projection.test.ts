@@ -16,14 +16,16 @@ describe("Mesh bootstrap projection persistence boundary", () => {
     const directory = new MeshEndpointDirectory();
     const loadEndpoints = vi.fn(async () => directory);
     const acceptEndpoint = vi.fn(async (value: unknown) => value as never);
-    const loadTransportPeers = vi.fn(async () => []);
+    const transportPeer = vi.fn(async () => undefined);
+    const listTransportPeers = vi.fn(async () => []);
     const acceptTransportPeer = vi.fn(async () => undefined);
     const markBootstrapComplete = vi.fn(async () => undefined);
     const bootstrapCompleted = vi.fn(async () => true);
     const ports = createMeshBootstrapProjectionPorts({
       loadEndpoints,
       acceptEndpoint,
-      loadTransportPeers,
+      transportPeer,
+      listTransportPeers,
       acceptTransportPeer,
       markBootstrapComplete,
       bootstrapCompleted,
@@ -39,7 +41,8 @@ describe("Mesh bootstrap projection persistence boundary", () => {
     ]);
     expect(Object.keys(ports.transportPeers).sort()).toEqual([
       "acceptTransportPeer",
-      "loadTransportPeers",
+      "listTransportPeers",
+      "transportPeer",
     ]);
     expect(Object.keys(ports.completions).sort()).toEqual([
       "bootstrapCompleted",
@@ -48,13 +51,15 @@ describe("Mesh bootstrap projection persistence boundary", () => {
 
     await ports.endpoints.loadEndpoints();
     await ports.endpoints.acceptEndpoint({ v: 1 });
-    await ports.transportPeers.loadTransportPeers();
+    await ports.transportPeers.transportPeer("peer");
+    await ports.transportPeers.listTransportPeers();
     await ports.transportPeers.acceptTransportPeer({} as never);
     await ports.completions.markBootstrapComplete("peer", "offer");
     await ports.completions.bootstrapCompleted("peer", "offer");
     expect(loadEndpoints).toHaveBeenCalledOnce();
     expect(acceptEndpoint).toHaveBeenCalledOnce();
-    expect(loadTransportPeers).toHaveBeenCalledOnce();
+    expect(transportPeer).toHaveBeenCalledWith("peer");
+    expect(listTransportPeers).toHaveBeenCalledOnce();
     expect(acceptTransportPeer).toHaveBeenCalledOnce();
     expect(markBootstrapComplete).toHaveBeenCalledOnce();
     expect(bootstrapCompleted).toHaveBeenCalledOnce();
@@ -64,7 +69,7 @@ describe("Mesh bootstrap projection persistence boundary", () => {
     const root = await createTempDir("mesh-bootstrap-projection");
     const distributedRoot = path.join(root, "distributed-runtime");
     const endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
-    const peerFile = path.join(distributedRoot, "mesh-peers.json");
+    const peerDirectory = path.join(distributedRoot, "mesh-peers");
     const completionFile = path.join(distributedRoot, "mesh-bootstrap-completions.json");
     const store = new FileMeshBootstrapStore(root);
     const ports = createMeshBootstrapProjectionPorts(store);
@@ -73,7 +78,7 @@ describe("Mesh bootstrap projection persistence boundary", () => {
       expect(ports.transportPeers).not.toHaveProperty("authorityLog");
       expect(ports.completions).not.toHaveProperty("artifactStore");
       expect((await ports.endpoints.loadEndpoints()).list()).toEqual([]);
-      expect(await ports.transportPeers.loadTransportPeers()).toEqual([]);
+      expect(await ports.transportPeers.listTransportPeers()).toEqual([]);
       expect(await ports.completions.bootstrapCompleted("peer-a", "offer-a")).toBe(false);
 
       const key = await DeviceKey.generate();
@@ -96,12 +101,19 @@ describe("Mesh bootstrap projection persistence boundary", () => {
         platform: "headless",
         enrolledAt: "2026-09-02T00:00:00.000Z",
       });
-      await ports.transportPeers.acceptTransportPeer({
-        identity,
+      const peer = { identity, rootCertificatePem: key.rootCertificatePem };
+      await ports.transportPeers.acceptTransportPeer(peer);
+      await ports.transportPeers.acceptTransportPeer(peer);
+      // 按设备键一份文件：精确读命中这台设备，别的设备不读出任何东西
+      expect(await ports.transportPeers.transportPeer(key.deviceId)).toEqual(peer);
+      expect(await ports.transportPeers.transportPeer("fp:uunknown")).toBeUndefined();
+      expect((await readdir(peerDirectory))).toHaveLength(1);
+      expect((await ports.transportPeers.listTransportPeers()).map((item) =>
+        item.identity.deviceId)).toEqual([key.deviceId]);
+      await expect(ports.transportPeers.acceptTransportPeer({
+        identity: { ...identity, displayName: "renamed peer" },
         rootCertificatePem: key.rootCertificatePem,
-      });
-      expect((await ports.transportPeers.loadTransportPeers()).map((peer) =>
-        peer.identity.deviceId)).toEqual([key.deviceId]);
+      })).rejects.toThrow("identity changed");
 
       await ports.completions.markBootstrapComplete("peer-a", "offer-a");
       await ports.completions.markBootstrapComplete("peer-a", "offer-a");
@@ -115,9 +127,10 @@ describe("Mesh bootstrap projection persistence boundary", () => {
       expect((await readdir(distributedRoot)).some((entry) => entry.endsWith(".tmp")))
         .toBe(false);
 
-      await mkdir(distributedRoot, { recursive: true });
-      await writeFile(peerFile, "{not-json", "utf8");
-      await expect(ports.transportPeers.loadTransportPeers())
+      await mkdir(peerDirectory, { recursive: true });
+      const [file] = await readdir(peerDirectory);
+      await writeFile(path.join(peerDirectory, file!), "{not-json", "utf8");
+      await expect(ports.transportPeers.transportPeer(key.deviceId))
         .rejects.toThrow("not valid JSON");
     } finally {
       await store.stopStorageMaintenance();

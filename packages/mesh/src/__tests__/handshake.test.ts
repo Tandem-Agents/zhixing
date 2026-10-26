@@ -693,3 +693,119 @@ describe("production log handoff on authenticated local TLS", () => {
     expect(JSON.stringify(all)).not.toContain("private-payload");
   }, 15000);
 });
+
+describe("terminal route resolution on the mutually authenticated handshake", () => {
+  const LOCATOR = "a".repeat(52);
+  const OTHER_LOCATOR = "b".repeat(52);
+
+  async function routedServer(input: {
+    readonly responder: TestDevice;
+    readonly member: TestDevice;
+    readonly routes: Readonly<Record<string, TrustedMeshPeer>>;
+    readonly maxConcurrent?: number;
+    readonly slowResolve?: Promise<void>;
+  }) {
+    const accepted: SecureMeshConnection[] = [];
+    const errors: Error[] = [];
+    const authorizations: unknown[] = [];
+    const resolutions: string[] = [];
+    const server = await LIVE_TLS_TIME.createAuthenticatedServer(
+      {
+        identity: input.responder.key,
+        trustedPeers: [input.member.peer],
+        protocolRange: RANGE,
+        replayWindow: new HandshakeReplayWindow(),
+        routes: {
+          resolve: async (locator) => {
+            resolutions.push(locator);
+            await input.slowResolve;
+            const peer = input.routes[locator];
+            return peer ? { peer, binding: `operation:${locator.slice(0, 4)}` } : undefined;
+          },
+          ...(input.maxConcurrent ? { maxConcurrent: input.maxConcurrent } : {}),
+        },
+        authorizePeer: (identity, _signal, route) => {
+          authorizations.push({ deviceId: identity.deviceId, route: route ?? null });
+          return true;
+        },
+        onHandshakeError: (error) => { errors.push(error); },
+      },
+      (connection) => { accepted.push(connection); },
+    );
+    return { port: await listen(server), accepted, errors, authorizations, resolutions };
+  }
+
+  function connectRouted(local: TestDevice, responder: TestDevice, port: number, locator?: string) {
+    return LIVE_TLS_TIME.openAuthenticatedConnection({
+      host: "127.0.0.1",
+      port,
+      identity: local.key,
+      trustedPeer: responder.peer,
+      protocolRange: RANGE,
+      authorizePeer: () => true,
+      ...(locator ? { locator } : {}),
+    });
+  }
+
+  it("trusts only the root resolved for the presented locator and binds the connection's purpose", async () => {
+    const [responder, member, historical, other] = await Promise.all(
+      ["anchor", "member", "historical", "other"].map(createDevice));
+    const routed = await routedServer({ responder, member, routes: { [LOCATOR]: historical.peer } });
+
+    const terminal = await connectRouted(historical, responder, routed.port, LOCATOR);
+    await vi.waitFor(() => expect(routed.accepted).toHaveLength(1));
+    expect(routed.accepted[0]!.peer.deviceId).toBe(historical.peer.identity.deviceId);
+    expect(routed.accepted[0]!.route).toEqual({ kind: "terminal", binding: "operation:aaaa" });
+    // 握手前选上下文、握手后再核一次：同一定位解析两次
+    expect(routed.resolutions).toEqual([LOCATOR, LOCATOR]);
+    expect(routed.authorizations).toEqual([{
+      deviceId: historical.peer.identity.deviceId,
+      route: { kind: "terminal", binding: "operation:aaaa" },
+    }]);
+    await terminal.close();
+
+    // 成员入口照旧：不触发解析，连接没有 route
+    const memberConnection = await connectRouted(member, responder, routed.port);
+    await vi.waitFor(() => expect(routed.accepted).toHaveLength(2));
+    expect(routed.accepted[1]!.route).toBeUndefined();
+    expect(routed.resolutions).toHaveLength(2);
+    await memberConnection.close();
+
+    // 冒用别人的定位、成员冒用定位、历史设备走成员入口、未知定位：都在认证完成前拒绝
+    for (const [client, locator] of [
+      [other, LOCATOR],
+      [member, LOCATOR],
+      [historical, undefined],
+      [historical, OTHER_LOCATOR],
+    ] as const) {
+      await expect(connectRouted(client, responder, routed.port, locator)).rejects.toBeInstanceOf(Error);
+    }
+    expect(routed.accepted).toHaveLength(2);
+    expect(routed.authorizations).toHaveLength(2);
+  }, 15000);
+
+  it("rejects locators beyond the bounded resolution capacity without blocking the member entry", async () => {
+    const [responder, member, historical] = await Promise.all(["anchor", "member", "historical"].map(createDevice));
+    const gate = deferred<void>();
+    const routed = await routedServer({
+      responder,
+      member,
+      routes: { [LOCATOR]: historical.peer },
+      maxConcurrent: 1,
+      slowResolve: gate.promise,
+    });
+    const first = connectRouted(historical, responder, routed.port, LOCATOR);
+    await vi.waitFor(() => expect(routed.resolutions).toHaveLength(1));
+    await expect(connectRouted(historical, responder, routed.port, LOCATOR)).rejects.toBeInstanceOf(Error);
+    const memberConnection = await connectRouted(member, responder, routed.port);
+    expect(memberConnection.route).toBeUndefined();
+    gate.resolve();
+    await (await first).close();
+    await memberConnection.close();
+  });
+
+  it("rejects a malformed locator on the client before connecting", async () => {
+    const [responder, historical] = await Promise.all(["anchor", "historical"].map(createDevice));
+    await expect(connectRouted(historical, responder, 1, "zhixing-mesh")).rejects.toThrow(/locator is invalid/u);
+  });
+});

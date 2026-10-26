@@ -94,10 +94,13 @@ describe("device removal target effect adapter", () => {
     const client = vi.fn(() => {
       throw new Error("offline target client must not be resolved");
     });
+    const routeFor = vi.fn(async () => {
+      throw new Error("an offline target must not receive route material");
+    });
     const adapter = new DeviceRemovalTargetEffectAdapter({
       has: vi.fn(() => false),
       client,
-    });
+    }, routeFor);
 
     await expect(adapter.accept({
       targetDeviceId: "device-target",
@@ -115,6 +118,7 @@ describe("device removal target effect adapter", () => {
       currentDutyDeviceId: "device-duty",
     })).resolves.toEqual({ kind: "unavailable" });
     expect(client).not.toHaveBeenCalled();
+    expect(routeFor).not.toHaveBeenCalled();
   });
 
   it("returns completed results from the same selected target client", async () => {
@@ -130,15 +134,20 @@ describe("device removal target effect adapter", () => {
         ? { v: 1, conversations: ["conv-main"], hasAcceptedWork: true }
         : { v: 1, state }), "utf8");
     });
+    const route = { locator: "l".repeat(52), secret: "s".repeat(43) };
+    const routeFor = vi.fn(async () => route);
     const adapter = new DeviceRemovalTargetEffectAdapter({
       has: vi.fn(() => true),
       client: vi.fn(() => ({ request })),
-    });
+    }, routeFor);
 
     const accepted = await adapter.accept({
       targetDeviceId: "device-target",
-      accepted: {} as never,
+      accepted: { operationId: "operation-1" } as never,
     });
+    // 终态路由材料随 accept 命令经这条已认证连接交付，按 operation 取得
+    expect(routeFor).toHaveBeenCalledWith("operation-1");
+    expect(JSON.parse(request.mock.calls[0]![1].toString())).toMatchObject({ op: "accept", route });
     const aborted = await adapter.abort({
       targetDeviceId: "device-target",
       operationId: "operation-1",
@@ -168,7 +177,7 @@ describe("device removal target effect adapter", () => {
     const adapter = new DeviceRemovalTargetEffectAdapter({
       has: vi.fn(() => true),
       client: vi.fn(() => ({ request: vi.fn(async () => Promise.reject(failure)) })),
-    });
+    }, vi.fn(async () => ({ locator: "l".repeat(52), secret: "s".repeat(43) })));
 
     await expect(adapter.decide({
       targetDeviceId: "device-target",

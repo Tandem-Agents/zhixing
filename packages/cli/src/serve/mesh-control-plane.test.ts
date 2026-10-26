@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import type {
@@ -7,6 +8,8 @@ import type {
   SecretStorePort,
 } from "@zhixing/core/contracts";
 import {
+  createTerminalRouteSecret,
+  currentAndPreviousTerminalRendezvousKeys,
   MeshConnectionRegistry,
   MeshEndpointDirectory,
 } from "@zhixing/mesh/bootstrap";
@@ -15,6 +18,8 @@ import {
   readBlindRendezvousHello,
 } from "@zhixing/mesh/blind-rendezvous";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { connectAuthenticatedMesh } from "@zhixing/mesh/handshake";
+import { MeshRequestChannel } from "@zhixing/mesh/request-channel";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { createTempDir } from "@zhixing/test-utils";
 import { ServerStateFile } from "@zhixing/server";
@@ -23,7 +28,7 @@ import { inspectLocalHealth } from "../maintenance/doctor.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
-import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
+import { openRelaySocket, ProductionMeshControlPlane } from "./mesh-control-plane.js";
 
 describe("production mesh control plane", () => {
   const controls: ProductionMeshControlPlane[] = [];
@@ -32,6 +37,30 @@ describe("production mesh control plane", () => {
   afterEach(async () => {
     await Promise.all(controls.splice(0).map((control) => control.stop()));
     await Promise.all(relayClosers.splice(0).map((close) => close()));
+  });
+
+  it("keeps a relay socket bound to its stop signal without letting the abort error escape", async () => {
+    const accepted = new Set<import("node:net").Socket>();
+    const relay = createServer((socket) => {
+      accepted.add(socket);
+      socket.on("error", () => undefined);
+    });
+    relay.listen(0, "127.0.0.1");
+    await once(relay, "listening");
+    const address = relay.address();
+    if (!address || typeof address === "string") throw new Error("missing relay port");
+    relayClosers.push(() => new Promise<void>((resolve) => {
+      for (const socket of accepted) socket.destroy();
+      relay.close(() => resolve());
+    }));
+    const stop = new AbortController();
+    const [key] = currentAndPreviousTerminalRendezvousKeys(createTerminalRouteSecret());
+    const socket = await openRelaySocket({ host: "127.0.0.1", port: address.port }, key, "connect", stop.signal);
+    // 交给 TLS 之前停止：原始套接字随 signal 销毁（等对端握手的中继入口靠它在停止时释放），abort 带的错误不外泄
+    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    stop.abort(new Error("retrieval stopped before TLS took the socket"));
+    await closed;
+    expect(socket.destroyed).toBe(true);
   });
 
   it("lets an empty-role non-anchor dial without opening a local listener", async () => {
@@ -399,6 +428,107 @@ describe("production mesh control plane", () => {
     ])).resolves.toBeUndefined();
   });
 
+  it("fixes a routed connection to terminal services by its entry, whether or not the peer is still a member", async () => {
+    const LOCATOR = "r".repeat(52);
+    for (const memberState of ["revoked", "active"] as const) {
+      const [anchor, executor] = await Promise.all([
+        createDevice(`terminal-anchor-${memberState}`),
+        createDevice(`terminal-executor-${memberState}`),
+      ]);
+      const port = await freePort();
+      const executorTrust = trustRecord(anchor.identity, executor.identity);
+      const anchorTrust = {
+        ...executorTrust,
+        members: executorTrust.members.map((member) =>
+          member.device.deviceId === executor.identity.deviceId ? { ...member, state: memberState } : member),
+      };
+      const ordinary = new MeshServiceRegistry();
+      ordinary.register("ordinary.echo", {
+        access: "read",
+        availability: "negotiated-version",
+        handler: async () => Buffer.from("ordinary"),
+      });
+      const terminal = new MeshServiceRegistry();
+      terminal.register("terminal.echo", {
+        access: "read",
+        availability: "negotiated-version",
+        handler: async (_payload, connection) => Buffer.from(connection.route?.binding ?? "none"),
+      });
+      const resolved: string[] = [];
+      const anchorControl = new ProductionMeshControlPlane({
+        localIdentity: anchor.key,
+        trust: anchorTrust,
+        configuration: {
+          enabledRoles: ["anchor"],
+          anchorListen: { bind: { host: "127.0.0.1", port } },
+        },
+        endpoints: new MeshEndpointDirectory(),
+        transportPeers: memberState === "active" ? [executor.peer] : [],
+        secretStore: new MemorySecretStore(),
+        ...controlPlanePersistence(new FileMeshBootstrapStore(
+          await createTempDir(`mesh-terminal-anchor-${memberState}`),
+        )),
+        services: ordinary,
+        terminalRoutes: {
+          services: terminal,
+          resolve: async (locator) => {
+            resolved.push(locator);
+            return locator === LOCATOR ? { peer: executor.peer, binding: "operation-1" } : undefined;
+          },
+          secret: async () => undefined,
+        },
+      });
+      const executorControl = new ProductionMeshControlPlane({
+        localIdentity: executor.key,
+        trust: executorTrust,
+        configuration: { enabledRoles: ["executor"] },
+        endpoints: new MeshEndpointDirectory([{
+          v: 1,
+          deviceId: anchor.identity.deviceId,
+          transports: [{ kind: "direct", host: "127.0.0.1", port }],
+          revision: 1,
+          at: new Date().toISOString(),
+        }]),
+        transportPeers: [anchor.peer],
+        secretStore: new MemorySecretStore(),
+        ...controlPlanePersistence(new FileMeshBootstrapStore(
+          await createTempDir(`mesh-terminal-executor-${memberState}`),
+        )),
+        services: new MeshServiceRegistry(),
+        watchTrust: false,
+      });
+      controls.push(anchorControl, executorControl);
+      await anchorControl.start();
+      await executorControl.start();
+      if (memberState === "active") {
+        await waitFor(() => anchorControl.connections.has(executor.identity.deviceId));
+      } else {
+        // 已撤销的设备走成员入口：成员身份集里没有它，握手即拒，也不触发终态解析
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        expect(anchorControl.connections.has(executor.identity.deviceId)).toBe(false);
+        expect(resolved).toEqual([]);
+      }
+
+      const routed = await connectAuthenticatedMesh({
+        host: "127.0.0.1",
+        port,
+        trustedPeer: anchor.peer,
+        identity: executor.key,
+        protocolRange: { min: "1", max: "1" },
+        authorizePeer: (identity) => identity.deviceId === anchor.identity.deviceId,
+        locator: LOCATOR,
+      });
+      const channel = new MeshRequestChannel(routed, new MeshServiceRegistry());
+      await waitFor(() => anchorControl.terminalConnections.has(executor.identity.deviceId));
+      expect(Buffer.from(await channel.request("terminal.echo", new Uint8Array())).toString()).toBe("operation-1");
+      // 终态入口上普通服务不存在，仍是成员也一样
+      await expect(channel.request("ordinary.echo", new Uint8Array())).rejects.toBeInstanceOf(Error);
+      // 终态连接单独登记：成员连接仍在（active 时），终态连接不进成员注册表
+      expect(anchorControl.connections.has(executor.identity.deviceId)).toBe(memberState === "active");
+      await channel.close();
+    }
+  }, 60_000);
+
   it("lets a surface fall back from direct transport to an authenticated blind relay", async () => {
     const [anchor, executor] = await Promise.all([
       createDevice("relay-anchor"),
@@ -515,7 +645,7 @@ function trustRecord(
   peerRole: "executor" | "surface" = "executor",
 ): HomeTrustRecord & { anchorEpoch: number } {
   return {
-    v: 1,
+    v: 2,
     schemaId: "HomeTrustRecord",
     homeId: "home-test",
     trustEpoch: 1,
@@ -533,7 +663,7 @@ function trustRecord(
 
 function anchorOnlyTrustRecord(anchor: DeviceIdentity): HomeTrustRecord & { anchorEpoch: number } {
   return {
-    v: 1,
+    v: 2,
     schemaId: "HomeTrustRecord",
     homeId: "home-test",
     trustEpoch: 1,
