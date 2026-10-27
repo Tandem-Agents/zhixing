@@ -25,7 +25,9 @@ import {
   CommittedMutationMaterializationError,
 } from "../protocol/index.js";
 import {
+  maintenanceRetryDelayMs,
   runInMaintenanceContext,
+  StorageMaintenanceCancelledError,
   storageMaintenanceObligation,
   StorageMaintenanceTaskRunner,
   type StorageMaintenanceGovernorPort,
@@ -40,9 +42,11 @@ import { IncrementalWorksceneActivityProjection } from "./activity-projection.js
 export interface AnchorWorksceneGlobalStateAdapterOptions {
   readonly log: AuthorityCommitLog;
   readonly anchorEpoch: number;
+  /** 移除场景内的一批会话；final 为该场景的最后一步，会话都已移除之后移除场景目录。 */
   readonly removeScene: (
     sceneId: string,
     conversationIds: readonly string[],
+    final: boolean,
   ) => Promise<void>;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly maintenanceRunner?: StorageMaintenanceTaskRunner;
@@ -65,11 +69,14 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
   readonly #removeScene: (
     sceneId: string,
     conversationIds: readonly string[],
+    final: boolean,
   ) => Promise<void>;
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #clock: () => string;
   readonly #deletionPageSize: number;
   #recovery: Promise<void> | undefined;
+  #recoveryRetry: ReturnType<typeof setTimeout> | undefined;
+  #stopped = false;
 
   constructor(options: AnchorWorksceneGlobalStateAdapterOptions) {
     if (!Number.isSafeInteger(options.anchorEpoch) || options.anchorEpoch <= 0) {
@@ -163,7 +170,25 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
 
   async refreshStagedMutations(): Promise<void> {
     await this.#registry.refreshCommitted();
-    await this.recoverPendingDeletions();
+    // 已提交的删除由后台按页续做：删除事实已经使场景从目录与会话准入中消失，刷新不等清理排空。
+    this.startPendingDeletionRecovery();
+  }
+
+  /**
+   * 安装待删场景的后台续做。启动与刷新都不等全部积压清理完：场景级 tombstone 已在删除事实的同一
+   * 事务里写入，物理清理按场景、按页在维护档续做；遇容量背压延后重试，停止之后不再续做。
+   */
+  startPendingDeletionRecovery(): void {
+    if (this.#stopped) return;
+    void this.recoverPendingDeletions().catch((error: unknown) => {
+      const retryAfterMs = maintenanceRetryDelayMs(error);
+      if (this.#stopped || retryAfterMs === undefined) return;
+      this.#recoveryRetry = setTimeout(() => {
+        this.#recoveryRetry = undefined;
+        this.startPendingDeletionRecovery();
+      }, Math.max(25, retryAfterMs));
+      this.#recoveryRetry.unref?.();
+    });
   }
 
   async read(
@@ -260,6 +285,7 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
           limit: this.#deletionPageSize,
         });
         for (const pending of page.items) {
+          if (this.#stopped) throw new StorageMaintenanceCancelledError();
           await this.#projectDeletion(
             pending.sceneId,
             pending.deletionRevision,
@@ -289,6 +315,10 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
   }
 
   async stop(): Promise<void> {
+    // 停止不等积压排空：维护 runner 停止后，进行中的场景在页边界中止，未完成的留给下次续做。
+    this.#stopped = true;
+    if (this.#recoveryRetry) clearTimeout(this.#recoveryRetry);
+    this.#recoveryRetry = undefined;
     const recovery = this.#recovery;
     await this.#activity.stop();
     await this.#maintenanceRunner.stop();
@@ -311,11 +341,21 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     await this.#maintenanceRunner.run(
       request,
       new AbortController().signal,
-      async () => {
-        const conversationIds = (await this.#activity.contributions(sceneId))
-          .filter((contribution) => !contribution.deleted)
-          .map((contribution) => contribution.conversationId);
-        await this.#removeScene(sceneId, conversationIds);
+      async (signal) => {
+        // 场景内按贡献页分批移除：每页的会话墓碑耐久之后才读下一页，崩溃或停止后按“未删除”
+        // 过滤接续；全部移除之后才移除场景目录并确认删除已投影。
+        let after: string | undefined;
+        do {
+          if (signal.aborted) throw new StorageMaintenanceCancelledError();
+          const page = await this.#activity.contributionPage(sceneId, after);
+          const conversationIds = page.entries
+            .filter((contribution) => !contribution.deleted)
+            .map((contribution) => contribution.conversationId);
+          if (conversationIds.length > 0) await this.#removeScene(sceneId, conversationIds, false);
+          after = page.next;
+        } while (after !== undefined);
+        if (signal.aborted) throw new StorageMaintenanceCancelledError();
+        await this.#removeScene(sceneId, [], true);
         await this.#registry.confirmDeletionProjected(
           sceneId,
           deletionRevision,
@@ -336,7 +376,7 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
   }
 
   #triggerRecovery(): void {
-    void this.recoverPendingDeletions().catch(() => {});
+    this.startPendingDeletionRecovery();
   }
 
   #admit(

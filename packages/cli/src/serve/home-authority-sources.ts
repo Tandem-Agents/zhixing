@@ -22,6 +22,7 @@ import { artifactReadCapacity, projectionReadCapacity } from "./artifact-read-ca
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
 import { executorIdForDevice } from "./executor-identity.js";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { createHomeAssetLifecycle, type HomeAssetLifecycle } from "./home-asset-lifecycle.js";
 
 export interface HomeAuthoritySourcesOptions {
   readonly home: string;
@@ -133,6 +134,7 @@ export class HomeAuthoritySources {
   #trustUnavailable = false;
   // 本机执行端的固定投影（按执行端身份分区，已知设备身份时在首次写入前登记）
   #executorRequired: readonly string[] = EXECUTOR_REQUIRED;
+  readonly #assetLifecycle: HomeAssetLifecycle | undefined;
 
   private constructor(
     readonly home: string,
@@ -158,6 +160,14 @@ export class HomeAuthoritySources {
       if (entries.some(entry => entry.stream === 'trust')) this.invalidateKnownTrust();
     });
     this.executor = new FileAuthorityCommitLog(path.join(root, "executor-authority"), this.artifacts, shared);
+    // 写者在首次写入前持有本 home 唯一的资产生命周期索引，两本日志的追加从此按预算核它的落后量。
+    this.#assetLifecycle = readOnly ? undefined : createHomeAssetLifecycle({
+      distributedRoot: root,
+      authority: this.authority,
+      executor: this.executor,
+      artifacts: this.artifacts,
+      storageMaintenance: options.storageMaintenance,
+    });
     this.verifier = createLiveTrustedDeviceProtocolVerifier((keyId) => this.identities.identityFor(keyId));
     this.identities.setSourceReader(() => this.authority.sourceIdentity());
     this.identities.setResolver(async (keyId) => {
@@ -205,6 +215,9 @@ export class HomeAuthoritySources {
           sources.authority.prepareProjections(CORE_WRITE_REQUIRED, "writer-ready"),
           sources.executor.prepareProjections(CORE_WRITE_REQUIRED, "writer-ready"),
         ]);
+        // 资产生命周期索引在任何领域写入前追平：此后每次追加的尾部准入都有确定的覆盖位置，持有
+        // 领域串行区的写者不会因为索引尚未打开而收到背压。尾部受上一个写者的准入预算约束。
+        await sources.#assetLifecycle?.lifecycle.catchUp();
       }
       return sources;
     } catch (error) {
@@ -343,13 +356,19 @@ export class HomeAuthoritySources {
     return Promise.all([this.authority.checkpoint(), this.executor.checkpoint()]);
   }
 
-  close(): Promise<void> {
-    return Promise.allSettled([this.authority.stopStorageMaintenance(), this.executor.stopStorageMaintenance()])
-      .then(results => {
-        const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
-        if (failures.length === 1) throw failures[0];
-        if (failures.length) throw new AggregateError(failures, "Home authority sources failed to close");
-      });
+  /** 本 home 唯一的资产生命周期索引；资产权威与检查点保留共用，只读访问者没有。 */
+  assetLifecycle(): HomeAssetLifecycle {
+    if (!this.#assetLifecycle) throw new TypeError("Read-only home authority access has no asset lifecycle");
+    return this.#assetLifecycle;
+  }
+
+  async close(): Promise<void> {
+    // 派生索引先停：它的维护读日志尾部，日志停在它之后。
+    const lifecycle = await Promise.allSettled([this.#assetLifecycle?.close()]);
+    const logs = await Promise.allSettled([this.authority.stopStorageMaintenance(), this.executor.stopStorageMaintenance()]);
+    const failures = [...lifecycle, ...logs].flatMap(result => result.status === "rejected" ? [result.reason] : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, "Home authority sources failed to close");
   }
 }
 

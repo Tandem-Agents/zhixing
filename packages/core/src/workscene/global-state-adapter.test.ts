@@ -206,6 +206,106 @@ describe("AnchorWorksceneGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT
     await fixture.adapter.recoverPendingDeletions();
     expect(completed).toEqual(["scene-a", "scene-b"]);
   });
+
+  it("removes a large scene page by page, resumes after a mid-scene failure and removes the scene directory last", async () => {
+    const pages: Array<{ readonly size: number; readonly final: boolean }> = [];
+    const removed: string[] = [];
+    let failSecondPage = true;
+    let log!: FileAuthorityCommitLog;
+    const fixture = await createFixture(async (sceneId, conversationIds, final) => {
+      pages.push({ size: conversationIds.length, final });
+      if (!final && failSecondPage && pages.filter((page) => !page.final).length === 2) {
+        failSecondPage = false;
+        throw new Error("crash in the middle of a scene");
+      }
+      // 生产清理为每个会话写入耐久删除；续做按“未删除”过滤
+      for (const conversationId of conversationIds) {
+        await appendActivity(log, { conversationId, sceneId, at: LATER }, "delete", 2);
+        removed.push(conversationId);
+      }
+    });
+    log = fixture.log;
+    const created = await fixture.adapter.mutate(
+      { kind: "workscene-create", name: "Large" },
+      context("create"),
+    );
+    if (created.kind !== "workscene-applied") throw new Error("unexpected result");
+    const conversations = Array.from({ length: 300 }, (_, index) => `ws:scene-a:c${String(index).padStart(3, "0")}`);
+    for (const conversationId of conversations) {
+      await appendActivity(fixture.log, { conversationId, sceneId: "scene-a", at: NOW });
+    }
+    await expect(
+      fixture.adapter.mutate(
+        {
+          kind: "workscene-delete",
+          sceneId: created.scene.id,
+          expectedRevision: created.scene.revision,
+        },
+        context("delete", created.scene.revision),
+      ),
+    ).resolves.toMatchObject({ kind: "workscene-deleted" });
+    await vi.waitFor(() => expect(pages.some((page) => page.final)).toBe(true), { timeout: 30_000 });
+    await fixture.adapter.recoverPendingDeletions();
+    // 每个会话恰好移除一次，失败的那一页之后由续做补齐；单次调用不超过一页，场景目录最后移除且只移除一次
+    expect([...removed].sort()).toEqual(conversations);
+    expect(pages.every((page) => page.size <= 128)).toBe(true);
+    expect(pages.filter((page) => page.final)).toEqual([{ size: 0, final: true }]);
+    expect(pages.at(-1)).toEqual({ size: 0, final: true });
+  }, 120_000);
+
+  it("opens without waiting for pending deletions and leaves unfinished scenes to the next owner after stop", async () => {
+    let cleanupAvailable = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const finals: string[] = [];
+    const removeScene = async (sceneId: string, _conversationIds: readonly string[], final: boolean) => {
+      if (!cleanupAvailable) throw new Error("defer cleanup");
+      if (!final) return;
+      await gate;
+      finals.push(sceneId);
+    };
+    const sceneIds = ["scene-a", "scene-b", "scene-c"];
+    const fixture = await createFixture(removeScene, {
+      deletionPageSize: 1,
+      sceneIdFactory: () => sceneIds.shift()!,
+    });
+    for (const [index, name] of ["First", "Second", "Third"].entries()) {
+      const created = await fixture.adapter.mutate(
+        { kind: "workscene-create", name },
+        context(`create-${index}`),
+      );
+      if (created.kind !== "workscene-applied") throw new Error("unexpected result");
+      await fixture.adapter.mutate(
+        {
+          kind: "workscene-delete",
+          sceneId: created.scene.id,
+          expectedRevision: created.scene.revision,
+        },
+        context(`delete-${index}`, created.scene.revision),
+      );
+    }
+    cleanupAvailable = true;
+    // 冷启动的新 owner：只安装续做，刷新也不等清理；已删场景此刻就不在目录里
+    const restarted = new AnchorWorksceneGlobalStateAdapter({
+      log: fixture.log, anchorEpoch: 1, removeScene, clock: () => NOW, deletionPageSize: 1,
+    });
+    restarted.startPendingDeletionRecovery();
+    await restarted.refreshStagedMutations();
+    const listed = await restarted.read({ kind: "workscene-list" }, context("list"));
+    expect(listed).toMatchObject({ kind: "workscene-list", scenes: [] });
+    expect(finals).toEqual([]);
+    // 停止不排空：进行中的场景完成后即停，其余留给下一个 owner
+    const stopping = restarted.stop();
+    release();
+    await stopping;
+    expect(finals.length).toBeLessThan(3);
+    const next = new AnchorWorksceneGlobalStateAdapter({
+      log: fixture.log, anchorEpoch: 1, removeScene, clock: () => NOW, deletionPageSize: 1,
+    });
+    onTestFinished(() => next.stop());
+    await next.recoverPendingDeletions();
+    expect(new Set(finals)).toEqual(new Set(["scene-a", "scene-b", "scene-c"]));
+  }, 120_000);
 });
 
 describe("IncrementalWorksceneActivityProjection lifecycle", () => {
@@ -299,6 +399,7 @@ async function createFixture(
   removeScene: (
     sceneId: string,
     conversationIds: readonly string[],
+    final: boolean,
   ) => Promise<void> = async () => {},
   options: {
     readonly deletionPageSize?: number;

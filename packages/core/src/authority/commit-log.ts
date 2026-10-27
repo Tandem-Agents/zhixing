@@ -25,7 +25,7 @@ import type {
   JsonValue,
   LogicalRecord,
 } from "../contracts/index.js";
-import type { AuthorityAppendAdmissionGuard } from "./interfaces.js";
+import type { AuthorityAppendAdmissionGuard, AuthorityTailConsumer } from "./interfaces.js";
 import {
   createFileLockAcquirer,
   ensureDurableDirectory,
@@ -379,6 +379,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #refreshedProjections = new Set<RegisteredDurableProjection>();
   #stopMaintenance: Promise<void> | undefined;
   readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
+  readonly #tailConsumers = new Set<AuthorityTailConsumer>();
   // Only byte-validation proofs, never shared mutable envelopes or business state.
   #verifiedTail: VerifiedLogTail | undefined;
   #logId: string | undefined;
@@ -841,6 +842,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           delete projection.failure;
           delete projection.recoveryReset;
         }
+        // 外部消费者（如跨日志的资产生命周期索引）不归本日志重置：通知它覆盖位置已失效，由它整段重建。
+        for (const consumer of this.#tailConsumers) consumer.sourceReplaced?.();
         await AuthenticatedFrameIndex.discard(this.rootDir);
         this.#frameIndex = undefined;
         await rename(temporaryPath, this.logPath);
@@ -870,6 +873,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     this.#appendAdmissionGuards.add(guard);
     return () => this.#appendAdmissionGuards.delete(guard);
+  }
+
+  /**
+   * 登记消费本日志尾部的外部派生索引：此后每次追加都按同一恢复欠账预算核它的覆盖位置，使它
+   * 落后的量与本日志自己的固定投影一样受硬界约束，不靠空闲维护碰巧追平。
+   */
+  registerTailConsumer(consumer: AuthorityTailConsumer): () => void {
+    this.#tailConsumers.add(consumer);
+    return () => this.#tailConsumers.delete(consumer);
   }
 
   async installAppendAdmissionGuard(
@@ -2370,6 +2382,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       prefixDigest,
     };
     await this.#admitRecoveryDebt(previousCheckpoint, frame.byteLength, affected);
+    this.#admitTailConsumers(previousCheckpoint, frame.byteLength);
     const preparedProjections: Array<{
       readonly projection: RegisteredDurableProjection;
       readonly prepared: Awaited<
@@ -2500,7 +2513,31 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         verifiedWalViews.put(this.logPath, extended, this.#viewLimits);
       } catch { verifiedWalViews.delete(this.logPath); } // Never fail an already durable commit for an optimization.
     }
+    this.#refreshTailConsumers(checkpoint);
     return envelope;
+  }
+
+  /**
+   * 耐久欠账加本次追加越过硬界时在追加前背压：由日志锁外让消费者追平并发布覆盖位置，再重跑本次
+   * 操作、重新核对 head 与额度。合法大帧只在先前欠账全部发布后接纳。
+   */
+  #admitTailConsumers(head: DurableLogCheckpoint, bytes: number): void {
+    for (const consumer of this.#tailConsumers) {
+      // 整段重建的尾部分别计量，不挡新写入；重建由提交后的刷新推进。
+      if (consumer.rebuilding?.()) continue;
+      if (!tailConsumerNeedsFlush(consumer.coveredThrough(head.logId), head, bytes, true)) continue;
+      const required = new AuthorityPreparationRequired([]);
+      required.prepareOutside = () => consumer.publishCoverage();
+      throw required;
+    }
+  }
+
+  /** 已提交之后越过主动刷新阈值的外部消费者异步追平并发布，不让下一次追加撞上硬界。 */
+  #refreshTailConsumers(head: DurableLogCheckpoint): void {
+    for (const consumer of this.#tailConsumers) {
+      if (!consumer.rebuilding?.() && !tailConsumerNeedsFlush(consumer.coveredThrough(head.logId), head, 0, false)) continue;
+      try { consumer.refresh(); } catch { /* 刷新只是提前追平，不能让已提交的追加失败。 */ }
+    }
   }
 
   async #admitRecoveryDebt(head: DurableLogCheckpoint, bytes: number, affected: readonly RegisteredDurableProjection[]): Promise<void> {
@@ -4260,6 +4297,13 @@ class RetainedReferenceMutationBuffer {
     }
     this.put(key, retainedProjectionValue(ref));
   }
+}
+
+/** 覆盖位置未知、不属于本日志或不在本日志已验前缀上，一律当作需要先追平。 */
+function tailConsumerNeedsFlush(covered: DurableLogCheckpoint | undefined, head: DurableLogCheckpoint,
+  bytes: number, hard: boolean): boolean {
+  if (!covered || covered.logId !== head.logId || covered.lsn > head.lsn || covered.frameEndOffset > head.frameEndOffset) return true;
+  return authorityTailNeedsFlush(covered, head, bytes, hard);
 }
 
 function retainedReferenceKey(digest: string): string {

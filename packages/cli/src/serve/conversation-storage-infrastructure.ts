@@ -52,6 +52,8 @@ export interface ConversationStorageInfrastructure {
     runRetentionSweep(): Promise<RetentionSweepReport>;
     isConversationDataAlive(directoryName: string): Promise<boolean>;
   }>;
+  /** 场景目录移除之后丢弃该场景的 store 与各会话打开态：同 id 再出现时从磁盘按新场景重新打开。 */
+  forgetScene(sceneId: string): void;
 }
 
 interface ScopeStorage {
@@ -215,6 +217,9 @@ export function createConversationStorageInfrastructure(input: Readonly<{
     } },
     naming,
     maintenance,
+    forgetScene: (sceneId: string) => {
+      workscenes.delete(sceneId);
+    },
   });
 }
 

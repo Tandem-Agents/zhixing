@@ -122,6 +122,7 @@ export {
 } from "./errors.js";
 export type {
   AuthorityAppendAdmissionGuard,
+  AuthorityTailConsumer,
   ArtifactGarbageCollectionResult,
   ArtifactDeletionResult,
   ArtifactRetentionSnapshot,

@@ -82,8 +82,12 @@ export interface SurfaceAssetGrantLedger {
   listActiveGrantPage(after: string | undefined, limit: number): Promise<readonly SurfaceAssetGrant[]>;
   load(): Promise<SurfaceAssetGrantLedgerSnapshot>;
   synchronize(): Promise<void>;
+  /** 只追平源尾、不排空维护任务；启动恢复用它。未实现时退回 synchronize。 */
+  catchUp?(): Promise<void>;
   /** 空闲维护：追平派生索引并完成挂起的合并；未实现时视为无事可做。 */
   maintainIndex?(): Promise<void>;
+  /** 停止前只发布已有的有界覆盖层与源向量，不追尾、不合并；未实现时视为无事可做。 */
+  checkpointIndex?(): Promise<void>;
   append(
     record: RevokedRecord | FrontierRecord,
   ): Promise<SurfaceAssetGrantLedgerAppendResult>;
@@ -328,6 +332,11 @@ export class SurfaceAssetCoordinator {
    */
   async maintainLedgerIndex(): Promise<void> {
     await this.options.ledger.maintainIndex?.();
+  }
+
+  /** 停止前发布账本派生索引已有的有界覆盖层与源向量，不新起追尾或整轮合并。 */
+  async checkpointLedgerIndex(): Promise<void> {
+    await this.options.ledger.checkpointIndex?.();
   }
 
   /** Returns whether the authority currently owns the requested asset scope. */
@@ -947,7 +956,9 @@ export class SurfaceAssetCoordinator {
     if (this.#recovered) return;
     const snapshot = loaded ?? await this.options.ledger.load();
     this.#time.reset(snapshot.durableTime);
-    await this.options.ledger.synchronize();
+    // 恢复只追源尾并推进时间前沿：过期、退休、接管与临时任务由后台维护分页排空，启动不等积压；
+    // 依赖记账的配额与接管确认在各自读取时追平。
+    await (this.options.ledger.catchUp?.() ?? this.options.ledger.synchronize());
     await this.#retireExpired(this.#time.observe().ms);
     // 恢复只重建耐久状态。锚点维护器会在启动时立即执行首轮 GC，
     // adopted cleanup 不得绕过其义务协调器落到恢复串行段内。

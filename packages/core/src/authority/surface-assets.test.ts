@@ -2319,6 +2319,30 @@ describe("surface asset collection capacity", { timeout: DURABLE_IO_TEST_TIMEOUT
     expect(synchronizes).toBe(1);
   });
 
+  it("recovers by catching up the source tail without draining ledger maintenance", async () => {
+    // 启动恢复只追源尾并推进时间前沿：过期、退休、接管与临时任务的排空留给后台维护。
+    let catchUps = 0;
+    let synchronizes = 0;
+    const state = await fixture({
+      ledgerDecorator: (ledger) =>
+        new Proxy(ledger, {
+          get(target, property, _receiver) {
+            if (property === "catchUp") return async () => { catchUps += 1; };
+            if (property === "synchronize") {
+              return async () => {
+                synchronizes += 1;
+                return target.synchronize();
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
+    });
+    await state.coordinator.recover();
+    expect({ catchUps, synchronizes }).toEqual({ catchUps: 1, synchronizes: 0 });
+  });
+
   it("retries recovery after backpressure instead of failing startup", async () => {
     // 段内准入零等待,容量紧张时立刻拿到背压。背压不是恢复失败:必须重试到收敛。
     // 重试发生在串行段之外这一点由实现结构保证(重试循环在 `#queue.run` 之外),

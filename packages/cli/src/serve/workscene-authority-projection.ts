@@ -25,7 +25,7 @@ export interface AnchorWorksceneAuthorityProjection {
   recover(): Promise<void>;
   replay(requestId: string): ReturnType<AuthorityRuntimeStack["replayWorksceneMutation"]>;
   installCleanup(
-    cleanup: (sceneId: string, conversationIds: readonly string[]) => Promise<void>,
+    cleanup: (sceneId: string, conversationIds: readonly string[], final: boolean) => Promise<void>,
   ): void;
   list(): Promise<WorksceneDto[]>;
   get(sceneId: string): Promise<WorksceneDto | null>;

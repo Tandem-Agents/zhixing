@@ -217,9 +217,11 @@ describe("surface asset index idle maintenance", () => {
     vi.useFakeTimers();
     try {
       const seen: string[] = [];
+      let checkpoints = 0;
       const port = {
         collectExpiredTemporaryAssets: async () => ({ processed: 0, removed: 0, hasMore: false }),
         maintainLedgerIndex: async () => { seen.push(currentMaintenanceUrgency()); },
+        checkpointLedgerIndex: async () => { checkpoints += 1; },
       } as unknown as SurfaceAssetCoordinator;
       const maintenance = new SurfaceAssetMaintenance({
         surfaceAssets: port, intervalMs: 3_600_000, indexFirstDelayMs: 60_000, indexIntervalMs: 30_000, onError: () => undefined,
@@ -232,26 +234,28 @@ describe("surface asset index idle maintenance", () => {
       expect(seen).toEqual(["background"]);
       await vi.advanceTimersByTimeAsync(30_000);
       expect(seen).toHaveLength(2);
-      // 正式停止前最后追平一次，此后不再运行。
+      // 停止只发布检查点一次，不再新起追平；此后不再运行。
       await maintenance.stop();
-      expect(seen).toHaveLength(3);
+      expect({ maintained: seen.length, checkpoints }).toEqual({ maintained: 2, checkpoints: 1 });
       await vi.advanceTimersByTimeAsync(120_000);
-      expect(seen).toHaveLength(3);
+      expect({ maintained: seen.length, checkpoints }).toEqual({ maintained: 2, checkpoints: 1 });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("stops the bounded final catch-up at its budget and returns only after the work stopped", async () => {
-    // 停止前的追平义务是 committed 的：仅撤掉等待者不会让它停下。到时必须连同义务一起中止，
-    // stop 返回之时不得仍有维护在写派生索引。
+  it("aborts in-flight idle maintenance at stop and returns only after the work stopped", async () => {
+    // 空闲维护义务是 committed 的：仅撤掉等待者不会让它停下。停止必须连同义务一起中止，
+    // stop 返回之时不得仍有维护在写派生索引，也不再新起一轮。
     const runner = new StorageMaintenanceTaskRunner();
     let running = false;
+    let started = 0;
     let stepsAfterStop = 0;
     let stopped = false;
     const port = {
       collectExpiredTemporaryAssets: async () => ({ processed: 0, removed: 0, hasMore: false }),
-      maintainLedgerIndex: () => runner.run(
+      checkpointLedgerIndex: async () => undefined,
+      maintainLedgerIndex: () => (started += 1, runner.run(
         storageMaintenanceObligation("lifecycle-reconcile", "surface-test", { head: 1 }, { owner: "artifact-lifecycle-index", obligation: "committed" }),
         currentMaintenanceAbortSignal(),
         async (signal) => {
@@ -266,17 +270,18 @@ describe("surface asset index idle maintenance", () => {
             running = false;
           }
         },
-      ),
+      )),
     } as unknown as SurfaceAssetCoordinator;
     const maintenance = new SurfaceAssetMaintenance({
-      surfaceAssets: port, intervalMs: 3_600_000, indexFirstDelayMs: 3_600_000, indexFinalBudgetMs: 30, onError: () => undefined,
+      surfaceAssets: port, intervalMs: 3_600_000, indexFirstDelayMs: 0, indexIntervalMs: 10, onError: () => undefined,
     });
     await maintenance.start();
+    while (!running) await new Promise((resolve) => setTimeout(resolve, 5));
     const startedAt = Date.now();
     await maintenance.stop();
     stopped = true;
     expect(Date.now() - startedAt).toBeLessThan(2_000);
-    expect(running).toBe(false);
+    expect({ running, started }).toEqual({ running: false, started: 1 });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(stepsAfterStop).toBe(0);
   });

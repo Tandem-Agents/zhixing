@@ -45,6 +45,7 @@ import {
 } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
+import type { HomeAssetLifecycle } from "./home-asset-lifecycle.js";
 
 import { foldConversationBaseBindings, conversationBaseKey, openConversationBase, registerConversationBaseContext,
   registerConversationTransferProjection, resolveCurrentConversationAuthorityAt, CONVERSATION_TRANSFER_PROJECTION_ID,
@@ -66,6 +67,12 @@ export interface CreateSurfaceAssetAuthorityOptions {
   readonly anchorEpoch: number;
   readonly clock?: () => string;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  /**
+   * 统一 home 入口持有的资产生命周期索引与 staging。生产经它与检查点保留共用同一实例（源集合固定
+   * 为两本权威日志），此时由入口负责停止；缺省时按 log 与 retentionLogs 自建，只用于不经统一入口的
+   * 测试与内嵌场景。
+   */
+  readonly shared?: HomeAssetLifecycle;
 }
 
 export type SurfaceAssetAuthority = SurfaceAssetCoordinator & {
@@ -107,11 +114,11 @@ function buildSurfaceAssetAuthority(
   readonly coordinatorOptions: SurfaceAssetCoordinatorOptions;
   readonly lifecycle: ArtifactLifecycleIndex;
 } {
-  const staging = createSurfaceAssetStagingInfrastructure({
+  const staging = options.shared?.staging ?? createSurfaceAssetStagingInfrastructure({
     distributedRoot: options.authorityRoot,
     storageMaintenance: options.storageMaintenance,
   });
-  const lifecycle = new ArtifactLifecycleIndex({
+  const lifecycle = options.shared?.lifecycle ?? new ArtifactLifecycleIndex({
     rootDir: path.join(options.authorityRoot, "derived"),
     logs: [options.log, ...options.retentionLogs],
     artifacts: options.artifacts,
@@ -128,6 +135,7 @@ function buildSurfaceAssetAuthority(
     options.anchorEpoch,
     lifecycle,
     options.verifier,
+    options.shared === undefined,
   );
   const coordinatorOptions: SurfaceAssetCoordinatorOptions = {
     artifacts: options.artifacts,
@@ -169,6 +177,8 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
     private readonly anchorEpoch: number,
     private readonly lifecycle: ArtifactLifecycleIndex,
     verifier: ProtocolSignatureVerifier,
+    /** 共用统一入口的索引时由入口停止，这里只停自建的。 */
+    private readonly ownsLifecycle: boolean,
   ) {
     this.#grantIndex = registerSurfaceAssetProjection(log, artifacts, verifier);
   }
@@ -177,12 +187,20 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
     return this.lifecycle.synchronize();
   }
 
+  catchUp(): Promise<void> {
+    return this.lifecycle.catchUp();
+  }
+
   maintainIndex(): Promise<void> {
     return this.lifecycle.maintainIdle();
   }
 
+  checkpointIndex(): Promise<void> {
+    return this.lifecycle.checkpoint();
+  }
+
   async stopStorageMaintenance(): Promise<void> {
-    await this.lifecycle.stopStorageMaintenance();
+    if (this.ownsLifecycle) await this.lifecycle.stopStorageMaintenance();
   }
 
   async load(): Promise<SurfaceAssetGrantLedgerSnapshot> {

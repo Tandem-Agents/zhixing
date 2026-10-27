@@ -84,7 +84,7 @@ import {
 } from "@zhixing/core/environment";
 import { AnchorRubricGlobalStateAdapter } from "@zhixing/core/rubrics";
 import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
-import { AnchorWorksceneGlobalStateAdapter } from "@zhixing/core/workscene";
+import { AnchorWorksceneGlobalStateAdapter, isWorksceneDeletedAt, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing/core/workscene";
 import { parseConversationId } from "@zhixing/core/conversation";
 import {
   DeliveryUncertainResolutionApplicationService,
@@ -295,6 +295,8 @@ export interface AuthorityRuntimeStack {
     cleanup: (
       sceneId: string,
       conversationIds: readonly string[],
+      /** 场景内最后一步：会话都已移除，接着移除场景目录。 */
+      final: boolean,
     ) => Promise<void>,
   ) => void;
   readonly workspaceCatalog: () => readonly {
@@ -650,6 +652,7 @@ export async function setupAuthorityRuntime(
           log: authorityLog,
           retentionLogs: [authorityLog, ...(executorLog ? [executorLog] : [])],
           ownsLogs: false,
+          shared: sources.assetLifecycle(),
           artifacts,
           signer: key,
           verifier,
@@ -1095,17 +1098,17 @@ export async function setupAuthorityRuntime(
         })
       : undefined;
     let worksceneCleanup:
-      | ((sceneId: string, conversationIds: readonly string[]) => Promise<void>)
+      | ((sceneId: string, conversationIds: readonly string[], final: boolean) => Promise<void>)
       | undefined;
     worksceneGlobalState = authorityLog
       ? new AnchorWorksceneGlobalStateAdapter({
           log: authorityLog,
           anchorEpoch,
-          removeScene: (sceneId, conversationIds) => {
+          removeScene: (sceneId, conversationIds, final) => {
             if (!worksceneCleanup) {
               throw new Error("Workscene cleanup owner is not installed");
             }
-            return worksceneCleanup(sceneId, conversationIds);
+            return worksceneCleanup(sceneId, conversationIds, final);
           },
           storageMaintenance: options.storageMaintenance,
           clock,
@@ -1253,6 +1256,14 @@ export async function setupAuthorityRuntime(
         worksceneRead?.kind === "workscene-get"
           ? (worksceneRead.scene ?? undefined)
           : undefined;
+      // 场景已删、会话墓碑尚待后台清理写入的窗口内，不派发该场景会话的运行。按场景删除 tombstone 精确读，
+      // 与输入准入、会话删除查询同一口径：只继承删除约束，不把“注册表里没有”当成删除。
+      if (parsedConversation.scope.kind === "workscene" && worksceneGlobalState && authorityLog) {
+        const sceneId = parsedConversation.scope.sceneId;
+        const deleted = (await authorityLog.transactDurableProjection(WORKSCENE_AUTHORITY_PROJECTION_ID,
+          async (view) => ({ kind: "return" as const, value: await isWorksceneDeletedAt(view, sceneId) }))).value;
+        if (deleted) throw new Error("Conversation workscene has been durably deleted");
+      }
       const environmentRequirement = deriveEnvironmentRequirement({
         ...(input.environment ? { explicit: input.environment } : {}),
         ...(workscene ? { workscene } : {}),
@@ -1900,6 +1911,8 @@ export async function setupAuthorityRuntime(
         log: authorityLog,
         retentionLogs: [authorityLog, ...(executorLog ? [executorLog] : [])],
         ownsLogs: false,
+        // 重绑沿用同一个资产生命周期索引，不另起实例。
+        shared: sources.assetLifecycle(),
         artifacts,
         signer: key,
         verifier,
@@ -1925,11 +1938,11 @@ export async function setupAuthorityRuntime(
       const nextWorkscene = new AnchorWorksceneGlobalStateAdapter({
         log: authorityLog,
         anchorEpoch: generation.anchorEpoch,
-        removeScene: (sceneId, conversationIds) => {
+        removeScene: (sceneId, conversationIds, final) => {
           if (!worksceneCleanup) {
             throw new Error("Workscene cleanup owner is not installed");
           }
-          return worksceneCleanup(sceneId, conversationIds);
+          return worksceneCleanup(sceneId, conversationIds, final);
         },
         storageMaintenance: options.storageMaintenance,
         clock,
@@ -2100,8 +2113,10 @@ export async function setupAuthorityRuntime(
         };
       },
       rebindInstalledAuthority,
+      // 启动只安装待删场景的后台续做：删除事实已使场景从目录与会话准入中消失，物理清理不在就绪
+      // 等待链上排空。
       recoverWorksceneState: async () => {
-        await worksceneGlobalState?.recoverPendingDeletions();
+        worksceneGlobalState?.startPendingDeletionRecovery();
       },
       replayWorksceneMutation: (requestId) =>
         worksceneGlobalState?.replayMutation(requestId) ?? Promise.resolve(null),

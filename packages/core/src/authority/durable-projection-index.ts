@@ -747,6 +747,7 @@ export class FileDurableProjectionIndex {
   #readViewSequence = 0;
   #currentCheckpoints: DurableProjectionCheckpoints | undefined;
   #publicationSequence = 0;
+  #adoptions = 0;
   readonly #readViews = new Map<string, ReadView>();
   readonly #inUseReadViews = new Map<
     string,
@@ -801,6 +802,7 @@ export class FileDurableProjectionIndex {
         return;
       }
       await this.#validatePublishedStorage(published);
+      this.#adoptions += 1;
       this.#manifest = published;
       this.#hasPublishedManifest = true;
       this.#currentCheckpoints = cloneCheckpoints(published.checkpoints);
@@ -872,6 +874,11 @@ export class FileDurableProjectionIndex {
   coverRecoveryGap(checkpoints: DurableProjectionCheckpoints): void { this.#unrelatedThrough = checkpoints; this.#activePublicationCount++; }
   extendRecoveryTarget(checkpoints: DurableProjectionCheckpoints): void { this.#recoveryTarget = checkpoints; this.#unrelatedThrough = checkpoints; this.#activePublicationCount++; }
   publishedCheckpoints(): DurableProjectionCheckpoints { return cloneCheckpoints(this.#requireManifest().checkpoints); }
+  /**
+   * 从磁盘采纳他方发布的更新一代的累计次数。每次采纳都替换本实例的底并丢弃未落盘的覆盖层；
+   * 在两次读数之间据旧底算出的决定，不能再发布到当前底上。
+   */
+  adoptionCount(): number { return this.#adoptions; }
   publishedRecoveryCoverage(): DurableProjectionCheckpoints {
     const manifest = this.#requireManifest();
     return cloneCheckpoints(manifest.unrelatedThrough ?? manifest.checkpoints);

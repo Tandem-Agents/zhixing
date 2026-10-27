@@ -262,6 +262,29 @@ describe("conversation storage infrastructure", () => {
     expect(await storage.maintenance.isConversationDataAlive(toSafePathSegment(scene))).toBe(false);
   });
 
+  it("reopens a recreated scene id from disk after the whole scene was removed", async () => {
+    const root = await createTempDir("scene-removal-cache");
+    const cleanup = createWorksceneStorageCleanupInfrastructure({ zhixingHome: root });
+    const storage = createConversationStorageInfrastructure({
+      zhixingHome: root, optimalMaxTokens: 4_000,
+      worksceneConversationStorageRemoval: cleanup.conversations,
+    });
+    const id = worksceneConversationId("scene-reused", "conversation-1");
+    await storage.directory.ensure(id);
+    await storage.runtime.appendCommittedRun(id, run("before removal", 0));
+    expect((await storage.runtime.loadHistory(id))?.turnCount).toBe(1);
+    // 场景整体移除：与宿主装配一致，场景目录移除之后丢弃该场景缓存的 store 与打开态
+    await cleanup.scenes.removeScene("scene-reused");
+    storage.forgetScene("scene-reused");
+    // 同一 id 再出现：按新场景从磁盘初始化，第一次写入不因旧打开态失败，读到的只有新内容
+    await storage.directory.ensure(id);
+    await storage.runtime.appendCommittedRun(id, run("after recreation", 0));
+    const history = await storage.runtime.loadHistory(id);
+    expect(history?.turnCount).toBe(1);
+    expect(JSON.stringify(history?.bootstrap)).toContain("after recreation");
+    expect(JSON.stringify(history?.bootstrap)).not.toContain("before removal");
+  }, 30_000);
+
   it("routes user and Workscene through one finite runtime/directory contract", async () => {
     const storage = createConversationStorageInfrastructure({
       zhixingHome: process.env.ZHIXING_HOME!,

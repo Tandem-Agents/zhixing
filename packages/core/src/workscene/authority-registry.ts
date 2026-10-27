@@ -568,6 +568,17 @@ async function readWorksceneScenes(
   return scenes;
 }
 
+/**
+ * 场景级删除 fence：删除事实与场景 tombstone 在同一事务里写入。绑定该场景的会话在查询与准入时
+ * 按场景精确读它来继承删除约束，不逐个改写会话；物理清理随后由后台分页续做。
+ */
+export async function isWorksceneDeletedAt(
+  projection: Pick<DurableProjectionReadContext, "get">,
+  sceneId: string,
+): Promise<boolean> {
+  return (await projection.get(worksceneTombstoneKey(sceneId))) !== undefined;
+}
+
 function worksceneSceneKey(sceneId: string): string {
   return `${WORKSCENE_SCENE_PREFIX}${sceneId}`;
 }

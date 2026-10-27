@@ -110,6 +110,27 @@ export class IncrementalWorksceneActivityProjection {
     );
   }
 
+  /**
+   * 场景内贡献的一页，按键接续。删除续做边删边翻页：每页都从上一页末键之后重新读当前视图，
+   * 不依赖可能随写入失效的续读令牌。
+   */
+  async contributionPage(sceneId: string, after?: string): Promise<{
+    readonly entries: readonly ReturnType<typeof parseContribution>[];
+    readonly next?: string;
+  }> {
+    const prefix = contributionScenePrefix(requireId(sceneId));
+    if (after !== undefined && !after.startsWith(prefix)) {
+      throw new TypeError("Workscene contribution cursor belongs to another scene");
+    }
+    const page = await this.#index.scan(
+      { ...(after === undefined ? { gte: prefix } : { gt: after }), lt: `${prefix}￿` },
+      ACTIVITY_PAGE_SIZE,
+    );
+    const entries = page.entries.map((entry) => parseContribution(entry.value));
+    const last = page.entries.at(-1)?.key;
+    return { entries, ...(page.entries.length === ACTIVITY_PAGE_SIZE && last !== undefined ? { next: last } : {}) };
+  }
+
   async rebuild(): Promise<void> {
     const rebuildable = this.#index as DurableProjectionIndex & {
       rebuild?: () => Promise<void>;

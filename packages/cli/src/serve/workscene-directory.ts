@@ -87,8 +87,8 @@ export function createWorksceneDirectory(deps: {
     authority: deps.conversationAuthority,
     sceneStorageRemoval: deps.sceneStorageRemoval,
   });
-  deps.authority.installCleanup((sceneId, conversationIds) =>
-    sessionOwner.removeScene(sceneId, conversationIds),
+  deps.authority.installCleanup((sceneId, conversationIds, final) =>
+    sessionOwner.removeScene(sceneId, conversationIds, final),
   );
 
   function runSceneOperation<T>(

@@ -999,7 +999,13 @@ async function runServerProcess(
     },
     worksceneAuthority,
     worksceneConversationStorageProjectionCleanup,
-    worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes,
+    worksceneSceneStorageRemoval: {
+      async removeScene(sceneId) {
+        await worksceneStorageCleanup.scenes.removeScene(sceneId);
+        // 场景目录已移除：同时丢弃该场景缓存的 store 与打开态，同 id 再出现时按新场景初始化。
+        conversationStorage.forgetScene(sceneId);
+      },
+    },
     zhixingHome,
     storageMaintenance: deviceCapacity.storage,
     lifecycleContributions,

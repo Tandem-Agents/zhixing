@@ -124,7 +124,9 @@ export class FileMeshBootstrapStore
   readonly #endpointFile: string;
   readonly #peerDirectory: string;
   readonly #completionFile: string;
-  readonly #checkpointLifecycle: ArtifactLifecycleIndex;
+  readonly #openCheckpointLifecycle: () => ArtifactLifecycleIndex;
+  #checkpointLifecycle: ArtifactLifecycleIndex | undefined;
+  #ownedCheckpointLifecycle: ArtifactLifecycleIndex | undefined;
   readonly #endpointWrites = new SerialTaskQueue();
   readonly #sources: HomeAuthoritySourcesLease | undefined;
 
@@ -170,22 +172,30 @@ export class FileMeshBootstrapStore
     );
     credentialExposureIndex(this.#log);
     bindConversationAnchorTenure(this.#log);
-    const staging = createSurfaceAssetStagingInfrastructure({
-      distributedRoot,
-      storageMaintenance: options.storageMaintenance,
-    });
-    this.#checkpointLifecycle = new ArtifactLifecycleIndex({
-      rootDir: path.join(distributedRoot, "derived"),
-      logs: [this.#log],
-      artifacts: this.#artifacts,
-      temporaryArtifacts: staging.temporaryArtifacts,
-      temporaryPresence: staging.presence,
-      receiver: staging.recovery,
-      storageMaintenance: options.storageMaintenance,
-      maintenanceResourceId: this.#artifacts.rootDir,
-      // 统一入口提供的日志由其 owner 停止；只有自建日志随本存储一起停止。
-      ownsSourceLogs: !options.sources,
-    });
+    // 检查点保留用到时才取索引。经写者统一入口时与资产权威共用同一个生命周期索引（源集合固定为
+    // 两本权威日志），由入口停止；源集合不同的实例交替打开同一目录会互相判失配、整段重放。只读
+    // 入口与不经统一入口的测试保持自建。
+    const shared = options.sources && !options.sources.sources.readOnly ? options.sources.sources : undefined;
+    this.#openCheckpointLifecycle = () => shared?.assetLifecycle().lifecycle ?? (() => {
+      const staging = createSurfaceAssetStagingInfrastructure({
+        distributedRoot,
+        storageMaintenance: options.storageMaintenance,
+      });
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(distributedRoot, "derived"),
+        logs: [this.#log],
+        artifacts: this.#artifacts,
+        temporaryArtifacts: staging.temporaryArtifacts,
+        temporaryPresence: staging.presence,
+        receiver: staging.recovery,
+        storageMaintenance: options.storageMaintenance,
+        maintenanceResourceId: this.#artifacts.rootDir,
+        // 统一入口提供的日志由其 owner 停止；只有自建日志随本存储一起停止。
+        ownsSourceLogs: !options.sources,
+      });
+      this.#ownedCheckpointLifecycle = lifecycle;
+      return lifecycle;
+    })();
     this.#endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
     this.#peerDirectory = path.join(distributedRoot, "mesh-peers");
     this.#completionFile = path.join(distributedRoot, "mesh-bootstrap-completions.json");
@@ -198,7 +208,8 @@ export class FileMeshBootstrapStore
   }
 
   async stopStorageMaintenance(): Promise<void> {
-    await this.#checkpointLifecycle.stopStorageMaintenance();
+    // 共用的生命周期索引随统一入口最后一个持有者关闭而停止；自建的随本存储停止。
+    await this.#ownedCheckpointLifecycle?.stopStorageMaintenance();
     if (this.#sources) await this.#sources.close();
     else await this.#log.stopStorageMaintenance();
   }
@@ -231,7 +242,7 @@ export class FileMeshBootstrapStore
   }
 
   checkpointRetention(): ArtifactCheckpointRetentionPort {
-    return this.#checkpointLifecycle;
+    return this.#checkpointLifecycle ??= this.#openCheckpointLifecycle();
   }
 
   async loadCheckpointRecords(): Promise<readonly CheckpointStreamRecord[]> {

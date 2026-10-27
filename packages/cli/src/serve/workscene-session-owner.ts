@@ -120,9 +120,14 @@ export class WorksceneSessionOwner {
     );
   }
 
+  /**
+   * 移除场景内的一批会话；final 为场景的最后一步，会话都已移除之后再移除场景目录。删除续做按页
+   * 调用，单个场景的会话再多也不一次装入。
+   */
   async removeScene(
     sceneId: string,
     conversationIds: readonly string[],
+    final = true,
   ): Promise<void> {
     const at = new Date().toISOString();
     for (const conversationId of conversationIds) {
@@ -138,7 +143,7 @@ export class WorksceneSessionOwner {
         conversationId,
       });
     }
-    await this.#sceneStorageRemoval.removeScene(sceneId);
+    if (final) await this.#sceneStorageRemoval.removeScene(sceneId);
   }
 
   async #recordAuthority(

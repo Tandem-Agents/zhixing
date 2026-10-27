@@ -30,6 +30,27 @@ export type AuthorityAppendAdmissionGuard = (
   entries: readonly LogicalRecord<unknown>[],
 ) => void;
 
+/**
+ * 本日志之外、消费本日志尾部的派生索引（如跨日志的资产生命周期索引）。每次追加按日志自己的恢复
+ * 欠账预算核它的耐久覆盖位置：越过硬界时在追加前背压，由日志在锁外调用 publishCoverage 后重新
+ * 核对 head 与额度；越过主动刷新阈值时提交后调用 refresh，异步发布、不阻塞提交。
+ */
+export interface AuthorityTailConsumer {
+  /**
+   * 崩溃后重开仍成立的覆盖位置：只计已落盘发布的检查点，不含内存里已追平、未落盘的覆盖层——
+   * 那部分重开后要从本日志重放，必须算在欠账里。尚未初始化或不认识该日志时为 undefined。
+   */
+  coveredThrough(logId: string): DurableLogCheckpoint | undefined;
+  /** 锁外初始化、追平本日志的尾部，并把覆盖位置落盘发布；只追到内存不算完成。 */
+  publishCoverage(): Promise<void>;
+  /** 越过主动刷新阈值后的异步追平与发布；自行去重，失败不影响已提交的追加。 */
+  refresh(): void;
+  /** 正在整段重建（源被替换或派生损坏）：重建尾部分别计量，不挡新写入，提交后照常触发追平。 */
+  rebuilding?(): boolean;
+  /** 本日志装入了新的 WAL 前缀（logId 不变、内容整段替换）：消费者的覆盖位置随之失效。 */
+  sourceReplaced?(): void;
+}
+
 export interface ArtifactStore {
   /** Stable physical generation for verified derived readers; never authority. */
   readIdentity?(ref: ArtifactRef): Promise<string>;

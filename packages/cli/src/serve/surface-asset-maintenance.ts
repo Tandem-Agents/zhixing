@@ -5,12 +5,9 @@ import type {
 import { runInMaintenanceContext, runWithMaintenanceUrgency } from "@zhixing/core/resources";
 
 const SURFACE_ASSET_GC_INTERVAL_MS = 60 * 60 * 1_000;
-// 派生索引的空闲维护：启动后先留出启动窗口，此后按较短周期追平，使重启只回放很短的尾部。
+// 派生索引的空闲维护：启动后先留出启动窗口，此后按较短周期追平并排空过期、退休、接管与临时任务。
 const SURFACE_ASSET_INDEX_FIRST_DELAY_MS = 60 * 1_000;
 const SURFACE_ASSET_INDEX_INTERVAL_MS = 30 * 1_000;
-// 正式停止前最后一次追平的时间上限：到时即请求中止，等它真正停下后再继续停止，余量由下次
-// 启动或空闲维护补齐。
-const SURFACE_ASSET_INDEX_FINAL_BUDGET_MS = 5_000;
 
 /** 只有取得进展才立即续跑,零进展必须等下一个周期,避免忙等。 */
 export function shouldContinueSurfaceAssetCollection(
@@ -25,7 +22,6 @@ export interface SurfaceAssetMaintenanceOptions {
   readonly intervalMs?: number;
   readonly indexFirstDelayMs?: number;
   readonly indexIntervalMs?: number;
-  readonly indexFinalBudgetMs?: number;
 }
 
 /**
@@ -89,19 +85,11 @@ export class SurfaceAssetMaintenance {
     this.#indexAbort.abort();
     await this.#task;
     await this.#indexTask;
-    // 正式停止前再追平一次派生索引并完成挂起的合并（有时间上限）：重启（含升级）后的首次
-    // 启动不必回放上一段会话的尾部，更不在启动路径上做与索引规模成正比的整轮合并。到时即
-    // 中止，并等它在步骤边界真正停下；返回之后不再有任何维护写入。
+    // 停止只发布派生索引已有的有界覆盖层与源向量，不新起追尾、排空或整轮合并：未覆盖的尾部受
+    // 源端追加准入预算约束，由下次启动追平；没做完的维护任务留给下次的后台维护续做。
     if (this.#started && !this.#finalized) {
       this.#finalized = true;
-      const finalAbort = new AbortController();
-      const timer = setTimeout(() => finalAbort.abort(), this.options.indexFinalBudgetMs ?? SURFACE_ASSET_INDEX_FINAL_BUDGET_MS);
-      timer.unref();
-      try {
-        await this.#maintainIndex(finalAbort.signal).catch(() => undefined);
-      } finally {
-        clearTimeout(timer);
-      }
+      await this.#surfaceAssets().checkpointLedgerIndex?.().catch(() => undefined);
     }
   }
 

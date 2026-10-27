@@ -76,8 +76,8 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 | C20 [ ] | mesh-bootstrap-store.ts:178/193→mesh-runtime-bootstrap:93；受管启动/backup owner也调用，重复重放trust全事件链 | 认证的当前信任投影与版本/epoch；fresh授权仍查当前信任，历史链验证/scrub保留；覆盖startup-application的本机配置/安全端口 |
 | C21 [ ] | FileTrustRuleSnapshotCatalog.open/#reload:301/428→loadPermissionSnapshotCatalog:452枚举全部保留快照 | latest/version/content/digest目录；只加载当前及活跃任务引用旧快照，按原合同验签 |
 | C22 [ ] | 可信home post-install的checkpoint/recovery activation、planned/disaster staging含整快照/目录恢复 | 当前installation/activation指针与未完目录；正常已完成安装不得每次回扫，灾备按§6 |
-| G26 [ ] | setup-delivery.ts:675→surfaceAssets.recover→ArtifactLifecycleIndex.synchronize:311；while(more)排空多日志追尾和retirement/adoption/expiry/temporary；surface-asset-maintenance.ts:92停止时还新起整轮维护 | 安全根/配额/引用证明与回收分开；跨日志向量和源端尾部预算明确维护，不能只把synchronize搬到后台，见§4.8 |
-| C27 [ ] | command.ts:1274→worksceneDirectory.recover→global-state-adapter.ts:251，启动循环全部pendingDeletionPage并逐项projectDeletion | 保留已有pending索引；先使受影响场景删除fence可见，清理按页续做，不排空全部待办才ready |
+| G26 [x] | 原机制：setup-delivery.ts:675→surfaceAssets.recover→ArtifactLifecycleIndex.synchronize:311；while(more)排空多日志追尾和retirement/adoption/expiry/temporary；surface-asset-maintenance.ts:92停止时还新起整轮维护 | 2026-10-26包5-5a独审通过（候选44a25e91）：安全根/配额/引用证明与回收分开，跨日志向量和源端尾部预算在维护，见§4.8。DPI重建步骤不读盘等观察划入5e |
+| C27 [x] | 原机制：command.ts:1274→worksceneDirectory.recover→global-state-adapter.ts:251，启动循环全部pendingDeletionPage并逐项projectDeletion | 2026-10-26包5-5a独审通过（候选44a25e91）：保留已有pending索引，受影响场景删除fence先可见，清理按页续做，不排空全部待办才ready，见§4.8 |
 | B04 保持 | ChannelInteractionCoordinator.listOpen是当前内存开放relay；executor job恢复有有限页 | 修上游全量发现，不把已有限的消费者再造一遍；开放义务多也不能全量阻塞终端ready |
 
 ### 3.4 旁路与排除的误报

@@ -926,7 +926,8 @@ describe("setupDelivery — Channel effect binding", () => {
       expect(runtime.controlAdmission).not.toBe(initial.controlAdmission);
       expect(runtime.resourceGovernor).not.toBe(initial.resourceGovernor);
       expect(runtime.surfaceAssets).toBe(initial.surfaceAssets);
-      expect(runtime.checkpointRetention).not.toBe(initial.checkpointRetention);
+      // 资产生命周期索引按源日志派生、与锚点代际无关：每进程一个、重绑沿用（装入新前缀时由日志通知它整段重建）
+      expect(runtime.checkpointRetention).toBe(initial.checkpointRetention);
       expect(runtime.rubricGlobalState).not.toBe(initial.rubricGlobalState);
       expect(runtime.globalMutationParticipants).toHaveLength(
         initial.globalMutationParticipants.length,

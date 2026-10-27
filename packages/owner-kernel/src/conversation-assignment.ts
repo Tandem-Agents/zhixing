@@ -190,6 +190,7 @@ import {
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
 import { parseConversationId } from "@zhixing/core/conversation";
+import { isWorksceneDeletedAt, registerWorksceneAuthorityProjection, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing/core/workscene";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
 import { projectPublishConflicts, projectPublishResults, decideConversationControlResponse } from "@zhixing/core/conversation/application";
 import {
@@ -2121,6 +2122,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     });
     const prepared = await prepareStored(userInput, this.#artifacts);
     await input.admission.prepareRecovery();
+    const sceneId = this.#worksceneFence();
     const apply = (basis: { state: RunProjection; cursor: ProjectionCursor } | undefined,
       onProjected: (state: RunProjection, cursor: ProjectionCursor) => void) => input.admission.applyAuthority<
       RunProjection,
@@ -2131,6 +2133,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       stream: runStream(this.#conversationId),
       initial: emptyProjection(this.#conversationId),
       ...(basis ? { targetBase: basis } : {}),
+      // 工作场景会话与场景删除事实在同一已验前缀上决定：场景已删即不再接纳新输入。
+      ...(sceneId === undefined ? {} : { readProjectionIds: [WORKSCENE_AUTHORITY_PROJECTION_ID] }),
       onProjected,
       reducer: (state, record, commit) =>
         this.#reduceRunProjection(
@@ -2162,7 +2166,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ),
         );
       },
-      decide: (state, context) => {
+      decide: async (state, context) => {
         const request = context.envelope.body;
         if (request.t !== "input") {
           return {
@@ -2177,6 +2181,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             result: rejectedControl(
               "fence-rejected",
               "Conversation has been durably deleted",
+            ),
+          };
+        }
+        if (sceneId !== undefined && await isWorksceneDeletedAt(
+          context.authorityPrefix.readProjection(WORKSCENE_AUTHORITY_PROJECTION_ID), sceneId)) {
+          return {
+            result: rejectedControl(
+              "fence-rejected",
+              "Conversation workscene has been durably deleted",
             ),
           };
         }
@@ -2376,8 +2389,26 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   /** Finite recovery reads use the original verified authority log and input
    * projection. They neither consume facts nor create a second delivery queue. */
+  /** 会话自身已删，或它所属的工作场景已删（场景级删除约束，按场景精确读继承）。 */
   async recoveryDeleted(): Promise<boolean> {
-    return (await this.#readIndex.state(this.#conversationId)).deleted === true;
+    if ((await this.#readIndex.state(this.#conversationId)).deleted === true) return true;
+    const sceneId = this.#worksceneFence();
+    if (sceneId === undefined) return false;
+    return (await this.#log.transactDurableProjection(WORKSCENE_AUTHORITY_PROJECTION_ID, async (view) => ({
+      kind: "return" as const,
+      value: await isWorksceneDeletedAt(view, sceneId),
+    }))).value;
+  }
+
+  /**
+   * 工作场景会话所属的场景；其他会话为 undefined。场景投影的定义与统一入口登记的相同（重复登记
+   * 幂等），使不经统一入口打开的日志也能按场景读删除约束。
+   */
+  #worksceneFence(): string | undefined {
+    const scope = parseConversationId(this.#conversationId).scope;
+    if (scope.kind !== "workscene") return undefined;
+    registerWorksceneAuthorityProjection(this.#log);
+    return scope.sceneId;
   }
 
   async recoveryPage(request: ConversationRecoveryRequest, legacyBase?: {

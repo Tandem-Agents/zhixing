@@ -11,13 +11,17 @@ import type {
   SurfaceAssetGrant,
   SurfaceAssetScope,
 } from "../contracts/index.js";
+import { createFileLockAcquirer, FileLockBusyError } from "../persistence/index.js";
 import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   currentMaintenanceAbortSignal,
   isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
+  runDetachedMaintenanceContext,
   runStorageMaintenanceStep,
+  StorageMaintenanceAdmissionError,
+  StorageMaintenanceCancelledError,
   storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
@@ -44,6 +48,7 @@ import type {
   ArtifactReferenceCursor,
   ArtifactStore,
   ArtifactRetentionSnapshot,
+  AuthorityTailConsumer,
   DurableLogCheckpoint,
   MutableArtifactStore,
   PhysicalStorageStepRunner,
@@ -61,6 +66,8 @@ const PENDING_JOB_PAGE_SIZE = 16;
 const MAX_RELEASE_PAGE_SIZE = 64;
 const MAX_SYNCHRONIZATION_TURNS = 4;
 const LIFECYCLE_ADMISSION_DEADLINE_MS = 5_000;
+const WRITER_LOCK_STALE_MS = 30_000;
+const WRITER_LOCK_WAIT_MS = 10_000;
 const EMPTY_FACT_ROOTS = createEmptyFactRoots();
 
 const STATE_PREFIX = "state/";
@@ -283,12 +290,21 @@ export class ArtifactLifecycleIndex {
   #sources: readonly LifecycleSource[] | undefined;
   readonly #sourceHeads = new Map<string, DurableLogCheckpoint>();
   #retentionRebuildRequired = false;
+  // 整段重建的目标源头：追平到它之前，尾部准入不按硬界挡新写入。
+  #rebuildTarget: LifecycleSourceHeads | undefined;
   #temporaryReconciliation: TemporaryReconciliationSession | undefined;
+  // 同一 home 的索引可能被宿主与短命命令两个进程打开：清单发布与非源派生的直写在跨进程锁内进行，
+  // 发布前先采纳他方更新的一代，不产生同代冲突，也不让一方的未落盘直写被另一方的发布冲掉。
+  readonly #lockPath: string;
+  readonly #acquireLock = createFileLockAcquirer();
+  readonly #writerLock = new AsyncLocalStorage<true>();
+  #refreshing: Promise<void> | undefined;
 
   constructor(options: ArtifactLifecycleIndexOptions) {
     if (options.logs.length === 0) {
       throw new TypeError("Artifact lifecycle index requires an authority log");
     }
+    this.#lockPath = path.join(path.resolve(options.rootDir), "artifact-lifecycle.lock");
     this.#logs = [...new Set(options.logs)];
     this.#ownsSourceLogs = options.ownsSourceLogs !== false;
     this.#artifacts = options.artifacts;
@@ -310,9 +326,10 @@ export class ArtifactLifecycleIndex {
       // 唯一的耐久写叶,不注入就等于这些写永远不进设备容量裁决。
       storageMaintenance: options.storageMaintenance,
       withSourceLock: (operation, abort) => this.#queueScope.getStore()?.active
-        ? operation()
-        : this.#serialize(operation, abort),
-      runDetached: (operation) => this.#queueScope.exit(operation),
+        ? this.#withWriterLock(operation)
+        : this.#serialize(() => this.#withWriterLock(operation), abort),
+      // 脱离调用方的后续工作不能继承调用方的串行区与跨进程锁：那时锁可能早已释放。
+      runDetached: (operation) => this.#queueScope.exit(() => this.#writerLock.exit(operation)),
       // 只包数据读取本身；投影退休清理由投影 owner 在该 permit 释放后独立准入，
       // 否则 lifecycle-reconcile 与 projection-compaction 会形成容量嵌套。
       runReadStep: (inputIdentity, operation) =>
@@ -321,16 +338,85 @@ export class ArtifactLifecycleIndex {
     this.#records = createBoundDurableProjectionReadContext(this.#index);
   }
 
+  /**
+   * 记账追平：追平各源尾部并排空退休、接管、过期与临时任务。配额、接管确认、后台回收与上传在场
+   * 记录依赖它；启动与首发路径上只需 grant 的读者用 {@link catchUp}。
+   */
   async synchronize(): Promise<void> {
     // 完整 reconcile 的身份只取触发时冻结的源日志头；派生索引同步位会随每页
     // 发布变化，不能进入义务键，否则同一目标在推进途中会裂成多个任务。
     const sources = await this.#initialize();
     const sourceHeads = await this.#captureSourceHeads(sources);
+    await this.#drive({ sourceHeads }, () => this.#synchronizeBounded(sourceHeads));
+  }
+
+  /**
+   * 只追平各源尾部，不排空退休、接管、过期与临时任务。尾部受源端追加准入的恢复欠账预算约束，
+   * 所以工作量与已结束的历史和积压的维护任务无关；那些任务由后台维护分页排空。
+   */
+  async catchUp(): Promise<void> {
+    const sources = await this.#initialize();
+    const sourceHeads = await this.#captureSourceHeads(sources);
+    // 义务身份与完整 reconcile 区分开：同源头的两种义务若合流，追尾的调用方会被拖进整轮排空。
+    await this.#drive({ sourceHeads, scope: "sources" }, () =>
+      this.#serialize(() => this.#catchUpLocked(sources, sourceHeads)));
+  }
+
+  /**
+   * 追平源尾部并把覆盖位置落盘发布。源端准入按已发布位置计欠账：只追到内存，重开后仍要回放
+   * 整段未发布尾部，准入在同一 head 上也永远不会放行。
+   */
+  async #publishCoverage(): Promise<void> {
+    await this.catchUp();
+    await this.#serialize(async () => {
+      await this.#index.flush({ compact: false });
+      this.#unflushedSourceRecords = 0;
+    });
+  }
+
+  /**
+   * 作为各源日志的尾部消费者登记：源端每次追加按日志自己的恢复欠账预算核本索引已落盘发布的覆盖
+   * 位置，越过硬界即在追加前背压、由日志锁外追平并发布，越过主动刷新阈值则提交后异步追平并发布。
+   * 每个打开本索引的写者进程在首次写入前登记一次。
+   */
+  registerTailAdmission(): () => void {
+    const consumer: AuthorityTailConsumer = {
+      // 只计清单里已发布的位置：内存覆盖层重开后要从源日志重放。未打开时位置未知；源还没有任何
+      // 已发布的覆盖时，覆盖位置就是它的起点。
+      coveredThrough: (logId) => this.#sources
+        ? this.#index.publishedCheckpoints()[logId] ?? this.#sources.find((source) => source.id === logId)?.origin
+        : undefined,
+      publishCoverage: () => this.#publishCoverage().catch((error: unknown) => {
+        if (error instanceof StorageMaintenanceAdmissionError || error instanceof StorageMaintenanceCancelledError) throw error;
+        // 发布失败：本次追加不提交，按容量背压交调用方在互斥区外重试；失败原因随 cause 带出。
+        throw Object.assign(
+          new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "slots", retryAfterMs: 25 }),
+          { cause: error },
+        );
+      }),
+      refresh: () => {
+        // 追加者的维护语境与串行区不随刷新带走：刷新是独立的后台推进。
+        this.#refreshing ??= this.#queueScope.exit(() => this.#writerLock.exit(() =>
+          runDetachedMaintenanceContext("background", () => this.#publishCoverage()))).catch(() => undefined)
+          .finally(() => { this.#refreshing = undefined; });
+      },
+      rebuilding: () => this.#retentionRebuildRequired || this.#rebuildTarget !== undefined,
+      // 源日志装入了新前缀：旧覆盖位置失效，下一步整段重建；缓存的源头提示一并作废。
+      sourceReplaced: () => {
+        this.#retentionRebuildRequired = true;
+        this.#sourceHeads.clear();
+      },
+    };
+    const unregister = this.#logs.map((log) => log.registerTailConsumer(consumer));
+    return () => { for (const remove of unregister) remove(); };
+  }
+
+  async #drive(identity: unknown, step: () => Promise<boolean>): Promise<void> {
     await this.#maintenanceRunner.run(
       storageMaintenanceObligation(
         "lifecycle-reconcile",
         this.#maintenanceResourceId,
-        { sourceHeads },
+        identity,
         { owner: "artifact-lifecycle-index", obligation: "committed" },
       ),
       currentMaintenanceAbortSignal(),
@@ -339,7 +425,7 @@ export class ArtifactLifecycleIndex {
         let more = true;
         while (more) {
           try {
-            more = await this.#synchronizeBounded(sourceHeads);
+            more = await step();
           } catch (error) {
             const retryAfterMs = maintenanceRetryDelayMs(error);
             // `#synchronizeBounded` 已退出自己的串行区，正常调用可在这里等待后
@@ -392,18 +478,123 @@ export class ArtifactLifecycleIndex {
     if (this.#ownsSourceLogs) for (const log of this.#logs) await log.stopStorageMaintenance();
   }
 
-  async #runSynchronized<T>(operation: () => Promise<T>): Promise<T> {
-    await this.synchronize();
-    try {
-      return await this.#serialize(operation);
-    } catch (error) {
-      if (!(error instanceof DurableProjectionStorageError)) throw error;
-      await this.#serialize(async () => {
-        this.#retentionRebuildRequired = true;
-      });
-      await this.synchronize();
-      return this.#serialize(operation);
+  /** 包着直写的操作传 verifyAfter=false：见 {@link #runCovered}。 */
+  async #runSynchronized<T>(operation: () => Promise<T>, verifyAfter = true): Promise<T> {
+    return this.#runCovered(() => this.synchronize(), operation, verifyAfter);
+  }
+
+  async #runCaughtUp<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#runCovered(() => this.catchUp(), operation, true);
+  }
+
+  /**
+   * 只在覆盖到冻结源头、且自追平开始没有换底的状态上执行操作。采纳他方发布会丢弃本实例未落盘的
+   * 覆盖层，可能发生在追平之后、读取之前，也可能发生在读取中途（读取触发的退役清理会读盘）；
+   * 这时重新追平再执行，而不是在退回的状态上作答。每次重做都对应他方又一次发布；停止后追平抛出，
+   * 循环随之结束。包着直写的操作只核执行前：直写在写者锁内读盘、按需重同步，执行后不能重做。
+   */
+  async #runCovered<T>(
+    advance: () => Promise<void>,
+    operation: () => Promise<T>,
+    verifyAfter: boolean,
+  ): Promise<T> {
+    let rebuilt = false;
+    for (;;) {
+      const sources = await this.#initialize();
+      const sourceHeads = await this.#captureSourceHeads(sources);
+      const base = this.#index.adoptionCount();
+      await advance();
+      let result: { readonly value: T } | undefined;
+      try {
+        result = await this.#serialize(async () => {
+          if (this.#index.adoptionCount() !== base || !this.#covers(sources, sourceHeads)) return undefined;
+          const value = await operation();
+          return !verifyAfter || this.#index.adoptionCount() === base ? { value } : undefined;
+        });
+      } catch (error) {
+        if (rebuilt || !(error instanceof DurableProjectionStorageError)) throw error;
+        rebuilt = true;
+        await this.#serialize(async () => {
+          this.#retentionRebuildRequired = true;
+        });
+        continue;
+      }
+      if (result) return result.value;
+      await yieldToEventLoop();
     }
+  }
+
+  #covers(sources: readonly LifecycleSource[], sourceHeads: LifecycleSourceHeads): boolean {
+    const checkpoints = this.#index.checkpoints();
+    return sources.every((source) =>
+      (checkpoints[source.id] ?? source.origin).lsn >= sourceHeads[source.id]!.lsn);
+  }
+
+  async #catchUpLocked(
+    sources: readonly LifecycleSource[],
+    sourceHeads: LifecycleSourceHeads,
+  ): Promise<boolean> {
+    if (this.#retentionRebuildRequired) {
+      await this.#reset(sources, sourceHeads);
+      this.#retentionRebuildRequired = false;
+      return true;
+    }
+    try {
+      const more = await this.#synchronizeSources(sources, sourceHeads);
+      this.#settleRebuild();
+      return more;
+    } catch (error) {
+      if (!isRebuildableProjectionFailure(error)) throw error;
+      await this.#reset(sources, sourceHeads);
+      return true;
+    }
+  }
+
+  /**
+   * 停止前发布已有的有界覆盖层与源向量：只写检查点，不追尾、不排空任务、不做整轮合并。未覆盖的
+   * 尾部受源端追加准入的预算约束，由下次启动追平。
+   */
+  async checkpoint(): Promise<void> {
+    if (!this.#sources) return;
+    await this.#serialize(() => this.#index.flushCheckpoint());
+  }
+
+  /** 跨进程写者锁：同一异步链内可重入；等不到时按容量背压交给调用方在其互斥区外重试。 */
+  async #withWriterLock<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#writerLock.getStore()) return operation();
+    let release: () => Promise<void>;
+    try {
+      release = await this.#acquireLock(this.#lockPath, {
+        staleMs: WRITER_LOCK_STALE_MS,
+        waitMs: WRITER_LOCK_WAIT_MS,
+        resourceName: "ArtifactLifecycleIndex",
+      });
+    } catch (error) {
+      if (!(error instanceof FileLockBusyError)) throw error;
+      throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "slots", retryAfterMs: 25 });
+    }
+    try {
+      return await this.#writerLock.run(true, operation);
+    } finally {
+      await release();
+    }
+  }
+
+  /**
+   * 非源派生的直写（上传在场意图、回收标记）：从决定到落盘整段持跨进程锁。先采纳他方已发布的
+   * 更新一代；采纳了就在锁内把源尾追平再做决定，因为本进程未落盘的覆盖层已随之作废。
+   */
+  #directWrite<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#withWriterLock(async () => {
+      const before = this.#index.checkpoints();
+      await this.#index.refreshPublishedState();
+      if (!sameSourceHeads(before, this.#index.checkpoints())) {
+        const sources = await this.#initialize();
+        const sourceHeads = await this.#captureSourceHeads(sources);
+        while (await this.#synchronizeSources(sources, sourceHeads)) await yieldToEventLoop();
+      }
+      return operation();
+    });
   }
 
   async #synchronizeBounded(
@@ -447,15 +638,22 @@ export class ArtifactLifecycleIndex {
   ): Promise<boolean> {
     const sources = await this.#initialize();
     if (this.#retentionRebuildRequired) {
-      await this.#reset(sources);
+      await this.#reset(sources, sourceHeads);
       this.#retentionRebuildRequired = false;
       return true;
     }
     try {
-      return await this.#advanceBounded(sources, sourceHeads);
+      const more = await this.#advanceBounded(sources, sourceHeads);
+      this.#settleRebuild();
+      return more;
     } catch (error) {
+      if (error instanceof LifecycleBaseReplaced) {
+        // 本步的增量没有留下。临时件对账的游标可能已越过这些条目，关掉会话、下一步从头对账。
+        await this.#closeTemporaryReconciliation();
+        return true;
+      }
       if (!isRebuildableProjectionFailure(error)) throw error;
-      await this.#reset(sources);
+      await this.#reset(sources, sourceHeads);
       return true;
     }
   }
@@ -531,8 +729,7 @@ export class ArtifactLifecycleIndex {
   }
 
   async checkpointRetentionSnapshot(): Promise<ArtifactCheckpointRetentionSnapshot> {
-    await this.synchronize();
-    return this.#serialize(async () => ({
+    return this.#runSynchronized(async () => ({
       sourceHeads: cloneSourceHeads(this.#index.checkpoints()),
     }));
   }
@@ -568,8 +765,8 @@ export class ArtifactLifecycleIndex {
     candidates: readonly ArtifactReleaseCandidate[],
   ): Promise<void> {
     if (candidates.length === 0) return;
-    await this.#runSynchronized(async () => {
-      const buffer = new MutationBuffer(this.#records);
+    await this.#runSynchronized(() => this.#directWrite(async () => {
+      const buffer = this.#buffer();
       for (const candidate of candidates) {
         const state = await this.#state(candidate.ref.digest, buffer);
         if (
@@ -586,14 +783,18 @@ export class ArtifactLifecycleIndex {
         }));
       }
       await this.#commit(buffer, this.#index.checkpoints());
-    });
+    }), false);
   }
 
+  /**
+   * 启动与每次使用 grant 的路径只追源尾：撤销在源回放时内联停用，过期按有效时间前沿在这里判定，
+   * 与后台排空过期任务后的结果逐键相同，不等过期、退休等积压排空。
+   */
   async activeGrant(
     grantId: string,
     expected?: SurfaceAssetGrant,
   ): Promise<SurfaceAssetGrant | undefined> {
-    return this.#runSynchronized(async () => {
+    return this.#runCaughtUp(async () => {
       const key = activeGrantKey(grantId);
       const value = await this.#records.get(key);
       if (value === undefined) return undefined;
@@ -611,6 +812,8 @@ export class ArtifactLifecycleIndex {
           "Active surface grant does not match its expected authority grant",
         );
       }
+      const effectiveTime = optionalTime(await this.#records.get(META_TIME_KEY));
+      if (effectiveTime && Date.parse(grant.expiry) <= Date.parse(effectiveTime)) return undefined;
       return grant;
     });
   }
@@ -656,10 +859,15 @@ export class ArtifactLifecycleIndex {
     });
   }
 
+  /** \u6709\u6548\u65f6\u95f4\u524d\u6cbf\u4e4b\u540e\u6700\u65e9\u7684\u5230\u671f\uff1b\u524d\u6cbf\u53ca\u4e4b\u524d\u5df2\u5230\u671f\u3001\u5c1a\u5f85\u540e\u53f0\u505c\u7528\u7684\u4e0d\u8ba1\u3002 */
   async nextGrantExpiry(): Promise<string | undefined> {
-    return this.#runSynchronized(async () => {
+    return this.#runCaughtUp(async () => {
+      const effectiveTime = optionalTime(await this.#records.get(META_TIME_KEY));
       const page = await this.#records.scan(
-        { gte: EXPIRY_GRANT_PREFIX, lt: `${EXPIRY_GRANT_PREFIX}\uffff` },
+        {
+          gte: effectiveTime ? `${EXPIRY_GRANT_PREFIX}${effectiveTime}\uffff` : EXPIRY_GRANT_PREFIX,
+          lt: `${EXPIRY_GRANT_PREFIX}\uffff`,
+        },
         1,
       );
       const first = page.entries[0];
@@ -723,8 +931,8 @@ export class ArtifactLifecycleIndex {
     ref: ArtifactRef,
     scopeIdentity: string,
   ): Promise<void> {
-    await this.#runSynchronized(async () => {
-      const buffer = new MutationBuffer(this.#records);
+    await this.#runSynchronized(() => this.#directWrite(async () => {
+      const buffer = this.#buffer();
       await this.#assertUploadScope(ref, scopeIdentity, buffer);
       buffer.put(
         temporaryIntentKey(ref.digest, scopeIdentity),
@@ -732,7 +940,7 @@ export class ArtifactLifecycleIndex {
       );
       await this.#commit(buffer, this.#index.checkpoints());
       await this.#temporaryPresence.mark(ref, scopeIdentity);
-    });
+    }), false);
   }
 
   async settleTemporaryPresence(
@@ -740,18 +948,18 @@ export class ArtifactLifecycleIndex {
     scopeIdentity: string,
     landed: boolean,
   ): Promise<void> {
-    await this.#runSynchronized(async () => {
+    await this.#runSynchronized(() => this.#directWrite(async () => {
       if (!landed) {
         await this.#temporaryPresence.remove(ref, scopeIdentity);
       }
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       const key = temporaryIntentKey(ref.digest, scopeIdentity);
       if (landed) {
         await this.#recordTemporary(ref, scopeIdentity, buffer);
       }
       buffer.tombstone(key);
       await this.#commit(buffer, this.#index.checkpoints());
-    });
+    }), false);
   }
 
   async temporaryBefore(
@@ -814,7 +1022,7 @@ export class ArtifactLifecycleIndex {
   }
 
   async markTemporaryRemoved(ref: ArtifactRef): Promise<boolean> {
-    return this.#runSynchronized(async () => {
+    return this.#runSynchronized(() => this.#directWrite(async () => {
       const prefix = temporaryScopePrefix(ref.digest);
       const page = await this.#records.scan(
         { gte: prefix, lt: `${prefix}\uffff` },
@@ -824,7 +1032,7 @@ export class ArtifactLifecycleIndex {
         scopeReference(value, key, temporaryScopeKey).scopeIdentity
       );
       await this.#temporaryPresence.removeScopes(ref, scopes);
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       for (const scopeIdentity of scopes) {
         await this.#removeTemporaryScope(ref, scopeIdentity, buffer);
       }
@@ -834,7 +1042,7 @@ export class ArtifactLifecycleIndex {
       }
       await this.#commit(buffer, this.#index.checkpoints());
       return complete;
-    });
+    }), false);
   }
 
   async #activeGrants(
@@ -962,12 +1170,26 @@ export class ArtifactLifecycleIndex {
     return sources;
   }
 
-  async #reset(sources: readonly LifecycleSource[]): Promise<void> {
+  /**
+   * 整段重建：派生损坏、源被替换或源集合换代。重建到起点时的源头之前，作为尾部消费者不参与硬界
+   * 准入——重建尾部分别计量，不挡新写入；由提交后的刷新与读取推进。
+   */
+  async #reset(sources: readonly LifecycleSource[], rebuildTarget: LifecycleSourceHeads): Promise<void> {
     await this.#closeTemporaryReconciliation();
     this.#unflushedSourceRecords = 0;
     await this.#index.reset(
       Object.fromEntries(sources.map((source) => [source.id, source.origin])),
     );
+    this.#rebuildTarget = rebuildTarget;
+  }
+
+  #settleRebuild(): void {
+    const target = this.#rebuildTarget;
+    if (!target) return;
+    const checkpoints = this.#index.checkpoints();
+    if (Object.values(target).every((head) => (checkpoints[head.logId]?.lsn ?? 0) >= head.lsn)) {
+      this.#rebuildTarget = undefined;
+    }
   }
 
   async #advanceBounded(
@@ -1068,7 +1290,7 @@ export class ArtifactLifecycleIndex {
       );
       return true;
     }
-    const buffer = new MutationBuffer(this.#records);
+    const buffer = this.#buffer();
     buffer.put(META_TEMPORARY_RECONCILED_KEY, true);
     await this.#commit(buffer, this.#index.checkpoints());
     await this.#closeTemporaryReconciliation();
@@ -1079,6 +1301,8 @@ export class ArtifactLifecycleIndex {
     ref: ArtifactRef,
     scopeIdentity: string,
   ): Promise<void> {
+    // 先记底：下面“已记录则跳过”的判断也属于这次决定。
+    const buffer = this.#buffer();
     const existingState = await this.#records.get(
       temporaryStateKey(ref.digest),
     );
@@ -1117,7 +1341,6 @@ export class ArtifactLifecycleIndex {
       assertCompatibleReference(lifecycle.ref, ref);
       return;
     }
-    const buffer = new MutationBuffer(this.#records);
     await this.#recordTemporary(ref, scopeIdentity, buffer);
     await this.#commit(buffer, this.#index.checkpoints());
   }
@@ -1135,7 +1358,7 @@ export class ArtifactLifecycleIndex {
       await this.#temporaryPresence.beginLegacyMigration(ref);
     }
     if (migrationValue === undefined) {
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       buffer.put(migrationKey, asJson({
         ref,
         found: false,
@@ -1153,7 +1376,7 @@ export class ArtifactLifecycleIndex {
     const lifecycle = await this.#state(ref.digest);
     if (lifecycle && isRetained(lifecycle)) {
       assertCompatibleReference(lifecycle.ref, ref);
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       const cleanupKey = temporaryCleanupKey(ref.digest);
       buffer.put(
         cleanupKey,
@@ -1183,13 +1406,13 @@ export class ArtifactLifecycleIndex {
       if (!migration.found) {
         throw new Error("Temporary surface asset has no durable upload grant");
       }
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       buffer.tombstone(migrationKey);
       await this.#commit(buffer, this.#index.checkpoints());
       await this.#temporaryPresence.finishLegacyMigration(ref);
       return true;
     }
-    const buffer = new MutationBuffer(this.#records);
+    const buffer = this.#buffer();
     for (const entry of page.entries) {
       const scopeIdentity = scopeReference(
         entry.value,
@@ -1253,7 +1476,7 @@ export class ArtifactLifecycleIndex {
           intent.scopeIdentity,
         );
       }
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       if (progress.complete || progress.receivedBytes > 0) {
         await this.#recordTemporary(
           intent.ref,
@@ -1294,15 +1517,21 @@ export class ArtifactLifecycleIndex {
         pageIndex < MAX_SYNCHRONIZATION_TURNS;
         pageIndex += 1
       ) {
+        // 先记底，再读覆盖位置：本页的决定与发布的位置都据同一个底。
+        const buffer = this.#buffer();
         const checkpoints = this.#index.checkpoints();
         const checkpoint = checkpoints[source.id] ?? source.origin;
         if (checkpoint.lsn >= sourceHead.lsn) {
+          // 同一位置前缀不同，或覆盖位置超出源日志的实际 head：源已被整段替换（如迁居装入新前缀）。
+          // 按派生损坏整段重建，不能当成已追平跳过——否则尾部准入会一直要求追平而追不动。另一步骤
+          // 已把索引推进到冻结源头之后则属正常，跳过即可。
           if (
-            checkpoint.lsn === sourceHead.lsn &&
-            !sameCheckpoint(checkpoint, sourceHead)
+            checkpoint.lsn === sourceHead.lsn
+              ? !sameCheckpoint(checkpoint, sourceHead)
+              : checkpoint.lsn > (await source.log.checkpoint()).lsn
           ) {
-            throw new Error(
-              "Artifact lifecycle source head disagrees with its checkpoint",
+            throw invalidLifecycleProjection(
+              "Artifact lifecycle checkpoint is not on its source log",
             );
           }
           break;
@@ -1326,18 +1555,24 @@ export class ArtifactLifecycleIndex {
             "Artifact lifecycle source ended before its frozen head",
           );
         }
-        const buffer = new MutationBuffer(this.#records);
         for (const envelope of page.commits) {
           await this.#applyEnvelope(source.id, envelope, buffer);
         }
         // Pure authority replay is reconstructible. Coalesce a short suffix
         // in the bounded overlay, but checkpoint at least each source page so
         // a crash never turns this optimization into an unbounded replay.
-        await this.#commit(buffer, {
-          ...checkpoints,
-          [source.id]: page.checkpoint,
-        }, false, page.commits.length);
-        if (page.checkpoint.lsn >= sourceHead.lsn) break;
+        try {
+          await this.#commit(buffer, {
+            ...checkpoints,
+            [source.id]: page.checkpoint,
+          }, false, page.commits.length);
+        } catch (error) {
+          // 换底：本页（连同此前未落盘的页）没有留下，下一轮从当前实际覆盖位置重读。
+          if (!(error instanceof LifecycleBaseReplaced)) throw error;
+        }
+        // 完成与否看提交后实际有效的覆盖位置，不看本页曾算到的位置。
+        const covered = this.#index.checkpoints()[source.id] ?? source.origin;
+        if (covered.lsn >= sourceHead.lsn) break;
         if (pageIndex === MAX_SYNCHRONIZATION_TURNS - 1) {
           hasMore = true;
         }
@@ -2011,7 +2246,7 @@ export class ArtifactLifecycleIndex {
         { gte: prefix, lt: `${prefix}\uffff` },
         RETIREMENT_PAGE_SIZE,
       );
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       for (const ownerEntry of owners.entries) {
         const owned = ownerDigest(ownerEntry.value, ownerEntry.key);
         const state = await this.#state(owned.digest, buffer);
@@ -2044,7 +2279,7 @@ export class ArtifactLifecycleIndex {
     if (pending.entries.length === 0) return false;
     for (const entry of pending.entries) {
       const job = adoptionJob(entry.value, entry.key);
-      const buffer = new MutationBuffer(this.#records);
+      const buffer = this.#buffer();
       const lifecycle = await this.#state(job.digest, buffer);
       if (!lifecycle || isRetained(lifecycle) !== job.adopted) {
         throw invalidLifecycleProjection(
@@ -2166,7 +2401,7 @@ export class ArtifactLifecycleIndex {
       RETIREMENT_PAGE_SIZE,
     );
     if (expired.entries.length === 0) return false;
-    const buffer = new MutationBuffer(this.#records);
+    const buffer = this.#buffer();
     for (const entry of expired.entries) {
       const grant = await this.#indexedGrant(
         entry.value,
@@ -2296,6 +2531,16 @@ export class ArtifactLifecycleIndex {
     return value === undefined ? undefined : deadOwner(value, deadKey(owner));
   }
 
+  /** 记下创建时的采纳计数：缓冲区里的决定都据这个底算出。 */
+  #buffer(): MutationBuffer {
+    return new MutationBuffer(this.#records, this.#index.adoptionCount());
+  }
+
+  /**
+   * 正常返回即保证本次增量留在当前底上。准备或落盘时都可能先读盘、采纳他方发布的更新一代：
+   * 准备时换了底，据旧底算出的增量不能发布；落盘时换了底，已发布的增量随覆盖层一起被丢弃。
+   * 两种情况都抛 {@link LifecycleBaseReplaced}，由调用方从当前状态重做。
+   */
   async #commit(
     buffer: MutationBuffer,
     checkpoints: DurableProjectionCheckpoints,
@@ -2306,18 +2551,37 @@ export class ArtifactLifecycleIndex {
     const prepared = await this.#index.prepare(
       bindDurableProjectionMutations(buffer.mutations()),
     );
+    // 自缓冲区创建（决定读取）到准备完成之间任何一次采纳，都使增量失去它的底。
+    this.#assertBase(buffer);
     this.#index.publish(prepared, checkpoints);
     this.#unflushedSourceRecords += replayedSourceRecords;
     if (replayedSourceRecords > 0 && this.#unflushedSourceRecords < SOURCE_PAGE_SIZE) return;
     await this.#index.flush({ compact });
     this.#unflushedSourceRecords = 0;
+    this.#assertBase(buffer);
+  }
+
+  #assertBase(buffer: MutationBuffer): void {
+    if (buffer.base !== this.#index.adoptionCount()) throw new LifecycleBaseReplaced();
+  }
+}
+
+/** 决定所依据的底已被采纳的他方新一代替换：增量没有留在当前底上，调用方从当前状态重做。 */
+class LifecycleBaseReplaced extends Error {
+  constructor() {
+    super("Artifact lifecycle base was replaced by an adopted peer publication");
+    this.name = "LifecycleBaseReplaced";
   }
 }
 
 class MutationBuffer {
   readonly #mutations = new Map<string, MutationValue>();
 
-  constructor(private readonly index: DurableProjectionReadContext) {}
+  constructor(
+    private readonly index: DurableProjectionReadContext,
+    /** 创建时的采纳计数。 */
+    readonly base: number,
+  ) {}
 
   get size(): number {
     return this.#mutations.size;

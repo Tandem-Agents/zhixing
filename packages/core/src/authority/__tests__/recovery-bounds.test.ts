@@ -9,6 +9,7 @@ import { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, maximumAuthori
 import { authorityWalMaximumFrameBytes } from "../wal-frame.js";
 import { durableProjectionDirectoryName, durableProjectionVersionDirectoryName, FileDurableProjectionIndex } from "../durable-projection-index.js";
 import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
+import type { AuthorityTailConsumer, DurableLogCheckpoint } from "../interfaces.js";
 
 const logs: FileAuthorityCommitLog[] = [];
 const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 91));
@@ -189,3 +190,70 @@ it("reclaims a retired projection version by pages, refuses directories in use o
   await expect(resumed.reclaimRetiredProjectionVersion("retired-copy", 1)).resolves.toBe("removed");
   await expect(stat(legacy)).rejects.toMatchObject({ code: "ENOENT" });
 }, 60_000);
+
+/** 外部尾部消费者的替身：覆盖位置由测试控制，追平即读到当前 head。 */
+function tailConsumer(log: FileAuthorityCommitLog, covered: DurableLogCheckpoint | undefined) {
+  const state = { covered, catchUps: 0, refreshes: 0, failure: undefined as Error | undefined };
+  const consumer: AuthorityTailConsumer = {
+    coveredThrough: () => state.covered,
+    publishCoverage: async () => {
+      state.catchUps++;
+      if (state.failure) throw state.failure;
+      // 锁外调用：若仍在追加的日志锁内，这里取当前 head 会与该锁互等。
+      state.covered = await log.checkpoint();
+    },
+    refresh: () => { state.refreshes++; },
+  };
+  return { state, unregister: log.registerTailConsumer(consumer) };
+}
+
+it("keeps an external tail consumer within the hard frame bound by catching it up outside the log lock", async () => {
+  const root = await createTempDir("b2-tail-consumer-bound");
+  const log = open(root);
+  const consumer = tailConsumer(log, await log.checkpoint());
+  let worst = 0;
+  for (let n = 0; n < AUTHORITY_RECOVERY_BUDGET.hardFrames * 2 + 3; n++) {
+    await log.append([{ stream: "control", body: { n } }]);
+    const head = await log.checkpoint();
+    worst = Math.max(worst, head.lsn - consumer.state.covered!.lsn);
+  }
+  // 刷新只是提示（替身不追平）；硬界由追加前的准入保证，越界的那次追加在锁外追平后成功。
+  expect(worst).toBeLessThanOrEqual(AUTHORITY_RECOVERY_BUDGET.hardFrames);
+  expect(consumer.state.catchUps).toBe(2);
+  expect(consumer.state.refreshes).toBeGreaterThan(0);
+  // 登记撤销后不再核它。
+  consumer.unregister();
+  for (let n = 0; n < AUTHORITY_RECOVERY_BUDGET.hardFrames + 1; n++) await log.append([{ stream: "control", body: { after: n } }]);
+  expect(consumer.state.catchUps).toBe(2);
+}, 120_000);
+
+it("returns ordinary backpressure to a writer holding a domain queue and admits its retry once the consumer caught up", async () => {
+  const root = await createTempDir("b2-tail-consumer-queue");
+  const log = open(root);
+  const origin = await log.checkpoint();
+  for (let n = 0; n < AUTHORITY_RECOVERY_BUDGET.hardFrames; n++) await log.append([{ stream: "control", body: { n } }]);
+  const consumer = tailConsumer(log, origin);
+  const queue = new SerialTaskQueue();
+  // 持有领域串行区：不在区内等待追平，按背压上抛，追平在后台进行。
+  await expect(queue.run(() => log.append([{ stream: "control", body: { queued: true } }])))
+    .rejects.toBeInstanceOf(AuthorityPreparationRequired);
+  expect((await log.checkpoint()).lsn).toBe(AUTHORITY_RECOVERY_BUDGET.hardFrames);
+  await vi.waitFor(() => expect(consumer.state.covered!.lsn).toBe(AUTHORITY_RECOVERY_BUDGET.hardFrames));
+  await expect(queue.run(() => log.append([{ stream: "control", body: { queued: true } }]))).resolves.toBeDefined();
+}, 120_000);
+
+it("fails an over-budget append without committing when the tail consumer cannot catch up", async () => {
+  const root = await createTempDir("b2-tail-consumer-failure");
+  const log = open(root);
+  const origin = await log.checkpoint();
+  for (let n = 0; n < AUTHORITY_RECOVERY_BUDGET.hardFrames; n++) await log.append([{ stream: "control", body: { n } }]);
+  const consumer = tailConsumer(log, origin);
+  consumer.state.failure = new Error("lifecycle catch-up failed");
+  await expect(log.append([{ stream: "control", body: { over: true } }])).rejects.toThrow("lifecycle catch-up failed");
+  expect((await log.checkpoint()).lsn).toBe(AUTHORITY_RECOVERY_BUDGET.hardFrames);
+  // 未知覆盖位置同样先追平，不按“无欠账”放行。
+  consumer.state.failure = undefined;
+  consumer.state.covered = undefined;
+  await expect(log.append([{ stream: "control", body: { over: true } }])).resolves.toBeDefined();
+  expect(consumer.state.catchUps).toBe(2);
+}, 120_000);

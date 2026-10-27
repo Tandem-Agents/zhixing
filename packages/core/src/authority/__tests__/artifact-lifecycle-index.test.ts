@@ -32,6 +32,7 @@ import {
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
   runInMaintenanceContext,
+  StorageMaintenanceAdmissionError,
   StorageMaintenanceTaskRunner,
   type DeviceCapacityAdmission,
   type StorageMaintenanceGovernorPort,
@@ -52,6 +53,8 @@ import {
   FileDurableProjectionIndex,
 } from "../durable-projection-index.js";
 import type { DurableLogCheckpoint } from "../interfaces.js";
+import { maximumAuthorityRecoveryTailBytes } from "../recovery-work.js";
+import { AuthorityCacheIntegrity } from "../startup-proofs.js";
 import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
 
 // 重 IO 组级预算:本机(低资源 Windows)上单条耐久用例真实耗时可达 20-30 秒,
@@ -552,16 +555,25 @@ describe("ArtifactLifecycleIndex", () => {
         { stream: "control", body: { t: "asset-grant-issued", grant: second } },
       ]);
       const derivedRoot = path.join(root, "derived");
-      const createIndex = () =>
-        new ArtifactLifecycleIndex({
+      // 每个实例用完即停：下面的改写是绕过索引写者锁的裸投影写入，不能与上一个实例仍在后台
+      // 进行的退休清理并发写同一份清单。
+      const inspectWith = async <T>(inspect: (index: ArtifactLifecycleIndex) => Promise<T>): Promise<T> => {
+        const index = new ArtifactLifecycleIndex({
           rootDir: derivedRoot,
           logs: [log],
           artifacts,
           temporaryArtifacts,
           temporaryPresence: temporaryPresence(root),
           receiver,
+          ownsSourceLogs: false,
         });
-      await expect(createIndex().activeGrant(first.grantId)).resolves.toEqual(
+        try {
+          return await inspect(index);
+        } finally {
+          await index.stopStorageMaintenance();
+        }
+      };
+      await expect(inspectWith((index) => index.activeGrant(first.grantId))).resolves.toEqual(
         first,
       );
       const encode = (value: string) =>
@@ -607,7 +619,7 @@ describe("ArtifactLifecycleIndex", () => {
             grantId: second.grantId,
           },
         );
-        await expect(check.inspect(createIndex())).resolves.toEqual(
+        await expect(inspectWith(check.inspect)).resolves.toEqual(
           check.expected,
         );
       }
@@ -621,7 +633,7 @@ describe("ArtifactLifecycleIndex", () => {
         })) as JsonValue,
       );
       await expect(
-        createIndex().activeGrant(first.grantId, first),
+        inspectWith((index) => index.activeGrant(first.grantId, first)),
       ).resolves.toEqual(first);
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
@@ -2433,4 +2445,778 @@ describe("ArtifactLifecycleIndex", () => {
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );
+
+  it(
+    "catches up the source tail without draining a retirement backlog",
+    async () => {
+      const work: Record<number, { readonly catchUp: number; readonly drain: number }> = {};
+      for (const owners of [4, 16]) {
+        const root = await createTempDir(`artifact-lifecycle-catch-up-${owners}`);
+        const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+        const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+        const receiver = new FileResumableArtifactReceiver(
+          temporaryArtifacts,
+          path.join(root, "partials"),
+          { maxArtifactBytes: 1_024 },
+        );
+        const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+          clock: () => "2026-07-25T00:00:00.000Z",
+        });
+        const createIndex = () => new ArtifactLifecycleIndex({
+          rootDir: path.join(root, "derived"),
+          logs: [log],
+          artifacts,
+          temporaryArtifacts,
+          temporaryPresence: temporaryPresence(root),
+          receiver,
+          ownsSourceLogs: false,
+        });
+        for (let index = 0; index < owners; index += 1) {
+          const ref = await artifacts.put(Buffer.from(`owned leaf ${index}`, "utf8"));
+          await log.append([{ stream: `run:conv-${index}`, body: { t: "admitted", attachments: [{ ...ref, kind: "file" }] } }]);
+        }
+        for (let index = 0; index < owners; index += 1) {
+          await log.append([{ stream: `run:conv-${index}`, body: { t: "session-lifecycle", mutation: "delete" } }]);
+        }
+        // 第一个实例追平到 head 并只写检查点：死亡会话已登记为退休任务，尚未排空
+        const first = createIndex();
+        await first.catchUp();
+        await first.checkpoint();
+        await first.stopStorageMaintenance();
+        const second = createIndex();
+        const readTail = vi.spyOn(FileAuthorityCommitLog.prototype, "readTail");
+        const get = vi.spyOn(FileDurableProjectionIndex.prototype, "get");
+        const scan = vi.spyOn(FileDurableProjectionIndex.prototype, "scan");
+        const reads = () => [get, scan].reduce((total, spy) => total +
+          spy.mock.contexts.filter((index) => (index as FileDurableProjectionIndex).projectionId === "artifact-lifecycle").length, 0);
+        try {
+          await second.catchUp();
+          // 前提：冷开时源尾为空，只剩退休积压
+          expect(readTail).not.toHaveBeenCalled();
+          const catchUp = reads();
+          get.mockClear();
+          scan.mockClear();
+          await second.synchronize();
+          work[owners] = { catchUp, drain: reads() };
+          // 排空之后这些叶子都已释放
+          expect(await second.releasedBefore("2026-07-25T01:00:00.000Z", 64)).toHaveLength(owners);
+        } finally {
+          readTail.mockRestore();
+          get.mockRestore();
+          scan.mockRestore();
+          await second.stopStorageMaintenance();
+          await log.stopStorageMaintenance();
+        }
+      }
+      expect(work[16]!.catchUp).toBe(work[4]!.catchUp);
+      expect(work[16]!.drain).toBeGreaterThan(work[4]!.drain);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "rebuilds onto an installed prefix without blocking new writes",
+    async () => {
+      const clock = { clock: () => "2026-07-25T00:00:00.000Z" };
+      const root = await createTempDir("artifact-lifecycle-installed-prefix");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+      const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1_024 });
+      const source = new FileAuthorityCommitLog(path.join(root, "source"), artifacts, clock);
+      await source.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z" } }]);
+      const sourceHead = await source.checkpoint();
+      const records = await source.readAll();
+      const target = new FileAuthorityCommitLog(path.join(root, "target"), artifacts, clock);
+      for (let index = 0; index < 300; index += 1) {
+        await target.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z" } }]);
+      }
+      const createIndex = () => new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [target],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root),
+        receiver,
+        ownsSourceLogs: false,
+      });
+      const index = createIndex();
+      const registered = vi.spyOn(FileAuthorityCommitLog.prototype, "registerTailConsumer");
+      const unregister = index.registerTailAdmission();
+      const consumer = registered.mock.calls[0]![0];
+      registered.mockRestore();
+      try {
+        await index.catchUp();
+        await index.checkpoint();
+        expect(consumer.rebuilding?.()).toBe(false);
+        // 迁居装入新前缀：logId 不变、内容整段替换，旧检查点（lsn 300）超出新 head
+        await target.installPlannedAnchorPrefix({
+          source: (async function* () { yield* records; })(),
+          sourceHead,
+          installationEntries: [{ stream: "job:installation", body: { installed: true } }],
+          candidateReferences: [],
+        });
+        expect((await target.checkpoint()).lsn).toBeLessThan(300);
+        // 安装即通知：未追尾前就处于重建，新写入不按硬界等它，重建由刷新在后台推进
+        expect(consumer.rebuilding?.()).toBe(true);
+        // 重建期间新写入不被挡
+        for (let write = 0; write < 5; write += 1) {
+          await target.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z" } }]);
+        }
+        const head = await target.checkpoint();
+        await index.catchUp();
+        expect((await index.checkpointRetentionSnapshot()).sourceHeads[head.logId]).toEqual(head);
+        expect(consumer.rebuilding?.()).toBe(false);
+      } finally {
+        unregister();
+        await index.stopStorageMaintenance();
+        await target.stopStorageMaintenance();
+        await source.stopStorageMaintenance();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "rebuilds from a stale manifest whose checkpoint lies beyond an installed shorter prefix",
+    async () => {
+      const clock = { clock: () => "2026-07-25T00:00:00.000Z" };
+      const root = await createTempDir("artifact-lifecycle-stale-ahead");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+      const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1_024 });
+      const source = new FileAuthorityCommitLog(path.join(root, "source"), artifacts, clock);
+      await source.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z" } }]);
+      const sourceHead = await source.checkpoint();
+      const records = await source.readAll();
+      const target = new FileAuthorityCommitLog(path.join(root, "target"), artifacts, clock);
+      for (let index = 0; index < 80; index += 1) {
+        await target.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z" } }]);
+      }
+      const createIndex = () => new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [target],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root),
+        receiver,
+        ownsSourceLogs: false,
+      });
+      try {
+        // 没有登记为尾部消费者的实例：只把旧位置（lsn 80）落盘，收不到安装通知
+        const first = createIndex();
+        await first.catchUp();
+        await first.checkpoint();
+        await first.stopStorageMaintenance();
+        await target.installPlannedAnchorPrefix({
+          source: (async function* () { yield* records; })(),
+          sourceHead,
+          installationEntries: [{ stream: "job:installation", body: { installed: true } }],
+          candidateReferences: [],
+        });
+        const head = await target.checkpoint();
+        expect(head.lsn).toBeLessThan(80);
+        // 打开时只看到旧清单：覆盖位置超出新 head，按派生损坏整段重建，而不是当成已追平跳过
+        const second = createIndex();
+        try {
+          await second.catchUp();
+          expect((await second.checkpointRetentionSnapshot()).sourceHeads[head.logId]).toEqual(head);
+        } finally {
+          await second.stopStorageMaintenance();
+        }
+      } finally {
+        await target.stopStorageMaintenance();
+        await source.stopStorageMaintenance();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "bounds the cold replay by publishing coverage before a legal large frame is admitted",
+    async () => {
+      const fixture = await durableTailFixture("artifact-lifecycle-durable-tail");
+      const { log, index, consumer } = fixture;
+      let coldLog: FileAuthorityCommitLog | undefined;
+      let cold: ArtifactLifecycleIndex | undefined;
+      try {
+        await index.catchUp();
+        for (let n = 0; n < 3; n += 1) {
+          const before = await log.checkpoint();
+          await log.append(largeFrame(n));
+          // 内存已追平、尚未发布的上一帧：大帧只在它落盘发布之后接纳
+          expect(consumer.coveredThrough(before.logId)).toEqual(before);
+          await index.catchUp();
+        }
+        const head = await log.checkpoint();
+        const maximum = maximumAuthorityRecoveryTailBytes();
+        expect(head.frameEndOffset - consumer.coveredThrough(head.logId)!.frameEndOffset).toBeLessThanOrEqual(maximum);
+        await fixture.close();
+        // 冷重开实际回放的字节就是耐久欠账，不能因为上次运行已在内存追平就少算
+        coldLog = fixture.createLog();
+        cold = fixture.createIndex(coldLog);
+        let replayed = 0;
+        const readTail = coldLog.readTail.bind(coldLog);
+        vi.spyOn(coldLog, "readTail").mockImplementation((async (from: DurableLogCheckpoint, ...rest: never[]) => {
+          const page = await readTail(from, ...rest);
+          replayed += page.checkpoint.frameEndOffset - from.frameEndOffset;
+          return page;
+        }) as never);
+        await cold.catchUp();
+        expect(replayed).toBeGreaterThan(0);
+        expect(replayed).toBeLessThanOrEqual(maximum);
+      } finally {
+        await fixture.close();
+        await cold?.stopStorageMaintenance();
+        await coldLog?.stopStorageMaintenance();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "publishes coverage in the background once the durable tail passes the refresh threshold",
+    async () => {
+      const fixture = await durableTailFixture("artifact-lifecycle-refresh-publish");
+      const { log, index, consumer } = fixture;
+      fixture.enableRefresh();
+      try {
+        await index.catchUp();
+        // 一帧即越过主动刷新阈值、未到硬界：提交不等它，随后由后台追平并落盘发布
+        await log.append(largeFrame(0));
+        const head = await log.checkpoint();
+        await vi.waitFor(() => expect(consumer.coveredThrough(head.logId)).toEqual(head), { timeout: 30_000 });
+      } finally {
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "refuses an over-budget append with backpressure while the lifecycle cannot publish its coverage",
+    async () => {
+      const fixture = await durableTailFixture("artifact-lifecycle-publish-failure");
+      const { log, index, consumer } = fixture;
+      const derivedRoot = fixture.derivedRoot;
+      const flush = FileDurableProjectionIndex.prototype.flush;
+      let failing = false;
+      const injected = vi.spyOn(FileDurableProjectionIndex.prototype, "flush").mockImplementation(
+        async function (this: FileDurableProjectionIndex, ...args: Parameters<typeof flush>) {
+          if (failing && this.rootDir.startsWith(derivedRoot)) throw new Error("injected lifecycle publish failure");
+          return flush.apply(this, args);
+        },
+      );
+      try {
+        await index.catchUp();
+        await log.append(largeFrame(0));
+        await index.catchUp();
+        const head = await log.checkpoint();
+        failing = true;
+        const refused = log.append(largeFrame(1));
+        await expect(refused).rejects.toBeInstanceOf(StorageMaintenanceAdmissionError);
+        await expect(refused).rejects.toMatchObject({
+          admission: { kind: "backpressured" },
+          cause: { message: "injected lifecycle publish failure" },
+        });
+        // 追加没有提交，未发布的欠账也没有被当成已覆盖
+        expect(await log.checkpoint()).toEqual(head);
+        expect(consumer.coveredThrough(head.logId)!.lsn).toBeLessThan(head.lsn);
+        failing = false;
+        await expect(log.append(largeFrame(1))).resolves.toBeDefined();
+        expect(consumer.coveredThrough(head.logId)).toEqual(head);
+      } finally {
+        injected.mockRestore();
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps a peer's direct write and never regresses the published source vector when an unpublished catch-up meets it",
+    async () => {
+      const root = await createTempDir("artifact-lifecycle-interleaved-direct-write");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+      const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1_024 });
+      const current = "2026-07-25T00:00:00.000Z";
+      const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, { clock: () => current });
+      const ref = await temporaryArtifacts.put(Buffer.from("interleaved upload", "utf8"));
+      const grant: SurfaceAssetGrant = {
+        v: 1,
+        grantId: "grt-01J00000000000000000000007",
+        scope: { domain: "conversation", conversationId: "conversation-interleaved", ownerEpoch: 1 },
+        surfacePrincipal: "surface-interleaved",
+        requestId: "request-interleaved",
+        kind: "asset-upload",
+        payloadDigest: byteDigest(Buffer.from("interleaved payload")),
+        assets: [ref],
+        issuedAt: current,
+        expiry: "2026-07-25T01:00:00.000Z",
+        signature: { alg: "test", keyId: "owner", sig: "test" },
+      };
+      await log.append([{ stream: "control", body: { t: "asset-grant-issued", grant } }]);
+      const createIndex = () => new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root),
+        receiver,
+        ownsSourceLogs: false,
+      });
+      const frontier = () => log.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: current } }]);
+      const local = createIndex();
+      const registered = vi.spyOn(FileAuthorityCommitLog.prototype, "registerTailConsumer");
+      const unregister = local.registerTailAdmission();
+      const consumer = registered.mock.calls[0]![0];
+      registered.mockRestore();
+      const peer = createIndex();
+      try {
+        await consumer.publishCoverage();
+        const logId = (await log.checkpoint()).logId;
+        const published = [consumer.coveredThrough(logId)!];
+        // 本实例把新尾部追到内存、未发布
+        for (let n = 0; n < 8; n += 1) await frontier();
+        await local.catchUp();
+        const localMemory = await log.checkpoint();
+        expect(consumer.coveredThrough(logId)).toEqual(published[0]);
+        // 对方在写者锁内发布一条直写（上传在场意图）
+        await peer.recordTemporaryPresence(ref, canonicalize(grant.scope));
+        for (let n = 0; n < 8; n += 1) await frontier();
+        // 本实例接着追尾并发布：采纳对方的新一代时作废自己未落盘的覆盖层，再从对方发布的位置追
+        await consumer.publishCoverage();
+        published.push(consumer.coveredThrough(logId)!);
+        await consumer.publishCoverage();
+        published.push(consumer.coveredThrough(logId)!);
+        for (let n = 1; n < published.length; n += 1) {
+          expect(published[n]!.lsn).toBeGreaterThanOrEqual(published[n - 1]!.lsn);
+        }
+        expect(published[1]!.lsn).toBeGreaterThanOrEqual(localMemory.lsn);
+        expect(published.at(-1)).toEqual(await log.checkpoint());
+        // 对方的直写没有被覆盖：意图排空后记为临时制品，在场标记与之一致地保留
+        const reader = createIndex();
+        try {
+          await expect(reader.temporaryBefore("2026-07-25T02:00:00.000Z", 8))
+            .resolves.toEqual([{ ref, eligibleAt: grant.expiry }]);
+        } finally {
+          await reader.stopStorageMaintenance();
+        }
+        await expect(temporaryPresence(root).has(ref)).resolves.toBe(true);
+      } finally {
+        unregister();
+        await peer.stopStorageMaintenance();
+        await local.stopStorageMaintenance();
+        await log.stopStorageMaintenance();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "answers the first read from the adopted coverage when a peer publication discards a replayed page before its flush",
+    async () => {
+      const fixture = await peerInterleavingFixture("artifact-lifecycle-peer-read");
+      const { log, local, peer, grantFor, gate } = fixture;
+      const grant = grantFor(1, "2026-07-25T01:00:00.000Z");
+      let pendingLocal: Promise<SurfaceAssetGrant | undefined> | undefined;
+      let pendingPeer: Promise<void> | undefined;
+      try {
+        await log.append([{ stream: "control", body: { t: "asset-grant-issued", grant } }]);
+        await local.maintainIdle();
+        await peer.maintainIdle();
+        // 对方已在旧源位置决定直写、持写者锁，停在发布前
+        pendingPeer = gate.holdPeer(() => peer.recordTemporaryPresence(fixture.ref, canonicalize(grant.scope)));
+        await gate.peerHeld();
+        await expect(access(fixture.lockPath)).resolves.toBeUndefined();
+        // 时间前沿越过到期：本实例把这页归约完，在本页落盘前停住（64 帧即触发按页落盘）
+        fixture.setNow("2026-07-25T02:00:00.000Z");
+        for (let n = 0; n < 64; n += 1) {
+          await log.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T02:00:00.000Z", n } }]);
+        }
+        pendingLocal = gate.holdLocalAfterPrepare(() => local.activeGrant(grant.grantId, grant));
+        await gate.localPrepared();
+        // 对方发布旧源位置加直写；本实例落盘时采纳它、丢弃自己未落盘的这页
+        gate.releasePeer();
+        await pendingPeer;
+        expect((await fixture.publishedCheckpoint()).lsn).toBe(1);
+        gate.releaseLocal();
+        // 第一次查询就按采纳后重新追平的状态作答，不靠下一次调用自愈
+        await expect(pendingLocal).resolves.toBeUndefined();
+        // 耐久向量从对方发布的位置单调推进到 head
+        await local.maintainIdle();
+        expect(await fixture.publishedCheckpoint()).toEqual(await log.checkpoint());
+      } finally {
+        gate.releaseAll();
+        await Promise.allSettled([pendingLocal, pendingPeer]);
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "answers from the covered state when a peer publication is adopted between catch-up and the read",
+    async () => {
+      const fixture = await peerInterleavingFixture("artifact-lifecycle-peer-between");
+      const { log, local, peer, grantFor, gate } = fixture;
+      const grant = grantFor(1, "2026-07-25T01:00:00.000Z");
+      let pendingPeer: Promise<void> | undefined;
+      const catchUp = local.catchUp.bind(local);
+      let adoptedBetween = false;
+      const advanced = vi.spyOn(local, "catchUp").mockImplementation(async () => {
+        await catchUp();
+        if (adoptedBetween) return;
+        adoptedBetween = true;
+        // 追平之后、读取之前：对方发布旧源位置，本实例的检查点落盘随即采纳它、丢掉刚追平的未落盘页
+        gate.releasePeer();
+        await pendingPeer;
+        await local.checkpoint();
+        expect((await fixture.publishedCheckpoint()).lsn).toBe(1);
+      });
+      try {
+        await log.append([{ stream: "control", body: { t: "asset-grant-issued", grant } }]);
+        await local.maintainIdle();
+        await peer.maintainIdle();
+        pendingPeer = gate.holdPeer(() => peer.recordTemporaryPresence(fixture.ref, canonicalize(grant.scope)));
+        await gate.peerHeld();
+        // 不到一页的时间前沿越过到期：追平只进覆盖层、不落盘
+        fixture.setNow("2026-07-25T02:00:00.000Z");
+        for (let n = 0; n < 10; n += 1) {
+          await log.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T02:00:00.000Z", n } }]);
+        }
+        await expect(local.activeGrant(grant.grantId, grant)).resolves.toBeUndefined();
+        expect(adoptedBetween).toBe(true);
+        expect(advanced.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        advanced.mockRestore();
+        gate.releaseAll();
+        await Promise.allSettled([pendingPeer]);
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "finishes publishing coverage at the head when a peer publication discards the page being flushed",
+    async () => {
+      const fixture = await peerInterleavingFixture("artifact-lifecycle-peer-publish");
+      const { log, local, peer, grantFor, gate } = fixture;
+      const grant = grantFor(1, "2026-07-26T00:00:00.000Z");
+      const registered = vi.spyOn(FileAuthorityCommitLog.prototype, "registerTailConsumer");
+      const unregister = local.registerTailAdmission();
+      const consumer = registered.mock.calls[0]![0];
+      registered.mockRestore();
+      // 只看这一次调用自己的完成判定，不让提交后的后台刷新代为追平
+      consumer.refresh = () => undefined;
+      let pendingLocal: Promise<void> | undefined;
+      let pendingPeer: Promise<void> | undefined;
+      try {
+        await log.append([{ stream: "control", body: { t: "asset-grant-issued", grant } }]);
+        await local.maintainIdle();
+        await peer.maintainIdle();
+        pendingPeer = gate.holdPeer(() => peer.recordTemporaryPresence(fixture.ref, canonicalize(grant.scope)));
+        await gate.peerHeld();
+        for (let n = 0; n < 64; n += 1) {
+          await log.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z", n } }]);
+        }
+        pendingLocal = gate.holdLocalAfterPrepare(() => consumer.publishCoverage());
+        await gate.localPrepared();
+        gate.releasePeer();
+        await pendingPeer;
+        expect((await fixture.publishedCheckpoint()).lsn).toBe(1);
+        gate.releaseLocal();
+        await pendingLocal;
+        const head = await log.checkpoint();
+        expect(consumer.coveredThrough(head.logId)).toEqual(head);
+      } finally {
+        unregister();
+        gate.releaseAll();
+        await Promise.allSettled([pendingLocal, pendingPeer]);
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "restarts temporary reconciliation when a peer publication discards one of its records",
+    async () => {
+      const fixture = await peerInterleavingFixture("artifact-lifecycle-peer-reconcile");
+      const { log, local, peer, grantFor, receiver } = fixture;
+      const second = await fixture.temporaryArtifacts.put(Buffer.from("second reconciled upload", "utf8"));
+      const grants = [grantFor(1, "2026-07-26T00:00:00.000Z"), { ...grantFor(2, "2026-07-26T00:00:00.000Z"), assets: [second] }];
+      const progress = receiver.progress.bind(receiver);
+      const secondEntered = deferred<void>();
+      const secondRelease = deferred<void>();
+      let reconciled = 0;
+      const probed = vi.spyOn(receiver, "progress").mockImplementation(async (...args: Parameters<typeof progress>) => {
+        reconciled += 1;
+        if (reconciled === 2) {
+          secondEntered.resolve();
+          await secondRelease.promise;
+        }
+        return progress(...args);
+      });
+      let pendingLocal: Promise<void> | undefined;
+      try {
+        await log.append(grants.map((grant) => ({ stream: "control", body: { t: "asset-grant-issued", grant } })));
+        // 上一版本留下的在场标记：首次同步要逐条对账，记成临时件
+        await fixture.presence.mark(fixture.ref, canonicalize(grants[0]!.scope));
+        await fixture.presence.mark(second, canonicalize(grants[1]!.scope));
+        await peer.catchUp();
+        // 本实例对账到第二条时停住；第一条已随提交落盘
+        pendingLocal = local.synchronize();
+        await secondEntered.promise;
+        // 对方采纳本实例已发布的一代，再追平新尾部并发布：它不做对账，发布的一代里没有第二条
+        await peer.checkpoint();
+        await log.append([{ stream: "control", body: { t: "authority-time-frontier", frontier: "2026-07-25T00:00:00.000Z" } }]);
+        await peer.catchUp();
+        await peer.checkpoint();
+        expect(await fixture.publishedCheckpoint()).toEqual(await log.checkpoint());
+        // 第二条的提交在落盘时采纳对方这一代、随覆盖层被丢弃：对账必须重来，不能越过它
+        secondRelease.resolve();
+        await pendingLocal;
+        const due = await local.temporaryBefore("2026-07-27T00:00:00.000Z", 8);
+        expect(due.map(({ ref }) => ref.digest).sort()).toEqual([fixture.ref.digest, second.digest].sort());
+      } finally {
+        probed.mockRestore();
+        secondRelease.resolve();
+        await Promise.allSettled([pendingLocal]);
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "never publishes a replayed page decided on a base that a peer publication replaced while preparing it",
+    async () => {
+      const fixture = await peerInterleavingFixture("artifact-lifecycle-peer-base");
+      const { log, local, peer, grantFor, gate } = fixture;
+      const revoked = grantFor(1, "2026-07-26T00:00:00.000Z");
+      let pendingPeer: Promise<void> | undefined;
+      try {
+        await log.append([{ stream: "control", body: { t: "asset-grant-issued", grant: revoked } }]);
+        await local.maintainIdle();
+        await peer.maintainIdle();
+        pendingPeer = gate.holdPeer(() => peer.recordTemporaryPresence(fixture.ref, canonicalize(revoked.scope)));
+        await gate.peerHeld();
+        await expect(access(fixture.lockPath)).resolves.toBeUndefined();
+        // 本实例把撤销归约进未落盘的覆盖层
+        await log.append([{ stream: "control", body: { t: "asset-grant-revoked", grantId: revoked.grantId, reason: "surface-revoked" } }]);
+        await expect(local.activeGrant(revoked.grantId, revoked)).resolves.toBeUndefined();
+        expect((await fixture.publishedCheckpoint()).lsn).toBe(1);
+        // 对方发布旧源位置加直写
+        gate.releasePeer();
+        await pendingPeer;
+        // 下一页的增量超过覆盖层条数上限：准备时先落盘，落盘里采纳对方的新一代
+        const fillers = Array.from({ length: 120 }, (_, index) => grantFor(index + 2, "2026-07-26T00:00:00.000Z"));
+        await log.append(fillers.map((grant) => ({ stream: "control", body: { t: "asset-grant-issued", grant } })));
+        await expect(local.activeGrant(revoked.grantId, revoked)).resolves.toBeUndefined();
+        await expect(local.activeGrant(fillers[0]!.grantId, fillers[0])).resolves.toEqual(fillers[0]);
+        // 落盘后冷开的实例同样看不到被撤销的 grant
+        await local.maintainIdle();
+        const cold = fixture.createIndex();
+        try {
+          await expect(cold.activeGrant(revoked.grantId, revoked)).resolves.toBeUndefined();
+        } finally {
+          await cold.stopStorageMaintenance();
+        }
+      } finally {
+        gate.releaseAll();
+        await Promise.allSettled([pendingPeer]);
+        await fixture.close();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
 });
+
+/**
+ * 两个 lifecycle 实例共用一个源日志与派生目录，用真实文件锁与耐久文件；DPI 的 prepare 上设两个闸门，
+ * 控制“对方持锁停在发布前”与“本实例准备好本页、停在发布前”的交错。只控制顺序，不改产品实现或已提交事实。
+ */
+async function peerInterleavingFixture(name: string) {
+  const root = await createTempDir(name);
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+  const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1_024 });
+  let now = "2026-07-25T00:00:00.000Z";
+  const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+    clock: () => now,
+    integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 73)),
+  });
+  const ref = await temporaryArtifacts.put(Buffer.from("peer interleaving upload", "utf8"));
+  const derivedRoot = path.join(root, "derived");
+  const createIndex = () => new ArtifactLifecycleIndex({
+    rootDir: derivedRoot,
+    logs: [log],
+    artifacts,
+    temporaryArtifacts,
+    temporaryPresence: temporaryPresence(root),
+    receiver,
+    ownsSourceLogs: false,
+  });
+  const grantFor = (n: number, expiry: string): SurfaceAssetGrant => ({
+    v: 1,
+    grantId: `grt-01J${String(n).padStart(23, "0")}`,
+    scope: { domain: "conversation", conversationId: `peer-${n}`, ownerEpoch: 1 },
+    surfacePrincipal: "surface-peer",
+    requestId: `request-${n}`,
+    kind: "asset-upload",
+    payloadDigest: byteDigest(Buffer.from(`payload-${n}`)),
+    assets: [ref],
+    issuedAt: now,
+    expiry,
+    signature: { alg: "test", keyId: "owner", sig: `sig-${n}` },
+  });
+  const local = createIndex();
+  const peer = createIndex();
+  const peerEntered = deferred<void>();
+  const peerRelease = deferred<void>();
+  const localPrepared = deferred<void>();
+  const localRelease = deferred<void>();
+  let role: "none" | "peer" | "local" = "none";
+  let peerHeld = false;
+  let localHeld = false;
+  const prepare = FileDurableProjectionIndex.prototype.prepare;
+  const spy = vi.spyOn(FileDurableProjectionIndex.prototype, "prepare").mockImplementation(
+    async function (this: FileDurableProjectionIndex, ...args: Parameters<typeof prepare>) {
+      const current = role;
+      if (this.projectionId === "artifact-lifecycle" && current === "peer" && !peerHeld) {
+        peerHeld = true;
+        peerEntered.resolve();
+        await peerRelease.promise;
+      }
+      const prepared = await prepare.apply(this, args);
+      if (this.projectionId === "artifact-lifecycle" && current === "local" && !localHeld) {
+        localHeld = true;
+        localPrepared.resolve();
+        await localRelease.promise;
+      }
+      return prepared;
+    },
+  );
+  const gate = {
+    holdPeer<T>(operation: () => Promise<T>): Promise<T> {
+      role = "peer";
+      return operation();
+    },
+    peerHeld: () => peerEntered.promise,
+    releasePeer() {
+      role = "none";
+      peerRelease.resolve();
+    },
+    holdLocalAfterPrepare<T>(operation: () => Promise<T>): Promise<T> {
+      role = "local";
+      return operation();
+    },
+    localPrepared: () => localPrepared.promise,
+    releaseLocal() {
+      role = "none";
+      localRelease.resolve();
+    },
+    releaseAll() {
+      role = "none";
+      peerRelease.resolve();
+      localRelease.resolve();
+    },
+  };
+  return {
+    log,
+    local,
+    peer,
+    ref,
+    temporaryArtifacts,
+    receiver,
+    presence: temporaryPresence(root),
+    gate,
+    grantFor,
+    createIndex,
+    lockPath: path.join(derivedRoot, "artifact-lifecycle.lock"),
+    setNow(next: string) {
+      now = next;
+    },
+    async publishedCheckpoint(): Promise<DurableLogCheckpoint> {
+      const manifest = JSON.parse(
+        await readFile(path.join(derivedRoot, "artifact-lifecycle", "manifest.json"), "utf8"),
+      ) as { readonly checkpoints: Readonly<Record<string, DurableLogCheckpoint>> };
+      const head = await log.checkpoint();
+      return manifest.checkpoints[head.logId]!;
+    },
+    async close() {
+      spy.mockRestore();
+      await peer.stopStorageMaintenance();
+      await local.stopStorageMaintenance();
+      await log.stopStorageMaintenance();
+    },
+  };
+}
+
+/** 每帧合法、单帧低于格式上限，但都超过硬界字节：只在先前欠账全部发布后接纳。 */
+function largeFrame(n: number) {
+  const padding = "x".repeat(24 * 1_024);
+  return Array.from({ length: 400 }, (_, entry) => ({
+    stream: "control",
+    body: { t: "authority-time-frontier", frontier: "2026-10-26T00:00:00.000Z", padding, n, entry },
+  }));
+}
+
+/**
+ * 认证日志与登记了尾部准入的 lifecycle。默认停掉提交后的后台刷新，只留追加前的硬界准入，免得刷新
+ * 碰巧先发布而掩盖准入缺陷；锁外准备次数有上限，准入不收敛时立即失败而不是空转到超时。
+ */
+async function durableTailFixture(name: string) {
+  const root = await createTempDir(name);
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+  const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1_024 });
+  const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 71));
+  const derivedRoot = path.join(root, "derived");
+  const createLog = () => new FileAuthorityCommitLog(path.join(root, "log"), artifacts, { integrity });
+  const createIndex = (log: FileAuthorityCommitLog) => new ArtifactLifecycleIndex({
+    rootDir: derivedRoot,
+    logs: [log],
+    artifacts,
+    temporaryArtifacts,
+    temporaryPresence: temporaryPresence(root),
+    receiver,
+    ownsSourceLogs: false,
+  });
+  const log = createLog();
+  const index = createIndex(log);
+  const registered = vi.spyOn(FileAuthorityCommitLog.prototype, "registerTailConsumer");
+  const unregister = index.registerTailAdmission();
+  const consumer = registered.mock.calls[0]![0];
+  registered.mockRestore();
+  const publish = consumer.publishCoverage;
+  let preparations = 0;
+  consumer.publishCoverage = () => {
+    preparations += 1;
+    if (preparations > 8) return Promise.reject(new Error("Tail admission did not converge"));
+    return publish();
+  };
+  const refresh = consumer.refresh;
+  consumer.refresh = () => undefined;
+  let closed = false;
+  return {
+    log,
+    index,
+    consumer,
+    derivedRoot,
+    createLog,
+    createIndex,
+    enableRefresh() {
+      consumer.refresh = refresh;
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      unregister();
+      await index.stopStorageMaintenance();
+      await log.stopStorageMaintenance();
+    },
+  };
+}

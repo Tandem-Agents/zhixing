@@ -1,8 +1,11 @@
 export type { WorkScene, IWorkSceneRegistry } from "./types.js";
 export {
+  WORKSCENE_AUTHORITY_PROJECTION_ID,
   WorksceneConflictError,
   WorksceneNotFoundError,
   WorksceneRevisionError,
+  isWorksceneDeletedAt,
+  registerWorksceneAuthorityProjection,
   type WorksceneRegistryControlContext,
 } from "./authority-registry.js";
 export {
