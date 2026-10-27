@@ -23,6 +23,7 @@ import {
   sealedBundleArtifact,
 } from "../../protocol/index.js";
 import {
+  DELIVERY_AUTHORITY_PROJECTION_ID,
   DeliveryAuthority,
   SCHEDULER_USER_NOTICE_STREAM,
   bindDeliveryLifecycleDecisionRecords,
@@ -75,10 +76,11 @@ export function createDeliveryLifecycleTestBinding(
   options: { readonly baseRetryDelayMs?: number } = {},
 ) {
   const correctness: DeliveryLifecycleCorrectnessPort = {
-    snapshot: () => authority.snapshot(),
-    transact: <Value>(decide: Parameters<
+    pending: () => authority.pendingItems(),
+    firstUncertain: async () => (await authority.uncertainPage(undefined, 1)).items[0]?.item,
+    transact: <Value>(itemIds: readonly string[], decide: Parameters<
       DeliveryLifecycleCorrectnessPort["transact"]
-    >[0]) => authority.transactDeliveryLifecycle((context) => {
+    >[1]) => authority.transactDeliveryLifecycle(itemIds, (context) => {
       try {
         const decision = decide({
           projection: projectDeliveryApplicationProjection(context.projection),
@@ -122,8 +124,8 @@ export function createDeliveryLifecycleTestBinding(
   const projection: DeliveryLifecycleProjectionPort & {
     statusNotice: DeliveryAuthority["statusNotice"];
   } = {
-    list: () => authority.list(),
-    snapshot: () => authority.snapshot(),
+    claimablePage: (request) => authority.claimablePage(request),
+    stats: () => authority.stats(),
     statusNotice: (itemId, statusRevision) =>
       authority.statusNotice(itemId, statusRevision),
   };
@@ -170,11 +172,12 @@ export async function enqueueDelivery(
     await log.transactProjection<Record<string, never>, unknown, DeliveryEnqueueResult>(
       {},
       (state) => state,
-      () => {
-        const decision = authority.prepareEnqueues(
+      async (_state, context) => {
+        const decision = await authority.prepareEnqueues(
           [input],
           input.intent.createdAt,
           prepareDeliveryEnqueues,
+          context,
         );
         if (!decision.accepted || decision.records.length === 0) {
           return { kind: "return", value: decision };
@@ -188,7 +191,7 @@ export async function enqueueDelivery(
           value: decision,
         };
       },
-      { candidateReferences: source.references },
+      { candidateReferences: source.references, readProjectionIds: [DELIVERY_AUTHORITY_PROJECTION_ID] },
     )
   ).value);
 }

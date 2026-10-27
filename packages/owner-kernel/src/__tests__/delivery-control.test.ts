@@ -5,6 +5,7 @@ import {
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
 import {
+  DELIVERY_AUTHORITY_PROJECTION_ID,
   DeliveryAuthority,
   decideDeliveryResolution,
   deliveryRecord,
@@ -99,11 +100,11 @@ async function createHarness() {
   }));
   const sourceRef = await artifacts.put(source.bytes);
   const created = await authority.coordinate(async () => (
-    await log.transactProjection<Record<string, never>, unknown, ReturnType<DeliveryAuthority["prepareEnqueues"]>>(
+    await log.transactProjection<Record<string, never>, unknown, Awaited<ReturnType<DeliveryAuthority["prepareEnqueues"]>>>(
       {},
       (state) => state,
-      () => {
-        const decision = authority.prepareEnqueues([input], NOW, prepareDeliveryEnqueues);
+      async (_state, context) => {
+        const decision = await authority.prepareEnqueues([input], NOW, prepareDeliveryEnqueues, context);
         if (!decision.accepted) return { kind: "return", value: decision };
         return {
           kind: "append",
@@ -123,7 +124,7 @@ async function createHarness() {
           value: decision,
         };
       },
-      { candidateReferences: [sourceRef] },
+      { candidateReferences: [sourceRef], readProjectionIds: [DELIVERY_AUTHORITY_PROJECTION_ID] },
     )
   ).value);
   if (!created.accepted) throw new Error("fixture delivery was rejected");
@@ -211,15 +212,14 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       automaticAttemptsUsed: 1,
     });
     const authority = {
-      transactDeliveryLifecycle: async <Value>(decide: Parameters<
-        DeliveryAuthority["transactDeliveryLifecycle"]
-      >[0]) => decide({
+      transactDeliveryLifecycle: async <Value>(
+        _itemIds: readonly string[],
+        decide: Parameters<DeliveryAuthority["transactDeliveryLifecycle"]>[1],
+      ) => decide({
         projection,
         transactionAt: NOW,
         currentAnchorEpoch: 7,
       }).value as Value,
-      list: async () => [],
-      snapshot: () => [],
     } as unknown as DeliveryAuthority;
 
     const application = createOwnerDeliveryLifecycleBinding({ authority }).application;
@@ -457,7 +457,7 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
     },
   );
 
-  it("rejects an orphan delivery source through the control consumer's full reducer", async () => {
+  it("rejects an orphan delivery source through the delivery projection's reducer", async () => {
     const root = await createTempDir("delivery-control-orphan");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
     const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
@@ -500,11 +500,8 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
         decision: "abandon",
       },
     });
-    const authority = {
-      anchorEpoch: 7,
-      coordinate: <Result>(operation: () => Promise<Result>) => operation(),
-      statusHistory: async () => [],
-    } as unknown as DeliveryAuthority;
+    // 投影在孤儿记录写入之后才登记：解决请求首次读投影时从源重建，按同一归约拒绝
+    const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
 
     await expect(application({
       admission,

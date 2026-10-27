@@ -6,7 +6,7 @@ import type { DeliveryFailure } from "../contracts/index.js";
 import type { IEventBus } from "../events/index.js";
 import { byteDigest, canonicalize } from "../protocol/index.js";
 import { validateOutboundContentDto } from "./content-schema.js";
-import { AuthorityDeliveryQueue } from "./authority-queue.js";
+import { DELIVERY_PRIORITY_RANKS } from "./authority-index.js";
 import type {
   DeliveryAttemptClaim,
   DeliveryLifecycleApplication,
@@ -52,21 +52,19 @@ export interface AuthorityDeliveryPipelineDeps {
   ) => Promise<import("../channels/types.js").OutboundContent>;
 }
 
-const PRIORITY_ORDER: Record<AuthorityDeliveryItem["priority"], number> = {
-  high: 3,
-  normal: 2,
-  low: 1,
-};
+/** 排空时每次从目录取的条数；处理仍逐条进行。 */
+const DRAIN_PAGE_SIZE = 32;
 const MAX_TIMER_INTERVAL_MS = 2_147_483_647;
 
 type PipelineState = "unstarted" | "prepared" | "prepared-paused" | "running" | "quiesced" | "stopped";
+/** 普通排空：激活、恢复、定时与调用方 flush 发起；显式排空：flushQuiescedOnce 收束冻结集合。 */
+type DrainMode = "background" | "explicit";
 
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
 export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
   readonly #application: DeliveryLifecycleApplication;
   readonly #projection: DeliveryLifecycleProjectionPort & DeliveryStatusProjectionPort;
   readonly #artifacts: ArtifactStore;
-  readonly #queue: AuthorityDeliveryQueue;
   readonly #transport: DeliveryTransport;
   readonly #eventBus: IEventBus<AuthorityDeliveryEventMap>;
   readonly #config: AuthorityDeliveryPipelineConfig;
@@ -82,7 +80,6 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
     this.#application = deps.application;
     this.#projection = deps.projection;
     this.#artifacts = deps.artifacts;
-    this.#queue = new AuthorityDeliveryQueue({ source: deps.projection });
     this.#transport = deps.transport;
     this.#eventBus = deps.eventBus;
     this.#config = deps.config;
@@ -97,11 +94,11 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
     await this.#activeFlush;
   }
 
+  /** 准备只换状态：待投递在持久目录里，就绪前不读 pending。 */
   async prepare(): Promise<void> {
     if (this.#state !== "unstarted") {
       throw new Error(`Pipeline.prepare: illegal transition from state="${this.#state}"`);
     }
-    await this.#queue.load();
     this.#state = "prepared";
   }
 
@@ -159,21 +156,20 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
     await this.#activeFlush?.catch(() => undefined);
   }
 
+  /**
+   * 显式排空一轮（drain/cancel 收束已冻结的工作用）：准入保持关闭，跑完这一轮（同样有本轮上界），只有
+   * stop 让它停在条目边界。先等正在收束的普通排空停在它的边界。
+   */
   async flushQuiescedOnce(): Promise<void> {
     if (this.#state !== "quiesced" && this.#state !== "prepared-paused") {
       throw new Error(
         `Pipeline.flushQuiescedOnce: illegal transition from state="${this.#state}"`,
       );
     }
-    const pausedState = this.#state;
-    this.#state = "running";
-    try {
-      await this.flush();
-    } finally {
-      this.#state = pausedState;
-      if (this.#flushTimer) clearInterval(this.#flushTimer);
-      this.#flushTimer = undefined;
-    }
+    await this.#activeFlush?.catch(() => undefined);
+    // 等待期间可能已停止
+    if (!this.#mayContinue("explicit")) return;
+    await this.#startDrain("explicit");
   }
 
   async resumeAfterAuthorityTransfer(): Promise<void> {
@@ -214,33 +210,29 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
 
   async flush(): Promise<void> {
     this.#assertRunning("flush");
+    return this.#startDrain("background");
+  }
+
+  /** 同一时刻只有一轮排空；已有一轮在跑时并入它。 */
+  #startDrain(mode: DrainMode): Promise<void> {
     if (this.#activeFlush) return this.#activeFlush;
-    this.#activeFlush = this.#drain().finally(() => {
+    this.#activeFlush = this.#drain(mode).finally(() => {
       this.#activeFlush = undefined;
     });
     return this.#activeFlush;
   }
 
-  stats(): AuthorityDeliveryStats {
-    const items = this.#projection.snapshot();
-    return {
-      pending: items.filter((item) =>
-        item.state === "queued" ||
-        item.state === "retry-wait" ||
-        item.state === "attempting" ||
-        item.state === "uncertain",
-      ).length,
-      queued: items.filter((item) => item.state === "queued").length,
-      attempting: items.filter((item) => item.state === "attempting").length,
-      retrying: items.filter((item) => item.state === "retry-wait").length,
-      uncertain: items.filter((item) => item.state === "uncertain").length,
-      delivered: items.filter(
-        (item) => item.state === "sent" || item.state === "verified-sent",
-      ).length,
-      failed: items.filter(
-        (item) => item.state === "failed" || item.state === "abandoned",
-      ).length,
-    };
+  /**
+   * 能否开始处理下一条：普通排空只在准入开放时继续，关闭准入或停止后停在条目边界；显式排空在准入关闭下
+   * 照常继续，只有停止让它停下。在途的那一条总是走完领取、发送与结果记账。
+   */
+  #mayContinue(mode: DrainMode): boolean {
+    return mode === "explicit" ? this.#state !== "stopped" : this.#state === "running";
+  }
+
+  /** 按状态的计数，读投影里固定个数的计数行。 */
+  stats(): Promise<AuthorityDeliveryStats> {
+    return this.#projection.stats();
   }
 
   #startFlushTimer(): void {
@@ -255,21 +247,47 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
     }, this.#config.flushIntervalMs);
   }
 
-  async #drain(): Promise<void> {
-    await this.#queue.refresh();
-    const ready = this.#queue.getReady(this.#now());
-    ready.sort((left, right) => PRIORITY_ORDER[right.priority] - PRIORITY_ORDER[left.priority]);
-    for (const item of ready) {
-      try {
-        await this.#process(item);
-      } catch (error) {
-        this.#logger.error("Unexpected delivery processing failure", {
-          itemId: item.id,
-          code: safePipelineFailureCode(error),
-        });
+  /**
+   * 一轮排空：按优先级从高到低，先走待领取目录（queued 与 attempting，按入列位置），再走已到期的重试
+   * （按尝试时间）。每次取一页，逐条处理；游标只向前，同一轮里每条至多处理一次。
+   *
+   * 本轮有上界：第一页读到的投影位置之后才进入目录的条目（新入队的、处理后重新入列的）留给下一轮，持续
+   * 到达的工作不会把这一轮无限拉长。uncertain 不在领取目录里，不会因此重发。
+   */
+  async #drain(mode: DrainMode): Promise<void> {
+    const now = this.#now().toISOString();
+    let enteredThrough: number | undefined;
+    for (const priority of DELIVERY_PRIORITY_RANKS) {
+      for (const kind of ["ready", "retry"] as const) {
+        let afterKey: string | undefined;
+        for (;;) {
+          if (!this.#mayContinue(mode)) return;
+          const page = await this.#projection.claimablePage({
+            priority,
+            kind,
+            now,
+            ...(afterKey === undefined ? {} : { afterKey }),
+            limit: DRAIN_PAGE_SIZE,
+            ...(enteredThrough === undefined ? {} : { enteredThrough }),
+          });
+          enteredThrough ??= page.enteredThrough;
+          for (const { item } of page.items) {
+            if (!this.#mayContinue(mode)) return;
+            try {
+              await this.#process(item);
+            } catch (error) {
+              this.#logger.error("Unexpected delivery processing failure", {
+                itemId: item.id,
+                code: safePipelineFailureCode(error),
+              });
+            }
+          }
+          // 重试目录里超出本轮上界的条目被跳过，以本页最后扫过的键续读
+          if (!page.more || page.next === undefined) break;
+          afterKey = page.next;
+        }
       }
     }
-    await this.#queue.refresh();
   }
 
   async #process(item: AuthorityDeliveryItem): Promise<void> {

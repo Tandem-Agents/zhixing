@@ -19,6 +19,7 @@ import {
   projectDeliveryLifecycleRecords,
 } from "./authority.js";
 import type { DeliveryEnqueueInput } from "./types.js";
+import type { ProjectionTransactionContext } from "../authority/index.js";
 
 const COMMAND: DeliveryUncertainResolutionCommand = {
   requestId: "resolution-1",
@@ -100,8 +101,10 @@ describe("Delivery obligation application", () => {
       createdAt: NOW,
     },
   };
+  /** 源事务的替身：这里的 Correctness 替身不读投影，只需一个事务身份。 */
+  const SOURCE_TRANSACTION = {} as ProjectionTransactionContext;
 
-  it("owns retry policy and the sole enqueue decision while Correctness supplies projection", () => {
+  it("owns retry policy and the sole enqueue decision while Correctness supplies projection", async () => {
     const prepare = vi.fn(
       (
         inputs: readonly DeliveryEnqueueInput[],
@@ -120,7 +123,7 @@ describe("Delivery obligation application", () => {
       { maxAttempts: 5 },
     );
 
-    const result = application.prepare([OBLIGATION], NOW);
+    const result = await application.prepare([OBLIGATION], NOW, SOURCE_TRANSACTION);
 
     expect(result.accepted).toBe(true);
     expect(prepare).toHaveBeenCalledOnce();
@@ -166,10 +169,10 @@ describe("Delivery obligation application", () => {
       }
       return decision;
     };
-    const obligation = new DeliveryObligationApplicationService({
+    const obligation = await new DeliveryObligationApplicationService({
       coordinate: (operation) => operation(),
       prepare,
-    }).prepare([OBLIGATION], NOW);
+    }).prepare([OBLIGATION], NOW, SOURCE_TRANSACTION);
     if (!obligation.accepted) throw new Error("expected accepted fixture");
     const itemId = obligation.items[0]!.itemId;
     const item = projection.items.get(itemId);
@@ -179,8 +182,9 @@ describe("Delivery obligation application", () => {
     item.automaticAttemptsUsed = 1;
 
     const application = new DeliveryLifecycleApplicationService({
-      snapshot: () => [],
-      transact: async (decide) => {
+      pending: async () => [],
+      firstUncertain: async () => undefined,
+      transact: async (_itemIds, decide) => {
         const decision = decide({
           projection: projectDeliveryApplicationProjection(projection),
           transactionAt: NOW,

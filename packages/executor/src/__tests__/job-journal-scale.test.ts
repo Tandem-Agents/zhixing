@@ -170,7 +170,7 @@ function manualJobRunId(input: { readonly taskId: string; readonly requestId: st
 }
 
 describe("job journal with a fixed current run and growing ended history", () => {
-  it("keeps the job domain's cold preparation, first activity, sustained operations and stop within fixed bounds at 64 / 256 / 1024 / 2048 ended runs while full replay grows, reporting the delivery first sync separately", async () => {
+  it("keeps the job domain's cold preparation, first delivery read, first activity, sustained operations and stop within fixed bounds at 64 / 256 / 1024 / 2048 ended runs while full replay grows", async () => {
     const rows: { ended: number; open: Phase; delivery: Phase; first: Phase; sustained: Phase; stop: Phase; fullReplay: Phase }[] = [];
     for (const ended of [64, 256, 1024, 2048]) {
       const root = await createTempDir("job-journal-scale-" + ended);
@@ -206,16 +206,17 @@ describe("job journal with a fixed current run and growing ended history", () =>
 
       const io = await captureFileIo(root, categorize);
       const cold = new FileAuthorityCommitLog(logRoot, artifacts, settings);
-      const participant = participantFor(cold);
+      const coldDelivery = new DeliveryAuthority({ log: cold, anchorEpoch: 3 });
+      const participant = createOwnerDeliveryParticipant({ authority: coldDelivery });
       const restarted = journalFor(cold, participant);
       await cold.prepareProjections([JOB_RUN_STATE_PROJECTION_ID]);
       const view = await restarted.schedulerReadView();
       const open = summary(io.snapshot());
       expect(view).toMatchObject({ runCount: ended + 1, consecutiveFailures: 0, last: { jobRunId: current, state: "queued" } });
       expect(view.open.map((occurrence) => occurrence.jobRunId)).toEqual([current]);
-      // 投递权威第一次协调：从起点同步投递流（C19），单列
+      // 投递权威冷开后的第一次协调与读取：只读计数行，投影追到头部只回放未发布的尾部
       io.reset();
-      await participant.coordinate(async () => undefined);
+      await participant.coordinate(() => coldDelivery.stats());
       const delivery = summary(io.snapshot());
       // 第一次活动：取消当前 run，再排一个并取消
       io.reset();
@@ -240,7 +241,7 @@ describe("job journal with a fixed current run and growing ended history", () =>
     }
     console.log(JSON.stringify(rows));
     for (const row of rows) {
-      for (const phase of [row.open, row.first, row.sustained, row.stop]) expect(phase.checkpoint).toBe(0);
+      for (const phase of [row.open, row.delivery, row.first, row.sustained, row.stop]) expect(phase.checkpoint).toBe(0);
       // 冷开与作业操作都不补做整理或回放写入
       expect(row.open.projectionWrites).toBe(0);
       // 固定上界：只读根行、当前 run 与它的行、各目录的首页与最近一段倒序索引，键数与已结束的 run 数量无关。
@@ -248,6 +249,7 @@ describe("job journal with a fixed current run and growing ended history", () =>
       // 一次查找至多经过 1 个基段和 4 个增量段。随历史变化的只有段填满前的探测次数与基段目录深度（对数），
       // 增量段个数随整理周期在 0～4 之间变化；清单是与历史无关的固定成本（分项见输出的 byFile）。
       expect(row.open.readBytes).toBeLessThanOrEqual(256 * 1024);
+      expect(row.delivery.readBytes).toBeLessThanOrEqual(64 * 1024);
       expect(row.first.readBytes).toBeLessThanOrEqual(256 * 1024);
       expect(row.sustained.readBytes).toBeLessThanOrEqual(320 * 1024);
       expect(row.stop.readBytes).toBeLessThanOrEqual(64 * 1024);
@@ -256,14 +258,13 @@ describe("job journal with a fixed current run and growing ended history", () =>
     const scale = (ended: number) => rows.find((row) => row.ended === ended)!;
     // 增长口径：已结束历史增 8 倍（256→2048），各阶段成本不超过 3 倍；线性增长会接近 8 倍。
     // 相邻档（1024→2048）的比值受段布局左右（增量段个数处在整理周期的哪一步、基段目录是否刚加深一层），区分不了有界与线性。
-    for (const phase of ["open", "first", "sustained"] as const) {
+    for (const phase of ["open", "delivery", "first", "sustained"] as const) {
       expect(scale(2048)[phase].readBytes).toBeLessThanOrEqual(scale(256)[phase].readBytes * 3);
       expect(scale(2048)[phase].reads).toBeLessThanOrEqual(scale(256)[phase].reads * 3);
       expect(scale(2048)[phase].probes).toBeLessThanOrEqual(scale(256)[phase].probes * 3);
     }
     expect(scale(2048).fullReplay.log).toBeGreaterThan(scale(1024).fullReplay.log * 1.8);
     expect(scale(2048).fullReplay.readBytes).toBeGreaterThan(10 * scale(2048).first.readBytes);
-    // 投递权威第一次协调从起点同步投递流，读量随投递历史增长（C19）：delivery 阶段只照实输出，不在本用例的有界断言内
   }, 1_800_000);
 
   it("lists startup tasks from the current definition and open-work directories at 64 / 256 / 1024 deleted tasks", async () => {

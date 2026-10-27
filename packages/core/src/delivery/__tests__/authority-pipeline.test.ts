@@ -99,12 +99,12 @@ describe("AuthorityDeliveryPipeline", () => {
       const created = await fixture.enqueue();
       if (!created.accepted) throw new Error("fixture enqueue failed");
       fixture.lifecycle.closeAdmission(fixture.pipeline);
-      await fixture.lifecycle.installAdmission({ operationId: "startup-stop", sources: [], deliveries: fixture.lifecycle.captureAcceptedWork() });
+      await fixture.lifecycle.installAdmission({ operationId: "startup-stop", sources: [], deliveries: await fixture.lifecycle.captureAcceptedWork() });
       await fixture.lifecycle.settleAcceptedWork({ operationId: "startup-stop", strategy: "drain", timeoutMs: 1_000, effects: fixture.pipeline });
       expect(send).toHaveBeenCalledOnce();
       fixture.pipeline.activate();
       await expect(fixture.pipeline.flush()).rejects.toThrow();
-      expect(fixture.lifecycle.captureAcceptedWork()).toEqual([]);
+      expect(await fixture.lifecycle.captureAcceptedWork()).toEqual([]);
       await fixture.lifecycle.releaseAdmission("startup-stop");
       await fixture.lifecycle.resume(fixture.pipeline);
       await fixture.pipeline.flush();
@@ -132,7 +132,7 @@ describe("AuthorityDeliveryPipeline", () => {
       await fixture.lifecycle.installAdmission({
         operationId: "lifecycle-1",
         sources: [],
-        deliveries: fixture.lifecycle.captureAcceptedWork(),
+        deliveries: await fixture.lifecycle.captureAcceptedWork(),
       });
       await fixture.lifecycle.settleAcceptedWork({
         operationId: "lifecycle-1",
@@ -142,7 +142,7 @@ describe("AuthorityDeliveryPipeline", () => {
       });
 
       expect(send).toHaveBeenCalledOnce();
-      expect(fixture.lifecycle.captureAcceptedWork()).toEqual([]);
+      expect(await fixture.lifecycle.captureAcceptedWork()).toEqual([]);
       await fixture.pipeline.stop();
     },
   );
@@ -157,7 +157,7 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.lifecycle.installAdmission({
       operationId: "lifecycle-immediate",
       sources: [],
-      deliveries: fixture.lifecycle.captureAcceptedWork(),
+      deliveries: await fixture.lifecycle.captureAcceptedWork(),
     });
     await fixture.lifecycle.settleAcceptedWork({
       operationId: "lifecycle-immediate",
@@ -167,7 +167,7 @@ describe("AuthorityDeliveryPipeline", () => {
     });
 
     expect(send).not.toHaveBeenCalled();
-    expect(fixture.lifecycle.captureAcceptedWork()).toEqual([
+    expect(await fixture.lifecycle.captureAcceptedWork()).toEqual([
       expect.objectContaining({ id: created.items[0]!.itemId }),
     ]);
     await fixture.pipeline.stop();
@@ -183,7 +183,7 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.lifecycle.installAdmission({
       operationId: "lifecycle-uncertain",
       sources: [],
-      deliveries: fixture.lifecycle.captureAcceptedWork(),
+      deliveries: await fixture.lifecycle.captureAcceptedWork(),
     });
 
     await expect(fixture.lifecycle.settleAcceptedWork({
@@ -206,7 +206,7 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.lifecycle.installAdmission({
       operationId: "lifecycle-deadline",
       sources: [],
-      deliveries: fixture.lifecycle.captureAcceptedWork(),
+      deliveries: await fixture.lifecycle.captureAcceptedWork(),
     });
 
     await expect(fixture.lifecycle.settleAcceptedWork({
@@ -294,7 +294,7 @@ describe("AuthorityDeliveryPipeline", () => {
 
     const flush = fixture.pipeline.flush();
     await sending;
-    expect(fixture.lifecycle.captureAcceptedWork()).toEqual([
+    expect(await fixture.lifecycle.captureAcceptedWork()).toEqual([
       expect.objectContaining({ id: first.items[0]!.itemId }),
     ]);
     const quiesced = fixture.pipeline.quiesceForAuthorityTransfer();
@@ -309,7 +309,7 @@ describe("AuthorityDeliveryPipeline", () => {
       commitRevision: 1,
     }));
     if (!second.accepted) throw new Error("fixture second enqueue failed");
-    expect(fixture.lifecycle.captureAcceptedWork()).toEqual([
+    expect(await fixture.lifecycle.captureAcceptedWork()).toEqual([
       expect.objectContaining({ id: second.items[0]!.itemId }),
     ]);
     await expect(fixture.pipeline.flush()).rejects.toThrow(/state="quiesced"/);
@@ -360,19 +360,20 @@ describe("AuthorityDeliveryPipeline", () => {
     let markBlocked!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const blocked = new Promise<void>((resolve) => { markBlocked = resolve; });
+    // 生命周期决定经投递投影的事务提交：发送之后的下一笔就是记结果的那笔
     const log = fixture.log as unknown as {
-      transactProjection: (...args: unknown[]) => Promise<unknown>;
+      transactDurableProjection: (...args: unknown[]) => Promise<unknown>;
     };
-    const transactProjection = fixture.log.transactProjection.bind(
+    const transactDurableProjection = fixture.log.transactDurableProjection.bind(
       fixture.log,
     ) as (...args: unknown[]) => Promise<unknown>;
-    log.transactProjection = async (...args) => {
+    log.transactDurableProjection = async (...args) => {
       if (blockNextTransaction) {
         blockNextTransaction = false;
         markBlocked();
         await gate;
       }
-      return transactProjection(...args);
+      return transactDurableProjection(...args);
     };
 
     const flush = fixture.pipeline.flush();

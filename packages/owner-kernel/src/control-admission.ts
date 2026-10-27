@@ -588,7 +588,7 @@ export class ControlAdmissionJournal {
       state: State,
       context: AtomicControlApplicationContext<Envelope>,
       plan: AtomicControlApplicationPlan,
-    ) => readonly LogicalRecord<unknown>[];
+    ) => readonly LogicalRecord<unknown>[] | Promise<readonly LogicalRecord<unknown>[]>;
     readonly onCommitted?: (
       state: State,
       commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
@@ -681,7 +681,7 @@ export class ControlAdmissionJournal {
       state: State,
       context: AtomicControlApplicationContext<Envelope>,
       plan: AtomicControlApplicationPlan,
-    ) => readonly LogicalRecord<unknown>[];
+    ) => readonly LogicalRecord<unknown>[] | Promise<readonly LogicalRecord<unknown>[]>;
     readonly onCommitted?: (
       state: State,
       commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
@@ -751,7 +751,7 @@ export class ControlAdmissionJournal {
             plan.authorityEntries ?? [],
           );
           const companionEntries = snapshotAuthorityEntries(
-            input.prepareCompanions?.(state.target, context, plan) ?? [],
+            (await input.prepareCompanions?.(state.target, context, plan)) ?? [],
           );
           const authorityEntries = [...primaryEntries, ...companionEntries];
           const allowedStreams = new Set([

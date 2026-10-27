@@ -810,7 +810,7 @@ async function runConversationScenario(
   const statusHub = new ExecutionStatusHub({
     conversationHistory: (requests) => protocol.statusHistory(requests),
     jobHistory: (requests) => jobStatus.statusHistory(requests),
-    deliveryHistory: async () => [],
+    deliveryHistory: async (cursors) => ({ notices: [], next: cursors }),
   });
   jobStatus.onStatus((notice) => statusHub.publish(notice));
   let remote: RemoteExecutorHarness | undefined;
@@ -1824,7 +1824,8 @@ async function runJobScenario(
     afterStatusRevision: 0,
   }]);
   const statuses = statusPage.notices;
-  const deliveries = await authority.authority.list();
+  // 当前未结的投递（pending 目录）；下面断言其中排队的作业结果投递恰有一条
+  const deliveries = await authority.authority.pendingItems();
   expect(statuses.length).toBeGreaterThan(0);
   expect(statuses.every(
     (notice) =>

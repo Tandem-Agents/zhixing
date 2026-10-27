@@ -195,6 +195,11 @@ export function buildServerInfoMethod(): MethodEntry {
           statusAfter.scheduler,
         )) ??
         { notices: [], nextRevision: statusAfter.scheduler };
+      // 全局发现只在调用方请求时读一页；当前 uncertain 是待处理事项，每次都给出（有上限的一页）
+      const deliveryNoticePage = statusAfter.deliveryNotice === undefined
+        ? undefined
+        : await ctx.server.serverInfoRuntime?.deliveryNotices?.(statusAfter.deliveryNotice ?? undefined);
+      const deliveryUncertainPage = await ctx.server.serverInfoRuntime?.deliveryUncertain?.(statusAfter.deliveryUncertain);
       const recoveryBackup = await ctx.server.recoveryBackupStatus?.();
       const openFinality = ctx.server.serverInfoRuntime?.openFirstPartyFinality;
       const hasStatusCursors =
@@ -303,11 +308,19 @@ export function buildServerInfoMethod(): MethodEntry {
             : [],
         );
       } else {
-        deliveryStatus = [
-          ...((await ctx.server.serverInfoRuntime?.deliveryStatus?.(
-            statusAfter.delivery,
-          )) ?? []),
-        ];
+        // 按主体精确补读：只读调用方列出的条目，不读未列出的条目
+        const deliveryCursors = Object.entries(statusAfter.delivery).map(
+          ([itemId, afterStatusRevision]) => ({ itemId, afterStatusRevision }),
+        );
+        if (deliveryCursors.length > 0) {
+          const deliveryPage =
+            (await ctx.server.serverInfoRuntime?.deliveryStatus?.(deliveryCursors)) ??
+            { notices: [], next: deliveryCursors };
+          deliveryStatus = [...deliveryPage.notices];
+          deliveryStatusNext = Object.fromEntries(
+            deliveryPage.next.map((cursor) => [cursor.itemId, cursor.afterStatusRevision]),
+          );
+        }
         const conversationPage =
           (await ctx.server.serverInfoRuntime?.conversationStatus?.(
             statusAfter.conversations,
@@ -350,6 +363,23 @@ export function buildServerInfoMethod(): MethodEntry {
         keepAliveWork: serverInfoWork.keepAliveWork,
         deliveryStatus,
         deliveryStatusNext,
+        ...(deliveryNoticePage
+          ? {
+              deliveryNotices: deliveryNoticePage.notices,
+              deliveryNoticeNext: deliveryNoticePage.next,
+              deliveryNoticeMore: deliveryNoticePage.more,
+              deliveryNoticeReset: deliveryNoticePage.reset,
+            }
+          : {}),
+        // 当前 uncertain 是待处理事项：每次都给出一页，带续读游标与是否还有下一页
+        deliveryUncertain: deliveryUncertainPage?.notices ?? [],
+        ...(deliveryUncertainPage
+          ? {
+              deliveryUncertainNext: deliveryUncertainPage.next,
+              deliveryUncertainMore: deliveryUncertainPage.more,
+              deliveryUncertainReset: deliveryUncertainPage.reset,
+            }
+          : {}),
         conversationStatus,
         conversationStatusNext,
         jobStatus,
@@ -939,6 +969,10 @@ function parseStatusAfter(
   params: unknown,
 ): {
   readonly delivery: Readonly<Record<string, number>>;
+  /** 全局发现：undefined 表示本次不读，null 表示从头读，字符串是不透明游标。 */
+  readonly deliveryNotice: string | null | undefined;
+  /** 当前 uncertain 续读：省略或 null 从头读，字符串是不透明游标。 */
+  readonly deliveryUncertain: string | undefined;
   readonly conversations: readonly {
     readonly conversationId: string;
     readonly runId: string;
@@ -952,7 +986,7 @@ function parseStatusAfter(
   readonly scheduler: number;
 } {
   if (params === undefined || params === null) {
-    return { delivery: {}, conversations: [], jobs: [], scheduler: 0 };
+    return { delivery: {}, deliveryNotice: undefined, deliveryUncertain: undefined, conversations: [], jobs: [], scheduler: 0 };
   }
   if (typeof params !== "object" || Array.isArray(params)) {
     throw RpcErrors.invalidParams("server.info params must be an object");
@@ -962,6 +996,8 @@ function parseStatusAfter(
     Object.keys(value).some(
       (key) =>
         key !== "deliveryStatusAfter" &&
+        key !== "deliveryNoticeAfter" &&
+        key !== "deliveryUncertainAfter" &&
         key !== "conversationStatusAfter" &&
         key !== "jobStatusAfter" &&
         key !== "schedulerNoticeAfter",
@@ -984,6 +1020,10 @@ function parseStatusAfter(
     ) {
       throw RpcErrors.invalidParams("deliveryStatusAfter must be an object");
     }
+    // 只携带调用方显式跟踪的主体；全局发现走 deliveryNoticeAfter，不再用全部条目的游标表
+    if (Object.keys(value.deliveryStatusAfter).length > 64) {
+      throw RpcErrors.invalidParams("deliveryStatusAfter exceeds 64 cursors");
+    }
     for (const [itemId, revision] of Object.entries(
       value.deliveryStatusAfter as Record<string, unknown>,
     )) {
@@ -996,6 +1036,20 @@ function parseStatusAfter(
       }
       delivery[itemId] = revision as number;
     }
+  }
+  const deliveryNotice = value.deliveryNoticeAfter;
+  if (
+    deliveryNotice !== undefined && deliveryNotice !== null &&
+    (typeof deliveryNotice !== "string" || deliveryNotice.length === 0 || deliveryNotice.length > 512)
+  ) {
+    throw RpcErrors.invalidParams("deliveryNoticeAfter is invalid");
+  }
+  const deliveryUncertain = value.deliveryUncertainAfter;
+  if (
+    deliveryUncertain !== undefined && deliveryUncertain !== null &&
+    (typeof deliveryUncertain !== "string" || deliveryUncertain.length === 0 || deliveryUncertain.length > 512)
+  ) {
+    throw RpcErrors.invalidParams("deliveryUncertainAfter is invalid");
   }
   const conversations: Array<{
     conversationId: string;
@@ -1075,7 +1129,14 @@ function parseStatusAfter(
       });
     }
   }
-  return { delivery, conversations, jobs, scheduler: scheduler as number };
+  return {
+    delivery,
+    deliveryNotice: deliveryNotice as string | null | undefined,
+    deliveryUncertain: (deliveryUncertain as string | null | undefined) ?? undefined,
+    conversations,
+    jobs,
+    scheduler: scheduler as number,
+  };
 }
 
 function statusNotificationMethod(notice: ExecutionStatusNotice): string {
@@ -1154,7 +1215,7 @@ async function buildServerInfoWorkSnapshot(
   }
 
   const deferredWork: ServerInfoWorkItem[] = [];
-  const deliveryStats = ctx.server.serverInfoRuntime?.deliveryStats?.();
+  const deliveryStats = await ctx.server.serverInfoRuntime?.deliveryStats?.();
   const deferredCount = deliveryStats === undefined ? 0 : Math.max(0, deliveryStats.pending);
   if (deferredCount > 0) {
     deferredWork.push({

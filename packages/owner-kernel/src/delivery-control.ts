@@ -1,11 +1,12 @@
 import {
+  DELIVERY_AUTHORITY_PROJECTION_ID,
   DELIVERY_STREAM,
   decideDeliveryResolution,
   deliveryResolutionStatusNotice,
   deliveryRecord,
   emptyDeliveryProjection,
+  loadDeliveryProjection,
   projectDeliveryApplicationProjection,
-  reduceDeliveryAuthorityRecord,
   type DeliveryAuthority,
   type DeliveryProjection,
 } from "@zhixing/core/delivery";
@@ -18,7 +19,6 @@ import type {
 import type {
   DeliveryStatusNotice,
   DeliveryStreamRecord,
-  LogicalRecord,
 } from "@zhixing/core/contracts";
 import type {
   ControlAdmissionJournal,
@@ -59,19 +59,23 @@ export function createDeliveryResolutionCorrectnessPort(input: {
         | Extract<DeliveryStreamRecord, { t: "delivery-resolved" }>
         | undefined;
       await input.admission.prepareRecovery();
+      // 目标前缀取自投递投影的当前游标：决定时按条目号装入这一条，不重放投递流
+      const cursor = await input.authority.headCursor();
       const outcome = await input.authority.coordinate(() =>
         input.admission.applyAuthority<DeliveryProjection, typeof envelope>({
           envelope,
           source,
           stream: DELIVERY_STREAM,
           initial: emptyDeliveryProjection(),
-          reducer: (state, record, commit) =>
-            reduceDeliveryAuthorityRecord(
-              state,
-              record as LogicalRecord<DeliveryStreamRecord>,
-              commit,
-            ),
-          decide: (state, context) => {
+          targetBase: {
+            state: emptyDeliveryProjection(),
+            cursor,
+            createState: emptyDeliveryProjection,
+            readProjectionIds: [DELIVERY_AUTHORITY_PROJECTION_ID],
+          },
+          // 投递投影在追加时由登记的归约维护，这里的目标状态不再承载投递事实
+          reducer: (state) => state,
+          decide: async (_target, context) => {
             if (requestedAnchorEpoch !== input.authority.anchorEpoch) {
               return {
                 result: {
@@ -85,6 +89,10 @@ export function createDeliveryResolutionCorrectnessPort(input: {
                 },
               };
             }
+            const state = await loadDeliveryProjection(
+              context.authorityPrefix.readProjection(DELIVERY_AUTHORITY_PROJECTION_ID),
+              [command.itemId],
+            );
             const decision = decide({
               projection: projectDeliveryApplicationProjection(state),
               transactionAt: context.authorityPrefix.at,

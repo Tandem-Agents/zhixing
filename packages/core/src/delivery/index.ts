@@ -17,7 +17,6 @@ export {
   SCHEDULER_USER_NOTICE_STREAM,
   assertDeliveryEnvelopeCompanions,
   bindDeliveryLifecycleDecisionRecords,
-  DeliveryAuthority,
   decideDeliveryResolution,
   deliveryIdempotencyKey,
   deliveryIntentDigest,
@@ -37,6 +36,15 @@ export {
   validateDeliveryIntent,
   validateDeliveryStreamRecord,
 } from "./authority.js";
+export { DeliveryAuthority } from "./delivery-authority.js";
+export type { DeliveryStatusPage, DeliverySubjectCursor } from "./delivery-authority.js";
+export {
+  DELIVERY_AUTHORITY_PROJECTION_ID,
+  DELIVERY_PRIORITY_RANKS,
+  loadDeliveryProjection,
+  registerDeliveryAuthorityProjection,
+} from "./authority-index.js";
+export type { DeliveryNoticePosition } from "./authority-index.js";
 export { validateOutboundContentDto } from "./content-schema.js";
 export {
   assertDeliveryItemId,
@@ -53,8 +61,6 @@ export type {
   DeliveryResolutionRequestBinding,
 } from "./authority.js";
 
-export { AuthorityDeliveryQueue } from "./authority-queue.js";
-export type { AuthorityDeliveryQueueOptions } from "./authority-queue.js";
 
 export { DefaultDeliveryRouter, buildRoutingContext } from "./router.js";
 export type {
@@ -70,6 +76,9 @@ export type {
   DeliveryApplicationProjectionItem,
   AuthorityDeliverySendMeta,
   AuthorityDeliveryStats,
+  DeliveryClaimablePage,
+  DeliveryClaimablePageRequest,
+  DeliveryDirectoryPage,
   DeliveryEndpointTransport,
   DeliveryEnqueueInput,
   DeliveryEnqueueResult,

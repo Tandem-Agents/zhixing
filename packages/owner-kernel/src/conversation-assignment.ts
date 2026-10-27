@@ -188,7 +188,7 @@ import {
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
-import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
+import { compileDeliveryContent, DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryContentValidationError, registerDeliveryAuthorityProjection, type CompiledDeliveryContent } from "@zhixing/core/delivery";
 import { parseConversationId } from "@zhixing/core/conversation";
 import { isWorksceneDeletedAt, registerWorksceneAuthorityProjection, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing/core/workscene";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
@@ -1114,6 +1114,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#projection = options.projection;
     this.#publisher = options.publisher;
     this.#delivery = options.delivery;
+    // 入队在本日志的源事务里按同一前缀读投递投影：本日志实例上须登记它（同定义重复登记即复用）
+    if (options.delivery) registerDeliveryAuthorityProjection(options.log);
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#legacyAbortTickets = options.legacyAbortTickets;
@@ -2134,7 +2136,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       initial: emptyProjection(this.#conversationId),
       ...(basis ? { targetBase: basis } : {}),
       // 工作场景会话与场景删除事实在同一已验前缀上决定：场景已删即不再接纳新输入。
-      ...(sceneId === undefined ? {} : { readProjectionIds: [WORKSCENE_AUTHORITY_PROJECTION_ID] }),
+      readProjectionIds: [
+        ...this.#deliveryProjectionIds(),
+        ...(sceneId === undefined ? [] : [WORKSCENE_AUTHORITY_PROJECTION_ID]),
+      ],
       onProjected,
       reducer: (state, record, commit) =>
         this.#reduceRunProjection(
@@ -2144,14 +2149,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ),
       candidateReferences: prepared.references,
       companionStreams: this.#delivery ? ["delivery"] : [],
-      prepareCompanions: (state, context, plan) => {
+      prepareCompanions: async (state, context, plan) => {
         const statuses = conversationStatusDeliveryInputs(
           this.#conversationId,
           state,
           plan.authorityEntries ?? [],
           context.authorityPrefix.at,
         );
-        const delivery = this.#delivery?.prepareConversationStatuses(statuses) ??
+        const delivery = await this.#delivery?.prepareConversationStatuses(statuses, context.authorityPrefix, plan.authorityEntries ?? []) ??
           { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!delivery.accepted) throw corruptRunJournal(delivery.error.message);
         return delivery.records;
@@ -3365,6 +3370,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       stream: runStream(this.#conversationId),
       initial: emptyProjection(this.#conversationId),
       ...(basis ? { targetBase: basis } : {}),
+      readProjectionIds: this.#deliveryProjectionIds(),
       onProjected,
       reducer: (state, record, commit) =>
         this.#reduceRunProjection(
@@ -3373,14 +3379,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
       companionStreams: this.#delivery ? ["delivery", "governor"] : ["governor"],
-      prepareCompanions: (state, context, plan) => {
+      prepareCompanions: async (state, context, plan) => {
         const statuses = conversationStatusDeliveryInputs(
           this.#conversationId,
           state,
           plan.authorityEntries ?? [],
           context.authorityPrefix.at,
         );
-        const prepared = this.#delivery?.prepareConversationStatuses(statuses) ??
+        // 状态通知与控制回执是同一事务里的两次入队：后一次计入前一次已计划的条目
+        const prepared = await this.#delivery?.prepareConversationStatuses(statuses, context.authorityPrefix, plan.authorityEntries ?? []) ??
           { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!prepared.accepted) throw corruptRunJournal(prepared.error.message);
         const controlResponses = conversationControlResponseDeliveryInputs(
@@ -3398,7 +3405,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           return [...resourceRecords, ...prepared.records];
         }
         const preparedResponses =
-          this.#delivery?.prepareConversationControlResponses(controlResponses) ??
+          await this.#delivery?.prepareConversationControlResponses(controlResponses, context.authorityPrefix, [...(plan.authorityEntries ?? []), ...prepared.records]) ??
           { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!preparedResponses.accepted) {
           throw corruptRunJournal(preparedResponses.error.message);
@@ -5356,7 +5363,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ),
           };
         }
-        const deliveryDecision = this.#delivery?.prepareConversationCommit(deliveryInput) ??
+        const deliveryDecision = await this.#delivery?.prepareConversationCommit(deliveryInput, authorityPrefix) ??
           { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
         if (!deliveryDecision.accepted) {
           return {
@@ -6443,6 +6450,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }));
   }
 
+  /** 本会话有投递能力时，源事务要按同一前缀读投递投影来决定入队。 */
+  #deliveryProjectionIds(): readonly string[] {
+    return this.#delivery ? [DELIVERY_AUTHORITY_PROJECTION_ID] : [];
+  }
+
   async #transact<Value>(decide: (state: RunProjection, prefix: ProjectionTransactionContext) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
     candidateReferences: readonly ArtifactRef[] = [], readProjectionIds: readonly string[] = [], scope: ConversationDecisionScope = {}) {
     if (this.#readBaseGeneration !== 0) return this.#transactLegacy(decide, candidateReferences, readProjectionIds);
@@ -6463,11 +6475,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             const decision = await decide(state, context);
             if (decision.kind !== 'append') return decision;
             const statuses = conversationStatusDeliveryInputs(this.#conversationId, state, decision.entries, context.at);
-            const delivery = this.#delivery?.prepareConversationStatuses(statuses) ?? { accepted: true as const, records: [] };
+            const delivery = await this.#delivery?.prepareConversationStatuses(statuses, context, decision.entries) ?? { accepted: true as const, records: [] };
             if (!delivery.accepted) throw corruptRunJournal(delivery.error.message);
             return { ...decision, entries: [...this.#prepareResourceTerminalRecords(state, decision.entries), ...decision.entries, ...delivery.records] };
           }, { stream: runStream(this.#conversationId), cursor: prepared.cursor, candidateReferences,
-            readProjectionIds: [...new Set([CONVERSATION_RUN_STATE_PROJECTION_ID, ...readProjectionIds, ...(this.#currentAuthority ? [CONVERSATION_TRANSFER_PROJECTION_ID, ...conversationAnchorProjectionIds(this.#log)] : [])])],
+            readProjectionIds: [...new Set([CONVERSATION_RUN_STATE_PROJECTION_ID, ...this.#deliveryProjectionIds(), ...readProjectionIds, ...(this.#currentAuthority ? [CONVERSATION_TRANSFER_PROJECTION_ID, ...conversationAnchorProjectionIds(this.#log)] : [])])],
             createState: () => { candidateLsn = undefined; return createConversationProjectionDraft(prepared.state).state; } });
         const coordinate = () => this.#delivery ? this.#delivery.coordinate(run) : run();
         const result = await (this.#resources ? this.#resources.coordinate(coordinate) : coordinate());
@@ -6912,7 +6924,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               decision.entries,
               context.at,
             );
-            const prepared = this.#delivery?.prepareConversationStatuses(statuses) ??
+            const prepared = await this.#delivery?.prepareConversationStatuses(statuses, context, decision.entries) ??
               { accepted: true as const, records: [], stagedRevisions: new Map(), stagedConflicts: new Map() };
             if (!prepared.accepted) {
               throw corruptRunJournal(prepared.error.message);
@@ -6934,15 +6946,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             },
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
-            readProjectionIds: this.#currentAuthority
-              ? [
-                  ...new Set([
-                    ...readProjectionIds,
-                    CONVERSATION_TRANSFER_PROJECTION_ID,
-                    ...conversationAnchorProjectionIds(this.#log),
-                  ]),
-                ]
-              : readProjectionIds,
+            readProjectionIds: [
+              ...new Set([
+                ...this.#deliveryProjectionIds(),
+                ...readProjectionIds,
+                ...(this.#currentAuthority
+                  ? [CONVERSATION_TRANSFER_PROJECTION_ID, ...conversationAnchorProjectionIds(this.#log)]
+                  : []),
+              ]),
+            ],
           });
         const transact = () => this.#delivery
           ? this.#delivery.coordinate(runTransaction)

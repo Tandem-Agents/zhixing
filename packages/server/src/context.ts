@@ -199,10 +199,32 @@ export interface ServerInfoRuntimeBinding {
     }[];
     close(): void;
   }>;
-  readonly deliveryStats?: () => AuthorityDeliveryStats;
+  /** 按状态的投递计数，读投影里固定个数的计数行。 */
+  readonly deliveryStats?: () => Promise<AuthorityDeliveryStats>;
+  /** 按主体精确补读：只读给出的条目各自修订号之后的那一段，next 是处理完之后的游标。 */
   readonly deliveryStatus?: (
-    afterByItem: Readonly<Record<string, number>>,
-  ) => Promise<readonly DeliveryStatusNotice[]>;
+    cursors: readonly { readonly itemId: string; readonly afterStatusRevision: number }[],
+  ) => Promise<{
+    readonly notices: readonly DeliveryStatusNotice[];
+    readonly next: readonly { readonly itemId: string; readonly afterStatusRevision: number }[];
+  }>;
+  /** 全局发现的一页：不透明游标绑定来源，来源变了从头读并标明 reset；没有投递能力时为 undefined。 */
+  readonly deliveryNotices?: (after: string | undefined) => Promise<{
+    readonly notices: readonly DeliveryStatusNotice[];
+    readonly next: string;
+    readonly more: boolean;
+    readonly reset: boolean;
+  } | undefined>;
+  /**
+   * 当前 uncertain 条目各自最新的通知：沿 uncertain 目录的有限一页，不透明游标续读，来源变了从头读并标明
+   * reset；没有投递能力时为 undefined。
+   */
+  readonly deliveryUncertain?: (after: string | undefined) => Promise<{
+    readonly notices: readonly DeliveryStatusNotice[];
+    readonly next: string;
+    readonly more: boolean;
+    readonly reset: boolean;
+  } | undefined>;
   readonly conversationStatus?: (
     after: readonly {
       readonly conversationId: string;

@@ -60,7 +60,7 @@ const AUTHORITY_REQUIRED = [CURRENT_TRUST_PROJECTION_ID, ...SHARED_REQUIRED, "cr
   "global-skill-authority-v1", "global-workscene-authority-v1", "global-rubric-authority-v1",
   "workscene-session-activity-v2", "global-schedule-authority-v1", "job-publish-pending-v1",
   "conversation-read-directory", "conversation-recovery-pending-v1", "conversation-run-state-v1", "advancement-recovery-v1",
-  "surface-asset-grants"] as const;
+  "surface-asset-grants", "delivery-authority-v1"] as const;
 const EXECUTOR_REQUIRED = [...SHARED_REQUIRED, "conversation-recovery-pending-v1", "workspace-binding-state-v1", "workspace-probe-state-v1",
   "executor-job-interaction-obligations", "executor-assignment-ledger-v1"] as const;
 
@@ -241,7 +241,8 @@ export class HomeAuthoritySources {
     ]);
     const { registerDeviceLifecycleProjection, registerSkillAuthorityProjection, registerWorksceneAuthorityProjection,
       registerRubricAuthorityProjection, registerWorksceneActivityProjection, registerWorkspaceBindingProjection,
-      registerWorkspaceProbeProjection, registerResourceGovernorIndex, registerResourceCapabilityActivations } = core;
+      registerWorkspaceProbeProjection, registerResourceGovernorIndex, registerResourceCapabilityActivations,
+      registerDeliveryAuthorityProjection } = core;
     const { registerControlAdmissionProjection, registerConversationIdentityProjection, registerScheduleAuthorityProjection,
       registerJobPublishPendingProjection, registerDeferredIntentProjection, registerConversationReadProjection,
       registerConversationTransferProjection, registerConversationRecoveryProjection, registerConversationRunProjection,
@@ -276,6 +277,8 @@ export class HomeAuthoritySources {
     // 推进待办依赖同一前缀上的 canonical；同批登记、同页准备，首开只扫一遍历史。
     registerAdvancementRecoveryProjection(authority, artifacts);
     registerSurfaceAssetProjection(authority, artifacts, verifier);
+    // 投递权威的按键投影：所有写者首次写入前登记，入队与生命周期决定都受同一恢复欠账预算约束
+    registerDeliveryAuthorityProjection(authority);
     registerWorkspaceBindingProjection(executor);
     registerWorkspaceProbeProjection(executor, verifier);
     registerExecutorJobRecoveryProjection(executor, verifier);

@@ -870,7 +870,7 @@ describe("server.info", () => {
           })],
         ),
         serverInfoRuntime: {
-          deliveryStats: () => ({
+          deliveryStats: async () => ({
             pending: 3,
             queued: 3,
             attempting: 0,
@@ -914,27 +914,124 @@ describe("server.info", () => {
     expect(result.shutdownAvailable).toBe(false);
   });
 
-  it("returns delivery history after each caller's durable revision", async () => {
-    const deliveryStatus = vi.fn(async () => [{
+  it("returns delivery history after each requested subject's durable revision", async () => {
+    const itemId = "dlv-01KXPWTM80BYB4SH423EJT1CVN";
+    const deliveryStatus = vi.fn(async () => ({
+      notices: [{
+        v: 1,
+        ref: { execution: "delivery", itemId },
+        state: "delivery-failed",
+        statusRevision: 4,
+        actions: [],
+        at: "2026-07-17T02:00:00.000Z",
+        attempt: 1,
+        anchorEpoch: 2,
+      }],
+      next: [{ itemId, afterStatusRevision: 4 }],
+    }));
+    const deliveryNotices = vi.fn();
+    const ctx = mkCtx({ serverInfoRuntime: { deliveryStatus, deliveryNotices } as never });
+
+    const result = await buildServerInfoMethod().handler({
+      deliveryStatusAfter: { [itemId]: 3 },
+    }, ctx) as any;
+
+    expect(deliveryStatus).toHaveBeenCalledWith([{ itemId, afterStatusRevision: 3 }]);
+    expect(result.deliveryStatus).toHaveLength(1);
+    expect(result.deliveryStatusNext).toEqual({ [itemId]: 4 });
+    // 没有请求全局发现：不读那一页，也不出现对应字段
+    expect(deliveryNotices).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty("deliveryNotices");
+  });
+
+  it("pages global delivery discovery only when requested and always lists current uncertain deliveries", async () => {
+    const notice = {
       v: 1,
       ref: { execution: "delivery", itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN" },
-      state: "delivery-failed",
-      statusRevision: 4,
-      actions: [],
+      state: "delivery-uncertain",
+      statusRevision: 3,
+      actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
       at: "2026-07-17T02:00:00.000Z",
       attempt: 1,
       anchorEpoch: 2,
-    }]);
-    const ctx = mkCtx({ serverInfoRuntime: { deliveryStatus } });
+      openFactDigest: `sha256:${"a".repeat(64)}`,
+    };
+    const deliveryNotices = vi.fn(async (after: string | undefined) => ({
+      notices: [notice],
+      next: after === undefined ? "dn1.first" : "dn1.second",
+      more: after === undefined,
+      reset: false,
+    }));
+    const deliveryUncertain = vi.fn(async () => ({ notices: [notice], next: "du1.first", more: false, reset: false }));
+    const ctx = mkCtx({ serverInfoRuntime: { deliveryNotices, deliveryUncertain } as never });
 
-    const result = await buildServerInfoMethod().handler({
-      deliveryStatusAfter: { "dlv-01KXPWTM80BYB4SH423EJT1CVN": 3 },
-    }, ctx) as any;
-
-    expect(deliveryStatus).toHaveBeenCalledWith({
-      "dlv-01KXPWTM80BYB4SH423EJT1CVN": 3,
+    const first = await buildServerInfoMethod().handler({ deliveryNoticeAfter: null }, ctx) as any;
+    expect(deliveryNotices).toHaveBeenLastCalledWith(undefined);
+    expect(first).toMatchObject({
+      deliveryNotices: [notice],
+      deliveryNoticeNext: "dn1.first",
+      deliveryNoticeMore: true,
+      deliveryNoticeReset: false,
+      deliveryUncertain: [notice],
+      deliveryUncertainNext: "du1.first",
+      deliveryUncertainMore: false,
     });
-    expect(result.deliveryStatus).toHaveLength(1);
+    const second = await buildServerInfoMethod().handler({ deliveryNoticeAfter: "dn1.first" }, ctx) as any;
+    expect(deliveryNotices).toHaveBeenLastCalledWith("dn1.first");
+    expect(second).toMatchObject({ deliveryNoticeNext: "dn1.second", deliveryNoticeMore: false });
+    const plain = await buildServerInfoMethod().handler({}, ctx) as any;
+    expect(deliveryNotices).toHaveBeenCalledTimes(2);
+    expect(plain.deliveryUncertain).toEqual([notice]);
+  });
+
+  it("pages current uncertain deliveries with a continuation cursor", async () => {
+    const uncertainNotice = (itemId: string) => ({
+      v: 1,
+      ref: { execution: "delivery", itemId },
+      state: "delivery-uncertain",
+      statusRevision: 3,
+      actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
+      at: "2026-07-17T02:00:00.000Z",
+      attempt: 1,
+      anchorEpoch: 2,
+      openFactDigest: `sha256:${"a".repeat(64)}`,
+    });
+    const deliveryUncertain = vi.fn(async (after: string | undefined) => after === undefined
+      ? { notices: [uncertainNotice("dlv-01KXPWTM80BYB4SH423EJT0001")], next: "du1.first", more: true, reset: false }
+      : { notices: [uncertainNotice("dlv-01KXPWTM80BYB4SH423EJT0002")], next: "du1.second", more: false, reset: false });
+    const ctx = mkCtx({ serverInfoRuntime: { deliveryUncertain } as never });
+
+    const first = await buildServerInfoMethod().handler({}, ctx) as any;
+    expect(deliveryUncertain).toHaveBeenLastCalledWith(undefined);
+    expect(first).toMatchObject({ deliveryUncertainNext: "du1.first", deliveryUncertainMore: true, deliveryUncertainReset: false });
+    // 续读：只把调用方给的游标交给权威，不扫全局历史
+    const second = await buildServerInfoMethod().handler({ deliveryUncertainAfter: "du1.first" }, ctx) as any;
+    expect(deliveryUncertain).toHaveBeenLastCalledWith("du1.first");
+    expect(second.deliveryUncertain.map((entry: { ref: { itemId: string } }) => entry.ref.itemId))
+      .toEqual(["dlv-01KXPWTM80BYB4SH423EJT0002"]);
+    expect(second).toMatchObject({ deliveryUncertainNext: "du1.second", deliveryUncertainMore: false });
+    await buildServerInfoMethod().handler({ deliveryUncertainAfter: null }, ctx);
+    expect(deliveryUncertain).toHaveBeenLastCalledWith(undefined);
+    for (const deliveryUncertainAfter of ["", "x".repeat(513), 7]) {
+      await expect(
+        buildServerInfoMethod().handler({ deliveryUncertainAfter }, ctx),
+      ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    }
+  });
+
+  it("rejects malformed global delivery cursors and oversized subject cursor sets", async () => {
+    const ctx = mkCtx({ serverInfoRuntime: { deliveryNotices: vi.fn(), deliveryStatus: vi.fn() } as never });
+    for (const deliveryNoticeAfter of ["", "x".repeat(513), 7]) {
+      await expect(
+        buildServerInfoMethod().handler({ deliveryNoticeAfter }, ctx),
+      ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    }
+    const oversized = Object.fromEntries(
+      Array.from({ length: 65 }, (_, index) => [`dlv-01KXPWTM80BYB4SH423EJT${String(index).padStart(4, "0")}`, 0]),
+    );
+    await expect(
+      buildServerInfoMethod().handler({ deliveryStatusAfter: oversized }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
   });
 
   it("returns scheduler notices from the caller's scalar durable cursor", async () => {

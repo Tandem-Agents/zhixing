@@ -888,7 +888,7 @@ describe("setupDelivery — Channel effect binding", () => {
         rubricGlobalState: runtime.rubricGlobalState,
         globalMutationParticipants: runtime.globalMutationParticipants,
       };
-      await initial.authority.list();
+      await initial.authority.stats();
       const generation = (epoch: number): InstalledAuthorityGeneration => ({
         transferId: `xfer-01J0000000000000000000000${epoch}`,
         commitDigest: protocolDigest("InstalledGenerationCommit", 1, { epoch }),
@@ -936,7 +936,7 @@ describe("setupDelivery — Channel effect binding", () => {
       for (const [index, participant] of runtime.globalMutationParticipants.entries()) {
         expect(participant).not.toBe(initial.globalMutationParticipants[index]);
       }
-      await expect(runtime.authority.list()).resolves.toEqual([]);
+      await expect(runtime.authority.pendingItems()).resolves.toEqual([]);
       expect(await runtime.rebindInstalledAuthority(structuredClone(second))).toEqual(receipt);
 
       const thirdEpoch = await roundTrip();

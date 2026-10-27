@@ -8,9 +8,10 @@ import {
   readDurableProjectionKeys,
   type AuthorityCommitLog,
   type DurableProjectionMutation,
+  type ProjectionTransactionContext,
   type RebuildableDurableProjectionIndex,
 } from "@zhixing/core/authority";
-import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, registerDeliveryAuthorityProjection, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { decideScheduleMissedSummary, type SchedulerNoticeDraft, type MissedSummaryGroup } from "@zhixing/core/scheduler/application";
 import type {
@@ -78,9 +79,19 @@ export class SchedulerUserNoticeJournal {
     this.#log = options.log;
     this.#delivery = options.delivery;
     registerSchedulerNoticeIndex(options.log);
+    // 通知的投递入队在本日志的源事务里按同一前缀读投递投影
+    registerDeliveryAuthorityProjection(options.log);
   }
 
-  prepareRecords(draft: SchedulerNoticeDraft): readonly LogicalRecord<unknown>[] {
+  /**
+   * 通知事实及其投递入队，在调用方持锁的源事务里决定。transaction 是那次源事务（须把投递投影列进
+   * readProjectionIds），candidates 是同一 envelope 里已计划的条目。
+   */
+  async prepareRecords(
+    draft: SchedulerNoticeDraft,
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<readonly LogicalRecord<unknown>[]> {
     const fact: SchedulerNoticeFact = {
       t: "scheduler-user-notice",
       noticeId: draft.noticeId,
@@ -96,7 +107,7 @@ export class SchedulerUserNoticeJournal {
     ];
     if (draft.target && draft.channelText) {
       const lifecycleSources = schedulerNoticeLifecycleSources(draft);
-      const prepared = this.#delivery.prepareSchedulerNotices?.([
+      const prepared = await this.#delivery.prepareSchedulerNotices?.([
         {
           at: draft.at,
           noticeId: draft.noticeId,
@@ -104,7 +115,7 @@ export class SchedulerUserNoticeJournal {
           text: draft.channelText,
           ...(lifecycleSources.length > 0 ? { lifecycleSources } : {}),
         } satisfies SchedulerNoticeDeliveryInput,
-      ]);
+      ], transaction, candidates);
       if (!prepared) {
         throw new Error("Scheduler notice delivery participant is unavailable");
       }
@@ -121,7 +132,7 @@ export class SchedulerUserNoticeJournal {
     for (const group of [...groups].sort((a, b) => a.groupKey.localeCompare(b.groupKey))) {
       await this.#delivery.coordinate(() => this.#log.transactDurableProjection<unknown, void>(
         SCHEDULER_NOTICE_INDEX_PROJECTION_ID,
-        async (view) => {
+        async (view, context) => {
           // 只读这一组成员各自是否已汇总
           const members = [...new Set(group.members.map((member) => `${member.taskId}\u0000${member.jobRunId}`))];
           const summarized = new Set<string>();
@@ -132,9 +143,10 @@ export class SchedulerUserNoticeJournal {
           }
           const draft = decideScheduleMissedSummary(group, summarized, at);
           return draft
-            ? { kind: "append", entries: this.prepareRecords(draft), value: undefined }
+            ? { kind: "append", entries: await this.prepareRecords(draft, context), value: undefined }
             : { kind: "return", value: undefined };
         },
+        { readProjectionIds: [DELIVERY_AUTHORITY_PROJECTION_ID] },
       ));
     }
     await this.publishNew();

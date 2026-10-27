@@ -249,11 +249,22 @@ export interface ExecutionStatusHubOptions {
       readonly afterStatusRevision: number;
     }[];
   }>;
+  /** 按主体精确补读：只读给出的条目各自修订号之后的那一段。 */
   readonly deliveryHistory: (
-    afterByItem: Readonly<Record<string, number>>,
-  ) => Promise<
-    readonly Extract<ExecutionStatusNotice, { ref: { execution: "delivery" } }>[]
-  >;
+    cursors: readonly {
+      readonly itemId: string;
+      readonly afterStatusRevision: number;
+    }[],
+  ) => Promise<{
+    readonly notices: readonly Extract<
+      ExecutionStatusNotice,
+      { ref: { execution: "delivery" } }
+    >[];
+    readonly next: readonly {
+      readonly itemId: string;
+      readonly afterStatusRevision: number;
+    }[];
+  }>;
 }
 
 /**
@@ -323,25 +334,16 @@ export class ExecutionStatusHub implements ExecutionFinalitySources {
         : { notices: [], next: [] },
       deliveryCursors.length > 0
         ? this.#options.deliveryHistory(
-            Object.fromEntries(
-              deliveryCursors.map((cursor) => [
-                cursor.subject.itemId,
-                cursor.afterStatusRevision,
-              ]),
-            ),
+            deliveryCursors.map((cursor) => ({
+              itemId: cursor.subject.itemId,
+              afterStatusRevision: cursor.afterStatusRevision,
+            })),
           )
-        : [],
+        : { notices: [], next: [] },
     ]);
-    const deliveryNext = deliveryCursors.map((cursor) => {
-      const itemId = cursor.subject.itemId;
-      const advanced = delivery
-        .filter((notice) => notice.ref.itemId === itemId)
-        .reduce(
-          (max, notice) => Math.max(max, notice.statusRevision),
-          cursor.afterStatusRevision,
-        );
-      return { subject: cursor.subject, afterStatusRevision: advanced };
-    });
+    const deliveryNextByItem = new Map(
+      delivery.next.map((cursor) => [cursor.itemId, cursor.afterStatusRevision]),
+    );
     const conversationNext = new Map(
       conversation.next.map((cursor) => [
         conversationCursorKey(cursor.conversationId, cursor.runId),
@@ -355,7 +357,7 @@ export class ExecutionStatusHub implements ExecutionFinalitySources {
       ]),
     );
     return {
-      notices: [...conversation.notices, ...job.notices, ...delivery],
+      notices: [...conversation.notices, ...job.notices, ...delivery.notices],
       next: [
         ...conversationCursors.map((cursor) => ({
           subject: cursor.subject,
@@ -384,7 +386,16 @@ export class ExecutionStatusHub implements ExecutionFinalitySources {
               );
             })(),
         })),
-        ...deliveryNext,
+        ...deliveryCursors.map((cursor) => ({
+          subject: cursor.subject,
+          afterStatusRevision:
+            deliveryNextByItem.get(cursor.subject.itemId) ??
+            (() => {
+              throw new TypeError(
+                "Delivery history omitted a requested subject cursor",
+              );
+            })(),
+        })),
       ],
     };
   }

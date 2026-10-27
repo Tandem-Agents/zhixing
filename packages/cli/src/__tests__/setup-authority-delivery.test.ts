@@ -1,21 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { deliveryRecord, prepareDeliveryEnqueues } from "@zhixing/core/delivery";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
+import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { createDeliveryResolutionFence } from "@zhixing/owner-kernel/delivery";
-import type {
-  SecretRef,
-  SecretStorePort,
-  TranscriptRunRecord,
-} from "@zhixing/core/contracts";
-import {
-  byteDigest,
-  canonicalize,
-  createConversationSealedBundle,
-  sealedBundleArtifact,
-} from "@zhixing/core/protocol";
+import type { SessionRuntime } from "@zhixing/owner-kernel/types";
 import { createTempDir } from "@zhixing/test-utils";
+import { DurableConversationInteractionObserver } from "../serve/conversation-protocol-runtime.js";
 import {
+  createProtocol,
+  getOrCreateActiveConversation,
+  MemorySecretStore,
   setupAuthorityRuntime,
+  TEST_DURABLE_IO_TIMEOUT_MS,
+  TEST_RUNTIME_AUTHORITY_FACTS,
+} from "../serve/__tests__/conversation-protocol-runtime-fixture.js";
+import {
   setupDelivery,
   type AuthorityRuntimeStack,
   type DeliveryStack,
@@ -28,14 +27,6 @@ const quietLogger = {
   debug: () => {},
 };
 
-const TEST_EXECUTOR_READINESS = {
-  tools: [] as string[],
-  mcpServers: [] as string[],
-  credentialBindings: [],
-  deviceScopedCredentialBindingIds: [] as string[],
-  credentialGeneration: null,
-};
-
 function emptyChannelDelivery(): ChannelDeliveryEffectSource {
   return {
     status: () => undefined,
@@ -43,70 +34,60 @@ function emptyChannelDelivery(): ChannelDeliveryEffectSource {
   };
 }
 
-async function putConversationBundle(
-  artifacts: DeliveryStack["artifacts"],
-  input: {
-    assignmentId: string;
-    runId: string;
-    conversationId: string;
-  },
-) {
-  const runRecord: TranscriptRunRecord = {
-    type: "run",
-    runId: input.runId,
-    runIndex: 1,
-    timestamp: "2026-07-25T00:00:00.000Z",
-    messages: [
-      {
-        role: "user",
-        content: [{ type: "text", text: "prepare delivery" }],
-      },
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "delivery ready" }],
-      },
-    ],
-  };
-  const runRecordRef = await artifacts.put(
-    Buffer.from(canonicalize(runRecord), "utf8"),
-  );
-  const emptyDigest = byteDigest(Buffer.alloc(0));
-  const bundle = createConversationSealedBundle({
-    assignmentId: input.assignmentId,
-    executorId: "executor-test",
-    streamFinal: { finalSeq: 1, streamDigest: emptyDigest },
-    usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
-    usageFinal: { reportDigest: emptyDigest, upToUsageSeq: 0 },
-    dependencyArtifacts: [],
-    body: {
-      t: "conversation",
-      runId: input.runId,
-      conversationId: input.conversationId,
-      ownerEpoch: 1,
-      baseRevision: 0,
-      runRecord: { ref: runRecordRef },
-      contentAssets: [],
+/**
+ * 经装配好的运行时走真实提交产生一条投递：对已登记的会话发起一个零候选的批量取消，
+ * 控制准入在同一权威决定里提交回执并入队一条发往渠道的 control-response 投递。
+ */
+async function enqueueControlResponse(
+  authorityRuntime: AuthorityRuntimeStack,
+  stack: DeliveryStack,
+  conversationId: string,
+): Promise<string> {
+  const runtime: SessionRuntime = {
+    ...TEST_RUNTIME_AUTHORITY_FACTS,
+    sessionId: `runtime-${conversationId}`,
+    async *run(): AsyncGenerator<AgentYield, RunResult> {
+      throw new Error("delivery fixture must not execute a turn");
     },
+    abort: () => false,
+    async dispose() {},
+  };
+  let manager!: ConversationManager;
+  const protocol = createProtocol({
+    authority: authorityRuntime,
+    manager: () => manager,
+    interactions: new DurableConversationInteractionObserver(),
   });
-  const artifact = sealedBundleArtifact(bundle);
-  return artifacts.put(artifact.bytes);
+  manager = new ConversationManager(
+    { create: vi.fn(async () => runtime) },
+    undefined,
+    { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
+  );
+  await getOrCreateActiveConversation(authorityRuntime, manager, conversationId);
+  protocol.bindDeliveryDrain(async () => {});
+  const cancelled = await protocol.cancel({
+    conversationId,
+    requestId: `cancel:${conversationId}`,
+    principal: {
+      surfacePrincipal: "rpc:owner",
+      deviceId: authorityRuntime.deviceId,
+      connectionId: "connection:delivery-fixture",
+    },
+    response: { replyTarget: { channelId: "feishu", to: "chat-1" } },
+  });
+  expect(cancelled.dispositions).toEqual([]);
+  const pending = await stack.authority.pendingItems();
+  expect(pending).toEqual([
+    expect.objectContaining({
+      keyBody: expect.objectContaining({ kind: "conversation-control-response-delivery" }),
+      state: "queued",
+    }),
+  ]);
+  return pending[0]!.id;
 }
 
 describe("setupDelivery authority production path", () => {
-  let home: string;
   let stack: DeliveryStack | null = null;
-  let secrets: MemorySecretStore;
-  let authorityRuntime: AuthorityRuntimeStack;
-
-  beforeEach(async () => {
-    home = await createTempDir("delivery");
-    secrets = new MemorySecretStore();
-    authorityRuntime = await setupAuthorityRuntime({
-      zhixingHome: home,
-      secretStore: secrets,
-      executorReadiness: TEST_EXECUTOR_READINESS,
-    });
-  });
 
   afterEach(async () => {
     if (stack) {
@@ -116,9 +97,13 @@ describe("setupDelivery authority production path", () => {
   });
 
   it("assembles a valid DeliveryStack with an empty channel registry", async () => {
-    const channels = emptyChannelDelivery();
+    const home = await createTempDir("delivery");
+    const authorityRuntime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
     stack = await setupDelivery({
-      channels,
+      channels: emptyChannelDelivery(),
       zhixingHome: home,
       authorityRuntime,
       logger: quietLogger,
@@ -131,80 +116,33 @@ describe("setupDelivery authority production path", () => {
     expect(stack.participant).toBeDefined();
     expect(stack.controlAdmission).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
-    expect(typeof stack.statusHistory).toBe("function");
+    expect(typeof stack.subjectHistory).toBe("function");
     expect(typeof stack.resolutionApplication.execute).toBe("function");
     expect(typeof stack.stop).toBe("function");
-  });
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("publishes a revisioned resolved notice through the production control path", async () => {
-    const channels = emptyChannelDelivery();
+    const home = await createTempDir("delivery");
+    const authorityRuntime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
     stack = await setupDelivery({
-      channels,
+      channels: emptyChannelDelivery(),
       zhixingHome: home,
       authorityRuntime,
       logger: quietLogger,
     });
-    const sourceRef = await putConversationBundle(stack.artifacts, {
-      assignmentId: "assignment-resolution",
-      runId: "run-resolution",
-      conversationId: "conversation-resolution",
-    });
-    const prepared = await stack.authority.coordinate(() =>
-      stack!.authorityLog.transactProjection(
-        {},
-        (state) => state,
-        (_state, context) => {
-          const enqueues = stack!.authority.prepareEnqueues([
-            {
-              keyBody: {
-                kind: "conversation-final-delivery",
-                conversationId: "conversation-resolution",
-                runId: "run-resolution",
-                commitRevision: 1,
-              },
-              intent: {
-                endpoint: {
-                  kind: "channel",
-                  target: { channelId: "feishu", to: "chat-1" },
-                },
-                content: { text: "resolve me" },
-                priority: "normal",
-                createdAt: context.at,
-                maxAttempts: 3,
-              },
-            },
-          ], context.at, prepareDeliveryEnqueues);
-          if (!enqueues.accepted) throw new Error(enqueues.error.message);
-          return {
-            kind: "append" as const,
-            entries: [
-              {
-                stream: "run:conversation-resolution",
-                body: {
-                  t: "committed",
-                  runId: "run-resolution",
-                  assignmentId: "assignment-resolution",
-                  bundle: { ref: sourceRef },
-                  commitRevision: 1,
-                },
-              },
-              ...enqueues.records.map(deliveryRecord),
-            ],
-            value: enqueues.items[0]!.itemId,
-          };
-        },
-        { candidateReferences: [sourceRef] },
-      ),
-    );
+    const itemId = await enqueueControlResponse(authorityRuntime, stack, "conversation-resolution");
     const lifecycle = authorityRuntime.deliveryLifecycle?.application;
     if (!lifecycle) throw new Error("expected Delivery lifecycle application");
     const claim = await lifecycle.claim({
-      itemId: prepared.value,
+      itemId,
       outcomePolicy: { kind: "manual-resolution" },
     });
     expect(claim.kind).toBe("send");
-    await lifecycle.claim({ itemId: prepared.value });
-    const uncertain = await stack.authority.get(prepared.value);
+    await lifecycle.claim({ itemId });
+    const uncertain = await stack.authority.get(itemId);
     expect(uncertain?.state).toBe("uncertain");
     const listener = vi.fn();
     stack.onStatus(() => {
@@ -219,7 +157,7 @@ describe("setupDelivery authority production path", () => {
         deviceId: "device-1",
         connectionId: "connection-1",
       },
-      itemId: prepared.value,
+      itemId,
       attempt: uncertain!.currentAttempt,
       resolutionFence: createDeliveryResolutionFence(1),
       openFactDigest: uncertain!.openFact!.openFactDigest,
@@ -228,83 +166,36 @@ describe("setupDelivery authority production path", () => {
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({
-        ref: { execution: "delivery", itemId: prepared.value },
+        ref: { execution: "delivery", itemId },
         state: "delivery-resolved",
         decision: "abandon",
       }),
     );
-    await expect(stack.statusHistory({ [prepared.value]: 0 })).resolves.toEqual(
+    const history = await stack.subjectHistory([{ itemId, afterStatusRevision: 0 }]);
+    expect(history.notices).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ state: "delivery-resolved" }),
       ]),
     );
-  }, 15_000);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("rebuilds queued delivery authority from the shared durable log", async () => {
+    const home = await createTempDir("delivery");
+    const secrets = new MemorySecretStore();
     const channels = emptyChannelDelivery();
+    let authorityRuntime = await setupAuthorityRuntime({ zhixingHome: home, secretStore: secrets });
     stack = await setupDelivery({
       channels,
       zhixingHome: home,
       authorityRuntime,
       logger: quietLogger,
     });
-    const authority = stack.authority;
-    const sourceRef = await putConversationBundle(stack.artifacts, {
-      assignmentId: "assignment-1",
-      runId: "run-1",
-      conversationId: "conversation-1",
-    });
-    const transaction = await authority.coordinate(() => stack!.authorityLog.transactProjection(
-      {},
-      (state) => state,
-      (_state, context) => {
-        const prepared = authority.prepareEnqueues([
-          {
-            keyBody: {
-              kind: "conversation-final-delivery",
-              conversationId: "conversation-1",
-              runId: "run-1",
-              commitRevision: 1,
-            },
-            intent: {
-              endpoint: {
-                kind: "channel",
-                target: { channelId: "feishu", to: "chat-1" },
-              },
-              content: { text: "done" },
-              priority: "normal",
-              source: { kind: "agent", conversationId: "conversation-1" },
-              createdAt: context.at,
-              maxAttempts: 3,
-            },
-          },
-        ], context.at, prepareDeliveryEnqueues);
-        if (!prepared.accepted) throw new Error(prepared.error.message);
-        return {
-          kind: "append" as const,
-          entries: [
-            {
-              stream: "run:conversation-1",
-              body: {
-                t: "committed",
-                runId: "run-1",
-                assignmentId: "assignment-1",
-                bundle: { ref: sourceRef },
-                commitRevision: 1,
-              },
-            },
-            ...prepared.records.map(deliveryRecord),
-          ],
-          value: prepared.items[0]!.itemId,
-        };
-      },
-      { candidateReferences: [sourceRef] },
-    ));
-    expect((await authority.get(transaction.value))?.state).toBe("queued");
+    const itemId = await enqueueControlResponse(authorityRuntime, stack, "conversation-1");
+    expect((await stack.authority.get(itemId))?.state).toBe("queued");
 
     stack.activate();
-    const frozen = stack.lifecycle.capture();
-    expect(frozen).toEqual([expect.objectContaining({ id: transaction.value })]);
+    const frozen = await stack.lifecycle.capture();
+    expect(frozen).toEqual([expect.objectContaining({ id: itemId })]);
     await stack.lifecycle.install({
       operationId: "host-stop-production-binding",
       sources: [],
@@ -323,49 +214,16 @@ describe("setupDelivery authority production path", () => {
     await stack.lifecycle.resume();
 
     await stack.stop();
-    authorityRuntime = await setupAuthorityRuntime({
-      zhixingHome: home,
-      secretStore: secrets,
-      executorReadiness: TEST_EXECUTOR_READINESS,
-    });
+    stack = null;
+    // 先关掉第一个运行时，让同 home 的日志释放；第二个运行时从磁盘重新打开
+    await authorityRuntime.startupCleanup.run();
+    authorityRuntime = await setupAuthorityRuntime({ zhixingHome: home, secretStore: secrets });
     stack = await setupDelivery({
       channels,
       zhixingHome: home,
       authorityRuntime,
       logger: quietLogger,
     });
-    expect((await stack.authority.get(transaction.value))?.state).toBe("queued");
-  }, 15_000);
+    expect((await stack.authority.get(itemId))?.state).toBe("queued");
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 });
-
-class MemorySecretStore implements SecretStorePort {
-  readonly values = new Map<string, string>();
-  async put(ref: SecretRef, value: string) { this.values.set(secretKey(ref), value); }
-  async get(ref: SecretRef) { return this.values.get(secretKey(ref)) ?? null; }
-  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
-    const storageKey = secretKey(ref);
-    const existing = this.values.get(storageKey);
-    if (existing !== undefined) return existing;
-    const value = create();
-    this.values.set(storageKey, value);
-    return value;
-  }
-
-  async delete(ref: SecretRef) { this.values.delete(secretKey(ref)); }
-  async list(prefix: string) {
-    return [...this.values.keys()]
-      .filter((value) => value.startsWith(prefix))
-      .map((value) => {
-        const separator = value.indexOf("/");
-        return {
-          kind: value.slice(0, separator) as SecretRef["kind"],
-          bindingId: value.slice(separator + 1),
-        };
-      });
-  }
-  async unlockState() { return "unlocked" as const; }
-}
-
-function secretKey(ref: SecretRef): string {
-  return `${ref.kind}/${ref.bindingId}`;
-}

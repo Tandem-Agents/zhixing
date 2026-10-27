@@ -22,6 +22,8 @@ import {
   type AuthorityDeliveryEventMap,
   type AuthorityDeliveryStats,
   type DeliveryStatusNotice,
+  type DeliveryStatusPage,
+  type DeliverySubjectCursor,
   type OutboxEvent,
   type OutboxRegistry,
 } from "@zhixing/core/delivery";
@@ -145,6 +147,9 @@ import type { InstalledAuthorityGeneration } from "./serve/planned-anchor-transf
 import { FileWorkspaceProbePersistence } from "./serve/workspace-probe-persistence.js";
 import { FileWorkspaceBindingGenerationPersistenceFactory } from "./serve/workspace-binding-generation-persistence.js";
 import { FileWorkspaceBindingCatalogPersistence } from "./serve/workspace-binding-catalog-persistence.js";
+
+/** 状态发现与 uncertain 列表的每页条数。 */
+const DELIVERY_STATUS_PAGE_SIZE = 64;
 
 export const INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS = Object.freeze([
   "runtime-epoch",
@@ -419,7 +424,7 @@ export interface DeliveryStack {
   authorityDelivery: AuthorityDeliveryPipeline;
   /** Enables transport side effects after the RPC server is listening. */
   activate(): void;
-  stats(): AuthorityDeliveryStats;
+  stats(): Promise<AuthorityDeliveryStats>;
   readonly lifecycle: DeliveryAcceptedWorkLifecyclePort;
   flush(): Promise<void>;
   quiesceForAuthorityTransfer(): Promise<void>;
@@ -431,9 +436,14 @@ export interface DeliveryStack {
   participant: OwnerDeliveryParticipant;
   controlAdmission: ControlAdmissionJournal;
   outboxRegistry: OutboxRegistry;
-  statusHistory: (
-    afterByItem?: Readonly<Record<string, number>>,
-  ) => Promise<readonly DeliveryStatusNotice[]>;
+  /** 按主体精确补读：只读给出的条目各自修订号之后的那一段。 */
+  subjectHistory: (
+    cursors: readonly DeliverySubjectCursor[],
+  ) => Promise<{ readonly notices: readonly DeliveryStatusNotice[]; readonly next: readonly DeliverySubjectCursor[] }>;
+  /** 全局发现的一页：游标绑定日志与锚定代次，来源变了从头读并标明 reset。 */
+  statusPage: (after: string | undefined) => Promise<DeliveryStatusPage>;
+  /** 当前 uncertain 条目各自最新的通知：沿 uncertain 目录的有限一页，游标续读，来源变了从头读并标明 reset。 */
+  uncertainNotices: (after: string | undefined) => Promise<DeliveryStatusPage>;
   onStatus: (
     listener: (notice: DeliveryStatusNotice) => void | Promise<void>,
   ) => () => void;
@@ -443,7 +453,7 @@ export interface DeliveryStack {
 }
 
 export interface DeliveryAcceptedWorkLifecyclePort {
-  capture(): readonly { readonly id: string; readonly revision: string }[];
+  capture(): Promise<readonly { readonly id: string; readonly revision: string }[]>;
   install(input: import("@zhixing/core/delivery").DeliveryLifecycleAdmission): Promise<void>;
   restore(input: import("@zhixing/core/delivery").DeliveryLifecycleRestoration): Promise<void>;
   seal(operationId: string): Promise<void>;
@@ -2621,8 +2631,9 @@ export async function setupDelivery(
         return options.authorityRuntime.controlAdmission;
       },
       outboxRegistry,
-      statusHistory: (afterByItem = {}) =>
-        options.authorityRuntime.authority.statusNotices(afterByItem),
+      subjectHistory: (cursors) => options.authorityRuntime.authority.subjectHistory(cursors),
+      statusPage: (after) => options.authorityRuntime.authority.statusPage(after, DELIVERY_STATUS_PAGE_SIZE),
+      uncertainNotices: (after) => options.authorityRuntime.authority.uncertainNotices(after, DELIVERY_STATUS_PAGE_SIZE),
       onStatus: (listener) => {
         statusListeners.add(listener);
         return () => statusListeners.delete(listener);

@@ -3,6 +3,7 @@ import {
   projectDeliveryApplicationProjection,
   projectDeliveryLifecycleRecords,
   type DeliveryAuthority,
+  type DeliveryClaimablePageRequest,
   type DeliveryStatusProjectionPort,
 } from "@zhixing/core/delivery";
 import { AuthorityStorageError } from "@zhixing/core/authority";
@@ -29,7 +30,7 @@ export function createDeliveryObligationCorrectnessPort(
   const port: DeliveryObligationCorrectnessPort = {
     coordinate: <Result>(operation: () => Promise<Result>) =>
       authority.coordinate(operation),
-    prepare: (inputs, commitAt, decide) =>
+    prepare: (inputs, commitAt, decide, transaction, candidates) =>
       authority.prepareEnqueues(
         inputs,
         commitAt,
@@ -38,6 +39,8 @@ export function createDeliveryObligationCorrectnessPort(
             projection: projectDeliveryApplicationProjection(projection),
             lifecycleAdmission,
           }),
+        transaction,
+        candidates,
       ),
   };
   return Object.freeze(port);
@@ -69,13 +72,15 @@ export function createOwnerDeliveryLifecycleBinding(options: {
   readonly baseRetryDelayMs?: number;
 }): OwnerDeliveryLifecycleBinding {
   const correctness: DeliveryLifecycleCorrectnessPort = Object.freeze({
-    snapshot: () => options.authority.snapshot(),
+    pending: () => options.authority.pendingItems(),
+    firstUncertain: async () => (await options.authority.uncertainPage(undefined, 1)).items[0]?.item,
     transact: <Value>(
+      itemIds: readonly string[],
       decide: (
         context: DeliveryLifecycleDecisionContext,
       ) => DeliveryLifecycleMutation<Value>,
     ) =>
-      options.authority.transactDeliveryLifecycle<DeliveryLifecycleCommit<Value>>((context) => {
+      options.authority.transactDeliveryLifecycle<DeliveryLifecycleCommit<Value>>(itemIds, (context) => {
         try {
           const decision = decide({
             projection: projectDeliveryApplicationProjection(context.projection),
@@ -118,8 +123,8 @@ export function createOwnerDeliveryLifecycleBinding(options: {
       })),
   });
   const projection: OwnerDeliveryLifecycleBinding["projection"] = Object.freeze({
-    list: () => options.authority.list(),
-    snapshot: () => options.authority.snapshot(),
+    claimablePage: (request: DeliveryClaimablePageRequest) => options.authority.claimablePage(request),
+    stats: () => options.authority.stats(),
     statusNotice: (itemId: string, statusRevision: number) =>
       options.authority.statusNotice(itemId, statusRevision),
   });

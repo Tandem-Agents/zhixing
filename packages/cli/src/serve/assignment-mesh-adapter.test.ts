@@ -1385,7 +1385,7 @@ describe("assignment mesh adapters", () => {
           notice.ref.jobRunId === "job-run-1",
       ),
     ).toBe(true);
-    const deliveryItems = await protocol.deliveryAuthority.list();
+    const deliveryItems = await protocol.deliveryAuthority.pendingItems();
     expect(deliveryItems).toHaveLength(1);
     expect(deliveryItems[0]).toMatchObject({
       keyBody: {

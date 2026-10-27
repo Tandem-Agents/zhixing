@@ -150,6 +150,32 @@ export interface DeliveryStatusProjectionPort {
   statusNotice(itemId: string, statusRevision: number): Promise<DeliveryStatusNotice | undefined>;
 }
 
+/** 领取目录的一页请求：ready 取 queued 与 attempting，retry 取下次尝试不晚于 now 的 retry-wait。 */
+export interface DeliveryClaimablePageRequest {
+  readonly priority: "high" | "normal" | "low";
+  readonly kind: "ready" | "retry";
+  readonly now: string;
+  readonly afterKey?: string;
+  readonly limit: number;
+  /**
+   * 本轮上界：只给出进入当前目录时的日志位置不大于它的条目，之后入列的留给下一轮。省略时以本页读到的
+   * 投影位置为上界，并在结果里给出，供同一轮的后续页沿用。
+   */
+  readonly enteredThrough?: number;
+}
+
+/** 目录的一页：每条带它的目录键，从最后一个键之后续读。 */
+export interface DeliveryDirectoryPage {
+  readonly items: readonly { readonly key: string; readonly item: AuthorityDeliveryItem }[];
+  readonly more: boolean;
+}
+
+/** 领取目录的一页：next 是本页最后扫过的键（含因超出本轮上界而跳过的），从它之后续读。 */
+export interface DeliveryClaimablePage extends DeliveryDirectoryPage {
+  readonly enteredThrough: number;
+  readonly next?: string;
+}
+
 export interface AuthorityDeliveryStats {
   readonly pending: number;
   readonly queued: number;

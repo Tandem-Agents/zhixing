@@ -1236,7 +1236,8 @@ async function runServerProcess(
     jobHistory: async (requests) => boundJobStatus
       ? boundJobStatus.statusHistory(requests)
       : { notices: [], next: requests },
-    deliveryHistory: async (requests) => (await boundDeliveryStack?.statusHistory(requests)) ?? [],
+    deliveryHistory: async (cursors) =>
+      (await boundDeliveryStack?.subjectHistory(cursors)) ?? { notices: [], next: cursors },
   });
   const firstPartyFinality: (input: Omit<ConstructorParameters<typeof FirstPartyFinalitySession>[0], "sources">) => FirstPartyFinalitySession =
     (input) => new FirstPartyFinalitySession({ sources: executionStatusHub, ...input });
@@ -3178,7 +3179,7 @@ async function runServerProcess(
           close: () => session.close(),
         };
       },
-      deliveryStats: () => {
+      deliveryStats: async () => {
         if (!boundDeliveryStack) {
           return {
             pending: 0,
@@ -3192,8 +3193,10 @@ async function runServerProcess(
         }
         return boundDeliveryStack.stats();
       },
-      deliveryStatus: (afterByItem) =>
-        boundDeliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
+      deliveryStatus: async (cursors) =>
+        (await boundDeliveryStack?.subjectHistory(cursors)) ?? { notices: [], next: cursors },
+      deliveryNotices: async (after) => boundDeliveryStack?.statusPage(after),
+      deliveryUncertain: async (after) => boundDeliveryStack?.uncertainNotices(after),
       conversationStatus: (after) =>
         boundConversationProtocol?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),

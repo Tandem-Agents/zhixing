@@ -14,6 +14,7 @@ import type {
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
+  DELIVERY_AUTHORITY_PROJECTION_ID,
   DeliveryAuthority,
   assertDeliveryEnvelopeCompanions,
   decideDeliveryResolution,
@@ -139,23 +140,25 @@ async function enqueue(
   const { maxAttempts, ...intent } = input.intent;
   const obligation = new DeliveryObligationApplicationService({
     coordinate: (operation) => authority.coordinate(operation),
-    prepare: (inputs, commitAt, decide) => authority.prepareEnqueues(
+    prepare: (inputs, commitAt, decide, transaction, candidates) => authority.prepareEnqueues(
       inputs,
       commitAt,
       (projection, _inputs, _commitAt, lifecycleAdmission) =>
         decide({ projection, lifecycleAdmission }),
+      transaction,
+      candidates,
     ),
   }, { maxAttempts });
   return authority.coordinate(async () => (
     await log.transactProjection<Record<string, never>, unknown, DeliveryEnqueueResult>(
       {},
       (state) => state,
-      (_state) => {
-        const decision = obligation.prepare([{
+      async (_state, context) => {
+        const decision = await obligation.prepare([{
           keyBody: input.keyBody,
           intent,
           ...(input.lifecycleSources ? { lifecycleSources: input.lifecycleSources } : {}),
-        }], input.intent.createdAt);
+        }], input.intent.createdAt, context);
         if (!decision.accepted || decision.records.length === 0) {
           return { kind: "return", value: decision };
         }
@@ -168,7 +171,7 @@ async function enqueue(
           value: decision,
         };
       },
-      { candidateReferences: source.references },
+      { candidateReferences: source.references, readProjectionIds: [DELIVERY_AUTHORITY_PROJECTION_ID] },
     )
   ).value);
 }
@@ -1084,8 +1087,9 @@ describe(
     if (!prepared.accepted) throw new Error("fixture prepare failed");
     await log.append(prepared.records.map(deliveryRecord));
 
+    // 投影在记录写入之后才登记：首次读取从源重建时按同一归约拒绝
     const restarted = new DeliveryAuthority({ log, anchorEpoch: 7 });
-    await expect(restarted.list()).rejects.toThrow(
+    await expect(restarted.stats()).rejects.toThrow(
       "Delivery enqueue must have exactly one matching authority source fact",
     );
   });
@@ -1105,7 +1109,7 @@ describe(
         mutationSeq: 2,
       },
     };
-    const prepared = authority.prepareEnqueues([input], FIRST, prepareDeliveryEnqueues);
+    const prepared = prepareDeliveryEnqueues(emptyDeliveryProjection(), [input], FIRST);
     if (!prepared.accepted) throw new Error("fixture prepare failed");
     const source = await createDeliverySourceFixture(artifacts, input.keyBody);
     const mismatchedSource = source.records(1).map((record) => {
@@ -1126,14 +1130,14 @@ describe(
         },
       };
     });
-    await log.append([
+    // 投影已登记：追加时按同一归约拒绝，不写入
+    await expect(log.append([
       ...mismatchedSource,
       ...prepared.records.map(deliveryRecord),
-    ]);
-
-    await expect(authority.list()).rejects.toThrow(
+    ])).rejects.toThrow(
       "Staged delivery enqueue must bind one committed assignment and publish outcome",
     );
+    await expect(authority.stats()).resolves.toMatchObject({ pending: 0 });
   });
 
   it("shares the complete publish decision structure without narrowing AuthorityError", () => {
@@ -1301,10 +1305,8 @@ describe(
         } as CommitEnvelope<unknown>),
       ).toThrow("must be unique companions");
     }
-    await fixture.log.append([resolved]);
-    await expect(
-      new DeliveryAuthority({ log: fixture.log, anchorEpoch: 7 }).list(),
-    ).rejects.toThrow("must be unique companions");
+    await expect(fixture.log.append([resolved])).rejects.toThrow("must be unique companions");
+    await expect(fixture.authority.get(fixture.itemId)).resolves.toMatchObject({ state: "uncertain" });
   });
 
   it("keeps a good projection snapshot after a failed transaction", async () => {
@@ -1315,9 +1317,10 @@ describe(
         outcomePolicy: { kind: "idempotent-redrive", windowMs: 0 },
       }),
     ).rejects.toThrow("positive safe integer");
-    await expect(fixture.authority.list()).resolves.toEqual([
-      expect.objectContaining({ id: fixture.itemId, state: "queued" }),
-    ]);
+    await expect(fixture.authority.get(fixture.itemId)).resolves.toMatchObject({
+      id: fixture.itemId,
+      state: "queued",
+    });
     await expect(
       fixture.lifecycle.claim({
         itemId: fixture.itemId,
@@ -1326,31 +1329,31 @@ describe(
     ).resolves.toMatchObject({ kind: "send", attempt: 1 });
   });
 
-  it("does not publish a projection mutated by a failed replay", async () => {
+  it("leaves the durable projection intact after a failed read", async () => {
     const fixture = await harness();
     const mutableLog = fixture.log as unknown as {
-      readProjection: (...args: unknown[]) => Promise<unknown>;
+      transactDurableProjection: (...args: unknown[]) => Promise<unknown>;
     };
-    const original = mutableLog.readProjection.bind(fixture.log);
-    mutableLog.readProjection = async (...args: unknown[]) => {
-      (args[0] as DeliveryProjection).items.clear();
+    const original = mutableLog.transactDurableProjection.bind(fixture.log);
+    mutableLog.transactDurableProjection = async () => {
       throw new Error("injected projection failure");
     };
-    await expect(fixture.authority.list()).rejects.toThrow("injected projection failure");
-    mutableLog.readProjection = original;
-    await expect(fixture.authority.list()).resolves.toEqual([
-      expect.objectContaining({ id: fixture.itemId, state: "queued" }),
-    ]);
+    await expect(fixture.authority.get(fixture.itemId)).rejects.toThrow("injected projection failure");
+    mutableLog.transactDurableProjection = original;
+    await expect(fixture.authority.get(fixture.itemId)).resolves.toMatchObject({
+      id: fixture.itemId,
+      state: "queued",
+    });
   });
 
   it("recovers a committed transition when the transaction response is lost", async () => {
     const fixture = await harness();
     const mutableLog = fixture.log as unknown as {
-      transactProjection: (...args: unknown[]) => Promise<unknown>;
+      transactDurableProjection: (...args: unknown[]) => Promise<unknown>;
     };
-    const original = mutableLog.transactProjection.bind(fixture.log);
+    const original = mutableLog.transactDurableProjection.bind(fixture.log);
     let failAfterCommit = true;
-    mutableLog.transactProjection = async (...args: unknown[]) => {
+    mutableLog.transactDurableProjection = async (...args: unknown[]) => {
       const transaction = await original(...args) as { readonly commit?: unknown };
       if (failAfterCommit && transaction.commit) {
         failAfterCommit = false;
@@ -1364,7 +1367,7 @@ describe(
         outcomePolicy: { kind: "manual-resolution" },
       }),
     ).rejects.toThrow("simulated lost transaction response");
-    mutableLog.transactProjection = original;
+    mutableLog.transactDurableProjection = original;
 
     await expect(fixture.authority.get(fixture.itemId)).resolves.toMatchObject({
       state: "attempting",
@@ -1373,9 +1376,10 @@ describe(
     });
   });
 
-  it("keeps the last good snapshot when a peer tail mutates then fails", async () => {
+  it("keeps the last good state when a peer tail mutates then fails", async () => {
     const fixture = await harness();
-    await fixture.log.append([
+    // 投影已登记：整封在追加时按同一归约拒绝，前半段的转换也不落盘
+    await expect(fixture.log.append([
       deliveryRecord({
         t: "attempt-started",
         itemId: fixture.itemId,
@@ -1386,20 +1390,11 @@ describe(
         statusRevision: 2,
       }),
       { stream: "delivery", body: { t: "malformed-peer-tail" } },
-    ]);
-
-    await expect(fixture.authority.list()).rejects.toThrow(
-      "Delivery stream record type is invalid",
-    );
-    expect(fixture.authority.snapshot()).toEqual([
-      expect.objectContaining({ id: fixture.itemId, state: "queued" }),
-    ]);
-    await expect(fixture.authority.list()).rejects.toThrow(
-      "Delivery stream record type is invalid",
-    );
-    expect(fixture.authority.snapshot()).toEqual([
-      expect.objectContaining({ id: fixture.itemId, state: "queued" }),
-    ]);
+    ])).rejects.toThrow("Delivery stream record type is invalid");
+    await expect(fixture.authority.get(fixture.itemId)).resolves.toMatchObject({
+      id: fixture.itemId,
+      state: "queued",
+    });
   });
 
   it("rejects sibling lifecycle transitions during cold replay", async () => {
@@ -1410,7 +1405,7 @@ describe(
         outcomePolicy: { kind: "manual-resolution" },
       }),
     );
-    await earlyFailed.log.append([
+    await expect(earlyFailed.log.append([
       deliveryRecord({
         t: "failed",
         itemId: earlyFailed.itemId,
@@ -1418,10 +1413,7 @@ describe(
         error: { code: "busy", message: "busy", retryable: true },
         statusRevision: 3,
       }),
-    ]);
-    await expect(
-      new DeliveryAuthority({ log: earlyFailed.log, anchorEpoch: 7 }).list(),
-    ).rejects.toThrow("remaining automatic budget");
+    ])).rejects.toThrow("remaining automatic budget");
 
     const premature = await harness(3);
     const idempotent = requireSend(
@@ -1436,7 +1428,7 @@ describe(
       kind: "idempotent-redrive" as const,
       redriveUntil: "2026-07-17T02:00:10.000Z",
     };
-    await premature.log.append([
+    await expect(premature.log.append([
       deliveryRecord({
         t: "delivery-uncertain",
         itemId: premature.itemId,
@@ -1453,10 +1445,7 @@ describe(
         }),
         statusRevision: 3,
       }),
-    ]);
-    await expect(
-      new DeliveryAuthority({ log: premature.log, anchorEpoch: 7 }).list(),
-    ).rejects.toThrow("does not bind the open attempt");
+    ])).rejects.toThrow("does not bind the open attempt");
   });
 
   it("rejects malformed or non-deliverable companion source projections", () => {

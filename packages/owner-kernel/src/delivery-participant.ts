@@ -6,6 +6,7 @@ import type {
   DeliveryObligation,
   DeliveryObligationApplication,
 } from "@zhixing/core/delivery/application";
+import type { ProjectionTransactionContext } from "@zhixing/core/authority";
 import {
   type AuthorityError,
   type CommitEnvelope,
@@ -113,15 +114,27 @@ export interface SchedulerNoticeDeliveryInput {
   }[];
 }
 
+/**
+ * 入队都在生产者持锁的源事务里决定：transaction 是那次源事务，投递经它按键读同一前缀的投递投影，
+ * 源事务须把投递投影列进 readProjectionIds。
+ */
 export interface ConversationDeliveryParticipant {
   coordinate<Result>(operation: () => Promise<Result>): Promise<Result>;
-  prepareConversationCommit(input: ConversationDeliveryCommitInput): DeliveryParticipantResult;
+  prepareConversationCommit(
+    input: ConversationDeliveryCommitInput,
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryParticipantResult>;
   prepareConversationStatuses(
     inputs: readonly ConversationStatusDeliveryInput[],
-  ): DeliveryParticipantResult;
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryParticipantResult>;
   prepareConversationControlResponses(
     inputs: readonly ConversationControlResponseInput[],
-  ): DeliveryParticipantResult;
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryParticipantResult>;
   assertConversationCommit(
     input: ConversationDeliveryCommitInput,
     envelope: CommitEnvelope<unknown>,
@@ -134,11 +147,21 @@ export interface ConversationDeliveryParticipant {
 
 export interface JobDeliveryParticipant {
   coordinate<Result>(operation: () => Promise<Result>): Promise<Result>;
-  prepareJobCommit(input: JobDeliveryCommitInput): DeliveryParticipantResult;
-  prepareJobStatuses(inputs: readonly JobStatusDeliveryInput[]): DeliveryParticipantResult;
+  prepareJobCommit(
+    input: JobDeliveryCommitInput,
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryParticipantResult>;
+  prepareJobStatuses(
+    inputs: readonly JobStatusDeliveryInput[],
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryParticipantResult>;
   prepareSchedulerNotices?(
     inputs: readonly SchedulerNoticeDeliveryInput[],
-  ): DeliveryParticipantResult;
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryParticipantResult>;
   assertJobCommit(input: JobDeliveryCommitInput, envelope: CommitEnvelope<unknown>): void;
   assertJobStatuses(
     inputs: readonly JobStatusDeliveryInput[],
@@ -168,7 +191,9 @@ export class OwnerDeliveryParticipant
 
   prepareConversationCommit(
     input: ConversationDeliveryCommitInput,
-  ): DeliveryParticipantResult {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryParticipantResult> {
     const conflicts = new Map(input.stagedContentErrors ?? []);
     for (const record of input.mutationBatch?.records ?? []) {
       if (record.mutation.kind !== "delivery-enqueue") continue;
@@ -183,51 +208,73 @@ export class OwnerDeliveryParticipant
     return this.#prepare(
       conversationCommitInputs(input),
       input.at,
+      transaction,
+      candidates,
       conflicts,
     );
   }
 
-  prepareJobCommit(input: JobDeliveryCommitInput): DeliveryParticipantResult {
+  prepareJobCommit(
+    input: JobDeliveryCommitInput,
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryParticipantResult> {
     return this.#prepare(
       jobCommitInputs(input),
       input.at,
+      transaction,
+      candidates,
       input.stagedContentErrors,
     );
   }
 
-  prepareConversationStatuses(
+  async prepareConversationStatuses(
     inputs: readonly ConversationStatusDeliveryInput[],
-  ): DeliveryParticipantResult {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryParticipantResult> {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
       inputs.flatMap(conversationStatusInputs),
       requireSingleCommitTime(inputs),
+      transaction,
+      candidates,
     );
   }
 
-  prepareConversationControlResponses(
+  async prepareConversationControlResponses(
     inputs: readonly ConversationControlResponseInput[],
-  ): DeliveryParticipantResult {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryParticipantResult> {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
       inputs.map(conversationControlResponseInput),
       requireSingleCommitTime(inputs),
+      transaction,
+      candidates,
     );
   }
 
-  prepareJobStatuses(
+  async prepareJobStatuses(
     inputs: readonly JobStatusDeliveryInput[],
-  ): DeliveryParticipantResult {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryParticipantResult> {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
       inputs.flatMap(jobStatusInputs),
       requireSingleCommitTime(inputs),
+      transaction,
+      candidates,
     );
   }
 
-  prepareSchedulerNotices(
+  async prepareSchedulerNotices(
     inputs: readonly SchedulerNoticeDeliveryInput[],
-  ): DeliveryParticipantResult {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryParticipantResult> {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
       inputs.map((input) => ({
@@ -245,6 +292,8 @@ export class OwnerDeliveryParticipant
         ...(input.lifecycleSources ? { lifecycleSources: input.lifecycleSources } : {}),
       })),
       requireSingleCommitTime(inputs),
+      transaction,
+      candidates,
     );
   }
 
@@ -327,12 +376,14 @@ export class OwnerDeliveryParticipant
     );
   }
 
-  #prepare(
+  async #prepare(
     inputs: readonly DeliveryObligation[],
     commitAt: string,
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[],
     stagedConflicts: ReadonlyMap<number, AuthorityError> = new Map(),
-  ): DeliveryParticipantResult {
-    const decision = this.#application.prepare(inputs, commitAt);
+  ): Promise<DeliveryParticipantResult> {
+    const decision = await this.#application.prepare(inputs, commitAt, transaction, candidates);
     if (!decision.accepted) return decision;
     const stagedRevisions = new Map<number, number>();
     for (let index = 0; index < inputs.length; index += 1) {

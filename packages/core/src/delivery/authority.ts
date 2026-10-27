@@ -15,13 +15,7 @@ import type {
 import {
   validateInlineOutboundContentDto,
 } from "./content-schema.js";
-import {
-  AuthorityStorageError,
-  type AuthorityCommitLog,
-  type ProjectionCursor,
-  type ProjectionTransactionContext,
-} from "../authority/index.js";
-import { SerialTaskQueue } from "../persistence/index.js";
+import { AuthorityStorageError } from "../authority/index.js";
 import {
   canonicalize,
   protocolDigest,
@@ -38,11 +32,7 @@ import type {
   DeliveryLifecycleBinding,
   DeliveryLifecycleSourcePermit,
 } from "./types.js";
-import type {
-  DeliveryLifecycleAdmissionMutation,
-  DeliveryLifecycleAdmissionState,
-  DeliveryLifecycleDecisionRecord,
-} from "./application.js";
+import type { DeliveryLifecycleDecisionRecord } from "./application.js";
 import {
   assertDeliveryDiagnosticText,
   assertDeliveryIdentifier,
@@ -58,13 +48,12 @@ import {
 
 export const DELIVERY_STREAM = "delivery";
 export const SCHEDULER_USER_NOTICE_STREAM = "intent:scheduler-user-notice";
-const deliveryOperationQueues = new WeakMap<AuthorityCommitLog, SerialTaskQueue>();
 
 interface AuthorityDeliveryOpenFact extends DeliveryOpenFact {
   readonly openedAnchorEpoch: number;
 }
 
-interface MutableDeliveryItem {
+export interface MutableDeliveryItem {
   id: string;
   idempotencyKey: string;
   keyBody: DeliveryEnqueueKeyBody;
@@ -96,7 +85,7 @@ type DeliveryStatusRecord = Extract<
   }
 >;
 
-interface DeliveryStatusNoticeEntry {
+export interface DeliveryStatusNoticeEntry {
   readonly record: DeliveryStatusRecord;
   readonly at: string;
   readonly closedOpenFactDigest?: string;
@@ -529,258 +518,6 @@ export function decideDeliveryResolution(
           ? "abandoned"
           : "queued",
   };
-}
-
-/** Anchor-owned delivery lifecycle and the shared enqueue uniqueness projection. */
-export class DeliveryAuthority {
-  readonly #log: AuthorityCommitLog;
-  readonly #anchorEpoch: number;
-  readonly #operations: SerialTaskQueue;
-  #enqueueProjection = emptyDeliveryProjection();
-  #cursor: ProjectionCursor | undefined;
-  #lifecycleAdmission: DeliveryLifecycleAdmissionState | undefined;
-
-  constructor(options: { readonly log: AuthorityCommitLog; readonly anchorEpoch: number }) {
-    if (!Number.isSafeInteger(options.anchorEpoch) || options.anchorEpoch <= 0) {
-      throw new TypeError("Delivery anchor epoch must be a positive safe integer");
-    }
-    this.#log = options.log;
-    this.#anchorEpoch = options.anchorEpoch;
-    const sharedOperations = deliveryOperationQueues.get(options.log) ?? new SerialTaskQueue();
-    deliveryOperationQueues.set(options.log, sharedOperations);
-    this.#operations = sharedOperations;
-  }
-
-  get anchorEpoch(): number {
-    return this.#anchorEpoch;
-  }
-
-  /** Called inside a source journal's serialized log transaction. */
-  prepareEnqueues(
-    inputs: readonly DeliveryEnqueueInput[],
-    commitAt: string,
-    decide: (
-      projection: DeliveryProjection,
-      inputs: readonly DeliveryEnqueueInput[],
-      commitAt: string,
-      lifecycleAdmission: DeliveryLifecycleAdmissionState | undefined,
-    ) => DeliveryEnqueueResult,
-  ): DeliveryEnqueueResult {
-    return decide(
-      this.#enqueueProjection,
-      inputs,
-      commitAt,
-      this.#lifecycleAdmission
-        ? snapshot(this.#lifecycleAdmission, "Delivery lifecycle admission projection")
-        : undefined,
-    );
-  }
-
-  /**
-   * Correctness boundary for lifecycle admission. Delivery owns all state
-   * transitions; Authority only serializes a projection snapshot and installs
-   * the returned state atomically with respect to delivery commits.
-   */
-  async transactDeliveryAdmission<Value>(
-    decide: (context: {
-      readonly projection: DeliveryProjection;
-      readonly admission: DeliveryLifecycleAdmissionState | undefined;
-    }) => DeliveryLifecycleAdmissionMutation<Value>,
-  ): Promise<Value> {
-    if (typeof decide !== "function") {
-      throw new TypeError("Delivery lifecycle admission decision must be a function");
-    }
-    return await this.coordinate(async () => {
-      const decision = decide({
-        projection: cloneDeliveryProjection(this.#enqueueProjection),
-        admission: this.#lifecycleAdmission
-          ? snapshot(this.#lifecycleAdmission, "Delivery lifecycle admission projection")
-          : undefined,
-      });
-      this.#lifecycleAdmission = decision.admission
-        ? snapshot(decision.admission, "Delivery lifecycle admission state")
-        : undefined;
-      return decision.value;
-    });
-  }
-
-  /** Serializes source commits with the shared delivery uniqueness projection. */
-  async coordinate<Result>(operation: () => Promise<Result>): Promise<Result> {
-    return this.#operations.run(async () => {
-      await this.#synchronizeUnlocked();
-      try {
-        return await operation();
-      } finally {
-        await this.#synchronizeUnlocked();
-      }
-    });
-  }
-
-  async list(): Promise<readonly AuthorityDeliveryItem[]> {
-    const state = await this.#select((projection) => projection);
-    return [...state.items.values()].map(materializeDeliveryItem);
-  }
-
-  /** Current in-process projection for synchronous health and status surfaces. */
-  snapshot(): readonly AuthorityDeliveryItem[] {
-    return [...this.#enqueueProjection.items.values()].map(materializeDeliveryItem);
-  }
-
-  async get(itemId: string): Promise<AuthorityDeliveryItem | undefined> {
-    assertDeliveryItemId(itemId);
-    return this.#select((state) => {
-      const item = state.items.get(itemId);
-      return item ? materializeDeliveryItem(item) : undefined;
-    });
-  }
-
-  async statusHistory(
-    itemId: string,
-    afterStatusRevision: number,
-  ): Promise<readonly DeliveryStatusNotice[]> {
-    assertDeliveryItemId(itemId);
-    if (!Number.isSafeInteger(afterStatusRevision) || afterStatusRevision < 0) {
-      throw new TypeError("Last-seen delivery status revision must be non-negative");
-    }
-    return this.#select((state) =>
-      (state.statusNotices.get(itemId) ?? [])
-        .filter(({ record }) => record.statusRevision > afterStatusRevision)
-        .map((entry) => deliveryStatusNotice(itemId, entry, this.#anchorEpoch)),
-    );
-  }
-
-  async statusNotices(
-    afterByItem: Readonly<Record<string, number>> = {},
-  ): Promise<readonly DeliveryStatusNotice[]> {
-    for (const [itemId, revision] of Object.entries(afterByItem)) {
-      assertDeliveryItemId(itemId, "Delivery status item id");
-      if (!Number.isSafeInteger(revision) || revision < 0) {
-        throw new TypeError("Delivery status revision must be non-negative");
-      }
-    }
-    return this.#select((state) =>
-      [...state.statusNotices.entries()]
-        .flatMap(([itemId, notices]) =>
-          notices
-            .filter(
-              ({ record }) =>
-                record.statusRevision > (afterByItem[itemId] ?? 0),
-            )
-            .map((entry) => deliveryStatusNotice(itemId, entry, this.#anchorEpoch)),
-        )
-        .sort((left, right) =>
-          left.at === right.at
-            ? left.ref.itemId.localeCompare(right.ref.itemId)
-            : left.at.localeCompare(right.at),
-        ),
-    );
-  }
-
-  /**
-   * Correctness boundary for Delivery lifecycle decisions. The caller owns the
-   * decision; Authority only supplies a serialized projection, authority time,
-   * the anchor fence, validation and one durable append.
-   */
-  async transactDeliveryLifecycle<Value>(
-    decide: (context: {
-      readonly projection: DeliveryProjection;
-      readonly transactionAt: string;
-      readonly currentAnchorEpoch: number;
-    }) => {
-      readonly records: readonly DeliveryStreamRecord[];
-      readonly value: Value;
-    },
-  ): Promise<Value> {
-    if (typeof decide !== "function") {
-      throw new TypeError("Delivery lifecycle decision must be a function");
-    }
-    return (
-      await this.#transact<Value>((state, context) => {
-        const decision = decide({
-          projection: cloneDeliveryProjection(state),
-          transactionAt: context.at,
-          currentAnchorEpoch: this.#anchorEpoch,
-        });
-        const records = decision.records.map((record) => {
-          const frozen = snapshot(record, "Delivery lifecycle decision record");
-          validateDeliveryStreamRecord(frozen);
-          return deliveryRecord(frozen);
-        });
-        return records.length === 0
-          ? { kind: "return", value: decision.value }
-          : { kind: "append", entries: records, value: decision.value };
-      })
-    ).value;
-  }
-
-  async statusNotice(
-    itemId: string,
-    statusRevision: number,
-  ): Promise<DeliveryStatusNotice | undefined> {
-    assertDeliveryItemId(itemId);
-    assertPositiveInteger(statusRevision, "Delivery status revision");
-    return this.#select((state) =>
-      deliveryProjectionStatusNotice(
-        state,
-        itemId,
-        statusRevision,
-        this.#anchorEpoch,
-      )
-    );
-  }
-
-  async #select<Value>(select: (state: DeliveryProjection) => Value): Promise<Value> {
-    return this.#operations.run(async () => {
-      await this.#synchronizeUnlocked();
-      return select(this.#enqueueProjection);
-    });
-  }
-
-  async #transact<Value>(
-    decide: (
-      state: DeliveryProjection,
-      context: ProjectionTransactionContext,
-    ) => import("../authority/index.js").ProjectionTransactionDecision<unknown, Value>,
-  ) {
-    return this.#operations.run(async () => {
-      const working = cloneDeliveryProjection(this.#enqueueProjection);
-      const transaction = await this.#log.transactProjection<
-        DeliveryProjection,
-        unknown,
-        Value
-      >(
-        working,
-        this.#reduceAuthority,
-        decide,
-        {
-          stream: DELIVERY_STREAM,
-          ...(this.#cursor ? { cursor: this.#cursor } : {}),
-        },
-      );
-      this.#enqueueProjection = transaction.state;
-      this.#cursor = transaction.cursor;
-      return transaction;
-    });
-  }
-
-  readonly #reduceAuthority = reduceDeliveryAuthorityRecord;
-
-  async #synchronizeUnlocked(): Promise<void> {
-    const working = cloneDeliveryProjection(this.#enqueueProjection);
-    const transaction = await this.#log.readProjection<
-      DeliveryProjection,
-      unknown
-    >(
-      working,
-      this.#reduceAuthority,
-      {
-        stream: DELIVERY_STREAM,
-        ...(this.#cursor ? { cursor: this.#cursor } : {}),
-      },
-    );
-    this.#enqueueProjection = transaction.state;
-    this.#cursor = transaction.cursor;
-  }
 }
 
 function validateLifecycleBinding(value: unknown): asserts value is DeliveryLifecycleBinding {
@@ -1434,7 +1171,7 @@ function appendStatusNotice(
   state.statusNotices.set(itemId, history);
 }
 
-function deliveryStatusNotice(
+export function deliveryStatusNotice(
   itemId: string,
   entry: DeliveryStatusNoticeEntry,
   currentAnchorEpoch: number,

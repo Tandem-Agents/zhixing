@@ -2,8 +2,9 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
+  type ProjectionTransactionContext,
 } from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority } from "@zhixing/core/delivery";
 import type {
   CommitEnvelope,
   ConversationRunState,
@@ -68,11 +69,43 @@ async function participantFixture(maxAttempts?: number) {
   const authority = new DeliveryAuthority({ log, anchorEpoch: 3 });
   return {
     authority,
-    owner: createOwnerDeliveryParticipant({
+    owner: inSourceTransaction(log, createOwnerDeliveryParticipant({
       authority,
       ...(maxAttempts ? { maxAttempts } : {}),
-    }),
+    })),
   };
+}
+
+type TransactionalPrepare<T> = {
+  [K in keyof T]: K extends `prepare${string}`
+    ? T[K] extends (...args: infer A) => infer R
+      ? (...args: A extends [...infer Head, ProjectionTransactionContext, ...unknown[]] ? Head : A) => R
+      : T[K]
+    : T[K];
+};
+
+/**
+ * 直接调用参与方入队的用例：每次入队都在一笔只读的源事务里决定（不追加），与生产一样经事务视图按同一
+ * 前缀读投递投影。
+ */
+function inSourceTransaction<T extends object>(
+  log: FileAuthorityCommitLog,
+  participant: T,
+): TransactionalPrepare<T> {
+  return new Proxy(participant, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (typeof value !== "function") return value;
+      if (typeof property !== "string" || !property.startsWith("prepare")) return value.bind(target);
+      return async (...args: unknown[]) => (await log.transactDurableProjection<never, unknown>(
+        DELIVERY_AUTHORITY_PROJECTION_ID,
+        async (_view, transaction) => ({
+          kind: "return",
+          value: await value.call(target, ...args, transaction),
+        }),
+      )).value;
+    },
+  }) as unknown as TransactionalPrepare<T>;
 }
 
 function deliveryKinds(records: readonly LogicalRecord<unknown>[]) {
@@ -204,7 +237,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
   it("delivers the integrated handoff result once while preserving explicit delivery and failure obligations", async () => {
     const owner = await participant();
     for (const [kind, nested] of [["task", true], ["resume", false], ["resume", true], ["result", false]] as const) {
-      const committed = owner.prepareConversationCommit({
+      const committed = await owner.prepareConversationCommit({
         at: NOW, conversationId: "conversation-1", runId: "run-1", assignmentId: "assignment-conversation", commitRevision: 1,
         conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE, assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
         ingress: { ...channelIngress, turnOrigin: { channel: "feishu", target: channelIngress.replyTarget, worksceneContinuation: { kind, conversationId: "source", runId: "source-run", ...(nested ? { returnConversationId: "source" } : {}) } } },
@@ -213,7 +246,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       if (!committed.accepted) throw new Error("commit rejected");
       expect(deliveryKinds(committed.records)).toEqual(nested ? ["staged-delivery"] : ["conversation-final-delivery", "staged-delivery"]);
     }
-    const failure = owner.prepareConversationStatuses([{ at: NOW, conversationId: "conversation-1", runId: "run-1", state: "uncertain", statusRevision: 2, ingress: { ...channelIngress, turnOrigin: { channel: "feishu", target: channelIngress.replyTarget, worksceneContinuation: { kind: "task", conversationId: "source", runId: "source-run" } } } }]);
+    const failure = await owner.prepareConversationStatuses([{ at: NOW, conversationId: "conversation-1", runId: "run-1", state: "uncertain", statusRevision: 2, ingress: { ...channelIngress, turnOrigin: { channel: "feishu", target: channelIngress.replyTarget, worksceneContinuation: { kind: "task", conversationId: "source", runId: "source-run" } } } }]);
     if (!failure.accepted) throw new Error("status rejected");
     expect(deliveryKinds(failure.records)).toEqual(["conversation-status-delivery"]);
   });
@@ -242,7 +275,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       ],
       deliveries: [],
     });
-    const conversation = owner.prepareConversationCommit({
+    const conversation = await owner.prepareConversationCommit({
       at: NOW,
       conversationId: "conversation-1",
       runId: "run-1",
@@ -254,7 +287,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       runRecord,
       mutationBatch: stagedMutation("assignment-conversation", "turn-origin"),
     });
-    const conversationStatus = owner.prepareConversationStatuses([{
+    const conversationStatus = await owner.prepareConversationStatuses([{
       at: NOW,
       conversationId: "conversation-1",
       runId: "run-1",
@@ -262,27 +295,27 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       statusRevision: 2,
       ingress: channelIngress,
     }]);
-    const control = owner.prepareConversationControlResponses([{
+    const control = await owner.prepareConversationControlResponses([{
       at: NOW,
       conversationId: "conversation-1",
       requestId: "cancel:conversation-1",
       replyTarget: channelIngress.replyTarget,
       response: "empty-cancel-batch",
     }]);
-    const job = owner.prepareJobCommit({
+    const job = await owner.prepareJobCommit({
       at: NOW,
       ...facts,
       assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
       mutationBatch: stagedMutation("assignment-job", "explicit"),
     });
-    const jobStatus = owner.prepareJobStatuses([{
+    const jobStatus = await owner.prepareJobStatuses([{
       at: NOW,
       occurrence: facts.occurrence,
       definition: facts.definition,
       state: "failed",
       statusRevision: 2,
     }]);
-    const notice = owner.prepareSchedulerNotices([{
+    const notice = await owner.prepareSchedulerNotices([{
       at: NOW,
       noticeId: "notice-1",
       target: channelIngress.replyTarget,
@@ -303,19 +336,19 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       "job-status-delivery",
       "scheduler-user-notice-delivery",
     ]);
-    expect(() => owner.prepareConversationStatuses([{
+    await expect(owner.prepareConversationStatuses([{
       at: NOW,
       conversationId: "conversation-successor",
       runId: "run-successor",
       state: "failed",
       statusRevision: 1,
       ingress: channelIngress,
-    }])).toThrow("not part of the frozen lifecycle operation");
+    }])).rejects.toThrow("not part of the frozen lifecycle operation");
   });
 
   it("derives conversation final, staged and non-terminal status deliveries", async () => {
     const owner = await participant();
-    const committed = owner.prepareConversationCommit({
+    const committed = await owner.prepareConversationCommit({
       at: NOW,
       conversationId: "conversation-1",
       runId: "run-1",
@@ -328,7 +361,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       mutationBatch: stagedMutation("assignment-conversation", "turn-origin"),
     });
     if (!committed.accepted) throw new Error("conversation fixture was rejected");
-    const status = owner.prepareConversationStatuses([
+    const status = await owner.prepareConversationStatuses([
       {
         at: NOW,
         conversationId: "conversation-1",
@@ -350,14 +383,14 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
   it("derives job result, staged and non-terminal status deliveries", async () => {
     const owner = await participant();
     const facts = jobFacts();
-    const committed = owner.prepareJobCommit({
+    const committed = await owner.prepareJobCommit({
       at: NOW,
       ...facts,
       assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
       mutationBatch: stagedMutation("assignment-job", "explicit"),
     });
     if (!committed.accepted) throw new Error("job fixture was rejected");
-    const status = owner.prepareJobStatuses([
+    const status = await owner.prepareJobStatuses([
       {
         at: NOW,
         occurrence: facts.occurrence,
@@ -403,7 +436,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
         ],
       ]),
     };
-    const committed = owner.prepareJobCommit(input);
+    const committed = await owner.prepareJobCommit(input);
     if (!committed.accepted) throw new Error("job fixture was rejected");
 
     expect(deliveryKinds(committed.records)).toEqual(["job-result-delivery"]);
@@ -514,7 +547,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
   it("does not create a duplicate status delivery for committed results", async () => {
     const owner = await participant();
     const facts = jobFacts();
-    const status = owner.prepareJobStatuses([
+    const status = await owner.prepareJobStatuses([
       {
         at: NOW,
         occurrence: facts.occurrence,
@@ -542,7 +575,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
     ];
 
     for (const [index, [state, expected]] of cases.entries()) {
-      const result = owner.prepareConversationStatuses([
+      const result = await owner.prepareConversationStatuses([
         {
           at: NOW,
           conversationId: "conversation-1",
@@ -574,7 +607,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
     ];
 
     for (const [index, [state, expected]] of cases.entries()) {
-      const result = owner.prepareJobStatuses([
+      const result = await owner.prepareJobStatuses([
         {
           at: NOW,
           occurrence: facts.occurrence,
@@ -602,7 +635,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
         mutation: { kind: "workscene-create", name: "Research" },
       },
     ]);
-    const committed = owner.prepareJobCommit({
+    const committed = await owner.prepareJobCommit({
       at: NOW,
       ...facts,
       assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
@@ -615,7 +648,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
 
   it("conflicts a turn-origin delivery without a durable route instead of rejecting the run", async () => {
     const owner = await participant();
-    const committed = owner.prepareConversationCommit({
+    const committed = await owner.prepareConversationCommit({
       at: NOW,
       conversationId: "conversation-1",
       runId: "run-1",
@@ -652,8 +685,8 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
         state, reason: "模型不可用", statusRevision: 1, ingress: channelIngress };
       const job = { at: NOW, occurrence: facts.occurrence, definition: facts.definition,
         state, statusRevision: 1 };
-      const preparedConversation = owner.prepareConversationStatuses([conversation]);
-      const preparedJob = owner.prepareJobStatuses([job]);
+      const preparedConversation = await owner.prepareConversationStatuses([conversation]);
+      const preparedJob = await owner.prepareJobStatuses([job]);
       if (!preparedConversation.accepted || !preparedJob.accepted) throw new Error("status rejected");
       const envelope = (entries: readonly LogicalRecord<unknown>[]) => ({
         v: 1 as const, lsn: 1, at: NOW, envelopeDigest: DIGEST, entries: [
@@ -683,8 +716,8 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       at: NOW, occurrence: { ...facts.occurrence, jobRunId }, definition: facts.definition,
       state: "cancelled" as const, statusRevision: 1,
     }));
-    const preparedConversation = owner.prepareConversationStatuses(conversations);
-    const preparedJob = owner.prepareJobStatuses(jobs);
+    const preparedConversation = await owner.prepareConversationStatuses(conversations);
+    const preparedJob = await owner.prepareJobStatuses(jobs);
     if (!preparedConversation.accepted || !preparedJob.accepted) throw new Error("batch rejected");
     const sourceRecords = [
       ...conversations.map((fact) => ({ stream: "run:conversation-1", body: { t: "state", runId: fact.runId, state: fact.state, statusRevision: 1 } })),
@@ -710,18 +743,18 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
     const definition = structuredClone(facts.definition);
     if (definition.definition.kind === "user") delete definition.definition.origin;
     const system: TaskDefinition = { ...definition, definition: { kind: "system", handler: "__transcript-gc" } };
-    const conversation = owner.prepareConversationStatuses([{
+    const conversation = await owner.prepareConversationStatuses([{
       at: NOW, conversationId: "conversation-1", runId: "run-1", state: "failed", statusRevision: 1,
       ingress: { kind: "first-party", surfacePrincipal: "surface:user-1", deviceId: "device-1", ingressId: "in-1", receivedAt: NOW },
     }]);
     expect(conversation).toMatchObject({ accepted: true, records: [] });
-    for (const candidate of [definition, system]) expect(owner.prepareJobStatuses([{
+    for (const candidate of [definition, system]) expect(await owner.prepareJobStatuses([{
       at: NOW, occurrence: facts.occurrence, definition: candidate, state: "failed", statusRevision: 1,
     }])).toMatchObject({ accepted: true, records: [] });
     const input = { at: NOW, conversationId: "conversation-1", requestId: "request-1",
       replyTarget: channelIngress.replyTarget, response: "empty-cancel-batch" as const };
-    const first = owner.prepareConversationControlResponses([input]);
-    expect(owner.prepareConversationControlResponses([input])).toEqual(first);
+    const first = await owner.prepareConversationControlResponses([input]);
+    expect(await owner.prepareConversationControlResponses([input])).toEqual(first);
     if (!first.accepted) throw new Error("control receipt rejected");
     expect(first.records).toHaveLength(1);
     expect(deliveryTexts(first.records)).toEqual(["当前没有正在处理的任务。"]);
@@ -743,7 +776,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       ingress: channelIngress,
       runRecord,
     } as const;
-    const prepared = original.prepareConversationCommit(input);
+    const prepared = await original.prepareConversationCommit(input);
     if (!prepared.accepted) throw new Error("conversation fixture was rejected");
     const envelope = {
       v: 1 as const,

@@ -1,8 +1,9 @@
 import path from "node:path";
-import { DeliveryAuthority, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
+  type ProjectionTransactionContext,
 } from "@zhixing/core/authority";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -14,6 +15,16 @@ import {
 } from "./durable-io-test-support.js";
 
 const NOW = "2026-08-02T10:00:00.000Z";
+
+function inSourceTransaction<T>(
+  log: FileAuthorityCommitLog,
+  operation: (transaction: ProjectionTransactionContext) => Promise<T>,
+): Promise<T> {
+  return log.transactDurableProjection<never, T>(
+    DELIVERY_AUTHORITY_PROJECTION_ID,
+    async (_view, transaction) => ({ kind: "return", value: await operation(transaction) }),
+  ).then((result) => result.value);
+}
 
 async function createHarness() {
   const root = await createTempDir("scheduler-user-notices");
@@ -107,7 +118,8 @@ describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
 
   it("projects a stable per-item publish result through the existing notice history", async () => {
     const harness = await createHarness();
-    const records = harness.notices.prepareRecords({
+    // 与生产一样在源事务里决定；这条通知没有投递目标，不入队
+    const records = await inSourceTransaction(harness.log, (transaction) => harness.notices.prepareRecords({
       noticeId: "scheduler-publish:stable",
       kind: "publish-result",
       state: "closed",
@@ -122,7 +134,7 @@ describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       reason: "定时任务未能保存场景修改。",
       actions: ["检查当前内容后重试"],
       at: NOW,
-    });
+    }, transaction));
     await harness.log.append(records);
 
     expect(await harness.notices.history(0)).toEqual([

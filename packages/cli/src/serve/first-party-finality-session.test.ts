@@ -37,7 +37,7 @@ function hub(history: readonly ExecutionStatusNotice[]): ExecutionStatusHub {
       };
     },
     jobHistory: async (cursors) => ({ notices: [], next: cursors }),
-    deliveryHistory: async () => [],
+    deliveryHistory: async (cursors) => ({ notices: [], next: cursors }),
   });
 }
 
@@ -151,17 +151,24 @@ describe("FirstPartyFinalitySession", () => {
         notices: [],
         next: cursors,
       }),
-      deliveryHistory: async () => [
-        {
-          ref: deliverySubject,
-          state: "delivery-failed",
-          statusRevision: 2,
-          actions: [],
-          at: "2026-07-28T00:00:00.000Z",
-          attempt: 1,
-          anchorEpoch: 1,
-        } as unknown as ExecutionStatusNotice,
-      ],
+      deliveryHistory: async (cursors) => {
+        // 只按请求的主体补读，不夹带未请求的条目
+        expect(cursors).toEqual([{ itemId: "dlv-1", afterStatusRevision: 1 }]);
+        return {
+          notices: [
+            {
+              ref: deliverySubject,
+              state: "delivery-failed",
+              statusRevision: 2,
+              actions: [],
+              at: "2026-07-28T00:00:00.000Z",
+              attempt: 1,
+              anchorEpoch: 1,
+            } as never,
+          ],
+          next: [{ itemId: "dlv-1", afterStatusRevision: 2 }],
+        };
+      },
     });
     const page = await sources.statusHistory([
       { subject, afterStatusRevision: 0 },
@@ -174,5 +181,70 @@ describe("FirstPartyFinalitySession", () => {
       { subject: deliverySubject, afterStatusRevision: 2 },
     ]);
     expect(page.notices).toHaveLength(2);
+  });
+
+  it("replays only the requested delivery subject page by page, then releases live notices in order", async () => {
+    const deliveryNotice = (itemId: string, statusRevision: number) => ({
+      ref: { execution: "delivery", itemId },
+      state: "delivery-failed",
+      statusRevision,
+      actions: [],
+      at: "2026-07-28T00:00:00.000Z",
+      attempt: 1,
+      anchorEpoch: 1,
+    }) as unknown as ExecutionStatusNotice;
+    // 请求的主体有 300 条历史，另一个未请求的条目也有历史；源端每个主体每页至多 128 条
+    const histories = new Map([
+      ["dlv-requested", Array.from({ length: 300 }, (_, index) => deliveryNotice("dlv-requested", index + 1))],
+      ["dlv-other", Array.from({ length: 50 }, (_, index) => deliveryNotice("dlv-other", index + 1))],
+    ]);
+    const requested: string[][] = [];
+    const sources = new ExecutionStatusHub({
+      conversationHistory: async (requests) => ({ notices: [], next: requests }),
+      jobHistory: async (cursors) => ({ notices: [], next: cursors }),
+      deliveryHistory: async (cursors) => {
+        requested.push(cursors.map(({ itemId }) => itemId));
+        const notices = cursors.flatMap((cursor) => (histories.get(cursor.itemId) ?? [])
+          .filter((candidate) => candidate.statusRevision > cursor.afterStatusRevision)
+          .slice(0, 128));
+        return {
+          notices: notices as never,
+          next: cursors.map((cursor) => ({
+            itemId: cursor.itemId,
+            afterStatusRevision: notices.filter((candidate) => candidate.ref.execution === "delivery" &&
+              candidate.ref.itemId === cursor.itemId).at(-1)?.statusRevision ?? cursor.afterStatusRevision,
+          })),
+        };
+      },
+    });
+    const seen: string[] = [];
+    const session = new FirstPartyFinalitySession({
+      sources,
+      lastSeen: [{ subject: { execution: "delivery", itemId: "dlv-requested" }, afterStatusRevision: 0 }],
+      onStatus: (accepted) => {
+        if (accepted.ref.execution === "delivery") seen.push(`${accepted.ref.itemId}:${accepted.statusRevision}`);
+      },
+    });
+    const startup = session.start();
+    // 补读期间到达的 live：请求主体的下一条与一个新条目的第一条
+    sources.publish(deliveryNotice("dlv-requested", 301));
+    sources.publish(deliveryNotice("dlv-new", 1));
+    await startup;
+
+    // 只读请求的主体，按页推进到它的水位即止，不读其他条目的历史
+    expect(requested).toEqual([["dlv-requested"], ["dlv-requested"], ["dlv-requested"], ["dlv-requested"]]);
+    // 补读完成即按修订号放行缓冲的 live（在同一串行队列里紧随补读），不再等任何其他历史
+    await vi.waitFor(() => {
+      expect(seen).toEqual([
+        ...Array.from({ length: 300 }, (_, index) => `dlv-requested:${index + 1}`),
+        "dlv-requested:301",
+        "dlv-new:1",
+      ]);
+    });
+    expect(requested).toHaveLength(4);
+    expect(session.nextCursors()).toEqual([
+      { subject: { execution: "delivery", itemId: "dlv-requested" }, afterStatusRevision: 301 },
+    ]);
+    session.close();
   });
 });

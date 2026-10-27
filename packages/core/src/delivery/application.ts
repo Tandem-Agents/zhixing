@@ -9,6 +9,7 @@ import type {
   DeliveryStreamRecord,
   LogicalRecord,
 } from "../contracts/index.js";
+import type { ProjectionTransactionContext } from "../authority/index.js";
 import {
   deliveryIdempotencyKey,
   deliveryIntentDigest,
@@ -30,6 +31,9 @@ import {
 } from "./lifecycle-policy.js";
 import type {
   AuthorityDeliveryItem,
+  AuthorityDeliveryStats,
+  DeliveryClaimablePage,
+  DeliveryClaimablePageRequest,
   DeliveryApplicationProjection,
   DeliveryApplicationProjectionItem,
   DeliveryEnqueueInput,
@@ -231,14 +235,21 @@ export type DeliveryObligationDecide = (
   context: DeliveryObligationDecisionContext,
 ) => DeliveryEnqueueResult;
 
-/** Correctness supplies serialization, the current projection and lifecycle fence only. */
+/**
+ * Correctness supplies serialization, the projection at the source transaction's prefix and the
+ * lifecycle fence only. The transaction is the producer's locked source transaction; Delivery reads
+ * its own projection through it and never re-enters the log lock. Candidates are the entries already
+ * planned for the same envelope; their enqueues count as already present.
+ */
 export interface DeliveryObligationCorrectnessPort {
   coordinate<Result>(operation: () => Promise<Result>): Promise<Result>;
   prepare(
     inputs: readonly DeliveryEnqueueInput[],
     commitAt: string,
     decide: DeliveryObligationDecide,
-  ): DeliveryEnqueueResult;
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryEnqueueResult>;
 }
 
 export interface DeliveryObligationApplication {
@@ -246,7 +257,9 @@ export interface DeliveryObligationApplication {
   prepare(
     obligations: readonly DeliveryObligation[],
     commitAt: string,
-  ): DeliveryObligationDecision;
+    transaction: ProjectionTransactionContext,
+    candidates?: readonly LogicalRecord<unknown>[],
+  ): Promise<DeliveryObligationDecision>;
 }
 
 /** The single Delivery-owned decision entry for all current producer obligations. */
@@ -269,10 +282,12 @@ export class DeliveryObligationApplicationService
     return this.correctness.coordinate(operation);
   }
 
-  prepare(
+  async prepare(
     obligations: readonly DeliveryObligation[],
     commitAt: string,
-  ): DeliveryObligationDecision {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[] = [],
+  ): Promise<DeliveryObligationDecision> {
     const inputs = obligations.map((obligation) => ({
       keyBody: obligation.keyBody,
       intent: { ...obligation.intent, maxAttempts: this.#maxAttempts },
@@ -280,7 +295,7 @@ export class DeliveryObligationApplicationService
         ? { lifecycleSources: obligation.lifecycleSources }
         : {}),
     }));
-    const decision = this.correctness.prepare(inputs, commitAt, (context) =>
+    const decision = await this.correctness.prepare(inputs, commitAt, (context) =>
       prepareDeliveryEnqueues(
         context.projection,
         inputs,
@@ -290,7 +305,7 @@ export class DeliveryObligationApplicationService
           inputs,
           context.lifecycleAdmission,
         ),
-      ));
+      ), transaction, candidates);
     if (!decision.accepted) return decision;
     return {
       accepted: true,
@@ -384,10 +399,17 @@ export interface DeliveryLifecycleCommit<Value> {
   readonly value: Value;
 }
 
-/** Correctness supplies one serialized projection transaction and its durable commit result. */
+/**
+ * Correctness supplies one serialized projection transaction over the named items and its durable
+ * commit result. The decision only sees the items it names.
+ */
 export interface DeliveryLifecycleCorrectnessPort {
-  snapshot(): readonly AuthorityDeliveryItem[];
+  /** 当前全部未结投递，供显式停机、迁居冻结；读量随真实未完成集合增长。 */
+  pending(): Promise<readonly AuthorityDeliveryItem[]>;
+  /** 任一 uncertain 投递，没有时为 undefined。 */
+  firstUncertain(): Promise<AuthorityDeliveryItem | undefined>;
   transact<Value>(
+    itemIds: readonly string[],
     decide: (
       context: DeliveryLifecycleDecisionContext,
     ) => DeliveryLifecycleMutation<Value>,
@@ -399,10 +421,10 @@ export interface DeliveryLifecycleCorrectnessPort {
   ): Promise<Value>;
 }
 
-/** Read-only projection mechanism used by the effect driver and Host accepted-work lifecycle. */
+/** Read-only projection mechanism used by the effect driver: bounded directory pages and state counts. */
 export interface DeliveryLifecycleProjectionPort {
-  list(): Promise<readonly AuthorityDeliveryItem[]>;
-  snapshot(): readonly AuthorityDeliveryItem[];
+  claimablePage(request: DeliveryClaimablePageRequest): Promise<DeliveryClaimablePage>;
+  stats(): Promise<AuthorityDeliveryStats>;
 }
 
 export interface DeliveryLifecycleAdmissionState {
@@ -449,7 +471,7 @@ export interface DeliveryLifecycleApplication {
     readonly outcome: DeliveryOutcome;
     readonly responseBindingDigest: string;
   }): Promise<DeliveryOutcomeDecision>;
-  captureAcceptedWork(): readonly { readonly id: string; readonly revision: string }[];
+  captureAcceptedWork(): Promise<readonly { readonly id: string; readonly revision: string }[]>;
   installAdmission(input: DeliveryLifecycleAdmission): Promise<void>;
   restoreAdmission(input: DeliveryLifecycleRestoration): Promise<void>;
   sealAdmission(operationId: string): Promise<void>;
@@ -508,8 +530,8 @@ export class DeliveryLifecycleApplicationService
       new Promise((resolve) => setTimeout(resolve, delayMs)));
   }
 
-  captureAcceptedWork(): readonly { readonly id: string; readonly revision: string }[] {
-    return acceptedDeliveryItems(this.correctnessSnapshot());
+  async captureAcceptedWork(): Promise<readonly { readonly id: string; readonly revision: string }[]> {
+    return acceptedDeliveryItems(await this.correctness.pending());
   }
 
   async installAdmission(input: DeliveryLifecycleAdmission): Promise<void> {
@@ -582,7 +604,7 @@ export class DeliveryLifecycleApplicationService
       await input.effects.flushQuiescedOnce();
       const pending = await this.acceptedWorkItems(input.operationId);
       if (pending.length === 0) return;
-      const uncertain = this.correctnessSnapshot().find((item) => item.state === "uncertain");
+      const uncertain = await this.correctness.firstUncertain();
       if (uncertain) {
         throw new Error(
           `Delivery ${uncertain.id} has an uncertain outcome that requires the existing user decision`,
@@ -602,10 +624,6 @@ export class DeliveryLifecycleApplicationService
     return effects.resume();
   }
 
-  private correctnessSnapshot(): readonly AuthorityDeliveryItem[] {
-    return this.correctness.snapshot();
-  }
-
   async claim(input: {
     readonly itemId: string;
     readonly outcomePolicy?: DeliveryAttemptOutcomePolicy;
@@ -622,7 +640,7 @@ export class DeliveryLifecycleApplicationService
           readonly responseBindingDigest: string;
         }
       | { readonly kind: "uncertain"; readonly itemId: string }
-    >((context) => {
+    >([frozen.itemId], (context) => {
       const item = context.projection.items.get(frozen.itemId);
       if (!item) return noDeliveryMutation({ kind: "skip" });
       if (item.state === "attempting") {
@@ -702,7 +720,7 @@ export class DeliveryLifecycleApplicationService
     if (frozen.error.retryable) {
       throw new TypeError("Delivery preflight failure must be permanent");
     }
-    const committed = await this.correctness.transact<DeliveryPreflightFailureDecision>((context) => {
+    const committed = await this.correctness.transact<DeliveryPreflightFailureDecision>([frozen.itemId], (context) => {
       const item = context.projection.items.get(frozen.itemId);
       if (!item || !isReadyForDeliveryAttempt(item, context.transactionAt)) {
         return noDeliveryMutation({ accepted: false });
@@ -747,7 +765,7 @@ export class DeliveryLifecycleApplicationService
           readonly statusRevision: number;
           readonly retryAt?: string;
         }
-    >((context) => {
+    >([frozen.itemId], (context) => {
       const item = context.projection.items.get(frozen.itemId);
       if (
         !item ||

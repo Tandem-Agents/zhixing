@@ -1,7 +1,7 @@
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, registerDeliveryAuthorityProjection, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import {
   DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
   decideScheduleCapabilityGap,
@@ -4385,6 +4385,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     this.#ingress = options.ingress;
     this.#legacyAbortTickets = options.legacyAbortTickets;
     this.#delivery = options.delivery;
+    // 入队在本日志的源事务里按同一前缀读投递投影：本日志实例上须登记它（同定义重复登记即复用）
+    registerDeliveryAuthorityProjection(options.log);
     this.#commitParticipant = options.commitParticipant;
     this.#resources = options.resources;
     this.#systemResources = options.systemResources;
@@ -4883,7 +4885,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     assertIdentifier(input.jobRunId, "Capability gap jobRunId");
     assertPositive(input.capabilityRevision, "Capability gap revision");
     if (input.reason.length === 0) throw new TypeError("Capability gap reason is required");
-    await this.#transact<void>((state) => {
+    await this.#transact<void>(async (state, prefix) => {
       const occurrence = state.occurrences.get(input.jobRunId);
       const current = state.states.get(input.jobRunId);
       const definition = occurrence
@@ -4904,7 +4906,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           capabilityRevision: input.capabilityRevision,
           reasonDigest: decision.reasonDigest, reason: input.reason,
         }),
-        ...this.#schedulerNotices!.prepareRecords({ ...decision.notice, at: this.#clock() }),
+        ...await this.#schedulerNotices!.prepareRecords({ ...decision.notice, at: this.#clock() }, prefix),
       ];
       return { kind: "append", entries, value: undefined };
     });
@@ -6741,25 +6743,26 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         state: target,
         cursor,
         createState: () => target,
-        readProjectionIds: [JOB_RUN_STATE_PROJECTION_ID],
+        readProjectionIds: [JOB_RUN_STATE_PROJECTION_ID, DELIVERY_AUTHORITY_PROJECTION_ID],
         validateAtPrefix: async (context) => {
           await preloadJobScope({ main: base }, scope, context.readProjection(JOB_RUN_STATE_PROJECTION_ID));
         },
       },
       reducer: (state, record, commit) => this.#reduce(state, record, commit),
       companionStreams: ["delivery", "governor", ...(this.#schedulerNotices ? [SCHEDULER_NOTICE_STREAM] : [])],
-      prepareCompanions: (state, context, plan) => {
+      prepareCompanions: async (state, context, plan) => {
         const statuses = jobStatusDeliveryInputs(
           this.#taskId,
           state,
           plan.authorityEntries ?? [],
           context.authorityPrefix.at,
         );
-        const prepared = this.#delivery.prepareJobStatuses(statuses);
+        const prepared = await this.#delivery.prepareJobStatuses(statuses, context.authorityPrefix, plan.authorityEntries ?? []);
         if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
         return [
-          ...this.#prepareCapabilityGapClosureRecords(
-            state, plan.authorityEntries ?? [], context.authorityPrefix.at,
+          ...await this.#prepareCapabilityGapClosureRecords(
+            state, plan.authorityEntries ?? [], context.authorityPrefix.at, context.authorityPrefix,
+            [...(plan.authorityEntries ?? []), ...prepared.records],
           ),
           ...prepared.records,
         ];
@@ -7848,7 +7851,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         this.#assertAssignmentUsageFinal(assigned.record, bundle.usageFinal);
         const mutationBatch = closure.batch;
         const definition = requireDefinitionRevision(state, occurrence.taskRevision);
-        const delivery = this.#delivery.prepareJobCommit({
+        const delivery = await this.#delivery.prepareJobCommit({
           at: prefix.at,
           occurrence,
           definition,
@@ -7864,7 +7867,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             : {}),
           stagedContents: compiledDelivery.stagedContents,
           stagedContentErrors: compiledDelivery.stagedContentErrors,
-        });
+        }, prefix);
         if (!delivery.accepted) {
           return {
             kind: "return",
@@ -8000,7 +8003,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             for (const draft of projectSchedulePublishNotices({
               taskId: this.#taskId, jobRunId: occurrence.jobRunId, assignmentId,
               definition, batch: mutationBatch, outcomes: publishOutcomes, at: prefix.at,
-            })) entries.push(...this.#schedulerNotices.prepareRecords(draft));
+            })) entries.push(...await this.#schedulerNotices.prepareRecords(draft, prefix, entries));
           }
         }
         if (current.state === "uncertain") {
@@ -8949,6 +8952,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
                 state,
                 decision.entries,
                 context.at,
+                context,
               );
               const statuses = jobStatusDeliveryInputs(
                 this.#taskId,
@@ -8956,7 +8960,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
                 decision.entries,
                 context.at,
               );
-              const prepared = this.#delivery.prepareJobStatuses(statuses);
+              const prepared = await this.#delivery.prepareJobStatuses(statuses, context, [...decision.entries, ...policyRecords]);
               if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
               const entries = [
                 ...resourceRecords,
@@ -8976,7 +8980,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             stream: jobStream(this.#taskId),
             cursor,
             candidateReferences,
-            readProjectionIds: [...new Set([JOB_RUN_STATE_PROJECTION_ID, ...readProjectionIds])],
+            readProjectionIds: [...new Set([JOB_RUN_STATE_PROJECTION_ID, DELIVERY_AUTHORITY_PROJECTION_ID, ...readProjectionIds])],
             createState: () => {
               candidateLsn = undefined;
               return state;
@@ -9212,6 +9216,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     state: JobProjection,
     entries: readonly LogicalRecord<unknown>[],
     at: string,
+    transaction: ProjectionTransactionContext,
   ): Promise<readonly LogicalRecord<unknown>[]> {
     const definition = state.definition;
     if (!definition || definition.definition.kind !== "user") return [];
@@ -9273,14 +9278,17 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         autoDisableRequired: policy.autoDisableRequired,
       }));
     }
-    return [...result, ...this.#prepareCapabilityGapClosureRecords(state, entries, at)];
+    return [...result, ...await this.#prepareCapabilityGapClosureRecords(state, entries, at, transaction, entries)];
   }
 
-  #prepareCapabilityGapClosureRecords(
+  /** candidates 是同一 envelope 里已计划的条目，其中的投递入队一并计入。 */
+  async #prepareCapabilityGapClosureRecords(
     state: JobProjection,
     entries: readonly LogicalRecord<unknown>[],
     at: string,
-  ): readonly LogicalRecord<unknown>[] {
+    transaction: ProjectionTransactionContext,
+    candidates: readonly LogicalRecord<unknown>[],
+  ): Promise<readonly LogicalRecord<unknown>[]> {
     const result: LogicalRecord<unknown>[] = [];
     if (this.#schedulerNotices) {
       const decision = decideScheduleCapabilityGapClosure({
@@ -9302,7 +9310,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           t: "capability-gap-closed", jobRunId: decision.jobRunId,
           round: decision.round, noticeId: decision.noticeId,
         }));
-        result.push(...this.#schedulerNotices.prepareRecords(decision.notice));
+        result.push(...await this.#schedulerNotices.prepareRecords(decision.notice, transaction, candidates));
       }
     }
     return result;
