@@ -85,10 +85,14 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
   if (op === "list") {
     const limit = args[0] as number, own = directory ? await directory.listEntries(limit) : [];
     if (own.some(isLegacyLogFile)) throw Error("reserved-legacy-name");
-    const all = [...own, ...await legacy!.list(limit)];
-    if (all.length > limit) throw Error("log-inventory-limit");
-    return all;
+    if (own.length > limit) throw Error("log-inventory-limit");
+    // 历史目录不随普通清点枚举，只核对已打开的族目录仍在原位
+    await legacy!.verify();
+    return own;
   }
+  if (op === "scanLegacy") return legacy!.scan(args[0] as boolean, args[1] as number);
+  if (op === "listLegacy") return legacy!.page(args[0] as string, args[1] as number);
+  if (op === "statLegacy") return legacy!.stat(args[0] as { name: string; path: string }[]);
   if (op === "statMany") return statLogFiles(directory, legacy!, args[0] as string[]);
   if (!directory && !(typeof args[0] === "string" && isLegacyLogFile(args[0]))) throw Error("filesystem-not-open");
   if (typeof args[0] === "string" && isLegacyLogFile(args[0])) {
@@ -99,7 +103,9 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
     if (op === "truncate" && args[2] === 0) return entry.directory.truncateFile(entry.name, args[1] as string, 0);
     if (op === "remove") {
       if (typeof args[1] !== "string") throw Error("legacy-identity-required");
-      await entry.directory.removeRetired(entry.name, args[1]); await entry.directory.sync(); return;
+      await entry.directory.removeRetired(entry.name, args[1]); await entry.directory.sync();
+      legacy!.forget(args[0]);
+      return;
     }
     throw Error("legacy-read-only");
   }

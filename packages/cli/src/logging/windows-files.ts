@@ -46,7 +46,7 @@ export class WindowsLogFiles implements LogFileSystem {
     await this.#directory?.close();
     this.#directory = undefined;
     this.#readOnly = readOnly;
-    this.#legacy = new LegacyLogFiles(this.#home, (root, create, ro) => this.#session!.openPath(root, create, ro), readOnly);
+    this.#legacy = new LegacyLogFiles(this.#home, (root, create, ro) => this.#session!.openPath(root, create, ro), readOnly, 100_000);
     if (!path.isAbsolute(this.#home)) throw Error("日志数据根必须为绝对路径");
     if (readOnly) {
       try { this.#directory = await this.#session.openPath(
@@ -84,9 +84,19 @@ export class WindowsLogFiles implements LogFileSystem {
   async list(limit: number): Promise<readonly string[]> {
     const own = this.#directory ? await this.#root().listEntries(limit) : [];
     if (own.some(isLegacyLogFile)) throw Error("日志根含保留的旧日志名称");
-    const names = [...own, ...await this.#legacy!.list(limit)];
-    if (names.length > limit) throw Error("日志文件清点超限");
-    return names;
+    if (own.length > limit) throw Error("日志文件清点超限");
+    // 历史目录不随普通清点枚举，只核对已打开的族目录仍在原位
+    await this.#legacy!.verify();
+    return own;
+  }
+  scanLegacy(restart: boolean, budget: number): ReturnType<LegacyLogFiles["scan"]> {
+    return this.#legacy!.scan(restart, budget);
+  }
+  listLegacy(after: string, limit: number): Promise<{ entries: { name: string; path: string }[]; end: boolean }> {
+    return this.#legacy!.page(after, limit);
+  }
+  statLegacy(entries: readonly { name: string; path: string }[]): Promise<readonly (LogFileInfo | null)[]> {
+    return this.#legacy!.stat(entries);
   }
   async stat(name: string): Promise<LogFileInfo> {
     if (isLegacyLogFile(name)) { const entry = this.#legacy!.resolve(name); return { ...await entry.directory.statFile(entry.name), legacyPath: entry.relativePath }; }
@@ -130,7 +140,9 @@ export class WindowsLogFiles implements LogFileSystem {
       this.#root(true);
       if (!identity) throw Error("回收旧日志必须提供登记身份");
       const entry = this.#legacy!.resolve(name);
-      await entry.directory.removeRetired(entry.name, identity); await entry.directory.sync(); return;
+      await entry.directory.removeRetired(entry.name, identity); await entry.directory.sync();
+      this.#legacy!.forget(name);
+      return;
     }
     const root = this.#root(true),
       info = await root.statFile(name);

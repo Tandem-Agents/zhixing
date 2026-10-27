@@ -274,7 +274,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
   it.each(["inventory", "publication"])("does not turn policy %s failures into a second successful publication", async phase => {
     const h = await setup();
     await h.store.initialize();
-    const write = h.files.write.bind(h.files), list = h.files.list.bind(h.files);
+    const write = h.files.write.bind(h.files), statMany = h.files.statMany!.bind(h.files), stat = h.files.stat.bind(h.files);
     let pendingWritten = false, failInventory = false, failed = false;
     h.files.write = async (name, bytes) => {
       if (name.endsWith(".new")) {
@@ -287,12 +287,14 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
       await write(name, bytes);
       if (name.endsWith(".head") && pendingWritten && !failed) failInventory = true;
     };
-    h.files.list = async limit => {
+    // 写事务内名字由本步骤自己的改动维护、不再重列；两次发布之间清点仍要重新 stat 本步骤改过的文件，故障注在这里
+    const inventoryFault = () => {
       if (phase === "inventory" && failInventory && !failed) {
         failed = true; throw Error("injected policy inventory failure");
       }
-      return list(limit);
     };
+    h.files.statMany = async names => { inventoryFault(); return statMany(names); };
+    h.files.stat = async name => { inventoryFault(); return stat(name); };
     await expect(h.store.applyPolicy({ ...policy, queryRecords: 2 }, 1)).rejects.toThrow(`injected policy ${phase} failure`);
     expect((await h.store.status()).policy).toMatchObject({ version: 1, effective: { queryRecords: 3 }, desired: { queryRecords: 2 } });
     await h.store.maintain();

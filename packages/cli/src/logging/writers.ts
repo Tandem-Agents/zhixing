@@ -28,6 +28,19 @@ export function classifyWindowsWriters(inventory: NodeProcessInventory, home: st
   };
 }
 
+/** 清点期间有 node 进程退出或刚启动时，单个句柄可能暂时取不到身份或参数。 */
+const TRANSIENT_INVENTORY_GAPS = new Set(["identity-unavailable", "arguments-unavailable"]);
+
+/** 只因瞬时缺口不完整时立即再清点，至多两次；持续不可得照旧保守地视为不完整。 */
+async function observeSettled(processes: LogWriterProcessObserver, signal?: AbortSignal): Promise<NodeProcessInventory> {
+  let inventory = await processes.observeNodeProcesses();
+  for (let retry = 0; retry < 2 && !inventory.complete && TRANSIENT_INVENTORY_GAPS.has(inventory.failure?.reason ?? ""); retry++) {
+    signal?.throwIfAborted();
+    inventory = await processes.observeNodeProcesses();
+  }
+  return inventory;
+}
+
 export interface LogWriterProcessObserver {
   observeNodeProcesses(): Promise<NodeProcessInventory>;
   readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
@@ -45,7 +58,7 @@ export function createLogWriterProbe(home: string, processes: LogWriterProcessOb
     if (cached && performance.now() < cachedUntil) return cached;
     const at = Date.now();
     try {
-      let result = process.platform === "win32" ? classifyWindowsWriters(await processes.observeNodeProcesses(), home, ownerPid) : await isolatedPosix(home, signal, ownerPid, runCommand);
+      let result = process.platform === "win32" ? classifyWindowsWriters(await observeSettled(processes, signal), home, ownerPid) : await isolatedPosix(home, signal, ownerPid, runCommand);
       if (process.platform === "win32" && result.complete) {
         const live = new Set(result.candidates.map(item => `${item.pid}:${item.birth}`));
         for (const key of admitted) if (!live.has(key)) admitted.delete(key);
@@ -67,7 +80,7 @@ export function createLogWriterProbe(home: string, processes: LogWriterProcessOb
         if (proofs.size) {
           // The OS peer proves PID, while the second inventory binds that proof to
           // the same incarnation. A reused PID must never inherit a cached proof.
-          result = classifyWindowsWriters(await processes.observeNodeProcesses(), home, ownerPid);
+          result = classifyWindowsWriters(await observeSettled(processes, signal), home, ownerPid);
           if (result.complete) for (const candidate of result.candidates) {
             const key = `${candidate.pid}:${candidate.birth}`, root = proofs.get(key);
             if (root === writerRootKey(home)) admitted.add(key);

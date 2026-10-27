@@ -57,6 +57,15 @@ class NodeFilesProcess implements LogFileSystem {
   list(limit: number): Promise<readonly string[]> {
     return this.#call("list", [limit]);
   }
+  scanLegacy(restart: boolean, budget: number): Promise<{ entries: { name: string; path: string }[]; scanned: number; bytes: number; end: boolean; restarted: boolean }> {
+    return this.#call("scanLegacy", [restart, budget]);
+  }
+  listLegacy(after: string, limit: number): Promise<{ entries: { name: string; path: string }[]; end: boolean }> {
+    return this.#call("listLegacy", [after, limit]);
+  }
+  statLegacy(entries: readonly { name: string; path: string }[]): Promise<readonly (LogFileInfo | null)[]> {
+    return this.#call("statLegacy", [entries]);
+  }
   stat(name: string): Promise<LogFileInfo> {
     return this.#call("stat", [name]);
   }
@@ -259,6 +268,15 @@ export class LogFilesProcess implements LogFileSystem {
   }
   list(limit: number): Promise<readonly string[]> {
     return this.#files.list(limit);
+  }
+  scanLegacy(restart: boolean, budget: number): Promise<{ readonly entries: readonly { name: string; path: string }[]; readonly scanned: number; readonly bytes: number; readonly end: boolean; readonly restarted: boolean }> {
+    return this.#files.scanLegacy!(restart, budget);
+  }
+  listLegacy(after: string, limit: number): Promise<{ readonly entries: readonly { name: string; path: string }[]; readonly end: boolean }> {
+    return this.#files.listLegacy!(after, limit);
+  }
+  statLegacy(entries: readonly { name: string; path: string }[]): Promise<readonly (LogFileInfo | null)[]> {
+    return this.#files.statLegacy!(entries);
   }
   stat(name: string): Promise<LogFileInfo> {
     return this.#files.stat(name);

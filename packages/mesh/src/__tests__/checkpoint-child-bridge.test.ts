@@ -96,6 +96,47 @@ describe("checkpoint child bridge", () => {
     } finally { await session.close(); }
   }, 15_000);
 
+  // 目录续读：同一句柄上每块至多一个预算缓冲，块与块之间不重不漏；位置只属于该句柄
+  it("continues directory chunks on one handle within the byte budget", async () => {
+    const root = await realpath(await createTempDir('checkpoint-directory-chunks'));
+    const session = process.platform === "win32" ? CheckpointDirectoryHandle.createWindowsSession() : undefined;
+    const openRoot = () => session?.openPath(root, false) ?? CheckpointDirectoryHandle.openPath(root, false);
+    const names = Array.from({ length: 193 }, (_, index) => `${'x'.repeat(156)}-${index}`);
+    try {
+      const writer = await openRoot();
+      try { for (const name of names) await writer.writeFile(name, Buffer.from('chunk')); }
+      finally { await writer.close(); }
+      const directory = await openRoot();
+      try {
+        await expect(directory.readEntryChunk(true, 1023)).rejects.toThrow();
+        await expect(directory.readEntryChunk(true, 65537)).rejects.toThrow();
+        const found: string[] = [];
+        let chunks = 0, scanned = 0;
+        for (let restart = true; ; restart = false) {
+          const chunk = await directory.readEntryChunk(restart, 4096);
+          chunks++; scanned += chunk.scanned;
+          // POSIX 读到达到预算为止，至多再多一项
+          expect(chunk.bytes).toBeLessThanOrEqual(4096 + 512);
+          found.push(...chunk.names);
+          if (chunk.end) break;
+          expect(chunks).toBeLessThan(200);
+        }
+        expect(chunks).toBeGreaterThan(5);
+        expect(scanned).toBeGreaterThanOrEqual(names.length);
+        expect([...found].sort()).toEqual([...names].sort());
+        expect(await directory.readEntryChunk(false, 4096)).toMatchObject({ names: [], end: true });
+        const again = await directory.readEntryChunk(true, 4096);
+        expect(again.names.length).toBeGreaterThan(0);
+      } finally { await directory.close(); }
+      // 新句柄不继承旧句柄的位置
+      const fresh = await openRoot();
+      try {
+        const first = await fresh.readEntryChunk(false, 65536);
+        expect(first.names.length).toBeGreaterThan(0);
+      } finally { await fresh.close(); }
+    } finally { await session?.close(); }
+  }, 15_000);
+
   it.skipIf(process.platform === "win32")("preserves errno when a file obstructs a directory operation", async () => {
     const root = await realpath(await createTempDir("checkpoint-posix-cause"));
     const file = path.join(root, "obstruction");

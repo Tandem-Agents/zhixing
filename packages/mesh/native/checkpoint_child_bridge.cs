@@ -194,6 +194,7 @@ internal static class CheckpointChildBridge {
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), RequestBytes(r)); return true; }
     if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit"), r.ContainsKey("identity") ? Text(r, "identity") : null, r.ContainsKey("prefix") && Flag(r, "prefix")));
     if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
+    if (op == "readEntryChunk") return ReadEntryChunk(Get(r, "parent"), Flag(r, "restart"), Number(r, "maximumBytes"));
     if (op == "listEntryPage") {
       var offset = Number(r, "offset"); var limit = Number(r, "limit");
       if (offset < 0 || offset > 4096 || limit < 1 || limit > 32) throw new InvalidOperationException("Invalid directory page");
@@ -466,6 +467,46 @@ internal static class CheckpointChildBridge {
   }
 
   sealed class DirectoryPage { public string[] names; public bool end; }
+  sealed class EntryChunk { public string[] names; public long scanned; public long bytes; public bool end; }
+
+  // 在同一目录句柄上接着读一块：restart 时从头开始，否则沿句柄的目录游标续读。缓冲大小就是这次的预算，
+  // 返回这一缓冲里的全部名字，以及实际扫描的目录项数与字节（含 "." ".."）；读尽时 end 为真。
+  static EntryChunk ReadEntryChunk(IntPtr parent, bool restart, long maximumBytes) {
+    if (maximumBytes < 1024 || maximumBytes > 65536) throw new InvalidOperationException("Invalid directory chunk");
+    const int fileNameLengthOffset = 60, fileNameOffset = 104;
+    var size = (int)maximumBytes;
+    var buffer = Marshal.AllocHGlobal(size);
+    var values = new List<string>();
+    long scanned = 0, bytes = 0;
+    try {
+      if (!GetFileInformationByHandleEx(parent, restart ? FileIdBothDirectoryRestartInfo : FileIdBothDirectoryInfo, buffer, (uint)size)) {
+        if (Marshal.GetLastWin32Error() == 18) return new EntryChunk { names = new string[0], scanned = 0, bytes = 0, end = true };
+        throw Win32("Unable to enumerate checkpoint directory by handle");
+      }
+      var offset = 0;
+      while (true) {
+        var current = IntPtr.Add(buffer, offset);
+        var nameBytes = Marshal.ReadInt32(current, fileNameLengthOffset);
+        if (nameBytes < 0 || (nameBytes & 1) != 0 || fileNameOffset + nameBytes > size - offset) {
+          throw new InvalidOperationException("Checkpoint directory entry is invalid");
+        }
+        var name = Marshal.PtrToStringUni(IntPtr.Add(current, fileNameOffset), nameBytes / 2);
+        var next = Marshal.ReadInt32(current, 0);
+        scanned++;
+        bytes += next == 0 ? fileNameOffset + nameBytes : next;
+        if (name != "." && name != "..") {
+          if (!ValidName(name)) throw new InvalidOperationException("Checkpoint directory contains an unknown child name");
+          values.Add(name);
+        }
+        if (next == 0) break;
+        if (next < fileNameOffset || offset + next >= size) {
+          throw new InvalidOperationException("Checkpoint directory entry offset is invalid");
+        }
+        offset += next;
+      }
+      return new EntryChunk { names = values.ToArray(), scanned = scanned, bytes = bytes, end = false };
+    } finally { Marshal.FreeHGlobal(buffer); }
+  }
 
   static DirectoryPage ReadEntries(IntPtr parent, long skip, long maximumEntries, bool complete) {
     const int bufferSize = 64 * 1024, fileNameLengthOffset = 60, fileNameOffset = 104;

@@ -17,6 +17,7 @@ interface NativeCheckpointChildBridge {
   writeAt(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer, identity?: string): CheckpointEntry;
   copyRange(parent: bigint, source: string, sourceIdentity: string, sourceBytes: number, sourceOffset: number, target: string, targetIdentity: string, targetOffset: number, length: number): CheckpointEntry;
   listEntryPage(parent: bigint, offset: number, limit: number): { names: readonly string[]; end: boolean };
+  readEntryChunk(parent: bigint, restart: boolean, maximumBytes: number): CheckpointEntryChunk;
   readLocalProcessDeclaration(endpoint: string, pid: number): string;
   processBirth(pid: number): string;
   openPath(path: string, create: boolean, readOnly: boolean): bigint;
@@ -56,6 +57,7 @@ interface BridgeApi {
   readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string, prefix?: boolean): Promise<Buffer>;
   listEntries(parent: bigint, maximumEntries: number): Promise<readonly string[]>;
   listEntryPage(parent: bigint, offset: number, limit: number): Promise<{ names: readonly string[]; end: boolean }>;
+  readEntryChunk(parent: bigint, restart: boolean, maximumBytes: number): Promise<CheckpointEntryChunk>;
   writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer, identity?: string): Promise<number>;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string, replace?: boolean): Promise<void>;
   unlinkEntry(parent: bigint, name: string, directory: boolean, retiredIdentity?: string, expectedIdentity?: string): Promise<void>;
@@ -71,6 +73,14 @@ export interface CheckpointEntry {
   readonly bytes: number;
   readonly allocatedBytes: number;
   readonly identity: string;
+}
+
+/** 目录续读的一块：本次返回的名字，以及实际扫描的目录项数与字节（含 "." ".."）；读尽时 end 为真。 */
+export interface CheckpointEntryChunk {
+  readonly names: readonly string[];
+  readonly scanned: number;
+  readonly bytes: number;
+  readonly end: boolean;
 }
 
 /** The filesystem owner keeps its private protocol; a containing execution
@@ -278,6 +288,20 @@ export class CheckpointDirectoryHandle {
     return page;
   }
 
+  /**
+   * 沿本句柄的目录游标接着读一块（restart 从头开始），至多一个 maximumBytes 的缓冲。位置只在本句柄、本进程内；
+   * 句柄关闭或会话结束即丢失，调用方须能从头重读。这不是目录快照，读的过程中目录可能变化。
+   */
+  async readEntryChunk(restart: boolean, maximumBytes: number): Promise<CheckpointEntryChunk> {
+    await this.#assertOpen();
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1024 || maximumBytes > 65536) throw Error("Invalid directory chunk");
+    const chunk = await this.#bridge.readEntryChunk(this.#openHandle(), restart, maximumBytes);
+    if (!Array.isArray(chunk.names) || chunk.names.some((name) => typeof name !== "string") || !Number.isSafeInteger(chunk.scanned) ||
+        chunk.scanned < chunk.names.length || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 0 || typeof chunk.end !== "boolean")
+      throw Error("Invalid directory chunk result");
+    return chunk;
+  }
+
   async writeRange(name: string, maximumBytes: number, offset: number, bytes: Uint8Array, identity?: string): Promise<number> {
     if (bytes.byteLength > (this.#bridge.maximumTransferBytes ?? Infinity)) throw new TypeError('Filesystem write exceeds its byte bound');
     await this.#assertOpen();
@@ -386,6 +410,7 @@ function nativeBridge(): BridgeApi {
     readFile: async (...args) => native().readFile(...args),
     listEntries: async (...args) => native().listEntries(...args),
     listEntryPage: async (...args) => native().listEntryPage(...args),
+    readEntryChunk: async (...args) => native().readEntryChunk(...args),
     writeRange: async (...args) => native().writeRange(...args),
     renameEntry: async (source, name, target, targetName, replace) => {
       native().renameEntry(source, name, target, targetName, replace ?? false);
@@ -627,6 +652,7 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
       parent: id(parent), maximumEntries,
     }),
     listEntryPage: (parent, offset, limit) => request<{ names: readonly string[]; end: boolean }>('listEntryPage', { parent: id(parent), offset, limit }),
+    readEntryChunk: (parent, restart, maximumBytes) => request<CheckpointEntryChunk>("readEntryChunk", { parent: id(parent), restart, maximumBytes }),
     writeRange: (parent, name, maximumBytes, offset, bytes, identity) => request<number>("writeRange", {
       parent: id(parent), name, maximumBytes, offset, data: bytes, ...(identity ? { identity } : {}),
     }),

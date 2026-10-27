@@ -49,6 +49,21 @@ export interface LogFileSystem {
   tryReadLock(): Promise<boolean>;
   unlock(): Promise<void>;
   close(): Promise<void>;
+  /**
+   * 存储的历史日志发现：沿族目录续读句柄每次至多读一块（budget 字节），返回块里属于固定族的名字与实际扫描的
+   * 目录项数、字节。restart 或实现里没有这一轮的位置时从头开始（restarted 为真）；end 表示连续读到了最后一族末尾。
+   * 没有历史目录的实现可以不提供。
+   */
+  scanLegacy?(restart: boolean, budget: number): Promise<{ readonly entries: readonly LegacyLogLocation[]; readonly scanned: number; readonly bytes: number; readonly end: boolean; readonly restarted: boolean }>;
+  /** 离线诊断目录：按虚拟名排序取 after 之后至多 limit 个（未初始化时由读取方使用，不在存储的普通路径上）。 */
+  listLegacy?(after: string, limit: number): Promise<{ readonly entries: readonly LegacyLogLocation[]; readonly end: boolean }>;
+  /** 按登记时记下的相对路径定位并 stat 历史日志（之后同名的读、截断、删除都按这个位置）；不存在给 null。 */
+  statLegacy?(entries: readonly LegacyLogLocation[]): Promise<readonly (LogFileInfo | null)[]>;
+}
+/** 历史日志的虚拟名与它在固定族目录里的相对路径。 */
+export interface LegacyLogLocation {
+  readonly name: string;
+  readonly path: string;
 }
 export interface LogSegment {
   readonly name: string;
@@ -92,6 +107,11 @@ export interface LogStoreSnapshot {
   writers?: (LogWriterIdentity & { protocol: 1 | 2; registeredAt?: number })[];
   migration?: LogMigration;
   legacyRetired?: number;
+  /**
+   * 历史日志发现进度：pass 是轮次；ended 表示本轮已有进程连续读到末尾；carry 是读到但空间不够、尚未登记的
+   * 一小批（不超过一块）；complete = ended 且 carry 为空。读到的目录位置不在这里，只在读取进程内。
+   */
+  legacyScan?: { pass: number; complete: boolean; ended: boolean; carry: LegacyLogLocation[] };
 }
 const STATE = /^state-(\d{12})\.json$/u;
 const HEAD = /^published-(\d{12})\.head$/u;
@@ -122,7 +142,15 @@ export const logDigest = (value: string | Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 export const logJson = (value: unknown): Buffer => Buffer.from(`${JSON.stringify(value)}\n`);
 
+/** 每个写步骤至多处理的一批历史日志（登记、为腾空间而回收各一批）。 */
+const LEGACY_BATCH = 32;
+/** 每个写步骤发现历史日志时原生续读的预算：一块目录项字节（含不匹配、已登记的项）。 */
+const LEGACY_SCAN_BYTES = 4096;
+const legacyLocation = (entry: { readonly name: string; readonly legacyPath?: string }): LegacyLogLocation | undefined =>
+  entry.legacyPath ? { name: entry.name, path: entry.legacyPath } : undefined;
+
 /** One Store protocol across processes. Snapshots are governance, never business authority. */
+
 export class LocalLogStore implements LogSink {
   readonly #beginClose: (deadline: number) => void;
   beginClose(deadline: number): void { this.#beginClose(deadline); }
@@ -143,6 +171,10 @@ export class LocalLogStore implements LogSink {
   readonly #observeWriters: ((signal: AbortSignal) => Promise<LogWriterObservation>) | undefined;
   #writersObserved: LogWriterObservation | undefined;
   #ioClaims = 0;
+  /** 本步骤正在使用的治理状态：清点里已登记的历史日志按它记下的身份与大小给出，不再逐个 stat。 */
+  #stepState: LogStoreSnapshot | undefined;
+  /** 本进程的历史日志续读属于哪一轮发现；与状态里的 pass 不同就从头重扫。 */
+  #scanPass: number | undefined;
 
   constructor(options: {
     files: LogFileSystem;
@@ -156,9 +188,13 @@ export class LocalLogStore implements LogSink {
       if (!this.#permit) throw storageFault("resource-permit-missing", "日志物理操作缺少资源许可");
       this.#permit.claim(dimension, amount);
       if (dimension === "ioOperations") this.#ioClaims += amount;
-    }, (...names) => {
-      this.#namesCache = undefined;
-      for (const name of names) this.#inventoryDirty.add(name);
+    }, {
+      // 写事务持锁期间只有本步骤改动名字空间：成功的新建、改名、删除直接更新已列出的名字，
+      // 不再每次改动都重列全部目录（含历史日志目录）；改动失败（可能留下半成品）就作废名字缓存
+      dirty: (...names) => { for (const name of names) this.#inventoryDirty.add(name); },
+      added: (name) => { if (this.#namesCache && !this.#namesCache.includes(name)) this.#namesCache = [...this.#namesCache, name]; },
+      removed: (name) => { if (this.#namesCache) this.#namesCache = this.#namesCache.filter((item) => item !== name); },
+      invalidate: () => { this.#namesCache = undefined; },
     });
     this.#capacity = options.capacity;
     this.#initial = validateLogPolicy(options.initialPolicy ?? DEFAULT_LOG_POLICY);
@@ -186,6 +222,7 @@ export class LocalLogStore implements LogSink {
         };
         await this.#save(state);
       }
+      this.#stepState = state;
       await this.#refreshMigration(state);
       await this.#recover(state);
       await this.#maintenance(state);
@@ -426,19 +463,17 @@ export class LocalLogStore implements LogSink {
   async inspectLegacy<T>(work: (
     state: LogStoreSnapshot | undefined,
     files: LogFileSystem,
-    unregistered: readonly string[],
-    current: () => Promise<{ state: LogStoreSnapshot | undefined; names: readonly string[] }>,
+    current: () => Promise<LogStoreSnapshot | undefined>,
   ) => Promise<T>): Promise<T> {
     return this.#step(false, async () => {
+      // 未初始化时历史日志由读取方经 listLegacy 分页观察，这里不再列出全集
       const current = async () => {
         const state = await this.#load();
-        if (state) return { state, names: [] };
-        const names = await this.#list();
-        if (names.some((name) => !isLegacyFile(name) && name !== "writer.lock")) throw new LogRequestError("日志存在未完成的初始化状态，请启动产品接续；离线读取未改动文件");
-        return { state, names: names.filter(isLegacyFile).sort() };
+        if (state) return state;
+        if ((await this.#list()).some((name) => name !== "writer.lock")) throw new LogRequestError("日志存在未完成的初始化状态，请启动产品接续；离线读取未改动文件");
+        return undefined;
       };
-      const { state, names } = await current();
-      return work(state, this.files, names, current);
+      return work(await current(), this.files, current);
     });
   }
 
@@ -537,6 +572,7 @@ export class LocalLogStore implements LogSink {
         this.#inventoryCache = undefined;
         this.#namesCache = undefined;
         this.#inventoryDirty.clear();
+        this.#stepState = undefined;
         try {
           if (releaseLock) await this.files.unlock();
         } catch (error) {
@@ -598,6 +634,7 @@ export class LocalLogStore implements LogSink {
   async #required(recover = false): Promise<LogStoreSnapshot> {
     const state = await this.#load(recover);
     if (!state) throw new LogStoreNotInitializedError();
+    this.#stepState = state;
     if (recover) await this.#refreshMigration(state);
     return state;
   }
@@ -746,6 +783,13 @@ export class LocalLogStore implements LogSink {
     if (state.legacy !== undefined && (!Array.isArray(state.legacy) || state.legacy.length > 4096 || state.legacy.some((entry) =>
       !isLegacyFile(entry.name) || !/^[a-f0-9]{64}$/u.test(entry.id) || typeof entry.identity !== "string" || entry.identity.length > 128 ||
       !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(entry.registeredAt) || !Number.isSafeInteger(entry.generation)))) throw storageFault("legacy-metadata-corrupt", "旧日志登记损坏");
+    // 早先只有 { after, complete } 的发现进度（未发布、只在本地测试资料里）视为尚未开始一轮
+    if (state.legacyScan !== undefined && !Number.isSafeInteger((state.legacyScan as { pass?: unknown }).pass)) state.legacyScan = undefined;
+    if (state.legacyScan !== undefined && (state.legacyScan.pass < 0 || typeof state.legacyScan.complete !== "boolean" || typeof state.legacyScan.ended !== "boolean" ||
+      !Array.isArray(state.legacyScan.carry) || state.legacyScan.carry.length > 512 || state.legacyScan.carry.some((entry) =>
+        !isLegacyFile(entry?.name) || typeof entry.path !== "string" || entry.path.length > 512) ||
+      (state.legacyScan.complete && (!state.legacyScan.ended || state.legacyScan.carry.length > 0))))
+      throw storageFault("legacy-metadata-corrupt", "旧日志发现进度损坏");
     if (state.writers !== undefined && (!Array.isArray(state.writers) || state.writers.length > 256 || state.writers.some((entry) =>
       ![1, 2].includes(entry.protocol) || (entry.registeredAt !== undefined && !Number.isSafeInteger(entry.registeredAt)) ||
       !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw storageFault("writer-metadata-corrupt", "日志写者登记损坏");
@@ -794,17 +838,17 @@ export class LocalLogStore implements LogSink {
     await this.files.sync();
   }
 
-  async #inventory(refreshLegacy = false): Promise<Map<string, LogFileInfo>> {
+  async #inventory(): Promise<Map<string, LogFileInfo>> {
     const result = new Map<string, LogFileInfo>();
     // Only one physical writer can change managed files while this mutex is held.
     // Namespace reuse ends at any mutation; restat changed/new files, including rejected partial writes.
     const cached = this.#inventoryLocked ? this.#inventoryCache : undefined;
     const missing: string[] = [];
     for (const name of await this.#list()) {
-      if (name !== "writer.lock" && !OWNED.test(name) && !isLegacyFile(name))
+      if (name !== "writer.lock" && !OWNED.test(name))
         throw storageFault("unmanaged-file", "日志根含未登记文件，已停止写入");
       const prior = cached?.get(name);
-      if (prior && !(refreshLegacy && isLegacyFile(name)) && !this.#inventoryDirty.has(name)) result.set(name, prior);
+      if (prior && !this.#inventoryDirty.has(name)) result.set(name, prior);
       else missing.push(name);
     }
     const observed = !missing.length ? [] : this.files.statMany
@@ -812,11 +856,25 @@ export class LocalLogStore implements LogSink {
       : await sequentialStats(this.files, missing);
     if (observed.length !== missing.length) throw storageFault("inventory-incomplete", "日志文件清点不完整");
     missing.forEach((name, index) => result.set(name, observed[index]!));
+    // 历史日志不在受管根里：只按已登记（含待回收）的事实计入，读取与回收时各自再核身份；
+    // 尚未发现的不进入清点，也就不会被当成零字节——迁移在发现走完之前不确认
+    for (const entry of [...(this.#stepState?.legacy ?? []), ...(this.#stepState?.pending ?? []).filter((item) => isLegacyFile(item.name))]) {
+      const legacyPath = (entry as { readonly legacyPath?: string }).legacyPath;
+      result.set(entry.name, { identity: entry.identity, bytes: entry.bytes, ...(legacyPath ? { legacyPath } : {}) });
+    }
     if (this.#inventoryLocked) {
       this.#inventoryCache = result;
       this.#inventoryDirty.clear();
     }
     return new Map(result);
+  }
+  /** 按登记位置 stat 一批历史日志；端口不提供历史目录时视为都不存在。 */
+  async #statLegacy(entries: readonly LegacyLogLocation[]): Promise<readonly (LogFileInfo | null)[]> {
+    if (!entries.length) return [];
+    if (!this.files.statLegacy) return entries.map(() => null);
+    const observed = await this.files.statLegacy(entries);
+    if (observed.length !== entries.length) throw storageFault("inventory-incomplete", "日志文件清点不完整");
+    return observed;
   }
   async #erase(name: string): Promise<void> {
     const info = await this.files.stat(name);
@@ -831,11 +889,17 @@ export class LocalLogStore implements LogSink {
       !proof.compatible?.some(writer => writer.pid === entry.pid && writer.birth === entry.birth)) ?? [];
   }
   async #refreshMigration(state: LogStoreSnapshot): Promise<void> {
-    // Legacy may still have an incompatible writer; registration always observes it afresh.
-    const inventory = await this.#inventory(true);
-    const historical = [...inventory].filter(([name]) => isLegacyFile(name));
-    if (!this.#observeWriters && !historical.length && !state.migration) return;
-    const before = JSON.stringify({ writers: state.writers, legacy: state.legacy, migration: state.migration });
+    let registered: boolean | undefined;
+    if (!this.#observeWriters && !state.migration && !state.legacy?.length) {
+      // 没有写者观察、也没有迁移：只做发现，登记到历史日志才开始迁移（无观察按阻塞处理），否则只保存发现进度
+      const progress = JSON.stringify(state.legacyScan);
+      registered = await this.#discover(state, undefined, false);
+      if (!registered) {
+        if (JSON.stringify(state.legacyScan) !== progress) await this.#save(state);
+        return;
+      }
+    }
+    const before = JSON.stringify({ writers: state.writers, legacy: state.legacy, migration: state.migration, legacyScan: state.legacyScan });
     const proof = this.#writersObserved;
     const complete = proof?.complete === true && proof.self !== undefined &&
       proof.candidates.some((entry) => entry.pid === proof.self!.pid && entry.birth === proof.self!.birth);
@@ -856,32 +920,104 @@ export class LocalLogStore implements LogSink {
     const previous = state.migration;
     const migration = { state: compatible ? previous?.state === "confirmed" ? "confirmed" : "pending" : "blocked", checkedAt: previous?.checkedAt ?? proof?.at ?? this.#now(), ...(compatible ? {} : { reason: complete ? "old-or-unknown-writer" : "writer-inventory-unavailable" }) } as LogMigration;
     state.migration = migration;
-    const prior = state.legacy ?? [];
-    const priorLegacy = JSON.stringify(prior);
-    state.legacy = prior.filter((entry) => inventory.get(entry.name)?.identity === entry.identity)
-      .map((entry) => ({ ...entry, bytes: inventory.get(entry.name)!.bytes }));
-    const known = new Set([...state.legacy.map((entry) => entry.name), ...state.pending.map((entry) => entry.name)]);
-    for (const [name, info] of historical.filter(([name]) => !known.has(name)).slice(0, 8)) {
-      state.legacy.push({ name, ...info, id: logDigest(`${name}:${info.identity}`), registeredAt: this.#now(), generation: state.generation + 1 });
-    }
-    if (compatible && (JSON.stringify(state.legacy) !== priorLegacy || historical.some(([name]) => !known.has(name))))
+    registered ??= await this.#discover(state, previous, compatible);
+    if (compatible && (registered || !state.legacyScan!.complete))
       state.migration = { ...state.migration, state: "pending" };
-    if (before !== JSON.stringify({ writers: state.writers, legacy: state.legacy, migration: state.migration })) {
+    if (before !== JSON.stringify({ writers: state.writers, legacy: state.legacy, migration: state.migration, legacyScan: state.legacyScan })) {
       state.migration = { ...state.migration, checkedAt: proof?.at ?? this.#now() };
       // Registration must survive a blocked append so simultaneous writers can
       // discover each other. Unchanged observations never publish a heartbeat.
       await this.#save(state);
     }
   }
+  /**
+   * 历史日志发现：普通步骤不列历史目录，每步至多原生读一块（LEGACY_SCAN_BYTES）。块里未登记的名字按空间登记
+   * （至多 LEGACY_BATCH），余下的留在持久 carry 里，清空之前不读下一块。续读位置只在本进程：pass 与本进程记的
+   * 不同（新一轮、进程或 worker 重启、别的进程重置过）就从头有限重扫，已登记与待回收的名字直接跳过，已完成的
+   * 登记、回收不重做。某个进程从第一族连续读到最后一族末尾（ended）且 carry 为空，这一轮才算走完。
+   * 旧写者退出（阻塞 → 兼容）时 pass 加一，找回它在世期间新增的文件。返回本步是否登记了新条目。
+   */
+  async #discover(state: LogStoreSnapshot, previous: LogMigration | undefined, compatible: boolean): Promise<boolean> {
+    state.legacy ??= [];
+    let scan = state.legacyScan ?? { pass: 0, complete: false, ended: false, carry: [] };
+    if (previous?.state === "blocked" && compatible) scan = { pass: scan.pass + 1, complete: false, ended: false, carry: [] };
+    if (!scan.complete && !this.files.scanLegacy) scan = { ...scan, complete: true, ended: true, carry: [] };
+    let registered = false;
+    if (!scan.complete) {
+      const known = new Set([...state.legacy.map((entry) => entry.name), ...state.pending.map((entry) => entry.name)]);
+      let carry = scan.carry.filter((entry) => !known.has(entry.name)), ended = scan.ended;
+      if (!carry.length && !ended) {
+        const chunk = await this.files.scanLegacy!(this.#scanPass !== scan.pass, LEGACY_SCAN_BYTES);
+        this.#scanPass = scan.pass;
+        const seen = new Set<string>();
+        carry = chunk.entries.filter((entry) => !known.has(entry.name) && !seen.has(entry.name) && !!seen.add(entry.name))
+          .map((entry) => ({ name: entry.name, path: entry.path }));
+        ended = chunk.end;
+      }
+      const admitted = await this.#legacyRoom(state, Math.min(carry.length, LEGACY_BATCH), compatible);
+      const registering = carry.slice(0, admitted);
+      const observed = await this.#statLegacy(registering);
+      registering.forEach((entry, index) => {
+        const info = observed[index];
+        if (!info) return; // 发现之后已不存在
+        state.legacy!.push({ name: entry.name, ...info, id: logDigest(`${entry.name}:${info.identity}`), registeredAt: this.#now(), generation: state.generation + 1 });
+        registered = true;
+      });
+      carry = carry.slice(admitted);
+      scan = { pass: scan.pass, complete: ended && !carry.length, ended, carry };
+    }
+    state.legacyScan = scan;
+    return registered;
+  }
   async #retireLegacy(state: LogStoreSnapshot, entry: LegacyLogEntry): Promise<void> {
+    await this.#retireLegacyBatch(state, [entry]);
+  }
+  /**
+   * 回收一批已登记的历史日志：按登记位置重新 stat，已不存在的丢掉登记，登记后被外部改动或替换的
+   * 按当前事实重新登记（不按旧事实删除），其余转入待回收并按既有批次截断、删除。阻塞时不回收。
+   */
+  async #retireLegacyBatch(state: LogStoreSnapshot, entries: readonly LegacyLogEntry[]): Promise<void> {
     if (state.migration?.state === "blocked") throw storageFault("legacy-writer-live", "旧日志写者尚未退出");
-    const actual = await this.files.stat(entry.name);
-    if (actual.identity !== entry.identity || actual.bytes !== entry.bytes) throw storageFault("legacy-changed", "旧日志在切换期间发生变化");
-    state.pending.push({ name: entry.name, ...actual, reclaimed: false });
-    state.legacy = state.legacy!.filter((item) => item !== entry);
-    state.legacyRetired = Math.min(Number.MAX_SAFE_INTEGER, (state.legacyRetired ?? 0) + 1);
+    if (!entries.length) return;
+    const located = entries.map(legacyLocation);
+    const observed = await this.#statLegacy(located.filter((entry): entry is LegacyLogLocation => entry !== undefined));
+    const retiring = new Set<string>();
+    let next = 0;
+    for (const [index, entry] of entries.entries()) {
+      const actual = located[index] ? observed[next++] : null;
+      state.legacy = state.legacy!.filter((item) => item !== entry);
+      if (!actual) continue;
+      if (actual.identity !== entry.identity || actual.bytes !== entry.bytes) {
+        state.legacy.push({ name: entry.name, ...actual, id: logDigest(`${entry.name}:${actual.identity}`), registeredAt: this.#now(), generation: state.generation + 1 });
+        continue;
+      }
+      state.pending.push({ name: entry.name, ...actual, reclaimed: false });
+      state.legacyRetired = Math.min(Number.MAX_SAFE_INTEGER, (state.legacyRetired ?? 0) + 1);
+      retiring.add(entry.name);
+    }
     await this.#save(state);
-    await this.#reclaimPending(state);
+    for (let round = 0; round < 4 && state.pending.some((item) => retiring.has(item.name)); round++) await this.#reclaimPending(state);
+  }
+  /**
+   * 发现期为登记腾空间，口径与 #makeRoom 相同（受管＋已登记历史＋待回收＋控制文件 ≤ maxFiles）：
+   * 未阻塞时先回收最早登记的历史条目（至多一批），仍不够再按既有顺序回收受管段；阻塞时不回收。
+   * 返回本步能登记的条数。
+   */
+  async #legacyRoom(state: LogStoreSnapshot, wanted: number, compatible: boolean): Promise<number> {
+    if (!wanted) return 0;
+    const room = async (): Promise<number> => state.policy.effective.maxFiles - CONTROL_FILES -
+      [...(await this.#inventory()).keys()].filter((name) => !name.startsWith("state-") && !HEAD.test(name) && name !== "writer.lock").length;
+    let available = await room();
+    if (available < wanted && compatible && state.legacy?.length) {
+      await this.#retireLegacyBatch(state, state.legacy.slice(0, Math.min(LEGACY_BATCH, wanted - Math.max(0, available))));
+      available = await room();
+    }
+    if (available < wanted && compatible) {
+      try { await this.#makeRoom(state, 0, wanted); }
+      catch (error) { if (!(error instanceof LogReclaimPendingError)) throw error; }
+      available = await room();
+    }
+    return Math.max(0, Math.min(wanted, available));
   }
   async #recover(state: LogStoreSnapshot): Promise<void> {
     await this.#reclaimPending(state);
@@ -930,9 +1066,20 @@ export class LocalLogStore implements LogSink {
   async #reclaimPending(state: LogStoreSnapshot): Promise<void> {
     const batch = state.pending.filter(item => !isLegacyFile(item.name) || state.migration?.state !== "blocked").slice(0, 16);
     if (!batch.length) return;
+    // 历史日志不在受管根里：按登记位置确认是否仍在，不存在即视为已回收
+    const legacy = new Map<RetiredFile, LogFileInfo | null>();
+    const observeLegacy = async (): Promise<void> => {
+      const items = batch.filter((item) => isLegacyFile(item.name) && state.pending.includes(item));
+      const located = items.map(legacyLocation);
+      const observed = await this.#statLegacy(located.filter((entry): entry is LegacyLogLocation => entry !== undefined));
+      let next = 0;
+      items.forEach((item, index) => legacy.set(item, located[index] ? observed[next++]! : null));
+    };
+    await observeLegacy();
     for (const item of batch) {
       if (!item.reclaimed) {
-        const actual = await this.files.stat(item.name);
+        const actual = isLegacyFile(item.name) ? legacy.get(item) : await this.files.stat(item.name);
+        if (!actual) { state.pending = state.pending.filter((entry) => entry !== item); continue; }
         if (actual.identity !== item.identity) throw storageFault("retirement-file-replaced", "待回收日志文件已替换");
         await this.files.truncate(item.name, item.identity, 0);
         item.reclaimed = true;
@@ -941,10 +1088,12 @@ export class LocalLogStore implements LogSink {
     }
     await this.#save(state);
     const names = await this.#list();
+    await observeLegacy();
     for (const item of batch) {
-      if (names.includes(item.name)) {
-        const actual = await this.files.stat(item.name);
-        if (actual.identity !== item.identity || actual.bytes !== 0)
+      if (!state.pending.includes(item)) continue;
+      const present = isLegacyFile(item.name) ? legacy.get(item) : names.includes(item.name) ? await this.files.stat(item.name) : null;
+      if (present) {
+        if (present.identity !== item.identity || present.bytes !== 0)
           throw storageFault("retirement-unconfirmed", "待回收日志空间未确认");
         await this.files.remove(item.name, item.identity);
       }
@@ -1061,8 +1210,8 @@ export class LocalLogStore implements LogSink {
       state.segments = state.segments.map(segment => segment.ordinals && !segment.sealed && (segment.bytes >= policy.segmentBytes || now - segment.receivedAt >= policy.segmentAgeMs) ? { ...segment, sealed: true } : segment);
       await this.#save(state);
     }
-    for (const entry of [...(state.legacy ?? [])].filter((entry) => now - entry.registeredAt >= policy.detailTtlMs).slice(0, 4))
-      await this.#retireLegacy(state, entry);
+    const expiredLegacy = (state.legacy ?? []).filter((entry) => now - entry.registeredAt >= policy.detailTtlMs).slice(0, 4);
+    if (expiredLegacy.length) await this.#retireLegacyBatch(state, expiredLegacy);
     const expired = [...state.segments]
       .filter(
         (item) =>
@@ -1124,9 +1273,8 @@ export class LocalLogStore implements LogSink {
       const before = JSON.stringify(state.migration);
       try {
         await this.#makeRoom(state, 0, 0);
-        const inventory = await this.#inventory();
-        const registered = new Set([...(state.legacy ?? []).map((entry) => entry.name), ...state.pending.map((entry) => entry.name)]);
-        const allRegistered = [...inventory.keys()].filter(isLegacyFile).every((name) => registered.has(name));
+        // 一轮发现走完才算全部历史已登记；未发现的从不计入清点，所以在此之前不确认新预算
+        const allRegistered = state.legacyScan?.complete === true;
         state.migration = { state: allRegistered && !state.pending.some((entry) => isLegacyFile(entry.name)) ? "confirmed" : "pending", checkedAt: state.migration.checkedAt, ...(allRegistered ? {} : { reason: "inventory-pending" }) };
       } catch (error) {
         if (!(error instanceof LogReclaimPendingError)) throw error;
@@ -1136,10 +1284,10 @@ export class LocalLogStore implements LogSink {
     }
   }
   async #status(state: LogStoreSnapshot): Promise<LogStatus> {
-    const inventory = await this.#inventory(true);
+    const inventory = await this.#inventory();
     const bytes = [...inventory.values()].reduce((sum, item) => sum + item.bytes, 0);
-    const changedLegacy = [...inventory].some(([name, info]) => isLegacyFile(name) && !state.legacy?.some((entry) => entry.name === name && entry.identity === info.identity && entry.bytes === info.bytes));
-    const migration = state.migration?.state === "confirmed" && (changedLegacy || bytes > state.policy.effective.maxBytes || inventory.size > state.policy.effective.maxFiles)
+    // 普通步骤不观察历史目录；登记后的外部改动由读取与回收时的身份复核处理
+    const migration = state.migration?.state === "confirmed" && (bytes > state.policy.effective.maxBytes || inventory.size > state.policy.effective.maxFiles)
       ? { ...state.migration, state: "pending" as const, reason: "inventory-changed" } : state.migration;
     return {
       storeId: state.storeId,
@@ -1207,12 +1355,25 @@ async function sequentialStats(files: LogFileSystem, names: readonly string[]): 
   return result;
 }
 
+/** 写事务里名字空间的变化：dirty 标记需重新 stat 的名字，added/removed 在改动成功后更新名字缓存，invalidate 在改动失败时作废它。 */
+interface LogNamespaceChanges {
+  dirty(...names: string[]): void;
+  added(name: string): void;
+  removed(name: string): void;
+  invalidate(): void;
+}
+
 function meteredFiles(
   files: LogFileSystem,
   claim: (dimension: "readBytes" | "writeBytes" | "ioOperations", amount: number) => void,
-  changed: (...names: string[]) => void,
+  namespace: LogNamespaceChanges,
 ): LogFileSystem {
   const io = (count = 1): void => claim("ioOperations", count);
+  const mutate = async (names: readonly string[], operation: () => Promise<void>, applied: () => void = () => undefined): Promise<void> => {
+    namespace.dirty(...names);
+    try { await operation(); } catch (error) { namespace.invalidate(); throw error; }
+    applied();
+  };
   const measured: LogFileSystem = {
     open: async (readOnly) => {
       io(8);
@@ -1236,29 +1397,25 @@ function meteredFiles(
       return files.read(name, size, offset, limit, identity, prefix);
     },
     ...(files.append ? { append: async (name: string, identity: string, offset: number, bytes: Uint8Array) => {
-      io(); claim("writeBytes", bytes.byteLength); changed(name);
-      await files.append!(name, identity, offset, bytes);
+      io(); claim("writeBytes", bytes.byteLength);
+      await mutate([name], () => files.append!(name, identity, offset, bytes));
     } } : {}),
     write: async (name, bytes) => {
       io();
       claim("writeBytes", bytes.byteLength);
-      changed(name);
-      await files.write(name, bytes);
+      await mutate([name], () => files.write(name, bytes), () => namespace.added(name));
     },
     rename: async (from, to) => {
       io();
-      changed(from, to);
-      await files.rename(from, to);
+      await mutate([from, to], () => files.rename(from, to), () => { namespace.removed(from); namespace.added(to); });
     },
     truncate: async (name, identity, bytes) => {
       io();
-      changed(name);
-      await files.truncate(name, identity, bytes);
+      await mutate([name], () => files.truncate(name, identity, bytes));
     },
     remove: async (name, identity) => {
       io();
-      changed(name);
-      await files.remove(name, identity);
+      await mutate([name], () => files.remove(name, identity), () => namespace.removed(name));
     },
     sync: async () => {
       io();
@@ -1278,6 +1435,21 @@ function meteredFiles(
     close: async () => {
       await files.close();
     },
+    ...(files.listLegacy ? { listLegacy: async (after: string, limit: number) => {
+      io();
+      return files.listLegacy!(after, limit);
+    } } : {}),
+    ...(files.scanLegacy ? { scanLegacy: async (restart: boolean, budget: number) => {
+      // 实际扫描的全部目录项都计入（含不匹配、已登记、重复的）
+      const chunk = await files.scanLegacy!(restart, budget);
+      io(Math.max(1, chunk.scanned));
+      claim("readBytes", chunk.bytes);
+      return chunk;
+    } } : {}),
+    ...(files.statLegacy ? { statLegacy: async (entries: readonly LegacyLogLocation[]) => {
+      io(entries.length);
+      return files.statLegacy!(entries);
+    } } : {}),
   };
   // Preserve the physical operation and finite native cause at the first trusted boundary.
   return Object.fromEntries(Object.entries(measured).map(([operation, method]) => [operation, async (...args: unknown[]) => {

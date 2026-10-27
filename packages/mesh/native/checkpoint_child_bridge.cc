@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -683,6 +684,60 @@ napi_value ListEntryPageCall(napi_env env, napi_callback_info info) {
     return result;
   } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
 }
+
+// 目录续读：每个目录句柄至多一个枚举流，跨调用保留读到的位置；restart 或句柄关闭时释放。
+std::map<int, DIR*> entryStreams;
+
+void ReleaseEntryStream(int parent) {
+  const auto found = entryStreams.find(parent);
+  if (found == entryStreams.end()) return;
+  closedir(found->second);
+  entryStreams.erase(found);
+}
+
+// 在同一目录句柄上接着读一块，累计目录项字节（d_reclen）达到预算或读尽为止；返回名字与实际扫描量（含 "." ".."）。
+napi_value ReadEntryChunkCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 3; napi_value args[3]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const int parent = Handle(U64(env, args[0]));
+    const bool restart = Bool(env, args[1]);
+    const auto maximum = BoundedInteger(env, args[2]);
+    if (maximum < 1024 || maximum > 65536) throw std::runtime_error("Invalid directory chunk");
+    if (restart) ReleaseEntryStream(parent);
+    DIR* directory = nullptr;
+    const auto found = entryStreams.find(parent);
+    if (found == entryStreams.end()) {
+      const int copy = openat(parent, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+      if (copy < 0) throw PosixFailure("Unable to open directory enumeration");
+      directory = fdopendir(copy);
+      if (!directory) { const int error = errno; close(copy); throw PosixFailure("Unable to enumerate directory", error); }
+      entryStreams[parent] = directory;
+    } else directory = found->second;
+    std::vector<std::string> names;
+    int64_t scanned = 0, bytes = 0;
+    bool end = false;
+    try {
+      while (bytes < maximum) {
+        errno = 0;
+        const auto* entry = readdir(directory);
+        if (!entry) { if (errno) throw PosixFailure("Unable to read directory chunk"); end = true; break; }
+        scanned++;
+        bytes += entry->d_reclen;
+        const std::string name(entry->d_name);
+        if (name == "." || name == "..") continue;
+        // Invalid names remain a visible failure, never invisible occupied assets.
+        ExactName(name);
+        names.push_back(name);
+      }
+    } catch (...) { ReleaseEntryStream(parent); throw; }
+    auto result = Object(env); Set(env, result, "names", Strings(env, names));
+    Set(env, result, "scanned", Integer(env, scanned));
+    Set(env, result, "bytes", Integer(env, bytes));
+    napi_value ended; Check(env, napi_get_boolean(env, end, &ended), "Unable to return directory chunk");
+    Set(env, result, "end", ended);
+    return result;
+  } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
+}
 #endif
 
 napi_value OpenPathCall(napi_env env, napi_callback_info info) {
@@ -1038,6 +1093,7 @@ napi_value CloseCall(napi_env env, napi_callback_info info) {
 #ifdef _WIN32
     if (!CloseHandle(Handle(U64(env, args[0])))) throw std::runtime_error("Unable to close checkpoint handle");
 #else
+    ReleaseEntryStream(Handle(U64(env, args[0])));
     if (close(Handle(U64(env, args[0]))) < 0) throw PosixFailure("Unable to close checkpoint handle");
 #endif
     return nullptr;
@@ -1109,6 +1165,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"writeAt", nullptr, WriteAtCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"copyRange", nullptr, CopyRangeCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listEntryPage", nullptr, ListEntryPageCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readEntryChunk", nullptr, ReadEntryChunkCall, nullptr, nullptr, nullptr, napi_default, nullptr},
 #endif
     {"readLocalProcessDeclaration", nullptr, ReadLocalProcessDeclarationCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"processBirth", nullptr, ProcessBirthCall, nullptr, nullptr, nullptr, napi_default, nullptr},

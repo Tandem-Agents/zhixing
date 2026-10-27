@@ -141,6 +141,27 @@ describe("log writer OS observation", () => {
     expect(observations).toBe(count);
   });
 
+  // 本机实测：并行起停短命 node 进程时清点偶发 identity-unavailable，对应进程事后已不存在
+  it.skipIf(process.platform !== "win32")("re-observes at once when a process vanished mid-scan, but stays conservative when it persists", async () => {
+    const self = { pid: 1, birth: "123", argv: ["node", "self"] };
+    const vanishing = { complete: false, entries: [self], failure: { reason: "identity-unavailable", pid: 9 } };
+    let observations = 0;
+    const settled = await createLogWriterProbe(home, {
+      observeNodeProcesses: async () => (++observations === 1 ? vanishing : { complete: true, entries: [self] }),
+      readLocalProcessDeclaration: async () => { throw Error("not reached"); },
+    }, self.pid)();
+    expect(settled.complete).toBe(true);
+    expect(observations).toBe(2);
+    // 一直取不到身份（例如无权打开的同名进程）：有限次重试后照旧不完整，不放过未证明的写者
+    let persistent = 0;
+    const blocked = await createLogWriterProbe(home, {
+      observeNodeProcesses: async () => { persistent++; return vanishing; },
+      readLocalProcessDeclaration: async () => { throw Error("not reached"); },
+    }, self.pid)();
+    expect(persistent).toBe(3);
+    expect(blocked).toMatchObject({ complete: false, failure: { operation: "writers.inventory", code: "identity-unavailable", writerPids: [9] } });
+  });
+
   it.skipIf(process.platform !== "win32").each(["reused", "incomplete"])("does not attach a peer proof to a %s inventory", async kind => {
     const self = { pid: 1, birth: "123", argv: ["node", "self"] };
     const peer = { pid: 2, birth: "456", argv: ["node", entry] };

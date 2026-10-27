@@ -285,6 +285,7 @@ function dispatch(r) {
     case 'truncateFile': return native.truncateFile(h(true), n(), r.identity, integer(r.bytes));
     case 'listEntries': return native.listEntries(h(), integer(r.maximumEntries, 4096));
     case 'listEntryPage': return native.listEntryPage(h(), integer(r.offset, 4096), integer(r.limit, 32));
+    case 'readEntryChunk': return native.readEntryChunk(h(), r.restart === true, integer(r.maximumBytes, 65536));
     case 'tryLock': {
       requireHandleSlot();
       return own(native.tryLock(h(true), n()));
