@@ -1,7 +1,6 @@
 import type {
   CredentialExposureRecord,
   HomeTrustEvent,
-  HomeTrustRecord,
 } from "@zhixing/core/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import {
@@ -21,10 +20,11 @@ import {
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
 import { credentialExposureIndex, projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
-import { replayTrustChain } from "@zhixing/mesh/trust-chain";
+import { EMPTY_TRUST_STREAM_FOLD, foldTrustStreamRecord, replayTrustChain, type TrustStreamFold } from "@zhixing/mesh/trust-chain";
 
 interface CurrentDeviceRetirementProjection {
   readonly trustEvents: readonly HomeTrustEvent[];
+  readonly trustStaged: TrustStreamFold["staged"];
   readonly exposures: readonly CredentialExposureRecord[];
   readonly lifecycle: DeviceLifecycleProjection;
 }
@@ -54,11 +54,11 @@ export async function commitCurrentDeviceRetirementTransaction(options: {
     unknown,
     void
   >(
-    { trustEvents: [], exposures: [], lifecycle: emptyDeviceLifecycleProjection() },
+    { trustEvents: [], trustStaged: EMPTY_TRUST_STREAM_FOLD.staged, exposures: [], lifecycle: emptyDeviceLifecycleProjection() },
     (state, entry) => {
-      if (entry.stream === "trust" && isTrustRecord(entry.body) &&
-        entry.body.t === "home-trust-event") {
-        return { ...state, trustEvents: [...state.trustEvents, entry.body.event] };
+      if (entry.stream === "trust") {
+        const fold = foldTrustStreamRecord({ events: state.trustEvents, staged: state.trustStaged }, entry.body);
+        return { ...state, trustEvents: fold.events, trustStaged: fold.staged };
       }
       if (entry.stream === "exposure" && isExposureRecord(entry.body)) {
         return { ...state, exposures: [...state.exposures, entry.body] };
@@ -143,14 +143,6 @@ export async function readCurrentDeviceRemovalPhaseLsn(options: {
   });
   if (!decision) throw new Error(`Anchor uninstall ${options.phase} LSN is missing`);
   return decision.lsn;
-}
-
-function isTrustRecord(input: unknown): input is
-  | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
-  | { readonly t: "home-trust-record"; readonly record: HomeTrustRecord } {
-  return !!input && typeof input === "object" &&
-    ((input as { t?: unknown }).t === "home-trust-event" ||
-      (input as { t?: unknown }).t === "home-trust-record");
 }
 
 function isExposureRecord(input: unknown): input is CredentialExposureRecord {

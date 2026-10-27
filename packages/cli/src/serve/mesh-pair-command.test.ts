@@ -20,6 +20,7 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { createPairingTrustEvent, renderPairingInvitation, runPairCommand } from "./mesh-pair-command.js";
+import { readSealedHomeRouteMaterial } from "./home-route-material.js";
 
 const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
 
@@ -273,6 +274,17 @@ describe("production mesh pairing command", () => {
       });
       expect(await anchorSecrets.get({ kind: "rendezvous", bindingId: executorId }))
         .toBe(await executorSecrets.get({ kind: "rendezvous", bindingId: anchorId }));
+      // 配对随 committed 帧下发家级 discovery 秘密：成员日后凭它找到更替后的值班设备
+      const discoveryRef = { kind: "terminal-route", bindingId: `home-discovery/${anchorTrust!.homeId}` } as const;
+      expect(await executorSecrets.get(discoveryRef)).not.toBeNull();
+      expect(await executorSecrets.get(discoveryRef)).toBe(await anchorSecrets.get(discoveryRef));
+      // 发现材料先于 enroll 密封：任何包含这台成员的完整检查点也包含它
+      const sealed = await readSealedHomeRouteMaterial(anchorStore.authorityLog());
+      const enrollLsn = (await anchorStore.authorityLog().readStream<{ readonly t: string; readonly event?: { readonly body: { readonly t: string; readonly device?: { readonly deviceId: string } } } }>("trust"))
+        .find(({ body }) => body.t === "home-trust-event" && body.event?.body.t === "enroll" && body.event.body.device?.deviceId === executorId)?.lsn;
+      expect(sealed?.backupKeyId).toBeDefined();
+      expect(enrollLsn).toBeDefined();
+      expect(sealed!.lsn).toBeLessThan(enrollLsn!);
       expect(loadConfig({ homeDir: anchorHome }).mesh?.enabledRoles).toEqual(["anchor", "executor"]);
       expect(loadConfig({ homeDir: executorHome }).mesh?.enabledRoles).toEqual([
         "anchor",
@@ -442,6 +454,10 @@ describe("production mesh pairing command", () => {
       const executorTrust = await new FileMeshBootstrapStore(executorHome).loadTrustRecord();
       expect(executorTrust).toEqual(anchorTrust);
       expect(anchorTrust?.members).toHaveLength(2);
+      // 续做重发的 committed 帧逐字节相同，discovery 秘密照样送达
+      const discoveryRef = { kind: "terminal-route", bindingId: `home-discovery/${anchorTrust!.homeId}` } as const;
+      expect(await executorSecrets.get(discoveryRef)).not.toBeNull();
+      expect(await executorSecrets.get(discoveryRef)).toBe(await anchorSecrets.get(discoveryRef));
     } finally {
       await proxy.close();
     }

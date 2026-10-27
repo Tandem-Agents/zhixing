@@ -61,6 +61,10 @@
       "types": "./dist/blind-relay.d.ts",
       "import": "./dist/blind-relay.js"
     },
+    "./home-discovery": {
+      "types": "./dist/home-discovery.d.ts",
+      "import": "./dist/home-discovery.js"
+    },
     "./device-identity": {
       "types": "./dist/device-identity.d.ts",
       "import": "./dist/device-identity.js"

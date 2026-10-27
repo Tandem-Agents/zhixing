@@ -7,6 +7,7 @@ import {
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
   type ArtifactStore,
+  type AuthorityCacheIntegrity,
 } from "@zhixing/core/authority";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
@@ -114,13 +115,20 @@ export function createPlannedAnchorTransferStagingInfrastructure(options: Readon
     openTarget(input: Readonly<{
       artifacts: ArtifactStore;
       verifier: ProtocolSignatureVerifier;
+      integrity?: AuthorityCacheIntegrity;
     }>): PlannedAnchorTargetStaging {
       assertOpen();
       const artifacts = requireFileArtifactStore(input.artifacts);
+      // 候选日志随本机历次当迁居目标增长，又在启动恢复必经路径上：带 home 缓存密钥时开启启动证明，
+      // 打开时只核验尾部，不整读整验（同工作区目录代际日志）
       const candidateLog = new FileAuthorityCommitLog(
         path.join(root, "candidate-claims"),
         artifacts,
-        { storageMaintenance: options.storageMaintenance, records: options.records },
+        {
+          storageMaintenance: options.storageMaintenance,
+          records: options.records,
+          ...(input.integrity ? { startupProofs: true, integrity: input.integrity } : {}),
+        },
       );
       const candidateJournal = new PlannedAnchorCandidateJournal(
         candidateLog,
@@ -208,6 +216,8 @@ function projectCandidates(
   return Object.freeze({
     state: journal.state.bind(journal),
     states: journal.states.bind(journal),
+    unfinishedStates: journal.unfinishedStates.bind(journal),
+    markCleaned: journal.markCleaned.bind(journal),
     claimCandidate: journal.claimCandidate.bind(journal),
     recordReady: journal.recordReady.bind(journal),
     markPrepared: journal.markPrepared.bind(journal),

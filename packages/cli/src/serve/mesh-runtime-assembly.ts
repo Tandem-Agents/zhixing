@@ -1,4 +1,15 @@
 import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import {
+  adoptDiscoveredTrust,
+  createHomeDiscoveryService,
+  memberDiscoveryResume,
+  type HomeDiscoveryService,
+} from "./home-discovery-service.js";
+import {
+  registerSupersededTrustReportService,
+  reportSupersededTrust,
+  SupersededTrustGovernance,
+} from "./superseded-trust-report.js";
 import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing/core/conversation";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
@@ -85,7 +96,7 @@ import type {
   MeshBootstrapProjectionPorts,
 } from "./mesh-bootstrap-projection.js";
 import type { MeshPairingContinuationRepository } from "./mesh-pairing-continuation-repository.js";
-import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
+import { ProductionMeshControlPlane, registerPairwiseRenegotiationService } from "./mesh-control-plane.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { registerSurfaceAssetMeshService } from "./surface-asset-mesh.js";
 import {
@@ -168,9 +179,15 @@ import {
   type PostAdoptionReviewLifecycleContribution,
 } from "./post-adoption-review.js";
 import {
+  backupCoversSealedMaterial,
+  ensureSealedHomeRouteMaterial,
+  loadHomeDiscoverySecret,
+  loadOrCreateHomeRouteMaterial,
+} from "./home-route-material.js";
+import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
+import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
-  loadOrCreateIssuerTerminalRouteSecret,
   resolveExecutorRemovalTerminalRoute,
   type ExecutorRemovalPublicState,
   type ExecutorRemovalTerminalRoute,
@@ -221,7 +238,7 @@ function assertPlannedAnchorConsumerReceipt(
 
 /** Single finite partition consumed by startup and live planned completion. */
 export function partitionPlannedAnchorPostInstall(
-  obligations: PlannedAnchorPostInstallDescriptor["pendingObligations"],
+  obligations: Extract<PlannedAnchorPostInstallDescriptor, { readonly requiresPostInstallCompletion: true }>["pendingObligations"],
 ): PlannedAnchorPostInstallGroups {
   const scheduler: Array<{ kind: "assignment" | "intent"; id: string }> = [];
   const conversation: Array<{
@@ -549,6 +566,9 @@ export class MeshRuntimeAssembly
   #deviceRemovalAuthority: CurrentIssuerDeviceRemovalAuthority | undefined;
   #disposeDeviceRemovalIssuer: (() => void) | undefined;
   #deviceRemovalIssuerKeyId: string | undefined;
+  #deviceRemovalIssuerKey: DeviceKey | undefined;
+  /** 旧分支否定事实：未收束前在 trust 进入控制面处生效为准入限制，现任按既有合同收束。 */
+  readonly #supersededTrust: SupersededTrustGovernance;
   #deviceRemovalTarget!: ExecutorRemovalTarget;
   #localDeviceRemovalOperation: string | undefined;
   #plannedAnchorOwner: PlannedAnchorTransferOwner | undefined;
@@ -914,6 +934,28 @@ export class MeshRuntimeAssembly
       ));
     }
 
+    // 现任侧的逐对重协商：离线回来的成员经发现接上后，在认证连接上提交新的逐对会合秘密
+    this.#disposers.push(registerPairwiseRenegotiationService(this.services, {
+      authorizesPairwiseRenegotiation: (deviceId) => this.#control.authorizesPairwiseRenegotiation(deviceId),
+      adoptPairwiseSecret: (deviceId, secret) => this.#control.adoptPairwiseSecret(deviceId, secret),
+    }));
+    // 现任侧：离线成员接续后上报的旧分支撤销/降权，验签后耐久记录，立即生效为准入限制并按既有合同收束
+    this.#supersededTrust = new SupersededTrustGovernance({
+      store: options.bootstrapStore,
+      removal: () => this.#deviceRemovalAuthority,
+      issuerKey: () => this.#deviceRemovalIssuerKey,
+      reconcile: async () => {
+        if (!this.#controlStarted || this.#closed) return;
+        const current = await options.bootstrapStore.loadCurrentTrust();
+        if (current) await this.#control.reconcileTrust(current);
+      },
+      onError: (error) => options.onError?.(error),
+    });
+    this.#disposers.push(registerSupersededTrustReportService(this.services, {
+      store: options.bootstrapStore,
+      authorize: (deviceId) => this.#control.authorizesPairwiseRenegotiation(deviceId),
+      onRecorded: () => this.#supersededTrust.onRecorded(),
+    }));
     this.#disposers.push(registerPlannedAnchorTrustReconciliationService(
       this.services,
       {
@@ -944,13 +986,31 @@ export class MeshRuntimeAssembly
         loadCurrentTrust: () => options.bootstrapStore.loadCurrentTrust(),
       }),
       services: this.services,
+      discovery: () => this.#homeDiscovery(),
+      memberDiscovery: {
+        secret: () => loadHomeDiscoverySecret(options.secretStore, options.trust.homeId),
+        localChain: () => options.bootstrapStore.discoveryLocalChain(),
+        resume: () => memberDiscoveryResume(options.bootstrapStore),
+        adopt: (verified) => adoptDiscoveredTrust({
+          store: options.bootstrapStore,
+          verified,
+          localIdentity: options.authority.identityKey,
+          // 待上报项（含自身降权）写下后、新视图发布前：本机限制先生效
+          beforePublish: () => this.#supersededTrust.load(),
+        }),
+        onIssuerConnected: async (_peer, client) => {
+          await reportSupersededTrust(options.bootstrapStore, client);
+          // 现任确认覆盖的自身降权随之解除（此后由现任侧限制与收束接管）
+          await this.#supersededTrust.refresh();
+        },
+      },
+      restrictTrust: this.#supersededTrust.apply,
       terminalRoutes: {
         services: this.#terminalOnlyServices,
         resolve: (locator) => this.#resolveTerminalRoute(locator),
         secret: async () => {
-          const issuerKeyId = this.#deviceRemovalIssuerKeyId;
-          if (!this.#deviceRemovalAuthority || issuerKeyId === undefined) return undefined;
-          return loadOrCreateIssuerTerminalRouteSecret(options.secretStore, issuerKeyId);
+          if (!this.#deviceRemovalAuthority || this.#deviceRemovalIssuerKeyId === undefined) return undefined;
+          return (await loadOrCreateHomeRouteMaterial(options.secretStore, options.trust.homeId)).terminal;
         },
       },
       connections: this.connections,
@@ -1186,6 +1246,7 @@ export class MeshRuntimeAssembly
       this.#disposeDeviceRemovalIssuer = undefined;
       this.#deviceRemovalAuthority = undefined;
       this.#deviceRemovalIssuerKeyId = undefined;
+      this.#deviceRemovalIssuerKey = undefined;
       return;
     }
     if (this.#deviceRemovalAuthority && this.#deviceRemovalIssuerKeyId === issuerKey.deviceId) {
@@ -1198,12 +1259,17 @@ export class MeshRuntimeAssembly
       secretStore: this.options.secretStore,
       verifier: this.options.authority.verifier,
       isReachable: (deviceId) => this.connections.has(deviceId),
-      onGuardChanged: (deviceId, operationId) =>
-        this.setDeviceRemovalGuard(deviceId, operationId),
+      onGuardChanged: (deviceId, operationId) => {
+        this.setDeviceRemovalGuard(deviceId, operationId);
+        // 一次移除结束：之前因它而暂缓的旧分支事实收束可以继续
+        if (operationId === undefined) this.#supersededTrust.resume();
+      },
       onTrustCommitted: async (next) => this.applyDeviceRemovalTrust(await this.#committedCurrentTrust(next)),
+      ensureRouteMaterialRecoverable: (homeId) => this.#ensureRouteMaterialRecoverable(homeId),
     });
     this.#deviceRemovalAuthority = authority;
     this.#deviceRemovalIssuerKeyId = issuerKey.deviceId;
+    this.#deviceRemovalIssuerKey = issuerKey;
     const disposeActive = registerDeviceRemovalIssuerMeshService(
       this.services,
       {
@@ -1609,6 +1675,7 @@ export class MeshRuntimeAssembly
     this.#transferAbort.abort(new Error("Conversation transfer runtime is stopping"));
     await this.#plannedTransferRuntime.close();
     this.#worker?.stopAccepting();
+    await this.#supersededTrust.stop();
     if (this.#controlStarted) await this.#control.stop();
     this.#controlStarted = false;
     await this.#removalRetrieval?.stop();
@@ -1860,6 +1927,7 @@ export class MeshRuntimeAssembly
       const lifecycle = this.#anchorPlannedDutyMigrationLifecycle();
       this.#plannedAnchorOwner = new PlannedAnchorTransferOwner({
         deviceId: this.options.authority.deviceId,
+        secretStore: this.options.secretStore,
         anchorEpoch: () => this.options.authority.anchorEpoch,
         identityKey: this.#plannedAnchorIssuerKey ?? this.options.authority.identityKey,
         bootstrapStore: this.options.bootstrapStore,
@@ -1996,6 +2064,10 @@ export class MeshRuntimeAssembly
       if (this.#started) await this.#startControl();
       return;
     }
+    // 只有尚需收尾的安装会挂在这里；已收尾的描述不带待办义务
+    if (!completion.requiresPostInstallCompletion) {
+      throw new Error("Completed migration installation has no post-install work");
+    }
     const consumers = this.#anchorPlannedDutyMigrationLifecycle().postInstall;
     const generationReceipt = await consumers.rebindAuthorityGeneration(
       completion.installedGeneration,
@@ -2050,6 +2122,8 @@ export class MeshRuntimeAssembly
         transferId: completion.installation.transferId,
         readiness: this.options.authority.plannedAnchorReadiness,
         staging: this.options.plannedAnchorTransferStaging,
+        authorityLog: this.options.authority.authorityLog,
+        installedGeneration: completion.installedGeneration,
       });
     }
     this.#plannedAnchorPostInstall = undefined;
@@ -2092,8 +2166,11 @@ export class MeshRuntimeAssembly
 
   async #startControl(): Promise<void> {
     if (this.#controlStarted || this.#closed) return;
+    // 未收束的旧分支事实先载入：控制面启动时按它重算 trust，限制从第一份 trust 起生效
+    await this.#supersededTrust.load();
     await this.#control.start();
     this.#controlStarted = true;
+    this.#supersededTrust.resume();
   }
 
   #installDeviceRemovalTarget(
@@ -2155,6 +2232,8 @@ export class MeshRuntimeAssembly
       deviceKey: options.authority.identityKey,
       verifier: options.authority.verifier,
       onError: (error) => options.onError?.(error),
+      localChain: () => options.bootstrapStore.discoveryLocalChain(),
+      discoveryProgress: options.bootstrapStore.authorityLog(),
     });
     this.#disposers.push(registerDeviceRemovalTargetMeshService(
       this.services,
@@ -2215,6 +2294,52 @@ export class MeshRuntimeAssembly
       throw new TypeError("Executor-only Mesh cannot own planned-duty migration");
     }
     return lifecycle;
+  }
+
+  /**
+   * 接受移除前置：家级路由材料存在；配置了恢复根时，其密封记录已被备份 owner 报告的当前可恢复完整检查点
+   * 实际包含（覆盖到记录所在 LSN）。不满足先经同一 owner 强制刷新一次，仍不满足拒绝接受。
+   */
+  async #ensureRouteMaterialRecoverable(homeId: string): Promise<void> {
+    const material = await loadOrCreateHomeRouteMaterial(this.options.secretStore, homeId);
+    const backupPublicKey = this.#control.currentTrust().recoveryBackupPublicKey;
+    if (!backupPublicKey) return;
+    const sealed = await ensureSealedHomeRouteMaterial(this.options.bootstrapStore.authorityLog(), {
+      material,
+      backupPublicKey,
+      backupKeyId: keyIdForPublicKey(backupPublicKey),
+    });
+    const checkpoint = this.#anchorPlannedDutyMigrationLifecycle().checkpoint;
+    if (checkpoint.kind === "unavailable") throw new Error("Recovery backup owner is unavailable");
+    if (backupCoversSealedMaterial(await checkpoint.owner.status(), sealed)) return;
+    await checkpoint.owner.force(`home-route-material:${sealed.lsn}`);
+    if (!backupCoversSealedMaterial(await checkpoint.owner.status(), sealed)) {
+      throw new Error("Device removal requires a recoverable backup that includes the home route material");
+    }
+  }
+
+  /** 家级发现服务：只有本机是现任 issuer 且持有当前 issuer key 时提供（逻辑见 createHomeDiscoveryService）。 */
+  async #homeDiscovery(): Promise<HomeDiscoveryService | undefined> {
+    const service = await createHomeDiscoveryService({
+      deviceId: this.options.authority.deviceId,
+      identityKey: this.options.authority.identityKey,
+      issuerKey: this.#deviceRemovalIssuerKey,
+      authority: this.#deviceRemovalAuthority,
+      store: this.options.bootstrapStore,
+      secretStore: this.options.secretStore,
+      trust: () => this.#control.currentTrust(),
+      ...(this.options.localEndpoint ? { localEndpoint: this.options.localEndpoint } : {}),
+    });
+    // 现任启动时把家级材料密封给当前恢复备份钥：之后的完整检查点随之包含，灾备目标据此恢复
+    const trust = this.#control.currentTrust();
+    if (service && trust.recoveryBackupPublicKey) {
+      await ensureSealedHomeRouteMaterial(this.options.bootstrapStore.authorityLog(), {
+        material: await loadOrCreateHomeRouteMaterial(this.options.secretStore, trust.homeId),
+        backupPublicKey: trust.recoveryBackupPublicKey,
+        backupKeyId: keyIdForPublicKey(trust.recoveryBackupPublicKey),
+      });
+    }
+    return service;
   }
 
   async #ensureRecoveryCheckpoint(transferId: string): Promise<string> {

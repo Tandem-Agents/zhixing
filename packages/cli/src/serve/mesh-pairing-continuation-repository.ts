@@ -10,6 +10,7 @@ import type {
   PakeRound,
 } from "@zhixing/core/contracts";
 import type { PairingAttemptAdmission } from "@zhixing/mesh/bootstrap-authority";
+import type { SealedPairingDiscoverySecret } from "@zhixing/mesh/bootstrap";
 
 export interface DurablePairingInvitation {
   readonly v: 1;
@@ -50,6 +51,8 @@ export interface DurablePairingBootstrap {
   readonly trustRecord: HomeTrustRecord;
   readonly issuerRootCertificatePem: string;
   readonly issuerEndpoint: MeshEndpointDescriptor;
+  /** 配对会话钥封装的家级 discovery 秘密。 */
+  readonly homeDiscovery?: SealedPairingDiscoverySecret;
 }
 
 interface PairingJoinerContinuationBase {

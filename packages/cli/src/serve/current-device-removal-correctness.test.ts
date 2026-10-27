@@ -142,6 +142,7 @@ describe("current device removal correctness adapters", { timeout: 30_000 }, () 
         publicKey: fixture.issuerKey.publicKey,
       }),
       acceptedIssuerDeviceId: "previous-duty-device",
+      acceptedIssuerKeyId: "previous-duty-device",
       acceptedTrustHeadDigest: fixture.initialProjection.chainHead.eventDigest,
     });
 

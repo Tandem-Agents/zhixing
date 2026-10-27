@@ -24,11 +24,14 @@ import type {
   PlannedAnchorTargetReadinessSummary,
   PlannedAnchorTransferTargetPort,
 } from "./planned-anchor-transfer.js";
+import type { HomeRouteMaterial } from "./home-route-material.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 export const PLANNED_ANCHOR_TRANSFER_READY_SERVICE = "anchor.transfer.ready";
 export const PLANNED_ANCHOR_TRANSFER_SUMMARY_SERVICE = "anchor.transfer.summary";
 export const PLANNED_ANCHOR_TRANSFER_SERVICE = "anchor.transfer";
+/** 迁居目标向源端取家级路由材料：只经已认证的迁居连接，请求方即连接对端。 */
+export const PLANNED_ANCHOR_ROUTE_MATERIAL_SERVICE = "anchor.transfer.route-material";
 export const PLANNED_ANCHOR_CANDIDATE_RELEASE_SERVICE =
   "anchor.transfer.candidate-release";
 export const PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE =
@@ -168,6 +171,20 @@ export class PlannedAnchorTransferMeshClient
   applyArtifactCommand(command: AnchorTransferCommand): Promise<AnchorTransferResult> {
     return this.apply(command);
   }
+
+  async routeMaterial(transferId: string): Promise<HomeRouteMaterial> {
+    const response = decode(await this.client.request(
+      PLANNED_ANCHOR_ROUTE_MATERIAL_SERVICE,
+      encode({ v: 1, transferId }),
+      currentMaintenanceAbortSignal(),
+    )) as Record<string, unknown>;
+    const material = response.material as HomeRouteMaterial | undefined;
+    if (response.v !== 1 || !material || typeof material !== "object" || typeof material.homeId !== "string" ||
+        typeof material.terminal !== "string" || typeof material.discovery !== "string") {
+      throw new TypeError("Migration route material response is invalid");
+    }
+    return Object.freeze({ homeId: material.homeId, terminal: material.terminal, discovery: material.discovery });
+  }
 }
 
 export function registerPlannedAnchorTransferMeshServices(
@@ -296,7 +313,7 @@ export function registerPlannedAnchorTransferSourceMeshService(
     readonly lifecycle?: PlannedAnchorTransferRuntimeLifecycle;
   },
 ): () => void {
-  return registry.register(PLANNED_ANCHOR_TRANSFER_SERVICE, {
+  const disposeCommand = registry.register(PLANNED_ANCHOR_TRANSFER_SERVICE, {
     access: "read",
     availability: "negotiated-version",
     authorize: (connection) => options.authorizeTarget(connection.peer.deviceId),
@@ -317,6 +334,25 @@ export function registerPlannedAnchorTransferSourceMeshService(
         : source.applyArtifactCommand(command)));
     },
   });
+  const disposeMaterial = registry.register(PLANNED_ANCHOR_ROUTE_MATERIAL_SERVICE, {
+    access: "read",
+    availability: "negotiated-version",
+    authorize: (connection) => options.authorizeTarget(connection.peer.deviceId),
+    handler: async (payload, connection) => {
+      const request = decode(payload) as Record<string, unknown>;
+      if (!request || request.v !== 1 || typeof request.transferId !== "string" || Object.keys(request).length !== 2) {
+        throw new TypeError("Migration route material request is invalid");
+      }
+      const source = options.source();
+      if (!source?.routeMaterial) throw new Error("Migration route material is unavailable");
+      // 请求方取自已认证连接的对端，不信请求体自报
+      return encode({ v: 1, material: await source.routeMaterial(request.transferId, connection.peer.deviceId) });
+    },
+  });
+  return () => {
+    disposeCommand();
+    disposeMaterial();
+  };
 }
 
 /** Existing authenticated reconciliation route; v2 carries bounded contiguous pages. */

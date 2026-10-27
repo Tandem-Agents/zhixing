@@ -34,6 +34,8 @@ import {
 } from "@zhixing/mesh/checkpoint";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import {
+  EMPTY_TRUST_STREAM_FOLD,
+  foldTrustStreamRecord,
   homeTrustEventDigest,
   replayTrustChain,
   type TrustProjection,
@@ -421,22 +423,19 @@ async function readCheckpointTrustEvents(
   artifacts: ArtifactStore,
   payload: FullAuthorityCheckpointPayload,
 ): Promise<readonly HomeTrustEvent[]> {
-  const events: HomeTrustEvent[] = [];
+  let fold = EMPTY_TRUST_STREAM_FOLD;
   for (const descriptor of payload.records.pages) {
     for (const commit of await readAuthorityPage(artifacts, {
       digest: descriptor.digest,
       bytes: descriptor.bytes,
     })) {
       for (const entry of commit.entries) {
-        const body = entry.body as { readonly t?: unknown; readonly event?: unknown };
-        if (entry.stream === "trust" && body.t === "home-trust-event") {
-          events.push(body.event as HomeTrustEvent);
-        }
+        if (entry.stream === "trust") fold = foldTrustStreamRecord(fold, entry.body);
       }
     }
   }
-  replayTrustChain(events);
-  return Object.freeze(events);
+  replayTrustChain(fold.events);
+  return Object.freeze([...fold.events]);
 }
 
 function checkpointIssuer(

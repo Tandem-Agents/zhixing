@@ -27,27 +27,29 @@ import {
   type ExecutorRemovalDecision,
   type ExecutorRemovalLifecycleIdentity,
   type ExecutorRemovalReceipt,
+  type ExecutorRemovalSuccessor,
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
 import type { MeshEndpointDescriptor, SecretRef } from "@zhixing/core/contracts";
 import {
   assertTerminalRouteSecret,
-  createTerminalRouteSecret,
   deriveTerminalRouteLocator,
   isTerminalRouteLocator,
   terminalRouteDigest,
   validateMeshEndpointDescriptor,
 } from "@zhixing/mesh/bootstrap";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
+import { verifyDeviceSignature, type DeviceKey } from "@zhixing/mesh/device-identity";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import {
   applyTrustEvent,
+  applyTrustEventWithHistory,
   buildHomeTrustRecord,
   createSignedTrustEvent,
   CURRENT_TRUST_PROJECTION_ID,
   homeTrustEventDigest,
   readCurrentTrust,
+  readCurrentTrustMember,
   readTrustEventByDigest,
   replayTrustChain,
 } from "@zhixing/mesh/trust-chain";
@@ -58,6 +60,7 @@ import {
 } from "@zhixing/mesh/credential-exposure";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
+import { loadOrCreateHomeRouteMaterial } from "./home-route-material.js";
 import type {
   LocalConversationOwnerAssembly,
   LocalConversationRemovalSnapshot,
@@ -93,6 +96,29 @@ export type ExecutorRemovalTargetDecision =
       readonly snapshot: LocalConversationRemovalSnapshot;
     };
 
+/**
+ * 现任按恢复证据补做移除时的领域结论（不是网络错误，target 收到后不再退避重试）：
+ * target-suspended —— 本机链上该设备挂起待重新配对，而证据只有接受、没有原 issuer 的撤销回执这一不可逆依据；
+ * membership-mismatch —— 本机链上该设备的身份或密钥代际与这次移除冻结的不同；
+ * domain-incompatible —— 证据属于别的 home，或接受点不在本机链（含经验证的分叉段）上。
+ */
+export type ExecutorRemovalDomainState = "target-suspended" | "membership-mismatch" | "domain-incompatible";
+
+export function isExecutorRemovalDomainState(value: unknown): value is ExecutorRemovalDomainState {
+  return value === "target-suspended" || value === "membership-mismatch" || value === "domain-incompatible";
+}
+
+/** 现任对恢复证据给出的领域结论；publicReason 经发现交换原样交给 target。 */
+export class ExecutorRemovalDomainRefusal extends Error {
+  constructor(readonly publicReason: ExecutorRemovalDomainState, message: string) {
+    super(message);
+    this.name = "ExecutorRemovalDomainRefusal";
+  }
+}
+
+/** 补证收束挂起成员的移除：只由补证在核过原撤销回执后写入，撤销时允许目标是挂起待重新配对（不激活）。 */
+const SUSPENDED_RECOVERY_PREFIX = "recovered:suspended:";
+
 export class CurrentIssuerDeviceRemovalAuthority {
   readonly #journal: DeviceLifecycleJournal;
 
@@ -104,6 +130,8 @@ export class CurrentIssuerDeviceRemovalAuthority {
     readonly isReachable: (deviceId: string) => boolean;
     readonly onGuardChanged?: (targetDeviceId: string, operationId: string | undefined) => void;
     readonly onTrustCommitted?: (record: HomeTrustRecord) => void | Promise<void>;
+    /** 接受前置：家级路由材料已在灾备能恢复的基线里（配置了恢复根时由备份 owner 刷新并核实际包含）。 */
+    readonly ensureRouteMaterialRecoverable?: (homeId: string) => Promise<void>;
     readonly now?: () => string;
   }) {
     this.#journal = new DeviceLifecycleJournal(
@@ -114,7 +142,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
 
   async candidates(): Promise<readonly DeviceRemovalCandidate[]> {
     const trust = replayTrustChain(await this.options.store.loadTrustEvents());
-    if (trust.issuer.deviceId !== this.options.issuerKey.deviceId) return [];
+    if (trust.issuer.issuerKeyId !== this.options.issuerKey.deviceId) return [];
     return trust.members
       .filter((member) =>
         member.state === "active" &&
@@ -133,7 +161,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     readonly targetName: string;
   }): Promise<ExecutorRemovalReceipt> {
     const trust = replayTrustChain(await this.options.store.loadTrustEvents());
-    if (trust.issuer.deviceId !== this.options.issuerKey.deviceId) {
+    if (trust.issuer.issuerKeyId !== this.options.issuerKey.deviceId) {
       throw new Error("Only the current duty device can remove a paired device");
     }
     const matches = trust.members.filter((member) =>
@@ -152,7 +180,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     readonly targetDeviceId: string;
   }): Promise<ExecutorRemovalReceipt> {
     const trust = replayTrustChain(await this.options.store.loadTrustEvents());
-    if (trust.issuer.deviceId !== this.options.issuerKey.deviceId) {
+    if (trust.issuer.issuerKeyId !== this.options.issuerKey.deviceId) {
       throw new Error("Only the current duty device can remove a paired device");
     }
     const target = trust.members.find((member) =>
@@ -180,8 +208,10 @@ export class CurrentIssuerDeviceRemovalAuthority {
       targetMemberPublicKey: target.device.publicKey,
       targetDeviceKeyGeneration: deviceKeyGeneration(target.device),
       acceptedIssuerDeviceId: trust.issuer.deviceId,
+      acceptedIssuerKeyId: trust.issuer.issuerKeyId,
       acceptedTrustHeadDigest: trust.chainHead.eventDigest,
     });
+    await this.options.ensureRouteMaterialRecoverable?.(trust.homeId);
     let operation = await this.#journal.accept(identity);
     if (operation.phase === "accepted") {
       operation = await this.#journal.advance(operationId, "gate-frozen", [{
@@ -202,6 +232,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
       targetDeviceId: identity.targetDeviceId,
       targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
       phase: "accepted",
       evidenceDigest: protocolDigest("ExecutorRemovalAdmission", 1, identity),
@@ -221,25 +252,19 @@ export class CurrentIssuerDeviceRemovalAuthority {
     return this.#bindTerminalRoute(operation.identity);
   }
 
-  /** 终态入口按定位精确解析：未知、已中止或不是本 issuer 接受的移除都查不到。 */
+  /**
+   * 终态入口按定位精确解析，未知的查不到。日志本身经迁居导入或检查点恢复，都由合法前任写入，
+   * 现任可解析前任接受的移除并承接它。
+   */
   async operationForRoute(locator: string): Promise<ExecutorRemovalLifecycleIdentity | undefined> {
     if (!isTerminalRouteLocator(locator)) return undefined;
     const operation = await this.#journal.removalForRoute(terminalRouteDigest(locator));
-    if (
-      !operation ||
-      operation.identity.kind !== "executor-removal" ||
-      operation.identity.acceptedIssuerDeviceId !== this.options.issuerKey.deviceId
-    ) {
-      return undefined;
-    }
+    if (!operation || operation.identity.kind !== "executor-removal") return undefined;
     return operation.identity;
   }
 
   async #bindTerminalRoute(identity: ExecutorRemovalLifecycleIdentity): Promise<ExecutorRemovalTerminalRoute> {
-    const secret = await loadOrCreateIssuerTerminalRouteSecret(
-      this.options.secretStore,
-      this.options.issuerKey.deviceId,
-    );
+    const secret = (await loadOrCreateHomeRouteMaterial(this.options.secretStore, identity.homeId)).terminal;
     const locator = deriveTerminalRouteLocator(secret, identity.operationId);
     await this.#journal.peerEffect(identity.operationId, {
       kind: "terminal-route",
@@ -253,6 +278,183 @@ export class CurrentIssuerDeviceRemovalAuthority {
    * 目标设备能否使用移除相关的终端专用服务：它最后一个未中止的移除存在（终结的也算）。
    * 访问时按目标设备精确读一条，不在启动时预装已移除的设备。
    */
+  /**
+   * 发现入口上 target 出示的恢复证据（target 已先验明本机是现任才发来）：签名按冻结身份里的目标公钥验，
+   * 绑定本次会话 transcript。日志里已有这次移除时只核冻结身份一致；没有时（灾备基线不含这次移除）按证据补做。
+   */
+  async acceptRecoveryEvidence(value: unknown, transcript: string): Promise<void> {
+    const evidence = validateExecutorRemovalRecoveryEvidence(value);
+    if (evidence.transcript !== transcript) {
+      throw new Error("Device removal recovery evidence does not bind this discovery session");
+    }
+    const { signature, ...unsigned } = evidence;
+    verifyDeviceSignature({
+      deviceId: evidence.identity.targetDeviceId,
+      publicKey: evidence.identity.targetMemberPublicKey,
+      displayName: "target",
+      platform: "headless",
+      enrolledAt: "1970-01-01T00:00:00.000Z",
+    }, "ExecutorRemovalRecoveryEvidence", 1, unsigned, signature);
+    const operation = await this.#journal.state(evidence.identity.operationId);
+    if (operation) {
+      if (operation.identity.kind !== "executor-removal" || !sameFrozenRemoval(operation.identity, evidence.identity)) {
+        throw new Error("Device removal recovery evidence conflicts with the durable removal");
+      }
+      return;
+    }
+    await this.#bootstrapFromEvidence(evidence);
+  }
+
+  /**
+   * 灾备基线不含这次移除：按 target 出示的证据补做。原 issuer 签的回执按本机链上 acceptedTrustHead 处被授权的
+   * issuer key 验，并核那时 target 是同一身份与密钥代际的 active 成员。只恢复证据支持的阶段：接受回执 → 记录接受、
+   * 冻结准入并绑定终态定位（之后照常继续移除）；撤销回执 → 由本机 issuer key 撤销 target 并推进到已撤销。
+   * 不重新授权删除，也不重放业务效果；target 的清理授权来自原撤销回执本身。
+   */
+  async #bootstrapFromEvidence(evidence: ExecutorRemovalRecoveryEvidence): Promise<void> {
+    const identity = evidence.identity;
+    // 本机链只按键读：链头投影与接受点投影走快照，不整读信任链
+    const store = this.options.store;
+    const head = await store.localTrustHead();
+    const trust = head ? await store.trustProjectionAt(head) : undefined;
+    if (!trust || trust.issuer.issuerKeyId !== this.options.issuerKey.deviceId) {
+      throw new Error("Only the current duty device of this home can recover a removal from evidence");
+    }
+    if (trust.homeId !== identity.homeId) {
+      throw new ExecutorRemovalDomainRefusal("domain-incompatible", "Device removal evidence belongs to another home");
+    }
+    let acceptance: Awaited<ReturnType<typeof projectionAtAcceptance>>;
+    try {
+      acceptance = await projectionAtAcceptance(store, evidence);
+    } catch (error) {
+      throw new ExecutorRemovalDomainRefusal("domain-incompatible", error instanceof Error ? error.message : String(error));
+    }
+    const atAcceptance = acceptance.projection;
+    const issuerMember = atAcceptance.members.find((member) => member.device.deviceId === atAcceptance.issuer.deviceId);
+    const targetAtAcceptance = atAcceptance.members.find((member) => member.device.deviceId === identity.targetDeviceId);
+    if (
+      atAcceptance.issuer.deviceId !== identity.acceptedIssuerDeviceId ||
+      atAcceptance.issuer.issuerKeyId !== identity.acceptedIssuerKeyId ||
+      !issuerMember ||
+      !targetAtAcceptance || targetAtAcceptance.state !== "active" ||
+      targetAtAcceptance.device.publicKey !== identity.targetMemberPublicKey ||
+      deviceKeyGeneration(targetAtAcceptance.device) !== identity.targetDeviceKeyGeneration
+    ) {
+      throw new ExecutorRemovalDomainRefusal("domain-incompatible", "Device removal evidence does not match the issuer and target at acceptance");
+    }
+    const acceptingKey = successorReceiptVerifier(this.options.verifier, {
+      issuerDeviceId: identity.acceptedIssuerDeviceId,
+      issuerKeyId: identity.acceptedIssuerKeyId,
+      issuerPublicKey: atAcceptance.issuer.issuerPublicKey ?? issuerMember.device.publicKey,
+      anchorEpoch: atAcceptance.anchorEpoch,
+    });
+    const accepted = validateExecutorRemovalReceipt(evidence.acceptedReceipt, acceptingKey);
+    if (accepted.phase !== "accepted" || accepted.signature.keyId !== identity.acceptedIssuerKeyId) {
+      throw new Error("Device removal evidence has no accepted receipt from the accepting issuer");
+    }
+    assertReceiptIdentity(accepted, identity);
+    const revoked = evidence.revokedReceipt
+      ? validateExecutorRemovalReceipt(evidence.revokedReceipt, acceptingKey)
+      : undefined;
+    if (revoked) {
+      if (revoked.phase !== "revoked" || revoked.signature.keyId !== identity.acceptedIssuerKeyId) {
+        throw new Error("Device removal evidence has an invalid revoked receipt");
+      }
+      assertReceiptIdentity(revoked, identity);
+    }
+    // 当前视图里的 target（含已撤销与待重新配对）按成员行精确读，不依赖投影里是否带着历史设备
+    const current = await store.trustMember(identity.targetDeviceId);
+    if (!current || current.device.publicKey !== identity.targetMemberPublicKey ||
+        deviceKeyGeneration(current.device) !== identity.targetDeviceKeyGeneration) {
+      throw new ExecutorRemovalDomainRefusal("membership-mismatch", "Device removal evidence names a device whose membership here does not match");
+    }
+    // 挂起待重新配对的成员：只有原 issuer 的撤销回执这一不可逆依据才收束（沿既有 revoke 转移，不激活）；
+    // 只有接受时不冒充成功路径，给出领域结论
+    const suspended = current.state === "pending-reenroll";
+    if (suspended && !revoked) {
+      throw new ExecutorRemovalDomainRefusal("target-suspended", "Device removal target is suspended here and the evidence has no irreversible revocation");
+    }
+    // 本机链上该设备已被撤销（灾备可达证据里带着撤销、检查点里没有这次移除）：按链上这条撤销推进，不再撤销一次
+    // 接受时 target 是 active：这条撤销只可能在接受点（或分叉祖先）之后，只读这一段
+    const existingRevoke = current.state === "revoked"
+      ? await findRevocationAfter(store, acceptance.onChainSince, head!, identity.targetDeviceId)
+      : undefined;
+    if (current.state === "revoked" && !existingRevoke) throw new Error("Device removal target is revoked without a revocation event");
+    const recovered: ExecutorRemovalLifecycleIdentity = Object.freeze({
+      ...identity,
+      requestId: `${suspended ? SUSPENDED_RECOVERY_PREFIX : "recovered:"}${identity.operationId}`,
+    });
+    let operation = await this.#journal.accept(recovered);
+    if (operation.phase === "accepted") {
+      operation = await this.#journal.advance(identity.operationId, "gate-frozen", [{
+        kind: "accepted-work",
+        digest: accepted.evidenceDigest,
+      }]);
+    }
+    await this.#bindTerminalRoute(recovered);
+    this.options.onGuardChanged?.(identity.targetDeviceId, identity.operationId);
+    if (!revoked && !existingRevoke) return;
+    const revocationEvidence: DeviceLifecycleEvidenceRef = {
+      kind: "accepted-work",
+      digest: revoked
+        ? protocolDigest("ExecutorRemovalRecoveredRevocation", 1, revoked)
+        : homeTrustEventDigest(existingRevoke!),
+    };
+    for (const phase of ["authority-decided", "authority-settled", "revocation-ready"] as const) {
+      if (phaseOrder(operation.phase) < phaseOrder(phase)) {
+        operation = await this.#journal.advance(identity.operationId, phase, [revocationEvidence]);
+      }
+    }
+    if (existingRevoke) await this.#recordExistingRevocation(recovered, existingRevoke);
+    else await this.#commitRevocation(recovered);
+  }
+
+  /** 现任链上已有对 target 的撤销：同一事务里把凭据暴露标记为 compromised、推进到 revoked，不追加信任事件。 */
+  async #recordExistingRevocation(identity: ExecutorRemovalLifecycleIdentity, revoke: HomeTrustEvent): Promise<void> {
+    const log = this.options.store.authorityLog();
+    credentialExposureIndex(log);
+    await log.transactDurableProjection<unknown, void>(
+      DEVICE_LIFECYCLE_PROJECTION_ID,
+      async (lifecycle, context) => {
+        const operation = await readDeviceLifecycleOperation(lifecycle, identity.operationId);
+        if (!operation || operation.identity.kind !== "executor-removal") throw new Error("Recovered removal lost its lifecycle operation");
+        if (operation.phase === "revoked") return { kind: "return", value: undefined };
+        if (operation.phase !== "revocation-ready") throw new Error("Recovered removal revocation requires its ready phase");
+        const activeExposures = await readExposureRecords(
+          context.readProjection(CREDENTIAL_EXPOSURE_PROJECTION_ID),
+          { state: "active", deviceId: identity.targetDeviceId },
+        );
+        const compromised = activeExposures.map((record) => Object.freeze({
+          ...record,
+          state: "compromised" as const,
+          markedAt: context.at,
+          rotationHint: record.rotationHint ?? "Rotate this external account credential",
+        }));
+        const lifecycleRecord = validateDeviceLifecycleRecord({
+          v: 1,
+          t: "advanced",
+          operationId: identity.operationId,
+          phase: "revoked",
+          evidence: [
+            { kind: "trust-event" as const, digest: homeTrustEventDigest(revoke) },
+            { kind: "credential-exposure" as const, digest: protocolDigest("CredentialExposureBatch", 1, compromised) },
+          ],
+        });
+        reduceDeviceLifecycle(operation, lifecycleRecord, this.options.verifier);
+        return {
+          kind: "append",
+          entries: [
+            ...compromised.map((body) => ({ stream: "exposure", body })),
+            { stream: "device-lifecycle", body: lifecycleRecord },
+          ],
+          value: undefined,
+        };
+      },
+      { readProjectionIds: [CREDENTIAL_EXPOSURE_PROJECTION_ID] },
+    );
+    await this.options.secretStore.delete({ kind: "rendezvous", bindingId: identity.targetDeviceId });
+  }
+
   async authorizesTarget(deviceId: string): Promise<boolean> {
     return (await this.#journal.lastRemovalFor(deviceId)) !== undefined;
   }
@@ -343,6 +545,12 @@ export class CurrentIssuerDeviceRemovalAuthority {
     if (!operation || operation.identity.kind !== "executor-removal" || operation.phase !== "terminal") {
       return undefined;
     }
+    // 原签名回执随 issuer-terminal 效果耐久：原样返回，继任者不改签名者；没有时按现任重算
+    const ref = operation.peerEffects.find((effect) => effect.kind === "issuer-terminal")
+      ?.evidence.find((item) => item.artifact)?.artifact;
+    if (ref) {
+      return decodeIssuerTerminalReceipt(await this.options.store.authorityLog().artifactStore.get(ref), this.options.verifier);
+    }
     return this.#removedReceipt(operation.identity);
   }
 
@@ -359,7 +567,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     }
     assertReceiptIdentity(ready, operation.identity);
     const identity = operation.identity;
-    if (operation.phase === "terminal") return this.#removedReceipt(identity);
+    if (operation.phase === "terminal") return this.#publishIssuerTerminal(identity, ready);
     if (operation.phase !== "revoked" && operation.phase !== "cleanup-complete") {
       throw new Error("Device cleanup-ready requires durable issuer revocation");
     }
@@ -383,16 +591,38 @@ export class CurrentIssuerDeviceRemovalAuthority {
         }),
       }]);
     }
+    return this.#publishIssuerTerminal(identity, ready);
+  }
+
+  /**
+   * 原签名终态回执在释放 guard 之前随 issuer-terminal 效果耐久：继任者原样转交，不改签名者。
+   * 回执由耐久事实确定性算出，重放得到同一制品，效果幂等。
+   */
+  async #publishIssuerTerminal(
+    identity: ExecutorRemovalLifecycleIdentity,
+    ready: ExecutorRemovalReceipt,
+  ): Promise<ExecutorRemovalReceipt> {
+    const existing = await this.terminal(identity.operationId);
+    const operation = await this.#journal.state(identity.operationId);
+    const effect = operation?.peerEffects.find((item) => item.kind === "issuer-terminal");
+    if (existing && effect?.evidence.some((item) => item.artifact)) {
+      this.options.onGuardChanged?.(identity.targetDeviceId, undefined);
+      return existing;
+    }
+    const removed = await this.#removedReceipt(identity);
+    const removedRef = await this.options.store.authorityLog().artifactStore.put(
+      Buffer.from(canonicalize(removed), "utf8"),
+    );
     await this.#journal.peerEffect(identity.operationId, {
       kind: "issuer-terminal",
       digest: protocolDigest("ExecutorRemovalIssuerTerminal", 1, {
         operationId: identity.operationId,
         cleanupDigest: ready.evidenceDigest,
       }),
-      evidence: [],
+      evidence: [{ kind: "cleanup", digest: removedRef.digest, artifact: removedRef }],
     });
     this.options.onGuardChanged?.(identity.targetDeviceId, undefined);
-    return this.#removedReceipt(identity);
+    return removed;
   }
 
   async acceptTargetAborted(input: ExecutorRemovalReceipt): Promise<void> {
@@ -484,7 +714,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
           operationId,
           homeId: operation.identity.homeId,
           subjectDeviceId: operation.identity.targetDeviceId,
-          authorizedByDeviceId: operation.identity.acceptedIssuerDeviceId,
+          authorizedByDeviceId: operation.identity.acceptedIssuerKeyId,
           reason: "user-cancelled",
           at: this.options.now?.() ?? new Date().toISOString(),
         }, this.options.issuerKey);
@@ -559,6 +789,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
   async #commitRevocation(
     identity: ExecutorRemovalLifecycleIdentity,
   ): Promise<ExecutorRemovalReceipt> {
+    const successor = await this.#successor(identity);
     // 已撤销的重驱（启动恢复）：撤销与信任记录早已耐久，只重做幂等的秘密删除并精确取回回执
     if ((await this.#journal.state(identity.operationId))?.phase === "revoked") {
       await this.options.secretStore.delete({ kind: "rendezvous", bindingId: identity.targetDeviceId });
@@ -590,6 +821,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
                 operation.evidence,
                 trustDigest ? await readTrustEventByDigest(trustView, trustDigest) : undefined,
                 this.options.issuerKey,
+                successor,
               ),
             },
           };
@@ -599,24 +831,31 @@ export class CurrentIssuerDeviceRemovalAuthority {
         }
         const current = await readCurrentTrust(trustView);
         if (!current) throw new Error("Device removal has no current trust projection");
-        if (current.issuer.deviceId !== this.options.issuerKey.deviceId) {
+        if (current.issuer.issuerKeyId !== this.options.issuerKey.deviceId) {
           throw new Error("Device removal issuer is no longer current");
         }
-        if (!await readTrustEventByDigest(trustView, identity.acceptedTrustHeadDigest)) {
+        // 补证恢复的移除（requestId 为 recovered:，只由补证在核过原回执与接受时投影后写入）可能接受于灾备前被取代的分支
+        if (
+          !identity.requestId.startsWith("recovered:") &&
+          !await readTrustEventByDigest(trustView, identity.acceptedTrustHeadDigest)
+        ) {
           throw new Error("Accepted device removal trust head is not an ancestor");
         }
-        const member = current.members.find((candidate) =>
-          candidate.device.deviceId === identity.targetDeviceId);
+        // 补证收束挂起成员（核过原撤销回执写入的标记）：当前视图只列 active，挂起成员按键精确读
+        const suspendedClosure = identity.requestId.startsWith(SUSPENDED_RECOVERY_PREFIX);
+        const member = current.members.find((candidate) => candidate.device.deviceId === identity.targetDeviceId) ??
+          (suspendedClosure ? await readCurrentTrustMember(trustView, identity.targetDeviceId) : undefined);
         if (
           !member ||
-          member.state !== "active" ||
+          (member.state !== "active" && !(suspendedClosure && member.state === "pending-reenroll")) ||
           member.device.publicKey !== identity.targetMemberPublicKey ||
           deviceKeyGeneration(member.device) !== identity.targetDeviceKeyGeneration
         ) {
           throw new Error("Device removal target membership changed after acceptance");
         }
+        const base = member.state === "active" ? current : { ...current, members: [...current.members, member] };
         const revoke = createSignedTrustEvent({
-          current,
+          current: base,
           body: {
             t: "revoke",
             deviceId: identity.targetDeviceId,
@@ -625,7 +864,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
           at: context.at,
           signer: this.options.issuerKey,
         });
-        const nextTrust = applyTrustEvent(current, revoke);
+        const nextTrust = applyTrustEvent(base, revoke);
         const trustRecord = buildHomeTrustRecord(nextTrust, this.options.issuerKey);
         const activeExposures = await readExposureRecords(
           context.readProjection(CREDENTIAL_EXPOSURE_PROJECTION_ID),
@@ -658,10 +897,12 @@ export class CurrentIssuerDeviceRemovalAuthority {
           targetDeviceId: identity.targetDeviceId,
           targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
           acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+          acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
           acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
           phase: "revoked",
           evidenceDigest: terminalEvidenceDigest(trustDigest, exposureDigest),
           at: context.at,
+          ...(successor ? { successor } : {}),
         }, this.options.issuerKey);
         return {
           kind: "append",
@@ -697,6 +938,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
       operation.evidence,
       await this.#revocationEvent(identity, operation.evidence),
       this.options.issuerKey,
+      await this.#successor(identity),
     );
   }
 
@@ -735,6 +977,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
       cleanupDigest: lostCleanup,
     });
     const phase = requestedPhase ?? (lost ? "lost" : "removed");
+    const successor = await this.#successor(identity);
     return createSignedExecutorRemovalReceipt({
       v: 1,
       operationId: identity.operationId,
@@ -742,6 +985,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
       targetDeviceId: identity.targetDeviceId,
       targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
       phase,
       evidenceDigest: protocolDigest("ExecutorRemovalRemovedTerminal", 1, {
@@ -751,7 +995,23 @@ export class CurrentIssuerDeviceRemovalAuthority {
         phase,
       }),
       at: revoke.at,
+      ...(successor ? { successor } : {}),
     }, this.options.issuerKey);
+  }
+
+  /** 接受这次移除的 issuer key 不是本机 key 时，签出的回执带继任绑定（现任 issuer 设备、key、公钥、任期）。 */
+  async #successor(identity: ExecutorRemovalLifecycleIdentity): Promise<ExecutorRemovalSuccessor | undefined> {
+    if (identity.acceptedIssuerKeyId === this.options.issuerKey.deviceId) return undefined;
+    const current = await this.options.store.loadVerifiedTrustIssuer();
+    if (!current || current.issuer.issuerKeyId !== this.options.issuerKey.deviceId) {
+      throw new Error("Only the current duty device can continue an inherited removal");
+    }
+    return Object.freeze({
+      issuerDeviceId: current.issuer.deviceId,
+      issuerKeyId: this.options.issuerKey.deviceId,
+      issuerPublicKey: this.options.issuerKey.publicKey,
+      anchorEpoch: current.anchorEpoch,
+    });
   }
 }
 
@@ -806,7 +1066,7 @@ export class ExecutorRemovalTarget {
     const receipt = validateExecutorRemovalReceipt(receiptInput, this.options.verifier);
     if (
       receipt.phase !== "accepted" ||
-      receipt.signature.keyId !== receipt.acceptedIssuerDeviceId ||
+      receipt.signature.keyId !== receipt.acceptedIssuerKeyId ||
       receipt.homeId !== this.options.homeId ||
       receipt.targetDeviceId !== this.options.deviceKey.deviceId ||
       receipt.targetDeviceKeyGeneration !== deviceKeyGeneration({
@@ -826,6 +1086,7 @@ export class ExecutorRemovalTarget {
       targetMemberPublicKey: this.options.deviceKey.publicKey,
       targetDeviceKeyGeneration: receipt.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: receipt.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: receipt.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: receipt.acceptedTrustHeadDigest,
     });
     const operation = await this.#journal.accept(identity);
@@ -833,7 +1094,7 @@ export class ExecutorRemovalTarget {
       throw new Error("Device removal was cancelled before target preflight");
     }
     // 撤销之后取回终态所需的材料先于回复 accept 耐久。
-    await this.#recordTerminalRoute(operation, route);
+    await this.#recordTerminalRoute(operation, route, receipt);
     const snapshot = await this.#acceptedWorkSnapshot(identity.operationId, false);
     await this.#recordPreflight(identity.operationId, snapshot);
     return snapshot;
@@ -973,14 +1234,31 @@ export class ExecutorRemovalTarget {
    * 撤销之后的本机收尾串行执行：内联请求与专用取回同时续做时按序进行，每一步按已存阶段幂等。
    * 不用 SerialTaskQueue：本机清理里的存储维护步骤要按原期限等待，不能被标成零等待互斥区。
    */
-  finish(receiptInput: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt | undefined> {
-    const run = this.#completion.then(() => this.#finish(receiptInput));
+  /**
+   * successor：本次连接上经继任证明验明的现任 issuer（设备、key、公钥、任期）；durable：回执来自本机耐久记录，
+   * 落盘前已验过。继任回执只在两者之一成立时接受。
+   */
+  finish(
+    receiptInput: ExecutorRemovalReceipt,
+    options: { readonly successor?: ExecutorRemovalSuccessor; readonly durable?: boolean } = {},
+  ): Promise<ExecutorRemovalReceipt | undefined> {
+    const run = this.#completion.then(() => this.#finish(receiptInput, options));
     this.#completion = run.then(() => undefined, () => undefined);
     return run;
   }
 
-  async #finish(receiptInput: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt | undefined> {
-    const receipt = validateExecutorRemovalReceipt(receiptInput, this.options.verifier);
+  async #finish(
+    receiptInput: ExecutorRemovalReceipt,
+    options: { readonly successor?: ExecutorRemovalSuccessor; readonly durable?: boolean },
+  ): Promise<ExecutorRemovalReceipt | undefined> {
+    const claimed = successorOf(receiptInput);
+    if (claimed && !options.durable && (!options.successor || canonicalize(claimed) !== canonicalize(options.successor))) {
+      throw new Error("Device removal successor receipt is not proven by the current issuer");
+    }
+    const receipt = validateExecutorRemovalReceipt(
+      receiptInput,
+      claimed ? successorReceiptVerifier(this.options.verifier, claimed) : this.options.verifier,
+    );
     const operation = await this.#journal.state(receipt.operationId);
     if (!operation || operation.identity.kind !== "executor-removal") {
       throw new Error("Device removal target operation is unknown");
@@ -989,16 +1267,21 @@ export class ExecutorRemovalTarget {
     assertReceiptIdentity(receipt, identity);
     if (
       !new Set(["revoked", "removed"]).has(receipt.phase) ||
-      receipt.signature.keyId !== receipt.acceptedIssuerDeviceId
+      receipt.signature.keyId !== (receipt.successor?.issuerKeyId ?? receipt.acceptedIssuerKeyId)
     ) {
       throw new Error("Device cleanup requires the current issuer's authenticated receipt");
     }
     let current = operation;
     if (receipt.phase === "revoked" && current.phase === "revocation-ready") {
+      // 撤销回执本身连同效果耐久：原 issuer 不在时它是向现任出示的撤销依据
+      const revokedRef = await this.options.log.artifactStore.put(Buffer.from(canonicalize(receipt), "utf8"));
       current = await this.#journal.peerEffect(receipt.operationId, {
         kind: "issuer-revoked",
         digest: protocolDigest("ExecutorRemovalIssuerRevoked", 1, receipt),
-        evidence: [{ kind: "trust-event", digest: receipt.evidenceDigest }],
+        evidence: [
+          { kind: "trust-event", digest: receipt.evidenceDigest },
+          { kind: "cleanup", digest: revokedRef.digest, artifact: revokedRef },
+        ],
       });
       current = await this.#journal.advance(receipt.operationId, "revoked", [{
         kind: "trust-event",
@@ -1020,6 +1303,7 @@ export class ExecutorRemovalTarget {
         targetDeviceId: identity.targetDeviceId,
         targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
         acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+        acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
         acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
         phase: "cleanup-ready",
         evidenceDigest: cleanupDigest,
@@ -1089,7 +1373,7 @@ export class ExecutorRemovalTarget {
     if (protocolDigest("ExecutorRemovalIssuerTerminalReceipt", 1, receipt) !== effect.digest) {
       throw new Error("Device removal issuer terminal receipt does not match its durable record");
     }
-    await this.finish(receipt);
+    await this.finish(receipt, { durable: true });
     return this.isRetired(operationId);
   }
 
@@ -1105,6 +1389,7 @@ export class ExecutorRemovalTarget {
   async #recordTerminalRoute(
     operation: DeviceLifecycleOperation,
     route: ExecutorRemovalTerminalRoute,
+    acceptedReceipt: ExecutorRemovalReceipt,
   ): Promise<void> {
     if (operation.identity.kind !== "executor-removal") {
       throw new Error("Device removal terminal route requires an executor-removal identity");
@@ -1135,6 +1420,7 @@ export class ExecutorRemovalTarget {
       locator: route.locator,
       issuer: issuer.peer,
       endpoint: issuer.endpoint,
+      acceptedReceipt,
     };
     decodeTerminalRouteArtifact(Buffer.from(canonicalize(material), "utf8"), identity);
     const artifact = await this.options.log.artifactStore.put(
@@ -1151,7 +1437,8 @@ export class ExecutorRemovalTarget {
     ready(receipt: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt>;
     cleanupReady(receipt: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt>;
     terminal(operationId: string): Promise<ExecutorRemovalReceipt | undefined>;
-  }): Promise<void> {
+  }, successor?: ExecutorRemovalSuccessor): Promise<void> {
+    const proven = successor ? { successor } : {};
     for (const operation of await this.#journal.activeFor(this.options.deviceKey.deviceId)) {
       if (operation.identity.kind !== "executor-removal") continue;
       if (
@@ -1168,26 +1455,26 @@ export class ExecutorRemovalTarget {
         });
         if (result.kind === "preflight-changed") continue;
         const ready = result.receipt;
-        const cleanupReady = await this.finish(await issuer.ready(ready));
-        if (cleanupReady) await this.finish(await issuer.cleanupReady(cleanupReady));
+        const cleanupReady = await this.finish(await issuer.ready(ready), proven);
+        if (cleanupReady) await this.finish(await issuer.cleanupReady(cleanupReady), proven);
         continue;
       }
       if (operation.phase === "revoked" || operation.phase === "cleanup-complete") {
         const cleanupReady = await this.#receiptFromPeerEffect(operation, "target-cleanup-ready");
         if (cleanupReady) {
-          await this.finish(await issuer.cleanupReady(cleanupReady));
+          await this.finish(await issuer.cleanupReady(cleanupReady), proven);
           continue;
         }
         const terminal = await issuer.terminal(operation.identity.operationId);
         if (terminal) {
-          await this.finish(terminal);
+          await this.finish(terminal, proven);
           continue;
         }
         // 撤销已记、清理或 cleanup-ready 尚未落盘：按同一 ready 取回 issuer 已存的撤销回执，续做本机清理。
         const decision = await this.#decision(operation);
         if (!decision) throw new Error("Revoked device removal is missing its durable decision");
-        const next = await this.finish(await issuer.ready(await this.#readyReceipt(operation, decision)));
-        if (next) await this.finish(await issuer.cleanupReady(next));
+        const next = await this.finish(await issuer.ready(await this.#readyReceipt(operation, decision)), proven);
+        if (next) await this.finish(await issuer.cleanupReady(next), proven);
       }
     }
   }
@@ -1268,6 +1555,7 @@ export class ExecutorRemovalTarget {
       targetDeviceId: identity.targetDeviceId,
       targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
       phase: "aborted",
       evidenceDigest: protocolDigest("ExecutorRemovalTargetAborted", 1, durableAbort),
@@ -1299,6 +1587,7 @@ export class ExecutorRemovalTarget {
       targetDeviceId: identity.targetDeviceId,
       targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
       phase: "revocation-ready",
       evidenceDigest: protocolDigest("ExecutorRemovalReady", 1, decision),
@@ -1513,6 +1802,10 @@ export interface ExecutorRemovalTerminalRecovery {
   readonly secret: string;
   readonly issuer: TrustedMeshPeer;
   readonly endpoint: MeshEndpointDescriptor;
+  /** 冻结的移除身份与 issuer 签的接受、撤销回执：原 issuer 不在时向现任出示的恢复证据。 */
+  readonly identity: ExecutorRemovalLifecycleIdentity;
+  readonly acceptedReceipt: ExecutorRemovalReceipt;
+  readonly revokedReceipt?: ExecutorRemovalReceipt;
 }
 
 interface ExecutorRemovalTerminalRouteArtifact {
@@ -1522,6 +1815,121 @@ interface ExecutorRemovalTerminalRouteArtifact {
   readonly locator: string;
   readonly issuer: TrustedMeshPeer;
   readonly endpoint: MeshEndpointDescriptor;
+  /** 原 issuer 签的接受回执：继任承接或补证时是 target 手里的接受依据。 */
+  readonly acceptedReceipt: ExecutorRemovalReceipt;
+}
+
+/** target 在发现会话里向现任出示的恢复证据：冻结身份与原 issuer 签的接受、撤销回执，设备钥签名绑定会话。 */
+export interface ExecutorRemovalRecoveryEvidence {
+  readonly v: 1;
+  readonly t: "executor-removal-recovery-evidence";
+  readonly transcript: string;
+  readonly identity: ExecutorRemovalLifecycleIdentity;
+  readonly acceptedReceipt: ExecutorRemovalReceipt;
+  readonly revokedReceipt?: ExecutorRemovalReceipt;
+  /** 现任链在接受点之前分叉时：本机链上公共祖先之后到 acceptedTrustHead 的原签名事件。 */
+  readonly forkSegment?: ExecutorRemovalForkSegment;
+  readonly signature: ReturnType<DeviceKey["sign"]>;
+}
+
+export interface ExecutorRemovalForkSegment {
+  readonly ancestor: { readonly seq: number; readonly eventDigest: string };
+  readonly events: readonly HomeTrustEvent[];
+}
+
+export function createExecutorRemovalRecoveryEvidence(input: {
+  readonly transcript: string;
+  readonly recovery: ExecutorRemovalTerminalRecovery;
+  readonly deviceKey: DeviceKey;
+  readonly forkSegment?: ExecutorRemovalForkSegment;
+}): ExecutorRemovalRecoveryEvidence {
+  const unsigned = {
+    v: 1 as const,
+    t: "executor-removal-recovery-evidence" as const,
+    transcript: input.transcript,
+    identity: input.recovery.identity,
+    acceptedReceipt: input.recovery.acceptedReceipt,
+    ...(input.recovery.revokedReceipt ? { revokedReceipt: input.recovery.revokedReceipt } : {}),
+    ...(input.forkSegment ? { forkSegment: input.forkSegment } : {}),
+  };
+  return Object.freeze({ ...unsigned, signature: input.deviceKey.sign("ExecutorRemovalRecoveryEvidence", 1, unsigned) });
+}
+
+/** 接受时的信任投影：基点在本机链上就在本机链上重放；分叉时从公共祖先逐条应用 target 附来的链段（每条验原签名）。 */
+/**
+ * 接受时的投影：接受点在本机链上时按摘要定位、走快照；否则用 target 附上的分叉段（本机链上的公共祖先之后到接受点
+ * 的原签名事件）从祖先投影逐条验过。另给出本机链上从哪一点之后才可能出现这次移除之后的撤销。
+ */
+async function projectionAtAcceptance(
+  store: FileMeshBootstrapStore,
+  evidence: ExecutorRemovalRecoveryEvidence,
+): Promise<{ readonly projection: ReturnType<typeof replayTrustChain>; readonly onChainSince: number }> {
+  const digest = evidence.identity.acceptedTrustHeadDigest;
+  const accepted = await store.trustEventByDigest(digest);
+  if (accepted) {
+    const projection = await store.trustProjectionAt({ seq: accepted.seq, eventDigest: digest });
+    if (projection) return { projection, onChainSince: accepted.seq };
+  }
+  const segment = evidence.forkSegment;
+  if (!segment || segment.events.length === 0 || segment.events.length > 4096) {
+    throw new Error("Device removal evidence was accepted outside this trust chain");
+  }
+  let projection = await store.trustProjectionAt(segment.ancestor);
+  if (!projection) throw new Error("Device removal fork segment does not start on this trust chain");
+  for (const event of segment.events) {
+    projection = await applyTrustEventWithHistory(projection, event, (id) => store.revokedTrustMemberAt(id, segment.ancestor.seq));
+  }
+  if (projection.chainHead.eventDigest !== digest) {
+    throw new Error("Device removal fork segment does not end at the accepted trust head");
+  }
+  return { projection, onChainSince: segment.ancestor.seq };
+}
+
+/** 本机链上 afterSeq 之后、链头之内对该设备的撤销事件（分页按键读这一段）。 */
+async function findRevocationAfter(
+  store: FileMeshBootstrapStore,
+  afterSeq: number,
+  head: { readonly seq: number },
+  deviceId: string,
+): Promise<HomeTrustEvent | undefined> {
+  for (let after = afterSeq; after < head.seq;) {
+    const page = await store.trustEventsAfter(after, 256);
+    if (page.length === 0) return undefined;
+    const revoke = page.find((event) => event.body.t === "revoke" && event.body.deviceId === deviceId);
+    if (revoke) return revoke;
+    after = page.at(-1)!.seq;
+  }
+  return undefined;
+}
+
+function validateExecutorRemovalRecoveryEvidence(value: unknown): ExecutorRemovalRecoveryEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Device removal recovery evidence is invalid");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = [
+    "acceptedReceipt", "identity", "signature", "t", "transcript", "v",
+    ...(record.revokedReceipt === undefined ? [] : ["revokedReceipt"]),
+    ...(record.forkSegment === undefined ? [] : ["forkSegment"]),
+  ];
+  if (
+    canonicalize(Object.keys(record).sort()) !== canonicalize(keys.sort()) ||
+    record.v !== 1 || record.t !== "executor-removal-recovery-evidence" || typeof record.transcript !== "string"
+  ) {
+    throw new TypeError("Device removal recovery evidence fields are invalid");
+  }
+  const identity = validateDeviceLifecycleRecord({ v: 1, t: "accepted", identity: record.identity });
+  if (identity.t !== "accepted" || identity.identity.kind !== "executor-removal") {
+    throw new TypeError("Device removal recovery evidence identity is invalid");
+  }
+  return record as unknown as ExecutorRemovalRecoveryEvidence;
+}
+
+/** 同一次移除：target 侧冻结身份的 requestId 是本机派生的，比对时不看它。 */
+function sameFrozenRemoval(left: ExecutorRemovalLifecycleIdentity, right: ExecutorRemovalLifecycleIdentity): boolean {
+  const { requestId: _left, ...a } = left;
+  const { requestId: _right, ...b } = right;
+  return canonicalize(a) === canonicalize(b);
 }
 
 export function validateExecutorRemovalTerminalRoute(value: unknown): ExecutorRemovalTerminalRoute {
@@ -1539,10 +1947,6 @@ export function validateExecutorRemovalTerminalRoute(value: unknown): ExecutorRe
   return Object.freeze({ locator: route.locator, secret: route.secret });
 }
 
-function issuerTerminalRouteRef(deviceId: string): SecretRef {
-  return { kind: "terminal-route", bindingId: `issuer/${deviceId}` };
-}
-
 function targetTerminalRouteRef(operationId: string): SecretRef {
   const digest = protocolDigest("ExecutorRemovalTerminalRouteRef", 1, { operationId });
   return { kind: "terminal-route", bindingId: `removal/${digest.slice("sha256:".length)}` };
@@ -1550,26 +1954,6 @@ function targetTerminalRouteRef(operationId: string): SecretRef {
 
 export function isTargetTerminalRouteRef(ref: SecretRef): boolean {
   return ref.kind === "terminal-route" && ref.bindingId.startsWith("removal/");
-}
-
-/** issuer 自有的终态路由秘密：首次需要时生成并回读，此后长期保留，不随成员撤销删除。 */
-export async function loadOrCreateIssuerTerminalRouteSecret(
-  store: SecretStorePort,
-  deviceId: string,
-): Promise<string> {
-  const ref = issuerTerminalRouteRef(deviceId);
-  let secret = store.getOrCreate
-    ? await store.getOrCreate(ref, createTerminalRouteSecret)
-    : await store.get(ref);
-  if (secret === null) {
-    secret = createTerminalRouteSecret();
-    await store.put(ref, secret);
-  }
-  assertTerminalRouteSecret(secret);
-  if (await store.get(ref) !== secret) {
-    throw new Error("Terminal route secret did not survive durable read-back");
-  }
-  return secret;
 }
 
 async function deleteTargetTerminalRouteSecret(store: SecretStorePort, operationId: string): Promise<void> {
@@ -1596,7 +1980,7 @@ function decodeTerminalRouteArtifact(
   if (
     !record || typeof record !== "object" || Array.isArray(record) ||
     canonicalize(Object.keys(record).sort()) !==
-      canonicalize(["endpoint", "issuer", "locator", "operationId", "t", "v"]) ||
+      canonicalize(["acceptedReceipt", "endpoint", "issuer", "locator", "operationId", "t", "v"]) ||
     record.v !== 1 || record.t !== "executor-removal-terminal-route" ||
     record.operationId !== identity.operationId || !isTerminalRouteLocator(record.locator)
   ) {
@@ -1614,6 +1998,11 @@ function decodeTerminalRouteArtifact(
   if (endpoint.deviceId !== identity.acceptedIssuerDeviceId) {
     throw new Error("Executor removal terminal route endpoint is not the accepted issuer");
   }
+  const acceptedReceipt = record.acceptedReceipt as ExecutorRemovalReceipt;
+  if (!acceptedReceipt || typeof acceptedReceipt !== "object" || acceptedReceipt.phase !== "accepted" ||
+      acceptedReceipt.operationId !== identity.operationId || acceptedReceipt.acceptedIssuerKeyId !== identity.acceptedIssuerKeyId) {
+    throw new Error("Executor removal terminal route artifact does not carry the accepted receipt");
+  }
   return Object.freeze({
     v: 1,
     t: "executor-removal-terminal-route",
@@ -1621,6 +2010,7 @@ function decodeTerminalRouteArtifact(
     locator: record.locator,
     issuer,
     endpoint,
+    acceptedReceipt,
   });
 }
 
@@ -1643,12 +2033,20 @@ async function loadExecutorRemovalTerminalRecovery(
   const secret = await store.get(targetTerminalRouteRef(identity.operationId));
   if (secret === null) throw new Error("Device removal terminal route secret is missing");
   assertTerminalRouteSecret(secret);
+  const revokedRef = operation.peerEffects.find((item) => item.kind === "issuer-revoked")
+    ?.evidence.find((item) => item.artifact)?.artifact;
+  const revokedReceipt = revokedRef
+    ? JSON.parse(Buffer.from(await log.artifactStore.get(revokedRef)).toString("utf8")) as ExecutorRemovalReceipt
+    : undefined;
   return Object.freeze({
     operationId: identity.operationId,
     locator: material.locator,
     secret,
     issuer: material.issuer,
     endpoint: material.endpoint,
+    identity,
+    acceptedReceipt: material.acceptedReceipt,
+    ...(revokedReceipt ? { revokedReceipt } : {}),
   });
 }
 
@@ -1685,7 +2083,7 @@ export async function settleExecutorRemovalBeforeBootstrap(input: {
   assertReceiptIdentity(receipt, identity);
   if (
     receipt.phase !== "removed" ||
-    receipt.signature.keyId !== identity.acceptedIssuerDeviceId ||
+    receipt.signature.keyId !== (receipt.successor?.issuerKeyId ?? identity.acceptedIssuerKeyId) ||
     protocolDigest("ExecutorRemovalIssuerTerminalReceipt", 1, receipt) !== effect.digest
   ) {
     throw new Error("Device removal issuer terminal receipt does not bind this operation");
@@ -1709,7 +2107,36 @@ function decodeIssuerTerminalReceipt(
   } catch (error) {
     throw new Error("Device removal issuer terminal receipt is corrupt", { cause: error });
   }
-  return validateExecutorRemovalReceipt(parsed, verifier);
+  const successor = successorOf(parsed);
+  return validateExecutorRemovalReceipt(parsed, successor ? successorReceiptVerifier(verifier, successor) : verifier);
+}
+
+function successorOf(value: unknown): ExecutorRemovalSuccessor | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const successor = (value as { readonly successor?: unknown }).successor;
+  return successor && typeof successor === "object" ? successor as ExecutorRemovalSuccessor : undefined;
+}
+
+/** 继任回执的验签：签名者是继任绑定里的现任 key 时按其公钥验，其余交给原验签器。 */
+export function successorReceiptVerifier(
+  base: ProtocolSignatureVerifier,
+  successor: ExecutorRemovalSuccessor,
+): ProtocolSignatureVerifier {
+  return {
+    verify(schemaId, version, payload, signature) {
+      if (signature.keyId !== successor.issuerKeyId) {
+        base.verify(schemaId, version, payload, signature);
+        return;
+      }
+      verifyDeviceSignature({
+        deviceId: successor.issuerKeyId,
+        publicKey: successor.issuerPublicKey,
+        displayName: "issuer",
+        platform: "headless",
+        enrolledAt: "1970-01-01T00:00:00.000Z",
+      }, schemaId, version, payload, signature);
+    },
+  };
 }
 
 /** 按 operation 冻结的代际精确删钥：钥已不在视为完成，换代的钥拒绝删除。 */
@@ -1762,6 +2189,7 @@ function assertReceiptIdentity(
     receipt.targetDeviceId !== identity.targetDeviceId ||
     receipt.targetDeviceKeyGeneration !== identity.targetDeviceKeyGeneration ||
     receipt.acceptedIssuerDeviceId !== identity.acceptedIssuerDeviceId ||
+    receipt.acceptedIssuerKeyId !== identity.acceptedIssuerKeyId ||
     receipt.acceptedTrustHeadDigest !== identity.acceptedTrustHeadDigest
   ) {
     throw new Error("Executor removal receipt changes the accepted identity");
@@ -1776,7 +2204,7 @@ function assertAbortIdentity(
     abort.operationId !== identity.operationId ||
     abort.homeId !== identity.homeId ||
     abort.subjectDeviceId !== identity.targetDeviceId ||
-    abort.authorizedByDeviceId !== identity.acceptedIssuerDeviceId
+    abort.authorizedByDeviceId !== identity.acceptedIssuerKeyId
   ) {
     throw new Error("Executor removal abort changes the accepted identity");
   }
@@ -1808,6 +2236,7 @@ function terminalReceiptFromState(
   evidence: readonly DeviceLifecycleEvidenceRef[],
   revoke: HomeTrustEvent | undefined,
   issuerKey: DeviceKey,
+  successor?: ExecutorRemovalSuccessor,
 ): ExecutorRemovalReceipt {
   const trustDigest = [...evidence].reverse().find((item) => item.kind === "trust-event")?.digest;
   const exposureDigest = [...evidence].reverse().find((item) => item.kind === "credential-exposure")?.digest;
@@ -1825,10 +2254,12 @@ function terminalReceiptFromState(
     targetDeviceId: identity.targetDeviceId,
     targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
     acceptedIssuerDeviceId: identity.acceptedIssuerDeviceId,
+    acceptedIssuerKeyId: identity.acceptedIssuerKeyId,
     acceptedTrustHeadDigest: identity.acceptedTrustHeadDigest,
     phase: "revoked",
     evidenceDigest: terminalEvidenceDigest(trustDigest, exposureDigest),
     at: revoke.at,
+    ...(successor ? { successor } : {}),
   }, issuerKey);
 }
 

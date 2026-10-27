@@ -9,9 +9,10 @@ import { AuthorityCacheIntegrity } from "../../../core/src/authority/startup-pro
 import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
 import { RecoveryRoot } from "../recovery-root.js";
 import { applyTrustEvent, buildHomeTrustRecord, createDomainResetEvent, createRecoveryRootEvent,
-  createSignedTrustEvent, createTrustGenesisEvent, initializeTrustChain, replayTrustChain, type TrustProjection } from "../trust-chain.js";
+  createSignedTrustEvent, createTrustGenesisEvent, homeTrustEventDigest, initializeTrustChain, replayTrustChain, type TrustProjection } from "../trust-chain.js";
 import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, LEGACY_TRUST_RECORD_MESSAGE, readCurrentTrust, readCurrentTrustRecord,
-  readLegacyClosedTrust, readTrustIdentity, readAnchorTenureAt, readCurrentAnchorTenure } from "../trust-current-index.js";
+  readLegacyClosedTrust, readTrustIdentity, readAnchorTenureAt, readCurrentAnchorTenure, readRevokedTrustMemberAt,
+  readTrustProjectionAt } from "../trust-current-index.js";
 
 const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => { await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance())); });
@@ -317,3 +318,78 @@ it('derives distinct A to B to A tenures, historical bases and disaster successi
     return { kind: 'return', value: undefined };
   });
 }, 30_000);
+
+// 总控反例（宽度）：当前活跃=1、读同一快照位置，只增已撤销完的设备历史——读取、写出与物化对象都不随它增长
+it("keeps historical projections and the 64th-event snapshot independent of retired device history", async () => {
+  const rows: Record<string, number>[] = [];
+  for (const count of [4, 16]) {
+    const f = await fixture();
+    let state = f.state;
+    const events: HomeTrustEvent[] = [];
+    const push = (body: HomeTrustEventBody) => {
+      const event = createSignedTrustEvent({ current: state, body, at, signer: f.issuer.key });
+      events.push(event);
+      state = applyTrustEvent(state, event);
+    };
+    const retired: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const old = await device(`retired-${index}`);
+      retired.push(old.key.deviceId);
+      push({ t: "enroll", device: old.identity, roles: ["executor"] });
+      push({ t: "revoke", deviceId: old.key.deviceId });
+    }
+    while (state.chainHead.seq < 70) push({ t: "role-change", deviceId: f.issuer.key.deviceId, roles: ["anchor"] });
+    await f.log.append([
+      ...events.map((event) => ({ stream: "trust", body: { t: "home-trust-event", event } })),
+      { stream: "trust", body: { t: "home-trust-record", record: buildHomeTrustRecord(state, f.issuer.key) } },
+    ] as Parameters<typeof f.log.append>[0]);
+    const measure = async (seq: number) => {
+      let reads = 0;
+      let readBytes = 0;
+      const point = { seq, eventDigest: homeTrustEventDigest(events[seq - 1]!) };
+      const projection = (await f.log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => {
+        const measured = {
+          get: async (key: string) => {
+            const value = await view.get(key);
+            reads += 1;
+            readBytes += Buffer.byteLength(JSON.stringify(value ?? null));
+            return value;
+          },
+          scan: async (...args: Parameters<typeof view.scan>) => {
+            const page = await view.scan(...args);
+            reads += 1;
+            readBytes += Buffer.byteLength(JSON.stringify(page.entries));
+            return page;
+          },
+        } as unknown as typeof view;
+        return { kind: "return" as const, value: await readTrustProjectionAt(measured, point) };
+      })).value!;
+      return { reads, readBytes, members: projection.members.length };
+    };
+    const atSnapshot = await measure(64);
+    const replayed = await measure(70);
+    // 写出：第 64 条之后存的快照行与它枚举的 live 目录
+    const written = (await f.log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: "return" as const,
+      value: {
+        snapshotBytes: Buffer.byteLength(JSON.stringify(await view.get("trust/snapshot/" + String(64).padStart(16, "0")))),
+        live: (await view.scan({ gte: "trust/live/", lt: "trust/live/￿" }, 256)).entries.length,
+      },
+    }))).value;
+    // 历史设备仍按键可得：在它们撤销之后的点上是已撤销成员，重复配对它们照样被拒
+    const revokedLater = (await f.log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: "return" as const, value: await readRevokedTrustMemberAt(view, retired[0]!, 64),
+    }))).value;
+    expect(revokedLater?.state).toBe("revoked");
+    rows.push({
+      history: count,
+      snapshotReads: atSnapshot.reads, snapshotBytes: atSnapshot.readBytes, snapshotMembers: atSnapshot.members,
+      replayReads: replayed.reads, replayBytes: replayed.readBytes, replayMembers: replayed.members,
+      writtenSnapshotBytes: written.snapshotBytes, live: written.live,
+    });
+  }
+  const [small, large] = rows as [Record<string, number>, Record<string, number>];
+  for (const key of ["snapshotReads", "snapshotMembers", "replayReads", "replayMembers", "live"]) expect(large[key], key).toBe(small[key]);
+  // 字节只允许序号位数之类的常数差
+  for (const key of ["snapshotBytes", "replayBytes", "writtenSnapshotBytes"]) expect(large[key]! - small[key]!, key).toBeLessThanOrEqual(128);
+}, 60_000);

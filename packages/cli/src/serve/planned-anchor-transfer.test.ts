@@ -44,6 +44,7 @@ import {
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
   completePlannedAnchorInstallationBeforeBootstrap,
+  finishPlannedAnchorPostInstall,
   type PlannedAnchorTransferTargetPort,
   type PlannedAnchorCandidateRelease,
 } from "./planned-anchor-transfer.js";
@@ -1020,7 +1021,7 @@ describe("planned anchor transfer prepared phase", {
     const recovered = await complete();
     const replay = await complete();
     expect(recovered?.installation.transferId).toBe(TRANSFER_ID);
-    expect(recovered?.state.phase).toBe("committed");
+    expect(recovered?.requiresPostInstallCompletion ? recovered.state.phase : undefined).toBe("committed");
     expect(recovered?.requiresPostInstallCompletion).toBe(true);
     expect(recovered?.installedGeneration).toMatchObject({
       transferId: TRANSFER_ID,
@@ -1029,6 +1030,7 @@ describe("planned anchor transfer prepared phase", {
       targetLogId: (await fixture.targetStore.authorityLog().originCheckpoint()).logId,
     });
     expect(replay).toEqual(recovered);
+    // staging 不在不等于已收尾：没有完成标记时仍需收尾，不把缺失的资料当成功
     await rm(path.join(
       fixture.targetRoot,
       "distributed-runtime",
@@ -1036,6 +1038,16 @@ describe("planned anchor transfer prepared phase", {
       "transfers",
       TRANSFER_ID,
     ), { recursive: true, force: true });
+    expect((await complete())?.requiresPostInstallCompletion).toBe(true);
+    // 运行时收尾：完成标记先于清理 staging 落盘，此后按已收尾返回
+    if (!recovered?.requiresPostInstallCompletion) throw new Error("expected pending post-install work");
+    await finishPlannedAnchorPostInstall({
+      transferId: TRANSFER_ID,
+      readiness: fixture.readiness.port,
+      staging: createPlannedAnchorTransferStagingInfrastructure({ zhixingHome: fixture.targetRoot }),
+      authorityLog: fixture.targetStore.authorityLog(),
+      installedGeneration: recovered.installedGeneration,
+    });
     const afterPrivateCleanup = await complete();
     expect(afterPrivateCleanup?.requiresPostInstallCompletion).toBe(false);
     expect(afterPrivateCleanup?.installedGeneration).toEqual(recovered?.installedGeneration);

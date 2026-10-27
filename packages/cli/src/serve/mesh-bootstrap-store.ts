@@ -44,9 +44,13 @@ import {
   verifyHomeTrustRecord,
   CURRENT_TRUST_PROJECTION_ID, LEGACY_TRUST_RECORD_MESSAGE, readCurrentTrust, readCurrentTrustRecord,
   readLegacyClosedTrust, readVerifiedTrustProgress, readTrustReconciliationPage, readTrustEventByDigest,
-  type CurrentTrustProjection, type HistoricalHomeTrustRecord,
+  readVerifiedTrustIssuer, readCurrentTrustMember, type CurrentTrustProjection, type HistoricalHomeTrustRecord,
+  EMPTY_TRUST_STREAM_FOLD, foldTrustStreamRecord, readTrustBranchProgress, readSupersededTrustEvents,
+  readTrustProjectionAt, readStagedTrustBranch, readTrustEventAt, readTrustEventsAfter, readRevokedTrustMemberAt, trustBranchAdoptionId,
+  type HomeTrustBranchAdoptedRecord, type HomeTrustBranchStagedRecord, type TrustStreamFold,
 } from "@zhixing/mesh/trust-chain";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
+import type { HomeDiscoveryLocalChain } from "@zhixing/mesh/home-discovery";
 import type {
   BootstrapAuthorityPort,
   PairingAtomicCommit,
@@ -77,7 +81,12 @@ import type { HomeAuthoritySourcesLease } from "./home-authority-sources.js";
 // 流里较早的快照可能是 v1 历史帧；新写入的一律是 v2
 type TrustStreamRecord =
   | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
-  | { readonly t: "home-trust-record"; readonly record: HomeTrustRecord | HistoricalHomeTrustRecord };
+  | { readonly t: "home-trust-record"; readonly record: HomeTrustRecord | HistoricalHomeTrustRecord }
+  | HomeTrustBranchStagedRecord
+  | HomeTrustBranchAdoptedRecord;
+
+/** 分支接续每页暂存的事件数上限：单页受原生帧约束，页数不限。 */
+const TRUST_BRANCH_PAGE_EVENTS = 64;
 
 const FULL_AUTHORITY_CHECKPOINT_SCOPE = Object.freeze([
   "global-authority",
@@ -98,6 +107,15 @@ interface PersistedTransportPeer {
 }
 
 import { bindConversationAnchorTenure } from './conversation-anchor-tenure.js';
+import { registerAnchorInstallationIndex } from "./anchor-installation-index.js";
+import { registerHomeRouteMaterialIndex } from "./home-route-material.js";
+import { registerSupersededTrustReportIndex } from "./superseded-trust-report.js";
+import {
+  readMemberTransport,
+  recordMemberEndpoint,
+  recordMemberTransport,
+  registerMemberConnectionDirectory,
+} from "./member-connection-directory.js";
 
 export interface FileMeshBootstrapStoreOptions {
   readonly records?: import("@zhixing/core/logging").LogRecordPort;
@@ -172,6 +190,12 @@ export class FileMeshBootstrapStore
     );
     credentialExposureIndex(this.#log);
     bindConversationAnchorTenure(this.#log);
+    // 当前安装指针：迁居与灾备的安装、收尾凭据都写在这本日志上，首次写入前登记
+    registerAnchorInstallationIndex(this.#log);
+    // 成员连接目录与家级路由材料的密封记录：随迁居前缀与完整检查点交给继任值班设备
+    registerMemberConnectionDirectory(this.#log);
+    registerHomeRouteMaterialIndex(this.#log);
+    registerSupersededTrustReportIndex(this.#log);
     // 检查点保留用到时才取索引。经写者统一入口时与资产权威共用同一个生命周期索引（源集合固定为
     // 两本权威日志），由入口停止；源集合不同的实例交替打开同一目录会互相判失配、整段重放。只读
     // 入口与不经统一入口的测试保持自建。
@@ -250,6 +274,12 @@ export class FileMeshBootstrapStore
       .map((record) => record.body);
   }
 
+  /** 已验信任链链头的 issuer 与任期，按键读，不要求签名记录已闭合（迁居源端提交后的启动恢复用）。 */
+  async loadVerifiedTrustIssuer() {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+      async view => ({ kind: 'return', value: await readVerifiedTrustIssuer(view) }))).value;
+  }
+
   async trustReconciliationProgress() {
     return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
       async view => ({ kind: 'return', value: await readVerifiedTrustProgress(view) }))).value;
@@ -259,6 +289,162 @@ export class FileMeshBootstrapStore
     return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view, context) => ({
       kind: 'return', value: await readTrustReconciliationPage(view, point => context.readEnvelopeAt!(point), input),
     }))).value;
+  }
+
+  /**
+   * 合法灾备后离线成员接续当前权威分支（发现已验过分叉规则与根签提交证明）：按接续标识分页暂存新分支，
+   * 已暂存的跳过（可中断续做）；完整时最后一条原子发布，未完时只暂存。旧分支事件留在 WAL 与 superseded 键里，
+   * 不删除。从进度接着的会话看不到分支首条，接续标识取自进度。返回接续标识。
+   */
+  async adoptTrustBranch(verified: {
+    readonly ancestor?: HomeTrustRecord['chainHead'];
+    readonly pages: readonly { readonly events: readonly HomeTrustEvent[]; readonly record?: HomeTrustRecord | HistoricalHomeTrustRecord }[];
+    readonly recoveryCommits: readonly unknown[];
+    readonly complete: boolean;
+    readonly adoptionId?: string;
+    /** 原子发布之前（暂存已齐）：例如写下待上报项并让本机限制先生效。 */
+    readonly beforePublish?: (adoptionId: string) => Promise<void>;
+  }): Promise<string> {
+    const ancestor = verified.ancestor;
+    if (!ancestor) throw new TypeError('Trust branch adoption requires a forked discovery');
+    const branch = verified.pages.flatMap((page) => page.events).filter((event) => event.seq > ancestor.seq);
+    const record = verified.complete ? verified.pages.at(-1)?.record : undefined;
+    if (verified.complete && (!record || record.v !== 2)) throw new Error('Discovered trust branch does not end at a current signed snapshot');
+    const progress = async (adoptionId?: string) => (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readTrustBranchProgress(view, adoptionId),
+    }))).value;
+    const superseded = (await progress()).head;
+    if (!superseded) throw new Error('Trust branch adoption requires a local trust chain');
+    if (!verified.adoptionId && branch[0]?.seq !== ancestor.seq + 1) {
+      throw new Error('Discovered trust branch does not start at its fork');
+    }
+    const adoptionId = verified.adoptionId ?? trustBranchAdoptionId(ancestor, superseded, homeTrustEventDigest(branch[0]!));
+    const current = await progress(adoptionId);
+    if (current.adopted) return adoptionId;
+    if (verified.adoptionId && current.stagedThrough === undefined) throw new Error('Trust branch staging to continue is missing');
+    const remaining = branch.filter((event) => event.seq > (current.stagedThrough ?? ancestor.seq));
+    const append = (body: TrustStreamRecord) => this.#log.transactDurableProjection<TrustStreamRecord, void>(CURRENT_TRUST_PROJECTION_ID, async () => ({
+      kind: 'append', entries: [{ stream: 'trust', body }], value: undefined,
+    }));
+    for (let index = 0; index < remaining.length; index += TRUST_BRANCH_PAGE_EVENTS) {
+      const events = remaining.slice(index, index + TRUST_BRANCH_PAGE_EVENTS);
+      const transitions = new Set(events
+        .filter((event) => event.body.t === 'issuer-transition' && event.body.reason === 'disaster-recovery')
+        .map((event) => homeTrustEventDigest(event)));
+      await append({
+        t: 'home-trust-branch-staged', adoptionId, ancestor, superseded, events,
+        recoveryCommits: verified.recoveryCommits.filter((commit) =>
+          transitions.has(String((commit as { readonly trustTransitionDigest?: unknown }).trustTransitionDigest))),
+      });
+    }
+    // 未完的会话只暂存；完整时以链头的当前签名快照原子发布
+    if (!record || record.v !== 2) return adoptionId;
+    await verified.beforePublish?.(adoptionId);
+    await append({ t: 'home-trust-branch-adopted', adoptionId, record });
+    this.#sources?.sources.invalidateKnownTrust();
+    return adoptionId;
+  }
+
+  /** 本机已验证信任链的链头（分支接续与发现进度以它判断是否仍是同一条本机链）。 */
+  async localTrustHead() {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: (await readTrustBranchProgress(view)).head,
+    }))).value;
+  }
+
+  /** 进行中的分支暂存（祖先、被替代链头、已暂存到的投影）。 */
+  async stagedTrustBranch(adoptionId: string) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readStagedTrustBranch(view, adoptionId),
+    }))).value;
+  }
+
+  /** 某次分支接续是否已原子发布（按键读）。 */
+  async trustBranchAdopted(adoptionId: string): Promise<boolean> {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: (await readTrustBranchProgress(view, adoptionId)).adopted,
+    }))).value;
+  }
+
+  /** 本机链上 seq 处的事件（按键读）。 */
+  async trustEventAt(seq: number) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readTrustEventAt(view, seq),
+    }))).value;
+  }
+
+  /** 本机链上 afterSeq 之后的至多 limit 条事件（按键范围读）。 */
+  async trustEventsAfter(afterSeq: number, limit: number) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readTrustEventsAfter(view, afterSeq, limit),
+    }))).value;
+  }
+
+  /** 家级发现的本机链端口：链头、按序号或摘要读事件、某点投影，全部按键读，不整读信任链。 */
+  async discoveryLocalChain(): Promise<HomeDiscoveryLocalChain | undefined> {
+    const head = await this.localTrustHead();
+    if (!head) return undefined;
+    return {
+      head,
+      eventAt: (seq) => this.trustEventAt(seq),
+      eventByDigest: (digest) => this.trustEventByDigest(digest),
+      projectionAt: async (point) => {
+        const projection = await this.trustProjectionAt(point);
+        if (!projection) throw new Error('Trust point is not on the local chain');
+        return projection;
+      },
+      revokedMemberAt: (deviceId, seq) => this.revokedTrustMemberAt(deviceId, seq),
+    };
+  }
+
+  /** seq 之时已撤销的设备（按键读成员行）；以收窄投影接着验时补齐事件引用到的历史成员。 */
+  async revokedTrustMemberAt(deviceId: string, seq: number) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readRevokedTrustMemberAt(view, deviceId, seq),
+    }))).value;
+  }
+
+  /** 当前视图里的一个成员（含已撤销与待重新配对，按键读）。 */
+  async trustMember(deviceId: string) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readCurrentTrustMember(view, deviceId),
+    }))).value;
+  }
+
+  /** 被取代旧分支上 afterSeq 之后的至多 limit 条原签名事件。 */
+  async supersededTrustEvents(adoptionId: string, afterSeq: number, limit: number) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readSupersededTrustEvents(view, adoptionId, afterSeq, limit),
+    }))).value;
+  }
+
+  /** 本机链上某一点的投影：按摘要精确定位、按键读到该点重放；该点不在本机链上返回 undefined。 */
+  async trustProjectionAt(point: HomeTrustRecord['chainHead']) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readTrustProjectionAt(view, point),
+    }))).value;
+  }
+
+  /** 发现入口：客户端给出的候选点里第一个落在本机链上的点（按事件摘要精确读，不整读信任流）。 */
+  async findTrustBase(points: readonly HomeTrustRecord['chainHead'][]): Promise<HomeTrustRecord['chainHead'] | undefined> {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => {
+      for (const point of points) {
+        const event = await readTrustEventByDigest(view, point.eventDigest);
+        if (event && event.seq === point.seq) return { kind: 'return' as const, value: { seq: point.seq, eventDigest: point.eventDigest } };
+      }
+      return { kind: 'return' as const, value: undefined };
+    })).value;
+  }
+
+  /** 发现入口的后缀分页：沿用对齐分页（停在原签名记录边界），到当前记录链头即完成。 */
+  async discoveryTrustPage(homeId: string, from: HomeTrustRecord['chainHead']) {
+    const page = await this.trustReconciliationPage({ homeId, chainHead: from });
+    const last = page.events.at(-1)?.seq ?? from.seq;
+    return {
+      events: page.events,
+      ...(page.record ? { record: page.record } : {}),
+      complete: page.done && last >= page.latest.seq,
+    };
   }
 
   async reconcileTrustPage(input: { homeId: string; previous: HomeTrustRecord['chainHead']; events: readonly HomeTrustEvent[];
@@ -294,10 +480,9 @@ export class FileMeshBootstrapStore
 
   async loadTrustEvents(): Promise<readonly HomeTrustEvent[]> {
     const records = await this.#log.readStream<TrustStreamRecord>("trust");
-    const events: HomeTrustEvent[] = [];
-    for (const { body } of records) {
-      if (body.t === "home-trust-event") events.push(body.event);
-    }
+    let fold = EMPTY_TRUST_STREAM_FOLD;
+    for (const { body } of records) fold = foldTrustStreamRecord(fold, body);
+    const events = [...fold.events];
     if (events.length > 0) replayTrustChain(events);
     return events;
   }
@@ -352,12 +537,10 @@ export class FileMeshBootstrapStore
 
   async #loadTrustRecordByReplay(): Promise<HomeTrustRecord | undefined> {
     const records = await this.#log.readStream<TrustStreamRecord>("trust");
-    const events: HomeTrustEvent[] = [];
-    let latest: HomeTrustRecord | HistoricalHomeTrustRecord | undefined;
-    for (const { body } of records) {
-      if (body.t === "home-trust-event") events.push(body.event);
-      else if (body.t === "home-trust-record") latest = body.record;
-    }
+    let fold = EMPTY_TRUST_STREAM_FOLD;
+    for (const { body } of records) fold = foldTrustStreamRecord(fold, body);
+    const events = fold.events;
+    const latest = fold.record;
     if (events.length === 0) return undefined;
     const projection = replayTrustChain(events);
     // 只读访问者不能补签：最新快照仍是 v1 历史帧时与当前快照读者给出同一错误
@@ -383,13 +566,13 @@ export class FileMeshBootstrapStore
       readonly lsn: number;
       readonly commit: RecoveryActivationAtomicCommit;
     }> = [];
-    const trustEvents: HomeTrustEvent[] = [];
+    let trustFold = EMPTY_TRUST_STREAM_FOLD;
 
     for (const envelope of snapshot.commits) {
       for (const entry of envelope.entries) {
         const body = entry.body;
-        if (entry.stream === "trust" && body.t === "home-trust-event") {
-          trustEvents.push(body.event);
+        if (entry.stream === "trust") {
+          trustFold = foldTrustStreamRecord(trustFold, body);
           continue;
         }
         if (
@@ -404,6 +587,7 @@ export class FileMeshBootstrapStore
       }
     }
 
+    const trustEvents = trustFold.events;
     if (trustEvents.length === 0) return undefined;
     const current = replayTrustChain(trustEvents);
     if (current.recoveryActivationDigest !== input.activationDigest) return undefined;
@@ -468,16 +652,14 @@ export class FileMeshBootstrapStore
       throw new Error("Recovery root activation historical tuple is incomplete");
     }
 
-    const historicalEvents: HomeTrustEvent[] = [];
+    let historicalFold = EMPTY_TRUST_STREAM_FOLD;
     for (const envelope of snapshot.commits) {
       if (envelope.lsn > match.lsn) break;
       for (const entry of envelope.entries) {
-        if (entry.stream === "trust" && entry.body.t === "home-trust-event") {
-          historicalEvents.push(entry.body.event);
-        }
+        if (entry.stream === "trust") historicalFold = foldTrustStreamRecord(historicalFold, entry.body);
       }
     }
-    const historical = replayTrustChain(historicalEvents);
+    const historical = replayTrustChain(historicalFold.events);
     const event = plan.rootEvent;
     const record = activationRecords[0]!;
     if (
@@ -558,18 +740,13 @@ export class FileMeshBootstrapStore
     readonly record?: HomeTrustRecord;
   }): Promise<TrustProjection> {
     const result = await this.#log.transactProjection<
-      readonly HomeTrustEvent[],
+      TrustStreamFold,
       TrustStreamRecord,
       TrustProjection
     >(
-      [],
-      (events, record) => {
-        if (record.body.t !== "home-trust-event") return events;
-        const next = [...events, record.body.event];
-        replayTrustChain(next);
-        return next;
-      },
-      (events) => {
+      EMPTY_TRUST_STREAM_FOLD,
+      (state, record) => foldTrustStreamRecord(state, record.body),
+      ({ events }) => {
         if (events.length === 0) throw new Error("Trust chain genesis is missing");
         const current = replayTrustChain(events);
         const projection = applyTrustEvent(current, input.event);
@@ -598,14 +775,12 @@ export class FileMeshBootstrapStore
       throw new TypeError("Recovery root lifecycle requires one or two trust events");
     }
     await this.#log.transactProjection<
-      { readonly events: readonly HomeTrustEvent[]; readonly record?: HomeTrustRecord | HistoricalHomeTrustRecord },
+      TrustStreamFold,
       TrustStreamRecord,
       void
     >(
-      { events: [] },
-      (state, entry) => entry.body.t === "home-trust-event"
-        ? { ...state, events: [...state.events, entry.body.event] }
-        : { ...state, record: entry.body.record },
+      EMPTY_TRUST_STREAM_FOLD,
+      (state, entry) => foldTrustStreamRecord(state, entry.body),
       (state) => {
         const exactEvents = state.events.slice(-input.events.length);
         if (state.record && canonicalize(exactEvents) === canonicalize(input.events)) {
@@ -643,18 +818,14 @@ export class FileMeshBootstrapStore
     readonly record: HomeTrustRecord;
   }): Promise<TrustProjection> {
     const result = await this.#log.transactProjection<
-      readonly HomeTrustEvent[],
+      TrustStreamFold,
       TrustStreamRecord,
       TrustProjection
     >(
-      [],
-      (events, logical) => {
-        if (logical.body.t !== "home-trust-event") return events;
-        const next = [...events, logical.body.event];
-        replayTrustChain(next);
-        return next;
-      },
-      (events) => {
+      EMPTY_TRUST_STREAM_FOLD,
+      (state, logical) => foldTrustStreamRecord(state, logical.body),
+      ({ events, record: latestRecord }) => {
+        const recordHead = latestRecord?.chainHead;
         if (events.length === 0) throw new Error("Trust chain genesis is missing");
         const current = replayTrustChain(events);
         if (
@@ -663,7 +834,16 @@ export class FileMeshBootstrapStore
           canonicalize(current.chainHead) === canonicalize(input.record.chainHead)
         ) {
           verifyHomeTrustRecord(input.record, current);
-          return { kind: "return", value: current };
+          if (recordHead && canonicalize(recordHead) === canonicalize(current.chainHead)) {
+            return { kind: "return", value: current };
+          }
+          // 链头已在本机而签名记录没跟上（迁居源端提交时只追加了 issuer-transition 事件）：补上这条记录，
+          // 本机前缀才完整，之后才能向新值班设备对齐信任
+          return {
+            kind: "append",
+            entries: [{ stream: "trust", body: { t: "home-trust-record", record: input.record } }],
+            value: current,
+          };
         }
         const projection = applyTrustEvent(current, input.event);
         verifyHomeTrustRecord(input.record, projection);
@@ -688,18 +868,13 @@ export class FileMeshBootstrapStore
     readonly localDeviceId: string;
   }): Promise<TrustProjection> {
     const result = await this.#log.transactProjection<
-      readonly HomeTrustEvent[],
+      TrustStreamFold,
       TrustStreamRecord,
       TrustProjection
     >(
-      [],
-      (events, logical) => {
-        if (logical.body.t !== "home-trust-event") return events;
-        const next = [...events, logical.body.event];
-        replayTrustChain(next);
-        return next;
-      },
-      (events) => {
+      EMPTY_TRUST_STREAM_FOLD,
+      (state, logical) => foldTrustStreamRecord(state, logical.body),
+      ({ events }) => {
         if (events.length === 0) throw new Error("Trust chain genesis is missing");
         const current = replayTrustChain(events);
         if (input.record.homeId !== current.homeId) {
@@ -756,15 +931,10 @@ export class FileMeshBootstrapStore
     ) {
       throw new Error("Trust bootstrap does not activate the local device");
     }
-    await this.#log.transactProjection<readonly HomeTrustEvent[], TrustStreamRecord, void>(
-      [],
-      (events, logical) => {
-        if (logical.body.t !== "home-trust-event") return events;
-        const next = [...events, logical.body.event];
-        replayTrustChain(next);
-        return next;
-      },
-      (events) => {
+    await this.#log.transactProjection<TrustStreamFold, TrustStreamRecord, void>(
+      EMPTY_TRUST_STREAM_FOLD,
+      (state, logical) => foldTrustStreamRecord(state, logical.body),
+      ({ events }) => {
         if (events.length > 0) {
           if (canonicalize(events) !== canonicalize(input.events)) {
             throw new Error("Local device already belongs to another trust chain");
@@ -840,7 +1010,7 @@ export class FileMeshBootstrapStore
   }
 
   async acceptEndpoint(value: unknown): Promise<MeshEndpointDescriptor> {
-    return this.#endpointWrites.run(async () => {
+    const accepted = await this.#endpointWrites.run(async () => {
       const directory = await this.loadEndpoints();
       const accepted = directory.accept(value);
       await writeDurableJson(this.#endpointFile, {
@@ -849,11 +1019,28 @@ export class FileMeshBootstrapStore
       } satisfies PersistedEndpointDirectory);
       return accepted;
     });
+    // 调用方都已按发布者核过描述设备（端点服务按连接对端、配对按配对双方）；只为链上成员记目录
+    const publisher = await this.#currentTrustMember(accepted.deviceId);
+    if (publisher) await recordMemberEndpoint(this.#log, accepted, publisher.device);
+    return accepted;
   }
 
-  /** 按设备精确读一份传输身份：启动、信任变更与终态解析都只读需要的那几份。 */
+  /**
+   * 按设备精确读一份传输身份：启动、信任变更与终态解析都只读需要的那几份。本地没有时（继任值班设备
+   * 上的成员）按成员连接目录精确读，且须与当前信任里该成员的公钥一致。
+   */
   async transportPeer(deviceId: string): Promise<TrustedMeshPeer | undefined> {
-    return await readTransportPeerFile(this.#transportPeerFile(deviceId), deviceId);
+    const local = await readTransportPeerFile(this.#transportPeerFile(deviceId), deviceId);
+    if (local) return local;
+    const member = await this.#currentTrustMember(deviceId);
+    return member ? readMemberTransport(this.#log, deviceId, member.device) : undefined;
+  }
+
+  async #currentTrustMember(deviceId: string) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: "return" as const,
+      value: await readCurrentTrustMember(view, deviceId),
+    }))).value;
   }
 
   /** 已知对端清单：只供灾备、备份这类人工命令枚举，启动与常驻路径不调用。 */
@@ -883,11 +1070,14 @@ export class FileMeshBootstrapStore
       if (existing && canonicalize(existing) !== canonicalize(accepted)) {
         throw new Error("Authenticated mesh peer transport identity changed");
       }
-      if (existing) return;
-      await writeDurableJson(file, {
-        v: 1,
-        peer: accepted,
-      } satisfies PersistedTransportPeer);
+      if (!existing) {
+        await writeDurableJson(file, {
+          v: 1,
+          peer: accepted,
+        } satisfies PersistedTransportPeer);
+      }
+      // 同时记进成员连接目录：继任值班设备经迁居前缀拿到它，不必与每台成员重新配对
+      await recordMemberTransport(this.#log, accepted);
     });
   }
 
@@ -936,6 +1126,7 @@ async function readTransportPeerFile(
 
 interface PairingProjection {
   readonly trustEvents: readonly HomeTrustEvent[];
+  readonly trustStaged?: TrustStreamFold["staged"];
   readonly attempts: ReadonlyMap<string, {
     readonly admission: PairingAttemptAdmission;
     readonly status: "started" | "failed" | "succeeded";
@@ -956,6 +1147,7 @@ type RecoveryStreamRecord =
 
 interface RecoveryProjection {
   readonly trustEvents: readonly HomeTrustEvent[];
+  readonly trustStaged?: TrustStreamFold["staged"];
   readonly checkpointRecords: readonly CheckpointStreamRecord[];
   readonly activations: ReadonlyMap<string, RecoveryActivationAtomicCommit>;
 }
@@ -1342,15 +1534,22 @@ function emptyPairingProjection(): PairingProjection {
   return { trustEvents: [], attempts: new Map() };
 }
 
+/** 配对与恢复投影里的信任链：沿共用折叠认得分支接续，链有变化时整链核对。 */
+function foldProjectionTrust<State extends { readonly trustEvents: readonly HomeTrustEvent[]; readonly trustStaged?: TrustStreamFold["staged"] }>(
+  state: State,
+  body: unknown,
+): State {
+  const fold = foldTrustStreamRecord({ events: state.trustEvents, staged: state.trustStaged ?? EMPTY_TRUST_STREAM_FOLD.staged }, body);
+  if (fold.events === state.trustEvents && fold.staged === (state.trustStaged ?? EMPTY_TRUST_STREAM_FOLD.staged)) return state;
+  if (fold.events !== state.trustEvents) replayTrustChain(fold.events);
+  return { ...state, trustEvents: fold.events, trustStaged: fold.staged };
+}
+
 function reducePairingProjection(
   state: PairingProjection,
   record: { readonly stream: string; readonly body: BootstrapRecord },
 ): PairingProjection {
-  if (record.stream === "trust" && record.body.t === "home-trust-event") {
-    const trustEvents = [...state.trustEvents, record.body.event];
-    replayTrustChain(trustEvents);
-    return { ...state, trustEvents };
-  }
+  if (record.stream === "trust") return foldProjectionTrust(state, record.body);
   if (record.stream !== "pairing") return state;
   const body = record.body;
   const attempts = new Map(state.attempts);
@@ -1404,13 +1603,12 @@ function reduceRecoveryProjection(
   record: { readonly stream: string; readonly body: RecoveryStreamRecord },
 ): RecoveryProjection {
   const body = record.body;
-  if (record.stream === "trust" && body.t === "home-trust-event") {
-    const trustEvents = [...state.trustEvents, body.event];
-    replayTrustChain(trustEvents);
-    return { ...state, trustEvents };
-  }
+  if (record.stream === "trust") return foldProjectionTrust(state, body);
   if (record.stream !== "checkpoint") return state;
-  if (body.t === "home-trust-event" || body.t === "home-trust-record") {
+  if (
+    body.t === "home-trust-event" || body.t === "home-trust-record" ||
+    body.t === "home-trust-branch-staged" || body.t === "home-trust-branch-adopted"
+  ) {
     throw new Error("Trust record was written to the checkpoint stream");
   }
   if (body.t === "recovery-activation-committed") {

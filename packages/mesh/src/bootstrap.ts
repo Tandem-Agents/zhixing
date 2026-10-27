@@ -1,4 +1,4 @@
-import { createHmac, hkdfSync, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import type {
   BlindRendezvousHello,
   DeviceRole,
@@ -339,6 +339,64 @@ export function derivePairwiseRendezvousSecret(
   ).toString("base64url");
 }
 
+export interface SealedPairingDiscoverySecret {
+  readonly nonce: string;
+  readonly ciphertext: string;
+}
+
+const PAIRING_DISCOVERY_KEY_INFO = Buffer.from("zhixing:pairing:home-discovery:key:v1", "utf8");
+const PAIRING_DISCOVERY_NONCE_INFO = Buffer.from("zhixing:pairing:home-discovery:nonce:v1", "utf8");
+
+/**
+ * 配对时随 committed 帧下发家级 discovery 秘密：配对帧本身明文，秘密用配对会话钥派生的钥封装。
+ * nonce 同样由会话钥派生，同一秘密的续做重发得到逐字节相同的帧（同钥同明文，不产生 nonce 复用风险）。
+ */
+export function sealPairingDiscoverySecret(
+  sharedKeyMaterial: Uint8Array | string,
+  secret: string,
+): SealedPairingDiscoverySecret {
+  assertTerminalRouteSecret(secret);
+  const { key, nonce } = pairingDiscoveryKeys(sharedKeyMaterial);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(PAIRING_DISCOVERY_KEY_INFO);
+  const sealed = Buffer.concat([cipher.update(secret, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  key.fill(0);
+  return { nonce: nonce.toString("base64url"), ciphertext: sealed.toString("base64url") };
+}
+
+export function openPairingDiscoverySecret(
+  sharedKeyMaterial: Uint8Array | string,
+  sealed: SealedPairingDiscoverySecret,
+): string {
+  const { key, nonce } = pairingDiscoveryKeys(sharedKeyMaterial);
+  if (sealed.nonce !== nonce.toString("base64url")) throw new TypeError("Pairing discovery secret nonce is invalid");
+  const bytes = Buffer.from(sealed.ciphertext, "base64url");
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+  decipher.setAAD(PAIRING_DISCOVERY_KEY_INFO);
+  decipher.setAuthTag(bytes.subarray(bytes.byteLength - 16));
+  let secret: string;
+  try {
+    secret = Buffer.concat([decipher.update(bytes.subarray(0, bytes.byteLength - 16)), decipher.final()]).toString("utf8");
+  } catch {
+    throw new TypeError("Pairing discovery secret failed authentication");
+  } finally {
+    key.fill(0);
+  }
+  assertTerminalRouteSecret(secret);
+  return secret;
+}
+
+function pairingDiscoveryKeys(sharedKeyMaterial: Uint8Array | string): { key: Buffer; nonce: Buffer } {
+  const input = typeof sharedKeyMaterial === "string"
+    ? Buffer.from(sharedKeyMaterial, "utf8")
+    : Buffer.from(sharedKeyMaterial);
+  if (input.byteLength < 16) throw new TypeError("Pairing key material must contain at least 128 bits");
+  return {
+    key: Buffer.from(hkdfSync("sha256", input, Buffer.alloc(0), PAIRING_DISCOVERY_KEY_INFO, 32)),
+    nonce: Buffer.from(hkdfSync("sha256", input, Buffer.alloc(0), PAIRING_DISCOVERY_NONCE_INFO, 12)),
+  };
+}
+
 export async function persistPairwiseRendezvousSecret(
   store: SecretStorePort,
   peerDeviceId: string,
@@ -422,6 +480,39 @@ export function currentAndPreviousTerminalRendezvousKeys(
   return Object.freeze([
     deriveTerminalRendezvousKey(secret, now),
     deriveTerminalRendezvousKey(secret, now - RENDEZVOUS_WINDOW_MS),
+  ]) as readonly [RendezvousKey, RendezvousKey];
+}
+
+/**
+ * 家级发现入口的会合键：按用途分域（成员发现用 discovery 秘密，终态取证用 terminal 秘密），
+ * 与终态入口、成员逐对入口都不同域；只有当前 issuer 注册，按 UTC 日轮换。
+ */
+export function deriveDiscoveryRendezvousKey(
+  secret: string,
+  purpose: "member" | "terminal",
+  windowAt: number | Date = Date.now(),
+): RendezvousKey {
+  assertTerminalRouteSecret(secret);
+  if (purpose !== "member" && purpose !== "terminal") throw new TypeError("Discovery purpose is invalid");
+  const timestamp = windowAt instanceof Date ? windowAt.getTime() : windowAt;
+  if (!Number.isFinite(timestamp)) throw new TypeError("Rendezvous window time is invalid");
+  const date = new Date(timestamp).toISOString().slice(0, 10);
+  const mac = createHmac("sha256", Buffer.from(secret, "base64url"))
+    .update(Buffer.from(`zhixing:rendezvous:discovery:${purpose}:v1`, "utf8"))
+    .update(Buffer.from([0]))
+    .update(date, "utf8")
+    .digest("hex");
+  return `rzv:${mac}`;
+}
+
+export function currentAndPreviousDiscoveryRendezvousKeys(
+  secret: string,
+  purpose: "member" | "terminal",
+  now = Date.now(),
+): readonly [RendezvousKey, RendezvousKey] {
+  return Object.freeze([
+    deriveDiscoveryRendezvousKey(secret, purpose, now),
+    deriveDiscoveryRendezvousKey(secret, purpose, now - RENDEZVOUS_WINDOW_MS),
   ]) as readonly [RendezvousKey, RendezvousKey];
 }
 

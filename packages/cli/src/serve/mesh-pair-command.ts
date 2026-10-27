@@ -25,10 +25,18 @@ import {
   createMeshEndpointDescriptor,
   deletePairwiseRendezvousSecret,
   derivePairwiseRendezvousSecret,
+  openPairingDiscoverySecret,
   persistPairwiseRendezvousSecret,
+  sealPairingDiscoverySecret,
   validateMeshEndpointDescriptor,
   validateRendezvousKey,
 } from "@zhixing/mesh/bootstrap";
+import {
+  ensureSealedHomeRouteMaterial,
+  loadOrCreateHomeRouteMaterial,
+  persistHomeDiscoverySecret,
+} from "./home-route-material.js";
+import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { encodeBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
 import { PairingCommitCoordinator } from "@zhixing/mesh/bootstrap-authority";
 import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
@@ -855,6 +863,15 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
         joiner: joinerProof.proof,
       }),
     };
+    // 成员发现材料先于 enroll 密封给恢复备份钥：同一流程里密封记录在前，任何包含这台新成员的完整检查点
+    // 也包含它的发现材料（成员在恢复基线里 ⇔ 发现材料在基线里）
+    if (projection.recoveryBackupPublicKey) {
+      await ensureSealedHomeRouteMaterial(input.store.authorityLog(), {
+        material: await loadOrCreateHomeRouteMaterial(input.secretStore, projection.homeId),
+        backupPublicKey: projection.recoveryBackupPublicKey,
+        backupKeyId: keyIdForPublicKey(projection.recoveryBackupPublicKey),
+      });
+    }
     await coordinator.commit({
       current: projection,
       offer: material.offer,
@@ -880,6 +897,11 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
       trustRecord,
       issuerRootCertificatePem: input.key.rootCertificatePem,
       issuerEndpoint,
+      // 成员发现材料：值班设备更替后，离线回来的成员凭它找到现任
+      homeDiscovery: sealPairingDiscoverySecret(
+        sessionKey,
+        (await loadOrCreateHomeRouteMaterial(input.secretStore, trustRecord.homeId)).discovery,
+      ),
     } satisfies PairingCommittedMessage);
     const acknowledged = await receivePairingFrame(transport);
     if (!isRecord(acknowledged) || acknowledged.t !== "bootstrap-complete") {
@@ -1081,6 +1103,7 @@ async function joinPairing(input: PairingRuntimeInput): Promise<void> {
     await sendPairingFrame(socket, { t: "joiner-proof", proof } satisfies JoinerProofMessage);
     const committed = asCommitted(await receivePairingFrame(socket));
     validateCommitted(invitation, join, sessionKey, committed);
+    await persistCommittedHomeDiscovery(input.secretStore, sessionKey, committed);
     const bootstrapContinuation: PairingJoinerContinuation = {
       ...continuation,
       phase: "bootstrap-ready",
@@ -1161,6 +1184,10 @@ async function resumeIssuerPairing(input: {
     trustRecord,
     issuerRootCertificatePem: input.input.key.rootCertificatePem,
     issuerEndpoint: continuation.issuerEndpoint,
+    homeDiscovery: sealPairingDiscoverySecret(
+      input.sessionKey,
+      (await loadOrCreateHomeRouteMaterial(input.input.secretStore, trustRecord.homeId)).discovery,
+    ),
   } satisfies PairingCommittedMessage);
   const acknowledged = await receivePairingFrame(input.transport);
   if (!isRecord(acknowledged) || acknowledged.t !== "bootstrap-complete") {
@@ -1215,6 +1242,7 @@ async function resumeJoinerPairing(input: {
       sessionKey,
       committed,
     );
+    await persistCommittedHomeDiscovery(input.input.secretStore, sessionKey, committed);
     if (
       input.continuation.phase === "bootstrap-ready" &&
       canonicalize(stripCommittedFrame(committed)) !==
@@ -2036,7 +2064,22 @@ function stripCommittedFrame(
     trustRecord: committed.trustRecord,
     issuerRootCertificatePem: committed.issuerRootCertificatePem,
     issuerEndpoint: committed.issuerEndpoint,
+    ...(committed.homeDiscovery ? { homeDiscovery: committed.homeDiscovery } : {}),
   };
+}
+
+/** 加入方在验过提交之后解封成员发现材料并入库（读回核对）；旧值班设备未下发时不写。 */
+async function persistCommittedHomeDiscovery(
+  secretStore: SecretStorePort,
+  sessionKey: Buffer | string,
+  committed: PairingCommittedMessage,
+): Promise<void> {
+  if (!committed.homeDiscovery) return;
+  await persistHomeDiscoverySecret(
+    secretStore,
+    committed.trustRecord.homeId,
+    openPairingDiscoverySecret(sessionKey, committed.homeDiscovery),
+  );
 }
 
 function restoreInvitation(

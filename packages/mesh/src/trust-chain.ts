@@ -99,6 +99,40 @@ export function initializeTrustChain(genesis: HomeTrustEvent): TrustProjection {
   });
 }
 
+/** 一条事件按状态转移规则要看到的成员：现任 issuer、目标设备、共签者、继任设备。 */
+export function trustEventMemberIds(issuerDeviceId: string, event: HomeTrustEvent): readonly string[] {
+  const ids = new Set([issuerDeviceId]);
+  switch (event.body.t) {
+    case "enroll": ids.add(event.body.device.deviceId); break;
+    case "reenroll": case "role-change": case "revoke": ids.add(event.body.deviceId); break;
+    case "domain-reset": ids.add(event.body.coSign.deviceId); break;
+    case "issuer-transition": ids.add(event.body.toDeviceId); break;
+  }
+  return [...ids];
+}
+
+/**
+ * 在不含已撤销历史设备的投影上应用一条事件：先把事件引用到、投影里没有的历史成员按键补进来（historical 只返回
+ * 在投影基点之前已撤销的设备），再按原规则应用——重复配对、撤销已撤销设备等校验不因投影收窄而漏掉。
+ */
+export async function applyTrustEventWithHistory(
+  current: TrustProjection,
+  event: HomeTrustEvent,
+  historical: (deviceId: string) => Promise<TrustProjection["members"][number] | undefined>,
+): Promise<TrustProjection> {
+  const missing = trustEventMemberIds(current.issuer.deviceId, event)
+    .filter((id) => !current.members.some((member) => member.device.deviceId === id));
+  const added: TrustProjection["members"][number][] = [];
+  for (const id of missing) {
+    const member = await historical(id);
+    if (member) {
+      if (member.state !== "revoked") throw new TypeError("Historical trust member must be revoked");
+      added.push(member);
+    }
+  }
+  return applyTrustEvent(added.length ? { ...current, members: [...current.members, ...added] } : current, event);
+}
+
 export function replayTrustChain(events: readonly HomeTrustEvent[]): TrustProjection {
   const [genesis, ...rest] = events;
   if (!genesis) throw new TypeError("Trust chain is empty");
@@ -769,8 +803,75 @@ export function assertRecoveryKeyPair(rootPublicKey: string, backupPublicKey: st
   importEncodedPublicKey(rootPublicKey, "ed25519");
   importEncodedPublicKey(backupPublicKey, "x25519");
 }
+/**
+ * trust 流里的分支接续（合法灾备后离线成员接续当前权威分支）：分页暂存新分支，不改当前链；最后一条原子切换到
+ * 新分支。旧分支事件仍在 WAL 里，不删除也不当新事实重放。
+ */
+export interface HomeTrustBranchStagedRecord {
+  readonly t: "home-trust-branch-staged";
+  readonly adoptionId: string;
+  readonly ancestor: TrustProjection["chainHead"];
+  readonly superseded: TrustProjection["chainHead"];
+  readonly events: readonly HomeTrustEvent[];
+  /** 本页灾备转移对应的根签 commit（证明恢复已提交）。 */
+  readonly recoveryCommits: readonly unknown[];
+}
+
+export interface HomeTrustBranchAdoptedRecord {
+  readonly t: "home-trust-branch-adopted";
+  readonly adoptionId: string;
+  readonly record: HomeTrustRecord;
+}
+
+/** 接续标识：祖先、被替代链头与新分支首条事件；崩溃后重做发现得到同一标识，按暂存进度续做。 */
+export function trustBranchAdoptionId(
+  ancestor: TrustProjection["chainHead"],
+  superseded: TrustProjection["chainHead"],
+  firstEventDigest: string,
+): string {
+  return protocolDigest("HomeTrustBranchAdoption", 1, { ancestor, superseded, first: firstEventDigest });
+}
+
+/** 按记录顺序折叠 trust 流得到的当前链：遇分支接续时截到祖先并接上已暂存的新分支。 */
+export interface TrustStreamFold {
+  readonly events: readonly HomeTrustEvent[];
+  readonly record?: HomeTrustRecord | HistoricalHomeTrustRecord;
+  readonly staged: ReadonlyMap<string, readonly HomeTrustEvent[]>;
+}
+
+export const EMPTY_TRUST_STREAM_FOLD: TrustStreamFold = Object.freeze({ events: Object.freeze([]), staged: new Map() });
+
+/** 所有按流折叠信任事件的读者共用：日志已认证，校验由当前信任投影在写入前完成，调用方按需再整链重放核对。 */
+export function foldTrustStreamRecord(state: TrustStreamFold, body: unknown): TrustStreamFold {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return state;
+  const record = body as { readonly t?: unknown };
+  if (record.t === "home-trust-event") {
+    return { ...state, events: [...state.events, (body as { readonly event: HomeTrustEvent }).event] };
+  }
+  if (record.t === "home-trust-record") {
+    return { ...state, record: (body as { readonly record: HomeTrustRecord | HistoricalHomeTrustRecord }).record };
+  }
+  if (record.t === "home-trust-branch-staged") {
+    const staged = body as HomeTrustBranchStagedRecord;
+    const next = new Map(state.staged);
+    next.set(staged.adoptionId, [...(next.get(staged.adoptionId) ?? []), ...staged.events]);
+    return { ...state, staged: next };
+  }
+  if (record.t === "home-trust-branch-adopted") {
+    const adopted = body as HomeTrustBranchAdoptedRecord;
+    const branch = state.staged.get(adopted.adoptionId);
+    if (!branch?.length) throw new TypeError("Trust branch adoption has no staged branch");
+    const next = new Map(state.staged);
+    next.delete(adopted.adoptionId);
+    return { events: [...state.events.slice(0, branch[0]!.seq), ...branch], record: adopted.record, staged: next };
+  }
+  return state;
+}
+
 export { CURRENT_TRUST_PROJECTION_ID, currentTrustIndex, readCurrentTrust, readCurrentTrustRecord,
   readTrustIdentity, readTrustGenesis, readAnchorTenureAt, readCurrentAnchorTenure, readCurrentTrustMember,
   readVerifiedTrustProgress, readTrustReconciliationPage, readTrustEventByDigest, readLegacyClosedTrust,
+  readVerifiedTrustIssuer, readTrustBranchProgress, readSupersededTrustEvents,
+  readTrustProjectionAt, readStagedTrustBranch, readTrustEventAt, readTrustEventsAfter, readRevokedTrustMemberAt,
   LEGACY_TRUST_RECORD_MESSAGE } from "./trust-current-index.js";
 export type { CurrentTrustProjection, VerifiedTrustIdentity, VerifiedAnchorTenure } from "./trust-current-index.js";

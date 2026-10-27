@@ -11,6 +11,7 @@ import type {
   HomeTrustEventWithBody,
   HomeTrustEventBody,
   HomeTrustRecord,
+  JsonValue,
   LogicalRecord,
   ReadyProof,
   SecretStorePort,
@@ -20,8 +21,11 @@ import type {
   ArtifactReceiveProgress,
   ArtifactStore,
   ArtifactCheckpointRetentionPort,
+  AuthorityCacheIntegrity,
   AuthorityAppendAdmissionGuard,
   DurableLogCheckpoint,
+  DurableProjectionMutation,
+  DurableProjectionReadContext,
   IdentifiedPhysicalStepRunner,
   PhysicalStorageStepRunner,
   PlannedAnchorPrefixInstallation,
@@ -33,7 +37,7 @@ import type {
   ProjectionTransactionReducer,
   ProjectionTransactionResult,
 } from "@zhixing/core/authority";
-import { collectArtifactRefs } from "@zhixing/core/authority";
+import { collectArtifactRefs, DurableProjectionRecordBindingError } from "@zhixing/core/authority";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   runStorageMaintenanceStep,
@@ -79,9 +83,21 @@ import {
 } from "@zhixing/mesh/trust-chain";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
+  installHomeRouteMaterial,
+  loadOrCreateHomeRouteMaterial,
+  loadStagedHomeRouteMaterial,
+  stageHomeRouteMaterial,
+  type HomeRouteMaterial,
+} from "./home-route-material.js";
+import {
+  PLANNED_POST_INSTALL_STREAM,
+  readAnchorInstallationState,
+  recordAnchorInstallationCompletion,
+  type AnchorInstallationIndexPort,
+} from "./anchor-installation-index.js";
+import {
   ANCHOR_CANDIDATE_STREAM,
   assertTargetWideAnchorCandidateAvailable,
-  emptyTargetWideAnchorCandidates,
   reduceTargetWideAnchorCandidateRecord,
   reduceTargetWideAnchorCandidates,
   targetWideAnchorCandidateClaim,
@@ -192,6 +208,8 @@ interface PlannedAnchorCandidateState {
   readonly terminal?: PlannedAnchorCandidateTerminal;
   readonly abort?: AnchorTransferAbort;
   readonly releaseDelivered?: true;
+  /** 目标端：只领了声明或已中止的候选，其本机清理已确认完成。 */
+  readonly cleaned?: true;
 }
 
 type PlannedAnchorCandidateRecord =
@@ -228,6 +246,11 @@ type PlannedAnchorCandidateRecord =
   | {
       readonly v: 1;
       readonly t: "planned-anchor-candidate-release-delivered";
+      readonly identity: PlannedAnchorCandidateIdentity;
+    }
+  | {
+      readonly v: 1;
+      readonly t: "planned-anchor-candidate-cleaned";
       readonly identity: PlannedAnchorCandidateIdentity;
     };
 
@@ -270,11 +293,19 @@ export interface PlannedAnchorTargetReadinessSummary {
 
 export interface PlannedAnchorTransferArtifactSourcePort {
   applyArtifactCommand(command: AnchorTransferCommand): Promise<AnchorTransferResult>;
+  /**
+   * 家级路由材料：源端只交给已冻结、尚未终结的本次迁居的目标（requester 是经认证的目标设备）。
+   * 经已认证的迁居连接传输，不写入任何制品或日志。
+   */
+  routeMaterial?(transferId: string, requesterDeviceId: string): Promise<HomeRouteMaterial>;
 }
 
 export interface PlannedAnchorCandidateJournalPort {
   state(transferId: string): Promise<PlannedAnchorCandidateState | undefined>;
   states(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>>;
+  /** 未完候选（终态未定、已释放未投递、清理未确认），启动恢复只遍历它。 */
+  unfinishedStates(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>>;
+  markCleaned(identity: PlannedAnchorCandidateIdentity): Promise<PlannedAnchorCandidateState>;
   claimCandidate(
     identity: PlannedAnchorCandidateIdentity,
   ): Promise<PlannedAnchorCandidateState>;
@@ -352,6 +383,8 @@ export interface PlannedAnchorTransferStagingArea {
   openTarget(input: Readonly<{
     artifacts: ArtifactStore;
     verifier: ProtocolSignatureVerifier;
+    /** 同一 home 的缓存密钥：候选日志是启动必经的辅助写日志，带上即开启启动证明。 */
+    integrity?: AuthorityCacheIntegrity;
   }>): PlannedAnchorTargetStaging;
   openTransfer(input: Readonly<{
     transferId: string;
@@ -362,7 +395,7 @@ export interface PlannedAnchorTransferStagingArea {
   close(): Promise<void>;
 }
 
-interface PlannedAnchorAuthorityReadPort {
+interface PlannedAnchorAuthorityReadPort extends AnchorInstallationIndexPort {
   readStream<Body = unknown>(
     stream: string,
   ): Promise<Array<{ lsn: number; at: string; body: Body }>>;
@@ -402,6 +435,9 @@ export interface PlannedAnchorJournalStorage {
       | Promise<ProjectionTransactionDecision<Body, Value>>,
     options?: ProjectionTransactionOptions,
   ): Promise<ProjectionTransactionResult<State, Body, Value>>;
+  // 迁居与候选的按键投影（未完目录与按 transferId 精确读）
+  durableProjection: import("@zhixing/core/authority").AuthorityCommitLog["durableProjection"];
+  transactDurableProjection: import("@zhixing/core/authority").AuthorityCommitLog["transactDurableProjection"];
   stopStorageMaintenance(): Promise<void>;
 }
 
@@ -447,19 +483,260 @@ interface PlannedAnchorCandidateProjection {
   readonly installedTransfers: ReadonlySet<string>;
 }
 
+/**
+ * 迁居与候选日志的按键投影：状态按 transferId 精确读，另有进行中的迁居、未完候选、进行中的全目标候选
+ * 与“本机源端按任期”目录。启动恢复与各事务只读这几个目录与本次 transferId 的键，与历史迁居（含导入
+ * 前缀）的数量无关。归约对每条记录组装只含相关键的小投影，沿用原有 reduceCandidateProjection。
+ */
+const PLANNED_JOURNAL_PROJECTION_ID = "planned-anchor-journal-v1";
+const PLANNED_CANDIDATES_PROJECTION_ID = "planned-anchor-candidates-v1";
+const PLANNED_JOURNAL_KEYS = Object.freeze({
+  transfer: "transfer/",
+  candidate: "candidate/",
+  targetWide: "target-wide/",
+  installed: "installed/",
+  openTransfer: "open-transfer/",
+  openCandidate: "open-candidate/",
+  openTargetWide: "open-target-wide/",
+  own: "own/",
+});
+const plannedJournalIndexes = new WeakMap<object, { readonly verifier: ProtocolSignatureVerifier; readonly projectionId: string }>();
+
+function plannedJournalIdentity(value: Record<string, string>): string {
+  return protocolDigest("PlannedAnchorJournalIdentity", 1, value);
+}
+
+function plannedJournalKey(prefix: string, transferId: string): string {
+  return `${prefix}${plannedJournalIdentity({ transferId })}`;
+}
+
+function ownTransferPrefix(sourceDeviceId: string, sourceAnchorEpoch?: number): string {
+  const device = `${PLANNED_JOURNAL_KEYS.own}${plannedJournalIdentity({ deviceId: sourceDeviceId })}/`;
+  // 任期倒置排序：前缀扫描的第一条就是本机最近一次任期
+  return sourceAnchorEpoch === undefined
+    ? device
+    : `${device}${(Number.MAX_SAFE_INTEGER - sourceAnchorEpoch).toString().padStart(16, "0")}/`;
+}
+
+function registerPlannedJournalIndex(
+  log: PlannedAnchorJournalStorage,
+  verifier: ProtocolSignatureVerifier,
+  includeTransferState: boolean,
+): string {
+  const projectionId = includeTransferState ? PLANNED_JOURNAL_PROJECTION_ID : PLANNED_CANDIDATES_PROJECTION_ID;
+  const existing = plannedJournalIndexes.get(log);
+  if (existing) {
+    if (existing.projectionId !== projectionId || existing.verifier !== verifier) {
+      throw new TypeError("Planned migration journal index is already bound by another owner");
+    }
+    return projectionId;
+  }
+  log.durableProjection({
+    projectionId,
+    reducerVersion: 1,
+    authenticated: true,
+    inputs: {
+      streams: includeTransferState
+        ? [ANCHOR_CANDIDATE_STREAM, ANCHOR_TRANSFER_STREAM, "transfer:anchor-current"]
+        : [ANCHOR_CANDIDATE_STREAM],
+    },
+    reduce: (envelope, current) => reducePlannedJournalIndex(envelope, current, verifier, includeTransferState),
+  });
+  plannedJournalIndexes.set(log, { verifier, projectionId });
+  return projectionId;
+}
+
+function journalTransferIdOf(entry: LogicalRecord<unknown>): string | undefined {
+  if (!isRecord(entry.body)) return undefined;
+  if (entry.stream === ANCHOR_CANDIDATE_STREAM) {
+    return isRecord(entry.body.identity) && typeof entry.body.identity.transferId === "string"
+      ? entry.body.identity.transferId
+      : undefined;
+  }
+  if (entry.stream === ANCHOR_TRANSFER_STREAM) {
+    return typeof entry.body.transferId === "string" ? entry.body.transferId : undefined;
+  }
+  return entry.stream === "transfer:anchor-current" && isPlannedInstallation(entry.body)
+    ? entry.body.transferId
+    : undefined;
+}
+
+function journalRow<T>(value: JsonValue | undefined): T | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new DurableProjectionRecordBindingError("Planned migration journal index row is invalid");
+  }
+  return value as unknown as T;
+}
+
+async function journalDirectory(view: DurableProjectionReadContext, prefix: string): Promise<string[]> {
+  const ids: string[] = [];
+  let continuation: string | undefined;
+  do {
+    const page = await view.scan({ gte: prefix, lt: `${prefix}￿` }, 128, continuation);
+    for (const entry of page.entries) {
+      const row = journalRow<{ readonly transferId?: unknown }>(entry.value);
+      if (typeof row?.transferId !== "string") {
+        throw new DurableProjectionRecordBindingError("Planned migration journal directory row is invalid");
+      }
+      ids.push(row.transferId);
+    }
+    continuation = page.continuation;
+  } while (continuation);
+  return ids;
+}
+
+/** 组装只含给定 transferId 与各进行中集合的小投影；决定函数与归约照原样消费它。 */
+async function readPlannedJournalProjection(
+  view: DurableProjectionReadContext,
+  transferIds: readonly string[],
+  scope: { readonly openCandidates: boolean; readonly openTransfers: boolean },
+): Promise<PlannedAnchorCandidateProjection> {
+  const claims = new Map<string, PlannedAnchorCandidateState>();
+  const targetWideClaims = new Map<string, TargetWideAnchorCandidateState>();
+  const transfers = new Map<string, PlannedAnchorTransferState>();
+  const installedTransfers = new Set<string>();
+  const load = async (transferId: string) => {
+    const claim = journalRow<PlannedAnchorCandidateState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.candidate, transferId)));
+    if (claim) claims.set(transferId, claim);
+    const targetWide = journalRow<TargetWideAnchorCandidateState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.targetWide, transferId)));
+    if (targetWide) targetWideClaims.set(transferId, targetWide);
+    const transfer = journalRow<PlannedAnchorTransferState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.transfer, transferId)));
+    if (transfer) transfers.set(transferId, transfer);
+    if (await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.installed, transferId)) !== undefined) {
+      installedTransfers.add(transferId);
+    }
+  };
+  const ids = new Set(transferIds);
+  // 全目标候选的唯一性总要看进行中集合；其余集合按事务需要读
+  for (const id of await journalDirectory(view, PLANNED_JOURNAL_KEYS.openTargetWide)) ids.add(id);
+  if (scope.openCandidates) for (const id of await journalDirectory(view, PLANNED_JOURNAL_KEYS.openCandidate)) ids.add(id);
+  if (scope.openTransfers) for (const id of await journalDirectory(view, PLANNED_JOURNAL_KEYS.openTransfer)) ids.add(id);
+  for (const id of ids) await load(id);
+  return { claims, targetWideClaims, transfers, installedTransfers };
+}
+
+function unfinishedCandidate(candidate: PlannedAnchorCandidateState, includeTransferState: boolean): boolean {
+  if (candidate.terminal === undefined) return true;
+  if (candidate.terminal === "released" && !candidate.releaseDelivered) return true;
+  // 目标端：只领了声明或已中止的候选在清理确认前仍需恢复续做
+  return !includeTransferState && candidate.terminal !== "committed" && !candidate.cleaned;
+}
+
+async function reducePlannedJournalIndex(
+  envelope: CommitEnvelope<JsonValue>,
+  current: DurableProjectionReadContext,
+  verifier: ProtocolSignatureVerifier,
+  includeTransferState: boolean,
+): Promise<readonly DurableProjectionMutation[]> {
+  const changes: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const read: DurableProjectionReadContext = {
+    get: async (key) => overlay.has(key) ? overlay.get(key) : current.get(key),
+    scan: async (range, limit, continuation) => {
+      const page = await current.scan(range, limit, continuation);
+      // 本批已写的目录键覆盖底层结果：新增的补上、已删的去掉
+      const entries = page.entries.filter((entry) => !overlay.has(entry.key) || overlay.get(entry.key) !== undefined)
+        .map((entry) => overlay.has(entry.key) ? { ...entry, value: overlay.get(entry.key)! } : entry);
+      for (const [key, value] of overlay) {
+        if (value !== undefined && key >= range.gte! && key < range.lt! && !entries.some((entry) => entry.key === key)) {
+          entries.push({ key, value });
+        }
+      }
+      entries.sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
+      return { ...page, entries };
+    },
+  };
+  const put = (key: string, value: JsonValue) => { overlay.set(key, value); changes.push({ kind: "put", key, value }); };
+  const remove = (key: string) => { overlay.set(key, undefined); changes.push({ kind: "tombstone", key }); };
+  const sync = (key: string, before: unknown, after: unknown) => {
+    if (canonicalize(before ?? null) === canonicalize(after ?? null)) return;
+    if (after === undefined) remove(key);
+    else put(key, after as JsonValue);
+  };
+  for (const entry of envelope.entries) {
+    const transferId = journalTransferIdOf(entry);
+    if (transferId === undefined) continue;
+    const before = await readPlannedJournalProjection(read, [transferId], { openCandidates: false, openTransfers: false });
+    const after = await verifyProtocolStep(() => reduceCandidateProjection(before, entry, verifier, includeTransferState));
+    const directoryRow = { transferId };
+    // 已安装的迁居（含导入前缀里前任的迁居，其终态写在导出之后）不再是本机的未完工作
+    const installedBefore = before.installedTransfers.has(transferId);
+    const installedAfter = after.installedTransfers.has(transferId);
+    const claim = after.claims.get(transferId);
+    sync(plannedJournalKey(PLANNED_JOURNAL_KEYS.candidate, transferId), before.claims.get(transferId), claim);
+    sync(plannedJournalKey(PLANNED_JOURNAL_KEYS.openCandidate, transferId),
+      before.claims.has(transferId) && !installedBefore && unfinishedCandidate(before.claims.get(transferId)!, includeTransferState)
+        ? directoryRow : undefined,
+      claim && !installedAfter && unfinishedCandidate(claim, includeTransferState) ? directoryRow : undefined);
+    const targetWide = after.targetWideClaims.get(transferId);
+    sync(plannedJournalKey(PLANNED_JOURNAL_KEYS.targetWide, transferId), before.targetWideClaims.get(transferId), targetWide);
+    sync(plannedJournalKey(PLANNED_JOURNAL_KEYS.openTargetWide, transferId),
+      before.targetWideClaims.get(transferId)?.terminal === undefined && before.targetWideClaims.has(transferId) ? directoryRow : undefined,
+      targetWide && targetWide.terminal === undefined ? directoryRow : undefined);
+    if (!includeTransferState) continue;
+    const transfer = after.transfers.get(transferId);
+    const priorTransfer = before.transfers.get(transferId);
+    sync(plannedJournalKey(PLANNED_JOURNAL_KEYS.transfer, transferId), priorTransfer, transfer);
+    const inProgress = (state: PlannedAnchorTransferState | undefined) =>
+      state !== undefined && state.phase !== "aborted" && state.phase !== "tombstoned";
+    sync(plannedJournalKey(PLANNED_JOURNAL_KEYS.openTransfer, transferId),
+      inProgress(priorTransfer) && !installedBefore ? directoryRow : undefined,
+      inProgress(transfer) && !installedAfter ? directoryRow : undefined);
+    if (transfer && !priorTransfer) {
+      put(`${ownTransferPrefix(transfer.identity.sourceDeviceId, transfer.identity.sourceAnchorEpoch)}${plannedJournalIdentity({ transferId })}`, directoryRow);
+    }
+    if (after.installedTransfers.has(transferId) && !before.installedTransfers.has(transferId)) {
+      put(plannedJournalKey(PLANNED_JOURNAL_KEYS.installed, transferId), directoryRow);
+    }
+  }
+  return changes;
+}
+
 export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJournalPort {
+  readonly #projectionId: string;
+
   constructor(
     private readonly log: PlannedAnchorJournalStorage,
     private readonly verifier: ProtocolSignatureVerifier,
     private readonly includeTransferState: boolean,
-  ) {}
-
-  async state(transferId: string): Promise<PlannedAnchorCandidateState | undefined> {
-    return (await this.#projection()).claims.get(transferId);
+  ) {
+    this.#projectionId = registerPlannedJournalIndex(log, verifier, includeTransferState);
   }
 
+  async state(transferId: string): Promise<PlannedAnchorCandidateState | undefined> {
+    return this.#read(async (view) =>
+      journalRow<PlannedAnchorCandidateState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.candidate, transferId))));
+  }
+
+  /** 显式历史查询：枚举全部候选。启动恢复与命令路径用 unfinishedStates。 */
   async states(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>> {
-    return (await this.#projection()).claims;
+    return this.#read(async (view) => {
+      const states = new Map<string, PlannedAnchorCandidateState>();
+      let continuation: string | undefined;
+      do {
+        const page = await view.scan({ gte: PLANNED_JOURNAL_KEYS.candidate, lt: `${PLANNED_JOURNAL_KEYS.candidate}￿` }, 128, continuation);
+        for (const entry of page.entries) {
+          const claim = journalRow<PlannedAnchorCandidateState>(entry.value)!;
+          states.set(claim.identity.transferId, claim);
+        }
+        continuation = page.continuation;
+      } while (continuation);
+      return states;
+    });
+  }
+
+  /** 未完候选：终态未定、已释放未投递，或（目标端）清理未确认。读取随未完工作数，与历史无关。 */
+  async unfinishedStates(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>> {
+    return this.#read(async (view) => {
+      const states = new Map<string, PlannedAnchorCandidateState>();
+      for (const transferId of await journalDirectory(view, PLANNED_JOURNAL_KEYS.openCandidate)) {
+        const claim = journalRow<PlannedAnchorCandidateState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.candidate, transferId)));
+        if (!claim) throw new DurableProjectionRecordBindingError("Planned migration candidate directory has no state");
+        states.set(transferId, claim);
+      }
+      return states;
+    });
   }
 
   async claimCandidate(
@@ -472,7 +749,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
       t: "planned-anchor-candidate-claimed",
       identity,
     };
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const targetWide = assertTargetWideAnchorCandidateAvailable(
         projection.targetWideClaims,
         targetWideIdentity,
@@ -529,7 +806,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     readyProof: ReadyProof,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration target has no durable candidate claim");
       assertCandidateIdentity(existing.identity, identity);
@@ -569,7 +846,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     if (terminal !== "aborted" && abortInput !== undefined) {
       throw new TypeError("Non-aborted migration candidate cannot store an abort decision");
     }
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration candidate terminal has no durable claim");
       assertCandidateIdentity(existing.identity, identity);
@@ -625,7 +902,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
     const prepared = validateCandidatePrepared(preparedInput, identity, this.verifier);
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration prepare has no durable candidate claim");
       assertCandidateIdentity(existing.identity, identity);
@@ -659,7 +936,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     const identity = validateCandidateIdentity(identityInput);
     const targetWideIdentity = plannedTargetWideCandidateIdentity(identity);
     const abort = validateCandidateAbort(abortInput, identity, this.verifier);
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration abort has no durable candidate claim");
       assertCandidateIdentity(existing.identity, identity);
@@ -699,7 +976,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
     const targetWideIdentity = plannedTargetWideCandidateIdentity(identity);
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration candidate release has no durable claim");
       assertCandidateIdentity(existing.identity, identity);
@@ -736,7 +1013,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     identityInput: PlannedAnchorCandidateIdentity,
   ): Promise<PlannedAnchorCandidateState> {
     const identity = validateCandidateIdentity(identityInput);
-    return (await this.#transact((projection) => {
+    return (await this.#transact(identity.transferId, (projection) => {
       const existing = projection.claims.get(identity.transferId);
       if (!existing) throw new Error("Migration candidate release has no durable claim");
       assertCandidateIdentity(existing.identity, identity);
@@ -757,45 +1034,73 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     })).value;
   }
 
+  /** 目标端：只领了声明或已中止的候选清理完成后写下，候选随之离开未完目录。 */
+  async markCleaned(
+    identityInput: PlannedAnchorCandidateIdentity,
+  ): Promise<PlannedAnchorCandidateState> {
+    const identity = validateCandidateIdentity(identityInput);
+    return (await this.#transact(identity.transferId, (projection) => {
+      const existing = projection.claims.get(identity.transferId);
+      if (!existing) throw new Error("Migration candidate cleanup has no durable claim");
+      assertCandidateIdentity(existing.identity, identity);
+      if (existing.terminal !== "aborted" && existing.terminal !== "released") {
+        throw new Error("Only an aborted or released migration candidate can complete cleanup");
+      }
+      if (existing.cleaned) return { kind: "return", value: existing };
+      const record: PlannedAnchorCandidateRecord = {
+        v: 1,
+        t: "planned-anchor-candidate-cleaned",
+        identity,
+      };
+      return {
+        kind: "append",
+        entries: [{ stream: ANCHOR_CANDIDATE_STREAM, body: record }],
+        value: { ...existing, cleaned: true as const },
+      };
+    })).value;
+  }
+
   async stopStorageMaintenance(): Promise<void> {
     await this.log.stopStorageMaintenance();
   }
 
-  #projection(): Promise<PlannedAnchorCandidateProjection> {
-    return this.log.rebuildProjection(
-      emptyCandidateProjection(),
-      (projection, entry) => verifyProtocolStep(() => reduceCandidateProjection(
-        projection,
-        entry,
-        this.verifier,
-        this.includeTransferState,
-      )),
-      { streams: this.#streams() },
-    );
+  async #read<T>(read: (view: DurableProjectionReadContext) => Promise<T>): Promise<T> {
+    return (await this.log.transactDurableProjection(this.#projectionId, async (view) => ({
+      kind: "return" as const,
+      value: await read(view),
+    }))).value;
   }
 
-  #transact<Value>(
+  /** 决定函数照原样消费小投影：本 transferId、未完候选、进行中的全目标候选与（含迁居状态时）进行中的迁居。 */
+  async #transact<Value>(
+    transferId: string,
     decide: (
       projection: PlannedAnchorCandidateProjection,
     ) => import("@zhixing/core/authority").ProjectionTransactionDecision<unknown, Value>,
   ) {
-    return this.log.transactProjection(
-      emptyCandidateProjection(),
-      (projection, entry) => verifyProtocolStep(() => reduceCandidateProjection(
-        projection,
-        entry,
-        this.verifier,
-        this.includeTransferState,
-      )),
-      decide,
-      { streams: this.#streams() },
-    );
+    return this.log.transactDurableProjection<unknown, Value>(this.#projectionId, async (view) =>
+      decide(await readPlannedJournalProjection(view, [transferId], {
+        openCandidates: true,
+        openTransfers: this.includeTransferState,
+      })));
   }
 
-  #streams(): readonly string[] {
-    return this.includeTransferState
-      ? [ANCHOR_CANDIDATE_STREAM, ANCHOR_TRANSFER_STREAM, "transfer:anchor-current"]
-      : [ANCHOR_CANDIDATE_STREAM];
+  /** 迁居日志的事务：同一按键投影上读本 transferId 的迁居与候选，再按原决定函数追加。 */
+  async transactTransfer<Value>(
+    transferId: string,
+    decide: (
+      projection: PlannedAnchorCandidateProjection,
+    ) => import("@zhixing/core/authority").ProjectionTransactionDecision<unknown, Value>,
+    candidateReferences?: readonly ArtifactRef[],
+  ) {
+    return this.log.transactDurableProjection<unknown, Value>(this.#projectionId, async (view) =>
+      decide(await readPlannedJournalProjection(view, [transferId], { openCandidates: false, openTransfers: false })),
+      candidateReferences ? { candidateReferences } : undefined);
+  }
+
+  /** 按键读迁居状态与各目录（只用于含迁居状态的日志）。 */
+  readIndex<T>(read: (view: DurableProjectionReadContext) => Promise<T>): Promise<T> {
+    return this.#read(read);
   }
 }
 
@@ -817,8 +1122,32 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
     return this.#candidates.state(transferId);
   }
 
+  /** 显式历史查询：枚举全部候选。恢复用 unfinishedCandidates。 */
   candidates(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>> {
     return this.#candidates.states();
+  }
+
+  unfinishedCandidates(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>> {
+    return this.#candidates.unfinishedStates();
+  }
+
+  /** 给定源设备最近一次任期内的全部迁居（按“本机源端按任期”目录读第一组），与历史任期数无关。 */
+  latestSourceTransfers(sourceDeviceId: string): Promise<readonly PlannedAnchorTransferState[]> {
+    return this.#candidates.readIndex(async (view) => {
+      const prefix = ownTransferPrefix(sourceDeviceId);
+      const first = (await view.scan({ gte: prefix, lt: `${prefix}￿` }, 1)).entries[0];
+      if (!first) return [];
+      const epochPrefix = first.key.slice(0, prefix.length + 17);
+      const states: PlannedAnchorTransferState[] = [];
+      for (const transferId of await journalDirectory(view, epochPrefix)) {
+        const state = journalRow<PlannedAnchorTransferState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.transfer, transferId)));
+        if (!state || state.identity.sourceDeviceId !== sourceDeviceId) {
+          throw new DurableProjectionRecordBindingError("Planned migration source directory has no matching state");
+        }
+        states.push(state);
+      }
+      return states;
+    });
   }
 
   terminalCandidate(
@@ -840,18 +1169,8 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
   ): Promise<PlannedAnchorTransferState> {
     const next = reducePlannedAnchorTransfer(undefined, record, this.verifier);
     const identity = candidateIdentityFromState(next);
-    const result = await this.log.transactProjection<
-      PlannedAnchorCandidateProjection,
-      unknown,
-      PlannedAnchorTransferState
-    >(
-      emptyCandidateProjection(),
-      (projection, entry) => verifyProtocolStep(() => reduceCandidateProjection(
-        projection,
-        entry,
-        this.verifier,
-        true,
-      )),
+    const result = await this.#candidates.transactTransfer<PlannedAnchorTransferState>(
+      record.transferId,
       (projection) => {
         const candidate = projection.claims.get(record.transferId);
         if (!candidate) throw new Error("Migration prepare has no durable candidate claim");
@@ -881,7 +1200,6 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
         }
         return { kind: "append", entries, value: prepared };
       },
-      { streams: [ANCHOR_CANDIDATE_STREAM, ANCHOR_TRANSFER_STREAM] },
     );
     return result.value;
   }
@@ -892,19 +1210,27 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
     return this.#candidates.markReleaseDelivered(identity);
   }
 
+  /** 按 transferId 精确读迁居状态，不重放迁居流。 */
   async state(transferId: string): Promise<PlannedAnchorTransferState | undefined> {
-    return (await this.states()).get(transferId);
+    return this.#candidates.readIndex(async (view) =>
+      journalRow<PlannedAnchorTransferState>(await view.get(plannedJournalKey(PLANNED_JOURNAL_KEYS.transfer, transferId))));
   }
 
+  /** 显式历史查询：枚举全部迁居。启动恢复用 latestSourceTransfers。 */
   async states(): Promise<ReadonlyMap<string, PlannedAnchorTransferState>> {
-    return this.log.rebuildProjection<
-      ReadonlyMap<string, PlannedAnchorTransferState>,
-      PlannedRecord
-    >(
-      new Map<string, PlannedAnchorTransferState>(),
-      (states, entry) => verifyProtocolStep(() => reduceJournal(states, entry, this.verifier)),
-      { stream: ANCHOR_TRANSFER_STREAM },
-    );
+    return this.#candidates.readIndex(async (view) => {
+      const states = new Map<string, PlannedAnchorTransferState>();
+      let continuation: string | undefined;
+      do {
+        const page = await view.scan({ gte: PLANNED_JOURNAL_KEYS.transfer, lt: `${PLANNED_JOURNAL_KEYS.transfer}￿` }, 128, continuation);
+        for (const entry of page.entries) {
+          const state = journalRow<PlannedAnchorTransferState>(entry.value)!;
+          states.set(state.identity.transferId, state);
+        }
+        continuation = page.continuation;
+      } while (continuation);
+      return states;
+    });
   }
 
   async stopStorageMaintenance(): Promise<void> {
@@ -920,15 +1246,10 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
       ...extraEntries,
       { stream: ANCHOR_TRANSFER_STREAM, body: record },
     ] as LogicalRecord<PlannedRecord>[];
-    const result = await this.log.transactProjection<
-      ReadonlyMap<string, PlannedAnchorTransferState>,
-      PlannedRecord,
-      PlannedAnchorTransferState
-    >(
-      new Map(),
-      (states, entry) => verifyProtocolStep(() => reduceJournal(states, entry, this.verifier)),
-      (states) => {
-        const current = states.get(record.transferId);
+    const result = await this.#candidates.transactTransfer<PlannedAnchorTransferState>(
+      record.transferId,
+      (projection) => {
+        const current = projection.transfers.get(record.transferId);
         const next = reducePlannedAnchorTransfer(current, record, this.verifier);
         if (current === next) return { kind: "return", value: next };
         beforeAppend?.();
@@ -938,23 +1259,17 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
           value: next,
         };
       },
-      {
-        stream: ANCHOR_TRANSFER_STREAM,
-        candidateReferences: collectArtifactRefs(entries),
-      },
+      collectArtifactRefs(entries),
     );
     return result.value;
   }
 
+  /** 只读进行中的迁居目录（阶段不为 aborted/tombstoned），不枚举历史。 */
   async assertNoCompetingTransfer(transferId: string): Promise<void> {
-    for (const [candidate, state] of await this.states()) {
-      if (
-        candidate !== transferId &&
-        state.phase !== "aborted" &&
-        state.phase !== "tombstoned"
-      ) {
-        throw new Error("Another duty-device migration is already in progress");
-      }
+    const competing = await this.#candidates.readIndex(async (view) =>
+      (await journalDirectory(view, PLANNED_JOURNAL_KEYS.openTransfer)).filter((candidate) => candidate !== transferId));
+    if (competing.length > 0) {
+      throw new Error("Another duty-device migration is already in progress");
     }
   }
 
@@ -1029,9 +1344,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     if (options.identityKey.deviceId !== options.deviceId) {
       throw new TypeError("Migration target identity key belongs to another device");
     }
+    const integrity = options.bootstrapStore.authoritySources()?.integrity;
     this.#staging = options.staging.openTarget({
       artifacts: options.artifacts,
       verifier: options.verifier,
+      ...(integrity ? { integrity } : {}),
     });
     this.#candidates = this.#staging.candidates;
   }
@@ -1040,31 +1357,31 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     return this.#context(transferId).journal.state(transferId);
   }
 
-  /** Restores durable late-ready exclusions before public target admission. */
+  /**
+   * Restores durable late-ready exclusions before public target admission.
+   * 只遍历未完候选：已提交的迁居不再打开它的私有日志，读取随未完工作数，与历史迁居次数无关。
+   */
   async recoverBeforeAdmission(): Promise<void> {
-    for (const candidate of (await this.#candidates.states()).values()) {
-      const context = this.#context(candidate.identity.transferId);
-      const phase = await context.journal.state(candidate.identity.transferId);
-      if (candidate.terminal === "aborted" && !phase) {
-        await this.#cleanupClaimOnlyCandidate(candidate);
-        continue;
-      }
-      if (candidate.terminal === "released" && !phase) {
-        await this.#cleanupClaimOnlyCandidate(candidate);
-        continue;
-      }
-      if (candidate.prepared && candidate.terminal === undefined && !phase) {
-        await context.journal.append(candidate.prepared);
-      }
-    }
-    for (const transferId of await this.#staging.recoverableTransferIds()) {
+    for (const candidate of (await this.#candidates.unfinishedStates()).values()) {
+      const transferId = candidate.identity.transferId;
       const context = this.#context(transferId);
-      const state = await context.journal.state(transferId);
-      if (!state) continue;
+      let state = await context.journal.state(transferId);
+      if (!state) {
+        if (candidate.terminal === "aborted" || candidate.terminal === "released") {
+          await this.#cleanupClaimOnlyCandidate(candidate);
+          continue;
+        }
+        if (candidate.prepared && candidate.terminal === undefined) {
+          state = await context.journal.append(candidate.prepared);
+        }
+        if (!state) continue;
+      }
       const identity = candidateIdentityFromState(state);
       await this.#candidates.claimCandidate(identity);
       if (state.phase === "aborted") {
         await this.#candidates.terminal(identity, "aborted", state.abort!);
+        // 中止的清理可重复执行；确认后候选离开未完目录
+        await this.#cleanupAborted(context, state);
         continue;
       }
       if (state.phase === "committed" || state.phase === "tombstoned") {
@@ -1216,6 +1533,8 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     }
     await context.cleanupTransferAndJournal();
     await this.options.readiness.release(release.identity.transferId);
+    // 清理确认后候选离开未完目录，此后启动不再访问它
+    await this.#candidates.markCleaned(release.identity);
   }
 
   async apply(commandInput: AnchorTransferCommand): Promise<AnchorTransferResult> {
@@ -1376,6 +1695,15 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         throw new Error(`Migration private import is missing ${ref.digest}`);
       }
     }
+    // 家级路由材料在源端决定提交之前取到并按 transferId 暂存：源端退役后无从补取
+    const source = this.options.sourceFor(state.identity.sourceDeviceId);
+    if (source.routeMaterial) {
+      const material = await source.routeMaterial(command.transferId, this.options.deviceId);
+      if (material.homeId !== state.readyProof.homeId) {
+        throw new Error("Migration route material belongs to another home");
+      }
+      await stageHomeRouteMaterial(this.options.secretStore, command.transferId, material);
+    }
     const next = await context.journal.append({
       v: 1,
       mode: "planned",
@@ -1406,19 +1734,27 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       if (!completion || completion.installation.transferId !== command.transferId) {
         throw new Error("Committed migration has no exact installation completion");
       }
+      // 安装收尾已完成时描述不带私有状态，重放沿用本次已读到的已提交状态
+      const committedState = completion.requiresPostInstallCompletion ? completion.state : state;
       await this.#candidates.terminal(
-        candidateIdentityFromState(completion.state),
+        candidateIdentityFromState(committedState),
         "committed",
       );
       const trustRecord = await this.#completeInstallation(
         context,
-        completion.state,
+        committedState,
         completion.installation.trustRecord,
       );
-      return resultFor(command, completion.state, trustRecord);
+      return resultFor(command, committedState, trustRecord);
     }
     if (state.phase !== "imported" || !state.checkpoint || !state.catalogRef || !state.catalog) {
       throw new Error("Migration target cannot commit before its private import is complete");
+    }
+    if (
+      this.options.sourceFor(state.identity.sourceDeviceId).routeMaterial &&
+      !(await loadStagedHomeRouteMaterial(this.options.secretStore, command.transferId))
+    ) {
+      throw new Error("Migration target has no staged home route material");
     }
     const committedRecord: Extract<PlannedRecord, { t: "anchor-committed" }> = {
       v: 1,
@@ -1492,6 +1828,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       ],
       candidateReferences: references,
     });
+    // 本机若是被新任期取代的旧源端（迁回原值班设备），安装已耐久后释放旧任期的 fence
+    PlannedAnchorTransferOwner.releaseSupersededFence(this.options.authorityLog, {
+      deviceId: this.options.deviceId,
+      installedAnchorEpoch: command.commit.nextAnchorEpoch,
+    });
     const completion = await completePlannedAnchorInstallationBeforeBootstrap({
       deviceId: this.options.deviceId,
       secretStore: this.options.secretStore,
@@ -1499,7 +1840,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       verifier: this.options.verifier,
       staging: this.options.staging,
     });
-    if (!completion || completion.installation.transferId !== command.transferId) {
+    if (
+      !completion ||
+      completion.installation.transferId !== command.transferId ||
+      !completion.requiresPostInstallCompletion
+    ) {
       throw new Error("Installed migration completion did not bind the committed transfer");
     }
     await this.#candidates.terminal(
@@ -1616,6 +1961,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     }
     await this.#context(candidate.identity.transferId).cleanupTransferAndJournal();
     await this.options.readiness.release(candidate.identity.transferId);
+    await this.#candidates.markCleaned(candidate.identity);
   }
 
   async #cleanupAborted(
@@ -1629,6 +1975,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     );
     await context.cleanupTransfer();
     await this.options.readiness.release(state.identity.transferId);
+    await this.#candidates.markCleaned(candidateIdentityFromState(state));
   }
 
   async #completeInstallation(
@@ -1768,9 +2115,14 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
   }
 }
 
+/** 每本权威日志上持有源端 fence 的 owner（同一进程里角色切换可能留下不止一个）；owner 被丢弃后 fence 仍按日志可寻。 */
+const sourceFenceOwners = new WeakMap<object, Set<PlannedAnchorTransferOwner>>();
+
 export class PlannedAnchorTransferOwner {
   readonly #journal: PlannedAnchorTransferJournal;
   #fencedTransferId: string | undefined;
+  #fencedEpoch: number | undefined;
+  #fencedCommitted = false;
   #disposeFence: (() => void) | undefined;
   #installingFence: Promise<void> | undefined;
 
@@ -1790,15 +2142,46 @@ export class PlannedAnchorTransferOwner {
     readonly lifecycle: PlannedAnchorTransferLifecycle;
     readonly onSourceCommitted?: (targetDeviceId: string) => void | Promise<void>;
     readonly onCommitted?: (record: HomeTrustRecord) => void | Promise<void>;
+    /** 家级路由材料所在的秘密库；没有时本源端不交出材料（目标随之不要求）。 */
+    readonly secretStore?: SecretStorePort;
     readonly now?: () => string;
   }) {
     this.#journal = new PlannedAnchorTransferJournal(options.log, options.verifier);
+    if (!options.secretStore) this.routeMaterial = undefined;
   }
+
+  /** 只交给已冻结或已导入、目标设备即请求方的本次迁居；此前未需要过的材料在这里生成。 */
+  routeMaterial: ((transferId: string, requesterDeviceId: string) => Promise<HomeRouteMaterial>) | undefined =
+    async (transferId, requesterDeviceId) => {
+      const state = await this.#journal.state(transferId);
+      if (
+        !state ||
+        (state.phase !== "frozen" && state.phase !== "imported") ||
+        state.identity.targetDeviceId !== requesterDeviceId
+      ) {
+        throw new Error("Home route material is only released to the frozen migration target");
+      }
+      return loadOrCreateHomeRouteMaterial(this.options.secretStore!, state.readyProof.homeId);
+    };
 
   /** Reinstalls a durable source fence before any public producer is admitted. */
   async recoverBeforeAdmission(): Promise<void> {
-    const states = await this.#journal.states();
-    for (const [transferId, state] of states) {
+    // 按键读已验链头的 issuer（不整流重放信任事件；提交后记录未跟上时也可读）
+    const trust = await this.options.bootstrapStore.loadVerifiedTrustIssuer();
+    if (!trust) throw new Error("Home trust is not initialized");
+    const stillIssuer = trust.issuer.deviceId === this.options.deviceId;
+    // 只恢复本机作为源端、属于本机最近一次任期的迁居。导入的前缀带着前任值班设备的迁居记录，
+    // 那是前任的 fence，装在本机会冻结本机；更早任期已提交的迁居已被之后的安装取代，不再约束本机。
+    // 本机仍是值班设备时恢复本任期在途或已中止的迁居；已交出值班时保持最近一次已提交迁居的 fence。
+    // 只读“本机源端按任期”目录的第一组，与历史迁居及导入前缀的数量无关。
+    const own = await this.#journal.latestSourceTransfers(this.options.deviceId);
+    const current = new Map(own
+      .filter((state) => (stillIssuer
+        ? state.identity.sourceAnchorEpoch === this.options.anchorEpoch() &&
+          state.phase !== "committed" && state.phase !== "tombstoned"
+        : state.phase === "committed" || state.phase === "tombstoned"))
+      .map((state) => [state.identity.transferId, state]));
+    for (const state of current.values()) {
       const identity = candidateIdentityFromState(state);
       await this.#journal.claimCandidate(identity);
       if (
@@ -1808,7 +2191,7 @@ export class PlannedAnchorTransferOwner {
         state.phase === "committed" ||
         state.phase === "tombstoned"
       ) {
-        await this.#installFence(transferId);
+        await this.#installFence(state);
       }
       if (state.phase === "committed" || state.phase === "tombstoned") {
         await this.#journal.terminalCandidate(identity, "committed");
@@ -1818,13 +2201,26 @@ export class PlannedAnchorTransferOwner {
       }
       await this.#drive(state).catch(() => undefined);
     }
-    for (const candidate of (await this.#journal.candidates()).values()) {
+    for (const candidate of (await this.#journal.unfinishedCandidates()).values()) {
+      // 候选同理：只续做本机作为源端、本任期的候选；导入前缀里前任的候选不由本机投递或准备
+      if (
+        candidate.identity.sourceDeviceId !== this.options.deviceId ||
+        !stillIssuer ||
+        candidate.identity.sourceAnchorEpoch !== this.options.anchorEpoch()
+      ) {
+        continue;
+      }
       if (candidate.terminal === "released" && !candidate.releaseDelivered) {
         await this.#deliverCandidateRelease(candidate.identity, "operator-cancelled")
           .catch(() => undefined);
         continue;
       }
-      if (candidate.terminal !== undefined || states.has(candidate.identity.transferId)) continue;
+      if (
+        candidate.terminal !== undefined ||
+        await this.#journal.state(candidate.identity.transferId) !== undefined
+      ) {
+        continue;
+      }
       await this.#prepareCandidate(candidate).catch(() => undefined);
     }
   }
@@ -1933,11 +2329,11 @@ export class PlannedAnchorTransferOwner {
     }
     if (state.phase === "aborted") throw new Error("Aborted migration cannot be fenced");
     if (state.phase === "committed" || state.phase === "tombstoned") {
-      await this.#installFence(input.transferId);
+      await this.#installFence(state);
       return this.options.log.checkpoint();
     }
     if (state.phase !== "prepared") {
-      await this.#installFence(input.transferId);
+      await this.#installFence(state);
       return this.options.log.checkpoint();
     }
 
@@ -1951,7 +2347,7 @@ export class PlannedAnchorTransferOwner {
       await this.options.lifecycle.drainAccepted();
       // Register before taking the checkpoint. Appends already inside the log
       // lock finish first and are included; every later fresh append is rejected.
-      await this.#installFence(input.transferId);
+      await this.#installFence(state);
       const sourceHead = await this.options.log.checkpoint();
       const pendingObligations = await projectPendingObligations(
         this.options.log,
@@ -2179,7 +2575,7 @@ export class PlannedAnchorTransferOwner {
         },
       );
       await this.options.onSourceCommitted?.(state.identity.targetDeviceId);
-      await this.#installFence(input.transferId);
+      await this.#installFence(state);
     } else {
       await this.options.onSourceCommitted?.(state.identity.targetDeviceId);
     }
@@ -2496,11 +2892,18 @@ export class PlannedAnchorTransferOwner {
     };
   }
 
-  async #installFence(transferId: string): Promise<void> {
+  async #installFence(state: PlannedAnchorTransferState): Promise<void> {
+    const transferId = state.identity.transferId;
     if (this.#fencedTransferId && this.#fencedTransferId !== transferId) {
       throw new Error("Another duty-device migration owns the authority fence");
     }
     this.#fencedTransferId = transferId;
+    this.#fencedEpoch = state.identity.sourceAnchorEpoch;
+    // 只取耐久状态：提交追加成功或恢复时读到已提交，才放行已提交旧源端的信任追赶与重任安装
+    if (state.phase === "committed" || state.phase === "tombstoned") this.#fencedCommitted = true;
+    const owners = sourceFenceOwners.get(this.options.log) ?? new Set<PlannedAnchorTransferOwner>();
+    owners.add(this);
+    sourceFenceOwners.set(this.options.log, owners);
     if (this.#disposeFence) return;
     if (this.#installingFence) return this.#installingFence;
     const installation = this.options.log.installAppendAdmissionGuard((entries) => {
@@ -2524,6 +2927,16 @@ export class PlannedAnchorTransferOwner {
         "t" in (entry.body as object) &&
         (entry.body as { t?: string }).t === "anchor-fenced",
       );
+      // 已提交的旧源端不再做权威决定，但仍追随信任链（只含 trust 流的写入，追加时由信任投影逐条验签），
+      // 也可以作为新一次迁居的目标被重新安装（安装记录的 issuer 是本机）
+      const retenure = (entry: LogicalRecord<unknown>) =>
+        entry.stream === "transfer:anchor-current" &&
+        isRecord(entry.body) &&
+        (entry.body.t === "planned-anchor-installed" || entry.body.t === "disaster-anchor-installed") &&
+        entry.body.transferId !== this.#fencedTransferId &&
+        isRecord(entry.body.trustRecord) &&
+        isRecord(entry.body.trustRecord.issuer) &&
+        entry.body.trustRecord.issuer.deviceId === this.options.deviceId;
       const permitted = entries.every((entry) =>
         belongsToFence(entry) ||
         belongsToCandidate(entry) ||
@@ -2531,7 +2944,8 @@ export class PlannedAnchorTransferOwner {
           entry.stream === SOURCE_CLOSURE_STREAM &&
           isRecord(entry.body) &&
           entry.body.transferId === this.#fencedTransferId) ||
-        (commitsTransfer && (entry.stream === "trust" || entry.stream === "transfer:anchor-current")),
+        (commitsTransfer && (entry.stream === "trust" || entry.stream === "transfer:anchor-current")) ||
+        (this.#fencedCommitted && (entry.stream === "trust" || retenure(entry))),
       );
       if (!permitted) {
         throw new Error("Duty-device migration has frozen authority writes");
@@ -2555,6 +2969,26 @@ export class PlannedAnchorTransferOwner {
     this.#disposeFence?.();
     this.#disposeFence = undefined;
     this.#fencedTransferId = undefined;
+    this.#fencedEpoch = undefined;
+    this.#fencedCommitted = false;
+    sourceFenceOwners.get(this.options.log)?.delete(this);
+  }
+
+  /**
+   * 本机作为新一次迁居的目标安装成功后调用：释放本机已被新任期取代的旧源端 fence。
+   * fence 按日志登记，交出值班后 owner 对象被丢弃也能找到；只释放已提交、任期更早的那一个。
+   */
+  static releaseSupersededFence(log: object, input: { readonly deviceId: string; readonly installedAnchorEpoch: number }): void {
+    for (const owner of [...(sourceFenceOwners.get(log) ?? [])]) {
+      if (
+        owner.options.deviceId === input.deviceId &&
+        owner.#fencedCommitted &&
+        owner.#fencedEpoch !== undefined &&
+        owner.#fencedEpoch < input.installedAnchorEpoch
+      ) {
+        owner.#clearFence();
+      }
+    }
   }
 }
 
@@ -2602,10 +3036,9 @@ async function loadInstalledAnchorTrustRecord(
   log: PlannedAnchorAuthorityReadPort,
   transferId: string,
 ): Promise<HomeTrustRecord | undefined> {
-  const records = await log.readStream<unknown>("transfer:anchor-current");
-  const installation = records.toReversed().find(({ body }) =>
-    isPlannedInstallation(body) && body.transferId === transferId);
-  return installation && isPlannedInstallation(installation.body)
+  // 按 transferId 精确读安装记录，不倒查整条 anchor-current 流
+  const installation = (await readAnchorInstallationState(log, transferId)).installation;
+  return installation && isPlannedInstallation(installation.body) && installation.body.transferId === transferId
     ? installation.body.trustRecord
     : undefined;
 }
@@ -2617,12 +3050,52 @@ export function isPlannedInstallation(value: unknown): value is PlannedAnchorIns
     typeof (value as { transferId?: unknown }).transferId === "string";
 }
 
-export interface PlannedAnchorPostInstallDescriptor {
-  readonly installation: PlannedAnchorInstallation;
-  readonly installedGeneration: InstalledAuthorityGeneration;
-  readonly state: PlannedAnchorTransferState;
-  readonly pendingObligations: AuthorityCatalog["pendingObligations"];
-  readonly requiresPostInstallCompletion: boolean;
+/** 已收尾的安装只带当前安装与代际；未收尾时才带私有日志状态与待办义务。 */
+export type PlannedAnchorPostInstallDescriptor =
+  | {
+      readonly installation: PlannedAnchorInstallation;
+      readonly installedGeneration: InstalledAuthorityGeneration;
+      readonly requiresPostInstallCompletion: false;
+    }
+  | {
+      readonly installation: PlannedAnchorInstallation;
+      readonly installedGeneration: InstalledAuthorityGeneration;
+      readonly state: PlannedAnchorTransferState;
+      readonly pendingObligations: AuthorityCatalog["pendingObligations"];
+      readonly requiresPostInstallCompletion: true;
+    };
+
+/** 计划迁居安装收尾的完成标记：在清理 staging 之前写入，启动据此判断已收尾，不靠 staging 是否存在。 */
+interface PlannedPostInstallCompletion {
+  readonly v: 1;
+  readonly t: "planned-post-install-completed";
+  readonly transferId: string;
+  readonly generationDigest: string;
+}
+
+function plannedInstalledGenerationDigest(generation: InstalledAuthorityGeneration): string {
+  return protocolDigest("PlannedInstalledAuthorityGeneration", 1, generation);
+}
+
+function plannedPostInstallCompletion(generation: InstalledAuthorityGeneration): PlannedPostInstallCompletion {
+  return Object.freeze({
+    v: 1,
+    t: "planned-post-install-completed",
+    transferId: generation.transferId,
+    generationDigest: plannedInstalledGenerationDigest(generation),
+  });
+}
+
+async function recordPlannedPostInstallCompletion(
+  log: AnchorInstallationIndexPort,
+  generation: InstalledAuthorityGeneration,
+): Promise<void> {
+  await recordAnchorInstallationCompletion(log, {
+    stream: PLANNED_POST_INSTALL_STREAM,
+    transferId: generation.transferId,
+    value: plannedPostInstallCompletion(generation),
+    conflictMessage: "Planned migration post-install completion conflicts with replay",
+  });
 }
 
 /**
@@ -2653,17 +3126,12 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
   readonly verifier: ProtocolSignatureVerifier;
   readonly staging: PlannedAnchorTransferStagingArea;
 }): Promise<PlannedAnchorPostInstallDescriptor | undefined> {
-  const installed = await loadCurrentPlannedAnchorInstallation(
-    input.bootstrapStore.authorityLog(),
-  );
+  const authorityLog = input.bootstrapStore.authorityLog();
+  const installed = await loadCurrentPlannedAnchorInstallation(authorityLog);
   if (!installed) return undefined;
   const { installation, installLsn } = installed;
   if (installation.trustRecord.issuer.deviceId !== input.deviceId) {
     return undefined;
-  }
-  const currentTrust = await input.bootstrapStore.loadTrustRecord();
-  if (!currentTrust || canonicalize(currentTrust) !== canonicalize(installation.trustRecord)) {
-    throw new Error("Installed migration trust does not match the current authority record");
   }
   if (
     installation.baseDigest !== protocolDigest("PlannedAnchorAuthorityBase", 1, {
@@ -2672,6 +3140,30 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
     })
   ) {
     throw new Error("Installed migration authority base digest is invalid");
+  }
+  const installedGeneration: InstalledAuthorityGeneration = Object.freeze({
+    transferId: installation.transferId,
+    commitDigest: protocolDigest("PlannedAnchorInstalledCommit", 1, installation.commit),
+    baseDigest: installation.baseDigest,
+    sourceHead: Object.freeze({ ...installation.sourceHead }),
+    targetLogId: (await authorityLog.originCheckpoint()).logId,
+    installLsn,
+    anchorEpoch: installation.commit.nextAnchorEpoch,
+    trustEpoch: installation.trustRecord.trustEpoch,
+    trustChainHead: Object.freeze({ ...installation.trustRecord.chainHead }),
+  });
+  // 已收尾：完成标记绑定完整代际，普通启动只需当前安装与代际。不打开私有 staging、不读 catalog；
+  // 安装后信任照常演进（配对、移除），不再与安装时的信任记录比对
+  const completion = (await readAnchorInstallationState(authorityLog, installation.transferId)).plannedCompletion;
+  if (completion) {
+    if (completion.conflict || canonicalize(completion.value) !== canonicalize(plannedPostInstallCompletion(installedGeneration))) {
+      throw new Error("Planned migration post-install completion belongs to another generation");
+    }
+    return Object.freeze({ installation, installedGeneration, requiresPostInstallCompletion: false as const });
+  }
+  const currentTrust = await input.bootstrapStore.loadTrustRecord();
+  if (!currentTrust || canonicalize(currentTrust) !== canonicalize(installation.trustRecord)) {
+    throw new Error("Installed migration trust does not match the current authority record");
   }
   const staging = input.staging.openTransfer({
     transferId: installation.transferId,
@@ -2720,6 +3212,9 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
         installation.transferId,
         installation.trustRecord.issuer.issuerKeyId,
       );
+      // 迁居暂存的家级路由材料随安装激活（回到原设备时与已有材料一致）
+      const staged = await loadStagedHomeRouteMaterial(input.secretStore, installation.transferId);
+      if (staged) await installHomeRouteMaterial(input.secretStore, staged, installation.transferId);
       state = await staging.journal.append({
         v: 1,
         mode: "planned",
@@ -2749,22 +3244,13 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
     ) {
       throw new Error("Installed migration catalog does not match its authority base");
     }
+    // 没有完成标记就由运行时续做收尾（幂等），不以 staging 是否存在判完成，意外缺失的资料不当成功
     return Object.freeze({
       installation,
-      installedGeneration: Object.freeze({
-        transferId: installation.transferId,
-        commitDigest: protocolDigest("PlannedAnchorInstalledCommit", 1, installation.commit),
-        baseDigest: installation.baseDigest,
-        sourceHead: Object.freeze({ ...installation.sourceHead }),
-        targetLogId: (await input.bootstrapStore.authorityLog().originCheckpoint()).logId,
-        installLsn,
-        anchorEpoch: installation.commit.nextAnchorEpoch,
-        trustEpoch: installation.trustRecord.trustEpoch,
-        trustChainHead: Object.freeze({ ...installation.trustRecord.chainHead }),
-      }),
+      installedGeneration,
       state,
       pendingObligations: catalog.pendingObligations,
-      requiresPostInstallCompletion: await staging.exists(),
+      requiresPostInstallCompletion: true as const,
     });
   } finally {
     await staging.close();
@@ -2775,8 +3261,15 @@ export async function finishPlannedAnchorPostInstall(input: {
   readonly transferId: string;
   readonly readiness: PlannedAnchorReadinessPort;
   readonly staging: PlannedAnchorTransferStagingArea;
+  readonly authorityLog: AnchorInstallationIndexPort;
+  readonly installedGeneration: InstalledAuthorityGeneration;
 }): Promise<void> {
   assertTransferStorageId(input.transferId);
+  if (input.installedGeneration.transferId !== input.transferId) {
+    throw new TypeError("Planned migration post-install generation belongs to another transfer");
+  }
+  // 完成标记先于清理 staging 落盘：此后启动按标记判已收尾；清理中途崩溃时标记已在，重做清理即可
+  await recordPlannedPostInstallCompletion(input.authorityLog, input.installedGeneration);
   await input.staging.cleanupPostInstall(input.transferId);
   await input.readiness.release(input.transferId);
 }
@@ -2787,22 +3280,21 @@ async function loadCurrentPlannedAnchorInstallation(
   readonly installation: PlannedAnchorInstallation;
   readonly installLsn: number;
 } | undefined> {
-  const records = await log.readStream<unknown>("transfer:anchor-current");
-  const latest = records.at(-1);
+  // 当前安装指针精确读：真正末条是计划迁居安装记录，且同一 transferId 的安装记录只此一条
+  const state = await readAnchorInstallationState(log);
+  const latest = state.current;
   if (!latest || !isPlannedInstallation(latest.body)) return undefined;
-  const installations = records
-    .filter((candidate): candidate is typeof candidate & {
-      readonly body: PlannedAnchorInstallation;
-    } => isPlannedInstallation(candidate.body));
-  const current = { ...latest, body: latest.body };
-  const duplicates = installations.filter((candidate) =>
-    candidate.body.transferId === current.body.transferId);
-  if (duplicates.length !== 1) {
+  if (
+    !state.installation ||
+    state.installation.duplicates !== 0 ||
+    state.installation.lsn !== latest.lsn ||
+    state.installation.entry !== latest.entry
+  ) {
     throw new Error("Current planned migration installation is ambiguous");
   }
   return {
-    installation: current.body,
-    installLsn: current.lsn,
+    installation: latest.body,
+    installLsn: latest.lsn,
   };
 }
 
@@ -3402,15 +3894,6 @@ function reduceJournal(
   return next;
 }
 
-function emptyCandidateProjection(): PlannedAnchorCandidateProjection {
-  return {
-    claims: new Map(),
-    targetWideClaims: emptyTargetWideAnchorCandidates(),
-    transfers: new Map(),
-    installedTransfers: new Set(),
-  };
-}
-
 function reduceCandidateProjection(
   projection: PlannedAnchorCandidateProjection,
   entry: LogicalRecord<unknown>,
@@ -3518,6 +4001,14 @@ function reduceCandidateProjection(
         : base.targetWideClaims;
       return { ...base, claims, targetWideClaims: legacyTargetWide };
     }
+    if (record.t === "planned-anchor-candidate-cleaned") {
+      if (existing.terminal !== "aborted" && existing.terminal !== "released") {
+        throw new Error("Migration candidate cleanup precedes its terminal decision");
+      }
+      const claims = new Map(base.claims);
+      claims.set(record.identity.transferId, { ...existing, cleaned: true });
+      return { ...base, claims };
+    }
     if (existing.terminal !== "released") {
       throw new Error("Migration candidate cleanup completion precedes release");
     }
@@ -3537,7 +4028,15 @@ function reduceCandidateProjection(
   if (entry.stream === "transfer:anchor-current" && isPlannedInstallation(entry.body)) {
     const installedTransfers = new Set(base.installedTransfers);
     installedTransfers.add(entry.body.transferId);
-    return { ...base, installedTransfers };
+    // 导入前缀里前任的全目标候选声明在安装后即视为已提交：它的终态写在导出之后，不在本机副本里
+    const claim = base.targetWideClaims.get(entry.body.transferId);
+    const targetWideClaims = claim && claim.terminal === undefined
+      ? reduceTargetWideAnchorCandidateRecord(
+          base.targetWideClaims,
+          targetWideAnchorCandidateTerminal(claim.identity, "committed"),
+        )
+      : base.targetWideClaims;
+    return { ...base, installedTransfers, targetWideClaims };
   }
   return base;
 }
@@ -3568,6 +4067,7 @@ function validateCandidateRecord(
       "planned-anchor-candidate-prepared",
       "planned-anchor-candidate-terminal",
       "planned-anchor-candidate-release-delivered",
+      "planned-anchor-candidate-cleaned",
     ].includes(String(record.t)) ||
     canonicalize(Object.keys(record).sort()) !== canonicalize(expected.sort())
   ) {

@@ -439,6 +439,7 @@ export {
   type ExecutorRemovalLifecycleIdentity,
   type ExecutorRemovalDecision,
   type ExecutorRemovalReceipt,
+  type ExecutorRemovalSuccessor,
   type StopHostGeneration,
   type StopEndpointLock,
   type StopLifecycleIdentity,

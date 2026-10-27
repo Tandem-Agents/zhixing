@@ -194,6 +194,37 @@ describe("device lifecycle protocol", () => {
     )).toThrow();
   });
 
+  it("binds removal abort to the accepted issuer key rather than the issuer device id", () => {
+    // 迁居后值班设备的 issuer key 与设备 ID 不同：中止只认接受时冻结的那把 key
+    const migratedKey = identity("issuer-key-2");
+    const accepted = reduceDeviceLifecycle(undefined, {
+      v: 1,
+      t: "accepted",
+      identity: { ...removalIdentity(), acceptedIssuerKeyId: "issuer-key-2" },
+    });
+    const abortBy = (authorizedByDeviceId: string, signer: ProtocolSigner) => createSignedDeviceLifecycleAbort({
+      v: 1,
+      operationId: "remove-1",
+      homeId: "home-1",
+      subjectDeviceId: "device-executor",
+      authorizedByDeviceId,
+      reason: "user-cancelled",
+      at: AT,
+    }, signer);
+    expect(() => reduceDeviceLifecycle(accepted, {
+      v: 1,
+      t: "aborted",
+      operationId: "remove-1",
+      abort: abortBy("device-anchor", issuer),
+    }, issuer)).toThrow("does not bind the accepted identity");
+    expect(reduceDeviceLifecycle(accepted, {
+      v: 1,
+      t: "aborted",
+      operationId: "remove-1",
+      abort: abortBy("issuer-key-2", migratedKey),
+    }, migratedKey).phase).toBe("aborted");
+  });
+
   it("requires recovery backup to close and flush accepted work before final verification", () => {
     let state = reduceDeviceLifecycle(undefined, {
       v: 1,
@@ -324,6 +355,7 @@ function removalIdentity(): ExecutorRemovalLifecycleIdentity {
     targetMemberPublicKey: "ed25519:executor-key",
     targetDeviceKeyGeneration: "device-key-generation-1",
     acceptedIssuerDeviceId: "device-anchor",
+    acceptedIssuerKeyId: "device-anchor",
     acceptedTrustHeadDigest: DIGEST,
   };
 }

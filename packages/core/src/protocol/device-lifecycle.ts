@@ -125,6 +125,8 @@ export interface ExecutorRemovalLifecycleIdentity {
   readonly targetMemberPublicKey: string;
   readonly targetDeviceKeyGeneration: string;
   readonly acceptedIssuerDeviceId: string;
+  /** 接受时链上授权的 issuer key：回执与中止由它签名。迁居与灾备后它与设备钥不同。 */
+  readonly acceptedIssuerKeyId: string;
   readonly acceptedTrustHeadDigest: string;
 }
 
@@ -197,6 +199,8 @@ export interface UnsignedExecutorRemovalReceipt {
   readonly targetDeviceId: string;
   readonly targetDeviceKeyGeneration: string;
   readonly acceptedIssuerDeviceId: string;
+  /** 接受时链上授权的 issuer key：回执与中止由它签名。迁居与灾备后它与设备钥不同。 */
+  readonly acceptedIssuerKeyId: string;
   readonly acceptedTrustHeadDigest: string;
   readonly phase:
     | "accepted"
@@ -208,6 +212,19 @@ export interface UnsignedExecutorRemovalReceipt {
     | "lost";
   readonly evidenceDigest: string;
   readonly at: string;
+  /**
+   * 继任回执：接受这次移除的 issuer 已不在任，由现任 issuer key 续签。target 只在用同一份继任证明
+   * 验明签名者与任期之后才接受；原 issuer 签的回执没有这一字段。
+   */
+  readonly successor?: ExecutorRemovalSuccessor;
+}
+
+export interface ExecutorRemovalSuccessor {
+  readonly issuerDeviceId: string;
+  readonly issuerKeyId: string;
+  /** 现任 issuer key 的公钥：target 落盘前已按继任证明核过它是链上现任，重启后据此本地重验签名完整性。 */
+  readonly issuerPublicKey: string;
+  readonly anchorEpoch: number;
 }
 
 export type ExecutorRemovalReceipt = UnsignedExecutorRemovalReceipt & {
@@ -351,6 +368,7 @@ export function validateExecutorRemovalReceipt(
   const value = cloneObject(input, "Executor removal receipt");
   exact(value, [
     "acceptedIssuerDeviceId",
+    "acceptedIssuerKeyId",
     "acceptedTrustHeadDigest",
     "at",
     "evidenceDigest",
@@ -358,6 +376,7 @@ export function validateExecutorRemovalReceipt(
     "operationId",
     "phase",
     "signature",
+    ...(value.successor === undefined ? [] : ["successor"]),
     "targetDeviceId",
     "targetDeviceKeyGeneration",
     "v",
@@ -753,6 +772,7 @@ function validateIdentity(input: unknown): DeviceLifecycleIdentity {
   if (value.kind === "executor-removal") {
     exact(value, [
       "acceptedIssuerDeviceId",
+      "acceptedIssuerKeyId",
       "acceptedTrustHeadDigest",
       "homeId",
       "kind",
@@ -763,7 +783,7 @@ function validateIdentity(input: unknown): DeviceLifecycleIdentity {
       "targetMemberPublicKey",
       "v",
     ], "Executor removal lifecycle identity");
-    for (const field of ["targetDeviceId", "targetDeviceKeyGeneration", "acceptedIssuerDeviceId"] as const) {
+    for (const field of ["targetDeviceId", "targetDeviceKeyGeneration", "acceptedIssuerDeviceId", "acceptedIssuerKeyId"] as const) {
       identifier(value[field], `Executor removal ${field}`);
     }
     publicKey(value.targetMemberPublicKey, "Executor removal target member public key");
@@ -875,19 +895,37 @@ function validateUnsignedRemovalReceipt(input: UnsignedExecutorRemovalReceipt): 
   const value = cloneObject(input, "Unsigned executor removal receipt");
   exact(value, [
     "acceptedIssuerDeviceId",
+    "acceptedIssuerKeyId",
     "acceptedTrustHeadDigest",
     "at",
     "evidenceDigest",
     "homeId",
     "operationId",
     "phase",
+    ...(value.successor === undefined ? [] : ["successor"]),
     "targetDeviceId",
     "targetDeviceKeyGeneration",
     "v",
   ], "Unsigned executor removal receipt");
+  if (value.successor !== undefined) {
+    const successor = cloneObject(value.successor, "Executor removal receipt successor");
+    exact(successor, ["anchorEpoch", "issuerDeviceId", "issuerKeyId", "issuerPublicKey"], "Executor removal receipt successor");
+    identifier(successor.issuerDeviceId, "Executor removal receipt successor issuerDeviceId");
+    identifier(successor.issuerKeyId, "Executor removal receipt successor issuerKeyId");
+    if (typeof successor.issuerPublicKey !== "string" || !successor.issuerPublicKey.startsWith("ed25519:")) {
+      throw new TypeError("Executor removal receipt successor issuerPublicKey is invalid");
+    }
+    if (!Number.isSafeInteger(successor.anchorEpoch) || (successor.anchorEpoch as number) < 1) {
+      throw new TypeError("Executor removal receipt successor anchorEpoch is invalid");
+    }
+    if (successor.issuerKeyId === value.acceptedIssuerKeyId) {
+      throw new TypeError("A successor receipt must be signed by a different issuer key than the accepting one");
+    }
+  }
   if (value.v !== 1) throw new TypeError("Executor removal receipt version must be 1");
   for (const field of [
     "acceptedIssuerDeviceId",
+    "acceptedIssuerKeyId",
     "homeId",
     "operationId",
     "targetDeviceId",
@@ -1049,8 +1087,9 @@ function subjectDeviceId(identity: DeviceLifecycleIdentity): string {
 }
 
 function abortAuthority(identity: Exclude<DeviceLifecycleIdentity, StopLifecycleIdentity>): string {
+  // 设备移除的中止由接受时的 issuer key 签（不是 issuer 设备钥）
   return identity.kind === "executor-removal"
-    ? identity.acceptedIssuerDeviceId
+    ? identity.acceptedIssuerKeyId
     : identity.currentDeviceId;
 }
 

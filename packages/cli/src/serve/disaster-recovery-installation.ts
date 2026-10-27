@@ -3,7 +3,6 @@ import type {
   AuthorityCatalog,
   HomeTrustEvent,
   HomeTrustRecord,
-  LogicalRecord,
 } from "@zhixing/core/contracts";
 import type {
   DurableLogCheckpoint,
@@ -14,13 +13,18 @@ import {
   protocolDigest,
 } from "@zhixing/core/protocol";
 import type { AnchorTransferCommit } from "@zhixing/core/contracts";
+import {
+  DISASTER_POST_INSTALL_STREAM,
+  readAnchorInstallationState,
+  recordAnchorInstallationCompletion,
+  type AnchorInstallationIndexPort,
+} from "./anchor-installation-index.js";
 import type { DisasterRecoveryJournalStorage } from "./disaster-recovery-staging.js";
 
 type DisasterCommit = Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
-const DISASTER_POST_INSTALL_STREAM = "transfer:anchor-disaster-post-install";
 
 export interface DisasterRecoveryAuthorityProjectionPort
-  extends DisasterRecoveryJournalStorage {
+  extends DisasterRecoveryJournalStorage, AnchorInstallationIndexPort {
   originCheckpoint(): Promise<DurableLogCheckpoint>;
 }
 
@@ -108,14 +112,17 @@ export async function loadCurrentDisasterRecoveryInstallation(
   readonly installLsn: number;
   readonly generation: DisasterInstalledAuthorityGeneration;
 } | undefined> {
-  const all = await log.readStream<unknown>("transfer:anchor-current");
-  const currentRecord = all.at(-1);
+  // 当前安装指针精确读：真正末条是灾备安装记录，且同一 transferId 的安装记录只此一条
+  const state = await readAnchorInstallationState(log);
+  const currentRecord = state.current;
   if (!currentRecord || !isDisasterRecoveryInstallation(currentRecord.body)) return undefined;
-  const current = { ...currentRecord, body: currentRecord.body };
-  const records = all.filter((record): record is typeof record & {
-    readonly body: DisasterRecoveryInstallation;
-  } => isDisasterRecoveryInstallation(record.body));
-  if (records.filter((record) => record.body.transferId === current.body.transferId).length !== 1) {
+  const current = { lsn: currentRecord.lsn, body: currentRecord.body };
+  if (
+    !state.installation ||
+    state.installation.duplicates !== 0 ||
+    state.installation.lsn !== currentRecord.lsn ||
+    state.installation.entry !== currentRecord.entry
+  ) {
     throw new Error("Current disaster recovery installation is ambiguous");
   }
   const installation = current.body;
@@ -166,42 +173,26 @@ export async function recordDisasterRecoveryPostInstallReceipt(input: {
   }[];
 }): Promise<DisasterRecoveryPostInstallReceipt> {
   const receipt = createPostInstallReceipt(input);
-  return (await input.log.transactProjection<
-    ReadonlyMap<string, DisasterRecoveryPostInstallReceipt>,
-    DisasterRecoveryPostInstallReceipt,
-    DisasterRecoveryPostInstallReceipt
-  >(
-    new Map(),
-    reducePostInstallReceipts,
-    (current) => {
-      const existing = current.get(receipt.transferId);
-      if (existing) {
-        if (canonicalize(existing) !== canonicalize(receipt)) {
-          throw new Error("Disaster recovery post-install receipt conflicts with replay");
-        }
-        return { kind: "return", value: existing };
-      }
-      return {
-        kind: "append",
-        entries: [{ stream: DISASTER_POST_INSTALL_STREAM, body: receipt }],
-        value: receipt,
-      };
-    },
-    { stream: DISASTER_POST_INSTALL_STREAM },
-  )).value;
+  return validatePostInstallReceipt(await recordAnchorInstallationCompletion(input.log, {
+    stream: DISASTER_POST_INSTALL_STREAM,
+    transferId: receipt.transferId,
+    value: receipt,
+    conflictMessage: "Disaster recovery post-install receipt conflicts with replay",
+  }));
 }
 
 export async function loadDisasterRecoveryPostInstallReceipt(input: {
   readonly log: DisasterRecoveryAuthorityProjectionPort;
   readonly generation: DisasterInstalledAuthorityGeneration;
 }): Promise<DisasterRecoveryPostInstallReceipt | undefined> {
-  const receipts = await input.log.rebuildProjection(
-    new Map<string, DisasterRecoveryPostInstallReceipt>(),
-    reducePostInstallReceipts,
-    { stream: DISASTER_POST_INSTALL_STREAM },
-  );
-  const receipt = receipts.get(input.generation.transferId);
-  if (!receipt) return undefined;
+  // 按 transferId 精确读回执，不重放回执流
+  const indexed = (await readAnchorInstallationState(input.log, input.generation.transferId)).disasterReceipt;
+  if (!indexed) return undefined;
+  if (indexed.conflict) throw new Error("Disaster recovery has conflicting post-install receipts");
+  const receipt = validatePostInstallReceipt(indexed.value);
+  if (receipt.transferId !== input.generation.transferId) {
+    throw new Error("Disaster recovery post-install receipt belongs to another generation");
+  }
   const generationDigest = installedGenerationDigest(input.generation);
   if (receipt.generationDigest !== generationDigest) {
     throw new Error("Disaster recovery post-install receipt belongs to another generation");
@@ -280,23 +271,6 @@ function installedGenerationDigest(generation: DisasterInstalledAuthorityGenerat
   return protocolDigest("DisasterInstalledAuthorityGeneration", 1, generation);
 }
 
-function reducePostInstallReceipts(
-  current: ReadonlyMap<string, DisasterRecoveryPostInstallReceipt>,
-  entry: LogicalRecord<unknown>,
-): ReadonlyMap<string, DisasterRecoveryPostInstallReceipt> {
-  if (entry.stream !== DISASTER_POST_INSTALL_STREAM) return current;
-  const receipt = validatePostInstallReceipt(entry.body);
-  const existing = current.get(receipt.transferId);
-  if (existing) {
-    if (canonicalize(existing) !== canonicalize(receipt)) {
-      throw new Error("Disaster recovery has conflicting post-install receipts");
-    }
-    return current;
-  }
-  const next = new Map(current);
-  next.set(receipt.transferId, receipt);
-  return next;
-}
 
 function validatePostInstallReceipt(value: unknown): DisasterRecoveryPostInstallReceipt {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

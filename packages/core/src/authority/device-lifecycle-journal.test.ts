@@ -51,6 +51,7 @@ describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
       targetMemberPublicKey: "ed25519:device-a",
       targetDeviceKeyGeneration: "generation-1",
       acceptedIssuerDeviceId: "device-anchor",
+      acceptedIssuerKeyId: "device-anchor",
       acceptedTrustHeadDigest: DIGEST,
     });
     await expect(fixture.journal.accept({

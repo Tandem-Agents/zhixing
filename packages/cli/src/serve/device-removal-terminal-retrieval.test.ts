@@ -22,9 +22,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
-  loadOrCreateIssuerTerminalRouteSecret,
   resolveExecutorRemovalTerminalRoute,
 } from "./device-removal.js";
+import { loadOrCreateHomeRouteMaterial } from "./home-route-material.js";
 import {
   DeviceRemovalIssuerMeshClient,
   DeviceRemovalTargetMeshClient,
@@ -323,6 +323,7 @@ describe("executor removal terminal retrieval through the duty device's fixed te
       targetMemberPublicKey: device.key.publicKey,
       targetDeviceKeyGeneration: accepted.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: accepted.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: accepted.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: accepted.acceptedTrustHeadDigest,
     });
     await expect(target.target.decide({
@@ -893,7 +894,7 @@ async function startIssuer(
           transportPeer: (deviceId) => home.ports.transportPeers.transportPeer(deviceId),
         }, locator);
       },
-      secret: () => loadOrCreateIssuerTerminalRouteSecret(home.secrets, home.issuerKey.deviceId),
+      secret: async () => (await loadOrCreateHomeRouteMaterial(home.secrets, trust.homeId)).terminal,
     },
     watchTrust: false,
   });

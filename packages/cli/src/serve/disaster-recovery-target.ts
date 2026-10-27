@@ -59,6 +59,8 @@ import {
   applyTrustEvent,
   buildHomeTrustRecord,
   createSignedTrustEvent,
+  EMPTY_TRUST_STREAM_FOLD,
+  foldTrustStreamRecord,
   replayTrustChain,
 } from "@zhixing/mesh/trust-chain";
 import { projectDeviceCredentialRevocation } from "@zhixing/mesh/credential-exposure";
@@ -84,6 +86,11 @@ import {
   type DisasterRecoveryAuthorityProjectionPort,
   type DisasterRecoveryInstallation,
 } from "./disaster-recovery-installation.js";
+import {
+  installHomeRouteMaterial,
+  openSealedHomeRouteMaterial,
+  type HomeRouteMaterialLogPort,
+} from "./home-route-material.js";
 import type { DisasterRecoveryReachabilityEvidence } from
   "./disaster-recovery-trust-evidence.js";
 import type {
@@ -135,13 +142,20 @@ export type DisasterRecoveryAbortState =
       readonly abort: import("@zhixing/core/contracts").DisasterRecoveryAbort;
     };
 
-export interface DisasterRecoveryPostInstallDescriptor {
-  readonly installation: DisasterRecoveryInstallation;
-  readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
-  readonly state?: DisasterRecoveryState;
-  readonly pendingObligations: import("@zhixing/core/contracts").AuthorityCatalog["pendingObligations"];
-  readonly requiresPostInstallCompletion: boolean;
-}
+/** 已收尾的安装只带当前安装与代际；未收尾时才带私有状态与待办义务。 */
+export type DisasterRecoveryPostInstallDescriptor =
+  | {
+      readonly installation: DisasterRecoveryInstallation;
+      readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
+      readonly requiresPostInstallCompletion: false;
+    }
+  | {
+      readonly installation: DisasterRecoveryInstallation;
+      readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
+      readonly state?: DisasterRecoveryState;
+      readonly pendingObligations: import("@zhixing/core/contracts").AuthorityCatalog["pendingObligations"];
+      readonly requiresPostInstallCompletion: true;
+    };
 
 export class DisasterRecoveryTransferJournal {
   constructor(
@@ -519,6 +533,27 @@ export class DisasterRecoveryTarget {
   }
 
   async commit(input: {
+    readonly transferId: string;
+    readonly recoveryRoot: RecoveryRoot;
+    readonly signal?: AbortSignal;
+  }): Promise<{
+    readonly state: DisasterRecoveryState;
+    readonly trustRecord: HomeTrustRecord;
+    readonly installation: DisasterRecoveryInstallation;
+  }> {
+    const result = await this.#commitInstallation(input);
+    // 家级路由材料随完整检查点的密封记录交到这里：用同一恢复根开封、写入并读回（重放幂等）。
+    // 没有密封记录的 home（从未需要过材料）由现任在需要时生成。
+    const material = await openSealedHomeRouteMaterial(
+      this.options.authorityLog as unknown as HomeRouteMaterialLogPort,
+      input.recoveryRoot,
+      result.trustRecord.homeId,
+    );
+    if (material) await installHomeRouteMaterial(this.options.secretStore, material);
+    return result;
+  }
+
+  async #commitInstallation(input: {
     readonly transferId: string;
     readonly recoveryRoot: RecoveryRoot;
     readonly signal?: AbortSignal;
@@ -1032,6 +1067,19 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
     return undefined;
   }
   const { installation } = installed;
+  const receipt = await loadDisasterRecoveryPostInstallReceipt({
+    log: authorityLog,
+    generation: installed.generation,
+  });
+  // 已收尾：回执绑定完整代际，普通启动只需当前安装与代际。不打开私有 staging、不读 catalog；
+  // 安装后信任照常演进（配对、移除），不再与安装时的信任记录比对
+  if (receipt) {
+    return Object.freeze({
+      installation,
+      installedGeneration: installed.generation,
+      requiresPostInstallCompletion: false as const,
+    });
+  }
   const trust = await input.bootstrapStore.loadTrustRecord();
   if (!trust || canonicalize(trust) !== canonicalize(installation.trustRecord)) {
     throw new Error("Installed disaster recovery trust does not match current authority");
@@ -1040,10 +1088,6 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
   if (!target || target.state !== "active" || !target.roles.includes("anchor")) {
     throw new Error("Installed disaster recovery target is not current-duty eligible");
   }
-  const receipt = await loadDisasterRecoveryPostInstallReceipt({
-    log: authorityLog,
-    generation: installed.generation,
-  });
   const transferKey = await loadAnchorIssuerKey(input.secretStore, installation.transferId);
   const staging = input.staging.openTarget({
     sharedArtifacts: input.bootstrapStore.artifactStore(),
@@ -1110,7 +1154,7 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
     installedGeneration: installed.generation,
     ...(state ? { state } : {}),
     pendingObligations: catalog.pendingObligations,
-    requiresPostInstallCompletion: receipt === undefined,
+    requiresPostInstallCompletion: true as const,
   });
 }
 
@@ -1239,18 +1283,19 @@ async function readSourceFacts(
   readonly trustEvents: readonly HomeTrustEvent[];
   readonly exposures: readonly CredentialExposureRecord[];
 }> {
-  const trustEvents: HomeTrustEvent[] = [];
+  let trustFold = EMPTY_TRUST_STREAM_FOLD;
   const exposures: CredentialExposureRecord[] = [];
   for await (const envelope of disasterAuthorityEnvelopes(artifacts, records)) {
     for (const entry of envelope.entries) {
       const body = entry.body as Record<string, unknown>;
-      if (entry.stream === "trust" && body.t === "home-trust-event") {
-        trustEvents.push(body.event as HomeTrustEvent);
+      if (entry.stream === "trust") {
+        trustFold = foldTrustStreamRecord(trustFold, body);
       } else if (entry.stream === "exposure" && isExposureRecord(body)) {
         exposures.push(body as unknown as CredentialExposureRecord);
       }
     }
   }
+  const trustEvents = [...trustFold.events];
   if (trustEvents.length === 0) throw new Error("Recovery authority has no trust prefix");
   replayTrustChain(trustEvents);
   return { trustEvents, exposures };

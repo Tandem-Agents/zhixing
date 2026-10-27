@@ -5,6 +5,7 @@ export default defineConfig({
     "src/checkpoint-child-bridge.ts",
     "src/checkpoint-bridge-artifact.ts",
     "src/blind-relay.ts",
+    "src/home-discovery.ts",
     "src/blind-rendezvous.ts",
     "src/bootstrap.ts",
     "src/index.ts",

@@ -76,6 +76,7 @@ describe("production mesh runtime bootstrap", () => {
         publicKey: local.deviceKey.publicKey,
       }),
       acceptedIssuerDeviceId: "previous-duty-device",
+      acceptedIssuerKeyId: "previous-duty-device",
       acceptedTrustHeadDigest: initialized.projection.chainHead.eventDigest,
     });
     for (const phase of [
@@ -604,6 +605,7 @@ async function removeTargetUntilFinalizeCrash(
       targetDeviceId: accepted.targetDeviceId,
       targetDeviceKeyGeneration: accepted.targetDeviceKeyGeneration,
       acceptedIssuerDeviceId: accepted.acceptedIssuerDeviceId,
+      acceptedIssuerKeyId: accepted.acceptedIssuerKeyId,
       acceptedTrustHeadDigest: accepted.acceptedTrustHeadDigest,
       phase: "removed",
       evidenceDigest: protocolDigest("ForgedTerminal", 1, { label }),
