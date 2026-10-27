@@ -242,7 +242,10 @@ export interface AssignmentLedgerOptions {
   readonly snapshotFor: (
     executorId: string,
   ) => ExecutorCapabilitySnapshot | undefined;
-  readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
+  /** 按 digest 取权限快照：账本在进事务前预读，事务内照原顺序判定；取到不等于授权。 */
+  readonly permissionSnapshotFor: (
+    digest: string,
+  ) => TrustRuleSnapshot | undefined | Promise<TrustRuleSnapshot | undefined>;
   readonly runtimeBindingGuard?: (input: {
     readonly assignmentId: string;
     readonly manifest: ExecutionManifest<"conversation">;
@@ -789,6 +792,10 @@ export class ConversationAssignmentLedger implements
           manifest: envelope.manifest as ExecutionManifest<"conversation">,
         })
       : undefined;
+    // 快照按 digest 内容寻址、不可变：事务前精确读，事务内照原顺序判定（时间窗、缺失、验签、版本）
+    const permissionSnapshot = await this.#permissionSnapshotFor(
+      envelope.permissionLease.snapshotDigest,
+    );
 
     const transaction = await this.#transact<DispatchDecision>(
       assignmentId,
@@ -868,9 +875,6 @@ export class ConversationAssignmentLedger implements
             },
           };
         }
-        const permissionSnapshot = this.#permissionSnapshotFor(
-          envelope.permissionLease.snapshotDigest,
-        );
         const effectiveAcceptedAt = new Date(this.#effectiveLeaseNow(state)).toISOString();
         let permissionError: AuthorityError | undefined;
         try {
@@ -3657,6 +3661,11 @@ export class ConversationAssignmentLedger implements
       | PermissionSnapshotLease<"job">,
   ): Promise<readonly PermissionRule[]> {
     const current = await this.#prepareExecutionAuthority(assignmentId);
+    // 事务前按调用方租约里的 digest 预读不可变快照；租约本身仍在事务内先验，再核 digest 一致才使用
+    const prefetchedDigest = typeof lease?.snapshotDigest === "string" ? lease.snapshotDigest : undefined;
+    const prefetched = prefetchedDigest === undefined
+      ? undefined
+      : await this.#permissionSnapshotFor(prefetchedDigest);
     const transaction = await this.#transact<readonly PermissionRule[] | undefined>(assignmentId, async (state, prefix) => {
       await current?.(state, prefix);
       const received = state.received?.body.activation;
@@ -3681,7 +3690,7 @@ export class ConversationAssignmentLedger implements
       ) {
         throw new TypeError("Permission snapshot lease does not bind received execution");
       }
-      const snapshot = this.#permissionSnapshotFor(validatedLease.snapshotDigest);
+      const snapshot = validatedLease.snapshotDigest === prefetchedDigest ? prefetched : undefined;
       if (snapshot === undefined) {
         throw new TypeError("Permission snapshot is unavailable for active execution");
       }

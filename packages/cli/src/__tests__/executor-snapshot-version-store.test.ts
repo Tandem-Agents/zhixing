@@ -266,8 +266,8 @@ describe("FileTrustRuleSnapshotCatalog", () => {
     expect(replay.highWater).toBe(2);
 
     const reopened = await FileTrustRuleSnapshotCatalog.open(root, verifier);
-    expect(reopened.snapshotFor(fromFirst.snapshot.digest)).toEqual(fromFirst.snapshot);
-    expect(reopened.snapshotFor(changed.snapshot.digest)).toEqual(changed.snapshot);
+    await expect(reopened.snapshot(fromFirst.snapshot.digest)).resolves.toEqual(fromFirst.snapshot);
+    await expect(reopened.snapshot(changed.snapshot.digest)).resolves.toEqual(changed.snapshot);
     await expect(reopened.highWater()).resolves.toBe(2);
   });
 });

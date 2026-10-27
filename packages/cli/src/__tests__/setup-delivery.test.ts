@@ -567,9 +567,9 @@ describe("setupDelivery — Channel effect binding", () => {
     );
     expect(advancedPrepared.policy.permissionSnapshot.snapshotVersion).toBe(1);
     expect(advancedInventory?.permissionSnapshotHighWater).toBe(1);
-    expect(advanced.permissionSnapshotFor(
+    await expect(advanced.permissionSnapshotFor(
       firstPrepared.policy.permissionSnapshot.digest,
-    )).toEqual(firstPrepared.policy.permissionSnapshot);
+    )).resolves.toEqual(firstPrepared.policy.permissionSnapshot);
     expect(() => validateTrustRuleSnapshot(
       advancedPrepared.policy.permissionSnapshot,
       advanced.verifier,
@@ -615,8 +615,8 @@ describe("setupDelivery — Channel effect binding", () => {
     expect(current.inventory.assetVersions).toEqual(
       firstInventory.assetVersions,
     );
-    expect(authority.permissionSnapshotFor(first.policy.permissionSnapshot.digest))
-      .toEqual(first.policy.permissionSnapshot);
+    await expect(authority.permissionSnapshotFor(first.policy.permissionSnapshot.digest))
+      .resolves.toEqual(first.policy.permissionSnapshot);
 
     const firstManifest = createExecutionManifest({
       baseRef: {

@@ -127,7 +127,7 @@ export interface ConversationOwnerRuntimeStack {
   readonly globalPublishing: boolean;
   readonly anchorEpoch: number;
   acceptsConversationId(conversationId: string): boolean;
-  permissionSnapshotFor(digest: string): TrustRuleSnapshot | undefined;
+  permissionSnapshotFor(digest: string): TrustRuleSnapshot | undefined | Promise<TrustRuleSnapshot | undefined>;
   prepareConversationAssignment(
     input: Parameters<AuthorityRuntimeStack["prepareConversationAssignment"]>[0],
   ): Promise<PreparedConversationAssignmentAuthority>;

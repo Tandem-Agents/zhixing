@@ -73,7 +73,7 @@ export function createConversationExecutorLedger(
     usageFinal: options.usageFinal,
     snapshotFor: (executorId: string): ExecutorCapabilitySnapshot | undefined =>
       options.authority.executorCapabilities.snapshotFor(executorId),
-    permissionSnapshotFor: (digest: string): TrustRuleSnapshot | undefined =>
+    permissionSnapshotFor: (digest: string): TrustRuleSnapshot | undefined | Promise<TrustRuleSnapshot | undefined> =>
       options.authority.permissionSnapshotFor(digest),
     runtimeBindingGuard: options.runtimeBindingGuard ?? (async ({
       assignmentId,

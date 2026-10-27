@@ -74,7 +74,7 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 | C18 [ ] | ExtensionApplication.list:85冷恢复全extension流并返回全部operations；channels prepare/snapshot使用 | 当前实例/未终结操作目录；完成操作exact；按现有功能装配，不新增渠道生命周期 |
 | C19 [x] | 原机制：AuthorityDeliveryPipeline.prepare→AuthorityDeliveryQueue.load→DeliveryAuthority全流/全列表再过滤pending | 2026-10-27包5-5b独审通过（候选86bd4238）：投递权威改为按键持久投影，入队在源事务里按键读，生命周期按条目号装入，准入分页冻结，排空每轮有上界、关闭即收束，计数读计数行，状态历史按主体补读与全局分页，当前uncertain有限分页；权限、回执、未知效果、幂等与补偿语义不变，见§4.12。普通冷开含有限的未发布尾部回放，最终时延归包7 |
 | C20 [ ] | mesh-bootstrap-store.ts:178/193→mesh-runtime-bootstrap:93；受管启动/backup owner也调用，重复重放trust全事件链 | 认证的当前信任投影与版本/epoch；fresh授权仍查当前信任，历史链验证/scrub保留；覆盖startup-application的本机配置/安全端口 |
-| C21 [ ] | FileTrustRuleSnapshotCatalog.open/#reload:301/428→loadPermissionSnapshotCatalog:452枚举全部保留快照 | latest/version/content/digest目录；只加载当前及活跃任务引用旧快照，按原合同验签 |
+| C21 [x] | 原机制：FileTrustRuleSnapshotCatalog.open/#reload→loadPermissionSnapshotCatalog枚举全部保留快照 | 2026-10-27包5-5c独审通过（候选eef27b7f）：快照内容寻址，另有head、按版本、按规则内容与按发布位置四类小指针；只读当前及在途租约引用的旧快照，按原合同验签；head与指针带home完整性MAC，读时有界核对，合法版本跳号下回放旧head也拒绝，见§4.13 |
 | C22 [ ] | 可信home post-install的checkpoint/recovery activation、planned/disaster staging含整快照/目录恢复 | 当前installation/activation指针与未完目录；正常已完成安装不得每次回扫，灾备按§6 |
 | G26 [x] | 原机制：setup-delivery.ts:675→surfaceAssets.recover→ArtifactLifecycleIndex.synchronize:311；while(more)排空多日志追尾和retirement/adoption/expiry/temporary；surface-asset-maintenance.ts:92停止时还新起整轮维护 | 2026-10-26包5-5a独审通过（候选44a25e91）：安全根/配额/引用证明与回收分开，跨日志向量和源端尾部预算在维护，见§4.8。DPI重建步骤不读盘等观察划入5e |
 | C27 [x] | 原机制：command.ts:1274→worksceneDirectory.recover→global-state-adapter.ts:251，启动循环全部pendingDeletionPage并逐项projectDeletion | 2026-10-26包5-5a独审通过（候选44a25e91）：保留已有pending索引，受影响场景删除fence先可见，清理按页续做，不排空全部待办才ready，见§4.8 |
@@ -287,6 +287,13 @@ G09由会话读目录负责：首屏需要的“历史之外的输入”和“�
   - 当前 uncertain 沿 uncertain 目录有限分页，带续读游标与是否还有下一页：页间新进入的排在已读位置之后，关闭的离开目录，续读不漏不重，不需要扫全局历史找当前待决项；
   - 客户端不在冷启动就绪前补到全历史尾部：当前未决事项照常及时可见，完整历史按页可读，补页不阻塞首发，也不把新通知压在旧历史之后。
   - 服务端、本机适配与客户端同轮更新，不保留面向旧客户端的双协议。
+
+### 4.13 权限快照与安装接续（C21/C22）
+
+- **权限快照目录**：每个快照一个内容寻址文件，另有 head、按版本、按规则内容、按发布位置四类小指针。
+  - 锁内只读所需指针与目标快照，读取与保留的快照数无关；崩溃留下的写意图由下一个加锁操作前滚或丢弃。
+  - head 与指针是决定当前权限版本的输入，带 home 完整性密钥的 MAC，不符即失败关闭；没有密钥的只读访问者只做一致性核对。
+  - 版本号可以合法跳号（远端按版本安装）。发布位置与版本号分开：head 每前进一次加一、稠密不跳号，每个位置一条带 MAC 的位置指针，先于 head 写。读取时核“位置指针等于 head、下一个位置不存在”，有界地证明 head 没有落后，不做整目录扫描。
 
 ## 5. 产品体验约束
 

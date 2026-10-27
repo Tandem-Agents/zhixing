@@ -312,9 +312,10 @@ export interface AuthorityRuntimeStack {
     displayName: string;
     workspaceBindingRevision: number;
   }[];
+  /** 按 digest 精确读权限快照（当前及在途租约引用的旧快照），不常驻全集。 */
   readonly permissionSnapshotFor: (
     digest: string,
-  ) => TrustRuleSnapshot | undefined;
+  ) => Promise<TrustRuleSnapshot | undefined>;
   readonly latestPermissionSnapshot: () => Promise<TrustRuleSnapshot | undefined>;
   readonly executionAssetCatalog: ExecutionAssetCatalogPort;
   readonly currentExecutionAssetBundle: () => Promise<ExecutionAssetBundle | undefined>;
@@ -697,6 +698,7 @@ export async function setupAuthorityRuntime(
     const permissionSnapshots = await FileTrustRuleSnapshotCatalog.open(
       path.join(authorityRoot, "permission-snapshots"),
       verifier,
+      { ...(sources.integrity ? { integrity: sources.integrity } : {}) },
     );
     const executionAssets = new FileExecutionAssetCache(
       path.join(authorityRoot, "execution-assets.json"),
@@ -2159,7 +2161,7 @@ export async function setupAuthorityRuntime(
               left.bindingRef.localeCompare(right.bindingRef),
           ),
       permissionSnapshotFor: (digest) =>
-        permissionSnapshots.snapshotFor(digest),
+        permissionSnapshots.snapshot(digest),
       latestPermissionSnapshot: () => permissionSnapshots.latest(),
       executionAssetCatalog: executionAssets,
       currentExecutionAssetBundle: () => executionAssets.bundle(),
