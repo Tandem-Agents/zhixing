@@ -74,7 +74,7 @@ import { TerminalCandidatesOwner } from './candidates.js';
 import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtime/stop-selection.js';
 import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
-import { recordTerminalFailure } from './failure.js';
+import { recordTerminalFailure, terminalStorageFullMessage } from './failure.js';
 
 type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
@@ -636,7 +636,10 @@ class TerminalApplication {
       if (this.#abort.signal.aborted) return;
       recordTerminalFailure(this.#logging.records, error, 'terminal-operation-failed');
       this.#mainView = { ...this.#mainView, busy: false, message: error instanceof ConfigurationEditPendingError
-        ? error.message : `操作未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`,
+        ? error.message
+        // 本机终端存储真实不足：按哪一层满了如实说明，草稿仍保留
+        : terminalStorageFullMessage(error instanceof Error ? error.message : undefined)
+        ?? `操作未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`,
         ...(error instanceof ConfigurationEditPendingError ? { choices: [{ id: 'config', label: '重新打开配置并核对状态' }, { id: 'exit', label: '退出终端' }] } : {}) };
       // 操作已结束：先交还准入门，再发布结果视图
       release();

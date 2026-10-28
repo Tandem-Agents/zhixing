@@ -5,6 +5,11 @@ export function recordFirstSurfaceOutput(records: LogRecordPort | undefined): vo
   shown.add(records);
   records.record({ event: "firstOutput", result: "success", data: { sinceProcessStartMs: Math.round(process.uptime() * 1000) } });
 }
+/** 终端实例存储账户一次请求的上下文：操作、桶、请求字节、期限内尝试次数、接续针对的原因码与容量仲裁结论。 */
+const TERMINAL_ASSET_FIELDS = {
+  operation: "text", bucket: "text", bytes: "number", attempts: "number", retriedOn: "text",
+  capacity: { fields: { kind: "text", blockedBy: "text", retryAfterMs: "number" } },
+} as const;
 export const RUNTIME_LOG_SOURCE: LogSource = {
   id: "runtime",
   version: 1,
@@ -43,6 +48,10 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     terminalFailure: { message: "终端操作首因", level: "error", tier: "critical", fields: {
       reason: "text", action: "text", role: "text", requestId: "number", active: "number", pending: "number", queued: "number", durationMs: "number",
       failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: 'text', maxItems: 4 },
+      asset: { fields: TERMINAL_ASSET_FIELDS },
+    } },
+    terminalAssetRetried: { message: "终端实例存储请求经接续后完成", level: "info", tier: "critical", fields: {
+      durationMs: "number", asset: { fields: TERMINAL_ASSET_FIELDS },
     } },
     started: {
       message: "运行入口已开始",

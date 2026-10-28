@@ -69,7 +69,7 @@ export type TerminalMessage =
       | { readonly kind: 'reserve'; readonly bucket: 'display' | 'input'; readonly bytes: number }
       | { readonly kind: 'settle'; readonly token: string; readonly bytes: number }
       | { readonly kind: 'released'; readonly bucket: 'display' | 'input'; readonly bytes: number } }
-  | { readonly type: "assets-result"; readonly id: number; readonly token?: string; readonly failed?: true }
+  | { readonly type: "assets-result"; readonly id: number; readonly token?: string; readonly failed?: true; readonly reason?: string }
   | { readonly type: 'host-start'; readonly id: string; readonly endpoint?: string; readonly channel?: 'posix'; readonly handoff: string; readonly deadline: number }
   | { readonly type: 'host-release'; readonly id: string }
   | { readonly type: 'host-state'; readonly id: string; readonly state: 'created' | 'failed' | 'exited'; readonly pid?: number; readonly code?: number }

@@ -23,6 +23,12 @@ type LockOwnerReading =
   | { readonly kind: "corrupt" };
 
 const activeTokens = new Set<string>();
+/**
+ * 本进程对各锁路径上次清理残留 claim 的时刻（调用方 now 口径）与所用 staleMs。claim 不携带所有权，
+ * 只有存在超过 staleMs 才可能可清理，所以同一路径在 staleMs 内不再逐次扫描；条目过了 staleMs 即不再起作用，
+ * 插入时顺手剔除，表的大小只取决于 staleMs 内取过锁的路径数。
+ */
+const claimCleanups = new Map<string, { readonly at: number; readonly staleMs: number }>();
 const defaultProcessIdentityResolver = createProcessIdentityResolver();
 const processIdentityScope = new AsyncLocalStorage<ProcessIdentityResolver>();
 /** A composition root supplies its platform port to its own async lifetime.
@@ -92,8 +98,8 @@ export async function acquireFileLock(
     birth: self.birth,
   };
   await mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  await cleanupAbandonedClaims(lockPath, options.staleMs, now, resolver);
-  await cleanupAbandonedClaims(`${lockPath}.reclaim`, options.staleMs, now, resolver);
+  await cleanupAbandonedClaimsAtInterval(lockPath, options.staleMs, now, resolver);
+  await cleanupAbandonedClaimsAtInterval(`${lockPath}.reclaim`, options.staleMs, now, resolver);
 
   while (true) {
     if (await tryCreateLockFile(lockPath, JSON.stringify(record))) {
@@ -161,6 +167,8 @@ async function reclaimDeadLock(
       owner.pid === observedOwner.pid;
     if (sameOwner && await isReclaimable(owner, currentAge, staleMs, resolver)) {
       await rm(lockPath, { force: true });
+      // 死去的持有者可能还留下未完成的 claim：下次取锁照常清理
+      claimCleanups.delete(lockPath);
       return true;
     }
     return false;
@@ -181,6 +189,8 @@ async function tryCreateLockFile(lockPath: string, content: string): Promise<boo
     return await claim.publish();
   } finally {
     await claim.dispose().catch((error: unknown) => {
+      // 本进程的 claim 没删掉：下次取锁照常清理
+      claimCleanups.delete(lockPath);
       process.emitWarning(
         new Error("Prepared lock claim cleanup failed; later acquisition will retry cleanup", {
           cause: error,
@@ -188,6 +198,21 @@ async function tryCreateLockFile(lockPath: string, content: string): Promise<boo
       );
     });
   }
+}
+
+async function cleanupAbandonedClaimsAtInterval(
+  targetPath: string,
+  staleMs: number,
+  now: () => number,
+  resolver: ProcessIdentityResolver,
+): Promise<void> {
+  const last = claimCleanups.get(targetPath);
+  const elapsed = last ? now() - last.at : -1;
+  if (last && elapsed >= 0 && elapsed < last.staleMs && last.staleMs <= staleMs) return;
+  await cleanupAbandonedClaims(targetPath, staleMs, now, resolver);
+  const at = now();
+  for (const [key, entry] of claimCleanups) if (at - entry.at >= entry.staleMs) claimCleanups.delete(key);
+  claimCleanups.set(targetPath, { at, staleMs });
 }
 
 async function cleanupAbandonedClaims(

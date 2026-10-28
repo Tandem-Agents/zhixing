@@ -301,6 +301,27 @@ describe("file lock atomic publication", () => {
     expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
     await release();
   }, 120_000);
+
+  it("同一路径在 staleMs 内不重复扫描残留 claim，超过 staleMs 后取锁照常清理", async () => {
+    const directory = await createTempDir("file-lock-claim-interval");
+    const lockPath = path.join(directory, "resource.lock");
+    let clock = Date.now();
+    const options = { staleMs: 1_000, waitMs: 500, retryMs: 5, now: () => clock };
+    await (await acquireFileLock(lockPath, options))();
+    // 取锁之后才出现的过期未完成 claim（比如别的进程在发布前崩溃留下的）
+    const claimPath = `${lockPath}.claim-${"e".repeat(32)}`;
+    await writeFile(claimPath, "{", "utf8");
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(claimPath, stale, stale);
+
+    clock += 10;
+    await (await acquireFileLock(lockPath, options))();
+    expect((await stat(claimPath)).isFile()).toBe(true);
+
+    clock += 2_000;
+    await (await acquireFileLock(lockPath, options))();
+    await expect(stat(claimPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
 
 describe("platform process identity projection", () => {

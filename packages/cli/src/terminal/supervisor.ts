@@ -18,7 +18,7 @@ import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/st
 import { resolveSelfExec } from '../serve/self-exec.js';
 import { terminalCloseDeadline, terminalWriterDeadline } from './close-budget.js';
 import { verifyTerminalAssets } from './verify-assets.js';
-import { recordTerminalFailure } from './failure.js';
+import { recordTerminalFailure, TERMINAL_ASSET_FAILURE_CODES } from './failure.js';
 import { readDeviceRestriction, retrievingHostAlive } from '../serve/device-restriction.js';
 
 type Role = 'recovery' | 'application' | 'ui';
@@ -54,6 +54,38 @@ export interface TerminalSupervisorOptions {
   readonly admitted?: (createStore: LogStoreWorkerFactory, capacity: ReturnType<typeof createDeviceCapacityRuntime>) => Promise<void>;
   readonly drain?: (deadline: number, code: number) => Promise<void>;
   readonly commandOutput?: (stream: 'stdout' | 'stderr', text: string) => void;
+}
+
+/** 实例存储账户一次请求在 S 内的整体期限：从收到请求起算，含排队、每次尝试与接续等待。
+ * S 处理完才回该请求的确认帧，N 对请求结果与确认帧各有 5 秒超时（确认超时会使通道失效），期限须留出往返余量。 */
+const ASSET_OPERATION_DEADLINE_MS = 4_000;
+
+/** 设备容量仲裁未授予（结构判断：S 的启动包不引入容量模块）。 */
+function capacityAdmission(error: unknown): { readonly kind: string; readonly blockedBy?: string; readonly retryAfterMs?: number } | undefined {
+  if (!(error instanceof Error) || error.name !== 'DeviceCapacityAdmissionError') return undefined;
+  const admission = (error as Error & { admission?: { kind?: unknown; blockedBy?: unknown; retryAfterMs?: unknown } }).admission;
+  return typeof admission?.kind === 'string' ? {
+    kind: admission.kind,
+    ...(typeof admission.blockedBy === 'string' ? { blockedBy: admission.blockedBy } : {}),
+    ...(typeof admission.retryAfterMs === 'number' ? { retryAfterMs: admission.retryAfterMs } : {}),
+  } : undefined;
+}
+
+/** 可重试的实例存储账户失败给出接续等待（有上限）；其余不重试。 */
+function retryableAssetDelayMs(error: unknown): number | undefined {
+  const capacity = capacityAdmission(error);
+  if (capacity) return capacity.kind === 'backpressured' ? Math.min(Math.max(capacity.retryAfterMs ?? 50, 10), 500) : undefined;
+  const code = error instanceof Error ? error.message : undefined;
+  return code === 'terminal-root-busy' ? 50 : code === 'terminal-root-changing' ? 20 : undefined;
+}
+
+/** 回给 N 与写入失败记录的确定原因码；不在白名单里的不外传。 */
+function assetFailureCode(error: unknown): string | undefined {
+  const capacity = capacityAdmission(error);
+  if (capacity) return capacity.kind === 'backpressured' ? 'terminal-assets-capacity-backpressured' : capacity.kind === 'capacity-gap' ? 'terminal-assets-capacity-gap' : undefined;
+  if (error instanceof Error && error.name === 'DeviceCapacityStepError') return 'terminal-assets-capacity-step';
+  const code = error instanceof Error ? error.message : undefined;
+  return code && TERMINAL_ASSET_FAILURE_CODES.includes(code) ? code : undefined;
 }
 
 /** Foreground lifetime owner. It forwards typed surface traffic but has no
@@ -854,6 +886,57 @@ class TerminalSupervisor {
     item.child.on('message', message => item.channel!.accept(message));
   }
 
+  /** N 对本实例存储账户的一次请求：S 独自解释三种有限操作，结果（或确定的失败原因）回给 N。 */
+  async #assetRequest(item: OwnedProcess, message: Extract<TerminalMessage, { type: 'assets' }>): Promise<void> {
+    if (!this.#assets || !Number.isSafeInteger(message.id) || message.id <= this.#lastAssetRequest) throw Error('terminal-assets-request');
+    this.#lastAssetRequest = message.id;
+    const operation = message.operation;
+    if (!operation || !Number.isSafeInteger(operation.bytes) || operation.bytes < 0 || operation.bytes > TERMINAL_LIMITS.storageReservationBytes) throw Error('terminal-assets-operation');
+    if (operation.kind === 'settle' ? !/^[a-f0-9-]{36}$/u.test(operation.token) : !['display', 'input'].includes(operation.bucket)) throw Error('terminal-assets-operation');
+    const assets = this.#assets;
+    // 只有可重试的情况（容量许可被背压、实例根的锁正忙、根目录在两次读之间变化）在整体期限内接续；
+    // 期限到时正在进行的尝试由截止信号结束。容量不足、槽位耗尽、结算越界与未知错误如实回失败原因
+    const started = performance.now();
+    const deadline = AbortSignal.timeout(ASSET_OPERATION_DEADLINE_MS), signal = AbortSignal.any([this.#abort.signal, deadline]);
+    let retriedOn: string | undefined, retriedCapacity: ReturnType<typeof capacityAdmission>;
+    for (let attempts = 1; ; attempts++) {
+      try {
+        let token: string | undefined;
+        if (operation.kind === 'reserve') token = await assets.reserve(operation.bucket, operation.bytes, signal);
+        else if (operation.kind === 'settle') await assets.settle(operation.token, operation.bytes, signal);
+        else if (operation.kind === 'released') await assets.released(operation.bucket, operation.bytes, signal);
+        else throw Error('terminal-assets-operation');
+        // 经接续才完成的请求也留一条记录：可重试原因的实际分布只能从这里得知
+        if (attempts > 1) {
+          try {
+            this.options.records?.record({ event: 'terminalAssetRetried', result: 'success', data: { durationMs: Math.round(performance.now() - started),
+              asset: { operation: operation.kind, ...(operation.kind === 'settle' ? {} : { bucket: operation.bucket }), bytes: operation.bytes, attempts,
+                ...(retriedOn ? { retriedOn } : {}), ...(retriedCapacity ? { capacity: retriedCapacity } : {}) } } });
+          } catch { /* 记录不能替代结果回送 */ }
+        }
+        this.#live(); await item.channel!.send({ type: 'assets-result', id: message.id, token });
+        return;
+      } catch (error) {
+        const filesystem = checkpointFilesystemCompletion(error);
+        const expired = deadline.aborted && !this.#abort.signal.aborted;
+        const retryMs = filesystem || expired ? undefined : retryableAssetDelayMs(error);
+        if (retryMs !== undefined && !this.#abort.signal.aborted && !this.#sealed && performance.now() - started + retryMs < ASSET_OPERATION_DEADLINE_MS) {
+          retriedOn = assetFailureCode(error); retriedCapacity = capacityAdmission(error);
+          await new Promise(resolve => setTimeout(resolve, retryMs)); continue;
+        }
+        const reason = expired ? 'terminal-assets-deadline' : assetFailureCode(error), capacity = capacityAdmission(error);
+        // 原错误的 message 即原因码时保留原错误（含来源栈帧）；容量仲裁的错误与期限到达以派生原因码记，结论另附
+        const recorded = reason && !(error instanceof Error && error.message === reason) ? Error(reason) : error;
+        recordTerminalFailure(this.options.records, recorded, 'terminal-assets-operation-failed', { durationMs: Math.round(performance.now() - started),
+          asset: { operation: operation.kind, ...(operation.kind === 'settle' ? {} : { bucket: operation.bucket }), bytes: operation.bytes, attempts,
+            ...(capacity ? { capacity } : {}), ...(retriedOn ? { retriedOn } : {}) } });
+        if (filesystem) void this.#close(74, 'terminal-filesystem-unconfirmed');
+        if (!this.#sealed) await item.channel!.send({ type: 'assets-result', id: message.id, failed: true, ...(reason ? { reason } : {}) });
+        return;
+      }
+    }
+  }
+
   async #roleMessage(item: OwnedProcess, message: TerminalMessage, traffic: TerminalTraffic): Promise<void> {
     if (message.type === 'exit') {
       if (message.bootstrapFailure) {
@@ -880,25 +963,7 @@ class TerminalSupervisor {
       if (message.role !== item.role || item.announced) throw Error('terminal-listener-handshake');
       item.announced = true; item.announceListening(); return;
     }
-    if (item.role === 'application' && message.type === 'assets') {
-      if (!this.#assets || !Number.isSafeInteger(message.id) || message.id <= this.#lastAssetRequest) throw Error('terminal-assets-request');
-      this.#lastAssetRequest = message.id;
-      const operation = message.operation;
-      if (!operation || !Number.isSafeInteger(operation.bytes) || operation.bytes < 0 || operation.bytes > TERMINAL_LIMITS.storageReservationBytes) throw Error('terminal-assets-operation');
-      if (operation.kind === 'settle' ? !/^[a-f0-9-]{36}$/u.test(operation.token) : !['display', 'input'].includes(operation.bucket)) throw Error('terminal-assets-operation');
-      try {
-        let token: string | undefined;
-        if (operation.kind === 'reserve') token = await this.#assets.reserve(operation.bucket, operation.bytes, this.#abort.signal);
-        else if (operation.kind === 'settle') await this.#assets.settle(operation.token, operation.bytes, this.#abort.signal);
-        else if (operation.kind === 'released') await this.#assets.released(operation.bucket, operation.bytes, this.#abort.signal);
-        else throw Error('terminal-assets-operation');
-        this.#live(); await item.channel!.send({ type: 'assets-result', id: message.id, token });
-      } catch (error) {
-        if (checkpointFilesystemCompletion(error)) void this.#close(74, 'terminal-filesystem-unconfirmed');
-        if (!this.#sealed) await item.channel!.send({ type: 'assets-result', id: message.id, failed: true });
-      }
-      return;
-    }
+    if (item.role === 'application' && message.type === 'assets') return this.#assetRequest(item, message);
     if (item.role === 'application' && message.type === 'host-start') { this.#startHost(message, item); return; }
     if (item.role === 'application' && message.type === 'host-release') { this.#releaseHost(message.id); return; }
     if (item.role === 'ui' && message.type === 'modes') {

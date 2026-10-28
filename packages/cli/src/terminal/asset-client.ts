@@ -28,7 +28,9 @@ export class TerminalAssetClient implements TerminalAssetAccount {
     const pending = this.#pending.get(message.id);
     if (!pending) return;
     this.#pending.delete(message.id); clearTimeout(pending.timer);
-    if (message.failed) pending.reject(Error('terminal-assets-unavailable')); else pending.resolve(message.token);
+    // S 给出的确定原因码原样作为拒绝原因（只接受形如 terminal-* 的源码字面量），没有则为通用的不可用
+    const reason = typeof message.reason === 'string' && /^terminal-[a-z-]{1,64}$/u.test(message.reason) ? message.reason : 'terminal-assets-unavailable';
+    if (message.failed) pending.reject(Error(reason)); else pending.resolve(message.token);
   }
   #request(operation: Extract<TerminalMessage, { type: 'assets' }>['operation']): Promise<string | undefined> {
     this.signal.throwIfAborted();

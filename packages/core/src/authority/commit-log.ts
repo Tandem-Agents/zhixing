@@ -348,6 +348,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   #work: AuthorityWork | undefined;
   /** One verified snapshot per exclusive operation; never survives the operation. */
   #operationView: VerifiedWalView | undefined;
+  /** 本次持锁操作开头读到的日志文件版本：本操作第一次取尾部时取用一次，不为同一份元数据再开文件；操作结束或追加写入即清除。 */
+  #operationMetadata: WalFileVersion | undefined;
   #lockSession: CommitLogLockSession | undefined;
   #lockSessionClosing: Promise<void> | undefined;
   /** 已进入本日志串行队列（排队或执行中）的加锁操作数。 */
@@ -2450,6 +2452,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       previousView = verifiedWalViews.get(this.logPath, checkpoint.logId, metadata);
       verifiedWalViews.delete(this.logPath);
       this.#operationView = undefined;
+      this.#operationMetadata = undefined;
       await handle.writeFile(frame);
       await handle.sync();
       committed = true;
@@ -3108,7 +3111,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   async #loadLastLsn(): Promise<number> {
-    const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
+    const operationMetadata = this.#operationMetadata;
+    this.#operationMetadata = undefined;
+    const metadata = operationMetadata ?? await readWalVersion(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
@@ -3795,12 +3800,22 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   async #ensureInitialized(): Promise<void> {
+    this.#operationMetadata = undefined;
     const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
     if (!metadata) {
       await this.#installEmptyLog();
+      return;
+    }
+    // 认证模式下文件版本与已核验尾部完全一致：日志身份沿用，不重读文件头。这与认证尾部“元数据一致即采用”
+    // （#loadAuthenticatedTail）是同一依据，只限身份写在日志文件头里的 versioned 格式（legacy 的身份在旁边的
+    // identity 文件里，日志元数据管不到它）；非认证模式、尚无已核验尾部或版本有任何变化时照旧重读
+    const tail = this.#verifiedTail;
+    if (this.#logId !== undefined && this.#logFormat === "versioned" && tail?.logId === this.#logId &&
+        matchesWalVersion(tail, metadata) && await this.#authenticatedMode()) {
+      this.#operationMetadata = metadata;
       return;
     }
     if (metadata.size >= AUTHORITY_WAL_FILE_HEADER_BYTES) {
@@ -4011,6 +4026,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               // 每次操作都重新按字节核验：同一持锁会话也不跨操作沿用视图，
               // 非协作写者在两次操作之间的改动仍由下一次操作发现。
               this.#operationView = undefined;
+              this.#operationMetadata = undefined;
               this.#work = undefined;
               observation.data.executionMs += performance.now() - executing;
               const releasing = performance.now();

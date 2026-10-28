@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { recordTerminalFailure } from '../failure.js';
+import { recordTerminalFailure, terminalStorageFullMessage } from '../failure.js';
 import type { LogDraft, LogRecordPort } from '@zhixing/core/logging';
 
 describe('terminal first-cause logging', () => {
@@ -34,5 +34,25 @@ describe('terminal first-cause logging', () => {
     } });
     const serialized = JSON.stringify(record.mock.calls);
     expect(serialized).not.toMatch(/secret|private-home|C:/u);
+  });
+
+  it('资产失败的接续原因只记白名单码', () => {
+    const entries: LogDraft[] = [];
+    const records: LogRecordPort = { record: value => { entries.push(typeof value === 'function' ? value() : value); } };
+    recordTerminalFailure(records, Error('terminal-assets-deadline'), 'terminal-assets-operation-failed',
+      { durationMs: 4001, asset: { operation: 'reserve', bucket: 'display', bytes: 10, attempts: 3, retriedOn: 'terminal-root-busy' } });
+    recordTerminalFailure(records, Error('terminal-assets-deadline'), 'terminal-assets-operation-failed',
+      { asset: { operation: 'settle', bytes: 0, attempts: 2, retriedOn: 'private-secret' } });
+    expect(entries[0]?.data).toMatchObject({ durationMs: 4001, failure: { code: 'terminal-assets-deadline' },
+      asset: { operation: 'reserve', bucket: 'display', bytes: 10, attempts: 3, retriedOn: 'terminal-root-busy' } });
+    expect(JSON.stringify(entries[1])).not.toContain('private-secret');
+  });
+
+  it('真实容量不足按哪一层满了给出出路；策略缺口与其余原因不算存储满', () => {
+    expect(terminalStorageFullMessage('terminal-instance-display-capacity')).toContain('新开一个终端窗口');
+    expect(terminalStorageFullMessage('terminal-root-capacity')).toContain('关闭其他终端窗口');
+    expect(terminalStorageFullMessage('terminal-disk-capacity')).toContain('释放磁盘空间');
+    for (const code of ['terminal-assets-capacity-gap', 'terminal-assets-capacity-backpressured', 'terminal-assets-deadline', 'terminal-assets-unavailable', undefined])
+      expect(terminalStorageFullMessage(code)).toBeUndefined();
   });
 });
