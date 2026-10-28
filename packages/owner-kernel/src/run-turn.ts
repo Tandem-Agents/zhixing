@@ -138,6 +138,14 @@ export interface DurableConversationCancellationResult {
   readonly dispositions: readonly DurableConversationCancellationDisposition[];
   /** Exact control receipt is durable, but its owner decision is still owed. */
   readonly receivedPending?: true;
+  /**
+   * 指定的运行在取消到达之前已按权威事实终结（取消被拒为已关闭、且按 runId 精确重读为终态）：
+   * 无需再取消，没有本地止损，也不连带取消依赖它的工作。
+   */
+  readonly finished?: {
+    readonly runId: string;
+    readonly runState: Extract<ConversationRunState, "committed" | "cancelled" | "failed" | "expired">;
+  };
 }
 
 /** Read-only durable ownership of a stable ingress identity. */

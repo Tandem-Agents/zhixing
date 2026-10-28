@@ -107,6 +107,9 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
         return Object.freeze({ matchedDurableRuns: 0, abortedInFlight: false,
           cancelledPending: 0, receivedPending: true as const });
       }
+      if (result.finished) {
+        return Object.freeze({ matchedDurableRuns: 0, abortedInFlight: false, cancelledPending: 0, finished: true as const });
+      }
       const dependentLifecycleIngressId = result.dispositions.find(
         (item) => item.source === "advancement",
       )?.ingressId;

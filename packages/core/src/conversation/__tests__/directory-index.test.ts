@@ -212,3 +212,91 @@ it('fails before source mutation when durable intent cannot be recorded', async 
   await expect(h.repo.rename('c-0000','must-not-persist')).rejects.toThrow('cannot be written');
   expect(await h.repo.get('c-0000')).toEqual(original);
 });
+
+// 只为保存失败回执而建的会话：导航（分页、最近、列表、降级直读、未发布覆盖）都不列出，精确读取与责任型读取照常；显现单向
+const receipt = { createdFor: 'submission-receipt' } as const;
+const ids = (records: readonly { id: string }[]) => records.map(item => item.id);
+it('keeps a receipt-only conversation out of navigation until it is revealed', async () => {
+  const h = await fixture(2);
+  await h.repo.ensure('shell', receipt);
+  await h.repo.touch('shell', '2095-01-01T00:00:00.000Z');
+  await h.index.prepare();
+  expect(ids((await h.repo.listPage({ limit: 8 })).records)).not.toContain('shell');
+  expect(await h.repo.findLatest()).not.toBe('shell');
+  expect(ids(await h.repo.list())).not.toContain('shell');
+  expect(ids(await h.repo.list({ includeArchived: true }))).not.toContain('shell');
+  expect(ids(await h.repo.list({ includeHidden: true }))).toContain('shell');
+  expect((await h.repo.get('shell'))?.createdFor).toBe('submission-receipt');
+  // 已存在的会话不因创建用途被改成隐藏；隐藏的会话也不因普通 ensure 显现
+  await h.repo.ensure('c-0000', receipt);
+  expect(ids((await h.repo.listPage({ limit: 8 })).records)).toContain('c-0000');
+  await h.repo.ensure('shell');
+  expect(await h.repo.findLatest()).not.toBe('shell');
+  await h.repo.reveal('shell');
+  expect(await h.repo.findLatest()).toBe('shell');
+  // 单向：显现后再按创建用途 ensure 也不会隐藏
+  await h.repo.ensure('shell', receipt);
+  expect(await h.repo.findLatest()).toBe('shell');
+  expect((await h.repo.get('shell'))?.createdFor).toBeUndefined();
+});
+
+it('applies the same navigation predicate to an unpublished overlay and to the direct fallback', async () => {
+  const h = await fixture(3); await h.index.prepare();
+  const file = path.join(h.root, 'c-0000', 'meta.json');
+  const before = JSON.parse(await fs.readFile(file, 'utf8')) as Conversation;
+  let applied!: () => void, resume!: () => void;
+  const ready = new Promise<void>(resolve => { applied = resolve; }), gate = new Promise<void>(resolve => { resume = resolve; });
+  const writing = h.index.mutate(async () => ({ segment: 'c-0000', apply: async () => {
+    await fs.writeFile(file + '.pending', JSON.stringify({ ...before, ...receipt, lastActiveAt: '2099-01-01T00:00:00.000Z' }));
+    await fs.rename(file + '.pending', file);
+    applied(); await gate;
+  } }));
+  await ready;
+  try { expect(ids((await new ConversationDirectoryIndex(h.root).page({ limit: 8 })).records)).not.toContain('c-0000'); }
+  finally { resume(); await writing; }
+  // 缓存不可写时只按本次可读事实直读：同一谓词
+  const fresh = await fixture(2);
+  await fresh.repo.ensure('shell', receipt);
+  const mkdir = fs.mkdir.bind(fs);
+  vi.spyOn(fs, 'mkdir').mockImplementation(((directory: string, options: unknown) => String(directory).includes('.directory-index-v1')
+    ? Promise.reject(Object.assign(new Error('synthetic readonly cache'), { code: 'EACCES' })) : mkdir(directory, options as never)) as typeof fs.mkdir);
+  const direct = await new ConversationDirectoryIndex(fresh.root).page({ limit: 8 });
+  expect(ids(direct.records).sort()).toEqual(['c-0000', 'c-0001']);
+});
+
+it.each([4, 64])('reads the first page and latest without visiting %i hidden receipt shells', async hidden => {
+  const h = await fixture(2);
+  for (let n = 0; n < hidden; n++) {
+    await h.repo.ensure('shell-' + String(n).padStart(4, '0'), receipt);
+    await h.repo.touch('shell-' + String(n).padStart(4, '0'), `2095-01-01T00:00:${String(n % 60).padStart(2, '0')}.000Z`);
+  }
+  await h.index.prepare();
+  const read = vi.spyOn(fs, 'readFile');
+  const page = await h.repo.listPage({ limit: 2 });
+  expect(ids(page.records).sort()).toEqual(['c-0000', 'c-0001']);
+  expect(await h.repo.findLatest()).toMatch(/^c-/u);
+  // 隐藏条目在 SQL 里按索引排除：读取的元数据只有返回的可见条目，不随隐藏条目数增长
+  expect(read.mock.calls.filter(args => String(args[0]).endsWith('meta.json')).length).toBeLessThanOrEqual(4);
+}, 60000);
+
+it('reads a prepared directory of the previous layout by adding the visibility column, without rebuilding', async () => {
+  const h = await fixture(1);
+  await h.repo.findLatest();
+  const directories = await fs.readdir(path.join(h.home, '.directory-index-v1'));
+  const file = path.join(h.home, '.directory-index-v1', directories[0]!, 'catalog.sqlite');
+  const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
+  const epochOf = () => {
+    const db = new DatabaseSync(file);
+    try {
+      const columns = (db.prepare('PRAGMA table_info(entries)').all() as Array<{ name: string }>).map(column => column.name);
+      return { epoch: (db.prepare('SELECT epoch FROM state').get() as { epoch: number }).epoch, hidden: columns.includes('hidden') };
+    } finally { db.close(); }
+  };
+  const before = epochOf().epoch;
+  // 前一版布局：没有导航可见性列与对应索引
+  const db = new DatabaseSync(file);
+  try { db.exec('DROP INDEX visible; ALTER TABLE entries DROP COLUMN hidden'); } finally { db.close(); }
+  const fresh = new ConversationRepository({ kind: 'user' }, h.home);
+  expect(await fresh.findLatest()).toBe('c-0000');
+  expect(epochOf()).toEqual({ epoch: before, hidden: true });
+});

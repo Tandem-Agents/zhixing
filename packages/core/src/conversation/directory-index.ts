@@ -69,28 +69,36 @@ export class ConversationDirectoryIndex {
     return collector.result();
   }
 
-  async list(includeArchived = false, readMetadata: MetadataReader = segment => this.#read(segment)): Promise<Conversation[]> {
+  /** includeHidden 只给恢复等责任型读取；导航（分页、最近、普通列表）不列只为失败回执而建的会话。 */
+  async list(includeArchived = false, readMetadata: MetadataReader = segment => this.#read(segment), includeHidden = false): Promise<Conversation[]> {
     if (!await this.#present()) return [];
-    return this.#query(undefined, includeArchived, readMetadata);
+    return this.#query(undefined, { includeArchived, includeHidden }, readMetadata);
   }
 
-  async #query(input: ConversationDirectoryPageRequest | undefined, includeArchived: boolean, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[]> {
+  /** 带显现意图、等待复核的隐藏会话（写入中断留下的）：按可见性列单独查询，有界 */
+  async revealIntents(readMetadata: MetadataReader = segment => this.#read(segment)): Promise<Conversation[]> {
+    if (!await this.#present()) return [];
+    return this.#query(undefined, { includeArchived: true, includeHidden: true, onlyRevealIntents: true }, readMetadata);
+  }
+
+  async #query(input: ConversationDirectoryPageRequest | undefined, scope: boolean | Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[]> {
+    const visibility: Visibility = typeof scope === 'boolean' ? { includeArchived: scope, includeHidden: false } : scope;
     await this.#bind();
     for (let attempt = 0; attempt < 3; attempt++) {
       signal?.throwIfAborted();
       try {
-        const result = await this.#snapshot(input, includeArchived, reader, signal);
+        const result = await this.#snapshot(input, visibility, reader, signal);
         if (result) return result;
         if (result === null) continue;
         await this.#prepare(reader, signal);
       } catch (error) {
-        if (error instanceof CacheUnavailable) return this.#direct(input, includeArchived, reader, signal);
+        if (error instanceof CacheUnavailable) return this.#direct(input, visibility, reader, signal);
         if (!(error instanceof InvalidDirectory) && !corruptIndex(error)) throw error;
         try {
           await this.#exclusive(async db => this.#rebuild(db));
           await this.#prepare(reader, signal);
         } catch (repairError) {
-          if (repairError instanceof CacheUnavailable) return this.#direct(input, includeArchived, reader, signal);
+          if (repairError instanceof CacheUnavailable) return this.#direct(input, visibility, reader, signal);
           if (corruptIndex(repairError)) continue;
           throw repairError;
         }
@@ -103,7 +111,7 @@ export class ConversationDirectoryIndex {
    * this page), then observe a fresh revision. All source mutations publish an
    * intent first. A stable pending target may yield either side of its atomic
    * meta replacement; both are complete, linearizable states. */
-  async #snapshot(input: ConversationDirectoryPageRequest | undefined, includeArchived: boolean, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[] | undefined | null> {
+  async #snapshot(input: ConversationDirectoryPageRequest | undefined, visibility: Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[] | undefined | null> {
     let db: DatabaseSync;
     try {
       const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
@@ -125,12 +133,20 @@ export class ConversationDirectoryIndex {
       if (!state) return;
       if (state.root !== this.#identity) throw new InvalidDirectory('Directory source binding is invalid');
       if (!state.ready || !state.revision) return;
+      // 前一版布局没有导航可见性列：按未就绪交给写锁打开时补列与建索引，不重建、不重读元数据
+      if (!db.prepare('PRAGMA table_info(entries)').all().some(column => column.name === 'hidden')) return;
       const pending = db.prepare('SELECT segment FROM pending WHERE singleton=1').get() as { segment: string } | undefined;
       if (pending) assertSegment(pending.segment);
       if (!pending && state.stamp !== await this.#stamp()) return;
       const params: Array<string | number> = [state.epoch];
       let where = 'epoch=?';
-      if (!includeArchived) where += ' AND archived=0';
+      // 等待复核的显现意图按可见性列取（archived 用 IN 以走同一索引），不读普通条目的元数据
+      if (visibility.onlyRevealIntents) where += ' AND archived IN (0,1) AND hidden=2';
+      else {
+        if (!visibility.includeArchived) where += ' AND archived=0';
+        // 在 SQL 里按索引排除，不先 LIMIT 再滤，也不为填满一页扫过累计的隐藏条目
+        if (!visibility.includeHidden) where += ' AND hidden=0';
+      }
       if (pending) { where += ' AND segment<>?'; params.push(pending.segment); }
       if (input?.after) {
         where += ' AND (active < ? OR (active=? AND id_order>?))';
@@ -153,7 +169,7 @@ export class ConversationDirectoryIndex {
       }
       if (pending) {
         const meta = await this.#metadata(pending.segment, reader);
-        if (meta && (includeArchived || !meta.archived)) values.push(meta);
+        if (meta && listed(meta, visibility)) values.push(meta);
       }
       db.exec('COMMIT');
       if (this.#state(db).revision !== state.revision) return null;
@@ -168,7 +184,7 @@ export class ConversationDirectoryIndex {
     await this.#bind();
     try { await this.#prepare(reader, signal); }
     catch (error) {
-      if (error instanceof CacheUnavailable) { await this.#direct({ limit: 1 }, false, reader, signal); return; }
+      if (error instanceof CacheUnavailable) { await this.#direct({ limit: 1 }, { includeArchived: false, includeHidden: false }, reader, signal); return; }
       if (!(error instanceof InvalidDirectory) && !corruptIndex(error)) throw error;
       await this.#exclusive(async db => this.#rebuild(db));
       await this.#prepare(reader, signal);
@@ -221,7 +237,7 @@ export class ConversationDirectoryIndex {
     } finally { await directory?.close().catch(() => {}); }
   }
 
-  async #direct(input: ConversationDirectoryPageRequest | undefined, includeArchived: boolean, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[]> {
+  async #direct(input: ConversationDirectoryPageRequest | undefined, visibility: Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[]> {
     // Exceptional cache failure: derive only this call from readable facts.
     const collector = input ? new ConversationDirectoryPageCollector<Conversation & { conversationId: string }>(input) : undefined;
     const values: Conversation[] = [];
@@ -230,7 +246,7 @@ export class ConversationDirectoryIndex {
       signal?.throwIfAborted();
       if (!entry.isDirectory()) continue;
       const meta = await this.#metadata(entry.name, reader);
-      if (!meta || (!includeArchived && meta.archived)) continue;
+      if (!meta || !listed(meta, visibility)) continue;
       if (collector) collector.add({ ...meta, conversationId: meta.id }); else values.push(meta);
     }
     return collector ? collector.entries : values.sort((a,b) => compareDirectoryKeys({ ...a, conversationId: a.id }, { ...b, conversationId: b.id }));
@@ -266,7 +282,8 @@ export class ConversationDirectoryIndex {
     const encoded = metadataDigest(value), existing = db.prepare('SELECT digest,epoch FROM entries WHERE segment=?').get(segment);
     const epoch = this.#state(db).epoch;
     if (existing?.digest === encoded && existing.epoch === epoch) return;
-    db.prepare('INSERT OR REPLACE INTO entries VALUES(?,?,?,?,?,?,?,?)').run(segment,value.id,value.name,Date.parse(value.lastActiveAt),idOrder(value.id),Number(!!value.archived),encoded,epoch);
+    db.prepare('INSERT OR REPLACE INTO entries(segment,id,name,active,id_order,archived,digest,epoch,hidden) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run(segment,value.id,value.name,Date.parse(value.lastActiveAt),idOrder(value.id),Number(!!value.archived),encoded,epoch,visibilityCode(value));
   }
   async #repair(db: DatabaseSync, reader: MetadataReader = segment => this.#read(segment)): Promise<void> {
     const pending = db.prepare('SELECT segment FROM pending WHERE singleton=1').get() as { segment: string } | undefined;
@@ -315,13 +332,16 @@ export class ConversationDirectoryIndex {
         try {
           value.exec(`PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-1024;
             CREATE TABLE IF NOT EXISTS state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),root TEXT NOT NULL,ready INTEGER NOT NULL,phase TEXT NOT NULL,epoch INTEGER NOT NULL,stamp TEXT NOT NULL,revision TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS entries(segment TEXT PRIMARY KEY,id TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL,id_order TEXT NOT NULL,archived INTEGER NOT NULL,digest TEXT NOT NULL,epoch INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS entries(segment TEXT PRIMARY KEY,id TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL,id_order TEXT NOT NULL,archived INTEGER NOT NULL,digest TEXT NOT NULL,epoch INTEGER NOT NULL,hidden INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS recent ON entries(epoch,archived,active DESC,id_order,segment);
             CREATE TABLE IF NOT EXISTS pending(singleton INTEGER PRIMARY KEY CHECK(singleton=1),segment TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS inventory(epoch INTEGER NOT NULL,segment TEXT NOT NULL,done INTEGER NOT NULL,PRIMARY KEY(epoch,segment));
             CREATE INDEX IF NOT EXISTS unfinished ON inventory(epoch,done,segment);`);
           const columns = value.prepare('PRAGMA table_info(state)').all();
           if (!columns.some(column => column.name === 'revision')) value.exec("ALTER TABLE state ADD COLUMN revision TEXT NOT NULL DEFAULT ''");
+          // 旧库补导航可见性列：已有行来自没有创建用途标记的元数据，默认 0 即正确
+          if (!value.prepare('PRAGMA table_info(entries)').all().some(column => column.name === 'hidden')) value.exec('ALTER TABLE entries ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+          value.exec('CREATE INDEX IF NOT EXISTS visible ON entries(epoch,archived,hidden,active DESC,id_order,segment)');
           const row = this.#state(value);
           if (row && row.root !== this.#identity) throw new InvalidDirectory('Conversation directory belongs to another source');
           if (!row) value.prepare("INSERT INTO state VALUES(1,?,0,'inventory',1,'',?)").run(this.#identity, randomUUID());
@@ -357,6 +377,19 @@ function validMetadata(value: Conversation | null): value is Conversation {
     typeof value.name === 'string' && typeof value.lastActiveAt === 'string' && Number.isFinite(Date.parse(value.lastActiveAt));
 }
 function metadataDigest(value: Conversation): string {
+  // 创建用途只在存在时追加：普通条目的摘要不变，不因加字段触发整库重建
   return digest(JSON.stringify([value.id,value.name,value.createdAt,value.lastActiveAt,!!value.archived,!!value.isDefault,
-    value.scope,value.preferredProvider,value.preferredModel]));
+    value.scope,value.preferredProvider,value.preferredModel,...(value.createdFor ? [value.createdFor] : []),
+    ...(value.revealIntent ? [JSON.stringify(value.revealIntent)] : [])]));
+}
+/** onlyRevealIntents：只列带显现意图、等待复核的隐藏会话（启动补齐用），不受归档与隐藏开关影响 */
+interface Visibility { readonly includeArchived: boolean; readonly includeHidden: boolean; readonly onlyRevealIntents?: boolean }
+/** 只为保存失败回执而建、尚无用户内容的会话不进会话导航 */
+function hiddenFromNavigation(value: Conversation): boolean { return value.createdFor === 'submission-receipt'; }
+/** 索引里的可见性列：0 进导航，1 隐藏，2 隐藏且带等待复核的显现意图 */
+function visibilityCode(value: Conversation): number { return hiddenFromNavigation(value) ? (value.revealIntent ? 2 : 1) : 0; }
+/** 快照 SQL、未发布覆盖与直接读取降级共用的导航谓词 */
+function listed(value: Conversation, visibility: Visibility): boolean {
+  if (visibility.onlyRevealIntents) return hiddenFromNavigation(value) && !!value.revealIntent;
+  return (visibility.includeArchived || !value.archived) && (visibility.includeHidden || !hiddenFromNavigation(value));
 }

@@ -1,5 +1,6 @@
 export type {
   Conversation,
+  ConversationRevealIntent,
   ConversationScope,
   CreateConversationOptions,
   EnsureConversationOptions,

@@ -80,6 +80,30 @@ describe("ConversationProtocolRuntime", () => {
     } finally { spy.mockRestore(); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  // 停止请求与运行终结交错：终结之前到达照常取消；终结之后才到达的（例如 Ctrl+C 恰逢运行刚结束）按权威终态答“已结束”，不报失败
+  it("answers a cancellation that arrives after the run already finished with that finished state", async () => {
+    const home = await createTempDir("conversation-finished-cancel");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    const factory = { create: vi.fn(async () => { throw Error("cancelled queued input must not execute"); }) };
+    manager = new ConversationManager(factory, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const conversationId = "finished-cancel";
+    await registerActiveConversation(authority, conversationId, new Date().toISOString());
+    const admitted = await protocol.admit({ conversationId, input: "queued",
+      invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: "finished-cancel-input" } },
+      surfacePrincipal: "rpc:owner" });
+    const principal = { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" };
+    try {
+      const first = await protocol.cancel({ conversationId, requestId: "cancel:before-finish", runId: admitted.runId, principal });
+      expect(first.finished).toBeUndefined();
+      expect(first.dispositions.map((item) => item.runState)).toEqual(["cancelled"]);
+      expect(await protocol.cancel({ conversationId, requestId: "cancel:after-finish", runId: admitted.runId, principal }))
+        .toEqual({ dispositions: [], finished: { runId: admitted.runId, runState: "cancelled" } });
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("recovers a received cancellation after its bounded foreground retry and a cold owner restart", async () => {
     const home = await createTempDir("conversation-received-cancel-recovery");
     const secretStore = new MemorySecretStore();

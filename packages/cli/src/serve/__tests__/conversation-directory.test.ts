@@ -154,6 +154,7 @@ describe("conversation directory(持久层实现)", () => {
       ensure: async (conversationId) => {
         await routedDirectory.ensure(conversationId);
       },
+      reveal: (conversationId) => routedDirectory.reveal(conversationId),
       ensureTranscript: (conversationId) =>
         routedDirectory.ensureTranscript(conversationId),
     });

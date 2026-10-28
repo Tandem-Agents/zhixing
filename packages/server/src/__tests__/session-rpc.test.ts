@@ -993,10 +993,13 @@ function createConversationProductApi(input: {
           submissions: advancement,
           newTask: advancement,
           newTaskConversation: {
-            ensureShell: (conversationId) =>
+            ensureShell: (conversationId, options) =>
               application
-                .ensureShell({ kind: "ensure-shell", conversationId })
+                .ensureShell({ kind: "ensure-shell", conversationId, ...options })
                 .then(() => undefined),
+            beginRevealShell: async () => false,
+            revealShell: async () => undefined,
+            abandonRevealShell: async () => undefined,
           },
           activeUserTurn: advancement,
           activeUserTurnRuntime: {

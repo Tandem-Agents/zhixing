@@ -139,6 +139,7 @@ import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import {
   type AdvancementConversationDirectory,
   createAdvancementRecoveryMaintenance,
+  newTaskSessionId,
   renderRecentContextFromMessages,
 } from "@zhixing/owner-services/advancement";
 import {
@@ -897,6 +898,12 @@ export async function createConversationServices(
     logger: console,
   });
   inputLifecycleContributions.acquire('advancementRecovery.stop', () => advancementRecovery.stop());
+  // 只为失败回执而建的会话：补齐写入中断留下的显现意图（只取等待复核的条目），普通发送按输入回执、
+  // 推进草案按草案会话精确复核；复核失败的留到下次启动，不影响本次启动
+  void inputConversationIdentityLifecycle.settleRevealIntents(async (conversationId, intent) => intent.kind === "turn"
+    ? (await protocol.inputReceipt({ conversationId, turnId: intent.turnId, surfacePrincipal: intent.surfacePrincipal })).status === "accepted"
+    : (await advancementController.loadExactSession(conversationId, newTaskSessionId(intent.draftId))) !== null,
+  ).catch((error: unknown) => console.warn(chalk.yellow(`[conversation] reveal intent settlement deferred: ${error instanceof Error ? error.message : String(error)}`)));
   const advancementAcceptedTurns =
     new AdvancementAcceptedTurnApplicationService({
       catchUp: {

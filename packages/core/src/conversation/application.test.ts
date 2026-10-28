@@ -40,6 +40,8 @@ import {
   type ConversationSecurityProjectionPort,
   type ConversationResolutionFence,
 } from "./application.js";
+import { createTempDir } from "@zhixing/test-utils";
+import { ConversationRepository } from "./repository.js";
 
 class TestCancellationResponseEffect extends ConversationCancellationResponseEffect {
   constructor() {
@@ -97,6 +99,7 @@ describe("Conversation identity lifecycle application", () => {
       exists,
       create,
       ensure,
+      reveal: async () => {},
       ensureTranscript,
     });
 
@@ -136,6 +139,7 @@ describe("Conversation identity lifecycle application", () => {
       exists,
       create: async () => "created-conversation",
       ensure,
+      reveal: async () => {},
       ensureTranscript,
     });
 
@@ -163,6 +167,9 @@ describe("Conversation identity lifecycle application", () => {
         throw failure;
       },
       ensure: async () => {
+        throw failure;
+      },
+      reveal: async () => {
         throw failure;
       },
       ensureTranscript: async () => {
@@ -1232,6 +1239,28 @@ describe("ConversationDirectoryApplicationService", () => {
     });
   });
 
+  it("answers a run that finished before its cancellation as finished, without cascading to dependent work", async () => {
+    const settle = vi.fn(async () => {});
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      runControl: {
+        requiresStableCancellationIdentity: true,
+        requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false,
+        createCancellationIdentity: () => { throw new Error("must not generate"); },
+        cancel: vi.fn(async () => ({ matchedDurableRuns: 0, abortedInFlight: false, cancelledPending: 0, finished: true as const })),
+        settleDependentCancellation: settle,
+        recoverDependentCancellation: vi.fn(async () => {}),
+        resolveUncertain: vi.fn(async () => ({ state: "cancelled", factDigest: `sha256:${"b".repeat(64)}` })),
+      },
+    });
+    await expect(application.abort({
+      kind: "abort", conversationId: "conversation-1", operationId: "abort-operation-1", runId: "run-1",
+      caller: { kind: "surface", surfacePrincipal: "rpc:test", connectionId: "connection-1" },
+    })).resolves.toEqual({ cancelled: false, feedback: { kind: "finished" } });
+    expect(settle).not.toHaveBeenCalled();
+  });
+
   it("fails closed on incomplete abort identities and empty cancellation", async () => {
     const application = new ConversationDirectoryApplicationService({
       storage: fixture().storage,
@@ -1475,6 +1504,157 @@ describe("ConversationDirectoryApplicationService", () => {
     }
     expect(rejection).toMatchObject({ reason: "turn-identity-required" });
     expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("reveals a receipt-only conversation only after durable admission and withdraws the intent when admission fails", async () => {
+    const order: string[] = [];
+    let fail = false, full = false;
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurns: {
+        requiresStableTurnIdentity: true,
+        createTurnIdentity: () => "unused",
+        admit: async (request) => {
+          // 准入端口在耐久接纳之前确认身份：这一步只记显现意图
+          const conversationId = request.identity.kind === "existing"
+            ? (await request.identity.exists(), request.identity.conversationId)
+            : await request.identity.create();
+          if (fail) throw Object.assign(new Error("injected durable admission failure"), { code: "EIO" });
+          if (full) return { status: "full", conversationId } as never;
+          order.push(`admitted:${conversationId}`);
+          return { status: "queued", conversationId, runId: "run-1" } as never;
+        },
+      },
+      agentTurnIdentity: {
+        exists: async (conversationId) => { order.push(`exists:${conversationId}`); return true; },
+        create: async () => "created-1",
+        ensure: async (conversationId) => { order.push(`ensure:${conversationId}`); },
+        beginReveal: async (conversationId, intent) => {
+          order.push(`intent:${conversationId}:${intent.kind === "turn" ? `${intent.surfacePrincipal}/${intent.turnId}` : ""}`); return true;
+        },
+        reveal: async (conversationId) => { order.push(`reveal:${conversationId}`); },
+        abandonReveal: async (conversationId) => { order.push(`abandon:${conversationId}`); },
+      },
+    });
+    const caller = { kind: "surface" as const, surfacePrincipal: "rpc:test", connectionId: "connection-1" };
+    const prepare = () => application.prepareAgentTurnIdentity({ kind: "prepare-agent-turn-identity", turnId: "turn-1", identitySource: "provided", caller });
+    const execution = { execute: async () => {}, cancelPending: async () => {} } as never;
+    const input = { parts: [{ type: "text" as const, text: "hello" }] };
+    const turnIdentity = prepare();
+    expect(order).toEqual([]);
+    await application.admitAgentTurn({ kind: "admit-agent-turn", conversationId: "shell-1", input, turnIdentity, caller, execution });
+    expect(order).toEqual(["exists:shell-1", "intent:shell-1:rpc:test/turn-1", "admitted:shell-1", "reveal:shell-1"]);
+    order.length = 0;
+    await application.admitAgentTurn({ kind: "admit-agent-turn", preallocatedConversationId: "shell-2", input, turnIdentity: prepare(), caller, execution });
+    expect(order).toEqual(["ensure:shell-2", "intent:shell-2:rpc:test/turn-1", "admitted:shell-2", "reveal:shell-2"]);
+    order.length = 0;
+    fail = true;
+    await expect(application.admitAgentTurn({ kind: "admit-agent-turn", conversationId: "shell-3", input, turnIdentity: prepare(), caller, execution }))
+      .rejects.toThrow("injected durable admission failure");
+    // 抛出时结果未知：意图保留，由宿主按回执复核
+    expect(order).toEqual(["exists:shell-3", "intent:shell-3:rpc:test/turn-1"]);
+    order.length = 0;
+    fail = false; full = true;
+    await expect(application.admitAgentTurn({ kind: "admit-agent-turn", conversationId: "shell-4", input, turnIdentity: prepare(), caller, execution }))
+      .rejects.toMatchObject({ code: "busy" });
+    // 确知未接纳（返回的结局）才撤销
+    expect(order).toEqual(["exists:shell-4", "intent:shell-4:rpc:test/turn-1", "abandon:shell-4"]);
+  });
+
+  it("keeps a receipt-only shell hidden on a real repository when durable admission fails, and settles an interrupted intent by its key", async () => {
+    const home = await createTempDir("reveal-intent");
+    const repo = new ConversationRepository({ kind: "user" }, home);
+    let fail = true;
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurnIdentity: {
+        exists: async (id) => !!await repo.get(id), create: async () => "unused", ensure: async () => {},
+        beginReveal: (id, intent) => repo.beginReveal(id, intent), reveal: (id) => repo.reveal(id),
+        abandonReveal: (id, intent) => repo.abandonReveal(id, intent),
+      },
+      agentTurns: {
+        requiresStableTurnIdentity: true, createTurnIdentity: () => "unused",
+        admit: async (request) => {
+          if (request.identity.kind === "existing") await request.identity.exists();
+          if (fail) throw Object.assign(new Error("injected durable admission failure"), { code: "EIO" });
+          return { status: "queued", conversationId: "receipt-only", runId: "run-1" } as never;
+        },
+      },
+    });
+    const caller = { kind: "surface" as const, surfacePrincipal: "rpc:probe", connectionId: "probe" };
+    const admit = () => application.admitAgentTurn({ kind: "admit-agent-turn", conversationId: "receipt-only",
+      input: { parts: [{ type: "text", text: "retry" }] }, caller, execution: {} as never,
+      turnIdentity: application.prepareAgentTurnIdentity({ kind: "prepare-agent-turn-identity", turnId: "turn-2", identitySource: "provided", caller }) });
+    await repo.ensure("receipt-only", { createdFor: "submission-receipt" });
+    await expect(admit()).rejects.toThrow("injected durable admission failure");
+    const cold = new ConversationRepository({ kind: "user" }, home);
+    expect(await cold.findLatest()).toBeNull();
+    // 抛出时结果未知：意图保留（仍隐藏），由宿主按回执复核
+    expect((await cold.get("receipt-only"))?.revealIntent).toEqual({ kind: "turn", turnId: "turn-2", surfacePrincipal: "rpc:probe" });
+    fail = false;
+    await admit();
+    expect(await new ConversationRepository({ kind: "user" }, home).findLatest()).toBe("receipt-only");
+    // 写入中断留下的意图：按依据复核，已耐久显现、未耐久撤销（仍隐藏）、复核失败保留到下次
+    const lifecycle = createConversationIdentityLifecycleApplication({
+      exists: async () => true, create: async () => "unused", ensure: async () => {}, ensureTranscript: async () => {},
+      reveal: (id) => repo.reveal(id), beginReveal: (id, intent) => repo.beginReveal(id, intent),
+      abandonReveal: (id, intent) => repo.abandonReveal(id, intent),
+      listRevealIntents: async () => (await repo.listRevealIntents()).map(value => ({ conversationId: value.id, intent: value.revealIntent! })),
+    });
+    for (const id of ["landed", "lost", "unknown"]) {
+      await repo.ensure(id, { createdFor: "submission-receipt" });
+      expect(await repo.beginReveal(id, { kind: "turn", turnId: `turn-${id}`, surfacePrincipal: "rpc:probe" })).toBe(true);
+    }
+    expect(await repo.beginReveal("receipt-only", { kind: "turn", turnId: "turn-9", surfacePrincipal: "rpc:probe" })).toBe(false);
+    const checked: string[] = [];
+    expect(await lifecycle.settleRevealIntents(async (id, intent) => {
+      checked.push(`${id}:${intent.kind === "turn" ? intent.turnId : ""}`);
+      if (id === "unknown") throw new Error("receipt unavailable");
+      return id === "landed";
+    })).toEqual({ revealed: 1, abandoned: 1, retained: 1 });
+    expect(checked.sort()).toEqual(["landed:turn-landed", "lost:turn-lost", "unknown:turn-unknown"]);
+    const after = new ConversationRepository({ kind: "user" }, home);
+    expect((await after.list()).map(value => value.id).sort()).toEqual(["landed", "receipt-only"]);
+    expect((await after.get("lost"))?.revealIntent).toBeUndefined();
+    expect((await after.listRevealIntents()).map(value => value.id)).toEqual(["unknown"]);
+  });
+
+  it("keeps the intent when the content landed but its acknowledgement was lost, and reveals it from the receipt", async () => {
+    const home = await createTempDir("reveal-uncertain");
+    const repo = new ConversationRepository({ kind: "user" }, home);
+    await repo.ensure("receipt-only", { createdFor: "submission-receipt" });
+    let committed = false;
+    const identity = {
+      exists: async (id: string) => !!await repo.get(id), create: async () => "unused", ensure: async () => {},
+      reveal: (id: string) => repo.reveal(id),
+      beginReveal: (id: string, intent: Parameters<typeof repo.beginReveal>[1]) => repo.beginReveal(id, intent),
+      abandonReveal: (id: string, intent: Parameters<typeof repo.abandonReveal>[1]) => repo.abandonReveal(id, intent),
+    };
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurnIdentity: identity,
+      agentTurns: {
+        requiresStableTurnIdentity: true, createTurnIdentity: () => "unused",
+        admit: async (request) => {
+          if (request.identity.kind === "existing") await request.identity.exists();
+          // 内容已耐久，应答在返回前丢失
+          committed = true;
+          throw Object.assign(new Error("durable write acknowledgement unknown"), { code: "EIO" });
+        },
+      },
+    });
+    const caller = { kind: "surface" as const, surfacePrincipal: "rpc:probe", connectionId: "probe" };
+    await expect(application.admitAgentTurn({ kind: "admit-agent-turn", conversationId: "receipt-only",
+      input: { parts: [{ type: "text", text: "retry" }] }, caller, execution: {} as never,
+      turnIdentity: application.prepareAgentTurnIdentity({ kind: "prepare-agent-turn-identity", turnId: "turn-2", identitySource: "provided", caller }) }))
+      .rejects.toThrow("acknowledgement unknown");
+    // 正式的意图恢复入口按回执核到内容已在：显现，不重发
+    const lifecycle = createConversationIdentityLifecycleApplication({
+      ...identity, ensureTranscript: async () => {},
+      listRevealIntents: async () => (await repo.listRevealIntents()).map(value => ({ conversationId: value.id, intent: value.revealIntent! })),
+    });
+    expect(await lifecycle.settleRevealIntents(async () => committed)).toEqual({ revealed: 1, abandoned: 0, retained: 0 });
+    expect(await new ConversationRepository({ kind: "user" }, home).findLatest()).toBe("receipt-only");
   });
 
   it("rejects a fabricated prepared turn identity before admission", async () => {

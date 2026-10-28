@@ -110,7 +110,7 @@ import {
   anchorConversationOwnerRuntime,
   type ConversationOwnerRuntimeStack,
 } from "./conversation-owner-runtime.js";
-import type { SessionStatePort } from "@zhixing/core/contracts";
+import type { ConversationRunState, SessionStatePort } from "@zhixing/core/contracts";
 import {
   DurableConversationInteractionObserver,
 } from "./durable-conversation-interactions.js";
@@ -1148,16 +1148,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!candidate) return { dispositions: [] };
     const runId = candidate.runId;
     const outcome = await this.#applyAuthorityControl(input.conversationId, journal, control, true);
-    if (outcome.kind === "rejected") {
-      throw new Error(
-        `Conversation cancellation was rejected: ${outcome.result.error.message}`,
-      );
-    }
-    if (outcome.result.status === "rejected") {
-      throw new Error(
-        `Conversation cancellation was rejected: ${outcome.result.error.message}`,
-      );
-    }
+    if (outcome.kind === "rejected") return this.#rejectedCancellation(journal, runId, outcome.result.error);
+    if (outcome.result.status === "rejected") return this.#rejectedCancellation(journal, runId, outcome.result.error);
     if (outcome.result.body.t !== "cancel") {
       throw new Error("Conversation cancellation returned another control result");
     }
@@ -1179,6 +1171,22 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
       ],
     };
+  }
+
+  /**
+   * 取消到达时运行已关闭（拒绝码 fence-rejected）：按 runId 精确重读权威状态，确为终态才给“已结束、无需再取消”；
+   * 找不到、仍在取消中、不确定以及其他拒绝如实抛出。
+   */
+  async #rejectedCancellation(
+    journal: ConversationRunJournal,
+    runId: string,
+    error: { readonly code: string; readonly message: string },
+  ): Promise<DurableConversationCancellationResult> {
+    if (error.code === "fence-rejected") {
+      const after = await journal.runControlDescriptor(runId);
+      if (after && isFinishedRunState(after.state)) return { dispositions: [], finished: { runId, runState: after.state } };
+    }
+    throw new Error(`Conversation cancellation was rejected: ${error.message}`);
   }
 
   /**
@@ -4038,6 +4046,11 @@ function requireRuntimeExecutionPermissionRules(
     );
   }
   return rules;
+}
+
+/** 运行的权威终态（不再可取消）；cancel-requested、uncertain 不算已终结。 */
+function isFinishedRunState(state: ConversationRunState): state is "committed" | "cancelled" | "failed" | "expired" {
+  return state === "committed" || state === "cancelled" || state === "failed" || state === "expired";
 }
 
 function conversationIdFromSubmissionContext(context: AuthorityCallContext): string {

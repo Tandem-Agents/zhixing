@@ -6,7 +6,7 @@ import { getWorkSceneConversationsRoot } from '../workscene/paths.js';
 import { ensureDurableDirectory, replaceFile, syncDirectory, durablyRemoveFile } from '../persistence/index.js';
 import { ConversationDirectoryIndex } from './directory-index.js';
 import type { ConversationDirectoryPageRequest } from './directory-page.js';
-import type { Conversation, ConversationScope, CreateConversationOptions, EnsureConversationOptions,
+import type { Conversation, ConversationRevealIntent, ConversationScope, CreateConversationOptions, EnsureConversationOptions,
   IConversationRepository, SegmentMeta, SegmentMetadata, TaskListState } from './types.js';
 import { DEFAULT_CONVERSATION_ID, DEFAULT_CONVERSATION_NAME } from './types.js';
 
@@ -30,8 +30,8 @@ export class ConversationRepository implements IConversationRepository {
     this.root = conversationsDir(scope, zhixingHome);
     this.index = new ConversationDirectoryIndex(this.root);
   }
-  async list(opts?: { includeArchived?: boolean }): Promise<Conversation[]> {
-    return this.index.list(opts?.includeArchived, segment => this.readSegment(segment));
+  async list(opts?: { includeArchived?: boolean; includeHidden?: boolean }): Promise<Conversation[]> {
+    return this.index.list(opts?.includeArchived, segment => this.readSegment(segment), opts?.includeHidden);
   }
   async listPage(input: ConversationDirectoryPageRequest) {
     return this.index.page(input, segment => this.readSegment(segment));
@@ -56,10 +56,38 @@ export class ConversationRepository implements IConversationRepository {
       const now = new Date().toISOString(), isDefault = id === DEFAULT_CONVERSATION_ID;
       const value: Conversation = { id, name: opts.name ?? (isDefault ? DEFAULT_CONVERSATION_NAME : id),
         createdAt: now, lastActiveAt: now, isDefault, archived: false, preferredModel: opts.preferredModel,
-        preferredProvider: opts.preferredProvider, scope: opts.scope ?? this.scope };
+        preferredProvider: opts.preferredProvider, scope: opts.scope ?? this.scope,
+        // 创建用途与元数据同一次写入：不存在先发布普通空壳、再补隐藏的窗口
+        ...(opts.createdFor === 'submission-receipt' && !isDefault ? { createdFor: opts.createdFor } : {}) };
       return { segment: toSafePathSegment(id), apply: async () => { await this.write(value); return value; } };
     });
   }
+  async reveal(id: string): Promise<void> {
+    await this.index.mutate(async () => {
+      const value = await this.get(id);
+      if (!value?.createdFor && !value?.revealIntent) return { value: undefined };
+      delete value.createdFor; delete value.revealIntent;
+      return { segment: toSafePathSegment(id), apply: () => this.write(value) };
+    });
+  }
+  async beginReveal(id: string, intent: ConversationRevealIntent): Promise<boolean> {
+    return this.index.mutate<boolean>(async () => {
+      const value = await this.get(id);
+      if (!value?.createdFor) return { value: false };
+      if (sameRevealIntent(value.revealIntent, intent)) return { value: true };
+      value.revealIntent = { ...intent };
+      return { segment: toSafePathSegment(id), apply: async () => { await this.write(value); return true; } };
+    });
+  }
+  async abandonReveal(id: string, intent: ConversationRevealIntent): Promise<void> {
+    await this.index.mutate(async () => {
+      const value = await this.get(id);
+      if (!value || !sameRevealIntent(value.revealIntent, intent)) return { value: undefined };
+      delete value.revealIntent;
+      return { segment: toSafePathSegment(id), apply: () => this.write(value) };
+    });
+  }
+  async listRevealIntents(): Promise<Conversation[]> { return this.index.revealIntents(); }
   async rename(id: string, name: string): Promise<Conversation> {
     return this.index.mutate<Conversation>(async () => {
       const value = await this.requireConversation(id);
@@ -155,4 +183,11 @@ export class ConversationRepository implements IConversationRepository {
     for (let n=2;n<=100;n++) { const id=`${base}-${n}`; if (!await this.get(id)) return id; }
     return autoChatId();
   }
+}
+
+/** 同一次写入的显现意图：按键依据逐项相等 */
+function sameRevealIntent(a: ConversationRevealIntent | undefined, b: ConversationRevealIntent): boolean {
+  if (!a || a.kind !== b.kind) return false;
+  return a.kind === 'turn' ? b.kind === 'turn' && a.turnId === b.turnId && a.surfacePrincipal === b.surfacePrincipal
+    : b.kind === 'advancement' && a.draftId === b.draftId;
 }

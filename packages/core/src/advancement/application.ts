@@ -1989,7 +1989,15 @@ export interface AdvancementNewTaskMechanismPort {
 
 /** Conversation application boundary used only after a draft has been built. */
 export interface AdvancementNewTaskConversationPort {
-  ensureShell(conversationId: string): Promise<void>;
+  /** createdFor 只在失败路径为保存回执新建身份时传：该会话在有内容前不进会话导航。 */
+  ensureShell(conversationId: string, options?: { readonly createdFor?: "submission-receipt" }): Promise<void>;
+  /**
+   * 只为失败回执而建的会话：待确认草案落盘之前记显现意图（按草案可复核，仍隐藏），落盘成功后显现、失败撤销；
+   * 中断留下的意图由宿主启动时按草案会话是否已耐久补齐。
+   */
+  beginRevealShell(conversationId: string, intent: { readonly kind: "advancement"; readonly draftId: string }): Promise<boolean>;
+  revealShell(conversationId: string): Promise<void>;
+  abandonRevealShell(conversationId: string, intent: { readonly kind: "advancement"; readonly draftId: string }): Promise<void>;
 }
 
 /** Path-free owner mechanisms for the active user-turn state transition. */
@@ -3058,7 +3066,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
         });
       } catch (error) {
         if (command.submission) {
-          if (command.conversationScope === "new") await this.#newTaskConversation.ensureShell(command.conversationId);
+          if (command.conversationScope === "new") await this.#newTaskConversation.ensureShell(command.conversationId, { createdFor: "submission-receipt" });
           await this.#submissions.settleSubmission(command.conversationId, command.submission, { kind: "contract-failed", code: "rubric-generation-failed" });
         }
         return Object.freeze({
@@ -3074,11 +3082,17 @@ export class AdvancementApplicationService implements AdvancementApplication {
       if (command.conversationScope === "new") {
         await this.#newTaskConversation.ensureShell(command.conversationId);
       }
+      // 只为失败回执而建的会话以耐久的待确认草案为显现依据：先记意图（仍隐藏），落盘成功后显现；
+      // 落盘抛出时结果未知（可能已写成），意图保留，由宿主启动时按草案精确复核。重试时会话可能按 existing 发来，所以不论 scope
+      const intent = { kind: "advancement", draftId: draft.draftId } as const;
+      const intended = await this.#newTaskConversation.beginRevealShell(command.conversationId, intent);
       const committed = await this.#newTask.persistNewTaskAwaitingSession({
         conversationId: command.conversationId,
         originalUserTask: command.userInput,
         draft, submission: command.submission,
       });
+      // 显现写失败时意图保留，下次宿主启动按草案补齐
+      if (intended) await this.#newTaskConversation.revealShell(command.conversationId).catch(() => {});
       assertCommittedNewTaskSession(committed, command, draft);
       const admissionSnapshot = freezeSnapshot(admission);
       const draftSnapshot = freezeSnapshot(draft);

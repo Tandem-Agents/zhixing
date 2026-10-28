@@ -7,6 +7,11 @@
 
 // ─── 核心类型 ───
 
+/** 显现意图的按键依据：普通发送按输入回执（调用方主体 + 回合），推进草案按草案（定位它的待确认会话）。 */
+export type ConversationRevealIntent =
+  | { readonly kind: 'turn'; readonly turnId: string; readonly surfacePrincipal: string }
+  | { readonly kind: 'advancement'; readonly draftId: string };
+
 /** 用户视角的对话身份（持久化在磁盘的 meta.json） */
 export interface Conversation {
   /** 用户可读的稳定 ID，创建后不可改；slug 格式 */
@@ -20,6 +25,16 @@ export interface Conversation {
   isDefault: boolean;
   /** 归档：从默认列表隐藏，但物理数据保留 */
   archived: boolean;
+  /**
+   * 创建用途：只为保存提交失败回执而新建、尚无用户内容。会话导航（列表、分页、最近）不列出，
+   * 精确读取、回执、恢复照常；首次写入用户内容之前去掉（单向）。
+   */
+  createdFor?: 'submission-receipt';
+  /**
+   * 显现意图：只为失败回执而建的会话在写入用户内容之前记下这次写入的按键依据（仍不进导航）；
+   * 写入成功即显现、失败即撤销，中断留下的意图由宿主启动时按依据复核补齐。
+   */
+  revealIntent?: ConversationRevealIntent;
   /** 偏好的 model（首次对话时确定，可被显式覆盖） */
   preferredModel?: string;
   /** 偏好的 provider */
@@ -100,10 +115,19 @@ export interface SegmentMetadata {
 /** ConversationRepository 公共接口 — Conversation 身份的磁盘 CRUD (meta.json) */
 export interface IConversationRepository {
   listPage?(input: import('./directory-page.js').ConversationDirectoryPageRequest): Promise<{ readonly records: readonly Conversation[]; readonly next?: import('./directory-page.js').ConversationDirectoryCursor }>;
-  list(opts?: { includeArchived?: boolean }): Promise<Conversation[]>;
+  /** includeHidden 只给恢复等责任型读取；会话导航不列只为失败回执而建的会话 */
+  list(opts?: { includeArchived?: boolean; includeHidden?: boolean }): Promise<Conversation[]>;
   get(id: string): Promise<Conversation | null>;
   create(opts: CreateConversationOptions): Promise<Conversation>;
   ensure(id: string, opts?: EnsureConversationOptions): Promise<Conversation>;
+  /** 去掉创建用途标记与显现意图，使会话进入导航（单向，没有标记时不写） */
+  reveal(id: string): Promise<void>;
+  /** 为只为失败回执而建的会话记下显现意图（仍不进导航）；没有创建用途标记时不写，返回是否记下 */
+  beginReveal(id: string, intent: ConversationRevealIntent): Promise<boolean>;
+  /** 撤销与之相同的显现意图，会话保持隐藏 */
+  abandonReveal(id: string, intent: ConversationRevealIntent): Promise<void>;
+  /** 带显现意图、等待复核的会话：只有写入中断留下的，按索引单独查询 */
+  listRevealIntents(): Promise<Conversation[]>;
   rename(id: string, name: string): Promise<Conversation>;
   archive(id: string, archived: boolean): Promise<Conversation>;
   delete(id: string): Promise<void>;
@@ -153,6 +177,8 @@ export interface EnsureConversationOptions {
   preferredModel?: string;
   preferredProvider?: string;
   scope?: ConversationScope;
+  /** 只在新建时随元数据一起写；已存在的会话不受影响 */
+  createdFor?: 'submission-receipt';
 }
 
 // ─── 常量 ───

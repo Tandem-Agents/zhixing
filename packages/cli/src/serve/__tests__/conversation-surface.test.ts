@@ -117,6 +117,8 @@ async function setupCtx() {
     ensureShell: vi.fn(async () => {}),
     initializeRuntimeStorage: vi.fn((id: string) =>
       conversationStorage.runtime.initTranscript(id)),
+    // 装配时补齐写入中断留下的显现意图（后台复核，不阻塞装配）
+    settleRevealIntents: vi.fn(async () => ({ revealed: 0, abandoned: 0, retained: 0 })),
   };
   const secretStore = new MemorySecretStore();
   const authorityRuntime = await setupAuthorityRuntime({
@@ -183,8 +185,10 @@ async function setupCtx() {
 
 describe("conversation 接入面：历史装载服从持久层不变量", { timeout: 30_000 }, () => {
   it("publishes a complete protocol/manager pair with an immutable committed-turn listener", async () => {
-    const { ctx, advancementConversationComposition } = await setupCtx();
+    const { ctx, advancementConversationComposition, conversationIdentityLifecycle } = await setupCtx();
     try {
+      // 装配启动一次显现意图复核
+      expect(conversationIdentityLifecycle.settleRevealIntents).toHaveBeenCalledTimes(1);
       expect(ConversationManager.prototype).not.toHaveProperty(
         "bindTurnCommittedListener",
       );

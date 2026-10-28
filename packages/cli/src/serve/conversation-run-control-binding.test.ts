@@ -27,6 +27,16 @@ describe("createAnchorConversationRunControlPort", () => {
       conversationId: "conversation-1", operationId: "cancel-1", runId: "run-1", caller, occurredAt: 123,
     })).resolves.toEqual({ matchedDurableRuns: 0, abortedInFlight: false, cancelledPending: 0, receivedPending: true });
   });
+  it("passes a run that already finished as finished, without a dependent lifecycle to settle", async () => {
+    const conversations = {
+      usesDurableTurnProtocol: () => true,
+      cancelDurableRuns: vi.fn(async () => ({ dispositions: [], finished: { runId: "run-1", runState: "committed" } })),
+      durableControlPrincipal: (input: object) => ({ ...input, deviceId: "device-1" }),
+    } as unknown as ConversationManager;
+    await expect(createAnchorConversationRunControlPort({ conversations }).cancel({
+      conversationId: "conversation-1", operationId: "cancel-1", runId: "run-1", caller, occurredAt: 123,
+    })).resolves.toEqual({ matchedDurableRuns: 0, abortedInFlight: false, cancelledPending: 0, finished: true });
+  });
   it("maps one durable cancellation and principal without owning the decision", async () => {
     const cancelDurableRuns = vi.fn(async () => ({
       dispositions: [

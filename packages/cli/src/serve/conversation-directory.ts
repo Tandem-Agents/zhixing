@@ -8,12 +8,13 @@
  * main 列表不混场景对话)。场景库句柄惰性建、按 sceneId 缓存。
  */
 
-import { parseConversationId, type Conversation, type IConversationRepository } from "@zhixing/core/conversation";
+import { parseConversationId, type Conversation, type ConversationRevealIntent, type IConversationRepository } from "@zhixing/core/conversation";
 import { readRunsReverse, type RunRecordWithRef, type TranscriptReadSource } from "@zhixing/core/transcript";
 import type {
   ConversationClearProjectionPort,
   ConversationDirectoryStorage,
   ConversationIdentityLifecycleMechanism,
+  ConversationShellOptions,
 } from "@zhixing/core/conversation/application";
 import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
 
@@ -44,7 +45,11 @@ export function createConversationDirectory(deps: {
 }): ConversationDirectoryStorage &
   Pick<ConversationIdentityLifecycleMechanism, "exists" | "ensureTranscript"> &
   Pick<ConversationClearProjectionPort, "clearStoredView"> & {
-    ensure(id: string): Promise<Conversation>;
+    ensure(id: string, options?: ConversationShellOptions): Promise<Conversation>;
+    reveal(id: string): Promise<void>;
+    beginReveal(id: string, intent: ConversationRevealIntent): Promise<boolean>;
+    abandonReveal(id: string, intent: ConversationRevealIntent): Promise<void>;
+    listRevealIntents(): Promise<readonly { readonly conversationId: string; readonly intent: ConversationRevealIntent }[]>;
     touch(id: string, at?: string): Promise<Conversation | null>;
     deleteStoredConversation(conversationId: string): Promise<boolean>;
     /** Temporary read-only Advancement recovery bridge; it shares the same storage primitive. */
@@ -87,7 +92,8 @@ export function createConversationDirectory(deps: {
       return { records: result.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })), next: result.next };
     } } : {}),
     listForAdvancement() {
-      return deps.user.repo.list();
+      // 恢复是责任型读取：只为失败回执而建的会话同样要看到
+      return deps.user.repo.list({ includeHidden: true });
     },
 
     async exists(id): Promise<boolean> {
@@ -110,12 +116,33 @@ export function createConversationDirectory(deps: {
       };
     },
 
-    async ensure(id): Promise<Conversation> {
+    async ensure(id, options): Promise<Conversation> {
       const h = handlesFor(id);
       const { scope } = parseConversationId(id);
-      const ensured = await h.repo.ensure(h.localId, { scope });
+      const ensured = await h.repo.ensure(h.localId, { scope, ...(options?.createdFor ? { createdFor: options.createdFor } : {}) });
       await h.transcript.init(h.localId);
       return ensured;
+    },
+
+    async reveal(id): Promise<void> {
+      const h = handlesFor(id);
+      await h.repo.reveal(h.localId);
+    },
+
+    async beginReveal(id, intent): Promise<boolean> {
+      const h = handlesFor(id);
+      return h.repo.beginReveal(h.localId, intent);
+    },
+
+    async abandonReveal(id, intent): Promise<void> {
+      const h = handlesFor(id);
+      await h.repo.abandonReveal(h.localId, intent);
+    },
+
+    async listRevealIntents() {
+      // 只为失败回执而建的会话都在用户区（不带会话 id 的发送）；按索引单独取等待复核的条目
+      return (await deps.user.repo.listRevealIntents()).flatMap(value =>
+        value.revealIntent ? [{ conversationId: value.id, intent: value.revealIntent }] : []);
     },
 
     async ensureTranscript(id): Promise<void> {

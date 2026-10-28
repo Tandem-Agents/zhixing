@@ -173,7 +173,7 @@ describe("production startup server ownership", () => {
     expect(source).toContain("boundConversations!.runMaintenanceExisting(");
     expect(source).toContain("boundConversations!.runMaintenance(conversationId, operation)");
     expect(source).toContain(
-      '.ensureShell({ kind: "ensure-shell", conversationId })',
+      '.ensureShell({ kind: "ensure-shell", conversationId, ...options })',
     );
     expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");

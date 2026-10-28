@@ -27,6 +27,9 @@ import { randomUUID } from "node:crypto";
 import { composeAdvancementClosureReport } from "@zhixing/core/advancement/application";
 import type { AdvancementSessionStore } from "./session-store.js";
 
+/** 新任务待确认会话的 id 由草案决定：落盘与按草案复核（空壳会话的显现补齐）用同一函数。 */
+export function newTaskSessionId(draftId: string): string { return `adv_${draftId}`; }
+
 export interface AdvancementControllerOptions {
   /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
   readonly store: AdvancementSessionStore;
@@ -139,7 +142,7 @@ export class AdvancementController implements
     draft: RubricContractDraftSnapshot;
   }>): Promise<AdvancementSession> {
     return this.store.createSession({
-      id: `adv_${input.draft.draftId}`,
+      id: newTaskSessionId(input.draft.draftId),
       conversationId: input.conversationId,
       originalUserTask: input.originalUserTask,
       pendingRubricDraft: input.draft,

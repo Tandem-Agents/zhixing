@@ -1123,6 +1123,17 @@ describe("AdvancementApplicationService detail query", () => {
         ensureShell: async () => {
           order.push("shell");
         },
+        // 普通新建会话没有创建用途标记：记意图返回 false，不显现
+        beginRevealShell: async () => {
+          order.push("intent");
+          return false;
+        },
+        revealShell: async () => {
+          order.push("reveal");
+        },
+        abandonRevealShell: async () => {
+          order.push("abandon");
+        },
       },
       newTask: {
         loadOpenNewTaskSession: async () => {
@@ -1171,6 +1182,7 @@ describe("AdvancementApplicationService detail query", () => {
       "admission",
       "draft",
       "shell",
+      "intent",
       "session",
     ]);
     expect(prepared.result).toMatchObject({
@@ -1188,10 +1200,11 @@ describe("AdvancementApplicationService detail query", () => {
   });
 
   it("keeps direct, busy, not-found and draft failure free of shell, session and Fact", async () => {
-    const ensureShell = vi.fn(async () => undefined);
+    const ensureShell = vi.fn(async () => undefined), revealShell = vi.fn(async () => undefined);
+    const beginRevealShell = vi.fn(async () => false), abandonRevealShell = vi.fn(async () => undefined);
     const persist = vi.fn();
     const runDirect = createApplication({
-      newTaskConversation: { ensureShell },
+      newTaskConversation: { ensureShell, revealShell, beginRevealShell, abandonRevealShell },
       newTask: {
         loadOpenNewTaskSession: async () => null,
         decideNewTaskAdmission: async () => ({
@@ -1252,7 +1265,7 @@ describe("AdvancementApplicationService detail query", () => {
     ).rejects.toMatchObject({ code: "conversation-not-found" });
 
     const failed = createApplication({
-      newTaskConversation: { ensureShell },
+      newTaskConversation: { ensureShell, revealShell, beginRevealShell, abandonRevealShell },
       newTask: {
         loadOpenNewTaskSession: async () => null,
         decideNewTaskAdmission: async () => ({
@@ -1282,7 +1295,52 @@ describe("AdvancementApplicationService detail query", () => {
       },
     });
     expect(ensureShell).not.toHaveBeenCalled();
+    expect(revealShell).not.toHaveBeenCalled();
+    expect(beginRevealShell).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("creates a receipt-only shell for a failed draft and reveals it only after a later draft is persisted", async () => {
+    const calls: unknown[][] = [];
+    let persistFails = false;
+    const conversation = {
+      ensureShell: async (...args: unknown[]) => { calls.push(["shell", ...args]); },
+      beginRevealShell: async (...args: unknown[]) => { calls.push(["intent", ...args]); return true; },
+      revealShell: async (...args: unknown[]) => { calls.push(["reveal", ...args]); },
+      abandonRevealShell: async (...args: unknown[]) => { calls.push(["abandon", ...args]); },
+    };
+    const submission = { surfacePrincipal: "surface", submissionId: "input-1", requestDigest: `sha256:${"a".repeat(64)}` as const };
+    let attempt = 0;
+    const draft = pendingRubric("重试后的标准");
+    const application = createApplication({
+      newTaskConversation: conversation,
+      submissions: { readSubmission: async () => null, settleSubmission: async (...args: unknown[]) => { calls.push(["receipt", (args[2] as { kind: string }).kind]); }, loadExactSession: async () => null },
+      newTask: {
+        loadOpenNewTaskSession: async () => null,
+        decideNewTaskAdmission: async () => ({ kind: "advancement-task", action: "start-advancement", reason: "needs rubric" }),
+        buildNewTaskRubricDraft: async () => { if (attempt++ === 0) throw new Error("draft unavailable"); return draft; },
+        persistNewTaskAwaitingSession: async ({ conversationId, originalUserTask }) => {
+          if (persistFails) throw new Error("draft session write failed");
+          calls.push(["session"]);
+          return session({ id: "adv_draft-1", conversationId, status: "awaiting-rubric-confirmation", originalUserTask, pendingRubricDraft: draft, confirmedRubric: undefined });
+        },
+      },
+    });
+    const input = { parts: [{ type: "text" as const, text: "推进任务" }] };
+    const intent = { kind: "advancement", draftId: draft.draftId };
+    // 首次失败：只为保存失败回执而建身份，标明创建用途，不显现
+    await application.prepareNewTask({ conversationId: "conv-new", conversationScope: "new", turnId: "turn-1", userInput: input, submission });
+    expect(calls).toEqual([["shell", "conv-new", { createdFor: "submission-receipt" }], ["receipt", "contract-failed"]]);
+    // 新的提交草案生成成功但落盘抛出：结果未知（可能已写成），意图保留、仍不显现，由宿主按草案复核
+    calls.length = 0; persistFails = true;
+    await expect(application.prepareNewTask({ conversationId: "conv-new", conversationScope: "existing", turnId: "turn-2", userInput: input,
+      submission: { ...submission, submissionId: "input-2" } })).rejects.toThrow("draft session write failed");
+    expect(calls).toEqual([["intent", "conv-new", intent]]);
+    // 再次提交成功（会话已存在，按 existing 发来）：待确认草案耐久落盘之后才显现
+    calls.length = 0; persistFails = false;
+    await application.prepareNewTask({ conversationId: "conv-new", conversationScope: "existing", turnId: "turn-3", userInput: input,
+      submission: { ...submission, submissionId: "input-3" } });
+    expect(calls).toEqual([["intent", "conv-new", intent], ["session"], ["reveal", "conv-new"]]);
   });
 
   it("fails closed for an open session and for a mismatched committed draft", async () => {
@@ -1340,6 +1398,9 @@ describe("AdvancementApplicationService detail query", () => {
         ensureShell: async () => {
           throw new Error("shell failed");
         },
+        beginRevealShell: async () => false,
+        revealShell: async () => undefined,
+        abandonRevealShell: async () => undefined,
       },
       newTask: {
         loadOpenNewTaskSession: async () => null,
@@ -2549,6 +2610,9 @@ function createRevisionFixture(
     },
     newTaskConversation: overrides.newTaskConversation ?? {
       ensureShell: async () => undefined,
+      beginRevealShell: async () => false,
+      revealShell: async () => undefined,
+      abandonRevealShell: async () => undefined,
     },
     activeUserTurn: overrides.activeUserTurn ?? {
       loadActiveUserTurnSession: async () => current,

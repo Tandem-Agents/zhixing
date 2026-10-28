@@ -630,9 +630,13 @@ async function runServerProcess(
       exists: (conversationId) => conversationDirectory.exists(conversationId),
       create: async () =>
         (await conversationDirectory.create()).conversationId,
-      ensure: async (conversationId) => {
-        await conversationDirectory.ensure(conversationId);
+      ensure: async (conversationId, options) => {
+        await conversationDirectory.ensure(conversationId, options);
       },
+      reveal: (conversationId) => conversationDirectory.reveal(conversationId),
+      beginReveal: (conversationId, intent) => conversationDirectory.beginReveal(conversationId, intent),
+      abandonReveal: (conversationId, intent) => conversationDirectory.abandonReveal(conversationId, intent),
+      listRevealIntents: () => conversationDirectory.listRevealIntents(),
       ensureTranscript: (conversationId) =>
         conversationDirectory.ensureTranscript(conversationId),
     });
@@ -2733,8 +2737,14 @@ async function runServerProcess(
       exists: (conversationId) =>
         conversationIdentityLifecycle.identityExists(conversationId),
       create: () => conversationIdentityLifecycle.createIdentity(),
-      ensure: (conversationId) =>
-        conversationIdentityLifecycle.ensureShell(conversationId),
+      ensure: (conversationId, options) =>
+        conversationIdentityLifecycle.ensureShell(conversationId, options),
+      beginReveal: (conversationId, intent) =>
+        conversationIdentityLifecycle.beginRevealShell(conversationId, intent),
+      reveal: (conversationId) =>
+        conversationIdentityLifecycle.revealShell(conversationId),
+      abandonReveal: (conversationId, intent) =>
+        conversationIdentityLifecycle.abandonRevealShell(conversationId, intent),
     },
     resume: createAnchorConversationResumePort({
       identity: conversationDirectory,
@@ -2843,10 +2853,16 @@ async function runServerProcess(
           submissions: advancementDetailController,
           newTask: advancementDetailController,
           newTaskConversation: {
-            ensureShell: (conversationId) =>
+            ensureShell: (conversationId, options) =>
               conversationApplication
-                .ensureShell({ kind: "ensure-shell", conversationId })
+                .ensureShell({ kind: "ensure-shell", conversationId, ...options })
                 .then(() => undefined),
+            beginRevealShell: (conversationId, intent) =>
+              conversationIdentityLifecycle.beginRevealShell(conversationId, intent),
+            revealShell: (conversationId) =>
+              conversationIdentityLifecycle.revealShell(conversationId),
+            abandonRevealShell: (conversationId, intent) =>
+              conversationIdentityLifecycle.abandonRevealShell(conversationId, intent),
           },
           activeUserTurn: advancementDetailController,
           activeUserTurnRuntime: {

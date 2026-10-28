@@ -21,7 +21,7 @@ import type { AbortReason } from "../interrupt/types.js";
 import type { TurnOrigin } from "../types/tools.js";
 import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
 import type { ContextBudget } from "../context/types.js";
-import type { TaskItem, TaskListState } from "./types.js";
+import type { ConversationRevealIntent, TaskItem, TaskListState } from "./types.js";
 import { parseConversationId } from "./scope-id.js";
 export {
   ConversationCommunicationApplicationService,
@@ -325,10 +325,22 @@ export interface ConversationAgentTurnAdmissionPort {
   >;
 }
 
+/** 会话的创建用途：只为保存提交失败回执而新建时，在有用户内容之前不进会话导航。 */
+export interface ConversationShellOptions {
+  readonly createdFor?: "submission-receipt";
+}
+
 export interface ConversationAgentTurnIdentityPort {
   exists(conversationId: string): Promise<boolean>;
   create(): Promise<string>;
-  ensure(conversationId: string): Promise<void>;
+  ensure(conversationId: string, options?: ConversationShellOptions): Promise<void>;
+  /**
+   * 只为失败回执而建的会话的显现：耐久接纳之前记下显现意图（仍隐藏），接纳成功后显现，失败后撤销意图；
+   * 中断留下的意图由宿主启动时按输入回执复核补齐。没有该机制的装配可省略。
+   */
+  beginReveal?(conversationId: string, intent: ConversationRevealIntent): Promise<boolean>;
+  reveal?(conversationId: string): Promise<void>;
+  abandonReveal?(conversationId: string, intent: ConversationRevealIntent): Promise<void>;
 }
 
 /**
@@ -339,13 +351,26 @@ export interface ConversationAgentTurnIdentityPort {
 export interface ConversationIdentityLifecycleMechanism
   extends ConversationAgentTurnIdentityPort {
   ensureTranscript(conversationId: string): Promise<void>;
+  reveal(conversationId: string): Promise<void>;
+  beginReveal(conversationId: string, intent: ConversationRevealIntent): Promise<boolean>;
+  abandonReveal(conversationId: string, intent: ConversationRevealIntent): Promise<void>;
+  listRevealIntents(): Promise<readonly { readonly conversationId: string; readonly intent: ConversationRevealIntent }[]>;
 }
 
 /** Finite Conversation application port consumed by Host-side collaborators. */
 export interface ConversationIdentityLifecycleApplication {
   identityExists(conversationId: string): Promise<boolean>;
   createIdentity(): Promise<string>;
-  ensureShell(conversationId: string): Promise<void>;
+  ensureShell(conversationId: string, options?: ConversationShellOptions): Promise<void>;
+  revealShell(conversationId: string): Promise<void>;
+  /** 只为失败回执而建的会话：写入用户内容前记显现意图、失败后撤销（见 ConversationAgentTurnIdentityPort） */
+  beginRevealShell(conversationId: string, intent: ConversationRevealIntent): Promise<boolean>;
+  abandonRevealShell(conversationId: string, intent: ConversationRevealIntent): Promise<void>;
+  /**
+   * 宿主启动时补齐写入中断留下的显现意图：按意图的按键依据复核内容是否已耐久，是则显现、否则撤销；
+   * 复核本身失败的保留到下次。只读等待复核的条目（有界）。
+   */
+  settleRevealIntents(durable: (conversationId: string, intent: ConversationRevealIntent) => Promise<boolean>): Promise<{ readonly revealed: number; readonly abandoned: number; readonly retained: number }>;
   initializeRuntimeStorage(conversationId: string): Promise<void>;
 }
 
@@ -364,9 +389,32 @@ export function createConversationIdentityLifecycleApplication(
     async createIdentity() {
       return mechanism.create();
     },
-    async ensureShell(conversationId: string) {
+    async ensureShell(conversationId: string, options?: ConversationShellOptions) {
       assertConversationIdentity(conversationId, "identity lifecycle shell");
-      await mechanism.ensure(conversationId);
+      await mechanism.ensure(conversationId, ...(options?.createdFor ? [{ createdFor: options.createdFor }] : []));
+    },
+    async revealShell(conversationId: string) {
+      assertConversationIdentity(conversationId, "identity lifecycle reveal");
+      await mechanism.reveal(conversationId);
+    },
+    async beginRevealShell(conversationId: string, intent: ConversationRevealIntent) {
+      assertConversationIdentity(conversationId, "identity lifecycle reveal intent");
+      return mechanism.beginReveal(conversationId, intent);
+    },
+    async abandonRevealShell(conversationId: string, intent: ConversationRevealIntent) {
+      assertConversationIdentity(conversationId, "identity lifecycle reveal intent");
+      await mechanism.abandonReveal(conversationId, intent);
+    },
+    async settleRevealIntents(durable: (conversationId: string, intent: ConversationRevealIntent) => Promise<boolean>) {
+      let revealed = 0, abandoned = 0, retained = 0;
+      for (const { conversationId, intent } of await mechanism.listRevealIntents()) {
+        let present: boolean;
+        try { present = await durable(conversationId, intent); }
+        catch { retained++; continue; }
+        if (present) { await mechanism.reveal(conversationId); revealed++; }
+        else { await mechanism.abandonReveal(conversationId, intent); abandoned++; }
+      }
+      return Object.freeze({ revealed, abandoned, retained });
     },
     async initializeRuntimeStorage(conversationId: string) {
       assertConversationIdentity(conversationId, "runtime storage initialization");
@@ -752,6 +800,8 @@ export interface ConversationCancellationProjection {
   readonly authoritativeResponse?: boolean;
   readonly dependentLifecycleIngressId?: string;
   readonly receivedPending?: true;
+  /** 指定的运行在取消到达之前已按权威事实终结：无需再取消，不连带取消依赖它的工作。 */
+  readonly finished?: true;
 }
 
 /** Opaque finite effect reference; only the Correctness adapter owns its target. */
@@ -851,6 +901,8 @@ export type ConversationDirectoryCommand =
   | Readonly<{
       kind: "ensure-shell";
       conversationId: string;
+      /** 只在为保存失败回执而新建身份时传 */
+      createdFor?: "submission-receipt";
     }>
   | Readonly<{
       kind: "resume";
@@ -999,7 +1051,7 @@ export type ConversationAbortedResult = {
     | Readonly<{ kind: "in-flight" }>
     | Readonly<{ kind: "pending"; count: number }>
     | Readonly<{ kind: "idle" }>;
-} | Readonly<{ cancelled: false; feedback: Readonly<{ kind: "received" }> }>;
+} | Readonly<{ cancelled: false; feedback: Readonly<{ kind: "received" }> | Readonly<{ kind: "finished" }> }>;
 
 export interface ConversationAgentTurnAdmissionResult {
   readonly conversationId: string;
@@ -1435,11 +1487,14 @@ export class ConversationDirectoryApplicationService
     >,
   ): Promise<ConversationShellEnsuredResult> {
     assertConversationIdentity(command.conversationId, "shell command");
+    if (command.createdFor !== undefined && command.createdFor !== "submission-receipt") {
+      throw new ConversationApplicationError("invalid-input", "Conversation shell purpose is invalid");
+    }
     const identity = this.input.agentTurnIdentity;
     if (!identity) {
       throw new Error("Conversation identity application is not assembled");
     }
-    await identity.ensure(command.conversationId);
+    await identity.ensure(command.conversationId, ...(command.createdFor ? [{ createdFor: command.createdFor }] : []));
     return Object.freeze({ conversationId: command.conversationId });
   }
 
@@ -1701,6 +1756,10 @@ export class ConversationDirectoryApplicationService
     });
     if (cancellation.receivedPending) {
       return Object.freeze({ cancelled: false as const, feedback: Object.freeze({ kind: "received" as const }) });
+    }
+    // 运行已在取消到达之前终结：如实给“已结束”，不当作取消成功，也不连带取消依赖它的工作
+    if (cancellation.finished) {
+      return Object.freeze({ cancelled: false as const, feedback: Object.freeze({ kind: "finished" as const }) });
     }
     if (cancellation.dependentLifecycleIngressId) {
       try {
@@ -2049,18 +2108,32 @@ export class ConversationDirectoryApplicationService
       );
     }
     const { turnId } = command.turnIdentity;
+    // 只为失败回执而建的会话：准入端口在耐久接纳之前确认身份，这里只记下显现意图（按输入回执可复核），
+    // 接纳成功后才显现、确知未接纳才撤销；准备身份与回执查询不经过这里，同身份取回原回执不会显现
+    const principal = (command.caller as { readonly surfacePrincipal?: unknown }).surfacePrincipal;
+    const intent: ConversationRevealIntent | undefined = typeof principal === "string"
+      ? { kind: "turn", turnId, surfacePrincipal: principal } : undefined;
+    let intended: string | undefined;
+    const intend = async (conversationId: string) => {
+      if (intent && await identity.beginReveal?.(conversationId, intent)) intended = conversationId;
+    };
     const conversationIdentity: ConversationAgentTurnIdentity =
       command.conversationId !== undefined
         ? {
             kind: "existing",
             conversationId: command.conversationId,
-            exists: () => identity.exists(command.conversationId!),
+            exists: async () => {
+              if (!(await identity.exists(command.conversationId!))) return false;
+              await intend(command.conversationId!);
+              return true;
+            },
           }
         : command.preallocatedConversationId !== undefined
           ? {
               kind: "create",
               create: async () => {
                 await identity.ensure(command.preallocatedConversationId!);
+                await intend(command.preallocatedConversationId!);
                 return command.preallocatedConversationId!;
               },
             }
@@ -2068,6 +2141,7 @@ export class ConversationDirectoryApplicationService
               kind: "create",
               create: async () => (await identity.create()),
             };
+    // 抛出不等于没有接纳（耐久写入可能已成而应答丢失）：意图保留，由宿主按输入回执精确复核后显现或撤销
     const outcome = await admission.admit({
       identity: conversationIdentity,
       input: command.input,
@@ -2082,6 +2156,12 @@ export class ConversationDirectoryApplicationService
       execution,
       ...(command.kind === "admit-agent-turn" && command.observe !== undefined ? { observe: command.observe } : {}),
     });
+    if (intended && intent) {
+      // 确知未接纳（返回的结局）才撤销意图；已耐久接纳则显现。显现写失败时意图保留，下次宿主启动按回执补齐
+      if (outcome.status === "not-found" || outcome.status === "full" || outcome.status === "lifecycle-busy") {
+        await identity.abandonReveal?.(intended, intent).catch(() => {});
+      } else await identity.reveal?.(intended).catch(() => {});
+    }
     if (outcome.status === "not-found") {
       throw new ConversationApplicationError(
         "not-found",
