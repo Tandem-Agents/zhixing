@@ -45,6 +45,14 @@ const cpuProf = args.includes("--cpu-prof") ? (args.splice(args.indexOf("--cpu-p
 // --count-fs：统计每个测试文件的文件系统调用次数（按方法与调用方），定位细碎 I/O 的来源。
 const countFs = args.includes("--count-fs") ? (args.splice(args.indexOf("--count-fs"), 1), true) : false;
 if (!["fast", "slow", "all"].includes(lane)) throw new Error(`Unknown lane: ${lane}`);
+// 形如测试文件的位置参数必须存在：vitest 把它当过滤串，写错的路径只会“匹配不到”，批次照样全过、漏跑没有信号。
+const missingFiles = args.filter((arg, index) => !arg.startsWith("-") &&
+  !["-t", "--testNamePattern"].includes(args[index - 1]) && /\.(?:m?ts|m?js)$/u.test(arg) &&
+  !existsSync(path.resolve(root, arg)));
+if (missingFiles.length) {
+  console.error(`[test-source] 这些测试文件不存在，未启动运行：\n${missingFiles.map((file) => `  ${file}`).join("\n")}`);
+  process.exit(2);
+}
 if (!Number.isSafeInteger(workers) || workers < 1) throw new Error("--workers must be a positive integer");
 if (!existsSync(vitest)) throw new Error(`Pinned vitest is missing: ${vitest}`);
 
