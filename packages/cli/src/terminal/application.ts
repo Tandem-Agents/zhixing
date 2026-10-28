@@ -21,7 +21,8 @@ import { LogFilesProcess } from '../logging/files-process.js';
 import { createLogWriterProbe } from '../logging/writers.js';
 import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
 import { terminalCloseDeadline, terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
-import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError } from '../runtime/core-host-connection.js';
+import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError, type CoreHostLifecycleNotice } from '../runtime/core-host-connection.js';
+import type { DeviceRestriction } from '../serve/device-restriction.js';
 import { connectReplHost } from '../runtime/repl-host-startup.js';
 import type { HostReloadOptions } from '../runtime/configuration-application.js';
 import type { NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
@@ -188,6 +189,7 @@ class TerminalApplication {
   #taskStatusDirty = false;
   #taskStatusSending?: Promise<void>;
   #startupWatch?: string;
+  #restrictionRecheck?: ReturnType<typeof setTimeout>;
   // 进行中的启动尝试：结束前提交一律不接纳，会话页如实投影为“启动中”，不提前提示可发送
   #startupAttempt?: object;
   #noticeDisplayReady?: Promise<void>;
@@ -347,6 +349,17 @@ class TerminalApplication {
         message: '连接已断开，输入与已有内容保留。按 Enter 重试。', choices: undefined };
       if (!this.#editor && !this.#operation) void this.#publish(this.#mainView).catch(() => this.#close(70, 'view-undelivered'));
     });
+    const releaseReconnected = this.#connection.onLifecycleNotice(notice => this.#reconnectedInBackground(notice));
+    this.#abort.signal.addEventListener('abort', () => { releaseReconnected(); clearTimeout(this.#restrictionRecheck); }, { once: true });
+  }
+
+  // 连接链在后台重新连上（别的读取先触发了连接建立）时，断线画面按与 Enter 重试相同的启动例程恢复，
+  // 不让用户对着“已断开”；进行中的启动、操作、确认、编辑与离线历史阅读不打断，仍可按 Enter
+  #reconnectedInBackground(notice: CoreHostLifecycleNotice): void {
+    if (notice.kind !== 'reconnected' || notice.reason !== 'connection-closed' || this.#abort.signal.aborted) return;
+    if (this.#mainView.connectionState !== 'unavailable' || this.#mainView.inputReceiptPending || this.#startupAttempt ||
+      this.#operation || this.#presentingConfirmation || this.#editor || this.#history?.offline) return;
+    this.#background(release => this.#startup(release));
   }
 
   // A malformed local configuration is a recoverable startup result. Do not
@@ -711,7 +724,11 @@ class TerminalApplication {
       finish(); await this.#unavailable(message); return;
     }
     if (result.kind === 'unavailable') {
-      finish(); await this.#unavailable(result.error instanceof CoreHostUnavailableError ? result.error.publicReason : '本机服务连接失败。'); return;
+      const restriction = result.error instanceof CoreHostUnavailableError ? result.error.restriction : undefined;
+      finish();
+      // 设备受限是宿主给出的领域状态，如实呈现，不套用“可重试”；正在取回最后一步时稍后自动复查
+      if (restriction) { await this.#unavailable((result.error as CoreHostUnavailableError).publicReason, false); this.#scheduleRestrictionRecheck(restriction); return; }
+      await this.#unavailable(result.error instanceof CoreHostUnavailableError ? result.error.publicReason : '本机服务连接失败。'); return;
     }
     this.#holdNoticeDisplay(); this.#taskNotices?.resume();
     if (this.#controller) {
@@ -836,12 +853,30 @@ class TerminalApplication {
     if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => this.#close(70, 'terminal-confirmation-notice-undelivered'));
   }
 
-  async #unavailable(message: string): Promise<void> {
+  async #unavailable(message: string, retryable = true): Promise<void> {
     this.#invalidateAuxiliary();
     this.#mainView = { ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
-      message: `${message} 输入与已有内容保留，可重试。`, busy: false,
+      message: retryable ? `${message} 输入与已有内容保留，可重试。` : message, busy: false,
       connected: false, connectionState: 'unavailable', choices: undefined };
     await this.#publish(this.#mainView);
+  }
+
+  // 宿主仍在联系值班设备取回最后一步：5 秒后按同一启动例程复查（拉起方见到存活的取回中宿主只读其状态、不再拉起），
+  // 状态变为终态或用户已在做别的事时不复查
+  #scheduleRestrictionRecheck(restriction: DeviceRestriction): void {
+    if (restriction.kind !== 'removal-retrieving' || this.#abort.signal.aborted) return;
+    // 只保留一个复查责任：重排前清掉旧的；中止时由构造里的中止处理清理，不每轮新增监听
+    clearTimeout(this.#restrictionRecheck);
+    this.#restrictionRecheck = setTimeout(() => {
+      this.#restrictionRecheck = undefined;
+      if (this.#abort.signal.aborted || this.#mainView.connectionState !== 'unavailable' || this.#startupAttempt) return;
+      // 页面暂忙时不打断，保留同一责任稍后接续
+      if (this.#mainView.inputReceiptPending || this.#operation || this.#presentingConfirmation || this.#editor || this.#history?.offline) {
+        this.#scheduleRestrictionRecheck(restriction); return;
+      }
+      this.#background(release => this.#startup(release));
+    }, 5_000);
+    this.#restrictionRecheck.unref?.();
   }
 
   async #confirmLimited(capabilities: readonly string[]): Promise<boolean> {

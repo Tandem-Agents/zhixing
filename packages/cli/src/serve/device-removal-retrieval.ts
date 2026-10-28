@@ -33,6 +33,7 @@ import {
   isExecutorRemovalDomainState,
   successorReceiptVerifier,
   type ExecutorRemovalDomainState,
+  type ExecutorRemovalLostOutcome,
   type ExecutorRemovalTerminalRecovery,
 } from "./device-removal.js";
 import { createManagedServiceAdapter } from "./managed-service.js";
@@ -56,6 +57,10 @@ export class ExecutorRemovalDomainStateError extends Error {
 export type ExecutorRemovalRetrievalResult =
   | { readonly kind: "retired" }
   | { readonly kind: "domain-state"; readonly state: ExecutorRemovalDomainState }
+  /** 值班设备按失联移出：取回结束，不是本机清理完成 */
+  | ({ readonly kind: "lost" } & ExecutorRemovalLostOutcome)
+  /** 本机已有显式新配对取代这次移除：取回结束，旧移除不再约束本机，之后正常装配 */
+  | { readonly kind: "superseded" }
   | { readonly kind: "stopped" };
 
 /** 一次终态连接：经原 issuer 时没有继任上下文；经发现找到现任时带上已验明的现任 issuer。 */
@@ -91,7 +96,11 @@ export async function retrieveExecutorRemovalTerminal(input: {
   const random = input.random ?? Math.random;
   let failures = 0;
   while (!input.signal.aborted) {
+    if (await input.target.isSuperseded(input.operationId)) return { kind: "superseded" };
     if (await input.target.isRetired(input.operationId)) return { kind: "retired" };
+    // 已耐久的 lost 回执先于本机补完判断：它不走删钥路径，零网络结束
+    const lost = await input.target.lostOutcome(input.operationId);
+    if (lost) return { kind: "lost", ...lost };
     try {
       // 已耐久 issuer 终态回执时只做本机收尾，不联网
       if (await input.target.finishFromDurableTerminal(input.operationId)) return { kind: "retired" };
@@ -113,7 +122,10 @@ export async function retrieveExecutorRemovalTerminal(input: {
         input.signal.removeEventListener("abort", stop);
         await channel.close().catch(() => undefined);
       }
+      if (await input.target.isSuperseded(input.operationId)) return { kind: "superseded" };
       if (await input.target.isRetired(input.operationId)) return { kind: "retired" };
+      const ended = await input.target.lostOutcome(input.operationId);
+      if (ended) return { kind: "lost", ...ended };
       failures += 1;
     } catch (error) {
       if (input.signal.aborted) return { kind: "stopped" };
@@ -134,8 +146,12 @@ export async function retrieveExecutorRemovalTerminal(input: {
  */
 export class ExecutorRemovalRetrievalOwner {
   #running: { readonly operationId: string; readonly controller: AbortController; readonly done: Promise<void> } | undefined;
-  /** 现任给出的领域结论：本进程内不再为该操作重启取回，供上层呈现。 */
-  readonly #domainStates = new Map<string, ExecutorRemovalDomainState>();
+  /**
+   * 现任给出的领域结论，连同给出结论时连上的值班设备：同一值班设备不再为该操作重启取回（不定时重试）；
+   * 之后连上另一台值班设备时按实际变化重判一次。lost 是值班设备的终态回执，耐久在本机，不再调度。
+   */
+  readonly #domainStates = new Map<string, { readonly state: ExecutorRemovalDomainState; readonly dutyDeviceId?: string }>();
+  readonly #lost = new Set<string>();
   #stopped = false;
 
   constructor(private readonly options: {
@@ -148,9 +164,17 @@ export class ExecutorRemovalRetrievalOwner {
     readonly discoveryProgress?: DiscoveryProgressLog;
   }) {}
 
-  /** 已有同一操作的 owner 时不重复启动；停止后不再接手。 */
-  schedule(operationId: string): void {
-    if (this.#stopped || this.#running || this.#domainStates.has(operationId)) return;
+  /**
+   * 已有同一操作的 owner 时不重复启动；停止后不再接手。dutyDeviceId 是这次调度时连上的值班设备（不知道时省略）：
+   * 与给出领域结论时的值班设备不同，才清掉旧结论重判。
+   */
+  schedule(operationId: string, dutyDeviceId?: string): void {
+    if (this.#stopped || this.#running || this.#lost.has(operationId)) return;
+    const concluded = this.#domainStates.get(operationId);
+    if (concluded) {
+      if (dutyDeviceId === undefined || dutyDeviceId === concluded.dutyDeviceId) return;
+      this.#domainStates.delete(operationId);
+    }
     const controller = new AbortController();
     const done = retrieveExecutorRemovalTerminal({
       target: this.options.target(),
@@ -163,7 +187,10 @@ export class ExecutorRemovalRetrievalOwner {
       ...(this.options.localChain ? { localChain: this.options.localChain } : {}),
       ...(this.options.discoveryProgress ? { discoveryProgress: this.options.discoveryProgress } : {}),
     }).then((result) => {
-      if (result.kind === "domain-state") this.#domainStates.set(operationId, result.state);
+      if (result.kind === "domain-state") {
+        this.#domainStates.set(operationId, { state: result.state, ...(dutyDeviceId === undefined ? {} : { dutyDeviceId }) });
+      }
+      if (result.kind === "lost") this.#lost.add(operationId);
     }, (error: unknown) => {
       this.options.onError?.(error instanceof Error ? error : new Error(String(error)));
     }).finally(() => {
@@ -178,7 +205,7 @@ export class ExecutorRemovalRetrievalOwner {
 
   /** 现任对该操作给出的领域结论（没有则 undefined）。 */
   domainState(operationId: string): ExecutorRemovalDomainState | undefined {
-    return this.#domainStates.get(operationId);
+    return this.#domainStates.get(operationId)?.state;
   }
 
   /** 等当前 owner 跑完或被取消；仅供停止与测试使用。 */
@@ -369,7 +396,7 @@ export async function runExecutorRemovalRetrieval(input: {
   readonly storageGovernor?: StorageMaintenanceGovernorPort;
   readonly signal?: AbortSignal;
   readonly onError?: (error: Error) => void;
-}): Promise<void> {
+}): Promise<ExecutorRemovalRetrievalResult> {
   const { mesh } = input;
   const log = mesh.bootstrapStore.authorityLog();
   const operation = await new DeviceLifecycleJournal(log, mesh.verifier).state(mesh.operationId);
@@ -430,7 +457,7 @@ export async function runExecutorRemovalRetrieval(input: {
       }];
     },
   });
-  await retrieveExecutorRemovalTerminal({
+  return retrieveExecutorRemovalTerminal({
     target,
     deviceKey: mesh.deviceKey,
     verifier: mesh.verifier,

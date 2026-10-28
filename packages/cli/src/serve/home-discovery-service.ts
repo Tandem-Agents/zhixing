@@ -31,8 +31,8 @@ export async function adoptDiscoveredTrust(input: {
   readonly store: FileMeshBootstrapStore;
   readonly verified: VerifiedHomeDiscovery | VerifiedHomeDiscoveryProgress;
   readonly localIdentity: Pick<DeviceIdentity, "deviceId" | "publicKey">;
-  /** 待上报项写下之后、分支发布之前：例如重载本机准入限制。 */
-  readonly beforePublish?: () => Promise<void>;
+  /** 待上报项写下之后、分支发布之前（给出本次接续标识）：例如重载本机准入限制、把接续绑定进配对续接。 */
+  readonly beforePublish?: (adoptionId: string) => Promise<void>;
 }): Promise<void> {
   const { store, verified } = input;
   const self = verified.projection.members.find((member) => member.device.deviceId === input.localIdentity.deviceId);
@@ -58,7 +58,7 @@ export async function adoptDiscoveredTrust(input: {
         await recordSupersededTrustPending(store.authorityLog(), {
           adoptionId: id, ancestor, superseded: localHead, branch: superseded.branch, self: superseded.self,
         });
-        await input.beforePublish?.();
+        await input.beforePublish?.(id);
       },
     });
     if (!verified.complete) {
@@ -101,9 +101,10 @@ async function readSupersededSegment(
   localHead: HomeTrustChainPoint,
   deviceId: string,
 ): Promise<{ readonly branch: string; readonly self: readonly SupersededTrustFact[] }> {
+  // 分叉点之后才在旧分支入链的设备没有祖先角色，也就没有相对祖先的自身降权事实；它能走到这里，前面已核过
+  // 它是已验现任分支上的 active 成员——只有显式重新配对（现任 enroll）之后才会如此
   const atAncestor = (await store.trustProjectionAt(ancestor))?.members.find((member) => member.device.deviceId === deviceId);
-  if (!atAncestor) throw new Error("This device was not a member at the common ancestor");
-  let roles: readonly DeviceRole[] = atAncestor.roles;
+  let roles: readonly DeviceRole[] = atAncestor?.roles ?? [];
   let branch: string | undefined;
   const self: SupersededTrustFact[] = [];
   for (let after = ancestor.seq; after < localHead.seq;) {
@@ -116,7 +117,7 @@ async function readSupersededSegment(
         throw new Error("This device was revoked on its own trust chain and cannot rejoin by discovery");
       }
       if (body.t !== "role-change" || body.deviceId !== deviceId) continue;
-      const removedRoles = roles.filter((role) => atAncestor.roles.includes(role) && !body.roles.includes(role));
+      const removedRoles = roles.filter((role) => (atAncestor?.roles ?? []).includes(role) && !body.roles.includes(role));
       if (removedRoles.length > 0) self.push(Object.freeze({ deviceId, event, reportedBy: deviceId, ancestor, removedRoles }));
       roles = body.roles;
     }

@@ -350,6 +350,11 @@ export class SupersededTrustGovernance {
     readonly onError?: (error: Error) => void;
   }) {}
 
+  /** 已载入的未收束旧分支事实（现任侧）：只读呈现用，不重新裁决权限。 */
+  openFacts(): readonly SupersededTrustFact[] {
+    return this.#open;
+  }
+
   /** 控制面在 trust 进入处同步调用：叠加已载入的未收束事实。 */
   readonly apply = <T extends RestrictableTrust>(record: T): T =>
     restrictTrustBySupersededFacts(record, [...this.#open, ...this.#self]);

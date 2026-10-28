@@ -51,6 +51,7 @@ import {
   readCurrentTrust,
   readCurrentTrustMember,
   readTrustEventByDigest,
+  readTrustMemberPairing,
   replayTrustChain,
 } from "@zhixing/mesh/trust-chain";
 import {
@@ -80,6 +81,7 @@ export interface ExecutorRemovalPublicState {
     | "revoking-access"
     | "cleaning-device"
     | "removed"
+    | "superseded"
     | "cancelled";
   readonly conversations: readonly string[];
   readonly localData: "known" | "unknown" | "removed";
@@ -100,12 +102,13 @@ export type ExecutorRemovalTargetDecision =
  * 现任按恢复证据补做移除时的领域结论（不是网络错误，target 收到后不再退避重试）：
  * target-suspended —— 本机链上该设备挂起待重新配对，而证据只有接受、没有原 issuer 的撤销回执这一不可逆依据；
  * membership-mismatch —— 本机链上该设备的身份或密钥代际与这次移除冻结的不同；
- * domain-incompatible —— 证据属于别的 home，或接受点不在本机链（含经验证的分叉段）上。
+ * domain-incompatible —— 证据属于别的 home，或接受点不在本机链（含经验证的分叉段）上；
+ * superseded —— 接受点之后这台设备已显式重新配对且仍有效，旧移除不再推进（target 按本机信任链复核后正常装配）。
  */
-export type ExecutorRemovalDomainState = "target-suspended" | "membership-mismatch" | "domain-incompatible";
+export type ExecutorRemovalDomainState = "target-suspended" | "membership-mismatch" | "domain-incompatible" | "superseded";
 
 export function isExecutorRemovalDomainState(value: unknown): value is ExecutorRemovalDomainState {
-  return value === "target-suspended" || value === "membership-mismatch" || value === "domain-incompatible";
+  return value === "target-suspended" || value === "membership-mismatch" || value === "domain-incompatible" || value === "superseded";
 }
 
 /** 现任对恢复证据给出的领域结论；publicReason 经发现交换原样交给 target。 */
@@ -362,6 +365,11 @@ export class CurrentIssuerDeviceRemovalAuthority {
       }
       assertReceiptIdentity(revoked, identity);
     }
+    // 接受点（分叉段时为公共祖先，其后现任分支上都是灾备恢复之后的事实）之后这台设备已显式重新配对、且仍是 active：
+    // 旧移除已被取代，给出可验证的结论，不 accept、不撤销。配对之后新发起的移除不受影响
+    if (pairingSupersedesRemoval({ identity, acceptedSeq: acceptance.onChainSince, current: await store.trustMemberPairing(identity.targetDeviceId) })) {
+      throw new ExecutorRemovalDomainRefusal("superseded", "Device removal was superseded by a later pairing of this device");
+    }
     // 当前视图里的 target（含已撤销与待重新配对）按成员行精确读，不依赖投影里是否带着历史设备
     const current = await store.trustMember(identity.targetDeviceId);
     if (!current || current.device.publicKey !== identity.targetMemberPublicKey ||
@@ -459,16 +467,39 @@ export class CurrentIssuerDeviceRemovalAuthority {
     return (await this.#journal.lastRemovalFor(deviceId)) !== undefined;
   }
 
-  /** 启动只恢复未终结的移除：移除守卫与待重提的撤销；读取随未终结移除数，与已终结的历史无关。 */
+  /**
+   * 启动只恢复未终结的移除：移除守卫与待重提的撤销；读取随未终结移除数，与已终结的历史无关。
+   * 已被显式重新配对取代的（配对提交后、终结前中断）在这里按同一事实终结，不设守卫、不中断启动。
+   */
   async resumeActive(): Promise<void> {
     for (const operation of await this.#journal.activeOfKind("executor-removal")) {
       if (operation.identity.kind !== "executor-removal") continue;
       const identity = operation.identity;
+      if (await supersedeIfPaired(this.options.store.authorityLog(), this.options.verifier, identity.operationId)) continue;
       this.options.onGuardChanged?.(identity.targetDeviceId, identity.operationId);
       if (operation.phase === "revocation-ready" || operation.phase === "revoked") {
-        await this.#commitRevocation(identity);
+        try { await this.#commitRevocation(identity); }
+        catch (error) { if (!(error instanceof ExecutorRemovalDomainRefusal && error.publicReason === "superseded")) throw error; }
       }
     }
+  }
+
+  /**
+   * 运行中的信任对账：仍被守卫的设备若其移除已被取代（已终结为 superseded，或同一有效事实成立），
+   * 终结并解除守卫；不需要等旧消息或重启。
+   */
+  async releaseSupersededGuard(deviceId: string, operationId: string): Promise<void> {
+    const operation = await this.#journal.state(operationId);
+    if (!operation || operation.identity.kind !== "executor-removal" || operation.identity.targetDeviceId !== deviceId) return;
+    if (!await supersedeIfPaired(this.options.store.authorityLog(), this.options.verifier, operationId)) return;
+    this.options.onGuardChanged?.(deviceId, undefined);
+  }
+
+  /** 被显式新配对取代的移除不发 removed 回执：先解除运行期守卫，再给 target 可验证的 superseded 结论。 */
+  #refuseIfSuperseded(operation: DeviceLifecycleOperation): void {
+    if (operation.terminalOutcome !== "superseded") return;
+    if (operation.identity.kind === "executor-removal") this.options.onGuardChanged?.(operation.identity.targetDeviceId, undefined);
+    throw new ExecutorRemovalDomainRefusal("superseded", "Device removal was superseded by a later pairing of this device");
   }
 
   async operation(operationId: string): Promise<ExecutorRemovalLifecycleIdentity | undefined> {
@@ -518,6 +549,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     }
     const identity = operation.identity;
     assertReceiptIdentity(ready, identity);
+    this.#refuseIfSuperseded(operation);
     if (operation.phase === "terminal" || operation.phase === "cleanup-complete") {
       return this.#removedReceipt(identity);
     }
@@ -545,6 +577,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     if (!operation || operation.identity.kind !== "executor-removal" || operation.phase !== "terminal") {
       return undefined;
     }
+    this.#refuseIfSuperseded(operation);
     // 原签名回执随 issuer-terminal 效果耐久：原样返回，继任者不改签名者；没有时按现任重算
     const ref = operation.peerEffects.find((effect) => effect.kind === "issuer-terminal")
       ?.evidence.find((item) => item.artifact)?.artifact;
@@ -567,6 +600,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     }
     assertReceiptIdentity(ready, operation.identity);
     const identity = operation.identity;
+    this.#refuseIfSuperseded(operation);
     if (operation.phase === "terminal") return this.#publishIssuerTerminal(identity, ready);
     if (operation.phase !== "revoked" && operation.phase !== "cleanup-complete") {
       throw new Error("Device cleanup-ready requires durable issuer revocation");
@@ -658,6 +692,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
       throw new Error("Lost-device removal operation is unknown");
     }
     const identity = operation.identity;
+    this.#refuseIfSuperseded(operation);
     if (operation.phase === "terminal") return this.#removedReceipt(identity);
     if (operation.phase === "aborted") throw new Error("Lost-device removal was cancelled before its durable decision");
     // 每一步按当前阶段续做：重复调用与停在任一阶段后的重驱都走同一条路，结果相同
@@ -799,6 +834,22 @@ export class CurrentIssuerDeviceRemovalAuthority {
     // 同一锁定前缀上：生命周期按 operation、当前信任按链头与 active 目录、祖先按事件摘要、凭据暴露按目标设备，
     // 都是精确读，不重放任何流；下一份签名快照只列 active 成员，读取随当前成员数。
     credentialExposureIndex(log);
+    try {
+      return await this.#commitRevocationTransaction(identity, log, successor);
+    } catch (error) {
+      if (!(error instanceof ExecutorRemovalSupersededError)) throw error;
+      // 撤销没有发生：以 superseded 独立终结这次移除（幂等，中断后重驱会再判到同一配对），解除守卫，并把结论交给 target
+      await this.#journal.terminal(identity.operationId, "superseded", [{ kind: "trust-event", digest: error.trustEventDigest }]);
+      this.options.onGuardChanged?.(identity.targetDeviceId, undefined);
+      throw new ExecutorRemovalDomainRefusal("superseded", "Device removal was superseded by a later pairing of this device");
+    }
+  }
+
+  async #commitRevocationTransaction(
+    identity: ExecutorRemovalLifecycleIdentity,
+    log: FileAuthorityCommitLog,
+    successor: ExecutorRemovalSuccessor | undefined,
+  ): Promise<ExecutorRemovalReceipt> {
     const result = await log.transactDurableProjection<unknown, {
       readonly receipt: ExecutorRemovalReceipt;
       readonly trustRecord?: HomeTrustRecord;
@@ -852,6 +903,15 @@ export class CurrentIssuerDeviceRemovalAuthority {
           deviceKeyGeneration(member.device) !== identity.targetDeviceKeyGeneration
         ) {
           throw new Error("Device removal target membership changed after acceptance");
+        }
+        // 旧效果的实际提交点：同一锁定前缀上按同一有效事实判断（挡迟到或此前未知的旧操作）；接受点不在本机链上不作派生结论
+        if (member.state === "active") {
+          const superseding = pairingSupersedesRemoval({
+            identity,
+            acceptedSeq: (await readTrustEventByDigest(trustView, identity.acceptedTrustHeadDigest))?.seq,
+            current: await readTrustMemberPairing(trustView, identity.targetDeviceId),
+          });
+          if (superseding) throw new ExecutorRemovalSupersededError(superseding);
         }
         const base = member.state === "active" ? current : { ...current, members: [...current.members, member] };
         const revoke = createSignedTrustEvent({
@@ -1265,11 +1325,26 @@ export class ExecutorRemovalTarget {
     }
     const identity = operation.identity;
     assertReceiptIdentity(receipt, identity);
+    // 已被显式新配对取代（加入完成时已在本机终结）：迟到的旧回执不再推进本机清理
+    if (operation.terminalOutcome === "superseded") return undefined;
     if (
-      !new Set(["revoked", "removed"]).has(receipt.phase) ||
+      !new Set(["revoked", "removed", "lost"]).has(receipt.phase) ||
       receipt.signature.keyId !== (receipt.successor?.issuerKeyId ?? receipt.acceptedIssuerKeyId)
     ) {
       throw new Error("Device cleanup requires the current issuer's authenticated receipt");
+    }
+    if (receipt.phase === "lost") {
+      // 值班设备按失联收束：取回到此结束，但这不是本机清理完成。回执随 issuer-terminal 效果耐久，
+      // 不清理、不删钥、不删路由副本、不推进本机阶段，重启后据此本地呈现
+      if (!operation.peerEffects.some((effect) => effect.kind === "issuer-terminal")) {
+        const receiptRef = await this.options.log.artifactStore.put(Buffer.from(canonicalize(receipt), "utf8"));
+        await this.#journal.peerEffect(receipt.operationId, {
+          kind: "issuer-terminal",
+          digest: protocolDigest("ExecutorRemovalIssuerTerminalReceipt", 1, receipt),
+          evidence: [{ kind: "cleanup", digest: receiptRef.digest, artifact: receiptRef }],
+        });
+      }
+      return undefined;
     }
     let current = operation;
     if (receipt.phase === "revoked" && current.phase === "revocation-ready") {
@@ -1338,9 +1413,22 @@ export class ExecutorRemovalTarget {
     return undefined;
   }
 
-  /** 本机这次移除是否已写本机 terminal。 */
+  /** 本机这次移除是否已按 removed 写本机 terminal（被显式新配对取代的不算退役）。 */
   async isRetired(operationId: string): Promise<boolean> {
-    return (await this.#journal.state(operationId))?.phase === "terminal";
+    const operation = await this.#journal.state(operationId);
+    return operation?.phase === "terminal" && operation.terminalOutcome !== "superseded";
+  }
+
+  /** 本机这次移除是否已被显式新配对取代。 */
+  async isSuperseded(operationId: string): Promise<boolean> {
+    return (await this.#journal.state(operationId))?.terminalOutcome === "superseded";
+  }
+
+  /** 已耐久的值班设备 lost 回执：取回已结束（按失联移出），本机清理状态按本机阶段给出；没有则 undefined。 */
+  async lostOutcome(operationId: string): Promise<ExecutorRemovalLostOutcome | undefined> {
+    const operation = await this.#journal.state(operationId);
+    if (!operation || operation.identity.kind !== "executor-removal") return undefined;
+    return lostOutcomeOf(operation, this.options.log, this.options.verifier);
   }
 
   /** 本机已进入撤销阶段、还没终结的那次移除；读取随本机未终结的生命周期操作数。 */
@@ -1441,6 +1529,8 @@ export class ExecutorRemovalTarget {
     const proven = successor ? { successor } : {};
     for (const operation of await this.#journal.activeFor(this.options.deviceKey.deviceId)) {
       if (operation.identity.kind !== "executor-removal") continue;
+      // 已按失联移出：取回已结束，不再联网续做
+      if (await lostOutcomeOf(operation, this.options.log, this.options.verifier)) continue;
       if (
         operation.phase === "authority-decided" ||
         operation.phase === "authority-settled" ||
@@ -1637,7 +1727,7 @@ export class ExecutorRemovalTarget {
     if (!operation || operation.identity.kind !== "executor-removal") return undefined;
     const decision = await this.#decision(operation);
     const preflight = decision ? undefined : await this.#preflight(operation);
-    return publicRemovalState(operation.phase, decision, preflight?.snapshot);
+    return publicRemovalState(operation.terminalOutcome === "superseded" ? "superseded" : operation.phase, decision, preflight?.snapshot);
   }
 
   async #preflight(
@@ -1885,6 +1975,87 @@ async function projectionAtAcceptance(
   return { projection, onChainSince: segment.ancestor.seq };
 }
 
+/** 撤销提交点发现旧移除已被之后的显式重新配对取代：事务中止，调用方以 superseded 终结。 */
+class ExecutorRemovalSupersededError extends Error {
+  constructor(readonly trustEventDigest: string) {
+    super("Device removal was superseded by a later pairing of this device");
+    this.name = "ExecutorRemovalSupersededError";
+  }
+}
+
+/**
+ * 旧移除是否已被显式重新配对取代（issuer 各收敛点共用的同一有效事实）：当前链上该设备是 active 成员，
+ * 它最近一次（重新）配对晚于这次移除在本机链上的接受点。成员、配对位置与接受点都按键/摘要精确读，与链长无关；
+ * 接受点不在本机链上（跨分支）就不作派生结论。成立时返回取代它的配对事件摘要。
+ */
+export function pairingSupersedesRemoval(input: {
+  readonly identity: Pick<ExecutorRemovalLifecycleIdentity, "targetDeviceId">;
+  /** 接受点在本机链上的序号；补证分叉段时为本机链上的公共祖先 */
+  readonly acceptedSeq: number | undefined;
+  readonly current: { readonly member: { readonly state: string; readonly device: { readonly deviceId: string } }; readonly pairing?: { readonly seq: number; readonly eventDigest: string } } | undefined;
+}): string | undefined {
+  const { acceptedSeq, current } = input;
+  if (acceptedSeq === undefined || !current?.pairing) return undefined;
+  if (current.member.state !== "active" || current.member.device.deviceId !== input.identity.targetDeviceId) return undefined;
+  return current.pairing.seq > acceptedSeq ? current.pairing.eventDigest : undefined;
+}
+
+/**
+ * 发起方配对提交之后：这台设备上确实被这次配对取代的移除（接受点在本机链上且早于这次配对）以 superseded 终结。
+ * 配对之后才接受的新移除不受影响；与运行中宿主的信任对账、启动恢复并发时都走同一原子判定，幂等。
+ */
+export async function supersedeRemovalsByPairing(input: {
+  readonly log: FileAuthorityCommitLog;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly deviceId: string;
+  readonly pairingEventDigest: string;
+}): Promise<void> {
+  const journal = new DeviceLifecycleJournal(input.log, input.verifier);
+  for (const operation of await journal.activeFor(input.deviceId)) {
+    if (operation.identity.kind !== "executor-removal" || operation.identity.targetDeviceId !== input.deviceId ||
+        operation.phase === "terminal" || operation.phase === "aborted") continue;
+    await supersedeIfPaired(input.log, input.verifier, operation.identity.operationId, input.pairingEventDigest);
+  }
+}
+
+/**
+ * 原子判定并终结：在生命周期事务里按同一锁定前缀读当前信任投影，同一有效事实成立（可指定须正是某次配对）
+ * 才追加 superseded 终态；不成立不写。已是 superseded 返回它的配对证据。返回取代它的配对事件摘要，未取代为 undefined。
+ */
+async function supersedeIfPaired(
+  log: FileAuthorityCommitLog,
+  verifier: ProtocolSignatureVerifier,
+  operationId: string,
+  pairingEventDigest?: string,
+): Promise<string | undefined> {
+  return (await log.transactDurableProjection<unknown, string | undefined>(
+    DEVICE_LIFECYCLE_PROJECTION_ID,
+    async (lifecycle, context) => {
+      const operation = await readDeviceLifecycleOperation(lifecycle, operationId);
+      if (!operation || operation.identity.kind !== "executor-removal") return { kind: "return", value: undefined };
+      if (operation.terminalOutcome === "superseded") {
+        return { kind: "return", value: operation.evidence.find((item) => item.kind === "trust-event")?.digest };
+      }
+      if (operation.phase === "terminal" || operation.phase === "aborted") return { kind: "return", value: undefined };
+      const trustView = context.readProjection(CURRENT_TRUST_PROJECTION_ID);
+      const superseding = pairingSupersedesRemoval({
+        identity: operation.identity,
+        acceptedSeq: (await readTrustEventByDigest(trustView, operation.identity.acceptedTrustHeadDigest))?.seq,
+        current: await readTrustMemberPairing(trustView, operation.identity.targetDeviceId),
+      });
+      if (!superseding || (pairingEventDigest !== undefined && superseding !== pairingEventDigest)) {
+        return { kind: "return", value: undefined };
+      }
+      const record = validateDeviceLifecycleRecord({
+        v: 1, t: "terminal", operationId, outcome: "superseded", evidence: [{ kind: "trust-event" as const, digest: superseding }],
+      });
+      reduceDeviceLifecycle(operation, record, verifier);
+      return { kind: "append", entries: [{ stream: "device-lifecycle", body: record }], value: superseding };
+    },
+    { readProjectionIds: [CURRENT_TRUST_PROJECTION_ID] },
+  )).value;
+}
+
 /** 本机链上 afterSeq 之后、链头之内对该设备的撤销事件（分页按键读这一段）。 */
 async function findRevocationAfter(
   store: FileMeshBootstrapStore,
@@ -2054,6 +2225,7 @@ async function loadExecutorRemovalTerminalRecovery(
  * 启动在普通身份与角色装配之前处理本机处于撤销阶段的移除：
  * 已有验签通过、反绑 operation 与代际的 issuer 终态回执，就按冻结代际删钥、写本机 terminal、删路由副本，
  * 零网络、不需私钥、不新建身份；没有就要求只运行专用取回。缺依据、坏签名、错 operation 一律失败关闭。
+ * 被显式重新配对取代的旧移除在加入完成时已在本机终结，这里只看未终结的，读取与信任历史无关。
  */
 export async function settleExecutorRemovalBeforeBootstrap(input: {
   readonly log: FileAuthorityCommitLog;
@@ -2063,6 +2235,7 @@ export async function settleExecutorRemovalBeforeBootstrap(input: {
   | { readonly kind: "none" }
   | { readonly kind: "completed"; readonly operationId: string }
   | { readonly kind: "retrieval"; readonly operationId: string; readonly targetDeviceId: string }
+  | ({ readonly kind: "lost"; readonly operationId: string } & ExecutorRemovalLostOutcome)
 > {
   const journal = new DeviceLifecycleJournal(input.log, input.verifier);
   const revoking = (await journal.activeOfKind("executor-removal")).filter((operation) =>
@@ -2082,11 +2255,15 @@ export async function settleExecutorRemovalBeforeBootstrap(input: {
   const receipt = decodeIssuerTerminalReceipt(await input.log.artifactStore.get(ref), input.verifier);
   assertReceiptIdentity(receipt, identity);
   if (
-    receipt.phase !== "removed" ||
+    (receipt.phase !== "removed" && receipt.phase !== "lost") ||
     receipt.signature.keyId !== (receipt.successor?.issuerKeyId ?? identity.acceptedIssuerKeyId) ||
     protocolDigest("ExecutorRemovalIssuerTerminalReceipt", 1, receipt) !== effect.digest
   ) {
     throw new Error("Device removal issuer terminal receipt does not bind this operation");
+  }
+  // 按失联移出：不删钥、不删路由副本、不写本机 terminal，启动按本机阶段呈现
+  if (receipt.phase === "lost") {
+    return { kind: "lost", operationId: identity.operationId, cleanup: lostCleanupOf(operation.phase) };
   }
   const keyEvidence = await deleteRemovedDeviceKeyGeneration(input.secretStore, identity);
   // 先删路由副本再写本机 terminal：删失败时下次启动仍会走到这里重做
@@ -2109,6 +2286,33 @@ function decodeIssuerTerminalReceipt(
   }
   const successor = successorOf(parsed);
   return validateExecutorRemovalReceipt(parsed, successor ? successorReceiptVerifier(verifier, successor) : verifier);
+}
+
+/**
+ * 按失联移出时本机清理状态：只以本机日志阶段为据，不推断远端。revocation-ready 之前不会开始清理；
+ * revoked 可能已部分清理（未确认）；cleanup-complete 是本机已核的清理完成。
+ */
+export type ExecutorRemovalLostCleanup = "not-started" | "unconfirmed" | "complete";
+export interface ExecutorRemovalLostOutcome {
+  readonly cleanup: ExecutorRemovalLostCleanup;
+}
+
+function lostCleanupOf(phase: DeviceLifecycleOperation["phase"]): ExecutorRemovalLostCleanup {
+  return phase === "cleanup-complete" ? "complete" : phase === "revoked" ? "unconfirmed" : "not-started";
+}
+
+async function lostOutcomeOf(
+  operation: DeviceLifecycleOperation,
+  log: Pick<FileAuthorityCommitLog, "artifactStore">,
+  verifier: ProtocolSignatureVerifier,
+): Promise<ExecutorRemovalLostOutcome | undefined> {
+  // 已被显式新配对取代：旧 lost 门不再约束本机
+  if (operation.terminalOutcome === "superseded") return undefined;
+  const effect = operation.peerEffects.find((item) => item.kind === "issuer-terminal");
+  const ref = effect?.evidence.find((item) => item.artifact)?.artifact;
+  if (!effect || !ref) return undefined;
+  const receipt = decodeIssuerTerminalReceipt(await log.artifactStore.get(ref), verifier);
+  return receipt.phase === "lost" ? { cleanup: lostCleanupOf(operation.phase) } : undefined;
 }
 
 function successorOf(value: unknown): ExecutorRemovalSuccessor | undefined {
@@ -2290,6 +2494,9 @@ function publicRemovalState(
   if (phase === "aborted") {
     return { phase: "cancelled", conversations, localData: "known", credentialActions: [] };
   }
+  if (phase === "superseded") {
+    return { phase: "superseded", conversations: [], localData: "known", credentialActions: [] };
+  }
   if (phase === "terminal") {
     return { phase: "removed", conversations: [], localData: "removed", credentialActions: [] };
   }
@@ -2315,6 +2522,9 @@ function publicIssuerRemovalState(
 ): ExecutorRemovalPublicState {
   if (operation.phase === "aborted") {
     return { phase: "cancelled", conversations: [], localData: "known", credentialActions: [] };
+  }
+  if (operation.terminalOutcome === "superseded") {
+    return { phase: "superseded", conversations: [], localData: "known", credentialActions: [] };
   }
   if (operation.phase === "terminal") {
     return {

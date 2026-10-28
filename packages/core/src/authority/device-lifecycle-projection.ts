@@ -144,7 +144,8 @@ export async function reduceLifecycleIndex(envelope: CommitEnvelope<JsonValue>, 
     const last = await resolveLifecyclePointer(read, await read.get(latestKey));
     if (last && (last.operation.identity.kind !== operation.identity.kind || lifecycleTargetDeviceId(last.operation) !== deviceId)) throw invalid();
     if (!last || compareLifecycleAcceptance(last, ref) <= 0) put(latestKey, ref);
-    if (operation.phase === "terminal" && operation.identity.kind !== "stop") {
+    // 被显式新配对取代的移除不是退役：不写退役指针，启动不据此判本机已移出
+    if (operation.phase === "terminal" && operation.identity.kind !== "stop" && operation.terminalOutcome !== "superseded") {
       for (const key of [lifecycleRetirementKey(), lifecycleRetirementKey(operation.subjectDeviceId)]) {
         const previous = await resolveLifecyclePointer(read, await read.get(key));
         if (previous && (previous.operation.phase !== "terminal" || previous.operation.identity.kind === "stop" ||

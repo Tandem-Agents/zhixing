@@ -24,6 +24,7 @@ export interface MeshBootstrapCompletionPersistencePort {
   readonly markBootstrapComplete: (
     peerDeviceId: string,
     offerId: string,
+    options?: { readonly replacePrevious?: boolean },
   ) => Promise<void>;
   readonly bootstrapCompleted: (
     peerDeviceId: string,
@@ -72,8 +73,8 @@ export function createMeshBootstrapProjectionPorts(
         source.acceptTransportPeer(peer),
     }),
     completions: Object.freeze({
-      markBootstrapComplete: (peerDeviceId: string, offerId: string) =>
-        source.markBootstrapComplete(peerDeviceId, offerId),
+      markBootstrapComplete: (peerDeviceId: string, offerId: string, options?: { readonly replacePrevious?: boolean }) =>
+        source.markBootstrapComplete(peerDeviceId, offerId, options),
       bootstrapCompleted: (peerDeviceId: string, offerId: string) =>
         source.bootstrapCompleted(peerDeviceId, offerId),
     }),

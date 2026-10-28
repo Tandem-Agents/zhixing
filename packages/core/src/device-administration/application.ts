@@ -27,6 +27,7 @@ export interface DeviceAdministrationRemovalState {
     | "revoking-access"
     | "cleaning-device"
     | "removed"
+    | "superseded"
     | "cancelled";
   readonly conversations: readonly string[];
   readonly localData: "known" | "removed" | "unknown";
@@ -69,8 +70,19 @@ export type DeviceAdministrationQuery =
   | DeviceAdministrationCurrentRemovalPreflightQuery
   | DeviceAdministrationCurrentRemovalStatusQuery;
 
+/**
+ * 不在可移除候选里、但需要让用户知道的成员状态（只读，不可选）：待重新配对，
+ * 或旧分支上的撤销/降权已在这里生效为限制、正在收束。
+ */
+export interface DeviceAdministrationMemberStatus {
+  readonly displayName: string;
+  readonly status: "pending-reenroll" | "revoked-on-old-branch" | "demoted-on-old-branch";
+}
+
 export interface DeviceAdministrationListResult {
   readonly devices: readonly DeviceAdministrationRelationship[];
+  /** 只读状态分组；选择器只用 devices */
+  readonly others?: readonly DeviceAdministrationMemberStatus[];
 }
 
 export interface DeviceAdministrationStatusResult {
@@ -268,6 +280,8 @@ export type DeviceAdministrationDutyMigrationAdmissionOutcome =
 /** Existing device relationship mechanism; product visibility stays in the application. */
 export interface DeviceAdministrationRelationshipReadPort {
   list(): Promise<readonly DeviceAdministrationRelationship[]>;
+  /** 只读成员状态（不进可移除候选）；没有该机制的装配可省略 */
+  others?(): Promise<readonly DeviceAdministrationMemberStatus[]>;
 }
 
 /** Existing removal-state mechanism; it does not own the user-visible query contract. */
@@ -907,12 +921,20 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   ): Promise<DeviceAdministrationCurrentRemovalStatusResult>;
   async query(query: DeviceAdministrationQuery): Promise<DeviceAdministrationResult> {
     switch (query.kind) {
-      case "list-device-relationships":
+      case "list-device-relationships": {
+        const others = await this.options.relationships.others?.();
         return Object.freeze({
           devices: Object.freeze(
             (await this.options.relationships.list()).map(freezeRelationship),
           ),
+          ...(others ? {
+            others: Object.freeze(others.map((member) => Object.freeze({
+              displayName: requireStableText(member.displayName, "Device name"),
+              status: member.status,
+            }))),
+          } : {}),
         });
+      }
       case "read-device-removal-state": {
         const targetName = requireStableText(query.targetName, "Device name");
         const state = await this.options.removalState.read(targetName);

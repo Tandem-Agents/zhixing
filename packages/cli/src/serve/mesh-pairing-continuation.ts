@@ -119,7 +119,11 @@ function assertContinuationShape(value: unknown): asserts value is PairingContin
     isRecord(value.invitation.offer) &&
     typeof value.invitation.offer.offerId === "string" &&
     isRecord(value.invitation.issuer) &&
-    typeof value.localDeviceId === "string"
+    typeof value.localDeviceId === "string" &&
+    (value.rejoin === undefined || (isRecord(value.rejoin) && Array.isArray(value.rejoin.operationIds) &&
+      value.rejoin.operationIds.length > 0 && value.rejoin.operationIds.every((id) => typeof id === "string") &&
+      (value.rejoin.replacedDeviceId === undefined || typeof value.rejoin.replacedDeviceId === "string") &&
+      (value.rejoin.adoptionId === undefined || typeof value.rejoin.adoptionId === "string")))
   ) {
     return;
   }

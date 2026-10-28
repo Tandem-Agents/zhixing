@@ -3,7 +3,7 @@ import {
   validateDeviceLifecycleRecord,
   type DeviceLifecycleAbort, type DeviceLifecycleEvidenceRef, type DeviceLifecycleIdentity,
   type DeviceLifecycleOperation, type DeviceLifecyclePeerEffect, type DeviceLifecyclePhase,
-  type DeviceLifecycleRecord,
+  type DeviceLifecycleRecord, type DeviceLifecycleTerminalOutcome,
 } from "../protocol/index.js";
 import type { ProtocolSignatureVerifier } from "../protocol/signature.js";
 import type { AuthorityCommitLog } from "./interfaces.js";
@@ -215,7 +215,7 @@ export class DeviceLifecycleJournal {
   peerEffect(operationId: string, effect: DeviceLifecyclePeerEffect): Promise<DeviceLifecycleOperation> {
     return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "peer-effect", operationId, effect }));
   }
-  terminal(operationId: string, outcome: "stopped" | "removed" | "retired", evidence: readonly DeviceLifecycleEvidenceRef[] = []): Promise<DeviceLifecycleOperation> {
+  terminal(operationId: string, outcome: DeviceLifecycleTerminalOutcome, evidence: readonly DeviceLifecycleEvidenceRef[] = []): Promise<DeviceLifecycleOperation> {
     return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "terminal", operationId, outcome, evidence }));
   }
 

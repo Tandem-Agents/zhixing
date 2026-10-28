@@ -47,6 +47,7 @@ function makeDeps(overrides: Partial<Parameters<typeof spawnDaemon>[0]["deps"]> 
     console: { log: vi.fn(), error: vi.fn() },
     readLogsFn: vi.fn(async () => ({ records: [] })),
     checkReadyMarkerFn: vi.fn(async () => true), // 默认认为 ready marker 存在
+    readRestrictionFn: vi.fn(async () => undefined), // 默认没有受限状态标记，不读任何真实 home
     ...overrides,
   };
 }
@@ -172,6 +173,69 @@ describe("spawnDaemon", () => {
     else expect(result).toMatchObject({ status: "ready", pid: 55555 });
     if (!delegated) expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining(["serve", "--auto-start"]), expect.objectContaining({ windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"] }));
     expect(child.listenerCount("message")).toBe(0);
+  });
+
+  it("returns the spawned host's device restriction at once instead of waiting for the readiness deadline", async () => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 4321, unref: vi.fn() });
+    let marker: { pid: number; startTime: number | null; publishedAt: number; restriction: { kind: "removal-retrieving" } } | undefined;
+    const result = await spawnDaemon({ automatic: true, forwardedArgs: ["serve"], deadlineAt: 60_000, reportFailure: false, deps: makeDeps({
+      clock, spawnFn: () => child as any, readLockFn: async () => null,
+      // 宿主在第二轮轮询前写下“取回中”：它拥有这个 home，但不提供普通服务（出生时间读不到时按本次子进程认）
+      readRestrictionFn: async () => marker,
+      sleep: async ms => { clock.advance(ms); marker ??= { pid: 4321, startTime: null, publishedAt: clock(), restriction: { kind: "removal-retrieving" } }; },
+    }) });
+    expect(result).toMatchObject({ ok: false, status: "restricted", restriction: { kind: "removal-retrieving" } });
+    expect(result.reason).toContain("正在联系值班设备");
+    expect(clock()).toBeLessThan(1_000);
+  });
+
+  it("ignores another process's stale restriction and does not spawn a second host while retrieval is live", async () => {
+    const stale = await spawnDaemon({ forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps: makeDeps({
+      readRestrictionFn: async () => ({ pid: 1111, startTime: 5, publishedAt: -30_000, restriction: { kind: "removed" } }),
+      readLockFn: async () => ({ pid: 99999, port: 3000 } as any), isProcessAliveFn: () => true, httpGetFn: async () => 200,
+    }) });
+    expect(stale).toMatchObject({ ok: true, status: "ready" });
+    const retrieving = { pid: 2222, startTime: 77, publishedAt: -1_000, restriction: { kind: "removal-retrieving" } } as const;
+    const spawnFn = vi.fn(() => makeFakeChild());
+    const live = await spawnDaemon({ automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps: makeDeps({
+      spawnFn, readRestrictionFn: async () => retrieving,
+      readProcessBirthFn: async (pid: number) => pid === 2222 ? { kind: "present", startTime: 77 } : { kind: "absent" },
+    }) });
+    expect(live).toMatchObject({ ok: false, status: "restricted", restriction: { kind: "removal-retrieving" } });
+    expect(spawnFn).not.toHaveBeenCalled();
+    // PID 被别的进程复用（出生时间不同）或读不到出生时间：不冒称正在取回，照常拉起
+    for (const birth of [{ kind: "present", startTime: 78 }, { kind: "unknown" }] as const) {
+      const reused = vi.fn(() => makeFakeChild());
+      await spawnDaemon({ forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps: makeDeps({
+        spawnFn: reused, readRestrictionFn: async () => retrieving, readProcessBirthFn: async () => birth,
+        readLockFn: async () => ({ pid: 99999, port: 3000 } as any), isProcessAliveFn: () => true, httpGetFn: async () => 200,
+      }) });
+      expect(reused).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("recognizes the restriction of the real managed host after the launch coordinator exits", async () => {
+    const run = async (marker: { pid: number; startTime: number | null; publishedAt: number }) => {
+      const clock = mkFakeClock();
+      const child = Object.assign(new EventEmitter(), { pid: 90001, unref: vi.fn() });
+      let published: unknown;
+      return spawnDaemon({ automatic: true, forwardedArgs: ["serve"], deadlineAt: 3_000, reportFailure: false, deps: makeDeps({
+        clock, spawnFn: () => child as any, readLockFn: async () => null, readRestrictionFn: async () => published as never,
+        sleep: async ms => {
+          clock.advance(ms);
+          if (!published) {
+            // 协调者交给系统服务后正常退出；真正宿主 90002 随后发布受限
+            child.emit("message", { type: "host-launch-plan", mode: "managed" }); child.emit("exit", 0, null);
+            published = { ...marker, restriction: { kind: "removed-lost", cleanup: "not-started" } };
+          }
+        },
+      }) });
+    };
+    expect(await run({ pid: 90002, startTime: 150, publishedAt: 190 })).toMatchObject({ ok: false, status: "restricted", restriction: { kind: "removed-lost" } });
+    // 出生早于本次拉起的旧宿主留下的标记、出生时间未知且不是本次子进程的标记：都不当作本次结果
+    expect(await run({ pid: 90002, startTime: -50_000, publishedAt: -40_000 })).toMatchObject({ ok: false, status: "starting" });
+    expect(await run({ pid: 90002, startTime: null, publishedAt: 190 })).toMatchObject({ ok: false, status: "starting" });
   });
 
   it("does not treat a failed managed coordinator as a successful handoff", async () => {

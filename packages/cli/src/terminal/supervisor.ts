@@ -18,6 +18,7 @@ import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/st
 import { resolveSelfExec } from '../serve/self-exec.js';
 import { terminalCloseDeadline, terminalWriterDeadline } from './close-budget.js';
 import { verifyTerminalAssets } from './verify-assets.js';
+import { readDeviceRestriction, retrievingHostAlive } from '../serve/device-restriction.js';
 
 type Role = 'recovery' | 'application' | 'ui';
 interface OwnedProcess {
@@ -1231,12 +1232,20 @@ class TerminalSupervisor {
   }
 }
 
-/** server.pid 记录的进程仍存活即视为本机已有 Host（含仍在启动者）；文件缺失、损坏或进程已不在则否。 */
+/**
+ * server.pid 记录的进程仍存活即视为本机已有 Host（含仍在启动者）；文件缺失、损坏或进程已不在则否。
+ * 正在取回移除最后一步的受限 Host 还没监听、没有 server.pid，按它发布的受限状态标记判断，免得再预拉起第二个；
+ * 标记的进程身份（PID 与出生时间）核不上或读不到时按未知，不当作它还在。
+ */
 async function recordedHostAlive(home: string): Promise<boolean> {
+  const alive = (pid: unknown) => {
+    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException | undefined)?.code === 'EPERM'; }
+  };
   try {
     const { pid } = JSON.parse(await readFile(path.join(home, 'server.pid'), 'utf8')) as { pid?: unknown };
-    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch (error) { return (error as NodeJS.ErrnoException | undefined)?.code === 'EPERM'; }
+    if (alive(pid)) return true;
+  } catch { /* 没有可用的 server.pid，再看受限标记 */ }
+  return retrievingHostAlive(await readDeviceRestriction(home));
 }

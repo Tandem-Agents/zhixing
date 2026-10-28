@@ -48,6 +48,7 @@ import {
   readVerifiedTrustIssuer, readCurrentTrustMember, type CurrentTrustProjection, type HistoricalHomeTrustRecord,
   EMPTY_TRUST_STREAM_FOLD, foldTrustStreamRecord, readTrustBranchProgress, readSupersededTrustEvents,
   readTrustProjectionAt, readStagedTrustBranch, readTrustEventAt, readTrustEventsAfter, readRevokedTrustMemberAt, trustBranchAdoptionId,
+  readTrustMemberPairing,
   type HomeTrustBranchAdoptedRecord, type HomeTrustBranchStagedRecord, type TrustStreamFold,
 } from "@zhixing/mesh/trust-chain";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
@@ -417,6 +418,13 @@ export class FileMeshBootstrapStore
   async trustMember(deviceId: string) {
     return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
       kind: 'return' as const, value: await readCurrentTrustMember(view, deviceId),
+    }))).value;
+  }
+
+  /** 当前视图里一个成员与最近一次（重新）配对它的事件位置（按键读）。 */
+  async trustMemberPairing(deviceId: string) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view) => ({
+      kind: 'return' as const, value: await readTrustMemberPairing(view, deviceId),
     }))).value;
   }
 
@@ -945,10 +953,24 @@ export class FileMeshBootstrapStore
       (state, logical) => foldTrustStreamRecord(state, logical.body),
       ({ events }) => {
         if (events.length > 0) {
-          if (canonicalize(events) !== canonicalize(input.events)) {
+          if (canonicalize(events) === canonicalize(input.events)) return { kind: "return", value: undefined };
+          // 原成员重新加入同一 home：现任链以本机链为前缀时只追加后缀与新的信任记录，不改写已有事件；
+          // 不是前缀（另一个 home 或无法证明先后的分支）一律拒绝
+          if (input.events.length <= events.length ||
+              canonicalize(events) !== canonicalize(input.events.slice(0, events.length))) {
             throw new Error("Local device already belongs to another trust chain");
           }
-          return { kind: "return", value: undefined };
+          return {
+            kind: "append",
+            entries: [
+              ...input.events.slice(events.length).map((event) => ({
+                stream: "trust",
+                body: { t: "home-trust-event" as const, event },
+              })),
+              { stream: "trust", body: { t: "home-trust-record" as const, record: input.record } },
+            ],
+            value: undefined,
+          };
         }
         return {
           kind: "append",
@@ -966,11 +988,12 @@ export class FileMeshBootstrapStore
     );
   }
 
-  async markBootstrapComplete(peerDeviceId: string, offerId: string): Promise<void> {
+  /** replacePrevious 只给已通过入口准入与信任前缀校验的重新加入：以本次邀请取代同一值班设备的旧完成记录。 */
+  async markBootstrapComplete(peerDeviceId: string, offerId: string, options: { readonly replacePrevious?: boolean } = {}): Promise<void> {
     await this.#endpointWrites.run(async () => {
       const current = await readBootstrapCompletions(this.#completionFile);
       const existing = current[peerDeviceId];
-      if (existing && existing !== offerId) {
+      if (existing && existing !== offerId && !options.replacePrevious) {
         throw new Error("Mesh peer bootstrap already completed under another pairing offer");
       }
       await writeDurableJson(this.#completionFile, {

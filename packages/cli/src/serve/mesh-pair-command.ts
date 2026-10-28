@@ -1,5 +1,8 @@
 import type { RuntimeLogContext } from "../logging/runtime.js";
-import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal } from "@zhixing/core/authority";
+import { getDefaultPidPath, getDefaultPortPath, isProcessAlive, readLock, resolveProcessStartTime } from "@zhixing/server/client";
+import { readPlatformProcessBirth } from "../platform/secret-platform.js";
+import { readDeviceRestriction, retrievingHostAlive } from "./device-restriction.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces, hostname, platform } from "node:os";
 import { connect, createServer, type Server, type Socket } from "node:net";
@@ -32,6 +35,7 @@ import {
 } from "@zhixing/mesh/bootstrap";
 import {
   ensureSealedHomeRouteMaterial,
+  loadHomeDiscoverySecret,
   loadOrCreateHomeRouteMaterial,
   persistHomeDiscoverySecret,
 } from "./home-route-material.js";
@@ -57,6 +61,7 @@ import {
   verifyDeviceSignature,
   type DeviceKey,
 } from "@zhixing/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
 import {
   assemblePairingFinished,
   assertPairingOfferJoin,
@@ -77,6 +82,10 @@ import {
   verifyHomeTrustRecord,
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
+import { currentAndPreviousDiscoveryRendezvousKeys } from "@zhixing/mesh/bootstrap";
+import { openHomeDiscovery, type VerifiedHomeDiscovery } from "@zhixing/mesh/home-discovery";
+import { adoptDiscoveredTrust, memberDiscoveryResume } from "./home-discovery-service.js";
+import { openRelaySocket } from "./mesh-control-plane.js";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import { createPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import { createPairingSocketPublishedCheckpointTarget } from "./paired-checkpoint-target-infrastructure.js";
@@ -84,7 +93,12 @@ import { createPublishedCheckpointTargetInfrastructure } from "./published-check
 import type { PublishedCheckpointPairedSessions } from "./published-checkpoint-target.js";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig, writeConfig } from "@zhixing/providers";
-import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
+import {
+  loadCandidateDeviceKey,
+  loadOrCreateCandidateDeviceKey,
+  loadOrCreateDeviceKey,
+  publishSwitchedDeviceKey,
+} from "./mesh-device-key.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
@@ -104,7 +118,9 @@ import type {
   MeshPairingContinuationRepository,
   PairingIssuerContinuation,
   PairingJoinerContinuation,
+  PairingRejoinBinding,
 } from "./mesh-pairing-continuation-repository.js";
+import { supersedeRemovalsByPairing } from "./device-removal.js";
 import {
   CredentialExposureAuthority,
   exposureGuardedSecretStore,
@@ -126,6 +142,8 @@ export interface PairCommandOptions {
   readonly listen?: string;
   readonly advertise?: string;
   readonly relay?: string;
+  /** 同 home 分叉重新加入时成员发现的期限（缺省 60 秒）。 */
+  readonly rejoinDiscoveryTimeoutMs?: number;
   readonly relayOnly?: boolean;
   readonly roles?: readonly DeviceRole[];
   readonly zhixingHome?: string;
@@ -160,6 +178,12 @@ interface PairingRuntimeInput extends PairCommandOptions {
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly key: DeviceKey;
+  /** 显式重新加入需要新身份时被它取代的原设备钥：配对完成后经切换记录发布新身份、隔离原钥 */
+  readonly replacedKey?: DeviceKey;
+  /** 已是成员的设备经入口准入的重新加入：接续前耐久绑定的工作流事实（同一值班设备的旧加入完成记录由本次取代） */
+  readonly rejoin?: PairingRejoinBinding;
+  /** 发起方签信任事件与记录的发证钥（链上现任 issuerKeyId）；缺省即设备钥 */
+  readonly issuerKey?: DeviceKey;
   readonly store: FileMeshBootstrapStore;
   readonly bootstrapProjection: MeshBootstrapProjectionPorts;
   readonly continuations: MeshPairingContinuationRepository;
@@ -293,8 +317,12 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       });
       return;
     }
+    // 灾备或迁居之后现任发证钥与设备钥不同：配对产生的信任事件与记录由链上现任 issuerKeyId 对应的已激活发证钥签
+    const issuerKey = await activeIssuerKeyFor(store, secretStore, key);
+    store.bindIssuerKey(issuerKey);
     await issuePairing({
       ...options,
+      issuerKey,
       composition,
       isolatedComposition: composition === "isolated",
       zhixingHome,
@@ -313,6 +341,15 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     try { await store.stopStorageMaintenance(); }
     finally { if (!options.logging) deviceCapacity.close(); }
   }
+}
+
+/** 发起方的签名钥：链上现任 issuerKeyId 就是设备钥时用设备钥，否则用本机已激活的那把发证钥。 */
+async function activeIssuerKeyFor(store: FileMeshBootstrapStore, secretStore: SecretStorePort, key: DeviceKey): Promise<DeviceKey> {
+  const record = await store.loadTrustRecord();
+  if (!record || record.issuer.issuerKeyId === key.deviceId) return key;
+  const active = await loadActiveAnchorIssuerKey(secretStore, record.issuer.issuerKeyId);
+  if (!active) throw new Error("This duty device has no active issuer key for the current trust chain");
+  return active;
 }
 
 async function reconcileAfterPairing(
@@ -740,7 +777,7 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
       let activatedCheckpointId: string | undefined;
       projection = await activateInitialRecoveryRoot({
         store: input.store,
-        issuerKey: input.key,
+        issuerKey: input.issuerKey ?? input.key,
         issuerIdentity: identity,
         current: projection,
         targetId: `backup-device:${targetDeviceId}`,
@@ -800,7 +837,7 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
       roles: normalizeGrantedRoles(input.roles),
       pairingTranscriptDigest: transcriptDigest,
       at: acceptedAt,
-      issuerKey: input.key,
+      issuerKey: input.issuerKey ?? input.key,
     });
     const acceptanceBody: Omit<PairingAcceptance, "finished"> = {
       v: 1,
@@ -883,6 +920,8 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
       attempt,
     });
     pairingCommitted = true;
+    // 这台设备上未终结的旧移除随这次显式配对结束；运行中的宿主按同一事实在信任对账时解除守卫
+    await supersedeKnownRemovals(input, joinMessage.join.device.deviceId, trustEvent);
     await input.bootstrapProjection.transportPeers.acceptTransportPeer({
       identity: joinMessage.join.device,
       rootCertificatePem: joinMessage.rootCertificatePem,
@@ -906,9 +945,11 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
     if (!isRecord(acknowledged) || acknowledged.t !== "bootstrap-complete") {
       throw new Error("Pairing peer did not acknowledge bootstrap completion");
     }
+    // 待重新配对的原成员以同一身份 reenroll：这次已提交的配对取代它旧的加入完成记录
     await input.bootstrapProjection.completions.markBootstrapComplete(
       peerDeviceId,
       material.offer.offerId,
+      { replacePrevious: trustEvent.body.t === "reenroll" },
     );
     await deletePairingSecret(input.secretStore, material.offer.offerId);
     await input.continuations.clear(material.offer.offerId);
@@ -986,8 +1027,53 @@ export function createPairingTrustEvent(input: {
   });
 }
 
-async function joinPairing(input: PairingRuntimeInput): Promise<void> {
+/**
+ * 已是成员的设备重新加入：只放行“本机有待合法取代的旧移除（撤销阶段及以后、目标是本机、未终结）＋本次是同一 home 的显式配对”，
+ * 且本机没有运行中的宿主（旧清理停在已证明边界，不与新接入并行）。暂存的领域结论文字不授予资格；其他已有链的设备照旧拒绝。
+ */
+async function rejoinAdmissible(
+  input: PairingRuntimeInput,
+  localHomeId: string,
+  invitedHomeId: string,
+): Promise<{ readonly newIdentity: boolean; readonly operationIds: readonly string[] } | undefined> {
+  if (localHomeId !== invitedHomeId) return undefined;
+  const sources = input.store.authoritySources();
+  if (!sources) return undefined;
+  const pending = (await new DeviceLifecycleJournal(input.store.authorityLog(), sources.verifier).activeOfKind("executor-removal"))
+    .filter((operation) => operation.identity.kind === "executor-removal" &&
+      operation.identity.requestId === `target:${operation.identity.operationId}` &&
+      operation.identity.targetDeviceId === input.key.deviceId &&
+      operation.phase !== "terminal" && operation.phase !== "aborted" &&
+      EXECUTOR_REMOVAL_PHASES.indexOf(operation.phase) >= EXECUTOR_REMOVAL_PHASES.indexOf("revocation-ready"));
+  if (pending.length === 0) return undefined;
+  if (await localHostRunning(input.zhixingHome)) {
+    throw new Error("Stop the local Zhixing service on this device before completing the pairing");
+  }
+  // 原身份已在值班链上撤销（本机已收到撤销回执，或已有 lost 等终态回执）只能以新身份加入；
+  // 仍停在 revocation-ready（值班链上待重新配对）按原身份 reenroll
+  const revoked = pending.some((operation) =>
+    operation.phase !== "revocation-ready" || operation.peerEffects.some((effect) => effect.kind === "issuer-terminal"));
+  return { newIdentity: revoked, operationIds: pending.map((operation) => operation.identity.operationId) };
+}
+
+const EXECUTOR_REMOVAL_PHASES: readonly string[] = ["accepted", "gate-frozen", "authority-decided", "authority-settled", "revocation-ready", "revoked", "cleanup-complete"];
+
+/** 本机宿主是否在运行：PID 锁指向存活进程，或正在取回的受限宿主仍是同一进程身份。 */
+async function localHostRunning(zhixingHome: string): Promise<boolean> {
+  const lock = await readLock({ pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) }).catch(() => null);
+  if (lock && isProcessAlive(lock.pid)) return true;
+  return retrievingHostAlive(await readDeviceRestriction(zhixingHome),
+    (pid) => readPlatformProcessBirth(pid, resolveProcessStartTime, undefined, isProcessAlive));
+}
+
+async function joinPairing(runtime: PairingRuntimeInput): Promise<void> {
+  let input = runtime;
   let persisted = await input.continuations.load();
+  // 续接的是新身份的重新加入：按续接记录找回候选钥，原钥在配对完成前仍是当前身份
+  if (persisted?.side === "joiner" && persisted.localDeviceId !== input.key.deviceId) {
+    const candidate = await loadCandidateDeviceKey(input.secretStore, persisted.localDeviceId);
+    if (candidate) input = { ...input, key: candidate, replacedKey: input.key };
+  }
   if (persisted?.side === "issuer") {
     throw new Error("A pairing issuer continuation is already active on this device");
   }
@@ -1033,13 +1119,28 @@ async function joinPairing(input: PairingRuntimeInput): Promise<void> {
     return;
   }
   if (persisted) {
+    // 重新加入按续接里耐久绑定的工作流事实续做（不按“本机现在有没有信任投影”猜）
+    if (persisted.rejoin) {
+      if (input.replacedKey && persisted.rejoin.replacedDeviceId !== input.replacedKey.deviceId) {
+        throw new Error("Pairing continuation is bound to a different replaced identity");
+      }
+      input = { ...input, rejoin: persisted.rejoin };
+    }
     await resumeJoinerPairing({ input, invitation, continuation: persisted });
     return;
   }
-  if (await input.store.loadTrustProjection()) {
-    throw new Error("This device already belongs to a home trust chain");
+  const existingTrust = await input.store.loadTrustProjection();
+  if (existingTrust) {
+    const rejoin = await rejoinAdmissible(input, existingTrust.homeId, invitation.offer.homeId);
+    if (!rejoin) throw new Error("This device already belongs to a home trust chain");
+    input = { ...input, rejoin: { operationIds: rejoin.operationIds, ...(rejoin.newIdentity ? { replacedDeviceId: input.key.deviceId } : {}) } };
+    // 新身份只在配对续接里使用：候选钥不被普通身份发现选中，配对完成并校验后才切换为当前身份
+    if (rejoin.newIdentity) input = { ...input, key: await loadOrCreateCandidateDeviceKey(input.secretStore), replacedKey: input.key };
   }
-  const identity = enrollDeviceIdentity(input.key, {
+  // 原身份重新加入（值班链上待重新配对）：沿用本机信任记录里自己的身份文档，reenroll 要求身份不变
+  const identity = (input.rejoin && !input.replacedKey
+    ? existingTrust?.members.find((member) => member.device.deviceId === input.key.deviceId)?.device
+    : undefined) ?? enrollDeviceIdentity(input.key, {
     displayName: hostname(),
     platform: devicePlatform(),
     enrolledAt: new Date().toISOString(),
@@ -1086,6 +1187,8 @@ async function joinPairing(input: PairingRuntimeInput): Promise<void> {
       join,
       pakeRounds,
       proof,
+      // 重新加入在任何提交之前就绑定被取代的旧移除与原身份，续接按它逐阶段补完
+      ...(input.rejoin ? { rejoin: input.rejoin } : {}),
     };
     await input.continuations.save(secretPending);
     const pairwise = derivePairwiseRendezvousSecret(sessionKey);
@@ -1103,13 +1206,13 @@ async function joinPairing(input: PairingRuntimeInput): Promise<void> {
     const committed = asCommitted(await receivePairingFrame(socket));
     validateCommitted(invitation, join, sessionKey, committed);
     await persistCommittedHomeDiscovery(input.secretStore, sessionKey, committed);
-    const bootstrapContinuation: PairingJoinerContinuation = {
+    const bootstrapContinuation: Extract<PairingJoinerContinuation, { phase: "bootstrap-ready" }> = {
       ...continuation,
       phase: "bootstrap-ready",
       committed: stripCommittedFrame(committed),
     };
     await input.continuations.save(bootstrapContinuation);
-    await completeJoinerBootstrap({ input, invitation, committed, socket });
+    await completeJoinerBootstrap({ input, invitation, committed, socket, continuation: bootstrapContinuation });
   } catch (error) {
     if (!commitPossible && peerDeviceId) {
       await deletePairingSecret(input.secretStore, invitation.offer.offerId);
@@ -1169,6 +1272,7 @@ async function resumeIssuerPairing(input: {
     ...(typeof input.sessionKey === "string" ? {} : { sessionKey: input.sessionKey }),
     attempt: continuation.attempt,
   });
+  await supersedeKnownRemovals(input.input, peerDeviceId, continuation.trustEvent);
   await input.input.bootstrapProjection.transportPeers.acceptTransportPeer({
     identity: continuation.join.device,
     rootCertificatePem: continuation.joinerRootCertificatePem,
@@ -1249,21 +1353,118 @@ async function resumeJoinerPairing(input: {
     ) {
       throw new Error("Pairing resume returned a different committed bootstrap");
     }
-    if (input.continuation.phase === "proof-ready") {
-      await input.input.continuations.save({
-        ...input.continuation,
-        phase: "bootstrap-ready",
-        committed: stripCommittedFrame(committed),
-      });
-    }
+    const bootstrapContinuation: Extract<PairingJoinerContinuation, { phase: "bootstrap-ready" }> =
+      input.continuation.phase === "bootstrap-ready"
+        ? input.continuation
+        : { ...input.continuation, phase: "bootstrap-ready", committed: stripCommittedFrame(committed) };
+    if (input.continuation.phase === "proof-ready") await input.input.continuations.save(bootstrapContinuation);
     await completeJoinerBootstrap({
       input: input.input,
       invitation: input.invitation,
       committed,
       socket,
+      continuation: bootstrapContinuation,
     });
   } finally {
     socket.destroy();
+  }
+}
+
+/**
+ * 原成员在旧分支、现任链上没有它的成员行（灾备基线之后才配对）时的重新加入：配对已提交之后，经现有成员发现取得并验证
+ * 根签恢复证明，按包5接续当前分支（adoptDiscoveredTrust）。发布之前把本次接续标识绑定进配对续接；这里只负责发布，
+ * 之后的核验与旧移除终结是重新加入的共同阶段（见 supersedeRejoinedRemovals）。
+ * 发现失败或不能证明时抛出：续接停在 bootstrap-ready、保持受限，重试从这里续做，不重复 enroll、不发布身份。
+ */
+const REJOIN_DISCOVERY_TIMEOUT_MS = 60_000;
+
+async function adoptRejoinBranch(
+  runtime: PairingRuntimeInput,
+  committed: PairingCommittedMessage,
+  bindAdoption: (adoptionId: string) => Promise<void>,
+): Promise<void> {
+  const store = runtime.store;
+  const secret = await loadHomeDiscoverySecret(runtime.secretStore, committed.trustRecord.homeId);
+  if (!secret) throw new Error("Rejoining a forked home requires its discovery material");
+  const relays = committed.issuerEndpoint.transports.flatMap((transport) => transport.kind === "blind-relay" ? [transport.relay] : []);
+  // 发现有限期限：值班设备的发现服务不在时不无限等待，续接停在 bootstrap-ready，重试从这里续做
+  const deadline = AbortSignal.timeout(runtime.rejoinDiscoveryTimeoutMs ?? REJOIN_DISCOVERY_TIMEOUT_MS);
+  const signal = runtime.signal ? AbortSignal.any([runtime.signal, deadline]) : deadline;
+  let verified: VerifiedHomeDiscovery | undefined;
+  const failures: Error[] = [];
+  for (const relay of relays) {
+    for (const key of currentAndPreviousDiscoveryRendezvousKeys(secret, "member")) {
+      try {
+        // 后缀超出单次会话预算时连续开会话：每次耐久已验证的前缀，直到拿到完整证明
+        for (let reached = -1; !verified;) {
+          const local = await store.discoveryLocalChain();
+          if (!local) throw new Error("Rejoining a forked home requires the local trust chain");
+          const resume = await memberDiscoveryResume(store);
+          const socket = await openRelaySocket(relay, key, "connect", signal);
+          const session = await openHomeDiscovery({ socket, purpose: "member", secret, local, ...(resume ? { resume } : {}), signal });
+          try {
+            if (session.verified.complete && !session.verified.forked) throw new Error("The current trust chain does not fork from this device's chain");
+            await adoptDiscoveredTrust({ store, verified: session.verified, localIdentity: runtime.key, beforePublish: bindAdoption });
+            if (session.verified.complete) verified = session.verified;
+            else if (session.verified.projection.chainHead.seq <= reached) throw new Error("Home discovery made no progress");
+            else reached = session.verified.projection.chainHead.seq;
+          } finally { session.close(); }
+        }
+      } catch (error) {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      }
+      if (verified) break;
+    }
+    if (verified) break;
+  }
+  if (!verified) {
+    throw new AggregateError(failures, `Pairing is committed but this device could not continue on the current trust branch (${relays.length} relays${failures.length ? `: ${failures.map((error) => error.message).join("; ")}` : ""})`);
+  }
+}
+
+/**
+ * 重新加入的共同收尾阶段（每步幂等，任一点中断后从头核到第一个未完成处）：本次配对事件按摘要在本机链上且配对的
+ * 正是本设备、本设备按键读为公钥一致的 active 成员、分叉接续已按绑定的接续标识发布；然后把续接绑定的旧移除以
+ * superseded 终结，证据把本次配对、旧接受点与接续耐久绑定在旧操作上（制品可按键复核），冷重开后不必再推导。
+ */
+async function supersedeRejoinedRemovals(
+  runtime: PairingRuntimeInput,
+  committed: PairingCommittedMessage,
+  binding: PairingRejoinBinding,
+): Promise<void> {
+  const store = runtime.store;
+  const sources = store.authoritySources();
+  if (!sources) throw new Error("Rejoining a home requires the local authority log");
+  const pairingDigest = committed.acceptance.chainHead.eventDigest;
+  const pairing = await store.trustEventByDigest(pairingDigest);
+  const paired = pairing?.body.t === "enroll" ? pairing.body.device.deviceId : pairing?.body.t === "reenroll" ? pairing.body.deviceId : undefined;
+  if (!pairing || paired !== runtime.key.deviceId) throw new Error("This device's trust chain does not contain this pairing");
+  const self = await store.trustMember(runtime.key.deviceId);
+  if (!self || self.state !== "active" || self.device.publicKey !== runtime.key.publicKey) {
+    throw new Error("This device is no longer an active member after this pairing");
+  }
+  if (binding.adoptionId && !await store.trustBranchAdopted(binding.adoptionId)) {
+    throw new Error("The current trust branch was not published on this device");
+  }
+  const journal = new DeviceLifecycleJournal(store.authorityLog(), sources.verifier);
+  const removedDeviceId = binding.replacedDeviceId ?? runtime.key.deviceId;
+  for (const operationId of binding.operationIds) {
+    const operation = await journal.state(operationId);
+    if (!operation || operation.identity.kind !== "executor-removal" ||
+        operation.identity.targetDeviceId !== removedDeviceId || operation.identity.homeId !== committed.trustRecord.homeId) {
+      throw new Error("The removal bound to this re-pairing is not on this device");
+    }
+    if (operation.phase === "terminal" || operation.phase === "aborted") continue;
+    const ref = await store.authorityLog().artifactStore.put(Buffer.from(canonicalize({
+      v: 1, operationId, homeId: operation.identity.homeId, removedDeviceId, currentDeviceId: runtime.key.deviceId,
+      accepted: operation.identity.acceptedTrustHeadDigest,
+      pairing: { eventDigest: pairingDigest, offerId: committed.acceptance.offerId, transcriptDigest: committed.acceptance.transcriptDigest },
+      ...(binding.adoptionId ? { adoptionId: binding.adoptionId } : {}),
+    }), "utf8"));
+    await journal.terminal(operationId, "superseded", [
+      { kind: "trust-event", digest: pairingDigest },
+      { kind: "accepted-work", digest: ref.digest, artifact: ref },
+    ]);
   }
 }
 
@@ -1272,22 +1473,51 @@ async function completeJoinerBootstrap(input: {
   readonly invitation: PairingInvitation;
   readonly committed: PairingCommittedMessage;
   readonly socket: Socket;
+  readonly continuation: Extract<PairingJoinerContinuation, { phase: "bootstrap-ready" }>;
 }): Promise<void> {
-  await input.input.store.importTrustBootstrap({
+  const store = input.input.store;
+  const pairingDigest = input.committed.acceptance.chainHead.eventDigest;
+  const importCommitted = () => store.importTrustBootstrap({
     events: input.committed.trustEvents,
     record: input.committed.trustRecord,
     localDeviceId: input.input.key.deviceId,
   });
+  let rejoin = input.input.rejoin;
+  if (!rejoin) {
+    await importCommitted();
+  } else {
+    // 重新加入按阶段续做，不按“现在是不是分叉”判断：本机链按摘要已含本次配对事件即已发布；本机链头在提交链上就导入后缀；
+    // 否则（同 home 分叉）经成员发现接续当前分支，发布前把接续标识绑定进续接
+    if (!await store.trustEventByDigest(pairingDigest)) {
+      if (await localHeadOnCommitted(store, input.committed)) await importCommitted();
+      else {
+        await adoptRejoinBranch(input.input, input.committed, async (adoptionId) => {
+          if (rejoin!.adoptionId === adoptionId) return;
+          if (rejoin!.adoptionId) throw new Error("Pairing continuation is bound to another trust branch continuation");
+          rejoin = { ...rejoin!, adoptionId };
+          await input.input.continuations.save({ ...input.continuation, rejoin });
+        });
+      }
+    }
+    await supersedeRejoinedRemovals(input.input, input.committed, rejoin);
+  }
   await input.input.bootstrapProjection.transportPeers.acceptTransportPeer({
     identity: input.invitation.issuer,
     rootCertificatePem: input.committed.issuerRootCertificatePem,
   });
-  await input.input.bootstrapProjection.endpoints.acceptEndpoint(
-    input.committed.issuerEndpoint,
-  );
+  // 原成员重新加入时本机可能已存着值班设备的端点描述（第一次配对时写入，或分叉接续时由成员发现接受的现行描述）：
+  // 目录按版本单调，已知描述版本不低于这次的就沿用，只有更新的才接受
+  const knownEndpoint = (await input.input.bootstrapProjection.endpoints.loadEndpoints()).get(input.committed.issuerEndpoint.deviceId);
+  if (!knownEndpoint || knownEndpoint.revision < input.committed.issuerEndpoint.revision) {
+    await input.input.bootstrapProjection.endpoints.acceptEndpoint(
+      input.committed.issuerEndpoint,
+    );
+  }
   const local = input.committed.trustRecord.members.find((member) =>
     member.device.deviceId === input.input.key.deviceId && member.state === "active");
   if (!local) throw new Error("Pairing trust projection does not contain the local device");
+  // 新身份的重新加入：配对已提交、信任已发布并核到新身份是 active 成员、旧移除已终结之后，才切换为本机唯一当前身份
+  if (input.input.replacedKey) await publishSwitchedDeviceKey(input.input.secretStore, input.input.replacedKey, input.input.key, pairingDigest);
   const config = loadConfig({ homeDir: input.input.zhixingHome });
   const executorAutoStart = await resolveExecutorAutoStartSelection({
     explicit: input.input.executorAutoStart,
@@ -1315,11 +1545,29 @@ async function completeJoinerBootstrap(input: {
   await input.input.bootstrapProjection.completions.markBootstrapComplete(
     input.invitation.issuer.deviceId,
     input.invitation.offer.offerId,
+    { replacePrevious: !!input.input.rejoin },
   );
   await sendPairingFrame(input.socket, { t: "bootstrap-complete" });
   await deletePairingSecret(input.input.secretStore, input.invitation.offer.offerId);
   await input.input.continuations.clear(input.invitation.offer.offerId);
   input.input.writeLine("这台设备已经准备好，可以开始使用知行了。");
+}
+
+/** 发起方配对提交之后：被这次配对（重新）接纳的设备上未终结的移除以 superseded 终结。 */
+async function supersedeKnownRemovals(input: PairingRuntimeInput, deviceId: string, trustEvent: HomeTrustEvent): Promise<void> {
+  const sources = input.store.authoritySources();
+  if (!sources) throw new Error("Pairing commit requires the local authority log");
+  await supersedeRemovalsByPairing({
+    log: input.store.authorityLog(), verifier: sources.verifier, deviceId, pairingEventDigest: homeTrustEventDigest(trustEvent),
+  });
+}
+
+/** 本机链头是否在这次提交的链上（链按摘要首尾相接，链头一致即整段是前缀）：只比对链头，不整读本机链。 */
+async function localHeadOnCommitted(store: FileMeshBootstrapStore, committed: PairingCommittedMessage): Promise<boolean> {
+  const head = await store.localTrustHead();
+  if (!head) return true;
+  const event = committed.trustEvents.find((candidate) => candidate.seq === head.seq);
+  return event !== undefined && homeTrustEventDigest(event) === head.eventDigest;
 }
 
 async function requestExecutorAutoStart(
@@ -1583,10 +1831,12 @@ function validateChallenge(
 ): void {
   const projection = replayTrustChain(challenge.trustEvents);
   const last = challenge.trustEvents.at(-1);
+  // 新成员是 enroll；值班链上待重新配对的原成员以同一身份 reenroll（issuer 已核身份文档不变）
+  const binds = last?.body.t === "enroll" ? last.body.device.deviceId === join.device.deviceId
+    : last?.body.t === "reenroll" && last.body.deviceId === join.device.deviceId;
   if (
     !last ||
-    last.body.t !== "enroll" ||
-    last.body.device.deviceId !== join.device.deviceId ||
+    !binds ||
     challenge.acceptance.offerId !== invitation.offer.offerId ||
     challenge.acceptance.transcriptDigest !== pairingTranscriptDigest(invitation.offer, join, pakeRounds) ||
     challenge.acceptance.chainHead.seq !== last.seq ||

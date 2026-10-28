@@ -68,6 +68,72 @@ const NOW = Date.parse("2026-07-12T08:00:00.000Z");
 const AT = new Date(NOW).toISOString();
 const ATTEMPT_TIMES = [NOW, NOW + 250, NOW + 750] as const;
 
+// 配对专用的发起方谓词：当前有效 issuer 设备、active、成员身份精确一致；信任事件仍须由当前 issuerKeyId 签；链头变化后不能以旧资格追加
+describe("pairing issuer eligibility", () => {
+  it("refuses a non-issuer or altered issuer identity before any attempt is admitted", async () => {
+    const issuer = await device("anchor");
+    const member = await device("executor");
+    const { projection: genesis } = trustGenesis(issuer);
+    const current = applyTrustEvent(genesis, createSignedTrustEvent({
+      current: genesis, body: { t: "enroll", device: member.identity, roles: ["executor"] }, at: AT, signer: issuer.key,
+    }));
+    const store = new TestAuthority(current);
+    const offers = new InMemoryPairingOfferRepository();
+    const coordinator = new PairingCommitCoordinator(store, offers);
+    const { offer } = offers.issueQr({ homeId: current.homeId, issuer: issuer.identity, protocolVersion: "1", now: NOW });
+    await expect(coordinator.beginQrAttempt({ current, offer, issuerIdentity: member.identity, now: NOW }))
+      .rejects.toThrow(/not the current trust issuer device/);
+    await expect(coordinator.beginQrAttempt({ current, offer, issuerIdentity: { ...issuer.identity, displayName: "imposter" }, now: NOW }))
+      .rejects.toThrow(/not the current trust issuer device/);
+    expect(store.attemptCount(offer.offerId)).toBe(0);
+  });
+
+  it("does not commit a trust event that the current issuer key did not sign", async () => {
+    const issuer = await device("anchor");
+    const joiner = await device("executor");
+    const rogue = await device("rogue");
+    const { projection: genesis } = trustGenesis(issuer);
+    const store = new TestAuthority(genesis);
+    const offers = new InMemoryPairingOfferRepository();
+    const coordinator = new PairingCommitCoordinator(store, offers);
+    const { offer, secret } = offers.issueQr({ homeId: genesis.homeId, issuer: issuer.identity, protocolVersion: "1", now: NOW });
+    const prepared = prepareQrPairing(genesis, offer, secret, issuer, joiner);
+    // 发起设备身份合法，但信任事件换成不是当前 issuerKeyId 的钥签；接受证明按这条事件重新组装，拒绝只能来自签名
+    const forged = createSignedTrustEvent({ current: genesis, body: prepared.trustEvent.body, at: AT, signer: rogue.key });
+    const acceptanceBody: Omit<PairingAcceptance, "finished"> = {
+      ...prepared.acceptance, chainHead: { seq: forged.seq, eventDigest: homeTrustEventDigest(forged) },
+    };
+    const acceptance = { ...acceptanceBody, finished: assemblePairingFinished({
+      method: "qr-secret",
+      issuer: createPairingAcceptanceProof({ acceptance: acceptanceBody, role: "issuer", signer: issuer.key, method: "qr-secret" }),
+      joiner: createPairingAcceptanceProof({ acceptance: acceptanceBody, role: "joiner", signer: joiner.key, method: "qr-secret" }),
+    }) };
+    const admission = await coordinator.beginQrAttempt({ current: genesis, offer, issuerIdentity: issuer.identity, now: NOW });
+    await expect(coordinator.commit({ ...prepared, trustEvent: forged, acceptance, attempt: admission, now: NOW }))
+      .rejects.toThrow(/signature|signer|issuer/i);
+    expect(store.projection.members.some((member) => member.device.deviceId === joiner.identity.deviceId)).toBe(false);
+  });
+
+  it("does not append with an eligibility taken before the chain head moved", async () => {
+    const issuer = await device("anchor");
+    const first = await device("first-executor");
+    const second = await device("second-executor");
+    const { projection: genesis } = trustGenesis(issuer);
+    const store = new TestAuthority(genesis);
+    const offers = new InMemoryPairingOfferRepository();
+    const coordinator = new PairingCommitCoordinator(store, offers);
+    const one = offers.issueQr({ homeId: genesis.homeId, issuer: issuer.identity, protocolVersion: "1", now: NOW });
+    const two = offers.issueQr({ homeId: genesis.homeId, issuer: issuer.identity, protocolVersion: "1", now: NOW });
+    const firstAdmission = await coordinator.beginQrAttempt({ current: genesis, offer: one.offer, issuerIdentity: issuer.identity, now: NOW });
+    const secondAdmission = await coordinator.beginQrAttempt({ current: genesis, offer: two.offer, issuerIdentity: issuer.identity, now: NOW });
+    await coordinator.commit({ ...prepareQrPairing(genesis, one.offer, one.secret, issuer, first), attempt: firstAdmission, now: NOW });
+    // 第二份仍按开始时的链头准备：链头已前进，不能以旧资格追加
+    await expect(coordinator.commit({ ...prepareQrPairing(genesis, two.offer, two.secret, issuer, second), attempt: secondAdmission, now: NOW }))
+      .rejects.toThrow();
+    expect(store.projection.members.some((member) => member.device.deviceId === second.identity.deviceId)).toBe(false);
+  });
+});
+
 describe("pairing protocol", () => {
   it("durably limits attempts and atomically grants a single QR enrollment", async () => {
     const issuer = await device("anchor");

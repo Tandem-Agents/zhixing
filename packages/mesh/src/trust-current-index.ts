@@ -17,7 +17,8 @@ import { assertRecoveryCommit, type DisasterRecoveryCommitProof } from "./recove
 export const CURRENT_TRUST_PROJECTION_ID = "home-current-trust";
 type Member = TrustProjection["members"][number];
 /** 成员行；revokedAt 是撤销该设备的事件序号（撤销是终态，供按点判断“那时是否已撤销”）。 */
-interface MemberRow { readonly member: Member; readonly reset: number; readonly ordinal: number; readonly revokedAt?: number }
+/** revokedAt/pairedAt：本机链上撤销它、最近一次（重新）配对它（enroll/reenroll）的事件序号。 */
+interface MemberRow { readonly member: Member; readonly reset: number; readonly ordinal: number; readonly revokedAt?: number; readonly pairedAt?: number }
 /** 最新一份已核验签名信任记录在 WAL 中的精确位置；完整记录按需读这一帧，不重放信任链。 */
 interface RecordLocator {
   readonly checkpoint: DurableLogCheckpoint;
@@ -81,7 +82,8 @@ function readMember(id: string, value: unknown, reset: number): MemberRow | unde
       !Array.isArray(value.member.roles) || !["active", "revoked", "pending-reenroll"].includes(value.member.state as string) ||
       !Number.isSafeInteger(value.ordinal) || (value.ordinal as number) < 0 || !Number.isSafeInteger(value.reset) ||
       (value.reset as number) < 0 || (value.reset as number) > reset ||
-      (value.revokedAt !== undefined && (!Number.isSafeInteger(value.revokedAt) || value.member.state !== "revoked"))) throw invalid();
+      (value.revokedAt !== undefined && (!Number.isSafeInteger(value.revokedAt) || value.member.state !== "revoked")) ||
+      (value.pairedAt !== undefined && (!Number.isSafeInteger(value.pairedAt) || (value.pairedAt as number) < 0))) throw invalid();
   const row = value as unknown as MemberRow;
   return row.reset < reset && row.member.state === "active"
     ? { ...row, member: { ...row.member, state: "pending-reenroll" } } : row;
@@ -107,7 +109,7 @@ export function decodeTrustIdentity(keyId: string, value: unknown): VerifiedTrus
 }
 
 export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurableProjectionIndex {
-  return log.durableProjection({ projectionId: CURRENT_TRUST_PROJECTION_ID, reducerVersion: 7, authenticated: true,
+  return log.durableProjection({ projectionId: CURRENT_TRUST_PROJECTION_ID, reducerVersion: 8, authenticated: true,
     inputs: { streams: ["trust"] },
     async reduce(envelope, current, source) {
       const changes = new Map<string, JsonValue | undefined>();
@@ -135,6 +137,7 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
             next = applyTrustEvent({ ...head.projection, members: [...touched.values()].map(row => row.member) }, event);
           }
           const reset = head.reset + Number(event.body.t === "domain-reset");
+          const paired = pairedDeviceOf(event);
           let count = head.count;
           // active 计数只算当前 reset 代的目录：换代后从 0 起，旧代的 active 行读出即为待重新配对
           let active = reset === head.reset ? head.active : 0;
@@ -147,7 +150,9 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
             }
             const ordinal = old?.ordinal ?? count++;
             const revokedAt = member.state === "revoked" ? (old?.revokedAt ?? event.seq) : undefined;
-            write(changes, memberKey(member.device.deviceId), { member, ordinal, reset, ...(revokedAt === undefined ? {} : { revokedAt }) });
+            const pairedAt = member.device.deviceId === paired ? event.seq : old?.pairedAt;
+            write(changes, memberKey(member.device.deviceId), { member, ordinal, reset,
+              ...(revokedAt === undefined ? {} : { revokedAt }), ...(pairedAt === undefined ? {} : { pairedAt }) });
             if (member.state === "revoked") changes.set(liveKey(member.device.deviceId), undefined);
             else write(changes, liveKey(member.device.deviceId), member.device.deviceId);
             if (member.state === "active") {
@@ -403,11 +408,14 @@ async function adoptTrustBranch(view: DurableProjectionReadContext, changes: Map
   for (const { key, value } of await scanAll(view, { gte: "trust/tenure-at/", lt: "trust/tenure-at/\uffff" })) {
     if (typeof value === "number" && value > branch.ancestorEpoch) changes.set(key, undefined);
   }
-  // 新分支上的撤销序号（成员行的 revokedAt）
+  // 新分支上的撤销与（重新）配对序号（成员行的 revokedAt/pairedAt）
   const branchRevokedAt = new Map<string, number>();
+  const branchPairedAt = new Map<string, number>();
   for (let seq = branch.ancestor.seq + 1; seq <= projection.chainHead.seq; seq++) {
     const event = await view.get(branchEventKey(adoptionId, seq)) as unknown as HomeTrustEvent | undefined;
     if (event?.body.t === "revoke") branchRevokedAt.set(event.body.deviceId, seq);
+    const paired = event ? pairedDeviceOf(event) : undefined;
+    if (paired !== undefined) branchPairedAt.set(paired, seq);
   }
   // 成员行只改写暂存投影里的成员（祖先处未撤销的全部成员、新分支动到的成员）；祖先之前已撤销的历史设备行不动
   const reset = head.reset + branch.resets;
@@ -419,7 +427,11 @@ async function adoptTrustBranch(view: DurableProjectionReadContext, changes: Map
     const old = readMember(id, await view.get(memberKey(id)), head.reset);
     if (old?.member.state === "active") changes.set(activePrefix(head.reset) + id, undefined);
     const revokedAt = member.state === "revoked" ? (branchRevokedAt.get(id) ?? old?.revokedAt) : undefined;
-    write(changes, memberKey(id), { member, ordinal: old?.ordinal ?? count++, reset, ...(revokedAt === undefined ? {} : { revokedAt }) });
+    // 旧分支上祖先之后的配对不在新链上，不沿用
+    const pairedAt = branchPairedAt.get(id) ??
+      (old?.pairedAt !== undefined && old.pairedAt <= branch.ancestor.seq ? old.pairedAt : undefined);
+    write(changes, memberKey(id), { member, ordinal: old?.ordinal ?? count++, reset,
+      ...(revokedAt === undefined ? {} : { revokedAt }), ...(pairedAt === undefined ? {} : { pairedAt }) });
     if (member.state === "revoked") changes.set(liveKey(id), undefined);
     else write(changes, liveKey(id), id);
     if (member.state === "active") {
@@ -612,6 +624,28 @@ export async function readTrustEventByDigest(view: DurableProjectionReadContext,
 export async function readCurrentTrustMember(view: DurableProjectionReadContext, deviceId: string): Promise<Member | undefined> {
   const head = readHead(await view.get(HEAD));
   return head ? readMember(deviceId, await view.get(memberKey(deviceId)), head.reset)?.member : undefined;
+}
+
+/**
+ * 当前链上最近一次（重新）配对这台设备的事件：成员行与事件都按键读，与链长无关；
+ * 从未配对过（如创始值班设备）或不是成员返回 undefined。
+ */
+export async function readTrustMemberPairing(view: DurableProjectionReadContext, deviceId: string): Promise<{
+  readonly member: Member;
+  readonly pairing?: TrustProjection["chainHead"];
+} | undefined> {
+  const head = readHead(await view.get(HEAD));
+  const row = head ? readMember(deviceId, await view.get(memberKey(deviceId)), head.reset) : undefined;
+  if (!row) return undefined;
+  if (row.pairedAt === undefined) return { member: row.member };
+  const event = await readTrustEventAt(view, row.pairedAt);
+  if (!event || pairedDeviceOf(event) !== deviceId) throw invalid();
+  return { member: row.member, pairing: { seq: event.seq, eventDigest: homeTrustEventDigest(event) } };
+}
+
+/** 事件（重新）配对的设备：enroll 的新成员、reenroll 的原成员；其他事件没有。 */
+function pairedDeviceOf(event: HomeTrustEvent): string | undefined {
+  return event.body.t === "enroll" ? event.body.device.deviceId : event.body.t === "reenroll" ? event.body.deviceId : undefined;
 }
 
 /** Incomplete suffixes are verified chain progress, not a ready trust view. */

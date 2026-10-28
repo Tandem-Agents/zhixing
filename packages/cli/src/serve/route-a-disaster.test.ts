@@ -13,8 +13,9 @@ import type {
   SecretStorePort,
   Signature,
 } from "@zhixing/core/contracts";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import {
+  canonicalize,
   createSignedDisasterRecoveryCommand,
   protocolDigest,
   type ProtocolSignatureVerifier,
@@ -22,7 +23,7 @@ import {
 import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
 import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
 import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
+import { loadActiveAnchorIssuerKey, persistDeviceKey } from "@zhixing/mesh/device-key-store";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
@@ -56,9 +57,13 @@ import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
   resolveExecutorRemovalTerminalRoute,
+  settleExecutorRemovalBeforeBootstrap,
 } from "./device-removal.js";
 import { registerDeviceRemovalIssuerMeshService } from "./device-removal-mesh.js";
 import { retrieveExecutorRemovalTerminal } from "./device-removal-retrieval.js";
+import { createPairingTrustEvent, runPairCommand } from "./mesh-pair-command.js";
+import { loadExistingDeviceKey, replacedDeviceOf } from "./mesh-device-key.js";
+import { committedRejoinPending } from "./mesh-runtime-bootstrap.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 import {
   completeDisasterRecoveryInstallationBeforeBootstrap,
@@ -82,6 +87,7 @@ import {
   restrictTrustBySupersededFacts,
   registerSupersededTrustReportService,
   SupersededTrustGovernance,
+  readPendingSupersededReports,
   reportSupersededTrust,
 } from "./superseded-trust-report.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
@@ -363,10 +369,276 @@ describe("a removal target suspended on the current chain", () => {
         });
         await expect(authorityB.acceptRecoveryEvidence(foreign, "foreign-transcript")).rejects.toMatchObject({ publicReason: "domain-incompatible" });
         expect(await authorityB.operation(operationId)).toBeUndefined();
+        // 现任随后经显式配对把 T 原身份重新加入（生产配对事件）；T 配对前发出的旧取回请求迟到：
+        // 给出 superseded 结论，不 accept、不撤销
+        const pairing = createPairingTrustEvent({
+          current: replayTrustChain(await f.targetStore.loadTrustEvents()), device: f.t.identity, roles: ["executor"],
+          pairingTranscriptDigest: "sha256:repair-after-suspension", at: AT, issuerKey: issuerKeyB,
+        });
+        expect(pairing.body.t).toBe("reenroll");
+        await f.targetStore.appendTrustEvent({ event: pairing, issuerKey: issuerKeyB });
+        const late = createExecutorRemovalRecoveryEvidence({ transcript: "late-transcript", recovery, deviceKey: f.t.key });
+        await expect(authorityB.acceptRecoveryEvidence(late, "late-transcript")).rejects.toMatchObject({ publicReason: "superseded" });
+        expect(await authorityB.operation(operationId)).toBeUndefined();
+        const after = await f.targetStore.loadTrustEvents();
+        expect(after.at(-1)).toEqual(pairing);
+        expect(replayTrustChain(after).members.find((member) => member.device.deviceId === tId)?.state).toBe("active");
       }
     }, 150_000);
   }
 });
+
+/** runPairCommand 需要按前缀列举的秘密存储（本文件的内存存储 list 不按前缀）。 */
+class PrefixSecretStore implements SecretStorePort {
+  readonly values = new Map<string, string>();
+  async put(ref: SecretRef, value: string): Promise<void> { this.values.set(`${ref.kind}/${ref.bindingId}`, value); }
+  async get(ref: SecretRef): Promise<string | null> { return this.values.get(`${ref.kind}/${ref.bindingId}`) ?? null; }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const existing = await this.get(ref);
+    if (existing !== null) return existing;
+    const value = create();
+    await this.put(ref, value);
+    return value;
+  }
+  async delete(ref: SecretRef): Promise<void> { this.values.delete(`${ref.kind}/${ref.bindingId}`); }
+  async list(prefix: string): Promise<SecretRef[]> {
+    return [...this.values.keys()].filter((entry) => entry.startsWith(prefix)).map((entry) => {
+      const separator = entry.indexOf("/");
+      return { kind: entry.slice(0, separator) as SecretRef["kind"], bindingId: entry.slice(separator + 1) };
+    });
+  }
+  async unlockState(): Promise<"unlocked"> { return "unlocked"; }
+}
+
+// 总控 reply-10e04c75（方案 B）：检查点之后才在旧分支配对的设备不在灾备基线里（现任给出 membership-mismatch）。
+// 灾备后的现任经真实配对入口发起配对、这台设备以原身份完成加入：配对提交后经现有成员发现接续当前分支，
+// 旧移除以 superseded 终结（证据耐久绑定本次配对、接续与旧接受点），之后正常装配
+describe("a device paired on the old branch after the recovery checkpoint", () => {
+  it("re-joins the recovered duty device through a real pairing and continues on the current branch", async () => {
+    const { f, relay, x, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint, bSecrets } = await forkedRejoinSetup();
+    const controlB = await startDutyDevice(f, issuerKeyB, relay.port, bEndpoint);
+    onTestFinished(() => controlB.stop());
+    const [issued, joined] = await pairWithRecoveredDuty(f, relay.port, bSecrets, xHome, xSecrets, { invite: true });
+    expect([issued.status, joined.status]).toEqual(["fulfilled", "fulfilled"]);
+    await assertForkedRejoinCompleted({ f, relay, x, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint, bSecrets });
+  }, 180_000);
+
+  // 配对已在现任提交、本机接续未完成（现任发现服务不在）：保持受限并如实呈现；之后从同一续接接着做，
+  // 不重复 enroll、不换身份，接续成功后旧移除才被取代
+  it("keeps the committed re-pairing pending until the current branch can be continued, then resumes it", async () => {
+    const scenario = await forkedRejoinSetup();
+    const { f, relay, x, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint, bSecrets } = scenario;
+    const [issued, joined] = await pairWithRecoveredDuty(f, relay.port, bSecrets, xHome, xSecrets, { invite: true, rejoinDiscoveryTimeoutMs: 2_000 });
+    expect(joined.status).toBe("rejected");
+    expect(String((joined as PromiseRejectedResult).reason)).toMatch(/could not continue on the current trust branch/u);
+    expect(issued.status).toBe("rejected");
+    const enrolls = async () => (await f.targetStore.loadTrustEvents()).filter((event) =>
+      event.body.t === "enroll" && event.body.device.deviceId === x.identity.deviceId).length;
+    expect(await enrolls()).toBe(1);
+    expect(await committedRejoinPending(xHome)).toBe(true);
+    expect((await loadExistingDeviceKey(xSecrets))?.deviceId).toBe(x.identity.deviceId);
+    expect((await new DeviceLifecycleJournal(xStore.authorityLog(), xVerifier).state(operationId))?.phase).not.toBe("terminal");
+
+    const controlB = await startDutyDevice(f, issuerKeyB, relay.port, bEndpoint);
+    onTestFinished(() => controlB.stop());
+    const [reissued, rejoined] = await pairWithRecoveredDuty(f, relay.port, bSecrets, xHome, xSecrets, { invite: false });
+    expect([reissued.status, rejoined.status]).toEqual(["fulfilled", "fulfilled"]);
+    expect(await enrolls()).toBe(1);
+    expect(await committedRejoinPending(xHome)).toBe(false);
+    await assertForkedRejoinCompleted(scenario);
+  }, 240_000);
+
+  // 当前分支已在本机发布、回到配对收尾之前中断：重试时已不是分叉，但旧移除的终结是续接绑定的必经阶段，照样补完
+  it("finishes the old removal on retry when the branch was published but the pairing completion was interrupted", async () => {
+    const scenario = await forkedRejoinSetup();
+    const { f, relay, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint, bSecrets } = scenario;
+    const controlB = await startDutyDevice(f, issuerKeyB, relay.port, bEndpoint);
+    onTestFinished(() => controlB.stop());
+    let injected = false;
+    const original = FileMeshBootstrapStore.prototype.adoptTrustBranch;
+    const publish = vi.spyOn(FileMeshBootstrapStore.prototype, "adoptTrustBranch").mockImplementation(async function (this: FileMeshBootstrapStore, ...args) {
+      const adoptionId = await original.apply(this, args);
+      if (!injected && await this.trustBranchAdopted(adoptionId)) {
+        injected = true;
+        throw new Error("injected after the branch was published");
+      }
+      return adoptionId;
+    });
+    const [issued, joined] = await pairWithRecoveredDuty(f, relay.port, bSecrets, xHome, xSecrets, { invite: true });
+    publish.mockRestore();
+    expect(injected).toBe(true);
+    expect([issued.status, joined.status]).toEqual(["rejected", "rejected"]);
+    expect(await committedRejoinPending(xHome)).toBe(true);
+    expect((await new DeviceLifecycleJournal(xStore.authorityLog(), xVerifier).state(operationId))?.phase).not.toBe("terminal");
+
+    const [reissued, rejoined] = await pairWithRecoveredDuty(f, relay.port, bSecrets, xHome, xSecrets, { invite: false });
+    expect([reissued.status, rejoined.status]).toEqual(["fulfilled", "fulfilled"]);
+    expect(await committedRejoinPending(xHome)).toBe(false);
+    await assertForkedRejoinCompleted(scenario);
+  }, 240_000);
+
+  // 旧分支上已按失联移出：X 以新身份经分叉接续加入，旧移除按续接绑定的原身份定位并取代，切换为新身份
+  it("re-joins with a new identity across the fork and supersedes the removal bound to the replaced identity", async () => {
+    const { f, relay, x, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint, bSecrets } = await forkedRejoinSetup({ lost: true });
+    const controlB = await startDutyDevice(f, issuerKeyB, relay.port, bEndpoint);
+    onTestFinished(() => controlB.stop());
+    const [issued, joined] = await pairWithRecoveredDuty(f, relay.port, bSecrets, xHome, xSecrets, { invite: true });
+    expect([issued.status, joined.status]).toEqual(["fulfilled", "fulfilled"]);
+    const current = (await loadExistingDeviceKey(xSecrets))!;
+    expect(current.deviceId).not.toBe(x.identity.deviceId);
+    expect(await replacedDeviceOf(xSecrets, current.deviceId)).toBe(x.identity.deviceId);
+    expect((await new DeviceLifecycleJournal(xStore.authorityLog(), xVerifier).state(operationId))).toMatchObject({ phase: "terminal", terminalOutcome: "superseded" });
+    expect((await xStore.trustMember(current.deviceId))?.state).toBe("active");
+    expect(replayTrustChain(await f.targetStore.loadTrustEvents()).members.find((member) => member.device.deviceId === current.deviceId)?.state).toBe("active");
+    expect(await settleExecutorRemovalBeforeBootstrap({ log: xStore.authorityLog(), verifier: xVerifier, secretStore: xSecrets }))
+      .toEqual({ kind: "none" });
+  }, 240_000);
+});
+
+/**
+ * 分叉重新加入的场景：X 在检查点之后入链、A 接受移除 X、X 到撤销阶段（lost 时 A 再按失联移出 X，X 持 lost 回执）；
+ * B 灾备恢复（现任链上没有 X）。不启动 B 的服务。
+ */
+async function forkedRejoinSetup(options: { readonly lost?: boolean } = {}) {
+    const f = await createHome();
+    const relay = await startRelay();
+    onTestFinished(() => relay.close());
+    await f.captureCheckpoint();
+    const x = await device("后配的设备-X");
+    f.identities.set(x.identity.deviceId, x.identity);
+    await f.appendSeenByE(createSignedTrustEvent({
+      current: (await f.sourceStore.loadCurrentTrust())!, signer: f.a.key, at: AT,
+      body: { t: "enroll", device: x.identity, roles: ["executor"] },
+    }));
+    // X 的完整 home：旧分支整链、设备钥、移除操作都在它自己的存储里
+    const xHome = await createTempDir("route-a-fork-x");
+    const xSecrets = new PrefixSecretStore();
+    await persistDeviceKey(xSecrets, x.key);
+    const xStore = await FileMeshBootstrapStore.open(xHome, x.key, { secretStore: xSecrets });
+    onTestFinished(() => xStore.stopStorageMaintenance());
+    await xStore.importTrustBootstrap({
+      events: await f.sourceStore.loadTrustEvents(), record: (await f.sourceStore.loadTrustRecord())!, localDeviceId: x.identity.deviceId,
+    });
+    // 生产配置下照运行时读一次当前信任，刷新常驻验签身份
+    await xStore.loadCurrentTrust();
+    const xVerifier = xStore.authoritySources()!.verifier;
+    const aEndpoint: MeshEndpointDescriptor = {
+      v: 1, deviceId: f.a.identity.deviceId, transports: [{ kind: "blind-relay", relay: { host: "127.0.0.1", port: relay.port } }],
+      revision: 1, at: AT,
+    };
+    const xTarget = new ExecutorRemovalTarget({
+      log: xStore.authorityLog(), homeId: HOME_ID, deviceKey: x.key, verifier: xVerifier, secretStore: xSecrets,
+      issuerRoute: async () => ({ peer: { identity: f.a.identity, rootCertificatePem: f.a.key.rootCertificatePem }, endpoint: aEndpoint }),
+      closeAdmission: async () => undefined, settleAcceptedWork: async () => undefined, releaseAdmission: async () => undefined,
+      transferToAnchor: async () => undefined,
+      cleanup: async () => { throw new Error("superseded removal must not clean"); },
+      finalizeDeviceKey: async () => { throw new Error("superseded removal must not delete the key"); },
+    });
+    const operationId = "remove-fork-x";
+    const accepted = await f.authorityA.accept({ requestId: `request-${operationId}`, operationId, targetName: x.identity.displayName });
+    await xTarget.accept(accepted, await f.authorityA.terminalRoute(operationId));
+    expect((await xTarget.decide({ operationId, mode: "destroy", currentAnchorDeviceId: f.a.identity.deviceId })).kind).toBe("ready");
+    if (options.lost) await xTarget.finish(await f.authorityA.commitLost(operationId));
+
+    // 灾备：B 以检查点为基线恢复，现任链上没有 X
+    const issuerKeyB = await f.recover();
+    expect(replayTrustChain(await f.targetStore.loadTrustEvents()).members.some((member) => member.device.deviceId === x.identity.deviceId)).toBe(false);
+    const bEndpoint: MeshEndpointDescriptor = {
+      v: 1, deviceId: f.b.identity.deviceId, transports: [{ kind: "blind-relay", relay: { host: "127.0.0.1", port: relay.port } }],
+      revision: 1, at: AT,
+    };
+    // 现任经真实配对入口发起配对用的秘密存储：按前缀列举，含 B 的设备钥与灾备后激活的发证钥
+    const bSecrets = new PrefixSecretStore();
+    for (const ref of await f.secretsB.list("")) {
+      const value = await f.secretsB.get(ref);
+      if (value !== null) await bSecrets.put(ref, value);
+    }
+    await persistDeviceKey(bSecrets, f.b.key);
+    return { f, relay, x, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint, bSecrets };
+}
+
+/** 现任经真实配对入口发起（或按续接重新发布同一邀请）、X 完成（或续做）加入；两侧结果都交回。 */
+async function pairWithRecoveredDuty(
+  f: Awaited<ReturnType<typeof createHome>>,
+  relayPort: number,
+  bSecrets: PrefixSecretStore,
+  xHome: string,
+  xSecrets: PrefixSecretStore,
+  options: { readonly invite: boolean; readonly rejoinDiscoveryTimeoutMs?: number },
+): Promise<[PromiseSettledResult<void>, PromiseSettledResult<void>]> {
+  let resolveInvitation!: (value: string) => void;
+  const invitation = new Promise<string>((resolve) => { resolveInvitation = resolve; });
+  const issuing = runPairCommand({
+    zhixingHome: f.targetRoot, secretStore: bSecrets, composition: "production",
+    confirmRecoveryPackage: async (encoded) => encoded,
+    showPairingInvitation: async (display) => { resolveInvitation(display.invitation); },
+    reconcileManagedService: async () => undefined,
+    relay: `127.0.0.1:${relayPort}`,
+    selectDutyDevice: async () => "paired",
+    migrateDutyTo: async () => undefined,
+    writeLine: (line) => { if (line.startsWith("邀请内容：")) resolveInvitation(line.slice("邀请内容：".length)); },
+  });
+  const encoded = await Promise.race([invitation, issuing.then(() => { throw new Error("pairing issuer ended before its invitation"); })]);
+  const joining = runPairCommand({
+    zhixingHome: xHome, secretStore: xSecrets, composition: "production",
+    promptExecutorAutoStart: async () => false,
+    ...(options.invite ? { invitation: encoded } : {}),
+    ...(options.rejoinDiscoveryTimeoutMs ? { rejoinDiscoveryTimeoutMs: options.rejoinDiscoveryTimeoutMs } : {}),
+    completeDeviceConfiguration: async () => "ready",
+    reconcileManagedService: async () => undefined,
+    writeLine: () => undefined,
+  });
+  return await Promise.allSettled([issuing, joining]) as [PromiseSettledResult<void>, PromiseSettledResult<void>];
+}
+
+/** 接续完成后的共同结论：旧移除 superseded 且证据耐久、X 是现任链 active 成员；待上报清除后冷重开仍成立；新移除可用。 */
+async function assertForkedRejoinCompleted(scenario: Awaited<ReturnType<typeof forkedRejoinSetup>>): Promise<void> {
+    const { f, x, xHome, xSecrets, xStore, xVerifier, operationId, issuerKeyB, bEndpoint } = scenario;
+    // 旧移除已按 superseded 终结，证据绑定本次配对与接续；X 是现任链上的 active 成员
+    const journal = new DeviceLifecycleJournal(xStore.authorityLog(), xVerifier);
+    const ended = await journal.state(operationId);
+    expect(ended).toMatchObject({ phase: "terminal", terminalOutcome: "superseded" });
+    const xEvents = await xStore.loadTrustEvents();
+    expect(replayTrustChain(xEvents).members.find((member) => member.device.deviceId === x.identity.deviceId)?.state).toBe("active");
+    expect(replayTrustChain(xEvents).issuer.issuerKeyId).toBe(issuerKeyB.deviceId);
+    expect(await settleExecutorRemovalBeforeBootstrap({ log: xStore.authorityLog(), verifier: xVerifier, secretStore: xSecrets }))
+      .toEqual({ kind: "none" });
+
+    // 旧分支待上报事实经现任确认后按既有归约清除：取代证明耐久在旧操作终态里，不依赖待上报记录，冷重开仍成立
+    const pending = await readPendingSupersededReports(xStore.authorityLog());
+    expect(pending.length).toBe(1);
+    await reportSupersededTrust(xStore, {
+      request: async () => Buffer.from(canonicalize({ through: pending[0]!.superseded }), "utf8"),
+    } as never);
+    expect(await readPendingSupersededReports(xStore.authorityLog())).toEqual([]);
+    await xStore.stopStorageMaintenance();
+    const reopened = await FileMeshBootstrapStore.open(xHome, x.key, { secretStore: xSecrets });
+    onTestFinished(() => reopened.stopStorageMaintenance());
+    await reopened.loadCurrentTrust();
+    const reopenedVerifier = reopened.authoritySources()!.verifier;
+    expect((await new DeviceLifecycleJournal(reopened.authorityLog(), reopenedVerifier).state(operationId))?.terminalOutcome).toBe("superseded");
+    expect(await settleExecutorRemovalBeforeBootstrap({ log: reopened.authorityLog(), verifier: reopenedVerifier, secretStore: xSecrets }))
+      .toEqual({ kind: "none" });
+
+    // 新接入之后，现任对 X 发起的新移除照常可用
+    const authorityB = new CurrentIssuerDeviceRemovalAuthority({
+      store: f.targetStore, issuerKey: issuerKeyB, secretStore: f.secretsB, verifier: f.verifier, isReachable: () => false,
+    });
+    const nextTarget = new ExecutorRemovalTarget({
+      log: reopened.authorityLog(), homeId: HOME_ID, deviceKey: x.key, verifier: reopenedVerifier, secretStore: xSecrets,
+      issuerRoute: async () => ({ peer: { identity: f.b.identity, rootCertificatePem: f.b.key.rootCertificatePem }, endpoint: bEndpoint }),
+      closeAdmission: async () => undefined, settleAcceptedWork: async () => undefined, releaseAdmission: async () => undefined,
+      transferToAnchor: async () => undefined,
+      cleanup: async () => [{ kind: "cleanup" as const, digest: protocolDigest("ForkRejoinNextCleanup", 1, {}) }],
+      finalizeDeviceKey: async () => [{ kind: "cleanup" as const, digest: protocolDigest("ForkRejoinNextKey", 1, {}) }],
+    });
+    const nextOperation = "remove-after-fork-rejoin";
+    const nextAccepted = await authorityB.accept({ requestId: `request-${nextOperation}`, operationId: nextOperation, targetName: x.identity.displayName });
+    await nextTarget.accept(nextAccepted, await authorityB.terminalRoute(nextOperation));
+    const nextDecision = await nextTarget.decide({ operationId: nextOperation, mode: "destroy", currentAnchorDeviceId: f.b.identity.deviceId });
+    if (nextDecision.kind !== "ready") throw new Error("new removal did not reach revocation-ready");
+    expect((await authorityB.commitReady(nextDecision.receipt)).phase).toBe("revoked");
+}
 
 // 总控 reply-c0b7df17：合法灾备后仍是有效成员的离线设备自动接续当前权威分支，旧分支证据保留
 describe("an offline member after a disaster recovery", () => {
@@ -896,7 +1168,7 @@ async function createHome() {
     credentialRevision: "credentials-disaster-v1",
   }));
   return {
-    a, b, t, e, identities, verifier, sourceStore, targetStore, secretsA, secretsB, eSecrets, authorityA, recoveryRoot,
+    a, b, t, e, identities, verifier, sourceStore, targetStore, targetRoot, secretsA, secretsB, eSecrets, authorityA, recoveryRoot,
     get eStore() { return eStore; },
     /** E 冷重启：关掉旧实例，按同一目录重开。 */
     async reopenE() {

@@ -185,6 +185,20 @@ describe("CoreHostConnection", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it("surfaces the host's device restriction as an unavailable result without spawning again", async () => {
+    const restriction = { kind: "removed-lost", cleanup: "unconfirmed" } as const;
+    const spawn = vi.fn(async () => ({ ok: false, reason: "受限", publicReason: "受限白话", restriction }));
+    const conn = new CoreHostConnection({
+      discover: async () => { throw new ServerNotRunningError("not running"); },
+      spawn,
+      createClient: () => { throw new Error("no client for a restricted host"); },
+    });
+    const failure = await conn.getClient().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(CoreHostUnavailableError);
+    expect(failure).toMatchObject({ publicReason: "受限白话", restriction });
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
   it("uses the finite current-anchor surface client when this home has no local host", async () => {
     const surface = makeFakeClient();
     const createLocalClient = vi.fn(() => asClient(makeFakeClient()));

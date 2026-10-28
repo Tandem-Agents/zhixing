@@ -436,6 +436,7 @@ export {
   type DeviceLifecyclePhase,
   type DeviceLifecycleProjection,
   type DeviceLifecycleRecord,
+  type DeviceLifecycleTerminalOutcome,
   type ExecutorRemovalLifecycleIdentity,
   type ExecutorRemovalDecision,
   type ExecutorRemovalReceipt,

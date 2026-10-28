@@ -698,6 +698,24 @@ describe("DeviceAdministrationApplicationService", () => {
     })).rejects.toThrow("Device name must be a non-empty string");
   });
 
+  it("lists read-only member states beside, never inside, the removable candidates", async () => {
+    const f = fixture();
+    const others = vi.fn(async () => [
+      { displayName: "旧笔记本", status: "revoked-on-old-branch" as const },
+      { displayName: "客厅电脑", status: "pending-reenroll" as const },
+    ]);
+    Object.assign(f.relationships, { others });
+    const listed = await f.application.query({ kind: "list-device-relationships" });
+    expect(listed).toEqual({
+      devices: [{ displayName: "书房设备", reachable: true }],
+      others: [
+        { displayName: "旧笔记本", status: "revoked-on-old-branch" },
+        { displayName: "客厅电脑", status: "pending-reenroll" },
+      ],
+    });
+    expect(Object.isFrozen((listed as { others: readonly object[] }).others[0])).toBe(true);
+  });
+
   it("contributes exactly five Query and eight Command operations with no Fact event", async () => {
     const f = fixture();
     const dispatcher = new ProductApiDispatcher(

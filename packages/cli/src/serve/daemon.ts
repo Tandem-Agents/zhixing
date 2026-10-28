@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import type { EventEmitter } from 'node:events';
 import { logFailureEvidence, type LogDraft, type LogRecordPort } from "@zhixing/core/logging";
 import chalk from "chalk";
+import { deviceRestrictionNotice, readDeviceRestriction, restrictionOfLaunch, retrievingHostAlive, type DeviceRestriction, type DeviceRestrictionMarker, type ProcessBirthReader } from "./device-restriction.js";
 import {
   readLock,
   isProcessAlive,
@@ -28,8 +29,10 @@ import {
   getDefaultPidPath,
   getDefaultPortPath,
   getDefaultReadyMarkerPath,
+  resolveProcessStartTime,
   type PidFileContents,
 } from "@zhixing/server/client";
+import { readPlatformProcessBirth } from "../platform/secret-platform.js";
 import {
   resolveSelfExec,
   buildDaemonSpawnOptions,
@@ -72,6 +75,10 @@ export interface SpawnDaemonDeps {
   console?: Pick<Console, "log" | "error">;
   /** .ready marker 路径覆盖（测试用；默认 ~/.zhixing/server.ready）*/
   readyMarkerPath?: string;
+  /** 受限状态标记读取（测试用；默认读本 home 的 server.restricted.json） */
+  readRestrictionFn?: () => Promise<DeviceRestrictionMarker | undefined>;
+  /** 进程出生时间读取（测试用；默认读平台进程身份）：核验取回中宿主是不是写标记的那个进程 */
+  readProcessBirthFn?: ProcessBirthReader;
 }
 
 export interface SpawnDaemonResult {
@@ -80,8 +87,11 @@ export interface SpawnDaemonResult {
    * ready: 已发现可连接服务。
    * starting: 本次 child 没有明确失败，但恢复窗口内尚未发现可连接服务。
    * failed: 本次 child 已失败，且没有其它健康 owner 可接管。
+   * restricted: 本机设备受限（正被移出、已移出等），宿主给出状态但不提供普通服务。
    */
-  status: "ready" | "starting" | "failed";
+  status: "ready" | "starting" | "failed" | "restricted";
+  /** status 为 restricted 时宿主给出的受限状态 */
+  restriction?: DeviceRestriction;
   pid?: number;
   port?: number;
   /** 失败原因（仅 ok=false 时填）*/
@@ -113,6 +123,14 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
     try { opts.records?.record({ ...draft, refs: [handoff] }); } catch { /* Observation must not alter startup. */ }
   };
   opts.signal?.throwIfAborted();
+  const readRestriction = deps.readRestrictionFn ?? (() => readDeviceRestriction(zhixingHome));
+  // 正在取回最后一步的受限宿主仍在运行（同一进程身份）：它拥有这个 home，不再拉起第二个，直接给出它的状态；
+  // 身份读不到或对不上按未知，照常拉起
+  const live = await readRestriction();
+  if (live && await retrievingHostAlive(live, deps.readProcessBirthFn ??
+    ((pid) => readPlatformProcessBirth(pid, resolveProcessStartTime, undefined, deps.isProcessAliveFn ?? isProcessAlive)))) {
+    return { ok: false, status: "restricted", restriction: live.restriction, reason: deviceRestrictionNotice(live.restriction), logPath };
+  }
 
   // 1. resolveSelfExec
   let execArgs;
@@ -133,6 +151,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   if (opts.automatic) spawnOpts.stdio = ["ignore", "ignore", "ignore", "ipc"];
   const spawnFn = deps.spawnFn ?? spawn;
   record({ event: "hostSpawnRequested", data: {} });
+  const launchStartedAt = (deps.clock ?? Date.now)();
   let child: DaemonChild;
   try { child = opts.automatic && opts.startAutomatic
     ? await opts.startAutomatic(handoff.id, opts.deadlineAt ?? Date.now() + handshakeTimeoutMs, opts.signal)
@@ -186,8 +205,10 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
         ...deps,
         readyMarkerPath,
         readLockFn: () => (deps.readLockFn ?? readLock)(lockPaths),
+        readRestrictionFn: readRestriction,
       },
       spawnedPid: child.pid,
+      launchStartedAt,
       getChildExit: () => childExit,
       getLaunchMode: () => launchMode,
     });
@@ -203,6 +224,12 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
     record({ event: "hostReady", result: "success", data: { pid: handshake.pid, spawnedPid: child.pid, launchMode } });
     printSuccessBanner(handshake.pid!, handshake.port!, logPath, con);
     return { ok: true, status: "ready", pid: handshake.pid, port: handshake.port, logPath, ...(launchMode ? { launchMode } : {}) };
+  }
+
+  if (handshake.status === "restricted" && handshake.restriction) {
+    record({ event: "hostRestricted", data: { kind: handshake.restriction.kind } });
+    if (opts.reportFailure !== false) con.error(handshake.reason);
+    return { ok: false, status: "restricted", restriction: handshake.restriction, reason: handshake.reason, logPath, ...(launchMode ? { launchMode } : {}) };
   }
 
   // 5. 失败路径
@@ -224,6 +251,7 @@ interface HandshakeResult {
   pid?: number;
   port?: number;
   reason?: string;
+  restriction?: DeviceRestriction;
 }
 
 interface HandshakeOpts {
@@ -233,6 +261,8 @@ interface HandshakeOpts {
   pollIntervalMs: number;
   deps: SpawnDaemonDeps;
   spawnedPid?: number;
+  /** 本次拉起开始的时间：受限标记按它判断是不是本次宿主的结果 */
+  launchStartedAt?: number;
   getChildExit?: () => ChildExit | null;
   getLaunchMode?: () => SpawnDaemonResult["launchMode"];
 }
@@ -288,6 +318,12 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
           }
         }
       }
+    }
+    // 本次拉起的宿主（含 managed 由系统服务另起的真正宿主）给出了受限状态：如实返回，不等就绪期限，
+    // 也不把随后的退出当作启动失败；旧标记与归属未知的标记不接收
+    const restricted = opts.launchStartedAt === undefined ? undefined : await opts.deps.readRestrictionFn?.();
+    if (restricted && restrictionOfLaunch(restricted, { startedAt: opts.launchStartedAt!, ...(opts.spawnedPid !== undefined ? { spawnedPid: opts.spawnedPid } : {}) })) {
+      return { ok: false, status: "restricted", restriction: restricted.restriction, reason: deviceRestrictionNotice(restricted.restriction) };
     }
     const childExit = pendingChildFailure(opts);
     if (childExit && childExitSeenAt === null) {

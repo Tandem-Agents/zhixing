@@ -2923,6 +2923,7 @@ async function runServerProcess(
         new DeviceAdministrationApplicationService({
           relationships: {
             list: () => meshRuntime!.removableDevices(),
+            others: () => meshRuntime!.deviceMemberStatuses(),
           },
           removalState: {
             read: (targetName) =>

@@ -22,6 +22,8 @@ import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { settleExecutorRemovalBeforeBootstrap } from "./device-removal.js";
+import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
+import { DeviceRestrictedError } from "./device-restriction.js";
 import {
   createMeshBootstrapProjectionPorts,
   loadActiveMemberTransportPeers,
@@ -128,6 +130,12 @@ export async function prepareMeshRuntimeBootstrap(
   }
 }
 
+/** 本机有已在值班设备提交、但本机还没完成接续的加入续接（重新配对已提交，本机接续未完成）。 */
+export async function committedRejoinPending(zhixingHome: string): Promise<boolean> {
+  const continuation = await createFileMeshPairingContinuationRepository(zhixingHome).load();
+  return continuation?.side === "joiner" && continuation.phase === "bootstrap-ready";
+}
+
 async function prepareWithBootstrapStore(
   input: PrepareMeshRuntimeBootstrapInput,
   configuration: MeshRoleBootConfig | undefined,
@@ -142,11 +150,23 @@ async function prepareWithBootstrapStore(
   }
   const existingDeviceKey = await loadExistingDeviceKey(input.secretStore);
   // 撤销阶段的本机移除先于普通身份与角色装配处理：已有终态依据就本地终结，零网络；否则只开放专用取回。
+  // 被显式重新配对取代的旧移除已在加入完成时终结，这里不读信任链
   const removal = await settleExecutorRemovalBeforeBootstrap({
     log: bootstrapStore.authorityLog(),
     verifier: sources.verifier,
     secretStore: input.secretStore,
   });
+  // 重新配对已在值班设备提交、本机接续未完成：如实呈现，不按旧移除继续取回或显示 lost（重试 zz pair 续做）
+  if (removal.kind === "retrieval" || removal.kind === "lost") {
+    if (await committedRejoinPending(input.zhixingHome)) {
+      throw new DeviceRestrictedError({ kind: "rejoin-pending" }, "This device's re-pairing is committed but not yet continued locally");
+    }
+  }
+  if (removal.kind === "lost") {
+    // 值班设备已按失联移出：零网络本地呈现，不删钥、不清理、不装配普通业务
+    throw new DeviceRestrictedError({ kind: "removed-lost", cleanup: removal.cleanup },
+      "The duty device removed this device as lost; local data was not cleaned by it");
+  }
   if (removal.kind === "retrieval") {
     if (!input.allowRemovalRetrieval) {
       throw new Error("This device is finishing its removal; start the local service so it can reach the duty device");
@@ -179,9 +199,9 @@ async function prepareWithBootstrapStore(
       ? terminalRetirement.identity.targetDeviceId
       : terminalRetirement.identity.currentDeviceId;
     await deleteDeviceKey(input.secretStore, retiredDeviceId);
-    throw new Error(terminalRetirement.identity.kind === "executor-removal"
-      ? "This device was removed; pair it again to create a new identity"
-      : "This duty-device home was permanently uninstalled; use the recovery flow to restore it");
+    throw terminalRetirement.identity.kind === "executor-removal"
+      ? new DeviceRestrictedError({ kind: "removed" }, "This device was removed; pair it again to create a new identity")
+      : new DeviceRestrictedError({ kind: "uninstalled" }, "This duty-device home was permanently uninstalled; use the recovery flow to restore it");
   }
   const hasActiveLifecycle = authorityLifecycle.active || executorLifecycle.active;
   if (hasActiveLifecycle && !existingDeviceKey) {

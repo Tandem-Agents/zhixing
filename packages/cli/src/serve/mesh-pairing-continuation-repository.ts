@@ -55,6 +55,16 @@ export interface DurablePairingBootstrap {
   readonly homeDiscovery?: SealedPairingDiscoverySecret;
 }
 
+/**
+ * 已是成员的设备重新加入时，在接续前耐久绑定的工作流事实：被这次显式配对取代的本机旧移除、
+ * 新身份时被取代的原身份；分叉接续在发布当前分支之前记下 adoptionId。续接按它逐阶段补完。
+ */
+export interface PairingRejoinBinding {
+  readonly operationIds: readonly string[];
+  readonly replacedDeviceId?: string;
+  readonly adoptionId?: string;
+}
+
 interface PairingJoinerContinuationBase {
   readonly v: 1;
   readonly side: "joiner";
@@ -63,6 +73,7 @@ interface PairingJoinerContinuationBase {
   readonly join: PairingJoin;
   readonly pakeRounds: readonly PakeRound[];
   readonly proof: PairingAcceptance["finished"]["joiner"];
+  readonly rejoin?: PairingRejoinBinding;
 }
 
 export type PairingJoinerContinuation = PairingJoinerContinuationBase & (

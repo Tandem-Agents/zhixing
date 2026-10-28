@@ -17,6 +17,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     coordinatorExited: { message: "后台启动协调者已正常完成", level: "info", tier: "critical", fields: { pid: "number", exitCode: "number", launchMode: "text" } },
     hostSpawnFailed: { message: "宿主进程交接发生错误", level: "error", tier: "critical", fields: { failure: { fields: LOG_FAILURE_FIELDS } } },
     hostReady: { message: "宿主已通过就绪握手", level: "info", tier: "critical", fields: { pid: "number", spawnedPid: "number", launchMode: "text" } },
+    hostRestricted: { message: "宿主报告本机设备受限，未提供普通服务", level: "info", tier: "critical", fields: { kind: "text" } },
     firstOutput: { message: "终端已首次输出启动内容", level: "info", tier: "critical", fields: { sinceProcessStartMs: "number" } },
     interactionReady: { message: "终端输入已就绪", level: "info", tier: "critical", fields: { sinceProcessStartMs: "number" } },
     terminalEntry: { message: "终端入口依赖加载耗时", level: "info", tier: "critical", fields: {

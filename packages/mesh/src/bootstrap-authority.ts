@@ -145,7 +145,7 @@ export class PairingCommitCoordinator {
   }): Promise<PairingAttemptAdmission> {
     const now = input.now ?? Date.now();
     const material = this.requireOffer(input.offer.offerId, now);
-    assertCurrentIssuer(input.current, input.issuerIdentity);
+    assertPairingIssuer(input.current, input.issuerIdentity);
     if (
       input.offer.method.kind !== "qr-secret" ||
       canonicalize(input.offer) !== canonicalize(material.offer)
@@ -165,7 +165,7 @@ export class PairingCommitCoordinator {
   }): Promise<{ attempt: PairingAttemptAdmission; session: AdmittedPakeIssuerSession }> {
     const now = input.now ?? Date.now();
     const material = this.requireOffer(input.offer.offerId, now);
-    assertCurrentIssuer(input.current, input.issuerIdentity);
+    assertPairingIssuer(input.current, input.issuerIdentity);
     if (canonicalize(input.offer) !== canonicalize(material.offer)) {
       throw new TypeError("Pairing offer differs from the issuer's active offer");
     }
@@ -264,7 +264,7 @@ export class PairingCommitCoordinator {
     const now = input.now ?? Date.now();
     let next!: TrustProjection;
     try {
-      assertCurrentIssuer(input.current, input.issuerIdentity);
+      assertPairingIssuer(input.current, input.issuerIdentity);
       const material = this.requireOffer(input.offer.offerId, now);
       assertPairingCommitBindings(input);
       if (canonicalize(input.offer) !== canonicalize(material.offer)) {
@@ -666,6 +666,23 @@ function isFullCheckpointEnvelope(envelope: CheckpointPackage["envelope"]): bool
     "conversation-content",
     "execution-assets",
   ]);
+}
+
+/**
+ * 配对的发起方：链上当前有效 issuer 设备、active 成员、成员身份精确一致。不要求设备钥就是 issuerKeyId——
+ * 灾备或迁居后现任发证钥是另一把已激活的钥；配对产生的信任事件与记录仍必须由当前 issuerKeyId 签
+ * （applyTrustEvent 与 buildHomeTrustRecord 强制），配对接受证明由这台发起设备签。
+ */
+function assertPairingIssuer(
+  current: TrustProjection,
+  identity: DeviceIdentity,
+): void {
+  const trusted = current.members.find(
+    (member) => member.device.deviceId === current.issuer.deviceId && member.state === "active",
+  );
+  if (!trusted || identity.deviceId !== current.issuer.deviceId || canonicalize(identity) !== canonicalize(trusted.device)) {
+    throw new TypeError("Pairing issuer is not the current trust issuer device");
+  }
 }
 
 function assertCurrentIssuer(

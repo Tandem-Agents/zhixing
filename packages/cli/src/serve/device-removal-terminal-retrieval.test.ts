@@ -3,7 +3,7 @@ import { createServer, type Socket } from "node:net";
 import path from "node:path";
 import type { MeshEndpointDescriptor, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { DeviceLifecycleJournal, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import { canonicalize, createSignedExecutorRemovalReceipt, protocolDigest } from "@zhixing/core/protocol";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
 import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
@@ -23,6 +23,7 @@ import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
   resolveExecutorRemovalTerminalRoute,
+  settleExecutorRemovalBeforeBootstrap,
 } from "./device-removal.js";
 import { loadOrCreateHomeRouteMaterial } from "./home-route-material.js";
 import {
@@ -31,7 +32,11 @@ import {
   registerDeviceRemovalIssuerMeshService,
   registerDeviceRemovalTargetMeshService,
 } from "./device-removal-mesh.js";
-import { ExecutorRemovalRetrievalOwner, retrieveExecutorRemovalTerminal } from "./device-removal-retrieval.js";
+import {
+  ExecutorRemovalDomainStateError,
+  ExecutorRemovalRetrievalOwner,
+  retrieveExecutorRemovalTerminal,
+} from "./device-removal-retrieval.js";
 import {
   createMeshBootstrapProjectionPorts,
   loadActiveMemberTransportPeers,
@@ -185,6 +190,66 @@ describe("executor removal terminal retrieval through the duty device's fixed te
       .toEqual(rows.map(() => [rows[0]!.startup, rows[0]!.retrieval, rows[0]!.replays]));
   }, 600_000);
 
+  // 固定当前状态（一条到撤销阶段、目标仍 active 的移除），两档已结束的信任历史：受限启动结算、值班设备冷开恢复
+  // （按同一有效事实判断是否已被重新配对取代）与撤销提交点都只按键读，不装载整条信任流、不重放日志流，读取与历史长度无关
+  it("keeps restricted startup, cold issuer resumption and the revocation commit independent of ended trust history", async () => {
+    type Reading = ReturnType<ReturnType<typeof countProjectionReads>["take"]> & { readonly trustLoads: number; readonly logReplays: number };
+    const rows: { readonly completed: number; readonly settle: Reading; readonly resume: Reading; readonly commit: Reading }[] = [];
+    for (const completed of [4, 24]) {
+      const home = await createIssuerHome(`history-${completed}`);
+      const relay = await startRelay();
+      const authority = home.authority();
+      for (let index = 0; index < completed; index++) {
+        await completeBySignedReceipts(home, authority, await enrollTarget(home, `ended-target-${index}`), index);
+      }
+      const live = await enrollTarget(home, "工作电脑-pending");
+      const issuer = await startIssuer(home, relay.port);
+      const target = createTarget(home, live, relay.port);
+      const operationId = `remove-pending-${completed}`;
+      try {
+        const accepted = await issuer.authority.accept({ requestId: `request-${operationId}`, operationId, targetName: live.identity.displayName });
+        await target.target.accept(accepted, await issuer.authority.terminalRoute(operationId));
+        const decision = await target.target.decide({ operationId, mode: "destroy", currentAnchorDeviceId: home.issuer.deviceId });
+        if (decision.kind !== "ready") throw new Error("target did not reach revocation-ready");
+        await issuer.control.stop();
+        const reads = countProjectionReads();
+        const trustLoads = vi.spyOn(FileMeshBootstrapStore.prototype, "loadTrustEvents");
+        const logReplays = vi.spyOn(FileAuthorityCommitLog.prototype, "transactProjection");
+        const take = (): Reading => {
+          const value = { ...reads.take(), trustLoads: trustLoads.mock.calls.length, logReplays: logReplays.mock.calls.length };
+          trustLoads.mockClear();
+          logReplays.mockClear();
+          return value;
+        };
+        try {
+          take();
+          expect((await settleExecutorRemovalBeforeBootstrap({ log: target.log, verifier: home.verifier, secretStore: target.secrets })).kind).toBe("retrieval");
+          const settle = take();
+          const cold = home.authority();
+          await cold.resumeActive();
+          const resume = take();
+          expect((await cold.commitReady(decision.receipt)).phase).toBe("revoked");
+          const commit = take();
+          rows.push({ completed, settle, resume, commit });
+        } finally {
+          reads.restore();
+          trustLoads.mockRestore();
+          logReplays.mockRestore();
+        }
+      } finally {
+        await relay.close();
+        await home.store.stopStorageMaintenance();
+      }
+    }
+    // allow-direct-stdout：规模用例的读数输出；测试文件不是运行时输出面
+    console.log("REMOVAL_HISTORY_ROWS", JSON.stringify(rows));
+    expect(rows.every(({ settle, resume, commit }) =>
+      [settle, resume, commit].every((reading) => reading.trustLoads === 0 && reading.logReplays === 0))).toBe(true);
+    const shape = ({ keys, scanned }: Reading) => ({ keys, scanned });
+    expect(rows.map(({ settle, resume, commit }) => [shape(settle), shape(resume), shape(commit)]))
+      .toEqual(rows.map(() => [shape(rows[0]!.settle), shape(rows[0]!.resume), shape(rows[0]!.commit)]));
+  }, 600_000);
+
   it("finishes from every durable point that still needs the duty device", async () => {
     const home = await createIssuerHome("crash-matrix");
     const relay = await startRelay();
@@ -240,6 +305,173 @@ describe("executor removal terminal retrieval through the duty device's fixed te
       await home.store.stopStorageMaintenance();
     }
   }, 120_000);
+
+  it.each(["revocation-ready", "revoked", "cleanup-complete"] as const)(
+    "ends retrieval on the duty device's verified lost receipt at %s, keeping identity, route copy and local state",
+    async (point) => {
+      const home = await createIssuerHome(`lost-${point}`);
+      const relay = await startRelay();
+      const issuer = await startIssuer(home, relay.port);
+      const device = await enrollTarget(home, `lost-${point}`);
+      let cleanupFails = point === "revoked";
+      const cleanup = vi.fn(async () => {
+        if (cleanupFails) {
+          cleanupFails = false;
+          throw new Error("simulated crash during local cleanup");
+        }
+        return [{ kind: "cleanup" as const, digest: protocolDigest("TerminalRetrievalCleanup", 1, { point }) }];
+      });
+      const target = createTarget(home, device, relay.port, { cleanup });
+      const operationId = `remove-lost-${point}`;
+      const retrieve = (timeout: number) => retrieveExecutorRemovalTerminal({
+        target: target.target,
+        deviceKey: device.key,
+        verifier: home.verifier,
+        operationId,
+        signal: AbortSignal.timeout(timeout),
+        random: () => 0.1,
+      });
+      try {
+        if (point === "revocation-ready") {
+          const accepted = await issuer.authority.accept({
+            requestId: `request-${operationId}`,
+            operationId,
+            targetName: device.identity.displayName,
+          });
+          await target.target.accept(accepted, await issuer.authority.terminalRoute(operationId));
+          const decision = await target.target.decide({ operationId, mode: "destroy", currentAnchorDeviceId: home.issuer.deviceId });
+          expect(decision.kind).toBe("ready");
+        } else {
+          const { revoked } = await driveToRevoked(home, issuer.authority, device, target.target, operationId);
+          if (point === "revoked") await expect(target.target.finish(revoked)).rejects.toThrow("simulated crash");
+          else expect(await target.target.finish(revoked)).toMatchObject({ phase: "cleanup-ready" });
+        }
+        // 值班设备按失联收束：撤销访问，远端本机资料状态未知
+        await expect(issuer.authority.commitLost(operationId)).resolves.toMatchObject({ phase: "lost" });
+        const routes = await target.secrets.list("terminal-route/");
+        expect(routes.length).toBeGreaterThan(0);
+        cleanup.mockClear();
+        const expected = { "revocation-ready": "not-started", revoked: "unconfirmed", "cleanup-complete": "complete" }[point];
+        await expect(retrieve(60_000)).resolves.toEqual({ kind: "lost", cleanup: expected });
+        // 取回结束不等于本机终结：不清理、不删钥、不删终态路由副本，本机阶段不变
+        expect(cleanup).not.toHaveBeenCalled();
+        await expect(target.target.isRetired(operationId)).resolves.toBe(false);
+        expect(await target.secrets.list("terminal-route/")).toEqual(routes);
+        expect((await new DeviceLifecycleJournal(target.log).state(operationId))?.phase).toBe(point);
+        // 值班设备不在也能本地给出同一结论：已耐久的 lost 回执，零网络
+        await issuer.control.stop();
+        await expect(retrieve(5_000)).resolves.toEqual({ kind: "lost", cleanup: expected });
+        await expect(settleExecutorRemovalBeforeBootstrap({
+          log: target.log,
+          verifier: home.verifier,
+          secretStore: target.secrets,
+        })).resolves.toEqual({ kind: "lost", operationId, cleanup: expected });
+        expect(await target.secrets.list("terminal-route/")).toEqual(routes);
+      } finally {
+        await issuer.control.stop();
+        await relay.close();
+        await home.store.stopStorageMaintenance();
+      }
+    },
+    120_000,
+  );
+
+  it("still rejects a lost receipt that the duty device did not sign", async () => {
+    const home = await createIssuerHome("lost-forged");
+    const relay = await startRelay();
+    const issuer = await startIssuer(home, relay.port);
+    const device = await enrollTarget(home, "lost-forged");
+    const target = createTarget(home, device, relay.port);
+    const operationId = "remove-lost-forged";
+    try {
+      const { revoked } = await driveToRevoked(home, issuer.authority, device, target.target, operationId);
+      // 目标自己签一份 lost：签名者不是值班设备，接受面不因 lost 扩大
+      const { signature: _signature, ...body } = revoked;
+      const forged = createSignedExecutorRemovalReceipt({ ...body, phase: "lost" }, device.key);
+      await expect(target.target.finish(forged)).rejects.toThrow("current issuer's authenticated receipt");
+      await expect(target.target.lostOutcome(operationId)).resolves.toBeUndefined();
+    } finally {
+      await issuer.control.stop();
+      await relay.close();
+      await home.store.stopStorageMaintenance();
+    }
+  }, 60_000);
+
+  // 显式新配对取代旧移除（加入完成时在本机以 superseded 终结）：迟到的旧回执不再推进本机清理；已推进到 cleanup-ready
+  // 的（lost 未删钥）同样可被取代；启动结算只看未终结的，直接为 none
+  it("keeps a removal superseded by an explicit new pairing from advancing cleanup or keeping the old gate", async () => {
+    const home = await createIssuerHome("superseded");
+    const relay = await startRelay();
+    const issuer = await startIssuer(home, relay.port);
+    const pairing = protocolDigest("SupersedingPairingFixture", 1, { home: "home-terminal" });
+    const supersede = (log: FileAuthorityCommitLog, operationId: string) =>
+      new DeviceLifecycleJournal(log, home.verifier).terminal(operationId, "superseded", [{ kind: "trust-event", digest: pairing }]);
+    try {
+      const late = await enrollTarget(home, "superseded-late");
+      const lateTarget = createTarget(home, late, relay.port);
+      const { revoked } = await driveToRevoked(home, issuer.authority, late, lateTarget.target, "remove-superseded-late");
+      await supersede(lateTarget.log, "remove-superseded-late");
+      await expect(lateTarget.target.finish(revoked)).resolves.toBeUndefined();
+      expect(await lateTarget.target.isSuperseded("remove-superseded-late")).toBe(true);
+      expect(await lateTarget.target.isRetired("remove-superseded-late")).toBe(false);
+      expect(await lateTarget.target.lostOutcome("remove-superseded-late")).toBeUndefined();
+      // 已终结的取代不会被后续回执推进
+      await expect(lateTarget.target.finish(revoked)).resolves.toBeUndefined();
+      expect(await settleExecutorRemovalBeforeBootstrap({ log: lateTarget.log, verifier: home.verifier, secretStore: lateTarget.secrets }))
+        .toEqual({ kind: "none" });
+
+      const cleaned = await enrollTarget(home, "superseded-cleaned");
+      const cleanedTarget = createTarget(home, cleaned, relay.port);
+      const driven = await driveToRevoked(home, issuer.authority, cleaned, cleanedTarget.target, "remove-superseded-cleaned");
+      expect(await cleanedTarget.target.finish(driven.revoked)).toMatchObject({ phase: "cleanup-ready" });
+      // 新配对在本机清理推进之后才成立：同样以取代终结，不删钥、不写 removed，启动结算为 none
+      await supersede(cleanedTarget.log, "remove-superseded-cleaned");
+      expect(await settleExecutorRemovalBeforeBootstrap({ log: cleanedTarget.log, verifier: home.verifier, secretStore: cleanedTarget.secrets }))
+        .toEqual({ kind: "none" });
+      expect(await cleanedTarget.target.isSuperseded("remove-superseded-cleaned")).toBe(true);
+      expect(await cleanedTarget.target.isRetired("remove-superseded-cleaned")).toBe(false);
+    } finally {
+      await issuer.control.stop();
+      await relay.close();
+      await home.store.stopStorageMaintenance();
+    }
+  }, 60_000);
+
+  it("re-judges an in-process domain conclusion only when a different duty device is reached", async () => {
+    const home = await createIssuerHome("domain-rejudge");
+    const relay = await startRelay();
+    const device = await enrollTarget(home, "domain-rejudge");
+    const target = createTarget(home, device, relay.port);
+    const open = vi.fn(async () => { throw new ExecutorRemovalDomainStateError("target-suspended"); });
+    const owner = new ExecutorRemovalRetrievalOwner({
+      target: () => target.target,
+      deviceKey: device.key,
+      verifier: home.verifier,
+      open,
+    });
+    const issuer = await startIssuer(home, relay.port);
+    const operationId = "remove-domain-rejudge";
+    try {
+      await driveToRevoked(home, issuer.authority, device, target.target, operationId);
+      owner.schedule(operationId, "duty-a");
+      await owner.settled();
+      expect(owner.domainState(operationId)).toBe("target-suspended");
+      // 同一值班设备：结论不变，不重跑、不定时重试
+      owner.schedule(operationId, "duty-a");
+      owner.schedule(operationId);
+      await owner.settled();
+      expect(open).toHaveBeenCalledOnce();
+      // 换到另一台值班设备：按实际变化重判一次
+      owner.schedule(operationId, "duty-b");
+      await owner.settled();
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      await owner.stop();
+      await issuer.control.stop();
+      await relay.close();
+      await home.store.stopStorageMaintenance();
+    }
+  }, 60_000);
 
   it("rejects unknown, cancelled and re-keyed removals at resolution and binds terminal commands to their operation", async () => {
     const home = await createIssuerHome("resolution");

@@ -40,6 +40,10 @@ describe("borrowed device removal interaction", () => {
     management.deviceStatus.mockResolvedValue(null);
     await showDeviceRemovalStatus("旅行电脑", options);
     expect(lines).toContain("已配对设备：");
+    // 只读状态分组呈现，不进选择器：交互移除只从 deviceList 的候选里选
+    expect(lines).toContain("- 书房电脑");
+    expect(lines).toContain("- 旧笔记本：已撤销访问");
+    expect(management.deviceList).toHaveBeenCalled();
     expect(lines).toContain("设备移除已取消，原有准入已恢复");
     expect(lines).toContain("没有找到该设备移除操作。");
     expect(stdout).not.toHaveBeenCalled();
@@ -76,6 +80,10 @@ describe("borrowed device removal interaction", () => {
 function removalManagement() {
   return {
     deviceList: vi.fn<DeviceRemovalManagement["deviceList"]>(async () => [{ displayName: "旅行电脑", reachable: true }]),
+    deviceListView: vi.fn<DeviceRemovalManagement["deviceListView"]>(async () => ({
+      devices: [{ displayName: "旅行电脑", reachable: true }],
+      others: [{ displayName: "书房电脑", status: "pending-reenroll" }, { displayName: "旧笔记本", status: "revoked-on-old-branch" }],
+    })),
     deviceRemove: vi.fn<DeviceRemovalManagement["deviceRemove"]>(async () => ({ conversations: ["待处理对话"], hasAcceptedWork: true })),
     deviceContinue: vi.fn<DeviceRemovalManagement["deviceContinue"]>(async () => cancelled()),
     deviceStatus: vi.fn<DeviceRemovalManagement["deviceStatus"]>(async () => cancelled()),

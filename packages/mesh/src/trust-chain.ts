@@ -873,5 +873,5 @@ export { CURRENT_TRUST_PROJECTION_ID, currentTrustIndex, readCurrentTrust, readC
   readVerifiedTrustProgress, readTrustReconciliationPage, readTrustEventByDigest, readLegacyClosedTrust,
   readVerifiedTrustIssuer, readTrustBranchProgress, readSupersededTrustEvents,
   readTrustProjectionAt, readStagedTrustBranch, readTrustEventAt, readTrustEventsAfter, readRevokedTrustMemberAt,
-  LEGACY_TRUST_RECORD_MESSAGE } from "./trust-current-index.js";
+  readTrustMemberPairing, LEGACY_TRUST_RECORD_MESSAGE } from "./trust-current-index.js";
 export type { CurrentTrustProjection, VerifiedTrustIdentity, VerifiedAnchorTenure } from "./trust-current-index.js";

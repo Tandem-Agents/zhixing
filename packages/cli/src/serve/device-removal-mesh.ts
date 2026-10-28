@@ -138,7 +138,9 @@ export function registerDeviceRemovalTargetMeshService(
     try {
       const cleanupReady = await input.target.finish(await issuer.ready(ready));
       if (cleanupReady) await input.target.finish(await issuer.cleanupReady(cleanupReady));
-      else if (!await input.target.isRetired(operationId)) {
+      // 值班设备已按失联收束（lost 回执已耐久）或显式新配对已取代这次移除：都不是续做中断
+      else if (!await input.target.isRetired(operationId) && !await input.target.lostOutcome(operationId) &&
+        !await input.target.isSuperseded(operationId)) {
         throw new Error("Device removal did not produce cleanup-ready");
       }
     } catch (error) {
@@ -391,6 +393,7 @@ function validatePublicState(input: unknown): ExecutorRemovalPublicState {
     "revoking-access",
     "cleaning-device",
     "removed",
+    "superseded",
     "cancelled",
   ]).has(value.phase as string)) {
     throw new TypeError("Device removal public phase is invalid");

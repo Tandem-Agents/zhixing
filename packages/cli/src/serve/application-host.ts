@@ -39,6 +39,8 @@ import {
   type ServeTopologyPlan,
 } from "./role-topology.js";
 import type { HostProcessMode } from "./self-exec.js";
+import { DeviceRestrictedError, deviceRestrictionHostStartTime, publishDeviceRestriction, type DeviceRestriction } from "./device-restriction.js";
+import { resolveProcessStartTime } from "@zhixing/server/client";
 import {
   projectRuntimeConfiguration,
   type RuntimeConfigurationProjections,
@@ -95,6 +97,8 @@ export interface PersistentApplicationHostDependencies<Options> {
     typeof createRecoveryRootPairedCheckpointCommandReceiverInfrastructure;
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
   readonly runRemovalRetrieval: typeof runExecutorRemovalRetrieval;
+  /** 设备受限状态的呈现标记：拉起方据此如实显示，不等成泛化的启动超时；不注入时不写。 */
+  readonly publishDeviceRestriction?: (zhixingHome: string, restriction: DeviceRestriction | undefined) => Promise<void>;
   readonly acquireLocalWorkspaceOwner: typeof acquireExecutorLocalWorkspaceOwner;
   readonly defineLocalWorkspaceIdentity: typeof defineLocalWorkspaceAssemblyIdentity;
   readonly importAnchorRole: () => Promise<AnchorRoleModule<Options>>;
@@ -205,29 +209,51 @@ export class PersistentApplicationHost<Options> {
       disasterRecoveryStaging,
       () => disasterRecoveryStaging.close(),
     );
-    let prepared = await this.#prepareMesh(
-      deviceCapacity,
-      plannedAnchorTransferStaging,
-      disasterRecoveryStaging,
-    );
-    if (prepared.mode === "removal-retrieval") {
-      // 撤销阶段的本机移除只运行专用取回，不装配普通业务；完成后重新准备，落到既有退休路径。
-      await this.#dependencies.runRemovalRetrieval({
-        mesh: prepared,
-        secretStore: this.#input.secretStore,
-        zhixingHome: this.#input.zhixingHome,
-        storageGovernor: deviceCapacity.storage,
-      });
-      await this.#releaseCurrentMesh();
+    const publishRestriction = (restriction: DeviceRestriction | undefined) =>
+      this.#dependencies.publishDeviceRestriction?.(this.#input.zhixingHome, restriction) ?? Promise.resolve();
+    let prepared: MeshRuntimeBootstrap | ExecutorRemovalRetrievalBootstrap;
+    try {
       prepared = await this.#prepareMesh(
         deviceCapacity,
         plannedAnchorTransferStaging,
         disasterRecoveryStaging,
       );
+      if (prepared.mode === "removal-retrieval") {
+        // 撤销阶段的本机移除只运行专用取回，不装配普通业务；完成后重新准备，落到既有退休路径。
+        // 取回可能等很久（网络不可达时一直退避）：先发布受限状态，前台据此如实显示，不等成启动超时
+        await publishRestriction({ kind: "removal-retrieving" });
+        const retrieval = await this.#dependencies.runRemovalRetrieval({
+          mesh: prepared,
+          secretStore: this.#input.secretStore,
+          zhixingHome: this.#input.zhixingHome,
+          storageGovernor: deviceCapacity.storage,
+        });
+        // 取回没有让本机终结：领域结论与按失联移出如实交给呈现，下次启动重新判断；不装配普通业务
+        if (retrieval?.kind === "domain-state") {
+          throw new DeviceRestrictedError({ kind: "removal-domain-state", state: retrieval.state },
+            `The current duty device reports this removal as ${retrieval.state}`);
+        }
+        if (retrieval?.kind === "lost") {
+          throw new DeviceRestrictedError({ kind: "removed-lost", cleanup: retrieval.cleanup },
+            "The duty device removed this device as lost; local data was not cleaned by it");
+        }
+        await this.#releaseCurrentMesh();
+        prepared = await this.#prepareMesh(
+          deviceCapacity,
+          plannedAnchorTransferStaging,
+          disasterRecoveryStaging,
+        );
+      }
+    } catch (error) {
+      // 受限是设备领域的结果，不是普通启动失败：发布给前台呈现后按原失败路径结束
+      if (error instanceof DeviceRestrictedError) await publishRestriction(error.restriction).catch(() => undefined);
+      throw error;
     }
     if (prepared.mode === "removal-retrieval") {
       throw new Error("Device removal retrieval did not reach its local terminal");
     }
+    // 本机不再受限：清掉此前的受限提示（只是呈现标记，清不掉不影响普通装配）
+    await publishRestriction(undefined).catch(() => undefined);
     let mesh: MeshRuntimeBootstrap = prepared;
 
     if (requiresRecoveryRootEstablishment(mesh)) {
@@ -433,6 +459,9 @@ export function createPersistentApplicationHost(
       const { runExecutorRemovalRetrieval } = await import("./device-removal-retrieval.js");
       return runExecutorRemovalRetrieval(options);
     },
+    // 宿主自己的出生时间带非原生平台回退（与 PID 锁同源）
+    publishDeviceRestriction: (zhixingHome, restriction) =>
+      publishDeviceRestriction(zhixingHome, restriction, deviceRestrictionHostStartTime(resolveProcessStartTime)),
     acquireLocalWorkspaceOwner: acquireExecutorLocalWorkspaceOwner,
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,
     importAnchorRole: () => import("./command.js"),

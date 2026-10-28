@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
+import { getEventListeners } from 'node:events';
 import ts from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 // 生产的提交入口、后台操作、视图发布与启动末段（启动尝试开头 + await displayPrepared 之后到方法结束）原样运行，
 // 只替换传输、验收方式处理与确认核对的异步闸门：可发送帧与实际准入门必须一致。
@@ -174,5 +175,93 @@ describe('startup admission matches the ready frame', () => {
     expect(target.noticeResumes).toBe(resumes);
     await target.publish({ ...target.mainView, message: '正在准备最近的对话…' });
     expect(views.at(-1).connectionState).toBe('starting');
+  });
+});
+
+describe('device restriction recheck', () => {
+  // 生产方法原样运行：只有“取回中”安排复查，复查时守卫不满足就不启动
+  const Recheck = () => new Function(ts.transpile(`class Fixture {
+    abort = new AbortController(); startups = 0; startupAttempt = undefined; operation = undefined;
+    presentingConfirmation = false; editor = undefined; history = undefined;
+    mainView = { kind: 'conversation', title: 'chat', connected: false, connectionState: 'unavailable' };
+    background(operation) { void operation(() => {}); } startup() { this.startups++; return Promise.resolve(); }
+    ${method('#scheduleRestrictionRecheck').replace(/#/gu, '')}
+  } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))();
+
+  it('rechecks a retrieving device once after a short delay and leaves terminal states alone', () => {
+    vi.useFakeTimers();
+    try {
+      const retrieving = new (Recheck())();
+      retrieving.scheduleRestrictionRecheck({ kind: 'removal-retrieving' });
+      vi.advanceTimersByTime(4_999);
+      expect(retrieving.startups).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(retrieving.startups).toBe(1);
+      for (const restriction of [{ kind: 'removed' }, { kind: 'removed-lost', cleanup: 'complete' }, { kind: 'removal-domain-state', state: 'membership-mismatch' }]) {
+        const terminal = new (Recheck())();
+        terminal.scheduleRestrictionRecheck(restriction);
+        vi.advanceTimersByTime(10_000);
+        expect(terminal.startups).toBe(0);
+      }
+      // 页面暂忙时不启动，但保留同一复查责任，空闲后接续一次
+      const busy = new (Recheck())();
+      busy.scheduleRestrictionRecheck({ kind: 'removal-retrieving' });
+      busy.operation = Promise.resolve();
+      vi.advanceTimersByTime(15_000);
+      expect(busy.startups).toBe(0);
+      busy.operation = undefined;
+      vi.advanceTimersByTime(5_000);
+      expect(busy.startups).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps one cancellable recheck during a long outage instead of adding abort listeners', () => {
+    vi.useFakeTimers();
+    const fixture = new (Recheck())();
+    // 每次复查的启动仍是取回中：再次安排复查（与生产启动例程相同）
+    fixture.startup = function () { this.startups++; this.scheduleRestrictionRecheck({ kind: 'removal-retrieving' }); return Promise.resolve(); };
+    try {
+      fixture.scheduleRestrictionRecheck({ kind: 'removal-retrieving' });
+      vi.advanceTimersByTime(60_000);
+      expect(fixture.startups).toBe(12);
+      expect(getEventListeners(fixture.abort.signal, 'abort').length).toBeLessThanOrEqual(1);
+      fixture.scheduleRestrictionRecheck({ kind: 'removal-retrieving' });
+      vi.advanceTimersByTime(5_000);
+      expect(fixture.startups).toBe(13);
+    } finally { fixture.abort.abort(); vi.useRealTimers(); }
+  });
+});
+
+describe('background reconnection restores the unavailable view', () => {
+  // 生产方法原样运行：连接链在后台重新连上后，断线画面按与 Enter 重试相同的启动例程恢复
+  const Reconnect = () => new Function(ts.transpile(`class Fixture {
+    abort = new AbortController(); startups = 0; startupAttempt = undefined; operation = undefined;
+    presentingConfirmation = false; editor = undefined; history = undefined;
+    mainView = { kind: 'conversation', title: 'chat', connected: false, connectionState: 'unavailable' };
+    background(operation) { void operation(() => {}); } startup() { this.startups++; return Promise.resolve(); }
+    ${method('#reconnectedInBackground').replace(/#/gu, '')}
+  } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))();
+  const closed = { kind: 'reconnected', reason: 'connection-closed' };
+
+  it('runs the startup routine once when the link reconnects behind an unavailable view', () => {
+    const target = new (Reconnect())();
+    target.reconnectedInBackground(closed);
+    expect(target.startups).toBe(1);
+  });
+
+  it.each([
+    ['a manual reconnect', (t: any) => t, { kind: 'reconnected', reason: 'manual-reconnect' }],
+    ['a connected view', (t: any) => { t.mainView = { ...t.mainView, connectionState: undefined, connected: true }; }, closed],
+    ['a startup attempt in flight', (t: any) => { t.startupAttempt = {}; }, closed],
+    ['an operation in flight', (t: any) => { t.operation = Promise.resolve(); }, closed],
+    ['a confirmation being presented', (t: any) => { t.presentingConfirmation = true; }, closed],
+    ['an open editor', (t: any) => { t.editor = {}; }, closed],
+    ['offline history reading', (t: any) => { t.history = { conversationId: 'chat', offline: true }; }, closed],
+    ['an input receipt awaiting reconciliation', (t: any) => { t.mainView = { ...t.mainView, inputReceiptPending: true }; }, closed],
+  ])('leaves the view to the user for %s', (_name, arrange, notice) => {
+    const target = new (Reconnect())();
+    arrange(target);
+    target.reconnectedInBackground(notice);
+    expect(target.startups).toBe(0);
   });
 });

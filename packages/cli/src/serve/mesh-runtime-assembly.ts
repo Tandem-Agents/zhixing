@@ -15,6 +15,7 @@ import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
   DeviceAdministrationDutyMigrationAdmissionPort,
   DeviceAdministrationDutyMigrationContext,
+  DeviceAdministrationMemberStatus,
   DeviceAdministrationRemovalEffectOutcome,
   DeviceAdministrationRemovalEffectPort,
 } from "@zhixing/core/device-administration/application";
@@ -1023,11 +1024,14 @@ export class MeshRuntimeAssembly
       onTrustReconciled: async (record) => {
         options.bootstrapStore.authoritySources()?.rememberCurrentTrust(record);
         options.executorTopologyTrust.accept(record);
-        for (const deviceId of this.#deviceRemovalGuards.keys()) {
-          if (!record.members.some((member) =>
-            member.device.deviceId === deviceId && member.state === "active") &&
-            (await this.#deviceRemovalAuthority?.authorizesTarget(deviceId)) !== true) {
+        for (const [deviceId, operationId] of [...this.#deviceRemovalGuards]) {
+          const active = record.members.some((member) =>
+            member.device.deviceId === deviceId && member.state === "active");
+          if (!active && (await this.#deviceRemovalAuthority?.authorizesTarget(deviceId)) !== true) {
             this.#deviceRemovalGuards.delete(deviceId);
+          } else if (active) {
+            // 重新配对后仍是 active：按同一有效事实核它的移除是否已被取代，成立即终结并解除守卫（不等旧消息或重启）
+            await this.#deviceRemovalAuthority?.releaseSupersededGuard(deviceId, operationId);
           }
         }
         await options.onTrustApplied?.(record);
@@ -1085,7 +1089,8 @@ export class MeshRuntimeAssembly
               // 撤销阶段的移除只由专用取回续做（成员连接随撤销断开），其余阶段照旧在成员连接上恢复
               const revoking = await this.#deviceRemovalTarget.revokingOperation();
               if (revoking) {
-                this.#removalRetrieval?.schedule(revoking);
+                // 带上这次连上的值班设备：领域结论只在值班设备变化后重判
+                this.#removalRetrieval?.schedule(revoking, connection.peer.deviceId);
               } else {
                 await this.#deviceRemovalTarget.resumeWithIssuer(
                   new DeviceRemovalIssuerMeshClient(
@@ -1321,6 +1326,25 @@ export class MeshRuntimeAssembly
     return this.#deviceRemovalAuthority.candidates();
   }
 
+  /**
+   * 不在可移除候选里、需要让用户知道的成员状态（只读）：当前视图里待重新配对的成员，
+   * 以及旧分支撤销/降权已生效为限制、尚未收束的设备。名称按当前视图取，取不到的不列。
+   */
+  async deviceMemberStatuses(): Promise<readonly DeviceAdministrationMemberStatus[]> {
+    if (!this.#deviceRemovalAuthority) return [];
+    const members = this.#control.currentTrust().members;
+    const nameOf = (deviceId: string) => members.find((member) => member.device.deviceId === deviceId)?.device.displayName;
+    const statuses: DeviceAdministrationMemberStatus[] = members
+      .filter((member) => member.state === "pending-reenroll")
+      .map((member) => ({ displayName: member.device.displayName, status: "pending-reenroll" as const }));
+    for (const fact of this.#supersededTrust.openFacts()) {
+      const displayName = nameOf(fact.deviceId);
+      if (!displayName) continue;
+      statuses.push({ displayName, status: fact.event.body.t === "revoke" ? "revoked-on-old-branch" : "demoted-on-old-branch" });
+    }
+    return statuses;
+  }
+
   deviceRemovalCommandContext() {
     const trust = this.#control.currentTrust();
     return Object.freeze({
@@ -1437,7 +1461,13 @@ export class MeshRuntimeAssembly
       const cleanupReady = await this.#deviceRemovalTarget.finish(
         await client.ready(decision.receipt),
       );
-      if (!cleanupReady) throw new Error("Retiring device did not produce cleanup-ready");
+      if (!cleanupReady) {
+        // 值班设备已按失联收束：取回结束，本机资料未由它清理，不当作续做中断
+        if (await this.#deviceRemovalTarget.lostOutcome(removalOperationId)) {
+          throw new Error("The duty device ended this removal as lost; local data was not cleaned by it");
+        }
+        throw new Error("Retiring device did not produce cleanup-ready");
+      }
       await this.#deviceRemovalTarget.finish(await client.cleanupReady(cleanupReady));
     } catch (error) {
       // 已产生 revocation-ready：内联续做中断时交给专用取回接续

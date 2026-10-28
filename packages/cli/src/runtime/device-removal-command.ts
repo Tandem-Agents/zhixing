@@ -21,7 +21,7 @@ export interface DeviceRemovalSelectionIO {
 }
 
 export type DeviceRemovalManagement = Pick<RpcManagementFacade,
-  "deviceList" | "deviceRemove" | "deviceContinue" | "deviceStatus">;
+  "deviceList" | "deviceListView" | "deviceRemove" | "deviceContinue" | "deviceStatus">;
 
 export interface DeviceRemovalCommandOptions {
   /** Borrowed from the caller; this command never ensures or disposes it. */
@@ -33,14 +33,26 @@ export interface DeviceRemovalCommandOptions {
 export async function listRemovableDevices(options: DeviceRemovalCommandOptions = {}): Promise<void> {
   const writeLine = options.writeLine ?? console.log;
   await withManagement(async (management) => {
-    const devices = await management.deviceList();
-    if (devices.length === 0) {
-      writeLine("当前没有可移除的已配对设备。");
-      return;
+    const { devices, others } = await management.deviceListView();
+    if (devices.length === 0) writeLine("当前没有可移除的已配对设备。");
+    else {
+      writeLine("已配对设备：");
+      for (const device of devices) {
+        writeLine(`- ${device.displayName}：${device.reachable ? "在线" : "当前离线"}`);
+      }
     }
-    writeLine("已配对设备：");
-    for (const device of devices) {
-      writeLine(`- ${device.displayName}：${device.reachable ? "在线" : "当前离线"}`);
+    // 只读状态单独分组，不进可移除候选
+    const pending = others.filter((member) => member.status === "pending-reenroll");
+    if (pending.length) {
+      writeLine("待重新配对（重新配对后才能继续使用，可用 zz pair）：");
+      for (const member of pending) writeLine(`- ${member.displayName}`);
+    }
+    const restricted = others.filter((member) => member.status !== "pending-reenroll");
+    if (restricted.length) {
+      writeLine("按旧历史分支记录受限（已在这里生效，正在收束）：");
+      for (const member of restricted) {
+        writeLine(`- ${member.displayName}：${member.status === "revoked-on-old-branch" ? "已撤销访问" : "已去掉部分角色"}`);
+      }
     }
   }, options);
 }
@@ -252,6 +264,7 @@ function renderState(state: DeviceRemovalState, writeLine: (line: string) => voi
     removed: state.localData === "unknown"
       ? "设备访问已撤销；目标设备本地数据仍不可验证或擦除"
       : "设备已安全移除",
+    superseded: "这台设备之后已重新配对，这次移除不再继续，设备上的资料保留",
     cancelled: "设备移除已取消，原有准入已恢复",
   };
   writeLine(label[state.phase]);

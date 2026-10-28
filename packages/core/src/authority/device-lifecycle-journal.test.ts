@@ -186,6 +186,48 @@ describe("DeviceLifecycleJournal durable current state", { timeout: DURABLE_IO_T
   });
 });
 
+describe("DeviceLifecycleJournal superseded executor removal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  const removal = (operationId: string) => ({
+    v: 1 as const, kind: "executor-removal" as const, requestId: `target:${operationId}`, operationId, homeId: "home-1",
+    targetDeviceId: "device-a", targetMemberPublicKey: "ed25519:device-a", targetDeviceKeyGeneration: "generation-1",
+    acceptedIssuerDeviceId: "device-anchor", acceptedIssuerKeyId: "device-anchor", acceptedTrustHeadDigest: DIGEST,
+  });
+  // 被显式新配对取代：独立终态，不是退役，不放宽 removed 的阶段守卫
+  it("ends an unfinished removal as superseded only with the superseding trust event and never records it as retirement", async () => {
+    const fixture = await createFixture();
+    await fixture.journal.accept(removal("remove-1"));
+    for (const phase of ["gate-frozen", "authority-decided", "authority-settled", "revocation-ready", "revoked"] as const) {
+      await fixture.journal.advance("remove-1", phase);
+    }
+    await expect(fixture.journal.terminal("remove-1", "removed")).rejects.toThrow("missing required durable phases");
+    await expect(fixture.journal.terminal("remove-1", "superseded")).rejects.toThrow("requires the superseding trust event");
+    const superseded = await fixture.journal.terminal("remove-1", "superseded", [{ kind: "trust-event", digest: DIGEST }]);
+    expect(superseded).toMatchObject({ phase: "terminal", terminalOutcome: "superseded" });
+    const state = await new DeviceLifecycleJournal(fixture.log, identity()).startupState("device-a");
+    expect(state).toEqual({ active: false });
+    // 本机已 cleanup-complete、还没删钥写 removed（lost 场景）同样可被显式新配对取代
+    await fixture.journal.accept({ ...removal("remove-2"), requestId: "target:remove-2" });
+    for (const phase of ["gate-frozen", "authority-decided", "authority-settled", "revocation-ready", "revoked", "cleanup-complete"] as const) {
+      await fixture.journal.advance("remove-2", phase);
+    }
+    expect(await fixture.journal.terminal("remove-2", "superseded", [{ kind: "trust-event", digest: DIGEST }])).toMatchObject({ terminalOutcome: "superseded" });
+    // 已真正 removed 的历史不能改写成 superseded；removed 的退役指针照常
+    await fixture.journal.accept({ ...removal("remove-3"), requestId: "target:remove-3" });
+    for (const phase of ["gate-frozen", "authority-decided", "authority-settled", "revocation-ready", "revoked", "cleanup-complete"] as const) {
+      await fixture.journal.advance("remove-3", phase);
+    }
+    expect(await fixture.journal.terminal("remove-3", "removed")).toMatchObject({ terminalOutcome: "removed" });
+    await expect(fixture.journal.terminal("remove-3", "superseded", [{ kind: "trust-event", digest: DIGEST }])).rejects.toThrow();
+    expect((await new DeviceLifecycleJournal(fixture.log, identity()).startupState("device-a")).retirement?.identity.operationId).toBe("remove-3");
+  });
+
+  it("does not let other lifecycle kinds end as superseded", async () => {
+    const fixture = await createFixture();
+    await fixture.journal.accept(stopIdentity());
+    await expect(fixture.journal.terminal("stop-1", "superseded", [{ kind: "trust-event", digest: DIGEST }])).rejects.toThrow("does not match operation kind");
+  });
+});
+
 async function createFixture() {
   const root = await createTempDir("device-lifecycle");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));

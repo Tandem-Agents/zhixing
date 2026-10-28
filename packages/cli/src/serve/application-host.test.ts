@@ -224,6 +224,23 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     expect(harness.events).toEqual(["capacity", "mesh:1", "removal-retrieval", "stop:1", "mesh:2"]);
   });
 
+  it("publishes the device restriction before a long retrieval and on a domain conclusion, and clears it on a normal bootstrap", async () => {
+    const harness = createHarness({ roles: ["executor"], removalRetrieval: true });
+    harness.runRemovalRetrieval.mockImplementationOnce(async () => ({ kind: "domain-state", state: "target-suspended" }) as never);
+    const published: unknown[] = [];
+    const publishDeviceRestriction = vi.fn(async (_home: string, restriction: unknown) => { published.push(restriction); });
+    await expect(new PersistentApplicationHost(createInput("managed"), { ...harness.dependencies, publishDeviceRestriction }).run())
+      .rejects.toMatchObject({ name: "DeviceRestrictedError", restriction: { kind: "removal-domain-state", state: "target-suspended" } });
+    // 取回之前先发布“取回中”，拿到领域结论后发布结论；不装配任何角色
+    expect(published).toEqual([{ kind: "removal-retrieving" }, { kind: "removal-domain-state", state: "target-suspended" }]);
+    expect(harness.roleInvocations()).toBe(0);
+
+    const normal = createHarness({ roles: ["executor"] });
+    const cleared = vi.fn(async () => undefined);
+    await new PersistentApplicationHost(createInput("managed"), { ...normal.dependencies, publishDeviceRestriction: cleared }).run();
+    expect(cleared).toHaveBeenCalledWith("test-home", undefined);
+  });
+
   it("uses the common termination path when recovery-root establishment fails", async () => {
     const failure = new Error("recovery failed");
     const harness = createHarness({

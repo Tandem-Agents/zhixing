@@ -248,7 +248,7 @@ export type DeviceLifecycleRecord =
       readonly v: 1;
       readonly t: "terminal";
       readonly operationId: string;
-      readonly outcome: "stopped" | "removed" | "retired";
+      readonly outcome: DeviceLifecycleTerminalOutcome;
       readonly evidence: readonly DeviceLifecycleEvidenceRef[];
     }
   | {
@@ -272,8 +272,14 @@ export interface DeviceLifecycleOperation {
   readonly recordDigests: Readonly<Record<string, string>>;
   readonly peerEffects: readonly DeviceLifecyclePeerEffect[];
   readonly abort?: DeviceLifecycleAbort;
-  readonly terminalOutcome?: "stopped" | "removed" | "retired";
+  readonly terminalOutcome?: DeviceLifecycleTerminalOutcome;
 }
+
+/**
+ * 终态结果。superseded 只属于 executor-removal：这次移除不再约束已证明的显式新配对（依据是一条
+ * trust-event 证据），不表示已清理，也不撤销已发生的撤销与凭据暴露；它不是 removed 或 aborted 的别名。
+ */
+export type DeviceLifecycleTerminalOutcome = "stopped" | "removed" | "retired" | "superseded";
 
 export interface DeviceLifecycleProjection {
   readonly operations: ReadonlyMap<string, DeviceLifecycleOperation>;
@@ -545,14 +551,14 @@ export function validateDeviceLifecycleRecord(input: unknown): DeviceLifecycleRe
   if (value.t === "terminal") {
     exact(value, ["evidence", "operationId", "outcome", "t", "v"], "Terminal lifecycle record");
     identifier(value.operationId, "Terminal lifecycle operationId");
-    if (!new Set(["stopped", "removed", "retired"]).has(value.outcome as string)) {
+    if (!new Set(["stopped", "removed", "retired", "superseded"]).has(value.outcome as string)) {
       throw new TypeError("Terminal lifecycle outcome is invalid");
     }
     return {
       v: 1,
       t: "terminal",
       operationId: value.operationId,
-      outcome: value.outcome as "stopped" | "removed" | "retired",
+      outcome: value.outcome as DeviceLifecycleTerminalOutcome,
       evidence: validateEvidence(value.evidence),
     };
   }
@@ -670,7 +676,8 @@ export function reduceDeviceLifecycle(
   }
   if (record.t === "terminal") {
     assertTerminalOutcome(current.identity.kind, record.outcome);
-    assertCanReachTerminal(current);
+    if (record.outcome === "superseded") assertCanBeSuperseded(current, record.evidence);
+    else assertCanReachTerminal(current);
     return advance(current, "terminal", record.evidence, key, digest, undefined, record.outcome);
   }
   assertNextPhase(current, record.phase);
@@ -1031,8 +1038,22 @@ function assertSequential(
 }
 
 function assertTerminalOutcome(kind: DeviceLifecycleKind, outcome: string): void {
+  if (kind === "executor-removal" && outcome === "superseded") return;
   const expected = kind === "stop" ? "stopped" : kind === "executor-removal" ? "removed" : "retired";
   if (outcome !== expected) throw new TypeError("Lifecycle terminal outcome does not match operation kind");
+}
+
+/**
+ * 取代适用于任何还没终结的移除（含本机已 cleanup-complete、尚未删钥写 removed 的 lost），且必须带取代它的
+ * 配对事件证据；已 removed/aborted 的终态不可改写（终态不再推进），removed 的阶段守卫不放宽。
+ */
+function assertCanBeSuperseded(current: DeviceLifecycleOperation, evidence: readonly DeviceLifecycleEvidenceRef[]): void {
+  if (current.identity.kind !== "executor-removal") {
+    throw new TypeError("Lifecycle operation cannot be superseded");
+  }
+  if (!evidence.some((item) => item.kind === "trust-event")) {
+    throw new TypeError("Superseded lifecycle terminal requires the superseding trust event");
+  }
 }
 
 function assertCanReachTerminal(current: DeviceLifecycleOperation): void {

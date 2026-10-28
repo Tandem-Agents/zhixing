@@ -12,7 +12,7 @@ import { applyTrustEvent, buildHomeTrustRecord, createDomainResetEvent, createRe
   createSignedTrustEvent, createTrustGenesisEvent, homeTrustEventDigest, initializeTrustChain, replayTrustChain, type TrustProjection } from "../trust-chain.js";
 import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, LEGACY_TRUST_RECORD_MESSAGE, readCurrentTrust, readCurrentTrustRecord,
   readLegacyClosedTrust, readTrustIdentity, readAnchorTenureAt, readCurrentAnchorTenure, readRevokedTrustMemberAt,
-  readTrustProjectionAt } from "../trust-current-index.js";
+  readTrustMemberPairing, readTrustProjectionAt } from "../trust-current-index.js";
 
 const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => { await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance())); });
@@ -88,6 +88,31 @@ it("represents reset without rewriting every historical member and re-enrolls by
   await f.append(reenroll, applyTrustEvent(nextState, reenroll));
   expect((await f.read())?.members.map(member => member.device.deviceId).sort()).toEqual([f.issuer.key.deviceId, peer.key.deviceId].sort());
 });
+
+it("reads the latest pairing of a member by its key: enroll, then the reenroll after a reset", async () => {
+  const f = await fixture(), peer = await device("peer"), other = await device("other");
+  const pairing = (deviceId: string) => f.log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+    async view => ({ kind: "return", value: await readTrustMemberPairing(view, deviceId) })).then(result => result.value);
+  await f.event({ t: "enroll", device: peer.identity, roles: ["executor"] });
+  const enrolled = f.state.chainHead;
+  await f.event({ t: "enroll", device: other.identity, roles: ["executor"] });
+  await f.event({ t: "role-change", deviceId: peer.identity.deviceId, roles: ["executor", "surface"] });
+  // 创始值班设备没有配对事件；别的设备的配对、角色变更都不改它的配对位置
+  expect(await pairing(f.issuer.identity.deviceId)).toEqual({ member: expect.objectContaining({ state: "active" }) });
+  expect((await pairing(peer.identity.deviceId))?.pairing).toEqual(enrolled);
+  const root = createRecoveryRootEvent({ current: f.state, op: "establish", candidate: RecoveryRoot.generate(), outerSigner: f.issuer.key, at });
+  await f.append(root, applyTrustEvent(f.state, root));
+  const reset = createDomainResetEvent({ current: f.state, issuer: f.issuer.key, coSigner: peer.key, at });
+  const resetState = applyTrustEvent(f.state, reset);
+  const nextRoot = createRecoveryRootEvent({ current: resetState, op: "establish", candidate: RecoveryRoot.generate(), outerSigner: f.issuer.key, at });
+  await f.appendGroup([reset, nextRoot], applyTrustEvent(resetState, nextRoot));
+  expect(await pairing(peer.identity.deviceId)).toEqual({ member: expect.objectContaining({ state: "pending-reenroll" }), pairing: enrolled });
+  await f.event({ t: "reenroll", deviceId: peer.identity.deviceId });
+  expect(await pairing(peer.identity.deviceId)).toEqual({ member: expect.objectContaining({ state: "active" }), pairing: f.state.chainHead });
+  await f.event({ t: "revoke", deviceId: other.identity.deviceId });
+  expect((await pairing(other.identity.deviceId))?.member.state).toBe("revoked");
+  expect(await pairing("fp:unknown")).toBeUndefined();
+}, 20_000);
 
 it("matches a full chain replay at every step and reads the latest signed record by its exact locator", async () => {
   const f = await fixture();

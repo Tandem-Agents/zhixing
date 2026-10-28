@@ -31,6 +31,7 @@ import {
   type ServerEndpoint,
 } from "@zhixing/server/client";
 import { spawnDaemon, type SpawnDaemonOptions } from "../serve/daemon.js";
+import { deviceRestrictionNotice, type DeviceRestriction } from "../serve/device-restriction.js";
 import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { randomUUID } from "node:crypto";
@@ -50,7 +51,9 @@ const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
 export class CoreHostUnavailableError extends Error {
-  constructor(reason: string, readonly publicReason = "本机服务连接失败，请查看运行日志。", readonly startupPending = false) {
+  constructor(reason: string, readonly publicReason = "本机服务连接失败，请查看运行日志。", readonly startupPending = false,
+    /** 本机设备受限（正被移出、已移出等）时宿主给出的状态：publicReason 即其白话呈现 */
+    readonly restriction?: DeviceRestriction) {
     super(`知行暂时不可用：${reason}`);
     this.name = "CoreHostUnavailableError";
   }
@@ -128,6 +131,8 @@ export interface CoreHostConnectionDeps {
     startupPending?: boolean;
     recoverable?: boolean;
     mode?: "managed" | "on-demand" | "none";
+    /** 宿主报告本机设备受限：不提供普通服务，publicReason 即其呈现 */
+    restriction?: DeviceRestriction;
   }>;
   /** 本机无需 host 时，建立到 current anchor 的有限认证 surface client。 */
   createSurfaceClient?: () => Promise<RpcClient>;
@@ -187,6 +192,11 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
         forwardedArgs: ["serve"],
         deps: { console: silent },
       }));
+      if (result.status === "restricted" && result.restriction) {
+        const notice = deviceRestrictionNotice(result.restriction);
+        return { ok: false, reason: notice, publicReason: notice, startupPending: false, recoverable: false,
+          mode: result.launchMode ?? "on-demand", restriction: result.restriction };
+      }
       return {
         ok: result.ok,
         reason: result.status === "starting" ? "等待本机服务就绪超时，可重试或用 zz logs 查看原因" : result.reason,
@@ -834,7 +844,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
         : await this.tryDiscover(opts.acceptEndpoint);
       if (endpoint) return endpoint;
       opts.signal.throwIfAborted();
-      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason, spawned.publicReason, spawned.startupPending);
+      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason, spawned.publicReason, spawned.startupPending, spawned.restriction);
     }
     const endpoint = await this.waitForDiscoverableService({
       deadlineAt: opts.deadlineAt,

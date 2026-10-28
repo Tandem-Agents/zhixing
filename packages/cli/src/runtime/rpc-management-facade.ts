@@ -87,6 +87,12 @@ export interface DeviceRemovalCandidate {
   reachable: boolean;
 }
 
+/** 不在可移除候选里的只读成员状态：待重新配对，或旧分支撤销/降权已在这里生效为限制。 */
+export interface DeviceMemberStatus {
+  displayName: string;
+  status: "pending-reenroll" | "revoked-on-old-branch" | "demoted-on-old-branch";
+}
+
 export interface DeviceRemovalState {
   phase:
     | "waiting-for-device"
@@ -95,6 +101,7 @@ export interface DeviceRemovalState {
     | "revoking-access"
     | "cleaning-device"
     | "removed"
+    | "superseded"
     | "cancelled";
   conversations: string[];
   localData: "known" | "removed" | "unknown";
@@ -228,10 +235,15 @@ export class RpcManagementFacade {
     return client.request<{ stage: "cancelled" }>("dutyMigration.cancel", input);
   }
 
+  /** 可移除候选：交互选择器只用它。 */
   async deviceList(): Promise<DeviceRemovalCandidate[]> {
+    return (await this.deviceListView()).devices;
+  }
+
+  /** 设备列表的完整呈现：可移除候选，加只读成员状态（不可选择）。 */
+  async deviceListView(): Promise<{ devices: DeviceRemovalCandidate[]; others: DeviceMemberStatus[] }> {
     const client = await this.link.getClient();
-    const result = await client.request<unknown>("device.list");
-    return decodeDeviceRemovalCandidates(result);
+    return decodeDeviceList(await client.request<unknown>("device.list"));
   }
 
   async deviceRemove(input: {
@@ -426,6 +438,25 @@ function decodeDutyMigrationTargets(input: unknown): DutyMigrationTarget[] {
   });
 }
 
+function decodeDeviceList(input: unknown): { devices: DeviceRemovalCandidate[]; others: DeviceMemberStatus[] } {
+  if (!isPlainRecord(input) || !Array.isArray(input.devices) ||
+      !(hasExactKeys(input, ["devices"]) || (hasExactKeys(input, ["devices", "others"]) && Array.isArray(input.others)))) {
+    throw new TypeError("Device list response is invalid");
+  }
+  const others = (Array.isArray(input.others) ? input.others : []).map((member) => {
+    if (
+      !isPlainRecord(member) ||
+      !hasExactKeys(member, ["displayName", "status"]) ||
+      typeof member.displayName !== "string" ||
+      !["pending-reenroll", "revoked-on-old-branch", "demoted-on-old-branch"].includes(member.status as string)
+    ) {
+      throw new TypeError("Device list status entry is invalid");
+    }
+    return { displayName: member.displayName, status: member.status as DeviceMemberStatus["status"] };
+  });
+  return { devices: decodeDeviceRemovalCandidates({ devices: input.devices }), others };
+}
+
 function decodeDeviceRemovalCandidates(input: unknown): DeviceRemovalCandidate[] {
   if (!isPlainRecord(input) || !hasExactKeys(input, ["devices"]) || !Array.isArray(input.devices)) {
     throw new TypeError("Device list response is invalid");
@@ -459,6 +490,7 @@ function decodeDeviceRemovalState(input: unknown): DeviceRemovalState {
     "revoking-access",
     "cleaning-device",
     "removed",
+    "superseded",
     "cancelled",
   ]);
   if (
