@@ -7,7 +7,6 @@ import QRCode from "qrcode";
 import { getZhixingHome } from "@zhixing/core/paths";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
-  CheckpointStreamRecord,
   DeviceIdentity,
   DeviceRole,
   HomeTrustEvent,
@@ -1492,15 +1491,7 @@ async function selectInitialPairingBackupTarget(input: {
 }): Promise<void> {
   if (await input.backupTargets.load()) return;
   const targetId = `backup-device:${input.targetDeviceId}`;
-  const records = await input.store.loadCheckpointRecords();
-  const created = [...records].reverse().find((record) =>
-    record.t === "checkpoint-created" &&
-    record.targetId === targetId &&
-    record.purpose.kind === "root-activation");
-  if (!created || !records.some((record) =>
-    record.t === "checkpoint-verified" &&
-    record.checkpointId === created.checkpointId &&
-    record.targetId === targetId)) return;
+  if (!(await input.store.latestRootActivation(targetId))?.verified) return;
   await input.backupTargets.select({
     kind: "paired-device",
     targetId,
@@ -2153,18 +2144,7 @@ async function loadPendingFullRootActivation(
     { kind: "root-activation" }
   >["plan"];
 } | undefined> {
-  const records = await store.loadCheckpointRecords();
-  const terminal = new Set(records
-    .filter((record) => record.t === "checkpoint-verified")
-    .map((record) => record.checkpointId));
-  const created = [...records].reverse().find((record): record is Extract<
-    CheckpointStreamRecord,
-    { t: "checkpoint-created" }
-  > =>
-    record.t === "checkpoint-created" &&
-    record.targetId === targetId &&
-    record.purpose.kind === "root-activation" &&
-    !terminal.has(record.checkpointId));
+  const created = await store.latestOpenRootActivation(targetId);
   if (!created) return undefined;
   const envelopeBytes = await store.artifactStore().get(created.envelopeRef);
   const envelopeText = Buffer.from(envelopeBytes).toString("utf8");

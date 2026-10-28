@@ -40,7 +40,13 @@ describe("recovery backup checkpoint owner", () => {
       recoveryRootPublicKey: recovery.rootPublicKey,
       recoveryBackupPublicKey: recovery.backupPublicKey,
     } as HomeTrustRecord;
-    const log = { readStream: async () => [] };
+    // 没有任何 checkpoint 记录的权威日志：生命周期投影为空视图
+    const empty = { get: async () => undefined, scan: async () => ({ entries: [] }) };
+    const log = {
+      durableProjection: () => undefined,
+      transactDurableProjection: async (_id: string, decide: (current: typeof empty, context: object) => Promise<{ value: unknown }>) =>
+        ({ value: (await decide(empty, {})).value }),
+    };
     const mesh = {
       deviceKey: key,
       bootstrapStore: {

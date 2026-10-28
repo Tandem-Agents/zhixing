@@ -26,9 +26,9 @@ import type {
   RunExecutorPort,
   RunSubmissionPort,
   EvidenceHandlerPort,
-  CheckpointStreamRecord,
   HomeTrustRecord,
 } from "@zhixing/core/contracts";
+import { readCheckpointLifecycle } from "@zhixing/mesh/checkpoint-service";
 import { createMeshRunInput, createMeshConversationCommunication, registerConversationCommunicationMesh } from "./conversation-communication-mesh.js";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
 import type { ExtensionManagementTransport } from "./extension-tools.js";
@@ -2349,17 +2349,11 @@ export class MeshRuntimeAssembly
     }
     const owner = checkpoint.owner;
     const status = await owner.status();
-    if (status.fullBackupReady && status.checkpointId) {
-      const records = await this.options.authority.authorityLog
-        .readStream<CheckpointStreamRecord>("checkpoint");
-      const verified = records.toReversed().find((entry) =>
-        entry.body.t === "checkpoint-verified" &&
-        entry.body.checkpointId === status.checkpointId &&
-        entry.body.targetId === status.targetId,
-      );
-      if (verified?.body.t === "checkpoint-verified") {
-        return verified.body.envelopeDigest;
-      }
+    if (status.fullBackupReady && status.checkpointId && status.targetId) {
+      // 同一 checkpoint 与目标的 verified 至多一条，按键读生命周期投影
+      const { checkpointId, targetId } = status;
+      const verified = await readCheckpointLifecycle(this.options.authority.authorityLog, (view) => view.verified(checkpointId, targetId));
+      if (verified) return verified.envelopeDigest;
     }
     return (await owner.force(`planned-anchor:${transferId}`)).envelope.digest;
   }

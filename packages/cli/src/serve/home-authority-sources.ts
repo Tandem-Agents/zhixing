@@ -54,13 +54,13 @@ const writers = new Map<string, OwnerSlot>();
 // Short-lived writers register all definitions but prepare only what they use.
 const CORE_WRITE_REQUIRED = ["authority-retained-references"] as const;
 const SHARED_REQUIRED = [...CORE_WRITE_REQUIRED, "device-lifecycle-state-v1", "control-admission-v1", "conversation-identities-v1",
-  "deferred-global-intents-v1", "conversation-transfer-current-v1", "resource-governor-index-v1",
+  "deferred-global-intents-v1", "conversation-transfer-current-v1", "conversation-transfer-sources-v1", "resource-governor-index-v1",
   "resource-capability-activation-v1"] as const;
 const AUTHORITY_REQUIRED = [CURRENT_TRUST_PROJECTION_ID, ...SHARED_REQUIRED, "credential-exposures-v1",
   "global-skill-authority-v1", "global-workscene-authority-v1", "global-rubric-authority-v1",
   "workscene-session-activity-v2", "global-schedule-authority-v1", "job-publish-pending-v1",
   "conversation-read-directory", "conversation-recovery-pending-v1", "conversation-run-state-v1", "advancement-recovery-v1",
-  "surface-asset-grants", "delivery-authority-v1"] as const;
+  "surface-asset-grants", "delivery-authority-v1", "extension-current-state", "checkpoint-lifecycle-v1"] as const;
 const EXECUTOR_REQUIRED = [...SHARED_REQUIRED, "conversation-recovery-pending-v1", "workspace-binding-state-v1", "workspace-probe-state-v1",
   "executor-job-interaction-obligations", "executor-assignment-ledger-v1"] as const;
 
@@ -231,13 +231,15 @@ export class HomeAuthoritySources {
    * 由其消费者按需登记所读的投影。
    */
   async #registerDefinitions(localExecutorId: string | undefined): Promise<void> {
-    const [core, owner, executorDefinitions, mesh, surfaceAssets, protocol] = await Promise.all([
+    const [core, owner, executorDefinitions, mesh, surfaceAssets, protocol, extensions, checkpoints] = await Promise.all([
       import("@zhixing/core/authority/startup-definitions"),
       import("@zhixing/owner-kernel/startup-definitions"),
       import("@zhixing/executor/startup-definitions"),
       import("@zhixing/mesh/credential-exposure"),
       import("./surface-asset-authority.js"),
       import("@zhixing/core/protocol"),
+      import("@zhixing/core/extensions/application"),
+      import("@zhixing/mesh/checkpoint-service"),
     ]);
     const { registerDeviceLifecycleProjection, registerSkillAuthorityProjection, registerWorksceneAuthorityProjection,
       registerRubricAuthorityProjection, registerWorksceneActivityProjection, registerWorkspaceBindingProjection,
@@ -245,7 +247,7 @@ export class HomeAuthoritySources {
       registerDeliveryAuthorityProjection } = core;
     const { registerControlAdmissionProjection, registerConversationIdentityProjection, registerScheduleAuthorityProjection,
       registerJobPublishPendingProjection, registerDeferredIntentProjection, registerConversationReadProjection,
-      registerConversationTransferProjection, registerConversationRecoveryProjection, registerConversationRunProjection,
+      registerConversationTransferProjection, registerConversationTransferSources, registerConversationRecoveryProjection, registerConversationRunProjection,
       registerAdvancementRecoveryProjection } = owner;
     const { registerExecutorJobRecoveryProjection, registerDataPlaneTicketProjection, dataPlaneTicketProjectionId,
       registerLeaseClockProjection, leaseClockProjectionId, registerAssignmentLedgerIndex } = executorDefinitions;
@@ -258,6 +260,8 @@ export class HomeAuthoritySources {
       registerConversationIdentityProjection(log, artifacts);
       registerDeferredIntentProjection(log);
       registerConversationTransferProjection(log, verifier);
+      // 会话迁移冻结的领域定位索引：首次写入前登记、随写入在线维护，冻结只读该会话相关的信封
+      registerConversationTransferSources(log, artifacts);
       // Global recovery discovery reads both sources before a local conversation
       // kernel is mounted. Prepare this fixed discovery index at Host.ready.
       registerConversationRecoveryProjection(log, artifacts);
@@ -279,6 +283,10 @@ export class HomeAuthoritySources {
     registerSurfaceAssetProjection(authority, artifacts, verifier);
     // 投递权威的按键投影：所有写者首次写入前登记，入队与生命周期决定都受同一恢复欠账预算约束
     registerDeliveryAuthorityProjection(authority);
+    // 扩展当前状态索引：首次写入前登记、随写入在线维护；不在扩展首次被调用时才登记，免得读取时追平全部无关尾部
+    extensions.registerExtensionIndex(authority);
+    // checkpoint 生命周期按键投影：状态、验证、清理与追加去重都按键读，首次写入前登记、随写入在线维护
+    checkpoints.registerCheckpointLifecycleIndex(authority);
     registerWorkspaceBindingProjection(executor);
     registerWorkspaceProbeProjection(executor, verifier);
     registerExecutorJobRecoveryProjection(executor, verifier);

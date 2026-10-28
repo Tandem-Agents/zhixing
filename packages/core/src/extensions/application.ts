@@ -28,6 +28,11 @@ import {
 } from "./contracts.js";
 
 export const EXTENSION_AUTHORITY_STREAM = "extensions";
+
+/** 扩展当前状态索引的固定登记：home 写者在首次写入前登记，随写入在线维护，读取时不必追平积累的无关尾部。 */
+export function registerExtensionIndex(log: AuthorityCommitLog): void {
+  extensionIndex(log);
+}
 export class ExtensionRevisionConflict extends Error {
   constructor() { super("Extension revision conflict"); }
 }

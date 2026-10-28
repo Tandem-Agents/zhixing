@@ -39,10 +39,10 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 
 | ID/待办 | 入口、已证机制与增长源 | 目标处理 |
 |---|---|---|
-| G01 [ ] | core/authority/commit-log.ts:658整份readFile checkpoint；startup-proofs.ts:145/197整份serialize/deserialize。64MiB超限不保存，可能反复回放 | 大集合退出标量checkpoint，仅保留固定schema字段/水位/根引用 |
-| G02 [ ] | commit-log #scanAuthenticated→frame-index ensureRows/scanRows；按流过滤仍可从0遍历全部认证帧行，Bloom只省载荷 | 领域索引有限定位＋按帧数和字节双阈值约束恢复尾部；不新增源位置目录，legacy沿同一认证帧索引兼容加速 |
-| G03 [ ] | durableProjection读前追平、initialize失配重建、prepare/flush/compaction | 必需索引在线维护，限制未发布尾部；普通查询不各自全库重建，根/当前页读取有界 |
-| G04 [ ] | registerCheckpointFlush、saveProjectionCheckpoint、stopStorageMaintenance周期/退出保存 | 只发布脏页/有界覆盖层；不在每次停止初始化所有索引或序列化全部终态 |
+| G01 [x] | 原机制：core/authority/commit-log.ts:658整份readFile checkpoint；startup-proofs.ts:145/197整份serialize/deserialize。64MiB超限不保存，可能反复回放 | 2026-10-28包5-5e独审通过（候选c9ce9006）：会话分派的标量检查点已退役，状态由按键投影持久，旧检查点只一次性接续；派发账本绑定检查点只存本次请求批次，沿用时按派发领域索引从目标派发自身LSN键起判断其后有无新信封，不从全局旧游标扫描无关记录；decision-migration只读受信旧代次一次。见§4.15 |
+| G02 [x] | 原机制：commit-log #scanAuthenticated→frame-index ensureRows/scanRows；按流过滤仍可从0遍历全部认证帧行，Bloom只省载荷 | 2026-10-28包5-5e独审通过（候选c9ce9006）：checkpoint生命周期与会话迁移冻结改由领域索引按键定位（§4.7边界、§4.15），恢复尾部沿§4.3既有帧数/字节准入。其余无游标全流读取（设备移除、配对恢复、计划迁居v1旧协议分支、灾备、本机退役、单分派spool）不在启动、普通回合或状态查询路径，按合同不改 |
+| G03 [x] | 原机制：durableProjection读前追平、initialize失配重建、prepare/flush/compaction | 2026-10-28包5-5e独审通过（候选c9ce9006）：单次get/scan对每个增量段（≤5）一次二分加对数深度目录页，不随键数按比例增长、不重放日志；reset以同锁内已发布清单与进程内清单中较新者为基准，代次单调，见§4.15。会话打开时多次调用的累计读量、冷启动段整理固定成本与实际启动时延归包7同候选验收，本行不代表启动时延达标 |
+| G04 [x] | 原机制：registerCheckpointFlush、saveProjectionCheckpoint、stopStorageMaintenance周期/退出保存 | 2026-10-28包5-5e独审通过（候选c9ce9006）：停止时只刷已准备且有未发布进度的投影（有界覆盖层），不打开未用索引、不重放历史、不做历史整理；登记的checkpointFlush均为DPI flushCheckpoint |
 | B01 保持 | frame-index分页MAC；DPI #validatePublishedStorage校验固定delta边界与树根 | 保留按需历史页和现有认证，不改回每次整文件验证，不靠扩大缓存预算掩盖增长 |
 
 ### 3.2 会话与首屏
@@ -76,7 +76,7 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 | C20 [ ] | mesh-bootstrap-store.ts:178/193→mesh-runtime-bootstrap:93；受管启动/backup owner也调用，重复重放trust全事件链 | 认证的当前信任投影与版本/epoch；fresh授权仍查当前信任，历史链验证/scrub保留；覆盖startup-application的本机配置/安全端口 |
 | C21 [x] | 原机制：FileTrustRuleSnapshotCatalog.open/#reload→loadPermissionSnapshotCatalog枚举全部保留快照 | 2026-10-27包5-5c独审通过（候选eef27b7f）：快照内容寻址，另有head、按版本、按规则内容与按发布位置四类小指针；只读当前及在途租约引用的旧快照，按原合同验签；head与指针带home完整性MAC，读时有界核对，合法版本跳号下回放旧head也拒绝，见§4.13 |
 | C22 [x] | 原机制：可信home post-install的checkpoint/recovery activation、planned/disaster staging含整快照/目录恢复 | 2026-10-27包5-5c独审通过（候选eef27b7f）：当前安装与未完安装按键索引，正常已完成安装不回扫；迁居/灾备后终态取回与有效成员接续（路线A）见§4.13。checkpoint当前流读取与DPI整理放大归5e |
-| G26 [x] | 原机制：setup-delivery.ts:675→surfaceAssets.recover→ArtifactLifecycleIndex.synchronize:311；while(more)排空多日志追尾和retirement/adoption/expiry/temporary；surface-asset-maintenance.ts:92停止时还新起整轮维护 | 2026-10-26包5-5a独审通过（候选44a25e91）：安全根/配额/引用证明与回收分开，跨日志向量和源端尾部预算在维护，见§4.8。DPI重建步骤不读盘等观察划入5e |
+| G26 [x] | 原机制：setup-delivery.ts:675→surfaceAssets.recover→ArtifactLifecycleIndex.synchronize:311；while(more)排空多日志追尾和retirement/adoption/expiry/temporary；surface-asset-maintenance.ts:92停止时还新起整轮维护 | 2026-10-26包5-5a独审通过（候选44a25e91）：安全根/配额/引用证明与回收分开，跨日志向量和源端尾部预算在维护，见§4.8。DPI重建步骤不读盘等观察划入5e，5e已闭合（reset代次单调，见§4.15） |
 | C27 [x] | 原机制：command.ts:1274→worksceneDirectory.recover→global-state-adapter.ts:251，启动循环全部pendingDeletionPage并逐项projectDeletion | 2026-10-26包5-5a独审通过（候选44a25e91）：保留已有pending索引，受影响场景删除fence先可见，清理按页续做，不排空全部待办才ready，见§4.8 |
 | B04 保持 | ChannelInteractionCoordinator.listOpen是当前内存开放relay；executor job恢复有有限页 | 修上游全量发现，不把已有限的消费者再造一遍；开放义务多也不能全量阻塞终端ready |
 
@@ -195,7 +195,7 @@ G24/G25由会话存储投影负责，保持当前预算、摘要文本与原文�
 
 ### 4.7 固定领域投影、输入过滤和同前缀决定
 
-在现有AuthorityCommitLog/DPI中登记固定领域定义，以领域索引里的会话前缀定位，不新增源位置目录、写者版本登记、持久迁移门、全局激活指针或强制每会话物理根。
+在现有AuthorityCommitLog/DPI中登记固定领域定义，以领域索引里的会话前缀定位，不新增源位置目录、写者版本登记、持久迁移门、全局激活指针或强制每会话物理根。这里禁止的是额外的跨领域全局源位置设施及其写者/迁移协议；领域索引为本领域定位保存必要的原记录位置（例如会话迁移冻结按会话找到需导出记录所在的信封）不在禁止之列。
 
 1. 领域声明消费的stream/记录类型并使用严格codec。无关输入不执行无必要归约，公共负向测试证明输入声明不会漏掉相关事实。未知类型/归属不能静默跳过。
 2. 同一事务的全部有限读取与相关写投影在日志锁下追平到同一已验head，然后准备delta、一次WAL fsync、不可失败发布。候选新增依赖时在提交前补齐并重新决定；未覆盖键不能返回“不存在”。
@@ -320,6 +320,14 @@ G09由会话读目录负责：首屏需要的“历史之外的输入”和“�
 - **登记表与空间**：登记前按与 #makeRoom 同一口径保证 受管＋已登记历史＋待回收＋控制文件 ≤ maxFiles，未阻塞时先回收最早登记的；每条约 330B，策略保证 governanceBytes ≥ maxFiles×2048，单次发布不超 governanceBytes/3。
 - **名字绑定**：发现与离线诊断目录只返回位置；虚拟名到实际位置的绑定只在按登记路径 stat 时建立，回收或缺失即移出，上限 4096。
 - **离线诊断**（未初始化、用户查询）按虚拟名排序分页，每次现读、不在进程里保留全集。
+
+### 4.15 checkpoint生命周期、迁移冻结定位与投影reset（共享G01～G04）
+
+- **checkpoint 生命周期**：固定投影 checkpoint-lifecycle-v1 在权威日志首次写入前登记、随写入在线维护。f/ 按事实摘要存全部生命周期事实，按键精确查找与去重，同键不同内容拒绝；另有只含当前未完成项的小索引：当前已验证、待复制、待清理、各代际最新已复制、完整代际最新 created、代际加请求的首个 created、各目标最新根激活与未验证根激活。次序用定长位置串“16位LSN.10位条目序号”，倒序键两段分别取反，信封条目数不设上限。非生命周期记录（如恢复根激活提交）不收录。状态、验证、候选、清理、待复制、复制去重、追加去重、计划迁居恢复检查点与配对都经该投影按键读取，不重放 checkpoint 流。
+- **迁移冻结定位**：固定投影 conversation-transfer-sources-v1 在两本日志首次写入前登记，按会话记录含其直接流与 final-outbox 条目、派发归属与发布位置、绑定控制请求与控制位置的信封位置，归属记最早建立的 LSN。冻结在冻点之后的同一已验证前缀上收集冻点之前的位置，按位置逐个读取原信封交给原两遍选择器；控制与派发制品的解析、验签与缺失拒绝不变。
+- **派发绑定沿用**：已保存的绑定检查点在派发领域索引同一已验证前缀上，从目标派发自身定长 LSN 键起取一条判断其后有无新信封；无变化即沿用，有变化按领域索引重建，返回的游标与本次判断同前缀。
+- **投影 reset**：在同一日志锁内读一次已发布清单，同投影、同归约版本且代次更高时以它为基准，代次单调，对方已发布的段进入退役链按既有回收删除；清单缺失或确证损坏时以进程内清单为基准，其他读取失败保留原因并拒绝本次 reset。
+- **读取边界**：单次 get/scan 对每个增量段一次二分加对数深度目录页；帧索引读取允许页与封条结构上界内的有界读取，不随历史增长。会话打开时多次调用的累计读量、冷启动固定成本与实际时延由包7同候选验收。
 
 ## 5. 产品体验约束
 

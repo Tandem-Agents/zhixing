@@ -93,7 +93,7 @@ describe("paired recovery backup setup", () => {
       expect(targetTrust?.recoveryRootPublicKey).toBe(sourceTrust?.recoveryRootPublicKey);
       expect(targetTrust?.recoveryBackupPublicKey).toBe(sourceTrust?.recoveryBackupPublicKey);
 
-      const records = await fixture.sourceBootstrap.bootstrapStore.loadCheckpointRecords();
+      const records = await fixture.sourceBootstrap.bootstrapStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
       const verified = records.find((record) => record.t === "checkpoint-verified");
       expect(verified).toBeDefined();
       const target = await FileRecoveryCheckpointTarget.openPaired({
@@ -178,7 +178,7 @@ describe("paired recovery backup setup", () => {
       } finally {
         await active.stop();
       }
-      expect((await fixture.sourceBootstrap.bootstrapStore.loadCheckpointRecords()).some((record) =>
+      expect((await fixture.sourceBootstrap.bootstrapStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body))).some((record) =>
         record.t === "checkpoint-created" &&
         record.purpose.kind === "periodic" &&
         record.targetId === `backup-device:${fixture.targetDeviceId}`)).toBe(true);

@@ -22,6 +22,7 @@ import {
 } from "@zhixing/core/authority";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import { credentialExposureIndex } from "@zhixing/mesh/credential-exposure";
+import { readCheckpointLifecycle } from "@zhixing/mesh/checkpoint-service";
 import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { ensureDurableDirectory, SerialTaskQueue, syncDirectory } from "@zhixing/core/persistence";
 import {
@@ -269,9 +270,17 @@ export class FileMeshBootstrapStore
     return this.#checkpointLifecycle ??= this.#openCheckpointLifecycle();
   }
 
-  async loadCheckpointRecords(): Promise<readonly CheckpointStreamRecord[]> {
-    return (await this.#log.readStream<CheckpointStreamRecord>("checkpoint"))
-      .map((record) => record.body);
+  /** 某目标最新的根激活 created，以及它是否已在该目标上验证（按键读 checkpoint 生命周期投影，不重放整条流）。 */
+  latestRootActivation(targetId: string): Promise<{ readonly created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>; readonly verified: boolean } | undefined> {
+    return readCheckpointLifecycle(this.#log, async (view) => {
+      const created = await view.latestRootActivation(targetId);
+      return created ? { created, verified: (await view.verified(created.checkpointId, targetId)) !== undefined } : undefined;
+    });
+  }
+
+  /** 某目标最新的、尚未在任何目标上验证的根激活 created。 */
+  latestOpenRootActivation(targetId: string): Promise<Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> | undefined> {
+    return readCheckpointLifecycle(this.#log, (view) => view.latestOpenRootActivation(targetId));
   }
 
   /** 已验信任链链头的 issuer 与任期，按键读，不要求签名记录已闭合（迁居源端提交后的启动恢复用）。 */

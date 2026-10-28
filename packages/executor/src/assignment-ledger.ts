@@ -1,7 +1,7 @@
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
 import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime,
   leaseClockProjectionId, readLeaseClockSummary, registerLeaseClockProjection, type LeaseClockSummary } from "./assignment-lease-clock.js";
-import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentIdFromStream, readAssignmentEnvelopes, readRecoveryCandidates,
+import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentChangedAfter, assignmentIdFromStream, readAssignmentEnvelopes, readRecoveryCandidates,
   registerAssignmentLedgerIndex } from "./assignment-ledger-index.js";
 import { Buffer } from "node:buffer";
 import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
@@ -1830,13 +1830,16 @@ export class ConversationAssignmentLedger implements
       let cursor: ProjectionCursor | undefined;
       const reusable = known ? wanted.filter(id => known.has(id)) : [];
       if (saved && known && reusable.length > 0) {
-        // 只找出检查点之后有新记录的分派；不归约、不验签。
-        const tail = await this.#log.readProjection<Set<string>, unknown>(new Set(), (touched, record) => {
-          touched.add(record.stream);
-          return touched;
-        }, { streams: reusable.map(assignmentStream), cursor: saved.cursor });
-        cursor = tail.cursor;
-        for (const id of reusable) if (!tail.state.has(assignmentStream(id))) bindings.set(id, known.get(id)!);
+        // 只找出检查点之后有新记录的分派：按派发领域索引里它自己的行判断，不从全局旧游标扫描其后的无关记录；
+        // 不归约、不验签。返回的游标与这次判断同一已验证前缀，沿用的绑定截至它成立。
+        const since = saved.cursor.lsn;
+        const check = await this.#log.transactDurableProjection<unknown, ReadonlySet<string>>(ASSIGNMENT_LEDGER_INDEX_ID, async current => {
+          const changed = new Set<string>();
+          for (const id of reusable) if (await assignmentChangedAfter(current, id, since)) changed.add(id);
+          return { kind: "return", value: changed };
+        });
+        cursor = check.cursor;
+        for (const id of reusable) if (!check.value.has(id)) bindings.set(id, known.get(id)!);
       }
       const fresh = wanted.filter(id => !bindings.has(id));
       for (let offset = 0; offset < fresh.length; offset += BINDING_RECOVERY_CHUNK) {

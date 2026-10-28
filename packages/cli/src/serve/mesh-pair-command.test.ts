@@ -259,7 +259,7 @@ describe("production mesh pairing command", () => {
       ]);
       const anchorId = anchorTrust!.issuer.deviceId;
       const executorId = anchorTrust!.members.find((member) => member.device.deviceId !== anchorId)!.device.deviceId;
-      const checkpointRecords = await anchorStore.loadCheckpointRecords();
+      const checkpointRecords = await anchorStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
       const created = checkpointRecords.find((record) =>
         record.t === "checkpoint-created" && record.targetId === `backup-device:${executorId}`);
       expect(created?.purpose.kind).toBe("root-activation");

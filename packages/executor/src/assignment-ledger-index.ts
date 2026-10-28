@@ -148,6 +148,14 @@ export async function readAssignmentEnvelopes(
   return envelopes;
 }
 
+/** 该派发在 lsn 之后有没有新信封：从它自己的定长 LSN 键处起扫一条，不碰别的派发与无关记录。 */
+export async function assignmentChangedAfter(view: DurableProjectionReadContext, assignmentId: string, lsn: number): Promise<boolean> {
+  const prefix = envelopePrefix(assignmentId);
+  const page = await view.scan({ gte: `${prefix}${String(lsn + 1).padStart(16, "0")}`, lt: `${prefix}￿` }, 1);
+  if (page.continuation) view.releaseContinuation?.(page.continuation);
+  return page.entries.length > 0;
+}
+
 /** 对话恢复候选目录里的派发 id。 */
 export async function readRecoveryCandidates(view: DurableProjectionReadContext): Promise<readonly string[]> {
   const assignmentIds: string[] = [];

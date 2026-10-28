@@ -28,6 +28,18 @@ import {
 } from "./checkpoint.js";
 import { captureFullAuthorityCheckpoint } from "./full-checkpoint.js";
 import type { RetirableRecoveryCheckpointTarget } from "./checkpoint-target.js";
+import {
+  CHECKPOINT_LIFECYCLE_PROJECTION_ID, CheckpointLifecycleView, checkpointRecordKey, registerCheckpointLifecycleIndex,
+} from "./checkpoint-lifecycle-index.js";
+
+export { CHECKPOINT_LIFECYCLE_PROJECTION_ID, CheckpointLifecycleView, registerCheckpointLifecycleIndex } from "./checkpoint-lifecycle-index.js";
+
+/** 在 checkpoint 生命周期投影的同一已验证视图上读取（先幂等登记，读前追平有界尾部）。 */
+export async function readCheckpointLifecycle<T>(log: AuthorityCommitLog, read: (view: CheckpointLifecycleView) => Promise<T>): Promise<T> {
+  registerCheckpointLifecycleIndex(log);
+  return (await log.transactDurableProjection<never, T>(CHECKPOINT_LIFECYCLE_PROJECTION_ID,
+    async (current) => ({ kind: "return", value: await read(new CheckpointLifecycleView(current)) }))).value;
+}
 import { keyIdForPublicKey, RecoveryRoot, verifyRecoverySignature } from "./recovery-root.js";
 import {
   runStorageMaintenanceStep,
@@ -86,26 +98,21 @@ export async function projectDurableRecoveryBackupStatus(
     trustChainHead: { ...options.trust.chainHead },
     targetId: options.targetId,
   };
-  const records = (await options.log.readStream<CheckpointStreamRecord>("checkpoint"))
-    .map((entry) => entry.body);
-  const verifiedPair = currentFullVerified(records, recipientKeyId)
-    .toReversed()
-    .map((verified) => ({
-      verified,
-      created: records.find((record): record is Extract<
-        CheckpointStreamRecord,
-        { t: "checkpoint-created" }
-      > => record.t === "checkpoint-created" &&
-        record.checkpointId === verified.checkpointId &&
-        record.targetId === options.targetId &&
-        record.generation !== undefined &&
-        canonicalize(record.generation) === canonicalize(generation)),
-    }))
-    .find(({ created, verified }) =>
-      created !== undefined &&
-      verified.targetId === options.targetId &&
-      verified.envelopeDigest === created.envelopeDigest &&
-      validVerificationSignature(verified, options.trust));
+  // 只读当前（未被取代）的已验证记录，最新在前；配对的 created 与同代际最新的 created 按键读
+  const { verifiedPair, pending } = await readCheckpointLifecycle(options.log, async (view) => {
+    let found: { verified: Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>; created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> } | undefined;
+    for (const verified of await view.currentVerified(recipientKeyId)) {
+      if (verified.targetId !== options.targetId) continue;
+      const created = await view.created(verified.checkpointId);
+      if (created !== undefined && created.targetId === options.targetId && created.generation !== undefined &&
+          canonicalize(created.generation) === canonicalize(generation) &&
+          verified.envelopeDigest === created.envelopeDigest && validVerificationSignature(verified, options.trust)) {
+        found = { verified, created };
+        break;
+      }
+    }
+    return { verifiedPair: found, pending: await view.latestCreated(generation) };
+  });
   if (verifiedPair?.created) {
     const created = verifiedPair.created;
     const abort = options.abort ?? new AbortController().signal;
@@ -145,12 +152,6 @@ export async function projectDurableRecoveryBackupStatus(
       };
     }
   }
-  const pending = [...records].reverse().find((record): record is Extract<
-    CheckpointStreamRecord,
-    { t: "checkpoint-created" }
-  > => record.t === "checkpoint-created" &&
-    record.generation !== undefined &&
-    canonicalize(record.generation) === canonicalize(generation));
   return pending
     ? {
         state: "pending-verification",
@@ -273,11 +274,12 @@ export class AuthorityCheckpointService {
     const created = await this.#created(input.checkpointId);
     if (!created) throw new Error("Recovery backup has not been created");
     this.#assertCreatedAuthority(created);
-    const records = await this.#records();
-    const existing = records.find((record): record is Extract<
-      CheckpointStreamRecord,
-      { t: "checkpoint-verified" }
-    > => record.t === "checkpoint-verified" && record.checkpointId === input.checkpointId);
+    // 同一视图：该 checkpoint 已有的 verified（按先后的第一个），以及当前未被取代的 verified（最新在前）
+    const { existing, current, replicated } = await readCheckpointLifecycle(this.options.log, async (view) => ({
+      existing: (await view.verifiedOfCheckpoint(input.checkpointId))[0],
+      current: await view.currentVerified(created.recipientKeyId),
+      replicated: created.targetId ? await view.replicated(input.checkpointId, created.targetId) : undefined,
+    }));
     let opened: Awaited<ReturnType<typeof verifyStoredFullAuthorityCheckpoint>> | undefined;
     let targetSession: RecoveryCheckpointTargetSession | undefined;
     try {
@@ -300,10 +302,6 @@ export class AuthorityCheckpointService {
         });
         return existing.verification;
       }
-      const replicated = records.find((record) =>
-        record.t === "checkpoint-replicated" &&
-        record.checkpointId === input.checkpointId &&
-        record.targetId === created.targetId);
       if (!replicated) throw new Error("Recovery backup has not reached its configured target");
       const verifiedAt = input.verifiedAt ?? this.#clock();
       const verification = createRecoveryCheckpointVerification({
@@ -320,7 +318,7 @@ export class AuthorityCheckpointService {
         verificationNonce: opened.verificationNonce,
         recoveryRootPublicKey: input.recoveryRoot.rootPublicKey,
       });
-      const superseded = currentFullVerified(records, created.recipientKeyId)
+      const superseded = [...current].reverse()
         .filter((record) => record.checkpointId !== input.checkpointId)
         .map<Extract<CheckpointStreamRecord, { t: "checkpoint-superseded" }>>((record) => ({
           t: "checkpoint-superseded",
@@ -377,47 +375,24 @@ export class AuthorityCheckpointService {
   /** Returns the newest durable target copy, including a terminal replay candidate. */
   async verificationCandidate(): Promise<RecoveryCheckpointVerificationCandidate | undefined> {
     this.#assertEnabled();
-    const records = await this.#records();
     const generation = this.#generation();
-    const replicated = new Set(records
-      .filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-replicated" }> =>
-        record.t === "checkpoint-replicated" &&
-        record.recipientKeyId === this.options.recipient.backupKeyId)
-      .map((record) => `${record.checkpointId}:${record.targetId}`));
-    const created = [...records].reverse().find((record): record is Extract<
-      CheckpointStreamRecord,
-      { t: "checkpoint-created" }
-    > => record.t === "checkpoint-created" &&
-      record.targetId !== undefined &&
-      record.generation !== undefined &&
-      record.generation.targetId === record.targetId &&
-      sameAuthorityGeneration(record.generation, generation) &&
-      replicated.has(`${record.checkpointId}:${record.targetId}`));
-    return created?.targetId
-      ? { checkpointId: created.checkpointId, targetId: created.targetId }
-      : undefined;
+    // 当前代际（root/recipient/trustChainHead）已复制的 created 中按 created 先后最新的一个，投影里按键维护
+    return readCheckpointLifecycle(this.options.log, (view) => view.latestReplicated(generation));
   }
 
   async cleanupExpired(now = this.#clock(), abort?: AbortSignal): Promise<void> {
-    const records = await this.#records();
-    const nowMs = Date.parse(now);
-    for (const record of records) {
-      if (
-        record.t !== "checkpoint-superseded" ||
-        nowMs - Date.parse(record.at) < RETENTION_MS
-      ) continue;
-      const created = records.find((candidate): candidate is Extract<
-        CheckpointStreamRecord,
-        { t: "checkpoint-created" }
-      > => candidate.t === "checkpoint-created" && candidate.checkpointId === record.checkpointId);
-      if (!created?.targetId) continue;
-      const targetRetired = records.some((candidate) =>
-        candidate.t === "checkpoint-cleanup-progress" &&
-        candidate.checkpointId === record.checkpointId &&
-        candidate.supersededBy === record.supersededBy &&
-        candidate.targetId === created.targetId &&
-        candidate.phase === "target-retired");
-      if (!targetRetired) {
+    // 只读已过保留期、目标尚未退役的待清理项（投影里按取代时间排序，退役后即移出）
+    const due = await readCheckpointLifecycle(this.options.log, async (view) => {
+      const items: { record: { checkpointId: string; supersededBy: string }; created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> }[] = [];
+      for (const item of await view.cleanupDue(Date.parse(now) - RETENTION_MS)) {
+        const created = await view.created(item.checkpointId);
+        if (created?.targetId === item.targetId) items.push({ record: item, created });
+      }
+      return items;
+    });
+    for (const { record, created } of due) {
+      if (!created.targetId) continue;
+      {
         const targetSession = await this.#target(created.targetId, created.recipientKeyId);
         try {
           const target = targetSession.target;
@@ -440,11 +415,9 @@ export class AuthorityCheckpointService {
 
   /** Replays all durable created obligations against their original target binding. */
   async recoverPending(abort?: AbortSignal): Promise<void> {
-    const records = await this.#records();
-    for (const created of records) {
-      if (created.t !== "checkpoint-created" || !created.targetId || !created.generation) continue;
-      if (records.some((record) => record.t === "checkpoint-replicated" &&
-        record.checkpointId === created.checkpointId && record.targetId === created.targetId)) continue;
+    // 只读待复制的 created（有目标与代际、尚未复制），按 created 先后
+    for (const created of await readCheckpointLifecycle(this.options.log, (view) => view.pendingReplication())) {
+      if (!created.targetId || !created.generation) continue;
       const checkpoint = await this.#loadLocalPackage(created, abort);
       const targetSession = await this.#target(created.targetId, created.recipientKeyId);
       try {
@@ -464,12 +437,7 @@ export class AuthorityCheckpointService {
     if (abort?.aborted) throw abort.reason ?? new Error("Recovery backup was cancelled");
     await target.writeDurable(checkpoint, abort);
     if (abort?.aborted) throw abort.reason ?? new Error("Recovery backup was cancelled");
-    const existing = (await this.#records()).find((record): record is Extract<
-      CheckpointStreamRecord,
-      { t: "checkpoint-replicated" }
-    > => record.t === "checkpoint-replicated" &&
-      record.checkpointId === created.checkpointId &&
-      record.targetId === target.targetId);
+    const existing = await readCheckpointLifecycle(this.options.log, (view) => view.replicated(created.checkpointId, target.targetId));
     if (existing) {
       if (
         existing.recipientKeyId !== created.recipientKeyId ||
@@ -581,33 +549,15 @@ export class AuthorityCheckpointService {
       ));
   }
 
-  async #records(): Promise<readonly CheckpointStreamRecord[]> {
-    return (await this.options.log.readStream<CheckpointStreamRecord>("checkpoint"))
-      .map((entry) => entry.body);
+  #created(checkpointId: string): Promise<Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> | undefined> {
+    return readCheckpointLifecycle(this.options.log, (view) => view.created(checkpointId));
   }
 
-  async #created(checkpointId: string): Promise<Extract<
-    CheckpointStreamRecord,
-    { t: "checkpoint-created" }
-  > | undefined> {
-    return (await this.#records()).find((record): record is Extract<
-      CheckpointStreamRecord,
-      { t: "checkpoint-created" }
-    > => record.t === "checkpoint-created" && record.checkpointId === checkpointId);
-  }
-
-  async #createdFor(
+  #createdFor(
     generation: RecoveryCheckpointGeneration,
     request: RecoveryCheckpointRequest,
   ): Promise<Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> | undefined> {
-    return (await this.#records()).find((record): record is Extract<
-      CheckpointStreamRecord,
-      { t: "checkpoint-created" }
-    > => record.t === "checkpoint-created" &&
-      record.generation !== undefined &&
-      record.request !== undefined &&
-      canonicalize(record.generation) === canonicalize(generation) &&
-      canonicalize(record.request) === canonicalize(request));
+    return readCheckpointLifecycle(this.options.log, (view) => view.createdFor(generation, request));
   }
 
   #assertCreatedForCurrentTarget(record: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>): void {
@@ -677,62 +627,33 @@ async function appendCheckpointRecords(
     .filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> =>
       record.t === "checkpoint-created")
     .map((record) => record.envelopeRef);
-  await log.transactProjection<readonly CheckpointStreamRecord[], CheckpointStreamRecord, void>(
-    [],
-    (state, record) => record.stream === "checkpoint" ? reduceRecords(state, record.body) : state,
-    (state) => {
-      let next = state;
+  // 按记录键在生命周期投影上去重：同键同内容跳过，同键不同内容即为冲突；不再从 LSN 0 重放 checkpoint 流
+  registerCheckpointLifecycleIndex(log);
+  await log.transactDurableProjection<CheckpointStreamRecord, void>(
+    CHECKPOINT_LIFECYCLE_PROJECTION_ID,
+    async (current) => {
+      const view = new CheckpointLifecycleView(current);
+      const batch = new Map<string, CheckpointStreamRecord>();
       const entries = [];
       for (const record of records) {
-        const existing = next.find((candidate) => checkpointRecordKey(candidate) === checkpointRecordKey(record));
+        const key = checkpointRecordKey(record);
+        const existing = batch.get(key) ?? await view.fact(key, record.t);
         if (existing) {
           if (canonicalize(existing) !== canonicalize(record)) {
             throw new TypeError("Checkpoint lifecycle replay conflicts with durable state");
           }
           continue;
         }
-        next = reduceRecords(next, record);
+        // 本地释放阶段不留事实，与原重放口径一致
+        if (!(record.t === "checkpoint-cleanup-progress" && record.phase === "local-released")) batch.set(key, record);
         entries.push({ stream: "checkpoint", body: record });
       }
       return entries.length === 0
         ? { kind: "return", value: undefined }
         : { kind: "append", entries, value: undefined };
     },
-    {
-      stream: "checkpoint",
-      ...(candidateReferences.length > 0 ? { candidateReferences } : {}),
-    },
+    candidateReferences.length > 0 ? { candidateReferences } : undefined,
   );
-}
-
-function reduceRecords(
-  state: readonly CheckpointStreamRecord[],
-  record: CheckpointStreamRecord,
-): readonly CheckpointStreamRecord[] {
-  if (record.t === "checkpoint-cleanup-progress" && record.phase === "local-released") {
-    return state;
-  }
-  const existing = state.find((candidate) => checkpointRecordKey(candidate) === checkpointRecordKey(record));
-  if (!existing) return [...state, record];
-  if (canonicalize(existing) !== canonicalize(record)) {
-    throw new TypeError("Checkpoint lifecycle contains conflicting durable facts");
-  }
-  return state;
-}
-
-function checkpointRecordKey(record: CheckpointStreamRecord): string {
-  switch (record.t) {
-    case "checkpoint-created":
-    case "checkpoint-superseded":
-      return `${record.t}:${record.checkpointId}`;
-    case "checkpoint-cleanup-progress":
-      return `${record.t}:${record.checkpointId}:${record.targetId}:${record.phase}`;
-    case "checkpoint-replicated":
-    case "checkpoint-verified":
-      return `${record.t}:${record.checkpointId}:${record.targetId}`;
-    case "checkpoint-verify-failed":
-      return `${record.t}:${canonicalize(record)}`;
-  }
 }
 
 function assertFullBinding(
@@ -758,22 +679,6 @@ function assertFullBinding(
     }) ||
     canonicalize(payload.coverage.classes) !== canonicalize(FULL_SCOPE)
   ) throw new TypeError("Recovery backup payload does not match its durable lifecycle facts");
-}
-
-function currentFullVerified(
-  records: readonly CheckpointStreamRecord[],
-  recipientKeyId: string,
-): Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>[] {
-  const superseded = new Set(records
-    .filter((record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-superseded" }> =>
-      record.t === "checkpoint-superseded")
-    .map((record) => record.checkpointId));
-  return records.filter((record): record is Extract<
-    CheckpointStreamRecord,
-    { t: "checkpoint-verified" }
-  > => record.t === "checkpoint-verified" &&
-    record.recipientKeyId === recipientKeyId &&
-    !superseded.has(record.checkpointId));
 }
 
 function sameAuthorityGeneration(

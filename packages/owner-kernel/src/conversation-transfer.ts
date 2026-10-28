@@ -17,6 +17,7 @@ import type {
   DurableProjectionReadContext,
   IdentifiedPhysicalStepRunner,
   DurableProjectionSource, VerifiedAnchorTenure,
+  DurableLogCheckpoint,
 } from "@zhixing/core/authority";
 import {
   validateAdmittedControlEnvelope,
@@ -236,9 +237,9 @@ export class ConversationTransferSource {
       throw new TypeError("Conversation changed before its transfer freeze");
     }
     const checkpoint = await this.#options.log.checkpoint();
-    const snapshot = await this.#options.log.readAll<unknown>();
+    // 按会话领域索引找到冻点前相关的信封并精确读出，原两遍选择器在这个子集上的结果与整读相同
     const selected = await selectConversationAuthorityRecords(
-      snapshot.filter((envelope) => envelope.lsn <= checkpoint.lsn),
+      await readConversationTransferEnvelopes(this.#options.log, this.#options.artifacts, identity.conversationId, checkpoint),
       identity.conversationId,
       this.#options.artifacts,
       this.#options.verifier,
@@ -1854,4 +1855,123 @@ function assertManifestIdentity(
   ) {
     throw new TypeError("Conversation transfer manifest does not bind target preparation");
   }
+}
+
+/**
+ * 会话迁移冻结的领域定位索引：只记“含该会话相关条目或归属来源的信封”在哪里，冻结时按会话前缀找到这些信封、
+ * 精确读出，再交给原两遍选择器（selectConversationAuthorityRecords），选择语义不变。
+ * - e/：直属流（run/intent/session-activity）与该会话 final-outbox 条目所在信封；
+ * - ca/ 与 pa/：run 正文里出现的 assignmentId（最早建立的 lsn）与该 assignmentId 的 publish 所在信封；
+ * - cc/ 与 cr/：物化后绑定该会话的 control 请求（最早建立的 lsn）与该 requestId 的全部 control 所在信封。
+ * 归属与位置都带 lsn，冻结只取冻点之前的，续读不混入冻点后的事实或关系。
+ */
+export const CONVERSATION_TRANSFER_SOURCES_PROJECTION_ID = "conversation-transfer-sources-v1";
+const DIRECT_STREAM_PREFIXES = ["run:", "intent:", "session-activity:"] as const;
+const sourceDigest = (domain: string, value: string): string => protocolDigest(`ConversationTransferSources${domain}`, 1, value);
+const lsnKey = (lsn: number): string => lsn.toString().padStart(16, "0");
+
+/** 物化后的 control 记录里被绑定的全部会话：与 recordBindsConversation 同一遍历（数组逐项、对象只下钻对象值）。 */
+function boundConversations(value: unknown, target: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) boundConversations(entry, target);
+    return;
+  }
+  if (!isPlainRecord(value)) return;
+  if (typeof value.conversationId === "string") target.add(value.conversationId);
+  for (const entry of Object.values(value)) if (isPlainRecord(entry)) boundConversations(entry, target);
+}
+
+/** 固定登记（重复登记同一定义幂等）：与会话迁移投影同处，首次写入前登记、随写入在线维护。 */
+export function registerConversationTransferSources(log: AuthorityCommitLog, artifacts: ArtifactStore): void {
+  log.durableProjection<unknown>({
+    projectionId: CONVERSATION_TRANSFER_SOURCES_PROJECTION_ID, reducerVersion: 1, authenticated: true,
+    inputs: { families: [...DIRECT_STREAM_PREFIXES], streams: ["control", "publish", "final-outbox"] },
+    async reduce(envelope, current, source: DurableProjectionSource) {
+      const changes = new Map<string, JsonValue | undefined>();
+      const position = source.checkpoint as unknown as JsonValue;
+      const establish = async (key: string, value: Record<string, JsonValue>) => {
+        if (changes.has(key) || (await current.get(key)) !== undefined) return;
+        changes.set(key, { ...value, lsn: envelope.lsn });
+      };
+      for (const entry of envelope.entries) {
+        const direct = DIRECT_STREAM_PREFIXES.find((prefix) => entry.stream.startsWith(prefix));
+        if (direct) {
+          const conversationId = entry.stream.slice(direct.length);
+          changes.set(`e/${sourceDigest("Conversation", conversationId)}/${lsnKey(envelope.lsn)}`, position);
+          if (direct === "run:") {
+            const assignments = new Set<string>();
+            collectStringFields(entry.body, "assignmentId", assignments);
+            for (const assignmentId of assignments)
+              await establish(`ca/${sourceDigest("Conversation", conversationId)}/${sourceDigest("Assignment", assignmentId)}`, { assignmentId });
+          }
+        } else if (entry.stream === "final-outbox") {
+          const conversationId = recordString(entry.body, "conversationId");
+          if (conversationId) changes.set(`e/${sourceDigest("Conversation", conversationId)}/${lsnKey(envelope.lsn)}`, position);
+        } else if (entry.stream === "publish") {
+          const assignmentId = recordString(entry.body, "assignmentId");
+          if (assignmentId) changes.set(`pa/${sourceDigest("Assignment", assignmentId)}/${lsnKey(envelope.lsn)}`, position);
+        } else if (entry.stream === "control") {
+          const requestId = recordString(entry.body, "requestId");
+          if (!requestId) continue;
+          changes.set(`cr/${sourceDigest("Request", requestId)}/${lsnKey(envelope.lsn)}`, position);
+          const bound = new Set<string>();
+          boundConversations(await materializeTransferControlRecord(entry.body, artifacts), bound);
+          for (const conversationId of bound)
+            await establish(`cc/${sourceDigest("Conversation", conversationId)}/${sourceDigest("Request", requestId)}`, { requestId });
+        }
+      }
+      return [...changes].map(([key, value]): DurableProjectionMutation => value === undefined
+        ? { kind: "tombstone", key } : { kind: "put", key, value });
+    },
+  });
+}
+
+/**
+ * 冻点之前与该会话相关的信封，按 lsn 先后精确读出（每个信封一次）。冻点由调用方先取得；索引视图在其后的
+ * 同一已验证前缀上，位置与归属都只取 lsn ≤ 冻点的。
+ */
+export async function readConversationTransferEnvelopes(
+  log: AuthorityCommitLog,
+  artifacts: ArtifactStore,
+  conversationId: string,
+  through: DurableLogCheckpoint,
+): Promise<readonly CommitEnvelope<unknown>[]> {
+  registerConversationTransferSources(log, artifacts);
+  const positions = (await log.transactDurableProjection<never, Map<number, DurableLogCheckpoint>>(CONVERSATION_TRANSFER_SOURCES_PROJECTION_ID, async (current) => {
+    const found = new Map<number, DurableLogCheckpoint>();
+    const upper = lsnKey(through.lsn + 1);
+    const scanAll = async (prefix: string, lt = prefix + "￿") => {
+      const entries: { key: string; value: JsonValue }[] = [];
+      for (let continuation: string | undefined, first = true; first || continuation; first = false) {
+        const page = await current.scan({ gte: prefix, lt }, 64, continuation);
+        entries.push(...page.entries);
+        continuation = page.continuation;
+      }
+      return entries;
+    };
+    const collect = async (prefix: string) => {
+      for (const { value } of await scanAll(prefix, prefix + upper)) {
+        const checkpoint = value as unknown as DurableLogCheckpoint;
+        if (checkpoint.lsn <= through.lsn) found.set(checkpoint.lsn, checkpoint);
+      }
+    };
+    const conversation = sourceDigest("Conversation", conversationId);
+    await collect(`e/${conversation}/`);
+    for (const { value } of await scanAll(`ca/${conversation}/`)) {
+      const relation = value as { assignmentId?: unknown; lsn?: unknown };
+      if (typeof relation.assignmentId === "string" && typeof relation.lsn === "number" && relation.lsn <= through.lsn)
+        await collect(`pa/${sourceDigest("Assignment", relation.assignmentId)}/`);
+    }
+    for (const { value } of await scanAll(`cc/${conversation}/`)) {
+      const relation = value as { requestId?: unknown; lsn?: unknown };
+      if (typeof relation.requestId === "string" && typeof relation.lsn === "number" && relation.lsn <= through.lsn)
+        await collect(`cr/${sourceDigest("Request", relation.requestId)}/`);
+    }
+    return { kind: "return", value: found };
+  })).value;
+  const envelopes: CommitEnvelope<unknown>[] = [];
+  // 按位置精确读：readEnvelopeAt 核对帧索引与 lsn，信封原样交给选择器，不重拼、不重算摘要
+  for (const lsn of [...positions.keys()].sort((left, right) => left - right))
+    envelopes.push(await log.readEnvelopeAt<unknown>(positions.get(lsn)!));
+  return envelopes;
 }

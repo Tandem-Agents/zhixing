@@ -99,6 +99,8 @@ describe("home authority sources", () => {
         await conversationRecoveryPage(log, lease.sources.artifacts);
         expect(new Set(ready[position]!.projections)).toEqual(registered.get(log.rootDir));
       }
+      // 扩展当前状态索引随固定定义在首次写入前登记，不等扩展首次被调用
+      expect(registered.get(lease.sources.authority.rootDir)).toContain("extension-current-state");
     } finally { await lease.close(); spy.mockRestore(); }
   }, 60_000);
 

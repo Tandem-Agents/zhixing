@@ -394,7 +394,7 @@ describe("production mesh runtime bootstrap", () => {
 
       const trust = await local.bootstrapStore.loadTrustProjection();
       if (!trust) throw new Error("recovery trust projection is missing");
-      const records = await local.bootstrapStore.loadCheckpointRecords();
+      const records = await local.bootstrapStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
       const readiness = projectRecoveryReadiness({
         trust,
         verifiedRecords: records.filter(

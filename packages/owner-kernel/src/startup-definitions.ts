@@ -7,4 +7,4 @@ export { registerConversationReadProjection } from "./conversation-read-index.js
 export { registerConversationRecoveryProjection } from "./conversation-recovery-index.js";
 export { registerConversationRunProjection } from "./conversation-run-state-index.js";
 export { registerAdvancementRecoveryProjection } from "./advancement-recovery-index.js";
-export { registerConversationTransferProjection } from "./conversation-transfer.js";
+export { registerConversationTransferProjection, registerConversationTransferSources } from "./conversation-transfer.js";

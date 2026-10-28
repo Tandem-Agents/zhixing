@@ -1158,7 +1158,9 @@ export class FileDurableProjectionIndex {
     const startAtSource = typeof this.#startAtSource === "function" ? head !== undefined && this.#startAtSource(head) : this.#startAtSource;
     const checkpoints = validateCheckpoints(startAtSource ? recoveryTarget : emptyCheckpoints);
     const seeded = startAtSource && this.#seedAtSource !== undefined && checkpoints.authority !== undefined;
-    const old = this.#manifest;
+    // 另一进程可能已发布更新的代次（本实例因存储错误重建时手里的是旧清单）：以同一锁内读到的已发布清单与
+    // 进程内清单中较新的为准，代次单调不回退，对方清单引用的段进入退役链而不成孤儿；磁盘清单不可读时退回进程内
+    const old = await this.#newestKnownManifest();
     const generation = (old?.generation ?? 0) + 1;
     let retirementRoot = old?.retirementRoot;
     if (this.#persistent && old && (old.baseRoot || old.deltaSegments.length)) {
@@ -3106,6 +3108,19 @@ export class FileDurableProjectionIndex {
       return this.#writeDirectoryPage(pivot.descriptor, nextLeft, nextRight);
     }
     return this.#writeDirectoryPage(descriptor, left, right);
+  }
+
+  async #newestKnownManifest(): Promise<ProjectionManifest | undefined> {
+    const memory = this.#manifest;
+    if (!this.#persistent) return memory;
+    // 只有确证损坏（或缺失，读取返回 undefined）才退回进程内清单；临时 I/O、权限、取消、资源准入等读不到当前
+    // 清单的失败保留原因并停止这次发布，不能拿旧的内存信息覆盖已发布代次与未完的退役义务
+    const published = await this.#readManifest().catch((error: unknown) => {
+      if (error instanceof DurableProjectionStorageError) return undefined;
+      throw error;
+    });
+    if (!published || published.projectionId !== this.projectionId || published.reducerVersion !== this.reducerVersion) return memory;
+    return !memory || published.generation > memory.generation ? published : memory;
   }
 
   async #readManifest(directory = this.rootDir): Promise<ProjectionManifest | undefined> {

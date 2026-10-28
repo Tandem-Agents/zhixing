@@ -8,7 +8,8 @@ import path from "node:path";
 import { AuthorityCacheIntegrity, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import { createSignedConversationEnvelope } from "@zhixing/core/protocol";
 import { captureFileIo, defaultFileIoCategory, type FileIoSnapshot } from "@zhixing/test-utils";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { AuthenticatedFrameIndex } from "../../../core/src/authority/frame-index.js";
 import { ConversationAssignmentLedger } from "../assignment-ledger.js";
 import { ExecutorResourceGovernor } from "../resource-governor.js";
 import {
@@ -130,4 +131,45 @@ describe("assignment ledger cold reads with fixed current work and growing ended
     expect(scale(1024).streamReplay.frameIndex).toBeGreaterThan(scale(64).streamReplay.frameIndex * 8);
     expect(scale(1024).wholeLog.log).toBeGreaterThan(scale(64).wholeLog.log * 8);
   }, 900_000);
+
+  // 沿用已保存的绑定检查点时，只按派发领域索引里目标派发自己的行判断其后有无新记录；
+  // 曾从检查点的全局游标按流过滤扫描，4 / 64 个无关派发时实际访问 8 / 128 个帧索引行
+  it("reuses a saved binding without visiting frame rows of unrelated later assignments", async () => {
+    const visited: number[] = [];
+    for (const unrelated of [4, 64]) {
+      const h = await createFormalReceiptHarness({ startupProofs: true, monotonicClock: () => 0 });
+      const logRoot = path.join(h.root, "formal-executor");
+      const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 5));
+      expect(await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"))).toMatchObject({ accepted: true });
+      // 保存目标派发的绑定检查点，之后目标不变，只经同一公开入口增加被拒的无关派发
+      await h.ledger.dataPlaneBindings([{ assignmentId: ASSIGNMENT_ID, use: "observe" }]);
+      for (let index = 0; index < unrelated; index++) {
+        const assignmentId = `later-${index}`;
+        const envelope = createSignedConversationEnvelope(
+          createUnsignedEnvelope(h.identity, { assignmentId, runId: `run-later-${index}` }), h.identity, h.identity);
+        expect(await h.ledger.dispatch(envelope, h.activation, ownerContext(assignmentId, "executor.dispatch"))).toMatchObject({ accepted: false });
+      }
+      await h.log.stopStorageMaintenance();
+      const cold = new FileAuthorityCommitLog(logRoot, h.artifacts, { clock: () => NOW, integrity });
+      onTestFinished(() => cold.stopStorageMaintenance());
+      const governor = new ExecutorResourceGovernor({ log: cold, signer: h.identity, verifier: h.identity, guard: { assert() {} },
+        executorId: EXECUTOR_ID, localDomainId: "local:device-1", localGovernorEpoch: 1, maxActiveRoots: 1, clock: () => NOW });
+      const ledger = new ConversationAssignmentLedger({ log: cold, artifacts: h.artifacts, executorId: EXECUTOR_ID,
+        signer: h.identity, verifier: h.identity, ownerControl, snapshotFor: matchingSnapshotFor,
+        permissionSnapshotFor: digest => matchingPermissionSnapshotFor(h.identity, digest), resources: governor, clock: () => NOW });
+      await cold.prepareProjections();
+      let rows = 0;
+      const scanRows = AuthenticatedFrameIndex.prototype.scanRows;
+      const spy = vi.spyOn(AuthenticatedFrameIndex.prototype, "scanRows").mockImplementation(function (this: AuthenticatedFrameIndex,
+        from: number, to: number, visit: (lsn: number, row: Buffer) => boolean | void) {
+        return scanRows.call(this, from, to, (lsn, row) => { rows++; return visit(lsn, row); });
+      });
+      try {
+        const [bound] = await ledger.dataPlaneBindings([{ assignmentId: ASSIGNMENT_ID, use: "observe" }]);
+        expect(bound).toMatchObject({ ref: h.activation.ref, executorId: EXECUTOR_ID });
+      } finally { spy.mockRestore(); }
+      visited.push(rows);
+    }
+    expect(visited[1], JSON.stringify(visited)).toBe(visited[0]);
+  }, 300_000);
 });
