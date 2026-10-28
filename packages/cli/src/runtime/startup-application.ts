@@ -1,9 +1,10 @@
 /** Node 首配检查、owner 保存及重读；终端只提供编辑回调。 */
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { getZhixingHome } from "@zhixing/core/paths";
 import type { SecretStorePort } from "@zhixing/core/contracts";
 import { FileLockBusyError } from "@zhixing/core/persistence";
-import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
+import { maintenanceRetryDelayMs, StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import {
   ConfigSchemaError,
@@ -82,6 +83,31 @@ export interface StartupApplicationOptions {
   }) => Promise<{ kind: "completed" | "cancelled" | "non-tty" }>;
   /** SecretStore 覆盖（测试或受管宿主注入）。 */
   secretStore?: SecretStorePort & CredentialStoreCoordinator;
+  /** 本次启动尝试的取消信号：读取配置的自动接续随它停止。 */
+  signal?: AbortSignal;
+  /** 读取配置遇正常内部竞争时的接续期限（测试可缩短）。 */
+  readContinuationMs?: number;
+}
+
+/** 启动尝试内读取配置遇正常内部竞争（文件锁忙、可重试的资源准入背压）时的接续期限；超过才交给用户。 */
+const STARTUP_READ_CONTINUATION_MS = 20_000;
+const LOCK_BUSY_RETRY_MS = 250;
+
+/**
+ * 同一次启动尝试里有限、可取消地接续读取：只对文件锁忙与 maintenanceRetryDelayMs 给出等待的背压重试，
+ * 损坏、不可重试的准入拒绝与其他错误原样交回；期限内仍不可读才交回最后一次错误。
+ */
+async function readContinuing<T>(read: () => Promise<T>, signal?: AbortSignal, budgetMs = STARTUP_READ_CONTINUATION_MS): Promise<T> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    signal?.throwIfAborted();
+    try { return await read(); }
+    catch (error) {
+      const wait = error instanceof FileLockBusyError ? LOCK_BUSY_RETRY_MS : maintenanceRetryDelayMs(error);
+      if (wait === undefined || Date.now() + wait > deadline) throw error;
+      await delay(wait, undefined, signal ? { signal } : undefined);
+    }
+  }
 }
 
 export async function checkStartupConfiguration(
@@ -130,11 +156,13 @@ export async function checkStartupConfiguration(
       homeDir: credentialsHomeDir, configPath, store: secretStore, records: options.records,
       processIdentityResolver: options.processIdentityResolver,
     });
-    const preparedCredentials = await configuration.read();
+    const preparedCredentials = await readContinuing(() => configuration!.read(), options.signal, options.readContinuationMs);
     credentials = preparedCredentials.credentials;
     config = preparedCredentials.config;
     credentialGeneration = preparedCredentials.generation;
   } catch (err) {
+    // 本次启动尝试已取消：不把取消报成配置或凭据故障
+    if (options.signal?.aborted) throw err;
     if (err instanceof CredentialsSchemaError) {
       return { kind: "schema-error", filePath: err.filePath, message: err.message };
     }

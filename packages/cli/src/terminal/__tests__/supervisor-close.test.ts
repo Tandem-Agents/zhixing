@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
 import { TERMINAL_LIMITS, type TerminalEnvelope, type TerminalMessage } from '../../../../terminal-ui/src/protocol.js';
 import { terminalWriterDeadline, terminalCloseDeadline } from '../close-budget.js';
+import { recordTerminalFailure } from '../failure.js';
 import { checkpointFilesystemCompletion, retainCheckpointFilesystemCompletion } from '../../../../mesh/src/checkpoint-filesystem-completion.js';
 import { beginLogPhase } from '@zhixing/core/logging';
 
@@ -90,9 +91,10 @@ class ProcessPort extends EventEmitter {
 function fixture(admitted = Promise.resolve(), args: readonly string[] = [], drain?: () => Promise<void>, loggingAdmission?: () => Promise<void>) {
   const timeoutExit = vi.fn(), peerFailures: string[] = [], children: ProcessPort[] = [];
   const processPort = { platform: 'win32', off: vi.fn(), exit: timeoutExit };
-  const Owner = new Function('beginLogPhase', 'process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'TerminalChannelRetiredError', 'terminalWriterDeadline', 'checkpointFilesystemCompletion', 'TERMINAL_LIMITS', 'terminalCloseDeadline', emitted + '\nreturn TerminalSupervisor;')(
+  const Owner = new Function('beginLogPhase', 'process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'TerminalChannelRetiredError', 'terminalWriterDeadline', 'checkpointFilesystemCompletion', 'TERMINAL_LIMITS', 'terminalCloseDeadline', 'recordTerminalFailure', emitted + '\nreturn TerminalSupervisor;')(
     beginLogPhase,
     processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, TerminalChannelRetiredError, terminalWriterDeadline, checkpointFilesystemCompletion, TERMINAL_LIMITS, terminalCloseDeadline,
+    recordTerminalFailure,
   ) as new (options: unknown) => SupervisorPort;
   const record = vi.fn();
   const supervisor = new Owner({ args, drain, admitted: loggingAdmission, records: { record } });

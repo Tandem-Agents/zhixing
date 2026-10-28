@@ -18,6 +18,7 @@ import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/st
 import { resolveSelfExec } from '../serve/self-exec.js';
 import { terminalCloseDeadline, terminalWriterDeadline } from './close-budget.js';
 import { verifyTerminalAssets } from './verify-assets.js';
+import { recordTerminalFailure } from './failure.js';
 import { readDeviceRestriction, retrievingHostAlive } from '../serve/device-restriction.js';
 
 type Role = 'recovery' | 'application' | 'ui';
@@ -439,9 +440,9 @@ class TerminalSupervisor {
           const { role, deadline: requestedDeadline } = message;
           const authorization = this.#creationOwners.get(owner);
           const allowed: Readonly<Record<string, readonly TerminalHelperRole[]>> = {
-            application: ['filesystem', 'log-store', 'log-files', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
+            application: ['filesystem', 'log-store', 'log-files', 'credential', 'clipboard', 'mcp-probe', 'mcp-probe-runner', 'writer-observer', 'managed-service'],
             'log-store': ['log-files', 'writer-observer'], 'log-files': ['filesystem', 'writer-observer'],
-            credential: ['credential-command'], 'writer-observer': ['writer-observer'],
+            credential: ['credential-command'], 'writer-observer': ['writer-observer'], 'mcp-probe-runner': ['mcp-probe'],
           };
           if (message.type !== 'create' || !authorization || ownerChild.exited || typeof role !== 'string' || !allowed[authorization.role]?.includes(role as TerminalHelperRole) ||
               this.#privateHelpers.has(id) || this.#hosts.has(id) || typeof requestedDeadline !== 'number' || !Number.isSafeInteger(requestedDeadline) || requestedDeadline <= Date.now()) throw Error('terminal-helper-admission');
@@ -533,9 +534,9 @@ class TerminalSupervisor {
           const { owner, id, role, endpoint, token, deadline: requestedDeadline } = message;
           const authorization = typeof owner === 'string' ? this.#creationOwners.get(owner) : undefined;
           const allowed: Readonly<Record<string, readonly TerminalHelperRole[]>> = {
-            application: ['filesystem', 'log-store', 'log-files', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
+            application: ['filesystem', 'log-store', 'log-files', 'credential', 'clipboard', 'mcp-probe', 'mcp-probe-runner', 'writer-observer', 'managed-service'],
             'log-store': ['log-files', 'writer-observer'], 'log-files': ['filesystem', 'writer-observer'],
-            credential: ['credential-command'], 'writer-observer': ['writer-observer'],
+            credential: ['credential-command'], 'writer-observer': ['writer-observer'], 'mcp-probe-runner': ['mcp-probe'],
           };
           if (message.v !== 1 || !authorization?.child || authorization.child.exited || typeof role !== 'string' || !allowed[authorization.role]?.includes(role as TerminalHelperRole) ||
               typeof id !== 'string' || !/^[a-f0-9-]{36}$/u.test(id) || this.#privateHelpers.has(id) ||
@@ -842,7 +843,14 @@ class TerminalSupervisor {
 
   #attachRole(item: OwnedProcess): void {
     item.channel = new TerminalChannel(this.instance, (packet, done) => item.child.send(packet, done),
-      (message, traffic) => this.#roleMessage(item, message, traffic), reason => void this.#close(70, reason));
+      (message, traffic) => this.#roleMessage(item, message, traffic), reason => {
+        // 先记下是哪一端、哪条请求、积压多少，再关闭：只有关闭原因时无法定位是谁没有确认
+        const context = item.channel?.failureContext;
+        recordTerminalFailure(this.options.records, context?.error ?? Error(reason), reason, {
+          role: item.role, requestId: context?.requestId, action: context?.action, pending: context?.pending, queued: context?.queued,
+        });
+        void this.#close(70, reason);
+      });
     item.child.on('message', message => item.channel!.accept(message));
   }
 

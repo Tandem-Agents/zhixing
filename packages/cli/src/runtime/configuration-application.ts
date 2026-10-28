@@ -243,16 +243,21 @@ export interface McpConfigurationDeps {
     ) => Promise<string>;
     llmConsume?: <T>(prompt: string, consume: (text: string) => T, role?: 'main' | 'light', signal?: AbortSignal) => Promise<T>;
     createStdioProcess?: CreateMcpManagementAdapterOptions['createStdioProcess'];
+    /** 一次性探测的替换实现（终端：在受管辅助进程里执行，不在本进程加载 SDK）；缺省在本进程探测。 */
+    createProbe?: (proxy: import('@zhixing/network').NetworkPolicy['proxy'] | undefined) =>
+      import('@zhixing/core/mcp-management').McpManagementInfrastructurePort['probe'];
 }
 
 export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {
   const { createMcpManagementAdapter } = await import('./mcp-management-adapter.js');
   const proxy = loadConfig({ configPath: deps.configPath }).network?.proxy;
-  const management = createMcpManagementAdapter({
+  const adapter = createMcpManagementAdapter({
     proxy,
     readStatusWire: deps.readMcpStatusWire,
     createStdioProcess: deps.createStdioProcess,
   });
+  // 探测可替换，其余能力（状态快照、搜索、读源）沿用同一适配器
+  const management = deps.createProbe ? Object.freeze({ ...adapter, probe: deps.createProbe(proxy) }) : adapter;
 
   // 接入相关的 LLM——走 main 档：搜索引导的判断 / 从 README 抽启动方式的质量
   // 直接决定接入成败，是质量敏感任务，不用 light。推理在宿主(llm.complete),

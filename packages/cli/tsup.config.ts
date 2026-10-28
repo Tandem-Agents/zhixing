@@ -50,7 +50,7 @@ async function bundleSupervisorEntry() {
 }
 
 export default defineConfig({
-  entry: { index: "src/entry.ts", metadata: "src/index.ts", "logging-admission-worker": "src/logging/writer-admission-worker.ts", "logging-files-worker": "src/logging/logging-files-worker.ts", "logging-writers-worker": "src/logging/logging-writers-worker.ts", "logging-store-worker": "src/logging/store-worker.ts" },
+  entry: { index: "src/entry.ts", metadata: "src/index.ts", "logging-admission-worker": "src/logging/writer-admission-worker.ts", "logging-files-worker": "src/logging/logging-files-worker.ts", "logging-writers-worker": "src/logging/logging-writers-worker.ts", "logging-store-worker": "src/logging/store-worker.ts", "mcp-probe-worker": "src/runtime/mcp-probe-worker.ts" },
   format: ["esm"],
   dts: false,
   sourcemap: true,

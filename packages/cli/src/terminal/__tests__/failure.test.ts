@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { recordTerminalFailure } from '../failure.js';
-import type { LogRecordPort } from '@zhixing/core/logging';
+import type { LogDraft, LogRecordPort } from '@zhixing/core/logging';
 
 describe('terminal first-cause logging', () => {
   it.each(['timeout', 'size', 'busy', 'incomplete', 'unavailable', 'encoding', 'read-failed', 'aborted', 'output-capacity'])
@@ -14,6 +14,13 @@ describe('terminal first-cause logging', () => {
     expect(JSON.stringify(record.mock.calls)).not.toContain('private-message');
     expect(record.mock.calls[1]![0].data.action).toBe('clipboard-write');
   });
+  it('S 记录角色通道失败时带上另一端的角色与积压', () => {
+    const entries: LogDraft[] = [];
+    const records: LogRecordPort = { record: value => { entries.push(typeof value === 'function' ? value() : value); } };
+    recordTerminalFailure(records, Error('terminal-delivery-timeout'), 'terminal-delivery-timeout', { role: 'application', pending: 3, queued: 1 });
+    expect(entries[0]?.data).toMatchObject({ reason: 'terminal-delivery-timeout', role: 'application', pending: 3, queued: 1 });
+  });
+
   it('记录有限错误码/请求及代码位置，不记录原始错误秘密或绝对路径', () => {
     const record = vi.fn(), records = { record } as unknown as LogRecordPort;
     const cause = Error('secret provider payload');

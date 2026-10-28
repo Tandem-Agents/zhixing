@@ -32,6 +32,7 @@ const emitted = ts.transpileModule(`
       this.#acceptCreation(ports.socket);
     }
     seal() { this.#sealed = true; this.#abort.abort(); }
+    accept(socket) { this.#acceptCreation(socket); }
     get retained() { return this.#privateHelpers.size; }
     #acceptOwnerChannel() { throw Error('Unexpected POSIX port'); }
     #close(code, reason) { this.failures.push({ code, reason }); }
@@ -167,5 +168,36 @@ describe('supervisor established filesystem lifetime', () => {
       expect(f.gate.kill).toHaveBeenCalled();
       expect(f.assets.settleWriter).not.toHaveBeenCalled(); expect(f.supervisor.retained).toBe(1);
     } finally { await f.dispose(); }
+  });
+});
+
+describe('supervisor MCP probe runner role', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  // 生产方法原样运行：application 可建 runner；runner 是只能建外部 MCP 命令的嵌套创建所有者；runner 退出时 S 强杀它建的命令
+  it('lets the runner create only external MCP commands and reaps them when the runner exits', async () => {
+    const parent = new ProcessPort(), first = new SocketPort(), owner = randomUUID(), children: ProcessPort[] = [];
+    const assets = { writerIntent: vi.fn(async () => {}), bindWriter: vi.fn(async () => {}), settleWriter: vi.fn(async () => {}) };
+    const processes = { children: new Set(), artifact: 'fixture-native', gate: 'fixture-gate',
+      create: vi.fn((..._args: unknown[]) => { const child = new ProcessPort(); children.push(child); return child; }) };
+    const supervisor = new loaded.FixtureSupervisor!({ assets, processes, owner, parent, socket: first }) as SupervisorPort & { accept(socket: SocketPort): void };
+    const request = (socket: SocketPort, from: string, role: string) => socket.emit('data', Buffer.from(JSON.stringify({
+      v: 1, owner: from, id: randomUUID(), role, endpoint: 'fixture-private', token: randomUUID(), deadline: Date.now() + 5000 }) + '\n'));
+    request(first, owner, 'mcp-probe-runner'); await vi.advanceTimersByTimeAsync(0);
+    expect(processes.create).toHaveBeenCalledOnce();
+    const runner = children[0]!, runnerToken = (processes.create.mock.calls[0]![2] as NodeJS.ProcessEnv).ZHIXING_TERMINAL_CREATE_TOKEN!;
+    expect(runnerToken).toMatch(/^[a-f0-9-]{36}$/u);
+    const command = new SocketPort(); supervisor.accept(command); request(command, runnerToken, 'mcp-probe'); await vi.advanceTimersByTimeAsync(0);
+    expect(processes.create).toHaveBeenCalledTimes(2);
+    expect(processes.create.mock.calls[1]![5]).toMatchObject({ scope: 'probe' });
+    for (const role of ['mcp-probe-runner', 'filesystem', 'clipboard']) {
+      const refused = new SocketPort(); supervisor.accept(refused); request(refused, runnerToken, role); await vi.advanceTimersByTimeAsync(0);
+      expect(refused.destroyed).toBe(true);
+    }
+    expect(processes.create).toHaveBeenCalledTimes(2);
+    runner.finish(0); await vi.advanceTimersByTimeAsync(0);
+    expect(children[1]!.kill).toHaveBeenCalledWith('SIGKILL');
+    children[1]!.finish(137); command.destroy(); first.destroy(); await vi.advanceTimersByTimeAsync(0);
   });
 });

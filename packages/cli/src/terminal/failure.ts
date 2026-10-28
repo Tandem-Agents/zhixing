@@ -25,7 +25,8 @@ const actions = new Set([
   'input-submit', 'input-references', 'skills-open', 'skills-action', 'skills-refresh',
 ]);
 export function recordTerminalFailure(records: LogRecordPort | undefined, error: unknown, reason: string,
-  context: { action?: string; requestId?: number; active?: number; pending?: number; queued?: number; durationMs?: number } = {}): void {
+  context: { action?: string; requestId?: number; active?: number; pending?: number; queued?: number; durationMs?: number;
+    /** 通道另一端的进程角色（S 记录角色通道失败时给出） */ role?: 'ui' | 'application' | 'host' | 'recovery' } = {}): void {
   try {
     const message = error instanceof Error ? error.message : undefined;
     const failure = typeof message === 'string' && codes.has(message) ? { category: 'terminal', code: message } : logFailureEvidence(error);
@@ -34,6 +35,7 @@ export function recordTerminalFailure(records: LogRecordPort | undefined, error:
       ...(sourceFrames.length ? { sourceFrames } : {}),
       ...Object.fromEntries(Object.entries(context).filter(([key, value]) => key !== 'action' && typeof value === 'number' && Number.isFinite(value))),
       action: context.action === undefined ? undefined : actions.has(context.action) ? context.action : 'other',
+      ...(context.role ? { role: context.role } : {}),
     } });
   } catch { /* Logging cannot replace cleanup or the original failure. */ }
 }

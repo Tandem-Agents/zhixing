@@ -203,7 +203,7 @@ class PosixCreationOwner {
 }
 
 /** Finite lifecycle roles only; domain owners keep their plans and data. */
-export type TerminalHelperRole = 'filesystem' | 'log-store' | 'log-files' | 'writer-observer' | 'credential' | 'credential-command' | 'clipboard' | 'mcp-probe' | 'managed-service';
+export type TerminalHelperRole = 'filesystem' | 'log-store' | 'log-files' | 'writer-observer' | 'credential' | 'credential-command' | 'clipboard' | 'mcp-probe' | 'mcp-probe-runner' | 'managed-service';
 export interface TerminalOwnedProcessOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly cwd?: string;

@@ -41,7 +41,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
       phase: "text", failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: "text", maxItems: 4 },
     } },
     terminalFailure: { message: "终端操作首因", level: "error", tier: "critical", fields: {
-      reason: "text", action: "text", requestId: "number", active: "number", pending: "number", queued: "number", durationMs: "number",
+      reason: "text", action: "text", role: "text", requestId: "number", active: "number", pending: "number", queued: "number", durationMs: "number",
       failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: 'text', maxItems: 4 },
     } },
     started: {

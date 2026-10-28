@@ -64,10 +64,39 @@ describe("startup SecretStore boundary", () => {
     const homeDir = await createTempDir('startup-preparation-unavailable');
     await writeFile(path.join(homeDir, 'config.jsonc'), JSON.stringify({ llm: { main: { provider: 'deepseek', model: 'deepseek-chat' } } }));
     const edit = vi.fn(async () => ({ kind: 'non-tty' as const }));
-    const result = await checkStartupConfiguration({ homeDir, mode: 'repl', secretStore: new MemoryStore(), edit,
+    // 接续期限内一直不可读才交给用户
+    const result = await checkStartupConfiguration({ homeDir, mode: 'repl', secretStore: new MemoryStore(), edit, readContinuationMs: 300,
       configuration: { read: async () => { throw error; }, edit: async () => { throw Error('must not edit'); } } });
     expect(result).toMatchObject({ kind: 'read-unavailable', message: expect.stringContaining('稍后重试') });
     expect(edit).not.toHaveBeenCalled();
+  });
+  it.each([
+    new FileLockBusyError('synthetic-authority'),
+    new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'ioOperations', retryAfterMs: 25 }),
+  ])('continues the same startup attempt once a normal internal contention clears: %s', async error => {
+    const homeDir = await createTempDir('startup-preparation-continues');
+    let attempts = 0;
+    const result = await checkStartupConfiguration({ homeDir, mode: 'repl', secretStore: new MemoryStore(), edit: vi.fn(),
+      configuration: { read: async () => {
+        if (++attempts < 3) throw error;
+        return { config: { llm: { main: { provider: 'deepseek', model: 'deepseek-chat' } } }, credentials: {}, generation: 'g1' } as never;
+      }, edit: async () => { throw Error('must not edit'); } } });
+    expect(attempts).toBe(3);
+    expect(result.kind).not.toBe('read-unavailable');
+  });
+  it('does not retry a non-retryable admission refusal and stops continuing when the attempt is cancelled', async () => {
+    const homeDir = await createTempDir('startup-preparation-refused');
+    let attempts = 0;
+    const refused = await checkStartupConfiguration({ homeDir, mode: 'repl', secretStore: new MemoryStore(), edit: vi.fn(),
+      configuration: { read: async () => { attempts++; throw new StorageMaintenanceAdmissionError({ kind: 'capacity-gap', blockedBy: 'temporaryBytes', required: 2, available: 1 }); },
+        edit: async () => { throw Error('must not edit'); } } });
+    expect(refused).toMatchObject({ kind: 'read-unavailable' });
+    expect(attempts).toBe(1);
+    const abort = new AbortController();
+    setTimeout(() => abort.abort(), 100);
+    await expect(checkStartupConfiguration({ homeDir, mode: 'repl', secretStore: new MemoryStore(), edit: vi.fn(), signal: abort.signal,
+      configuration: { read: async () => { throw new FileLockBusyError('synthetic-authority'); }, edit: async () => { throw Error('must not edit'); } } }))
+      .rejects.toMatchObject({ name: 'AbortError' });
   });
   it("a reused local configuration port rechecks committed exposure before returning credentials", async () => {
     const homeDir = await createTempDir("configuration-fresh-policy"), store = new MemoryStore();

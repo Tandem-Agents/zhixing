@@ -707,7 +707,7 @@ class TerminalApplication {
         const { checkStartupConfiguration } = await observeStartupPhase(this.#logging.records, 'terminal.load-configuration', () => import('../runtime/startup-application.js'));
         this.#abort.signal.throwIfAborted();
         return checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
-        secretStore: this.#secretStore,
+        signal: this.#abort.signal, secretStore: this.#secretStore,
         processIdentityResolver: this.#secretPlatform.processIdentityResolver,
         records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
         edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
@@ -1666,10 +1666,10 @@ class TerminalApplication {
     const { editRuntimeConfiguration, prepareMcpConfiguration } = await import('../runtime/configuration-application.js');
     this.#abort.signal.throwIfAborted();
     const connected = this.#connection.getStatus().kind === 'connected';
+    // 一次性探测在受管 runner 里加载 SDK 并建链：本进程首次加载 SDK 会同步卡住事件循环，超过 S 的确认期限即被关掉
+    const { createTerminalMcpProbe } = kind === 'mcp' ? await import('./mcp-probe-runner.js') : { createTerminalMcpProbe: undefined };
     const mcp = kind === 'mcp' ? await prepareMcpConfiguration({ configPath: this.#configPath,
-      createStdioProcess: (command, args, env, signal) => createTerminalOwnedProcessFactory('mcp-probe')(command, args, {
-        env, signal: signal ? AbortSignal.any([signal, this.#abort.signal]) : this.#abort.signal, deadline: Date.now() + 5000,
-      }),
+      createProbe: proxy => createTerminalMcpProbe!({ signal: this.#abort.signal, ...(proxy ? { proxy } : {}) }),
       readMcpStatusWire: async () => (await this.#management.serverInfoIfConnected())?.mcpServers ?? [],
       readMcpPending: async () => connected && this.#controller ? this.#management.mcpPending(this.#controller.current.conversationId) : [],
       llmComplete: (prompt, role, signal) => {
