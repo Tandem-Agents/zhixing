@@ -2050,7 +2050,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           runRecord: { timestamp: this.#clock(), messages: [], usage },
           newMessages: [], durationMs: 0 };
       }
-      this.#observeFailure(error, { phase: "run", conversationId: input.conversationId, runId });
+      // 取消已耐久后执行体以 AbortError 结束是用户中止，不是执行失败的首因；状态读不到时照旧记录
+      const userCancelled = (error as { name?: unknown } | null)?.name === "AbortError" &&
+        await journal.runState(runId).then(state => state === "cancel-requested" || state === "cancelled", () => false);
+      if (!userCancelled) this.#observeFailure(error, { phase: "run", conversationId: input.conversationId, runId });
       this.#markRecovery(input.conversationId);
       throw error;
     } finally {

@@ -4,6 +4,7 @@ import { LOG_FAILURE_FIELDS, logFailureEvidence, failureSourceFrames } from "../
 import { AuthorityStorageError } from "./errors.js";
 import { observationRefs } from "../logging/producer.js";
 import type { LogicalRecord } from "../contracts/index.js";
+import { maintenanceRetryDelayMs, type StorageMaintenanceAdmissionError } from "../resources/storage-maintenance.js";
 
 export const AUTHORITY_LOG_SOURCE: LogSource = {
   id: "authority", version: 1,
@@ -25,6 +26,7 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
       projection: "text", version: "number", outcome: "text", reason: "text",
     } },
     waiting: { message: "业务权威操作仍在等待或执行", level: "info", tier: "critical", fields: { operation: "text", waitFor: "text", durationMs: "number" } },
+    deferred: { message: "业务权威操作被资源准入推迟，由调用方重试", level: "info", tier: "detail", fields: { operation: "text", waitFor: "text", blockedBy: "text", retryAfterMs: "number" } },
     failed: { message: "业务权威操作未完成", level: "error", tier: "critical", fields: { operation: "text", waitFor: "text", validation: "text", sourceFrames: { items: "text", maxItems: 4 }, failure: { fields: LOG_FAILURE_FIELDS } } },
   },
 };
@@ -63,9 +65,14 @@ export class AuthorityWorkObserver {
         if (finished) return;
         finished = true;
         if (timer) clearInterval(timer);
-        if (failure.length && this.records) {
+        const retryAfterMs = failure.length ? maintenanceRetryDelayMs(failure[0]) : undefined;
+        if (retryAfterMs !== undefined && this.records) {
+          // 可重试背压由调用方重试，只记推迟，不记“操作未完成”
+          const { admission } = failure[0] as StorageMaintenanceAdmissionError;
+          emit("deferred", { waitFor, blockedBy: "blockedBy" in admission ? admission.blockedBy : undefined, retryAfterMs });
+        } else if (failure.length && this.records) {
           const error = failure[0];
-          emit("failed", { waitFor, sourceFrames: failureSourceFrames(error), ...(error instanceof AuthorityStorageError && error.validation ? { validation: error.validation } : {}), failure: error instanceof AuthorityStorageError && error.cause === undefined ? { category: "authority", code: error.code } : logFailureEvidence(error) }, true);
+          emit("failed",{ waitFor, sourceFrames: failureSourceFrames(error), ...(error instanceof AuthorityStorageError && error.validation ? { validation: error.validation } : {}), failure: error instanceof AuthorityStorageError && error.cause === undefined ? { category: "authority", code: error.code } : logFailureEvidence(error) }, true);
         }
         if (!this.records) return;
         try {

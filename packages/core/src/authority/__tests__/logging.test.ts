@@ -7,6 +7,7 @@ import { FileArtifactStore } from "../artifact-store.js";
 import type { LogDraft, LogRecordPort } from "../../logging/contracts.js";
 import { observeLogPhase } from "../../logging/phase.js";
 import { AuthorityStorageError } from "../errors.js";
+import { StorageMaintenanceAdmissionError } from "../../resources/index.js";
 
 it('reports only finite validation branches and the failed transaction stage', () => {
   const { records, entries } = collector();
@@ -18,6 +19,23 @@ it('reports only finite validation branches and the failed transaction stage', (
   expect(JSON.stringify(entries)).not.toContain('private');
   expect(new AuthorityStorageError('invalid-authority-record', 'private', { validation: 'private' as never }).validation).toBeUndefined();
   expect(new AuthorityStorageError('invalid-authority-record', 'Commit envelope digest is invalid').validation).toBe('envelope-digest');
+});
+
+it("records a retryable admission deferral without reporting the operation as failed", () => {
+  const { records, entries } = collector();
+  const observer = new AuthorityWorkObserver(records, () => "authority-1");
+  const deferred = observer.begin("transactProjection"); deferred.stage("candidate-validate");
+  deferred.finish(new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "derived-preparation", retryAfterMs: 1 }));
+  observer.flush();
+  // 可重试背压由调用方重试，不是“业务权威操作未完成”
+  expect(entries.some(item => item.event === "failed")).toBe(false);
+  expect(entries).toContainEqual(expect.objectContaining({ event: "deferred",
+    data: expect.objectContaining({ operation: "transactProjection", waitFor: "candidate-validate", blockedBy: "derived-preparation", retryAfterMs: 1 }) }));
+  // 容量缺口不可重试，仍是失败
+  const gap = observer.begin("append");
+  gap.finish(new StorageMaintenanceAdmissionError({ kind: "capacity-gap", blockedBy: "disk", required: 2, available: 1 } as never));
+  observer.flush();
+  expect(entries).toContainEqual(expect.objectContaining({ event: "failed", result: "failure", data: expect.objectContaining({ operation: "append" }) }));
 });
 
 function collector() {

@@ -685,7 +685,8 @@ describe("ConversationProtocolRuntime", () => {
     return { reached, stopped, tail, close, waitForSeq, streamEnd, runtime, kernelRuns: () => kernelRuns };
   }
 
-  async function startCancellableRun(topology: "absent" | "available", name: string) {
+  async function startCancellableRun(topology: "absent" | "available", name: string,
+    onFailure?: (error: unknown) => void) {
     const home = await createTempDir(name);
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     const f = cancellableStreamFixture(name);
@@ -693,7 +694,7 @@ describe("ConversationProtocolRuntime", () => {
     onTestFinished(() => spool.stopStorageMaintenance());
     let manager!: ConversationManager;
     const protocol = createProtocol({ authority, manager: () => manager,
-      interactions: new DurableConversationInteractionObserver(),
+      interactions: new DurableConversationInteractionObserver(), ...(onFailure ? { onFailure } : {}),
       onFirstPartyFrame: async () => {}, onFirstPartyStreamEnd: f.streamEnd,
       localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => f.runtime },
         createStream: input => AssignmentStreamWriter.open(spool, input.assignmentId, input.ref) },
@@ -755,6 +756,31 @@ describe("ConversationProtocolRuntime", () => {
         run.tail.resolve(); await vi.waitFor(() => expect(run.close).toHaveBeenCalledOnce());
       }
       expect((await run.records()).some(record => record.t === "state" && record.state === "cancelled")).toBe(true);
+    } finally { await run.finish(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["absent", "available"] as const)("does not report a user cancellation as the $0 conversation failure cause", async topology => {
+    const failures: unknown[] = [];
+    const run = await startCancellableRun(topology, `cancel-not-failure-${topology}`, error => { failures.push(error); });
+    try {
+      await run.cancel();
+      // 取消已耐久后执行体才以 AbortError 结束：这是用户中止，不是会话执行失败的首因
+      run.stopped.resolve();
+      await run.running;
+      run.tail.resolve();
+      await vi.waitFor(async () => expect((await run.records()).some(record => record.t === "state" && record.state === "cancelled")).toBe(true));
+      expect(failures.filter(error => (error as Error).name === "AbortError")).toEqual([]);
+    } finally { await run.finish(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("still reports an abort that no cancellation requested", async () => {
+    const failures: unknown[] = [];
+    const run = await startCancellableRun("absent", "abort-without-cancel", error => { failures.push(error); });
+    try {
+      // 没有取消请求时执行体以 AbortError 结束（例如宿主停止），仍是需要排查的首因
+      run.stopped.resolve();
+      await run.running;
+      await vi.waitFor(() => expect(failures.some(error => (error as Error).name === "AbortError")).toBe(true));
     } finally { await run.finish(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
