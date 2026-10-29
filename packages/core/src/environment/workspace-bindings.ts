@@ -52,7 +52,8 @@ const ADMIN_STEP_BUDGET: DeviceCapacityBudget = {
     temporaryBytes: 0,
     slots: 1,
   },
-  quantum: { readBytes: 64 * 1024, writeBytes: 64 * 1024, ioOperations: 8 },
+  // Indexed reads belong to their own physical leaves, not this WAL write plan.
+  quantum: { readBytes: 0, writeBytes: 64 * 1024, ioOperations: 8 },
 };
 type WorkspaceBindingRequestIdentity =
   | {
@@ -804,6 +805,7 @@ export class WorkspaceBindingService
             serviceClass: "workload-interactive",
             atomic: ADMIN_STEP_BUDGET,
             preferred: ADMIN_STEP_BUDGET,
+            separateReadAdmission: true,
             maxWaitMs: 0,
           },
           abort,

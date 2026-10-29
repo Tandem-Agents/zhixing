@@ -166,6 +166,8 @@ export type ActiveDeviceCapacityStep =
       readonly arbiter: DeviceCapacityArbiterPort;
       readonly serviceClass: DeviceWorkloadCapacityRequest["serviceClass"];
       readonly bound: DeviceCapacityBudget;
+      /** This workload owns its writes; reads acquire separately metered leaves. */
+      readonly separateReadAdmission?: true;
       readonly abort: AbortSignal;
     };
 
@@ -245,7 +247,10 @@ export class DefaultDeviceCapacityArbiter
       request.preferred.occupancy.slots === 0 && request.maxWaitMs === 0 &&
       context?.active && owner?.kind === "workload" &&
       owner.serviceClass === request.serviceClass && owner.bound.occupancy.slots > 0 &&
-      QUANTUM_DIMENSIONS.every(dimension => owner.bound.quantum[dimension] === 0) &&
+      (owner.separateReadAdmission === true
+        ? owner.bound.quantum.readBytes === 0 && request.atomic.quantum.writeBytes === 0 && request.preferred.quantum.writeBytes === 0 &&
+          request.atomic.occupancy.temporaryBytes === 0 && request.preferred.occupancy.temporaryBytes === 0
+        : QUANTUM_DIMENSIONS.every(dimension => owner.bound.quantum[dimension] === 0)) &&
       reservation && this.#issuedPermits.has(reservation) ? reservation : undefined;
     validateRequest(request, lender !== undefined);
     if (abort.aborted) return Promise.resolve({ kind: "cancelled" });
@@ -774,6 +779,9 @@ export interface DeviceWorkloadCapacityRequest {
   readonly atomic: DeviceCapacityBudget;
   readonly preferred: DeviceCapacityBudget;
   readonly maxWaitMs: number;
+  /** Opt in only when both read budgets are zero. The workload's I/O plan
+   * covers its writes; each read leaf must obtain and consume its own permit. */
+  readonly separateReadAdmission?: true;
 }
 
 export async function runWithDeviceCapacity<T>(
@@ -782,6 +790,13 @@ export async function runWithDeviceCapacity<T>(
   abort: AbortSignal,
   operation: () => Promise<T>,
 ): Promise<T> {
+  if (request.separateReadAdmission !== undefined && request.separateReadAdmission !== true) {
+    throw new TypeError("Device workload read admission mode is invalid");
+  }
+  const separateReadAdmission = request.separateReadAdmission === true;
+  if (separateReadAdmission && (request.atomic.quantum.readBytes !== 0 || request.preferred.quantum.readBytes !== 0)) {
+    throw new TypeError("Separate workload read admission requires zero read budgets");
+  }
   const admission = await arbiter.acquire(
     {
       admissionId: deviceCapacityAdmissionId(request.serviceClass),
@@ -807,6 +822,7 @@ export async function runWithDeviceCapacity<T>(
           occupancy: Object.freeze({ ...request.atomic.occupancy }),
           quantum: Object.freeze({ ...request.atomic.quantum }),
         }),
+        ...(separateReadAdmission ? { separateReadAdmission: true as const } : {}),
         abort,
       },
       operation,
@@ -1073,3 +1089,4 @@ function cloneBudget(budget: DeviceCapacityBudget): DeviceCapacityBudget {
     quantum: { ...budget.quantum },
   };
 }
+

@@ -1,6 +1,10 @@
 import path from "node:path";
-import { describe, expect, it, onTestFinished } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createTempDir, captureFileIo } from "@zhixing/test-utils";
+import { AuthorityCacheIntegrity } from "../authority/startup-proofs.js";
+import { observeProjectionQueryWork } from "../test-support/projection-query-work.js";
+import { projectionReadCapacity } from "../../../cli/src/serve/artifact-read-capacity.js";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -18,6 +22,8 @@ import type {
 } from "../protocol/index.js";
 import {
   DefaultDeviceCapacityArbiter,
+  DefaultStorageMaintenanceGovernor,
+  currentDeviceCapacityStep,
   createDefaultDeviceCapacityPolicy,
 } from "../resources/index.js";
 import {
@@ -345,15 +351,17 @@ function createServiceAt(
       authorityLog: true,
       publishAttempts: 0,
     }),
+  logOverride?: FileAuthorityCommitLog,
+  capacityOverride?: DefaultDeviceCapacityArbiter,
 ): WorkspaceBindingService {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(
+  const log = logOverride ?? new FileAuthorityCommitLog(
     path.join(root, "binding-log"),
     artifacts,
     { clock: () => NOW },
   );
   onTestFinished(() => log.stopStorageMaintenance());
-  const capacity = new DefaultDeviceCapacityArbiter({
+  const capacity = capacityOverride ?? new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy(),
     probe: () => ({
       cpuBusyRatio: 0,
@@ -521,3 +529,156 @@ function corruptCreateRecord(
     ...overrides,
   };
 }
+
+it.each([false, true])('keeps cold binding reads and materialization fixed across 8/32/128 ended bindings (new write: %s)', async newWrite => {
+  const rows = [];
+  for (const history of [8, 32, 128]) {
+    const root = await tempRoot(), integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 101));
+    const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
+    const capacity = new DefaultDeviceCapacityArbiter({ policy: createDefaultDeviceCapacityPolicy(), probe: () => ({
+      cpuBusyRatio: 0, availableMemoryBytes: Number.MAX_SAFE_INTEGER, processRssBytes: 0, temporaryBytesAvailable: Number.MAX_SAFE_INTEGER,
+    }) });
+    const storageMaintenance = new DefaultStorageMaintenanceGovernor({ capacity });
+    // Match the production setup-delivery generation: one arbiter, physical
+    // projection read leaves, maintenance, integrity and startup proofs.
+    const open = () => new FileAuthorityCommitLog(path.join(root, 'binding-log'), artifacts, { clock: () => NOW, integrity,
+      storageMaintenance, startupProofs: true, runProjectionReadStep: projectionReadCapacity(capacity) });
+    const step = async <T>(phase: string, operation: () => Promise<T>) => {
+      try { return await operation(); } catch (error) {
+        console.log('G16-binding-failure ' + JSON.stringify({ history, phase, violation: capacity.snapshot().lastViolation })); throw error;
+      }
+    };
+    const persistence = generationPersistence({ marker: false, authorityLog: true, publishAttempts: 0 });
+    const warm = open(); let nextRef = 0;
+    const service = createServiceAt(root, () => `binding-${nextRef++}`, persistence, warm, capacity);
+    const currentInput = { displayName: 'Current', absolutePath: path.join(root, 'current') };
+    const current = await step('warm-current', () => service.create(currentInput, control('current')));
+    let oldInput: { displayName: string; absolutePath: string } | undefined, oldBinding: typeof current | undefined;
+    for (let index = 0; index < history; index++) {
+      const input = { displayName: `Old ${index}`, absolutePath: path.join(root, `old-${index}`) };
+      const binding = await step(`warm-create-${index}`, () => service.create(input, control(`create-old-${index}`)));
+      await step(`warm-remove-${index}`, () => service.remove(binding.bindingRef, binding.revision, control(`remove-old-${index}`)));
+      if (index === 0) { oldInput = input; oldBinding = binding; }
+    }
+    const head = await warm.checkpoint(); await warm.stopStorageMaintenance();
+    const io = await captureFileIo(root), cold = open(), work = observeProjectionQueryWork(cold);
+    const restarted = createServiceAt(root, undefined, persistence, cold, capacity);
+    try {
+      expect(await step('cold-resolve', () => restarted.resolveWorkspace(current.bindingRef))).toEqual({ absolutePath: currentInput.absolutePath, workspaceBindingRevision: 1 });
+      expect((await step('cold-list', () => restarted.list(control('current-list')))).map(item => item.bindingRef)).toEqual([current.bindingRef]);
+      if (newWrite) expect(await step('cold-new-create', () => restarted.create({ displayName: 'New', absolutePath: path.join(root, 'new') }, control('new-request'))))
+        .toMatchObject({ displayName: 'New', workspaceBindingRevision: 1 });
+      else expect(await step('cold-request-replay', () => restarted.create(oldInput!, control('create-old-0')))).toEqual(oldBinding);
+      expect((await cold.checkpoint()).lsn).toBe(head.lsn + Number(newWrite));
+      const query = io.snapshot(), materialized = work.snapshot(); work.restore();
+      await cold.stopStorageMaintenance(); const stopped = io.snapshot();
+      rows.push({ history, materialized, cold: { reads: query.reads, bytes: query.readBytes, writes: query.writeBytes,
+        logBytes: query.byCategory.log?.readBytes ?? 0, probes: query.segmentEntryProbes },
+        stop: { reads: stopped.readBytes - query.readBytes, writes: stopped.writeBytes - query.writeBytes } });
+    } finally { work.restore(); await cold.stopStorageMaintenance(); }
+  }
+  console.log('G16-binding ' + JSON.stringify({ newWrite, rows }));
+  for (const row of rows.slice(1)) {
+    expect({ ...row.materialized, valueBytes: 0 }).toEqual({ ...rows[0]!.materialized, valueBytes: 0 });
+    expect(Math.abs(row.materialized.valueBytes - rows[0]!.materialized.valueBytes)).toBeLessThanOrEqual(1024);
+  }
+}, 180_000);
+
+
+
+
+async function budgetedBindingFixture(legacy = false) {
+  const root = await tempRoot(), integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 104));
+  if (legacy) { await mkdir(path.join(root, 'binding-log'), { recursive: true }); await writeFile(path.join(root, 'binding-log/authority.log'), Buffer.alloc(0)); }
+  const defaults = createDefaultDeviceCapacityPolicy(); let availableMemory = 8 * 1024 ** 3;
+  const capacity = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy,
+    slots: 1, memorySafetyReserveBytes: 0, temporarySafetyReserveBytes: 0 } },
+    probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: availableMemory, processRssBytes: 0, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+  const storageMaintenance = new DefaultStorageMaintenanceGovernor({ capacity }), leaf = projectionReadCapacity(capacity)!;
+  const trace = { attempted: 0, executed: 0 };
+  const open = () => new FileAuthorityCommitLog(path.join(root, 'binding-log'), new FileArtifactStore(path.join(root, 'artifacts')), {
+    integrity, startupProofs: true, storageMaintenance, clock: () => NOW,
+    runProjectionReadStep: (step, operation) => {
+      const owner = currentDeviceCapacityStep(), admin = owner?.kind === 'workload' && owner.separateReadAdmission === true;
+      if (admin) trace.attempted++;
+      return leaf(step, () => { if (admin) trace.executed++; return operation(); });
+    },
+  });
+  const persistence = generationPersistence({ marker: false, authorityLog: true, publishAttempts: 0 }); let nextRef = 0;
+  const make = (log: FileAuthorityCommitLog) => createServiceAt(root, () => `owned-${nextRef++}`, persistence, log, capacity);
+  const log = open(), service = make(log);
+  return { root, log, service, capacity, trace,
+    setMemory(bytes = 8 * 1024 ** 3) { availableMemory = bytes; },
+    async reopen() { await log.stopStorageMaintenance(); const cold = open(); return { log: cold, service: make(cold) }; },
+  };
+}
+
+describe('workspace admin separately metered reads', () => {
+  it.each([false, true])('keeps initialization, cold replay and CRUD under the original write budget (legacy: %s)', async legacy => {
+    const h = await budgetedBindingFixture(legacy);
+    const input = { displayName: 'Current', absolutePath: path.join(h.root, 'current') };
+    const created = await h.service.create(input, control('original'));
+    const cold = await h.reopen(), before = await cold.log.checkpoint();
+    expect(await cold.service.create(input, control('original'))).toEqual(created);
+    expect((await cold.log.checkpoint()).lsn).toBe(before.lsn);
+    const updated = await cold.service.update(created.bindingRef, { displayName: 'Renamed' }, created.revision, control('rename'));
+    await cold.service.remove(created.bindingRef, updated.revision, control('remove'));
+    expect(await cold.service.list(control('list'))).toEqual([]);
+    expect(await cold.service.create(input, control('original'))).toEqual(created);
+    expect((await cold.log.checkpoint()).lsn).toBe(before.lsn + 2);
+    expect(h.trace.executed).toBeGreaterThan(0); expect(h.capacity.snapshot().lastViolation).toBeUndefined();
+    expect(h.capacity.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
+  it.each(['pressure', 'cancel'] as const)('keeps WAL unchanged when an admitted admin read meets %s and then retries exactly', async reason => {
+    const h = await budgetedBindingFixture();
+    await h.service.create({ displayName: 'Existing', absolutePath: path.join(h.root, 'existing') }, control('existing'));
+    const cold = await h.reopen(); await cold.service.initialize();
+    const before = await cold.log.checkpoint(), baseline = { ...h.trace }, cancellation = new AbortController();
+    const request = { ...control('retryable'), abort: cancellation.signal };
+    const input = { displayName: 'New', absolutePath: path.join(h.root, 'new') };
+    const acquire = h.capacity.acquire.bind(h.capacity);
+    const refusal = vi.spyOn(h.capacity, 'acquire').mockImplementation((entry, signal) => {
+      const owner = currentDeviceCapacityStep();
+      if (entry.admissionId.startsWith('projection-read:') && owner?.kind === 'workload' && owner.separateReadAdmission) {
+        expect(entry.maxWaitMs).toBe(0);
+        if (reason === 'pressure') h.setMemory(0); else cancellation.abort();
+      }
+      return acquire(entry, signal);
+    });
+    try {
+      await expect(cold.service.create(input, request)).rejects.toMatchObject({ name: 'StorageMaintenanceAdmissionError' });
+      expect(h.trace.attempted).toBeGreaterThan(baseline.attempted);
+      expect(h.trace.executed).toBe(baseline.executed);
+    } finally { refusal.mockRestore(); h.setMemory(); }
+    expect((await cold.log.checkpoint()).lsn).toBe(before.lsn);
+    expect(h.capacity.snapshot().occupancyInUse.slots).toBe(0);
+    const retried = await cold.service.create(input, control('retryable'));
+    expect((await cold.log.checkpoint()).lsn).toBe(before.lsn + 1);
+    expect(await cold.service.create(input, control('retryable'))).toEqual(retried);
+    expect((await cold.log.checkpoint()).lsn).toBe(before.lsn + 1);
+    expect(h.capacity.snapshot().lastViolation).toBeUndefined();
+  });
+
+  it('recovers a lost post-commit response after a cold restart without a second append', async () => {
+    const h = await budgetedBindingFixture(); await h.service.initialize();
+    const before = await h.log.checkpoint(), original = h.log.transactDurableProjection.bind(h.log);
+    const request = control('reply-lost'), input = { displayName: 'Once', absolutePath: path.join(h.root, 'once') };
+    let lost = false;
+    const response = vi.spyOn(h.log, 'transactDurableProjection').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (!lost && result.commit?.entries.some(entry => (entry.body as { requestId?: unknown })?.requestId === request.requestId)) {
+        lost = true; throw Error('synthetic post-commit response loss');
+      }
+      return result;
+    });
+    try { await expect(h.service.create(input, request)).rejects.toThrow('post-commit response loss'); }
+    finally { response.mockRestore(); }
+    expect(lost).toBe(true); expect((await h.log.checkpoint()).lsn).toBe(before.lsn + 1);
+    const cold = await h.reopen(), replayed = await cold.service.create(input, control('reply-lost'));
+    expect(replayed).toMatchObject({ bindingRef: 'owned-0', revision: 1, displayName: 'Once' });
+    expect((await cold.log.checkpoint()).lsn).toBe(before.lsn + 1);
+    expect(await cold.service.list(control('list-once'))).toEqual([replayed]);
+    expect(h.capacity.snapshot().lastViolation).toBeUndefined();
+  });
+});

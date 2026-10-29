@@ -43,9 +43,9 @@ async function readWithCapacity<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   const owner = currentDeviceCapacityStep();
-  // A physical plan already owns its reads. Workloads with an explicit I/O
-  // plan do too; only occupancy-only workloads need an incremental leaf.
-  if (owner?.kind === "physical" || (owner?.kind === "workload" &&
+  // Physical and default explicit I/O plans own their reads. An opted-in
+  // write workload, like an occupancy-only workload, admits each read leaf.
+  if (owner?.kind === "physical" || (owner?.kind === "workload" && !owner.separateReadAdmission &&
     Object.values(owner.bound.quantum).some((value) => value !== 0))) {
     return operation();
   }

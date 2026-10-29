@@ -238,3 +238,75 @@ it("retries projection reads after real slot pressure is released and never read
   expect(operation).not.toHaveBeenCalled();
   expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
 });
+
+describe('explicit read leaves inside a write workload', () => {
+  const write: DeviceCapacityBudget = { ...workload, quantum: { readBytes: 0, writeBytes: 256, ioOperations: 8 } };
+  const request = { serviceClass: 'workload-interactive' as const, atomic: write, preferred: write, maxWaitMs: 0, separateReadAdmission: true as const };
+
+  it('uses the only real slot, meters file reads once and preserves the write budget', async () => {
+    const { store, bytes, ref, arbiter, acquire } = await fixture();
+    await runWithDeviceCapacity(arbiter, request, abort, async () => {
+      const owner = currentDeviceCapacityStep();
+      claimDeviceCapacity('writeBytes', 17); claimDeviceCapacity('ioOperations', 2);
+      expect(await store.get(ref)).toEqual(bytes);
+      await projectionReadCapacity(arbiter)!('segment-open', async () => claimDeviceCapacity('ioOperations', 2));
+      expect(currentDeviceCapacityStep()).toBe(owner); expect(arbiter.snapshot().occupancyInUse).toEqual(write.occupancy);
+    });
+    expect(acquire).toHaveBeenCalledTimes(3);
+    for (const [leaf] of acquire.mock.calls.slice(1)) expect(leaf).toMatchObject({ maxWaitMs: 0,
+      atomic: { occupancy: { slots: 0 }, quantum: { writeBytes: 0 } } });
+    expect(arbiter.snapshot().quantumAvailable).toEqual({ readBytes: MIB - ref.bytes, writeBytes: MIB - 17, ioOperations: 95 });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0); expect(arbiter.snapshot().lastViolation).toBeUndefined();
+  });
+
+  it('does not let a read leaf spend its parent write allocation', async () => {
+    const { arbiter } = await fixture();
+    await runWithDeviceCapacity(arbiter, request, abort, async () => {
+      const owner = currentDeviceCapacityStep();
+      await expect(projectionReadCapacity(arbiter)!('segment-open', async () => claimDeviceCapacity('writeBytes', 1)))
+        .rejects.toThrow('exceeded writeBytes');
+      expect(currentDeviceCapacityStep()).toBe(owner); claimDeviceCapacity('writeBytes', 17);
+    });
+    expect(arbiter.snapshot().lastViolation).toMatchObject({ dimension: 'writeBytes', limit: 0, requested: 1 });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
+  it.each(['pressure', 'cancel'] as const)('does no file IO when the read leaf meets %s', async reason => {
+    const { store, ref, arbiter, physicalPath } = await fixture();
+    if (reason === 'pressure') {
+      const consumed = { ...workload, quantum: { readBytes: MIB - ref.bytes + 1, writeBytes: 0, ioOperations: 0 } };
+      const admission = await arbiter.acquire({ admissionId: 'prior-read-work', serviceClass: 'storage-foreground', atomic: consumed, preferred: consumed, maxWaitMs: 0 }, abort);
+      if (admission.kind !== 'granted') throw Error('Prior admitted read must fit');
+      try { await withDeviceCapacityStep(admission.permit, consumed, async () => claimDeviceCapacity('readBytes', consumed.quantum.readBytes)); }
+      finally { admission.permit.release(); }
+    }
+    const cancelled = new AbortController();
+    await runWithDeviceCapacity(arbiter, request, cancelled.signal, async () => {
+      const owner = currentDeviceCapacityStep(); if (reason === 'cancel') cancelled.abort();
+      await expect(store.get(ref)).rejects.toMatchObject({ name: 'DeviceCapacityAdmissionError', admission: { kind: reason === 'cancel' ? 'cancelled' : 'backpressured' } });
+      expect(physicalPath).not.toHaveBeenCalled(); expect(currentDeviceCapacityStep()).toBe(owner);
+      expect(arbiter.snapshot().occupancyInUse.slots).toBe(1);
+    });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
+  it('requires a real additional slot when the read belongs to another arbiter', async () => {
+    const first = await fixture(), second = await fixture();
+    const held = await second.arbiter.acquire({ admissionId: 'other-occupant', serviceClass: 'storage-foreground', atomic: workload, preferred: workload, maxWaitMs: 0 }, abort);
+    if (held.kind !== 'granted') throw Error('Other occupant must fit');
+    try { await runWithDeviceCapacity(first.arbiter, request, abort, async () => {
+      await expect(second.store.get(second.ref)).rejects.toMatchObject({ admission: { kind: 'backpressured', blockedBy: 'slots' } });
+      expect(second.physicalPath).not.toHaveBeenCalled();
+      expect(second.acquire.mock.calls.at(-1)![0]).toMatchObject({ atomic: { occupancy: { slots: 1 } }, maxWaitMs: 0 });
+    }); } finally { held.permit.release(); }
+    expect(first.arbiter.snapshot().occupancyInUse.slots).toBe(0); expect(second.arbiter.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
+  it('retains the default explicit workload read plan without another admission', async () => {
+    const { store, bytes, ref, arbiter, acquire } = await fixture();
+    const planned = { ...workload, quantum: { readBytes: ref.bytes, writeBytes: 0, ioOperations: 1 } };
+    await runWithDeviceCapacity(arbiter, { serviceClass: 'workload-interactive', atomic: planned, preferred: planned, maxWaitMs: 0 }, abort,
+      async () => expect(await store.get(ref)).toEqual(bytes));
+    expect(acquire).toHaveBeenCalledTimes(1); expect(arbiter.snapshot().lastViolation).toBeUndefined();
+  });
+});

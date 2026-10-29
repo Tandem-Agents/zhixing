@@ -469,3 +469,53 @@ describe("DefaultDeviceCapacityArbiter", () => {
     );
   });
 });
+
+describe('explicit separate read admission', () => {
+  it('borrows a genuine write workload slot and settles each ledger independently', async () => {
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure, now: () => 0 });
+    const signal = new AbortController().signal, write = budget(1, { writeBytes: 40, ioOperations: 8 });
+    await runWithDeviceCapacity(arbiter, { ...request('writer', write), separateReadAdmission: true }, signal, async () => {
+      const owner = currentDeviceCapacityStep();
+      expect(owner).toMatchObject({ kind: 'workload', separateReadAdmission: true }); expect(Object.isFrozen(owner)).toBe(true);
+      claimDeviceCapacity('writeBytes', 10); claimDeviceCapacity('ioOperations', 2);
+      const read = budget(0, { readBytes: 20, ioOperations: 3 });
+      const leaf = await arbiter.acquire(request('leaf', read), signal);
+      if (leaf.kind !== 'granted') throw Error('Owned read leaf must fit');
+      try { await withDeviceCapacityStep(leaf.permit, read, async () => {
+        expect(currentDeviceCapacityStep()).toEqual({ kind: 'physical' });
+        claimDeviceCapacity('readBytes', 20); claimDeviceCapacity('ioOperations', 3);
+      }); } finally { leaf.permit.release(); }
+      expect(currentDeviceCapacityStep()).toBe(owner); expect(arbiter.snapshot().occupancyInUse).toEqual(write.occupancy);
+    });
+    expect(arbiter.snapshot().quantumAvailable).toEqual({ readBytes: 80, writeBytes: 90, ioOperations: 95 });
+    expect(arbiter.snapshot().occupancyInUse).toEqual(emptyDeviceCapacityBudget().occupancy);
+    expect(arbiter.snapshot().lastViolation).toBeUndefined();
+  });
+
+  it.each([{ atomic: 1, preferred: 1 }, { atomic: 0, preferred: 1 }])('rejects simultaneous aggregate and independent read plans: %j', async reads => {
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure, now: () => 0 }); let entered = false;
+    await expect(runWithDeviceCapacity(arbiter, { ...request('invalid', budget(1, { readBytes: reads.atomic, writeBytes: 40 })),
+      preferred: budget(1, { readBytes: reads.preferred, writeBytes: 40 }), separateReadAdmission: true,
+    }, new AbortController().signal, async () => { entered = true; })).rejects.toThrow('zero read budgets');
+    expect(entered).toBe(false); expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    expect(arbiter.snapshot().quantumAvailable).toEqual({ readBytes: 100, writeBytes: 100, ioOperations: 100 });
+  });
+
+  it('does not grant the opt-in to a default plan, a forged owner or a different arbiter', async () => {
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure }), other = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
+    const write = budget(1, { writeBytes: 40, ioOperations: 8 }), signal = new AbortController().signal;
+    const leaf = request('read', budget(0, { readBytes: 10 }));
+    await runWithDeviceCapacity(arbiter, request('default', write), signal, async () => {
+      expect(() => Object.assign(currentDeviceCapacityStep()!, { separateReadAdmission: true })).toThrow();
+      expect(() => arbiter.acquire(leaf, signal)).toThrow();
+    });
+    await runWithDeviceCapacity(arbiter, { ...request('separate', write), separateReadAdmission: true }, signal, async () => {
+      expect(() => other.acquire(leaf, signal)).toThrow();
+      expect(() => arbiter.acquire(request('not-a-read', budget(0, { writeBytes: 1 })), signal)).toThrow();
+      expect(() => arbiter.acquire({ ...leaf, preferred: budget(0, { readBytes: 10, writeBytes: 1 }) }, signal)).toThrow();
+      expect(() => arbiter.acquire(request('not-read-storage', budget(0, { temporaryBytes: 1 })), signal)).toThrow();
+    });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0); expect(other.snapshot().occupancyInUse.slots).toBe(0);
+  });
+});
+

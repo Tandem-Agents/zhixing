@@ -1,7 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir, captureFileIo } from "@zhixing/test-utils";
+import { AuthorityCacheIntegrity } from "../authority/startup-proofs.js";
+import { observeProjectionQueryWork } from "../test-support/projection-query-work.js";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
 import type {
   CapabilityDescriptor,
@@ -216,7 +218,7 @@ describe("workspace probe conformance", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
 });
 
 async function createFixture(
-  options: { readonly persistence?: MemoryWorkspaceProbePersistence } = {},
+  options: { readonly persistence?: MemoryWorkspaceProbePersistence; readonly integrity?: AuthorityCacheIntegrity } = {},
 ) {
   const root = await tempRoot();
   const logs = new Set<FileAuthorityCommitLog>();
@@ -277,14 +279,14 @@ async function createFixture(
   const probeLog = trackLog(new FileAuthorityCommitLog(
     path.join(root, "probe-log"),
     artifacts,
-    { clock: () => NOW },
+    { clock: () => NOW, integrity: options.integrity },
   ));
   const persistence = options.persistence ?? new MemoryWorkspaceProbePersistence();
-  const createHandler = (clock: () => string = () => NOW) =>
+  const createHandler = (clock: () => string = () => NOW, log = probeLog) =>
     new WorkspaceProbeHandler({
       executorId: "executor-a",
       environment: bindings,
-      log: probeLog,
+      log,
       persistence,
       signer: identity,
       verifier: identity,
@@ -292,6 +294,7 @@ async function createFixture(
       clock,
     });
   return {
+    root, bindingLog, probeLog,
     bindings,
     bindingRef: binding.bindingRef,
     handler: createHandler(),
@@ -431,3 +434,32 @@ function inventory(): ExecutorVersionInventory {
 async function tempRoot(): Promise<string> {
   return createTempDir("workspace-probe");
 }
+
+it('keeps cold exact probe replay fixed across 8/32/128 completed requests', async () => {
+  const rows = [];
+  for (const history of [8, 32, 128]) {
+    const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 102)), fixture = await createFixture({ integrity });
+    const issue = (requestId: string) => fixture.owner.issue({ requestId, deviceId: 'device-a', bindingRef: fixture.bindingRef,
+      executorId: 'executor-a', resourceLease: probeLease(requestId) });
+    const current = issue('exact-current'), expected = await fixture.handler.probe(current);
+    for (let index = 0; index < history; index++) await fixture.handler.probe(issue(`old-${index}`));
+    const head = await fixture.probeLog.checkpoint(); await fixture.probeLog.stopStorageMaintenance(); await fixture.bindingLog.stopStorageMaintenance();
+    const io = await captureFileIo(fixture.root);
+    const cold = new FileAuthorityCommitLog(path.join(fixture.root, 'probe-log'), new FileArtifactStore(path.join(fixture.root, 'artifacts')),
+      { clock: () => LATER, integrity });
+    onTestFinished(() => cold.stopStorageMaintenance());
+    const work = observeProjectionQueryWork(cold), repeatedProbe = vi.spyOn(fixture.bindings, 'probePath');
+    try {
+      expect(await fixture.createHandler(() => LATER, cold).probe(current)).toEqual(expected);
+      expect(repeatedProbe).not.toHaveBeenCalled(); expect((await cold.checkpoint()).lsn).toBe(head.lsn);
+      const query = io.snapshot(), materialized = work.snapshot(); work.restore();
+      await cold.stopStorageMaintenance(); const stopped = io.snapshot();
+      rows.push({ history, materialized, cold: { reads: query.reads, bytes: query.readBytes, writes: query.writeBytes,
+        logBytes: query.byCategory.log?.readBytes ?? 0, probes: query.segmentEntryProbes },
+        stop: { reads: stopped.readBytes - query.readBytes, writes: stopped.writeBytes - query.writeBytes } });
+    } finally { repeatedProbe.mockRestore(); work.restore(); await cold.stopStorageMaintenance(); }
+  }
+  console.log('G16-probe ' + JSON.stringify(rows));
+  for (const row of rows.slice(1)) expect(row.materialized).toEqual(rows[0]!.materialized);
+}, 180_000);
+
