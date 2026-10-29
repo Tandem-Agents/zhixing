@@ -252,6 +252,8 @@ export async function prepareAuthorityServices(
 export interface StartAssetMaintenanceInput {
   readonly authorityRuntime: AuthorityRuntimeStack;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
+  /** 索引空闲维护每轮开始前等待前台安静。 */
+  readonly whenQuiet?: (signal: AbortSignal) => Promise<void>;
 }
 
 export async function startAssetMaintenance(
@@ -267,6 +269,7 @@ export async function startAssetMaintenance(
     surfaceAssets: () => authority.surfaceAssets,
     onError: (error) =>
       console.warn(chalk.yellow(`[assets] ${error.message}`)),
+    ...(input.whenQuiet ? { whenQuiet: input.whenQuiet } : {}),
   });
   input.lifecycleContributions.acquire("assetMaintenance.stop", () =>
     maintenance.stop()
@@ -980,6 +983,7 @@ export async function createConversationServices(
   );
   if (dataPlane) await dataPlane.start();
   await protocol.recoverReadinessProjections();
+
   return Object.freeze({
     conversations: manager,
     conversationProtocol: protocol,

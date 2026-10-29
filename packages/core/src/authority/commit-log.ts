@@ -338,6 +338,8 @@ export interface LockedSourceReader {
 
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #sourceScope = new AsyncLocalStorage<{ active: boolean }>();
+  /** 空闲维护入口发起的投影维护：持锁时没有权威操作在等它，紧急度沿用所属维护义务。返回即失效，不随定时器等后续工作外泄。 */
+  readonly #idleScope = new AsyncLocalStorage<{ active: boolean }>();
   readonly #readOnly: boolean;
   readonly #owner: boolean;
   #readOnlyLegacyId: string | undefined;
@@ -1004,6 +1006,25 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   /** 进程停机时取消日志迁移及该日志所拥有的全部投影维护义务。 */
   stopStorageMaintenance(): Promise<void> {
     return this.#stopMaintenance ??= this.#stopStorageMaintenance();
+  }
+
+  /**
+   * 空闲维护：对本实例已打开的持久投影完成挂起的段整理并发布已有进度，使正常停止时的检查点能保存
+   * 覆盖层、重启只需回放很短的尾部，点读也少探查增量段。不打开未用索引；每个投影开始前与每个整理步
+   * 之间经 betweenSteps 等待（宿主传入“前台安静”），前台到来时在步边界让路；停止或中止后不再发起。
+   * 其持锁步骤按调用方声明的维护等级准入（宿主为后台），不因持有日志锁提为前台。
+   */
+  async maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal): Promise<void> {
+    for (const projection of [...this.#durableProjections.values()]) {
+      if (signal.aborted || this.#maintenanceStopped) return;
+      if (!projection.opened || projection.failure !== undefined || !projection.state.isPersistent()) continue;
+      if (!projection.state.hasPendingCompaction() && !hasUnpublishedProgress(projection)) continue;
+      await betweenSteps();
+      if (signal.aborted || this.#maintenanceStopped) return;
+      const scope = { active: true };
+      try { await this.#idleScope.run(scope, () => projection.state.flush({ compact: true, betweenSteps, singleFlush: true })); }
+      finally { scope.active = false; }
+    }
   }
 
   async #stopStorageMaintenance(): Promise<void> {
@@ -4011,12 +4032,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               // 外层 `#operations` 串行队列已单点标记,内层维护准入随之零等待——
               // 排队会把锁的持有时间拉到准入超时,阻塞全部其他持锁者。背压由本方法
               // 的锁外重试兜住。
+              // 例外是空闲维护入口自己发起的持锁步骤:没有权威操作在等它,沿用串行队列
+              // 继承的所属义务语境(后台;被前台加入同一义务即随之提级)。争用时后台准入
+              // 被拒即放锁、锁外重试,等锁的前台随之先行。
               const scope = { active: true };
               try {
-                const result = await this.#sourceScope.run(scope, () => runInMaintenanceContext("foreground", async () => {
+                const run = async () => {
                   await this.#ensureInitialized();
                   return await operation();
-                }));
+                };
+                const result = await this.#sourceScope.run(scope, () =>
+                  this.#idleScope.getStore()?.active ? run() : runInMaintenanceContext("foreground", run));
                 return result;
               } finally { scope.active = false; }
             } catch (error) {

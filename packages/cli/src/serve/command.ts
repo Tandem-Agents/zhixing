@@ -313,6 +313,7 @@ import {
 } from "./workscene-remote-workspace-probe.js";
 import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
 import { FOREGROUND_QUIET_MS } from "./device-capacity-runtime.js";
+import { AuthorityIdleMaintenance } from "./authority-idle-maintenance.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -1095,7 +1096,11 @@ async function runServerProcess(
     });
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
   }) : undefined;
-  await startAssetMaintenance({ authorityRuntime, lifecycleContributions });
+  await startAssetMaintenance({
+    authorityRuntime,
+    lifecycleContributions,
+    whenQuiet: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
+  });
   const meshBootstrap = bootstrap.mesh;
   const preparedMeshRuntime =
     enabledSurfaces.has("mesh-control") && meshBootstrap.mode === "trusted-home"
@@ -3261,6 +3266,14 @@ async function runServerProcess(
     // 前台安静时推进：请求在途或正向接入面推送运行进展时暂停，不与终端打开会话、首发和运行争用。
     const decisionLog = homeAuthority.authority;
     lifecycleContributions.acquire("decisionMigration.stop", () => stopConversationDecisionMigration(decisionLog));
+    // 空闲维护：前台安静时完成两本日志已打开投影挂起的段整理并发布进度，正常退出后下次启动不必回放整场尾部
+    const authorityIdleMaintenance = new AuthorityIdleMaintenance({
+      logs: [homeAuthority.authority, homeAuthority.executor],
+      whenQuiet: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
+      onError: (error) => console.warn(chalk.yellow(`[server] authority idle maintenance paused: ${error.message}`)),
+    });
+    lifecycleContributions.acquire("authorityIdleMaintenance.stop", () => authorityIdleMaintenance.stop());
+    authorityIdleMaintenance.start();
     void observeLogPhase(startupRecords, "decision-migration", async () => {
       await startConversationDecisionMigration(decisionLog, {
         idle: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),

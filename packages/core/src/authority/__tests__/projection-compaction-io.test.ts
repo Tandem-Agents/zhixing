@@ -161,6 +161,7 @@ it('waits between background compaction steps at the caller gate and continues a
       await index.flush({ compact: false });
     }
     expect((await manifest()).compaction).toBeDefined();
+    expect(index.hasPendingCompaction()).toBe(true);
     // 后台整理在每一步之前等调用方的闸门；闸门未放行时一步也不做。
     let gateCalls = 0, release: () => void = () => undefined;
     const gate = () => { gateCalls++; return new Promise<void>(resolve => { release = resolve; }); };
@@ -179,6 +180,7 @@ it('waits between background compaction steps at the caller gate and continues a
     await background;
     expect(gateCalls).toBe(2);
     expect((await manifest()).compaction).toBeUndefined();
+    expect(index.hasPendingCompaction()).toBe(false);
     expect(await index.getMany([key('m', 0), key('m', 4_999), key('a', 2), key('z', 511)])).toEqual([0, 4_999, 'updated2', 'z511']);
   } finally { await index.stopStorageMaintenance(); }
 }, 120_000);

@@ -886,6 +886,8 @@ export class FileDurableProjectionIndex {
   isPersistent(): boolean { return this.#persistent; }
   /** 是否有已发布但尚未落盘的行。 */
   hasUnflushedRows(): boolean { return this.#active.size > 0; }
+  /** 已发布清单上挂着尚未完成的段整理（增量段超过上限后开始，按范围分步推进）。 */
+  hasPendingCompaction(): boolean { return this.#manifest?.compaction !== undefined; }
   /** 未落盘的行已占覆盖层上限的一半以上（按条数或字节）。 */
   overlayAtLeastHalfFull(): boolean { return this.#active.size * 2 >= this.#overlayEntries || this.#activeBytes * 2 >= this.#overlayBytes; }
   /**
@@ -1410,12 +1412,17 @@ export class FileDurableProjectionIndex {
     readonly compact?: boolean;
     /** 段整理的步间闸门（见 #betweenCompactionSteps）。 */
     readonly betweenSteps?: () => Promise<void>;
+    /**
+     * 至多落盘一次：本次落盘之后（两步之间）到达的行留给此后的落盘，段整理照常推进。空闲维护用它只收拢
+     * 发起时已有的进度，前台持续写入时不追着新行一段接一段地落盘。
+     */
+    readonly singleFlush?: boolean;
   } = {}): Promise<void> {
     if (!this.#persistent) return;
     if (this.#writeIntent) await this.refreshPublishedState();
     // 紧急度继承调用语境,不在这里声明:前台请求触发的提交按前台准入,
     // 启动恢复触发的按恢复,周期回收触发的才是后台。
-    await this.#runFlush("committed", options.compact !== false, false, options.betweenSteps);
+    await this.#runFlush("committed", options.compact !== false, false, options.betweenSteps, options.singleFlush === true);
   }
 
   async flushCheckpoint(): Promise<void> {
@@ -1435,8 +1442,9 @@ export class FileDurableProjectionIndex {
   }
 
   async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false,
-    betweenSteps?: () => Promise<void>): Promise<void> {
+    betweenSteps?: () => Promise<void>, singleFlush = false): Promise<void> {
     await this.#runRetirementCleanup();
+    let flushed = false;
     for (;;) {
       const manifest = this.#requireManifest();
       // 退出/启动检查点不承担与历史规模成正比的合并；未落盘覆盖层由权威尾部恢复。
@@ -1510,6 +1518,8 @@ export class FileDurableProjectionIndex {
         this.#resetActiveProgress();
         return;
       }
+      // 已落过一次：此后到达的行留给之后的落盘
+      if (singleFlush && flushed) return;
       if (this.#active.size >= PREENCODE_MIN_ENTRIES && !this.#rebuildCache?.complete) await this.#preEncodeActive();
       const frozenInput = {
         manifestGeneration: manifest.generation,
@@ -1534,6 +1544,7 @@ export class FileDurableProjectionIndex {
               () => this.#flushActive(),
             ),
       );
+      flushed = true;
       await this.#runRetirementCleanup();
     }
   }

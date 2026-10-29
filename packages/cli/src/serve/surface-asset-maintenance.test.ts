@@ -244,6 +244,34 @@ describe("surface asset index idle maintenance", () => {
     }
   });
 
+  it("starts each index round only after the foreground has been quiet", async () => {
+    vi.useFakeTimers();
+    try {
+      let maintained = 0;
+      let release!: () => void;
+      const quiet = vi.fn((_signal: AbortSignal) => new Promise<void>((resolve) => { release = resolve; }));
+      const port = {
+        collectExpiredTemporaryAssets: async () => ({ processed: 0, removed: 0, hasMore: false }),
+        maintainLedgerIndex: async () => { maintained += 1; },
+        checkpointLedgerIndex: async () => undefined,
+      } as unknown as SurfaceAssetCoordinator;
+      const maintenance = new SurfaceAssetMaintenance({
+        surfaceAssets: port, intervalMs: 3_600_000, indexFirstDelayMs: 0, indexIntervalMs: 30_000, onError: () => undefined,
+        whenQuiet: quiet,
+      });
+      await maintenance.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(quiet).toHaveBeenCalledOnce();
+      expect(maintained).toBe(0);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(maintained).toBe(1);
+      await maintenance.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("aborts in-flight idle maintenance at stop and returns only after the work stopped", async () => {
     // 空闲维护义务是 committed 的：仅撤掉等待者不会让它停下。停止必须连同义务一起中止，
     // stop 返回之时不得仍有维护在写派生索引，也不再新起一轮。

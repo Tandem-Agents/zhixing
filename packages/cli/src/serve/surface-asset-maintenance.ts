@@ -6,7 +6,8 @@ import { runInMaintenanceContext, runWithMaintenanceUrgency } from "@zhixing/cor
 
 const SURFACE_ASSET_GC_INTERVAL_MS = 60 * 60 * 1_000;
 // 派生索引的空闲维护：启动后先留出启动窗口，此后按较短周期追平并排空过期、退休、接管与临时任务。
-const SURFACE_ASSET_INDEX_FIRST_DELAY_MS = 60 * 1_000;
+// 每轮在前台安静时才开始，所以启动窗口不必长到覆盖整段会话：短会话正常退出前也能发布覆盖位置。
+const SURFACE_ASSET_INDEX_FIRST_DELAY_MS = 5 * 1_000;
 const SURFACE_ASSET_INDEX_INTERVAL_MS = 30 * 1_000;
 
 /** 只有取得进展才立即续跑,零进展必须等下一个周期,避免忙等。 */
@@ -22,6 +23,8 @@ export interface SurfaceAssetMaintenanceOptions {
   readonly intervalMs?: number;
   readonly indexFirstDelayMs?: number;
   readonly indexIntervalMs?: number;
+  /** 索引空闲维护每轮开始前等待前台安静；不提供时立即开始。 */
+  readonly whenQuiet?: (signal: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -96,6 +99,8 @@ export class SurfaceAssetMaintenance {
   // 空闲维护随时可放弃：取消即连同它发起的维护义务一起中止，并等它们在步骤边界停下才返回。
   #maintainIndex(signal: AbortSignal): Promise<void> {
     return runWithMaintenanceUrgency(() => "background", signal, async () => {
+      if (signal.aborted) return;
+      await this.options.whenQuiet?.(signal);
       if (signal.aborted) return;
       await this.#surfaceAssets().maintainLedgerIndex?.();
     }, () => true);
