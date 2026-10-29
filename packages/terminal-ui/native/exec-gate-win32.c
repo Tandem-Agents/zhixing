@@ -189,12 +189,16 @@ int wmain(int argc, wchar_t **argv) {
     read_all(control, received, (DWORD)length); if (memcmp(received, expected, (size_t)length)) fail();
   }
   if (now_ms() >= deadline || ResumeThread(child.hThread) != 1) fail(); CloseHandle(child.hThread);
+  /* A resumed receipt must describe an already settled creation phase. S/N
+   * retain their own deadlines until that receipt, so failure here is still
+   * closed and the already registered Job remains owned. */
+  if (!SetEvent(admitted) || WaitForSingleObject(watchdog, INFINITE) != WAIT_OBJECT_0) fail();
+  CloseHandle(watchdog); CloseHandle(admitted);
   HANDLE watcher = NULL;
   if (argv[4][0]) {
     char message[256]; DWORD n = (DWORD)snprintf(message, sizeof message, "{\"type\":\"resumed\",%s}\n", identity); write_all(control, message, n);
     watcher = CreateThread(NULL, 0, watch_control, NULL, 0, NULL); if (!watcher) fail();
   }
-  SetEvent(admitted); WaitForSingleObject(watchdog, INFINITE); CloseHandle(watchdog); CloseHandle(admitted);
   if (WaitForSingleObject(child.hProcess, INFINITE) != WAIT_OBJECT_0) fail();
   DWORD code; if (!GetExitCodeProcess(child.hProcess, &code)) fail();
   InterlockedExchange(&finishing, TRUE);

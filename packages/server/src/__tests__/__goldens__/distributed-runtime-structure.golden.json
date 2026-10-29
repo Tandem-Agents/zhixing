@@ -1193,7 +1193,7 @@
     },
     {
       "kind": "import",
-      "references": 16,
+      "references": 17,
       "sourceZone": "cli/runtime",
       "target": "cli/serve"
     },
@@ -1211,7 +1211,7 @@
     },
     {
       "kind": "import",
-      "references": 3,
+      "references": 4,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/mcp"
     },
@@ -1295,7 +1295,7 @@
     },
     {
       "kind": "type-import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/network"
     },
@@ -1331,7 +1331,7 @@
     },
     {
       "kind": "dynamic-import",
-      "references": 1,
+      "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1343,7 +1343,7 @@
     },
     {
       "kind": "dynamic-import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1373,7 +1373,7 @@
     },
     {
       "kind": "import",
-      "references": 293,
+      "references": 305,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1385,7 +1385,7 @@
     },
     {
       "kind": "import",
-      "references": 96,
+      "references": 118,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1397,7 +1397,7 @@
     },
     {
       "kind": "import",
-      "references": 55,
+      "references": 57,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1433,7 +1433,7 @@
     },
     {
       "kind": "import",
-      "references": 17,
+      "references": 19,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
@@ -1457,7 +1457,7 @@
     },
     {
       "kind": "type-import",
-      "references": 229,
+      "references": 243,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1469,7 +1469,7 @@
     },
     {
       "kind": "type-import",
-      "references": 73,
+      "references": 89,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1517,19 +1517,19 @@
     },
     {
       "kind": "import",
-      "references": 15,
+      "references": 16,
       "sourceZone": "core/authority",
       "target": "core/persistence"
     },
     {
       "kind": "import",
-      "references": 13,
+      "references": 15,
       "sourceZone": "core/authority",
       "target": "core/protocol"
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "core/authority",
       "target": "core/protocol"
     },
@@ -1571,6 +1571,12 @@
     },
     {
       "kind": "import",
+      "references": 6,
+      "sourceZone": "core/transcript",
+      "target": "core/persistence"
+    },
+    {
+      "kind": "import",
       "references": 1,
       "sourceZone": "core/transcript",
       "target": "core/protocol"
@@ -1583,7 +1589,7 @@
     },
     {
       "kind": "import",
-      "references": 19,
+      "references": 24,
       "sourceZone": "executor",
       "target": "package:@zhixing/core"
     },
@@ -1619,7 +1625,7 @@
     },
     {
       "kind": "import",
-      "references": 10,
+      "references": 13,
       "sourceZone": "mesh",
       "target": "package:@zhixing/core"
     },
@@ -1631,7 +1637,7 @@
     },
     {
       "kind": "type-import",
-      "references": 1,
+      "references": 2,
       "sourceZone": "mesh",
       "target": "external:node:net"
     },
@@ -1643,7 +1649,7 @@
     },
     {
       "kind": "type-import",
-      "references": 23,
+      "references": 26,
       "sourceZone": "mesh",
       "target": "package:@zhixing/core"
     },
@@ -1673,13 +1679,13 @@
     },
     {
       "kind": "import",
-      "references": 130,
+      "references": 136,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 98,
+      "references": 101,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
