@@ -399,6 +399,7 @@ export async function createUnassignedHarness(
     clock?: () => string;
     monotonicClock?: () => number;
     assignmentRecordV2Writes?: boolean;
+    integrity?: AuthorityCacheIntegrity;
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
@@ -411,6 +412,7 @@ export async function createUnassignedHarness(
   log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock,
     lockWaitMs: 2_000,
+    ...(options.integrity ? { integrity: options.integrity } : {}),
   });
   const identity = new TestProtocolIdentity();
   const control = new ControlAdmissionJournal(log, artifacts);
@@ -541,6 +543,7 @@ export async function createHarness(
     clock?: () => string;
     monotonicClock?: () => number;
     assignmentRecordV2Writes?: boolean;
+    integrity?: AuthorityCacheIntegrity;
   } = {},
 ) {
   const harness = await createUnassignedHarness(options);

@@ -68,13 +68,15 @@ export async function prepareConversationRunView(options: {
 }) {
   const { log, artifacts, verifier, conversationId: id } = options, scope = options.scope ?? {};
   registerConversationRunProjection(log, artifacts, verifier, options.legacy);
-  const selected = await log.transactDurableProjection<never, { metadata: ConversationRunView; version: string; source?: ConversationBaseSource }>(CONVERSATION_RUN_STATE_PROJECTION_ID,
+  const selected = await log.transactDurableProjection<never, { metadata: ConversationRunView; version: string; source?: ConversationBaseSource; completeCurrentView: boolean }>(CONVERSATION_RUN_STATE_PROJECTION_ID,
     async current => {
       const binding = await current.get(conversationBaseKey(id)) as unknown as ConversationBaseBinding | undefined;
       const view = await conversationViewAt(log, current, id);
+      // Published imported/legacy bases retain their original full preparation.
+      const readScope = binding && scope.current === false ? { ...scope, current: true } : scope;
       const source = binding ? await openConversationBase(log, binding) : undefined;
       if (options.baseSource && (!source || source.namespace !== options.baseSource.namespace)) throw new TypeError('Working set does not bind the published conversation base');
-      return { kind: 'return', value: { metadata: await readConversationRunViewMetadata(view, id, scope),
+      return { kind: 'return', value: { metadata: await readConversationRunViewMetadata(view, id, readScope), completeCurrentView: readScope.current !== false,
         version: await conversationWorkingVersion(current, id), ...(source ? { source } : {}) } };
     });
   const source = selected.value.source;
@@ -82,7 +84,7 @@ export async function prepareConversationRunView(options: {
     readEnvelopeAt: location => log.readEnvelopeAt(location),
     ...(source ? { readImportedRecord: location => source.record(location), prefetchImported: locations => source.prefetch(locations) } : {}),
     readAdvancementStatus: sessionId => readConversationExactValue(log, id, 'advancementStatuses', sessionId) });
-  return { state, version: selected.value.version, cursor: selected.cursor };
+  return { state, version: selected.value.version, cursor: selected.cursor, completeCurrentView: selected.value.completeCurrentView };
 }
 
 export async function readConversationExactValue<T>(log: AuthorityCommitLog, id: string, name: string, key: string | number): Promise<T | undefined> {

@@ -247,7 +247,11 @@ describe('package 1a cold-storage workload boundary', () => {
     console.log(JSON.stringify({ size, mode: 'native', endedHistory: size * 2 + 1, sources: sources.length,
       coldCurrent, recovery, firstSend, saveStop, continuation, beforeSend, afterSend }));
 
-    expect(coldCurrent.materializations).toBeGreaterThan(0);
+    // 本地会话（无导入基底）冷打开只按索引读取当前事实，不再整体物化执行工作集；恢复与首发仍各准备一次，
+    // 说明计量钩子在工作
+    expect(coldCurrent.materializations).toBe(0);
+    expect(coldCurrent.readBytes).toBeGreaterThan(0);
+    expect(recovery.materializations + firstSend.materializations).toBeGreaterThan(0);
     // Current/recovery/first-send/save must not walk the ended history.
     for (const phase of [coldCurrent, recovery, firstSend, saveStop]) {
       expect(phase.scans).toBeLessThanOrEqual(64);

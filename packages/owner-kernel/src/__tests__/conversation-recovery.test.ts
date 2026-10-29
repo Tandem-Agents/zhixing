@@ -32,6 +32,49 @@ async function admit(journal: ConversationRunJournal, text = 'original input') {
       turnOrigin: { channel: 'rpc', messageIdentity: { id: 'seed-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
 }
 
+it('reads current authority and empty obligations without assembling an execution working set', async () => {
+  const h = await harness(true); await admit(h.journal);
+  const before = (await h.log.checkpoint()).lsn;
+  const original = h.log.transactDurableProjection.bind(h.log);
+  const observe = vi.spyOn(h.log, 'transactDurableProjection').mockImplementation((async (id, decide, ...rest) =>
+    original(id, async (current, context) => {
+      const value = await decide(current, context);
+      if (id === 'conversation-run-state-v1' && value.kind === 'return' && value.value && typeof value.value === 'object' && 'metadata' in value.value)
+        throw Error('A narrow query assembled the execution working set');
+      return value;
+    }, ...rest)) as typeof original);
+  const bodies = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('Empty obligations must not load unrelated bodies'));
+  try {
+    expect(await h.journal.authorityState()).toMatchObject({ deleted: false, hasDurableIdentity: true, commitRevision: 0 });
+    expect(await h.journal.pendingDispatches()).toEqual([]);
+    expect(await h.journal.assignmentsAwaitingRecovery()).toEqual([]);
+    expect(await h.journal.resumeCommittedProjections()).toBe(0);
+    expect(await h.journal.pendingFinalFrames()).toEqual([]);
+    expect(bodies).not.toHaveBeenCalled();
+    expect((await h.log.checkpoint()).lsn).toBe(before);
+  } finally { observe.mockRestore(); bodies.mockRestore(); }
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'after-narrow-queries' });
+  expect(await h.journal.currentState('seed-run')).toBe('cancelled');
+}, 30_000);
+it('reads one run state at the current authority prefix without assembling unrelated working sets', async () => {
+  const h = await harness(true);
+  await admit(h.journal);
+  const original = h.log.transactDurableProjection.bind(h.log);
+  const scans = vi.fn(() => { throw Error('Exact run state must not scan the current working set'); });
+  const observe = vi.spyOn(h.log, 'transactDurableProjection').mockImplementation((async (id, decide, ...rest) =>
+    original(id, (current, context) => decide({ ...current, scan: scans }, context), ...rest)) as typeof original);
+  const bodies = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('Exact run state must not materialize input bodies'));
+  try {
+    expect(await h.journal.runState('seed-run')).toBe('queued');
+    expect(await h.journal.currentState('seed-run')).toBe('queued');
+    expect(await h.journalAt().runState('seed-run')).toBe('queued');
+    expect(await h.journal.currentState('missing')).toBeUndefined();
+    expect(scans).not.toHaveBeenCalled(); expect(bodies).not.toHaveBeenCalled();
+  } finally { observe.mockRestore(); bodies.mockRestore(); }
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'cancel-exact' });
+  expect(await h.journal.currentState('seed-run')).toBe('cancelled');
+  expect(await h.journalAt().runState('seed-run')).toBe('cancelled');
+}, 30_000);
 it('prepares overlapping cancellations in owner order without discarding a completed working set', async () => {
   const h = await harness(true);
   await admit(h.journal);

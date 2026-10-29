@@ -125,11 +125,16 @@ const assignmentSets = ['conflictAssignments', 'openConflictAssignments', 'super
 
 /** Reconstruct a finite metadata view. The complete queue is current work;
  * terminated run/assignment identities are loaded only when requested. */
+export async function readConversationGuardRoot(view: DurableProjectionReadContext, id: string): Promise<Root | undefined> {
+  const root = await view.get(rootKey(id)) as unknown as Root | undefined;
+  if (root && root.conversationId !== id) throw Error('Conversation state root binding is invalid');
+  return root;
+}
+
 async function readGuard(view: DurableProjectionReadContext, id: string, scope: ConversationRunScope) {
   const state = emptySubmissionGuardProjection();
   const fields = conversationFieldReader(view, id);
-  const root = await view.get(rootKey(id)) as unknown as Root | undefined;
-  if (root && root.conversationId !== id) throw Error('Conversation state root binding is invalid');
+  const root = await readConversationGuardRoot(view, id);
   state.activeRunId = root?.activeRunId; state.ticketSyncFrontier = root?.ticketSyncFrontier;
   const runs = new Set(scope.runs), assignments = new Set(scope.assignments), ingresses = new Set(scope.ingresses), tickets = new Set(scope.tickets);
   if (root?.activeRunId) runs.add(root.activeRunId);

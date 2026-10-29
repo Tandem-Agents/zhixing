@@ -672,6 +672,7 @@
           "deferredWork": [],
           "deliveryStatus": [],
           "deliveryStatusNext": {},
+          "deliveryUncertain": [],
           "host": "string",
           "jobStatus": [],
           "jobStatusNext": [],

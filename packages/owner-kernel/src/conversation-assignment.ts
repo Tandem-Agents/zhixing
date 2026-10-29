@@ -5,6 +5,7 @@ import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFo
 import { conversationRecoveryPage, prepareConversationEffects, conversationRecoveryVersion, CONVERSATION_RECOVERY_PROJECTION_ID, type ConversationEffectSelection } from "./conversation-recovery-index.js";
 export { conversationRecoveryPage, conversationRecoveryPending } from "./conversation-recovery-index.js";
 import { registerConversationRunProjection, registerConversationRunReadProjection, readConversationSubmissionState, conversationWorkingVersion } from './conversation-run-state-index.js';
+import { readIndexedConversationAuthority, readIndexedPendingDispatch, readIndexedRecoveryAssignments, readIndexedPendingProjections } from './conversation-run-queries.js';
 import { prepareConversationRunView, conversationDecisionScope, readConversationExactValue, type ConversationDecisionScope } from './conversation-run-state-view.js';
 import { registerAdvancementRecoveryProjection, readAdvancementRecovery, advancementPendingPrefix, advancementRecoveryPrefix, advancementRecoveryRoot, advancementRecoveryHead, advancementPendingRun, type AdvancementCleanupWork } from './advancement-recovery-index.js';
 import { CONVERSATION_RUN_STATE_PROJECTION_ID } from './conversation-run-state-index.js';
@@ -1709,6 +1710,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly hasDurableIdentity: boolean;
     readonly pendingLifecycleProjections: number;
   }> {
+    if (this.#readBaseGeneration === 0 && !this.#importedBaseSource) {
+      const exact = await this.#readCurrentIndexed(view => readIndexedConversationAuthority(view, this.#conversationId));
+      if (exact !== undefined) return exact;
+    }
     return this.#select((state) => ({
       domainRevision: state.domainRevision,
       commitRevision: state.commits.at(-1)?.commitRevision ?? 0,
@@ -2339,7 +2344,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (state.closedInputAssignments.has(assignmentId)) throw new Error("Run input is already closed");
       if (state.openInputAssignments.get(runId) === assignmentId) return { kind: "return", value: undefined };
       return { kind: "append", entries: [runRecord(this.#conversationId, { t: "run-input-opened", runId, assignmentId })], value: undefined };
-    }, [], [], conversationDecisionScope({ runId, assignmentId }));
+    }, [], [], this.#exactCommandScope({ runId, assignmentId }));
     return {
       receive: (boundary) => this.receiveRunInput(runId, assignmentId, boundary),
       close: () => this.closeRunInput(runId, assignmentId),
@@ -2713,7 +2718,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           : undefined,
         assignmentIdInUse: state.assignedById.has(envelope.assignmentId),
       };
-    }, conversationDecisionScope({ unsignedEnvelope }));
+    }, this.#exactCommandScope({ unsignedEnvelope }));
     const currentAssignment = existingState.currentAssignment;
     if (currentAssignment) {
       if (
@@ -2813,7 +2818,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: { assignmentId: envelope.assignmentId },
         };
       },
-      [artifact.ref, ...envelopeReferences], [CONTROL_PROJECTION_ID], conversationDecisionScope({ unsignedEnvelope }),
+      [artifact.ref, ...envelopeReferences], [CONTROL_PROJECTION_ID], this.#exactCommandScope({ unsignedEnvelope }),
     );
     const assigned = transaction.state.assignedById.get(transaction.value.assignmentId);
     if (!assigned) throw new Error("Assigned commit did not rebuild its outbox fact");
@@ -2823,7 +2828,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async pendingDispatches(): Promise<PendingConversationDispatch[]> {
-    const assigned = await this.#select((state) =>
+    const assigned = this.#readBaseGeneration === 0 && !this.#importedBaseSource
+      ? await this.#readCurrentIndexed(view => readIndexedPendingDispatch(view, this.#conversationId))
+      : await this.#select((state) =>
       selectActiveAssignment(state, (candidate, current) =>
         current === "dispatched" &&
         !candidate.acked &&
@@ -3809,7 +3816,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         | "committed";
       readonly assigned: AssignedProjection;
     };
-    const candidates = await this.#select((state): RecoveryCandidate[] =>
+    const candidates: RecoveryCandidate[] = this.#readBaseGeneration === 0 && !this.#importedBaseSource
+      ? await this.#readCurrentIndexed(view => readIndexedRecoveryAssignments(view, this.#conversationId))
+      : await this.#select((state): RecoveryCandidate[] =>
       [...new Set([
         ...state.recoveryAssignments,
         ...state.bundleAcknowledgementOutbox,
@@ -4421,7 +4430,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    }, [], [], conversationDecisionScope({ assignmentId, ctx }));
+    }, [], [], this.#exactCommandScope({ assignmentId, ctx }));
   }
 
   async reconcileStarted(
@@ -5559,7 +5568,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   /** Rebuild every missing post-commit projection from durable committed facts. */
   async resumeCommittedProjections(): Promise<number> {
-    const pending = await this.#select((state) =>
+    const pending = this.#readBaseGeneration === 0 && !this.#importedBaseSource
+      ? await this.#readCurrentIndexed(view => readIndexedPendingProjections(view, this.#conversationId))
+      : await this.#select((state) =>
       [...state.pendingCommitProjections.values()].map((committed) =>
         snapshot(committed, "Pending commit projection"),
       ), conversationDecisionScope({  }),
@@ -5742,6 +5753,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         .map((entry) => snapshot(entry, "Pending final frame"))
         .sort((left, right) => left.record.commitRevision - right.record.commitRevision),
     );
+    if (!pending.length) return [];
     const assignmentByRevision = await this.#select((state) =>
       new Map(
         pending.flatMap(({ record }) => {
@@ -5862,7 +5874,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   async runState(runId: string): Promise<ConversationRunState | undefined> {
     assertIdentifier(runId, "Run id");
-    return this.#select((state) => state.stateByRun.get(runId)?.state, conversationDecisionScope({ runId }));
+    return this.currentState(runId);
   }
 
   worksceneContinuationFrontiers(root: { conversationId: string; runId: string }) {
@@ -6213,7 +6225,22 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async currentState(runId: string): Promise<ConversationRunState | undefined> {
-    return this.#select((state) => state.stateByRun.get(runId)?.state, conversationDecisionScope({ runId }));
+    if (this.#readBaseGeneration !== 0 || this.#importedBaseSource) {
+      return this.#select((state) => state.stateByRun.get(runId)?.state, conversationDecisionScope({ runId }));
+    }
+    // A status query needs one fact at the current source prefix, not a complete
+    // execution working set. Keep owner ordering and the existing preparation,
+    // migration and imported-base gates; nothing is cached across queries.
+    return this.#repeatWorkingSet(() => this.#operations.run(async () => {
+      const result = await this.#log.transactDurableProjection<never, ConversationRunState | undefined>(
+        CONVERSATION_RUN_STATE_PROJECTION_ID, async current => {
+          const view = await conversationViewAt(this.#log, current, this.#conversationId);
+          const status = await readConversationStateField(view, this.#conversationId, 'stateByRun', runId) as
+            ReturnType<RunProjection['stateByRun']['get']>;
+          return { kind: 'return', value: status?.state };
+        });
+      return result.value;
+    }));
   }
 
   async currentResolution(
@@ -6410,7 +6437,26 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     };
   }
 
+  /** A query owns one synchronized source prefix; it never publishes a partial
+   * execution working set or retains mutable rows after releasing that prefix. */
+  async #readCurrentIndexed<Value>(select: (view: import('@zhixing/core/authority').DurableProjectionReadContext) => Promise<Value>): Promise<Value> {
+    return this.#repeatWorkingSet(() => this.#operations.run(async () => {
+      const result = await this.#log.transactDurableProjection<never, Value>(CONVERSATION_RUN_STATE_PROJECTION_ID,
+        async current => ({ kind: 'return', value: await select(await conversationViewAt(this.#log, current, this.#conversationId)) }));
+      return result.value;
+    }));
+  }
+
+  /** Only commands whose decision, reducer and status effects have explicit subjects use this scope. */
+  #exactCommandScope(input: unknown): ConversationDecisionScope {
+    return conversationDecisionScope(input, this.#readBaseGeneration === 0 && !this.#importedBaseSource
+      ? { current: false } : {});
+  }
+
   async #prepareWorkingSet(scope: ConversationDecisionScope) {
+    // An imported base may be installed while this owner operation is queued.
+    // Keep its established full preparation path until that path is proven narrower.
+    if (scope.current === false && (this.#readBaseGeneration !== 0 || this.#importedBaseSource)) scope = { ...scope, current: true };
     const prepared = await prepareConversationRunView({ log: this.#log, artifacts: this.#artifacts, verifier: this.#verifier,
       conversationId: this.#conversationId, scope, previous: this.#runProjection?.state, legacy: this.#legacyAbortTickets,
       ...(this.#importedBaseSource ? { baseSource: this.#importedBaseSource } : {}) });
@@ -6445,7 +6491,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         await this.#checkWorkingSet(context, prepared.version);
         return { kind: 'return', value: select(prepared.state) };
       });
-      this.#runProjection = { state: prepared.state, cursor: result.cursor };
+      if (prepared.completeCurrentView) this.#runProjection = { state: prepared.state, cursor: result.cursor };
       return result.value;
     }));
   }
@@ -6485,7 +6531,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const result = await (this.#resources ? this.#resources.coordinate(coordinate) : coordinate());
         // This cache owns only immutable current payloads; every next decision
         // obtains its metadata again from the same-head indexed authority.
-        this.#runProjection = { state: result.state, cursor: result.cursor };
+        // A subject-local decision does not establish the complete input basis.
+        // Keep any earlier complete snapshot only for identity-bound immutable body reuse.
+        if (prepared.completeCurrentView) this.#runProjection = { state: result.state, cursor: result.cursor };
         if (result.commit) this.#publishStatusNotices(conversationStatusNoticesForCommit(result.state, result.commit, this.#conversationId, this.#ownerEpoch));
         return result;
       });
@@ -6504,7 +6552,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const createState = () => createConversationProjectionDraft(prepared.state).state;
         return operation({ state: createState(), cursor: prepared.cursor, createState,
           readProjectionIds: [CONVERSATION_RUN_STATE_PROJECTION_ID], validateAtPrefix: context => this.#checkWorkingSet(context, prepared.version),
-        }, (state, cursor) => { this.#runProjection = { state, cursor }; });
+        }, (state, cursor) => { if (prepared.completeCurrentView) this.#runProjection = { state, cursor }; });
       });
     });
   }
