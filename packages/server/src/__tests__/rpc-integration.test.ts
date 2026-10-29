@@ -9,6 +9,19 @@
  * - parse error / method not found 错误返回
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import path from "node:path";
+import { acquireFileLock, withFileLockProcessIdentity } from "@zhixing/core/persistence";
+import {
+  DEVICE_CAPACITY_CLASSES,
+  DefaultDeviceCapacityArbiter,
+  currentDeviceCapacityStep,
+  isHoldingMaintenanceExclusion,
+  runHoldingMaintenanceExclusion,
+  runWithDeviceCapacity,
+  type DeviceCapacityPolicy,
+} from "@zhixing/core/resources";
+import { createTempDir } from "@zhixing/test-utils";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
 import { startServer, type ZhixingServerInstance } from "../server.js";
@@ -100,6 +113,111 @@ async function connect(port: number, path = "/ws"): Promise<RpcClient> {
 }
 
 // ─── 测试 ───
+
+describe("WebSocket RPC 只恢复服务级的平台身份端口", () => {
+  const MIB = 1024 * 1024;
+  const capacity = { memoryReservationBytes: MIB, temporaryBytes: 0, slots: 1 };
+  const step = { occupancy: capacity, quantum: { readBytes: 0, writeBytes: 0, ioOperations: 0 } };
+  const capacityPolicy: DeviceCapacityPolicy = {
+    version: 1,
+    occupancy: { memoryReservationBytes: 16 * MIB, temporaryBytes: 16 * MIB, slots: 1, memorySafetyReserveBytes: 0, temporarySafetyReserveBytes: 0 },
+    quantum: { readBytes: 100, writeBytes: 100, ioOperations: 100 },
+    quantumRefillPerSecond: { readBytes: 100, writeBytes: 100, ioOperations: 100 },
+    pressure: { maxCpuBusyRatio: 0.9, minimumAvailableMemoryBytes: 0 },
+    retryAfterMs: 1,
+    classWeights: Object.fromEntries(DEVICE_CAPACITY_CLASSES.map((serviceClass) => [serviceClass, 1])) as DeviceCapacityPolicy["classWeights"],
+  };
+
+  // 取锁时哪个解析器被调用，就说明请求处理拿到的是哪个服务的身份端口（都没被调用＝落到默认解析）。
+  function platformIdentity(calls: string[], name: string) {
+    return { read: async (pid: number) => { calls.push(name); return { kind: "present" as const, birth: `win32:${pid}` }; } };
+  }
+
+  function testContext(): ReturnType<typeof createServerContext> {
+    return createServerContext({ config: { ...DEFAULT_SERVER_CONFIG, port: 0 }, version: TEST_VERSION, token: TEST_TOKEN });
+  }
+
+  function registerLock(server: ZhixingServerInstance, directory: string): void {
+    let next = 0;
+    server.registry.register({
+      name: "test.lock",
+      requiresAuth: false,
+      handler: async () => {
+        const release = await acquireFileLock(path.join(directory, `lock-${++next}`), { staleMs: 30_000, waitMs: 1_000 });
+        await release();
+        return { ok: true };
+      },
+    });
+  }
+
+  it("两个服务各在自己的身份作用域内启动，每次请求只用本服务的端口，断开重连后不变", async () => {
+    const root = await createTempDir("ws-platform-identity");
+    const calls: string[] = [];
+    const first = await withFileLockProcessIdentity(platformIdentity(calls, "first"), () => startServer({ context: testContext() }));
+    const second = await withFileLockProcessIdentity(platformIdentity(calls, "second"), () => startServer({ context: testContext() }));
+    try {
+      registerLock(first, path.join(root, "first"));
+      registerLock(second, path.join(root, "second"));
+      const toFirst = await connect(first.port);
+      const toSecond = await connect(second.port);
+      await toFirst.request("test.lock");
+      await toSecond.request("test.lock");
+      await toFirst.request("test.lock");
+      await toSecond.request("test.lock");
+      const byServer = (name: string) => calls.filter((call) => call === name).length;
+      expect(calls.length).toBeGreaterThanOrEqual(4);
+      expect(new Set(calls)).toEqual(new Set(["first", "second"]));
+      const beforeReconnect = byServer("first");
+      toFirst.close();
+      const again = await connect(first.port);
+      await again.request("test.lock");
+      expect(byServer("first")).toBeGreaterThan(beforeReconnect);
+      again.close();
+      toSecond.close();
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it("接入时已结束的维护互斥、已完成的容量步骤与其他操作上下文不随消息复活，前一请求的上下文不进入下一请求", async () => {
+    const root = await createTempDir("ws-platform-identity-only");
+    const calls: string[] = [];
+    const operation = new AsyncLocalStorage<string>();
+    const carried = new AsyncLocalStorage<string>();
+    const arbiter = new DefaultDeviceCapacityArbiter({
+      policy: capacityPolicy,
+      probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 64 * MIB, processRssBytes: MIB, temporaryBytesAvailable: 64 * MIB }),
+    });
+    const admission = { admissionId: "server-start", serviceClass: "workload-interactive" as const, atomic: step, preferred: step, maxWaitMs: 0 };
+    const server = await withFileLockProcessIdentity(platformIdentity(calls, "service"), () =>
+      operation.run("startup-operation", () =>
+        runHoldingMaintenanceExclusion(() =>
+          runWithDeviceCapacity(arbiter, admission, new AbortController().signal, () => startServer({ context: testContext() })))));
+    try {
+      registerLock(server, root);
+      server.registry.register({ name: "test.carry", requiresAuth: false, handler: () => { carried.enterWith("previous-request"); return { ok: true }; } });
+      server.registry.register({
+        name: "test.context",
+        requiresAuth: false,
+        handler: () => {
+          let step: string;
+          try { step = currentDeviceCapacityStep() === undefined ? "none" : "active"; } catch { step = "revived-finished-step"; }
+          return { holdingExclusion: isHoldingMaintenanceExclusion(), step, operation: operation.getStore() ?? null, carried: carried.getStore() ?? null };
+        },
+      });
+      const client = await connect(server.port);
+      await client.request("test.carry");
+      const seen = await client.request("test.context");
+      expect(isSuccessResponse(seen) && seen.result).toEqual({ holdingExclusion: false, step: "none", operation: null, carried: null });
+      await client.request("test.lock");
+      expect(calls).toContain("service");
+      client.close();
+    } finally {
+      await server.close();
+    }
+  });
+});
 
 describe("WebSocket + RPC (S2.C)", () => {
   let server: ZhixingServerInstance;

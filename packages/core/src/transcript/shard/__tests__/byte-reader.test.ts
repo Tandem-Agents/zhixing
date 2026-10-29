@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createTempDir } from '@zhixing/test-utils';
 import type { Message } from '../../../types/messages.js';
+import { createFileLockAcquirer, withFileLockProcessIdentity } from '../../../persistence/file-lock.js';
 import { TranscriptByteReader, type TranscriptBodyCursor } from '../byte-reader.js';
 import { ShardedTranscriptStore } from '../store.js';
 
@@ -28,6 +29,29 @@ describe('byte history', () => {
       expect((await reader.page()).hasMore).toBe(false);
     } finally { await reader.close(); }
   });
+  it('在平台作用域外按次新建的正文读取器沿用长期资源显式传入的取锁端口', async () => {
+    const home = await createTempDir('byte-history-lock-port'), body = '中🙂\\\n'.repeat(220000);
+    const store = new ShardedTranscriptStore(home);
+    const dir = path.join(home, 'c', 'transcript');
+    await store.appendRunRecord('c', run(assistant(body)));
+    // 长期资源在其平台作用域内捕获的端口；读取器本身在作用域外新建
+    const reads: number[] = [];
+    const resolver = { read: async (pid: number) => { reads.push(pid); return { kind: 'present' as const, birth: 'fixture-birth' }; } };
+    const acquireFileLock = withFileLockProcessIdentity(resolver, () => createFileLockAcquirer());
+    const reader = new TranscriptByteReader(dir, path.join(home, '.read-index'), { acquireFileLock });
+    try {
+      let cursor: TranscriptBodyCursor | undefined, preparing = 0, output = '';
+      for (;;) {
+        const page = await reader.page({ cursor }); cursor = page.cursor;
+        if (page.preparing) { expect(++preparing).toBeLessThan(20); continue; }
+        for (const part of page.fragments) output = part.text + output;
+        if (!page.hasMore) break;
+      }
+      expect(output).toBe(body);
+    } finally { await reader.close(); }
+    expect(reads).toContain(process.pid);
+  });
+
   it('reads a giant record after clear, preserves source and reuses verified positions', async () => {
     const home = await createTempDir('byte-history'), body = '中🙂\\\n'.repeat(220000);
     const store = new ShardedTranscriptStore(home);

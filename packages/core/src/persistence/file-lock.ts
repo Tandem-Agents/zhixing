@@ -37,6 +37,13 @@ export function withFileLockProcessIdentity<T>(resolver: ProcessIdentityResolver
   return resolver ? processIdentityScope.run(resolver, work) : work();
 }
 
+/** 长连接入口在接入时捕获平台身份端口，消息到达时只恢复这一个作用域：不携带接入时的
+ * 请求、阶段、容量、维护或事务上下文。未配置端口时原样执行，保留原回退。 */
+export function captureFileLockProcessIdentity(): <T>(work: () => T) => T {
+  const resolver = processIdentityScope.getStore();
+  return (work) => withFileLockProcessIdentity(resolver, work);
+}
+
 /** A persistent resource owns its platform port, even when later requests
  * arrive through an async boundary created outside the composition root.
  * Capture only this port, never request/phase/maintenance execution context. */

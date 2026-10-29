@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { ArtifactJsonIndex } from '../../authority/artifact-json-index.js';
+import { ArtifactJsonIndex, type ArtifactJsonIndexOptions } from '../../authority/artifact-json-index.js';
 import type { ArtifactRef } from '../../contracts/index.js';
 import { publishedShardSize, readDirectoryView, strictOffsetOf } from './directory-view.js';
 import type { TranscriptView } from './types.js';
@@ -38,7 +38,8 @@ export class TranscriptByteReader {
   readonly #published = new Map<number, number | undefined>();
   readonly #visibility = new Map<string, { checked: NonNullable<TranscriptBodyCursor['visibleThrough']>; tail?: TranscriptBodyCursor; scan?: TranscriptBodyCursor }>();
   get lastClearAt(): string | undefined { return this.#lastClearAt; }
-  constructor(readonly directory: string, indexDirectory?: string) {
+  /** options.acquireFileLock：由长期存在的会话存储在构造时捕获并传入，读取器按次新建也沿用它的平台端口。 */
+  constructor(readonly directory: string, indexDirectory?: string, options: ArtifactJsonIndexOptions = {}) {
     this.json = new ArtifactJsonIndex({ readRange: async (ref, offset, bytes) => {
       const source = this.#source;
       if (!source?.ref || source.ref.digest !== ref.digest || offset < 0 || offset + bytes > ref.bytes) throw Error('transcript-byte-source');
@@ -46,7 +47,7 @@ export class TranscriptByteReader {
       const buffer = Buffer.alloc(bytes), result = await source.file.read(buffer, 0, bytes, source.from + offset);
       if (result.bytesRead !== bytes) throw Error('transcript-byte-short-read');
       await this.#assertIdentity(source.file, source.identity); return buffer;
-    } }, indexDirectory);
+    } }, indexDirectory, options);
   }
   async close(): Promise<void> { this.#closed = true; this.#visibility.clear(); await this.#source?.file.close(); this.#source = undefined; await this.json.close(); }
   async #identity(file: FileHandle): Promise<string> {

@@ -4,7 +4,7 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { prepareExclusiveFileClaim } from "../exclusive-file-claim.js";
-import { acquireFileLock, createFileLockAcquirer, withFileLockProcessIdentity } from "../file-lock.js";
+import { acquireFileLock, captureFileLockProcessIdentity, createFileLockAcquirer, withFileLockProcessIdentity } from "../file-lock.js";
 import {
   createProcessIdentityResolver,
   type ProcessIdentityReading,
@@ -41,6 +41,21 @@ describe("file lock atomic publication", () => {
       withFileLockProcessIdentity(port('444'), () => read('parallel')),
     ]);
     expect(result).toEqual([['222', '111', '333'], '444']);
+  });
+  it('restores only the captured service port at a later entry, and leaves an unconfigured entry unchanged', async () => {
+    const directory = await createTempDir('file-lock-captured-port');
+    const port = (birth: string): ProcessIdentityResolver => ({ read: async () => ({ kind: 'present', birth }) });
+    const read = async (name: string, explicit?: ProcessIdentityResolver) => {
+      const file = path.join(directory, name);
+      const release = await acquireFileLock(file, { staleMs: 1000, waitMs: 0, processIdentityResolver: explicit });
+      try { return JSON.parse(await readFile(file, 'utf8')).birth; } finally { await release(); }
+    };
+    const service = withFileLockProcessIdentity(port('service'), captureFileLockProcessIdentity);
+    const unconfigured = captureFileLockProcessIdentity();
+    // 消息到达时已不在任何作用域内：只靠捕获恢复
+    expect(await service(() => read('later'))).toBe('service');
+    expect(await service(() => read('explicit', port('explicit')))).toBe('explicit');
+    expect(await withFileLockProcessIdentity(port('caller'), () => unconfigured(() => read('unconfigured')))).toBe('caller');
   });
   it("publishes only one complete owner when prepared contenders interleave", async () => {
     const directory = await createTempDir("file-lock-publication");

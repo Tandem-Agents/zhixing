@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createFileLockAcquirer } from "@zhixing/core/persistence";
 import { fromSafePathSegment, toSafePathSegment } from "@zhixing/core/paths";
 import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing/core/workscene";
 import {
@@ -74,6 +75,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   clearTaskListCache?: (conversationId: string) => void;
 }>): ConversationStorageInfrastructure {
   const zhixingHome = input.zhixingHome;
+  const acquireFileLock = createFileLockAcquirer();
   const user = createScopeStorage({ kind: "user" }, zhixingHome);
   const workscenes = new Map<string, ScopeStorage>();
 
@@ -124,7 +126,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
       }
       if (!turnCount) return undefined;
       const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
-        path.join(zhixingHome, 'cache', 'transcript-read-index'));
+        path.join(zhixingHome, 'cache', 'transcript-read-index'), { acquireFileLock });
       try {
         const bootstrap = await buildStartupBootstrap({
           conversationId: storage.localId,
@@ -234,11 +236,12 @@ export function createReadOnlyConversationStorage(zhixingHome: string, signal?: 
 > & { openBodyReader(conversationId: string): TranscriptByteReader } {
   const root = conversationsDir({ kind: "user" }, zhixingHome);
   const transcript = createReadOnlyTranscriptSource(root);
+  const acquireFileLock = createFileLockAcquirer();
   return Object.freeze({
     openBodyReader(conversationId: string) {
       const { scope, localId } = parseConversationId(conversationId);
       const directory = path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(localId), 'transcript');
-      return new TranscriptByteReader(directory, path.join(zhixingHome, 'cache', 'transcript-read-index'));
+      return new TranscriptByteReader(directory, path.join(zhixingHome, 'cache', 'transcript-read-index'), { acquireFileLock });
     },
     async listPage(input: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
       const page = await readConversationDirectoryPage(root, input, undefined, signal);

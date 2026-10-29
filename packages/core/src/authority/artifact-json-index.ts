@@ -39,14 +39,21 @@ export async function closeArtifactJsonIndex(store: ArtifactStore): Promise<void
   await cache.get(store)?.close();
 }
 
+export interface ArtifactJsonIndexOptions {
+  /** 长期资源在构造时捕获的取锁函数（带其平台端口）；按次新建的索引由它显式传入，不依赖新建时的异步作用域。 */
+  readonly acquireFileLock?: ReturnType<typeof createFileLockAcquirer>;
+}
+
 export class ArtifactJsonIndex {
-  readonly #acquireFileLock = createFileLockAcquirer();
+  readonly #acquireFileLock: ReturnType<typeof createFileLockAcquirer>;
   readonly #queue = new SerialTaskQueue();
   #db?: DatabaseSync;
   readonly #scans = new Map<string, Scan>();
   #idle?: ReturnType<typeof setTimeout>;
   #unlock?: () => Promise<void>;
-  constructor(readonly store: Pick<ArtifactStore, 'readRange' | 'readIdentity'>, readonly directory?: string) {}
+  constructor(readonly store: Pick<ArtifactStore, 'readRange' | 'readIdentity'>, readonly directory?: string, options: ArtifactJsonIndexOptions = {}) {
+    this.#acquireFileLock = options.acquireFileLock ?? createFileLockAcquirer();
+  }
   async #open(): Promise<DatabaseSync> {
     clearTimeout(this.#idle);
     if (this.#db) return this.#db;

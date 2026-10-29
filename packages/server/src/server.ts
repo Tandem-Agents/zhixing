@@ -15,6 +15,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { Duplex } from "node:stream";
+import { captureFileLockProcessIdentity } from "@zhixing/core/persistence";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ScheduleRuntimeApplication } from "@zhixing/core/scheduler/application";
 import { createEventBridge, type DisposeBridge } from "@zhixing/rpc/event-bridge";
@@ -324,9 +325,12 @@ async function startServerWithOwner(
     const connection = createRpcConnection(ws, { loopback, onNotify: () => ctx.foregroundActivity?.pulse() });
     registerConnection(connection);
 
+    // 在 Node 24.19 上已验证：服务端接受的连接升级后，读事件读不到接入时的异步上下文。组合根交给本服务的平台身份端口属于服务生命周期，
+    // 在接入时捕获、每条消息只恢复它；接入时的其他操作上下文（阶段、容量、维护、事务）不随消息复活。
+    const withPlatformIdentity = captureFileLockProcessIdentity();
     ws.on("message", (data) => {
       // ws 默认把 text frame 给 Buffer——dispatcher 内部统一转 string
-      void dispatcher.handleMessage(connection, data as Buffer);
+      withPlatformIdentity(() => void dispatcher.handleMessage(connection, data as Buffer));
     });
 
     ws.on("error", (err) => {
