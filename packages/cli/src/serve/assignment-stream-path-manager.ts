@@ -96,6 +96,8 @@ interface ActivePath {
   readonly controller: AbortController;
   readonly connection: AssignmentStreamPathConnection;
   resumeAcknowledged: boolean;
+  /** 本路径上已持久确认到的序号；采纳水位超过它时，下一次订阅前先补确认。 */
+  acknowledgedSeq: number;
 }
 
 class SupersededAssignmentStreamPathError extends Error {}
@@ -195,6 +197,9 @@ export class AssignmentStreamPathManager {
           attempted = active;
           await this.#resume(active, signal);
           if (!this.#isCurrent(active)) continue;
+          // 订阅必须从持久确认处接续；上一页采纳后未确认成功的前缀先补上。
+          await this.#acknowledgeAdopted(active, signal);
+          if (!this.#isCurrent(active)) continue;
 
           const checkpoint = this.#verifier.checkpoint();
           const frames = await active.connection.subscribe(
@@ -211,6 +216,11 @@ export class AssignmentStreamPathManager {
 
           for (const frame of frames) {
             if (!this.#isCurrent(active)) break;
+            // 最终帧与交互帧的采纳会等待外部推进，先确认此前已采纳的前缀。
+            if (frame.payload.kind === "provisional-final" || frame.payload.kind === "interaction") {
+              await this.#acknowledgeAdopted(active, signal);
+              if (!this.#isCurrent(active)) break;
+            }
             const before = this.#verifier.checkpoint();
             const disposition = this.#verifier.accept(frame);
             const after = this.#verifier.checkpoint();
@@ -228,21 +238,16 @@ export class AssignmentStreamPathManager {
                 });
               } catch (error) {
                 this.#verifier = new StreamFrameVerifier(before);
+                // 尽力确认此前成功采纳的前缀；没确认上的由下一次订阅前补上，原错误照旧抛出。
+                await this.#acknowledgeAdopted(active, signal).catch(() => undefined);
                 throw error;
               }
               accepted += 1;
             }
-            if (!this.#isCurrent(active)) break;
-            await active.connection.acknowledge(
-              {
-                v: 1,
-                assignmentId: this.#assignmentId,
-                consumer: this.#consumer,
-                ackSeq: after.lastSeq,
-              },
-              combineSignals(signal, active.controller.signal),
-            );
           }
+          if (!this.#isCurrent(active)) continue;
+          // 整页处理完，一次累积确认已采纳的最高连续序号。
+          await this.#acknowledgeAdopted(active, signal);
           if (!this.#isCurrent(active)) continue;
           return {
             path: active.path,
@@ -370,6 +375,7 @@ export class AssignmentStreamPathManager {
       controller,
       connection,
       resumeAcknowledged: false,
+      acknowledgedSeq: 0,
     };
     this.#active = active;
     return active;
@@ -389,7 +395,26 @@ export class AssignmentStreamPathManager {
         combineSignals(signal, active.controller.signal),
       );
     }
-    if (this.#isCurrent(active)) active.resumeAcknowledged = true;
+    if (this.#isCurrent(active)) {
+      active.resumeAcknowledged = true;
+      active.acknowledgedSeq = checkpoint.lastSeq;
+    }
+  }
+
+  /** 确认本路径上已采纳的最高连续前缀（ack 是累积的）；已确认到该序号则不再提交。 */
+  async #acknowledgeAdopted(active: ActivePath, signal: AbortSignal): Promise<void> {
+    const adopted = this.#verifier.checkpoint().lastSeq;
+    if (adopted <= active.acknowledgedSeq || !this.#isCurrent(active)) return;
+    await active.connection.acknowledge(
+      {
+        v: 1,
+        assignmentId: this.#assignmentId,
+        consumer: this.#consumer,
+        ackSeq: adopted,
+      },
+      combineSignals(signal, active.controller.signal),
+    );
+    if (this.#isCurrent(active)) active.acknowledgedSeq = Math.max(active.acknowledgedSeq, adopted);
   }
 
   async #select(path: AssignmentStreamPath): Promise<void> {
