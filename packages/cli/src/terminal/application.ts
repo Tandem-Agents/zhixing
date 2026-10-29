@@ -47,7 +47,7 @@ import { createRuntimeConfigurationProvider } from '../runtime/runtime-configura
 import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
-import { TerminalDisplayStore } from './display-store.js';
+import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
 import { TerminalDisplayReplay, type DisplayReplaySource } from './display-replay.js';
 import { encodeBodyPage, type BodyPageRevision } from '@zhixing/terminal-ui/body-model';
 import { textFragments } from './history-segments.js';
@@ -1048,14 +1048,25 @@ class TerminalApplication {
     }
   }
 
-  async #onlineHistoryPage(history: TerminalHistoryState): Promise<void> {
+  async #onlineHistoryPage(owner: TerminalHistoryState): Promise<void> {
+    const stageInitial = !this.#mainView.readyForInput && this.#display.first === 0 && this.#display.last === 0;
+    const history = stageInitial ? { ...owner } : owner;
+    const staged: InitialHistoryDisplaySegment[] = [], progressAfter: TerminalHistoryState[] = [];
+    const current = () => this.#history === owner && !this.#abort.signal.aborted;
+    const append = async (segment: InitialHistoryDisplaySegment['segment'], replay: DisplayReplaySource, cursor: ConversationBodyCursor) => {
+      if (stageInitial) {
+        if (progressAfter.length) progressAfter[progressAfter.length - 1] = { ...history };
+        history.bodyCursor = cursor; staged.push({ segment, replay }); progressAfter.push({ ...history });
+      } else {
+        await this.#display.append(segment, true, undefined, true, replay); history.bodyCursor = cursor;
+      }
+    };
     let projected = 0;
     const originalMessage = this.#mainView.message;
     let progressMessage = originalMessage;
     const progress = (message: string) => {
       if (this.#mainView.message === progressMessage) { this.#mainView = { ...this.#mainView, message }; progressMessage = message; }
     };
-    const current = () => this.#history === history && !this.#abort.signal.aborted;
     while (current() && projected < 4 && history.hasMore) {
       const page = history.buffered ?? await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
         'terminal.history-rpc', () => this.#conversation.bodyPage(history.conversationId, history.bodyCursor, { includeInputs: true }));
@@ -1094,18 +1105,18 @@ class TerminalApplication {
           progress('正在恢复这条历史消息的排版…'); await this.#publishHistoryView(); continue;
         }
         for (const item of parsed.items) {
-          await this.#display.append({ blockId, groupId, role, text: item.text, contentOffset: item.contentOffset, final: item.body.end, body: item.body }, true, undefined, true, replay);
-          history.bodyCursor = { ...source.cursor, offset: item.contentOffset }; projected++;
+          await append({ blockId, groupId, role, text: item.text, contentOffset: item.contentOffset, final: item.body.end, body: item.body }, replay,
+            { ...source.cursor, offset: item.contentOffset }); projected++;
           if (projected === 4) break;
         }
         if (!parsed.items.length) history.bodyCursor = { ...source.cursor, offset: 0 };
       } else {
         const part = source;
-        await this.#display.append({ blockId, groupId, role, text: part.text, contentOffset: part.offset, final: part.final,
+        await append({ blockId, groupId, role, text: part.text, contentOffset: part.offset, final: part.final,
           body: { version: 1, revision: 1, kind: 'plain', end: part.final, context: { nodes: [{ kind: 'paragraph', origin: 0,
             from: part.offset, to: part.offset + part.text.length, anchor: part.offset === 0 && role !== 'user' && role !== 'thinking',
-            runs: [{ from: part.offset, to: part.offset + part.text.length, text: part.text, style: 0 }] }] } } }, true, undefined, true, replay);
-        history.bodyCursor = { ...source.cursor, offset: part.offset }; projected++;
+            runs: [{ from: part.offset, to: part.offset + part.text.length, text: part.text, style: 0 }] }] } } }, replay,
+          { ...source.cursor, offset: part.offset }); projected++;
       }
       // Consume only the source range actually projected. Keep the remainder
       // of this one bounded RPC page, including OTHER blocks, for the next
@@ -1118,6 +1129,15 @@ class TerminalApplication {
       history.recoveryRunIds = [...new Set([...(history.recoveryRunIds ?? []), source.runId])].slice(0, 4);
     }
     if (current()) {
+      if (staged.length) {
+        progressAfter[progressAfter.length - 1] = { ...history };
+        const published = await this.#display.appendInitialHistory(staged, current, index => {
+          if (current()) Object.assign(owner, progressAfter[index]);
+        });
+        if (!current()) return;
+        if (!published) throw Error('terminal-history-generation-changed');
+      }
+      if (stageInitial) Object.assign(owner, history);
       progress(originalMessage ?? '');
       await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
         'terminal.history-display', async () => { await this.#displayPage(); await this.#publishHistoryView(); });

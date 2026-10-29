@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, stat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
-import { TerminalDisplayStore } from '../display-store.js';
+import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from '../display-store.js';
 import { projectHistorySegmentsReverse } from '../history-segments.js';
 import { TerminalBodyProjection, type BodyProjectionChange } from '../body-projection.js';
 import { TerminalManagedFiles } from '../managed-files.js';
@@ -46,8 +46,9 @@ async function setup(replay?: (record: DisplayReplayRecord) => Promise<import('@
       await expect(stat(path.join(root, 'display/data'))).rejects.toMatchObject({ code: 'ENOENT' }); stored -= bytes;
     }),
   };
-  const store = new TerminalDisplayStore(root, capacity, account, new AbortController().signal, undefined, replay); stores.push(store);
-  return { root, account, store, counts: () => ({ active, outstanding, stored }) };
+  const abort = new AbortController();
+  const store = new TerminalDisplayStore(root, capacity, account, abort.signal, undefined, replay); stores.push(store);
+  return { root, account, store, abort, counts: () => ({ active, outstanding, stored }) };
 }
 
 describe('display recovery retains the original cache', () => {
@@ -371,3 +372,168 @@ describe('bounded terminal display projection', () => {
     expect(h.store.last).toBe(0); await h.store.reset(); expect(h.store.paused).toBe(false);
   });
 });
+
+function initialHistoryItems(count = 4, large = false): InitialHistoryDisplaySegment[] {
+  return Array.from({ length: count }, (_, index): InitialHistoryDisplaySegment => {
+    const text = large ? '汉😀'.repeat(4000) : `保留原文 ${index} 😀`;
+    return { segment: { blockId: `history-${index}`, groupId: `group-${index}`, role: 'user', text, contentOffset: 0, final: true,
+      ...(large ? { body: { version: 1, revision: 1, kind: 'plain', end: true, context: { nodes: [{ kind: 'paragraph', origin: 0,
+        from: 0, to: text.length, anchor: false, runs: [{ from: 0, to: text.length, text, style: 0 }] }] } } } : {}) },
+      replay: { kind: 'owner', conversationId: 'initial', runId: `run-${index}`, length: text.length, markdown: false,
+        cursor: { conversationId: 'initial', ownerEpoch: 1, revision: 1, message: index, block: 0, offset: 0 } } };
+  });
+}
+async function initialHistorySetup(items = initialHistoryItems()) {
+  const replay = new TerminalDisplayReplay(async (source, offset) => items.find(item => item.replay.kind === 'owner' && source.kind === 'owner' && item.replay.runId === source.runId)!.segment.text.slice(offset));
+  const h = await setup(record => replay.read(record));
+  return { ...h, items, replay };
+}
+
+describe('initial durable history batch', () => {
+  it.each([false, true])('keeps the exact old bytes, negative ordinals and source text (split: %s)', async split => {
+    const items = split ? initialHistoryItems(2, true) : initialHistoryItems();
+    const baseline = await initialHistorySetup(items), batched = await initialHistorySetup(items);
+    const writes = vi.spyOn(TerminalManagedFiles.prototype, 'write');
+    try {
+      for (const item of items) await baseline.store.append(item.segment, true, undefined, true, item.replay);
+      const priorWrites = writes.mock.calls.length;
+      const confirmed: number[] = [];
+      expect(await batched.store.appendInitialHistory(items, () => true, index => confirmed.push(index))).toBe(true);
+      expect(writes.mock.calls.length - priorWrites).toBe(3);
+      expect(priorWrites).toBe(9);
+      expect(confirmed).toEqual(items.map((_, index) => index));
+      expect(batched.store.first).toBe(-4); expect(batched.store.last).toBe(0);
+      expect(await batched.store.page()).toEqual(await baseline.store.page());
+      for (const file of ['data', 'index']) expect(await readFile(path.join(batched.root, 'display', file)))
+        .toEqual(await readFile(path.join(baseline.root, 'display', file)));
+      expect(batched.counts()).toEqual(baseline.counts());
+      expect((await readFile(path.join(batched.root, 'display/data'))).includes(Buffer.from(items[0]!.segment.text))).toBe(false);
+    } finally { baseline.replay.close(); batched.replay.close(); }
+  });
+
+  it('rechecks empty eligibility behind an already queued live write and preserves its positive index', async () => {
+    const h = await initialHistorySetup(), writes = vi.spyOn(TerminalManagedFiles.prototype, 'write');
+    try {
+      const first = h.store.append({ blockId: 'live', role: 'assistant', text: 'live retained', contentOffset: 0, final: true });
+      expect(h.store.last).toBe(0);
+      const batch = h.store.appendInitialHistory(h.items, () => true);
+      await first; expect(await batch).toBe(true);
+      expect(writes).toHaveBeenCalledTimes(11);
+      expect((await h.store.page(0)).segments[0]?.text).toBe('live retained');
+      expect((await h.store.page(-4, false)).segments.map(segment => segment.text)).toEqual(h.items.map(item => item.segment.text).reverse());
+    } finally { h.replay.close(); }
+  });
+
+  it('selects the old per-carrier path before IO when splitting exceeds four carriers', async () => {
+    const h = await initialHistorySetup(initialHistoryItems(4, true)), writes = vi.spyOn(TerminalManagedFiles.prototype, 'write');
+    try {
+      const confirmed: number[] = [];
+      expect(await h.store.appendInitialHistory(h.items, () => true, index => confirmed.push(index))).toBe(true);
+      expect(writes).toHaveBeenCalledTimes(17); expect(h.store.first).toBe(-8);
+      expect(confirmed).toEqual([0, 1, 2, 3]); expect(h.account.reserve).toHaveBeenCalledTimes(1);
+      expect(h.counts()).toMatchObject({ active: 0, outstanding: 0 });
+    } finally { h.replay.close(); }
+  });
+
+  it.each([1, 2, 3])('never publishes or retries after physical completion %i becomes unknown', async failure => {
+    const h = await initialHistorySetup(), original = TerminalManagedFiles.prototype.write;
+    let writes = 0;
+    vi.spyOn(TerminalManagedFiles.prototype, 'write').mockImplementation(async function (...args) {
+      const value = await original.apply(this, args);
+      if (++writes === failure) throw Error('synthetic unknown completion');
+      return value;
+    });
+    const confirmed = vi.fn();
+    try {
+      await expect(h.store.appendInitialHistory(h.items, () => true, confirmed)).rejects.toThrow('unknown completion');
+      expect(writes).toBe(failure); expect(confirmed).not.toHaveBeenCalled(); expect(h.store.first).toBe(0);
+      expect(h.store.paused).toBe(true); expect(h.counts()).toMatchObject({ active: 0, stored: 0 });
+      expect(h.counts().outstanding).toBe(132 * 1024); expect(h.account.settle).not.toHaveBeenCalled();
+      await expect(h.store.retry()).rejects.toThrow('recovery-unavailable');
+      await expect(h.store.appendInitialHistory(h.items, () => true)).rejects.toThrow('paused');
+      expect(writes).toBe(failure); expect(h.account.released).not.toHaveBeenCalled();
+    } finally { h.replay.close(); }
+  });
+
+  it('retains the complete reservation when settlement is unknown', async () => {
+    const h = await initialHistorySetup(); h.account.settle.mockRejectedValueOnce(Error('settlement unknown'));
+    try {
+      await expect(h.store.appendInitialHistory(h.items, () => true)).rejects.toThrow('settlement unknown');
+      expect(h.store.first).toBe(0); expect(h.counts()).toMatchObject({ outstanding: 132 * 1024, stored: 0 });
+      await expect(h.store.reset()).rejects.toThrow('settlement-unknown'); expect(h.account.released).not.toHaveBeenCalled();
+    } finally { h.replay.close(); }
+  });
+
+  it.each(['epoch', 'reset', 'abort'] as const)('suppresses stale publication after writes while %s retires the page', async reason => {
+    const h = await initialHistorySetup(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const settle = h.account.settle.getMockImplementation()!; let current = true;
+    h.account.settle.mockImplementation(async (...args) => { entered.resolve(); await release.promise; return settle(...args); });
+    const confirmed = vi.fn();
+    try {
+      const batch = h.store.appendInitialHistory(h.items, () => current, confirmed);
+      await entered.promise; expect(h.store.first).toBe(0); expect(confirmed).not.toHaveBeenCalled();
+      let reset: Promise<void> | undefined;
+      if (reason === 'epoch') current = false;
+      else if (reason === 'reset') reset = h.store.reset();
+      else h.abort.abort(Error('cancelled'));
+      release.resolve(); expect(await batch).toBe(false); await reset;
+      expect(h.store.first).toBe(0); expect(h.store.last).toBe(0); expect(confirmed).not.toHaveBeenCalled();
+      expect(h.counts()).toMatchObject({ active: 0, outstanding: 0, stored: reason === 'reset' ? 0 : 132 * 1024 });
+      if (reason === 'epoch') {
+        expect((await h.store.page()).segments).toEqual([]);
+        await h.store.append({ blockId: 'new', role: 'user', text: 'new page', contentOffset: 0, final: true });
+        expect((await h.store.page()).segments.map(segment => segment.text)).toEqual(['new page']);
+      }
+    } finally { release.resolve(); h.replay.close(); }
+  });
+
+  it('drops an epoch retired while queued without reserving or writing', async () => {
+    const h = await initialHistorySetup(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const original = TerminalManagedFiles.prototype.prepareDisplay, writes = vi.spyOn(TerminalManagedFiles.prototype, 'write');
+    vi.spyOn(TerminalManagedFiles.prototype, 'prepareDisplay').mockImplementation(async function (...args) {
+      entered.resolve(); await release.promise; return original.apply(this, args);
+    });
+    let current = true;
+    try {
+      const preparation = h.store.prepare(); await entered.promise;
+      const batch = h.store.appendInitialHistory(h.items, () => current); current = false; release.resolve();
+      await preparation; expect(await batch).toBe(false);
+      expect(writes).not.toHaveBeenCalled(); expect(h.account.reserve).not.toHaveBeenCalled();
+    } finally { release.resolve(); h.replay.close(); }
+  });
+
+  it('settles a reservation to zero when the epoch retires before the first write', async () => {
+    const h = await initialHistorySetup(), reserve = h.account.reserve.getMockImplementation()!;
+    const writes = vi.spyOn(TerminalManagedFiles.prototype, 'write'); let current = true;
+    h.account.reserve.mockImplementation(async (...args) => { const token = await reserve(...args); current = false; return token; });
+    try {
+      expect(await h.store.appendInitialHistory(h.items, () => current)).toBe(false);
+      expect(writes).not.toHaveBeenCalled(); expect(h.account.settle).toHaveBeenCalledWith('own-reservation', 0);
+      expect(h.counts()).toEqual({ active: 0, outstanding: 0, stored: 0 });
+    } finally { h.replay.close(); }
+  });
+
+  it('refuses capacity without creating files or publishing history', async () => {
+    const h = await initialHistorySetup(), writes = vi.spyOn(TerminalManagedFiles.prototype, 'write');
+    h.account.reserve.mockRejectedValueOnce(Error('capacity unavailable'));
+    try {
+      await expect(h.store.appendInitialHistory(h.items, () => true)).rejects.toThrow('capacity unavailable');
+      expect(writes).not.toHaveBeenCalled(); expect(h.store.first).toBe(0); expect(h.counts().outstanding).toBe(0);
+    } finally { h.replay.close(); }
+  });
+
+  it('reports only confirmed items when the original fallback stops after a partial prefix', async () => {
+    const h = await initialHistorySetup();
+    try {
+      await h.store.append({ blockId: 'live', role: 'user', text: 'live', contentOffset: 0, final: true });
+      const original = TerminalManagedFiles.prototype.write; let calls = 0;
+      vi.spyOn(TerminalManagedFiles.prototype, 'write').mockImplementation(async function (...args) {
+        if (++calls === 3) throw Error('fallback stopped'); return original.apply(this, args);
+      });
+      const confirmed: number[] = [];
+      await expect(h.store.appendInitialHistory(h.items, () => true, index => confirmed.push(index))).rejects.toThrow('fallback stopped');
+      expect(confirmed).toEqual([0]); expect(h.store.first).toBe(-1);
+    } finally { h.replay.close(); }
+  });
+});
+

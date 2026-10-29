@@ -16,6 +16,10 @@ const SLOT_BYTES = BODY_FRAGMENT_ENCODED_BYTES;
 // Root inventory/commitment must not be repeated for every physical write.
 const DATA_EXTENT_BYTES = TERMINAL_LIMITS.storageReservationBytes - 4096;
 const PHYSICAL_EXTENT_BYTES = 1024 * 1024;
+export interface InitialHistoryDisplaySegment {
+  readonly segment: TerminalDisplaySegment;
+  readonly replay: DisplayReplaySource;
+}
 interface ActiveFragment { readonly ordinal: number; readonly offset: number; readonly length: number; revision: number; semantic: string }
 interface ConfirmedFragment { readonly entry: Buffer; readonly segment: TerminalDisplaySegment; readonly encodedBytes: number }
 const bodySemantic = (body: NonNullable<TerminalDisplaySegment['body']>) => createHash('sha256')
@@ -126,6 +130,99 @@ export class TerminalDisplayStore {
       }
     });
   }
+  /** Commit one initial history page. Eligibility is rechecked in the owning
+   * queue; later pages and split pages keep the existing per-fragment path.
+   * The callback advances the caller's page only after its confirmed display
+   * publication, including a confirmed prefix on that fallback path. */
+  appendInitialHistory(items: readonly InitialHistoryDisplaySegment[], current: () => boolean,
+    stored?: (index: number) => void): Promise<boolean> {
+    if (!items.length || items.length > 4 || !this.replay) return Promise.reject(Error('terminal-display-replay-admission'));
+    for (const { segment } of items) {
+      if (!segment.blockId || segment.blockId.length > 512 || segment.role.length > 32 ||
+        !Number.isSafeInteger(segment.contentOffset) || segment.contentOffset < 0 || Buffer.byteLength(segment.text) > 32 * 1024 ||
+        (segment.body && !validateBodyMetadata(segment.body, segment.contentOffset, segment.text.length))) return Promise.reject(Error('terminal-display-segment-size'));
+    }
+    const generation = this.#generation;
+    const valid = () => generation === this.#generation && current() && !this.signal.aborted;
+    let published = false;
+    return this.#enqueue(async () => {
+      if (!valid()) return;
+      const split = (item: InitialHistoryDisplaySegment) => {
+        const parts: { segment: TerminalDisplaySegment; encoded: Buffer; replay: DisplayReplaySource }[] = [];
+        for (const part of carriers(item.segment)) {
+          if (parts.length >= 16) throw Error('terminal-display-carrier-capacity');
+          parts.push({ segment: part.segment, encoded: this.#encode(part.segment, part.encoded), replay: item.replay });
+        }
+        return parts.reverse();
+      };
+      let parts: ReturnType<typeof split> = [];
+      const empty = this.#first === 0 && this.#last === 0 && this.#bytes === 0 && this.#indexBytes === 0 &&
+        this.#dataAllocation === 0 && this.#indexAllocation === 0 && this.#activeCount === 0 && this.#active.size === 0 &&
+        !this.#unsettled && !this.#unpublished && !this.#admission;
+      if (empty) for (const item of items) {
+        const group = split(item);
+        if (parts.length + group.length > 4) { parts = []; break; }
+        parts.push(...group);
+      }
+      if (!empty || parts.length === 0) {
+        // This choice precedes reserve/IO. Never retry a partially written batch.
+        for (let index = 0; index < items.length; index++) {
+          for (const part of split(items[index]!)) {
+            if (!valid()) return;
+            await this.#appendFragment(part.segment, part.encoded, true, valid, true, part.replay);
+          }
+          if (!valid()) return;
+          stored?.(index);
+        }
+        published = true; return;
+      }
+      const records = parts.map(part => this.#encodeReplay(part.segment, part.replay));
+      const data = Buffer.concat(records), dataAllocation = 128 * 1024;
+      const indexBytes = indexPosition(-parts.length) + INDEX_BYTES, indexAllocation = allocated(indexBytes);
+      const indexPayload = Buffer.alloc(indexAllocation), entries: Buffer[] = [];
+      let offset = 0;
+      for (let index = 0; index < parts.length; index++) {
+        const entry = Buffer.alloc(INDEX_BYTES);
+        entry.writeBigUInt64LE(BigInt(offset)); entry.writeUInt32LE(records[index]!.length, 8);
+        entry.copy(indexPayload, indexPosition(-index - 1)); entries.push(entry); offset += records[index]!.length;
+      }
+      const charge = dataAllocation + indexAllocation;
+      const token = await this.account.reserve('display', charge);
+      this.#unsettled = true;
+      if (!valid()) { await this.account.settle(token, 0); this.#unsettled = false; return; }
+      await terminalPhysicalStep(this.capacity, bound, this.signal, async step => {
+        step.claim('writeBytes', dataAllocation - 1);
+        this.#dataIdentity = (await this.#files.write('display/data', Buffer.alloc(1), dataAllocation - 1, dataAllocation, step)).identity;
+      });
+      await terminalPhysicalStep(this.capacity, bound, this.signal, async step => {
+        this.#dataIdentity = (await this.#files.write('display/data', data, 0, dataAllocation, step, this.#dataIdentity)).identity;
+        this.#indexIdentity = (await this.#files.write('display/index', indexPayload, 0, indexAllocation, step)).identity;
+      });
+      await this.account.settle(token, charge);
+      // Even a retired page owns its actual bytes until the ordinary reset/close.
+      this.#unsettled = false; this.#bytes = data.length; this.#indexBytes = indexBytes;
+      this.#dataAllocation = dataAllocation; this.#indexAllocation = indexAllocation;
+      if (!valid()) return;
+      for (let index = 0; index < parts.length; index++) {
+        const segment = Object.freeze({ ...parts[index]!.segment });
+        this.#rememberHot(-index - 1, { entry: entries[index]!, segment, encodedBytes: Buffer.byteLength(JSON.stringify(segment)) });
+      }
+      this.#first = -parts.length;
+      for (let index = 0; index < items.length; index++) stored?.(index);
+      published = true;
+    }).then(() => published);
+  }
+
+  #encodeReplay(segment: TerminalDisplaySegment, replay: DisplayReplaySource): Buffer {
+    const record: DisplayReplayRecord = { replay, blockId: segment.blockId, groupId: segment.groupId, role: segment.role,
+      contentOffset: segment.contentOffset, length: segment.text.length, final: segment.final,
+      digest: createHash('sha256').update(segment.text).digest('hex') };
+    // The disk retains only the source locator. The confirmed hot page owns text.
+    const encoded = Buffer.from(JSON.stringify(record));
+    if (encoded.length > 4096) throw Error('terminal-display-replay-size');
+    return encoded;
+  }
+
   async #appendFragment(segment: TerminalDisplaySegment, encoded: Buffer, prepend: boolean, current: () => boolean, stable: boolean, replay?: DisplayReplaySource): Promise<void> {
       const ordinal = prepend ? this.#first - 1 : this.#last;
       const active = !prepend && segment.body && !stable ? this.#active.get(segment.blockId) : undefined;
@@ -151,15 +248,9 @@ export class TerminalDisplayStore {
       }
       if (!prepend && segment.body && !stable) this.#checkActive(segment.blockId);
       if (replay) {
-        const record: DisplayReplayRecord = { replay, blockId: segment.blockId, groupId: segment.groupId, role: segment.role,
-          contentOffset: segment.contentOffset, length: segment.text.length, final: segment.final,
-          digest: createHash('sha256').update(segment.text).digest('hex') };
-        // The confirmed hot page retains its full projection. Disk stores only
-        // an immutable locator; dropping that hot copy never loses source data.
-        encoded = Buffer.from(JSON.stringify(record));
-        if (encoded.length > 4096) throw Error('terminal-display-replay-size');
+        encoded = this.#encodeReplay(segment, replay);
       }
-      await this.#write(ordinal, encoded, undefined, !prepend && !!segment.body && !stable, segment);
+      await this.#write(ordinal, encoded, undefined, !prepend && !!segment.body && !stable, segment, current);
       // The write remains accounted, but a notice from a superseded context
       // must never advance the visible range. A later append reuses this index.
       if (!current()) return;
@@ -230,7 +321,7 @@ export class TerminalDisplayStore {
     })).catch(error => { this.#failed = true; throw error; }).finally(() => { this.#pending--; });
     this.#tail = operation.catch(() => {}); return operation;
   }
-  async #write(ordinal: number, encoded: Buffer, previous: Buffer | undefined, mutable: boolean, segment: TerminalDisplaySegment): Promise<void> {
+  async #write(ordinal: number, encoded: Buffer, previous: Buffer | undefined, mutable: boolean, segment: TerminalDisplaySegment, current: () => boolean = () => true): Promise<void> {
     const confirmed = Object.freeze({ ...segment });
     const indexOffset = indexPosition(ordinal), indexBytes = Math.max(this.#indexBytes, indexOffset + INDEX_BYTES);
     const spare = previous ? previous.readUInt32LE(12) - 1 : -1;
@@ -274,7 +365,7 @@ export class TerminalDisplayStore {
     this.#dataAllocation = dataAllocation; this.#indexAllocation = indexAllocation;
     // Metadata is validated/frozen by #encode. Keep a private immutable outer
     // record; a JSON round trip here only recreated the same confirmed content.
-    this.#rememberHot(ordinal, { entry, segment: confirmed, encodedBytes: Buffer.byteLength(JSON.stringify(confirmed)) });
+    if (current()) this.#rememberHot(ordinal, { entry, segment: confirmed, encodedBytes: Buffer.byteLength(JSON.stringify(confirmed)) });
   }
   #rememberHot(ordinal: number, value: ConfirmedFragment): void {
     if (this.#reading.has(ordinal)) this.#reading.set(ordinal, value);
