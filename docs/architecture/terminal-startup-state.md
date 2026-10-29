@@ -1,6 +1,6 @@
 # 终端启动：累计状态边界与恢复架构
 
-更新：2026-10-19。状态：**包0及包1a已通过整轮独立审查并提交发布；下一步按双方认可的执行计划完成交互长尾前置包，再进入调整后的1b与2。** 当前执行顺序以[终端迁移收尾方案与执行计划](../tasks/terminal-migration-delivery-plan.md)为准。B2/B3已通过单元审查，收窄C已通过总控正确性验收，C阶段G11/G17新增改造已回退。本文继续维护累计状态机制及技术边界。整个启动专项尚未最终验收，旧调度副本缺少绑定退出证明时继续pending，R2不再指导已替代机制。
+更新：2026-10-29。状态：**包0～6按各自工程范围已验收；本节27项G/C机制已按独审和有效规模证据回填。包7固定10次冷启、2次热入的功能链通过，冷热性能仍未达标，整个启动专项及终端迁移未完成最终交付。** 执行顺序和整体验收门仍以[终端迁移收尾方案与执行计划](../tasks/terminal-migration-delivery-plan.md)为准；工程机制成立与最终体验通过分别判断。
 
 本文是[启动性能专项](../tasks/terminal-startup-performance.md)的架构增补，唯一维护累计状态机制清单、目标结构和实施边界。耗时账与原始证据归[执行记录](../tasks/terminal-startup-performance-record.md)。母架构以[架构概述](../../research/design/architecture/overview.md)、[AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)和[分布式规格§4.1](../../research/design/modules/distributed-runtime/specification.md)为基础，不另造产品语义或事实权威。
 
@@ -33,6 +33,8 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 
 ## 3. 机制清单
 
+2026-10-29按包1b、2、4的既有独审回填九项旧状态，并按包7 G16独审及组合规模证据回填G16/C18/C20。勾选只表示相应工程机制成立，不表示包7性能或全终端交付通过。G16冷态行政命令计量故障已修复，原失败与物理读量仍保留；领域读取有界不等于每个规模的全部IO恒等。
+
 **G**：已证可达的累计增长机制；**C**：对应现有功能/恢复分支启用时可达，仍属实施范围；**B**：已具有边界或没有证据是历史增长，保留并回归，不凭可能性扩面。行号用于定位，工程实施以符号/调用关系为准。G/C待办不代表已经实测出新增超时。
 
 ### 3.1 物理层与投影
@@ -52,11 +54,11 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 | G05 [x] | 原审计机制：ConversationRunJournal的commits/admittedByRun/stateByRun等随历史累积，v2仅去正文 | 2026-10-19包1a独审通过：当前/指定工作集与历史exact分离，同前缀决定，保存不再整体序列化历史；不代表最终整链延迟达标 |
 | G06 [x] | 原审计机制：恢复发现保存、复制并遍历全会话/run/publish集合 | 2026-10-19包1a独审通过：同事务pending目录、当前fence、分页恢复及停止义务 |
 | G07 [x] | 原审计机制：缺checkpoint时收集所选run及全局publish/final-outbox信封 | 2026-10-19包1a独审通过：按会话、assignment/frame定位和恢复；认证导入base与本地tail同边界，新旧资料、目标续执行及当前owner直接责任随§4.9验证 |
-| G08 [ ] | owner-services/advancement/recovery-maintenance.ts:126→directory.list后逐会话恢复；Host及local owner启动调用 | 只发现有推进义务的会话，不枚举全部对话；保留原始任务接纳与副作用恢复 |
-| G09 [ ] | ConversationMessageInputReader #prepare/#read先折叠本会话全消息事实、排序inputs再截200条；控制页从0追历史 | 历史外输入和可中断运行持久定位；当前控制与历史展示分开，页上限不能掩盖全量前置 |
-| C10 [ ] | conversation/directory-reader.ts:7、repository.ts:136、N离线listPage；返回有限页但先遍历目录/meta | 本地持久活动目录/最新定位；离线不重新枚举全部历史，旧目录仅用于迁移 |
-| G24 [ ] | build-startup-bootstrap.ts:90预算前调用snapshots.list；snapshot/store.ts:75读全部摘要并排序；shard/byte-reader.ts:54为最新/前驱分片遍历全目录；legacy计数也全扫 | 摘要资格索引、当前分片/前驱定位及可信计数；保留摘要不覆盖原文、clear和回退语义，见§4.6 |
-| G25 [ ] | shard/store.ts:213 appendCommittedRun→findRunInLock:377首次建全runId Map并读全部分片；conversation-manager.ts:1689首轮结果/恢复可达 | runId到物理位置的耐久幂等投影；定位缺失与真实不存在分开，不能把全量成本转移到首轮提交 |
+| G08 [x] | 原机制：owner-services/advancement/recovery-maintenance.ts:126→directory.list后逐会话恢复；Host及local owner启动调用 | 2026-10-23包1b工程独审通过：按未完推进义务目录发现会话，分页恢复与停止责任保持，不枚举全部已结束会话；原始接纳与副作用接续不变。旧资料转换和最终时延仍单列，见执行计划包1b |
+| G09 [x] | 原机制：ConversationMessageInputReader #prepare/#read先折叠本会话全消息事实、排序inputs再截200条；控制页从0追历史 | 2026-10-24包2-3及包2收尾独审通过：历史外候选由持久读目录精确定位，当前可变种子与历史exact分开；真实持久基底8/32/128对照保持候选数，跨页upper、32批顺序及消费后前移守住。1a控制目标/状态查询证据复用，最终性能归包7 |
+| C10 [x] | 原机制：conversation/directory-reader.ts:7、repository.ts:136、N离线listPage；返回有限页但先遍历目录/meta | 2026-10-23包1b工程独审通过：本地持久活动目录、最近定位与离线分页替代全目录/meta枚举；目录迁移按有界准备与已验源位置接续。工程边界成立，最终冷热时延归包7 |
+| G24 [x] | 原机制：build-startup-bootstrap.ts:90预算前调用snapshots.list；snapshot/store.ts:75读全部摘要并排序；shard/byte-reader.ts:54为最新/前驱分片遍历全目录；legacy计数也全扫 | 2026-10-24包2-1/2-2及包2收尾独审通过：摘要资格、当前分片/前驱、封片长度与可信计数按当前根/索引读取；坏摘要有限降级不吞转录错误，clear/retention及原文覆盖保持。普通打开不列全摘要/分片，必要旧资料接续单列 |
+| G25 [x] | 原机制：shard/store.ts:213 appendCommittedRun→findRunInLock:377首次建全runId Map并读全部分片；conversation-manager.ts:1689首轮结果/恢复可达 | 2026-10-24包2-1及包2收尾独审通过：runId到位置的耐久幂等定位随分片发布；短写、根sync失败、退休失败、旧clear游标与截断反例通过。首轮提交不建立全历史runId表，故障保留未确认发布并可恢复 |
 | B02 保持 | SessionMeta.turnCount与正文token预算本身有界，但不能证明其前置发现有界 | 保留正文装填/最近一组压缩核；修G24/G25，不再将正常bootstrap整体标作已有限 |
 | B03 保持 | Timeline/BodyReader有界片段、N首屏每轮最多4片、display replay/page | 保留顺序、源身份、clear/delete代际、阅读锚、草稿、复制与原UI；仅显示页有限不证明底层发现有限 |
 
@@ -65,15 +67,15 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 | ID/待办 | 入口、已证机制与增长源 | 目标处理 |
 |---|---|---|
 | G11 [x] | DeviceLifecycleJournal 按键：startupState 精确读退休指针并只读 active 目录首项，state/latest/activeFor 精确读；mesh-runtime-bootstrap 只用 startupState。启动只恢复未终结的移除（active-kind 目录），读取与已终结移除数无关；operations() 只作显式历史查询。终态取回按请求解析：issuer 的成员入口与常驻中继注册只含当前 active 成员，历史设备只经固定数量的终态接入（直连监听 + 中继上当前/前一窗各 2 条）进入，SNI 携带由 issuer 终态路由秘密派生的不透明 operation 定位，按 removal-route 目录精确读出 operation 并核对代际与传输身份后才建该连接的 CA；入口用途绑定到连接，只开放该 operation 的终态 exact-set。传输对端目录按设备键存储，启动与信任变更只精确读当前成员，轮询稳态不读。target 侧在 accept 时落盘路由秘密与恢复制品，删钥后的本地终结与仍需联网的专用取回都在 bootstrap 普通装配之前完成；进程不重启时，不可逆之后中断的内联续做交给唯一的运行中取回 owner；路由副本先于本机 terminal 删除。issuer 的撤销与终结回执按撤销事件摘要经当前信任投影的摘要目录精确读原事件重建；首次撤销（含启动恢复 revocation-ready）在生命周期锁定前缀上精确读 operation、当前信任链头与 active 目录、祖先事件与目标设备的 active 凭据暴露，不重放 trust、exposure 与生命周期流；签名信任记录 v2 只列 active 成员，签名按 active 目录读、写入按同一目录与 active 计数全等核对，读取、物化、验证与写出随当前成员数，不随已撤销成员与已完成移除增长；历史成员与身份留在事件链和身份目录，按键给出；开发资料里 v1 快照是历史帧，值班设备补签、其他设备对齐取回同链头的 v2 一次性接续；取回与重投都不整读信任流、不重放生命周期流。取回 owner 停止时取消握手中与等待请求中的网络等待并回收连接。设备移除删除后的收束核对先等正在跑的一轮恢复结束，再在静止点上逐会话读取 | 2026-10-26包3独审通过（候选817203bb）：启动只恢复未终结的移除，读取与已终结移除数无关；同一issuer下终态自动取回；首次撤销与v2当前授权快照随当前成员数；冷重启后历史身份在验签边界内按需补齐。迁居/灾备与终态取回的交界归包5（C22），已声明失联的设备重新出现归包6，冷启动段整理与准备的固定成本归包5、时延与慢样本归包7；不代表最终整链延迟达标 |
-| G12 [ ] | Anchor/ExecutorResourceGovernor #restoreCheckpoint/#compactProjection整体装载reservations/usage/lease/dequeue；27天保留仍随使用增长 | 类公平差额/当前占用聚合、指定lease等exact；历史usage和幂等索引落盘，TTL/时钟/公平重放保持 |
-| G13 [ ] | DataPlaneTicketRegistry.recover:429/maintain/#load全票据；AssignmentLedger:1804绑定checkpoint整Map | ticket exact授权、expiry/未撤销义务索引；只为当前连接或待执行assignment恢复绑定 |
-| G14 [ ] | listScheduleTaskIds:44保存所有出现过的taskId→AnchorScheduler.prepare:154逐task恢复定义/occurrence | 当前定义、下一到期、未完job目录；系统任务exact准备，历史任务不先装载 |
-| C15 [ ] | listConversationTransferStates:710→LocalConversationOwner.start:1090全迁移Map、排序后筛选 | 当前active/fenced迁移按conversation/operation定位；终态幂等按键保留 |
-| G16 [ ] | workspace-bindings.ts:906/938、workspace-probe.ts:533/557及setup-delivery:1060整投影加载/clone/保存 | 当前binding、未完操作目录与request exact；保留establishment marker、签名与版本水位 |
+| G12 [x] | 原机制：Anchor/ExecutorResourceGovernor #restoreCheckpoint/#compactProjection整体装载reservations/usage/lease/dequeue；27天保留仍随使用增长 | 2026-10-26包4独审通过（最终候选360dc0f7）：当前占用/公平聚合、指定lease/usage及历史幂等按键处理，资源代次安全清理与配额/队位/TTL/未知终态保持；4096行工作集内固定建链成本及最终时延归包7 |
+| G13 [x] | 原机制：DataPlaneTicketRegistry.recover:429/maintain/#load全票据；AssignmentLedger:1804绑定checkpoint整Map | 2026-10-26包4独审通过，2026-10-28包5-5e补闭合绑定复核：票据exact授权、有效时钟、有限到期/退休与完成撤销淘汰保持；恢复当前有效票据对应的请求批次，已有绑定仅按自身派发流变化重算，不扫描无关历史帧索引。有效观察票据与已结束run历史不是同一集合 |
+| G14 [x] | 原机制：listScheduleTaskIds:44保存所有出现过的taskId→AnchorScheduler.prepare:154逐task恢复定义/occurrence | 2026-10-26包4独审通过（最终候选360dc0f7）：当前调度定义/下一到期/未完作业目录、完整次序和合并失败摘要生效；当前决定按需装入，缺行耗尽明确终止而不无限重开。B2引用化与正常停止有界检查点复用，最终固定成本归包7 |
+| C15 [x] | 原机制：listConversationTransferStates:710→LocalConversationOwner.start:1090全迁移Map、排序后筛选 | 2026-10-26包4独审通过：当前active/fenced迁移与终态幂等按conversation/operation定位；1a导入/来源直接交界复用，导入取消、接纳与退役锁竞争沿既有授权/资源/源前缀修复，不恢复全迁移Map |
+| G16 [x] | 原机制：workspace-bindings、workspace-probe及setup-delivery整投影加载/clone/保存 | 包0按当前binding、未完目录和request exact读取，保留establishment marker、签名及版本水位；2026-10-29包7补8/32/128已结束对象冷态验证，绑定重放/新写物化恒18/21行、探针恒3行。新发现索引叶读误计入行政写io8的故障已独审修复：仅该行政步骤显式独立读准入，保留write64KiB/io8及真实同arbiter借槽、授权/源锁/取消。结合G03固定增量窗口与目录定位证明；物理读量并非恒等，见下方补充规模证据 |
 | G17 [x] | CredentialExposureAuthority 的路由与绑定按键读，待轮换走 compromised 状态索引；暴露索引另按（绑定，服务）聚合历来最大的修订号。启动轮换发布从待轮换记录起步，修订号精确读聚合后加一，publishRotation 只读回受影响记录与当前待轮换列表；读取随待轮换数，不扫描过往身份。startup-application 只读本机 SecretStore，不读暴露索引；过去 principal/scope 身份保留 | 2026-10-26包3独审通过（3-2，候选953d0e56）：启动轮换发布的读取随待轮换数，不扫描过往身份，修订号与原算法一致；待轮换列表的O(C²)重复读如实保留；不代表最终整链延迟达标 |
-| C18 [ ] | ExtensionApplication.list:85冷恢复全extension流并返回全部operations；channels prepare/snapshot使用 | 当前实例/未终结操作目录；完成操作exact；按现有功能装配，不新增渠道生命周期 |
+| C18 [x] | 原机制：ExtensionApplication冷恢复全extension流并返回全部operations；channels prepare/snapshot使用 | 包0改为当前实例/未终结操作目录及完成操作exact；2026-10-29包7补8/32/128已完成操作+1待办的认证冷开，当前/待办/重放恒4次决定、4键、3次scan、4行约580字节；结合G03按范围定位及有界增量窗口，不全量物化已完成操作，不新增渠道生命周期。物理读量与边界见下方补充规模证据 |
 | C19 [x] | 原机制：AuthorityDeliveryPipeline.prepare→AuthorityDeliveryQueue.load→DeliveryAuthority全流/全列表再过滤pending | 2026-10-27包5-5b独审通过（候选86bd4238）：投递权威改为按键持久投影，入队在源事务里按键读，生命周期按条目号装入，准入分页冻结，排空每轮有上界、关闭即收束，计数读计数行，状态历史按主体补读与全局分页，当前uncertain有限分页；权限、回执、未知效果、幂等与补偿语义不变，见§4.12。普通冷开含有限的未发布尾部回放，最终时延归包7 |
-| C20 [ ] | mesh-bootstrap-store.ts:178/193→mesh-runtime-bootstrap:93；受管启动/backup owner也调用，重复重放trust全事件链 | 认证的当前信任投影与版本/epoch；fresh授权仍查当前信任，历史链验证/scrub保留；覆盖startup-application的本机配置/安全端口 |
+| C20 [x] | 原机制：mesh-bootstrap-store→mesh-runtime-bootstrap；受管启动/backup owner重复重放trust全事件链 | 包0使用认证当前信任投影与版本/epoch；包3已验4/16历史成员及快照计数，G11当前信任与G17暴露聚合证明复用。2026-10-29核对startup-application本机端口：每个当前配置对新/旧表示各取all/local聚合，共4个route键；fresh授权仍查当前信任，历史链验证/scrub保持。当前配置量属于F，不冒称所有IO恒定，不扩展秘密存储 |
 | C21 [x] | 原机制：FileTrustRuleSnapshotCatalog.open/#reload→loadPermissionSnapshotCatalog枚举全部保留快照 | 2026-10-27包5-5c独审通过（候选eef27b7f）：快照内容寻址，另有head、按版本、按规则内容与按发布位置四类小指针；只读当前及在途租约引用的旧快照，按原合同验签；head与指针带home完整性MAC，读时有界核对，合法版本跳号下回放旧head也拒绝，见§4.13 |
 | C22 [x] | 原机制：可信home post-install的checkpoint/recovery activation、planned/disaster staging含整快照/目录恢复 | 2026-10-27包5-5c独审通过（候选eef27b7f）：当前安装与未完安装按键索引，正常已完成安装不回扫；迁居/灾备后终态取回与有效成员接续（路线A）见§4.13。checkpoint当前流读取与DPI整理放大归5e |
 | G26 [x] | 原机制：setup-delivery.ts:675→surfaceAssets.recover→ArtifactLifecycleIndex.synchronize:311；while(more)排空多日志追尾和retirement/adoption/expiry/temporary；surface-asset-maintenance.ts:92停止时还新起整轮维护 | 2026-10-26包5-5a独审通过（候选44a25e91）：安全根/配额/引用证明与回收分开，跨日志向量和源端尾部预算在维护，见§4.8。DPI重建步骤不读盘等观察划入5e，5e已闭合（reset代次单调，见§4.15） |
@@ -91,6 +93,14 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 | B08 保持 | 用户明确请求全量导出/历史搜索、跨设备资料传输、全部可信恢复材料丢失后的真正灾备允许按工作量推进，但不得暗绑普通启动，正常升级不得冒充灾备排除 |
 
 覆盖方法：枚举所有生产loadProjectionCheckpoint使用方（run四投影、发现、生命周期、双governor、executor绑定、workspace双目录、task IDs、transfer），再沿T0–X真实调用链补查非checkpoint整流/目录/数组/clone与分页前置。G/C必须有实现或新的边界证据才能销项；B仅保留必要回归。不能因“以前通过”“名字叫缓存”排除。
+
+### 包7补充规模证据与结论范围（2026-10-29）
+
+绑定旧请求重放、新建、探针重放、扩展当前与待办读取均经过正常停止及认证冷开，历史8/32/128，当前集合固定。领域决定分别恒6/6/2/4次，物化行18/21/3/4；完整冷开及查询物理读字节分别为绑定重放23764/69947/242479、新建24933/73042/253059、探针13972/24937/57040、扩展10669/25772/29178；其中WAL分别743/746/750、743/746/750、893/895/898、629/629/630。不能省略变化的物理读量或将逻辑计数误写为全链恒时。
+
+组合依据是已验G03底座：base范围从lowerBound目录定位，构建时过滤墓碑，常规片最多512条/1MiB；delta最多4段、合并中暂多1段，普通覆盖层512条/1MiB。固定窗口内布局与墓碑可改变实际读量，树定位成本可随深度变化；这不同于每次全量物化已结束历史。样本本身不证明任意规模恒定。
+
+G16生产修复直接17例及11文件125消费者例physical通过，总控独跑17例通过；额度不足/取消不执行读叶、不追加WAL，追加后回包丢失冷重放不二次追加，新home与legacy均覆盖。源事务、权限、写预算和StepError分类保持。上述工程闭合不解除最终性能门：冻结候选10冷+2热全数保留，生产可用帧短/长冷组中位7.976/8.822秒，热入3.010/2.730秒，未达目标。
 
 ## 4. 统一目标结构
 
