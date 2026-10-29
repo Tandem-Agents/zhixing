@@ -23,9 +23,10 @@ import type {
 import { EMPTY_EVIDENCE_CAPABILITIES, canBeRequired } from "./types.js";
 import { parseJsonObject } from "./json.js";
 import { protocolDigest } from "../protocol/canonical.js";
+import { RUBRIC_NEARBY_SCORE_THRESHOLD } from "./thresholds.js";
 
 const RUBRIC_MATCH_SCORE_THRESHOLD = 0.3;
-export const RUBRIC_NEARBY_SCORE_THRESHOLD = 0.2;
+export { RUBRIC_NEARBY_SCORE_THRESHOLD };
 
 export interface BuildRubricContractDraftInput {
   readonly originalTurnId: string;

@@ -1,5 +1,6 @@
 import type { ConversationRunState } from "../contracts/index.js";
-import { isProtocolIdentifier, protocolDigest } from "../protocol/index.js";
+import { protocolDigest } from "../protocol/canonical.js";
+import { isProtocolIdentifier } from "../protocol/validation.js";
 import type { Message, MessageInputIdentity } from "../types/messages.js";
 import { normalizeUserTurnInput, isNonEmptyUserTurnInput, type UserTurnInput, type UserTurnInputLike } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";

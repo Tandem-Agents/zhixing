@@ -45,6 +45,7 @@ const entry = [
     "src/product-api/catalog.ts",
     "src/trust-administration/application.ts",
     "src/advancement/index.ts",
+    "src/advancement/thresholds.ts",
     "src/resources/index.ts",
     "src/security/index.ts",
     "src/confirmation/index.ts",

@@ -172,6 +172,10 @@
       "types": "./dist/conversation/application.d.ts",
       "import": "./dist/conversation/application.js"
     },
+    "./advancement/thresholds": {
+      "types": "./dist/advancement/thresholds.d.ts",
+      "import": "./dist/advancement/thresholds.js"
+    },
     "./advancement/application": {
       "types": "./dist/advancement/application.d.ts",
       "import": "./dist/advancement/application.js"

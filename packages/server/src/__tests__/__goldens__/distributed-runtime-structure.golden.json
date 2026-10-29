@@ -1283,7 +1283,7 @@
     },
     {
       "kind": "type-import",
-      "references": 55,
+      "references": 56,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1541,7 +1541,7 @@
     },
     {
       "kind": "import",
-      "references": 3,
+      "references": 5,
       "sourceZone": "core/conversation",
       "target": "core/protocol"
     },

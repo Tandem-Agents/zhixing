@@ -11,7 +11,8 @@ import {
 } from "../product-api/catalog.js";
 export { projectPublishConflicts, projectPublishResults, productizePublishAuthorityError, publishConflictProductCopy } from "./publish-results.js";
 export { decideConversationStatusNotification, decideConversationControlResponse, conversationControlResponseText, type ConversationControlResponse } from "./notifications.js";
-import { isProtocolIdentifier, protocolDigest } from "../protocol/index.js";
+import { protocolDigest } from "../protocol/canonical.js";
+import { isProtocolIdentifier } from "../protocol/validation.js";
 import type { RunRecordWithRef } from "../transcript/shard/reader.js";
 import {
   isNonEmptyUserTurnInput,

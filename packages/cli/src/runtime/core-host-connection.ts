@@ -48,6 +48,8 @@ const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
 // ordinary-startup latency; spawn and discovery still share one deadline.
 const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
+// 自动拉起时等宿主就绪的轮询间隔：就绪后每多等一轮都直接压在终端可用前；标记出现前每轮只读锁与标记
+const AUTOMATIC_READY_POLL_MS = 50;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
 export class CoreHostUnavailableError extends Error {
@@ -185,6 +187,7 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
         reportFailure: false,
         automatic: true,
         startAutomatic,
+        pollIntervalMs: AUTOMATIC_READY_POLL_MS,
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
         // 自动拉起与显式 serve 是同一个宿主——装什么由配置说了算（渠道 / MCP

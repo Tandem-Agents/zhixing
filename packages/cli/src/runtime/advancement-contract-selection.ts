@@ -1,4 +1,5 @@
-import { RUBRIC_NEARBY_SCORE_THRESHOLD, type RubricContractDraftSnapshot } from "@zhixing/core/advancement";
+import type { RubricContractDraftSnapshot } from "@zhixing/core/advancement";
+import { RUBRIC_NEARBY_SCORE_THRESHOLD } from "@zhixing/core/advancement/thresholds";
 import type { SelectionRequest } from "../tui/selection/types.js";
 
 export type AdvancementContractSelectionValue =

@@ -49,7 +49,7 @@ describe("CoreHost default dependency home binding", () => {
     );
     await deps.spawn();
     expect(calls.reconcile).not.toHaveBeenCalled();
-    expect(calls.spawn).toHaveBeenCalledWith(expect.objectContaining({ zhixingHome: home, automatic: true }));
+    expect(calls.spawn).toHaveBeenCalledWith(expect.objectContaining({ zhixingHome: home, automatic: true, pollIntervalMs: 50 }));
     const endpoint = { pid: { pid: 42 } } as never;
     await deps.stopUnresponsiveHost!(endpoint, new Error("unresponsive"));
     expect(calls.stop).toHaveBeenCalledWith(expect.objectContaining({
