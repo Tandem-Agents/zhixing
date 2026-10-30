@@ -18,13 +18,27 @@ export const MAX_LOG_TOKEN_LENGTH = 160;
 export const MAX_LOG_ID_LENGTH = 512;
 const TOKEN = new RegExp(`^[a-zA-Z0-9_.:-]{1,${MAX_LOG_TOKEN_LENGTH}}$`, "u");
 const RESULTS = new Set(["success", "failure", "unknown", "refused", "cancelled"]);
+/** 判定是确定性的纯函数：只记住判定通过的值（有界，满了淘汰最早的），不合法的值不留存。 */
+const PASSED_LIMIT = 4096;
+const passedTokens = new Set<string>(), passedIdentities = new Set<string>();
+function remember(passed: Set<string>, value: string): void {
+  if (passed.size >= PASSED_LIMIT) passed.delete(passed.values().next().value!);
+  passed.add(value);
+}
 export function validLogToken(value: unknown): value is string {
-  return typeof value === "string" && TOKEN.test(value) && scrubSecrets(value).scrubbed === value;
+  if (typeof value !== "string" || !TOKEN.test(value)) return false;
+  if (passedTokens.has(value)) return true;
+  if (scrubSecrets(value).scrubbed !== value) return false;
+  remember(passedTokens, value);
+  return true;
 }
 /** Product identities are opaque Unicode values, not schema names or filesystem paths. */
 export function validLogIdentity(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_LOG_ID_LENGTH &&
-    !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value) && scrubSecrets(value).scrubbed === value;
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_LOG_ID_LENGTH) return false;
+  if (passedIdentities.has(value)) return true;
+  if (/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value) || scrubSecrets(value).scrubbed !== value) return false;
+  remember(passedIdentities, value);
+  return true;
 }
 function plain(value: unknown): asserts value is Record<string, unknown> {
   if (

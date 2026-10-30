@@ -1282,3 +1282,109 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     await expect(app.read(address, "detail")).rejects.toThrow("已变化");
   }, 20_000);
 });
+
+describe("runtime log Store reuses verification only for byte-identical governance state", () => {
+  function observed(home: string, outcomes: string[], files = new LogFilesProcess(home)) {
+    const store = new LocalLogStore({
+      files,
+      capacity: createDeviceCapacityRuntime(home).arbiter,
+      initialPolicy: policy,
+      observeStateRead: (outcome) => outcomes.push(outcome),
+    });
+    stores.push(store);
+    return { store, files };
+  }
+  const latestState = async (root: string) => (await readdir(root)).filter((name) => /^state-\d+\.json$/u.test(name)).sort().at(-1)!;
+  const texts = async (store: LocalLogStore) =>
+    (await new LogApplication(store, () => owner, ["fixture:1"]).search()).records.map((record) => record.data.text).sort();
+
+  it("reuses its own publication and still rejects a same-length in-place change of that file", async () => {
+    const h = await setup();
+    const outcomes: string[] = [];
+    const { store } = observed(h.home, outcomes);
+    await store.initialize();
+    await store.append([h.capture("one")]);
+    outcomes.length = 0;
+    await store.append([h.capture("two")]);
+    expect(outcomes).toContain("reused");
+    expect(outcomes).not.toContain("verified");
+    // 等长且仍是合法 JSON 的改写：只靠长度或身份分辨不出，必须逐字节比较后走完整核验
+    const name = await latestState(h.root);
+    const text = await readFile(path.join(h.root, name), "utf8");
+    const at = text.indexOf('"digest":"') + '"digest":"'.length;
+    await writeFile(path.join(h.root, name), text.slice(0, at) + (text[at] === "0" ? "1" : "0") + text.slice(at + 1));
+    await expect(store.append([h.capture("three")])).rejects.toThrow("日志治理文件损坏");
+  }, 20_000);
+
+  it("fully verifies after another writer publishes and keeps every record exactly once", async () => {
+    const h = await setup();
+    const outcomes: string[] = [];
+    const { store: first } = observed(h.home, outcomes);
+    const { store: second } = observed(h.home, []);
+    await first.initialize();
+    await first.append([h.capture("a1")]);
+    await second.append([h.capture("b1")]);
+    outcomes.length = 0;
+    await first.append([h.capture("a2")]);
+    expect(outcomes[0]).toBe("verified");
+    expect(await texts(first)).toEqual(["a1", "a2", "b1"]);
+  }, 20_000);
+
+  it("revalidates a same-named segment whose content changed in a newer publication", async () => {
+    const h = await setup();
+    const { store: writer } = observed(h.home, []);
+    await writer.initialize();
+    await writer.append([h.capture("one")]);
+    await writer.append([h.capture("two")]);
+    const outcomes: string[] = [];
+    const { store: reader } = observed(h.home, outcomes);
+    await reader.read(async () => undefined);
+    expect(outcomes).toEqual(["verified"]);
+    // 另一写者发布的新一代里，同名分段被改成非法内容：摘要正确，分段核验必须重做
+    const state = await h.snapshot();
+    state.generation += 1;
+    state.segments[0]!.recordIds[0] = "not-a-record-id";
+    const stem = `state-${String(state.generation).padStart(12, "0")}`;
+    await writeFile(path.join(h.root, `${stem}.json`), JSON.stringify({ digest: logDigest(JSON.stringify(state)), state }));
+    await writeFile(path.join(h.root, stem.replace("state-", "published-") + ".head"), "");
+    await expect(reader.read(async () => undefined)).rejects.toThrow("日志段元信息损坏");
+  }, 20_000);
+
+  it("hands every operation its own state copy", async () => {
+    const h = await setup();
+    const outcomes: string[] = [];
+    const { store } = observed(h.home, outcomes);
+    await store.initialize();
+    await store.append([h.capture("one")]);
+    await store.read(async (state) => {
+      state.segments.splice(0);
+      state.upper = 0;
+    });
+    await store.append([h.capture("two")]);
+    expect(outcomes).toContain("reused");
+    expect(await texts(store)).toEqual(["one", "two"]);
+  }, 20_000);
+
+  it("does not trust a publication whose head write failed and recovers it once", async () => {
+    const h = await setup();
+    const outcomes: string[] = [];
+    const { store, files } = observed(h.home, outcomes);
+    await store.initialize();
+    await store.append([h.capture("one")]);
+    const write = files.write.bind(files);
+    let failed = false;
+    files.write = async (name, bytes) => {
+      if (name.startsWith("published-") && !failed) {
+        failed = true;
+        throw Error("injected publication head failure");
+      }
+      await write(name, bytes);
+    };
+    await expect(store.append([h.capture("two")])).rejects.toThrow();
+    outcomes.length = 0;
+    await store.append([h.capture("three")]);
+    // 未发布的候选在恢复里完整核验一次；之后读到同一份字节才复用
+    expect(outcomes).toContain("verified");
+    expect(await texts(store)).toEqual(["one", "three", "two"]);
+  }, 20_000);
+});

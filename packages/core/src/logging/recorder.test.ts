@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { bindLogSource, captureLog, validLogIdentity } from "./capture.js";
+import { bindLogSource, captureLog, validLogIdentity, validLogToken } from "./capture.js";
 import { LogRecorder } from "./recorder.js";
 import { observationRefs } from "./producer.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
@@ -116,6 +116,22 @@ describe("runtime log capture and lifecycle", () => {
     expect(observationRefs({ conversationId: "ws:研发项目:primary" })).toEqual([{ kind: "conversation", id: "ws:研发项目:primary" }]);
     for (const id of ["", "x".repeat(513), "a\nb", "a\u001bb", "a\u202eb", "\ud800", "token=private-test-value"]) {
       expect(validLogIdentity(id)).toBe(false);
+    }
+  });
+  it("\u8eab\u4efd\u4e0e\u8bb0\u53f7\u5224\u5b9a\u7684\u6309\u503c\u7f13\u5b58\u4e0d\u6539\u53d8\u7ed3\u8bba\uff0c\u88ab\u62d2\u7684\u503c\u91cd\u590d\u5224\u5b9a\u4ecd\u88ab\u62d2", () => {
+    // \u8d85\u8fc7\u7f13\u5b58\u4e0a\u9650\u7684\u5927\u91cf\u5408\u6cd5\u503c\u4e4b\u540e\uff0c\u5148\u524d\u7684\u5408\u6cd5\u503c\u4ecd\u901a\u8fc7\u3001\u542b\u51ed\u636e\u6216\u63a7\u5236\u5b57\u7b26\u7684\u503c\u4ecd\u88ab\u62d2
+    for (let index = 0; index < 5000; index++) expect(validLogIdentity(`scope-${index}`)).toBe(true);
+    expect(validLogIdentity("scope-1")).toBe(true);
+    expect(validLogIdentity("scope-4999")).toBe(true);
+    for (const id of ["a\nb", "token=private-test-value", "sk-ant-abcdefghijklmnopqrstu"]) {
+      expect(validLogIdentity(id)).toBe(false);
+      expect(validLogIdentity(id)).toBe(false);
+    }
+    expect(validLogToken("fixture.event")).toBe(true);
+    expect(validLogToken("fixture.event")).toBe(true);
+    for (const token of ["sk-abcdefghijklmnopqrstuvwxyz", "a b"]) {
+      expect(validLogToken(token)).toBe(false);
+      expect(validLogToken(token)).toBe(false);
     }
   });
   it("采集错误不被过去已经恢复的写锁等待覆盖", async () => {

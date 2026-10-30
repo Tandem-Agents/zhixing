@@ -149,6 +149,54 @@ const LEGACY_SCAN_BYTES = 4096;
 const legacyLocation = (entry: { readonly name: string; readonly legacyPath?: string }): LegacyLogLocation | undefined =>
   entry.legacyPath ? { name: entry.name, path: entry.legacyPath } : undefined;
 
+/** 早先只有 { after, complete } 的发现进度（未发布、只在本地测试资料里）视为尚未开始一轮。 */
+function resetUnstartedLegacyScan(state: LogStoreSnapshot): void {
+  if (state.legacyScan !== undefined && !Number.isSafeInteger((state.legacyScan as { pass?: unknown }).pass)) state.legacyScan = undefined;
+}
+
+/** 只依赖分段自身内容的检查（不含与整份状态水位、其他分段相关的检查）。 */
+function assertSegmentContent(segment: LogSegment): void {
+  if (
+    !/^segment-[a-f0-9-]{36}\.jsonl$/u.test(segment.name) ||
+    !Number.isSafeInteger(segment.bytes) ||
+    segment.bytes <= 0 ||
+    segment.bytes > 8 * 1024 * 1024 ||
+    !Number.isSafeInteger(segment.start) ||
+    !Number.isSafeInteger(segment.end) ||
+    segment.start < 1 ||
+    segment.end < segment.start ||
+    !Array.isArray(segment.recordIds) ||
+    segment.recordIds.length !== (segment.ordinals?.length ?? segment.end - segment.start + 1) ||
+    segment.recordIds.length > 4096 ||
+    segment.recordIds.some((id) => !/^[a-f0-9-]{36}$/u.test(id)) ||
+    !Array.isArray(segment.attachments) ||
+    segment.attachments.length > 4096 ||
+    !["critical", "detail"].includes(segment.tier) ||
+    !Number.isSafeInteger(segment.receivedAt)
+  )
+    throw storageFault("segment-metadata-corrupt", "日志段元信息损坏");
+  for (const detail of segment.attachments)
+    if (
+      !/^detail-[a-f0-9-]{36}\.json$/u.test(detail.name) ||
+      !Number.isSafeInteger(detail.bytes) ||
+      detail.bytes <= 0 ||
+      detail.bytes > 1024 * 1024
+    )
+      throw storageFault("detail-metadata-corrupt", "日志详情元信息损坏");
+  if (
+    segment.access !== undefined &&
+    !validLogAccess(segment.access, segment.recordIds.length, segment.bytes)
+  )
+    throw storageFault("access-projection-corrupt", "日志访问投影损坏");
+}
+
+/** 活动段字段的自身一致性；排在分段名唯一检查之后，保持原有的报错先后。 */
+function assertActiveSegmentContent(segment: LogSegment): void {
+  if (segment.ordinals && (!Array.isArray(segment.ordinals) || !segment.ordinals.length ||
+    segment.ordinals[0] !== segment.start || segment.ordinals.at(-1) !== segment.end ||
+    typeof segment.identity !== "string" || segment.identity.length > 128 || typeof segment.sealed !== "boolean" || !segment.access)) throw storageFault("active-segment-corrupt", "日志活动段元信息损坏");
+}
+
 /** One Store protocol across processes. Snapshots are governance, never business authority. */
 
 export class LocalLogStore implements LogSink {
@@ -175,6 +223,11 @@ export class LocalLogStore implements LogSink {
   #stepState: LogStoreSnapshot | undefined;
   /** 本进程的历史日志续读属于哪一轮发现；与状态里的 pass 不同就从头重扫。 */
   #scanPass: number | undefined;
+  /** 本实例最近一次完整核验通过或自己发布成功的那一代状态的原始字节；读到逐字节相同的内容才免去重复核验。 */
+  #verifiedState: { readonly name: string; readonly raw: Buffer } | undefined;
+  /** 本实例已核验过的分段（分段名 → 其 JSON 文本）；文本完全相同才跳过只依赖分段自身内容的检查。 */
+  #verifiedSegments = new Map<string, string>();
+  readonly #observeStateRead: ((outcome: "reused" | "verified") => void) | undefined;
 
   constructor(options: {
     files: LogFileSystem;
@@ -182,6 +235,8 @@ export class LocalLogStore implements LogSink {
     initialPolicy?: LogPolicy;
     now?: () => number;
     observeWriters?: (signal: AbortSignal) => Promise<LogWriterObservation>;
+    /** 每次读取治理状态的结局：逐字节相同而复用，或完整核验；只用于观测。 */
+    observeStateRead?: (outcome: "reused" | "verified") => void;
   }) {
     this.#beginClose = deadline => options.files.beginClose?.(deadline);
     this.files = meteredFiles(options.files, (dimension, amount) => {
@@ -200,6 +255,7 @@ export class LocalLogStore implements LogSink {
     this.#initial = validateLogPolicy(options.initialPolicy ?? DEFAULT_LOG_POLICY);
     this.#now = options.now ?? Date.now;
     this.#observeWriters = options.observeWriters;
+    this.#observeStateRead = options.observeStateRead;
   }
 
   async initialize(): Promise<LogStatus> {
@@ -692,7 +748,16 @@ export class LocalLogStore implements LogSink {
   async #readState(name: string): Promise<LogStoreSnapshot> {
     const info = await this.files.stat(name);
     if (info.bytes > 4 * 1024 * 1024) throw storageFault("metadata-size-limit", "日志治理文件超限");
-    const content = Buffer.from(await this.files.read(name, info.bytes, 0, info.bytes, info.identity)).toString("utf8");
+    const raw = Buffer.from(await this.files.read(name, info.bytes, 0, info.bytes, info.identity));
+    // 与本实例已核验的同一代逐字节相同：只重新解析出一份新对象，不再重做摘要与结构核验
+    const verified = this.#verifiedState;
+    if (verified?.name === name && verified.raw.equals(raw)) {
+      const reused = (JSON.parse(raw.toString("utf8")) as { state: LogStoreSnapshot }).state;
+      resetUnstartedLegacyScan(reused);
+      this.#observeStateRead?.("reused");
+      return reused;
+    }
+    const content = raw.toString("utf8");
     let envelope: { digest: string; state: LogStoreSnapshot };
     try { envelope = JSON.parse(content); }
     catch { throw storageFault("metadata-json-invalid", "日志治理文件损坏"); }
@@ -724,45 +789,17 @@ export class LocalLogStore implements LogSink {
     if (state.segments.length > 4096 || state.pending.length > 4096 || state.retired.length > 64)
       throw storageFault("metadata-count-limit", "日志治理状态超限");
     const ordinals = new Set<number>(), segmentNames = new Set<string>();
+    const segmentTexts = new Map<string, string>();
     for (const segment of state.segments) {
-      if (
-        !/^segment-[a-f0-9-]{36}\.jsonl$/u.test(segment.name) ||
-        !Number.isSafeInteger(segment.bytes) ||
-        segment.bytes <= 0 ||
-        segment.bytes > 8 * 1024 * 1024 ||
-        !Number.isSafeInteger(segment.start) ||
-        !Number.isSafeInteger(segment.end) ||
-        segment.start < 1 ||
-        segment.end < segment.start ||
-        segment.end > state.upper ||
-        !Array.isArray(segment.recordIds) ||
-        segment.recordIds.length !== (segment.ordinals?.length ?? segment.end - segment.start + 1) ||
-        segment.recordIds.length > 4096 ||
-        segment.recordIds.some((id) => !/^[a-f0-9-]{36}$/u.test(id)) ||
-        !Array.isArray(segment.attachments) ||
-        segment.attachments.length > 4096 ||
-        !["critical", "detail"].includes(segment.tier) ||
-        !Number.isSafeInteger(segment.receivedAt)
-      )
-        throw storageFault("segment-metadata-corrupt", "日志段元信息损坏");
-      for (const detail of segment.attachments)
-        if (
-          !/^detail-[a-f0-9-]{36}\.json$/u.test(detail.name) ||
-          !Number.isSafeInteger(detail.bytes) ||
-          detail.bytes <= 0 ||
-          detail.bytes > 1024 * 1024
-        )
-          throw storageFault("detail-metadata-corrupt", "日志详情元信息损坏");
-      if (
-        segment.access !== undefined &&
-        !validLogAccess(segment.access, segment.recordIds.length, segment.bytes)
-      )
-        throw storageFault("access-projection-corrupt", "日志访问投影损坏");
+      const text = JSON.stringify(segment);
+      // 只依赖分段自身内容的检查是纯函数：文本与本实例已核验的同名分段完全相同则结论不变
+      const known = this.#verifiedSegments.get(segment.name) === text;
+      if (!known) assertSegmentContent(segment);
+      if (segment.end > state.upper) throw storageFault("segment-metadata-corrupt", "日志段元信息损坏");
       if (segmentNames.has(segment.name)) throw storageFault("duplicate-segment", "日志段身份重复");
       segmentNames.add(segment.name);
-      if (segment.ordinals && (!Array.isArray(segment.ordinals) || !segment.ordinals.length ||
-        segment.ordinals[0] !== segment.start || segment.ordinals.at(-1) !== segment.end ||
-        typeof segment.identity !== "string" || segment.identity.length > 128 || typeof segment.sealed !== "boolean" || !segment.access)) throw storageFault("active-segment-corrupt", "日志活动段元信息损坏");
+      segmentTexts.set(segment.name, text);
+      if (!known) assertActiveSegmentContent(segment);
       let prior = 0;
       for (let index = 0; index < segment.recordIds.length; index++) {
         const ordinal = segment.ordinals?.[index] ?? segment.start + index;
@@ -783,8 +820,7 @@ export class LocalLogStore implements LogSink {
     if (state.legacy !== undefined && (!Array.isArray(state.legacy) || state.legacy.length > 4096 || state.legacy.some((entry) =>
       !isLegacyFile(entry.name) || !/^[a-f0-9]{64}$/u.test(entry.id) || typeof entry.identity !== "string" || entry.identity.length > 128 ||
       !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(entry.registeredAt) || !Number.isSafeInteger(entry.generation)))) throw storageFault("legacy-metadata-corrupt", "旧日志登记损坏");
-    // 早先只有 { after, complete } 的发现进度（未发布、只在本地测试资料里）视为尚未开始一轮
-    if (state.legacyScan !== undefined && !Number.isSafeInteger((state.legacyScan as { pass?: unknown }).pass)) state.legacyScan = undefined;
+    resetUnstartedLegacyScan(state);
     if (state.legacyScan !== undefined && (state.legacyScan.pass < 0 || typeof state.legacyScan.complete !== "boolean" || typeof state.legacyScan.ended !== "boolean" ||
       !Array.isArray(state.legacyScan.carry) || state.legacyScan.carry.length > 512 || state.legacyScan.carry.some((entry) =>
         !isLegacyFile(entry?.name) || typeof entry.path !== "string" || entry.path.length > 512) ||
@@ -794,6 +830,10 @@ export class LocalLogStore implements LogSink {
       ![1, 2].includes(entry.protocol) || (entry.registeredAt !== undefined && !Number.isSafeInteger(entry.registeredAt)) ||
       !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw storageFault("writer-metadata-corrupt", "日志写者登记损坏");
     if (state.migration !== undefined && (!["pending", "blocked", "confirmed"].includes(state.migration.state) || !Number.isSafeInteger(state.migration.checkedAt))) throw storageFault("migration-metadata-corrupt", "日志切换状态损坏");
+    // 全部核验通过才登记；核验失败保留上一次的登记，不把未通过的内容当作已核验
+    this.#verifiedState = { name, raw };
+    this.#verifiedSegments = segmentTexts;
+    this.#observeStateRead?.("verified");
     return state;
   }
   async #save(state: LogStoreSnapshot): Promise<void> {
@@ -812,10 +852,9 @@ export class LocalLogStore implements LogSink {
           .filter((name) => /^state-\d{12}\.(?:json|new)$/u.test(name))
           .map((name) => Number(name.slice(6, 18))),
       ) + 1;
-    const content = logJson({
-      digest: logDigest(JSON.stringify(state)),
-      state,
-    });
+    // 状态只序列化一次：摘要与写入内容共用同一份文本，字节与 logJson({ digest, state }) 相同
+    const serialized = JSON.stringify(state);
+    const content = Buffer.from(`{"digest":${JSON.stringify(logDigest(serialized))},"state":${serialized}}\n`);
     if (content.length > Math.floor(state.policy.effective.governanceBytes / 3))
       throw storageFault("governance-reserve", "日志治理预留不足");
     const stem = `state-${String(state.generation).padStart(12, "0")}`;
@@ -836,6 +875,8 @@ export class LocalLogStore implements LogSink {
     // Visibility follows the durability proof; the marker contains no mutable state.
     await this.files.write(stem.replace("state-", "published-") + ".head", new Uint8Array());
     await this.files.sync();
+    // 发布头已落盘才登记：任一步失败或结果未知时，下一次按实际最新头完整核验
+    this.#verifiedState = { name: `${stem}.json`, raw: content };
   }
 
   async #inventory(): Promise<Map<string, LogFileInfo>> {
