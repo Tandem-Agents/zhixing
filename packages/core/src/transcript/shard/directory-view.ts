@@ -62,6 +62,22 @@ export async function readDirectoryView(transcriptDir: string): Promise<Transcri
   throw new TranscriptViewBusyError();
 }
 
+/**
+ * 已发布状态的身份：根的 epoch 与发布序号。每次发布（追加、清除、保留期、转换）序号递增，目录删除后重建换新
+ * epoch；同一身份下已发布范围内的字节不变。既无根也无 v1 索引（尚未写入）为 "none"；旧测试格式尚未转换时为
+ * null（未知，调用方不得据此判定未变）。
+ */
+export async function readDirectoryPublicationIdentity(transcriptDir: string): Promise<string | null> {
+  for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
+    const file = await readRootFile(transcriptDir);
+    if (!file) return (await readLegacyView(transcriptDir)) === null ? "none" : null;
+    const current = selectCurrentRoot(file);
+    if (current) return `${current.root.epoch.toString("hex")}:${current.root.pub}`;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new TranscriptViewBusyError();
+}
+
 async function readLegacyView(transcriptDir: string): Promise<TranscriptView | null> {
   const file = path.join(transcriptDir, LEGACY_INDEX_FILE_NAME);
   let index: TranscriptIndex;

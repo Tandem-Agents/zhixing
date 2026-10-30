@@ -5,6 +5,7 @@
  * handles, not references to services or a general-purpose setup registry.
  */
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
+import { observeLogPhase } from "@zhixing/core/logging";
 import { WorksceneContinuationApplication } from "@zhixing/core/workscene/application";
 import { createWorksceneContinuationPort } from "./workscene-continuation-adapter.js";
 import {
@@ -493,6 +494,8 @@ export async function createHostLosslessDataPlane(
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
+  /** 宿主启动期日志：按子步骤记录装配耗时（只观测）。 */
+  readonly startupRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly deviceCapacity: import('@zhixing/core/resources').DeviceCapacityArbiterPort;
   /** 本机执行的运行计为宿主前台活动。 */
   readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
@@ -863,7 +866,7 @@ export async function createConversationServices(
   managerAssembly.complete(manager);
   const conversationPerspectives = input.createConversationPerspectives(manager);
   const advancementComposition =
-    await input.advancementConversationComposition.create({
+    await observeLogPhase(input.startupRecords, "create-advancement-composition", () => input.advancementConversationComposition.create({
       sessionState: protocol.sessionState,
       recentContext: Object.freeze({
         read: async (conversationId: string) =>
@@ -871,7 +874,7 @@ export async function createConversationServices(
             manager.getHistory(conversationId, 6),
           ),
       }),
-    });
+    }));
   const advancementController = advancementComposition.controller;
   const advancementReviews = advancementComposition.reviews;
   const advancementConversationLifecycle = advancementComposition.lifecycle;
@@ -981,8 +984,8 @@ export async function createConversationServices(
       30_000,
     ).then(() => undefined),
   );
-  if (dataPlane) await dataPlane.start();
-  await protocol.recoverReadinessProjections();
+  if (dataPlane) { const started = dataPlane; await observeLogPhase(input.startupRecords, "start-data-plane", () => started.start()); }
+  await observeLogPhase(input.startupRecords, "recover-readiness-projections", () => protocol.recoverReadinessProjections());
 
   return Object.freeze({
     conversations: manager,

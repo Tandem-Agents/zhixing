@@ -35,6 +35,7 @@ describe("typed pre-server lifecycle contributions", () => {
       { owner: 'anchor-host', role: 'runtime', id: 'advancementRecovery.stop', stage: 'runtime' },
       { owner: 'anchor-host', role: 'runtime', id: 'decisionMigration.stop', stage: 'runtime' },
       { owner: 'anchor-host', role: 'runtime', id: 'authorityIdleMaintenance.stop', stage: 'runtime' },
+      { owner: 'anchor-host', role: 'runtime', id: 'startupHistoryPrefetch.close', stage: 'runtime' },
     ]);
     expect(ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS).toContainEqual({
       owner: "anchor-host",

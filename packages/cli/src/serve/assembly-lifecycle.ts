@@ -117,6 +117,8 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
   { owner: 'anchor-host', role: 'runtime', id: 'decisionMigration.stop', stage: 'runtime' },
   // 后登记先执行：在各日志停止并保存检查点之前，先中止并等授权投影的空闲维护停在步边界。
   { owner: 'anchor-host', role: 'runtime', id: 'authorityIdleMaintenance.stop', stage: 'runtime' },
+  // 后登记先执行：启动历史预读（目录页、元信息与历史读取都会读存储并写派生缓存）先停下并等在途读取收敛。
+  { owner: 'anchor-host', role: 'runtime', id: 'startupHistoryPrefetch.close', stage: 'runtime' },
 ] as const satisfies readonly AssemblyLifecycleDescriptor[];
 
 /**

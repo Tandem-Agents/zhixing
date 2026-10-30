@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createFileLockAcquirer } from "@zhixing/core/persistence";
 import { fromSafePathSegment, toSafePathSegment } from "@zhixing/core/paths";
+import { createFileLockAcquirer } from "@zhixing/core/persistence";
 import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing/core/workscene";
 import {
   ConversationRepository,
@@ -37,6 +37,7 @@ import {
 } from "@zhixing/core/transcript";
 import type { ConversationRuntimeStoragePort } from "./access-surface.js";
 import { createConversationDirectory } from "./conversation-directory.js";
+import { StartupHistoryPrefetch } from "./startup-history-prefetch.js";
 import type { NamerConversationRepo } from "./turn-maintenance.js";
 import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
 
@@ -55,6 +56,14 @@ export interface ConversationStorageInfrastructure {
   }>;
   /** 场景目录移除之后丢弃该场景的 store 与各会话打开态：同 id 再出现时从磁盘按新场景重新打开。 */
   forgetScene(sceneId: string): void;
+  /**
+   * 宿主就绪前的启动历史预读（见 StartupHistoryPrefetch）：runtime.loadHistory 在来源未变时取用。
+   * close 由装配 owner 在会话存储与权威关闭之前调用。
+   */
+  readonly startupHistory: Readonly<{
+    prefetch(conversationId: string, committedTurnCount: number): Promise<void>;
+    close(): Promise<void>;
+  }>;
 }
 
 interface ScopeStorage {
@@ -75,6 +84,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   clearTaskListCache?: (conversationId: string) => void;
 }>): ConversationStorageInfrastructure {
   const zhixingHome = input.zhixingHome;
+  // 宿主装配时捕获平台端口：之后在 RPC 上下文里按次新建的正文读取器也沿用它，不回落到需另起子进程的身份解析
   const acquireFileLock = createFileLockAcquirer();
   const user = createScopeStorage({ kind: "user" }, zhixingHome);
   const workscenes = new Map<string, ScopeStorage>();
@@ -103,43 +113,59 @@ export function createConversationStorageInfrastructure(input: Readonly<{
       : {}),
   });
 
-  const runtime: ConversationRuntimeStoragePort = Object.freeze({
-    async loadHistory(conversationId, committedTurnCount) {
-      if (committedTurnCount !== undefined &&
-          (!Number.isSafeInteger(committedTurnCount) || committedTurnCount < 0)) {
-        throw new TypeError("Committed conversation turn count is invalid");
-      }
-      if (committedTurnCount === 0) return undefined;
+  const loadHistory: ConversationRuntimeStoragePort["loadHistory"] = async (conversationId, committedTurnCount) => {
+    if (committedTurnCount !== undefined &&
+        (!Number.isSafeInteger(committedTurnCount) || committedTurnCount < 0)) {
+      throw new TypeError("Committed conversation turn count is invalid");
+    }
+    if (committedTurnCount === 0) return undefined;
+    const storage = routeConversation(conversationId);
+    const { scope } = parseConversationId(conversationId);
+    // 早期本地测试资料（v1 转录索引）在首次读取前一次性转换；当前格式只是打开。摘要是可丢弃的
+    // 派生缓存：启动只经它的只读选取视图（不等写者、不写盘、出错即不带摘要），恢复、修复与转换
+    // 都归维护
+    await storage.transcript.prepareRead(storage.localId);
+    // 轮数与 clear 边界取自同一次读到的转录视图：owner 前缀给出的可信轮数优先，纯转录会话由视图
+    // O(1) 算出，不枚举记录；clear 之后、第一次提交之前轮数为 0
+    const view = await storage.transcript.readView(storage.localId);
+    let turnCount = committedTurnCount;
+    if (turnCount === undefined) {
+      turnCount = view ? countRunsInView(view) : 0;
+      if (turnCount === undefined) throw new Error("Prepared transcript view has no published run watermark");
+    }
+    if (!turnCount) return undefined;
+    const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
+      path.join(zhixingHome, 'cache', 'transcript-read-index'), { acquireFileLock });
+    try {
+      const bootstrap = await buildStartupBootstrap({
+        conversationId: storage.localId,
+        store: storage.transcript,
+        snapshots: storage.snapshots,
+        capability: { optimalMaxTokens: input.optimalMaxTokens },
+        estimator: createTokenEstimator(),
+        runs: readBootstrapRunViews(reader),
+        clearBoundary: { lastClearAt: view?.lastClearAt },
+      });
+      return { bootstrap, turnCount };
+    } finally { await reader.close(); }
+  };
+  // 装载结果只取决于承诺轮数与转录、快照两处的已发布状态：任何写入都会改变其中一处的发布身份
+  const startupHistory = new StartupHistoryPrefetch({
+    load: loadHistory,
+    identity: async (conversationId, committedTurnCount) => {
       const storage = routeConversation(conversationId);
-      const { scope } = parseConversationId(conversationId);
-      // 早期本地测试资料（v1 转录索引）在首次读取前一次性转换；当前格式只是打开。摘要是可丢弃的
-      // 派生缓存：启动只经它的只读选取视图（不等写者、不写盘、出错即不带摘要），恢复、修复与转换
-      // 都归维护
-      await storage.transcript.prepareRead(storage.localId);
-      // 轮数与 clear 边界取自同一次读到的转录视图：owner 前缀给出的可信轮数优先，纯转录会话由视图
-      // O(1) 算出，不枚举记录；clear 之后、第一次提交之前轮数为 0
-      const view = await storage.transcript.readView(storage.localId);
-      let turnCount = committedTurnCount;
-      if (turnCount === undefined) {
-        turnCount = view ? countRunsInView(view) : 0;
-        if (turnCount === undefined) throw new Error("Prepared transcript view has no published run watermark");
-      }
-      if (!turnCount) return undefined;
-      const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
-        path.join(zhixingHome, 'cache', 'transcript-read-index'), { acquireFileLock });
-      try {
-        const bootstrap = await buildStartupBootstrap({
-          conversationId: storage.localId,
-          store: storage.transcript,
-          snapshots: storage.snapshots,
-          capability: { optimalMaxTokens: input.optimalMaxTokens },
-          estimator: createTokenEstimator(),
-          runs: readBootstrapRunViews(reader),
-          clearBoundary: { lastClearAt: view?.lastClearAt },
-        });
-        return { bootstrap, turnCount };
-      } finally { await reader.close(); }
+      const [transcript, snapshots] = await Promise.all([
+        storage.transcript.readPublicationIdentity(storage.localId),
+        storage.snapshots.readPublicationIdentity(storage.localId),
+      ]);
+      return transcript === null || snapshots === null
+        ? undefined
+        : JSON.stringify([committedTurnCount ?? null, transcript, snapshots]);
     },
+  });
+
+  const runtime: ConversationRuntimeStoragePort = Object.freeze({
+    loadHistory: (conversationId, committedTurnCount) => startupHistory.load(conversationId, committedTurnCount),
     async initTranscript(conversationId) {
       const storage = routeConversation(conversationId);
       await storage.transcript.init(storage.localId);
@@ -222,6 +248,10 @@ export function createConversationStorageInfrastructure(input: Readonly<{
     forgetScene: (sceneId: string) => {
       workscenes.delete(sceneId);
     },
+    startupHistory: Object.freeze({
+      prefetch: (conversationId: string, committedTurnCount: number) => startupHistory.prefetch(conversationId, committedTurnCount),
+      close: () => startupHistory.close(),
+    }),
   });
 }
 

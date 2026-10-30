@@ -138,13 +138,15 @@ describe("setupDelivery — Channel effect binding", () => {
       await expect(governor.consume(lease, usage, control)).rejects.toThrow("cannot call reservation.consume");
       await expect(governor.settle(lease, completion)).rejects.toThrow("cannot call reservation.settle");
       await expect(governor.release(lease, completion)).rejects.toThrow("cannot call reservation.release");
+      await expect(governor.settleAndRelease(lease, completion)).rejects.toThrow("cannot call reservation.settle");
       const port = createControlCompletionPort({ roles: { main: role, light: role }, meter: governor, defaultMaxOutputTokens: 1024 });
       await expect(port.complete({ role: "light", messages: [userMessage("binding test")], lease,
         abort: new AbortController().signal, deadlineAt: control.deadlineAt }))
         .resolves.toMatchObject({ ok: true, text: "governed control reply", usage: { inputTokens: 10, outputTokens: 3 } });
       expect(chat).toHaveBeenCalledOnce();
-      await governor.settle(lease, control);
-      await governor.release(lease, control);
+      // 推进控制调用的收尾走合并入口，授权仍由安装的守卫逐项判定
+      await governor.settleAndRelease(lease, control);
+      await expect(governor.inspectImmediateRoot(workload)).resolves.toMatchObject({ kind: "reservation", state: "released" });
 
       // The same product's review owner holds both lifecycle and meter duties.
       const review = ctx("advancement-review");

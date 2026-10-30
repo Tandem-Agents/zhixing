@@ -9,17 +9,17 @@ describe("production startup server ownership", () => {
       location(source, "beforePublish: async (openingServer) =>"));
     const order = [
       "sessionBroadcastLifecycle.install(sessionTransport)",
-      "await installConfirmationBridge({",
+      "await observeLogPhase(startupRecords, \"activate-confirmation-bridge\", () => installConfirmationBridge({",
       "boundChannelConversationProduct?.assertBound()",
-      "await startAnchorRuntime()",
-      "await recoverHostStop()",
+      "await observeLogPhase(startupRecords, \"activate-anchor-runtime\", () => startAnchorRuntime())",
+      "await observeLogPhase(startupRecords, \"activate-host-stop-recovery\", () => recoverHostStop())",
       "await currentRemovalMigrationApplication?.resumeActive()",
       "await currentRemovalRecoveryApplication?.resumeActive()",
       "anchorInternalStopLifecycle.assertServerStartAllowed()",
       "await advancementRecovery?.prepare()",
       "anchorInternalStopLifecycle.install({",
-      "await startConversationRecovery({",
-      "await boundChannelConnections?.activate()",
+      "await observeLogPhase(startupRecords, \"start-conversation-recovery\", () => startConversationRecovery({",
+      "if (boundChannelConnections) await observeLogPhase(startupRecords, \"activate-channel-connections\", () => boundChannelConnections.activate())",
       "startupRollback.commit()",
     ].map((token) => location(gate, token));
     expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -27,7 +27,7 @@ describe("production startup server ownership", () => {
       .toBeLessThan(location(source, "runner = await runServer({"));
     const stopRecovery = source.slice(location(source, "const recoverHostStop = async"),
       location(source, "async function cleanupLocalDevice()"));
-    expect(stopRecovery).toContain("await recoverAdvancementAcceptedWork()");
+    expect(stopRecovery).toContain("await observeLogPhase(startupRecords, \"stop-recovery-advancement-work\", () => recoverAdvancementAcceptedWork())");
     expect(stopRecovery).toContain("startupLifecycle = undefined");
     const surfaces = await readSource("access-surfaces.ts");
     expect(surfaces).toContain('if (channelMechanism.kind === "absent") return;');
@@ -215,7 +215,7 @@ describe("production startup server ownership", () => {
       "definePostAdoptionReviewLifecycleContribution({",
     );
     const authority = location(source, "prepareAuthorityServices({");
-    const conversation = location(source, "const conversationServices = await createConversationServices({");
+    const conversation = location(source, "const conversationServices = await observeLogPhase(startupRecords, \"create-conversation-services\", () => createConversationServices({");
     const runtimeHost = location(source, "const runtimeHost = new RuntimeHost({");
     expect(authority).toBeLessThan(conversation);
     expect(conversation).toBeLessThan(runtimeHost);
@@ -244,12 +244,12 @@ describe("production startup server ownership", () => {
     expect(surfaces).not.toContain("ctx.channelChallenges");
     expect(surfaces).toContain("onChallengeAction: channelChallengeAction");
     const channelPreparation = location(source,
-      "await prepareChannel({",
+      "await observeLogPhase(startupRecords, \"prepare-channel\", () => prepareChannel({",
     );
-    const losslessComposition = location(source, "await createHostLosslessDataPlane({");
-    const jobOwnerRecovery = location(source, "await startExecutorJobOwner({");
+    const losslessComposition = location(source, "await observeLogPhase(startupRecords, \"create-lossless-data-plane\", () => createHostLosslessDataPlane({");
+    const jobOwnerRecovery = location(source, "await observeLogPhase(startupRecords, \"start-executor-jobs\", () => startExecutorJobOwner({");
     const interactionRecovery = location(source,
-      "await recoverChannelInteractions({",
+      "await observeLogPhase(startupRecords, \"recover-channel-interactions\", () => recoverChannelInteractions({",
     );
     expect(channelPreparation).toBeLessThan(losslessComposition);
     expect(losslessComposition).toBeLessThan(jobOwnerRecovery);
@@ -303,13 +303,13 @@ describe("production startup server ownership", () => {
     expect(firstPartySurfaceOwner).toBeGreaterThan(serverContext);
     expect(firstPartySurfaceCleanup).toBeGreaterThan(firstPartySurfaceOwner);
     expect(firstPartySurfaceOwner).toBeGreaterThan(serverRun);
-    expect(firstPartySurfaceOwner).toBeGreaterThan(location(source, "      await recoverHostStop();"));
+    expect(firstPartySurfaceOwner).toBeGreaterThan(location(source, "      await observeLogPhase(startupRecords, \"activate-host-stop-recovery\", () => recoverHostStop());"));
     expect(source.match(/schedulerGenerationOwner\.postAdoptionReview/gu)).toHaveLength(2);
-    const bind = location(source, "const serverBinding = await bindServer");
+    const bind = location(source, "const serverBinding = await observeLogPhase(startupRecords, \"bind-server\", () => bindServer");
     expect(bind).toBeLessThan(
-      location(source, "const conversationServices = await createConversationServices({"),
+      location(source, "const conversationServices = await observeLogPhase(startupRecords, \"create-conversation-services\", () => createConversationServices({"),
     );
-    expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
+    expect(bind).toBeLessThan(location(source, "const stopResume = await observeLogPhase(startupRecords, \"stop-recovery-resume\", () => stopCoordinator.resumeActive())"));
     const broadcastOwner = location(
       source,
       "const sessionBroadcastLifecycle = new AnchorSessionBroadcastLifecycle()",
@@ -358,7 +358,7 @@ describe("production startup server ownership", () => {
     );
     const contribution = location(
       activation,
-      "await installConfirmationBridge({",
+      "await observeLogPhase(startupRecords, \"activate-confirmation-bridge\", () => installConfirmationBridge({",
     );
     const postServerTransfer = location(
       activation,

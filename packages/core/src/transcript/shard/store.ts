@@ -49,6 +49,7 @@ import {
 } from "./directory-root.js";
 import {
   LEGACY_INDEX_FILE_NAME,
+  readDirectoryPublicationIdentity,
   readDirectoryView,
   readRootFile,
   readShardLinesAt,
@@ -322,6 +323,11 @@ export class ShardedTranscriptStore {
   /** 只读视图（不持锁）：一次读取以同一次取到的根为边界 */
   async readView(conversationId: string): Promise<TranscriptView | null> {
     return await readDirectoryView(this.transcriptDir(conversationId));
+  }
+
+  /** 已发布状态的身份（见 readDirectoryPublicationIdentity）：派生读取据此判断来源在两次读取之间是否变化 */
+  async readPublicationIdentity(conversationId: string): Promise<string | null> {
+    return await readDirectoryPublicationIdentity(this.transcriptDir(conversationId));
   }
 
   /** 读一片的有效记录行；limit 截到已发布前缀。文件不存在返回 null */

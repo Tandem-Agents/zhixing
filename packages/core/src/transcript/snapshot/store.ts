@@ -221,6 +221,16 @@ export class SnapshotStore {
     };
   }
 
+  /**
+   * 登记索引的身份：根的 epoch 与发布序号。登记、撤可见与删除都发布新序号，索引重建换新 epoch；派生读取据此判断
+   * 可选快照在两次读取之间是否变化。没有索引为 "none"；索引此刻不可读为 null（未知，调用方不得据此判定未变）。
+   */
+  async readPublicationIdentity(conversationId: string): Promise<string | null> {
+    const state = await this.readIndex(this.snapshotsDir(conversationId));
+    if (state.kind === "absent") return "none";
+    return state.kind === "ok" ? `${state.root.epoch.toString("hex")}:${state.root.pub}` : null;
+  }
+
   /** 列出可见的已登记快照，按 createdAt 降序：诊断与测试用，读量随快照数增长，不在启动路径上 */
   async list(conversationId: string): Promise<SegmentSnapshotFile[]> {
     const dir = this.snapshotsDir(conversationId);

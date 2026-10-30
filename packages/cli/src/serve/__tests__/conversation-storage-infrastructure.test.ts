@@ -348,6 +348,76 @@ describe("conversation storage infrastructure", () => {
   });
 });
 
+describe("启动历史预读按真实来源身份取用", () => {
+  async function seeded() {
+    const root = await createTempDir("startup-history-prefetch");
+    const storage = createConversationStorageInfrastructure({
+      zhixingHome: root, optimalMaxTokens: 4_000,
+      worksceneConversationStorageRemoval: createWorksceneStorageCleanupInfrastructure({ zhixingHome: root }).conversations,
+    });
+    const { conversationId } = await storage.directory.create();
+    await storage.runtime.appendCommittedRun(conversationId, run("BEFORE-PREFETCH", 0));
+    // 统计读到的转录记录数：取用预读时不读，按原路径读取时必读
+    const records = TranscriptByteReader.prototype.records;
+    let visited = 0;
+    vi.spyOn(TranscriptByteReader.prototype, "records").mockImplementation(async function* (this: TranscriptByteReader, ...args) {
+      for await (const record of records.apply(this, args)) { visited++; yield record; }
+    });
+    return { storage, conversationId, visited: () => visited };
+  }
+
+  it("来源未变：首次装载取用预读结果，不再读转录", async () => {
+    const { storage, conversationId, visited } = await seeded();
+    await storage.startupHistory.prefetch(conversationId, 1);
+    const prefetched = visited();
+    const history = await storage.runtime.loadHistory(conversationId, 1);
+    expect(visited()).toBe(prefetched);
+    expect(JSON.stringify(history?.bootstrap)).toContain("BEFORE-PREFETCH");
+    await storage.startupHistory.close();
+  });
+
+  it.each([
+    ["追加", (storage: Awaited<ReturnType<typeof seeded>>["storage"], id: string) =>
+      storage.runtime.appendCommittedRun(id, run("AFTER-APPEND", 1)), "AFTER-APPEND"],
+    // 清除后再提交同样轮数：承诺轮数与预读时相同，只有来源身份能分辨
+    ["清除后再提交", async (storage: Awaited<ReturnType<typeof seeded>>["storage"], id: string) => {
+      await storage.directory.clearStoredView(id);
+      await storage.runtime.appendCommittedRun(id, run("AFTER-CLEAR", 1));
+    }, "AFTER-CLEAR"],
+    // 这份快照覆盖不到已装载的轮次、不会入选，内容相同；登记变了就必须重新读取来源
+    ["写入快照", (storage: Awaited<ReturnType<typeof seeded>>["storage"], id: string) => storage.runtime.writeSnapshot(id, {
+      coveredThroughRunIndex: 0, structuredSummary: { facts: "SNAPSHOT-FACT", state: "", active: "" }, tokensBefore: 100, tokensAfter: 10,
+    }), "reread"],
+    ["删除", async (storage: Awaited<ReturnType<typeof seeded>>["storage"], id: string) => {
+      await storage.directory.deleteStoredConversation(id);
+    }, "gone"],
+  ] as const)("%s之后按原路径读取，不取用预读结果", async (_name, change, expected) => {
+    const { storage, conversationId, visited } = await seeded();
+    await storage.startupHistory.prefetch(conversationId, 1);
+    await change(storage, conversationId);
+    const prefetched = visited();
+    const loaded = await storage.runtime.loadHistory(conversationId, 1).then(
+      (history) => JSON.stringify(history?.bootstrap ?? null), (error: unknown) => `rejected:${String(error)}`);
+    if (expected === "gone") expect(loaded).not.toContain("BEFORE-PREFETCH");
+    else {
+      expect(visited()).toBeGreaterThan(prefetched);
+      if (expected !== "reread") expect(loaded).toContain(expected);
+      // 清除之前的内容不得再出现（预读结果里只有它）
+      if (expected === "AFTER-CLEAR") expect(loaded).not.toContain("BEFORE-PREFETCH");
+    }
+    await storage.startupHistory.close();
+  });
+
+  it("关闭后不再预读，装载按原路径读取", async () => {
+    const { storage, conversationId, visited } = await seeded();
+    await storage.startupHistory.close();
+    await storage.startupHistory.prefetch(conversationId, 1);
+    expect(visited()).toBe(0);
+    await storage.runtime.loadHistory(conversationId, 1);
+    expect(visited()).toBeGreaterThan(0);
+  });
+});
+
 function run(text: string, runIndex: number) {
   return {
     type: "run" as const,

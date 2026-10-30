@@ -24,6 +24,7 @@ import { validateSessionProcessProjection, type SessionProcessProjection, type S
 import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
 import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core/types";
 import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
+import { isMainConversationId } from "../conversation-selection.js";
 import type {
   ConversationStatusNotice,
   FinalFrame,
@@ -2523,10 +2524,6 @@ function toActiveConversation(input: {
     name: input.name,
     mode: deriveMode(input.conversationId),
   };
-}
-
-function isMainConversationId(conversationId: string): boolean {
-  return parseConversationId(conversationId).scope.kind === "user";
 }
 
 function isAwaitingRubricResult(

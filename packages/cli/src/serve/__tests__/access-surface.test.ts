@@ -9,21 +9,21 @@ describe("Host static construction graph", () => {
     const command = await read("command.ts");
     const calls = [
       "prepareAuthorityServices({",
-      "await createConversationServices({",
+      "await observeLogPhase(startupRecords, \"create-conversation-services\", () => createConversationServices({",
       "new RuntimeHost({",
       "await createLocalConversationOwner({",
       "await createExecutorJobOwner({",
-      "await startAssetMaintenance({",
-      "return prepareMeshRuntime({",
-      "await bindAdvancementEvidenceTopology({",
-      "await prepareChannel({",
-      "await createHostLosslessDataPlane({",
+      "await observeLogPhase(startupRecords, \"start-asset-maintenance\", () => startAssetMaintenance({",
+      "return observeLogPhase(startupRecords, \"prepare-mesh-runtime\", () => prepareMeshRuntime({",
+      "await observeLogPhase(startupRecords, \"bind-advancement-evidence\", () => bindAdvancementEvidenceTopology({",
+      "await observeLogPhase(startupRecords, \"prepare-channel\", () => prepareChannel({",
+      "await observeLogPhase(startupRecords, \"create-lossless-data-plane\", () => createHostLosslessDataPlane({",
       "conversationLosslessDataPlane.assertComplete()",
-      "await startExecutorJobOwner({",
-      "await recoverChannelInteractions({",
-      "await prepareDelivery({",
-      "await installConfirmationBridge({",
-      "await startConversationRecovery({",
+      "await observeLogPhase(startupRecords, \"start-executor-jobs\", () => startExecutorJobOwner({",
+      "await observeLogPhase(startupRecords, \"recover-channel-interactions\", () => recoverChannelInteractions({",
+      "await observeLogPhase(startupRecords, \"prepare-delivery\", () => prepareDelivery({",
+      "await observeLogPhase(startupRecords, \"activate-confirmation-bridge\", () => installConfirmationBridge({",
+      "await observeLogPhase(startupRecords, \"start-conversation-recovery\", () => startConversationRecovery({",
     ];
     let previous = -1;
     for (const call of calls) {
@@ -43,8 +43,8 @@ describe("Host static construction graph", () => {
     expect(command).toContain("meshRuntimePreparation: preparedMeshRuntime");
     expect(command).toContain("channelChallengeAction: losslessDataPlane.onChallengeAction");
     expect(command.indexOf("beforeActivate: async (openingRunner) =>"))
-      .toBeLessThan(command.indexOf("await installConfirmationBridge({"));
-    expect(command.indexOf("await startConversationRecovery({"))
+      .toBeLessThan(command.indexOf("await observeLogPhase(startupRecords, \"activate-confirmation-bridge\", () => installConfirmationBridge({"));
+    expect(command.indexOf("await observeLogPhase(startupRecords, \"start-conversation-recovery\", () => startConversationRecovery({"))
       .toBeLessThan(command.indexOf("startupRollback.commit()"));
   });
 

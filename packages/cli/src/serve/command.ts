@@ -19,6 +19,7 @@ import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import { currentMaintenanceAbortSignal } from '@zhixing/core/resources';
 import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
+import { isMainConversationId } from "../conversation-selection.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
@@ -472,7 +473,7 @@ async function runServerProcess(
   // ============================================================================
 
   // 1. token
-  const tokenInfo = await loadOrCreateToken(getDefaultTokenPath(zhixingHome));
+  const tokenInfo = await observeLogPhase(startupRecords, "load-server-token", () => loadOrCreateToken(getDefaultTokenPath(zhixingHome)));
   if (tokenInfo.generated && processMode !== "managed") {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
@@ -481,9 +482,9 @@ async function runServerProcess(
   // the inactive endpoint or any producer can be acquired. Downstream surfaces
   // only decide whether frozen work may resume, never whether fresh work may enter.
   const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
-  const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
+  const lifecycleHomeId = (await observeLogPhase(startupRecords, "lifecycle-origin", () => lifecycleAuthorityLog.originCheckpoint())).logId;
   const lifecycleJournal = new DeviceLifecycleJournal(lifecycleAuthorityLog);
-  const localLifecycleOperations = (await lifecycleJournal.activeFor(bootstrap.mesh.deviceKey.deviceId)).filter((operation) =>
+  const localLifecycleOperations = (await observeLogPhase(startupRecords, "lifecycle-active-operations", () => lifecycleJournal.activeFor(bootstrap.mesh.deviceKey.deviceId))).filter((operation) =>
     (operation.identity.kind === "stop" &&
       operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
     (operation.identity.kind === "executor-removal" &&
@@ -551,16 +552,16 @@ async function runServerProcess(
 
   // The final home endpoint is acquired inactive. Workscene receives its complete
   // topology demand only after this same endpoint owns the live connection projection.
-  const serverBinding = await bindServer({
+  const serverBinding = await observeLogPhase(startupRecords, "bind-server", () => bindServer({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
-  });
+  }));
   hostShellLifecycle.acquireBinding(serverBinding);
   // 端口单例刚取得、本宿主尚未覆盖发现文件：当场核对残留的前一宿主记录是否已原生退出。
   // 这是回收旧二进制专用派生副本的唯一退出证明来源（标记消失或取得单例本身都不是证明）。
-  const priorHostExitProven = await provePriorHostExited({
+  const priorHostExitProven = await observeLogPhase(startupRecords, "prove-prior-host-exit", () => provePriorHostExited({
     pidPath: getDefaultPidPath(zhixingHome),
     portPath: getDefaultPortPath(zhixingHome),
-  });
+  }));
   const homeAuthority = bootstrap.mesh.bootstrapStore.authoritySources();
 
   const registry = new CleanupRegistry({
@@ -754,6 +755,7 @@ async function runServerProcess(
   });
   const authorityRuntime = await observeLogPhase(startupRecords, "prepare-authority", () => setupAuthorityRuntime({
     records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
+    phaseRecords: startupRecords,
     extensionReadiness: createChannelExtensionReadiness(
       new ChannelConfiguration(getGlobalConfigPath({}, zhixingHome), bootstrap.secretStore),
       path.join(zhixingHome, "extensions", "artifacts"),
@@ -980,7 +982,8 @@ async function runServerProcess(
   // This one-shot port remains closed until that finite construction cycle ends.
   const conversationLosslessDataPlane =
     createConversationLosslessDataPlaneAssemblyHandle();
-  const conversationServices = await createConversationServices({
+  const conversationServices = await observeLogPhase(startupRecords, "create-conversation-services", () => createConversationServices({
+    startupRecords,
     onFailure: (error, context) => recordConversationFailure(startupRecords, error, context),
     deviceCapacity: deviceCapacity.arbiter,
     foregroundActivity: deviceCapacity.foreground,
@@ -1023,7 +1026,29 @@ async function runServerProcess(
     conversationDeleteProjection: conversationDirectory,
     conversationCommittedViewStorage: conversationStorage.committedViews,
     taskListService: builtinExtraTools.taskListService,
-  }, conversationLosslessDataPlane);
+  }, conversationLosslessDataPlane));
+  // 启动预读：终端启动会选会话目录第一页里第一个可恢复的主对话。按同一排序与判定，在就绪前的准备间隙
+  // 预读它的启动历史；只读、可丢弃，选中的不是它或来源有变化时，装载按原路径进行。任务归装配 owner：
+  // 停止与启动回滚都先停下它、等目录页、元信息与历史读取收敛，然后才轮到会话存储与权威关闭。
+  let startupHistoryStopped = false;
+  const startupHistoryPrefetch = (async () => {
+    const page = await conversationDirectory.listPage?.({ limit: 24 });
+    const candidate = page?.records.find((record) => isMainConversationId(record.conversationId));
+    if (!candidate || startupHistoryStopped) return;
+    const meta = await conversationServices.conversationProtocol.sessionState.readSessionMeta(candidate.conversationId, {
+      principal: { kind: "host", component: "conversation-bootstrap" },
+      requestId: "conversation-bootstrap-prefetch",
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    // 只预读有 owner 前缀的会话：首次装载以同一承诺轮数读取
+    if (meta.baseRevision > 0 && !startupHistoryStopped) {
+      await conversationStorage.startupHistory.prefetch(candidate.conversationId, meta.turnCount);
+    }
+  })().catch(() => undefined);
+  lifecycleContributions.acquire("startupHistoryPrefetch.close", async () => {
+    startupHistoryStopped = true;
+    await Promise.all([startupHistoryPrefetch, conversationStorage.startupHistory.close()]);
+  });
   const advancementController = conversationServices.advancement;
   const advancementReviews = conversationServices.advancementReviews;
   const advancementConversationLifecycle =
@@ -1096,11 +1121,11 @@ async function runServerProcess(
     });
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
   }) : undefined;
-  await startAssetMaintenance({
+  await observeLogPhase(startupRecords, "start-asset-maintenance", () => startAssetMaintenance({
     authorityRuntime,
     lifecycleContributions,
     whenQuiet: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
-  });
+  }));
   const meshBootstrap = bootstrap.mesh;
   const preparedMeshRuntime =
     enabledSurfaces.has("mesh-control") && meshBootstrap.mode === "trusted-home"
@@ -1109,14 +1134,15 @@ async function runServerProcess(
               !conversationServices.assignmentArtifactReceiver) {
             throw new Error("Mesh requires the completed Conversation topology");
           }
-          return prepareMeshRuntime({
+          const assignmentArtifactReceiver = conversationServices.assignmentArtifactReceiver;
+          return observeLogPhase(startupRecords, "prepare-mesh-runtime", () => prepareMeshRuntime({
             meshBootstrap,
             authorityRuntime,
             conversationProtocol: conversationServices.conversationProtocol,
             meshConnections,
             meshExecutorTopologyTrust,
             conversationExecutorTopologyDirectory: conversationServices.conversationExecutorTopologyDirectory,
-            assignmentArtifactReceiver: conversationServices.assignmentArtifactReceiver,
+            assignmentArtifactReceiver,
             zhixingHome,
             localConversationOwner: localExecutor?.owner,
             jobRelayObligations: authorityServices.jobRelayObligations,
@@ -1132,18 +1158,18 @@ async function runServerProcess(
             secretStore: bootstrap.secretStore,
             onTrustApplied,
             lifecycleContributions,
-          });
+          }));
         })()
       : undefined;
-  await bindAdvancementEvidenceTopology({
+  await observeLogPhase(startupRecords, "bind-advancement-evidence", () => bindAdvancementEvidenceTopology({
     authorityRuntime,
     conversationProtocol: conversationServices.conversationProtocol,
     advancementEvidenceRuntime,
     evidenceHandler: authorityServices.evidenceHandler,
     meshRuntimePreparation: preparedMeshRuntime,
-  });
+  }));
   const channelMechanism: PreparedChannelMechanism = enabledSurfaces.has("channel")
-    ? await prepareChannel({
+    ? await observeLogPhase(startupRecords, "prepare-channel", () => prepareChannel({
         bindLogs: bootstrap.bindLogs,
         notifyOperation: extensionNotifications.notify,
         preparationClosed: extensionNotifications.preparationClosed,
@@ -1159,9 +1185,9 @@ async function runServerProcess(
         channelHttpRoutes,
         conversations: conversationServices.conversations,
         channelConfiguration,
-      })
+      }))
     : Object.freeze({ kind: "absent", reason: "not-configured" });
-  const losslessDataPlane = await createHostLosslessDataPlane({
+  const losslessDataPlane = await observeLogPhase(startupRecords, "create-lossless-data-plane", () => createHostLosslessDataPlane({
     authorityRuntime,
     jobStatus: authorityServices.jobStatus,
     channelMechanism,
@@ -1175,21 +1201,21 @@ async function runServerProcess(
     jobRelayObligations: authorityServices.jobRelayObligations,
     meshBootstrap: bootstrap.mesh,
     lifecycleContributions,
-  }, conversationLosslessDataPlane);
+  }, conversationLosslessDataPlane));
   conversationLosslessDataPlane.assertComplete();
   const recoverLocalJobsAfterBindings = localExecutor
-    ? await startExecutorJobOwner({
+    ? await observeLogPhase(startupRecords, "start-executor-jobs", () => startExecutorJobOwner({
       executorJobOwnerAssembly: localExecutor.jobs,
       lifecycleContributions,
       startupLifecycle,
-    })
+    }))
     : undefined;
-  await recoverChannelInteractions({
+  await observeLogPhase(startupRecords, "recover-channel-interactions", () => recoverChannelInteractions({
     channelMechanism,
     channelCoordinator: losslessDataPlane.coordinator,
     startupLifecycle,
-  });
-  const delivery = enabledSurfaces.has("delivery") ? await prepareDelivery({
+  }));
+  const delivery = enabledSurfaces.has("delivery") ? await observeLogPhase(startupRecords, "prepare-delivery", () => prepareDelivery({
     authorityRuntime,
     startupRollback,
     lifecycleContributions,
@@ -1203,7 +1229,7 @@ async function runServerProcess(
     channelChallengeAction: losslessDataPlane.onChallengeAction,
     channelMechanism,
     zhixingHome,
-  }) : undefined;
+  })) : undefined;
   if (delivery) {
     conversationServices.conversationProtocol.bindDeliveryDrain(() =>
       delivery.deliveryStack.flush(),
@@ -1254,7 +1280,7 @@ async function runServerProcess(
   boundConversationProtocol?.onStatus((notice) => executionStatusHub.publish(notice));
   boundJobStatus?.onStatus((notice) => executionStatusHub.publish(notice));
   boundDeliveryStack?.onStatus((notice) => executionStatusHub.publish(notice));
-  const authorityCheckpointOwner = await createConfiguredCheckpointOwner({
+  const authorityCheckpointOwner = await observeLogPhase(startupRecords, "create-checkpoint-owner", () => createConfiguredCheckpointOwner({
     backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
     publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
       zhixingHome,
@@ -1291,11 +1317,11 @@ async function runServerProcess(
       chalk.red("[recovery-backup]"),
       error instanceof Error ? error.message : String(error),
     ),
-  });
+  }));
   if (authorityCheckpointOwner) {
     hostShellLifecycle.acquireCheckpointOwner(authorityCheckpointOwner);
   }
-  await authorityCheckpointOwner?.start();
+  if (authorityCheckpointOwner) await observeLogPhase(startupRecords, "start-checkpoint-owner", () => authorityCheckpointOwner.start());
   const worksceneDirectory = boundWorksceneDirectory;
   const worksceneApplication = boundWorksceneApplication;
   if (!worksceneDirectory || !worksceneApplication) {
@@ -1328,9 +1354,9 @@ async function runServerProcess(
   // 定时任务路径 runtime.run 不传 conversationId——schedule origin 派生为 null
   // （任务 AI 自创建子任务非用户发起），TaskListProvider 闭包内 ALS 取不到
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
-  const ephemeralRuntime = await runtimeHost.createEphemeralRuntime(
+  const ephemeralRuntime = await observeLogPhase(startupRecords, "create-ephemeral-runtime", () => runtimeHost.createEphemeralRuntime(
     anchorRuntimeProjections.ephemeral(),
-  );
+  ));
   lifecycleContributions.acquire("ephemeralRuntime.dispose", () =>
     ephemeralRuntime.dispose("session-dispose"),
   );
@@ -1397,21 +1423,21 @@ async function runServerProcess(
     if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
     startupLifecycleFrozenRecoveryStarted = true;
     try {
-      await boundLocalConversationOwner?.recoverAcceptedWorkForLifecycle();
-      await boundExecutorJobOwner?.recoverAcceptedWorkForLifecycle();
-      await meshRuntime?.recoverAcceptedWorkForLifecycle();
-      await boundChannelCoordinator?.recover();
-      await schedulerApplication.recoverAcceptedWork(
+      await observeLogPhase(startupRecords, "accepted-work-conversations", async () => { await boundLocalConversationOwner?.recoverAcceptedWorkForLifecycle(); });
+      await observeLogPhase(startupRecords, "accepted-work-jobs", async () => { await boundExecutorJobOwner?.recoverAcceptedWorkForLifecycle(); });
+      await observeLogPhase(startupRecords, "accepted-work-mesh", async () => { await meshRuntime?.recoverAcceptedWorkForLifecycle(); });
+      await observeLogPhase(startupRecords, "accepted-work-channels", async () => { await boundChannelCoordinator?.recover(); });
+      await observeLogPhase(startupRecords, "accepted-work-scheduler", () => schedulerApplication.recoverAcceptedWork(
         sources
           .filter((source) => source.owner === "scheduler")
           .map(({ id, revision }) => ({ id, revision })),
-      );
+      ));
     } catch (error) {
       startupLifecycleFrozenRecoveryStarted = false;
       throw error;
     }
   }
-  const startAnchorRuntime = await (async () => {
+  const startAnchorRuntime = await observeLogPhase(startupRecords, "prepare-anchor-runtime", async () => {
     if (!boundEnabledRoles.includes("anchor")) return async () => {};
     if (
       !boundAuthorityRuntime ||
@@ -1916,7 +1942,7 @@ async function runServerProcess(
         await boundChannelConnections?.connectConfigured();
       }
     };
-  })();
+  });
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
   // ============================================================================
@@ -2283,7 +2309,7 @@ async function runServerProcess(
     isHostStopped: isLifecycleHostStopped,
   });
   const recoverHostStop = async (): Promise<void> => {
-    const stopResume = await stopCoordinator.resumeActive();
+    const stopResume = await observeLogPhase(startupRecords, "stop-recovery-resume", () => stopCoordinator.resumeActive());
     if (startupLifecycleOperation?.identity.kind === "stop") {
       const operationId = startupLifecycleOperation.identity.operationId;
       const terminal = stopResume.find((operation) =>
@@ -2291,21 +2317,27 @@ async function runServerProcess(
       if (!terminal) {
         throw new Error("Durable host-stop recovery did not prove the old host terminal");
       }
-      await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
-      await boundDeliveryStack?.lifecycle.release(operationId);
-      await boundDeliveryStack?.lifecycle.resume();
+      await observeLogPhase(startupRecords, "stop-recovery-release-admission", async () => {
+        await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
+      });
+      await observeLogPhase(startupRecords, "stop-recovery-delivery", async () => {
+        await boundDeliveryStack?.lifecycle.release(operationId);
+        await boundDeliveryStack?.lifecycle.resume();
+      });
       if (!startupLifecycleFrozenRecoveryStarted) {
-        await recoverStartupLifecycleAcceptedWork(
+        await observeLogPhase(startupRecords, "stop-recovery-accepted-work", () => recoverStartupLifecycleAcceptedWork(
           startupLifecycle?.delivery.sources ?? [],
-        );
+        ));
       }
-      await recoverAdvancementAcceptedWork();
+      await observeLogPhase(startupRecords, "stop-recovery-advancement-work", () => recoverAdvancementAcceptedWork());
       advancementRecovery?.resume();
       schedulerApplication.resumeAdmission();
       boundExecutorJobOwner?.resumeAccepting();
       meshRuntime?.resumeAcceptingAfterLifecycle();
       boundInboundRouter?.resumeNewMessages();
-      await boundChannelConnections?.resumeConfigured();
+      await observeLogPhase(startupRecords, "stop-recovery-channels", async () => {
+        await boundChannelConnections?.resumeConfigured();
+      });
       boundLocalConversationOwner?.resumeRecoveryAfterLifecycle();
       startupLifecycle = undefined;
       managedHostStopping = false;
@@ -2751,22 +2783,35 @@ async function runServerProcess(
       abandonReveal: (conversationId, intent) =>
         conversationIdentityLifecycle.abandonRevealShell(conversationId, intent),
     },
+    // 选会话（resume）各步记为阶段，只观测：每一步的墙钟与其中的存储工作归到具体步骤
     resume: createAnchorConversationResumePort({
-      identity: conversationDirectory,
+      identity: {
+        touch: (conversationId) => observeLogPhase(startupRecords, "resume-restore-identity", () =>
+          conversationDirectory.touch(conversationId)),
+      },
       runReadiness: {
         prepareConversationReadiness: async (conversationId) => {
-          await boundConversationProtocol.prepareConversationReadiness(conversationId);
-          await boundConversations!.getOrCreateExisting(conversationId, () =>
-            conversationIdentityLifecycle.identityExists(conversationId));
+          await observeLogPhase(startupRecords, "resume-protocol-readiness", () =>
+            boundConversationProtocol.prepareConversationReadiness(conversationId));
+          await observeLogPhase(startupRecords, "resume-conversation-runtime", () =>
+            boundConversations!.getOrCreateExisting(conversationId, () =>
+              conversationIdentityLifecycle.identityExists(conversationId)));
           // Terminal.usable 边界：所选会话的必要状态就绪后，按日志记录派生状态的就绪位置；
           // 此后首发只处理该位置之后的新事实，不补做此前的欠账或初建。
           if (homeAuthority) {
-            await homeAuthority.prepareRuntime("terminal-usable");
+            await observeLogPhase(startupRecords, "resume-terminal-usable", () =>
+              homeAuthority.prepareRuntime("terminal-usable"));
           }
         },
       },
-      ...(advancementRecovery ? { recovery: advancementRecovery } : {}),
-      adoptionReview: schedulerGenerationOwner.postAdoptionReview,
+      ...(advancementRecovery ? { recovery: {
+        recoverConversation: (conversationId: string) => observeLogPhase(startupRecords, "resume-advancement-recovery", () =>
+          advancementRecovery.recoverConversation(conversationId)),
+      } } : {}),
+      adoptionReview: {
+        reviewForSurface: (request) => observeLogPhase(startupRecords, "resume-adoption-review", () =>
+          schedulerGenerationOwner.postAdoptionReview.reviewForSurface(request)),
+      },
     }),
     clear: createAnchorConversationClearCommitPort({
       conversations: boundConversations!,
@@ -3086,15 +3131,15 @@ async function runServerProcess(
   extensionHandle.bind(meshRuntime ? meshRuntime.extensionManagementForAnchor(localExtensionManagement) : localExtensionManagement);
   if (meshRuntime) meshRuntime.bindExtensionManagement(localExtensionManagement,
     createExtensionArtifactReceiver({ home: zhixingHome, artifacts: authorityRuntime.artifacts }));
-  await recoverLocalJobsAfterBindings?.();
-  await localExecutor?.owner.start(startupLifecycle
+  await observeLogPhase(startupRecords, "recover-local-jobs", async () => { await recoverLocalJobsAfterBindings?.(); });
+  await observeLogPhase(startupRecords, "start-local-executor-owner", async () => { await localExecutor?.owner.start(startupLifecycle
     ? { lifecycle: {
         operationId: startupLifecycle.delivery.operationId,
         kind: startupLifecycle.kind,
         recoverAcceptedWork: startupLifecycle.recoverAcceptedWork,
         alreadySettled: startupLifecycle.alreadySettled,
       } }
-    : {});
+    : {}); });
   boundChannelConversationProduct?.bind(productApi);
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
@@ -3247,12 +3292,12 @@ async function runServerProcess(
 
   // runServer 将同一 prepared endpoint 单向转交给 Host shell；activation
   // gate、ready publication 与正常终止共享同一个幂等 owner。
-  if (!await verifyManagedHostAdmission(
+  if (!await observeLogPhase(startupRecords, "verify-managed-admission", () => verifyManagedHostAdmission(
     initialManagedHostAdmission,
     processMode,
     zhixingHome,
     loadManagedState,
-  )) {
+  ))) {
     boundInboundRouter?.refuseNewMessages();
     await reconcileManagedState("managed-preflight");
     throw new Error("Managed host admission changed during startup");
@@ -3316,7 +3361,7 @@ async function runServerProcess(
       // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
       // 每个资源先进入同一 startup rollback，再由 gate 作有限、类型化移交。
       if (enabledSurfaces.has("confirmation-bridge")) {
-        await installConfirmationBridge({
+        await observeLogPhase(startupRecords, "activate-confirmation-bridge", () => installConfirmationBridge({
           conversations: boundConversations,
           confirmationHub,
           runner: openingRunner,
@@ -3324,17 +3369,19 @@ async function runServerProcess(
           continuationSource: async (entry) => entry.conversationId
             ? conversationServices.worksceneContinuation.interactionSource(entry.conversationId, entry.request.turnOrigin)
             : undefined,
-        });
+        }));
       }
       // Recovery may emit events, run accepted work, or request Channel reopen.
       // Physical Channel connections remain behind their Host activation gate.
       boundChannelConversationProduct?.assertBound();
-      await startAnchorRuntime();
-      await recoverHostStop();
-      await currentRemovalMigrationApplication?.resumeActive();
-      await currentRemovalRecoveryApplication?.resumeActive();
+      await observeLogPhase(startupRecords, "activate-anchor-runtime", () => startAnchorRuntime());
+      await observeLogPhase(startupRecords, "activate-host-stop-recovery", () => recoverHostStop());
+      await observeLogPhase(startupRecords, "activate-removal-resume", async () => {
+        await currentRemovalMigrationApplication?.resumeActive();
+        await currentRemovalRecoveryApplication?.resumeActive();
+      });
       anchorInternalStopLifecycle.assertServerStartAllowed();
-      await advancementRecovery?.prepare();
+      await observeLogPhase(startupRecords, "activate-advancement-recovery", async () => { await advancementRecovery?.prepare(); });
       if (advancementRecovery && !startupLifecycleOperation) {
         advancementRecovery.start();
       }
@@ -3382,7 +3429,7 @@ async function runServerProcess(
       boundJobStatus?.onStatus((notice) => openingRunner.server.context.broadcastAll?.("job.status", notice));
       boundJobStatus?.onSchedulerNotice((notice) => openingRunner.server.context.broadcastAll?.("scheduler.notice", notice));
       if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
-        await schedulerApplication.resumeManualSurfaces();
+        await observeLogPhase(startupRecords, "activate-scheduler-surfaces", () => schedulerApplication.resumeManualSurfaces());
       }
 
       // Host shell 已接管 endpoint/state/discovery。既有 pre-server 贡献按
@@ -3390,11 +3437,11 @@ async function runServerProcess(
       lifecycleContributions.transferTo(registry, "foundation");
       lifecycleContributions.transferTo(registry, "surface");
 
-      await startConversationRecovery({
+      await observeLogPhase(startupRecords, "start-conversation-recovery", () => startConversationRecovery({
         conversationProtocol: boundConversationProtocol,
         startupLifecycle,
         lifecycleContributions,
-      });
+      }));
 
       lifecycleContributions.transferExactTo(
         registry,
@@ -3430,7 +3477,7 @@ async function runServerProcess(
 
       // All recovery and required consumers are ready before a Channel can
       // deliver its first callback, including reconnects requested by recovery.
-      await boundChannelConnections?.activate();
+      if (boundChannelConnections) await observeLogPhase(startupRecords, "activate-channel-connections", () => boundChannelConnections.activate());
 
       // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
       lifecycleContributions.assertTransferred();

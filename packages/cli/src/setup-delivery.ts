@@ -133,6 +133,7 @@ import {
   rebindSurfaceAssetAuthority,
 } from "./serve/surface-asset-authority.js";
 import { openHomeAuthoritySources, type HomeAuthoritySourcesLease } from "./serve/home-authority-sources.js";
+import { beginLogPhase } from "@zhixing/core/logging";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
@@ -500,6 +501,8 @@ export interface ExecutorReadiness {
 
 export interface SetupAuthorityRuntimeOptions {
   readonly records?: import("@zhixing/core/logging").LogRecordPort;
+  /** 装配各步骤的子阶段记录（启动阶段来源）；只用于观测。 */
+  readonly phaseRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly extensionReadiness?: (log: FileAuthorityCommitLog) => Promise<{ channels: readonly string[]; revision: string }>;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
@@ -545,6 +548,23 @@ function projectAdvancementRubricArtifacts(
   return Object.freeze(projection);
 }
 
+/** 顺序子阶段：进入下一段即结束上一段；只记录，不改变执行顺序与失败语义。 */
+function sequentialLogPhases(records: import("@zhixing/core/logging").LogRecordPort | undefined) {
+  let current: ReturnType<typeof beginLogPhase> | undefined;
+  return {
+    enter(phase: string): void {
+      current?.finish();
+      current = records ? beginLogPhase(records, phase) : undefined;
+    },
+    end(...failure: [] | [unknown]): void {
+      const phase = current;
+      current = undefined;
+      if (failure.length) phase?.finish(failure[0]);
+      else phase?.finish();
+    },
+  };
+}
+
 export async function setupAuthorityRuntime(
   options: SetupAuthorityRuntimeOptions,
 ): Promise<AuthorityRuntimeStack> {
@@ -575,11 +595,13 @@ export async function setupAuthorityRuntime(
     "authorityRuntime.stopStorageMaintenance",
     stopStorageMaintenance,
   );
+  const phases = sequentialLogPhases(options.phaseRecords);
   try {
     const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
     // 统一 home 入口：同进程同 home 的权威日志、制品库与活验签器只有一个 owner，
     // 固定领域定义在任何写入前已登记。commit 时间戳与本 stack 其余组件必须同钟:
     // 租约活性等判定以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
+    phases.enter("authority-open-sources");
     authoritySources = await openHomeAuthoritySources({
       home: options.zhixingHome,
       secretStore: options.secretStore,
@@ -594,6 +616,7 @@ export async function setupAuthorityRuntime(
     const anchorEnabled = options.enableAnchor ?? true;
     authorityLog = anchorEnabled ? sources.authority : undefined;
     const localExecutorEnabled = options.enableLocalExecutor ?? true;
+    phases.enter("authority-load-runtime");
     const ownerRuntime = anchorEnabled || localExecutorEnabled
       ? await Promise.all([
           import("@zhixing/owner-kernel/control-admission"),
@@ -675,6 +698,7 @@ export async function setupAuthorityRuntime(
     // 启动恢复没有任何调用在等它,但它决定权威何时可用:按恢复档准入,既不与
     // 小时级回收同档竞争,也不冒充前台抢占正在服务的请求。
     const recoveringAssets = surfaceAssets;
+    phases.enter("authority-asset-recovery");
     if (recoveringAssets) {
       await runInMaintenanceContext("recovery", () =>
         recoveringAssets.recover(),
@@ -684,6 +708,7 @@ export async function setupAuthorityRuntime(
     const capabilityDirectoryStore = new FileExecutorCapabilityDirectoryStore(
       path.join(authorityRoot, "executor-capability-directory.json"),
     );
+    phases.enter("authority-capability-directory");
     let capabilityDirectoryEstablished =
       (await capabilityDirectoryStore.load()) !== undefined;
     const versionStore = localExecutorEnabled
@@ -695,6 +720,7 @@ export async function setupAuthorityRuntime(
     await versionStore?.assertCapabilityDirectoryCoherence(
       capabilityDirectoryEstablished,
     );
+    phases.enter("authority-permission-snapshots");
     const permissionSnapshots = await FileTrustRuleSnapshotCatalog.open(
       path.join(authorityRoot, "permission-snapshots"),
       verifier,
@@ -705,6 +731,7 @@ export async function setupAuthorityRuntime(
       artifacts,
       verifier,
     );
+    phases.enter("authority-executor-capabilities");
     const executorCapabilities = await ExecutorCapabilityDirectory.open({
       verifier,
       store: capabilityDirectoryStore,
@@ -792,6 +819,7 @@ export async function setupAuthorityRuntime(
     };
     const conversationAuthority = createConversationAuthorityVerifier({ sources, deviceId: key.deviceId, localOwnerEpoch, executorLog,
       standaloneAnchorEpoch: () => anchorEnabled ? anchorEpoch : undefined });
+    phases.enter("authority-anchor-authorization");
     if (anchorEnabled) {
       const current = await sources.currentAnchorAuthorization(key.deviceId);
       if ((installedAuthorityGeneration && !current.tenure) || current.tenure?.deviceId === key.deviceId &&
@@ -987,6 +1015,7 @@ export async function setupAuthorityRuntime(
       latestLocalExecutorPublication = publication;
       return publication;
     };
+    phases.enter("authority-local-executor");
     if (localExecutorEnabled) {
       if (!options.deviceCapacity) {
         // Library callers that only exercise authority protocols may omit the
@@ -1141,6 +1170,7 @@ export async function setupAuthorityRuntime(
           clock,
         })
       : undefined;
+    phases.enter("authority-workscene-staging");
     await worksceneGlobalState?.initializeStagedPublishing();
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
@@ -2018,6 +2048,7 @@ export async function setupAuthorityRuntime(
         participants: INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
       });
     };
+    phases.enter("authority-execution-assets");
     if (routedGlobalState) {
       await executionAssets
         .publishFromAuthority({
@@ -2029,6 +2060,7 @@ export async function setupAuthorityRuntime(
         .catch(() => undefined);
       if (localExecutorEnabled) await refreshLocalExecutorSnapshot();
     }
+    phases.end();
     return {
       get anchorEpoch() {
         return anchorEpoch;
@@ -2211,6 +2243,7 @@ export async function setupAuthorityRuntime(
       stopStorageMaintenance,
     };
   } catch (error) {
+    phases.end(error);
     // 失败即执行同一幂等 handle;handle 缓存执行结果,外层回滚事务再跑它只会
     // 复用同一次。原始失败优先上抛,清理自身的失败经外层回滚事务可观测。
     await startupCleanup.run().catch(() => undefined);
