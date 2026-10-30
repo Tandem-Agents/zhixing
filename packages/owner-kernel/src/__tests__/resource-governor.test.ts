@@ -27,6 +27,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AnchorResourceGovernor,
   assignmentReservationId,
+  ResourceAdmissionExpiredError,
 } from "../resource-governor.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
@@ -358,6 +359,54 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
+  it("queues and reserves an immediately admissible control root in one frame", async () => {
+    const fixture = await createHarness();
+    const workload = { kind: "control", id: "control-one-frame", attempt: 1 } as const;
+    const before = (await fixture.log.readAll()).length;
+    const lease = await fixture.governor.acquireRoot(
+      workload,
+      { maxCalls: 1 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      hostContext,
+    );
+    const envelopes = await fixture.log.readAll();
+    expect(envelopes).toHaveLength(before + 1);
+    expect(envelopes.at(-1)!.entries.map((entry) => (entry.body as { t: string }).t)).toEqual(["queued", "reserve"]);
+    const snapshot = await fixture.restart().snapshot();
+    expect(snapshot.reservations.get(lease.reservationId)?.state).toBe("active");
+    expect(snapshot.queued.has(lease.reservationId)).toBe(false);
+  });
+
+  it("only queues a control root while its admission class is held by another candidate, then follows the original path", async () => {
+    const fixture = await createHarness();
+    const interactive = { admissionClass: "interactive", entry: "conversation-input" } as const;
+    // 同类别里一个已准备、尚未激活的分派候选占住公平窗口
+    await fixture.governor.enqueueRoot(
+      assignmentReservationId("assignment-holds-class"),
+      { kind: "run", id: "run-holds-class", attempt: 1 },
+      interactive,
+      hostContext,
+    );
+    await fixture.governor.prepareAssignmentRoot({
+      assignmentId: "assignment-holds-class",
+      executorId: "executor-1",
+      workload: { kind: "run", id: "run-holds-class", attempt: 1 },
+      scopeBinding: { kind: "conversation", conversationId: "conversation-1", ownerEpoch: 1 },
+      budget: { maxCalls: 1 },
+    }, interactive, hostContext);
+    const workload = { kind: "control", id: "control-behind-candidate", attempt: 1 } as const;
+    const shortContext = { ...hostContext, deadlineAt: new Date(Date.parse(NOW) + 300).toISOString() };
+    const before = (await fixture.log.readAll()).length;
+    await expect(fixture.governor.acquireRoot(workload, { maxCalls: 1 }, interactive, shortContext))
+      .rejects.toBeInstanceOf(ResourceAdmissionExpiredError);
+    const types = (await fixture.log.readAll()).slice(before)
+      .map((envelope) => envelope.entries.map((entry) => (entry.body as { t: string }).t));
+    // 没有被立即授予：先只写排队，等到截止由原路径出队，从未写入预留
+    expect(types[0]).toEqual(["queued"]);
+    expect(types.flat()).not.toContain("reserve");
+    expect(types.flat()).toContain("dequeue");
+  });
+
   it("conservatively consumes unfinished metered usage when settling a control root", async () => {
     const fixture = await createHarness();
     const workload = { kind: "control", id: "control-unfinished-usage", attempt: 1 } as const;
@@ -389,6 +438,76 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
         usageId: "usage:control-unfinished-usage:1",
       }),
     ]));
+  });
+
+  it("settles and releases a control root in one frame and stays idempotent once released", async () => {
+    const fixture = await createHarness();
+    const workload = { kind: "control", id: "control-settle-release", attempt: 1 } as const;
+    const lease = await fixture.governor.acquireRoot(
+      workload,
+      { maxCalls: 1, maxTokens: 100 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      hostContext,
+    );
+    await fixture.governor.reserveUsage(
+      lease,
+      { usageId: "usage:control-settle-release:1", calls: 1, tokens: 100 },
+      hostContext,
+    );
+    const before = (await fixture.log.readAll()).length;
+    await fixture.governor.settleAndRelease(lease, hostContext);
+    const envelopes = await fixture.log.readAll();
+    // 保守消耗、结算、释放写在同一帧（与先结算再释放的两次提交结果相同）
+    expect(envelopes).toHaveLength(before + 1);
+    expect(envelopes.at(-1)!.entries.map((entry) => (entry.body as { t: string }).t)).toEqual(["consume", "settle", "release"]);
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toMatchObject({ kind: "reservation", state: "released" });
+    await fixture.governor.settleAndRelease(lease, hostContext);
+    await fixture.restart().settleAndRelease(lease, hostContext);
+    expect(await fixture.log.readAll()).toHaveLength(before + 1);
+  });
+
+  it("only adds the release to an already settled root and rejects a reclaimed root like settle does", async () => {
+    const fixture = await createHarness();
+    const origin = { admissionClass: "advancement", entry: "advancement-control" } as const;
+    const settled = await fixture.governor.acquireRoot({ kind: "control", id: "control-settled", attempt: 1 }, { maxCalls: 1 }, origin, hostContext);
+    await fixture.governor.settle(settled, hostContext);
+    const before = (await fixture.log.readAll()).length;
+    await fixture.governor.settleAndRelease(settled, hostContext);
+    const envelopes = await fixture.log.readAll();
+    expect(envelopes).toHaveLength(before + 1);
+    expect(envelopes.at(-1)!.entries.map((entry) => (entry.body as { t: string }).t)).toEqual(["release"]);
+
+    const reclaimed = await fixture.governor.acquireRoot({ kind: "control", id: "control-reclaimed", attempt: 1 }, { maxCalls: 1 }, origin, hostContext);
+    await fixture.governor.reclaim(reclaimed);
+    const afterReclaim = (await fixture.log.readAll()).length;
+    await expect(fixture.governor.settle(reclaimed, hostContext)).rejects.toThrow();
+    await expect(fixture.governor.settleAndRelease(reclaimed, hostContext)).rejects.toThrow();
+    expect(await fixture.log.readAll()).toHaveLength(afterReclaim);
+  });
+
+  it("requires both settle and release authority for settling and releasing together", async () => {
+    const fixture = await createHarness();
+    const lease = await fixture.governor.acquireRoot(
+      { kind: "control", id: "control-authority", attempt: 1 },
+      { maxCalls: 1 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      hostContext,
+    );
+    const settleOnly = new AnchorResourceGovernor({
+      log: fixture.log,
+      signer,
+      verifier,
+      guard: { assert(_principal: unknown, method: string) { if (method === "reservation.release") throw new Error("release not granted"); } },
+      anchorEpoch: 1,
+      localExecutorId: "executor-1",
+      reporterKeyFor: () => "executor-1",
+      leaseTtlMs: 15 * 60_000,
+      clock: () => NOW,
+      monotonicClock: () => performance.now(),
+    });
+    const before = (await fixture.log.readAll()).length;
+    await expect(settleOnly.settleAndRelease(lease, hostContext)).rejects.toThrow("release not granted");
+    expect(await fixture.log.readAll()).toHaveLength(before);
   });
 
   it("freezes a bounded review delegation and preserves its conversation scope through child usage", async () => {

@@ -53,6 +53,9 @@ function createGovernorProbe(input?: {
     async release() {
       events.push({ op: "release" });
     },
+    async settleAndRelease() {
+      events.push({ op: "settleAndRelease" });
+    },
   };
   return { governor, events };
 }
@@ -92,7 +95,7 @@ describe("governControlTextCall", () => {
     authority.resourceGovernor = second.governor;
     await expect(call("second", "light")).resolves.toBe("second");
     for (const probe of [first, second]) {
-      expect(probe.events.map((event) => event.op)).toEqual(["acquireRoot", "settle", "release"]);
+      expect(probe.events.map((event) => event.op)).toEqual(["acquireRoot", "settleAndRelease"]);
     }
   });
 
@@ -116,8 +119,7 @@ describe("governControlTextCall", () => {
       "acquireRoot",
       "reserveUsage",
       "consume",
-      "settle",
-      "release",
+      "settleAndRelease",
     ]);
     const reserve = probe.events[1]!.detail as { usageId: string; tokens: number; calls: number };
     const consume = probe.events[2]!.detail as { usageId: string; tokens: number; calls: number };
@@ -141,7 +143,7 @@ describe("governControlTextCall", () => {
     );
     await expect(governed("condense")).rejects.toThrow("provider interrupted");
     const ops = probe.events.map((event) => event.op);
-    expect(ops).toEqual(["acquireRoot", "reserveUsage", "consume", "settle", "release"]);
+    expect(ops).toEqual(["acquireRoot", "reserveUsage", "consume", "settleAndRelease"]);
     const conservative = probe.events[2]!.detail as { tokens: number };
     expect(conservative.tokens).toBe(777);
   });
@@ -181,8 +183,7 @@ describe("governControlTextCall", () => {
       "acquireRoot",
       "reserveUsage",
       "consume",
-      "settle",
-      "release",
+      "settleAndRelease",
     ]);
     const consume = probe.events[2]!.detail as { tokens: number };
     expect(consume.tokens).toBe(15);
@@ -211,7 +212,7 @@ describe("governControlTextCall", () => {
     await stream.next();
     await stream.return?.(undefined as never);
     const ops = probe.events.map((event) => event.op);
-    expect(ops).toEqual(["acquireRoot", "reserveUsage", "consume", "settle", "release"]);
+    expect(ops).toEqual(["acquireRoot", "reserveUsage", "consume", "settleAndRelease"]);
     const conservative = probe.events[2]!.detail as { tokens: number };
     expect(conservative.tokens).toBeGreaterThan(0);
   });

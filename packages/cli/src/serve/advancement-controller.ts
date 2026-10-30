@@ -13,6 +13,11 @@ import type {
   ResourceReservationPort,
   SessionStatePort,
 } from "@zhixing/core/contracts";
+
+/** 推进控制调用的治理端口：在通用资源端口之外，收尾使用同一所有者的“结算并释放”（同一帧、需两项授权）。 */
+type AdvancementResourcePort = ResourceReservationPort & {
+  settleAndRelease: ResourceReservationPort["settle"];
+};
 import {
   assertAdvancementModelProviderBinding,
   type AdvancementModelProviderFactory,
@@ -46,7 +51,7 @@ export interface ServeAdvancementControllerDeps {
    * 晚于本控制器创建；advancement 外调发生在运行期，取值时必须已就绪，
    * 缺失即 fail-closed，不允许静默绕过治理）。
    */
-  readonly governor: () => ResourceReservationPort | undefined;
+  readonly governor: () => AdvancementResourcePort | undefined;
   /** Conversation-owner state port captured directly before publication. */
   readonly sessionState: SessionStatePort;
   /** Required recent-context reader captured from the bound conversation owner. */
@@ -69,9 +74,9 @@ export interface ServeAdvancementControllerDeps {
 
 /** 惰性解析的治理端口代理——每次调用时解析真实 governor，缺失即拒绝。 */
 function lazyResourcePort(
-  resolve: () => ResourceReservationPort | undefined,
-): ResourceReservationPort {
-  const required = (): ResourceReservationPort => {
+  resolve: () => AdvancementResourcePort | undefined,
+): AdvancementResourcePort {
+  const required = (): AdvancementResourcePort => {
     const port = resolve();
     if (!port) {
       throw new Error("Advancement LLM calls require the durable authority runtime");
@@ -103,6 +108,7 @@ function lazyResourcePort(
     consume: (lease, usage, ctx) => required().consume(lease, usage, ctx),
     settle: (lease, ctx) => required().settle(lease, ctx),
     release: (lease, ctx) => required().release(lease, ctx),
+    settleAndRelease: (lease, ctx) => required().settleAndRelease(lease, ctx),
   };
 }
 
@@ -172,8 +178,8 @@ export async function createServeAdvancementApplications(
       }
       return result.text;
     } finally {
-      await governor.settle(lease, ctx).catch(() => {});
-      await governor.release(lease, ctx).catch(() => {});
+      // 结算与释放在同一帧；与原先各自尽力的两步逐状态等价（已结算只补释放，已释放不写，已回收照旧拒绝）
+      await governor.settleAndRelease(lease, ctx).catch(() => {});
     }
   };
   // 取证能力集是运行时探测的系统事实（git 可用性 / workspace 形态），

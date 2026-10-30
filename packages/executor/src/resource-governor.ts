@@ -7,6 +7,7 @@ import {
   liveGovernorReservations,
   readReceivedCapabilityActivation,
   registerResourceCapabilityActivations,
+  requireGovernorRecordNeeds,
   type GovernorDecision,
   type GovernorSession,
 } from "@zhixing/core/authority";
@@ -73,6 +74,14 @@ const MAX_LEASE_TTL_MS = RESOURCE_LEASE_MAX_TTL_MS;
 const DEFAULT_CANDIDATE_TTL_MS = 5_000;
 const MAX_CANDIDATE_TTL_MS = 60_000;
 const MAX_USAGE_REPORT_ENTRIES = 256;
+
+/** 需按租约与主体授权的资源动作；结算并释放同时要求其中两项。 */
+type AuthorizedResourceMethod =
+  | "reservation.acquireChild"
+  | "reservation.reserveUsage"
+  | "reservation.consume"
+  | "reservation.settle"
+  | "reservation.release";
 
 export interface ExecutorResourceGuard {
   assert(
@@ -794,6 +803,37 @@ export class ExecutorResourceGovernor
     );
   }
 
+  /**
+   * 结算并释放：根租约的两项终态写在同一帧，需同时具备结算与释放两项授权；两项判定在同一状态上求得，
+   * 与先结算、再释放的两次提交逐一对应。子租约的结算要处理整棵子树，仍按原来的两次调用进行。
+   */
+  async settleAndRelease(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void> {
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
+    if (validated.parentId !== undefined) {
+      await this.settle(validated, ctx);
+      await this.release(validated, ctx);
+      return;
+    }
+    await this.#withAuthorizedResourceCall(
+      validated,
+      ctx,
+      ["reservation.settle", "reservation.release"],
+      (state) => {
+        const settle = this.#terminalDecision(state, validated, "settle");
+        const release = this.#terminalDecision(state, validated, "release");
+        if (settle.kind === "return" && release.kind === "return") return settle;
+        return {
+          kind: "append",
+          entries: [
+            ...(settle.kind === "append" ? settle.entries : []),
+            ...(release.kind === "append" ? release.entries : []),
+          ],
+          value: undefined,
+        };
+      },
+    );
+  }
+
   async reclaimExpired(): Promise<number> {
     canonicalTime(this.#clock(), "Resource reclaim time");
     const reclaimed = await this.#transact<number>((state) => {
@@ -1304,12 +1344,8 @@ export class ExecutorResourceGovernor
   async #withAuthorizedResourceCall<Value>(
     lease: ResourceLease,
     ctx: AuthorityCallContext,
-    method:
-      | "reservation.acquireChild"
-      | "reservation.reserveUsage"
-      | "reservation.consume"
-      | "reservation.settle"
-      | "reservation.release",
+    // 一次决定涉及多项资源动作时（如结算并释放），每一项都按原规则单独授权
+    methodOrMethods: AuthorizedResourceMethod | readonly AuthorizedResourceMethod[],
     decide: (
       state: GovernorProjection,
     ) =>
@@ -1320,10 +1356,11 @@ export class ExecutorResourceGovernor
           readonly value: Value;
         },
   ): Promise<Value> {
+    const methods: readonly AuthorizedResourceMethod[] = typeof methodOrMethods === "string" ? [methodOrMethods] : methodOrMethods;
     return this.#operations.run(async () => {
       await this.#refreshSession();
       const session = this.#session!;
-      this.#guard.assert(ctx.principal, method);
+      for (const method of methods) this.#guard.assert(ctx.principal, method);
       const { reservation, root } = await session.resolve((state) => {
         const reservation = state.reservations.get(lease.reservationId);
         return { reservation, root: reservation && state.reservations.get(reservation.rootReservationId) };
@@ -1349,13 +1386,15 @@ export class ExecutorResourceGovernor
           root.lease as AssignmentResourceLease,
         );
         const acceptedCapIds = activation.acceptedCapIds;
-        (await verifyProtocolStep(() => assertAcceptedResourceCapabilityBinding({
-          context: ctx,
-          method,
-          rootLease: root.lease as AssignmentResourceLease,
-          acceptedCapIds,
-          verifier: this.#verifier,
-        })));
+        for (const method of methods) {
+          (await verifyProtocolStep(() => assertAcceptedResourceCapabilityBinding({
+            context: ctx,
+            method,
+            rootLease: root.lease as AssignmentResourceLease,
+            acceptedCapIds,
+            verifier: this.#verifier,
+          })));
+        }
       }
       const preview = await session.resolve(decide);
       if (preview.kind === "return") return preview.value;
@@ -1364,14 +1403,16 @@ export class ExecutorResourceGovernor
         if (!root || !activation) {
           throw new Error("Assignment resource root disappeared during authorization");
         }
-        (await verifyProtocolStep(() => assertActivatedResourceCapability({
-          context: ctx,
-          method,
-          rootLease: root.lease as AssignmentResourceLease,
-          activeCapIds: activation.activeCapIds,
-          verifier: this.#verifier,
-          now: activation.acceptedAt,
-        })));
+        for (const method of methods) {
+          (await verifyProtocolStep(() => assertActivatedResourceCapability({
+            context: ctx,
+            method,
+            rootLease: root.lease as AssignmentResourceLease,
+            activeCapIds: activation.activeCapIds,
+            verifier: this.#verifier,
+            now: activation.acceptedAt,
+          })));
+        }
         this.#assertCapabilityDeadline(
           ctx.principal.capability,
           activation.acceptedAt,
@@ -1443,6 +1484,7 @@ export class ExecutorResourceGovernor
   }
 
   #preflight(entries: readonly LogicalRecord<GovernorRecord>[], state: GovernorProjection = this.#currentState()): void {
+    requireGovernorRecordNeeds(state, entries);
     let candidate = cloneGovernorProjection(state);
     for (const entry of entries) {
       if (entry.stream !== this.#stream) {

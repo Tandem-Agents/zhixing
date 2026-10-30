@@ -8,6 +8,7 @@ import {
   liveGovernorReservations,
   readCapabilityActivation,
   registerResourceCapabilityActivations,
+  requireGovernorRecordNeeds,
   type GovernorDecision,
   type GovernorSession,
 } from "@zhixing/core/authority";
@@ -99,6 +100,14 @@ export interface AnchorResourceGovernorOptions {
   readonly clock?: () => string;
   readonly monotonicClock?: () => number;
 }
+
+/** 需按租约与主体授权的资源动作；结算并释放同时要求其中两项。 */
+type AuthorizedResourceMethod =
+  | "reservation.acquireChild"
+  | "reservation.reserveUsage"
+  | "reservation.consume"
+  | "reservation.settle"
+  | "reservation.release";
 
 type RootResourceCandidate =
   | AssignmentResourceLease
@@ -245,6 +254,87 @@ export class AnchorResourceGovernor
     requireIdentifier(ctx.requestId, "Reservation requestId");
     deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
     await this.#enqueue(reservationId, workload, origin.admissionClass);
+  }
+
+  /**
+   * control 立即授予：排队与可立即授予时的预留在同一次决定里形成。
+   * 与等待候选一样先登记本预留为等待者；在同一事务的隔离草稿上以原归约追加排队记录，再以原公平选择判定。
+   * 选中自己且签发与接受校验通过，就把排队与预留写在同一帧并返回租约。否则只写排队，返回 undefined，
+   * 由调用方照原路径等待候选；签发失败时原路径会重做并按原规则出队。
+   * 出队墓碑、既有排队与既有预留都按 #enqueue 的原规则处理，并交回原路径。草稿不发布，候选登记不变。
+   */
+  async #enqueueImmediateRoot(
+    reservationId: string,
+    workload: RootResourceWorkload,
+    admissionClass: AdmissionClass,
+    ctx: AuthorityCallContext,
+    create: () => ImmediateRootResourceLease,
+  ): Promise<ImmediateRootResourceLease | undefined> {
+    // 与等待候选同一截止判定：已到截止就不立即授予，只排队，由原路径按原规则出队并报过期
+    const deadline = deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
+    this.#candidateWaiters.set(reservationId, (this.#candidateWaiters.get(reservationId) ?? 0) + 1);
+    try {
+      return await this.#transact<ImmediateRootResourceLease | undefined>((state) => {
+        const dequeued = state.dequeued.get(rootResourceWorkloadKey(workload));
+        if (dequeued !== undefined) {
+          throw new ImmediateRootReplayTerminalError({
+            kind: "dequeued",
+            reason: dequeued,
+          });
+        }
+        const existing = state.queued.get(reservationId);
+        if (existing !== undefined) {
+          if (
+            existing !== admissionClass ||
+            canonicalize(state.queuedWorkloads.get(reservationId)) !== canonicalize(workload)
+          ) {
+            throw new TypeError("Queued reservation changed admission contract");
+          }
+          return { kind: "return", value: undefined };
+        }
+        if (state.reservations.has(reservationId)) {
+          return { kind: "return", value: undefined };
+        }
+        const queued = governorRecord({
+          t: "queued",
+          reservationId,
+          admissionClass,
+          workload,
+        });
+        if (deadline - this.#monotonicClock() <= 0) {
+          return { kind: "append", entries: [queued], value: undefined };
+        }
+        requireGovernorRecordNeeds(state, [queued]);
+        const draft = applyGovernorRecord(cloneGovernorProjection(state), queued.body, this.#verifier);
+        const selected = selectFairReservation(
+          draft,
+          new Set(this.#candidates.keys()),
+          new Set(this.#candidateWaiters.keys()),
+        );
+        if (
+          selected?.reservationId !== reservationId ||
+          selected.admissionClass !== admissionClass
+        ) {
+          return { kind: "append", entries: [queued], value: undefined };
+        }
+        let lease: ImmediateRootResourceLease;
+        try {
+          lease = create();
+          this.#validateLeaseAcceptance(lease, this.#clock());
+        } catch {
+          return { kind: "append", entries: [queued], value: undefined };
+        }
+        return {
+          kind: "append",
+          entries: [queued, governorRecord({ t: "reserve", lease })],
+          value: lease,
+        };
+      });
+    } finally {
+      const remaining = (this.#candidateWaiters.get(reservationId) ?? 1) - 1;
+      if (remaining > 0) this.#candidateWaiters.set(reservationId, remaining);
+      else this.#candidateWaiters.delete(reservationId);
+    }
   }
 
   async #enqueue(
@@ -399,7 +489,33 @@ export class AnchorResourceGovernor
     assertImmediateRootResourceBinding(audience, scopeBinding, budget, delegation);
     deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
     const reservationId = immediateReservationId(workload);
-    await this.#enqueue(reservationId, workload, validatedOrigin.admissionClass);
+    const matches = (candidate: ImmediateRootResourceLease) =>
+      canonicalize({
+        workload: candidate.workload,
+        scopeBinding: candidate.scopeBinding,
+        audience: candidate.audience,
+        budget: candidate.budget,
+        delegation: candidate.delegation ?? null,
+      }) === canonicalize({
+        workload,
+        scopeBinding,
+        audience,
+        budget,
+        delegation: delegation ?? null,
+      });
+    const create = () => this.#signLease({
+      reservationId,
+      admissionClass: validatedOrigin.admissionClass,
+      workload,
+      scopeBinding,
+      audience,
+      budget,
+      ...(delegation === undefined ? {} : { delegation }),
+      domain: { kind: "anchor", anchorEpoch: this.#anchorEpoch },
+    }) as ImmediateRootResourceLease;
+    // 可立即授予时，排队与预留在同一次决定里同帧形成；否则只排队，下面照原路径等待候选
+    const immediate = await this.#enqueueImmediateRoot(reservationId, workload, validatedOrigin.admissionClass, ctx, create);
+    if (immediate) return immediate;
     try {
       return await this.#waitForCandidate(
         reservationId,
@@ -407,30 +523,8 @@ export class AnchorResourceGovernor
         () => this.#acquireImmediateRoot(
             reservationId,
             validatedOrigin.admissionClass,
-            (candidate) =>
-              canonicalize({
-                workload: candidate.workload,
-                scopeBinding: candidate.scopeBinding,
-                audience: candidate.audience,
-                budget: candidate.budget,
-                delegation: candidate.delegation ?? null,
-              }) === canonicalize({
-                workload,
-                scopeBinding,
-                audience,
-                budget,
-                delegation: delegation ?? null,
-              }),
-            () => this.#signLease({
-              reservationId,
-              admissionClass: validatedOrigin.admissionClass,
-              workload,
-              scopeBinding,
-              audience,
-              budget,
-              ...(delegation === undefined ? {} : { delegation }),
-              domain: { kind: "anchor", anchorEpoch: this.#anchorEpoch },
-            }) as ImmediateRootResourceLease,
+            matches,
+            create,
           ),
       );
     } catch (error) {
@@ -674,6 +768,33 @@ export class AnchorResourceGovernor
       ctx,
       "reservation.release",
       (state) => terminalDecision(state, validated, "release"),
+    );
+  }
+
+  /**
+   * 结算并释放：同一次决定里的两项终态写在同一帧，需同时具备结算与释放两项授权。
+   * 两项判定都在同一状态上求得——释放允许从 active 或 settled 进入，故与先结算、再释放的两次提交逐一对应：
+   * active 时两者都写，已结算只补释放，已释放直接返回，冲突或租约不匹配与单独结算一样拒绝。
+   */
+  async settleAndRelease(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void> {
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
+    await this.#withAuthorizedResourceCall(
+      validated,
+      ctx,
+      ["reservation.settle", "reservation.release"],
+      (state) => {
+        const settle = terminalDecision(state, validated, "settle");
+        const release = terminalDecision(state, validated, "release");
+        if (settle.kind === "return" && release.kind === "return") return settle;
+        return {
+          kind: "append",
+          entries: [
+            ...(settle.kind === "append" ? settle.entries : []),
+            ...(release.kind === "append" ? release.entries : []),
+          ],
+          value: undefined,
+        };
+      },
     );
   }
 
@@ -1059,6 +1180,7 @@ export class AnchorResourceGovernor
   }
 
   #preflight(entries: readonly LogicalRecord<GovernorRecord>[], state: GovernorProjection = this.#currentState()): void {
+    requireGovernorRecordNeeds(state, entries);
     let candidate = cloneGovernorProjection(state);
     for (const entry of entries) {
       if (entry.stream !== GOVERNOR_STREAM) {
@@ -1351,12 +1473,8 @@ export class AnchorResourceGovernor
   async #withAuthorizedResourceCall<Value>(
     lease: ResourceLease,
     ctx: AuthorityCallContext,
-    method:
-      | "reservation.acquireChild"
-      | "reservation.reserveUsage"
-      | "reservation.consume"
-      | "reservation.settle"
-      | "reservation.release",
+    // 一次决定涉及多项资源动作时（如结算并释放），每一项都按原规则单独授权
+    methodOrMethods: AuthorizedResourceMethod | readonly AuthorizedResourceMethod[],
     decide: (
       state: GovernorProjection,
     ) =>
@@ -1367,10 +1485,11 @@ export class AnchorResourceGovernor
           readonly value: Value;
         },
   ): Promise<Value> {
+    const methods: readonly AuthorizedResourceMethod[] = typeof methodOrMethods === "string" ? [methodOrMethods] : methodOrMethods;
     return this.#operations.run(async () => {
       await this.#refreshSession();
       const session = this.#session!;
-      this.#guard.assert(ctx.principal, method);
+      for (const method of methods) this.#guard.assert(ctx.principal, method);
       const { reservation, root } = await session.resolve((state) => {
         const reservation = state.reservations.get(lease.reservationId);
         return { reservation, root: reservation && state.reservations.get(reservation.rootReservationId) };
@@ -1396,13 +1515,15 @@ export class AnchorResourceGovernor
           root.lease as AssignmentResourceLease,
         );
         const acceptedCapIds = activation.acceptedCapIds;
-        (await verifyProtocolStep(() => assertAcceptedResourceCapabilityBinding({
-          context: ctx,
-          method,
-          rootLease: root.lease as AssignmentResourceLease,
-          acceptedCapIds,
-          verifier: this.#verifier,
-        })));
+        for (const method of methods) {
+          (await verifyProtocolStep(() => assertAcceptedResourceCapabilityBinding({
+            context: ctx,
+            method,
+            rootLease: root.lease as AssignmentResourceLease,
+            acceptedCapIds,
+            verifier: this.#verifier,
+          })));
+        }
       }
       const preview = await session.resolve(decide);
       if (preview.kind === "return") return preview.value;
@@ -1412,14 +1533,16 @@ export class AnchorResourceGovernor
           throw new Error("Assignment resource root disappeared during authorization");
         }
         const rootLease = root.lease as AssignmentResourceLease;
-        (await verifyProtocolStep(() => assertActivatedResourceCapability({
-          context: ctx,
-          method,
-          rootLease,
-          activeCapIds: activation.activeCapIds,
-          verifier: this.#verifier,
-          now: activation.acceptedAt,
-        })));
+        for (const method of methods) {
+          (await verifyProtocolStep(() => assertActivatedResourceCapability({
+            context: ctx,
+            method,
+            rootLease,
+            activeCapIds: activation.activeCapIds,
+            verifier: this.#verifier,
+            now: activation.acceptedAt,
+          })));
+        }
         this.#assertCapabilityDeadline(
           ctx.principal.capability,
           activation.acceptedAt,

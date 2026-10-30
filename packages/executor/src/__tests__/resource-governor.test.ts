@@ -331,6 +331,76 @@ describe("ExecutorResourceGovernor", {
     )).toHaveLength(0);
   });
 
+  it("settles and releases a local control root in one frame and stays idempotent once released", async () => {
+    const fixture = await createHarness();
+    const workload = { kind: "control", id: "local-control-settle-release", attempt: 1 } as const;
+    const lease = await fixture.governor.acquireRoot(
+      workload,
+      { maxCalls: 1 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      context,
+    );
+    const terminalContext = {
+      ...context,
+      deadlineAt: "2026-07-20T00:00:30.000Z",
+    };
+    const before = (await fixture.log.readAll()).length;
+    // 截止晚于租约到期仍按原授权条件拒绝，且不写任何记录
+    await expect(fixture.governor.settleAndRelease(lease, context)).rejects.toThrow("deadline exceeds lease expiry");
+    expect(await fixture.log.readAll()).toHaveLength(before);
+    await fixture.governor.settleAndRelease(lease, terminalContext);
+    const envelopes = await fixture.log.readAll();
+    // 结算与释放写在同一帧，结果与先结算再释放相同
+    expect(envelopes).toHaveLength(before + 1);
+    expect(envelopes.at(-1)!.entries.map((entry) => (entry.body as { t: string }).t)).toEqual(["settle", "release"]);
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toMatchObject({ kind: "reservation", state: "released" });
+    await fixture.governor.settleAndRelease(lease, terminalContext);
+    expect(await fixture.log.readAll()).toHaveLength(before + 1);
+  });
+
+  it("settles an already-settled control root by releasing only, and falls back to two frames for child leases", async () => {
+    const fixture = await createHarness();
+    const terminalContext = {
+      ...context,
+      deadlineAt: "2026-07-20T00:00:30.000Z",
+    };
+    const lease = await fixture.governor.acquireRoot(
+      { kind: "control", id: "local-control-settled", attempt: 1 },
+      { maxCalls: 1 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      context,
+    );
+    await fixture.governor.settle(lease, terminalContext);
+    const before = (await fixture.log.readAll()).length;
+    await fixture.governor.settleAndRelease(lease, terminalContext);
+    const envelopes = await fixture.log.readAll();
+    expect(envelopes).toHaveLength(before + 1);
+    expect(envelopes.at(-1)!.entries.map((entry) => (entry.body as { t: string }).t)).toEqual(["release"]);
+
+    const root = await fixture.governor.acquireRoot(
+      { kind: "control", id: "local-control-parent", attempt: 1 },
+      { maxCalls: 3 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      terminalContext,
+      { executorId: "executor-1" },
+      { kind: "conversation", conversationId: "settle-release-conversation", ownerEpoch: 1 },
+      { executorId: "executor-1", maxDepth: 1, maxBudget: { maxCalls: 2 } },
+    );
+    const child = await fixture.governor.acquireChild(
+      root,
+      { kind: "evidence", id: "settle-release-child", attempt: 1 },
+      { maxCalls: 1 },
+      terminalContext,
+    );
+    const beforeChild = (await fixture.log.readAll()).length;
+    await fixture.governor.settleAndRelease(child, terminalContext);
+    const childEnvelopes = await fixture.log.readAll();
+    // 子租约结算涉及整棵子树，仍是先结算、再释放两次提交
+    expect(childEnvelopes).toHaveLength(beforeChild + 2);
+    expect(childEnvelopes.at(-1)!.entries.map((entry) => (entry.body as { t: string }).t)).toEqual(["release"]);
+    expect((await fixture.governor.snapshot()).reservations.get(child.reservationId)?.state).toBe("released");
+  });
+
   it("rechecks control capacity at reserve and retains queued work for retry", async () => {
     const fixture = await createHarness(1);
     const root = assignmentLease("assignment-capacity", "run-capacity", 1);

@@ -31,6 +31,8 @@ export interface ControlLlmGovernor {
   ): Promise<void>;
   settle(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void>;
   release(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void>;
+  /** 结算并释放写在同一帧（需同时具备两项授权）；control 收尾用它，少一次耐久提交。 */
+  settleAndRelease(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void>;
 }
 
 export type GovernedTextCall = (
@@ -65,7 +67,7 @@ export interface GovernedControlMetering {
 
 interface ControlWorkSession {
   readonly metering: GovernedControlMetering;
-  /** 收束会话：保守 consume 未收束预占 → settle → release；hadError 时终结失败不再抛（原错优先） */
+  /** 收束会话：保守 consume 未收束预占 → 结算并释放（同一帧）；hadError 时终结失败不再抛（原错优先） */
   finalize(hadError: boolean): Promise<void>;
 }
 
@@ -129,8 +131,7 @@ async function openControlWorkSession(
             ctx,
           );
         }
-        await options.governor.settle(lease, ctx);
-        await options.governor.release(lease, ctx);
+        await options.governor.settleAndRelease(lease, ctx);
       } catch (settlementError) {
         if (!hadError) throw settlementError;
         // 原始调用错误优先透出；终结失败由过期回收兜底，不吞原错
@@ -142,7 +143,7 @@ async function openControlWorkSession(
 /**
  * control 类外调的统一治理骨架：acquireRoot 过公平准入 → 在计量序列内执行调用
  * （外调前耐久预占、响应后按实际用量消费）→ 调用结果未知时按预占上限保守收束 →
- * finally 内 settle + release——与资源治理规格的 control 终结行一致。
+ * finally 内结算并释放（同一帧）——与资源治理规格的 control 终结行一致。
  */
 export async function governControlWork<T>(
   options: GovernControlTextCallOptions,

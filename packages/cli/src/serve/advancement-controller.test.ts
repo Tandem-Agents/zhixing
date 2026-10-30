@@ -31,6 +31,44 @@ describe("Serve Advancement application assembly", () => {
     expect(applications.reviews).toBeDefined();
   });
 
+  it("finalizes each control call through the governor's combined settle-and-release, including failed calls", async () => {
+    const lease = Object.freeze({ reservationId: "reservation:control" });
+    const governor = {
+      acquireRoot: vi.fn(async () => lease),
+      settle: vi.fn(async () => undefined),
+      release: vi.fn(async () => undefined),
+      settleAndRelease: vi.fn(async () => undefined),
+    };
+    const completion = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, text: "{\"action\":\"run-direct\"}" })
+        .mockResolvedValueOnce({ ok: false, error: { message: "model unavailable" } }),
+    };
+    const { controller } = await createServeAdvancementApplications({
+      modelProvider: {
+        create: () => createAdvancementModelProviderBinding({ completion, reviewer: { review: vi.fn() } }),
+      },
+      governor: () => governor as never,
+      sessionState,
+      recentContext: Object.freeze({ read: async () => undefined }),
+      rubricScope: "local",
+    });
+    const userInput = { parts: [{ type: "text", text: "帮我整理一下这周的会议记录" }] } as const;
+
+    await controller.decideActiveUserTurnAdmission({ conversationId: "conversation-1", userInput });
+    await controller.decideActiveUserTurnAdmission({ conversationId: "conversation-1", userInput });
+
+    expect(governor.acquireRoot).toHaveBeenCalledTimes(2);
+    expect(governor.settleAndRelease).toHaveBeenCalledTimes(2);
+    for (const [index, call] of governor.settleAndRelease.mock.calls.entries()) {
+      const acquireContext = (governor.acquireRoot.mock.calls[index] as unknown[])[3];
+      expect(call).toEqual([lease, acquireContext]);
+    }
+    expect(governor.settle).not.toHaveBeenCalled();
+    expect(governor.release).not.toHaveBeenCalled();
+  });
+
   it("fails closed instead of publishing applications for a widened binding", async () => {
     const create = vi.fn(() =>
       Object.freeze({

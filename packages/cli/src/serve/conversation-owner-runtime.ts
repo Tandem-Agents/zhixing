@@ -43,6 +43,8 @@ export type ConversationOwnerDomain =
 export type ConversationOwnerResourceAuthority = ResourceReservationPort &
   AssignmentResourceCoordinator & {
     reclaimExpired(): Promise<number>;
+    /** 结算并释放写在同一帧（推进控制调用的收尾使用）。 */
+    settleAndRelease: ResourceReservationPort["settle"];
   };
 
 export interface ConversationResourceRecoveryPort {
