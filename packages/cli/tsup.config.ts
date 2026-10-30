@@ -3,6 +3,27 @@ import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, relative } from "node:path";
 import { createRequire } from "node:module";
 import { bundleProgram, type ProgramBundleDynamicSite } from "./src/build/program-bundle.ts";
+import { deriveTerminalChunkTable, TERMINAL_CHUNK_TABLE_MIN_BYTES } from "./src/terminal/chunk-table.ts";
+
+/**
+ * 终端制品拷入后：每个平台目录按原清单逐个核对大制品的大小与整文件摘要（不符即构建失败，绝不改写原摘要），
+ * 再由这份核对一致的文件派生块表，写入 dist 清单的 chunkTables。terminal-ui 自己的清单与工具链不变。
+ */
+async function deriveTerminalChunkTables(root: string): Promise<void> {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const file = join(root, entry.name, "manifest.json");
+    if (!entry.isDirectory() || !await readFile(file).then(() => true, () => false)) continue;
+    const manifest = JSON.parse(await readFile(file, "utf8")) as { artifacts?: { name: string; bytes: number; sha256: string }[]; chunkTables?: unknown };
+    if (!Array.isArray(manifest.artifacts)) throw new Error(`Terminal manifest ${entry.name} has no artifacts`);
+    if (manifest.chunkTables !== undefined) throw new Error(`Terminal manifest ${entry.name} already carries chunk tables`);
+    const tables = [];
+    for (const artifact of manifest.artifacts) {
+      if (artifact.bytes <= TERMINAL_CHUNK_TABLE_MIN_BYTES) continue;
+      tables.push(deriveTerminalChunkTable(artifact, await readFile(join(root, entry.name, artifact.name))));
+    }
+    if (tables.length) await writeFile(file, `${JSON.stringify({ ...manifest, chunkTables: tables }, null, 2)}\n`);
+  }
+}
 
 async function buildExtensionKit() {
   const kit = "dist/extension-kit";
@@ -83,6 +104,7 @@ export default defineConfig({
     await buildExtensionKit();
     // The independent UI/native closure survives tsup's clean build.
     await cp("../terminal-ui/dist", "dist/terminal", { recursive: true });
+    await deriveTerminalChunkTables("dist/terminal");
     // Independently built migration artifacts, never imported by the CLI process.
     await mkdir("dist/extensions", { recursive: true });
     for (const directory of await readdir("../channels", { withFileTypes: true })) {

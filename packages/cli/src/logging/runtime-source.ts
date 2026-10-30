@@ -34,6 +34,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     } },
     terminalAssetVerification: { message: "终端固定制品校验耗时", level: "info", tier: "critical", fields: {
       asset: "text", durationMs: "number", openMs: "number", statMs: "number", readMs: "number", hashMs: "number", closeMs: "number", bytes: "number", reads: "number",
+      threads: "number", threadStartMs: "number", threadSetupMs: "number", threadHashMs: "number", threadReturnMs: "number", threadCpuMs: "number",
     } },
     terminalCreation: { message: "终端进程创建分段耗时", level: "info", tier: "critical", fields: {
       instance: "text", role: "text", spawnId: "text", durationMs: "number", permitMs: "number", endpointMs: "number", parameterMs: "number", dispatchMs: "number",

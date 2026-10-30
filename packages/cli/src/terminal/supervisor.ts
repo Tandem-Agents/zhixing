@@ -18,6 +18,7 @@ import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/st
 import { resolveSelfExec } from '../serve/self-exec.js';
 import { terminalCloseDeadline, terminalWriterDeadline } from './close-budget.js';
 import { verifyTerminalAssets } from './verify-assets.js';
+import { readTerminalChunkTables } from './chunk-table.js';
 import { recordTerminalFailure, TERMINAL_ASSET_FAILURE_CODES } from './failure.js';
 import { readDeviceRestriction, retrievingHostAlive } from '../serve/device-restriction.js';
 
@@ -167,9 +168,11 @@ class TerminalSupervisor {
     process.on('unhandledRejection', this.#uncaught);
     try {
       const distribution = path.join(this.options.distribution, `${process.platform}-${process.arch}`);
-      const manifest = JSON.parse(await this.#phase('manifest', () => readFile(path.join(distribution, 'manifest.json'), 'utf8'))) as { protocol?: string; artifacts?: { name: string; bytes: number; sha256: string }[] };
+      const manifest = JSON.parse(await this.#phase('manifest', () => readFile(path.join(distribution, 'manifest.json'), 'utf8'))) as { protocol?: string; artifacts?: { name: string; bytes: number; sha256: string }[]; chunkTables?: unknown };
       if (manifest.protocol !== TERMINAL_PROTOCOL || !Array.isArray(manifest.artifacts)) throw Error('terminal-package-version');
       const artifacts = manifest.artifacts;
+      // 有块表的制品并行核验全部字节；表存在但不合格按清单失败，不当缺失
+      const chunkTables = readTerminalChunkTables(manifest.chunkTables, artifacts);
       const filesystem = this.#filesystem = CheckpointDirectoryHandle.createSession(5000, (executable, args) => this.#createFilesystem(executable, args));
       // Fixed package reads can overlap R preparation. Process creation and
       // all caller storage effects still require R and normal admission.
@@ -182,7 +185,7 @@ class TerminalSupervisor {
       const executableSuffix = process.platform === 'win32' ? '.exe' : '';
       const renderLibrary = process.platform === 'win32' ? 'opentui.dll' : process.platform === 'darwin' ? 'libopentui.dylib' : 'libopentui.so';
       const verify = (names: readonly string[]) => verifyTerminalAssets(distribution, artifacts, names,
-        () => this.#live(), () => { void this.#close(71, 'terminal-package-integrity'); }, this.options.records);
+        () => this.#live(), () => { void this.#close(71, 'terminal-package-integrity'); }, this.options.records, this.#abort.signal, chunkTables);
       // Neither group depends on the other. Keep the full per-consumer check,
       // and retain both real handle-closing completions even on early failure.
       const recoveryVerified = verify([`recovery${executableSuffix}`, 'foreground.node', `exec-gate${executableSuffix}`]);

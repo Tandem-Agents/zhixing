@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { CHECKPOINT_BRIDGE_TARGETS, checkpointBridgeTarget, assertCheckpointBridgeHost, currentGlibcVersion, verifyCheckpointBridgeArtifact } from "../packages/mesh/src/checkpoint-bridge-artifact.ts";
+import { verifyTerminalChunkTables } from "./terminal-chunk-check.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const canonicalRepositoryUrl = "https://github.com/Tandem-Agents/zhixing.git";
@@ -203,6 +204,8 @@ async function verifyTerminalClosure(packageRoot, version) {
         assert((metadata.mode & 0o111) !== 0, `${id}/${artifact.name} 丢失可执行权限`);
       }
     }
+    // cli 构建派生的块表（S 据此并行核验）：逐块按文件内容独立重算，大制品必须有表
+    await verifyTerminalChunkTables(id, manifest, name => readFile(path.join(targetRoot, name)));
   }
 }
 
