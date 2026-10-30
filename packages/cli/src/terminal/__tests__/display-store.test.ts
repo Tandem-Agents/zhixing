@@ -537,3 +537,88 @@ describe('initial durable history batch', () => {
   });
 });
 
+describe('initial history reservation taken before the first page request', () => {
+  // 每份预留各有令牌，结算按令牌核对：同一份不结算两次，实际字节不超过该份
+  function tokens(h: Awaited<ReturnType<typeof initialHistorySetup>>) {
+    const open = new Map<string, number>(); let next = 0;
+    const settled: [string, number][] = [];
+    h.account.reserve.mockImplementation(async (_bucket, bytes) => { const token = `reservation-${++next}`; open.set(token, bytes); return token; });
+    h.account.settle.mockImplementation(async (token, bytes) => {
+      const reserved = open.get(token);
+      if (reserved === undefined || bytes > reserved) throw Error('terminal-storage-settlement');
+      open.delete(token); settled.push([token, bytes]);
+    });
+    return { open, settled };
+  }
+
+  it('lets the batch write take the early reservation and settle its actual bytes once', async () => {
+    const h = await initialHistorySetup(), ledger = tokens(h);
+    try {
+      h.store.reserveInitialHistory(); h.store.reserveInitialHistory();
+      expect(h.account.reserve).toHaveBeenCalledTimes(1);
+      expect(await h.store.appendInitialHistory(h.items, () => true)).toBe(true);
+      await h.store.releaseInitialHistory();
+      expect(h.account.reserve).toHaveBeenCalledTimes(1);
+      expect(ledger.settled).toEqual([['reservation-1', 128 * 1024 + 4096]]); expect(ledger.open.size).toBe(0);
+    } finally { h.replay.close(); }
+  });
+
+  it('settles an unused reservation to zero, including one that arrives after the release', async () => {
+    const h = await initialHistorySetup(), ledger = tokens(h), reserve = h.account.reserve.getMockImplementation()!;
+    let arrive!: () => void;
+    const gate = new Promise<void>(resolve => { arrive = resolve; });
+    h.account.reserve.mockImplementationOnce(async (...args) => { await gate; return reserve(...args); });
+    try {
+      h.store.reserveInitialHistory();
+      const released = h.store.releaseInitialHistory();
+      await Promise.resolve();
+      expect(ledger.settled).toEqual([]);
+      arrive(); await released;
+      expect(ledger.settled).toEqual([['reservation-1', 0]]); expect(ledger.open.size).toBe(0);
+      await h.store.releaseInitialHistory(); expect(h.account.settle).toHaveBeenCalledTimes(1);
+    } finally { h.replay.close(); }
+  });
+
+  it('falls back to reserving before the write when the early reservation failed', async () => {
+    const h = await initialHistorySetup(), ledger = tokens(h);
+    h.account.reserve.mockRejectedValueOnce(Error('capacity busy'));
+    try {
+      h.store.reserveInitialHistory();
+      expect(await h.store.appendInitialHistory(h.items, () => true)).toBe(true);
+      expect(h.account.reserve).toHaveBeenCalledTimes(2);
+      expect(ledger.settled).toEqual([['reservation-1', 128 * 1024 + 4096]]); expect(ledger.open.size).toBe(0);
+    } finally { h.replay.close(); }
+  });
+
+  it('returns the early reservation before the per-carrier fallback reserves its own', async () => {
+    const h = await initialHistorySetup(initialHistoryItems(4, true)), ledger = tokens(h);
+    try {
+      h.store.reserveInitialHistory();
+      expect(await h.store.appendInitialHistory(h.items, () => true)).toBe(true);
+      expect(ledger.settled[0]).toEqual(['reservation-1', 0]); expect(ledger.open.size).toBe(0);
+      expect(h.store.first).toBe(-8);
+    } finally { h.replay.close(); }
+  });
+
+  it('settles to zero when the page retires after the early reservation and before any write', async () => {
+    const h = await initialHistorySetup(), ledger = tokens(h), writes = vi.spyOn(TerminalManagedFiles.prototype, 'write');
+    try {
+      h.store.reserveInitialHistory();
+      expect(await h.store.appendInitialHistory(h.items, () => false)).toBe(false);
+      await h.store.releaseInitialHistory();
+      expect(writes).not.toHaveBeenCalled();
+      expect(ledger.settled).toEqual([['reservation-1', 0]]); expect(ledger.open.size).toBe(0);
+    } finally { h.replay.close(); }
+  });
+
+  it('does not reserve once the store already holds content', async () => {
+    const h = await initialHistorySetup();
+    try {
+      await h.store.append({ blockId: 'live', role: 'user', text: 'live', contentOffset: 0, final: true });
+      const before = h.account.reserve.mock.calls.length;
+      h.store.reserveInitialHistory();
+      expect(h.account.reserve.mock.calls.length).toBe(before);
+    } finally { h.replay.close(); }
+  });
+});
+

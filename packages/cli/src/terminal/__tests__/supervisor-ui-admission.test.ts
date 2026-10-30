@@ -17,9 +17,10 @@ const methods = ['#admitUi', '#resume', '#live', '#uiEnvironment'].map(name => {
 const emitted = ts.transpileModule(`class Fixture {
   instance = 'fixture-instance'; #assets; #native = { child: {pid: 42}, spawnId: 'recovery' }; #nativeBirth = 'born';
   #abort = new AbortController(); #sealed = false; #roleIntents = {}; #startupTimer; #ui;
-  options = {}; #firstFramePhase;
+  options = {}; #firstFramePhase; #application; #applicationSpawn; #applicationIntentRecorded = false;
   #phase(_name, work) { return work(); }
-  constructor(ports) { this.ports = ports; this.#assets = ports.assets; }
+  constructor(ports) { this.ports = ports; this.#assets = ports.assets; this.#application = ports.application; this.#applicationSpawn = ports.applicationSpawn; }
+  #beginApplication(instancePath) { this.ports.beginApplication(instancePath, this.#applicationIntentRecorded); }
   #spawn(...args) { this.ports.spawn(...args); return { child: this.ports.child, resumed: false }; }
   #processIdentity() { return this.ports.identity; }
   #close(code, reason) { this.#sealed = true; this.#abort.abort(); this.ports.closed(code, reason); if(this.#ui) this.#ui.child.kill(); }
@@ -31,15 +32,16 @@ interface FixturePort { run(verified: Promise<boolean>): Promise<{instancePath: 
 const loaded: { Fixture?: new (ports: unknown) => FixturePort } = {};
 new Function('exports', 'process', 'path', 'randomUUID', 'TerminalChannelRetiredError', emitted)(loaded, { platform: 'win32', env: {} }, path, randomUUID, TerminalChannelRetiredError);
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function fixture() {
+function fixture(preloaded?: { spawnId: string }) {
   const admission = deferred<string>(), bind = deferred<void>(), verification = deferred<boolean>();
   const root = path.resolve('fixture-root'), instancePath = path.join(root, 'instance-fixture-instance');
-  const assets = { root, admit: vi.fn(() => admission.promise), intent: vi.fn(async () => {}), bind: vi.fn(() => bind.promise) };
-  const child = { resume: vi.fn(), kill: vi.fn() }, spawn = vi.fn(), closed = vi.fn();
-  const target = new loaded.Fixture!({ assets, child, spawn, closed, identity: Promise.resolve({pid: 99, birth: 'ui', spawnId: 'ui'}) });
+  const assets = { root, admit: vi.fn(() => admission.promise), intents: vi.fn(async () => {}), bind: vi.fn(() => bind.promise) };
+  const child = { resume: vi.fn(), kill: vi.fn() }, spawn = vi.fn(), closed = vi.fn(), beginApplication = vi.fn();
+  const target = new loaded.Fixture!({ assets, child, spawn, closed, beginApplication, identity: Promise.resolve({pid: 99, birth: 'ui', spawnId: 'ui'}),
+    ...(preloaded ? { application: { role: 'application' }, applicationSpawn: preloaded.spawnId } : {}) });
   const task = target.run(verification.promise); void task.catch(() => {});
   const flush = () => vi.advanceTimersByTimeAsync(0);
-  return { target, task, assets, child, spawn, closed, admission, bind, verification, instancePath, flush };
+  return { target, task, assets, child, spawn, closed, beginApplication, admission, bind, verification, instancePath, flush };
 }
 describe('supervisor UI execution admission', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -49,11 +51,11 @@ describe('supervisor UI execution admission', () => {
     expect(f.assets.admit).toHaveBeenCalledOnce(); expect(f.spawn).toHaveBeenCalledOnce();
     expect(f.child.resume).not.toHaveBeenCalled();
     f.verification.resolve(true); await f.flush();
-    expect(f.spawn).toHaveBeenCalledOnce(); expect(f.assets.intent).not.toHaveBeenCalled(); expect(f.child.resume).not.toHaveBeenCalled();
+    expect(f.spawn).toHaveBeenCalledOnce(); expect(f.assets.intents).not.toHaveBeenCalled(); expect(f.child.resume).not.toHaveBeenCalled();
     const env = f.spawn.mock.calls[0]![4];
     expect(env.TEMP).toBe(path.join(f.instancePath, 'runtime')); expect(env.HOME).toBe(env.TEMP);
     f.admission.resolve(f.instancePath); await f.flush();
-    expect(f.assets.intent).toHaveBeenCalledOnce(); expect(f.assets.bind).toHaveBeenCalledOnce(); expect(f.child.resume).not.toHaveBeenCalled();
+    expect(f.assets.intents).toHaveBeenCalledOnce(); expect(f.assets.bind).toHaveBeenCalledOnce(); expect(f.child.resume).not.toHaveBeenCalled();
     f.bind.resolve(); expect((await f.task).instancePath).toBe(f.instancePath);
     expect(f.child.resume).toHaveBeenCalledOnce();
   });
@@ -68,7 +70,7 @@ describe('supervisor UI execution admission', () => {
   });
   it('does not execute when storage completes ahead of verification, or after late verification on close', async () => {
     const f = fixture(); f.admission.resolve(f.instancePath); f.bind.resolve(); await f.flush();
-    expect(f.child.resume).not.toHaveBeenCalled(); expect(f.assets.intent).not.toHaveBeenCalled();
+    expect(f.child.resume).not.toHaveBeenCalled(); expect(f.assets.intents).not.toHaveBeenCalled();
     f.target.cancel(); f.verification.resolve(true);
     await expect(f.task).rejects.toBeInstanceOf(TerminalChannelRetiredError);
     expect(f.child.kill).toHaveBeenCalledOnce(); expect(f.child.resume).not.toHaveBeenCalled();
@@ -93,7 +95,7 @@ describe('supervisor UI execution admission', () => {
   });
   it('does not execute against a different returned instance path', async () => {
     const f = fixture(); f.verification.resolve(true); f.admission.resolve('different');
-    await expect(f.task).rejects.toThrow('terminal-instance-path'); expect(f.assets.intent).not.toHaveBeenCalled(); expect(f.child.resume).not.toHaveBeenCalled();
+    await expect(f.task).rejects.toThrow('terminal-instance-path'); expect(f.assets.intents).not.toHaveBeenCalled(); expect(f.child.resume).not.toHaveBeenCalled();
   });
   it('keeps the creation deadline across slow storage admission', async () => {
     const f = fixture(); f.verification.resolve(true); await f.flush();
@@ -101,6 +103,24 @@ describe('supervisor UI execution admission', () => {
     expect(f.closed).toHaveBeenCalledWith(78, 'terminal-startup-timeout');
     f.admission.resolve(f.instancePath); await expect(f.task).rejects.toBeInstanceOf(TerminalChannelRetiredError);
     expect(f.child.resume).not.toHaveBeenCalled();
+  });
+  it('records the preloaded application intent in the same durable update and starts its own chain before the UI bind', async () => {
+    const spawnId = randomUUID();
+    const f = fixture({ spawnId }); f.verification.resolve(true); await f.flush();
+    expect(f.assets.intents).not.toHaveBeenCalled(); expect(f.beginApplication).not.toHaveBeenCalled();
+    f.admission.resolve(f.instancePath); await f.flush();
+    expect(f.assets.intents).toHaveBeenCalledOnce();
+    expect(f.assets.intents.mock.calls[0]![0]).toEqual([{ role: 'ui', spawnId: expect.any(String) }, { role: 'application', spawnId }]);
+    // N 的身份、绑定与放行在完整核对与存储准入之后开始，不等 UI 的绑定与恢复
+    expect(f.beginApplication).toHaveBeenCalledWith(f.instancePath, true);
+    expect(f.child.resume).not.toHaveBeenCalled();
+    f.bind.resolve(); await f.task; expect(f.child.resume).toHaveBeenCalledOnce();
+  });
+  it('without a preloaded application records only the UI intent and starts no application chain before admission', async () => {
+    const f = fixture(); f.verification.resolve(true); f.admission.resolve(f.instancePath); await f.flush();
+    expect(f.assets.intents.mock.calls[0]![0]).toEqual([{ role: 'ui', spawnId: expect.any(String) }]);
+    expect(f.beginApplication).toHaveBeenCalledWith(f.instancePath, false);
+    f.bind.resolve(); await f.task;
   });
   it('rejects a late bind even before the deadline timer callback runs', async () => {
     const f = fixture(); f.verification.resolve(true); f.admission.resolve(f.instancePath); await f.flush();

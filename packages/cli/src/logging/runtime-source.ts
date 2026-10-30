@@ -30,6 +30,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     } },
     terminalApplicationLoad: { message: "终端应用依赖加载耗时", level: "info", tier: "critical", fields: {
       entryMs: "number", writerDeclarationMs: "number", moduleLoadMs: "number", processCpuUserMs: "number", processCpuSystemMs: "number",
+      preloadWaitMs: "number",
     } },
     terminalAssetVerification: { message: "终端固定制品校验耗时", level: "info", tier: "critical", fields: {
       asset: "text", durationMs: "number", openMs: "number", statMs: "number", readMs: "number", hashMs: "number", closeMs: "number", bytes: "number", reads: "number",

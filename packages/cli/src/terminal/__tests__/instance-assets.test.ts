@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -121,6 +122,100 @@ describe('terminal instance root admission', () => {
     await expect(h.assets.release(h.signal)).rejects.toThrow('helper-not-exited');
     await h.assets.settleWriter(id, writer, h.signal);
     await h.assets.release(h.signal);
+  });
+
+  it('queries the filesystem writer only after the first locked file operation has brought its helper up', async () => {
+    // 生产里写者辅助进程由第一次文件操作拉起，之前查询身份即失败；准入不得在那之前发起该查询
+    const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+    const identity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
+    const lock = path.join(home, 'temporary', 'terminal', 'owner.lock');
+    const writer = { pid: 123458, birth: 'synthetic-file-worker', spawnId: randomUUID() };
+    let queried = 0;
+    const assets = new TerminalInstanceAssets(home, capacity().owner, identity, undefined, async () => {
+      queried++;
+      if (!existsSync(lock)) throw Error('terminal-assets-worker-unregistered');
+      return writer;
+    });
+    owners.push(assets);
+    const directory = await assets.admit(randomUUID(), { pid: process.pid, birth: 'synthetic-self-birth', spawnId: randomUUID() }, new AbortController().signal);
+    expect(queried).toBe(1);
+    expect(JSON.parse(await readFile(path.join(directory, 'owner.json'), 'utf8')).writers[writer.spawnId]).toMatchObject({ state: 'bound', identity: writer });
+  });
+
+  it('removes its own unpublished instance directory when admission fails after creating it, so the next admission succeeds', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+    const identity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
+    const recovery = () => ({ pid: process.pid, birth: 'synthetic-self-birth', spawnId: randomUUID() });
+    const failing = new TerminalInstanceAssets(home, capacity().owner, identity, undefined, async () => { throw Error('terminal-assets-worker-unregistered'); });
+    owners.push(failing);
+    await expect(failing.admit(randomUUID(), recovery(), new AbortController().signal)).rejects.toThrow('terminal-assets-worker-unregistered');
+    const root = path.join(home, 'temporary', 'terminal');
+    expect((await readdir(root)).filter(name => name.startsWith('instance-'))).toEqual([]);
+    const next = new TerminalInstanceAssets(home, capacity().owner, identity);
+    owners.push(next);
+    await expect(next.admit(randomUUID(), recovery(), new AbortController().signal)).resolves.toContain('instance-');
+  });
+
+  describe('interrupted admission residue', () => {
+    const selfIdentity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
+    const recovery = () => ({ pid: process.pid, birth: 'synthetic-self-birth', spawnId: randomUUID() });
+    async function homeWith(build: (instance: string) => Promise<void>) {
+      const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+      const root = path.join(home, 'temporary', 'terminal');
+      // 先由一次正常准入与释放建好受管根，再放入残留
+      const first = new TerminalInstanceAssets(home, capacity().owner, selfIdentity); owners.push(first);
+      await first.admit(randomUUID(), recovery(), new AbortController().signal); await first.release(new AbortController().signal);
+      const instance = path.join(root, `instance-${randomUUID()}`);
+      await mkdir(instance); await build(instance);
+      return { home, root, instance };
+    }
+    const admitNext = async (home: string) => {
+      const next = new TerminalInstanceAssets(home, capacity().owner, selfIdentity); owners.push(next);
+      return next.admit(randomUUID(), recovery(), new AbortController().signal);
+    };
+
+    it.each([
+      ['an empty instance directory (killed right after creation)', async () => {}],
+      ['one empty child (killed while creating children)', async (instance: string) => { await mkdir(path.join(instance, 'display')); }],
+      ['all three empty children (killed before publication)', async (instance: string) => {
+        for (const child of ['display', 'input', 'runtime']) await mkdir(path.join(instance, child));
+      }],
+    ])('reclaims %s under the root lock so the next admission starts', async (_name, build) => {
+      const { home, root, instance } = await homeWith(build);
+      await expect(admitNext(home)).resolves.toContain('instance-');
+      expect((await readdir(root)).includes(path.basename(instance))).toBe(false);
+    });
+
+    it.each([
+      ['a partial owner.next', async (instance: string) => { await writeFile(path.join(instance, 'owner.next'), '{"partial":'); }],
+      ['a non-empty child', async (instance: string) => { await mkdir(path.join(instance, 'display')); await writeFile(path.join(instance, 'display', 'data'), 'x'); }],
+      ['an extra entry', async (instance: string) => { await mkdir(path.join(instance, 'display')); await mkdir(path.join(instance, 'cache')); }],
+      ['a file in place of a child directory', async (instance: string) => { await writeFile(path.join(instance, 'runtime'), ''); }],
+      ['a junction in place of a child directory', async (instance: string) => {
+        const target = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(target);
+        await symlink(target, path.join(instance, 'input'), 'junction');
+      }],
+    ])('keeps residue with %s and refuses admission as before', async (_name, build) => {
+      const { home, root, instance } = await homeWith(build);
+      await expect(admitNext(home)).rejects.toThrow();
+      expect((await readdir(root)).includes(path.basename(instance))).toBe(true);
+    });
+
+    it('cannot reclaim a creator\'s directory while that creator still holds the root lock', async () => {
+      const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+      const gate = Promise.withResolvers<void>(), waiting = Promise.withResolvers<void>();
+      const holder = new TerminalInstanceAssets(home, capacity().owner, selfIdentity, undefined, async () => {
+        waiting.resolve(); await gate.promise; return { pid: 123459, birth: 'synthetic-file-worker', spawnId: randomUUID() };
+      });
+      owners.push(holder);
+      const holding = holder.admit(randomUUID(), recovery(), new AbortController().signal);
+      await waiting.promise;
+      // 持锁者已建好目录、尚未发布：另一个准入拿不到根锁，不会看到也不会收回它
+      await expect(admitNext(home)).rejects.toThrow('terminal-root-busy');
+      gate.resolve();
+      const directory = await holding;
+      expect(JSON.parse(await readFile(path.join(directory, 'owner.json'), 'utf8')).id).toBeDefined();
+    });
   });
 
   it('preserves unknown residue and prevents a reparse from crossing the managed boundary', async () => {

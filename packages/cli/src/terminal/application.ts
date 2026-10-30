@@ -10,6 +10,7 @@ import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/t
 import { isAbsolute } from 'node:path';
 import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import type { TerminalPreloadRelease } from './application-preload.js';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
 import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
@@ -91,17 +92,19 @@ interface TerminalHistoryState {
  * connection and configuration transaction; it never opens a terminal reader. */
 export async function runTerminalApplication(timing?: {
   entryMs: number; writerDeclarationMs: number; moduleLoadMs: number; processCpuUserMs: number; processCpuSystemMs: number;
-}): Promise<void> {
+  preloadWaitMs?: number;
+}, preloaded?: { readonly transport: TerminalParentTransport; readonly release: TerminalPreloadRelease }): Promise<void> {
   const instance = process.env.ZHIXING_TERMINAL_INSTANCE;
   const home = process.env.ZHIXING_TERMINAL_HOME;
-  const directory = process.env.ZHIXING_TERMINAL_DIRECTORY;
-  const directoryIdentity = process.env.ZHIXING_TERMINAL_DIRECTORY_ID;
-  const endpoint = consumeTerminalParentEndpoint();
+  // 受管预加载时实例目录与目录身份只随 S 的放行到达，父通道也已在预加载时接管
+  const directory = preloaded ? preloaded.release.directory : process.env.ZHIXING_TERMINAL_DIRECTORY;
+  const directoryIdentity = preloaded ? preloaded.release.directoryIdentity : process.env.ZHIXING_TERMINAL_DIRECTORY_ID;
+  const endpoint = preloaded ? undefined : consumeTerminalParentEndpoint();
   const identityPattern = process.platform === 'win32' ? /^[a-f0-9]+:[a-f0-9]{16}$/u : /^[0-9]+:[0-9]+$/u;
-  if (endpoint === undefined || !instance || !/^[a-f0-9-]{36}$/u.test(instance) || !home || !isAbsolute(home) || !directory || !isAbsolute(directory) || !directoryIdentity || !identityPattern.test(directoryIdentity)) throw Error('terminal-application-admission');
-  const transport = new TerminalParentTransport(endpoint);
+  if ((!preloaded && endpoint === undefined) || !instance || !/^[a-f0-9-]{36}$/u.test(instance) || !home || !isAbsolute(home) || !directory || !isAbsolute(directory) || !directoryIdentity || !identityPattern.test(directoryIdentity)) throw Error('terminal-application-admission');
+  const transport = preloaded?.transport ?? new TerminalParentTransport(endpoint!);
   // Host self-execution inherits environment: never forward a surface role.
-  for (const key of ['ZHIXING_TERMINAL_ROLE', 'ZHIXING_TERMINAL_INSTANCE', 'ZHIXING_TERMINAL_HOME', 'ZHIXING_TERMINAL_DIRECTORY', 'ZHIXING_TERMINAL_DIRECTORY_ID', 'ZHIXING_TERMINAL_PIPE']) delete process.env[key];
+  for (const key of ['ZHIXING_TERMINAL_ROLE', 'ZHIXING_TERMINAL_INSTANCE', 'ZHIXING_TERMINAL_HOME', 'ZHIXING_TERMINAL_DIRECTORY', 'ZHIXING_TERMINAL_DIRECTORY_ID', 'ZHIXING_TERMINAL_PIPE', 'ZHIXING_TERMINAL_PRELOAD']) delete process.env[key];
   const args = normalizeCliArgs(process.argv.slice(2));
   const early = beginEntryLogging(args.length ? 'independent-command' : 'repl');
   if (timing) early.records.record({ event: 'terminalApplicationLoad', data: timing, refs: [{ kind: 'terminal', id: instance }] });
@@ -169,6 +172,15 @@ class TerminalApplication {
   #generation = 0;
   #hello = false;
   #started = false;
+  // 早启：本实例已获放行、对象与接收器已建立并完成 hello 后，N 自己发起默认会话的启动尝试；
+  // U 的第一次 startup 请求只领这份回执、接上同一尝试，不重做
+  #earlyStartup = false;
+  #startupReceipt = false;
+  // U 就绪门：U 只在建好 root 并收到 application-ready 之后才发请求，故通过校验的第一条 U 请求即开门（只开一次）。
+  // 门前发往 U 的消息在各自生产者处等待（视图、任务与过程状态沿用既有合并），不另设队列；N↔S 的资产、宿主、错误与关闭不经此门
+  #uiOpen = false;
+  #openUi!: () => void;
+  readonly #uiReady = new Promise<void>(resolve => { this.#openUi = resolve; });
   #operation?: Promise<void>;
   #submittingInput = false;
   #receiptRetry?: () => void;
@@ -236,7 +248,7 @@ class TerminalApplication {
         void this.#close(70, reason);
       });
     this.#recovery = new TerminalRecovery({ signal: this.#abort.signal, publish: view => this.#publish(view),
-      send: message => this.#channel.send(message, 'body') });
+      send: message => this.#toUi(message, 'body') });
     this.#hosts = new TerminalHostLauncher(this.#channel);
     this.#connection = new CoreHostConnection({ ...defaultCoreHostConnectionDeps(home, this.#logging.records, this.#hosts.start),
       createClient: url => createRpcClient({ url, maximumPendingRequests: 12, maximumQueuedRequestBytes: 1024 * 1024 }),
@@ -299,6 +311,9 @@ class TerminalApplication {
     this.#pendingSend = new TerminalPendingSendStore(this.#files, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal);
     this.#inputHistoryReader = new TerminalInputHistoryReader(this.#inputs);
     this.#bodyWork = new TerminalBodyWork(this.#logging.capacity.arbiter, this.#abort.signal);
+    // 启动时的配置检查模块（放行之后才装）：在等 UI 发起启动的空档里先装好，#startup 里的同一导入直接取模块缓存；
+    // 只装载、不执行，失败时 #startup 按原路径再导入并照常报错
+    void import('../runtime/startup-application.js').catch(() => {});
     this.#processSession = new TerminalProcessSession({
       currentConversation: () => this.#controller?.current.conversationId,
       changed: status => { this.#processStatus = status; this.#sendProcessStatus(); },
@@ -334,7 +349,7 @@ class TerminalApplication {
       this.#confirmation.invalid = true;
       const selection = this.#selection; this.#selection = undefined;
       if (selection) {
-        selection.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {});
+        selection.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); void this.#toUi({ type: 'invalidate', requestId: selection.id }).catch(() => {});
       }
     });
     this.#connection.onDisconnect(() => {
@@ -394,7 +409,27 @@ class TerminalApplication {
     // S may finish spawning while this module's dependency graph is loading.
     // Announce only after the actual IPC consumer exists; no startup packet is lost.
     await this.#channel.send({ type: 'hello', role: 'application' });
+    this.#beginEarlyStartup();
     await this.#completion;
+  }
+
+  // 默认会话的启动链（连接、配置检查、选会话与恢复、首屏取页与写入）只依赖放行、本进程对象与宿主连接，不依赖 U 首帧：
+  // hello 之后即开始，与 U 初始化重叠；发往 U 的视图与页等门开再送，需要用户的步骤照常等 U 应答。独立命令仍等 U 的 startup
+  #beginEarlyStartup(): void {
+    if (this.args.length || this.#started || this.#abort.signal.aborted) return;
+    this.#started = this.#earlyStartup = true;
+    this.#background(release => this.#startup(release));
+  }
+
+  /** 发往 U 的消息统一经此：门开之前等门（随关闭中止，不重新开门），门开之后直接交给通道。 */
+  async #toUi(message: TerminalMessage, lane?: 'body' | 'control'): Promise<void> {
+    if (!this.#uiOpen) await new Promise<void>((resolve, reject) => {
+      const aborted = () => reject(Error('terminal-application-closed'));
+      if (this.#abort.signal.aborted) { aborted(); return; }
+      this.#abort.signal.addEventListener('abort', aborted, { once: true });
+      void this.#uiReady.then(() => { this.#abort.signal.removeEventListener('abort', aborted); resolve(); });
+    });
+    return this.#channel.send(message, lane);
   }
   readonly #message = (value: unknown): void => { this.#channel.accept(value); };
   readonly #disconnected = (): void => { void this.#close(70, 'supervisor-disconnected', false); };
@@ -421,6 +456,8 @@ class TerminalApplication {
     if (!this.#hello || message.type !== 'request' || !Number.isSafeInteger(message.id) || message.id <= this.#lastRequest ||
       !message.action || typeof message.action.kind !== 'string') throw Error('terminal-application-request');
     this.#lastRequest = message.id;
+    // 通过握手、方向、序号与消息校验的 U 请求：U 已建 root 并收到 application-ready，开 U 就绪门
+    if (!this.#uiOpen) { this.#uiOpen = true; this.#openUi(); }
     if (this.#requests.size >= TERMINAL_LIMITS.pendingRequests) {
       recordTerminalFailure(this.#logging.records, Error('terminal-application-request-capacity'), 'terminal-request-busy',
         { requestId: message.id, action: message.action.kind, active: this.#requests.size });
@@ -462,8 +499,10 @@ class TerminalApplication {
     if (this.args.length && !['startup', 'exit', 'interrupt', 'configuration-action', 'secret-value', 'selection', 'recovery-part', 'recovery-page', 'recovery-cancel', 'clipboard-read'].includes(action.kind)) throw Error('terminal-command-action-unavailable');
     switch (action.kind) {
       case 'startup':
+        // 早启已发起的尝试：U 的第一次 startup 只领回执、接上它（不论进行中、已成功或已失败），不重做恢复、不另起宿主；再次请求照旧拒绝
+        if (this.#earlyStartup && !this.#startupReceipt) { this.#startupReceipt = true; return { accepted: true }; }
         if (this.#started) throw Error('terminal-startup-already-requested');
-        this.#started = true; this.#background(release => this.args.length ? this.#independentCommand() : this.#startup(release)); return { accepted: true };
+        this.#started = this.#startupReceipt = true; this.#background(release => this.args.length ? this.#independentCommand() : this.#startup(release)); return { accepted: true };
       case 'recovery-part': case 'recovery-page': case 'recovery-cancel':
         await this.#recovery.act(action); return { accepted: true };
       case 'retry-connection':
@@ -583,7 +622,7 @@ class TerminalApplication {
       case 'input-submit':
         if (!Number.isSafeInteger(action.version) || action.version < 0) throw Error('terminal-input-version');
         if (!this.#controller || this.#connection.getStatus().kind !== 'connected' || this.#history?.offline || this.#operation) {
-          await this.#channel.send({ type: 'submission', inputId: action.inputId, version: action.version, accepted: false, message: '当前无法接纳输入，草稿已保留。' }); return { accepted: false };
+          await this.#toUi({ type: 'submission', inputId: action.inputId, version: action.version, accepted: false, message: '当前无法接纳输入，草稿已保留。' }); return { accepted: false };
         }
         this.#background(() => this.#submit(action.inputId, action.version)); return { accepted: true };
       case 'abort':
@@ -695,8 +734,10 @@ class TerminalApplication {
     // A connection notice ends with that attempt. Clear its stored projection,
     // not just the transient starting frame; later business notices survive.
     if (this.#mainView.connectionState) this.#mainView = { ...this.#mainView, message: undefined };
-    await this.#publish({ ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
+    const starting = this.#publish({ ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
       message: undefined, choices: undefined, busy: true, connected: false, connectionState: 'starting', readyForInput: false });
+    // U 未就绪时“启动中”视图在门前等待（只留最新快照），启动链不等它送达；送达失败照常经通道失败与关闭路径收束
+    if (this.#uiOpen) await starting; else void starting.catch(() => {});
     this.#invalidateAuxiliary();
     this.#holdNoticeDisplay();
     try {
@@ -1050,6 +1091,15 @@ class TerminalApplication {
 
   async #onlineHistoryPage(owner: TerminalHistoryState): Promise<void> {
     const stageInitial = !this.#mainView.readyForInput && this.#display.first === 0 && this.#display.last === 0;
+    if (!stageInitial) { await this.#readOnlineHistoryPage(owner, false); return; }
+    // 首屏批量写入的显示预留与首页 RPC 并发取得；本次读取结束时未被取用的（失败、取消、代际变化、迟到）结算为 0。
+    // 结算失败只会让这份占用保守地留到 S 回收本实例，不会少计
+    this.#display.reserveInitialHistory();
+    try { await this.#readOnlineHistoryPage(owner, true); }
+    finally { await this.#display.releaseInitialHistory().catch(() => {}); }
+  }
+
+  async #readOnlineHistoryPage(owner: TerminalHistoryState, stageInitial: boolean): Promise<void> {
     const history = stageInitial ? { ...owner } : owner;
     const staged: InitialHistoryDisplaySegment[] = [], progressAfter: TerminalHistoryState[] = [];
     const current = () => this.#history === owner && !this.#abort.signal.aborted;
@@ -1155,7 +1205,7 @@ class TerminalApplication {
       // Body delivery is FIFO. Publish this base before yielding so concurrent
       // navigation can reference the already enqueued page in the same order.
       this.#displaySent = { revision, page };
-      try { await this.#channel.send({ type: 'display-patch', patch }, 'body'); }
+      try { await this.#toUi({ type: 'display-patch', patch }, 'body'); }
       catch (error) { this.#displaySent = undefined; throw error; }
     }
   }
@@ -1230,7 +1280,7 @@ class TerminalApplication {
     this.#processStatusSending = (async () => {
       while (this.#processStatusDirty && !this.#abort.signal.aborted) {
         this.#processStatusDirty = false;
-        await this.#channel.send({ type: 'process-status', status: this.#processStatus });
+        await this.#toUi({ type: 'process-status', status: this.#processStatus });
       }
     })().catch(() => this.#close(70, 'terminal-process-status-undelivered'))
       .finally(() => { this.#processStatusSending = undefined; if (this.#processStatusDirty && !this.#abort.signal.aborted) this.#sendProcessStatus(); });
@@ -1289,7 +1339,7 @@ class TerminalApplication {
     let settled = false;
     const settle = (accepted: boolean) => {
       if (settled) return; settled = true;
-      void this.#channel.send({ type: 'submission', inputId, version, accepted }).catch(() => this.#close(70, 'terminal-submission-undelivered'));
+      void this.#toUi({ type: 'submission', inputId, version, accepted }).catch(() => this.#close(70, 'terminal-submission-undelivered'));
       if (accepted) {
         this.#inputs.transfer(`frozen:${inputId}`, `history:${inputId}`);
         this.#inputHistory.push(inputId);
@@ -1844,7 +1894,7 @@ class TerminalApplication {
     this.#taskStatusSending = (async () => {
       while (this.#taskStatusDirty && !this.#abort.signal.aborted) {
         this.#taskStatusDirty = false;
-        await this.#channel.send({ type: 'task-status', status: this.#taskStatus });
+        await this.#toUi({ type: 'task-status', status: this.#taskStatus });
       }
     })().catch(() => this.#close(70, 'terminal-task-status-undelivered'))
       .finally(() => { this.#taskStatusSending = undefined; if (this.#taskStatusDirty) this.#sendTaskStatus(); });
@@ -1964,7 +2014,7 @@ class TerminalApplication {
     this.#invalidateAuxiliary();
     this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#sessionCommands?.invalidate(); this.#candidates.close();
     const selection = this.#selection; this.#selection = undefined;
-    if (selection) { selection.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {}); }
+    if (selection) { selection.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); void this.#toUi({ type: 'invalidate', requestId: selection.id }).catch(() => {}); }
   }
 
   #deletedCurrent(): void {
@@ -2186,7 +2236,7 @@ class TerminalApplication {
       while (this.#nextView && !this.#abort.signal.aborted) {
         const next = this.#nextView; this.#nextView = undefined;
         if ((next.current && !next.current()) || !this.#ownsPage(next.view)) continue;
-        await this.#channel.send({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation } });
+        await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation } });
       }
     })().finally(() => { this.#publishing = undefined; if (view.kind === 'conversation') this.#drainConfirmations(); });
     return this.#publishing;

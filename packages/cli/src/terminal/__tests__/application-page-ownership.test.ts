@@ -8,13 +8,14 @@ import { terminalSelectionActions } from '../selection.js';
 // In-flight history and IPC delivery are independently controlled at real awaits.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#publish', '#ownsPage', '#choosePage', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
+const methods = ['#publish', '#toUi', '#ownsPage', '#choosePage', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
   const method = owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name);
   if (!method) throw Error(`Missing production method ${name}`);
   return method.getText(source).replace(/#/gu, '');
 }).join('\n');
 const Fixture = new Function('randomUUID', 'terminalSelectionActions', 'terminalEnvironment', ts.transpile(`class Fixture {
   abort = new AbortController(); generation = 0; mainView = {kind:'conversation',title:'chat'};
+  uiOpen = true; uiReady = Promise.resolve();
   drainConfirmations() {};
   ${methods}
 } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(randomUUID, terminalSelectionActions, () => undefined);

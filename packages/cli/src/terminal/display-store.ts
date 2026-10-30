@@ -30,6 +30,9 @@ const bound: DeviceCapacityBudget = {
 };
 const allocated = (bytes: number) => Math.ceil(bytes / 4096) * 4096;
 const indexPosition = (ordinal: number) => (ordinal < 0 ? -ordinal * 2 - 1 : ordinal * 2) * INDEX_BYTES;
+// 首屏批量写入的占用上界：数据区一次分配 128 KiB，索引至多 4 条
+const INITIAL_HISTORY_DATA_BYTES = 128 * 1024;
+const INITIAL_HISTORY_CHARGE = INITIAL_HISTORY_DATA_BYTES + allocated(indexPosition(-4) + INDEX_BYTES);
 const quotedBytes = (value: string) => Buffer.byteLength(JSON.stringify(value)) - 2;
 function carrierBytes(segment: TerminalDisplaySegment, encodedBytes = Buffer.byteLength(JSON.stringify(segment))): number {
   const rendered = segment.body?.context.nodes.reduce((sum, node) => sum + node.runs.reduce((n, run) => n + quotedBytes(run.text), 0), 0);
@@ -71,6 +74,9 @@ export class TerminalDisplayStore {
   // later mutation. Keep its full confirmed entry before touching that index.
   #unpublished?: { readonly ordinal: number; readonly entry: Buffer };
   #admission?: string;
+  // 首屏批量写入自己的有限预留（与输入准入那份互不挪用）：与首页 RPC 并发取得，只供批量路径取用；
+  // 早取失败记为空，批量路径照原样在写前重新预留
+  #initial?: Promise<string | undefined>;
   #preparing?: Promise<void>;
   #dataIdentity?: string; #indexIdentity?: string;
   readonly #files: TerminalManagedFiles;
@@ -90,6 +96,18 @@ export class TerminalDisplayStore {
   prepare(): Promise<void> {
     return this.#preparing ??= this.#enqueue(() => terminalPhysicalStep(this.capacity, bound, this.signal,
       step => this.#files.prepareDisplay(step)));
+  }
+
+  /** 首页 RPC 之前调用：先取首屏批量写入的预留，与 RPC 并发。只在存储仍空时发起，已有一份时不重复。 */
+  reserveInitialHistory(): void {
+    if (this.#initial || this.#first !== 0 || this.#last !== 0 || !this.replay || this.signal.aborted) return;
+    this.#initial = this.account.reserve('display', INITIAL_HISTORY_CHARGE).catch(() => undefined);
+  }
+
+  /** 首屏预留未被批量写入取用时交还：等它到达（含迟到）后结算为 0；已取用或从未预留时什么也不做。 */
+  releaseInitialHistory(): Promise<void> {
+    const initial = this.#initial; this.#initial = undefined;
+    return initial ? initial.then(token => token ? this.account.settle(token, 0) : undefined) : Promise.resolve();
   }
 
   async admit(): Promise<void> {
@@ -165,6 +183,8 @@ export class TerminalDisplayStore {
         parts.push(...group);
       }
       if (!empty || parts.length === 0) {
+        // 不走批量路径：首屏预留用不上，先交还再逐段写（逐段写各自预留）
+        await this.releaseInitialHistory();
         // This choice precedes reserve/IO. Never retry a partially written batch.
         for (let index = 0; index < items.length; index++) {
           for (const part of split(items[index]!)) {
@@ -177,7 +197,7 @@ export class TerminalDisplayStore {
         published = true; return;
       }
       const records = parts.map(part => this.#encodeReplay(part.segment, part.replay));
-      const data = Buffer.concat(records), dataAllocation = 128 * 1024;
+      const data = Buffer.concat(records), dataAllocation = INITIAL_HISTORY_DATA_BYTES;
       const indexBytes = indexPosition(-parts.length) + INDEX_BYTES, indexAllocation = allocated(indexBytes);
       const indexPayload = Buffer.alloc(indexAllocation), entries: Buffer[] = [];
       let offset = 0;
@@ -187,7 +207,9 @@ export class TerminalDisplayStore {
         entry.copy(indexPayload, indexPosition(-index - 1)); entries.push(entry); offset += records[index]!.length;
       }
       const charge = dataAllocation + indexAllocation;
-      const token = await this.account.reserve('display', charge);
+      // 取用与首页 RPC 并发取得的首屏预留（至多 4 段，占用不超过其上界），按实际字节结算；没有或早取失败时照原样写前预留
+      const early = this.#initial; this.#initial = undefined;
+      const token = await early ?? await this.account.reserve('display', charge);
       this.#unsettled = true;
       if (!valid()) { await this.account.settle(token, 0); this.#unsettled = false; return; }
       await terminalPhysicalStep(this.capacity, bound, this.signal, async step => {

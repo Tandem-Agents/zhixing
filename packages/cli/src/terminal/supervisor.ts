@@ -102,6 +102,9 @@ class TerminalSupervisor {
   readonly instance = randomUUID();
   readonly #owned: OwnedProcess[] = [];
   readonly #roleIntents: Partial<Record<'application' | 'ui', string>> = {};
+  #applicationSpawn: ReturnType<typeof randomUUID> | undefined;
+  /** N 的创建意向已随 UI 的意向一并耐久登记。 */
+  #applicationIntentRecorded = false;
   readonly #waiters = new Set<NativeWaiter>();
   readonly #abort = new AbortController();
   readonly #completion: Promise<number>;
@@ -215,6 +218,7 @@ class TerminalSupervisor {
       await this.#phase('recovery-admit', () => this.#nativeCommand('admit', event => event.event === 'admitted', 800));
       this.#live();
       this.#prelaunchHost();
+      this.#preloadApplication();
       this.#capacity = createDeviceCapacityRuntime(path.join(this.options.home, 'temporary', 'terminal'), { createDirectory: false, activityDriven: true });
       const identity: TerminalIdentityResolver = { read: pid => this.#identity(pid) };
       await filesystemVerified; this.#live();
@@ -222,11 +226,11 @@ class TerminalSupervisor {
         if (!this.#assetFileWorker) throw Error('terminal-assets-worker-unregistered');
         return this.#helperIdentity(this.#assetFileWorker.child, this.#assetFileWorker.spawnId);
       });
-      const { instancePath, startupDeadline, ui } = await this.#admitUi(distribution, surfaceVerified);
-      // UI creation has no dependency on the business module graph. Start N
-      // while U establishes its input/rendering handshake, retaining one
-      // admission promise before U is allowed to send any business request.
-      this.#beginApplication(instancePath);
+      // UI creation has no dependency on the business module graph. N starts
+      // inside #admitUi right after the shared creation intent, while U
+      // establishes its handshake; U still waits on one admission promise
+      // before it may send any business request.
+      const { startupDeadline, ui } = await this.#admitUi(distribution, surfaceVerified);
       // The original bootstrap recorder already owns all startup evidence.
       // Start its physical store after instance/UI creation, before the UI
       // handshake, so logging helpers do not contend with that cold path.
@@ -244,7 +248,8 @@ class TerminalSupervisor {
 
   async #admitUi(distribution: string, surfaceVerified: Promise<boolean>): Promise<{ instancePath: string; startupDeadline: number; ui: OwnedProcess }> {
     const assets = this.#assets!, recovery = this.#native!;
-    const admitted = this.#phase('storage-admission', () => assets.admit(this.instance, { pid: recovery.child.pid!, birth: this.#nativeBirth!, spawnId: recovery.spawnId }, this.#abort.signal));
+    const admitted = this.#phase('storage-admission', () => assets.admit(this.instance, { pid: recovery.child.pid!, birth: this.#nativeBirth!, spawnId: recovery.spawnId }, this.#abort.signal,
+      (name, work) => this.#phase(name, work)));
     void admitted.catch(() => { if (!this.#sealed) void this.#close(71, 'terminal-assets-admission-failed'); });
     this.#live();
     // R and the native/gate closure are already admitted. OS creation may
@@ -262,7 +267,13 @@ class TerminalSupervisor {
     this.#live(startupDeadline);
     if (await admitted !== instancePath) throw Error('terminal-instance-path');
     this.#live();
-    await this.#phase('ui-intent', () => assets.intent('ui', this.#abort.signal, uiSpawn)); this.#live();
+    // N 已预加载、已创建：UI 与 N 的创建意向一次耐久登记，此后两边各自查身份、各自绑定、各自放行
+    const applicationSpawn = this.#application ? this.#applicationSpawn : undefined;
+    await this.#phase('ui-intent', () => assets.intents([{ role: 'ui', spawnId: uiSpawn },
+      ...(applicationSpawn ? [{ role: 'application' as const, spawnId: applicationSpawn }] : [])], this.#abort.signal)); this.#live();
+    this.#applicationIntentRecorded = applicationSpawn !== undefined;
+    // 完整核对与存储准入都已通过：N 的身份、绑定与放行从这里开始，与 UI 的身份、绑定、恢复并行
+    this.#beginApplication(instancePath);
     const identity = await this.#phase('ui-identity', () => this.#processIdentity(this.#ui!)); this.#live();
     await this.#phase('ui-bind', () => assets.bind('ui', identity, this.#abort.signal)); this.#live();
     this.#resume(this.#ui, startupDeadline);
@@ -285,24 +296,47 @@ class TerminalSupervisor {
     }
   }
 
+  /**
+   * N 的受管只读预加载：R 与原生创建闭包已核对受理后即经同一创建路径拉起 N 并让它装载模块图，与资产核对、
+   * 存储准入并行。放行之前 N 不读写 home、不记日志、不连接业务；耐久意向、身份绑定与完整准入之后，
+   * #beginApplication 才经父通道放行。放行前 S 关闭时它作为未监听进程被直接终止，没有意向需要结算。
+   */
+  #preloadApplication(): void {
+    const spawnId = this.#applicationSpawn = this.#roleIntents.application = randomUUID();
+    // Projection creates short-lived DTOs beside another rendering runtime.
+    // Adjust GC scheduling without capping the admitted RPC/input capacity.
+    const application = this.#spawn('application', process.execPath,
+      ['--max-semi-space-size=4', '--heap-growing-percent=20', this.options.programEntry ?? this.options.entry, ...this.options.args], ['ignore', 'pipe', 'pipe', 'ipc'], {
+        ...process.env, ZHIXING_TERMINAL_ROLE: 'application', ZHIXING_TERMINAL_PRELOAD: '1', ZHIXING_TERMINAL_INSTANCE: this.instance,
+        ZHIXING_TERMINAL_HOME: this.options.home,
+      }, spawnId);
+    // 原生创建完成、取得进程句柄后才能恢复；创建失败由进程的错误事件按原路径关闭，封口后不再恢复
+    void application.child.created.then(() => {
+      if (this.#sealed) return;
+      try { this.#resume(application); } catch { void this.#close(71, 'terminal-startup-failed'); }
+    }, () => {});
+  }
+
   #beginApplication(instancePath: string): void {
     this.#applicationAdmitted = (async () => {
       this.#live();
-      const spawnId = this.#roleIntents.application = randomUUID();
+      const application = this.#application!;
+      const spawnId = this.#applicationSpawn!;
       const deadline = Date.now() + TERMINAL_LIMITS.applicationStartupTimeoutMs;
       this.#applicationStartupTimer = setTimeout(() => void this.#close(78, 'terminal-application-startup-timeout'), TERMINAL_LIMITS.applicationStartupTimeoutMs);
-      await this.#phase('application-intent', () => this.#assets!.intent('application', this.#abort.signal, spawnId));
+      if (!this.#applicationIntentRecorded) await this.#phase('application-intent', () => this.#assets!.intent('application', this.#abort.signal, spawnId));
       this.#live();
-      // Projection creates short-lived DTOs beside another rendering runtime.
-      // Adjust GC scheduling without capping the admitted RPC/input capacity.
-      const application = this.#spawn('application', process.execPath,
-        ['--max-semi-space-size=4', '--heap-growing-percent=20', this.options.entry, ...this.options.args], ['ignore', 'pipe', 'pipe', 'ipc'], {
-          ...process.env, ZHIXING_TERMINAL_ROLE: 'application', ZHIXING_TERMINAL_INSTANCE: this.instance,
-          ZHIXING_TERMINAL_DIRECTORY: instancePath, ZHIXING_TERMINAL_DIRECTORY_ID: this.#assets!.instanceIdentity, ZHIXING_TERMINAL_HOME: this.options.home,
-        }, spawnId);
       const identity = await this.#phase('application-identity', () => this.#processIdentity(application));
       await this.#phase('application-bind', () => this.#assets!.bind('application', identity, this.#abort.signal));
-      this.#resume(application, deadline);
+      this.#live(deadline);
+      // 预加载的放行是唯一的启动闸门：意向、身份绑定与完整准入之后，才把实例目录交给 N
+      await this.#phase('application-release', async () => {
+        if (!await this.#bounded(application.child.transportReady, Math.max(0, deadline - Date.now()), this.#abort.signal))
+          throw Object.assign(Error('terminal-application-listener-timeout'), { code: 'ETIMEDOUT' });
+        await new Promise<void>((resolve, reject) => application.child.send({
+          type: 'terminal-preload-release', instance: this.instance, directory: instancePath, directoryId: this.#assets!.instanceIdentity,
+        }, error => error ? reject(error) : resolve()));
+      });
       await this.#phase('application-listener', async () => {
         if (!await this.#bounded(application.listening, Math.max(0, deadline - Date.now()), this.#abort.signal))
           throw Object.assign(Error('terminal-application-listener-timeout'), { code: 'ETIMEDOUT' });

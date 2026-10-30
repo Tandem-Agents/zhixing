@@ -6,15 +6,18 @@ import { describe, expect, it, vi } from 'vitest';
 // ports are replaced; parsing, page progression and publication order are real.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const method = owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === '#onlineHistoryPage');
-if (!method) throw Error('Missing production online history method');
+const methods = ['#onlineHistoryPage', '#readOnlineHistoryPage'].map(name => {
+  const node = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === name);
+  if (!node) throw Error(`Missing production online history method ${name}`);
+  return node.getText(source);
+}).join('\n');
 const Fixture = new Function('observeStartupPhase', ts.transpile(`class Fixture {
   abort = new AbortController(); mainView = { readyForInput: false }; logging = { records: undefined };
   historyParser = { close() {} }; bodyWork = { run: work => work() };
   displayed = 0; published = 0;
   async displayPage() { this.displayed++; }
   async publishHistoryView() { this.published++; }
-  ${method.getText(source).replace(/#/gu, '')}
+  ${methods.replace(/#/gu, '')}
 } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))((_records: unknown, _phase: string, work: () => Promise<unknown>) => work());
 
 function fixture() {
@@ -26,7 +29,11 @@ function fixture() {
   target.history = history;
   target.conversation = { bodyPage: vi.fn(async () => ({ fragments, hasMore: false })) };
   const stored: string[] = [];
+  const order: string[] = [];
+  target.conversation.bodyPage.mockImplementation(async () => { order.push('rpc'); return { fragments, hasMore: false }; });
   target.display = { first: 0, last: 0,
+    reserveInitialHistory: vi.fn(() => { order.push('reserve'); }),
+    releaseInitialHistory: vi.fn(async () => { order.push('release'); }),
     append: vi.fn(async (segment: { text: string }) => { stored.push(segment.text); }),
     appendInitialHistory: vi.fn(async (items: { segment: { text: string } }[], current: () => boolean, committed: (index: number) => void) => {
       entered.resolve(); await release.promise;
@@ -34,7 +41,7 @@ function fixture() {
       for (const [index, item] of items.entries()) { stored.push(item.segment.text); committed(index); }
       return true;
     }) };
-  return { target, history, fragments, stored, entered, release };
+  return { target, history, fragments, stored, entered, release, order };
 }
 
 describe('initial history cursor follows confirmed display', () => {
@@ -49,6 +56,8 @@ describe('initial history cursor follows confirmed display', () => {
     expect(h.stored).toEqual(h.fragments.map(fragment => fragment.text));
     expect(h.target.conversation.bodyPage).toHaveBeenCalledTimes(1);
     expect(h.target.display.append).not.toHaveBeenCalled(); expect(h.target.displayed).toBe(1);
+    // 首屏预留在首页 RPC 之前发起，读取结束时交还未用的部分
+    expect(h.order).toEqual(['reserve', 'rpc', 'release']);
   });
 
   it('leaves the original page available after an unconfirmed batch failure', async () => {
@@ -56,6 +65,22 @@ describe('initial history cursor follows confirmed display', () => {
     await expect(h.target.onlineHistoryPage(h.history)).rejects.toThrow('unknown IO');
     expect(h.history).toEqual({ conversationId: 'current', hasMore: true, offline: false });
     expect(h.target.displayed).toBe(0); expect(h.target.published).toBe(0);
+    expect(h.order).toEqual(['reserve', 'rpc', 'release']);
+  });
+
+  it('returns the early reservation when the first page request fails', async () => {
+    const h = fixture(); h.target.conversation.bodyPage.mockRejectedValueOnce(Error('rpc failed'));
+    await expect(h.target.onlineHistoryPage(h.history)).rejects.toThrow('rpc failed');
+    expect(h.target.display.reserveInitialHistory).toHaveBeenCalledTimes(1);
+    expect(h.target.display.releaseInitialHistory).toHaveBeenCalledTimes(1);
+    expect(h.target.display.appendInitialHistory).not.toHaveBeenCalled();
+  });
+
+  it('takes no early reservation for a page after input is ready', async () => {
+    const h = fixture(); h.target.mainView.readyForInput = true;
+    await h.target.onlineHistoryPage(h.history);
+    expect(h.target.display.reserveInitialHistory).not.toHaveBeenCalled();
+    expect(h.target.display.releaseInitialHistory).not.toHaveBeenCalled();
   });
 
   it('never installs an old page or its cursor after the conversation epoch changes', async () => {

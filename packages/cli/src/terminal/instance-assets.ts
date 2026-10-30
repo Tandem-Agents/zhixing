@@ -32,6 +32,8 @@ const META_RESERVE = 16 * 1024 * 1024;
 const ROOT_BUSY = Symbol('root-busy');
 const ROOT_CHANGED = Symbol('root-changed');
 const FILE_BATCH = 32;
+/** 每个实例目录下由准入创建的子目录。 */
+const INSTANCE_CHILDREN = ['display', 'input', 'runtime'];
 
 /** S owns the shared root account. Only known instance paths leave this owner. */
 export class TerminalInstanceAssets {
@@ -60,12 +62,19 @@ export class TerminalInstanceAssets {
     return this.#record.directoryIdentity;
   }
 
-  async admit(id: string, recovery: TerminalProcessIdentity, signal: AbortSignal): Promise<string> {
+  /** observe：调用方给出时按子步骤记录耗时（只观测，不改语义）。 */
+  async admit(id: string, recovery: TerminalProcessIdentity, signal: AbortSignal,
+    observe: <T>(name: string, work: () => Promise<T>) => Promise<T> = (_name, work) => work()): Promise<string> {
     if (!ID.test(id) || this.#record) throw Error('terminal-instance-id');
-    const owner = await this.identity.read(process.pid);
+    const owner = await observe('storage-admission-owner', () => this.identity.read(process.pid));
     if (owner.kind !== 'present') throw Error('terminal-owner-identity');
     await this.#enqueue(async () => {
-      const records = await this.#locked(signal, step => this.#records(step));
+      const records = await observe('storage-admission-records', () => this.#locked(signal,
+        step => observe('storage-admission-records-read', () => this.#records(step)), false, observe));
+      // 写者辅助进程由第一次文件操作拉起，此时已在：它的身份查询与清理检查、库存遍历并行，锁内发布记录时才使用
+      const writerIdentity = this.filesystemWriter?.();
+      void writerIdentity?.catch(() => {});
+      let removed = false;
       for (const record of records) {
         const members = [record.owner, ...Object.values(record.roles), ...Object.values(record.writers ?? {}).flatMap(writer => writer.identity ? [writer.identity] : []), ...(record.cleanupWriters ?? [])];
         // Version 3 intents prove that no execution permit can precede a
@@ -81,9 +90,10 @@ export class TerminalInstanceAssets {
           // A reused or unreadable PID protects the old assets; no guesswork.
           if (observed.kind !== 'absent') dead = false;
         }
-        if (dead) await this.#remove(record, signal).catch(() => {});
+        if (dead) { removed = true; await this.#remove(record, signal).catch(() => {}); }
       }
-      await this.#withInventory(signal, async (remaining, physical, step) => {
+      // 没有清理任何实例时，刚才锁内读到的记录就是库存快照；锁内发布前仍按签名核对未变
+      await observe('storage-admission-inventory', () => this.#withInventory(signal, async (remaining, physical, step) => {
         await this.#canReserve(remaining, physical, 'display', TERMINAL_LIMITS.startupReservationBytes, true, step);
         const record: InstanceRecord = {
           version: 3, id, directoryIdentity: '', owner: { pid: process.pid, birth: owner.birth, spawnId: randomUUID() },
@@ -92,30 +102,50 @@ export class TerminalInstanceAssets {
         };
         const root = await this.#root(step);
         if ((await this.#rootEntries(step)).includes(`instance-${id}`)) throw Error('terminal-instance-already-exists');
+        const folder = `instance-${id}`;
         step.claim('ioOperations', 6);
-        const directory = await root.openDirectory(`instance-${id}`, true);
+        const directory = await root.openDirectory(folder, true);
         record.directoryIdentity = directory.identity;
-        if (this.filesystemWriter) {
-          const writer = await this.filesystemWriter();
-          record.writers![writer.spawnId] = { role: 'filesystem', owner: record.owner.spawnId, state: 'bound', identity: writer };
+        let published = false;
+        try {
+          try {
+            if (writerIdentity) {
+              const writer = await writerIdentity;
+              record.writers![writer.spawnId] = { role: 'filesystem', owner: record.owner.spawnId, state: 'bound', identity: writer };
+            }
+            // 三个子目录互不依赖，经同一文件辅助会话并发创建；任何一个失败照旧整体失败
+            const created = await Promise.allSettled(INSTANCE_CHILDREN.map(async child => {
+              step.claim('ioOperations', 6); await (await directory.openDirectory(child, true)).close();
+            }));
+            const failed = created.find(result => result.status === 'rejected');
+            if (failed?.status === 'rejected') throw failed.reason;
+          } finally { await directory.close(); }
+          await observe('storage-admission-publish', () => this.#publish(record, step));
+          published = true;
+        } finally {
+          // 发布前失败：本次在同一把根锁内刚建、尚无记录的实例目录由本次收回，不留作后续准入读不出记录的残留
+          if (!published) await this.#reclaimInterrupted(root, folder, step, record.directoryIdentity).catch(() => false);
         }
-        try { for (const child of ['display', 'input', 'runtime']) {
-          step.claim('ioOperations', 6); await (await directory.openDirectory(child, true)).close();
-        } } finally { await directory.close(); }
-        await this.#publish(record, step);
         this.#record = record;
-      });
+      }, removed ? undefined : records));
     });
     return this.instancePath;
   }
 
   async intent(role: 'application' | 'ui', signal: AbortSignal, spawnId = randomUUID()): Promise<string> {
-    if (!ID.test(spawnId)) throw Error('terminal-role-spawn-identity');
-    await this.#update(signal, record => {
-      if (record.roles[role] || record.pendingRoles.some(value => (typeof value === 'string' ? value : value.role) === role)) throw Error('terminal-role-already-registered');
-      record.pendingRoles.push({ role, spawnId, state: 'gate-unreleased' });
-    });
+    await this.intents([{ role, spawnId }], signal);
     return spawnId;
+  }
+
+  /** 多个角色的创建意向一次耐久登记（都处于未放行）；此后各角色各自查身份、各自绑定、各自放行，互不等待。 */
+  async intents(entries: readonly { readonly role: 'application' | 'ui'; readonly spawnId: string }[], signal: AbortSignal): Promise<void> {
+    if (!entries.length || entries.some(entry => !ID.test(entry.spawnId)) || new Set(entries.map(entry => entry.role)).size !== entries.length) throw Error('terminal-role-spawn-identity');
+    await this.#update(signal, record => {
+      for (const { role, spawnId } of entries) {
+        if (record.roles[role] || record.pendingRoles.some(value => (typeof value === 'string' ? value : value.role) === role)) throw Error('terminal-role-already-registered');
+        record.pendingRoles.push({ role, spawnId, state: 'gate-unreleased' });
+      }
+    });
   }
 
   bind(role: 'application' | 'ui', identity: TerminalProcessIdentity, signal: AbortSignal): Promise<void> {
@@ -218,15 +248,17 @@ export class TerminalInstanceAssets {
     return task;
   }
 
-  async #locked<T>(signal: AbortSignal, run: (step: DeviceCapacityStepPermit) => Promise<T>, recovery = false): Promise<T> {
+  /** observe：调用方给出时把打开根目录与取根锁记为子步骤（许可等待＝外层减内层）；只观测，不改语义。 */
+  async #locked<T>(signal: AbortSignal, run: (step: DeviceCapacityStepPermit) => Promise<T>, recovery = false,
+    observe: <U>(name: string, work: () => Promise<U>) => Promise<U> = (_name, work) => work()): Promise<T> {
     const deadline = performance.now() + 1000;
     for (;;) {
       const result = await terminalPhysicalStep(this.capacity, terminalMetadataStep, signal, async step => {
-        const root = await this.#root(step);
+        const root = await observe('storage-admission-root', () => this.#root(step));
         // Permanent, empty OS lock; no pathname-based stale lock reclamation.
         // Acquire the whole finite operation before entering the mutex.
         step.claim('ioOperations', 8);
-        const unlock = await root.tryLock('owner.lock');
+        const unlock = await observe('storage-admission-lock', () => root.tryLock('owner.lock'));
         if (!unlock) return ROOT_BUSY;
         try { return await run(step); } finally { await unlock(); }
       }, recovery);
@@ -237,9 +269,11 @@ export class TerminalInstanceAssets {
     }
   }
 
-  async #withInventory<T>(signal: AbortSignal, run: (records: InstanceRecord[], physical: ReadonlyMap<string, number>, step: DeviceCapacityStepPermit) => Promise<T>): Promise<T> {
+  /** reused：调用方刚在锁内读到、且之后没有改动根目录的记录，可作首轮快照；锁内仍按签名核对。 */
+  async #withInventory<T>(signal: AbortSignal, run: (records: InstanceRecord[], physical: ReadonlyMap<string, number>, step: DeviceCapacityStepPermit) => Promise<T>,
+    reused?: InstanceRecord[]): Promise<T> {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const snapshot = await this.#locked(signal, step => this.#records(step));
+      const snapshot = attempt === 0 && reused ? reused : await this.#locked(signal, step => this.#records(step));
       const physical = new Map<string, number>();
       for (const record of snapshot) physical.set(record.id, await this.#physicalBytes(record, signal));
       const result = await this.#locked(signal, async step => {
@@ -277,7 +311,11 @@ export class TerminalInstanceAssets {
     }
     for (const folder of folders) {
       if (markers.includes(`cleanup-${folder.slice(9)}.json`)) continue;
-      records.push(await this.#readRecord(folder, step));
+      try { records.push(await this.#readRecord(folder, step)); }
+      catch (error) {
+        // 读不出记录时，只有“中断的准入”这一可识别状态会被收回；其余照旧报错、原样保留
+        if (!await this.#reclaimInterrupted(await this.#root(step), folder, step)) throw error;
+      }
     }
     return records;
   }
@@ -438,6 +476,55 @@ export class TerminalInstanceAssets {
 
   /** Finish the original published-intent bytes, never overwrite a leftover
    * candidate or manufacture a replacement from a stale in-memory record. */
+  /** 收回本次准入刚建、尚未发布记录的实例目录：只含本次建的空子目录时才删；有任何其他内容（如已写出的 owner.next）即原样保留，交给既有恢复。 */
+  /**
+   * 收回中断的准入留下的实例目录。只能在持根锁时调用：创建到发布都在同一把根锁内，持锁所见的这种目录不可能在途。
+   * 判定（先有界核对全部内容、类型与身份，任何一条不满足即原样保留并返回 false）：没有 owner.json 与 owner.next；
+   * 只含 display/input/runtime 的子集；每个都是按身份确认的实际空目录（链接/重解析点由 statEntry 拒绝，也算不满足）。
+   * 删除按身份逐层只删空目录，绝不递归强删；删除途中内容或身份变化即报错停止，尚存部分仍是上述子集，下次可续做。
+   * expectedIdentity：本次准入刚建、所有权明确的目录，另须与它的身份一致。
+   */
+  async #reclaimInterrupted(root: CheckpointDirectoryHandle, folder: string, step: DeviceCapacityStepPermit, expectedIdentity?: string): Promise<boolean> {
+    if (!/^instance-[a-f0-9-]{36}$/u.test(folder)) return false;
+    const children: { name: string; identity: string }[] = [];
+    let identity: string;
+    try {
+      step.claim('ioOperations', 12);
+      const info = await root.statEntry(folder);
+      if (info.kind !== 'directory' || (expectedIdentity !== undefined && info.identity !== expectedIdentity)) return false;
+      identity = info.identity;
+      const directory = await root.openDirectory(folder, false);
+      try {
+        if (directory.identity !== identity) return false;
+        step.claim('ioOperations', 8);
+        const page = await directory.listEntryPage(0, INSTANCE_CHILDREN.length + 1);
+        if (!page.end || page.names.some(name => !INSTANCE_CHILDREN.includes(name))) return false;
+        for (const name of page.names) {
+          step.claim('ioOperations', 20);
+          const child = await directory.statEntry(name);
+          if (child.kind !== 'directory') return false;
+          const handle = await directory.openDirectory(name, false);
+          try {
+            if (handle.identity !== child.identity) return false;
+            const inner = await handle.listEntryPage(0, 1);
+            if (inner.names.length || !inner.end) return false;
+          } finally { await handle.close(); }
+          children.push({ name, identity: child.identity });
+        }
+      } finally { await directory.close(); }
+    } catch { return false; }
+    const directory = await root.openDirectory(folder, false);
+    try {
+      if (directory.identity !== identity) throw Error('terminal-instance-reclaim-changed');
+      for (const child of children) { step.claim('ioOperations', 8); await directory.unlink(child.name, true, child.identity); }
+      if (children.length) await directory.sync();
+    } finally { await directory.close(); }
+    step.claim('ioOperations', 8);
+    await root.unlink(folder, true, identity);
+    await root.sync();
+    return true;
+  }
+
   async #recoverPublication(directory: CheckpointDirectoryHandle, step: DeviceCapacityStepPermit, id: string): Promise<void> {
     step.claim('ioOperations', 16);
     const names = await directory.listEntries(8);
