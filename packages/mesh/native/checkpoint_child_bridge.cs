@@ -4,7 +4,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Web.Script.Serialization;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 internal static class CheckpointChildBridge {
@@ -35,6 +35,7 @@ internal static class CheckpointChildBridge {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint capacity, uint flags);
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool GetDiskFreeSpaceExW(string directory, out ulong available, out ulong total, out ulong free);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool WaitNamedPipeW(string name, uint timeout);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr handle);
   [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal, InternalHigh; public uint Offset, OffsetHigh; public IntPtr Event; }
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool LockFileEx(IntPtr handle, uint flags, uint reserved, uint low, uint high, ref OVERLAPPED overlapped);
@@ -72,7 +73,6 @@ internal static class CheckpointChildBridge {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder image, ref uint size);
   [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int kind, IntPtr buffer, int length, out int required);
   static long NextHandle = 1;
-  static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
   // Opt-in disposable display owner only. Denying delete sharing pins the
   // name while retained; every use still checks size, identity and link count.
   // Four handles suffice for data/index plus their finite replacement work.
@@ -101,12 +101,11 @@ internal static class CheckpointChildBridge {
     // Only the containing foreground owner supplies this fixed private pipe.
     // Ordinary checkpoint/logging owners retain their existing stdio protocol.
     var endpoint = Environment.GetEnvironmentVariable("ZHIXING_CHECKPOINT_PIPE");
-    NamedPipeClientStream transport = null;
+    Stream transport = null;
     if (endpoint != null) {
       const string prefix = "\\\\.\\pipe\\zhixing-terminal-";
       if (!endpoint.StartsWith(prefix, StringComparison.Ordinal) || endpoint.Length > 160) throw new InvalidOperationException("Invalid filesystem owner pipe");
-      transport = new NamedPipeClientStream(".", endpoint.Substring(9), PipeDirection.InOut);
-      transport.Connect(5000);
+      transport = ConnectOwnerPipe(endpoint, 5000);
     }
     var input = new BufferedStream(transport != null ? (Stream)transport : StandardPipe(-10, FileAccess.Read), 64 * 1024);
     Console.SetOut(new StreamWriter(transport != null ? (Stream)transport : StandardPipe(-11, FileAccess.Write), new UTF8Encoding(false), 4096, true) { AutoFlush = true });
@@ -130,6 +129,21 @@ internal static class CheckpointChildBridge {
     input.Dispose();
   }
 
+  // 私有管道按路径直接打开，连接不加载 System.Core：服务端尚未建立（2）时短暂让出重试，实例全忙（231）时
+  // 等一个实例空出，都在同一期限内；期限到了按连接失败结束。连上后是无缓冲的同步字节流，
+  // 父端断开时读到流尾、写入报错，与原先的管道客户端相同。
+  static Stream ConnectOwnerPipe(string path, int timeoutMs) {
+    var deadline = Environment.TickCount + timeoutMs;
+    for (;;) {
+      var handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+      if (handle != new IntPtr(-1)) return new FileStream(new SafeFileHandle(handle, true), FileAccess.ReadWrite, 1, false);
+      var error = Marshal.GetLastWin32Error();
+      var remaining = deadline - Environment.TickCount;
+      if (remaining <= 0 || (error != 2 && error != 231)) throw new System.ComponentModel.Win32Exception(error, "Unable to connect filesystem owner pipe");
+      if (error == 231) WaitNamedPipeW(path, (uint)remaining); else Thread.Sleep(1);
+    }
+  }
+
   static Dictionary<string, object> ReadRequest(Stream input) {
     const int maximum = 8 * 1024 * 1024;
     using (var header = new MemoryStream()) {
@@ -140,11 +154,11 @@ internal static class CheckpointChildBridge {
         if (header.Length >= maximum) throw new InvalidOperationException("Checkpoint request exceeds its bound");
         header.WriteByte((byte)next);
       }
-      var request = Json.Deserialize<Dictionary<string, object>>(new UTF8Encoding(false, true).GetString(header.GetBuffer(), 0, (int)header.Length));
+      var request = ParseRequest(new UTF8Encoding(false, true).GetString(header.GetBuffer(), 0, (int)header.Length));
       if (request.ContainsKey("dataBytes")) {
         var op = Text(request, "op");
-        if (!(request["dataBytes"] is int)) throw new InvalidOperationException("Invalid checkpoint binary length");
-        long length = (int)request["dataBytes"];
+        if (!(request["dataBytes"] is long)) throw new InvalidOperationException("Invalid checkpoint binary length");
+        long length = (long)request["dataBytes"];
         if (request.ContainsKey("data") || (op != "writeAt" && op != "writeFile" && op != "writeRange") ||
             length < 0 || length + header.Length + 1 > maximum) throw new InvalidOperationException("Invalid checkpoint binary range");
         var data = new byte[(int)length];
@@ -244,19 +258,19 @@ internal static class CheckpointChildBridge {
       var row = new PROCESSENTRY32 { Size = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
       var present = Process32FirstW(snapshot, ref row); var scanned = 0; var candidates = 0;
       while (present) {
-        if (++scanned > 65536) { complete = false; failure = new { reason = "inventory-limit" }; break; }
+        if (++scanned > 65536) { complete = false; failure = InventoryFailure("inventory-limit"); break; }
         if (IsNodeImage(row.Executable)) {
           var pid = row.ProcessId;
-          if (++candidates > 256) { complete = false; failure = new { reason = "inventory-limit" }; break; }
+          if (++candidates > 256) { complete = false; failure = InventoryFailure("inventory-limit"); break; }
           var process = OpenProcess(0x1000 | SYNCHRONIZE, false, pid);
           if (process == IntPtr.Zero) {
             // ERROR_INVALID_PARAMETER means this snapshot PID no longer exists.
-            if (Marshal.GetLastWin32Error() != 87) { complete = false; if (failure == null) failure = new { reason = "identity-unavailable", pid }; }
+            if (Marshal.GetLastWin32Error() != 87) { complete = false; if (failure == null) failure = InventoryFailure("identity-unavailable", pid); }
           } else try {
             if (WaitForSingleObject(process, 0) != 0) {
               long created, exited, kernel, user; uint size = 32768; var image = new StringBuilder((int)size);
               if (!GetProcessTimes(process, out created, out exited, out kernel, out user) || !QueryFullProcessImageNameW(process, 0, image, ref size)) {
-                if (WaitForSingleObject(process, 0) != 0) { complete = false; if (failure == null) failure = new { reason = "identity-unavailable", pid }; }
+                if (WaitForSingleObject(process, 0) != 0) { complete = false; if (failure == null) failure = InventoryFailure("identity-unavailable", pid); }
               } else if (IsNodeImage(Path.GetFileName(image.ToString()))) {
                 // Keep the previous WMI microsecond precision and UTC tick format
                 // so persisted writer identities remain comparable across upgrade.
@@ -273,7 +287,7 @@ internal static class CheckpointChildBridge {
                   } finally { if (memory != IntPtr.Zero) LocalFree(memory); }
                 }
                 if (WaitForSingleObject(process, 0) != 0) {
-                  if (argv == null) { complete = false; if (failure == null) failure = new { reason = "arguments-unavailable", pid }; }
+                  if (argv == null) { complete = false; if (failure == null) failure = InventoryFailure("arguments-unavailable", pid); }
                   entries.Add(new Dictionary<string, object> { {"pid", pid}, {"birth", birth}, {"argv", argv} });
                 }
               }
@@ -288,6 +302,9 @@ internal static class CheckpointChildBridge {
     if (failure != null) result.Add("failure", failure);
     return result;
   }
+
+  static Dictionary<string, object> InventoryFailure(string reason) { return new Dictionary<string, object> { {"reason", reason} }; }
+  static Dictionary<string, object> InventoryFailure(string reason, uint pid) { return new Dictionary<string, object> { {"reason", reason}, {"pid", pid} }; }
 
   static bool IsNodeImage(string name) {
     return String.Equals(name, "node.exe", StringComparison.OrdinalIgnoreCase) || String.Equals(name, "node", StringComparison.OrdinalIgnoreCase);
@@ -590,7 +607,7 @@ internal static class CheckpointChildBridge {
       if (!GetFileInformationByHandleEx(handle, 1, standard, 24)) throw Win32("Unable to inspect physical allocation");
       var allocated = Marshal.ReadInt64(standard, 0); var bytes = Marshal.ReadInt64(standard, 8);
       if (allocated < 0 || bytes < 0) throw new InvalidOperationException("Invalid physical allocation");
-      return new { kind = directory ? "directory" : "file", bytes = bytes, allocatedBytes = allocated, identity = Identity(info) };
+      return new Dictionary<string, object> { {"kind", directory ? "directory" : "file"}, {"bytes", bytes}, {"allocatedBytes", allocated}, {"identity", Identity(info)} };
     } finally { Marshal.FreeHGlobal(standard); }
   }
 
@@ -742,16 +759,171 @@ internal static class CheckpointChildBridge {
   static Exception Win32(string message) { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), message); }
   static void Reply(Dictionary<string, object> request, bool ok, object value, string error) {
     var id = request != null && request.ContainsKey("id") ? request["id"] : 0;
+    var output = new StringBuilder("{\"id\":");
+    WriteJson(output, id);
     if (ok && request != null && Text(request, "op") == "readFile") {
       // Dispatch alone creates this value using Convert.ToBase64String.
       // Base64 has no JSON quote/control characters; never use this for paths,
       // errors, caller-provided strings or other operation results.
-      Console.WriteLine("{\"id\":" + Json.Serialize(id) + ",\"ok\":true,\"value\":\"" + (string)value + "\"}");
+      output.Append(",\"ok\":true,\"value\":\"").Append((string)value).Append("\"}");
     } else {
-      var response = new Dictionary<string, object> { {"id", id}, {"ok", ok} };
-      if (ok) response["value"] = value; else response["error"] = error;
-      Console.WriteLine(Json.Serialize(response));
+      output.Append(",\"ok\":").Append(ok ? "true" : "false").Append(ok ? ",\"value\":" : ",\"error\":");
+      WriteJson(output, ok ? value : error);
+      output.Append('}');
     }
+    Console.WriteLine(output.ToString());
     Console.Out.Flush();
+  }
+
+  // 固定协议的有界编解码，不加载通用 JSON 框架。请求头是一个扁平对象：值为字符串、整数、true/false/null，
+  // 或由这些标量组成的一层数组。重复键、尾随内容、更深的嵌套、小数与指数、越界整数、裸控制字符和畸形转义
+  // 一律拒绝；上层按坏帧结束本连接，不把残余字节当成下一条请求。
+  static Exception Malformed() { return new InvalidOperationException("Malformed checkpoint request"); }
+  static int Peek(string text, int at) { return at < text.Length ? text[at] : -1; }
+  static void SkipSpace(string text, ref int at) { while (at < text.Length && (text[at] == ' ' || text[at] == '\t' || text[at] == '\r' || text[at] == '\n')) at++; }
+  static void Expect(string text, ref int at, char expected) { if (Peek(text, at) != expected) throw Malformed(); at++; }
+
+  static Dictionary<string, object> ParseRequest(string text) {
+    var at = 0;
+    var request = new Dictionary<string, object>(StringComparer.Ordinal);
+    SkipSpace(text, ref at);
+    Expect(text, ref at, '{');
+    SkipSpace(text, ref at);
+    if (Peek(text, at) == '}') at++;
+    else for (;;) {
+      SkipSpace(text, ref at);
+      var key = ParseString(text, ref at);
+      SkipSpace(text, ref at);
+      Expect(text, ref at, ':');
+      SkipSpace(text, ref at);
+      var value = ParseValue(text, ref at, true);
+      if (request.ContainsKey(key)) throw Malformed();
+      request.Add(key, value);
+      SkipSpace(text, ref at);
+      var next = Peek(text, at); at++;
+      if (next == '}') break;
+      if (next != ',') throw Malformed();
+    }
+    SkipSpace(text, ref at);
+    if (at != text.Length) throw Malformed();
+    return request;
+  }
+
+  static object ParseValue(string text, ref int at, bool allowArray) {
+    var c = Peek(text, at);
+    if (c == '"') return ParseString(text, ref at);
+    if (c == '[' && allowArray) {
+      at++;
+      var items = new List<object>();
+      SkipSpace(text, ref at);
+      if (Peek(text, at) == ']') { at++; return items; }
+      for (;;) {
+        SkipSpace(text, ref at);
+        items.Add(ParseValue(text, ref at, false));
+        SkipSpace(text, ref at);
+        var next = Peek(text, at); at++;
+        if (next == ']') return items;
+        if (next != ',') throw Malformed();
+      }
+    }
+    if (Literal(text, ref at, "true")) return true;
+    if (Literal(text, ref at, "false")) return false;
+    if (Literal(text, ref at, "null")) return null;
+    if (c == '-' || (c >= '0' && c <= '9')) return ParseInteger(text, ref at);
+    throw Malformed();
+  }
+
+  static bool Literal(string text, ref int at, string word) {
+    if (at + word.Length > text.Length || String.CompareOrdinal(text, at, word, 0, word.Length) != 0) return false;
+    at += word.Length;
+    return true;
+  }
+
+  static long ParseInteger(string text, ref int at) {
+    var start = at;
+    if (Peek(text, at) == '-') at++;
+    if (Peek(text, at) == '0') at++;
+    else if (Peek(text, at) >= '1' && Peek(text, at) <= '9') { while (Peek(text, at) >= '0' && Peek(text, at) <= '9') at++; }
+    else throw Malformed();
+    var c = Peek(text, at);
+    if (c == '.' || c == 'e' || c == 'E') throw Malformed();
+    long value;
+    if (at - start > 20 || !Int64.TryParse(text.Substring(start, at - start), System.Globalization.NumberStyles.AllowLeadingSign,
+        System.Globalization.CultureInfo.InvariantCulture, out value)) throw Malformed();
+    return value;
+  }
+
+  static string ParseString(string text, ref int at) {
+    Expect(text, ref at, '"');
+    var builder = new StringBuilder();
+    for (;;) {
+      if (at >= text.Length) throw Malformed();
+      var c = text[at++];
+      if (c == '"') return builder.ToString();
+      if (c < ' ') throw Malformed();
+      if (c != '\\') { builder.Append(c); continue; }
+      if (at >= text.Length) throw Malformed();
+      var escaped = text[at++];
+      if (escaped == '"' || escaped == '\\' || escaped == '/') builder.Append(escaped);
+      else if (escaped == 'b') builder.Append('\b');
+      else if (escaped == 'f') builder.Append('\f');
+      else if (escaped == 'n') builder.Append('\n');
+      else if (escaped == 'r') builder.Append('\r');
+      else if (escaped == 't') builder.Append('\t');
+      else if (escaped == 'u') {
+        int code;
+        if (at + 4 > text.Length || !Int32.TryParse(text.Substring(at, 4), System.Globalization.NumberStyles.AllowHexSpecifier,
+            System.Globalization.CultureInfo.InvariantCulture, out code)) throw Malformed();
+        builder.Append((char)code); at += 4;
+      } else throw Malformed();
+    }
+  }
+
+  // 应答只由 Dispatch 的已知结果构成：null、布尔、整数、字符串、键值表、列表与固定的目录结果，其余类型拒绝编码。
+  // 字符串转义引号、反斜杠、控制字符与不成对的代理项；成对代理项与其余字符按 UTF-8 原样写出。
+  static void WriteJson(StringBuilder output, object value) {
+    if (value == null) { output.Append("null"); return; }
+    if (value is bool) { output.Append((bool)value ? "true" : "false"); return; }
+    var text = value as string;
+    if (text != null) { WriteString(output, text); return; }
+    if (value is int || value is uint || value is long) { output.Append(Convert.ToInt64(value).ToString(System.Globalization.CultureInfo.InvariantCulture)); return; }
+    var map = value as Dictionary<string, object>;
+    if (map != null) {
+      output.Append('{');
+      var first = true;
+      foreach (var pair in map) {
+        if (!first) output.Append(',');
+        first = false;
+        WriteString(output, pair.Key); output.Append(':'); WriteJson(output, pair.Value);
+      }
+      output.Append('}');
+      return;
+    }
+    var page = value as DirectoryPage;
+    if (page != null) { WriteJson(output, new Dictionary<string, object> { {"names", page.names}, {"end", page.end} }); return; }
+    var chunk = value as EntryChunk;
+    if (chunk != null) { WriteJson(output, new Dictionary<string, object> { {"names", chunk.names}, {"scanned", chunk.scanned}, {"bytes", chunk.bytes}, {"end", chunk.end} }); return; }
+    var list = value as System.Collections.IList;
+    if (list != null) {
+      output.Append('[');
+      for (var i = 0; i < list.Count; i++) { if (i > 0) output.Append(','); WriteJson(output, list[i]); }
+      output.Append(']');
+      return;
+    }
+    throw new InvalidOperationException("Checkpoint reply value is not encodable");
+  }
+
+  static void WriteString(StringBuilder output, string value) {
+    output.Append('"');
+    for (var i = 0; i < value.Length; i++) {
+      var c = value[i];
+      if (c == '"') output.Append("\\\"");
+      else if (c == '\\') output.Append("\\\\");
+      else if (c < ' ') output.Append("\\u").Append(((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+      else if (Char.IsHighSurrogate(c) && i + 1 < value.Length && Char.IsLowSurrogate(value[i + 1])) { output.Append(c).Append(value[i + 1]); i++; }
+      else if (Char.IsSurrogate(c)) output.Append("\\u").Append(((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+      else output.Append(c);
+    }
+    output.Append('"');
   }
 }

@@ -18,7 +18,6 @@ if (process.platform === "win32") {
     "/optimize+",
     // This pipe-only helper must not allocate a hidden console per owner.
     "/target:winexe",
-    "/reference:System.Web.Extensions.dll",
     "/reference:System.Management.dll",
     `/out:${output}`,
     source,
