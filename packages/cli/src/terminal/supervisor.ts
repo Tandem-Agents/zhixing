@@ -48,6 +48,8 @@ interface NativeWaiter { readonly matches: (event: NativeEvent) => boolean; reso
 export interface TerminalSupervisorOptions {
   readonly home: string;
   readonly entry: string;
+  /** 单份启动图入口：宿主与 N 由它拉起；缺省同 entry（逐文件）。 */
+  readonly programEntry?: string;
   readonly args: readonly string[];
   readonly distribution: string;
   readonly records?: LogRecordPort;
@@ -661,7 +663,7 @@ class TerminalSupervisor {
     const creationDeadline = Math.min(message.deadline, Date.now() + 5000);
     if (creationDeadline <= Date.now()) { void application.channel!.send({ type: 'host-state', id: message.id, state: 'failed' }).catch(() => {}); return; }
     if (this.#adoptPrelaunchedHost(message, application)) return;
-    const resolved = resolveSelfExec(['serve', '--auto-start'], { argv: [process.execPath, this.options.entry],
+    const resolved = resolveSelfExec(['serve', '--auto-start'], { argv: [process.execPath, this.options.programEntry ?? this.options.entry],
       env: { ...process.env, ZHIXING_HOME: this.options.home, ZHIXING_LOG_HANDOFF: message.handoff,
         ...(process.platform === 'win32' ? { ZHIXING_HOST_STARTUP_PIPE: message.endpoint } : { ZHIXING_HOST_STARTUP_FD: '6' }) } });
     for (const key of Object.keys(resolved.env)) if (key.startsWith('ZHIXING_TERMINAL_') || key === 'ZHIXING_LOG_STORE_PIPE') delete resolved.env[key];
@@ -730,7 +732,7 @@ class TerminalSupervisor {
         await endpoint.listen(server);
         this.#live();
         if (this.#hostRequested) throw Error('terminal-host-already-requested');
-        const resolved = resolveSelfExec(['serve', '--auto-start'], { argv: [process.execPath, this.options.entry],
+        const resolved = resolveSelfExec(['serve', '--auto-start'], { argv: [process.execPath, this.options.programEntry ?? this.options.entry],
           env: { ...process.env, ZHIXING_HOME: this.options.home, ZHIXING_LOG_HANDOFF: handoff, ZHIXING_HOST_STARTUP_PIPE: endpoint.address } });
         for (const key of Object.keys(resolved.env)) if (key.startsWith('ZHIXING_TERMINAL_') || key === 'ZHIXING_LOG_STORE_PIPE') delete resolved.env[key];
         child = this.#processes!.create(resolved.command, resolved.args, resolved.env, false, false, { scope: 'host', pipeEnvironment: false });

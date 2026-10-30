@@ -1,6 +1,6 @@
 import type { DecorateRunBusFn } from '@zhixing/orchestrator/runtime';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
-import { validateSessionEventProjection } from '@zhixing/core/protocol';
+import { validateSessionEventProjection } from '@zhixing/core/protocol/stream';
 import type { SessionEventProjection } from '@zhixing/core/types';
 import { boundedProcessValue } from '@zhixing/rpc/session-wire';
 import type { CliWriter } from '../screen/index.js';

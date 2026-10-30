@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
-import { resolveCliEntry } from '../cli-entry.js';
+import { resolveProgramEntry } from '../cli-entry.js';
 import type { SecretStorePort } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
@@ -155,7 +155,7 @@ function createCurrentManagedServiceStateProjector(homeDir: string) {
 }
 
 function currentManagedServiceIdentity(homeDir: string) {
-  const entryScript = resolveCliEntry();
+  const entryScript = resolveProgramEntry();
   const account = userInfo();
   return Object.freeze({
     platform: process.platform,

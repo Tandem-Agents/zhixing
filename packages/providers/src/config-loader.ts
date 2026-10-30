@@ -18,7 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { acquireFileLock, ensureDurableDirectory } from "@zhixing/core/persistence";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import { canonicalize, protocolDigest } from "@zhixing/core/protocol/canonical";
 import {
   parse as parseJsonc,
   printParseErrorCode,

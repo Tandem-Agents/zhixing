@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { resolveCliEntry } from '../cli-entry.js';
+import { programBundleEntry, resolveCliEntry } from '../cli-entry.js';
 import { getZhixingHome } from '@zhixing/core/paths';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
@@ -21,7 +21,7 @@ export async function launchTerminal(args: readonly string[], entryTiming?: {
   const output: { stream: 'stdout' | 'stderr'; text: string }[] = [];
   let outputBytes = 0;
   try {
-    result = await runTerminalSupervisor({ home, entry, args, distribution: path.join(path.dirname(entry), 'terminal'), records: early.records,
+    result = await runTerminalSupervisor({ home, entry, programEntry: programBundleEntry(entry), args, distribution: path.join(path.dirname(entry), 'terminal'), records: early.records,
       commandOutput: (stream, text) => {
         outputBytes += Buffer.byteLength(text);
         if (outputBytes > 1024 * 1024) throw Error('terminal-command-output-capacity');

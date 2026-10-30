@@ -57,6 +57,8 @@ const entry = [
     "src/orchestration/index.ts",
     "src/contracts/index.ts",
     "src/protocol/index.ts",
+    "src/protocol/stream.ts",
+    "src/protocol/canonical.ts",
     "src/persistence/index.ts",
     "src/paths.ts",
     "src/authority/index.ts",

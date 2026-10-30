@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { resolveCliEntry } from '../cli-entry.js';
+import { resolveProgramEntry } from '../cli-entry.js';
 import { createTerminalOwnedProcessFactory } from './host-launch.js';
 import { TerminalClipboardWriter } from './clipboard-write.js';
 
@@ -27,7 +27,7 @@ export class TerminalClipboard {
   #busy = false;
   #writer?: TerminalClipboardWriter;
   constructor(readonly signal: AbortSignal, readonly create: Create = createTerminalOwnedProcessFactory('clipboard'), readonly platform = process.platform,
-    readonly environment: NodeJS.ProcessEnv = process.env, readonly entry = () => resolveCliEntry()) {}
+    readonly environment: NodeJS.ProcessEnv = process.env, readonly entry = () => resolveProgramEntry()) {}
   write(text: string) { return (this.#writer ??= new TerminalClipboardWriter(this.signal, this.create, this.platform, this.environment, this.entry)).write(text); }
   async close(): Promise<void> { await this.#writer?.close(); }
   async read(write: (text: string) => Promise<void>, limit = 16 * 1024 * 1024): Promise<boolean> {

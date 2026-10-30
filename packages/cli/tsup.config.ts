@@ -2,6 +2,7 @@ import { defineConfig } from "tsup";
 import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, relative } from "node:path";
 import { createRequire } from "node:module";
+import { bundleProgram, type ProgramBundleDynamicSite } from "./src/build/program-bundle.ts";
 
 async function buildExtensionKit() {
   const kit = "dist/extension-kit";
@@ -49,6 +50,24 @@ async function bundleSupervisorEntry() {
     external: ['@zhixing/mesh/*'], sourcemap: true, logLevel: 'silent' });
 }
 
+/** 单份启动图里允许出现的非字面量动态装入位置（逐条评审；变化即构建失败）。都是装原生件，不装 JS。 */
+const PROGRAM_DYNAMIC_SITES: readonly ProgramBundleDynamicSite[] = [
+  { package: "@zhixing/cli", call: "createRequire(<module-url>)(artifact)", count: 4,
+    reason: "host-launch、foreground-process、writer-declaration 装分发目录 terminal/<平台>/ 下按清单核验过的原生件（S 的 launch 块里另有同源副本，宿主与 N 不会装入该块）" },
+  { package: "@zhixing/cli", call: "createRequire(<module-url>)(filename)", count: 2,
+    reason: "secret-platform 装 foreground.node：先按清单核对字节数与 sha256 再装入（含 S 的 launch 块副本）" },
+  { package: "@zhixing/mesh", call: "createRequire(<module-url>)(verifyCheckpointBridgeArtifact( fileURLToPath(new URL(\"../\", <module-url>)), target ))", count: 1,
+    reason: "mesh 装检查点桥接原生件：路径由 mesh 包根解析，装入前经 verifyCheckpointBridgeArtifact 核验" },
+];
+/** ws 的可选原生加速依赖：运行时 require 失败即退回纯 JS，与逐文件形态一致。 */
+const PROGRAM_OPTIONAL_EXTERNALS = ["bufferutil", "utf-8-validate"];
+
+async function bundleProgramEntry() {
+  const require = createRequire(import.meta.url);
+  const { build } = createRequire(require.resolve("tsup"))("esbuild");
+  await bundleProgram({ cliRoot: resolve("."), build, dynamicSites: PROGRAM_DYNAMIC_SITES, optionalExternals: PROGRAM_OPTIONAL_EXTERNALS });
+}
+
 export default defineConfig({
   entry: { index: "src/entry.ts", metadata: "src/index.ts", "logging-admission-worker": "src/logging/writer-admission-worker.ts", "logging-files-worker": "src/logging/logging-files-worker.ts", "logging-writers-worker": "src/logging/logging-writers-worker.ts", "logging-store-worker": "src/logging/store-worker.ts", "mcp-probe-worker": "src/runtime/mcp-probe-worker.ts" },
   format: ["esm"],
@@ -60,6 +79,7 @@ export default defineConfig({
   banner: { js: "#!/usr/bin/env node" },
   onSuccess: async () => {
     await bundleSupervisorEntry();
+    await bundleProgramEntry();
     await buildExtensionKit();
     // The independent UI/native closure survives tsup's clean build.
     await cp("../terminal-ui/dist", "dist/terminal", { recursive: true });

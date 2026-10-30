@@ -16,7 +16,7 @@ import { spawn, type SpawnOptions, type ChildProcess } from "node:child_process"
 import { stat } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { getZhixingHome } from "@zhixing/core/paths";
-import http from "node:http";
+import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import type { EventEmitter } from 'node:events';
 import { logFailureEvidence, type LogDraft, type LogRecordPort } from "@zhixing/core/logging";
@@ -38,6 +38,10 @@ import {
   buildDaemonSpawnOptions,
   UnsupportedSelfExecError,
 } from "./self-exec.js";
+
+// 按 CommonJS 取内置 http（同一个模块对象）：ESM 导入内置模块会为它建导出外观、逐个读取全部导出，连带把惰性的
+// WebSocket 等导出背后的 undici 整个编译出来；这里只用 http.get 做健康探测，终端 N 的启动依赖图也经过这里
+const http = createRequire(import.meta.url)("node:http") as typeof import("node:http");
 
 export interface SpawnDaemonOptions {
   /** Terminal N retains startup policy while S performs its fixed OS launch. */

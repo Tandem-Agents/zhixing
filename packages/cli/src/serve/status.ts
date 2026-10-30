@@ -15,7 +15,7 @@
  */
 
 import chalk from "chalk";
-import http from "node:http";
+import { createRequire } from "node:module";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   readLock,
@@ -36,6 +36,9 @@ import {
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import type { ManagedServiceCurrentState } from "./managed-service-reconciler.js";
+
+// 按 CommonJS 取内置 http（同一个模块对象），不让 ESM 导出外观连带编译 undici；这里只用 http.get 做健康探测
+const http = createRequire(import.meta.url)("node:http") as typeof import("node:http");
 
 export type ServerLiveStatus = "running" | "running-unhealthy" | "stopped" | "stale";
 

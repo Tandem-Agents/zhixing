@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { acquireFileLock, ensureDurableDirectory, syncDirectory, type FileLockOptions } from "@zhixing/core/persistence";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing/core/protocol/canonical";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { applyConfigPatch, assertAbsoluteWorkspaceRoot, assertNoConfigurationCommit, loadConfig, writeConfigUnlocked } from "./config-loader.js";
 import { applyCredentialEdits, assertNoConfigurationEdit, commitCredentialsUnlocked, CONFIGURATION_EDIT_REF,

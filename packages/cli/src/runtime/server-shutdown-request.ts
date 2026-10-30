@@ -1,4 +1,4 @@
-import { protocolDigest } from "@zhixing/core/protocol";
+import { protocolDigest } from "@zhixing/core/protocol/canonical";
 import type { ServerShutdownParams } from "@zhixing/server";
 
 /** A retry of the same intent on the same Host must resume its durable stop. */

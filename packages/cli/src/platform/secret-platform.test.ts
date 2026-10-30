@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { LogDraft } from '@zhixing/core/logging';
 import { nativeSecretPlatform, readPlatformProcessBirth, resolvePlatformProcessStartTime } from './secret-platform.js';
 
-vi.mock('../cli-entry.js', () => ({ resolveCliEntry: () => fileURLToPath(new URL('../../dist/index.js', import.meta.url)) }));
+vi.mock('../cli-entry.js', () => ({ resolveProgramEntry: () => fileURLToPath(new URL('../../dist/index.js', import.meta.url)) }));
 
 it('preserves explicit native absence independently of unreadable process identity', async () => {
   const fallback = vi.fn(async () => 123);

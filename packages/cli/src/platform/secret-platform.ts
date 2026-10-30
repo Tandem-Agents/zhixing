@@ -4,14 +4,14 @@ import { open, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { PlatformSecretStoreOptions } from '@zhixing/secrets';
-import { resolveCliEntry } from '../cli-entry.js';
+import { resolveProgramEntry } from '../cli-entry.js';
 import { observeLogPhase, type LogRecordPort } from '@zhixing/core/logging';
 
 /** Composition-root adapter shared by Host and terminal application. Core and
  * Secrets only receive their existing identity/protection ports. */
 export function nativeSecretPlatform(records?: () => LogRecordPort | undefined): Pick<PlatformSecretStoreOptions, 'processIdentityResolver' | 'windowsProtection'> {
   if (process.platform !== 'win32') return {};
-  const directory = path.join(path.dirname(resolveCliEntry()), 'terminal', `${process.platform}-${process.arch}`);
+  const directory = path.join(path.dirname(resolveProgramEntry()), 'terminal', `${process.platform}-${process.arch}`);
   const filename = path.join(directory, 'foreground.node');
   // Source-only/unsupported distributions retain the existing portable adapter.
   // A present but corrupt native asset must fail closed, not silently fall back.

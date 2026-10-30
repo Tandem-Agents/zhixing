@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, open, readFile, readdir, rm, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing/core/protocol/canonical";
 import { mergeIdMap } from "./internal/io.js";
 import type { ZhixingCredentials } from "./types.js";
 

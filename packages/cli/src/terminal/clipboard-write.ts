@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { resolveCliEntry } from '../cli-entry.js';
+import { resolveProgramEntry } from '../cli-entry.js';
 import { createTerminalOwnedProcessFactory } from './host-launch.js';
 
 type Create = ReturnType<typeof createTerminalOwnedProcessFactory>;
@@ -23,7 +23,7 @@ export class TerminalClipboardWriter {
   #pending?: { abort: AbortController; work: Promise<ClipboardWriteResult> };
   #replacing = false;
   constructor(readonly signal: AbortSignal, readonly create: Create, readonly platform: NodeJS.Platform,
-    readonly environment: NodeJS.ProcessEnv = process.env, readonly entry = () => resolveCliEntry()) {}
+    readonly environment: NodeJS.ProcessEnv = process.env, readonly entry = () => resolveProgramEntry()) {}
 
   async write(text: string): Promise<ClipboardWriteResult> {
     this.signal.throwIfAborted();

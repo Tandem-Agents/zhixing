@@ -1,5 +1,5 @@
 import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing/core/conversation/application';
-import { validateSessionEventProjection } from '@zhixing/core/protocol';
+import { validateSessionEventProjection } from '@zhixing/core/protocol/stream';
 import type { SessionEventProjection } from '@zhixing/core/types';
 import { boundedProcessValue, processText } from '@zhixing/rpc/session-wire';
 import type { AgentYield } from '@zhixing/core/loop';

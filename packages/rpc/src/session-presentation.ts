@@ -2,7 +2,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { stripPresentationFromAgentYield, type AgentYield } from '@zhixing/core/loop';
 import type { FileDiffPresentationArtifact, SubAgentResultPresentationArtifact, SessionEventProjection } from '@zhixing/core/types';
 import type { TurnContext } from '@zhixing/core/types';
-import { validateAgentYield, validateSessionEventProjection } from '@zhixing/core/protocol';
+import { validateAgentYield, validateSessionEventProjection } from '@zhixing/core/protocol/stream';
 
 export type SessionPresentationProfile = 'default' | 'bounded-v1';
 export const SESSION_PROCESS_METHOD = 'session.process';

@@ -1,6 +1,6 @@
 import type { AgentYield } from '@zhixing/core/loop';
 import { getTotalInputTokens, type SessionEventProjection } from '@zhixing/core/types';
-import { validateSessionEventProjection } from '@zhixing/core/protocol';
+import { validateSessionEventProjection } from '@zhixing/core/protocol/stream';
 import { boundedProcessValue, processText, projectSessionArtifact, validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource } from '@zhixing/rpc/session-wire';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import type { TerminalProcessView, ProcessChildView } from '@zhixing/terminal-ui/process-model';
