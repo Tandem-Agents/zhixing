@@ -894,6 +894,10 @@ export function createDefaultDeviceCapacityPolicy(): DeviceCapacityPolicy {
   };
 }
 
+// CPU 忙碌比例只进诊断快照、不参与准入；Windows 上每次读 CPU 时间都要逐核查询，
+// 所以采样窗口取 2 s，前台连续准入期间不反复付这笔开销。
+const CPU_SAMPLE_WINDOW_MS = 2_000;
+
 export function createNodeDeviceCapacityProbe(
   temporaryRoot: string,
   options: {
@@ -909,7 +913,7 @@ export function createNodeDeviceCapacityProbe(
   let cpuBusyRatio = 0;
   return () => {
     const sampledAt = now();
-    if (sampledAt - sampleStartedAt >= 250) {
+    if (sampledAt - sampleStartedAt >= CPU_SAMPLE_WINDOW_MS) {
       const currentCpu = readCpuTimes();
       const totalDelta = currentCpu.total - previousCpu.total;
       if (totalDelta > 0) {
@@ -925,7 +929,8 @@ export function createNodeDeviceCapacityProbe(
     return {
       cpuBusyRatio,
       availableMemoryBytes: toSafeInteger(freemem()),
-      processRssBytes: toSafeInteger(process.memoryUsage().rss),
+      // 只取常驻集：rss() 不计算整份堆统计，取值与 memoryUsage().rss 相同
+      processRssBytes: toSafeInteger(process.memoryUsage.rss()),
       ...(filesystem ? { temporaryBytesAvailable: toSafeInteger(Number(filesystem.bavail) * Number(filesystem.bsize)) } : {}),
     };
   };

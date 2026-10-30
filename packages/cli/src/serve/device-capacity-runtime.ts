@@ -58,7 +58,11 @@ export function createDeviceCapacityRuntime(
       const started = performance.now();
       let granted = false;
       try {
-        await filesystem.prepare(request.maxWaitMs, signal);
+        // 磁盘样本只决定临时空间这一维：原子与首选都不要临时空间的请求不等样本（缺样本只让这一维未知，
+        // 这类请求的准入结论不变）；要临时空间的照旧等新鲜样本
+        if (request.atomic.occupancy.temporaryBytes > 0 || request.preferred.occupancy.temporaryBytes > 0) {
+          await filesystem.prepare(request.maxWaitMs, signal);
+        }
         const result = await underlying.acquire(
           { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - Math.ceil(performance.now() - started)) }, signal,
         );

@@ -156,6 +156,29 @@ describe("device capacity disk sampling", () => {
       .toMatchObject({ kind: "backpressured", blockedBy: "probe-unavailable" });
   });
 
+  it("does not wait for a disk sample before a temporary-free request, while a temporary request still waits for a fresh one", async () => {
+    const home = await createTempDir("capacity-no-sample-wait");
+    const disk = manualSampler();
+    const runtime = createDeviceCapacityRuntime(home, { createDirectory: false, diskSampler: disk.starter });
+    // 从未采到样本：不要临时空间的请求有等待额度也立即受理，不等那一轮采样
+    const started = performance.now();
+    const admitted = await runtime.arbiter.acquire({ admissionId: "no-sample-read", serviceClass: "storage-foreground",
+      atomic: read, preferred: read, maxWaitMs: 1_000 }, new AbortController().signal);
+    expect(admitted.kind).toBe("granted");
+    expect(performance.now() - started).toBeLessThan(200);
+    if (admitted.kind === "granted") admitted.permit.release();
+    // 要临时空间的请求照旧等新鲜样本：样本到达之前不受理
+    let settled = false;
+    const waiting = runtime.arbiter.acquire({ admissionId: "no-sample-disk", serviceClass: "storage-foreground",
+      atomic: budget, preferred: budget, maxWaitMs: 1_000 }, new AbortController().signal).finally(() => { settled = true; });
+    await sleep(50);
+    expect(settled).toBe(false);
+    disk.sample();
+    const granted = await waiting;
+    expect(granted.kind).toBe("granted");
+    if (granted.kind === "granted") granted.permit.release();
+  });
+
   it("does not block the runtime entry on a disk probe and returns from close within its deadline", async () => {
     const home = await createTempDir("capacity-entry");
     const started = Date.now();

@@ -246,23 +246,32 @@ describe("DefaultDeviceCapacityArbiter", () => {
     const temporaryRoot = await createTempDir("device-capacity-probe");
     let now = 0;
     let cpu = { total: 1_000, idle: 500 };
+    let cpuReads = 0;
     const probe = createNodeDeviceCapacityProbe(temporaryRoot, {
       now: () => now,
-      readCpuTimes: () => cpu,
+      readCpuTimes: () => {
+        cpuReads += 1;
+        return cpu;
+      },
     });
+    expect(cpuReads).toBe(1);
 
     cpu = { total: 1_001, idle: 500 };
     expect(probe().cpuBusyRatio).toBe(0);
-    now = 249;
+    now = 1_999;
     cpu = { total: 2_000, idle: 500 };
     expect(probe().cpuBusyRatio).toBe(0);
+    // 窗口未满时连续取样不读 CPU 时间
+    expect(cpuReads).toBe(1);
 
-    now = 250;
+    now = 2_000;
     cpu = { total: 2_000, idle: 1_000 };
     expect(probe().cpuBusyRatio).toBe(0.5);
-    now = 300;
+    expect(cpuReads).toBe(2);
+    now = 2_050;
     cpu = { total: 3_000, idle: 1_000 };
     expect(probe().cpuBusyRatio).toBe(0.5);
+    expect(cpuReads).toBe(2);
   });
 
   it("distinguishes an impossible capacity gap from temporary backpressure", async () => {
