@@ -146,7 +146,7 @@ import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-sta
 import { waitForExecutorRoleTerminal } from "./executor-role-terminal.js";
 import {
   ExecutorInternalStopLifecycle,
-  shouldExecutorIdleExit,
+  createExecutorIdleCheck,
 } from "./executor-internal-stop.js";
 import {
   ExecutorRoleLifecycle,
@@ -1058,27 +1058,19 @@ async function runExecutorProcess(
       }).catch(() => undefined);
     }
     if (processMode === "on-demand") {
+      // 空闲须连续两次检查成立且期间无本地连接进出，已接纳工作查询返回后按当前状态重核（createExecutorIdleCheck）
       executorServerLifecycle.startIdleTimer(
-        async () => {
-          const anchorDeviceId = currentAnchorDeviceId();
-          const localConnectionCount = localConversationServer.server.connections.size;
-          const currentAnchorConnected = anchorDeviceId !== undefined &&
-            mesh!.connections.has(anchorDeviceId);
-          const [hasLocalAcceptedWork, remoteAcceptedWork] =
-            localConnectionCount > 0 || currentAnchorConnected
-              ? [false, []] as const
-              : await Promise.all([
-                  localConversationOwner!.hasIdleBlockingWork(),
-                  jobOwnerAssembly!.acceptedWorkItems(),
-                ]);
-          if (!shouldExecutorIdleExit({
-            localConnectionCount,
-            currentAnchorConnected,
-            hasLocalAcceptedWork,
-            hasRemoteAcceptedWork: remoteAcceptedWork.length > 0,
-          })) return;
-          await executorInternalStop.requestStop({ reason: "idle", strategy: "drain" });
-        },
+        createExecutorIdleCheck({
+          connectionChanges: () => localConversationServer.server.connectionChanges,
+          localConnectionCount: () => localConversationServer.server.connections.size,
+          anchorConnected: () => {
+            const anchorDeviceId = currentAnchorDeviceId();
+            return anchorDeviceId !== undefined && mesh!.connections.has(anchorDeviceId);
+          },
+          hasLocalAcceptedWork: () => localConversationOwner!.hasIdleBlockingWork(),
+          hasRemoteAcceptedWork: async () => (await jobOwnerAssembly!.acceptedWorkItems()).length > 0,
+          requestStop: () => executorInternalStop.requestStop({ reason: "idle", strategy: "drain" }),
+        }),
         (error) => {
           writer.notify(
             `[idle] durable Executor Host stop failed; the same operation will retry: ${

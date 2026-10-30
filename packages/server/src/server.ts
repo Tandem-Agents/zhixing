@@ -53,6 +53,8 @@ export interface ZhixingServerInstance {
   readonly registry: HandlerRegistry;
   /** 当前活跃的 RPC 连接列表（用于推送事件、强制断开） */
   readonly connections: ReadonlySet<RpcConnection>;
+  /** 连接变动计数：每有一条连接加入或断开即 +1，单调递增；供“这段时间里是否有连接进出”的判定使用 */
+  readonly connectionChanges: number;
   /** Admit an existing first-party transport to this Server generation. */
   registerConnection(connection: RpcConnection): void;
   /** 同一 prepared Server generation 拥有的会话组播传输。 */
@@ -285,6 +287,7 @@ async function startServerWithOwner(
   // 用 noServer 模式：手动处理 upgrade，便于路径过滤
   const wss = new WebSocketServer({ noServer: true });
   const connections = new Set<RpcConnection>();
+  let connectionChanges = 0;
   const connectionGeneration = {};
   let activeClosed = false;
   const rpcSurfaces = new RpcSurfaceRegistry();
@@ -298,9 +301,10 @@ async function startServerWithOwner(
     if (connections.has(connection)) return;
     connectionGenerations.set(connection, connectionGeneration);
     connections.add(connection);
+    connectionChanges++;
     connection.onClose(() => {
       rpcSurfaces.unbind(connection);
-      connections.delete(connection);
+      if (connections.delete(connection)) connectionChanges++;
       ctx.conversation?.removeObserverFromAll(String(connection.id));
     });
   }
@@ -395,6 +399,7 @@ async function startServerWithOwner(
     context: ctx,
     registry,
     connections,
+    get connectionChanges() { return connectionChanges; },
     registerConnection,
     ...(sessionBroadcastTransport ? { sessionBroadcastTransport } : {}),
     async close() {

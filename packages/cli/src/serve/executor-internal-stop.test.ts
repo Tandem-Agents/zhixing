@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createExecutorIdleCheck,
   ExecutorInternalStopLifecycle,
   type ExecutorInternalStopGeneration,
   shouldExecutorIdleExit,
@@ -199,6 +200,65 @@ describe("shouldExecutorIdleExit", () => {
       hasRemoteAcceptedWork: false,
       ...override,
     })).toBe(false);
+  });
+});
+
+describe("createExecutorIdleCheck", () => {
+  // 可控的在场与工作状态；本地已接纳工作查询可在某一次挂起，模拟查询期间的交错
+  function idleWorld() {
+    const state = { connections: 0, changes: 0, anchor: false, localWork: false, remoteWork: false };
+    let hold: ReturnType<typeof deferred<void>> | undefined;
+    const requestStop = vi.fn(async () => undefined);
+    const check = createExecutorIdleCheck({
+      connectionChanges: () => state.changes,
+      localConnectionCount: () => state.connections,
+      anchorConnected: () => state.anchor,
+      hasLocalAcceptedWork: async () => { const pending = hold; hold = undefined; if (pending) await pending.promise; return state.localWork; },
+      hasRemoteAcceptedWork: async () => state.remoteWork,
+      requestStop,
+    });
+    return { state, check, requestStop, holdNextQuery: () => { hold = deferred<void>(); return hold; } };
+  }
+  const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+
+  it("does not stop when a connection arrives while the accepted-work query is pending", async () => {
+    const world = idleWorld();
+    await world.check();
+    const held = world.holdNextQuery();
+    const second = world.check();
+    await settle();
+    // 查询挂起期间新终端连上：连接数 1、变动计数 +1
+    world.state.connections = 1; world.state.changes = 1;
+    held.resolve();
+    await second;
+    expect(world.requestStop).not.toHaveBeenCalled();
+  });
+
+  it("does not stop when the anchor comes online while the queries are pending", async () => {
+    const world = idleWorld();
+    await world.check();
+    const held = world.holdNextQuery();
+    const second = world.check();
+    await settle();
+    world.state.anchor = true;
+    held.resolve();
+    await second;
+    expect(world.requestStop).not.toHaveBeenCalled();
+  });
+
+  it("stops once after two consecutive idle checks without connection activity, and an abandoned check restarts the count", async () => {
+    const world = idleWorld();
+    await world.check();
+    await world.check();
+    expect(world.requestStop).toHaveBeenCalledTimes(1);
+    const fresh = idleWorld();
+    await fresh.check();
+    // 一条连接加入又断开（+2）：上一次空闲判定作废，需要重新连续两次
+    fresh.state.changes = 2;
+    await fresh.check();
+    expect(fresh.requestStop).not.toHaveBeenCalled();
+    await fresh.check();
+    expect(fresh.requestStop).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -30,3 +30,17 @@ export function shouldIdleExit(snapshot: IdleSnapshot): boolean {
   if (hasLiveRemoteSurface) return false;
   return !snapshot.hasUserPendingWork;
 }
+
+/**
+ * 空闲须跨过一个完整检查周期才退出：本次与上一次检查都判定空闲，且两次之间连接变动计数未变（期间没有任何连接进出）。
+ * 只看单次快照时，上一个终端刚断开、下一个终端尚未连上的空档也会被判为空闲，宿主在新终端启动途中停机。
+ * 返回的判定函数有状态，每个空闲检查责任各持一个。
+ */
+export function createIdleExitGate(): (idle: boolean, connectionChanges: number) => boolean {
+  let idleAt: number | undefined;
+  return (idle, connectionChanges) => {
+    const confirmed = idle && idleAt === connectionChanges;
+    idleAt = idle ? connectionChanges : undefined;
+    return confirmed;
+  };
+}

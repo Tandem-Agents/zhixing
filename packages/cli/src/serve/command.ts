@@ -207,7 +207,7 @@ import { definePostAdoptionReviewLifecycleContribution } from "./post-adoption-r
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
-import { shouldIdleExit } from "./idle-policy.js";
+import { createIdleExitGate, shouldIdleExit } from "./idle-policy.js";
 import type {
   AdvancementConversationComposition,
   PreparedChannelMechanism,
@@ -3547,14 +3547,17 @@ async function runServerProcess(
   // 退出走正常 shutdown(drain 在跑任务)、不改 idempotent shutdown 契约。
   if (processMode === "on-demand") {
     const IDLE_CHECK_MS = 60_000;
+    // 空闲须连续两次检查成立且期间无连接进出：避开“上一终端刚断开、新终端尚未连上”的空档
+    const idleExitGate = createIdleExitGate();
     hostShellLifecycle.startIdleReaper(async () => {
-      const exit = shouldIdleExit({
+      const connectionChanges = runner!.server.connectionChanges;
+      const exit = idleExitGate(shouldIdleExit({
         connectionCount: runner!.server.connections.size,
         channelStates:
           boundChannelStatuses?.().map((s) => s.state) ?? [],
         hasUserPendingWork:
           schedulerApplication.readStatus().enabledUserTaskCount > 0,
-      });
+      }), connectionChanges);
       if (exit) {
         await anchorInternalStop.requestStop({ reason: "idle", strategy: "drain" });
       }

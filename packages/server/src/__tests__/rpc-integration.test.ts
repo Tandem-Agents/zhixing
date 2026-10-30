@@ -399,9 +399,12 @@ describe("WebSocket + RPC (S2.C)", () => {
   });
 
   it("close() disconnects all active connections", async () => {
+    const before = server.connectionChanges;
     const c1 = await connect(server.port);
     const c2 = await connect(server.port);
     expect(server.connections.size).toBe(2);
+    // 每有一条连接加入或断开，变动计数 +1
+    expect(server.connectionChanges).toBe(before + 2);
 
     const closeWaiters = [
       new Promise<void>((r) => c1.ws.once("close", () => r())),
@@ -411,6 +414,7 @@ describe("WebSocket + RPC (S2.C)", () => {
     await Promise.all(closeWaiters);
 
     expect(server.connections.size).toBe(0);
+    expect(server.connectionChanges).toBe(before + 4);
   });
 
   it("server can notify a connection (push event)", async () => {

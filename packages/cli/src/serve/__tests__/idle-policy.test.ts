@@ -9,7 +9,31 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { shouldIdleExit } from "../idle-policy.js";
+import { createIdleExitGate, shouldIdleExit } from "../idle-policy.js";
+
+describe("空闲须跨过一个完整检查周期", () => {
+  it("单次空闲不退出；连续两次空闲且期间无连接进出才退出", () => {
+    const gate = createIdleExitGate();
+    expect(gate(true, 4)).toBe(false);
+    expect(gate(true, 4)).toBe(true);
+  });
+
+  it("上一终端刚断开、新终端在两次检查之间连上又断开：连接变动计数变化，不退出", () => {
+    const gate = createIdleExitGate();
+    expect(gate(true, 4)).toBe(false);
+    // 期间一条连接加入并断开（+2）：上一次的空闲判定作废，重新起算
+    expect(gate(true, 6)).toBe(false);
+    expect(gate(true, 6)).toBe(true);
+  });
+
+  it("任一次检查不空闲即重置", () => {
+    const gate = createIdleExitGate();
+    expect(gate(true, 4)).toBe(false);
+    expect(gate(false, 5)).toBe(false);
+    expect(gate(true, 6)).toBe(false);
+    expect(gate(true, 6)).toBe(true);
+  });
+});
 
 describe("shouldIdleExit", () => {
   it("无人且无事 → 退出(含:渠道装配过但全部 error/disconnected)", () => {

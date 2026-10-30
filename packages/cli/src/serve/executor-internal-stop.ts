@@ -1,4 +1,5 @@
 import type { StopStrategy } from "@zhixing/core/protocol";
+import { createIdleExitGate } from "./idle-policy.js";
 
 export interface ExecutorInternalStopRequest {
   readonly reason: string;
@@ -127,4 +128,41 @@ export function shouldExecutorIdleExit(snapshot: ExecutorIdleSnapshot): boolean 
     !snapshot.currentAnchorConnected &&
     !snapshot.hasLocalAcceptedWork &&
     !snapshot.hasRemoteAcceptedWork;
+}
+
+export interface ExecutorIdleCheckPorts {
+  /** 本地会话服务的连接变动计数（连接加入或断开各 +1） */
+  readonly connectionChanges: () => number;
+  readonly localConnectionCount: () => number;
+  /** 当前锚点设备此刻是否在场 */
+  readonly anchorConnected: () => boolean;
+  readonly hasLocalAcceptedWork: () => Promise<boolean>;
+  readonly hasRemoteAcceptedWork: () => Promise<boolean>;
+  readonly requestStop: () => Promise<unknown>;
+}
+
+/**
+ * 执行端宿主的空闲检查，计时器每到点调用一次。空闲须连续两次检查成立且期间无连接进出（createIdleExitGate）。
+ * 已接纳工作的两个查询是异步的：查询返回后按当前状态重核连接变动计数、本地连接与锚点在场，任何变化都放弃这次空闲判定，
+ * 不拿查询前的快照停机；判定与发起停机之间不再有等待。
+ */
+export function createExecutorIdleCheck(ports: ExecutorIdleCheckPorts): () => Promise<void> {
+  const gate = createIdleExitGate();
+  return async () => {
+    const connectionChanges = ports.connectionChanges();
+    let idle = false;
+    if (ports.localConnectionCount() === 0 && !ports.anchorConnected()) {
+      const [hasLocalAcceptedWork, hasRemoteAcceptedWork] = await Promise.all([
+        ports.hasLocalAcceptedWork(),
+        ports.hasRemoteAcceptedWork(),
+      ]);
+      idle = ports.connectionChanges() === connectionChanges && shouldExecutorIdleExit({
+        localConnectionCount: ports.localConnectionCount(),
+        currentAnchorConnected: ports.anchorConnected(),
+        hasLocalAcceptedWork,
+        hasRemoteAcceptedWork,
+      });
+    }
+    if (gate(idle, connectionChanges)) await ports.requestStop();
+  };
 }
