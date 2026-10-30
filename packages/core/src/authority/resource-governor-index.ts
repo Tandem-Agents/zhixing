@@ -117,7 +117,8 @@ export class GovernorStateRequired extends AuthorityPreparationRequired {
     super([]);
     this.name = "GovernorStateRequired";
     this.message = "Resource governor state is being loaded";
-    if (load) this.prepareOutside = load;
+    // 同一次缺键只装一次：日志在持外层串行权时先在后台发起，协调者随后等待的是同一次装入
+    if (load) { let pending: Promise<void> | undefined; this.prepareOutside = () => pending ??= load(); }
   }
 }
 
@@ -258,6 +259,11 @@ export class GovernorWorkingSet implements GovernorProjection {
   get loadedKeys(): number { return this.#base.size + this.#pages.size; }
   satisfies(need: GovernorNeed): boolean {
     return "fair" in need ? this.hasFair() : "key" in need ? this.isLoaded(need.key) : this.hasPage(need.page);
+  }
+  /** 一次报全给定需求里尚未装入的部分（只抛一次）；全部已装入时不做任何事。 */
+  requireNeeds(needs: readonly GovernorNeed[]): void {
+    const missing = needs.filter((need) => !this.satisfies(need));
+    if (missing.length) throw this.#missing(missing);
   }
   hasPage(page: IndexPage): boolean { return this.#pages.has(pageId(page)); }
   hasFair(): boolean { return this.#fair !== undefined; }
@@ -708,6 +714,16 @@ function dependentRoot(key: string, value: JsonValue | undefined): string | unde
     default:
       return undefined;
   }
+}
+
+/**
+ * 同步判断推演一批调控记录之前，一次报全它们归约所需、可从记录本身得出的键与索引页（缺多少报多少，只抛一次），
+ * 避免推演中按惰性读取逐键发现、每发现一个就整笔重跑。依赖状态才能发现的键仍由惰性读取逐步补齐。
+ * 非按键工作集（完整投影）不需要装入。
+ */
+export function requireGovernorRecordNeeds(state: GovernorProjection, records: readonly { readonly body: unknown }[]): void {
+  if (!(state instanceof GovernorWorkingSet)) return;
+  state.requireNeeds(records.flatMap((record) => governorRecordNeeds(record.body)));
 }
 
 /** 一条调控记录归约时必读、可从记录本身得出的键与索引页。 */

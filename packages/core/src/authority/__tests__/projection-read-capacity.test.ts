@@ -133,14 +133,19 @@ describe("authority projection physical reads", () => {
     } finally { await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
   });
 
-  it("adopts other instances' projection publications once per lock session, not on every write", async () => {
-    // 其他实例只能持锁发布：本实例持有锁会话期间不会出现新的发布，后续写入不再逐个重读清单。
+  it.each([
+    // 同一锁会话内：其他实例只能持锁发布，本实例持有会话期间不会出现新的发布，后续写入不再逐个重读清单。
+    // 持有上限另有合同（到上限即在操作边界关闭）；这里固定为极大值，免得负载下会话恰在最后一次追加的边界关闭。
+    { name: "adopts other instances' projection publications once per lock session, not on every write", maxHold: 600_000, readsManifests: false },
+    // 会话到持有上限即在操作边界关闭：下一操作开新会话，按合同重新采纳其他实例的发布
+    { name: "re-adopts published manifests in the new session after the hold bound closes the old one", maxHold: 0, readsManifests: true },
+  ])("$name", async ({ maxHold, readsManifests }) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "projection-session-refresh-"));
     const arbiter = singleSlotArbiter();
     const steps: string[] = [];
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
       storageMaintenance: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
-      runProjectionReadStep: leafProjectionReads(arbiter, steps), lockSessionLingerMs: 60_000 });
+      runProjectionReadStep: leafProjectionReads(arbiter, steps), lockSessionLingerMs: 60_000, lockSessionMaxHoldMs: maxHold });
     try {
       registerCounters(log);
       for (const id of COUNTERS) await log.append([{ stream: `job:${id}`, body: { n: 1 } }]);
@@ -148,7 +153,9 @@ describe("authority projection physical reads", () => {
       await log.transactDurableProjection("counter-b", async () => ({
         kind: "append", entries: [{ stream: "job:counter-b", body: { n: 2 } }], value: undefined,
       }), { runPhysicalStep: callerStep(arbiter) });
-      expect(steps.filter((step) => step === "manifest")).toEqual([]);
+      const manifests = steps.filter((step) => step === "manifest");
+      if (readsManifests) expect(manifests.length).toBeGreaterThan(0);
+      else expect(manifests).toEqual([]);
     } finally { await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
   });
 });

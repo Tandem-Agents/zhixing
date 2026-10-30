@@ -24,6 +24,9 @@ it('uses identical file identity and nanosecond timestamps for path and borrowed
   try {
     const direct = await readWalVersion(handle), fromPath = await readWalVersion(file);
     expect(fromPath).toEqual(direct);
+    // 按路径的卷号与 fstat 不一致：此后每次按路径读仍取 fstat，不改用按路径 stat
+    expect(await readWalVersion(file)).toEqual(direct);
+    expect(await readWalVersion(file)).toEqual(direct);
     expect((await handle.stat({ bigint: true })).ino).toBe(direct.ino); // Borrowed handle remains open.
   } finally { await handle.close(); }
 });

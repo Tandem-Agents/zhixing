@@ -51,6 +51,8 @@ export class ArtifactJsonIndex {
   readonly #scans = new Map<string, Scan>();
   #idle?: ReturnType<typeof setTimeout>;
   #unlock?: () => Promise<void>;
+  /** 固定文本的已编译语句按连接复用；连接关闭即随之丢弃，不跨连接沿用。 */
+  readonly #statements = new WeakMap<DatabaseSync, Map<string, ReturnType<DatabaseSync['prepare']>>>();
   constructor(readonly store: Pick<ArtifactStore, 'readRange' | 'readIdentity'>, readonly directory?: string, options: ArtifactJsonIndexOptions = {}) {
     this.#acquireFileLock = options.acquireFileLock ?? createFileLockAcquirer();
   }
@@ -109,41 +111,48 @@ export class ArtifactJsonIndex {
     finally { this.#db?.close(); this.#db = undefined; this.#scans.clear(); await this.#releaseWriter(); }
   }); }
   async #releaseWriter(): Promise<void> { if (this.#scans.size) return; const release = this.#unlock; this.#unlock = undefined; await release?.(); }
+  #sql(db: DatabaseSync, text: string): ReturnType<DatabaseSync['prepare']> {
+    let statements = this.#statements.get(db);
+    if (!statements) this.#statements.set(db, statements = new Map());
+    let statement = statements.get(text);
+    if (!statement) statements.set(text, statement = db.prepare(text));
+    return statement;
+  }
   async #run<T>(fn: (db: DatabaseSync) => Promise<T>): Promise<T> {
     return this.#queue.run(async () => { const db = await this.#open(); try { return await fn(db); } finally { this.#release(); } });
   }
   #remove(db: DatabaseSync, ref: string): void {
-    db.prepare('DELETE FROM slices WHERE ref=?').run(ref);
-    db.prepare('DELETE FROM sources WHERE ref=?').run(ref);
-    db.prepare('DELETE FROM pieces WHERE ref=?').run(ref); db.prepare('DELETE FROM nodes WHERE ref=?').run(ref); db.prepare('DELETE FROM artifacts WHERE ref=?').run(ref);
+    this.#sql(db, 'DELETE FROM slices WHERE ref=?').run(ref);
+    this.#sql(db, 'DELETE FROM sources WHERE ref=?').run(ref);
+    this.#sql(db, 'DELETE FROM pieces WHERE ref=?').run(ref); this.#sql(db, 'DELETE FROM nodes WHERE ref=?').run(ref); this.#sql(db, 'DELETE FROM artifacts WHERE ref=?').run(ref);
   }
   /** Immutable file slices can reuse an already verified JSON index. The
    * caller must bind the source identity to its open file and exact extent. */
   async sourceRef(identity: string): Promise<ArtifactRef | undefined> {
     return this.#run(async db => {
-      const row = db.prepare('SELECT s.ref,s.bytes FROM sources s JOIN artifacts a ON a.ref=s.ref WHERE s.identity=? AND a.ready=1').get(identity);
+      const row = this.#sql(db, 'SELECT s.ref,s.bytes FROM sources s JOIN artifacts a ON a.ref=s.ref WHERE s.identity=? AND a.ready=1').get(identity);
       return row ? { digest: String(row.ref) as ArtifactRef['digest'], bytes: Number(row.bytes) } : undefined;
     });
   }
   async bindSource(identity: string, ref: ArtifactRef): Promise<void> {
     if (identity.length > 4096) throw Error('artifact-json-source-identity');
     await this.#run(async db => {
-      if (db.prepare('SELECT ready FROM artifacts WHERE ref=?').get(ref.digest)?.ready !== 1) throw Error('artifact-json-not-ready');
-      db.prepare('INSERT OR REPLACE INTO sources VALUES(?,?,?)').run(identity, ref.digest, ref.bytes);
+      if (this.#sql(db, 'SELECT ready FROM artifacts WHERE ref=?').get(ref.digest)?.ready !== 1) throw Error('artifact-json-not-ready');
+      this.#sql(db, 'INSERT OR REPLACE INTO sources VALUES(?,?,?)').run(identity, ref.digest, ref.bytes);
     });
   }
   /** A verified JSONL record boundary is disposable alongside its byte index. */
   async sourceSlice(identity: string, tail: number): Promise<number | undefined> {
     return this.#run(async db => {
-      const row = db.prepare('SELECT s.start FROM slices s JOIN artifacts a ON a.ref=s.ref WHERE s.identity=? AND s.tail=? AND a.ready=1').get(identity, tail);
+      const row = this.#sql(db, 'SELECT s.start FROM slices s JOIN artifacts a ON a.ref=s.ref WHERE s.identity=? AND s.tail=? AND a.ready=1').get(identity, tail);
       return row ? Number(row.start) : undefined;
     });
   }
   async bindSourceSlice(identity: string, start: number, tail: number, ref: ArtifactRef): Promise<void> {
     if (identity.length > 4096 || !Number.isSafeInteger(start) || !Number.isSafeInteger(tail) || start < 0 || tail <= start) throw Error('artifact-json-source-slice');
     await this.#run(async db => {
-      if (db.prepare('SELECT ready FROM artifacts WHERE ref=?').get(ref.digest)?.ready !== 1) throw Error('artifact-json-not-ready');
-      db.prepare('INSERT OR REPLACE INTO slices VALUES(?,?,?,?)').run(identity, tail, start, ref.digest);
+      if (this.#sql(db, 'SELECT ready FROM artifacts WHERE ref=?').get(ref.digest)?.ready !== 1) throw Error('artifact-json-not-ready');
+      this.#sql(db, 'INSERT OR REPLACE INTO slices VALUES(?,?,?,?)').run(identity, tail, start, ref.digest);
     });
   }
   /** Each call performs at most the supplied source-byte quantum. The caller
@@ -154,15 +163,15 @@ export class ArtifactJsonIndex {
     return this.#run(async db => {
       signal?.throwIfAborted();
       const identity = await this.store.readIdentity?.(ref);
-      const found = db.prepare('SELECT bytes,ready,canonical,identity FROM artifacts WHERE ref=?').get(ref.digest);
+      const found = this.#sql(db, 'SELECT bytes,ready,canonical,identity FROM artifacts WHERE ref=?').get(ref.digest);
       if (found?.ready === 1 && found.bytes === ref.bytes && found.canonical !== null && (identity === undefined || found.identity === identity)) {
-        db.prepare('UPDATE artifacts SET touched=? WHERE ref=?').run(Date.now(), ref.digest);
+        this.#sql(db, 'UPDATE artifacts SET touched=? WHERE ref=?').run(Date.now(), ref.digest);
         return { ready: true, bytes: ref.bytes, total: ref.bytes };
       }
       if (this.directory && !this.#unlock) {
         this.#unlock = await this.#acquireFileLock(path.join(this.directory, INDEX_LOCK), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
         // A different process may have finished while this caller waited.
-        const ready = db.prepare('SELECT ready,canonical,identity FROM artifacts WHERE ref=?').get(ref.digest);
+        const ready = this.#sql(db, 'SELECT ready,canonical,identity FROM artifacts WHERE ref=?').get(ref.digest);
         if (ready?.ready === 1 && ready.canonical !== null && (identity === undefined || ready.identity === identity)) {
           await this.#releaseWriter(); return { ready: true, bytes: ref.bytes, total: ref.bytes };
         }
@@ -173,7 +182,7 @@ export class ArtifactJsonIndex {
         if (this.#scans.size >= 4) { const oldest = this.#scans.keys().next().value!; this.#remove(db, oldest); this.#scans.delete(oldest); }
         this.#remove(db, ref.digest);
         this.#scans.set(ref.digest, { ref, at: 0, next: 1, stack: [], root: false, canonical: true, hash: createHash('sha256') });
-        db.prepare('INSERT INTO artifacts(ref,bytes,ready,touched,identity) VALUES(?,?,0,?,?)').run(ref.digest, ref.bytes, Date.now(), identity ?? null);
+        this.#sql(db, 'INSERT INTO artifacts(ref,bytes,ready,touched,identity) VALUES(?,?,0,?,?)').run(ref.digest, ref.bytes, Date.now(), identity ?? null);
       }
       const scan = this.#scans.get(ref.digest)!; this.#scans.delete(ref.digest); this.#scans.set(ref.digest, scan);
       const until = Math.min(ref.bytes, scan.at + budget);
@@ -190,9 +199,9 @@ export class ArtifactJsonIndex {
           } catch (error) { db.exec('ROLLBACK'); throw error; }
           scan.hash.update(bytes);
           await new Promise<void>(setImmediate);
-          const pages = Number(db.prepare('PRAGMA page_count').get()!.page_count);
+          const pages = Number(this.#sql(db, 'PRAGMA page_count').get()!.page_count);
           if (pages * 4096 > MAX_BYTES * .75) {
-            const victims = db.prepare('SELECT ref FROM artifacts WHERE ref<>? ORDER BY touched LIMIT 16').all(ref.digest);
+            const victims = this.#sql(db, 'SELECT ref FROM artifacts WHERE ref<>? ORDER BY touched LIMIT 16').all(ref.digest);
             for (const victim of victims) if (!this.#scans.has(String(victim.ref))) this.#remove(db, String(victim.ref));
             db.exec('PRAGMA incremental_vacuum(256)');
           }
@@ -201,7 +210,7 @@ export class ArtifactJsonIndex {
           await this.#assertIdentity(db, ref);
           if (scan.token?.primitive !== undefined) this.#primitive(db, scan);
           if (!scan.root || scan.stack.length || scan.token || `sha256:${scan.hash.digest('hex')}` !== ref.digest) throw Error('artifact-json-invalid');
-          db.prepare('UPDATE artifacts SET ready=1,touched=?,canonical=? WHERE ref=?').run(Date.now(), Number(scan.canonical), ref.digest);
+          this.#sql(db, 'UPDATE artifacts SET ready=1,touched=?,canonical=? WHERE ref=?').run(Date.now(), Number(scan.canonical), ref.digest);
           this.#scans.delete(ref.digest); await this.#releaseWriter(); return { ready: true, bytes: ref.bytes, total: ref.bytes };
         }
         return { ready: false, bytes: scan.at, total: ref.bytes };
@@ -213,7 +222,7 @@ export class ArtifactJsonIndex {
     if (parent && !['first', 'value'].includes(parent.phase) || !parent && scan.root) throw Error('artifact-json-value');
     if (parent?.kind === 'object' && parent.key === undefined) throw Error('artifact-json-key');
     const id = scan.next++, field = parent?.kind === 'array' ? String(parent.count) : parent?.key ?? '';
-    db.prepare('INSERT INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(scan.ref.digest, id, parent?.id ?? 0, field, parent?.count ?? 0, kind, scan.at, -1, 0);
+    this.#sql(db, 'INSERT INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(scan.ref.digest, id, parent?.id ?? 0, field, parent?.count ?? 0, kind, scan.at, -1, 0);
     if (!parent) scan.root = true;
     return id;
   }
@@ -224,14 +233,14 @@ export class ArtifactJsonIndex {
     const raw = await this.#read(scan.ref, token.piece, end - token.piece);
     const text = JSON.parse(`"${dec.decode(raw)}"`) as string;
     if (/[\ud800-\udfff]/u.test(text) || JSON.stringify(text).slice(1, -1) !== dec.decode(raw)) scan.canonical = false;
-    db.prepare('INSERT INTO pieces VALUES(?,?,?,?,?,?)').run(scan.ref.digest, token.id!, token.units, token.piece, end, text.length);
+    this.#sql(db, 'INSERT INTO pieces VALUES(?,?,?,?,?,?)').run(scan.ref.digest, token.id!, token.units, token.piece, end, text.length);
     token.units += text.length; token.piece = end;
   }
   #primitive(db: DatabaseSync, scan: Scan): void {
     const token = scan.token!, value: unknown = JSON.parse(token.primitive!);
     if (JSON.stringify(value) !== token.primitive) scan.canonical = false;
     if (value !== null && typeof value !== 'number' && typeof value !== 'boolean' || typeof value === 'number' && !Number.isFinite(value)) throw Error('artifact-json-primitive');
-    db.prepare('UPDATE nodes SET hi=? WHERE ref=? AND id=?').run(scan.at, scan.ref.digest, token.id!);
+    this.#sql(db, 'UPDATE nodes SET hi=? WHERE ref=? AND id=?').run(scan.at, scan.ref.digest, token.id!);
     scan.token = undefined; this.#done(scan);
   }
   #byte(db: DatabaseSync, scan: Scan, byte: number): Promise<void> | void {
@@ -258,7 +267,7 @@ export class ArtifactJsonIndex {
           frame.previousKey = frame.key;
         } else {
           await this.#piece(db, scan, scan.at);
-          db.prepare('UPDATE nodes SET hi=?,units=? WHERE ref=? AND id=?').run(scan.at + 1, token.units, scan.ref.digest, token.id!);
+          this.#sql(db, 'UPDATE nodes SET hi=?,units=? WHERE ref=? AND id=?').run(scan.at + 1, token.units, scan.ref.digest, token.id!);
           this.#done(scan);
         }
         scan.token = undefined;
@@ -280,7 +289,7 @@ export class ArtifactJsonIndex {
     const frame = scan.stack.at(-1);
     if (byte === 125 || byte === 93) {
       if (!frame || (byte === 125 ? frame.kind !== 'object' : frame.kind !== 'array') || !['first', 'comma'].includes(frame.phase)) throw Error('artifact-json-close');
-      db.prepare('UPDATE nodes SET hi=?,units=? WHERE ref=? AND id=?').run(scan.at + 1, frame.count, scan.ref.digest, frame.id);
+      this.#sql(db, 'UPDATE nodes SET hi=?,units=? WHERE ref=? AND id=?').run(scan.at + 1, frame.count, scan.ref.digest, frame.id);
       scan.stack.pop(); this.#done(scan); return;
     }
     if (frame?.phase === 'comma') { if (byte !== 44) throw Error('artifact-json-comma'); frame.phase = frame.kind === 'object' ? 'key' : 'value'; return; }
@@ -298,9 +307,9 @@ export class ArtifactJsonIndex {
   }
   async node(ref: ArtifactRef, keys: readonly (string | number)[]): Promise<ArtifactJsonNode | undefined> {
     return this.#run(async db => {
-      if (db.prepare('SELECT ready FROM artifacts WHERE ref=?').get(ref.digest)?.ready !== 1) throw Error('artifact-json-not-ready');
-      let node = db.prepare('SELECT * FROM nodes WHERE ref=? AND parent=0').get(ref.digest) as unknown as ArtifactJsonNode | undefined;
-      for (const key of keys) { if (!node) return; node = db.prepare('SELECT * FROM nodes WHERE ref=? AND parent=? AND field=?').get(ref.digest, node.id, String(key)) as unknown as ArtifactJsonNode | undefined; }
+      if (this.#sql(db, 'SELECT ready FROM artifacts WHERE ref=?').get(ref.digest)?.ready !== 1) throw Error('artifact-json-not-ready');
+      let node = this.#sql(db, 'SELECT * FROM nodes WHERE ref=? AND parent=0').get(ref.digest) as unknown as ArtifactJsonNode | undefined;
+      for (const key of keys) { if (!node) return; node = this.#sql(db, 'SELECT * FROM nodes WHERE ref=? AND parent=? AND field=?').get(ref.digest, node.id, String(key)) as unknown as ArtifactJsonNode | undefined; }
       return node;
     });
   }
@@ -310,10 +319,10 @@ export class ArtifactJsonIndex {
     return JSON.parse(dec.decode(await this.#read(ref, node.lo, node.hi - node.lo)));
   }
   async canonical(ref: ArtifactRef): Promise<boolean> {
-    return this.#run(async db => { await this.#assertIdentity(db, ref); return db.prepare('SELECT canonical FROM artifacts WHERE ref=? AND ready=1').get(ref.digest)?.canonical === 1; });
+    return this.#run(async db => { await this.#assertIdentity(db, ref); return this.#sql(db, 'SELECT canonical FROM artifacts WHERE ref=? AND ready=1').get(ref.digest)?.canonical === 1; });
   }
   async #assertIdentity(db: DatabaseSync, ref: ArtifactRef): Promise<void> {
-    if (this.store.readIdentity && db.prepare('SELECT identity FROM artifacts WHERE ref=?').get(ref.digest)?.identity !== await this.store.readIdentity(ref))
+    if (this.store.readIdentity && this.#sql(db, 'SELECT identity FROM artifacts WHERE ref=?').get(ref.digest)?.identity !== await this.store.readIdentity(ref))
       throw Error('artifact-json-source-changed');
   }
   async assertCurrent(ref: ArtifactRef): Promise<void> { await this.#run(db => this.#assertIdentity(db, ref)); }
@@ -325,7 +334,7 @@ export class ArtifactJsonIndex {
   }
   async children(ref: ArtifactRef, node: ArtifactJsonNode, after = -1, limit = 64): Promise<readonly ArtifactJsonNode[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) throw Error('artifact-json-children-limit');
-    return this.#run(async db => db.prepare('SELECT * FROM nodes WHERE ref=? AND parent=? AND ordinal>? ORDER BY ordinal LIMIT ?')
+    return this.#run(async db => this.#sql(db, 'SELECT * FROM nodes WHERE ref=? AND parent=? AND ordinal>? ORDER BY ordinal LIMIT ?')
       .all(ref.digest, node.id, after, limit) as unknown as ArtifactJsonNode[]);
   }
   async digestRange(ref: ArtifactRef, node: ArtifactJsonNode): Promise<string> {
@@ -340,7 +349,7 @@ export class ArtifactJsonIndex {
   async references(ref: ArtifactRef): Promise<ArtifactRef[]> {
     const found = new Map<string, ArtifactRef>(); let after = 0;
     for (;;) {
-      const rows = await this.#run(async db => db.prepare(`SELECT d.id,d.lo,d.hi,b.lo blo,b.hi bhi FROM nodes d
+      const rows = await this.#run(async db => this.#sql(db, `SELECT d.id,d.lo,d.hi,b.lo blo,b.hi bhi FROM nodes d
         JOIN nodes b ON b.ref=d.ref AND b.parent=d.parent AND b.field='bytes' AND b.kind='scalar'
         JOIN nodes p ON p.ref=d.ref AND p.id=d.parent AND p.kind='object'
         WHERE d.ref=? AND d.field='digest' AND d.kind='string' AND d.id>? ORDER BY d.id LIMIT 64`).all(ref.digest, after));
@@ -361,7 +370,7 @@ export class ArtifactJsonIndex {
   async text(ref: ArtifactRef, node: ArtifactJsonNode, before = Number.MAX_SAFE_INTEGER, count = 4): Promise<readonly { text: string; offset: number; final: boolean }[]> {
     if (node.kind !== 'string' || !Number.isSafeInteger(before) || before < 0 || !Number.isSafeInteger(count) || count < 1 || count > 4) throw Error('artifact-json-text');
     return this.#run(async db => {
-      const rows = db.prepare('SELECT offset,lo,hi,units FROM pieces WHERE ref=? AND node=? AND offset<? ORDER BY offset DESC LIMIT ?').all(ref.digest, node.id, before, count);
+      const rows = this.#sql(db, 'SELECT offset,lo,hi,units FROM pieces WHERE ref=? AND node=? AND offset<? ORDER BY offset DESC LIMIT ?').all(ref.digest, node.id, before, count);
       const values = [];
       for (const row of rows) {
         const lo = Number(row.lo), hi = Number(row.hi), offset = Number(row.offset);
@@ -379,7 +388,7 @@ export class ArtifactJsonIndex {
     if (node.kind !== 'string' || !Number.isSafeInteger(offset) || offset < 0 || offset > node.units) throw Error('artifact-json-text-range');
     if (offset === node.units) return { text: '', offset, final: true };
     return this.#run(async db => {
-      const row = db.prepare('SELECT offset,lo,hi,units FROM pieces WHERE ref=? AND node=? AND offset<=? ORDER BY offset DESC LIMIT 1').get(ref.digest, node.id, offset);
+      const row = this.#sql(db, 'SELECT offset,lo,hi,units FROM pieces WHERE ref=? AND node=? AND offset<=? ORDER BY offset DESC LIMIT 1').get(ref.digest, node.id, offset);
       if (!row) throw Error('artifact-json-piece-missing');
       const lo = Number(row.lo), hi = Number(row.hi), start = Number(row.offset);
       if (hi - lo > PIECE + 16 || lo < 0 || hi > ref.bytes) throw Error('artifact-json-range');

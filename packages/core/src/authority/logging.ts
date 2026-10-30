@@ -17,7 +17,14 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
     corrupted: { message: "业务权威历史字节与认证索引不符", level: "error", tier: "critical", fields: { error: "text" } },
     work: { message: "业务权威存储工作汇总", level: "info", tier: "critical", fields: {
       operation: "text", preparationMs: "number", releaseMs: "number", retryWaitMs: "number", recoveries: "number", operations: "number", scans: "number", readBytes: "number", queueMs: "number", lockWaitMs: "number", executionMs: "number", retries: "number",
-      preparedFrames: "number",
+      preparedFrames: "number", segmentOpens: "number", maxExecutionMs: "number",
+      lockAcquisitions: "number", lockAfterIdle: "number", lockAfterHoldLimit: "number", lockAfterBoundary: "number", lockAfterHandoff: "number",
+    } },
+    opened: { message: "上一个就绪准备边界以来本进程首次打开的持久投影（含清单与段边界核验、检查点核对），按耗时列出最慢的几个", level: "info", tier: "critical", fields: {
+      boundary: "text", count: "number", totalMs: "number", slowest: { items: "text", maxItems: 8 },
+    } },
+    maintained: { message: "一轮空闲维护整理过的投影，按耗时列出最慢的几个", level: "info", tier: "critical", fields: {
+      count: "number", durationMs: "number", slowest: { items: "text", maxItems: 8 },
     } },
     prepared: { message: "就绪边界依赖的派生状态已在该位置就绪", level: "info", tier: "critical", fields: {
       boundary: "text", lsn: "number", frameEndOffset: "number", projections: "number", durationMs: "number",
@@ -26,7 +33,7 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
       projection: "text", version: "number", outcome: "text", reason: "text",
     } },
     waiting: { message: "业务权威操作仍在等待或执行", level: "info", tier: "critical", fields: { operation: "text", waitFor: "text", durationMs: "number" } },
-    deferred: { message: "业务权威操作被资源准入推迟，由调用方重试", level: "info", tier: "detail", fields: { operation: "text", waitFor: "text", blockedBy: "text", retryAfterMs: "number" } },
+    deferred: { message: "业务权威操作被资源准入推迟，由调用方重试", level: "info", tier: "detail", fields: { operation: "text", waitFor: "text", blockedBy: "text", retryAfterMs: "number", kind: "text" } },
     failed: { message: "业务权威操作未完成", level: "error", tier: "critical", fields: { operation: "text", waitFor: "text", validation: "text", sourceFrames: { items: "text", maxItems: 4 }, failure: { fields: LOG_FAILURE_FIELDS } } },
   },
 };
@@ -40,12 +47,22 @@ export interface AuthorityWork {
   lockWaitMs: number; executionMs: number; releaseMs: number; retryWaitMs: number; retries: number;
   /** 派生状态追平/候选构建实际处理的源帧数（锁内同步与锁外分页准备都计入）。 */
   preparedFrames: number;
+  /** 经准入实际做了的段文件身份核对次数（同一源操作内同一段只核一次）。 */
+  segmentOpens: number;
+  /** 新取得写者锁（新锁会话）的次数；沿用已有会话的操作不计。 */
+  lockAcquisitions: number;
+  /** 新取得锁之前，上一个会话的结束原因：空闲到期、持有上限、操作边界强制释放、同进程另一实例收回。 */
+  lockAfterIdle: number;
+  lockAfterHoldLimit: number;
+  lockAfterBoundary: number;
+  lockAfterHandoff: number;
 }
 const emptyWork = (): AuthorityWork => ({ scans: 0, readBytes: 0, recoveries: 0, queueMs: 0, preparationMs: 0,
-  lockWaitMs: 0, executionMs: 0, releaseMs: 0, retryWaitMs: 0, retries: 0, preparedFrames: 0 });
+  lockWaitMs: 0, executionMs: 0, releaseMs: 0, retryWaitMs: 0, retries: 0, preparedFrames: 0, segmentOpens: 0,
+  lockAcquisitions: 0, lockAfterIdle: 0, lockAfterHoldLimit: 0, lockAfterBoundary: 0, lockAfterHandoff: 0 });
 /** Bounded by phase and finite operation kind, never by business body or operation count. */
 export class AuthorityWorkObserver {
-  #pending = new Map<string, { refs: readonly LogRef[]; data: AuthorityWork & { operation: AuthorityOperation; operations: number } }>();
+  #pending = new Map<string, { refs: readonly LogRef[]; data: AuthorityWork & { operation: AuthorityOperation; operations: number; maxExecutionMs: number } }>();
   #timer: ReturnType<typeof setTimeout> | undefined;
   constructor(private readonly records: LogRecordPort | undefined, private readonly authority: () => string | undefined) {}
   begin(operation: AuthorityOperation) {
@@ -61,6 +78,14 @@ export class AuthorityWorkObserver {
     const timer = this.records ? setInterval(() => emit("waiting", { waitFor, durationMs: Math.round(performance.now() - since) }), 5000) : undefined;
     timer?.unref();
     return { data, stage: (stage: string) => { const previous = waitFor; waitFor = stage; since = performance.now(); return previous; },
+      // 锁外重试前记下这一次被拒的叶：所处阶段、阻塞维度与维护类别；只观测，不改重试
+      deferred: (error: unknown) => {
+        const retryAfterMs = maintenanceRetryDelayMs(error);
+        if (retryAfterMs === undefined || !this.records) return;
+        const { admission, maintenanceKind } = error as StorageMaintenanceAdmissionError;
+        emit("deferred", { waitFor, blockedBy: "blockedBy" in admission ? admission.blockedBy : undefined, retryAfterMs,
+          ...(maintenanceKind ? { kind: maintenanceKind } : {}) });
+      },
       finish: (...failure: [] | [unknown]) => {
         if (finished) return;
         finished = true;
@@ -79,9 +104,11 @@ export class AuthorityWorkObserver {
           const id = this.authority();
           const key = JSON.stringify([operation, refs]);
           if (!this.#pending.has(key) && this.#pending.size >= 8) this.flush();
-          const bucket = this.#pending.get(key) ?? { refs: [...refs, ...(id ? [{ kind: "authority", id }] : [])], data: { ...emptyWork(), operation, operations: 0 } };
+          const bucket = this.#pending.get(key) ?? { refs: [...refs, ...(id ? [{ kind: "authority", id }] : [])], data: { ...emptyWork(), operation, operations: 0, maxExecutionMs: 0 } };
           for (const name of Object.keys(data) as (keyof AuthorityWork)[]) bucket.data[name] += Math.round(data[name]);
           bucket.data.operations++;
+          // 汇总里单次操作的最长锁内执行：用来核对最长一步，而不只看合计与平均
+          bucket.data.maxExecutionMs = Math.max(bucket.data.maxExecutionMs, Math.round(data.executionMs));
           this.#pending.set(key, bucket);
           this.#timer ??= setTimeout(() => this.flush(), 1000);
           this.#timer.unref();

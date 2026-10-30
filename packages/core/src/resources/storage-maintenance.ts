@@ -27,6 +27,7 @@ export const STORAGE_MAINTENANCE_KINDS = [
   "projection-flush",
   "projection-rebuild",
   "projection-scrub",
+  "projection-open",
   "projection-compaction",
   "lifecycle-reconcile",
   "asset-gc",
@@ -51,6 +52,7 @@ export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "projection-flush": "durable-projection-index",
   "projection-rebuild": "durable-projection-index",
   "projection-scrub": "durable-projection-index",
+  "projection-open": "durable-projection-index",
   "projection-compaction": "durable-projection-index",
   "lifecycle-reconcile": "artifact-lifecycle-index",
   "asset-gc": "anchor-asset-maintainer",
@@ -526,6 +528,11 @@ const STORAGE_STEP_BUDGETS: Readonly<
     16 * MIB,
     16_384,
   ),
+  // 投影正常打开的只读步骤。内存按各步同时存活的数据：探测与确认步各一次清单读（原字节、文本、解析对象、
+  // 规范化与认证输入，取清单读的既有估算 4×16 MiB）；段步依次读首尾两条、不同时持有（2×16 MiB 加偏移批）；
+  // 目录页步一页；跨步只留段描述符、目录页指针与清单摘要（至多 5 个描述符，结构上界在 64 KiB 内）。
+  // 读量最重的是段步的首尾两条（各至多 16 MiB 值加键、头与偏移批）；零写与零临时预算，任何写入申领即越界
+  "projection-open": budget(64 * MIB + 64 * 1024, 0, 40 * MIB, 0, 64),
   "projection-compaction": budget(
     32 * MIB,
     256 * MIB,

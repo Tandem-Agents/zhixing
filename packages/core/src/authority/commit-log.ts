@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { setImmediate as yieldToIo } from "node:timers/promises";
 import type { LogRecordPort } from "../logging/contracts.js";
 import { authorityObservationRefs, AuthorityWorkObserver, type AuthorityWork } from "./logging.js";
+import { currentLogPhaseRefs } from "../logging/phase.js";
 import {
   link,
   mkdir,
@@ -165,11 +166,15 @@ const LOCK_SESSION_MAX_HOLD_MS = 500;
 /** 同一进程内处于空闲保留期的写者锁会话；其他实例需要同一把锁时立即收回，不必等保留期结束。 */
 const idleLockSessions = new Map<string, () => Promise<void>>();
 
+/** 会话结束的原因：空闲到期、到达持有上限、操作边界强制释放（失败、只读、不保留）、同进程另一实例收回。只用于换锁观测。 */
+type LockSessionEnd = "idle" | "hold-limit" | "boundary" | "handoff";
 /** 跨连续操作持有的写者锁：省去逐次取锁、放锁的文件往返，不改变每次操作的字节核验。 */
 interface CommitLogLockSession {
   readonly release: () => Promise<void>;
   readonly acquiredAt: number;
-  readonly close: () => Promise<void>;
+  readonly close: (reason: LockSessionEnd) => Promise<void>;
+  /** 同进程另一实例需要同一把锁时收回本空闲会话的入口（登记在 idleLockSessions，按引用比对）。 */
+  readonly handoff: () => Promise<void>;
   idle: ReturnType<typeof setTimeout> | undefined;
   /** 本会话内逐次字节核验共用的读取缓冲。 */
   comparison?: Buffer;
@@ -348,12 +353,24 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #workObserver: AuthorityWorkObserver;
   readonly #checkpointViews = new WeakMap<DurableLogCheckpoint, FileProjectionCursor>();
   #work: AuthorityWork | undefined;
+  /** 投影读取步骤：计入当前操作的段核对次数，再交给调用方给出的准入（没有则直接执行）。 */
+  readonly #projectionReadStep = <T>(step: import('./durable-projection-index.js').DurableProjectionReadStep, operation: () => Promise<T>): Promise<T> => {
+    if (step === 'segment-open' && this.#work) this.#work.segmentOpens++;
+    return this.#runProjectionReadStep ? this.#runProjectionReadStep(step, operation) : operation();
+  };
+  /** 当前源操作的作用域对象；操作结束后不再给出，投影据此只在同一操作内复用段身份核对。 */
+  readonly #currentSourceOperation = (): object | undefined => {
+    const scope = this.#sourceScope.getStore();
+    return scope?.active ? scope : undefined;
+  };
   /** One verified snapshot per exclusive operation; never survives the operation. */
   #operationView: VerifiedWalView | undefined;
   /** 本次持锁操作开头读到的日志文件版本：本操作第一次取尾部时取用一次，不为同一份元数据再开文件；操作结束或追加写入即清除。 */
   #operationMetadata: WalFileVersion | undefined;
   #lockSession: CommitLogLockSession | undefined;
   #lockSessionClosing: Promise<void> | undefined;
+  /** 上一个会话因何结束；下一次取锁时计入换锁观测后清除。 */
+  #lastLockSessionEnd: LockSessionEnd | undefined;
   /** 已进入本日志串行队列（排队或执行中）的加锁操作数。 */
   #lockedOperations = 0;
   readonly rootDir: string;
@@ -387,6 +404,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   // Only byte-validation proofs, never shared mutable envelopes or business state.
   #verifiedTail: VerifiedLogTail | undefined;
   #logId: string | undefined;
+  /** 本进程首次打开的投影及耗时，在下一个就绪准备边界汇总一次后清空（至多 256 项）。 */
+  readonly #openedSinceSummary: { projection: string; durationMs: number }[] = [];
   #logFormat: "legacy" | "versioned" | undefined;
   /** 认证模式（开启启动证明、带版本头的日志、完整性密钥就绪）；每个实例判定一次。 */
   /** 认证模式下本日志的帧索引，与 #verifiedTail 覆盖到同一个尾部。 */
@@ -631,7 +650,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       ...(definition.startAtSource ? { startAtSource: definition.startAtSource } : {}),
       ...(definition.seedAtSource ? { seedAtSource: definition.seedAtSource } : {}),
       storageMaintenance: this.#storageMaintenance,
-      runReadStep: this.#runProjectionReadStep,
+      runReadStep: this.#projectionReadStep,
+      sourceOperation: this.#currentSourceOperation,
       ...(this.#projectionRebuildOverlayBytes === undefined ? {} : { rebuildOverlayBytes: this.#projectionRebuildOverlayBytes }),
     });
     const registered: RegisteredDurableProjection = {
@@ -679,7 +699,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       rootDir: path.join(this.rootDir, 'projections', durableProjectionVersionDirectoryName(binding.projectionId, binding.reducerVersion), identity),
       allowSegmentReclamation: this.#owner, withSourceLock: locked,
       runDetached: operation => this.#sourceScope.exit(operation), storageMaintenance: this.#storageMaintenance,
-      runReadStep: this.#runProjectionReadStep,
+      runReadStep: this.#projectionReadStep, sourceOperation: this.#currentSourceOperation,
     });
     const open = async () => { await state.initialize(checkpoints); await state.refreshPublishedState(); };
     // 续读不保留读视图：消费方按键续读，保留下来的旧代际视图会把这份投影的回收挡到租期结束。
@@ -1015,16 +1035,44 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
    * 其持锁步骤按调用方声明的维护等级准入（宿主为后台），不因持有日志锁提为前台。
    */
   async maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal): Promise<void> {
-    for (const projection of [...this.#durableProjections.values()]) {
-      if (signal.aborted || this.#maintenanceStopped) return;
-      if (!projection.opened || projection.failure !== undefined || !projection.state.isPersistent()) continue;
-      if (!projection.state.hasPendingCompaction() && !hasUnpublishedProgress(projection)) continue;
-      await betweenSteps();
-      if (signal.aborted || this.#maintenanceStopped) return;
-      const scope = { active: true };
-      try { await this.#idleScope.run(scope, () => projection.state.flush({ compact: true, betweenSteps, singleFlush: true })); }
-      finally { scope.active = false; }
+    // 每个投影的整理墙钟（含步间让路）记入本轮汇总，供定位一次会话后哪些投影需要大量整理；只观测
+    const maintained: { projection: string; durationMs: number }[] = [];
+    const round = performance.now();
+    try {
+      for (const projection of [...this.#durableProjections.values()]) {
+        if (signal.aborted || this.#maintenanceStopped) return;
+        if (!projection.opened || projection.failure !== undefined || !projection.state.isPersistent()) continue;
+        if (!projection.state.hasPendingCompaction() && !hasUnpublishedProgress(projection)) continue;
+        await betweenSteps();
+        if (signal.aborted || this.#maintenanceStopped) return;
+        const scope = { active: true }, started = performance.now();
+        try { await this.#idleScope.run(scope, () => projection.state.flush({ compact: true, betweenSteps, singleFlush: true })); }
+        finally {
+          scope.active = false;
+          maintained.push({ projection: projection.state.projectionId, durationMs: Math.round(performance.now() - started) });
+        }
+      }
+    } finally {
+      if (maintained.length) {
+        try {
+          const slowest = [...maintained].sort((a, b) => b.durationMs - a.durationMs).slice(0, 8).map(item => `${item.durationMs}ms ${item.projection}`);
+          this.#records?.record({ event: "maintained", refs: [...currentLogPhaseRefs(), ...(this.#logId ? [{ kind: "authority", id: this.#logId }] : [])],
+            data: { count: maintained.length, durationMs: Math.round(performance.now() - round), slowest } });
+        } catch { /* Observation never changes authority outcome. */ }
+      }
     }
+  }
+
+  /**
+   * 空闲追平：把点名的派生投影追到日志头（同 prepareProjections，不带边界、不记水位）。与 maintainIdleProjections
+   * 同一可放弃边界：持锁步骤按调用方声明的维护等级准入（宿主为后台），争用时放锁、锁外重试，等锁的前台先行；
+   * 中止或停止后不再发起。
+   */
+  async catchUpIdleProjections(ids: readonly string[], signal: AbortSignal): Promise<void> {
+    if (signal.aborted || this.#maintenanceStopped) return;
+    const scope = { active: true };
+    try { await this.#idleScope.run(scope, () => this.prepareProjections(ids)); }
+    finally { scope.active = false; }
   }
 
   async #stopStorageMaintenance(): Promise<void> {
@@ -2010,9 +2058,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   async #openDurableProjection(projection: RegisteredDurableProjection, head: DurableLogCheckpoint): Promise<void> {
     if (projection.failure !== undefined) return;
     const origin = { authority: this.#durableCheckpoint(0) };
+    const started = performance.now();
     try {
       const reopening = projection.opened === true;
       await projection.state.initialize(origin, { authority: head });
+      // 本进程首次打开（任一入口）计时，累积到下一个就绪准备边界汇总；只观测
+      if (!reopening && this.#openedSinceSummary.length < 256) {
+        this.#openedSinceSummary.push({ projection: projection.state.projectionId, durationMs: Math.round(performance.now() - started) });
+      }
       // 其他实例只能持锁发布：只有本实例新取得锁会话时，才需要采用他们已发布的清单；
       // 发布前的维护步骤另在源锁内刷新，避免旧清单覆盖其他实例。
       if (reopening && !this.#refreshedProjections.has(projection)) await projection.state.refreshPublishedState();
@@ -2155,6 +2208,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     // 未指定时准备全部已登记投影：一个投影的永久故障不升级为全局阻塞，它被排除在水位集合外，
     // 相关读写仍由其自身的不可用状态拒绝。显式点名的投影必须全部就绪。
     const watermark = await this.#prepareProjectionsAt(ids ?? [...this.#durableProjections.keys()], ids === undefined);
+    if (boundary && this.#openedSinceSummary.length) {
+      // 上一个边界以来本进程首次打开的投影：记总数、总耗时与最慢的前 8 个（字段有界，只有投影标识与毫秒）
+      const opened = this.#openedSinceSummary.splice(0);
+      try {
+        const slowest = [...opened].sort((a, b) => b.durationMs - a.durationMs).slice(0, 8).map(item => `${item.durationMs}ms ${item.projection}`);
+        this.#records?.record({ event: "opened", refs: [...currentLogPhaseRefs(), { kind: "authority", id: watermark.logId }],
+          data: { boundary, count: opened.length, totalMs: opened.reduce((sum, item) => sum + item.durationMs, 0), slowest } });
+      } catch { /* Observation never changes authority outcome. */ }
+    }
     if (boundary) {
       this.#records?.record({ event: "prepared", refs: [{ kind: "authority", id: watermark.logId }], data: {
         boundary, lsn: watermark.lsn, frameEndOffset: watermark.frameEndOffset, projections: watermark.projections.length,
@@ -4103,6 +4165,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         ) {
           throw error;
         }
+        observation.deferred(error);
         observation.stage("maintenance-retry");
         const retrying = performance.now();
         await waitForMaintenanceRetry(
@@ -4120,8 +4183,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (held) {
       clearTimeout(held.idle);
       held.idle = undefined;
-      if (idleLockSessions.get(this.#lockPath) === held.close) idleLockSessions.delete(this.#lockPath);
-      return held;
+      if (idleLockSessions.get(this.#lockPath) === held.handoff) idleLockSessions.delete(this.#lockPath);
+      // 已到持有上限的会话不再接续新操作（空闲计时可能被延后或被排队操作跳过）：先放锁，再按原路径重新取得
+      if (performance.now() - held.acquiredAt < this.#lockSessionMaxHoldMs) return held;
+      await held.close("hold-limit");
     }
     await this.#lockSessionClosing?.catch(() => undefined);
     // 同进程另一实例在空闲保留期持有同一把锁：立即收回，按原有语义由文件锁仲裁。
@@ -4145,9 +4210,18 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const session: CommitLogLockSession = {
       release,
       acquiredAt: performance.now(),
-      close: () => this.#closeLockSession(session),
+      close: (reason) => this.#closeLockSession(session, reason),
+      handoff: () => this.#closeLockSession(session, "handoff"),
       idle: undefined,
     };
+    // 换锁观测：本次新取得锁，以及上一个会话因何结束
+    observation.data.lockAcquisitions++;
+    const ended = this.#lastLockSessionEnd;
+    this.#lastLockSessionEnd = undefined;
+    if (ended === "idle") observation.data.lockAfterIdle++;
+    else if (ended === "hold-limit") observation.data.lockAfterHoldLimit++;
+    else if (ended === "boundary") observation.data.lockAfterBoundary++;
+    else if (ended === "handoff") observation.data.lockAfterHandoff++;
     // 不持锁期间其他实例可能已持锁发布投影清单：新会话里再次打开投影时须重新采纳。
     this.#refreshedProjections.clear();
     this.#lockSession = session;
@@ -4156,25 +4230,33 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
 
   /** 失败或持有到上限即在本操作边界释放；后续已排队的操作直接沿用；否则短暂保留以接住紧随其后的操作。 */
   async #leaveLockSession(session: CommitLogLockSession, failed: boolean): Promise<void> {
-    if (failed || this.#readOnly || this.#lockSessionLingerMs === 0 || performance.now() - session.acquiredAt >= this.#lockSessionMaxHoldMs) {
-      await session.close();
+    if (failed || this.#readOnly || this.#lockSessionLingerMs === 0) {
+      await session.close("boundary");
+      return;
+    }
+    const remaining = this.#lockSessionMaxHoldMs - (performance.now() - session.acquiredAt);
+    if (remaining <= 0) {
+      await session.close("hold-limit");
       return;
     }
     if (this.#lockedOperations > 1) return;
+    // 空闲保留不越过剩余持有预算：持有预算先用完时按持有上限放锁
+    const holdBound = remaining < this.#lockSessionLingerMs;
     session.idle = setTimeout(() => {
-      // 计时到期时若已有操作排进队列，由它沿用并在结束时重新计时。
-      if (this.#lockedOperations === 0) void session.close().catch(() => undefined);
-    }, this.#lockSessionLingerMs);
+      // 计时到期时若已有操作排进队列，由它沿用并在结束时重新计时；已到上限的由它在入口先放锁。
+      if (this.#lockedOperations === 0) void session.close(holdBound ? "hold-limit" : "idle").catch(() => undefined);
+    }, holdBound ? remaining : this.#lockSessionLingerMs);
     session.idle.unref?.();
-    idleLockSessions.set(this.#lockPath, session.close);
+    idleLockSessions.set(this.#lockPath, session.handoff);
   }
 
-  #closeLockSession(session: CommitLogLockSession): Promise<void> {
+  #closeLockSession(session: CommitLogLockSession, reason: LockSessionEnd): Promise<void> {
     if (this.#lockSession !== session) return this.#lockSessionClosing ?? Promise.resolve();
     clearTimeout(session.idle);
     session.idle = undefined;
-    if (idleLockSessions.get(this.#lockPath) === session.close) idleLockSessions.delete(this.#lockPath);
+    if (idleLockSessions.get(this.#lockPath) === session.handoff) idleLockSessions.delete(this.#lockPath);
     this.#lockSession = undefined;
+    this.#lastLockSessionEnd = reason;
     const closing: Promise<void> = session.release().finally(() => {
       if (this.#lockSessionClosing === closing) this.#lockSessionClosing = undefined;
     });
