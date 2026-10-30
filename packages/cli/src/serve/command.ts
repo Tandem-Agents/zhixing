@@ -987,6 +987,7 @@ async function runServerProcess(
     onFailure: (error, context) => recordConversationFailure(startupRecords, error, context),
     deviceCapacity: deviceCapacity.arbiter,
     foregroundActivity: deviceCapacity.foreground,
+    whenQuiet: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
     onRunStatus: createExtensionStatusObserver(extensionHandle.port),
     mcp: mcpApplication,
     conversationNamingStorage: conversationStorage.naming,

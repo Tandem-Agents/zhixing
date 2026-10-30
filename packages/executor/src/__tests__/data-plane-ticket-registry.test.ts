@@ -663,9 +663,14 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     const assignments = { dataPlaneBinding: vi.fn(async () => binding),
       dataPlaneBindings: vi.fn(async (requests: readonly unknown[]) => requests.map(() => binding)) };
     const spool = { deferRecoveredConsumers: vi.fn(async () => {}), qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
-    const registry = new DataPlaneTicketRegistry({ log: new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock }),
-      executorId: "executor-fixed", verifier: identity, assignments, spool, clock, monotonicClock: () => 1000 });
-    for (let i = 0; i < 35; i++) await registry.accept(createTicketAt("run-observe", "recovery-" + i, "2026-07-23T00:00:00.000Z", "2026-07-23T00:05:00.000Z", identity, "recovery-assignment-" + i % 8));
+    // 资格确认写入前退出：35 张都是真实的恢复欠账（分两个写者进程接纳，各自都不触发本进程的未确认上界）
+    const registryOptions = { log: new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock }),
+      executorId: "executor-fixed", verifier: identity, assignments, spool, clock, monotonicClock: () => 1000, confirmQualifications: false };
+    for (const [from, to] of [[0, 20], [20, 35]] as const) {
+      const writer = new DataPlaneTicketRegistry(registryOptions);
+      for (let i = from; i < to; i++) await writer.accept(createTicketAt("run-observe", "recovery-" + i, "2026-07-23T00:00:00.000Z", "2026-07-23T00:05:00.000Z", identity, "recovery-assignment-" + i % 8));
+    }
+    const registry = new DataPlaneTicketRegistry(registryOptions);
     assignments.dataPlaneBinding.mockClear();
     const gates: ReturnType<typeof Promise.withResolvers<void>>[] = [];
     let active = 0, maximum = 0, released = false, done = false;
@@ -794,9 +799,12 @@ it('retires a recovered invalid binding batch durably before revoking its consum
   const assignments = { dataPlaneBinding: vi.fn(async () => binding),
     dataPlaneBindings: vi.fn(async (requests: readonly unknown[]) => requests.map(() => undefined)) };
   const spool = { deferRecoveredConsumers: vi.fn(async () => {}), qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
-  const options = { log, executorId: 'executor-fixed', verifier: identity, assignments, spool, clock, monotonicClock: () => 1000 };
-  const registry = new DataPlaneTicketRegistry(options);
-  for (let i = 0; i < 35; i++) await registry.accept(createTicketAt('run-observe', 'invalid-recovery-' + i, '2026-07-23T00:00:00.000Z', '2026-07-23T00:05:00.000Z', identity));
+  // 资格确认写入前退出：35 张都是真实的恢复欠账（分两个写者进程接纳，各自都不触发本进程的未确认上界）
+  const options = { log, executorId: 'executor-fixed', verifier: identity, assignments, spool, clock, monotonicClock: () => 1000, confirmQualifications: false };
+  for (const [from, to] of [[0, 20], [20, 35]] as const) {
+    const writer = new DataPlaneTicketRegistry(options);
+    for (let i = from; i < to; i++) await writer.accept(createTicketAt('run-observe', 'invalid-recovery-' + i, '2026-07-23T00:00:00.000Z', '2026-07-23T00:05:00.000Z', identity));
+  }
   vi.mocked(spool.qualifyConsumer).mockClear(); assignments.dataPlaneBinding.mockClear();
   vi.mocked(spool.revokeConsumer).mockImplementation(async input => {
     if (input.consumer.kind !== 'surface-ticket') throw Error('Unexpected recovered consumer');

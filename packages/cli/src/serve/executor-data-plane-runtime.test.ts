@@ -34,6 +34,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       stopStorageMaintenance = vi.fn();
     }
     class Tickets {
+      maintainQualifications = vi.fn(async () => 0); flushQualifications = vi.fn(async () => {});
       recover = recover;
       maintain = maintainTickets;
     }
@@ -80,6 +81,34 @@ describe("ExecutorDataPlaneRuntime", () => {
         },
       }),
     ).resolves.toBe(opened);
+    await runtime.close();
+  });
+
+  it("lets each maintenance obligation bear its own failure without starving the others", async () => {
+    const reclaimDue = vi.fn(async (assignmentId: string) => assignmentId === "assignment-2");
+    const maintainQualifications = vi.fn(async () => 3);
+    class Spool {
+      assignmentIdPage = vi.fn(async () => ["assignment-1", "assignment-2"]);
+      reclaimDue = reclaimDue;
+      closeAssignmentScan = vi.fn(async () => undefined);
+      stopStorageMaintenance = vi.fn();
+    }
+    class Tickets {
+      recover = vi.fn(async () => undefined);
+      // 过期退休后的物理撤销被背压：这一义务失败
+      maintain = vi.fn(async () => { throw new Error("revocation backpressured"); });
+      maintainQualifications = maintainQualifications; flushQualifications = vi.fn(async () => {});
+    }
+    const runtime = composeRuntime({
+      zhixingHome: "X:/zhixing-home",
+      authority: { artifacts: {}, executorLog: {}, executorId: "executor-1", verifier: {} } as never,
+      module: { AssignmentStreamSpool: Spool, AssignmentStreamWriter: class {}, DataPlaneTicketRegistry: Tickets } as unknown as ExecutorRoleModule,
+    }, { dataPlaneBinding: vi.fn(), authorizeOwnerRelay: vi.fn() } as never);
+    await runtime.start();
+    // 本轮照样报告失败，但资格补登与各分派回收都轮到了
+    await expect(runtime.maintain()).rejects.toThrow("revocation backpressured");
+    expect(maintainQualifications).toHaveBeenCalledOnce();
+    expect(reclaimDue.mock.calls.map(([assignmentId]) => assignmentId)).toEqual(["assignment-1", "assignment-2"]);
     await runtime.close();
   });
 
@@ -130,6 +159,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       stopStorageMaintenance = vi.fn();
     }
     class Tickets {
+      maintainQualifications = vi.fn(async () => 0); flushQualifications = vi.fn(async () => {});
       recover = vi.fn(async () => undefined);
       maintain = vi.fn(
         async (
@@ -190,7 +220,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       closeAssignmentScan = vi.fn(async () => undefined);
       stopStorageMaintenance = vi.fn();
     }
-    class Tickets {}
+    class Tickets { maintainQualifications = vi.fn(async () => 0); flushQualifications = vi.fn(async () => {}); }
     class Writer {}
     const createAssignment = vi.fn(() => {
       throw new Error("assignment construction failed");
@@ -230,6 +260,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       | undefined;
     class Spool {}
     class Tickets {
+      maintainQualifications = vi.fn(async () => 0); flushQualifications = vi.fn(async () => {});
       constructor(options: { readonly assignments: typeof ticketAssignments }) {
         ticketAssignments = options.assignments;
       }
@@ -283,7 +314,7 @@ describe("ExecutorDataPlaneRuntime", () => {
 
   it("owns concrete spool and tickets while exposing one finite Mesh service lifecycle", () => {
     class Spool {}
-    class Tickets {}
+    class Tickets { maintainQualifications = vi.fn(async () => 0); flushQualifications = vi.fn(async () => {}); }
     class Writer {}
     const runtime = composeRuntime({
       zhixingHome: "X:/zhixing-home",
@@ -327,7 +358,7 @@ describe("ticket startup recovery ownership", () => {
   function fixture(recover: () => Promise<void>) {
     const closeScan = vi.fn(async () => undefined);
     class Spool { closeAssignmentScan = closeScan; stopStorageMaintenance = vi.fn(); }
-    class Tickets { recover = recover; }
+    class Tickets { recover = recover; maintainQualifications = vi.fn(async () => 0); flushQualifications = vi.fn(async () => {}); }
     const runtime = composeRuntime({ zhixingHome: "X:/recovery", authority: { artifacts: {}, executorLog: {}, executorId: "executor-1", verifier: {} } as never,
       module: { AssignmentStreamSpool: Spool, AssignmentStreamWriter: class {}, DataPlaneTicketRegistry: Tickets } as unknown as ExecutorRoleModule });
     return { runtime, closeScan };

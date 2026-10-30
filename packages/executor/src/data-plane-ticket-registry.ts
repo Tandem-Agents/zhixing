@@ -45,6 +45,12 @@ const MAINTENANCE_FRONTIER_STEPS = 8;
 const MAINTENANCE_EXPIRY_BATCHES = 8;
 /** 归约接受的单步上限（不小于写入方的批量），一条前沿记录的校验与剪除都不超过它。 */
 const MAX_RETIREMENT_FRONTIER_BATCH = 128;
+/** 资格已耐久的待确认票据凑满这么多张即合批确认（每个分派一条记录），也是一条确认记录的上限。 */
+const QUALIFICATION_CONFIRM_BATCH = 32;
+/** 不足一批时，最后一次登记资格之后至多等这么久就确认：正常接纳的欠账在这个窗口内核销。 */
+const QUALIFICATION_CONFIRM_DELAY_MS = 1_000;
+/** 周期维护每轮至多为这么多张不在本进程待确认集里的欠账补登资格并确认。 */
+const MAINTENANCE_QUALIFICATION_BATCH = 8;
 
 type TicketRegistryRecord =
   | {
@@ -68,6 +74,15 @@ type TicketRegistryRecord =
       readonly ticketDigest?: string;
       readonly reason: "expired" | "invalidated" | "revoked";
       readonly retainUntil: string;
+    }
+  | {
+      /**
+       * 这些已接纳票据在 spool 上的资格已经耐久：核销它们的恢复欠账。接纳时刻随票据给出，
+       * 同一票据退休后再接纳是另一笔欠账，不能用前一轮的资格核销。
+       */
+      readonly t: "data-plane-ticket-qualified";
+      readonly assignmentId: string;
+      readonly tickets: readonly { readonly ticketId: string; readonly acceptedAt: string }[];
     }
   | {
       /** 恢复据以把已过期票据排除在外的时刻：耐久的时间下界，冷重开后“现在”不早于它。 */
@@ -113,8 +128,14 @@ interface TicketView {
   frontier(): Promise<string | undefined>;
   /** 全部在用票据（经到期索引定位）。 */
   accepted(): Promise<readonly AcceptedTicket[]>;
-  /** 到期晚于 at 的在用票据（恢复只需要它们）。 */
+  /** 到期晚于 at 的在用票据。 */
   acceptedAfter(at: string): Promise<readonly AcceptedTicket[]>;
+  /** 到期晚于 at、资格尚未确认耐久的在用票据（恢复欠账）：只随欠账数增长，不随有效期内的接纳总数增长。 */
+  pendingAccepted(at: string): Promise<readonly AcceptedTicket[]>;
+  /** 这一次接纳是否仍有资格欠账。 */
+  pending(accepted: AcceptedTicket): Promise<boolean>;
+  /** 欠账索引里到期晚于 at、键在 after 之后的至多 limit 张（索引层取页，读取与物化都以 limit 为界）。 */
+  pendingPage(at: string, after: string | undefined, limit: number): Promise<readonly { readonly key: string; readonly accepted: AcceptedTicket }[]>;
   /** 到期不晚于 at 的在用票据中，按到期时刻的前 limit 张。 */
   expiredThrough(at: string, limit: number): Promise<readonly AcceptedTicket[]>;
   /** 本日志重放出的时间前沿：已接纳票据的接纳时刻、恢复记下的观测时刻与退休前沿中最晚者。 */
@@ -159,6 +180,15 @@ export interface DataPlaneTicketRegistryOptions {
   readonly spool: AssignmentStreamSpool;
   readonly clock?: () => string;
   readonly monotonicClock?: () => number;
+  /** 不足一批的待确认票据最多等多久合批确认；缺省 QUALIFICATION_CONFIRM_DELAY_MS。 */
+  readonly qualificationConfirmDelayMs?: number;
+  /** false：不自动确认，等同进程总在确认写入前退出（欠账留给恢复与维护）；flushQualifications 照常可用。 */
+  readonly confirmQualifications?: boolean;
+  /**
+   * 前台安静判定（取消时立即返回、不抛出）：给出时，定时的合批确认先在登记表队列与日志锁之外等它返回再排进队列，
+   * 不与前台的派发、运行争同一条日志。新接纳前的上界冲刷与停止冲刷不等它。
+   */
+  readonly whenQuiet?: (signal: AbortSignal) => Promise<void>;
 }
 
 export interface AuthorizedDataPlaneTicket {
@@ -189,6 +219,21 @@ export class DataPlaneTicketRegistry {
   // 物理撤销已成功、完成回执尚未耐久的票据（票据 → 派发）。回执耐久后即淘汰，之后的幂等由退休行的
   // revocation 与未撤销目录承担；授权始终读耐久退休，新的登记表会补做全部未完成的撤销
   readonly #revokedConsumers = new Map<string, string>();
+  // spool 资格已耐久、确认尚未写入的票据（票据 → 这一次接纳的时刻与分派）。合批确认提交后淘汰；
+  // 确认失败时保留待下一批，耐久欠账在下次启动照常恢复
+  readonly #qualified = new Map<string, { readonly assignmentId: string; readonly acceptedAt: string }>();
+  // 本进程接纳已耐久、spool 资格登记失败的票据：与待确认票据合计受同一上界约束，冲刷时先重试登记
+  readonly #owed = new Map<string, AcceptedTicket>();
+  // 维护补登的续做位置：上一页最后一张欠账的索引键，下一轮从它之后取页，到尾回到开头
+  #qualificationCursor: string | undefined;
+  readonly #qualificationConfirmDelayMs: number;
+  readonly #confirmQualifications: boolean;
+  #confirmTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #whenQuiet: ((signal: AbortSignal) => Promise<void>) | undefined;
+  // 停止冲刷时取消仍在等前台安静的定时确认
+  readonly #quiet = new AbortController();
+  // 一次定时确认正在等前台安静：它排进队列时会合批全部待确认票据，期间不再另起计时
+  #confirmWaiting = false;
   readonly #projectionId: string;
   // 不可回退有效时钟的锚定：本进程任一次有效时钟观测值与当时的单调钟读数。“现在”取
   // max(墙钟, 锚定 + 单调流逝, 日志时间前沿)，日志时间前沿在每次读写时于锁内同一位置读取；
@@ -204,7 +249,10 @@ export class DataPlaneTicketRegistry {
     this.#spool = options.spool;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
-    this.#floor = { wall: Date.parse(this.#clock()), monotonic: this.#monotonicClock() };
+    this.#qualificationConfirmDelayMs = options.qualificationConfirmDelayMs ?? QUALIFICATION_CONFIRM_DELAY_MS;
+    this.#confirmQualifications = options.confirmQualifications ?? true;
+    this.#whenQuiet = options.whenQuiet;
+    this.#floor ={ wall: Date.parse(this.#clock()), monotonic: this.#monotonicClock() };
     // 生产装配在首次写入前已登记同一定义；直接构造（测试、新 home）在此登记，重复登记幂等
     registerDataPlaneTicketProjection(this.#log, this.#verifier, this.#executorId);
     this.#projectionId = dataPlaneTicketProjectionId(this.#executorId);
@@ -217,6 +265,7 @@ export class DataPlaneTicketRegistry {
       throw new TypeError("Data-plane ticket targets a different executor");
     }
     await this.#operations.run(async () => {
+      await this.#boundUnconfirmed();
       const projected = await this.#read(async view => ({ existing: await view.ticket(ticket.ticketId), frontier: await view.frontier(), at: this.#nowIso() }));
       const existing = projected.existing;
       if (existing?.s === "a") {
@@ -351,10 +400,16 @@ export class DataPlaneTicketRegistry {
         this.#revokedConsumers.delete(ticket.ticketId);
         this.#pendingRevocations.delete(ticket.ticketId);
       }
-      await this.#restoreAcceptedConsumer(
-        accepted,
-        transaction.value.existing,
-      );
+      try {
+        await this.#restoreAcceptedConsumer(
+          accepted,
+          transaction.value.existing,
+        );
+      } catch (error) {
+        // 接纳已耐久、资格未登记：记为本进程欠下的确认，下一次新接纳耐久前重试，并计入同一上界
+        if (accepted.ticket.kind !== "abort") this.#owed.set(accepted.ticket.ticketId, accepted);
+        throw error;
+      }
     });
     return ticket;
   }
@@ -474,11 +529,12 @@ export class DataPlaneTicketRegistry {
   async recover(): Promise<void> {
     await this.maintain(undefined, 0, 0, 0);
     await this.#operations.run(async () => {
-      // 只读尚未到期的在用票据（经到期索引定位），不回放历史；已过期未退休的积压不进恢复，
-      // 对它的访问由授权按有效时钟判过期拒绝，退休由周期维护按批续做。排除所依据的时刻先耐久记下
+      // 只读资格欠账里尚未到期的票据：资格已耐久并确认的票据不需要恢复（spool 自身留存其资格，
+      // 授权每次重查绑定，过期退休与物理撤销由周期维护按批续做）。已过期未退休的积压不进恢复，
+      // 对它的访问由授权按有效时钟判过期拒绝。排除所依据的时刻先耐久记下
       const at = await this.#read(async () => this.#nowIso());
       await this.#recordObservedTime(at);
-      const entries = await this.#read(view => view.acceptedAfter(at));
+      const entries = await this.#read(view => view.pendingAccepted(at));
       const recovered = new Map<string, StoredTicket>(entries.map(entry => [entry.ticket.ticketId, { s: "a", ...entry }]));
       const pending = new Set<Promise<void>>();
       let failed = false;
@@ -655,6 +711,115 @@ export class DataPlaneTicketRegistry {
       return;
     }
     await this.#qualify(accepted.ticket, authorization.value.expiresAt);
+    // qualifyConsumer 返回时这一资格已在 spool 上耐久且一致，这一次接纳的欠账可以核销
+    this.#noteQualified(accepted);
+  }
+
+  /**
+   * 新接纳耐久之前，把本进程欠下的确认（资格已耐久待确认的、登记失败的）压回一批之内：先重试登记失败的，
+   * 再合批确认。任何一步失败，这次接纳就在耐久之前失败；已经成功的接纳不受影响。在登记表队列内调用，
+   * 不依赖定时确认按时运行。
+   */
+  async #boundUnconfirmed(): Promise<void> {
+    if (this.#qualified.size + this.#owed.size < QUALIFICATION_CONFIRM_BATCH) return;
+    for (const [ticketId, accepted] of [...this.#owed]) {
+      await this.#restoreAcceptedConsumer(accepted, true);
+      // 登记成功已转入待确认；授权失效的已退休（欠账随退休核销）
+      if (this.#owed.get(ticketId) === accepted) this.#owed.delete(ticketId);
+    }
+    await this.#confirmQualified();
+  }
+
+  #noteQualified(accepted: AcceptedTicket): void {
+    if (this.#owed.get(accepted.ticket.ticketId)?.acceptedAt === accepted.acceptedAt) this.#owed.delete(accepted.ticket.ticketId);
+    this.#qualified.set(accepted.ticket.ticketId, { assignmentId: accepted.ticket.assignmentId, acceptedAt: accepted.acceptedAt });
+    if (!this.#confirmQualifications) return;
+    this.#scheduleConfirmation(this.#qualified.size >= QUALIFICATION_CONFIRM_BATCH ? 0 : this.#qualificationConfirmDelayMs);
+  }
+
+  /**
+   * 合批确认排进登记表队列，不让接纳或授权等它；已有更早的确认计划时只会提前、不会推后。确认是后台工作：
+   * 到点后先在队列与日志锁之外等前台安静，等待期间接纳、授权与上界冲刷照常走队列。
+   */
+  #scheduleConfirmation(delayMs: number): void {
+    if (this.#confirmWaiting) return;
+    if (this.#confirmTimer && delayMs > 0) return;
+    if (this.#confirmTimer) clearTimeout(this.#confirmTimer);
+    this.#confirmTimer = setTimeout(() => {
+      this.#confirmTimer = undefined;
+      // 失败只留下耐久欠账与进程内标记：下一次登记资格、周期维护或停止冲刷会再确认，下次启动照常恢复
+      void (async () => {
+        if (this.#whenQuiet && !this.#quiet.signal.aborted) {
+          this.#confirmWaiting = true;
+          try { await this.#whenQuiet(this.#quiet.signal); } finally { this.#confirmWaiting = false; }
+        }
+        await this.#operations.run(() => this.#confirmQualified());
+      })().catch(() => undefined);
+    }, delayMs);
+    this.#confirmTimer.unref?.();
+  }
+
+  /** 在登记表队列内调用：把进程内待确认票据按批写成确认记录，只核销同一次接纳、仍有欠账的票据。 */
+  async #confirmQualified(): Promise<void> {
+    while (this.#qualified.size) {
+      const batch = [...this.#qualified].slice(0, QUALIFICATION_CONFIRM_BATCH);
+      await this.#transact<void>(async view => {
+        const current = await view.tickets(batch.map(([ticketId]) => ticketId));
+        const byAssignment = new Map<string, { ticketId: string; acceptedAt: string }[]>();
+        for (const [index, [ticketId, noted]] of batch.entries()) {
+          const stored = current[index];
+          // 已退休、已换一次接纳或已核销的票据不再写确认
+          if (stored?.s !== "a" || stored.ticket.assignmentId !== noted.assignmentId || stored.acceptedAt !== noted.acceptedAt) continue;
+          if (!await view.pending(stored)) continue;
+          const group = byAssignment.get(noted.assignmentId) ?? [];
+          group.push({ ticketId, acceptedAt: noted.acceptedAt });
+          byAssignment.set(noted.assignmentId, group);
+        }
+        const entries = [...byAssignment].map(([assignmentId, tickets]) =>
+          ticketRecord(assignmentId, { t: "data-plane-ticket-qualified", assignmentId, tickets }));
+        return entries.length ? { kind: "append", entries, value: undefined } : { kind: "return", value: undefined };
+      });
+      // 交易已提交：这一批要么本次核销，要么此前已核销、已退休或已换代，进程内标记都不再需要；
+      // 交易抛错（结果未知）时走不到这里，标记保留待重试
+      for (const [ticketId, noted] of batch) if (this.#qualified.get(ticketId) === noted) this.#qualified.delete(ticketId);
+    }
+  }
+
+  /** 停止前把资格已耐久的待确认票据合批确认；失败只留下耐久欠账，下次启动照常恢复。 */
+  async flushQualifications(): Promise<void> {
+    if (this.#confirmTimer) clearTimeout(this.#confirmTimer);
+    this.#confirmTimer = undefined;
+    // 停止冲刷不等前台安静；仍在等待的定时确认随之返回（入队后发现已无待确认票据）
+    this.#quiet.abort();
+    await this.#operations.run(() => this.#confirmQualified());
+  }
+
+  /**
+   * 周期维护：为不在本进程待确认集里的欠账（接纳耐久后登记前崩溃、登记失败、恢复时只延后登记的）
+   * 补登 spool 资格并确认，每轮至多 limit 张。补登走与接纳重放相同的授权与登记路径：授权已失效的
+   * 退休并撤销（退休随即核销欠账）；单张失败（例如流已永久回收）不阻断其余，它的欠账保留到到期退休。
+   */
+  async maintainQualifications(runPhysicalStep?: PhysicalStorageStepRunner, limit = MAINTENANCE_QUALIFICATION_BATCH): Promise<number> {
+    const step = runPhysicalStep ?? ((operation) => operation());
+    // 索引层只取一页：从上一轮停下的位置之后续做，到尾回到开头；读取与物化都以 limit 为界
+    const page = await this.#operations.run(() => this.#read(async view => {
+      const at = this.#nowIso();
+      const next = await view.pendingPage(at, this.#qualificationCursor, limit);
+      return next.length || this.#qualificationCursor === undefined ? next : view.pendingPage(at, undefined, limit);
+    }));
+    this.#qualificationCursor = page.at(-1)?.key;
+    const failures: unknown[] = [];
+    let restored = 0;
+    for (const { accepted } of page) {
+      if (this.#qualified.has(accepted.ticket.ticketId)) continue;
+      restored++;
+      // 单张失败保留它的欠账，下一遍再试；不挡住同页其后与之后各页的义务
+      try { await this.#operations.run(() => step(() => this.#restoreAcceptedConsumer(accepted, true))); }
+      catch (error) { failures.push(error); }
+    }
+    await this.#operations.run(() => step(() => this.#confirmQualified()));
+    if (failures.length) throw failures.length === 1 ? failures[0] : new AggregateError(failures, "Ticket qualification maintenance left obligations");
+    return restored;
   }
 
   async #authorizeUnlocked(
@@ -862,10 +1027,16 @@ const TICKET_PREFIX = "t:";
 const EXPIRY_PREFIX = "x:";
 const RETAIN_PREFIX = "k:";
 const UNREVOKED_PREFIX = "u:";
+// 资格欠账：已接纳、spool 资格尚未确认耐久的非中止票据，键 q:<到期时刻>:<id>。按到期排序，恢复从“现在”之后
+// 起扫，已过期票据与被核销、退休留下的墓碑不进入扫描范围（与到期索引同口径）
+const PENDING_PREFIX = "q:";
 const FRONTIER_KEY = "f";
 const TIME_FRONTIER_KEY = "o";
 // 2：归约另维护时间前沿行（接纳时刻、观测时刻、退休前沿取最晚）
-const TICKET_INDEX_REDUCER_VERSION = 2;
+// 3：归约另维护资格欠账行；恢复只枚举欠账，资格确认记录按同一次接纳核销
+const TICKET_INDEX_REDUCER_VERSION = 3;
+
+const pendingKey = (accepted: AcceptedTicket) => `${PENDING_PREFIX}${acceptedTicketExpiresAt(accepted)}:${accepted.ticket.ticketId}`;
 
 /**
  * 票据登记表投影。按执行端身份各一份（退休前沿只认本执行端的流），与原先每个登记表实例的
@@ -997,6 +1168,25 @@ function ticketView(current: DurableProjectionReadContext): TicketView & {
       const start: Lower = "gte" in lower && lower.gte > from ? lower : { gte: from };
       const ids = (await scanAll<TicketIndexEntry>(start, `${EXPIRY_PREFIX}\uffff`)).map(entry => entry.ticketId);
       return (await tickets(ids)).flatMap(entry => entry?.s === "a" ? [acceptedOf(entry)] : []);
+    },
+    // \u8d44\u683c\u6b20\u8d26\u91cc\u5230\u671f\u665a\u4e8e at \u7684\u7968\u636e\uff1a\u6b20\u8d26\u884c\u53ea\u5c5e\u4e8e\u5728\u7528\u7968\u636e\uff0c\u9000\u4f11\u6216\u6838\u9500\u5373\u5220\u9664\uff1b\u4ece q:<at>; \u8d77\u626b\uff0c\u626b\u63cf\u91cf\u968f\u6709\u6548\u671f\u5185\u7684\u6b20\u8d26\u589e\u957f
+    async pendingAccepted(at) {
+      assertCanonicalTime(at, "Ticket registry observation time");
+      const ids = (await scanAll<TicketIndexEntry>({ gte: `${PENDING_PREFIX}${at};` }, `${PENDING_PREFIX}\uffff`)).map(entry => entry.ticketId);
+      return (await tickets(ids)).flatMap(entry => entry?.s === "a" ? [acceptedOf(entry)] : []);
+    },
+    pending: async accepted => (await current.get(pendingKey(accepted))) !== undefined,
+    async pendingPage(at, after, limit) {
+      assertCanonicalTime(at, "Ticket registry observation time");
+      const from = `${PENDING_PREFIX}${at};`;
+      const lower: Lower = after !== undefined && after >= from ? { gt: after } : { gte: from };
+      const page = await current.scan({ ...lower, lt: `${PENDING_PREFIX}￿` }, limit);
+      if (page.continuation) current.releaseContinuation?.(page.continuation);
+      const stored = await tickets(page.entries.map(entry => (entry.value as unknown as TicketIndexEntry).ticketId));
+      return page.entries.flatMap((entry, index) => {
+        const value = stored[index];
+        return value?.s === "a" ? [{ key: entry.key, accepted: acceptedOf(value) }] : [];
+      });
     },
     // 到期不晚于 at 的在用票据中按到期时刻的前 limit 张（读够即交还续读）
     async expiredThrough(at, limit) {
@@ -1167,6 +1357,22 @@ async function reduceTicketIndex(
       await advanceTimeFrontier(record.acceptedAt);
       put(`${EXPIRY_PREFIX}${acceptedTicketExpiresAt(accepted)}:${record.ticket.ticketId}`,
         { ticketId: record.ticket.ticketId, assignmentId: record.ticket.assignmentId } satisfies TicketIndexEntry);
+      // 中止票据不登记 spool 资格，没有资格欠账
+      if (record.ticket.kind !== "abort") {
+        put(pendingKey(accepted), { ticketId: record.ticket.ticketId, assignmentId: record.ticket.assignmentId } satisfies TicketIndexEntry);
+      }
+      continue;
+    }
+    if (record.t === "data-plane-ticket-qualified") {
+      // 只核销同一分派、同一次接纳、仍有欠账的在用票据；任何一张不符整条拒绝，不清除其他未完成义务
+      for (const { ticketId, acceptedAt } of record.tickets) {
+        const stored = await view.ticket(ticketId);
+        if (stored?.s !== "a" || stored.ticket.assignmentId !== record.assignmentId || stored.acceptedAt !== acceptedAt ||
+            stored.ticket.kind === "abort" || !await view.pending(stored)) {
+          throw new TypeError("Ticket qualification does not match a pending acceptance");
+        }
+        drop(pendingKey(stored));
+      }
       continue;
     }
     const stored = await view.ticket(record.ticketId);
@@ -1210,6 +1416,8 @@ async function reduceTicketIndex(
     }
     if (stored?.s === "a") {
       drop(`${EXPIRY_PREFIX}${acceptedTicketExpiresAt(stored)}:${record.ticketId}`);
+      // 退休即终结这一次接纳：它的资格欠账随之核销，撤销由退休自己的未撤销义务承担
+      drop(pendingKey(stored));
     }
     put(TICKET_PREFIX + record.ticketId, {
       s: "r",
@@ -1369,6 +1577,28 @@ function validateTicketRegistryRecord(
       reason: record.reason,
       retainUntil: record.retainUntil,
     };
+  }
+  if (record.t === "data-plane-ticket-qualified") {
+    assertKeys(record, ["assignmentId", "t", "tickets"]);
+    assertProtocolIdentifier(record.assignmentId, "Ticket qualification assignment id");
+    if (!Array.isArray(record.tickets) || record.tickets.length === 0 || record.tickets.length > QUALIFICATION_CONFIRM_BATCH) {
+      throw new TypeError("Ticket qualification batch is invalid");
+    }
+    const seen = new Set<string>();
+    const tickets = record.tickets.map((value: unknown) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+        throw new TypeError("Ticket qualification entry must be a plain object");
+      }
+      const entry = value as Record<string, unknown>;
+      assertKeys(entry, ["acceptedAt", "ticketId"]);
+      assertProtocolIdentifier(entry.ticketId, "Ticket qualification ticket id");
+      if (typeof entry.acceptedAt !== "string") throw new TypeError("Ticket qualification acceptance time is invalid");
+      assertCanonicalTime(entry.acceptedAt, "Ticket qualification acceptance time");
+      if (seen.has(entry.ticketId)) throw new TypeError("Ticket qualification repeats a ticket");
+      seen.add(entry.ticketId);
+      return { ticketId: entry.ticketId, acceptedAt: entry.acceptedAt };
+    });
+    return { t: "data-plane-ticket-qualified", assignmentId: record.assignmentId, tickets };
   }
   if (record.t === "data-plane-ticket-observed-time") {
     assertKeys(record, ["executorId", "observedAt", "t"]);

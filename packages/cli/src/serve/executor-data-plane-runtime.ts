@@ -1,6 +1,7 @@
 import path from "node:path";
 import { artifactReadCapacity, projectionReadCapacity } from './artifact-read-capacity.js';
 import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import type { PhysicalStorageStepRunner } from "@zhixing/core/authority";
 import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError, StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
   DataPlaneTicket,
@@ -53,6 +54,8 @@ export interface ExecutorDataPlaneRuntimeOptions {
   readonly deviceCapacity?: DeviceCapacityArbiterPort;
   readonly clock?: () => string;
   readonly onError?: (error: Error) => void;
+  /** 宿主前台安静判定：票据资格的定时合批确认先等它，不与前台派发和运行争执行端日志。 */
+  readonly whenQuiet?: (signal: AbortSignal) => Promise<void>;
 }
 
 /** Finite assignment authority required by the executor data-plane mechanism. */
@@ -175,6 +178,7 @@ export class ExecutorDataPlaneRuntime {
       },
       spool: this.#spool,
       clock,
+      ...(options.whenQuiet ? { whenQuiet: options.whenQuiet } : {}),
     });
     this.assignmentTickets = Object.freeze({
       authorize: (...args: Parameters<DataPlaneTicketRegistry["authorize"]>) =>
@@ -393,6 +397,8 @@ export class ExecutorDataPlaneRuntime {
     await this.#startup?.catch(() => undefined);
     await this.#maintenanceRunner.stop();
     await this.#maintenance?.catch(() => undefined);
+    // 资格已耐久的待确认票据在 spool 关闭前合批确认；失败只留下耐久欠账，下次启动照常恢复
+    await this.#tickets.flushQualifications().catch(() => undefined);
     await this.#spool.closeAssignmentScan();
     await this.#spool.stopStorageMaintenance();
   }
@@ -404,28 +410,36 @@ export class ExecutorDataPlaneRuntime {
    */
   async #runMaintenance(): Promise<number> {
     const abort = new AbortController();
-    const expired = await this.#maintenanceRunner.run(
+    // 各维护义务分别承担错误与续做：一项失败不让本轮其余义务（资格补登、各分派回收）轮不到，本轮末统一报告
+    const failures: unknown[] = [];
+    const attempt = async <T>(work: () => Promise<T>, fallback: T): Promise<T> => {
+      try { return await work(); } catch (error) { failures.push(error); return fallback; }
+    };
+    const ticketStep = (input: string): PhysicalStorageStepRunner => (operation) =>
+      runStorageMaintenanceStep(
+        this.#storageGovernor,
+        storageMaintenanceRequest("ticket-retirement", this.#executorId, input, { obligation: "committed" }),
+        operation,
+      );
+    const expired = await attempt(() => this.#maintenanceRunner.run(
       storageMaintenanceObligation("ticket-retirement", this.#executorId, "periodic", {
         owner: "executor-data-plane",
         obligation: "committed",
       }),
       abort.signal,
-      () =>
-        this.#tickets.maintain((operation) =>
-          runStorageMaintenanceStep(
-            this.#storageGovernor,
-            storageMaintenanceRequest(
-              "ticket-retirement",
-              this.#executorId,
-              "periodic",
-              { obligation: "committed" },
-            ),
-            operation,
-          ),
-        ),
-    );
+      () => this.#tickets.maintain(ticketStep("periodic")),
+    ), 0);
+    // 资格欠账单列一个义务：为接纳后尚未确认的票据补登资格并核销，排在本轮回收之前；启动恢复因此只承担有界欠账
+    await attempt(() => this.#maintenanceRunner.run(
+      storageMaintenanceObligation("ticket-retirement", this.#executorId, "qualification", {
+        owner: "executor-data-plane",
+        obligation: "committed",
+      }),
+      abort.signal,
+      () => this.#tickets.maintainQualifications(ticketStep("qualification")),
+    ), 0);
     let reclaimed = 0;
-    const assignmentIds = await this.#maintenanceRunner.run(
+    const assignmentIds = await attempt(() => this.#maintenanceRunner.run(
       storageMaintenanceObligation(
         "stream-spool-reclaim",
         this.#executorId,
@@ -448,10 +462,10 @@ export class ExecutorDataPlaneRuntime {
               operation,
             ),
         ),
-    );
+    ), [] as readonly string[]);
     for (const assignmentId of assignmentIds) {
       if (this.#closed) break;
-      const done = await this.#maintenanceRunner.run(
+      const done = await attempt(() => this.#maintenanceRunner.run(
         storageMaintenanceObligation(
           "stream-spool-reclaim",
           assignmentId,
@@ -472,9 +486,10 @@ export class ExecutorDataPlaneRuntime {
               operation,
             ),
           ),
-      );
+      ), false);
       if (done) reclaimed += 1;
     }
+    if (failures.length) throw failures.length === 1 ? failures[0] : new AggregateError(failures, "Executor data-plane maintenance left obligations");
     return expired + reclaimed;
   }
 

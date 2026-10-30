@@ -499,6 +499,8 @@ export interface CreateConversationServicesInput {
   readonly deviceCapacity: import('@zhixing/core/resources').DeviceCapacityArbiterPort;
   /** 本机执行的运行计为宿主前台活动。 */
   readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
+  /** 宿主前台安静判定：执行端票据资格的定时合批确认先等它。 */
+  readonly whenQuiet?: (signal: AbortSignal) => Promise<void>;
   readonly onFailure?: import("./conversation-protocol-runtime.js").ConversationProtocolRuntimeOptions["onFailure"];
   readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
@@ -622,6 +624,7 @@ export async function createConversationServices(
             ...(inputStorageMaintenance
               ? { storageMaintenance: inputStorageMaintenance }
               : {}),
+            ...(input.whenQuiet ? { whenQuiet: input.whenQuiet } : {}),
             onError: (error) =>
               console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
           },

@@ -78,6 +78,8 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
       const recent = ticket("recent-revoked", "current-assignment-0", "2026-07-25T00:00:00.000Z", "2026-07-25T01:00:00.000Z");
       await registry.accept(recent);
       await registry.revoke({ assignmentId: recent.assignmentId, ticketId: recent.ticketId });
+      // 与生产停止顺序一致：日志停止前先冲刷待确认的资格，不留定时确认落到冷开的计量窗口里
+      await registry.flushQualifications();
       await log.stopStorageMaintenance();
       const logBytes = (await stat(path.join(logRoot, "authority.log"))).size;
 
@@ -106,8 +108,8 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
     console.log(JSON.stringify(rows));
     const [small, middle, , large] = rows as { restored: number[]; recovery: ReturnType<typeof summary>; stop: ReturnType<typeof summary>; fullReplay: ReturnType<typeof summary> }[];
     for (const row of rows as typeof small[]) {
-      // 只为当前有效票据恢复绑定；冷开只读日志尾部，不读检查点；停止不再写入
-      expect(row.restored).toEqual([4]);
+      // 当前有效票据的资格已在停止前确认：冷恢复没有欠账、不恢复任何绑定（授权照常，见上）；冷开只读日志尾部，不读检查点；停止不再写入
+      expect(row.restored).toEqual([]);
       expect(row.recovery.log).toBeLessThanOrEqual(small!.recovery.log + 16);
       expect(row.recovery.checkpoint).toBe(0);
       expect(row.stop).toEqual(small!.stop);
@@ -141,6 +143,7 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
         await registry.accept(old);
         await registry.revoke({ assignmentId: old.assignmentId, ticketId: old.ticketId });
       }
+      await registry.flushQualifications();
       await log.stopStorageMaintenance();
       now = "2026-07-25T00:00:00.000Z"; monotonic += 48 * 60 * 60 * 1_000;
 
@@ -183,7 +186,9 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
     const scale = (ended: number) => rows.find(row => row.ended === ended)! as Row;
     // 冷恢复不随已过保留期的票据数增长，也不写墓碑
     for (const row of rows as Row[]) expect(row.recovery.writeBytes).toBeLessThanOrEqual(scale(8).recovery.writeBytes + 1_024);
-    expect(scale(2048).recovery.readBytes).toBeLessThanOrEqual(scale(512).recovery.readBytes * 1.5);
+    // 冷恢复只枚举资格欠账：512/2048 档读量约 14/24 KB（只扫在用票据时约 105/114 KB）。剩下随剪除前积压的增量
+    // 来自打开投影时的基础目录页（512→2048 约 3→8 页），两种做法相同（均约 +9.5 KB），按固定余量计
+    expect(scale(2048).recovery.readBytes).toBeLessThanOrEqual(scale(512).recovery.readBytes * 1.5 + 16 * 1024);
     expect(scale(2048).recovery.reads).toBeLessThanOrEqual(scale(512).recovery.reads * 1.5);
     // 每步只读前沿之后的一页（至多 32 行，落到基段时按 64KB 段读批次读盘）、剪除 32 张票据的三类键，
     // 外加至多 8 次物理撤销：单步的中位读写与积压总数无关
@@ -202,7 +207,8 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
       const binding = { ref, executorId: "executor-fixed", ownerKeyId: "owner-fixed" };
       const assignments = { dataPlaneBinding: async () => binding, dataPlaneBindings: vi.fn(async (requests: readonly unknown[]) => requests.map(() => binding)) };
       const spool = { deferRecoveredConsumers: vi.fn(async () => {}), qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => undefined) } as unknown as AssignmentStreamSpool;
-      const options = (log: FileAuthorityCommitLog) => ({ log, spool, clock, monotonicClock: () => monotonic, executorId: "executor-fixed", verifier: identity, assignments });
+      // 资格确认写入前退出：全部票据都是恢复欠账，冷恢复只为其中仍有效的那一张恢复绑定
+      const options = (log: FileAuthorityCommitLog) => ({ log, spool, clock, monotonicClock: () => monotonic, executorId: "executor-fixed", verifier: identity, assignments, confirmQualifications: false });
       const logRoot = path.join(root, "authority");
       const logFile = path.join(logRoot, "authority.log");
       const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 7));
@@ -227,7 +233,7 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
       const io = await captureFileIo(root, category);
       const first = await open();
       const recovery = summary(io.snapshot());
-      // 冷恢复只为有效票据恢复绑定，不追加退休记录；只记下排除过期票据所依据的时间下界（固定一条）
+      // 冷恢复只为仍有效的欠账恢复绑定，不追加退休记录；只记下排除过期票据所依据的时间下界（固定一条）
       expect(first.restored).toEqual([1]);
       expect(first.appended).toBeGreaterThan(0);
       // 准入照原 TTL 即时判定：有效的可用，过期的拒绝
@@ -292,6 +298,7 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
         spy.mockRestore();
       }
       rows.push({ completed, requested, endedRequested });
+      await registry.flushQualifications();
       await log.stopStorageMaintenance();
     }
     console.log(JSON.stringify(rows));
@@ -461,6 +468,7 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
     await expect(registry.authorizeSurface(ordered[0]!, "observe", `assignment-${ordered[0]}`, "surface:origin")).rejects.toThrow(/unknown/);
     await expect(registry.authorizeSurface(ordered[32]!, "observe", `assignment-${ordered[32]}`, "surface:origin")).rejects.toThrow(/retired/);
     // 冷重开后按耐久前沿续做，剪完剩下的 8 张
+    await registry.flushQualifications();
     await log.stopStorageMaintenance();
     const cold = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock, integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 7)) });
     const reopened = new DataPlaneTicketRegistry({ log: cold, spool, clock, monotonicClock: () => monotonic, executorId: "executor-fixed", verifier: identity, assignments });
