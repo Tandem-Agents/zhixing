@@ -20,6 +20,10 @@
  * 配对从 runMessages 派生：[首条, 末条 assistant]。无 assistant 的 run
  * （中断 / 错误在首次 LLM 完成之前）派生空 assistant 成对入窗——记录侧不
  * 伪造消息，兜底收敛在派生这一个点。
+ *
+ * 末条 assistant 以工具调用收尾时（排他控制调用结束运行、工具阶段中断），
+ * 它的工具结果属于不入窗的工具轮；配对只留它已说的内容、去掉工具调用，
+ * 窗口里不出现没有结果的工具调用。
  */
 
 import type { Message } from "../../types/messages.js";
@@ -85,8 +89,10 @@ class AttentionWindow implements AttentionWindowState {
     // 无 assistant（run 在首次 LLM 完成前被中断 / 出错）→ 空 assistant 兜底，
     // 让"完成与中断的 run 都能成对入窗"无需调用方特判。
     const user = input.runMessages[0]!;
-    const assistant =
-      findLastAssistantMessage(input.runMessages) ?? emptyAssistantMessage();
+    const last = findLastAssistantMessage(input.runMessages);
+    const assistant = last
+      ? { ...last, content: last.content.filter((block) => block.type !== "tool_use") }
+      : emptyAssistantMessage();
     this.entries.push({
       kind: "pair",
       messages: [user, assistant],

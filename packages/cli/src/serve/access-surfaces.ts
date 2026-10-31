@@ -138,14 +138,16 @@ import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import {
+  type AdvancementController,
   type AdvancementConversationDirectory,
   createAdvancementRecoveryMaintenance,
-  newTaskSessionId,
   renderRecentContextFromMessages,
 } from "@zhixing/owner-services/advancement";
+import { adjudicateAdvancementExecution } from "@zhixing/core/advancement/execution-context";
 import {
   createAdvancementReviewProxySchedulePort,
 } from "@zhixing/owner-services/advancement/proxy-scheduler";
+import { advancementProposalEvent } from "./advancement-proposal-events.js";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import {
   createConfirmationBridge,
@@ -671,12 +673,21 @@ export async function createConversationServices(
     publish: inputSessionBroadcast,
   });
   inputLifecycleContributions.acquire("sessionProcess.dispose", () => processProjection.dispose());
+  // 推进组合在协议运行时之后建成；推进执行材料在指派时才裁决，按那时已建成的控制器精确取会话
+  let advancementExecutionSessions: Pick<AdvancementController, "loadExactSession"> | undefined;
   const protocol = new ConversationProtocolRuntime({
     onFailure: input.onFailure,
     authority: inputAuthorityRuntime,
     storedIdentityExists: (conversationId) => inputConversationIdentityLifecycle.identityExists(conversationId),
     manager: managerAssembly.resolve,
     recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
+    advancementExecution: {
+      prepare: async ({ conversationId, turnId, binding }) => {
+        if (!advancementExecutionSessions) throw new Error("推进组合尚未就绪，推进执行材料留待恢复时裁决");
+        return adjudicateAdvancementExecution(
+          await advancementExecutionSessions.loadExactSession(conversationId, binding.sessionId), binding, turnId);
+      },
+    },
     losslessDataPlane: Object.freeze({
       kind: "available",
       port: losslessDataPlane.port,
@@ -868,6 +879,7 @@ export async function createConversationServices(
   });
   managerAssembly.complete(manager);
   const conversationPerspectives = input.createConversationPerspectives(manager);
+  const advancementEvents = createAdvancementEventSink(inputSessionBroadcast);
   const advancementComposition =
     await observeLogPhase(input.startupRecords, "create-advancement-composition", () => input.advancementConversationComposition.create({
       sessionState: protocol.sessionState,
@@ -877,9 +889,12 @@ export async function createConversationServices(
             manager.getHistory(conversationId, 6),
           ),
       }),
+      onProposalFact: (fact) => advancementEvents.emit(advancementProposalEvent(fact)),
     }));
   const advancementController = advancementComposition.controller;
+  advancementExecutionSessions = advancementController;
   const advancementReviews = advancementComposition.reviews;
+  const advancementProposals = advancementComposition.proposals;
   const advancementConversationLifecycle = advancementComposition.lifecycle;
   const conversationExists = (conversationId: string) =>
     inputConversationIdentityLifecycle.identityExists(conversationId);
@@ -904,14 +919,14 @@ export async function createConversationServices(
     ),
     events: createAdvancementEventSink(inputSessionBroadcast),
     reviewResults,
+    proposals: advancementProposals,
     logger: console,
   });
   inputLifecycleContributions.acquire('advancementRecovery.stop', () => advancementRecovery.stop());
-  // 只为失败回执而建的会话：补齐写入中断留下的显现意图（只取等待复核的条目），普通发送按输入回执、
-  // 推进草案按草案会话精确复核；复核失败的留到下次启动，不影响本次启动
-  void inputConversationIdentityLifecycle.settleRevealIntents(async (conversationId, intent) => intent.kind === "turn"
-    ? (await protocol.inputReceipt({ conversationId, turnId: intent.turnId, surfacePrincipal: intent.surfacePrincipal })).status === "accepted"
-    : (await advancementController.loadExactSession(conversationId, newTaskSessionId(intent.draftId))) !== null,
+  // 只为失败回执而建的会话：补齐写入中断留下的显现意图（只取等待复核的条目），按输入回执精确复核；
+  // 复核失败的留到下次启动，不影响本次启动
+  void inputConversationIdentityLifecycle.settleRevealIntents(async (conversationId, intent) =>
+    (await protocol.inputReceipt({ conversationId, turnId: intent.turnId, surfacePrincipal: intent.surfacePrincipal })).status === "accepted",
   ).catch((error: unknown) => console.warn(chalk.yellow(`[conversation] reveal intent settlement deferred: ${error instanceof Error ? error.message : String(error)}`)));
   const advancementAcceptedTurns =
     new AdvancementAcceptedTurnApplicationService({
@@ -923,6 +938,7 @@ export async function createConversationServices(
       },
       review: advancementReviews,
       results: reviewResults,
+      proposals: advancementProposals,
     });
   auxiliaryRecoveryAssembly.complete(async (conversationId) => {
     await worksceneContinuation.recover(conversationId);
@@ -997,6 +1013,7 @@ export async function createConversationServices(
     advancementRecovery,
     advancement: advancementController,
     advancementReviews,
+    advancementProposals,
     advancementConversationLifecycle,
     worksceneDirectory,
     worksceneApplication,

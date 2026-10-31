@@ -25,6 +25,7 @@ import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 import { TerminalOutputProjection } from '../../terminal/output.js';
 import { createUserSubmission } from "../user-submission.js";
 import { projectProcessYield } from '@zhixing/rpc/session-wire';
+import { advancementExecutionTurnId } from "@zhixing/core/advancement/proposal-identity";
 
 import { makeFakeHostLink } from "./fake-host-link.js";
 
@@ -1841,8 +1842,8 @@ describe("ConversationController", () => {
       f.emit.complete({ conversationId: 'conv-1', turnId, result: { reason: 'completed' } });
       throw Error('late receipt');
     };
-    f.conversation.confirmAdvancement.mockImplementationOnce(async () => completeThenThrow('conv-1', 'original'));
-    f.conversation.cancelAdvancement.mockImplementationOnce(async () => completeThenThrow('conv-1', 'original'));
+    f.conversation.confirmAdvancement.mockImplementationOnce(async () => completeThenThrow('conv-1', advancementExecutionTurnId('original', 'advancement', 'draft-1')));
+    f.conversation.cancelAdvancement.mockImplementationOnce(async () => completeThenThrow('conv-1', advancementExecutionTurnId('original', 'direct')));
     try {
       const result = kind === 'prepared' ? await controller.beginPreparedUserTurn(completeThenThrow)
         : kind === 'referenced' ? await controller.beginReferencedUserTurn(completeThenThrow)
@@ -1862,8 +1863,8 @@ describe("ConversationController", () => {
       f.emit.delta({ conversationId: 'conv-1', turnId, delta: { type: 'text_delta', text: 'accepted output' } });
       throw original;
     };
-    f.conversation.confirmAdvancement.mockImplementationOnce(async () => acceptedThenThrow('conv-1', 'original'));
-    f.conversation.cancelAdvancement.mockImplementationOnce(async () => acceptedThenThrow('conv-1', 'original'));
+    f.conversation.confirmAdvancement.mockImplementationOnce(async () => acceptedThenThrow('conv-1', advancementExecutionTurnId('original', 'advancement', 'draft-1')));
+    f.conversation.cancelAdvancement.mockImplementationOnce(async () => acceptedThenThrow('conv-1', advancementExecutionTurnId('original', 'direct')));
     try {
       const result = kind === 'prepared' ? controller.beginPreparedUserTurn(acceptedThenThrow)
         : kind === 'referenced' ? controller.beginReferencedUserTurn(acceptedThenThrow)
@@ -1922,6 +1923,33 @@ describe("ConversationController", () => {
     expect(onAccepted).not.toHaveBeenCalled();
   });
 
+  it.each(["kept", "supplemented"] as const)("beginUserTurn:提议阶段的输入（%s）是已结算提交,不挂运行等待", async (disposition) => {
+    const f = makeFakes();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        status: "advancement-proposal",
+        advancementSessionId: "adv-1",
+        disposition,
+        message: "宿主给出的推进文案",
+      }),
+    );
+    const { controller } = makeController(f);
+
+    const result = await controller.beginUserTurn("进度怎么样了？");
+
+    expect(result).toMatchObject({
+      kind: "submission-settled",
+      conversationId: "conv-1",
+      submission: { disposition: disposition === "supplemented" ? "revision-saved" : "not-saved" },
+      message: "宿主给出的推进文案",
+    });
+    expect((controller as unknown as { turnOutcomes: Map<string, unknown> }).turnOutcomes.size).toBe(0);
+    controller.dispose();
+  });
+
   it("beginUserTurn:Rubric 草案失败是受控结果,不等待 complete", async () => {
     const f = makeFakes();
     f.conversation.send.mockImplementationOnce(
@@ -1943,7 +1971,7 @@ describe("ConversationController", () => {
     );
   });
 
-  it("confirmRubricContract:确认后用原 turnId 等待执行 complete", async () => {
+  it("confirmRubricContract:确认后用派生执行身份等待执行 complete", async () => {
     const f = makeFakes();
     const { controller } = makeController(f);
     const onAccepted = vi.fn();
@@ -1955,10 +1983,11 @@ describe("ConversationController", () => {
       rubricDraftId: "draft-1",
       rubricDraft: rubricDraft("turn-rubric"),
     };
+    const executionTurnId = advancementExecutionTurnId("turn-rubric", "advancement", "draft-1");
     f.conversation.confirmAdvancement.mockResolvedValueOnce({
       conversationId: "conv-1",
       sessionId: "conv-1",
-      turnId: "turn-rubric",
+      turnId: executionTurnId,
       status: "confirmed",
       advancementSessionId: "adv-1",
       runStatus: "immediate",
@@ -1982,7 +2011,7 @@ describe("ConversationController", () => {
     );
     expect(onAccepted).toHaveBeenCalledExactlyOnceWith({
       conversationId: "conv-1",
-      turnId: "turn-rubric",
+      turnId: executionTurnId,
     });
     expect(settled).toBe(false);
     expect(acceptedTurn.rubricPublicationMessage).toBe(
@@ -1992,7 +2021,7 @@ describe("ConversationController", () => {
     f.emit.complete({
       conversationId: "conv-1",
       sessionId: "conv-1",
-      turnId: "turn-rubric",
+      turnId: executionTurnId,
       result: { reason: "completed" },
     });
     await expect(acceptedTurn.outcome).resolves.toMatchObject({
@@ -2000,7 +2029,7 @@ describe("ConversationController", () => {
     });
   });
 
-  it("cancelRubricContract:降级直接执行时复用原 turnId 等待 complete", async () => {
+  it("cancelRubricContract:降级直接执行时用派生执行身份等待 complete", async () => {
     const f = makeFakes();
     const { controller } = makeController(f);
     const pending = {
@@ -2011,10 +2040,11 @@ describe("ConversationController", () => {
       rubricDraftId: "draft-1",
       rubricDraft: rubricDraft("turn-rubric"),
     };
+    const executionTurnId = advancementExecutionTurnId("turn-rubric", "direct");
     f.conversation.cancelAdvancement.mockResolvedValueOnce({
       conversationId: "conv-1",
       sessionId: "conv-1",
-      turnId: "turn-rubric",
+      turnId: executionTurnId,
       status: "direct-execution",
       advancementSessionId: "adv-1",
       runStatus: "immediate",
@@ -2034,7 +2064,7 @@ describe("ConversationController", () => {
     f.emit.complete({
       conversationId: "conv-1",
       sessionId: "conv-1",
-      turnId: "turn-rubric",
+      turnId: executionTurnId,
       result: { reason: "completed" },
     });
     await expect(result.turn.outcome).resolves.toMatchObject({
@@ -2638,6 +2668,8 @@ it.each(["confirm", "direct", "confirm-save"] as const)("preserves Ctrl+C throug
   const facade = new RpcConversationFacade(transport.link);
   const controller = new ConversationController({ conversation: facade, workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: () => {} }, initial);
   const pending = { kind: "awaiting-rubric-confirmation" as const, conversationId: "conv-1", turnId: "original-turn", advancementSessionId: "adv-1", rubricDraftId: "draft-1", rubricDraft: rubricDraft("original-turn") };
+  // 宿主按原始输入派生执行身份：确认带被确认的草案，降级只看原始输入
+  const executionTurnId = kind === "direct" ? advancementExecutionTurnId("original-turn", "direct") : advancementExecutionTurnId("original-turn", "advancement", "draft-1");
   transport.setResponder(async (method, raw: any) => {
     if (method === "session.advancementConfirm" || method === "session.advancementCancel") {
       mutationCount++; submitted = raw.submissionId; entered.resolve(); await release.promise; throw new RpcClientClosedError();
@@ -2645,7 +2677,7 @@ it.each(["confirm", "direct", "confirm-save"] as const)("preserves Ctrl+C throug
     if (method === "session.inputReceipt") {
       expect(raw.turnId).toBe(submitted);
       if (!ready) throw new RpcClientClosedError();
-      return { status: "settled", conversationId: "conv-1", turnId: submitted, result: { conversationId: "conv-1", sessionId: "conv-1", turnId: "original-turn", runId: "original-run" } };
+      return { status: "settled", conversationId: "conv-1", turnId: submitted, result: { conversationId: "conv-1", sessionId: "conv-1", turnId: executionTurnId, runId: "original-run" } };
     }
     return {};
   });
@@ -2664,8 +2696,13 @@ it.each(["confirm", "direct", "confirm-save"] as const)("preserves Ctrl+C throug
     await expect(changed).rejects.toBeInstanceOf(PendingInputReceiptError);
     expect(cancelled).toBe(false);
     expect(mutationCount).toBe(1);
+    // 被拒的另一项操作不留等待，本地运行指针仍是待核对操作的执行身份
+    const internals = controller as unknown as { turnOutcomes: Map<string, unknown>; localTurnsByConversation: Map<string, string> };
+    expect([...internals.turnOutcomes.keys()]).toEqual([executionTurnId]);
+    expect(internals.localTurnsByConversation.get("conv-1")).toBe(executionTurnId);
     const recovered = await controller.reconcileRubricSubmission({ ...pending, rubricDraftId: "draft-refreshed" });
     expect(recovered?.kind).toBe("accepted");
+    if (recovered?.kind === "accepted") expect(recovered.turn.turnId).toBe(executionTurnId);
     await cancellation;
     expect(mutationCount).toBe(1);
     const aborts = transport.requests.filter(item => item.method === "session.abort");

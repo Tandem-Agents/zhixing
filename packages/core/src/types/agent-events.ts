@@ -107,6 +107,8 @@ export type PostTurnControlIntent =
   | { kind: "delegate_mcp"; candidate: import("../mcp-management/setup.js").McpSetupCandidate; handoff: WorksceneTaskHandoff }
   | { kind: "connect_mcp"; candidate: import("../mcp-management/setup.js").McpSetupCandidate; scope: import("../mcp-management/application.js").McpConnectionScope; handoff: WorksceneTaskHandoff }
   | { kind: "stop_task"; conversationId: string; runId: string; handoff?: never }
+  /** 主 Agent 提出推进；只在产品为本运行启用时有效，原任务就是本运行的用户输入，由推进应用接受。 */
+  | { kind: "propose_advancement"; handoff?: never }
   | { kind: "enter"; sceneId: string; handoff?: WorksceneTaskHandoff }
   | { kind: "exit"; handoff?: WorksceneTaskHandoff }
   | {

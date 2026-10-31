@@ -5,7 +5,10 @@ import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 import { AuthorityStorageError } from "@zhixing/core/authority";
 import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from "@zhixing/executor";
 import { randomUUID } from "node:crypto";
-import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext, readWorksceneTaskContext } from "@zhixing/core/workscene/application";
+import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext } from "@zhixing/core/workscene/application";
+import { advancementExecutionContextBlock, type AdvancementExecutionMaterial } from "@zhixing/core/advancement/execution-context";
+import type { TurnOriginAdvancementExecution } from "@zhixing/core/types";
+import { executionTurnContext, withoutRecoveredSurfaceCapabilities } from "./execution-turn-context.js";
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
 import { parseConversationId, parseLocalConversationId } from "@zhixing/core/conversation";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
@@ -185,6 +188,19 @@ export interface ConversationProtocolRuntimeOptions {
   ) => Promise<void>;
   /** Reconciles durable conversation facts with independently persisted auxiliary views. */
   readonly recoverAuxiliary: (conversationId: string) => Promise<void>;
+  /**
+   * 推进执行材料：带执行标记的运行在指派前按冻结身份裁决原任务、补充与契约，随指派投影交给执行体。
+   * 读取推进状态失败时抛出（运行留在队列由恢复重试）；身份不符等确定结果以“不可用”裁决交给执行体失败。
+   */
+  readonly advancementExecution?: ConversationAdvancementExecutionPort;
+}
+
+export interface ConversationAdvancementExecutionPort {
+  prepare(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+    binding: TurnOriginAdvancementExecution;
+  }>): Promise<AdvancementExecutionMaterial>;
 }
 
 interface AppliedConversationAdmission {
@@ -368,6 +384,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | ((input: DurableConversationSessionProjectionInput) => Promise<void>)
     | undefined;
   readonly #recoverAuxiliary: (conversationId: string) => Promise<void>;
+  readonly #advancementExecution: ConversationAdvancementExecutionPort | undefined;
   readonly #lifecycleProjectionClaims = new Map<string, Promise<number>>();
   readonly #activeRecoveryClaims = new Map<string, number>();
   /** 本进程仍在执行的 assignment → run；覆盖完整运行生命期，也用于取消后的本机止损。 */
@@ -470,6 +487,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Conversation protocol requires auxiliary recovery");
     }
     this.#recoverAuxiliary = options.recoverAuxiliary;
+    this.#advancementExecution = options.advancementExecution;
     this.#issuer = new ConversationAssignmentAuthority({
       signer: authority.signer,
       verifier: authority.verifier,
@@ -1514,8 +1532,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         resourceContext,
       );
       // Resolve unrelated context before starting the short-lived fair slot.
-      const controlContext = worksceneTaskContext(await WorksceneContinuationApplication.tasks(
-        (id, query) => this.worksceneContinuationSources(id, query), input.conversationId));
+      const controlContext = [
+        ...worksceneTaskContext(await WorksceneContinuationApplication.tasks(
+          (id, query) => this.worksceneContinuationSources(id, query), input.conversationId)),
+        ...await this.#advancementExecutionContext(input.conversationId, executionIngress),
+      ];
       const prepareResourceLease = () => this.#authority.resources.prepareAssignmentRoot<"conversation">({
         assignmentId,
         executorId: targetExecutorId,
@@ -1818,7 +1839,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         const generator = effect.runKernel(executionMessages, {
           ...input.options,
           inputPort,
-          turnContext: { ...input.options?.turnContext, worksceneTasks: readWorksceneTaskContext(dispatch.envelope.work.controlContext) },
+          turnContext: executionTurnContext(dispatch.envelope.work, input.options?.turnContext),
           onProtocolEvent: async (event, meta) => {
             await appendObservedFrame(
               { kind: "agent-event", event },
@@ -3174,6 +3195,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return reconciled;
   }
 
+  // 带执行标记的运行按冻结身份裁决推进材料，随指派投影交给执行体；读取推进状态失败照常抛出，运行留在队列由恢复重试
+  async #advancementExecutionContext(conversationId: string, ingress: IngressContext): Promise<{ source: string; block: string }[]> {
+    const binding = ingress.turnOrigin?.advancementExecution;
+    if (!binding) return [];
+    const material: AdvancementExecutionMaterial = this.#advancementExecution
+      ? await this.#advancementExecution.prepare({ conversationId, turnId: ingress.ingressId, binding })
+      : Object.freeze({ status: "unavailable", turnId: ingress.ingressId, binding, reason: "宿主没有装配推进执行材料" });
+    return [advancementExecutionContextBlock(material)];
+  }
+
   async #mayScheduleInput(conversationId: string, runId: string): Promise<boolean> {
     if (!await this.#settleTargetCancellations(conversationId, runId)) return false;
     const state = await this.#journal(conversationId).assignmentSchedulingState(runId);
@@ -3775,21 +3806,6 @@ function runOptionsForPending(
   };
 }
 
-function withoutRecoveredSurfaceCapabilities(
-  origin: NonNullable<IngressContext["turnOrigin"]>,
-): NonNullable<IngressContext["turnOrigin"]> {
-  if (origin.surface?.capabilities?.postTurnControl !== true) return origin;
-  return {
-    ...origin,
-    surface: {
-      ...origin.surface,
-      capabilities: {
-        ...origin.surface.capabilities,
-        postTurnControl: false,
-      },
-    },
-  };
-}
 
 function assignmentContext(
   envelope: Extract<import("@zhixing/core/contracts").DispatchEnvelope, { execution: "conversation" }>,

@@ -9,6 +9,7 @@ import type {
   AdvancementProxyTurnPort,
 } from "@zhixing/owner-services/advancement";
 import { protocolDigest } from "@zhixing/core/protocol";
+import { advancementOriginalTaskInput } from "@zhixing/core/advancement";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
@@ -151,10 +152,12 @@ export function createAdvancementOriginalTaskAdmissionPort(
       if (!obligation) {
         throw new Error("Advancement original-task admission intent is missing");
       }
+      // 执行输入与首次接纳同源：提议会话是推进控制消息，其余会话是原始输入
+      const input = advancementOriginalTaskInput(session);
       const expected = protocolDigest(
         "AdvancementOriginalTaskInput",
         1,
-        session.originalUserTask,
+        input,
       );
       if (expected !== obligation.intent.inputDigest) {
         throw new Error("Advancement original-task admission input digest mismatch");
@@ -172,7 +175,7 @@ export function createAdvancementOriginalTaskAdmissionPort(
       try {
         const admission = await manager.admitDurableTurn({
           conversationId: session.conversationId,
-          input: session.originalUserTask,
+          input,
           invocation: { kind: "agent", source: "interactive" },
           options: {
             turnContext: {

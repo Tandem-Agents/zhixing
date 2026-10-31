@@ -14,6 +14,7 @@ import type { Message } from "../../../types/messages.js";
 import { assistantMessage, userMessage } from "../../../types/messages.js";
 import { extractFirstText } from "../../../types/messages.js";
 import { createAttentionWindow } from "../attention-window.js";
+import { assertToolPairingIntact } from "../../message-turns.js";
 import type { WindowCompact } from "../types.js";
 
 // ─── 工具 ───
@@ -102,6 +103,40 @@ describe("acceptRun · 蒸馏对派生", () => {
     const msgs = w.getMessages();
     expect(msgs).toHaveLength(2);
     expect(msgs[1]).toEqual({ role: "assistant", content: [] });
+  });
+
+  it("以工具调用收尾的 run（排他控制结束运行）：配对不带无结果的工具调用", () => {
+    const w = createAttentionWindow();
+    w.acceptRun({ runMessages: [
+      userMessage("按截图修好界面"),
+      { role: "assistant", content: [
+        { type: "tool_use", id: "t1", name: "Task", input: {} },
+        { type: "tool_use", id: "t2", name: "propose_advancement", input: {} },
+      ] },
+      { role: "user", content: [
+        { type: "tool_result", toolUseId: "t1", content: "Not started", isError: true },
+        { type: "tool_result", toolUseId: "t2", content: "已提出推进" },
+      ] },
+    ] });
+    w.acceptRun({ runMessages: [userMessage("用户已确认，开始执行"), assistantMessage("完成")] });
+    const msgs = w.getMessages();
+    expect(msgs[1]).toEqual({ role: "assistant", content: [] });
+    expect(() => assertToolPairingIntact(msgs)).not.toThrow();
+  });
+
+  it("工具阶段中断的 run：保留助手已说的文字，去掉工具调用", () => {
+    const w = createAttentionWindow();
+    w.acceptRun({ runMessages: [
+      userMessage("读文件"),
+      { role: "assistant", content: [
+        { type: "text", text: "我先读一下" },
+        { type: "tool_use", id: "t1", name: "Read", input: {} },
+      ] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "aborted", isError: true }] },
+    ] });
+    const msgs = w.getMessages();
+    expect(msgs[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "我先读一下" }] });
+    expect(() => assertToolPairingIntact(msgs)).not.toThrow();
   });
 
   it("runMessages 为空 → 抛错（编程错误，不静默）", () => {

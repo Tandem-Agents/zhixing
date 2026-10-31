@@ -46,6 +46,8 @@ export function createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(
                 conversationId,
                 turnId,
                 originalUserTask: input.originalUserTask,
+                // 执行运行与耐久 ingress 同一来源：冻结的执行标记随运行上下文到达注入钩子
+                turnOrigin: input.admissionIntent.turnOrigin,
               }),
             cancelPending: (cancelled) =>
               input.surface.cancelPending(cancelled),

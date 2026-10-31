@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
+  AdvancementProposalApplicationService,
   buildClosureSynthesisPrompt,
   LLMAdvancementAdmissionStrategy,
   LLMRubricDraftGenerationStrategy,
   LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
+  type AdvancementProposalFactPort,
   type RubricCatalogPort,
+  type RubricContractCompleteOptions,
 } from "@zhixing/core/advancement";
 import { userMessage } from "@zhixing/core";
 import type {
@@ -70,6 +73,8 @@ export interface ServeAdvancementControllerDeps {
   readonly rubricScope?: "global" | "local";
   readonly rubricCatalog?: RubricCatalogPort;
   readonly rubricPublication?: RubricPublicationPort;
+  /** 提议阶段的可见结果（草案就绪、生成失败或结果不明）交给接入面呈现。 */
+  readonly onProposalFact?: AdvancementProposalFactPort["publish"];
 }
 
 /** 惰性解析的治理端口代理——每次调用时解析真实 governor，缺失即拒绝。 */
@@ -117,6 +122,8 @@ const ADVANCEMENT_CONTROL_BUDGET = { maxCalls: 1, maxTokens: 300_000 } as const;
 export interface ServeAdvancementApplications {
   readonly controller: AdvancementController;
   readonly reviews: AdvancementReviewAttemptApplication;
+  /** 主 Agent 提议的接受与草案。 */
+  readonly proposals: AdvancementProposalApplicationService;
 }
 
 export async function createServeAdvancementApplications(
@@ -152,7 +159,9 @@ export async function createServeAdvancementApplications(
   const completeViaPort = async (
     role: "main" | "light",
     prompt: string,
+    options: RubricContractCompleteOptions = {},
   ): Promise<string> => {
+    options.abortSignal?.throwIfAborted();
     const workId = `advancement:${randomUUID()}`;
     const ctx = {
       principal: { kind: "host" as const, component: "advancement-control" },
@@ -166,11 +175,16 @@ export async function createServeAdvancementApplications(
       ctx,
     );
     try {
+      // 图片与提示同属一条用户消息；调用随调用方的中止信号停下（停服、排空、删除）
+      const images = options.images ?? [];
       const result = await modelProvider.completion.complete({
         role,
-        messages: [userMessage(prompt)],
+        messages: [images.length === 0 ? userMessage(prompt) : {
+          role: "user",
+          content: [{ type: "text", text: prompt }, ...images.map((source) => ({ type: "image" as const, source }))],
+        }],
         lease,
-        abort: new AbortController().signal,
+        abort: options.abortSignal ?? new AbortController().signal,
         deadlineAt: ctx.deadlineAt,
       });
       if (!result.ok) {
@@ -197,10 +211,10 @@ export async function createServeAdvancementApplications(
         ? {}
         : { rubricCatalog: new GlobalRubricCatalog(rubricLibrary) }),
     generationStrategy: new LLMRubricDraftGenerationStrategy({
-      complete: (prompt) => completeViaPort("main", prompt),
+      complete: (prompt, options) => completeViaPort("main", prompt, options),
     }),
     revisionStrategy: new LLMRubricDraftRevisionStrategy({
-      complete: (prompt) => completeViaPort("main", prompt),
+      complete: (prompt, options) => completeViaPort("main", prompt, options),
     }),
     ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
   });
@@ -266,5 +280,20 @@ export async function createServeAdvancementApplications(
     closureSynthesizer,
     contractBuilder,
   });
-  return Object.freeze({ controller, reviews });
+  // 起草与修订沿用控制器现有的模型调用（经 completeViaPort 计量），持久化走同一 store
+  const proposals = new AdvancementProposalApplicationService({
+    mechanism: {
+      listPendingProposals: (conversationId) => store.listPendingProposals(conversationId),
+      acceptProposal: (input) => store.acceptProposal(input),
+      loadLatestSession: (conversationId) => controller.loadLatestSession(conversationId),
+      transitionDraftAttempt: (conversationId, sessionId, attempt) =>
+        store.transitionDraftAttempt(conversationId, sessionId, attempt),
+      persistProposalDraft: (conversationId, sessionId, attempt, revision, draft) =>
+        store.persistProposalDraft(conversationId, sessionId, attempt, revision, draft),
+      buildDraft: (input) => controller.buildRubricDraft(input),
+      reviseDraft: (input) => controller.reviseRubricDraftContent(input),
+    },
+    ...(deps.onProposalFact ? { facts: { publish: deps.onProposalFact } } : {}),
+  });
+  return Object.freeze({ controller, reviews, proposals });
 }

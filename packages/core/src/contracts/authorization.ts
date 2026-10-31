@@ -159,6 +159,7 @@ export type AuthorityPortMethodId =
   | "session.readTaskList"
   | "session.readAdvancementState"
   | "session.listPendingAdvancementOriginalTasks"
+  | "session.listPendingAdvancementProposals"
   | "session.readAdvancementSubmission"
   | "session.mutate"
   | "global.read"

@@ -15,6 +15,7 @@
 
 import chalk from "chalk";
 import { describeClosureVerdict, renderClosureReport, type AdvancementExit, type AdvancementRunReview, type ReviewEvidence } from "@zhixing/core/advancement";
+import { advancementProposalStalledMessage, describeAdvancementProposalStage } from "@zhixing/core/advancement/proposal-messages";
 import type { SessionAdvancementDetailResult } from "@zhixing/rpc";
 import { clampLine } from "./tui/line-width.js";
 import { layout } from "./tui/style.js";
@@ -93,7 +94,9 @@ function countVerdicts(review: AdvancementRunReview): {
  *
  * 呈现取舍：
  * - contract_*（草案 / 确认 / 取消 / 失败）不在此渲染——契约确认是发起端
- *   行为，由 send 返回值驱动的确认面与同步提示承载，事件重放会双渲染；
+ *   行为，由确认面与同步提示承载（提议后的草案异步就绪时，发起端终端经
+ *   会话快照拉起确认面），事件重放会双渲染；
+ * - proposal_draft_failed 渲染失败或结果不明与可继续的操作，原任务保留；
  * - decision 为 exit 的 run_reviewed 不单独出行——紧随的 exited 事件
  *   携收场报告，一处收束；
  * - payload 是 wire 数据，防御性解析，形状不符静默跳过（呈现层绝不抛错）。
@@ -160,6 +163,15 @@ export function renderAdvancementControlEventLines(
       return [
         line(chalk.yellow(`${layout.contentPrefix}⚠ 推进恢复失败${detail}`), width),
       ];
+    }
+    case "advancement:proposal_draft_failed": {
+      // 提议之后的草案起草失败或结果不明：说明原任务保留，以及可继续的操作
+      const outcome = isRecord(payload) ? payload["outcome"] : undefined;
+      const message = isRecord(payload) ? payload["message"] : undefined;
+      return [line(chalk.yellow(`${layout.contentPrefix}⚠ ${advancementProposalStalledMessage(
+        outcome === "uncertain" ? "uncertain" : "failed",
+        typeof message === "string" && message ? message : undefined,
+      )}`), width)];
     }
     default:
       return [];
@@ -261,7 +273,7 @@ function dimLine(text: string, width: number): string {
  */
 export function renderResumedAdvancementNotice(
   snapshot: {
-    readonly status: "awaiting-rubric-confirmation" | "active";
+    readonly status: "awaiting-rubric-confirmation" | "active" | "proposed" | "drafting" | "draft-failed" | "draft-uncertain";
     readonly rubricTitle?: string;
     readonly lastReview?: { readonly round: number };
   },
@@ -269,6 +281,9 @@ export function renderResumedAdvancementNotice(
 ): string {
   if (snapshot.status === "awaiting-rubric-confirmation") {
     return systemLine("该对话有待确认的推进任务", width);
+  }
+  if (snapshot.status !== "active") {
+    return systemLine(`该对话${describeAdvancementProposalStage(snapshot.status)}`, width);
   }
   const title = snapshot.rubricTitle ? `：${snapshot.rubricTitle}` : "";
   const rounds =

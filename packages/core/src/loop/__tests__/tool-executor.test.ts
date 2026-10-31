@@ -949,3 +949,131 @@ describe("executeToolCalls · 并发模式", () => {
     });
   });
 });
+
+describe("executeToolCalls · 排他初始控制工具的批次门", () => {
+  function makeControlTool(
+    handler: () => Promise<{ content: string; isError?: boolean }> | { content: string; isError?: boolean },
+    invoked: { count: number },
+  ): ToolDefinition {
+    return {
+      name: "control",
+      description: "exclusive control",
+      inputSchema: { type: "object" as const },
+      needsPermission: false,
+      exclusiveInitialControl: {
+        validateInput: (input) => (input.bad === true ? "bad input" : undefined),
+      },
+      call: async () => {
+        invoked.count += 1;
+        return handler();
+      },
+    };
+  }
+
+  function setup(options: { readonly parallel?: boolean } = {}) {
+    const control = { count: 0 };
+    const business = { count: 0 };
+    const tools: ToolDefinition[] = [
+      makeControlTool(() => ({ content: "proposed" }), control),
+      makeBatchTool("write", () => {
+        business.count += 1;
+        return { content: "written" };
+      }, { isParallelSafe: options.parallel ?? false }),
+    ];
+    return { control, business, tools };
+  }
+
+  async function run(
+    tools: ToolDefinition[],
+    toolCalls: ToolUseBlock[],
+    exclusiveControl?: { readonly enabled: ReadonlySet<string>; readonly toolsStartedBefore: boolean },
+  ) {
+    const yields: AgentYield[] = [];
+    const gen = executeToolCalls({
+      toolCalls,
+      tools,
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      ...(exclusiveControl ? { exclusiveControl } : {}),
+    });
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) return { result: value, yields };
+      yields.push(value);
+    }
+  }
+
+  const enabled = { enabled: new Set(["control"]), toolsStartedBefore: false } as const;
+  const controlCall = (id: string, input: Record<string, unknown> = {}): ToolUseBlock => ({ type: "tool_use", id, name: "control", input });
+  const writeCall = (id: string): ToolUseBlock => ({ type: "tool_use", id, name: "write", input: {} });
+
+  it("选中唯一有效的排他调用：只启动它，同批业务调用不启动并返回配对结果", async () => {
+    const { control, business, tools } = setup();
+    const { result, yields } = await run(tools, [writeCall("w1"), controlCall("c1"), writeCall("w2")], enabled);
+    expect(control.count).toBe(1);
+    expect(business.count).toBe(0);
+    expect(yields.filter((y) => y.type === "tool_start").map((y) => y.type === "tool_start" && y.id)).toEqual(["c1"]);
+    expect(result.completedResults.map((r) => [r.toolUseId, r.isError === true])).toEqual([["w1", true], ["c1", false], ["w2", true]]);
+    expect(result.exclusive).toEqual({ id: "c1", outcome: "succeeded" });
+    expect(result.startedTools).toBe(true);
+  });
+
+  it("并行安全的业务调用与排他调用同批时，并行批也不启动", async () => {
+    const { control, business, tools } = setup({ parallel: true });
+    const { result } = await run(tools, [writeCall("w1"), writeCall("w2"), controlCall("c1")], enabled);
+    expect(business.count).toBe(0);
+    expect(control.count).toBe(1);
+    expect(result.exclusive?.outcome).toBe("succeeded");
+  });
+
+  it("两个排他调用、本运行已启动过工具、本运行未启用、入参不合法：整批都不启动", async () => {
+    for (const [calls, control] of [
+      [[controlCall("c1"), controlCall("c2"), writeCall("w1")], enabled],
+      [[controlCall("c1"), writeCall("w1")], { enabled: new Set(["control"]), toolsStartedBefore: true }],
+      [[controlCall("c1"), writeCall("w1")], { enabled: new Set<string>(), toolsStartedBefore: false }],
+      [[controlCall("c1"), writeCall("w1")], undefined],
+      [[controlCall("c1", { bad: true }), writeCall("w1")], enabled],
+    ] as const) {
+      const fixture = setup();
+      const { result, yields } = await run(fixture.tools, [...calls], control);
+      expect(fixture.control.count).toBe(0);
+      expect(fixture.business.count).toBe(0);
+      expect(yields.some((y) => y.type === "tool_start")).toBe(false);
+      expect(result.completedResults.every((r) => r.isError === true)).toBe(true);
+      expect(result.completedResults).toHaveLength(calls.length);
+      expect(result.exclusive).toBeUndefined();
+      expect(result.startedTools).toBe(false);
+    }
+  });
+
+  it("选中的排他调用自身失败（返回错误或抛错）：结果为 failed，同批业务调用仍不启动", async () => {
+    for (const handler of [
+      () => ({ content: "broken", isError: true }),
+      () => { throw new Error("boom"); },
+    ]) {
+      const control = { count: 0 };
+      const business = { count: 0 };
+      const tools: ToolDefinition[] = [
+        makeControlTool(handler, control),
+        makeBatchTool("write", () => {
+          business.count += 1;
+          return { content: "written" };
+        }, { isParallelSafe: false }),
+      ];
+      const { result } = await run(tools, [controlCall("c1"), writeCall("w1")], enabled);
+      expect(control.count).toBe(1);
+      expect(business.count).toBe(0);
+      expect(result.exclusive).toEqual({ id: "c1", outcome: "failed" });
+    }
+  });
+
+  it("不含排他调用时规划不变；startedTools 只在真正进入工具实现时为真", async () => {
+    const { business, tools } = setup();
+    const ran = await run(tools, [writeCall("w1")], enabled);
+    expect(business.count).toBe(1);
+    expect(ran.result.startedTools).toBe(true);
+    expect(ran.result.exclusive).toBeUndefined();
+    const missing = await run(tools, [{ type: "tool_use", id: "x", name: "absent", input: {} }], enabled);
+    expect(missing.result.startedTools).toBe(false);
+  });
+});

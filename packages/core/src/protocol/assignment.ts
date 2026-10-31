@@ -2929,11 +2929,29 @@ function assertTurnOrigin(value: unknown): void {
   assertObject(value, "Turn origin");
   assertExactKeys(
     value,
-    ["channel", "surface", "target", "triggeredBy", "worksceneContinuation", "messageIdentity"],
+    ["channel", "surface", "target", "triggeredBy", "worksceneContinuation", "messageIdentity", "enabledControls", "advancementExecution"],
     "Turn origin",
     true,
   );
   assertIdentifier(value.channel, "Turn origin channel");
+  if (value.advancementExecution !== undefined) {
+    // 推进原任务的执行标记：会话、模式与（确认执行时）被确认的草案
+    const execution = value.advancementExecution;
+    assertObject(execution, "Turn origin advancement execution");
+    assertExactKeys(execution, ["sessionId", "mode", "draftId"], "Turn origin advancement execution", true);
+    assertIdentifier(execution.sessionId, "Turn origin advancement session");
+    if (execution.mode !== "advancement" && execution.mode !== "direct") throw new TypeError("Invalid turn origin advancement execution mode");
+    if ((execution.mode === "advancement") !== (execution.draftId !== undefined)) throw new TypeError("Turn origin advancement execution draft must match its mode");
+    if (execution.draftId !== undefined) assertIdentifier(execution.draftId, "Turn origin advancement draft");
+  }
+  if (value.enabledControls !== undefined) {
+    // 产品为本次运行启用的排他控制工具名：有界、无重复
+    if (!Array.isArray(value.enabledControls) || value.enabledControls.length > 8 ||
+        new Set(value.enabledControls).size !== value.enabledControls.length) {
+      throw new TypeError("Turn origin enabledControls must be a short list of distinct names");
+    }
+    for (const name of value.enabledControls) assertIdentifier(name, "Turn origin enabled control");
+  }
   if (value.messageIdentity !== undefined) validateMessageInputIdentity(value.messageIdentity);
   if (value.worksceneContinuation !== undefined) {
     assertObject(value.worksceneContinuation, "Workscene continuation");

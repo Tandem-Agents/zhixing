@@ -9,5 +9,6 @@ export function conversationCommitSummary(record: Omit<TranscriptRunRecord, 'mes
       ? { kind: 'set_workdir' as const, sceneId: intent.sceneId, workspace: intent.workspace } : undefined;
   return { runIndex: record.runIndex, ...(record.usage ? { usage: record.usage } : {}),
     ...(navigation ? { navigation } : {}), handedOff, conflict: !!control?.conflict,
-    controlRecovery: !!record.postTurnControl || !!record.worksceneContinuation };
+    controlRecovery: !!record.postTurnControl || !!record.worksceneContinuation,
+    ...(intent?.kind === 'propose_advancement' ? { advancementProposal: true as const } : {}) };
 }

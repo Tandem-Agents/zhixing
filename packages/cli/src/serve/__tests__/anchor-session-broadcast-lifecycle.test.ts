@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AnchorSessionBroadcastLifecycle } from "../anchor-session-broadcast-lifecycle.js";
 import { createTempDir } from "@zhixing/test-utils";
 import {
+  advancementExecutionTurnId,
   type AdvancementRunReview,
   type ConfirmedRubricSnapshot,
 } from "@zhixing/core/advancement";
@@ -94,15 +95,16 @@ describe("AnchorSessionBroadcastLifecycle", () => {
     };
     for (const id of ids) {
       const task = { parts: [{ type: "text" as const, text: "finish" }] };
+      const originalTurnId = `turn-${id}`;
       const intent = {
-        turnId: `turn-${id}`, surfacePrincipal: "surface:test",
+        turnId: advancementExecutionTurnId(originalTurnId, "advancement", "draft"), surfacePrincipal: "surface:test",
         turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
         inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, task),
       };
       await store.createSession({
         id, conversationId: id, originalUserTask: task,
         pendingRubricDraft: {
-          draftId: "draft", originalTurnId: intent.turnId, source: "generated",
+          draftId: "draft", originalTurnId, source: "generated",
           candidateRubricIds: [], title: rubric.title, description: rubric.description,
           content: { ...rubric.content, passCriteria: ["finished"] },
           createdAt: "2026-01-01T00:00:00.000Z",

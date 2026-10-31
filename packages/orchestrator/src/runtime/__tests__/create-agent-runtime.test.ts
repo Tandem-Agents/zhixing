@@ -161,11 +161,14 @@ function createTestModelProvider(primaryRole: "main" | "power") {
     defaultMaxOutputTokens: { main: 8192, light: 8192, power: 8192 },
     primary: {
       budget: { contextWindow: 128_000, maxOutputTokens: 8192 },
-      inputCapabilities: { images: false },
+      inputCapabilities: { images: primaryImages.current },
       attention: { optimalMaxTokens: 64_000, riskMaxTokens: 96_000 },
     },
   });
 }
+
+/** 主模型是否声明支持图片；默认不支持，个别用例打开。 */
+const primaryImages = { current: false };
 
 function createTestRuntimeEnvironment(
   workspace?: string | null,
@@ -304,6 +307,7 @@ function runKernel(
 
 beforeEach(() => {
   providerRef.current = null;
+  primaryImages.current = false;
   powerRoleRef.current = null;
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
@@ -1769,6 +1773,114 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(beforeMsgCount).toBe(1); // onBeforeRun 观测到的是用户原始输入
     expect(afterReason).toBe("completed");
     expect(afterTurnIndex).toBe(7);
+  });
+
+  it("onBeforeRun 拿到本次运行的耐久身份；注入的文字与图片进入模型请求、不落盘", async () => {
+    const provider = new MockLLMProvider([{ text: "done" }]);
+    // 主模型声明支持图片
+    primaryImages.current = true;
+    providerRef.current = provider;
+    const image = { type: "base64" as const, mediaType: "image/png", data: "iVBORw0KGgo=" };
+    const turnOrigin = { channel: "rpc", advancementExecution: { sessionId: "session-1", mode: "direct" as const } };
+    const seen: Array<{ turnId?: string; turnOrigin?: unknown }> = [];
+    const runtime = await createAgentRuntime({
+      lifecycle: [{
+        id: "test-sub",
+        onBeforeRun: (ctx) => {
+          seen.push({ turnId: ctx.turnId, turnOrigin: ctx.turnOrigin });
+          ctx.injectUserContext({ text: "原任务：看图修界面", images: [image] });
+        },
+      }],
+    });
+
+    const completion = await runKernel(runtime, {
+      modelInput: { messages: [userMessage("执行上面的原任务")] },
+      identity: { turnIndex: 0, turnContext: { turnId: "turn-1:direct", turnOrigin } },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+
+    expect(seen).toEqual([{ turnId: "turn-1:direct", turnOrigin }]);
+    // 模型收到的当前用户消息：<context> 文字在前、原文在后，图片附在末尾
+    const sent = providerRef.current.calls[0]!.messages.at(-1)!;
+    expect(sent.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("原任务：看图修界面") });
+    expect(sent.content.at(-1)).toEqual({ type: "image", source: image });
+    // 持久化的用户消息仍是原文，不含注入的文字与图片
+    expect(completion.artifacts.runRecord.messages[0]).toEqual(userMessage("执行上面的原任务"));
+  });
+
+  it("宿主裁决的必需上下文排在钩子贡献之前进入模型请求、不落盘，不依赖任何钩子", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "done" }]);
+    primaryImages.current = true;
+    const image = { type: "base64" as const, mediaType: "image/png", data: "iVBORw0KGgo=" };
+    const runtime = await createAgentRuntime({
+      lifecycle: [{ id: "soft", onBeforeRun: (ctx) => ctx.injectUserContext("钩子贡献") }],
+    });
+    const turnOrigin = { channel: "rpc", advancementExecution: { sessionId: "session-1", mode: "direct" as const } };
+    const completion = await runKernel(runtime, {
+      modelInput: { messages: [userMessage("执行上面的原任务")] },
+      identity: { turnIndex: 0, turnContext: { turnId: "turn-1:direct", turnOrigin,
+        requiredUserContext: [{ text: "推进中的原任务：看图修界面", images: [image] }] } },
+      control: {}, correctness: {}, observation: {},
+    });
+    const sent = providerRef.current.calls[0]!.messages.at(-1)!;
+    const text = (sent.content[0] as { text: string }).text;
+    expect(text.indexOf("推进中的原任务：看图修界面")).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf("推进中的原任务：看图修界面")).toBeLessThan(text.indexOf("钩子贡献"));
+    expect(sent.content.at(-1)).toEqual({ type: "image", source: image });
+    expect(completion.artifacts.runRecord.messages[0]).toEqual(userMessage("执行上面的原任务"));
+  });
+
+  it("排他初始控制工具只在本运行耐久身份的 turnOrigin 启用它时才启动", async () => {
+    let calls = 0;
+    const control: ToolDefinition = {
+      name: "control_probe", description: "exclusive control probe",
+      inputSchema: { type: "object", properties: {} },
+      isReadOnly: false, isParallelSafe: false, needsPermission: false,
+      boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
+      exclusiveInitialControl: { validateInput: () => undefined },
+      call: async () => { calls++; return { content: "proposed", isError: false }; },
+    };
+    const run = async (turnOrigin?: { enabledControls: string[] }) => {
+      providerRef.current = new MockLLMProvider([
+        { toolCalls: [{ id: "c1", name: "control_probe", input: {} }] },
+        { text: "done" },
+      ]);
+      const runtime = await createAgentRuntime({ extraTools: [control] });
+      await runKernel(runtime, {
+        modelInput: { messages: [userMessage("hi")] },
+        identity: { turnIndex: 0, turnContext: { turnId: "turn-1", ...(turnOrigin ? { turnOrigin } : {}) } },
+        control: {}, correctness: {}, observation: {},
+      });
+    };
+    await run();
+    expect(calls).toBe(0);
+    await run({ enabledControls: ["control_probe"] });
+    expect(calls).toBe(1);
+  });
+
+  it("模型不支持图片时注入的图片不被静默丢弃：按输入能力校验结束本次运行", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "不应到达" }]);
+    const runtime = await createAgentRuntime({
+      lifecycle: [{
+        id: "test-sub",
+        onBeforeRun: (ctx) => {
+          ctx.injectUserContext({ text: "原任务", images: [{ type: "base64", mediaType: "image/png", data: "iVBORw0KGgo=" }] });
+        },
+      }],
+    });
+
+    const completion = await runKernel(runtime, {
+      modelInput: { messages: [userMessage("执行上面的原任务")] },
+      identity: { turnIndex: 0 },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+
+    expect(completion.terminal.reason).toBe("error");
+    expect(providerRef.current.calls).toHaveLength(0);
   });
 
   it("首窗 onWindowOpen(instance-start) 抛错 → createAgentRuntime 失败(安全回滚)", async () => {

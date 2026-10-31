@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AdvancementSession } from "@zhixing/core/advancement";
+import { advancementProposalExecutionInput, type AdvancementSession } from "@zhixing/core/advancement";
 import type { LifecycleBeforeRunContext } from "@zhixing/orchestrator/runtime";
 import { createAdvancementAcceptanceLifecycle } from "../advancement-acceptance-lifecycle.js";
 
-function activeSession(): AdvancementSession {
+function activeSession(id = "session-1", criterion = "测试通过"): AdvancementSession {
   return {
-    id: "session-1",
+    id,
     conversationId: "conv-1",
     status: "active",
     originalUserTask: { parts: [{ type: "text", text: "把测试修到全绿" }] },
@@ -22,7 +22,7 @@ function activeSession(): AdvancementSession {
       description: "判断代码任务是否完成",
       content: {
         passCriteria: [
-          { id: "pc-1", text: "测试通过" },
+          { id: "pc-1", text: criterion },
           { id: "pc-2", text: "实现满足需求" },
         ],
         evidenceRequirements: [
@@ -47,8 +47,10 @@ function activeSession(): AdvancementSession {
 
 function beforeRunContext(
   conversationId: string | undefined,
-): LifecycleBeforeRunContext & { injected: Array<string | null> } {
-  const injected: Array<string | null> = [];
+  identity: Partial<Pick<LifecycleBeforeRunContext, "turnId" | "turnOrigin" | "messages">> = {},
+): LifecycleBeforeRunContext & { injected: Array<unknown>; warnings: string[] } {
+  const injected: Array<unknown> = [];
+  const warnings: string[] = [];
   return {
     runtimeId: "rt-1",
     mode: "main",
@@ -58,11 +60,16 @@ function beforeRunContext(
     turnIndex: 0,
     isWindowFirstRun: true,
     messages: [],
+    ...identity,
+    reportLifecycleWarning: async (event) => {
+      warnings.push(event.message);
+    },
     injectUserContext: (content) => {
       injected.push(content);
     },
     injected,
-  };
+    warnings,
+  } as never;
 }
 
 describe("createAdvancementAcceptanceLifecycle", () => {
@@ -115,6 +122,42 @@ describe("createAdvancementAcceptanceLifecycle", () => {
     await lifecycle.onBeforeRun?.(ctx);
 
     expect(ctx.injected).toEqual([]);
+  });
+
+  it.each([
+    ["确认执行 A", { sessionId: "session-a", mode: "advancement" as const, draftId: "draft-1" }],
+    ["降级执行 A（此时 active 是 B）", { sessionId: "session-a", mode: "direct" as const }],
+  ])("带执行标记的运行（%s）不注入任何内容、不查会话：原任务与契约由宿主裁决的指派材料给出", async (_label, marker) => {
+    const advancement = {
+      loadActiveSession: vi.fn(async () => activeSession("session-b", "CRITERION_B")),
+    };
+    const lifecycle = createAdvancementAcceptanceLifecycle(advancement as never);
+    const ctx = beforeRunContext("conv-1", {
+      turnId: marker.mode === "advancement" ? "turn-1:advancement:draft-1" : "turn-1:direct",
+      turnOrigin: { channel: "rpc", triggeredBy: "rpc:test", advancementExecution: marker },
+    });
+
+    await lifecycle.onBeforeRun?.(ctx);
+
+    expect(ctx.injected).toEqual([]);
+    expect(ctx.warnings).toEqual([]);
+    expect(advancement.loadActiveSession).not.toHaveBeenCalled();
+  });
+
+  it("普通运行即使复制了推进控制消息的文字，也只注入验收条件、没有原任务", async () => {
+    const advancement = {
+      loadActiveSession: vi.fn(async () => activeSession()),
+    };
+    const lifecycle = createAdvancementAcceptanceLifecycle(advancement as never);
+    const ctx = beforeRunContext("conv-1", {
+      messages: [{ role: "user", content: advancementProposalExecutionInput("advancement").parts }] as never,
+    });
+
+    await lifecycle.onBeforeRun?.(ctx);
+
+    expect(ctx.injected).toHaveLength(1);
+    expect(ctx.injected[0]).toContain("验收条件");
+    expect(JSON.stringify(ctx.injected)).not.toContain("推进中的原任务");
   });
 
   it("无会话身份的 run（ephemeral）直接跳过、不查推进状态", async () => {

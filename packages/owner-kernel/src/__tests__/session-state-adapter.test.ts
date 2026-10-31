@@ -23,6 +23,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   advancementEvidenceRequestId,
+  advancementExecutionTurnId,
   type AdvancementControlEvent,
 } from "@zhixing/core/advancement";
 import {
@@ -199,7 +200,8 @@ function createdEvent(
   };
 }
 
-function confirmedEvent(): AdvancementControlEvent {
+/** 确认事件；mode=direct 时取其执行意向作降级用（执行身份由原始输入 turn-1 派生，确认执行绑定草案 draft-1）。 */
+function confirmedEvent(mode: "advancement" | "direct" = "advancement"): AdvancementControlEvent {
   const originalUserTask = task("把测试修到全绿");
   return {
     type: "rubric_confirmed",
@@ -207,7 +209,7 @@ function confirmedEvent(): AdvancementControlEvent {
     sessionId: "session-1",
     confirmedRubric: confirmed(),
     admissionIntent: {
-      turnId: "turn-1",
+      turnId: advancementExecutionTurnId("turn-1", mode, mode === "advancement" ? "draft-1" : undefined),
       surfacePrincipal: "surface:test",
       turnOrigin: { channel: "rpc", triggeredBy: "surface:test" },
       inputDigest: protocolDigest(
@@ -867,7 +869,7 @@ it('session batch read crosses 64 frames and discards failed partial state', asy
 it("retains exact cancelled direct intent across a new head and authority replay", async () => {
   const h = await createHarness();
   await h.write([createdEvent()]);
-  const confirmation = confirmedEvent();
+  const confirmation = confirmedEvent("direct");
   if (confirmation.type !== "rubric_confirmed") throw Error("fixture");
   await h.write([{ type: "original_task_directed", timestamp: NOW, sessionId: "session-1", admissionIntent: confirmation.admissionIntent,
     exit: { reason: "user-cancelled", message: "直接执行", occurredAt: NOW } }]);
@@ -878,7 +880,7 @@ it("retains exact cancelled direct intent across a new head and authority replay
   expect((await adapter.readAdvancementState("conv-1", hostCtx("head")))?.id).toBe("session-new");
   expect(await adapter.listPendingAdvancementOriginalTasks("conv-1", hostCtx("pending"))).toEqual({ sessionIds: ["session-1"] });
   expect(await adapter.readAdvancementState("conv-1", hostCtx("exact"), "session-1")).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: "pending" } });
-  await adapter.mutate("conv-1", { kind: "advancement-event", events: [{ type: "original_task_admitted", sessionId: "session-1", timestamp: NOW, turnId: "turn-1", inputDigest: confirmation.admissionIntent.inputDigest, runId: "run-direct" }] }, hostCtx("settle-direct"));
+  await adapter.mutate("conv-1", { kind: "advancement-event", events: [{ type: "original_task_admitted", sessionId: "session-1", timestamp: NOW, turnId: confirmation.admissionIntent.turnId, inputDigest: confirmation.admissionIntent.inputDigest, runId: "run-direct" }] }, hostCtx("settle-direct"));
   expect(await adapter.listPendingAdvancementOriginalTasks("conv-1", hostCtx("done"))).toEqual({ sessionIds: [] });
   expect((await pendingAdvancementConversations(h.log, h.artifacts, verifier)).conversationIds).toEqual([]);
   await expect(adapter.listPendingAdvancementOriginalTasks("conv-1", { ...hostCtx("forbidden"), principal: { kind: "surface", surfacePrincipal: "surface:test", connectionId: "conn-test" } } as never)).rejects.toThrow();
@@ -969,7 +971,7 @@ it.each(['pending-delete','session-text','session-state','session-key','session-
     const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 71));
     const h = await createHarness('conv-1',1,verifier,integrity);
     await h.write([createdEvent()]);
-    const confirmation = confirmedEvent();
+    const confirmation = confirmedEvent('direct');
     if (confirmation.type !== 'rubric_confirmed') throw Error('fixture');
     await h.write([{ type:'original_task_directed', sessionId:'session-1',timestamp:NOW,admissionIntent:confirmation.admissionIntent,
       exit:{reason:'user-cancelled',message:'direct',occurredAt:NOW} }]);
@@ -1037,7 +1039,7 @@ it('advancement cold readers replay a same-identity old signed state, rotate key
   await fs.cp(source,snapshot,{recursive:true});
   const writer=trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir,h.artifacts,{integrity,clock:()=>NOW}));
   const writerJournal=h.makeJournal(writer), adapter=new ConversationSessionStateAdapter({journalFor:()=>writerJournal,sessionExists:async()=>true});
-  const confirmation=confirmedEvent(); if(confirmation.type!=='rubric_confirmed')throw Error('fixture');
+  const confirmation=confirmedEvent('direct'); if(confirmation.type!=='rubric_confirmed')throw Error('fixture');
   await adapter.mutate('conv-1',{kind:'advancement-event',events:[{type:'original_task_directed',sessionId:'session-1',timestamp:NOW,
     admissionIntent:confirmation.admissionIntent,exit:{reason:'user-cancelled',message:'direct',occurredAt:NOW}}]},hostCtx('after-old-snapshot'));
   const expected=await writerJournal.advancementSession('session-1');

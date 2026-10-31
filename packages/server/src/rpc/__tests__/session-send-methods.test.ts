@@ -27,6 +27,7 @@ import {
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
 } from "@zhixing/core/advancement/application";
+import { advancementProposalDispositionMessage } from "@zhixing/core/advancement/proposal-messages";
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { type SessionRuntime } from "@zhixing/owner-kernel/types";
 import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
@@ -219,20 +220,27 @@ describe("session.send 方法", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
-  it("generates one legacy identity before Advancement preprocessing", async () => {
+  // 新任务与换目标后的新任务启用推进提议；维护忙、作用域未确认时按普通运行
+  it.each([
+    ["new-task", "new-task", true],
+    ["replaced", "not-applicable", true],
+    ["owner-busy", "owner-busy", false],
+  ] as const)("generates one legacy identity before Advancement preprocessing; %s enables the proposal: %s", async (route, prepared, enabled) => {
     const createTurnIdentity = vi.fn(() => "turn-generated");
-    const admit = vi.fn();
+    const admit = vi.fn(async (input: Parameters<ConversationAgentTurnAdmissionPort["admit"]>[0]) => ({
+      status: "queued" as const,
+      conversationId: "conversation-1",
+      runId: `run-${input.turnId}`,
+    }));
     const prepareNewTask = vi.fn(
-      async (input: { readonly turnId: string }) => ({
-        result: {
-          kind: "contract-failed" as const,
-          conversationId: "conversation-1",
-          originalTurnId: input.turnId,
-          error: { message: "draft failed" },
-        },
+      async (_input: { readonly turnId: string }) => ({
+        result: { kind: prepared },
         facts: [],
       }),
     );
+    const awaitingRubric = route === "replaced"
+      ? { result: { kind: "replaced", conversationId: "conversation-1", advancementSessionId: "adv-old" }, facts: [] }
+      : { result: { kind: "not-applicable" }, facts: [] };
     const addObserver = vi.fn(() => true);
     const notify = vi.fn();
     const method = buildSessionSendMethod();
@@ -252,7 +260,7 @@ describe("session.send 方法", () => {
         descriptor === ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND
           ? { result: { kind: "not-applicable" }, facts: [] }
           : descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND
-          ? { result: { kind: "not-applicable" }, facts: [] }
+          ? awaitingRubric
           : descriptor === ADVANCEMENT_PREPARE_NEW_TASK_COMMAND
             ? await prepareNewTask(input as { readonly turnId: string })
           : await conversationProductApi.command(
@@ -269,6 +277,7 @@ describe("session.send 方法", () => {
             _exists: () => Promise<boolean>,
             run: () => Promise<unknown>,
           ) => ({ status: "ok", value: await run() }),
+          drainLifecycleDiagnostics: () => [],
         },
         advancement: {
           loadActiveSession: async () => null,
@@ -289,14 +298,15 @@ describe("session.send 方法", () => {
     ).resolves.toMatchObject({
       conversationId: "conversation-1",
       turnId: "turn-generated",
-      status: "contract-failed",
     });
     expect(createTurnIdentity).toHaveBeenCalledTimes(1);
     expect(prepareNewTask).toHaveBeenCalledWith(expect.objectContaining({
       turnId: "turn-generated",
     }));
-    expect(addObserver).toHaveBeenCalledTimes(1);
-    expect(admit).not.toHaveBeenCalled();
+    // 照常接纳；启用时耐久 ingress 的 turnOrigin 为这次运行启用推进提议
+    expect(admit).toHaveBeenCalledOnce();
+    expect(admit.mock.calls[0]![0]).toMatchObject({ turnId: "turn-generated" });
+    expect(admit.mock.calls[0]![0].turnOrigin?.enabledControls).toEqual(enabled ? ["propose_advancement"] : undefined);
   });
 
   it("admitTurn 撞工作场景静默闸时返回 BUSY", async () => {
@@ -755,11 +765,13 @@ describe("session durable control 方法", () => {
 });
 
 describe("session.inputReceipt Advancement projection", () => {
-  it.each(["saved", "stale", "not-saved", "direct", "pending-collision", "rejected", "cancelled", "failed"] as const)("projects %s from authenticated authority reads", async kind => {
+  it.each(["saved", "stale", "not-saved", "direct", "pending-collision", "rejected", "cancelled", "failed", "proposal-kept", "proposal-supplemented"] as const)("projects %s from authenticated authority reads", async kind => {
     const currentInput = "current-input", principal = "rpc:owned";
     const identity = { surfacePrincipal: principal, submissionId: currentInput, requestDigest: `sha256:${"a".repeat(64)}` };
     const outcome = kind === "rejected" ? { kind: "rejected", code: "rubric-draft-stale" } : (kind === "direct" || kind === "pending-collision") ? { kind: "original-task-intent", mode: "direct", sessionId: "adv-old", originalTurnId: "original-input" }
       : kind === "cancelled" ? { kind: "cancelled", sessionId: "adv-old" }
+      : kind === "proposal-kept" ? { kind: "proposal-kept", sessionId: "adv-proposal", originalTurnId: "original-input" }
+      : kind === "proposal-supplemented" ? { kind: "proposal-supplemented", sessionId: "adv-proposal", originalTurnId: "original-input", revision: 1 }
       : kind === "failed" ? { kind: "contract-failed", code: "rubric-generation-failed" }
       : kind === "not-saved" ? { kind: "not-saved", sessionId: "adv-old", draftId: "draft", originalTurnId: "original-input" }
       : { kind: "draft-saved", disposition: "original-saved", sessionId: "adv-old", draftId: "draft", draftVersion: 0, originalTurnId: "original-input" };
@@ -787,6 +799,12 @@ describe("session.inputReceipt Advancement projection", () => {
     if (kind === "direct") expect(result.result).toMatchObject({ turnId: "original-input", runId: "run-original" });
     if (kind === "saved" || kind === "not-saved") expect(result.result.submission).toEqual({ turnId: currentInput, disposition: kind === "saved" ? "original-saved" : "not-saved" });
     if (kind === "stale") { expect(result.result.status).toBe("submission-settled"); expect(result.result.rubricDraft).toBeUndefined(); }
+    // 提议阶段的输入回执核对回原结果，不落入“准则未能生成”
+    if (kind === "proposal-kept" || kind === "proposal-supplemented") {
+      const disposition = kind === "proposal-kept" ? "kept" : "supplemented";
+      expect(result.result).toEqual({ conversationId: "conv", sessionId: "conv", turnId: currentInput, status: "advancement-proposal",
+        advancementSessionId: "adv-proposal", disposition, message: advancementProposalDispositionMessage(disposition) });
+    }
     expect(command).not.toHaveBeenCalled();
   });
 });

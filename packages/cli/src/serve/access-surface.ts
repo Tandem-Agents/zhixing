@@ -1,5 +1,6 @@
 /** Finite contracts shared by the Host construction and activation phases. */
 import type { AdvancementRecentContextPort } from "./advancement-controller.js";
+import type { AdvancementProposalApplicationService, AdvancementProposalFactPort } from "@zhixing/core/advancement";
 import type { AdvancementEvidenceRemoteDirectory } from "./advancement-evidence-topology.js";
 import type { AssignmentDataPlaneRemoteDirectory } from "./assignment-data-plane-topology.js";
 import type { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
@@ -46,10 +47,13 @@ export interface AdvancementConversationComposition {
   create(input: Readonly<{
     sessionState: SessionStatePort;
     recentContext: AdvancementRecentContextPort;
+    /** 提议阶段的可见结果交给接入面呈现。 */
+    onProposalFact?: AdvancementProposalFactPort["publish"];
   }>): Promise<Readonly<{
     controller: AdvancementController;
     reviews: AdvancementReviewAttemptApplication;
     lifecycle: AdvancementConversationLifecycleApplication;
+    proposals: AdvancementProposalApplicationService;
   }>>;
 }
 

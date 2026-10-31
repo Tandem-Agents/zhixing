@@ -108,7 +108,7 @@ export class PendingInputReceiptError extends Error {
 export class RpcConversationFacade {
   #continuationRequirement: readonly string[] | null = null;
   #limitedCapabilitiesAccepted = false;
-  #pendingAdvancement = new Map<string, { method: string; key: string; submissionId: string }>();
+  #pendingAdvancement = new Map<string, { method: string; key: string; submissionId: string; params: Readonly<Record<string, unknown>> }>();
 
   constructor(private readonly link: CoreHostRpcLink) {}
 
@@ -244,6 +244,12 @@ export class RpcConversationFacade {
     return this.#pendingAdvancement.has(conversationId);
   }
 
+  /** 尚待核对的推进操作（方法与提交参数）；调用方据此算出这次操作会执行的 turn。 */
+  pendingAdvancementOperation(conversationId: string): { readonly method: string; readonly params: Readonly<Record<string, unknown>> } | undefined {
+    const pending = this.#pendingAdvancement.get(conversationId);
+    return pending ? { method: pending.method, params: pending.params } : undefined;
+  }
+
   /** Read the saved submission, independently of the currently displayed draft
    * or button. The consumer takes responsibility before the identity retires. */
   async consumePendingAdvancement<T>(conversationId: string, consume: (result: SessionSendResult) => T): Promise<T | undefined> {
@@ -271,7 +277,7 @@ export class RpcConversationFacade {
     const pending = this.#pendingAdvancement.get(conversationId);
 
     if (pending && pending.key !== key) throw new PendingInputReceiptError("上次操作结果尚待核对；请先重试上一次操作，再选择其他操作。");
-    const identity = pending ?? { method, key, submissionId: generateTurnId() };
+    const identity = pending ?? { method, key, submissionId: generateTurnId(), params };
     if (!pending && this.#pendingAdvancement.size >= 64) throw Error("尚有未核对的任务操作，请先核对其结果。");
     this.#pendingAdvancement.set(conversationId, identity);
     let cause: unknown = Error("上次操作结果待核对");

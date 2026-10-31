@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import {
   runReviewedEvents,
   advancementReviewAttemptMutationId,
+  advancementProposalSessionId,
+  isOpenAdvancementSession,
   type AdvancementControlEvent,
+  type AdvancementDraftAttempt,
   type AdvancementEvidenceAttempt,
   type AdvancementEvidenceOutcome,
   type AdvancementEvidenceSettlement,
@@ -34,6 +37,14 @@ export interface AdvancementSessionStore {
   settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome): Promise<void>;
   regenerateSession(conversationId: string, previousSessionId: string, nextSessionId: string, draft: RubricContractDraftSnapshot, exit: AdvancementExit, submission?: AdvancementSubmissionIdentity): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }>;
   createSession(input: CreateAdvancementSessionInput): Promise<AdvancementSession>;
+  /** 接受主 Agent 提议：同一提议重复接受返回同一会话；已有未终结会话时记为未被接受（建会话并同批取消）。 */
+  acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("@zhixing/core").UserTurnInput }>): Promise<AdvancementSession>;
+  supplementProposal(conversationId: string, sessionId: string, supplement: import("@zhixing/core").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession>;
+  transitionDraftAttempt(conversationId: string, sessionId: string, attempt: AdvancementDraftAttempt): Promise<AdvancementSession>;
+  /** 已提交、尚未被接受或拒绝的提议运行，带原始输入身份与还原的原任务。 */
+  listPendingProposals(conversationId: string): Promise<readonly { readonly runId: string; readonly originalTurnId: string; readonly originalUserTask: import("@zhixing/core").UserTurnInput }[]>;
+  /** 写入已消费的尝试与草案（并入截至 revision 的补充），会话进入待确认。 */
+  persistProposalDraft(conversationId: string, sessionId: string, attempt: AdvancementDraftAttempt, revision: number, draft: RubricContractDraftSnapshot): Promise<AdvancementSession>;
   directOriginalTask(conversationId: string, sessionId: string, admissionIntent: AdvancementOriginalTaskAdmissionIntent, exit: AdvancementExit, timestamp?: string, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession>;
   rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp?: string): Promise<AdvancementSession>;
   listPendingOriginalTasks(conversationId: string, after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }>;
@@ -223,6 +234,47 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     const created = await this.loadSession(conversationId, nextSessionId);
     if (!created) throw Error("Advancement regenerated session missing after commit");
     return { exited, created };
+  }
+
+  async acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("@zhixing/core").UserTurnInput }>): Promise<AdvancementSession> {
+    const sessionId = advancementProposalSessionId(input.proposalId);
+    const existing = await this.loadSession(input.conversationId, sessionId);
+    if (existing) return existing;
+    const timestamp = this.#now();
+    const identity = {
+      timestamp,
+      sessionId,
+      conversationId: input.conversationId,
+      proposalId: input.proposalId,
+      runId: input.runId,
+      originalTurnId: input.originalTurnId,
+      originalUserTask: input.originalUserTask,
+    };
+    const open = (await this.loadConversationSessions(input.conversationId)).some(isOpenAdvancementSession);
+    return await this.#write(input.conversationId, [open
+      ? { type: "proposal_rejected", ...identity, exit: { reason: "superseded", message: "提议未被接受：会话里已有未结束的推进。", occurredAt: timestamp } }
+      : { type: "proposal_accepted", ...identity }], `advancement-proposal:${input.proposalId.replace("sha256:", "")}`);
+  }
+
+  listPendingProposals(conversationId: string) {
+    return this.#port.listPendingAdvancementProposals(conversationId, this.#ctx(this.#requestIdFor()));
+  }
+
+  async supplementProposal(conversationId: string, sessionId: string, supplement: import("@zhixing/core").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
+    return await this.#write(conversationId, [{ type: "proposal_supplemented", timestamp: this.#now(), sessionId, supplement }], undefined, submission);
+  }
+
+  async transitionDraftAttempt(conversationId: string, sessionId: string, attempt: AdvancementDraftAttempt): Promise<AdvancementSession> {
+    return await this.#write(conversationId, [{ type: "draft_attempt_transitioned", timestamp: this.#now(), sessionId, attempt }],
+      `advancement-draft:${sessionId}:${attempt.generation}:${attempt.phase}`);
+  }
+
+  async persistProposalDraft(conversationId: string, sessionId: string, attempt: AdvancementDraftAttempt, revision: number, draft: RubricContractDraftSnapshot): Promise<AdvancementSession> {
+    const timestamp = this.#now();
+    return await this.#write(conversationId, [
+      { type: "draft_attempt_transitioned", timestamp, sessionId, attempt },
+      { type: "proposal_drafted", timestamp, sessionId, revision, pendingRubricDraft: draft },
+    ], `advancement-draft:${sessionId}:${attempt.generation}:drafted`);
   }
 
   async directOriginalTask(conversationId: string, sessionId: string, admissionIntent: AdvancementOriginalTaskAdmissionIntent, exit: AdvancementExit, timestamp = this.#now(), submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
@@ -526,11 +578,8 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     conversationId: string,
   ): Promise<AdvancementSession | null> {
     const head = await this.#read(conversationId);
-    return head &&
-      (head.status === "awaiting-rubric-confirmation" ||
-        head.status === "active")
-      ? head
-      : null;
+    // 未终结含提议阶段：会话删除或清空时同样要取消它们
+    return head && isOpenAdvancementSession(head) ? head : null;
   }
 
   async loadConversationSessions(
@@ -631,7 +680,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     if (events.length !== 1) throw Error("Submission must bind one finite business transition");
     const event = events[0]!;
     if (event.type === "submission_settled") throw Error("Submission receipt cannot settle itself");
-    return advancementSubmissionOutcome(event, event.type === "rubric_draft_revised" ? await this.loadSession(conversationId, event.sessionId) : undefined);
+    return advancementSubmissionOutcome(event, event.type === "rubric_draft_revised" || event.type === "proposal_supplemented" ? await this.loadSession(conversationId, event.sessionId) : undefined);
   }
 
   #ctx(requestId: string): AuthorityCallContext {
@@ -690,6 +739,14 @@ function advancementEventIsReflected(
           message.id === event.proxyMessage.id &&
           canonicalEqual(message, event.proxyMessage),
       );
+    case "proposal_accepted":
+    case "proposal_rejected":
+      return session.proposal?.proposalId === event.proposalId;
+    case "draft_attempt_transitioned":
+      return canonicalEqual(session.proposal?.draftAttempt, event.attempt) ||
+        (session.proposal?.draftAttempt?.generation ?? 0) > event.attempt.generation;
+    case "proposal_drafted":
+      return session.pendingRubricDraft?.draftId === event.pendingRubricDraft.draftId;
     case "completed":
       return session.status === "completed" && canonicalEqual(session.exit, event.exit);
     case "exited":

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActiveConversation, ConversationController, TurnOutcome } from '../../runtime/conversation-controller.js';
 import type { RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
-import { TerminalSessionCommands, projectTerminalTurnOutcome, type TerminalTurnOutcome } from '../session-commands.js';
+import { TerminalSessionCommands, projectCommittedTerminalOutcome, projectTerminalTurnOutcome, type TerminalTurnOutcome } from '../session-commands.js';
+import { ADVANCEMENT_PROPOSED_NOTICE } from '@zhixing/core/advancement/proposal-messages';
 import type { TerminalSelectionPort } from '../selection.js';
 
 function fixture() {
@@ -67,6 +68,14 @@ describe('terminal session navigation', () => {
       handoff: { goal: 'x'.repeat(1024 * 1024), constraints: [], completed: [], remaining: ['continue'] } } } });
     expect(outcome.control).toEqual({ handedOff: true, navigation: undefined, conflict: false });
     expect(JSON.stringify(outcome).length).toBeLessThan(512);
+  });
+  it('shows a proposing run as proposed, not completed, from both the live intent and the committed summary', () => {
+    const result = { reason: 'completed' } as unknown as TurnOutcome['result'];
+    expect(projectTerminalTurnOutcome({ result, postTurnControl: { intent: { kind: 'propose_advancement' } } }))
+      .toEqual({ reason: 'completed', message: ADVANCEMENT_PROPOSED_NOTICE, control: { handedOff: false, conflict: false, advancementProposal: true } });
+    expect(projectCommittedTerminalOutcome({ runIndex: 1, handedOff: false, conflict: false, advancementProposal: true }))
+      .toMatchObject({ message: ADVANCEMENT_PROPOSED_NOTICE, control: { advancementProposal: true } });
+    expect(projectCommittedTerminalOutcome({ runIndex: 1, handedOff: false, conflict: false }).control).not.toHaveProperty('advancementProposal');
   });
   it('keeps completed, turn-limit, aborted and error outcomes distinct', () => {
     const project = (result: unknown) => projectTerminalTurnOutcome({ result: result as TurnOutcome['result'] });

@@ -1,6 +1,5 @@
 export {
   AdvancementController,
-  newTaskSessionId,
   renderRecentContextFromMessages,
   type AdvancementControllerOptions,
 } from "./controller.js";

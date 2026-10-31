@@ -26,6 +26,7 @@ import type {
   AdvancementExit,
   AdvancementOriginalTaskAdmissionIntent,
   AdvancementProxyMessage,
+  AdvancementProposalStageStatus,
   AdvancementRunReview,
   AdvancementSession,
   AdvancementSessionStatus,
@@ -44,6 +45,9 @@ import {
   advancementReviewRootRequestId,
 } from "./review-attempt-identity.js";
 import { createAdvancementWindowReviewEntry } from "./window-state.js";
+import { advancementExecutionTurnId, advancementOriginalTaskInput, advancementProposalExecution } from "./proposal-identity.js";
+import type { AdvancementProposalApplicationService } from "./proposal-application.js";
+import { isOpenAdvancementSession, isProposalStageStatus } from "./reducer.js";
 import type {
   ArtifactRef,
   Digest,
@@ -1432,7 +1436,8 @@ function projectAdvancementActiveState(
 ): AdvancementActiveStateProjection | null {
   if (
     session.status !== "awaiting-rubric-confirmation" &&
-    session.status !== "active"
+    session.status !== "active" &&
+    !isProposalStageStatus(session.status)
   ) {
     return null;
   }
@@ -1775,16 +1780,19 @@ export class AdvancementAcceptedTurnApplicationService
   readonly #catchUp: AdvancementAcceptedTurnCatchUpPort;
   readonly #review: Pick<AdvancementReviewAttemptApplication, "reviewAcceptedRun">;
   readonly #results: AdvancementReviewResultProjectionApplication;
+  readonly #proposals?: Pick<AdvancementProposalApplicationService, "advance">;
   readonly #chains = new Map<string, Promise<void>>();
 
   constructor(options: Readonly<{
     catchUp: AdvancementAcceptedTurnCatchUpPort;
     review: Pick<AdvancementReviewAttemptApplication, "reviewAcceptedRun">;
     results: AdvancementReviewResultProjectionApplication;
+    proposals?: Pick<AdvancementProposalApplicationService, "advance">;
   }>) {
     this.#catchUp = options.catchUp;
     this.#review = options.review;
     this.#results = options.results;
+    this.#proposals = options.proposals;
   }
 
   acceptCommittedTurn(turn: AdvancementCommittedTurn): void {
@@ -1801,6 +1809,11 @@ export class AdvancementAcceptedTurnApplicationService
   }
 
   async #reviewCommittedTurn(turn: AdvancementCommittedTurn): Promise<void> {
+    // 提议运行不是验收对象：提交后立即接受提议并起草案；失败留给 G08 恢复兜底
+    if (turn.runRecord.postTurnControl?.intent.kind === "propose_advancement") {
+      await this.#proposals?.advance(turn.conversationId).catch(() => undefined);
+      return;
+    }
     let catchUp: AdvancementAcceptedTurnCatchUpResult;
     try {
       catchUp = await this.#catchUp.catchUpAcceptedTurn(
@@ -1901,6 +1914,8 @@ export interface AdvancementConversationLifecycleApplication {
 export interface AdvancementConversationLifecycleApplicationOptions {
   readonly mechanism: AdvancementConversationLifecycleMechanismPort;
   readonly conversationAlive: AdvancementConversationAlivePort;
+  /** 对话删除后中止该对话的在途草案调用；会话已取消，迟到结果只作废。 */
+  readonly proposals?: Pick<AdvancementProposalApplicationService, "cancel">;
 }
 
 /** One finite lifecycle application assembled before any Host consumer is published. */
@@ -1909,10 +1924,12 @@ export class AdvancementConversationLifecycleApplicationService
 {
   readonly #mechanism: AdvancementConversationLifecycleMechanismPort;
   readonly #conversationAlive: AdvancementConversationAlivePort;
+  readonly #proposals?: Pick<AdvancementProposalApplicationService, "cancel">;
 
   constructor(options: AdvancementConversationLifecycleApplicationOptions) {
     this.#mechanism = options.mechanism;
     this.#conversationAlive = options.conversationAlive;
+    this.#proposals = options.proposals;
   }
 
   async cancelConversationLifecycle(conversationId: string): Promise<void> {
@@ -1926,6 +1943,8 @@ export class AdvancementConversationLifecycleApplicationService
       reason: "user-cancelled",
       message: "原始对话已删除，推进会话已取消。",
     });
+    // 先取消再中止：在途草案调用停下后看到会话已离开本代，结果只作废、不再发布
+    await this.#proposals?.cancel(conversationId);
   }
 
   async removeConversationData(conversationId: string): Promise<void> {
@@ -1964,40 +1983,6 @@ export class AdvancementConversationLifecycleApplicationService
       warnings: Object.freeze(warnings),
     });
   }
-}
-
-/** Path-free mechanisms used by the no-open-session new-task decision. */
-export interface AdvancementNewTaskMechanismPort {
-  loadOpenNewTaskSession(
-    conversationId: string,
-  ): Promise<AdvancementSession | null>;
-  decideNewTaskAdmission(input: Readonly<{
-    conversationId: string;
-    userInput: Readonly<UserTurnInput>;
-  }>): Promise<AdvancementAdmissionDecision>;
-  buildNewTaskRubricDraft(input: Readonly<{
-    originalTurnId: string;
-    originalUserTask: Readonly<UserTurnInput>;
-  }>): Promise<RubricContractDraftSnapshot>;
-  persistNewTaskAwaitingSession(input: Readonly<{
-    submission?: AdvancementSubmissionIdentity;
-    conversationId: string;
-    originalUserTask: Readonly<UserTurnInput>;
-    draft: RubricContractDraftSnapshot;
-  }>): Promise<AdvancementSession>;
-}
-
-/** Conversation application boundary used only after a draft has been built. */
-export interface AdvancementNewTaskConversationPort {
-  /** createdFor 只在失败路径为保存回执新建身份时传：该会话在有内容前不进会话导航。 */
-  ensureShell(conversationId: string, options?: { readonly createdFor?: "submission-receipt" }): Promise<void>;
-  /**
-   * 只为失败回执而建的会话：待确认草案落盘之前记显现意图（按草案可复核，仍隐藏），落盘成功后显现、失败撤销；
-   * 中断留下的意图由宿主启动时按草案会话是否已耐久补齐。
-   */
-  beginRevealShell(conversationId: string, intent: { readonly kind: "advancement"; readonly draftId: string }): Promise<boolean>;
-  revealShell(conversationId: string): Promise<void>;
-  abandonRevealShell(conversationId: string, intent: { readonly kind: "advancement"; readonly draftId: string }): Promise<void>;
 }
 
 /** Path-free owner mechanisms for the active user-turn state transition. */
@@ -2102,6 +2087,10 @@ export interface AdvancementAwaitingRubricAdmissionMechanismPort {
     conversationId: string;
     userInput: Readonly<UserTurnInput>;
   }>): Promise<AdvancementAwaitingRubricAdmissionDecision>;
+  decideProposalStageAdmission(input: Readonly<{
+    conversationId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementProposalStageAdmissionDecision>;
 }
 
 /** Path-free mechanisms for confirming a Rubric and settling its durable handoff. */
@@ -2199,10 +2188,12 @@ export interface AdvancementOriginalTaskSurfacePort {
     connectionId: string;
   }>;
   readonly turnOrigin?: TurnOrigin;
+  /** turnOrigin 是执行意向冻结的来源（含执行标记）；接入面按它执行，不按本连接另拼。 */
   execute(input: Readonly<{
     conversationId: string;
     turnId: string;
     originalUserTask: Readonly<UserTurnInput>;
+    turnOrigin: TurnOrigin;
   }>): Promise<void>;
   cancelPending(input: Readonly<{
     conversationId: string;
@@ -2248,8 +2239,6 @@ export interface AdvancementApplicationOptions {
   readonly activeState: Pick<AdvancementReviewAttemptApplication, "queryActiveState">;
   readonly detail: AdvancementDetailReadPort;
   readonly maintenance: AdvancementConversationMaintenancePort;
-  readonly newTask: AdvancementNewTaskMechanismPort;
-  readonly newTaskConversation: AdvancementNewTaskConversationPort;
   readonly activeUserTurn: AdvancementActiveUserTurnMechanismPort;
   readonly activeUserTurnRuntime: AdvancementActiveUserTurnRuntimePort;
   readonly rubricRevision: AdvancementRubricRevisionMechanismPort;
@@ -2259,6 +2248,32 @@ export interface AdvancementApplicationOptions {
   readonly rubricPublication?: RubricPublicationPort;
   readonly submissions: AdvancementSubmissionMechanismPort;
   readonly confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
+  /** 主 Agent 提议的接受与草案；控制输入处理前先接受待接受提议。 */
+  readonly proposals: Pick<AdvancementProposalApplicationService, "acceptPending" | "advance">;
+  readonly proposalStage: AdvancementProposalStageMechanismPort;
+}
+
+/** 提议阶段（proposed、drafting、draft-failed、draft-uncertain）收到用户输入时的判断。 */
+export type AdvancementProposalStageAction =
+  | "keep"
+  | "supplement"
+  | "downgrade-to-direct"
+  | "cancel-pending-task"
+  | "replace-task";
+
+export interface AdvancementProposalStageAdmissionDecision {
+  readonly action: AdvancementProposalStageAction;
+  readonly reason?: string;
+}
+
+/** 提议阶段的补充写入；会话状态的决定留在本应用。 */
+export interface AdvancementProposalStageMechanismPort {
+  supplementProposal(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    supplement: Readonly<UserTurnInput>;
+    submission?: AdvancementSubmissionIdentity;
+  }>): Promise<AdvancementSession>;
 }
 
 export interface AdvancementNewTaskCommand {
@@ -2381,25 +2396,11 @@ export interface AdvancementSessionExitedFact extends ProductApiFact {
 }
 
 export type AdvancementNewTaskResult =
+  /** 已有未终结推进会话：这条输入由推进控制接住。 */
   | Readonly<{ kind: "not-applicable" }>
-  | Readonly<{
-      kind: "run-direct";
-      admission: AdvancementAdmissionDecision;
-    }>
-  | Readonly<{ kind: "owner-busy" }>
-  | Readonly<{
-      kind: "contract-failed";
-      conversationId: string;
-      originalTurnId: string;
-      error: Readonly<{ message: string }>;
-    }>
-  | Readonly<{
-      kind: "awaiting-rubric-confirmation";
-      conversationId: string;
-      advancementSessionId: string;
-      draft: RubricContractDraftSnapshot;
-      admission: AdvancementAdmissionDecision;
-    }>;
+  /** 新任务：照常运行，并为这次运行启用推进提议。 */
+  | Readonly<{ kind: "new-task" }>
+  | Readonly<{ kind: "owner-busy" }>;
 
 export interface AdvancementContractDraftCreatedFact extends ProductApiFact {
   readonly kind: "advancement-contract-draft-created";
@@ -2432,7 +2433,8 @@ export interface AdvancementActiveStateQuery {
 
 export interface AdvancementActiveStateProjection {
   readonly advancementSessionId: string;
-  readonly status: "awaiting-rubric-confirmation" | "active";
+  /** 提议阶段（proposed、drafting、draft-failed、draft-uncertain）也属未终结推进，接入面重连后据此呈现。 */
+  readonly status: "awaiting-rubric-confirmation" | "active" | AdvancementProposalStageStatus;
   readonly rubricTitle?: string;
   readonly rubricDraftId?: string;
   readonly pendingRubricDraft?: RubricContractDraftSnapshot;
@@ -2500,6 +2502,26 @@ export type AdvancementAwaitingRubricControlResult =
       conversationId: string;
       advancementSessionId: string;
       rubricDraft: RubricContractDraftSnapshot;
+    }>
+  /** 提议阶段的继续或提问：目标不变，这条输入不保存。 */
+  | Readonly<{
+      kind: "keep-proposal";
+      conversationId: string;
+      advancementSessionId: string;
+      status: AdvancementSession["status"];
+    }>
+  /** 提议阶段的补充：记为修订请求，草案就绪后并入。 */
+  | Readonly<{
+      kind: "proposal-supplemented";
+      conversationId: string;
+      advancementSessionId: string;
+      revision: number;
+    }>
+  /** 明确换目标：旧提议已取消，这条输入按新任务运行。 */
+  | Readonly<{
+      kind: "replaced";
+      conversationId: string;
+      advancementSessionId: string;
     }>
   | Readonly<{
       kind: "cancelled";
@@ -2651,8 +2673,6 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #activeState: Pick<AdvancementReviewAttemptApplication, "queryActiveState">;
   readonly #detail: AdvancementDetailReadPort;
   readonly #maintenance: AdvancementConversationMaintenancePort;
-  readonly #newTask: AdvancementNewTaskMechanismPort;
-  readonly #newTaskConversation: AdvancementNewTaskConversationPort;
   readonly #activeUserTurn: AdvancementActiveUserTurnMechanismPort;
   readonly #activeUserTurnRuntime: AdvancementActiveUserTurnRuntimePort;
   readonly #rubricRevision: AdvancementRubricRevisionMechanismPort;
@@ -2661,14 +2681,16 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #rubricConfirmation: AdvancementRubricConfirmationMechanismPort;
   readonly #rubricPublication?: RubricPublicationPort;
   readonly #confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
+  readonly #proposals: Pick<AdvancementProposalApplicationService, "acceptPending" | "advance">;
+  readonly #proposalStage: AdvancementProposalStageMechanismPort;
 
   constructor(options: AdvancementApplicationOptions) {
+    this.#proposals = options.proposals;
+    this.#proposalStage = options.proposalStage;
     this.#submissions = options.submissions;
     this.#activeState = options.activeState;
     this.#detail = options.detail;
     this.#maintenance = options.maintenance;
-    this.#newTask = options.newTask;
-    this.#newTaskConversation = options.newTaskConversation;
     this.#activeUserTurn = options.activeUserTurn;
     this.#activeUserTurnRuntime = options.activeUserTurnRuntime;
     this.#rubricRevision = options.rubricRevision;
@@ -3028,91 +3050,15 @@ export class AdvancementApplicationService implements AdvancementApplication {
       throw new TypeError("Advancement new task requires non-empty user input");
     }
 
+    // 新任务准入只判作用域：先幂等接受待接受提议；已有未终结推进会话时由推进控制接住这条输入，
+    // 否则照常运行，并为这次运行启用推进提议，由主 Agent 自己判断是否提出推进。
     const decide = async () => {
-      const open = await this.#newTask.loadOpenNewTaskSession(
-        command.conversationId,
-      );
-      if (open) {
-        return Object.freeze({
-          result: Object.freeze<AdvancementNewTaskResult>({
-            kind: "not-applicable",
-          }),
-        });
-      }
-
-      const admission = await this.#newTask.decideNewTaskAdmission({
-        conversationId: command.conversationId,
-        userInput: command.userInput,
+      const head = await this.#proposals.acceptPending(command.conversationId);
+      return Object.freeze({
+        result: Object.freeze<AdvancementNewTaskResult>(
+          head && isOpenAdvancementSession(head) ? { kind: "not-applicable" } : { kind: "new-task" },
+        ),
       });
-      if (admission.action !== "start-advancement") {
-        if (admission.action !== "run-direct") {
-          throw new TypeError(
-            `Advancement new-task admission returned invalid action: ${admission.action}`,
-          );
-        }
-        return Object.freeze({
-          result: Object.freeze<AdvancementNewTaskResult>({
-            kind: "run-direct",
-            admission: freezeSnapshot(admission),
-          }),
-        });
-      }
-
-      let draft: RubricContractDraftSnapshot;
-      try {
-        draft = await this.#newTask.buildNewTaskRubricDraft({
-          originalTurnId: command.turnId,
-          originalUserTask: command.userInput,
-        });
-      } catch (error) {
-        if (command.submission) {
-          if (command.conversationScope === "new") await this.#newTaskConversation.ensureShell(command.conversationId, { createdFor: "submission-receipt" });
-          await this.#submissions.settleSubmission(command.conversationId, command.submission, { kind: "contract-failed", code: "rubric-generation-failed" });
-        }
-        return Object.freeze({
-          result: Object.freeze<AdvancementNewTaskResult>({
-            kind: "contract-failed",
-            conversationId: command.conversationId,
-            originalTurnId: command.turnId,
-            error: Object.freeze({ message: applicationErrorMessage(error) }),
-          }),
-        });
-      }
-
-      if (command.conversationScope === "new") {
-        await this.#newTaskConversation.ensureShell(command.conversationId);
-      }
-      // 只为失败回执而建的会话以耐久的待确认草案为显现依据：先记意图（仍隐藏），落盘成功后显现；
-      // 落盘抛出时结果未知（可能已写成），意图保留，由宿主启动时按草案精确复核。重试时会话可能按 existing 发来，所以不论 scope
-      const intent = { kind: "advancement", draftId: draft.draftId } as const;
-      const intended = await this.#newTaskConversation.beginRevealShell(command.conversationId, intent);
-      const committed = await this.#newTask.persistNewTaskAwaitingSession({
-        conversationId: command.conversationId,
-        originalUserTask: command.userInput,
-        draft, submission: command.submission,
-      });
-      // 显现写失败时意图保留，下次宿主启动按草案补齐
-      if (intended) await this.#newTaskConversation.revealShell(command.conversationId).catch(() => {});
-      assertCommittedNewTaskSession(committed, command, draft);
-      const admissionSnapshot = freezeSnapshot(admission);
-      const draftSnapshot = freezeSnapshot(draft);
-      const result = Object.freeze<AdvancementNewTaskResult>({
-        kind: "awaiting-rubric-confirmation",
-        conversationId: committed.conversationId,
-        advancementSessionId: committed.id,
-        draft: draftSnapshot,
-        admission: admissionSnapshot,
-      });
-      const fact = Object.freeze<AdvancementContractDraftCreatedFact>({
-        kind: "advancement-contract-draft-created",
-        conversationId: committed.conversationId,
-        originalTurnId: command.turnId,
-        advancementSessionId: committed.id,
-        rubricDraftId: draftSnapshot.draftId,
-        rubricDraft: draftSnapshot,
-        admission: admissionSnapshot,
-      });
-      return Object.freeze({ result, fact });
     };
 
     const maintained =
@@ -3299,14 +3245,19 @@ export class AdvancementApplicationService implements AdvancementApplication {
 
         const confirmedRubric =
           await this.#rubricConfirmation.confirmRubricDraftContent(draft);
+        const execution = originalTaskExecution(session, "advancement", draft);
         const admissionIntent = Object.freeze<AdvancementOriginalTaskAdmissionIntent>({
-          turnId: draft.originalTurnId,
+          turnId: execution.turnId,
           surfacePrincipal: command.surface.caller.surfacePrincipal,
-          turnOrigin: freezeSnapshot(command.originalTaskTurnOrigin),
+          // 执行标记由宿主冻结进意向：运行据此精确定位本会话与被确认的草案
+          turnOrigin: freezeSnapshot({
+            ...command.originalTaskTurnOrigin,
+            advancementExecution: { sessionId: session.id, mode: "advancement" as const, draftId: draft.draftId },
+          }),
           inputDigest: protocolDigest(
             "AdvancementOriginalTaskInput",
             1,
-            session.originalUserTask,
+            execution.input,
           ),
         });
         const committed =
@@ -3321,7 +3272,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
         const fact = Object.freeze<AdvancementContractConfirmedFact>({
           kind: "advancement-contract-confirmed",
           conversationId: committed.conversationId,
-          originalTurnId: committed.originalTaskAdmission!.intent.turnId,
+          // 界面以原始输入锚定推进卡片；执行身份另由确认结果给出
+          originalTurnId: draft.originalTurnId,
           advancementSessionId: committed.id,
           controlSeq: committed.rubricDraftVersion + 1,
           ...(committedRubric.source.kind === "library"
@@ -3332,7 +3284,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
           committed,
           draft: freezeSnapshot(draft),
           fact,
-          originalUserTask: freezeSnapshot(committed.originalUserTask),
+          // 交给接纳端口的执行输入：提议会话是推进控制消息，其余会话是原始输入
+          originalUserTask: freezeSnapshot(advancementOriginalTaskInput(committed)),
         });
       },
     );
@@ -3477,13 +3430,12 @@ export class AdvancementApplicationService implements AdvancementApplication {
   }
 
   async #persistDirectOriginalTask(session: AdvancementSession, surface: AdvancementOriginalTaskSurfacePort, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
-    const draft = session.pendingRubricDraft;
-    if (!draft) throw new TypeError("Direct original task requires its pending draft");
+    const execution = originalTaskExecution(session, "direct", session.pendingRubricDraft);
     const principal = surface.caller.surfacePrincipal;
     const intent: AdvancementOriginalTaskAdmissionIntent = {
-      turnId: draft.originalTurnId, surfacePrincipal: principal,
-      turnOrigin: { channel: "rpc", triggeredBy: principal },
-      inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, session.originalUserTask),
+      turnId: execution.turnId, surfacePrincipal: principal,
+      turnOrigin: { channel: "rpc", triggeredBy: principal, advancementExecution: { sessionId: session.id, mode: "direct" } },
+      inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, execution.input),
     };
     return this.#rubricCancellation.persistDirectOriginalTask({
       conversationId: session.conversationId, advancementSessionId: session.id, admissionIntent: intent, submission,
@@ -3497,7 +3449,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
     let admitted: Awaited<ReturnType<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>>;
     try {
       admitted = await this.#confirmedOriginalTask.admit({ conversationId: session.conversationId,
-        originalUserTask: session.originalUserTask, admissionIntent: obligation.intent, surface });
+        originalUserTask: advancementOriginalTaskInput(session), admissionIntent: obligation.intent, surface });
     } catch (error) {
       if (error instanceof AdvancementOriginalTaskAdmissionError) {
         if (error.reason === "idempotency-conflict") {
@@ -3544,9 +3496,11 @@ export class AdvancementApplicationService implements AdvancementApplication {
     const maintained = await this.#maintenance.runExisting(
       command.conversationId,
       async () => {
-        const session = await this.#detail.loadLatestSession(
-          command.conversationId,
-        );
+        // 先幂等接受待接受提议；提议阶段的输入由推进领域接住，不落回新任务路径
+        const session = await this.#proposals.acceptPending(command.conversationId);
+        if (session?.proposal && isProposalStageStatus(session.status)) {
+          return await this.#controlProposalStage(session, command);
+        }
         if (!session || session.status !== "awaiting-rubric-confirmation") {
           return Object.freeze({ kind: "not-applicable" as const });
         }
@@ -3646,6 +3600,17 @@ export class AdvancementApplicationService implements AdvancementApplication {
     if (decision.kind === "not-applicable") {
       return Object.freeze({ result: decision });
     }
+    if (decision.kind === "keep-proposal" || decision.kind === "proposal-supplemented") {
+      // 补充后会话若回到 proposed（失败或结果不明之后），起新一代草案；不阻塞这次回应
+      if (decision.kind === "proposal-supplemented") {
+        void this.#proposals.advance(command.conversationId).catch(() => undefined);
+      }
+      return Object.freeze({ result: decision.result });
+    }
+    if (decision.kind === "replaced") {
+      await command.fact.publish(decision.fact);
+      return Object.freeze({ result: decision.result, fact: decision.fact });
+    }
     if (decision.kind === "keep-awaiting") {
       return Object.freeze({
         result: Object.freeze<AdvancementAwaitingRubricControlResult>({
@@ -3672,7 +3637,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
     const executed = await this.#executeDirectOriginalTask(decision.committed, command.surface);
     if (
       executed.conversationId !== decision.committed.conversationId ||
-      executed.turnId !== decision.draft.originalTurnId
+      executed.turnId !== decision.committed.originalTaskAdmission?.intent.turnId
     ) {
       throw new TypeError(
         "Advancement original-task execution returned a mismatched identity",
@@ -3689,6 +3654,79 @@ export class AdvancementApplicationService implements AdvancementApplication {
       }),
       fact: decision.fact,
     });
+  }
+
+  /**
+   * 提议阶段的控制输入：继续或提问保持目标、这条输入不保存；补充记为修订请求；
+   * 降级、取消、换目标走各自出口。普通新消息不经过这里，只有已有未终结推进会话时才判断。
+   */
+  async #controlProposalStage(session: AdvancementSession, command: AdvancementAwaitingRubricControlCommand) {
+    const proposal = session.proposal!;
+    const conversationId = command.conversationId;
+    const decision = await this.#awaitingRubricAdmission.decideProposalStageAdmission({
+      conversationId,
+      userInput: freezeSnapshot(command.userInput),
+    });
+    switch (decision.action) {
+      case "keep": {
+        if (command.submission) {
+          await this.#submissions.settleSubmission(conversationId, command.submission, {
+            kind: "proposal-kept", sessionId: session.id, originalTurnId: proposal.originalTurnId,
+          });
+        }
+        return Object.freeze({
+          kind: "keep-proposal" as const,
+          result: Object.freeze<AdvancementAwaitingRubricControlResult>({
+            kind: "keep-proposal", conversationId, advancementSessionId: session.id, status: session.status,
+          }),
+        });
+      }
+      case "supplement": {
+        const committed = await this.#proposalStage.supplementProposal({
+          conversationId,
+          advancementSessionId: session.id,
+          supplement: freezeSnapshot(command.userInput),
+          ...(command.submission ? { submission: command.submission } : {}),
+        });
+        return Object.freeze({
+          kind: "proposal-supplemented" as const,
+          result: Object.freeze<AdvancementAwaitingRubricControlResult>({
+            kind: "proposal-supplemented", conversationId, advancementSessionId: session.id,
+            revision: committed.proposal?.supplements.length ?? 0,
+          }),
+        });
+      }
+      case "downgrade-to-direct": {
+        const committed = await this.#persistDirectOriginalTask(session, command.surface, command.submission);
+        return Object.freeze({
+          kind: "direct-original-task" as const,
+          committed,
+          fact: proposalCancelledFact(committed, proposal.originalTurnId, true),
+        });
+      }
+      case "cancel-pending-task":
+      case "replace-task": {
+        const replaced = decision.action === "replace-task";
+        // 换目标时这条输入随后按新任务运行，提交回执随那次运行结算，不在这里记为取消
+        const committed = await this.#rubricCancellation.persistRubricCancellation({
+          conversationId,
+          advancementSessionId: session.id,
+          reason: replaced ? "superseded" : "user-cancelled",
+          message: replaced ? "用户换了新任务" : "用户取消待推进任务",
+          ...(!replaced && command.submission ? { submission: command.submission } : {}),
+        });
+        const fact = proposalCancelledFact(committed, proposal.originalTurnId, false);
+        return replaced
+          ? Object.freeze({
+              kind: "replaced" as const,
+              fact,
+              result: Object.freeze<AdvancementAwaitingRubricControlResult>({
+                kind: "replaced", conversationId, advancementSessionId: committed.id,
+              }),
+            })
+          : Object.freeze({ kind: "cancelled" as const, committed, fact });
+      }
+    }
   }
 
   async cancelRubric(
@@ -3743,7 +3781,10 @@ export class AdvancementApplicationService implements AdvancementApplication {
             { advancementSessionId: command.advancementSessionId },
           );
         }
-        if (session.status !== "awaiting-rubric-confirmation") {
+        // 来自提议的会话在草案失败或结果不明时同样可以降级或取消；此时没有草案可核对
+        const proposalStalled = !!session.proposal &&
+          (session.status === "draft-failed" || session.status === "draft-uncertain");
+        if (session.status !== "awaiting-rubric-confirmation" && !proposalStalled) {
           throw await this.#rejectSubmission(command, new AdvancementApplicationError("not-awaiting-rubric-confirmation",
             `Advancement session is not awaiting rubric confirmation: ${session.id}`,
             { advancementSessionId: session.id },
@@ -3775,15 +3816,18 @@ export class AdvancementApplicationService implements AdvancementApplication {
           );
         }
         const draft = committed.pendingRubricDraft;
-        const executeOriginal = command.executeOriginal && draft !== undefined;
-        const fact = Object.freeze<AdvancementContractCancelledFact>({
-          kind: "advancement-contract-cancelled",
-          conversationId: committed.conversationId,
-          originalTurnId: draft?.originalTurnId ?? committed.id,
-          advancementSessionId: committed.id,
-          controlSeq: committed.rubricDraftVersion + 1,
-          executeOriginal,
-        });
+        // 提议会话的执行由原始输入派生，不依赖草案；其余会话降级执行需要它的草案
+        const executeOriginal = command.executeOriginal && (!!session.proposal || draft !== undefined);
+        const fact = session.proposal
+          ? proposalCancelledFact(committed, session.proposal.originalTurnId, executeOriginal)
+          : Object.freeze<AdvancementContractCancelledFact>({
+              kind: "advancement-contract-cancelled",
+              conversationId: committed.conversationId,
+              originalTurnId: draft?.originalTurnId ?? committed.id,
+              advancementSessionId: committed.id,
+              controlSeq: committed.rubricDraftVersion + 1,
+              executeOriginal,
+            });
         return Object.freeze({
           committed,
           draft,
@@ -3807,7 +3851,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
 
     const decision = maintained.value;
     await command.fact.publish(decision.fact);
-    if (!decision.executeOriginal || !decision.draft) {
+    if (!decision.executeOriginal) {
       return Object.freeze({
         result: Object.freeze<AdvancementRubricCancellationResult>({
           kind: "cancelled",
@@ -3821,7 +3865,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
     const executed = await this.#executeDirectOriginalTask(decision.committed, command.surface);
     if (
       executed.conversationId !== decision.committed.conversationId ||
-      executed.turnId !== decision.draft.originalTurnId
+      executed.turnId !== decision.committed.originalTaskAdmission?.intent.turnId
     ) {
       throw new TypeError(
         "Advancement original-task execution returned a mismatched identity",
@@ -4163,25 +4207,45 @@ function assertAdvancementSessionIdentity(
   }
 }
 
-function assertCommittedNewTaskSession(
-  session: AdvancementSession,
-  command: AdvancementNewTaskCommand,
-  draft: RubricContractDraftSnapshot,
-): void {
-  if (
-    session.status !== "awaiting-rubric-confirmation" ||
-    session.conversationId !== command.conversationId ||
-    session.id !== `adv_${draft.draftId}` ||
-    !session.pendingRubricDraft ||
-    canonicalize(session.pendingRubricDraft) !== canonicalize(draft) ||
-    canonicalize(session.originalUserTask) !== canonicalize(command.userInput)
-  ) {
+/** 提议阶段降级、取消或换目标后的可见事实；提议阶段没有草案，原始输入取自提议。 */
+function proposalCancelledFact(
+  committed: AdvancementSession,
+  originalTurnId: string,
+  executeOriginal: boolean,
+): AdvancementContractCancelledFact {
+  if (committed.status !== "cancelled") {
     throw new AdvancementApplicationError(
-      "committed-rubric-draft-missing",
-      `Committed Advancement session has no matching new-task draft: ${session.id}`,
-      { advancementSessionId: session.id },
+      "committed-cancellation-missing",
+      `Committed Advancement session is not cancelled: ${committed.id}`,
+      { advancementSessionId: committed.id },
     );
   }
+  return Object.freeze<AdvancementContractCancelledFact>({
+    kind: "advancement-contract-cancelled",
+    conversationId: committed.conversationId,
+    originalTurnId,
+    advancementSessionId: committed.id,
+    controlSeq: committed.rubricDraftVersion + 1,
+    executeOriginal,
+    ...(!executeOriginal ? { reason: "user-cancelled" as const } : {}),
+  });
+}
+
+/** 原任务的执行身份与输入：身份一律由原始输入身份派生；来自提议的会话输入是推进控制消息，其余会话是原始输入。 */
+function originalTaskExecution(
+  session: AdvancementSession,
+  mode: "advancement" | "direct",
+  draft: RubricContractDraftSnapshot | undefined,
+): { readonly turnId: string; readonly input: UserTurnInput } {
+  if (session.proposal) {
+    return advancementProposalExecution({
+      originalTurnId: session.proposal.originalTurnId,
+      mode,
+      ...(mode === "advancement" && draft ? { draftId: draft.draftId } : {}),
+    });
+  }
+  if (!draft) throw new TypeError("Original task execution requires its pending draft");
+  return { turnId: advancementExecutionTurnId(draft.originalTurnId, mode, draft.draftId), input: session.originalUserTask };
 }
 
 function assertCommittedRubricConfirmation(

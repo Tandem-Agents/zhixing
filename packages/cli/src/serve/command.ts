@@ -838,7 +838,8 @@ async function runServerProcess(
           AdvancementConversationComposition["create"]
         >[0],
       ) {
-        const { controller, reviews } = await createServeAdvancementApplications({
+        const { controller, reviews, proposals } = await createServeAdvancementApplications({
+          ...(input.onProposalFact ? { onProposalFact: input.onProposalFact } : {}),
           modelProvider: createHostAdvancementModelProviderFactory({
             configuration: advancementConfiguration,
             credentials: providerCredentials,
@@ -876,8 +877,9 @@ async function runServerProcess(
               isConversationDataAlive:
                 conversationStorage.maintenance.isConversationDataAlive,
             },
+            proposals,
           });
-        return Object.freeze({ controller, reviews, lifecycle });
+        return Object.freeze({ controller, reviews, lifecycle, proposals });
       },
     });
 
@@ -2902,18 +2904,10 @@ async function runServerProcess(
               ),
           },
           submissions: advancementDetailController,
-          newTask: advancementDetailController,
-          newTaskConversation: {
-            ensureShell: (conversationId, options) =>
-              conversationApplication
-                .ensureShell({ kind: "ensure-shell", conversationId, ...options })
-                .then(() => undefined),
-            beginRevealShell: (conversationId, intent) =>
-              conversationIdentityLifecycle.beginRevealShell(conversationId, intent),
-            revealShell: (conversationId) =>
-              conversationIdentityLifecycle.revealShell(conversationId),
-            abandonRevealShell: (conversationId, intent) =>
-              conversationIdentityLifecycle.abandonRevealShell(conversationId, intent),
+          proposals: conversationServices.advancementProposals,
+          proposalStage: {
+            supplementProposal: ({ conversationId, advancementSessionId, supplement, submission }) =>
+              advancementDetailController.supplementProposal({ conversationId, advancementSessionId, supplement, ...(submission ? { submission } : {}) }),
           },
           activeUserTurn: advancementDetailController,
           activeUserTurnRuntime: {

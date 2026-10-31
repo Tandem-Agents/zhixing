@@ -130,7 +130,8 @@ export interface ConversationAdvancementRubricDraftProjection {
 
 export interface ConversationAdvancementProjection {
   readonly advancementSessionId: string;
-  readonly status: "awaiting-rubric-confirmation" | "active";
+  /** 提议阶段（proposed、drafting、draft-failed、draft-uncertain）同属未终结推进。 */
+  readonly status: "awaiting-rubric-confirmation" | "active" | "proposed" | "drafting" | "draft-failed" | "draft-uncertain";
   readonly rubricTitle?: string;
   readonly rubricDraftId?: string;
   readonly pendingRubricDraft?: ConversationAdvancementRubricDraftProjection;

@@ -37,6 +37,9 @@ export interface AdvancementRecoveryMaintenanceOptions {
   readonly originalTasks?: AdvancementOriginalTaskAdmissionPort;
   readonly logger?: Pick<Console, "warn">;
   readonly pending?: AdvancementRecoveryReadPort;
+  /** 主 Agent 提议的接受与草案；恢复时兜底推进，排空与停止时中止它的在途草案调用。 */
+  readonly proposals?: Pick<import("@zhixing/core/advancement").AdvancementProposalApplicationService, "advance"> &
+    Partial<Pick<import("@zhixing/core/advancement").AdvancementProposalApplicationService, "beginDrain" | "resume" | "stop">>;
 }
 
 export type AdvancementRecoveryResult =
@@ -176,17 +179,21 @@ class DefaultAdvancementRecoveryMaintenance
     await this.beginDrain();
     this.stopped = true; this.abort.abort();
     clearTimeout(this.timer); this.timer = undefined;
+    await this.options.proposals?.stop?.();
     await this.loop;
     await Promise.allSettled([...this.recovering.values()]);
   }
   async beginDrain(): Promise<void> {
     this.draining = true; this.abort.abort(); clearTimeout(this.timer); this.timer = undefined;
+    // 恢复里在等的 advance 由提议应用的排空中止其模型调用，不拖到调用超时
+    await this.options.proposals?.beginDrain?.();
     await this.loop; await Promise.allSettled([...this.recovering.values()]);
   }
   resume(): void {
     if (this.stopped) return;
     this.draining = false;
     if (this.abort.signal.aborted) this.abort = new AbortController();
+    this.options.proposals?.resume?.();
     this.start();
   }
 
@@ -256,6 +263,11 @@ class DefaultAdvancementRecoveryMaintenance
       await this.options.reviews.reconcileConversation(conversationId, work?.items);
       if (work?.items.some(item => item.deleted)) return { status: 'no-active-session', conversationId };
       if (this.draining) return { status: 'no-pending-recovery', conversationId };
+      // 提议兜底：接受待接受提议、起草案、结算失去调用者的草案尝试。每次普通提交后的追赶恢复不做这一步，
+      // 正常路径已在提交后直接推进提议，不为每个普通运行多读一次待办
+      if (this.options.proposals && options?.beforeRunIndex === undefined) {
+        await this.options.proposals.advance(conversationId);
+      }
       session = await this.options.advancement.loadActiveSession(conversationId);
     } catch (err) {
       return this.failed(conversationId, undefined, undefined, err);

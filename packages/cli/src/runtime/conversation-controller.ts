@@ -20,6 +20,7 @@ import { PendingInputReceiptError } from "./rpc-conversation-facade.js";
  */
 
 import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
+import { advancementExecutionTurnId } from "@zhixing/core/advancement/proposal-identity";
 import { validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource, type SessionPresentationProfile } from "@zhixing/rpc/session-wire";
 import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
 import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core/types";
@@ -733,6 +734,13 @@ export class ConversationController<Outcome = TurnOutcome> {
           advancementSessionId: sendResult.advancementSessionId,
         };
       }
+      if ("status" in sendResult && sendResult.status === "advancement-proposal") {
+        // 提议阶段的输入不启动运行：目标不变（不保存）或记为补充（已保存），推进进展随后经推进事件呈现
+        this.discardTurnWaiter(target, turnId);
+        return { kind: "submission-settled", conversationId: target, turnId,
+          submission: { turnId, disposition: sendResult.disposition === "supplemented" ? "revision-saved" : "not-saved" },
+          message: sendResult.message };
+      }
       const acceptedId = sendResult.turnId;
       if (acceptedId !== turnId) {
         // 自然语言“直接执行”接纳的是待确认原任务。沿其耐久 run 收敛，不把当前输入 ID 当执行 ID。
@@ -774,8 +782,9 @@ export class ConversationController<Outcome = TurnOutcome> {
   /** Reconcile the original operation even after a refreshed draft changed its
    * parameters. This follows/cancels the original run, never the new button. */
   async reconcileRubricSubmission(pending: AwaitingRubricReferenceTurn): Promise<BeginReferencedUserTurnResult<Outcome> | undefined> {
-    if (!this.opts.conversation.hasPendingAdvancement(pending.conversationId)) return undefined;
-    const outcome = this.attachTurnWaiter(pending.conversationId, pending.turnId);
+    const turnId = this.pendingAdvancementTurnId(pending);
+    if (!turnId) return undefined;
+    const outcome = this.attachTurnWaiter(pending.conversationId, turnId);
     const receipt = this.opts.conversation.consumePendingAdvancement<SessionSendReferenceResult>(pending.conversationId,
       result => {
         if ('status' in result && result.status === 'awaiting-rubric-confirmation') {
@@ -787,7 +796,30 @@ export class ConversationController<Outcome = TurnOutcome> {
         if (!result) throw new Error("待核对操作身份已变化，请重新查看。");
         return result;
       });
-    return this.finishReferencedUserTurn(receipt, pending.conversationId, pending.turnId, outcome, {});
+    return this.finishReferencedUserTurn(receipt, pending.conversationId, turnId, outcome, {});
+  }
+
+  /** 尚待核对的推进操作会落到哪个 turn：确认由原始输入与被确认的草案派生，降级由原始输入派生；修订与单纯取消不执行，沿用原始输入身份。 */
+  private pendingAdvancementTurnId(pending: AwaitingRubricReferenceTurn): string | undefined {
+    const operation = this.opts.conversation.pendingAdvancementOperation(pending.conversationId);
+    if (!operation) return undefined;
+    const { method, params } = operation;
+    if (method === "session.advancementConfirm" && typeof params.rubricDraftId === "string") {
+      return advancementExecutionTurnId(pending.turnId, "advancement", params.rubricDraftId);
+    }
+    if (method === "session.advancementCancel" && params.executeOriginal === true) {
+      return advancementExecutionTurnId(pending.turnId, "direct");
+    }
+    return pending.turnId;
+  }
+
+  /** 推进操作的回执待核对时，只保留与待核对操作同一执行身份的等待；被门面拒绝的另一项操作撤回自己的等待，本地运行指针还给挂载前的运行。 */
+  private settleRejectedAdvancementWaiter(pending: AwaitingRubricReferenceTurn, turnId: string, previousLocal: string | undefined): void {
+    if (this.pendingAdvancementTurnId(pending) === turnId) return;
+    this.discardTurnWaiter(pending.conversationId, turnId);
+    if (previousLocal && previousLocal !== turnId && this.turnOutcomes.has(previousLocal)) {
+      this.localTurnsByConversation.set(pending.conversationId, previousLocal);
+    }
   }
 
   async confirmRubricContract(
@@ -796,9 +828,12 @@ export class ConversationController<Outcome = TurnOutcome> {
       readonly rubricPersistence?: SessionRubricPersistenceChoice;
     } = {},
   ): Promise<AcceptedTurn<Outcome>> {
+    // 确认后执行原任务的 turn 由原始输入身份与被确认的草案派生，与宿主同算，先挂等待再发确认
+    const executionTurnId = advancementExecutionTurnId(pending.turnId, "advancement", pending.rubricDraftId);
+    const previousLocal = this.localTurnsByConversation.get(pending.conversationId);
     const outcome = this.attachTurnWaiter(
       pending.conversationId,
-      pending.turnId,
+      executionTurnId,
       options,
     );
     try {
@@ -808,7 +843,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         pending.rubricDraftId,
         options.rubricPersistence,
       );
-      if (result.turnId !== pending.turnId) {
+      if (result.turnId !== executionTurnId) {
         throw new Error(
           `ConversationController: advancement confirm returned unexpected turnId "${result.turnId}"`,
         );
@@ -816,26 +851,27 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.observedConversationId = pending.conversationId;
       this.registerDurableRun(
         pending.conversationId,
-        pending.turnId,
+        executionTurnId,
         result.runId,
       );
       this.markLocalTurnAccepted({
         conversationId: pending.conversationId,
-        turnId: pending.turnId,
+        turnId: executionTurnId,
         ...(result.runId ? { runId: result.runId } : {}),
       });
       return {
         conversationId: pending.conversationId,
-        turnId: pending.turnId,
+        turnId: executionTurnId,
         outcome,
         ...(result.rubricPublicationMessage
           ? { rubricPublicationMessage: result.rubricPublicationMessage }
           : {}),
       };
     } catch (err) {
-      const accepted = this.completedTurnAfterError(pending.conversationId, pending.turnId, outcome);
+      const accepted = this.completedTurnAfterError(pending.conversationId, executionTurnId, outcome);
       if (accepted) return accepted;
-      if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(pending.conversationId, pending.turnId);
+      if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(pending.conversationId, executionTurnId);
+      else this.settleRejectedAdvancementWaiter(pending, executionTurnId, previousLocal);
       throw this.turnReceiptFailure(err, outcome);
     }
   }
@@ -845,8 +881,11 @@ export class ConversationController<Outcome = TurnOutcome> {
     opts: { executeOriginal?: boolean; onAccepted?: BeginTurnOptions["onAccepted"] } = {},
   ): Promise<RubricContractCancelResult<Outcome>> {
     const executeOriginal = opts.executeOriginal ?? false;
+    // 降级执行原任务的 turn 由原始输入身份派生，与宿主同算
+    const executionTurnId = advancementExecutionTurnId(pending.turnId, "direct");
+    const previousLocal = this.localTurnsByConversation.get(pending.conversationId);
     const outcome = executeOriginal
-      ? this.attachTurnWaiter(pending.conversationId, pending.turnId, {
+      ? this.attachTurnWaiter(pending.conversationId, executionTurnId, {
           onAccepted: opts.onAccepted,
         })
       : null;
@@ -862,7 +901,7 @@ export class ConversationController<Outcome = TurnOutcome> {
             "ConversationController: direct execution returned without an attached turn waiter",
           );
         }
-        if (result.turnId !== pending.turnId) {
+        if (result.turnId !== executionTurnId) {
           throw new Error(
             `ConversationController: advancement cancel returned unexpected turnId "${result.turnId}"`,
           );
@@ -870,26 +909,26 @@ export class ConversationController<Outcome = TurnOutcome> {
         this.observedConversationId = pending.conversationId;
         this.registerDurableRun(
           pending.conversationId,
-          pending.turnId,
+          executionTurnId,
           result.runId,
         );
         this.markLocalTurnAccepted({
           conversationId: pending.conversationId,
-          turnId: pending.turnId,
+          turnId: executionTurnId,
         });
         return {
           kind: "direct-execution",
           advancementSessionId: result.advancementSessionId,
           turn: {
             conversationId: pending.conversationId,
-            turnId: pending.turnId,
+            turnId: executionTurnId,
             ...(result.runId ? { runId: result.runId } : {}),
             outcome,
           },
         };
       }
       if (outcome) {
-        this.discardTurnWaiter(pending.conversationId, pending.turnId);
+        this.discardTurnWaiter(pending.conversationId, executionTurnId);
       }
       return {
         kind: "cancelled",
@@ -898,9 +937,10 @@ export class ConversationController<Outcome = TurnOutcome> {
       };
     } catch (err) {
       if (outcome) {
-        const accepted = this.completedTurnAfterError(pending.conversationId, pending.turnId, outcome);
+        const accepted = this.completedTurnAfterError(pending.conversationId, executionTurnId, outcome);
         if (accepted) return { kind: 'direct-execution', advancementSessionId: pending.advancementSessionId, turn: accepted };
-        if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(pending.conversationId, pending.turnId);
+        if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(pending.conversationId, executionTurnId);
+        else this.settleRejectedAdvancementWaiter(pending, executionTurnId, previousLocal);
         throw this.turnReceiptFailure(err, outcome);
       }
       throw err;

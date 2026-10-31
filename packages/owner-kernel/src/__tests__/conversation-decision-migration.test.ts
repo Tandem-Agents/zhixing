@@ -549,7 +549,10 @@ it('withdraws every other partition of a fact folded outside admission instead o
   const envelope = { lsn: 9, at: NOW, entries: ['unmigrated', 'migrated', 'fresh'].map(id => ({ stream: 'run:' + id, body: { t: 'admitted' } })) } as unknown as CommitEnvelope<JsonValue>;
   const checkpoint = { logId: 'log', lsn: 9, frameEndOffset: 0, prefixDigest: '' } as unknown as DurableLogCheckpoint;
   // 候选写入：先迁移未迁移分区再重做。
-  await expect(reduce(envelope, view, { checkpoint, candidate: true })).rejects.toBeInstanceOf(AuthorityPreparationRequired);
+  const signal = await reduce(envelope, view, { checkpoint, candidate: true }).catch((error: unknown) => error);
+  expect(signal).toBeInstanceOf(AuthorityPreparationRequired);
+  // 只供观测：推迟事件能区分决策分区迁移与派生投影准备，并带出待迁移分区
+  expect((signal as AuthorityPreparationRequired).observed).toMatchObject({ reason: 'decision-migration', positions: [expect.stringContaining('unmigrated')] });
   // 不经准入：已迁移会话撤回标记，没有历史的新会话记入清单，二者此后都从日志完整迁移。
   const mutations = await reduce(envelope, view, { checkpoint });
   expect(mutations).toEqual([

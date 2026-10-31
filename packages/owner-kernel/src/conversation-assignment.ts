@@ -7,7 +7,7 @@ export { conversationRecoveryPage, conversationRecoveryPending } from "./convers
 import { registerConversationRunProjection, registerConversationRunReadProjection, readConversationSubmissionState, conversationWorkingVersion } from './conversation-run-state-index.js';
 import { readIndexedConversationAuthority, readIndexedPendingDispatch, readIndexedRecoveryAssignments, readIndexedPendingProjections } from './conversation-run-queries.js';
 import { prepareConversationRunView, conversationDecisionScope, readConversationExactValue, type ConversationDecisionScope } from './conversation-run-state-view.js';
-import { registerAdvancementRecoveryProjection, readAdvancementRecovery, advancementPendingPrefix, advancementRecoveryPrefix, advancementRecoveryRoot, advancementRecoveryHead, advancementPendingRun, type AdvancementCleanupWork } from './advancement-recovery-index.js';
+import { registerAdvancementRecoveryProjection, readAdvancementRecovery, advancementPendingPrefix, advancementRecoveryPrefix, advancementRecoveryRoot, advancementRecoveryHead, advancementPendingRun, advancementPendingProposals, type AdvancementCleanupWork } from './advancement-recovery-index.js';
 import { CONVERSATION_RUN_STATE_PROJECTION_ID } from './conversation-run-state-index.js';
 import type { JsonValue } from '@zhixing/core/contracts';
 import { readConversationStateField } from './conversation-run-state-index.js';
@@ -34,7 +34,7 @@ export async function pendingAdvancementConversations(log: AuthorityCommitLog, a
 }
 import { Buffer } from "node:buffer";
 import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
-import { userMessageFromTurnInput, type Message } from "@zhixing/core";
+import { userMessageFromTurnInput, userTurnInputFromMessages, type Message } from "@zhixing/core";
 import type { RunInputPort } from "@zhixing/core/loop";
 import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
@@ -5967,6 +5967,27 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const page = ids.slice(0, 50);
       return { sessionIds: page, ...(ids.length > page.length ? { next: page[page.length - 1]! } : {}) };
     });
+  }
+
+  /**
+   * 已提交、尚未被推进应用接受或拒绝的提议运行。原始输入身份取自接纳记录；运行终态后接纳记录里的输入已被压缩，
+   * 原任务从已提交运行记录的用户消息还原（附件名称、类型与大小不在消息里）。待接受提议很少，按提议读一次正文。
+   */
+  async pendingAdvancementProposals(): Promise<readonly { readonly runId: string; readonly originalTurnId: string; readonly originalUserTask: UserTurnInput }[]> {
+    const runIds = await this.#readAdvancementRecovery(async current =>
+      advancementPendingProposals(await conversationViewAt(this.#log, current, this.#conversationId), this.#conversationId));
+    const pending: { readonly runId: string; readonly originalTurnId: string; readonly originalUserTask: UserTurnInput }[] = [];
+    for (const runId of runIds) {
+      const originalTurnId = await this.#select((state) => {
+        const ingress = state.admittedByRun.get(runId)?.record.ingress;
+        return ingress && "ingressId" in ingress ? ingress.ingressId : undefined;
+      }, conversationDecisionScope({ runId }));
+      const committed = originalTurnId ? await this.committedRun(runId) : undefined;
+      if (originalTurnId && committed) {
+        pending.push({ runId, originalTurnId, originalUserTask: userTurnInputFromMessages(committed.runRecord.messages) });
+      }
+    }
+    return pending;
   }
 
   async advancementSessions(): Promise<AdvancementSession[]> {

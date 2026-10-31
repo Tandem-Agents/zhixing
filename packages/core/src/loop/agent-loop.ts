@@ -45,7 +45,7 @@
 
 import { buildCleanup } from "../interrupt/cleanup.js";
 import { createInterruptController, getAbortReason } from "../interrupt/controller.js";
-import { toAgentError } from "../types/errors.js";
+import { AgentError, toAgentError } from "../types/errors.js";
 import { emptyUsage, getTotalInputTokens, mergeUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import type { Message } from "../types/messages.js";
@@ -62,6 +62,7 @@ import type {
   AgentLoopParams,
   AgentResult,
   AgentYield,
+  ExecuteToolCallsResult,
   LoopState,
   PreparedSendView,
 } from "./types.js";
@@ -160,6 +161,9 @@ export async function* runAgentLoop(
     turnCount: 0,
     totalUsage: emptyUsage(),
   };
+  // 排他初始控制工具的批次门：本运行启用的控制名，以及本运行是否已进入过任何工具实现
+  const exclusiveControls = params.enabledExclusiveControls ?? new Set<string>();
+  let toolsStarted = false;
 
   // ─── 终止流程状态机 ───
   //
@@ -504,7 +508,7 @@ export async function* runAgentLoop(
       }
 
       // ── Step 2: Execute tools ──
-      const toolExecutorResult = yield* executeToolCalls({
+      const toolExecutorResult: ExecuteToolCallsResult = yield* executeToolCalls({
         toolCalls,
         tools,
         deps,
@@ -514,7 +518,9 @@ export async function* runAgentLoop(
         llmRoles: params.llmRoles,
         roleThinking: params.roleThinking,
         sideEffects: params.toolSideEffectObserver,
+        exclusiveControl: { enabled: exclusiveControls, toolsStartedBefore: toolsStarted },
       });
+      toolsStarted ||= toolExecutorResult.startedTools;
 
       // ── Tool 阶段 abort → 调 cleanup 注入 placeholder + 退出 ──
       // 已完成的 tool_results 已 yield 过 tool_end (run-agent trackMessages 已收集),
@@ -601,6 +607,22 @@ export async function* runAgentLoop(
       });
       if (turnEnd.kind === "terminal") {
         return await finalizeRun(turnEnd.result);
+      }
+
+      // 选中的排他初始控制调用决定本运行结束：成功即本次推理完成（是否接受由产品决定），
+      // 失败即运行错误，不转成普通执行。这里不收取新输入，未收取的输入留给下一次运行。
+      const exclusive = toolExecutorResult.exclusive;
+      if (exclusive) {
+        const name = toolCalls.find((call) => call.id === exclusive.id)?.name ?? exclusive.id;
+        return await finalizeRun(
+          exclusive.outcome === "succeeded"
+            ? { reason: "completed", message: llmResult.message, usage }
+            : {
+                reason: "error",
+                error: new AgentError(`排他控制调用 "${name}" 失败，本运行终止`, "tool_error", false),
+                usage,
+              },
+        );
       }
 
       const incoming = !controller.signal.aborted && newTurnCount < maxTurns

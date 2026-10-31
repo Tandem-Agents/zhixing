@@ -187,7 +187,5 @@ export class ConversationRepository implements IConversationRepository {
 
 /** 同一次写入的显现意图：按键依据逐项相等 */
 function sameRevealIntent(a: ConversationRevealIntent | undefined, b: ConversationRevealIntent): boolean {
-  if (!a || a.kind !== b.kind) return false;
-  return a.kind === 'turn' ? b.kind === 'turn' && a.turnId === b.turnId && a.surfacePrincipal === b.surfacePrincipal
-    : b.kind === 'advancement' && a.draftId === b.draftId;
+  return !!a && a.kind === b.kind && a.turnId === b.turnId && a.surfacePrincipal === b.surfacePrincipal;
 }

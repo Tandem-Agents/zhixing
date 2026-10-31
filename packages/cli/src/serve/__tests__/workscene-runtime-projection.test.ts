@@ -178,6 +178,7 @@ describe("Workscene product runtime projection", () => {
     expect(withoutWorkspace.profile.instructions).toContain("受托任务的结果自动回到原对话");
     expect(main.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
+      "propose_advancement",
       "schedule",
       "task_list",
       "workmode_enter",
@@ -197,6 +198,7 @@ describe("Workscene product runtime projection", () => {
     expect(withoutWorkspace.runtimeTools.extraTools.every((tool) => tool.systemPromptGuidance === undefined)).toBe(true);
     expect(withWorkspace.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
+      "propose_advancement",
       "schedule",
       "task_list",
       "workmode_exit",
@@ -343,6 +345,8 @@ describe("Workscene product runtime projection", () => {
       "workscene_rename_current",
       "workscene_set_workdir_current",
       "workscene_clear_workdir_current",
+      // 推进提议常驻会话运行时；冻结的执行画像按目录过滤工具，目录缺它就装不进运行
+      "propose_advancement",
     ]) {
       expect(catalog.tools).toContain(name);
     }

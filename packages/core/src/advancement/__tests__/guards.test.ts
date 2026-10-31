@@ -7,7 +7,13 @@ import {
   advancementReviewLineageId,
 } from "../review-attempt-identity.js";
 import { applyAdvancementEvent, type AdvancementFoldMap } from "../reducer.js";
+import {
+  advancementProposalExecution,
+  advancementProposalId,
+  advancementProposalSessionId,
+} from "../proposal-identity.js";
 import { evidenceRequestDigest, protocolDigest } from "../../protocol/index.js";
+import type { TurnOrigin } from "../../types/tools.js";
 import type {
   AdvancementEvidenceAttempt,
   AdvancementControlEvent,
@@ -497,3 +503,123 @@ function evidenceAttempt(
     requestDigest: evidenceRequestDigest(request),
   };
 }
+
+describe("主 Agent 提议形成的推进会话", () => {
+  const proposalId = advancementProposalId("conv-1", "run-1");
+  const sessionId = advancementProposalSessionId(proposalId);
+  const accepted: AdvancementControlEvent = {
+    type: "proposal_accepted",
+    timestamp: NOW,
+    sessionId,
+    conversationId: "conv-1",
+    proposalId,
+    runId: "run-1",
+    originalTurnId: "turn-1",
+    originalUserTask: task("原任务"),
+  };
+  const attempt = (phase: "invoking" | "consumed" | "failed" | "deferred", generation = 1, revision = 0): AdvancementControlEvent =>
+    ({ type: "draft_attempt_transitioned", timestamp: NOW, sessionId, attempt: { generation, revision, phase } });
+  const drafted = (revision = 0): AdvancementControlEvent =>
+    ({ type: "proposal_drafted", timestamp: NOW, sessionId, revision, pendingRubricDraft: draft() });
+  const supplement: AdvancementControlEvent = { type: "proposal_supplemented", timestamp: NOW, sessionId, supplement: task("补充") };
+  const receipt = (outcome: Record<string, unknown>): AdvancementControlEvent => ({
+    type: "submission_settled",
+    timestamp: NOW,
+    conversationId: "conv-1",
+    receipt: { identity: { surfacePrincipal: "surface:test", submissionId: "s-1", requestDigest: `sha256:${"0".repeat(64)}` }, outcome } as never,
+  });
+
+  it("接受：身份由会话与运行派生；已有未终结会话时只能记为未被接受（单条事件、直接终结）", () => {
+    expect(() => assertAdvancementEventBatchLegal(new Map(), [accepted])).not.toThrow();
+    expect(() => assertAdvancementEventBatchLegal(new Map(), [{ ...accepted, sessionId: "other" }])).toThrow(/bind its proposal/);
+    expect(() => assertAdvancementEventBatchLegal(new Map(), [{ ...accepted, runId: "run-2" }])).toThrow(/bind its proposal/);
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [accepted])).toThrow();
+    expect(() => assertAdvancementEventBatchLegal(activeFold(), [accepted])).toThrow(/open advancement session/);
+    const rejected: AdvancementControlEvent = { ...(accepted as Extract<AdvancementControlEvent, { type: "proposal_accepted" }>), type: "proposal_rejected",
+      exit: { reason: "superseded", message: "未被接受", occurredAt: NOW } };
+    expect(() => assertAdvancementEventBatchLegal(activeFold(), [rejected])).not.toThrow();
+    expect(() => assertAdvancementEventBatchLegal(activeFold(), [{ ...rejected, exit: { reason: "user-cancelled", message: "x", occurredAt: NOW } } as AdvancementControlEvent])).toThrow(/superseded/);
+    expect(foldOf(...[created, confirm, rejected]).get(sessionId)?.status).toBe("cancelled");
+    expect(foldOf(accepted).get(sessionId)?.status).toBe("proposed");
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [created])).toThrow(/open advancement session/);
+  });
+
+  it("草案尝试只能从 proposed 起一代，结果须同代，草案须绑定已消费的尝试与当前补充数", () => {
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [attempt("consumed")])).toThrow(/draft attempt/);
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [attempt("invoking", 2)])).toThrow(/draft attempt/);
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [attempt("invoking", 1, 1)])).toThrow(/draft attempt/);
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [attempt("invoking")])).not.toThrow();
+    const invoking = foldOf(accepted, attempt("invoking"));
+    expect(invoking.get(sessionId)?.status).toBe("drafting");
+    expect(() => assertAdvancementEventBatchLegal(invoking, [attempt("invoking", 2)])).toThrow(/draft attempt/);
+    expect(() => assertAdvancementEventBatchLegal(invoking, [drafted()])).toThrow(/consumed attempt/);
+    expect(() => assertAdvancementEventBatchLegal(invoking, [attempt("consumed"), drafted()])).not.toThrow();
+    // 草案期间收到补充：用旧 revision 的草案被拒
+    const supplemented = foldOf(accepted, attempt("invoking"), supplement);
+    expect(() => assertAdvancementEventBatchLegal(supplemented, [attempt("consumed"), drafted(0)])).toThrow(/revision/);
+    expect(() => assertAdvancementEventBatchLegal(supplemented, [attempt("consumed"), drafted(1)])).not.toThrow();
+    expect(foldOf(accepted, attempt("invoking"), attempt("consumed"), drafted()).get(sessionId)?.status).toBe("awaiting-rubric-confirmation");
+    expect(foldOf(accepted, attempt("invoking"), attempt("deferred")).get(sessionId)?.status).toBe("draft-uncertain");
+    // 失败后补充回到 proposed，由下一代并入
+    const failed = foldOf(accepted, attempt("invoking"), attempt("failed"));
+    expect(failed.get(sessionId)?.status).toBe("draft-failed");
+    const resumed = foldOf(accepted, attempt("invoking"), attempt("failed"), supplement);
+    expect(resumed.get(sessionId)?.status).toBe("proposed");
+    expect(() => assertAdvancementEventBatchLegal(resumed, [attempt("invoking", 2, 1)])).not.toThrow();
+  });
+
+  it("补充只在提议阶段；确认与降级绑定由提议派生的执行身份，不绑原文", () => {
+    const awaiting = foldOf(accepted, attempt("invoking"), attempt("consumed"), drafted());
+    expect(() => assertAdvancementEventBatchLegal(awaiting, [supplement])).toThrow(/open proposal/);
+    const execution = advancementProposalExecution({ originalTurnId: "turn-1", mode: "advancement", draftId: "draft-1" });
+    const marker = { sessionId, mode: "advancement" as const, draftId: "draft-1" };
+    const intent = {
+      turnId: execution.turnId,
+      surfacePrincipal: "surface:test",
+      turnOrigin: { channel: "rpc", triggeredBy: "surface:test", advancementExecution: marker } as TurnOrigin,
+      inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, execution.input),
+    };
+    const confirmEvent = (admissionIntent: typeof intent): AdvancementControlEvent =>
+      ({ type: "rubric_confirmed", timestamp: NOW, sessionId, confirmedRubric: confirmed(), admissionIntent });
+    expect(() => assertAdvancementEventBatchLegal(awaiting, [confirmEvent(intent)])).not.toThrow();
+    expect(() => assertAdvancementEventBatchLegal(awaiting, [confirmEvent({ ...intent, turnId: "turn-1" })])).toThrow(/execution identity/);
+    expect(() => assertAdvancementEventBatchLegal(awaiting, [confirmEvent({
+      ...intent, inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, task("原任务")),
+    })])).toThrow(/bind task content/);
+    // 执行标记：提议会话必须带，且会话、模式、草案逐项一致
+    for (const turnOrigin of [
+      { channel: "rpc", triggeredBy: "surface:test" },
+      { channel: "rpc", triggeredBy: "surface:test", advancementExecution: { ...marker, sessionId: "other-session" } },
+      { channel: "rpc", triggeredBy: "surface:test", advancementExecution: { ...marker, draftId: "draft-2" } },
+      { channel: "rpc", triggeredBy: "surface:test", advancementExecution: { sessionId, mode: "direct" as const } },
+    ] as TurnOrigin[]) {
+      expect(() => assertAdvancementEventBatchLegal(awaiting, [confirmEvent({ ...intent, turnOrigin })])).toThrow(/advancement execution/);
+    }
+    const direct = advancementProposalExecution({ originalTurnId: "turn-1", mode: "direct" });
+    const directOrigin = { channel: "rpc", triggeredBy: "surface:test", advancementExecution: { sessionId, mode: "direct" as const } } as TurnOrigin;
+    const directed: AdvancementControlEvent = {
+      type: "original_task_directed",
+      timestamp: NOW,
+      sessionId,
+      exit: { reason: "user-cancelled", message: "直接执行", occurredAt: NOW },
+      admissionIntent: { ...intent, turnId: direct.turnId, turnOrigin: directOrigin, inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, direct.input) },
+    };
+    for (const fold of [foldOf(accepted), foldOf(accepted, attempt("invoking"), attempt("failed")), awaiting]) {
+      expect(() => assertAdvancementEventBatchLegal(fold, [directed])).not.toThrow();
+    }
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [{ ...directed, admissionIntent: { ...intent } }])).toThrow(/original task and principal/);
+    expect(() => assertAdvancementEventBatchLegal(foldOf(accepted), [{
+      ...directed, admissionIntent: { ...directed.admissionIntent, turnOrigin: { channel: "rpc", triggeredBy: "surface:test" } },
+    } as AdvancementControlEvent])).toThrow(/advancement execution/);
+  });
+
+  it("提议阶段的两种回执绑定原始输入与修订数", () => {
+    const open = foldOf(accepted);
+    expect(() => assertAdvancementEventBatchLegal(open, [receipt({ kind: "proposal-kept", sessionId, originalTurnId: "turn-1" })])).not.toThrow();
+    expect(() => assertAdvancementEventBatchLegal(open, [receipt({ kind: "proposal-kept", sessionId, originalTurnId: "turn-2" })])).toThrow(/open proposal/);
+    expect(() => assertAdvancementEventBatchLegal(open, [supplement, receipt({ kind: "proposal-supplemented", sessionId, originalTurnId: "turn-1", revision: 1 })])).not.toThrow();
+    expect(() => assertAdvancementEventBatchLegal(open, [supplement, receipt({ kind: "proposal-supplemented", sessionId, originalTurnId: "turn-1", revision: 2 })])).toThrow(/open proposal/);
+    const awaiting = foldOf(accepted, attempt("invoking"), attempt("consumed"), drafted());
+    expect(() => assertAdvancementEventBatchLegal(awaiting, [receipt({ kind: "proposal-kept", sessionId, originalTurnId: "turn-1" })])).toThrow(/open proposal/);
+  });
+});

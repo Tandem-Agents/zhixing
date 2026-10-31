@@ -176,6 +176,18 @@
       "types": "./dist/advancement/thresholds.d.ts",
       "import": "./dist/advancement/thresholds.js"
     },
+    "./advancement/proposal-identity": {
+      "types": "./dist/advancement/proposal-identity.d.ts",
+      "import": "./dist/advancement/proposal-identity.js"
+    },
+    "./advancement/proposal-messages": {
+      "types": "./dist/advancement/proposal-messages.d.ts",
+      "import": "./dist/advancement/proposal-messages.js"
+    },
+    "./advancement/execution-context": {
+      "types": "./dist/advancement/execution-context.d.ts",
+      "import": "./dist/advancement/execution-context.js"
+    },
     "./advancement/application": {
       "types": "./dist/advancement/application.d.ts",
       "import": "./dist/advancement/application.js"

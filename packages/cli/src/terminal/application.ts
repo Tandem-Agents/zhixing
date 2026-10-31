@@ -37,6 +37,7 @@ import type { TerminalTasks } from './tasks.js';
 import type { TerminalTaskNotices } from './task-notices.js';
 import type { TerminalInformationCommands } from './information-commands.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
+import { advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
@@ -112,6 +113,19 @@ export async function runTerminalApplication(timing?: {
   await application.run();
 }
 
+// 提议阶段的草案结果（控制域事件）：就绪，或起草失败/结果不明；轮次取原任务轮次
+type ProposalStageEvent = { conversationId: string; turnId: string } & ({ kind: 'ready' } | { kind: 'stalled'; outcome: 'failed' | 'uncertain' });
+function proposalStageEvent(value: unknown): ProposalStageEvent | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const event = value as Partial<SessionEventEnvelope>;
+  if (event.scope !== 'control' || typeof event.conversationId !== 'string' || typeof event.runId !== 'string') return undefined;
+  if (event.event === 'advancement:contract_draft') return { kind: 'ready', conversationId: event.conversationId, turnId: event.runId };
+  if (event.event !== 'advancement:proposal_draft_failed') return undefined;
+  const payload = event.payload;
+  const outcome = payload && typeof payload === 'object' && 'outcome' in payload && payload.outcome === 'uncertain' ? 'uncertain' : 'failed';
+  return { kind: 'stalled', conversationId: event.conversationId, turnId: event.runId, outcome };
+}
+
 class TerminalApplication {
   readonly #files: TerminalManagedFiles;
   readonly #channel: TerminalChannel;
@@ -151,6 +165,8 @@ class TerminalApplication {
   #pendingRubricResolution?: { controller: ConversationController<TerminalTurnOutcome>; conversationId: string; result: BeginReferencedUserTurnResult<TerminalTurnOutcome> };
   #deferredRubric?: Omit<AwaitingRubricConfirmationTurn, 'rubricDraft'>;
   #pendingRubricNotice?: string;
+  // 提议轮次最近一次起草结果的提示：草案事件可能先于本轮运行结束到达，运行结束时据此显示，不退回“正在起草”
+  #proposalStage?: { conversationId: string; turnId: string; message: string };
   readonly #configPath: string;
   readonly #abort = new AbortController();
   readonly #clipboard = new TerminalClipboard(this.#abort.signal);
@@ -333,6 +349,9 @@ class TerminalApplication {
     });
     const releaseProcessEvents = this.#connection.onNotification('session.event', value => {
       if (value && typeof value === 'object') this.#processSession.acceptEvent(value as SessionEventEnvelope);
+      const stage = proposalStageEvent(value);
+      if (stage?.kind === 'ready') this.#proposalDraftReady(stage.conversationId, stage.turnId);
+      else if (stage) this.#proposalDraftStalled(stage.conversationId, stage.turnId, stage.outcome);
     });
     this.#abort.signal.addEventListener('abort', releaseProcessEvents, { once: true });
     this.#confirmations = new RpcConfirmationBroker({ link: this.#connection, onResolveError: () => {
@@ -366,6 +385,31 @@ class TerminalApplication {
     });
     const releaseReconnected = this.#connection.onLifecycleNotice(notice => this.#reconnectedInBackground(notice));
     this.#abort.signal.addEventListener('abort', () => { releaseReconnected(); clearTimeout(this.#restrictionRecheck); }, { once: true });
+  }
+
+  // 提议后的草案异步就绪：发起端空闲时经会话快照直接拉起确认面；忙时留下继续确认的入口，不打断进行中的操作
+  #proposalDraftReady(conversationId: string, turnId: string): void {
+    if (this.#abort.signal.aborted || this.#controller?.current.conversationId !== conversationId) return;
+    if (this.#pendingRubric || this.#deferredRubric) return;
+    if (!this.#operation && !this.#editor && !this.#selection && !this.#presentingConfirmation &&
+        !this.#submittingInput && !this.#state.activeTurnPromise) {
+      this.#background(() => this.#resolveRubric());
+      return;
+    }
+    const message = '验收标准已就绪，可以确认。';
+    this.#proposalStage = { conversationId, turnId, message };
+    this.#mainView = { ...this.#mainView, message,
+      choices: [...(this.#mainView.choices ?? []).filter(choice => choice.id !== 'rubric-resume'), { id: 'rubric-resume', label: '确认验收标准' }] };
+    if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => {});
+  }
+
+  // 起草失败或结果不明：底部提示换成可继续的操作（失败详情已在历史行），不再停在“正在起草”
+  #proposalDraftStalled(conversationId: string, turnId: string, outcome: 'failed' | 'uncertain'): void {
+    if (this.#abort.signal.aborted || this.#controller?.current.conversationId !== conversationId) return;
+    const message = advancementProposalStalledMessage(outcome);
+    this.#proposalStage = { conversationId, turnId, message };
+    this.#mainView = { ...this.#mainView, message };
+    if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => {});
   }
 
   // 连接链在后台重新连上（别的读取先触发了连接建立）时，断线画面按与 Enter 重试相同的启动例程恢复，
@@ -1693,6 +1737,11 @@ class TerminalApplication {
       // bounded independently of the control frame and detached from its RPC.
       if (this.#controller?.current.conversationId !== conversationId) return;
       this.#mainView = { ...this.#mainView, busy: false, message: outcome.reason === 'completed' ? undefined : outcome.message };
+      // 提议运行结束不是任务完成：显示“已提出推进”，草案就绪后由草案事件拉起确认面；起草结果先到时显示该结果
+      if (outcome.control?.advancementProposal) {
+        const stage = this.#proposalStage;
+        this.#mainView = { ...this.#mainView, message: stage?.conversationId === conversationId && stage.turnId === turnId ? stage.message : outcome.message };
+      }
       if (outcome.control?.handedOff) this.#mainView = { ...this.#mainView, message: '已提交任务交接；后续结果将在原对话中返回。' };
       else if (outcome.control?.navigation) {
         this.#invalidateConversation();

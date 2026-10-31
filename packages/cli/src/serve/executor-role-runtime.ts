@@ -22,6 +22,8 @@ import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js"
 import { readGuidanceFile } from "./read-guidance-file.js";
 import { createAnchorWorksceneAssignmentToolApplication } from "./workscene-application-adapter.js";
 import { createWorkmodeEnterTool, createWorkmodeExitTool, createWorksceneListTool, createWorksceneTaskTools, WORKSCENE_PRODUCT_TOOL_IDS } from "./workmode-tools.js";
+import { createAdvancementProposalTool } from "./advancement-proposal-tool.js";
+import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing/core/advancement/proposal-identity";
 import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { mcpConfigurationRevision } from "@zhixing/providers";
@@ -1207,6 +1209,8 @@ export class ExecutorRuntimeSubstrate {
           ...(this.options.mcpProductTools ?? []),
           ...mcp.tools,
           ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools(createWorksceneRunToolApplication())),
+          // 推进提议常驻会话运行时；只有宿主发送路径判定为新任务作用域的运行才启用
+          ...(sessionId && isLocalConversationId(sessionId) ? [] : [createAdvancementProposalTool()]),
         ...(sessionId && isLocalConversationId(sessionId) ? [] : workscene
           ? [createWorkmodeExitTool(createWorksceneRunToolApplication())]
           : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication(), createWorksceneRunToolApplication()), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
@@ -1286,6 +1290,7 @@ export class ExecutorRuntimeSubstrate {
           WORKSCENE_PRODUCT_TOOL_IDS.exit,
           WORKSCENE_PRODUCT_TOOL_IDS.list,
           ...createWorksceneTaskTools(createWorksceneRunToolApplication()).map(tool => tool.name),
+          ADVANCEMENT_PROPOSAL_TOOL,
         ]),
       ].sort(),
       mcpServers: mcp.serverIds,

@@ -130,6 +130,7 @@ export class ConversationBaseSource {
   }
   preparationRequired(): AuthorityPreparationRequired {
     const error = new AuthorityPreparationRequired([]);
+    error.observed = { reason: 'imported-base-prepare', positions: [] };
     error.prepareOutside = async () => {
       try { await this.prepare(); }
       catch (cause) {
@@ -204,6 +205,7 @@ export class ConversationBaseSource {
         // 已是待装入（例如基底尚未就绪）的原样交出；只把排他段内取不到锁的背压改成段外补齐
         if (error instanceof AuthorityPreparationRequired || !isHoldingMaintenanceExclusion() || maintenanceRetryDelayMs(error) === undefined) throw error;
         const required = new AuthorityPreparationRequired([]);
+        required.observed = { reason: 'conversation-base-fill', positions: [] };
         required.prepareOutside = fill;
         throw required;
       }

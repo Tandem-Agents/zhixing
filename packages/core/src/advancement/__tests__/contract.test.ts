@@ -605,4 +605,41 @@ describe("RubricContractBuilder", () => {
     );
     expect(draft.content.passCriteria).toEqual(["相同标准", "相同标准"]);
   });
+
+  it("纯图片原任务起草、只有图片的补充修订：图片随模型调用附上，中止信号传到调用", async () => {
+    const image = { type: "base64" as const, mediaType: "image/png", data: "iVBORw0KGgo=" };
+    const supplementImage = { type: "base64" as const, mediaType: "image/jpeg", data: "/9j/4AAQ" };
+    const calls: Array<{ prompt: string; images?: readonly unknown[]; abortSignal?: AbortSignal }> = [];
+    const reply = JSON.stringify({
+      title: "截图问题验收", description: "按截图核对界面问题是否修复。", passCriteria: ["截图中的问题不再出现"],
+      evidenceRequirements: [{ id: "fact", kind: "conversation-fact", description: "说明修复结果。", required: false }],
+      failureHandling: [{ id: "continue", scenario: "问题仍在", reply: "继续修复并说明结果。" }],
+    });
+    const complete = async (prompt: string, options?: { images?: readonly unknown[]; abortSignal?: AbortSignal }) => {
+      calls.push({ prompt, ...options });
+      return reply;
+    };
+    const builder = new RubricContractBuilder({
+      now: () => "2026-01-01T00:00:00.000Z",
+      generationStrategy: new LLMRubricDraftGenerationStrategy({ complete }),
+      revisionStrategy: new LLMRubricDraftRevisionStrategy({ complete }),
+    });
+    const abort = new AbortController();
+    const originalUserTask = { parts: [{ type: "image" as const, source: image }] };
+    const draft = await builder.buildDraft({ originalTurnId: "turn-1", originalUserTask, abortSignal: abort.signal });
+    expect(calls[0]!.images).toEqual([image]);
+    expect(calls[0]!.abortSignal).toBe(abort.signal);
+    expect(calls[0]!.prompt).toContain("任务附图 1 张");
+
+    await builder.reviseDraft({
+      currentDraft: draft,
+      originalUserTask,
+      supplements: [{ parts: [{ type: "image", source: supplementImage }] }],
+      abortSignal: abort.signal,
+    });
+    // 原任务图在前、补充图在后，与修订意见里的标注对应
+    expect(calls[1]!.images).toEqual([image, supplementImage]);
+    expect(calls[1]!.prompt).toContain("补充 1：（无文字）（附图 1 张，随本请求附上）");
+    await expect(builder.reviseDraft({ currentDraft: draft, originalUserTask, supplements: [] })).rejects.toThrow("revision feedback is empty");
+  });
 });

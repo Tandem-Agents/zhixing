@@ -174,6 +174,11 @@ export interface AgentLoopParams {
    */
   turnContextInjector?: TurnContextInjector;
   /**
+   * 本运行启用的排他初始控制工具名（见 ToolDefinition.exclusiveInitialControl）。
+   * 由产品经 TurnOrigin.enabledControls 决定；缺省时一个都不启用。
+   */
+  enabledExclusiveControls?: ReadonlySet<string>;
+  /**
    * Token 估算器 —— 仅用于 per-LLM-call 校准。
    *
    * 缺省时不做任何校准（向后兼容）。注册时 agent-loop 在每次成功的 LLM call 后用
@@ -383,6 +388,10 @@ export interface ExecuteToolCallsResult {
    * - 非 abort 退出 → undefined
    */
   readonly abortedDuringToolAt?: number;
+  /** 本批是否真正进入过工具实现；规划阶段拒绝、未注册、未启动的调用都不算。 */
+  readonly startedTools: boolean;
+  /** 本批选中了排他初始控制调用时，记它的调用 id 与执行结果。 */
+  readonly exclusive?: { readonly id: string; readonly outcome: "succeeded" | "failed" };
 }
 
 // ─── Runtime 层 Run 返回值 ───

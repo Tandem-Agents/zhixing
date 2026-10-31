@@ -12,6 +12,9 @@ import {
   createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
 } from "../advancement-original-task-application.js";
 
+const frozenOrigin = Object.freeze({ channel: "rpc", triggeredBy: "surface-1",
+  advancementExecution: Object.freeze({ sessionId: "session-1", mode: "advancement" as const, draftId: "draft-1" }) });
+
 describe("Anchor Advancement original-task execution adapter", () => {
   it("uses the Conversation application once with the original identity and surface effects", async () => {
     const prepared = { turnId: "turn-1" } as ConversationPreparedAgentTurnIdentity;
@@ -47,7 +50,7 @@ describe("Anchor Advancement original-task execution adapter", () => {
 
     await expect(adapter.admit({
       conversationId: "conv-1",
-      admissionIntent: { turnId: "turn-1", surfacePrincipal: "surface-1", turnOrigin: { channel: "rpc", triggeredBy: "surface-1" }, inputDigest: `sha256:${"1".repeat(64)}` },
+      admissionIntent: { turnId: "turn-1", surfacePrincipal: "surface-1", turnOrigin: frozenOrigin, inputDigest: `sha256:${"1".repeat(64)}` },
       originalUserTask,
       surface,
     })).resolves.toEqual({
@@ -73,12 +76,14 @@ describe("Anchor Advancement original-task execution adapter", () => {
       conversationId: "conv-1",
       input: originalUserTask,
       turnIdentity: prepared,
-      turnOrigin: { channel: "rpc", triggeredBy: "surface-1" },
+      turnOrigin: frozenOrigin,
     }));
+    // 接入面执行运行用意向冻结的来源（含执行标记），不由本连接另拼
     expect(surfaceExecute).toHaveBeenCalledWith({
       conversationId: "conv-1",
       turnId: "turn-1",
       originalUserTask,
+      turnOrigin: frozenOrigin,
     });
     expect(surface.onAdmitted).toHaveBeenCalledOnce();
   });

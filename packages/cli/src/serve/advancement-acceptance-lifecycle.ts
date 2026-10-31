@@ -11,23 +11,26 @@ import type { AdvancementController } from "@zhixing/owner-services/advancement"
  * run 的发送视图：落盘 messages[0] 恒为用户原文、窗口不含注入块，由注入
  * 通道结构保证。failureHandling 与裁判过程不在公开面内。
  *
+ * 确认或降级后执行原任务的那次运行（耐久来源带执行标记）不由这里注入：它所需的
+ * 原任务、补充与契约由宿主按冻结身份裁决成指派材料，执行体作为必需上下文注入；
+ * 这里再按“当前 active 会话”注入，会把别的会话的契约夹进来。
+ *
  * 由宿主装配层注册（随 RuntimeHost 的共享订阅者集合下发全部会话实例），
  * 不经 ConversationManager——注入内容按 conversationId 运行期查推进会话
  * 状态动态决定：无 active 会话（含 ephemeral 无会话身份的 run）即不注入，
  * 会话到达终态后自然停注。
  */
 export function createAdvancementAcceptanceLifecycle(
-  advancement: AdvancementController,
+  advancement: Pick<AdvancementController, "loadActiveSession">,
 ): AgentRuntimeLifecycle {
   return {
     id: "advancement-acceptance-conditions",
     async onBeforeRun(ctx) {
-      if (!ctx.conversationId) return;
+      if (!ctx.conversationId || ctx.turnOrigin?.advancementExecution) return;
       const session = await advancement.loadActiveSession(ctx.conversationId);
-      if (!session || session.status !== "active") return;
-      const rubric = session.confirmedRubric;
-      if (!rubric) return;
-      ctx.injectUserContext(renderAcceptanceConditions(rubric.content));
+      if (session?.status === "active" && session.confirmedRubric) {
+        ctx.injectUserContext(renderAcceptanceConditions(session.confirmedRubric.content));
+      }
     },
   };
 }

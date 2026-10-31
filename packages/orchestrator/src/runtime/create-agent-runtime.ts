@@ -121,6 +121,7 @@ import type {
   LifecycleWindowCloseContext,
   LifecycleBeforeRunContext,
   LifecycleAfterRunContext,
+  UserContextContribution,
   WindowOpenReason,
   WindowCloseReason,
   DisposeReason,
@@ -1593,7 +1594,10 @@ export async function createAgentRuntime(
       //
       // 订阅者经 injectUserContext 贡献注入内容,运行体收齐后拼一个 <context> 块
       //（拼装 / 包标签 / 注入位置归运行体,订阅者只递交内容）。
-      const userContextContributions: string[] = [];
+      // 宿主裁决的必需上下文排在订阅者贡献之前，不经软钩子、无论订阅者成败都注入。
+      const userContextContributions: UserContextContribution[] = [
+        ...(envelope.identity.turnContext?.requiredUserContext ?? []),
+      ];
       for (const sub of lifecycle) {
         const beforeRunCtx: LifecycleBeforeRunContext = {
           ...lifecycleBase({
@@ -1604,12 +1608,15 @@ export async function createAgentRuntime(
           }),
           conversationId: envelope.identity.conversationId,
           turnIndex: envelope.identity.turnIndex,
+          ...(envelope.identity.turnContext?.turnId ? { turnId: envelope.identity.turnContext.turnId } : {}),
+          ...(envelope.identity.turnContext?.turnOrigin ? { turnOrigin: envelope.identity.turnContext.turnOrigin } : {}),
           isWindowFirstRun,
           messages: envelope.modelInput.messages,
           injectUserContext(content) {
-            if (content !== null && content.trim().length > 0) {
-              userContextContributions.push(content);
-            }
+            if (content === null) return;
+            const text = typeof content === "string" ? content : content.text;
+            const images = typeof content === "string" ? 0 : content.images?.length ?? 0;
+            if (text.trim().length > 0 || images > 0) userContextContributions.push(content);
           },
         };
         try {
@@ -1815,6 +1822,10 @@ export async function createAgentRuntime(
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,
+          // 本运行启用的排他初始控制工具由产品经 turnOrigin 决定，Kernel 只按名字放行
+          enabledExclusiveControls: new Set(
+            envelope.identity.turnContext?.turnOrigin?.enabledControls ?? [],
+          ),
           // 估算器 per-LLM-call 校准：agent-loop 在每次成功 LLM call 后用本次实际
           // 送入 provider 的请求视图对账全量输入真值，让系数与 LLM 实际处理的 size 对账
           tokenEstimator: estimator,

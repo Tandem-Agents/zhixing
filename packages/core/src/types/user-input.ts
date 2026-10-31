@@ -97,6 +97,24 @@ export function userMessageFromTurnInput(input: UserTurnInputLike): Message {
   return { role: "user", content };
 }
 
+/**
+ * 从一次运行记录的消息还原这次运行的原始输入（userMessageFromTurnInput 的逆）：只取第一条带文本或图片的用户消息，
+ * 即本次 ingress 的输入；运行中途经输入端口追加的用户消息属于各自的 ingress，不并入，工具结果不算。
+ * 图片的名称、类型与大小只是选取附件时的元数据，转成消息时本就不进入模型，这里无法也无需还原。
+ */
+export function userTurnInputFromMessages(messages: readonly Message[]): UserTurnInput {
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    const parts: UserInputPart[] = [];
+    for (const block of message.content) {
+      if (block.type === "text" && block.text.length > 0) parts.push({ type: "text", text: block.text });
+      else if (block.type === "image") parts.push({ type: "image", source: block.source });
+    }
+    if (parts.length > 0) return { parts };
+  }
+  return { parts: [] };
+}
+
 export function extractUserTurnInputText(input: UserTurnInputLike): string {
   return normalizeUserTurnInput(input).parts
     .filter((part): part is UserInputTextPart => part.type === "text")

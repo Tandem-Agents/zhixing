@@ -94,6 +94,14 @@ interface ExecuteToolCallsParams {
    */
   roleThinking?: ResolvedRoleThinking;
   sideEffects?: ToolSideEffectObserver;
+  /**
+   * 排他初始控制工具的批次门输入：本运行启用的控制名，以及本运行此前是否已启动过工具。
+   * 缺省时一个都不启用。
+   */
+  exclusiveControl?: {
+    readonly enabled: ReadonlySet<string>;
+    readonly toolsStartedBefore: boolean;
+  };
 }
 
 type PlannedToolCall =
@@ -123,13 +131,57 @@ export async function* executeToolCalls(
   params: ExecuteToolCallsParams,
 ): AsyncGenerator<AgentYield, ExecuteToolCallsResult> {
   const toolMap = new Map(params.tools.map((t) => [t.name, t]));
-  const plannedCalls = planToolCalls(params.toolCalls, toolMap);
+  const gated = gateExclusiveControl(params.toolCalls, toolMap, params.exclusiveControl);
+  const plannedCalls = gated?.planned ?? planToolCalls(params.toolCalls, toolMap);
 
-  if (canRunParallel(plannedCalls)) {
-    return yield* runParallelBatch(params, plannedCalls);
+  const batch = canRunParallel(plannedCalls)
+    ? yield* runParallelBatch(params, plannedCalls)
+    : yield* runSerialBatch(params, plannedCalls, toolMap);
+  if (gated?.selected === undefined || batch.unexecutedToolUses.length > 0) return batch;
+  // 中断时不给出结果，交给中断路径；否则按选中调用自己的结果判定成败
+  const selected = batch.completedResults.find((result) => result.toolUseId === gated.selected);
+  return selected
+    ? { ...batch, exclusive: { id: gated.selected, outcome: selected.isError ? "failed" : "succeeded" } }
+    : batch;
+}
+
+/**
+ * 排他初始控制工具的批次门：在任何工具启动前对整批一次决定。
+ * 批次里没有排他调用时返回 undefined，走原有规划。
+ * 有排他调用时：它唯一、本运行未启动过工具、本运行已启用、入参合法，才只启动它，同批其他调用不启动；
+ * 任一条件不满足，整批都不启动。
+ */
+function gateExclusiveControl(
+  toolCalls: ToolUseBlock[],
+  toolMap: Map<string, ToolDefinition>,
+  control: ExecuteToolCallsParams["exclusiveControl"],
+): { readonly planned: PlannedToolCall[]; readonly selected?: string } | undefined {
+  const exclusive = toolCalls.filter((call) => toolMap.get(call.name)?.exclusiveInitialControl);
+  if (exclusive.length === 0) return undefined;
+  const only = exclusive[0]!;
+  const refusal = exclusive.length > 1
+    ? "Only one exclusive control call is allowed in a batch."
+    : control?.toolsStartedBefore === true
+      ? `Tool "${only.name}" is only available before any tool has started in this run; continue the task without it.`
+      : control?.enabled.has(only.name) !== true
+        ? `Tool "${only.name}" is not available in this run.`
+        : toolMap.get(only.name)!.exclusiveInitialControl!.validateInput(only.input);
+  if (refusal !== undefined) {
+    const result: ToolResult = { content: `${refusal} No call in this batch was started.`, isError: true };
+    return { planned: toolCalls.map((call) => ({ kind: "reject", call, result })) };
   }
-
-  return yield* runSerialBatch(params, plannedCalls, toolMap);
+  const skipped: ToolResult = {
+    content: `Not started: this batch selected the exclusive control call "${only.name}".`,
+    isError: true,
+  };
+  return {
+    selected: only.id,
+    planned: toolCalls.map((call) =>
+      call === only
+        ? { kind: "run", call, tool: toolMap.get(call.name) }
+        : { kind: "reject", call, result: skipped }
+    ),
+  };
 }
 
 /**
@@ -157,6 +209,7 @@ async function* runSerialBatch(
   let abortedAtIndex: number | null = null;
   // abort 发生在工具 await 期间时记退出时刻；abort 发生在循环顶 (工具间隙) 时为 undefined
   let abortedDuringToolAt: number | undefined;
+  let startedTools = false;
 
   for (let i = 0; i < plannedCalls.length; i++) {
     const planned = plannedCalls[i]!;
@@ -239,6 +292,7 @@ async function* runSerialBatch(
       roleThinking,
     };
 
+    startedTools = true;
     try {
       const rawResult = await executeObservedTool(
         deps,
@@ -346,6 +400,7 @@ async function* runSerialBatch(
     unexecutedToolUses:
       abortedAtIndex !== null ? toolCalls.slice(abortedAtIndex) : [],
     abortedDuringToolAt,
+    startedTools,
   };
 }
 
@@ -411,6 +466,7 @@ async function* runParallelBatch(
       completedResults: [],
       unexecutedToolUses: [...toolCalls],
       abortedDuringToolAt: undefined,
+      startedTools: false,
     };
   }
 
@@ -557,6 +613,8 @@ async function* runParallelBatch(
     completedResults: results,
     unexecutedToolUses,
     abortedDuringToolAt,
+    // 并发分支只在全部可运行调用都已注册时进入，启动即进入工具实现
+    startedTools: runnable.length > 0,
   };
 }
 

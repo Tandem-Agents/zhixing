@@ -13,11 +13,41 @@ import type { UserTurnInput } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
 
 export type AdvancementSessionStatus =
+  | "proposed"
+  | "drafting"
+  | "draft-failed"
+  | "draft-uncertain"
   | "awaiting-rubric-confirmation"
   | "active"
   | "completed"
   | "exited"
   | "cancelled";
+
+/** 提议阶段：主 Agent 已提出推进，草案尚未进入待确认。 */
+export type AdvancementProposalStageStatus = Extract<AdvancementSessionStatus, "proposed" | "drafting" | "draft-failed" | "draft-uncertain">;
+
+/**
+ * 主 Agent 在新任务运行中提出的推进：提议运行与原始输入的身份，以及草案阶段收到的补充与最新一代尝试。
+ * 原任务就是提议运行的用户输入，随会话的 originalUserTask 保存。
+ */
+export interface AdvancementProposal {
+  readonly proposalId: string;
+  readonly runId: string;
+  readonly originalTurnId: string;
+  readonly supplements: readonly UserTurnInput[];
+  readonly draftAttempt?: AdvancementDraftAttempt;
+}
+
+/** invoking 是外调可能已发生的不可重放边界；deferred 表示调用者已不在、结果不明。 */
+export type AdvancementDraftAttemptPhase = "invoking" | "consumed" | "failed" | "deferred";
+
+export interface AdvancementDraftAttempt {
+  readonly generation: number;
+  /** 发起时已收到的补充条数；草案生成后若补充更多，按修订语义并入再进入待确认。 */
+  readonly revision: number;
+  readonly phase: AdvancementDraftAttemptPhase;
+  readonly detail?: string;
+}
 
 export type ObjectiveSignalKind =
   | "file-diff"
@@ -335,6 +365,8 @@ export interface AdvancementSession {
   readonly reviewRootSettlements?: readonly { readonly lineageId: string; readonly generation: number }[];
   readonly evidence?: AdvancementEvidenceProjection;
   readonly exit?: AdvancementExit;
+  /** 由主 Agent 提议形成的会话才有；旧的前置准入会话没有。 */
+  readonly proposal?: AdvancementProposal;
 }
 
 export interface CreateAdvancementSessionInput {
@@ -350,6 +382,11 @@ export type AdvancementStoreEvent =
   | import("./submission.js").AdvancementSubmissionSettledEvent
   | AdvancementSessionRegeneratedEvent
   | AdvancementSessionCreatedEvent
+  | AdvancementProposalAcceptedEvent
+  | AdvancementProposalRejectedEvent
+  | AdvancementProposalSupplementedEvent
+  | AdvancementDraftAttemptTransitionedEvent
+  | AdvancementProposalDraftedEvent
   | AdvancementRubricDraftRevisedEvent
   | AdvancementRubricConfirmedEvent
   | AdvancementOriginalTaskDirectedEvent
@@ -389,6 +426,55 @@ export interface AdvancementSessionCreatedEvent {
   readonly sessionId: string;
   readonly conversationId: string;
   readonly originalUserTask: UserTurnInput;
+  readonly pendingRubricDraft: RubricContractDraftSnapshot;
+}
+
+/** 推进应用接受提议：建会话，状态 proposed。 */
+export interface AdvancementProposalAcceptedEvent {
+  readonly type: "proposal_accepted";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly conversationId: string;
+  readonly proposalId: string;
+  readonly runId: string;
+  readonly originalTurnId: string;
+  readonly originalUserTask: UserTurnInput;
+}
+
+/** 提议未被接受（会话里已有未结束的推进）：直接记为已终结的会话，不打开任何推进。 */
+export interface AdvancementProposalRejectedEvent {
+  readonly type: "proposal_rejected";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly conversationId: string;
+  readonly proposalId: string;
+  readonly runId: string;
+  readonly originalTurnId: string;
+  readonly originalUserTask: UserTurnInput;
+  readonly exit: AdvancementExit;
+}
+
+/** 草案阶段用户补充约束：记为修订请求，原任务与关联不变。 */
+export interface AdvancementProposalSupplementedEvent {
+  readonly type: "proposal_supplemented";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly supplement: UserTurnInput;
+}
+
+export interface AdvancementDraftAttemptTransitionedEvent {
+  readonly type: "draft_attempt_transitioned";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly attempt: AdvancementDraftAttempt;
+}
+
+/** 草案就绪并已并入截至 revision 的补充，会话进入待确认。 */
+export interface AdvancementProposalDraftedEvent {
+  readonly type: "proposal_drafted";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly revision: number;
   readonly pendingRubricDraft: RubricContractDraftSnapshot;
 }
 

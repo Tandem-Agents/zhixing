@@ -43,6 +43,8 @@ import type {
   AdvancementRunReview,
   AdvancementSession,
 } from "../types.js";
+import { advancementProposalExecution } from "../proposal-identity.js";
+import { userTurnInputFromText } from "../../types/user-input.js";
 
 describe("AdvancementApplicationService detail query", () => {
   it("returns null when the owner has no Advancement session", async () => {
@@ -384,7 +386,7 @@ describe("AdvancementApplicationService detail query", () => {
           order.push("execute");
           expect(input).toMatchObject({
             conversationId: "conv-1",
-            admissionIntent: { turnId: "turn-1" },
+            admissionIntent: { turnId: "turn-1:direct" },
             originalUserTask: source.originalUserTask,
             surface: expect.any(Object),
           });
@@ -422,7 +424,7 @@ describe("AdvancementApplicationService detail query", () => {
       kind: "direct-original-task",
       conversationId: "conv-1",
       advancementSessionId: "adv-1",
-      turnId: "turn-1",
+      turnId: "turn-1:direct",
       runId: "run-1",
       runStatus: "immediate",
     });
@@ -444,7 +446,7 @@ describe("AdvancementApplicationService detail query", () => {
     await expect(fixture.application.cancelRubric({
       conversationId: "conv-1", advancementSessionId: "adv-1", executeOriginal: true,
       fact: { publish }, surface: testSurface(),
-    })).rejects.toThrow("Direct original task requires its pending draft");
+    })).rejects.toThrow("Original task execution requires its pending draft");
     expect(publish).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
 
@@ -570,13 +572,13 @@ describe("AdvancementApplicationService detail query", () => {
         admit: async (input) => {
           order.push("admit");
           expect(input.admissionIntent).toMatchObject({
-            turnId: "turn-1",
+            turnId: "turn-1:advancement:draft-1",
             surfacePrincipal: "surface-test",
             turnOrigin: { channel: "rpc", triggeredBy: "surface-test" },
           });
           return {
             conversationId: "conv-1",
-            turnId: "turn-1",
+            turnId: "turn-1:advancement:draft-1",
             runId: "run-confirmed",
             status: "queued",
           };
@@ -629,7 +631,7 @@ describe("AdvancementApplicationService detail query", () => {
     expect(confirmed.result).toEqual({
       conversationId: "conv-1",
       advancementSessionId: "adv-1",
-      turnId: "turn-1",
+      turnId: "turn-1:advancement:draft-1",
       runId: "run-confirmed",
       runStatus: "queued",
       rubricPublicationMessage: "准则已保存到准则库。",
@@ -696,7 +698,7 @@ describe("AdvancementApplicationService detail query", () => {
       confirmedOriginalTask: {
         admit: async () => ({
           conversationId: "conv-1",
-          turnId: "turn-1",
+          turnId: "turn-1:advancement:draft-1",
           runId: "run-recover-settlement",
           status: "queued",
         }),
@@ -712,7 +714,7 @@ describe("AdvancementApplicationService detail query", () => {
       result: {
         conversationId: "conv-1",
         advancementSessionId: "adv-1",
-        turnId: "turn-1",
+        turnId: "turn-1:advancement:draft-1",
         runId: "run-recover-settlement",
         runStatus: "queued",
       },
@@ -720,7 +722,7 @@ describe("AdvancementApplicationService detail query", () => {
     });
     expect(committed.originalTaskAdmission).toMatchObject({
       status: "pending",
-      intent: { turnId: "turn-1" },
+      intent: { turnId: "turn-1:advancement:draft-1" },
     });
   });
 
@@ -976,11 +978,11 @@ describe("AdvancementApplicationService detail query", () => {
       order.push("execute");
       expect(input).toMatchObject({
         conversationId: "conv-1",
-        admissionIntent: expect.objectContaining({ turnId: "turn-1" }),
+        admissionIntent: expect.objectContaining({ turnId: "turn-1:direct" }),
       });
       return {
         conversationId: "conv-1",
-        turnId: "turn-1",
+        turnId: "turn-1:direct",
         runId: "run-1",
         status: "immediate" as const,
       };
@@ -1024,7 +1026,7 @@ describe("AdvancementApplicationService detail query", () => {
       kind: "direct-original-task",
       conversationId: "conv-1",
       advancementSessionId: "adv-1",
-      turnId: "turn-1",
+      turnId: "turn-1:direct",
       runId: "run-1",
       runStatus: "immediate",
     });
@@ -1105,346 +1107,99 @@ describe("AdvancementApplicationService detail query", () => {
     expect(publish).toHaveBeenCalledOnce();
   });
 
-  it("owns new-conversation admission, shell-before-session and committed draft Fact", async () => {
-    const order: string[] = [];
-    const draft = pendingRubric("新任务标准");
-    const application = createApplication({
-      maintenance: {
-        runNew: async (_conversationId, operation) => {
-          order.push("maintenance");
-          return { status: "done", value: await operation() };
-        },
-        runExisting: async (_conversationId, operation) => ({
-          status: "done",
-          value: await operation(),
-        }),
-      },
-      newTaskConversation: {
-        ensureShell: async () => {
-          order.push("shell");
-        },
-        // 普通新建会话没有创建用途标记：记意图返回 false，不显现
-        beginRevealShell: async () => {
-          order.push("intent");
-          return false;
-        },
-        revealShell: async () => {
-          order.push("reveal");
-        },
-        abandonRevealShell: async () => {
-          order.push("abandon");
-        },
-      },
-      newTask: {
-        loadOpenNewTaskSession: async () => {
-          order.push("open");
-          return null;
-        },
-        decideNewTaskAdmission: async () => {
-          order.push("admission");
-          return {
-            kind: "advancement-task",
-            action: "start-advancement",
-            reason: "needs rubric",
-          };
-        },
-        buildNewTaskRubricDraft: async () => {
-          order.push("draft");
-          return draft;
-        },
-        persistNewTaskAwaitingSession: async ({
-          conversationId,
-          originalUserTask,
-        }) => {
-          order.push("session");
-          return session({
-            id: "adv_draft-1",
-            conversationId,
-            status: "awaiting-rubric-confirmation",
-            originalUserTask,
-            pendingRubricDraft: draft,
-            confirmedRubric: undefined,
-          });
-        },
-      },
-    });
-
-    const prepared = await application.prepareNewTask({
-      conversationId: "conv-new",
-      conversationScope: "new",
-      turnId: "turn-1",
-      userInput: { parts: [{ type: "text", text: "把任务做完" }] },
-    });
-
-    expect(order).toEqual([
-      "maintenance",
-      "open",
-      "admission",
-      "draft",
-      "shell",
-      "intent",
-      "session",
-    ]);
-    expect(prepared.result).toMatchObject({
-      kind: "awaiting-rubric-confirmation",
-      advancementSessionId: "adv_draft-1",
-      conversationId: "conv-new",
-    });
-    expect(prepared.fact).toMatchObject({
-      kind: "advancement-contract-draft-created",
-      conversationId: "conv-new",
-      originalTurnId: "turn-1",
-      advancementSessionId: "adv_draft-1",
-      rubricDraftId: "draft-1",
-    });
-  });
-
-  it("keeps direct, busy, not-found and draft failure free of shell, session and Fact", async () => {
-    const ensureShell = vi.fn(async () => undefined), revealShell = vi.fn(async () => undefined);
-    const beginRevealShell = vi.fn(async () => false), abandonRevealShell = vi.fn(async () => undefined);
-    const persist = vi.fn();
-    const runDirect = createApplication({
-      newTaskConversation: { ensureShell, revealShell, beginRevealShell, abandonRevealShell },
-      newTask: {
-        loadOpenNewTaskSession: async () => null,
-        decideNewTaskAdmission: async () => ({
-          kind: "direct-task",
-          action: "run-direct",
-          reason: "direct",
-        }),
-        buildNewTaskRubricDraft: vi.fn(),
-        persistNewTaskAwaitingSession: persist,
-      },
-    });
-    await expect(
-      runDirect.prepareNewTask({
-        conversationId: "conv-1",
-        conversationScope: "existing",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "直接回答" }] },
-      }),
-    ).resolves.toEqual({
-      result: {
-        kind: "run-direct",
-        admission: {
-          kind: "direct-task",
-          action: "run-direct",
-          reason: "direct",
-        },
-      },
-    });
-
+  it("新任务只判作用域：先接受待接受提议，无未终结会话为 new-task，有则 not-applicable，不调模型准入", async () => {
+    const acceptPending = vi.fn(async () => null);
+    const fresh = createApplication({ proposals: { acceptPending, advance: async () => null } });
+    await expect(fresh.prepareNewTask({ conversationId: "conv-1", conversationScope: "existing", turnId: "turn-1", userInput: userTurnInputFromText("整理会议记录") }))
+      .resolves.toMatchObject({ result: { kind: "new-task" } });
+    expect(acceptPending).toHaveBeenCalledWith("conv-1");
+    const proposed = session({ status: "proposed", confirmedRubric: undefined, proposal: { proposalId: "p", runId: "run-1", originalTurnId: "turn-1", supplements: [] } });
+    const open = createApplication({ proposals: { acceptPending: async () => proposed, advance: async () => proposed } });
+    await expect(open.prepareNewTask({ conversationId: "conv-1", conversationScope: "existing", turnId: "turn-2", userInput: userTurnInputFromText("进度如何") }))
+      .resolves.toMatchObject({ result: { kind: "not-applicable" } });
+    const terminal = session({ status: "cancelled", confirmedRubric: undefined });
+    const closed = createApplication({ proposals: { acceptPending: async () => terminal, advance: async () => terminal } });
+    await expect(closed.prepareNewTask({ conversationId: "conv-1", conversationScope: "existing", turnId: "turn-3", userInput: userTurnInputFromText("新的事") }))
+      .resolves.toMatchObject({ result: { kind: "new-task" } });
     const busy = createApplication({
-      maintenance: {
-        runNew: async () => ({ status: "busy" }),
-        runExisting: async () => ({ status: "busy" }),
-      },
+      maintenance: { runNew: async () => ({ status: "busy" }), runExisting: async () => ({ status: "busy" }) },
     });
-    await expect(
-      busy.prepareNewTask({
-        conversationId: "conv-new",
-        conversationScope: "new",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "直接回答" }] },
-      }),
-    ).resolves.toEqual({ result: { kind: "owner-busy" } });
-
-    const notFound = createApplication({
-      maintenance: {
-        runNew: async () => ({ status: "busy" }),
-        runExisting: async () => ({ status: "not-found" }),
-      },
-    });
-    await expect(
-      notFound.prepareNewTask({
-        conversationId: "conv-missing",
-        conversationScope: "existing",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "直接回答" }] },
-      }),
-    ).rejects.toMatchObject({ code: "conversation-not-found" });
-
-    const failed = createApplication({
-      newTaskConversation: { ensureShell, revealShell, beginRevealShell, abandonRevealShell },
-      newTask: {
-        loadOpenNewTaskSession: async () => null,
-        decideNewTaskAdmission: async () => ({
-          kind: "advancement-task",
-          action: "start-advancement",
-          reason: "needs rubric",
-        }),
-        buildNewTaskRubricDraft: async () => {
-          throw new Error("draft unavailable");
-        },
-        persistNewTaskAwaitingSession: persist,
-      },
-    });
-    await expect(
-      failed.prepareNewTask({
-        conversationId: "conv-new",
-        conversationScope: "new",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "推进任务" }] },
-      }),
-    ).resolves.toEqual({
-      result: {
-        kind: "contract-failed",
-        conversationId: "conv-new",
-        originalTurnId: "turn-1",
-        error: { message: "draft unavailable" },
-      },
-    });
-    expect(ensureShell).not.toHaveBeenCalled();
-    expect(revealShell).not.toHaveBeenCalled();
-    expect(beginRevealShell).not.toHaveBeenCalled();
-    expect(persist).not.toHaveBeenCalled();
+    await expect(busy.prepareNewTask({ conversationId: "conv-1", conversationScope: "existing", turnId: "turn-4", userInput: userTurnInputFromText("x") }))
+      .resolves.toMatchObject({ result: { kind: "owner-busy" } });
   });
 
-  it("creates a receipt-only shell for a failed draft and reveals it only after a later draft is persisted", async () => {
-    const calls: unknown[][] = [];
-    let persistFails = false;
-    const conversation = {
-      ensureShell: async (...args: unknown[]) => { calls.push(["shell", ...args]); },
-      beginRevealShell: async (...args: unknown[]) => { calls.push(["intent", ...args]); return true; },
-      revealShell: async (...args: unknown[]) => { calls.push(["reveal", ...args]); },
-      abandonRevealShell: async (...args: unknown[]) => { calls.push(["abandon", ...args]); },
-    };
-    const submission = { surfacePrincipal: "surface", submissionId: "input-1", requestDigest: `sha256:${"a".repeat(64)}` as const };
-    let attempt = 0;
-    const draft = pendingRubric("重试后的标准");
-    const application = createApplication({
-      newTaskConversation: conversation,
-      submissions: { readSubmission: async () => null, settleSubmission: async (...args: unknown[]) => { calls.push(["receipt", (args[2] as { kind: string }).kind]); }, loadExactSession: async () => null },
-      newTask: {
-        loadOpenNewTaskSession: async () => null,
-        decideNewTaskAdmission: async () => ({ kind: "advancement-task", action: "start-advancement", reason: "needs rubric" }),
-        buildNewTaskRubricDraft: async () => { if (attempt++ === 0) throw new Error("draft unavailable"); return draft; },
-        persistNewTaskAwaitingSession: async ({ conversationId, originalUserTask }) => {
-          if (persistFails) throw new Error("draft session write failed");
-          calls.push(["session"]);
-          return session({ id: "adv_draft-1", conversationId, status: "awaiting-rubric-confirmation", originalUserTask, pendingRubricDraft: draft, confirmedRubric: undefined });
-        },
-      },
+  it("提议阶段的继续保持目标并结算 proposal-kept；补充写入修订并推进新一代", async () => {
+    const proposal = { proposalId: "proposal-1", runId: "run-1", originalTurnId: "turn-1", supplements: [] };
+    const settleSubmission = vi.fn(async () => undefined);
+    const submission = { surfacePrincipal: "surface:test", submissionId: "s-1", requestDigest: `sha256:${"0".repeat(64)}` };
+    const kept = createRevisionFixture(session({ status: "drafting", confirmedRubric: undefined, proposal }), {
+      submissions: { readSubmission: async () => null, settleSubmission, loadExactSession: async () => null },
     });
-    const input = { parts: [{ type: "text" as const, text: "推进任务" }] };
-    const intent = { kind: "advancement", draftId: draft.draftId };
-    // 首次失败：只为保存失败回执而建身份，标明创建用途，不显现
-    await application.prepareNewTask({ conversationId: "conv-new", conversationScope: "new", turnId: "turn-1", userInput: input, submission });
-    expect(calls).toEqual([["shell", "conv-new", { createdFor: "submission-receipt" }], ["receipt", "contract-failed"]]);
-    // 新的提交草案生成成功但落盘抛出：结果未知（可能已写成），意图保留、仍不显现，由宿主按草案复核
-    calls.length = 0; persistFails = true;
-    await expect(application.prepareNewTask({ conversationId: "conv-new", conversationScope: "existing", turnId: "turn-2", userInput: input,
-      submission: { ...submission, submissionId: "input-2" } })).rejects.toThrow("draft session write failed");
-    expect(calls).toEqual([["intent", "conv-new", intent]]);
-    // 再次提交成功（会话已存在，按 existing 发来）：待确认草案耐久落盘之后才显现
-    calls.length = 0; persistFails = false;
-    await application.prepareNewTask({ conversationId: "conv-new", conversationScope: "existing", turnId: "turn-3", userInput: input,
-      submission: { ...submission, submissionId: "input-3" } });
-    expect(calls).toEqual([["intent", "conv-new", intent], ["session"], ["reveal", "conv-new"]]);
+    await expect(kept.application.controlAwaitingRubric({
+      conversationId: "conv-1", userInput: userTurnInputFromText("进度如何"), fact: { publish: vi.fn() }, surface: testSurface(), submission,
+    })).resolves.toMatchObject({ result: { kind: "keep-proposal", status: "drafting" } });
+    expect(settleSubmission).toHaveBeenCalledWith("conv-1", submission, { kind: "proposal-kept", sessionId: "adv-1", originalTurnId: "turn-1" });
+
+    const advance = vi.fn(async () => null);
+    const supplemented = createRevisionFixture(session({ status: "draft-failed", confirmedRubric: undefined, proposal }), {
+      decideProposalStageAdmission: async () => ({ action: "supplement" }),
+    });
+    const options = { ...supplemented.options, proposals: { ...supplemented.options.proposals, advance } };
+    await expect(new AdvancementApplicationService(options).controlAwaitingRubric({
+      conversationId: "conv-1", userInput: userTurnInputFromText("只看本周"), fact: { publish: vi.fn() }, surface: testSurface(),
+    })).resolves.toMatchObject({ result: { kind: "proposal-supplemented", revision: 1 } });
+    await vi.waitFor(() => expect(advance).toHaveBeenCalledWith("conv-1"));
   });
 
-  it("fails closed for an open session and for a mismatched committed draft", async () => {
-    const open = createApplication({
-      newTask: {
-        loadOpenNewTaskSession: async () => session(),
-        decideNewTaskAdmission: vi.fn(),
-        buildNewTaskRubricDraft: vi.fn(),
-        persistNewTaskAwaitingSession: vi.fn(),
-      },
+  it("提议阶段降级以派生身份执行推进控制消息一次；取消与换目标走各自出口，换目标不结算这条输入", async () => {
+    const proposal = { proposalId: "proposal-1", runId: "run-1", originalTurnId: "turn-1", supplements: [] };
+    const admit = vi.fn(async (input: Parameters<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>[0]) => ({
+      conversationId: input.conversationId, turnId: input.admissionIntent.turnId, runId: "run-direct", status: "immediate" as const,
+    }));
+    const direct = createRevisionFixture(session({ status: "proposed", confirmedRubric: undefined, proposal }), {
+      decideProposalStageAdmission: async () => ({ action: "downgrade-to-direct" }),
+      confirmedOriginalTask: { admit },
     });
-    await expect(
-      open.prepareNewTask({
-        conversationId: "conv-1",
-        conversationScope: "existing",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "推进任务" }] },
-      }),
-    ).resolves.toEqual({ result: { kind: "not-applicable" } });
+    const publish = vi.fn();
+    await expect(direct.application.controlAwaitingRubric({
+      conversationId: "conv-1", userInput: userTurnInputFromText("不用推进了，直接做"), fact: { publish }, surface: testSurface(),
+    })).resolves.toMatchObject({ result: { kind: "direct-original-task", runId: "run-direct" } });
+    const execution = advancementProposalExecution({ originalTurnId: "turn-1", mode: "direct" });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(admit.mock.calls[0]![0]).toMatchObject({ originalUserTask: execution.input, admissionIntent: { turnId: execution.turnId } });
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ executeOriginal: true, originalTurnId: "turn-1" }));
 
-    const draft = pendingRubric("新任务标准");
-    const mismatched = createApplication({
-      newTask: {
-        loadOpenNewTaskSession: async () => null,
-        decideNewTaskAdmission: async () => ({
-          kind: "advancement-task",
-          action: "start-advancement",
-          reason: "needs rubric",
-        }),
-        buildNewTaskRubricDraft: async () => draft,
-        persistNewTaskAwaitingSession: async () =>
-          session({
-            id: "adv_other",
-            status: "awaiting-rubric-confirmation",
-            pendingRubricDraft: draft,
-            confirmedRubric: undefined,
-          }),
-      },
-    });
-    await expect(
-      mismatched.prepareNewTask({
-        conversationId: "conv-1",
-        conversationScope: "existing",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "推进任务" }] },
-      }),
-    ).rejects.toMatchObject({ code: "committed-rubric-draft-missing" });
+    for (const [action, kind, reason] of [["cancel-pending-task", "cancelled", "user-cancelled"], ["replace-task", "replaced", "superseded"]] as const) {
+      const settleSubmission = vi.fn(async () => undefined);
+      const fixture = createRevisionFixture(session({ status: "drafting", confirmedRubric: undefined, proposal }), {
+        decideProposalStageAdmission: async () => ({ action }),
+        submissions: { readSubmission: async () => null, settleSubmission, loadExactSession: async () => null },
+      });
+      const published = vi.fn();
+      const result = await fixture.application.controlAwaitingRubric({
+        conversationId: "conv-1", userInput: userTurnInputFromText("换个事"), fact: { publish: published }, surface: testSurface(),
+        submission: { surfacePrincipal: "surface:test", submissionId: "s-1", requestDigest: `sha256:${"0".repeat(64)}` },
+      });
+      expect(result.result.kind).toBe(kind);
+      expect(published).toHaveBeenCalledWith(expect.objectContaining({ executeOriginal: false }));
+      expect((await fixture.options.detail.loadLatestSession("conv-1"))?.exit?.reason ?? reason).toBe(reason);
+    }
   });
 
-  it("does not persist after shell failure and does not emit a Fact after persistence failure", async () => {
-    const draft = pendingRubric("新任务标准");
-    const persistAfterShell = vi.fn();
-    const shellFailure = createApplication({
-      newTaskConversation: {
-        ensureShell: async () => {
-          throw new Error("shell failed");
-        },
-        beginRevealShell: async () => false,
-        revealShell: async () => undefined,
-        abandonRevealShell: async () => undefined,
-      },
-      newTask: {
-        loadOpenNewTaskSession: async () => null,
-        decideNewTaskAdmission: async () => ({
-          kind: "advancement-task",
-          action: "start-advancement",
-          reason: "needs rubric",
-        }),
-        buildNewTaskRubricDraft: async () => draft,
-        persistNewTaskAwaitingSession: persistAfterShell,
-      },
-    });
-    await expect(
-      shellFailure.prepareNewTask({
-        conversationId: "conv-new",
-        conversationScope: "new",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "推进任务" }] },
-      }),
-    ).rejects.toThrow("shell failed");
-    expect(persistAfterShell).not.toHaveBeenCalled();
-
-    const persistenceFailure = createApplication({
-      newTask: {
-        loadOpenNewTaskSession: async () => null,
-        decideNewTaskAdmission: async () => ({
-          kind: "advancement-task",
-          action: "start-advancement",
-          reason: "needs rubric",
-        }),
-        buildNewTaskRubricDraft: async () => draft,
-        persistNewTaskAwaitingSession: async () => {
-          throw new Error("session write failed");
-        },
-      },
-    });
-    await expect(
-      persistenceFailure.prepareNewTask({
-        conversationId: "conv-1",
-        conversationScope: "existing",
-        turnId: "turn-1",
-        userInput: { parts: [{ type: "text", text: "推进任务" }] },
-      }),
-    ).rejects.toThrow("session write failed");
+  it("提议会话确认：执行身份与输入由提议与被确认的草案派生，不以原文作为新用户消息", async () => {
+    const draft = pendingRubric("提议草案");
+    const admit = vi.fn(async (input: Parameters<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>[0]) => ({
+      conversationId: input.conversationId, turnId: input.admissionIntent.turnId, runId: "run-exec", status: "immediate" as const,
+    }));
+    const fixture = createRevisionFixture(session({
+      status: "awaiting-rubric-confirmation",
+      confirmedRubric: undefined,
+      pendingRubricDraft: draft,
+      proposal: { proposalId: "proposal-1", runId: "run-1", originalTurnId: "turn-1", supplements: [] },
+    }), { confirmedOriginalTask: { admit } });
+    await fixture.application.confirmRubric(confirmationCommand({ expectedRubricDraftId: draft.draftId }));
+    const execution = advancementProposalExecution({ originalTurnId: "turn-1", mode: "advancement", draftId: draft.draftId });
+    expect(admit.mock.calls[0]![0]).toMatchObject({ originalUserTask: execution.input, admissionIntent: { turnId: execution.turnId } });
   });
 
   it("owns active continuation ordering and settles only a genuinely interrupted outstanding proxy", async () => {
@@ -1716,7 +1471,7 @@ describe("AdvancementApplicationService detail query", () => {
         userInput: { parts: [{ type: "text", text: "直接回答" }] },
       }),
     ).resolves.toMatchObject({
-      result: { kind: "run-direct" },
+      result: { kind: "new-task" },
       facts: [],
     });
     await expect(
@@ -1916,6 +1671,31 @@ describe("AdvancementConversationLifecycleApplicationService", () => {
 });
 
 describe("Advancement accepted-turn application", () => {
+  it("带推进提议的运行提交后交给提议应用推进，不进入验收；推进失败也不阻塞后续运行", async () => {
+    const order: string[] = [];
+    let fail = true;
+    const application = new AdvancementAcceptedTurnApplicationService({
+      catchUp: { catchUpAcceptedTurn: async () => { order.push("catch-up"); return { status: "no-pending-recovery" }; } },
+      review: { reviewAcceptedRun: async () => { order.push("review"); return acceptedTurnReviewResult("reviewed"); } },
+      results: { projectReviewResult: async () => { order.push("project"); } },
+      proposals: {
+        advance: async (conversationId) => {
+          order.push(`advance:${conversationId}`);
+          if (fail) { fail = false; throw new Error("transient"); }
+          return null;
+        },
+      },
+    });
+    const proposalRun = committedTurn({
+      runRecord: { timestamp: "2026-01-01T00:00:00.000Z", messages: [], postTurnControl: { intent: { kind: "propose_advancement" } } },
+    });
+    application.acceptCommittedTurn(proposalRun);
+    application.acceptCommittedTurn(proposalRun);
+    application.acceptCommittedTurn(committedTurn({ runIndex: 1 }));
+    await flushAcceptedTurns();
+    expect(order).toEqual(["advance:conv-1", "advance:conv-1", "catch-up", "review", "project"]);
+  });
+
   it("admits only durable turns and orders catch-up, review, and result projection", async () => {
     const order: string[] = [];
     const events: string[] = [];
@@ -2240,14 +2020,18 @@ function createApplication(
       confirmedRubric: undefined,
     }),
   );
+  const detail = overrides.detail ?? fixture.options.detail;
   return new AdvancementApplicationService({
     submissions: overrides.submissions ?? fixture.options.submissions,
     activeState: overrides.activeState ?? fixture.options.activeState,
-    detail: overrides.detail ?? fixture.options.detail,
+    detail,
     maintenance: overrides.maintenance ?? fixture.options.maintenance,
-    newTask: overrides.newTask ?? fixture.options.newTask,
-    newTaskConversation:
-      overrides.newTaskConversation ?? fixture.options.newTaskConversation,
+    // 默认没有待接受提议：接受后的头会话就是 detail 端口读到的会话
+    proposals: overrides.proposals ?? {
+      acceptPending: (conversationId) => detail.loadLatestSession(conversationId),
+      advance: (conversationId) => detail.loadLatestSession(conversationId),
+    },
+    proposalStage: overrides.proposalStage ?? fixture.options.proposalStage,
     activeUserTurn:
       overrides.activeUserTurn ?? fixture.options.activeUserTurn,
     activeUserTurnRuntime:
@@ -2432,8 +2216,8 @@ type RevisionFixtureOverrides =
   Readonly<{
     submissions?: AdvancementApplicationOptions["submissions"];
     maintenance?: AdvancementConversationMaintenancePort;
-    newTask?: AdvancementApplicationOptions["newTask"];
-    newTaskConversation?: AdvancementApplicationOptions["newTaskConversation"];
+    proposals?: AdvancementApplicationOptions["proposals"];
+    proposalStage?: AdvancementApplicationOptions["proposalStage"];
     activeUserTurn?: AdvancementApplicationOptions["activeUserTurn"];
     activeUserTurnRuntime?: AdvancementApplicationOptions["activeUserTurnRuntime"];
     confirmedOriginalTask?: AdvancementConfirmedOriginalTaskAdmissionPort;
@@ -2509,6 +2293,8 @@ function createRevisionFixture(
         action: "keep-awaiting-confirmation",
         reason: "test",
       })),
+    decideProposalStageAdmission:
+      overrides.decideProposalStageAdmission ?? (async () => ({ action: "keep" })),
   };
   const rubricConfirmation: AdvancementRubricConfirmationMechanismPort = {
     persistOriginalTaskAdmissionRejection: overrides.persistOriginalTaskAdmissionRejection ?? (async ({ reason }) => {
@@ -2584,35 +2370,15 @@ function createRevisionFixture(
     },
     detail: port(current),
     maintenance,
-    newTask: overrides.newTask ?? {
-      loadOpenNewTaskSession: async () => null,
-      decideNewTaskAdmission: async () => ({
-        kind: "direct-task",
-        action: "run-direct",
-        reason: "test",
-      }),
-      buildNewTaskRubricDraft: async () => pendingRubric("新任务标准"),
-      persistNewTaskAwaitingSession: async ({
-        conversationId,
-        originalUserTask,
-        draft,
-      }) => {
-        current = session({
-          id: `adv_${draft.draftId}`,
-          conversationId,
-          status: "awaiting-rubric-confirmation",
-          originalUserTask,
-          pendingRubricDraft: draft,
-          confirmedRubric: undefined,
-        });
+    proposals: overrides.proposals ?? {
+      acceptPending: async (conversationId) => (current.conversationId === conversationId ? current : null),
+      advance: async (conversationId) => (current.conversationId === conversationId ? current : null),
+    },
+    proposalStage: overrides.proposalStage ?? {
+      supplementProposal: async ({ supplement }) => {
+        current = { ...current, proposal: { ...current.proposal!, supplements: [...current.proposal!.supplements, supplement] } };
         return current;
       },
-    },
-    newTaskConversation: overrides.newTaskConversation ?? {
-      ensureShell: async () => undefined,
-      beginRevealShell: async () => false,
-      revealShell: async () => undefined,
-      abandonRevealShell: async () => undefined,
     },
     activeUserTurn: overrides.activeUserTurn ?? {
       loadActiveUserTurnSession: async () => current,

@@ -38,6 +38,89 @@ import { ConversationKernelExecution } from "../conversation-kernel-execution.js
 import { TEST_DURABLE_IO_TIMEOUT_MS, TEST_ANCHOR_LOSSLESS_DATA_PLANE, TEST_LOCAL_EXECUTOR, TEST_RUNTIME_AUTHORITY_FACTS, setupAuthorityRuntime, createProtocol, registerActiveConversation, getOrCreateActiveConversation, expectSettled, MemorySecretStore } from "./conversation-protocol-runtime-fixture.js";
 
 describe("ConversationProtocolRuntime", () => {
+  // 推进执行运行的耐久身份与指派材料：真实协议运行时，执行体是替身（只记录收到的上下文、是否被调用）
+  const EXECUTION_TURN = "turn-1:advancement:draft-1";
+  const EXECUTION_INPUT = "用户已确认 Rubric，开始执行上面提出的原任务。";
+  const marker = { sessionId: "advancement-proposal-1", mode: "advancement" as const, draftId: "draft-1" };
+  const durableOrigin = { channel: "rpc", triggeredBy: "rpc:owner", advancementExecution: marker, enabledControls: ["propose_advancement"] };
+  async function executionHarness(name: string, material: "ready" | "unavailable") {
+    const home = await createTempDir(name);
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const seen: Array<import("@zhixing/core/types").TurnContext | undefined> = [];
+    const execution: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: name,
+      async *run(messages, options) {
+        seen.push(options?.turnContext);
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage }, newMessages: [assistant], durationMs: 1 };
+      },
+      abort: () => false, async dispose() {} };
+    let manager!: ConversationManager;
+    const failures: string[] = [];
+    const prepare = vi.fn(async ({ turnId, binding }: { turnId: string; binding: typeof marker }) => material === "ready"
+      ? { status: "ready" as const, turnId, binding, context: [{ text: "推进中的原任务：MATERIAL_A" }] }
+      : { status: "unavailable" as const, turnId, binding, reason: "推进会话 advancement-proposal-1 不存在" });
+    const protocol = createProtocol({ authority, manager: () => manager, onFailure: (error: unknown) => { failures.push(String(error)); },
+      interactions: new DurableConversationInteractionObserver(), advancementExecution: { prepare },
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => execution } } });
+    manager = new ConversationManager({ create: async () => execution }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const managed = await getOrCreateActiveConversation(authority, manager, name);
+    return { protocol, manager, managed, seen, failures, prepare,
+      // 与推进原任务接纳端口同形：耐久 turnId 为派生执行身份，turnOrigin 为宿主冻结的来源
+      admit: (turnOrigin: object = durableOrigin) => protocol.admit({ conversationId: name, input: EXECUTION_INPUT,
+        invocation: { kind: "agent", source: "interactive" }, surfacePrincipal: "rpc:owner",
+        options: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: EXECUTION_TURN, turnOrigin: turnOrigin as never } } }),
+      close: async () => { await protocol.stopRecoveryLoop(); await manager.disposeAll(); } };
+  }
+
+  it("deferred execution receives the durable origin and the adjudicated material", async () => {
+    const h = await executionHarness("admitted-turn-origin", "ready");
+    try {
+      const admission = await h.manager.admitDurableTurn({ conversationId: "admitted-turn-origin", input: userTurnInputFromText(EXECUTION_INPUT),
+        invocation: { kind: "agent", source: "interactive" }, surfacePrincipal: "rpc:owner",
+        options: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: EXECUTION_TURN, turnOrigin: durableOrigin as never } } });
+      if (admission.shouldEnqueue) admission.onDeferred?.();
+      await vi.waitFor(async () => {
+        await h.protocol.recoverConversation("admitted-turn-origin");
+        expect({ seen: h.seen.length, failures: h.failures }).toEqual({ seen: 1, failures: [] });
+      }, { timeout: 20000, interval: 100 });
+      expect(h.prepare).toHaveBeenCalledWith({ conversationId: "admitted-turn-origin", turnId: EXECUTION_TURN, binding: marker });
+      expect(h.seen[0]).toMatchObject({ turnId: EXECUTION_TURN, turnOrigin: durableOrigin, requiredUserContext: [{ text: "推进中的原任务：MATERIAL_A" }] });
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("unavailable material fails the run before the runtime starts", async () => {
+    const h = await executionHarness("admitted-material-unavailable", "unavailable");
+    try {
+      await h.admit();
+      const running = projectSessionTurn({ manager: h.manager, managed: h.managed, text: EXECUTION_INPUT, turnId: EXECUTION_TURN, notify: () => {},
+        runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: EXECUTION_TURN, turnOrigin: durableOrigin as never } } });
+      const outcome = await running;
+      expect(outcome.kind).toBe("error");
+      expect(h.seen).toEqual([]);
+      expect(h.failures.join("\n")).toMatch(/推进执行运行缺少必需的原任务材料：推进会话 advancement-proposal-1 不存在/u);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each([
+    ["改掉并丢失执行标记、抬高界面能力", durableOrigin, { channel: "rpc", triggeredBy: "1", surface: { capabilities: { postTurnControl: true } } }, durableOrigin],
+    ["恢复削减界面能力仍然生效", { ...durableOrigin, surface: { capabilities: { postTurnControl: true } } },
+      { ...durableOrigin, surface: { capabilities: { postTurnControl: false } } }, { ...durableOrigin, surface: { capabilities: { postTurnControl: false } } }],
+  ])("replay of the same ingress: %s", async (_label, admitted, caller, expected) => {
+    const h = await executionHarness(`admitted-replay-${expected === durableOrigin ? "identity" : "reduction"}`, "ready");
+    try {
+      await h.admit(admitted);
+      const outcome = await projectSessionTurn({ manager: h.manager, managed: h.managed, text: EXECUTION_INPUT, turnId: EXECUTION_TURN, notify: () => {},
+        runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: EXECUTION_TURN, turnOrigin: caller as never } } });
+      expectSettled(outcome);
+      expect(h.seen).toHaveLength(1);
+      expect(h.seen[0]!.turnOrigin).toEqual(expected);
+      expect(h.seen[0]!.requiredUserContext).toEqual([{ text: "推进中的原任务：MATERIAL_A" }]);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("isolates a permanently failed received cancellation from another conversation's recovery", async () => {
     const home = await createTempDir("received-cancel-isolation");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });

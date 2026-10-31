@@ -4,6 +4,7 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { advancementLogPath } from "../paths.js";
 import { AdvancementStore } from "../store.js";
+import { advancementExecutionTurnId } from "../proposal-identity.js";
 import type {
   AdvancementExit,
   AdvancementRunReview,
@@ -85,9 +86,10 @@ function createInput(
   };
 }
 
-function originalTaskAdmissionIntent() {
+/** 原任务执行意向：执行身份由原始输入 turn-1 派生，确认执行绑定草案 draft-1，降级执行只看原始输入。 */
+function originalTaskAdmissionIntent(mode: "advancement" | "direct" = "advancement") {
   return {
-    turnId: "turn-1",
+    turnId: advancementExecutionTurnId("turn-1", mode, mode === "advancement" ? "draft-1" : undefined),
     surfacePrincipal: "surface:test",
     turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
     inputDigest: protocolDigest(
@@ -194,7 +196,7 @@ describe("AdvancementStore", () => {
   it("direct intent survives a new head and reload, while pure cancellation creates no obligation", async () => {
     const { root, store } = await makeStore();
     await store.createSession(createInput());
-    const intent = originalTaskAdmissionIntent();
+    const intent = originalTaskAdmissionIntent("direct");
     const exit: AdvancementExit = { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" };
     await expect(store.directOriginalTask("conv-1", "session-1", { ...intent, turnId: "wrong-turn" }, exit)).rejects.toThrow("does not bind");
     const directed = await store.directOriginalTask("conv-1", "session-1", intent, exit);
@@ -212,7 +214,7 @@ describe("AdvancementStore", () => {
   it("permanent direct rejection is durable and no longer recoverable", async () => {
     const { root, store } = await makeStore();
     await store.createSession(createInput());
-    const intent = originalTaskAdmissionIntent();
+    const intent = originalTaskAdmissionIntent("direct");
     await store.directOriginalTask("conv-1", "session-1", intent, { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" });
     await store.rejectOriginalTaskAdmission("conv-1", "session-1", { turnId: intent.turnId, inputDigest: intent.inputDigest, reason: "idempotency-conflict" });
     const recovered = new AdvancementStore(root);

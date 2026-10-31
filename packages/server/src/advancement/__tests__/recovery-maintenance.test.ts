@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  advancementExecutionTurnId,
   advancementLogPath,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
@@ -188,7 +189,7 @@ function task(text: string) {
 
 function originalTaskAdmissionIntent() {
   return {
-    turnId: "turn-1",
+    turnId: advancementExecutionTurnId("turn-1", "advancement", "draft-1"),
     surfacePrincipal: "surface:test",
     turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
     inputDigest: protocolDigest(
@@ -1484,7 +1485,7 @@ it.each(["admitted", "rejected"] as const)("recovers old direct obligation benea
   const originalUserTask = task("完成原任务");
   const pendingRubricDraft = { ...draft(), originalTurnId: "turn-direct" };
   await store.createSession({ id: "adv-direct", conversationId: "conv-1", originalUserTask, pendingRubricDraft });
-  const intent = { turnId: "turn-direct", surfacePrincipal: "surface:user-1",
+  const intent = { turnId: advancementExecutionTurnId("turn-direct", "direct"), surfacePrincipal: "surface:user-1",
     turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:user-1" },
     inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, originalUserTask) };
   await store.directOriginalTask("conv-1", "adv-direct", intent, { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" });
@@ -1535,4 +1536,33 @@ it('discovers only pending pages, advances past a permanent failure, and stops i
   recovery.start(); await recovery.stop();
   expect(await recovery.recoverAllOpenSessions()).toEqual([]);
   expect(list).toHaveBeenCalledTimes(2);
+});
+
+it('drains an in-flight proposal draft through the proposal application instead of waiting for the model call', async () => {
+  // 提议应用的在途起草：只有被排空中止才返回，模拟模型调用挂到超时
+  let abortFlight!: () => void;
+  const flight = new Promise<null>((resolve) => { abortFlight = () => resolve(null); });
+  const proposals = {
+    advance: vi.fn(() => flight),
+    beginDrain: vi.fn(async () => { abortFlight(); }),
+    resume: vi.fn(),
+    stop: vi.fn(async () => { abortFlight(); }),
+  };
+  const recovery = createOwnerAdvancementRecoveryMaintenance({
+    advancement: { listPendingOriginalTasks: async () => ({ sessionIds: [] }), loadActiveSession: async () => null } as never,
+    reviews: fakeReviewApplication(), reviewResults: emptyReviewResults(), proposals,
+    directory: { list: async () => [], exists: async () => true, readRunsReverse: vi.fn() } as never,
+    proxyTurns: { isRunning: () => false, inspectDurableClaim: async () => ({ status: 'unclaimed' }), schedule: vi.fn() } as never,
+  });
+  const recovering = recovery.recoverConversation('conv-1');
+  await vi.waitFor(() => expect(proposals.advance).toHaveBeenCalledWith('conv-1'));
+  const started = Date.now();
+  await recovery.beginDrain();
+  expect(Date.now() - started).toBeLessThan(2_000);
+  expect(proposals.beginDrain).toHaveBeenCalledTimes(1);
+  await expect(recovering).resolves.toMatchObject({ conversationId: 'conv-1' });
+  recovery.resume();
+  expect(proposals.resume).toHaveBeenCalledTimes(1);
+  await recovery.stop();
+  expect(proposals.stop).toHaveBeenCalledTimes(1);
 });

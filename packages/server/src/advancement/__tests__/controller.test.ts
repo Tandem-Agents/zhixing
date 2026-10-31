@@ -110,7 +110,8 @@ function task(text: string) {
 
 function originalTaskAdmissionIntent() {
   return {
-    turnId: "turn-1",
+    // 执行身份由原始输入与被确认的草案派生
+    turnId: "turn-1:advancement:draft-1",
     surfacePrincipal: "surface:test",
     turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:test" },
     inputDigest: protocolDigest(
@@ -665,7 +666,7 @@ describe("AdvancementReviewAttemptApplication.reviewAcceptedRun", () => {
       onAdmissionTiming: (ms) => timings.push(ms),
     });
 
-    await controller.decideNewTaskAdmission({
+    await controller.decideActiveUserTurnAdmission({
       conversationId: "conv-projection",
       userInput: task("继续把它弄完"),
     });
@@ -728,19 +729,19 @@ describe("AdvancementReviewAttemptApplication.reviewAcceptedRun", () => {
       },
     });
 
-    const result = await controller.decideNewTaskAdmission({
-      conversationId: "conv-projection-fail",
-      userInput: task("继续"),
-    });
-
-    expect(result.action).toBe("run-direct");
-    expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
     await expect(
       controller.decideActiveUserTurnAdmission({
         conversationId: "conv-projection-fail",
         userInput: task("继续"),
       }),
     ).resolves.toMatchObject({ action: "run-direct" });
+    expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
+    await expect(
+      controller.decideProposalStageAdmission({
+        conversationId: "conv-projection-fail",
+        userInput: task("继续"),
+      }),
+    ).resolves.toMatchObject({ action: "keep" });
     expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
   });
 

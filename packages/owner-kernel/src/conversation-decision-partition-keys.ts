@@ -24,6 +24,8 @@ export function installDecisionMigrator(log: AuthorityCommitLog, migrate: (parti
 /** 分区尚未迁移：放开日志锁，迁移这些分区后整体重做本次读写。 */
 export function decisionMigrationRequired(log: AuthorityCommitLog, partitions: readonly string[]): AuthorityPreparationRequired {
   const error = new AuthorityPreparationRequired([]);
+  // 只供观测：推迟事件据此区分决策分区迁移与派生投影准备
+  error.observed = { reason: 'decision-migration', positions: partitions.slice(0, 8) };
   error.prepareOutside = async () => {
     const migrate = migrators.get(log);
     if (!migrate) throw new TypeError('Conversation decision migration is not installed');

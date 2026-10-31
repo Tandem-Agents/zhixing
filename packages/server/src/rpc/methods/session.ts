@@ -1,5 +1,5 @@
 import { protocolDigest } from "@zhixing/core/protocol";
-import type { AdvancementSubmissionIdentity } from "@zhixing/core/advancement";
+import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalDispositionMessage, type AdvancementSubmissionIdentity } from "@zhixing/core/advancement";
 import type { SessionInputReceipt } from "@zhixing/rpc/session-wire";
 /**
  * session.* RPC 方法
@@ -35,6 +35,7 @@ import {
   isNonEmptyUserTurnInput,
   type AgentEventMap,
   type TurnContext,
+  type TurnOrigin,
   type UserTurnInput,
   userTurnInputFromText,
 } from "@zhixing/core/types";
@@ -122,6 +123,7 @@ import {
   type SessionConversationEntry,
   type SessionAwaitingRubricResult,
   type SessionContractFailedResult,
+  type SessionAdvancementProposalResult,
   type SessionListResult,
   type SessionPostTurnControlIntentPayload,
   type SessionNewResult,
@@ -184,7 +186,9 @@ async function querySessionInputReceipt(ctx: Parameters<MethodEntry["handler"]>[
       : { ...base, status: "submission-settled", submission: { turnId: submissionId, disposition },
           message: out.kind === "not-saved" ? "本次输入未保存；待确认任务已经变化，请查看当前任务。" : "本次输入已保存；任务状态已经变化，请查看当前任务。" };
   } else if (out.kind === "cancelled") result = { ...base, status: "cancelled", advancementSessionId: out.sessionId };
-  else result = contractFailedResult(conversationId, submissionId, { message: "准则未能生成，原输入已保留。" });
+  else if (out.kind === "proposal-kept" || out.kind === "proposal-supplemented") {
+    result = advancementProposalResult(conversationId, submissionId, out.sessionId, out.kind === "proposal-kept" ? "kept" : "supplemented");
+  } else result = contractFailedResult(conversationId, submissionId, { message: "准则未能生成，原输入已保留。" });
   return { status: "settled", conversationId, turnId: submissionId, result };
 }
 
@@ -419,7 +423,9 @@ export function buildSessionSendMethod(): MethodEntry {
           })();
           const prepared = dispatched.result;
 
-          if (prepared.kind === "owner-busy") {
+          // 新任务照常运行：作用域已确认时为这次运行启用推进提议，由主 Agent 自己判断是否提出；
+          // 维护忙时作用域未确认，按普通运行处理、不启用提议
+          if (prepared.kind === "new-task" || prepared.kind === "owner-busy") {
             return await sendUserTurn({
               manager,
               conversationId: id,
@@ -434,80 +440,7 @@ export function buildSessionSendMethod(): MethodEntry {
               server: ctx.server,
               surfaceCapabilities,
               ...(environment ? { environment } : {}),
-            });
-          }
-
-          if (prepared.kind === "awaiting-rubric-confirmation") {
-            const fact = dispatched.facts[0];
-            if (!fact) {
-              throw new RpcAppError(
-                RPC_ERROR_CODES.INTERNAL_ERROR,
-                "Advancement new-task commit did not emit its draft Fact",
-              );
-            }
-            manager.addObserver(fact.conversationId, connectionId, {
-              allowInactive: true,
-            });
-            notifyAdvancementEvent({
-              conversationId: fact.conversationId,
-              turnId: fact.originalTurnId,
-              seq: 0,
-              event: "advancement:contract_draft",
-              payload: {
-                advancementSessionId: fact.advancementSessionId,
-                rubricDraftId: fact.rubricDraftId,
-                rubricDraft: fact.rubricDraft,
-                admission: fact.admission,
-              },
-              connection: ctx.connection,
-              broadcast,
-            });
-            return awaitingRubricResult(
-              prepared.conversationId,
-              prepared.advancementSessionId,
-              prepared.draft,
-              { turnId, disposition: "original-saved" },
-            );
-          }
-
-          if (prepared.kind === "contract-failed") {
-            manager.addObserver(prepared.conversationId, connectionId, {
-              allowInactive: true,
-            });
-            notifyAdvancementEvent({
-              conversationId: prepared.conversationId,
-              turnId: prepared.originalTurnId,
-              seq: 0,
-              event: "advancement:contract_failed",
-              payload: {
-                originalTurnId: prepared.originalTurnId,
-                error: prepared.error,
-              },
-              connection: ctx.connection,
-              broadcast,
-            });
-            return contractFailedResult(
-              prepared.conversationId,
-              turnId,
-              prepared.error,
-            );
-          }
-
-          if (prepared.kind === "run-direct") {
-            return await sendUserTurn({
-              manager,
-              conversationId: id,
-              preallocatedConversationId: id ? undefined : preparedId,
-              input,
-              engage,
-              turnId,
-              turnIdentity,
-              connectionId,
-              connection: ctx.connection,
-              broadcast,
-              server: ctx.server,
-              surfaceCapabilities,
-              ...(environment ? { environment } : {}),
+              ...(prepared.kind === "new-task" ? { enabledControls: [ADVANCEMENT_PROPOSAL_TOOL] } : {}),
             });
           }
           newTaskNotApplicable = true;
@@ -582,6 +515,34 @@ export function buildSessionSendMethod(): MethodEntry {
               advancementSessionId:
                 controlled.result.advancementSessionId,
             };
+          }
+          if (controlled.result.kind === "keep-proposal" || controlled.result.kind === "proposal-supplemented") {
+            // 提议阶段的输入：目标不变或记为补充；推进进展随后经推进事件呈现
+            manager.addObserver(controlled.result.conversationId, connectionId, { allowInactive: true });
+            return advancementProposalResult(
+              controlled.result.conversationId,
+              turnId,
+              controlled.result.advancementSessionId,
+              controlled.result.kind === "keep-proposal" ? "kept" : "supplemented",
+            );
+          }
+          if (controlled.result.kind === "replaced") {
+            // 明确换目标：旧提议已取消，这条输入按新任务运行，同样可再提议
+            return await sendUserTurn({
+              manager,
+              conversationId: id,
+              input,
+              engage,
+              turnId,
+              turnIdentity,
+              connectionId,
+              connection: ctx.connection,
+              broadcast,
+              server: ctx.server,
+              surfaceCapabilities,
+              ...(environment ? { environment } : {}),
+              enabledControls: [ADVANCEMENT_PROPOSAL_TOOL],
+            });
           }
           if (newTaskNotApplicable) {
             const racedActiveResponse = projectActiveAdvancementPreparation(
@@ -910,6 +871,9 @@ function createAdvancementOriginalTaskSurface(input: Readonly<{
         input.manager,
         input.broadcast,
         { postTurnControl: false },
+        undefined,
+        undefined,
+        turn.turnOrigin,
       );
     },
     cancelPending: ({ conversationId, turnId }) => {
@@ -1014,6 +978,8 @@ interface SendDirectTurnInput {
   readonly server: ServerContext;
   readonly surfaceCapabilities: SessionSurfaceCapabilities;
   readonly environment?: ExplicitEnvironmentSelection;
+  /** 产品为这次运行启用的排他控制工具（新任务作用域时为推进提议）。 */
+  readonly enabledControls?: readonly string[];
 }
 
 async function prepareSessionSendTurnIdentity(
@@ -1128,6 +1094,7 @@ async function sendDirectTurn(
     ...(input.environment
       ? { environment: structuredClone(input.environment) }
       : {}),
+    ...(input.enabledControls?.length ? { enabledControls: input.enabledControls } : {}),
   });
   return {
     conversationId: admitted.conversationId,
@@ -1233,6 +1200,8 @@ interface AdmitAndMaybeStartTurnInput {
     readonly surfacePrincipal: string;
     readonly turnOrigin: TurnContext["turnOrigin"];
   };
+  /** 写入耐久 ingress 的 turnOrigin：执行信封与提交校验都从这里读启用。 */
+  readonly enabledControls?: readonly string[];
 }
 
 async function admitAndMaybeStartTurn(
@@ -1254,6 +1223,7 @@ async function admitAndMaybeStartTurn(
         turnId,
         input.connection,
         input.surfaceCapabilities,
+        input.enabledControls,
       ).turnOrigin;
     const dispatch = await productApi.command(
       CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
@@ -1287,6 +1257,7 @@ async function admitAndMaybeStartTurn(
               input.broadcast,
               input.surfaceCapabilities,
               input.environment,
+              input.enabledControls,
             );
           },
           // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
@@ -1412,6 +1383,24 @@ function contractFailedResult(
   };
 }
 
+/** 提议阶段输入的结果：turnId 属于这次输入，文案由推进领域给出。发送与回执核对同源。 */
+function advancementProposalResult(
+  conversationId: string,
+  turnId: string,
+  advancementSessionId: string,
+  disposition: SessionAdvancementProposalResult["disposition"],
+): SessionAdvancementProposalResult {
+  return {
+    conversationId,
+    sessionId: conversationId,
+    turnId,
+    status: "advancement-proposal",
+    advancementSessionId,
+    disposition,
+    message: advancementProposalDispositionMessage(disposition),
+  };
+}
+
 function notifyAdvancementEvent(input: {
   readonly conversationId: string;
   readonly turnId: string;
@@ -1509,6 +1498,8 @@ async function runManagedTurn(
     postTurnControl: false,
   },
   environment?: ExplicitEnvironmentSelection,
+  enabledControls?: readonly string[],
+  frozenTurnOrigin?: TurnOrigin,
 ): Promise<void> {
   const push = (method: string, params: unknown): void => {
     if (broadcast) broadcast(conversationId, method, params);
@@ -1528,11 +1519,15 @@ async function runManagedTurn(
   try {
     // RPC 入口触发的 turn 无通道 target，确认请求按连接身份定向回发起端。
     // post-turn 控制能力必须由发起端声明；RPC 本身不代表有 consumer。
-    const turnContext = rpcTurnContext(
-      turnId,
-      connection,
-      connection.closed ? { postTurnControl: false } : surfaceCapabilities,
-    );
+    // 已有冻结来源的运行（推进原任务执行）沿用它，与耐久 ingress 一致，不按本连接另拼
+    const turnContext: TurnContext = frozenTurnOrigin
+      ? { turnId, turnOrigin: frozenTurnOrigin }
+      : rpcTurnContext(
+          turnId,
+          connection,
+          connection.closed ? { postTurnControl: false } : surfaceCapabilities,
+          enabledControls,
+        );
     await manager.executeTurn({
       conversationId,
       userInput: input,
@@ -1600,6 +1595,7 @@ function rpcTurnContext(
   turnId: string,
   connection: RpcConnection,
   surfaceCapabilities: SessionSurfaceCapabilities,
+  enabledControls?: readonly string[],
 ): TurnContext {
   return {
     turnId,
@@ -1613,6 +1609,7 @@ function rpcTurnContext(
             },
           }
         : {}),
+      ...(enabledControls?.length ? { enabledControls: [...enabledControls] } : {}),
     },
   };
 }

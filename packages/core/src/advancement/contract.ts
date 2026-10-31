@@ -3,6 +3,7 @@ import {
   extractUserTurnInputText,
   type UserTurnInput,
 } from "../types/user-input.js";
+import type { ImageSource } from "../types/messages.js";
 import type {
   RubricAsset,
   RubricDraft,
@@ -31,11 +32,15 @@ export { RUBRIC_NEARBY_SCORE_THRESHOLD };
 export interface BuildRubricContractDraftInput {
   readonly originalTurnId: string;
   readonly originalUserTask: UserTurnInput;
+  /** 停服、删除或调用者放弃时中止模型调用。 */
+  readonly abortSignal?: AbortSignal;
 }
 
 export interface RubricDraftGenerationInput
   extends BuildRubricContractDraftInput {
   readonly taskText: string;
+  /** 原任务的图片，随起草调用附上。 */
+  readonly images: readonly ImageSource[];
   readonly candidateRubrics: readonly RubricDraftCandidate[];
   readonly evidenceCapabilities: EvidenceCapabilitySet;
   readonly now: string;
@@ -52,12 +57,19 @@ export interface RubricDraftGenerationStrategy {
 export interface ReviseRubricContractDraftInput {
   readonly currentDraft: RubricContractDraftSnapshot;
   readonly originalUserTask: UserTurnInput;
-  readonly userFeedback: string;
+  /** 用户对草案的文字意见；提议阶段的补充走 supplements。 */
+  readonly userFeedback?: string;
+  /** 提议阶段收到的补充原样输入（文字与图片），按修订语义并入。 */
+  readonly supplements?: readonly UserTurnInput[];
+  readonly abortSignal?: AbortSignal;
 }
 
 export interface RubricDraftRevisionInput
   extends ReviseRubricContractDraftInput {
   readonly taskText: string;
+  readonly userFeedback: string;
+  /** 随修订调用附上的图片：原任务的在前，补充的按顺序在后，与 userFeedback 里的标注对应。 */
+  readonly images: readonly ImageSource[];
   readonly evidenceCapabilities: EvidenceCapabilitySet;
   readonly now: string;
 }
@@ -66,7 +78,13 @@ export interface RubricDraftRevisionStrategy {
   revise(input: RubricDraftRevisionInput): Promise<RubricContractDraftSnapshot>;
 }
 
-export type RubricContractComplete = (prompt: string) => Promise<string>;
+export interface RubricContractCompleteOptions {
+  /** 与提示一同交给模型的图片（原任务与补充的原图）。 */
+  readonly images?: readonly ImageSource[];
+  readonly abortSignal?: AbortSignal;
+}
+
+export type RubricContractComplete = (prompt: string, options?: RubricContractCompleteOptions) => Promise<string>;
 
 /** Read-only Rubric library view injected by the current authority domain. */
 export interface RubricCatalogPort {
@@ -125,6 +143,7 @@ export class RubricContractBuilder {
     return await this.generationStrategy.generate({
       ...input,
       taskText,
+      images: imagesOf(input.originalUserTask),
       candidateRubrics: ranked.map(toDraftCandidate).slice(0, 3),
       evidenceCapabilities: this.evidenceCapabilities,
       now: this.now(),
@@ -135,7 +154,17 @@ export class RubricContractBuilder {
     input: ReviseRubricContractDraftInput,
   ): Promise<RubricContractDraftSnapshot> {
     const taskText = extractUserTurnInputText(input.originalUserTask).trim();
-    const feedback = input.userFeedback.trim();
+    // 补充原样并入：文字逐条标注，图片按顺序随调用附上；只有图片的补充同样是有效修订
+    const supplements = input.supplements ?? [];
+    const supplementImages = supplements.map(imagesOf);
+    const feedback = [
+      input.userFeedback?.trim() ?? "",
+      ...supplements.map((supplement, index) => {
+        const text = extractUserTurnInputText(supplement).trim();
+        const images = supplementImages[index]!.length;
+        return `补充 ${index + 1}：${text || "（无文字）"}${images ? `（附图 ${images} 张，随本请求附上）` : ""}`;
+      }),
+    ].filter((line) => line.length > 0).join("\n");
     if (!feedback) {
       throw new Error("RubricContractBuilder: revision feedback is empty");
     }
@@ -143,6 +172,7 @@ export class RubricContractBuilder {
       ...input,
       taskText,
       userFeedback: feedback,
+      images: [...imagesOf(input.originalUserTask), ...supplementImages.flat()],
       evidenceCapabilities: this.evidenceCapabilities,
       now: this.now(),
     });
@@ -294,7 +324,10 @@ export class LLMRubricDraftGenerationStrategy
     input: RubricDraftGenerationInput,
   ): Promise<RubricContractDraftSnapshot> {
     const parsed = parseJsonObject(
-      await this.complete(buildRubricDraftPrompt(input)),
+      await this.complete(buildRubricDraftPrompt(input), {
+        images: input.images,
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      }),
     );
     const normalized = normalizeGeneratedRubricDraft(
       parsed,
@@ -331,7 +364,10 @@ export class LLMRubricDraftRevisionStrategy
     input: RubricDraftRevisionInput,
   ): Promise<RubricContractDraftSnapshot> {
     const parsed = parseJsonObject(
-      await this.complete(buildRubricDraftRevisionPrompt(input)),
+      await this.complete(buildRubricDraftRevisionPrompt(input), {
+        images: input.images,
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      }),
     );
     const normalized = normalizeGeneratedRubricDraft(
       parsed,
@@ -472,7 +508,16 @@ JSON 结构:
 ${candidates}
 
 用户任务:
-${input.taskText}`;
+${input.taskText || "（无文字）"}${renderAttachedImagesNote(input.images.length)}`;
+}
+
+/** 随调用附上的图片在提示里的说明；没有图片时不写。 */
+function renderAttachedImagesNote(count: number): string {
+  return count > 0 ? `\n（任务附图 ${count} 张，按顺序随本请求附上，起草与修订时一并参考。）` : "";
+}
+
+function imagesOf(input: UserTurnInput): ImageSource[] {
+  return input.parts.flatMap((part) => (part.type === "image" ? [part.source] : []));
 }
 
 function buildRubricDraftRevisionPrompt(
@@ -505,7 +550,7 @@ JSON 结构:
 }
 
 原始任务:
-${input.taskText}
+${input.taskText || "（无文字）"}${renderAttachedImagesNote(input.images.length)}
 
 当前草案:
 ${JSON.stringify({

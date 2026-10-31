@@ -79,6 +79,12 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     return (await this.#journal(conversationId)).pendingAdvancementOriginalTasks(after);
   }
 
+  async listPendingAdvancementProposals(conversationId: string, ctx: AuthorityCallContext) {
+    assertProtocolIdentifier(conversationId, "Session conversationId");
+    assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.listPendingAdvancementProposals");
+    return (await this.#journal(conversationId)).pendingAdvancementProposals();
+  }
+
   async mutate(
     conversationId: string,
     mutation: SessionControlMutation | SessionStagedMutation,

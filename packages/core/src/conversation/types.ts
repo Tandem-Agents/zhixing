@@ -7,10 +7,9 @@
 
 // ─── 核心类型 ───
 
-/** 显现意图的按键依据：普通发送按输入回执（调用方主体 + 回合），推进草案按草案（定位它的待确认会话）。 */
+/** 显现意图的按键依据：按输入回执（调用方主体 + 回合）复核。 */
 export type ConversationRevealIntent =
-  | { readonly kind: 'turn'; readonly turnId: string; readonly surfacePrincipal: string }
-  | { readonly kind: 'advancement'; readonly draftId: string };
+  { readonly kind: 'turn'; readonly turnId: string; readonly surfacePrincipal: string };
 
 /** 用户视角的对话身份（持久化在磁盘的 meta.json） */
 export interface Conversation {

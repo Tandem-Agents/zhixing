@@ -40,6 +40,7 @@ export type {
   LLMRubricDraftRevisionStrategyOptions,
   ReviseRubricContractDraftInput,
   RubricContractComplete,
+  RubricContractCompleteOptions,
   RubricContractBuilderOptions,
   RubricCatalogPort,
   RubricDraftCandidate,
@@ -73,10 +74,15 @@ export {
   foldAdvancementEvents,
   freezeAdvancementSessions,
   isOpenAdvancementSession,
+  isProposalStageStatus,
   runReviewedEvents,
   type AdvancementFoldMap,
   type AdvancementFoldSession,
 } from "./reducer.js";
+export * from "./proposal-identity.js";
+export * from "./proposal-application.js";
+export * from "./proposal-messages.js";
+export * from "./execution-context.js";
 export { assertAdvancementEventBatchLegal } from "./guards.js";
 export {
   deriveUnmetCriteriaTexts,

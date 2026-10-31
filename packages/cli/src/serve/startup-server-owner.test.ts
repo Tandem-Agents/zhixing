@@ -141,8 +141,9 @@ describe("production startup server ownership", () => {
     expect(advancementApplication).toBeGreaterThan(conversationApplication);
     expect(advancementContribution).toBeLessThan(dispatcher);
     expect(source).toContain("ADVANCEMENT_PRODUCT_API_EXACT_SET.operations");
-    expect(source).toContain("newTask: advancementDetailController");
-    expect(source).toContain("newTaskConversation: {");
+    expect(source).toContain("proposals: conversationServices.advancementProposals");
+    expect(source).toContain("advancementDetailController.supplementProposal(");
+    expect(source).not.toContain("newTaskConversation: {");
     expect(source).toContain("rubricRevision: advancementDetailController");
     const rubricCancellation = location(source, "rubricCancellation: {");
     const rubricCancellationRead = source.indexOf(
@@ -172,7 +173,8 @@ describe("production startup server ownership", () => {
     );
     expect(source).toContain("boundConversations!.runMaintenanceExisting(");
     expect(source).toContain("boundConversations!.runMaintenance(conversationId, operation)");
-    expect(source).toContain(
+    // 新任务由普通发送路径建对话，推进装配不再预建对话壳
+    expect(source).not.toContain(
       '.ensureShell({ kind: "ensure-shell", conversationId, ...options })',
     );
     expect(context).toContain("productApi,");

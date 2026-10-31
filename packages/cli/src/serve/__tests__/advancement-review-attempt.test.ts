@@ -1,6 +1,6 @@
 import path from "node:path";
 import { MockLLMProvider } from "@zhixing/core/loop";
-import { advancementReviewAttemptId, advancementReviewLineageId, advancementReviewRootRequestId, type AdvancementReviewAttempt, type ConfirmedRubricSnapshot } from "@zhixing/core/advancement";
+import { advancementExecutionTurnId, advancementReviewAttemptId, advancementReviewLineageId, advancementReviewRootRequestId, type AdvancementReviewAttempt, type ConfirmedRubricSnapshot } from "@zhixing/core/advancement";
 import { type RunRecordInput } from "@zhixing/core/transcript";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import {
@@ -786,7 +786,7 @@ async function makeActive(store: AdvancementStore): Promise<void> {
     "session-1",
     confirmedRubric(),
     {
-      turnId: "turn-1",
+      turnId: advancementExecutionTurnId("turn-1", "advancement", "draft-1"),
       surfacePrincipal: "surface:test",
       turnOrigin: { channel: "rpc", triggeredBy: "surface:test" },
       inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, originalUserTask),

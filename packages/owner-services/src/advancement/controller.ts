@@ -2,6 +2,7 @@ import type { AdvancementSubmissionIdentity, AdvancementSubmissionOutcome } from
 import {
   RubricContractBuilder,
   ConservativeAdvancementAdmissionStrategy,
+  isOpenAdvancementSession,
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
@@ -16,7 +17,7 @@ import type {
   AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionDecision,
   AdvancementAwaitingRubricAdmissionMechanismPort,
-  AdvancementNewTaskMechanismPort,
+  AdvancementProposalStageAdmissionDecision,
   AdvancementRubricConfirmationMechanismPort,
   AdvancementRubricRevisionMechanismPort,
   AdvancementClosureSynthesizer,
@@ -26,9 +27,6 @@ import type {
 import { randomUUID } from "node:crypto";
 import { composeAdvancementClosureReport } from "@zhixing/core/advancement/application";
 import type { AdvancementSessionStore } from "./session-store.js";
-
-/** 新任务待确认会话的 id 由草案决定：落盘与按草案复核（空壳会话的显现补齐）用同一函数。 */
-export function newTaskSessionId(draftId: string): string { return `adv_${draftId}`; }
 
 export interface AdvancementControllerOptions {
   /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
@@ -53,7 +51,6 @@ export interface AdvancementControllerOptions {
 export class AdvancementController implements
   AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionMechanismPort,
-  AdvancementNewTaskMechanismPort,
   AdvancementRubricRevisionMechanismPort,
   AdvancementRubricConfirmationMechanismPort
 {
@@ -106,49 +103,31 @@ export class AdvancementController implements
     });
   }
 
-  loadOpenNewTaskSession(
-    conversationId: string,
-  ): Promise<AdvancementSession | null> {
-    return this.store.loadActiveSession(conversationId);
-  }
-
-  async decideNewTaskAdmission(input: Readonly<{
-    conversationId: string;
-    userInput: Readonly<UserTurnInput>;
-  }>): Promise<AdvancementAdmissionDecision> {
-    const decision = await this.decideAdmission(input);
-    if (
-      decision.action !== "run-direct" &&
-      decision.action !== "start-advancement"
-    ) {
-      throw new Error(
-        `AdvancementController: invalid new-task admission action ${decision.action}`,
-      );
-    }
-    return decision;
-  }
-
-  buildNewTaskRubricDraft(input: Readonly<{
+  /** 为原任务生成 Rubric 草案（提议起草用）。 */
+  buildRubricDraft(input: Readonly<{
     originalTurnId: string;
     originalUserTask: Readonly<UserTurnInput>;
+    abortSignal?: AbortSignal;
   }>): Promise<RubricContractDraftSnapshot> {
     return this.contractBuilder.buildDraft(input);
   }
 
-  persistNewTaskAwaitingSession(input: Readonly<{
-    submission?: AdvancementSubmissionIdentity;
+  /** 提议阶段的控制输入判断；判不清时保持原目标。 */
+  async decideProposalStageAdmission(input: Readonly<{
     conversationId: string;
-    originalUserTask: Readonly<UserTurnInput>;
-    draft: RubricContractDraftSnapshot;
-  }>): Promise<AdvancementSession> {
-    return this.store.createSession({
-      id: newTaskSessionId(input.draft.draftId),
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementProposalStageAdmissionDecision> {
+    const decision = await this.decideAdmission({
       conversationId: input.conversationId,
-      originalUserTask: input.originalUserTask,
-      pendingRubricDraft: input.draft,
-      createdAt: input.draft.createdAt,
-      submission: input.submission,
+      userInput: input.userInput,
+      hasProposalStageSession: true,
     });
+    const action = decision.action === "supplement-proposal"
+      ? "supplement"
+      : decision.action === "downgrade-to-direct" || decision.action === "cancel-pending-task" || decision.action === "replace-task"
+        ? decision.action
+        : "keep";
+    return Object.freeze({ action, reason: decision.reason });
   }
 
   private async decideAdmission(input: {
@@ -156,6 +135,7 @@ export class AdvancementController implements
     readonly userInput: UserTurnInput;
     readonly hasOpenAdvancementSession?: boolean;
     readonly hasActiveAdvancementSession?: boolean;
+    readonly hasProposalStageSession?: boolean;
   }): Promise<AdvancementAdmissionDecision> {
     let recentContext: string | undefined;
     try {
@@ -169,6 +149,7 @@ export class AdvancementController implements
         input: input.userInput,
         hasOpenAdvancementSession: input.hasOpenAdvancementSession,
         hasActiveAdvancementSession: input.hasActiveAdvancementSession,
+        ...(input.hasProposalStageSession ? { hasProposalStageSession: true } : {}),
         ...(recentContext ? { recentContext } : {}),
       });
     } finally {
@@ -288,6 +269,11 @@ export class AdvancementController implements
     );
   }
 
+  /** 提议阶段的补充：记为修订请求，随提交回执写入。 */
+  supplementProposal(input: Readonly<{ conversationId: string; advancementSessionId: string; supplement: Readonly<UserTurnInput>; submission?: AdvancementSubmissionIdentity }>): Promise<AdvancementSession> {
+    return this.store.supplementProposal(input.conversationId, input.advancementSessionId, input.supplement, input.submission);
+  }
+
   persistDirectOriginalTask(input: Readonly<{ submission?: AdvancementSubmissionIdentity; conversationId: string; advancementSessionId: string; admissionIntent: import("@zhixing/core/advancement").AdvancementOriginalTaskAdmissionIntent; exit: import("@zhixing/core/advancement").AdvancementExit }>): Promise<AdvancementSession> {
     return this.store.directOriginalTask(input.conversationId, input.advancementSessionId, input.admissionIntent, input.exit, undefined, input.submission);
   }
@@ -342,10 +328,13 @@ export class AdvancementController implements
     return this.store.loadSession(conversationId, advancementSessionId);
   }
 
+  /** 修订草案：用户的文字意见，或提议阶段的补充原样输入（文字与图片）。 */
   reviseRubricDraftContent(input: Readonly<{
     currentDraft: RubricContractDraftSnapshot;
     originalUserTask: UserTurnInput;
-    userFeedback: string;
+    userFeedback?: string;
+    supplements?: readonly UserTurnInput[];
+    abortSignal?: AbortSignal;
   }>): Promise<RubricContractDraftSnapshot> {
     return this.contractBuilder.reviseDraft(input);
   }
@@ -406,11 +395,7 @@ export class AdvancementController implements
   ): Promise<AdvancementSession | null> {
     const sessions = await this.store.loadConversationSessions(conversationId);
     if (sessions.length === 0) return null;
-    const open = sessions.find(
-      (session) =>
-        session.status === "awaiting-rubric-confirmation" ||
-        session.status === "active",
-    );
+    const open = sessions.find(isOpenAdvancementSession);
     return open ?? sessions[sessions.length - 1]!;
   }
 

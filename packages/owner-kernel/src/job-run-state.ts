@@ -28,6 +28,8 @@ export class JobStateRequired extends AuthorityPreparationRequired {
     super([]);
     this.name = "JobStateRequired";
     this.message = "Job state is being loaded";
+    // 只供观测：推迟事件据此区分作业状态缺键装入与派生投影准备
+    this.observed = { reason: 'job-state', positions: needs.slice(0, 8).map((need) => 'key' in need ? `key:${need.key.slice(0, 48)}` : 'page' in need ? 'page' : 'range') };
     if (load) {
       // 日志层可能已在后台启动同一次装入：同一个错误只装一次
       let loading: Promise<void> | undefined;

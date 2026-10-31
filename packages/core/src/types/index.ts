@@ -45,6 +45,7 @@ export {
   normalizeUserTurnInput,
   resolveModelInputCapabilities,
   userMessageFromTurnInput,
+  userTurnInputFromMessages,
   userTurnInputFromText,
   validateMessagesAgainstInputCapabilities,
 } from "./user-input.js";
@@ -72,8 +73,10 @@ export type {
   ToolResult,
   ToolSideEffectObserver,
   ToolSpec,
+  RequiredUserContext,
   TurnContext,
   TurnOrigin,
+  TurnOriginAdvancementExecution,
 } from "./tools.js";
 export { toToolSpec, generateTurnId } from "./tools.js";
 

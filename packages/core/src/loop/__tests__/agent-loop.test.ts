@@ -1725,4 +1725,112 @@ describe("Agent Loop", () => {
     });
   });
 
+  describe("排他初始控制工具", () => {
+    function controlTool(invoked: { count: number }, result: { content: string; isError?: boolean } = { content: "proposed" }): ToolDefinition {
+      return {
+        ...makeTool("control", async () => {
+          invoked.count += 1;
+          return result;
+        }),
+        isReadOnly: false,
+        isParallelSafe: false,
+        exclusiveInitialControl: { validateInput: (input) => (input.bad === true ? "bad input" : undefined) },
+      };
+    }
+    const enabled = new Set(["control"]);
+
+    it("选中的排他调用成功后本运行以 completed 结束，不再调模型", async () => {
+      const invoked = { count: 0 };
+      const read = vi.fn(async () => ({ content: "read" }));
+      const provider = new MockLLMProvider([
+        { text: "先说明一下", toolCalls: [{ id: "c1", name: "control", input: {} }, { id: "r1", name: "read", input: {} }] },
+        { text: "不应被调用" },
+      ]);
+      const { result } = await drainAgentLoop(baseParams(provider, {
+        tools: [controlTool(invoked), makeTool("read", read)],
+        enabledExclusiveControls: enabled,
+      }));
+      expect(result.reason).toBe("completed");
+      expect(provider.callCount).toBe(1);
+      expect(invoked.count).toBe(1);
+      expect(read).not.toHaveBeenCalled();
+      expect(result.reason === "completed" && result.message.content.some((block) => block.type === "tool_use")).toBe(true);
+    });
+
+    it("选中的排他调用失败后本运行以 error 终止，同批与后续都不再执行工具", async () => {
+      const invoked = { count: 0 };
+      const read = vi.fn(async () => ({ content: "read" }));
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "c1", name: "control", input: {} }, { id: "r1", name: "read", input: {} }] },
+        { toolCalls: [{ id: "r2", name: "read", input: {} }] },
+      ]);
+      const { result } = await drainAgentLoop(baseParams(provider, {
+        tools: [controlTool(invoked, { content: "broken", isError: true }), makeTool("read", read)],
+        enabledExclusiveControls: enabled,
+      }));
+      expect(result.reason).toBe("error");
+      expect(provider.callCount).toBe(1);
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it("本运行已启动过工具后再提出：整批不启动，按普通任务继续", async () => {
+      const invoked = { count: 0 };
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "r1", name: "read", input: {} }] },
+        { toolCalls: [{ id: "c1", name: "control", input: {} }] },
+        { text: "继续直接完成" },
+      ]);
+      const { result } = await drainAgentLoop(baseParams(provider, {
+        tools: [controlTool(invoked), makeTool("read")],
+        enabledExclusiveControls: enabled,
+      }));
+      expect(result.reason).toBe("completed");
+      expect(invoked.count).toBe(0);
+      expect(provider.callCount).toBe(3);
+    });
+
+    it("入参不合法时整批不启动，下一轮重提成功；未启用时排他调用不启动、运行继续", async () => {
+      const invoked = { count: 0 };
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "c1", name: "control", input: { bad: true } }] },
+        { toolCalls: [{ id: "c2", name: "control", input: {} }] },
+      ]);
+      const retried = await drainAgentLoop(baseParams(provider, {
+        tools: [controlTool(invoked)],
+        enabledExclusiveControls: enabled,
+      }));
+      expect(retried.result.reason).toBe("completed");
+      expect(provider.callCount).toBe(2);
+      expect(invoked.count).toBe(1);
+
+      const disabled = { count: 0 };
+      const plain = new MockLLMProvider([
+        { toolCalls: [{ id: "c1", name: "control", input: {} }] },
+        { text: "直接回答" },
+      ]);
+      const ran = await drainAgentLoop(baseParams(plain, { tools: [controlTool(disabled)] }));
+      expect(ran.result.reason).toBe("completed");
+      expect(disabled.count).toBe(0);
+      expect(plain.callCount).toBe(2);
+    });
+
+    it("排他调用执行中被中断：本运行按中断结束，不当作成功", async () => {
+      const controller = new AbortController();
+      const provider = new MockLLMProvider([{ toolCalls: [{ id: "c1", name: "control", input: {} }] }]);
+      const tool: ToolDefinition = {
+        ...controlTool({ count: 0 }),
+        call: async () => {
+          controller.abort();
+          throw new DOMException("aborted", "AbortError");
+        },
+      };
+      const { result } = await drainAgentLoop(baseParams(provider, {
+        tools: [tool],
+        enabledExclusiveControls: enabled,
+        abortSignal: controller.signal,
+      }));
+      expect(result.reason).toBe("aborted");
+    });
+  });
+
 });

@@ -1,6 +1,7 @@
 import type {
   AdvancementEvidenceProjection,
   AdvancementEvidenceGeneration,
+  AdvancementProposalStageStatus,
   AdvancementRunReview,
   AdvancementSession,
   AdvancementStoreEvent,
@@ -29,6 +30,7 @@ export interface MutableAdvancementSession {
   evidencePending: AdvancementEvidenceProjection["pending"][number][];
   evidenceGenerations: AdvancementEvidenceGeneration[];
   exit?: AdvancementSession["exit"];
+  proposal?: AdvancementSession["proposal"];
 }
 
 export type AdvancementFoldSession = MutableAdvancementSession;
@@ -92,6 +94,57 @@ export function applyAdvancementEvent(
         evidenceGenerations: [],
       });
       break;
+    case "proposal_accepted":
+    case "proposal_rejected":
+      sessions.set(event.sessionId, {
+        id: event.sessionId,
+        conversationId: event.conversationId,
+        status: event.type === "proposal_accepted" ? "proposed" : "cancelled",
+        ...(event.type === "proposal_rejected" ? { exit: event.exit } : {}),
+        originalUserTask: event.originalUserTask,
+        createdAt: event.timestamp,
+        updatedAt: event.timestamp,
+        rubricDraftVersion: 0,
+        runs: [],
+        proxyMessages: [],
+        reviewAttempts: [],
+        evidencePending: [],
+        evidenceGenerations: [],
+        proposal: {
+          proposalId: event.proposalId,
+          runId: event.runId,
+          originalTurnId: event.originalTurnId,
+          supplements: [],
+        },
+      });
+      break;
+    case "proposal_supplemented": {
+      const session = sessions.get(event.sessionId);
+      if (!session?.proposal) return;
+      session.updatedAt = event.timestamp;
+      session.proposal = { ...session.proposal, supplements: [...session.proposal.supplements, event.supplement] };
+      // 失败或结果不明后再补充，回到 proposed 由下一次尝试并入
+      if (session.status === "draft-failed" || session.status === "draft-uncertain") session.status = "proposed";
+      break;
+    }
+    case "draft_attempt_transitioned": {
+      const session = sessions.get(event.sessionId);
+      if (!session?.proposal) return;
+      session.updatedAt = event.timestamp;
+      session.proposal = { ...session.proposal, draftAttempt: { ...event.attempt } };
+      if (event.attempt.phase === "invoking") session.status = "drafting";
+      else if (event.attempt.phase === "failed") session.status = "draft-failed";
+      else if (event.attempt.phase === "deferred") session.status = "draft-uncertain";
+      break;
+    }
+    case "proposal_drafted": {
+      const session = sessions.get(event.sessionId);
+      if (!session) return;
+      session.status = "awaiting-rubric-confirmation";
+      session.updatedAt = event.timestamp;
+      session.pendingRubricDraft = event.pendingRubricDraft;
+      break;
+    }
     case "rubric_confirmed": {
       const session = sessions.get(event.sessionId);
       if (!session) return;
@@ -316,16 +369,24 @@ function freezeSession(session: MutableAdvancementSession): AdvancementSession {
         }
       : {}),
     exit: session.exit,
+    ...(session.proposal ? { proposal: structuredClone(session.proposal) } : {}),
   };
 }
 
+/** 未终结推进会话：提议、草案、待确认与进行中的全部状态。 */
 export function isOpenAdvancementSession(
   session: Pick<AdvancementSession, "status">,
 ): boolean {
   return (
+    isProposalStageStatus(session.status) ||
     session.status === "awaiting-rubric-confirmation" ||
     session.status === "active"
   );
+}
+
+/** 提议接受之后、草案进入待确认之前的状态。 */
+export function isProposalStageStatus(status: AdvancementSession["status"]): status is AdvancementProposalStageStatus {
+  return status === "proposed" || status === "drafting" || status === "draft-failed" || status === "draft-uncertain";
 }
 
 /** 会话的推进头状态：open 会话优先，否则最新终态会话。 */

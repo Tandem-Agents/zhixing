@@ -16,6 +16,10 @@ export type AdvancementSubmissionOutcome =
   | { readonly kind: "not-saved"; readonly sessionId: string; readonly draftId: string; readonly originalTurnId: string }
   | { readonly kind: "original-task-intent"; readonly mode: "advancement" | "direct"; readonly sessionId: string; readonly originalTurnId: string }
   | { readonly kind: "cancelled"; readonly sessionId: string }
+  /** 提议阶段的继续或提问：目标不变，这条输入不保存。 */
+  | { readonly kind: "proposal-kept"; readonly sessionId: string; readonly originalTurnId: string }
+  /** 提议阶段的补充：记为第 revision 条修订请求。 */
+  | { readonly kind: "proposal-supplemented"; readonly sessionId: string; readonly originalTurnId: string; readonly revision: number }
   | { readonly kind: "contract-failed"; readonly code: "rubric-generation-failed" | "rubric-revision-failed" };
 
 export interface AdvancementSubmissionReceipt {
@@ -49,6 +53,9 @@ export function isAdvancementSubmissionReceipt(value: unknown): value is Advance
     case "original-task-intent": return keys(out, ["kind", "mode", "sessionId", "originalTurnId"]) &&
       (out.mode === "direct" || out.mode === "advancement") && identifier(out.sessionId) && identifier(out.originalTurnId);
     case "cancelled": return keys(out, ["kind", "sessionId"]) && identifier(out.sessionId);
+    case "proposal-kept": return keys(out, ["kind", "sessionId", "originalTurnId"]) && identifier(out.sessionId) && identifier(out.originalTurnId);
+    case "proposal-supplemented": return keys(out, ["kind", "sessionId", "originalTurnId", "revision"]) && identifier(out.sessionId) &&
+      identifier(out.originalTurnId) && Number.isSafeInteger(out.revision) && Number(out.revision) > 0;
     case "rejected": return keys(out, ["kind", "code"]) && ["conversation-busy", "advancement-session-not-found", "not-awaiting-rubric-confirmation", "pending-rubric-draft-missing", "rubric-draft-stale"].includes(String(out.code));
     case "contract-failed": return keys(out, ["kind", "code"]) && (out.code === "rubric-generation-failed" || out.code === "rubric-revision-failed");
     default: return false;
@@ -69,6 +76,10 @@ export function advancementSubmissionOutcome(event: Exclude<import("./types.js")
       case "rubric_confirmed":
       case "original_task_directed": return { kind: "original-task-intent", mode: event.type === "rubric_confirmed" ? "advancement" : "direct", sessionId: event.sessionId, originalTurnId: event.admissionIntent.turnId };
       case "cancelled": return { kind: "cancelled", sessionId: event.sessionId };
+      case "proposal_supplemented": {
+        if (!previous?.proposal) throw Error("Advancement supplement target is missing");
+        return { kind: "proposal-supplemented", sessionId: event.sessionId, originalTurnId: previous.proposal.originalTurnId, revision: previous.proposal.supplements.length + 1 };
+      }
       default: throw Error("Advancement transition does not settle a surface submission");
     }
 }

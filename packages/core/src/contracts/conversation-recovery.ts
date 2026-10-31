@@ -14,6 +14,8 @@ export interface ConversationCommitSummary {
   readonly conflict: boolean;
   /** Absent on older commits: recovery must conservatively inspect them. */
   readonly controlRecovery?: boolean;
+  /** 只在运行记录带推进提议时出现；推进待办目录据此登记“提议待接受”，不为普通提交读取正文。 */
+  readonly advancementProposal?: true;
 }
 export interface ConversationCompletionPage {
   readonly conversationId: string;

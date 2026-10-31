@@ -197,6 +197,18 @@ export interface SessionCancelledRubricResult extends SessionAcceptedSendResult 
   advancementSessionId: string;
 }
 
+/**
+ * 主 Agent 已提出推进、草案尚未进入待确认时收到的输入：kept 表示目标不变、这条输入不保存，
+ * supplemented 表示记为对原任务的补充。turnId 属于这次输入；推进进展随后经推进事件与会话读取呈现。
+ */
+export interface SessionAdvancementProposalResult extends SessionAcceptedSendResult {
+  status: "advancement-proposal";
+  advancementSessionId: string;
+  disposition: "kept" | "supplemented";
+  /** 推进领域给出的回应文案，接入面原样呈现。 */
+  message: string;
+}
+
 export interface SessionContractFailedResult extends SessionAcceptedSendResult {
   status: "contract-failed";
   error: { message: string };
@@ -216,6 +228,7 @@ export type SessionSendResult =
   | SessionAcceptedSendResult
   | SessionAwaitingRubricResult
   | SessionCancelledRubricResult
+  | SessionAdvancementProposalResult
   | SessionContractFailedResult;
 
 export interface SessionAdvancementConfirmResult extends SessionAcceptedSendResult {
@@ -276,9 +289,10 @@ export type SessionAdvancementCancelResult =
 
 export interface SessionAdvancementStateSnapshot {
   advancementSessionId: string;
+  /** 提议阶段（proposed、drafting、draft-failed、draft-uncertain）同属未终结推进。 */
   status: Extract<
     AdvancementSessionStatus,
-    "awaiting-rubric-confirmation" | "active"
+    "awaiting-rubric-confirmation" | "active" | "proposed" | "drafting" | "draft-failed" | "draft-uncertain"
   >;
   rubricTitle?: string;
   rubricDraftId?: string;

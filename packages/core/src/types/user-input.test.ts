@@ -5,9 +5,32 @@ import {
   isUserTurnInput,
   resolveModelInputCapabilities,
   userMessageFromTurnInput,
+  userTurnInputFromMessages,
   userTurnInputFromText,
   validateMessagesAgainstInputCapabilities,
 } from "./user-input.js";
+
+describe("从运行记录还原原始输入", () => {
+  it("只取本次输入的第一条用户消息，文本与图片来源与原输入的消息形态一致，后续追加输入与工具结果不并入", () => {
+    const original = {
+      parts: [
+        { type: "text" as const, text: "整理这张图里的会议记录" },
+        { type: "image" as const, source: { type: "base64" as const, mediaType: "image/png", data: "AAAA" }, name: "a.png", mimeType: "image/png", size: 3 },
+      ],
+    };
+    const messages = [
+      userMessageFromTurnInput(original),
+      { role: "assistant" as const, content: [{ type: "text" as const, text: "好的" }] },
+      { role: "user" as const, content: [{ type: "tool_result" as const, toolUseId: "t1", content: "结果" }] },
+      userMessageFromTurnInput(userTurnInputFromText("顺便看下周")),
+    ];
+    const restored = userTurnInputFromMessages(messages);
+    expect(userMessageFromTurnInput(restored)).toEqual(userMessageFromTurnInput(original));
+    expect(restored.parts).toHaveLength(2);
+    expect(JSON.stringify(restored)).not.toContain("顺便看下周");
+    expect(userTurnInputFromMessages([messages[2]!, messages[0]!])).toEqual(restored);
+  });
+});
 
 describe("user turn input", () => {
   it("纯文本输入投影为 user text message", () => {

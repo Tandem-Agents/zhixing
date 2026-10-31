@@ -6,15 +6,23 @@ import {
   applyAdvancementEvent,
   assertTerminalReviewDecision,
   isOpenAdvancementSession,
+  isProposalStageStatus,
   type AdvancementFoldMap,
   type AdvancementFoldSession,
 } from "./reducer.js";
+import {
+  advancementExecutionTurnId,
+  advancementProposalExecutionInput,
+  advancementProposalId,
+  advancementProposalSessionId,
+} from "./proposal-identity.js";
 import {
   canonicalize,
   evidenceRequestDigest,
   protocolDigest,
 } from "../protocol/index.js";
 import { assertUniqueConfirmedRubricContractContentIds } from "./contract.js";
+import type { TurnOriginAdvancementExecution } from "../types/tools.js";
 import { advancementEvidenceRequestId } from "./evidence-identity.js";
 import {
   advancementReviewAttemptId,
@@ -63,6 +71,12 @@ export function assertAdvancementEventBatchLegal(
               (outcome.kind === "draft-saved" && session.rubricDraftVersion !== outcome.draftVersion)) {
             throw Error("Advancement receipt does not bind the committed draft");
           }
+        } else if (outcome.kind === "proposal-kept" || outcome.kind === "proposal-supplemented") {
+          if (!session.proposal || !isProposalStageStatus(session.status) ||
+              session.proposal.originalTurnId !== outcome.originalTurnId ||
+              (outcome.kind === "proposal-supplemented" && session.proposal.supplements.length !== outcome.revision)) {
+            throw Error("Advancement receipt does not bind the open proposal");
+          }
         } else if (outcome.kind === "original-task-intent") {
           const admission = session.originalTaskAdmission;
           if (!admission || admission.intent.turnId !== outcome.originalTurnId ||
@@ -92,15 +106,72 @@ export function assertAdvancementEventBatchLegal(
         }
         break;
       }
+      case "proposal_accepted":
+      case "proposal_rejected": {
+        if (
+          work.has(event.sessionId) ||
+          event.proposalId !== advancementProposalId(event.conversationId, event.runId) ||
+          event.sessionId !== advancementProposalSessionId(event.proposalId)
+        ) {
+          throw new Error("AdvancementStore: proposal session does not bind its proposal");
+        }
+        if (event.type === "proposal_rejected" && event.exit.reason !== "superseded") {
+          throw new Error("AdvancementStore: a rejected proposal must be superseded");
+        }
+        if (event.type === "proposal_accepted" && [...work.values()].some(isOpenAdvancementSession)) {
+          throw new Error(
+            `AdvancementStore: conversation "${event.conversationId}" already has an open advancement session`,
+          );
+        }
+        break;
+      }
+      case "proposal_supplemented": {
+        const session = requireSession(work, event.sessionId);
+        if (!session.proposal || !isProposalStageStatus(session.status)) {
+          throw new Error("AdvancementStore: supplements require an open proposal");
+        }
+        break;
+      }
+      case "draft_attempt_transitioned": {
+        const session = requireSession(work, event.sessionId);
+        const proposal = session.proposal;
+        const prior = proposal?.draftAttempt;
+        const attempt = event.attempt;
+        const legal = !!proposal && (attempt.phase === "invoking"
+          ? session.status === "proposed" && attempt.generation === (prior?.generation ?? 0) + 1 &&
+            attempt.revision === proposal.supplements.length
+          : session.status === "drafting" && prior?.phase === "invoking" &&
+            prior.generation === attempt.generation && prior.revision === attempt.revision);
+        if (!legal) throw new Error("AdvancementStore: draft attempt transition is not legal");
+        break;
+      }
+      case "proposal_drafted": {
+        const session = requireSession(work, event.sessionId);
+        const proposal = session.proposal;
+        if (
+          !proposal || session.status !== "drafting" || proposal.draftAttempt?.phase !== "consumed" ||
+          event.revision !== proposal.supplements.length || event.revision < proposal.draftAttempt.revision ||
+          event.pendingRubricDraft.originalTurnId !== proposal.originalTurnId
+        ) {
+          throw new Error("AdvancementStore: drafted proposal does not bind its consumed attempt and revision");
+        }
+        break;
+      }
       case "rubric_confirmed": {
         const session = requireAwaiting(work, event.sessionId);
         assertUniqueConfirmedRubricContractContentIds(
           event.confirmedRubric.content,
         );
+        // 执行身份一律由原始输入身份与被确认的草案派生；提议会话的执行输入是推进控制消息
+        const originalTurnId = session.proposal?.originalTurnId ?? session.pendingRubricDraft?.originalTurnId;
+        const draftId = session.pendingRubricDraft?.draftId;
+        if (!originalTurnId || !draftId || event.admissionIntent.turnId !== advancementExecutionTurnId(originalTurnId, "advancement", draftId)) {
+          throw new Error("AdvancementStore: original-task admission intent does not bind the execution identity");
+        }
         const expected = protocolDigest(
           "AdvancementOriginalTaskInput",
           1,
-          session.originalUserTask,
+          session.proposal ? advancementProposalExecutionInput("advancement") : session.originalUserTask,
         );
         if (event.admissionIntent.inputDigest !== expected) {
           throw new Error(
@@ -115,15 +186,29 @@ export function assertAdvancementEventBatchLegal(
             "AdvancementStore: original-task admission intent does not bind its surface principal",
           );
         }
+        if (!bindsAdvancementExecution(session, event.admissionIntent.turnOrigin.advancementExecution, { sessionId: session.id, mode: "advancement", draftId })) {
+          throw new Error("AdvancementStore: original-task admission intent does not bind its advancement execution");
+        }
         break;
       }
       case "original_task_directed": {
-        const session = requireAwaiting(work, event.sessionId);
+        const session = requireSession(work, event.sessionId);
         const intent = event.admissionIntent;
-        if (intent.turnId !== session.pendingRubricDraft?.originalTurnId ||
-            intent.inputDigest !== protocolDigest("AdvancementOriginalTaskInput", 1, session.originalUserTask) ||
+        // 来自提议的会话在草案阶段与待确认时都可降级；执行身份由原始输入身份派生
+        if (session.proposal
+          ? !isProposalStageStatus(session.status) && session.status !== "awaiting-rubric-confirmation"
+          : session.status !== "awaiting-rubric-confirmation") {
+          throw new Error(`AdvancementStore: session "${event.sessionId}" cannot be directed in its current state`);
+        }
+        const originalTurnId = session.proposal?.originalTurnId ?? session.pendingRubricDraft?.originalTurnId;
+        if (!originalTurnId || intent.turnId !== advancementExecutionTurnId(originalTurnId, "direct") ||
+            intent.inputDigest !== protocolDigest("AdvancementOriginalTaskInput", 1,
+              session.proposal ? advancementProposalExecutionInput("direct") : session.originalUserTask) ||
             intent.turnOrigin.triggeredBy !== intent.surfacePrincipal || event.exit.reason !== "user-cancelled") {
           throw new Error("AdvancementStore: direct admission does not bind the original task and principal");
+        }
+        if (!bindsAdvancementExecution(session, intent.turnOrigin.advancementExecution, { sessionId: session.id, mode: "direct" })) {
+          throw new Error("AdvancementStore: direct admission does not bind its advancement execution");
         }
         break;
       }
@@ -498,6 +583,19 @@ export function assertAdvancementEventBatchLegal(
     }
     applyAdvancementEvent(work, event);
   }
+}
+
+/**
+ * 执行意向里的推进执行标记：来自提议的会话必须带、且与会话、模式、被确认的草案逐项一致；
+ * 其余会话不带或一致。运行体按这个标记定位本次执行的推进会话。
+ */
+function bindsAdvancementExecution(
+  session: AdvancementFoldSession,
+  marker: TurnOriginAdvancementExecution | undefined,
+  expected: TurnOriginAdvancementExecution,
+): boolean {
+  if (!marker) return !session.proposal;
+  return canonicalize(marker) === canonicalize(expected);
 }
 
 function sameRunRecordRef(

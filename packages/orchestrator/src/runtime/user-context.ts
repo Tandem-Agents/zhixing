@@ -16,6 +16,7 @@ import {
   findLastUserIndex,
   replaceFirstText,
 } from "@zhixing/core/types";
+import type { UserContextContribution } from "./lifecycle.js";
 
 const CONTEXT_TAG = "<context>";
 const CONTEXT_TAG_END = "</context>";
@@ -26,20 +27,28 @@ const CONTEXT_TAG_END = "</context>";
  */
 export function prependContextBlock(
   messages: readonly Message[],
-  contributions: readonly string[],
+  contributions: readonly UserContextContribution[],
 ): Message[] {
   const sections = contributions
-    .map((c) => c.trim())
+    .map((c) => (typeof c === "string" ? c : c.text).trim())
     .filter((c) => c.length > 0);
-  if (sections.length === 0) return [...messages];
+  // 图片按贡献顺序附在当前 run 用户消息之后，与文字一样只进本次 run
+  const images = contributions.flatMap((c) => (typeof c === "string" ? [] : c.images ?? []));
+  if (sections.length === 0 && images.length === 0) return [...messages];
 
-  const block = `${CONTEXT_TAG}\n${sections.join("\n\n")}\n${CONTEXT_TAG_END}`;
   const result = [...messages];
   const idx = findLastUserIndex(result);
   if (idx === -1) return result;
 
-  const current = extractFirstText(result[idx]!);
-  const injected = current ? `${block}\n\n${current}` : block;
-  result[idx] = replaceFirstText(result[idx]!, injected);
+  if (sections.length > 0) {
+    const block = `${CONTEXT_TAG}\n${sections.join("\n\n")}\n${CONTEXT_TAG_END}`;
+    const current = extractFirstText(result[idx]!);
+    const injected = current ? `${block}\n\n${current}` : block;
+    result[idx] = replaceFirstText(result[idx]!, injected);
+  }
+  if (images.length > 0) {
+    const target = result[idx]!;
+    result[idx] = { ...target, content: [...target.content, ...images.map((source) => ({ type: "image" as const, source }))] };
+  }
   return result;
 }

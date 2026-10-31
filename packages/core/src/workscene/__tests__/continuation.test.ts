@@ -62,6 +62,22 @@ describe("workscene assignment-bound facts", () => {
       validateWorksceneContinuationCommit({}, { ...work, controlContext: [] }),
     ).not.toThrow();
   });
+
+  it("推进提议只在运行的耐久 ingress 启用了它时被提交接受，且不是 workscene 交接", () => {
+    const proposal = { postTurnControl: { intent: { kind: "propose_advancement" as const } } };
+    const enabled = {
+      ingress: { turnOrigin: { channel: "rpc" as const, enabledControls: ["propose_advancement"] } },
+      controlContext: [],
+    } as Parameters<typeof validateWorksceneContinuationCommit>[1];
+    expect(() => validateWorksceneControl(proposal.postTurnControl)).not.toThrow();
+    expect(() => validateWorksceneControl({ intent: { kind: "propose_advancement", sceneId: "x" } })).toThrow();
+    expect(() => validateWorksceneContinuationCommit(proposal, enabled)).not.toThrow();
+    expect(() => validateWorksceneContinuationCommit(proposal, { ...enabled, ingress: { turnOrigin: { channel: "rpc" } } } as typeof enabled)).toThrow(/not enabled/);
+    expect(() => validateWorksceneContinuationCommit(proposal, { ...enabled, ingress: {} } as typeof enabled)).toThrow(/not enabled/);
+    const source = { conversationId: "main-1", runId: "run-1", ingressId: "turn-1", current: true, state: "committed", result: "", surfacePrincipal: "rpc", control: proposal.postTurnControl } as const;
+    expect(worksceneContinuationTarget(source)).toBeUndefined();
+    expect(hasPendingWorksceneTask(proposal)).toBe(false);
+  });
 });
 function original(
   overrides: Partial<WorksceneContinuationSource> = {},

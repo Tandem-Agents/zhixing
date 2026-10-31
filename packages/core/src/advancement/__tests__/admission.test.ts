@@ -5,6 +5,30 @@ import {
 } from "../admission.js";
 import { userTurnInputFromText } from "../../types/user-input.js";
 
+describe("提议阶段的控制判断", () => {
+  const input = userTurnInputFromText("顺便只看本周的会议");
+
+  it("保守策略与无法解析的模型输出都保持原目标", async () => {
+    await expect(new ConservativeAdvancementAdmissionStrategy().decide({ input, hasProposalStageSession: true }))
+      .resolves.toMatchObject({ action: "keep-proposal" });
+    const broken = new LLMAdvancementAdmissionStrategy({ complete: async () => "{\"action\":\"start-advancement\"}" });
+    await expect(broken.decide({ input, hasProposalStageSession: true, hasOpenAdvancementSession: true }))
+      .resolves.toMatchObject({ action: "keep-proposal" });
+  });
+
+  it("五种动作按模型判断返回，提示词只列提议阶段的动作", async () => {
+    for (const action of ["keep-proposal", "supplement-proposal", "downgrade-to-direct", "cancel-pending-task", "replace-task"]) {
+      let prompt = "";
+      const strategy = new LLMAdvancementAdmissionStrategy({
+        complete: async (value) => { prompt = value; return JSON.stringify({ action, reason: "测试" }); },
+      });
+      await expect(strategy.decide({ input, hasProposalStageSession: true })).resolves.toMatchObject({ action });
+      expect(prompt).toContain("推进提议阶段控制判断器");
+      expect(prompt).not.toContain("keep-awaiting-confirmation");
+    }
+  });
+});
+
 describe("ConservativeAdvancementAdmissionStrategy", () => {
   const strategy = new ConservativeAdvancementAdmissionStrategy();
 

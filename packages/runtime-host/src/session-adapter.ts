@@ -257,6 +257,7 @@ export function createOwnerRuntimeAdapter(
           control: {
             abortSignal: controller.signal,
             modelCallResourceMeter: options?.modelCallResourceMeter,
+            modelProviderPhases: options?.modelProviderPhases,
           },
           correctness: {
             inputPort: options?.inputPort,

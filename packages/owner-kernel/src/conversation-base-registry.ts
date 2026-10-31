@@ -25,6 +25,7 @@ export function registerConversationBaseRepair(log: AuthorityCommitLog, id: stri
 }
 export function conversationBaseRepairRequired(log: AuthorityCommitLog, binding: ConversationBaseBinding): AuthorityPreparationRequired {
   const error = new AuthorityPreparationRequired([]);
+  error.observed = { reason: 'conversation-base-repair', positions: [] };
   error.prepareOutside = async () => {
     const context = contexts.get(log);
     if (!context) throw new TypeError('Conversation base has no registered verifier');

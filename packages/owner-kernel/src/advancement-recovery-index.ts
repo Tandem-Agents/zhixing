@@ -17,7 +17,7 @@ import { partitionedDecisionReducer, decisionSeedAtSource, decisionStartAtSource
 export const advancementRecoveryPrefix = (id: string) => 'conversation/' + hash(id) + '/advancement-recovery/';
 export const advancementPendingPrefix = 'advancement-pending/';
 const ordinal = (n: number) => String(n).padStart(16, '0');
-interface Root { head?: string; headOrder?: string; active?: string; original: number; cleanup: number; epoch: number; deleted?: boolean }
+interface Root { head?: string; headOrder?: string; active?: string; original: number; cleanup: number; epoch: number; deleted?: boolean; proposals?: number }
 interface Session { status: AdvancementSession['status']; createdAt: string; originalPending: boolean; direct?: boolean; originalRunId?: string; lower?: number; proxy?: string; evidence: Record<string,string>; rebuild?: string }
 export interface AdvancementCleanupWork { sessionId: string; attempt: AdvancementReviewAttempt }
 export interface AdvancementRunWork { runId: string; runIndex: number }
@@ -42,20 +42,36 @@ export async function advancementPendingRun(view: DurableProjectionReadContext, 
 export async function publishAdvancementPending(view: DurableProjectionReadContext, id: string, put: (key: string, value: unknown) => void, drop: (key: string) => void): Promise<void> {
   const p = advancementRecoveryPrefix(id), root = await advancementRecoveryRoot(view, id);
   const active = root.active && !root.deleted ? await view.get(p + 'session/' + hash(root.active)) as unknown as Session | undefined : undefined;
-  const work = root.cleanup > 0 || !root.deleted && (root.original > 0 || active &&
-    (active.proxy || Object.keys(active.evidence).length || active.rebuild || !!await advancementPendingRun(view, id, root.active!)));
+  const work = root.cleanup > 0 || !root.deleted && (root.original > 0 || (root.proposals ?? 0) > 0 || active &&
+    (active.status === 'proposed' || active.status === 'drafting' ||
+      active.proxy || Object.keys(active.evidence).length || active.rebuild || !!await advancementPendingRun(view, id, root.active!)));
   const key = advancementPendingPrefix + hash(id);
   if (work) put(key, id); else drop(key);
+}
+
+/** 本会话已提交、尚未被推进应用接受或拒绝的提议运行（按登记顺序）。 */
+export async function advancementPendingProposals(view: DurableProjectionReadContext, id: string): Promise<readonly string[]> {
+  const p = advancementRecoveryPrefix(id), root = await advancementRecoveryRoot(view, id);
+  if (root.deleted || !(root.proposals ?? 0)) return [];
+  const page = await view.scan({ gte: p + 'proposal/', lt: p + 'proposal/￿' }, 16);
+  return page.entries.map(row => (row.value as unknown as { runId: string }).runId);
 }
 
 export async function foldAdvancementRecovery(input: {
   id: string; view: DurableProjectionReadContext; put(key: string, value: unknown): void; drop(key: string): void;
   event?: AdvancementControlEvent; committed?: { runId: string; record: Omit<TranscriptRunRecord, 'messages'> }; lifecycle?: 'clear' | 'delete';
+  /** 带推进提议的已提交运行：与运行同一提交登记“提议待接受”。 */
+  proposal?: { runId: string };
 }): Promise<void> {
   const {id,view,put,drop,event}=input,p=advancementRecoveryPrefix(id);
   if(event?.type==='submission_settled')return;
-  if (!event && await view.get(p+'root')===undefined) return;
+  if (!event && !input.proposal && await view.get(p+'root')===undefined) return;
   const root=await advancementRecoveryRoot(view,id);
+  const proposalKey=(runId:string)=>p+'proposal/'+hash(runId);
+  if(input.proposal){
+    if(!root.deleted&&await view.get(proposalKey(input.proposal.runId))===undefined){put(proposalKey(input.proposal.runId),{runId:input.proposal.runId});root.proposals=(root.proposals??0)+1;}
+    put(p+'root',root);await publishAdvancementPending(view,id,put,drop);return;
+  }
   if(input.committed&&(!root.active||root.deleted))return;
   const sessionKey=(sid:string)=>p+'session/'+hash(sid);
   const runKey=(sid:string,index:number)=>p+'runs/'+root.epoch+'/'+hash(sid)+'/'+ordinal(index);
@@ -63,11 +79,20 @@ export async function foldAdvancementRecovery(input: {
   if(input.lifecycle){root.epoch++;if(input.lifecycle==='delete')root.deleted=true;}
   if(event){
     const sid=event.sessionId,key=sessionKey(sid),prior=await view.get(key) as unknown as Session|undefined;
-    let s:Session=prior?structuredClone(prior):{status:'awaiting-rubric-confirmation',createdAt:event.timestamp,originalPending:false,evidence:{}};
-    if(!prior&&event.type!=='session_created')throw new TypeError('Advancement pending state has no creation fact');
+    let s:Session=prior?structuredClone(prior):{status:event.type==='proposal_accepted'?'proposed':event.type==='proposal_rejected'?'cancelled':'awaiting-rubric-confirmation',createdAt:event.timestamp,originalPending:false,evidence:{}};
+    if(!prior&&event.type!=='session_created'&&event.type!=='proposal_accepted'&&event.type!=='proposal_rejected')throw new TypeError('Advancement pending state has no creation fact');
     const wasOriginal=prior?original(prior):false;
     switch(event.type){
       case 'session_created':break;
+      case 'proposal_accepted':case 'proposal_rejected':
+        // 接受或拒绝都了结“提议待接受”
+        if(await view.get(proposalKey(event.runId))!==undefined){drop(proposalKey(event.runId));root.proposals=Math.max(0,(root.proposals??0)-1);}
+        break;
+      case 'proposal_supplemented':if(s.status==='draft-failed'||s.status==='draft-uncertain')s.status='proposed';break;
+      case 'draft_attempt_transitioned':
+        if(event.attempt.phase==='invoking')s.status='drafting';else if(event.attempt.phase==='failed')s.status='draft-failed';else if(event.attempt.phase==='deferred')s.status='draft-uncertain';
+        break;
+      case 'proposal_drafted':s.status='awaiting-rubric-confirmation';break;
       case 'rubric_confirmed':s.status='active';s.originalPending=true;s.direct=false;break;
       case 'original_task_directed':s.status='cancelled';s.originalPending=true;s.direct=true;break;
       case 'original_task_admission_rejected':s.status='cancelled';s.originalPending=false;break;
@@ -90,7 +115,7 @@ export async function foldAdvancementRecovery(input: {
     if(!prior&&(!root.headOrder||s.createdAt>=root.headOrder)){root.head=sid;root.headOrder=s.createdAt;}
     const isOriginal=original(s);root.original+=Number(isOriginal)-Number(wasOriginal);
     if(isOriginal)put(p+'original/'+sid,sid);else drop(p+'original/'+sid);
-    if(s.status==='active'||s.status==='awaiting-rubric-confirmation')root.active=sid;else if(root.active===sid)delete root.active;
+    if(s.status==='active'||s.status==='awaiting-rubric-confirmation'||s.status==='proposed'||s.status==='drafting'||s.status==='draft-failed'||s.status==='draft-uncertain')root.active=sid;else if(root.active===sid)delete root.active;
     // Omit undefined DTO fields before publishing JSON index rows.
     put(key,JSON.parse(JSON.stringify(s)));
     if(event.type==='review_attempt_transitioned'||event.type==='review_root_settled'){
@@ -160,6 +185,9 @@ export function registerAdvancementRecoveryProjection(log:AuthorityCommitLog,art
           const event=stored&&typeof stored==='object'&&'ref'in stored?JSON.parse(Buffer.from(await artifacts.get((stored as {ref:ArtifactRef}).ref)).toString('utf8')):stored;
           await foldAdvancementRecovery({id,view:local,put,drop,event:event as AdvancementControlEvent});
         }else if(body.t==='committed'){
+          // 带提议的提交在“无活跃会话即跳过”之前登记义务；标记来自已核对的提交摘要，不为普通提交读正文
+          if((body.readSummary as {advancementProposal?:boolean}|undefined)?.advancementProposal===true)
+            await foldAdvancementRecovery({id,view:local,put,drop,proposal:{runId:body.runId as string}});
           const root=await advancementRecoveryRoot(local,id);if(!root.active||root.deleted)continue;
           const binding=await loadCommittedBundleBinding(envelope as unknown as ConversationFactGroup,artifacts,candidate=>candidate.assignmentId===body.assignmentId);
           const record='metadata'in binding.closure?binding.closure.metadata:binding.closure.runRecord;

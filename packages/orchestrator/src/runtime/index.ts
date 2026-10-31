@@ -130,6 +130,7 @@ export {
   type LifecycleWindowOpenContext,
   type LifecycleBeforeRunContext,
   type LifecycleAfterRunContext,
+  type UserContextContribution,
   type LifecycleWindowCloseContext,
   type WindowOpenReason,
   type WindowCloseReason,

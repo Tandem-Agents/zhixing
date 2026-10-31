@@ -50,8 +50,10 @@ import {
   createAdvancementRecoveryMaintenance,
   DeferredRubricPublication,
   renderRecentContextFromMessages,
+  type AdvancementController,
   type AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services/advancement";
+import { adjudicateAdvancementExecution } from "@zhixing/core/advancement/execution-context";
 import {
   DeferredScheduleIntentProducer,
   type DeferredScheduleIntentResult,
@@ -819,10 +821,19 @@ export class LocalConversationOwnerAssembly {
     });
 
     let protocol!: ConversationProtocolRuntime;
+    // 推进应用在协议运行时之后建成；推进执行材料在指派时才裁决，按那时已建成的控制器精确取会话
+    let advancementExecutionSessions: Pick<AdvancementController, "loadExactSession"> | undefined;
     protocol = new ConversationProtocolRuntime({
       owner,
       manager: managerAssembly.resolve,
       recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
+      advancementExecution: {
+        prepare: async ({ conversationId, turnId, binding }) => {
+          if (!advancementExecutionSessions) throw new Error("推进应用尚未就绪，推进执行材料留待恢复时裁决");
+          return adjudicateAdvancementExecution(
+            await advancementExecutionSessions.loadExactSession(conversationId, binding.sessionId), binding, turnId);
+        },
+      },
       losslessDataPlane: Object.freeze({
         kind: "absent",
         reason: "executor-only",
@@ -968,6 +979,7 @@ export class LocalConversationOwnerAssembly {
         }),
       }),
     });
+    advancementExecutionSessions = advancement;
 
     const conversationExists = (conversationId: string) =>
       protocol.sessionExists(conversationId);

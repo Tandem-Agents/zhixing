@@ -60,6 +60,20 @@ export interface TurnOrigin {
       postTurnControl?: boolean;
     };
   };
+  /** 产品应用为本次运行启用的排他初始控制工具名；不由模型或接入参数指定，也不授予权限。 */
+  enabledControls?: readonly string[];
+  /**
+   * 推进原任务的执行运行：宿主在确认或降级时冻结进执行意向，运行据此精确定位推进会话、模式与确认的草案；
+   * 不由模型、消息正文或接入参数指定。
+   */
+  advancementExecution?: TurnOriginAdvancementExecution;
+}
+
+export interface TurnOriginAdvancementExecution {
+  readonly sessionId: string;
+  readonly mode: "advancement" | "direct";
+  /** 确认执行时为被确认的草案；降级执行不带。 */
+  readonly draftId?: string;
 }
 
 /**
@@ -82,9 +96,20 @@ export function generateTurnId(): string {
   return `turn_${ts}_${rand}`;
 }
 
+/**
+ * 宿主裁决、本次运行必须带上的上下文：文字进当前用户消息的上下文块，图片随本次消息附上；
+ * 运行体原样注入发送视图，不落盘。
+ */
+export interface RequiredUserContext {
+  readonly text: string;
+  readonly images?: readonly import("./messages.js").ImageSource[];
+}
+
 export interface TurnContext {
   /** 产品应用投影的当前可停止委托，仅供本次运行定位，不产生授权。 */
   worksceneTasks?: readonly import("../workscene/continuation.js").WorksceneTaskReference[];
+  /** 指派投影里宿主为本次运行裁决的必需上下文（如推进执行运行的原任务与契约），运行体必须注入。 */
+  requiredUserContext?: readonly RequiredUserContext[];
   /** 全局唯一 turn 标识（用于观测 / Outbox Turn Slot 关联）。 */
   turnId?: string;
   /** 当前 turn 绑定的用户 target */
@@ -465,6 +490,15 @@ export interface ToolDefinition {
    * 未设置表示不限制；超限调用返回输入级 isError，不会进入工具实现。
    */
   maxCallsPerTurn?: number;
+
+  /**
+   * 排他初始控制工具。只有本运行还没有启动过任何工具、且产品经 TurnOrigin.enabledControls
+   * 为本运行启用了它时，才能作为批次里唯一被启动的调用；同批其他调用不启动。它成功后本运行结束，
+   * 失败则本运行以错误终止。validateInput 在任何工具启动前校验入参，返回错误文本时整批都不启动。
+   */
+  exclusiveInitialControl?: {
+    readonly validateInput: (input: Record<string, unknown>) => string | undefined;
+  };
 
   /**
    * 此工具跨越的安全边界（forward-looking 字段）。

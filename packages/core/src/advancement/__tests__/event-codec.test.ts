@@ -13,6 +13,52 @@ const NOW = "2026-08-04T00:00:00.000Z";
 const verifier: ProtocolSignatureVerifier = { verify() {} };
 
 describe("isAdvancementControlEvent", () => {
+  it("提议阶段的四种事件按精确形状接受，多余字段或非法相位被拒", () => {
+    const task = { parts: [{ type: "text" as const, text: "原任务" }] };
+    const accepted = { type: "proposal_accepted", timestamp: NOW, sessionId: "s", conversationId: "c", proposalId: "p", runId: "r", originalTurnId: "t", originalUserTask: task };
+    const supplemented = { type: "proposal_supplemented", timestamp: NOW, sessionId: "s", supplement: task };
+    const attempt = { type: "draft_attempt_transitioned", timestamp: NOW, sessionId: "s", attempt: { generation: 1, revision: 0, phase: "invoking" } };
+    const drafted = {
+      type: "proposal_drafted", timestamp: NOW, sessionId: "s", revision: 0,
+      pendingRubricDraft: {
+        draftId: "d", originalTurnId: "t", source: "generated", candidateRubricIds: [], title: "准则", description: "描述",
+        content: { passCriteria: ["通过"], evidenceRequirements: [], failureHandling: [{ id: "f", scenario: "失败", reply: "修复" }] },
+        createdAt: NOW,
+      },
+    };
+    for (const event of [accepted, supplemented, attempt, drafted]) {
+      expect(isAdvancementControlEvent(event, verifier)).toBe(true);
+      expect(isAdvancementControlEvent({ ...event, extra: true }, verifier)).toBe(false);
+    }
+    expect(isAdvancementControlEvent({ ...attempt, attempt: { ...attempt.attempt, detail: "调用者已不在", phase: "deferred" } }, verifier)).toBe(true);
+    expect(isAdvancementControlEvent({ ...attempt, attempt: { ...attempt.attempt, phase: "started" } }, verifier)).toBe(false);
+    expect(isAdvancementControlEvent({ ...attempt, attempt: { ...attempt.attempt, generation: 0 } }, verifier)).toBe(false);
+    expect(isAdvancementControlEvent({ ...accepted, originalUserTask: "原任务" }, verifier)).toBe(false);
+  });
+
+  it("执行意向的 turnOrigin 可带推进执行标记，标记形状按模式精确校验", () => {
+    const directed = (advancementExecution?: unknown) => ({
+      type: "original_task_directed", timestamp: NOW, sessionId: "s",
+      exit: { reason: "user-cancelled", message: "直接执行", occurredAt: NOW },
+      admissionIntent: {
+        turnId: "t:direct", surfacePrincipal: "rpc:p", inputDigest: `sha256:${"1".repeat(64)}`,
+        turnOrigin: { channel: "rpc", triggeredBy: "rpc:p", ...(advancementExecution === undefined ? {} : { advancementExecution }) },
+      },
+    });
+    expect(isAdvancementControlEvent(directed(), verifier)).toBe(true);
+    expect(isAdvancementControlEvent(directed({ sessionId: "s", mode: "direct" }), verifier)).toBe(true);
+    expect(isAdvancementControlEvent(directed({ sessionId: "s", mode: "advancement", draftId: "d" }), verifier)).toBe(true);
+    for (const malformed of [
+      { sessionId: "s", mode: "advancement" },
+      { sessionId: "s", mode: "direct", draftId: "d" },
+      { sessionId: "", mode: "direct" },
+      { sessionId: "s", mode: "other" },
+      { sessionId: "s", mode: "direct", extra: true },
+    ]) {
+      expect(isAdvancementControlEvent(directed(malformed), verifier)).toBe(false);
+    }
+  });
+
   it("accepts the closed nested review and window shapes", () => {
     expect(isAdvancementControlEvent(reviewed(), verifier)).toBe(true);
     expect(isAdvancementControlEvent(windowUpdated(), verifier)).toBe(true);

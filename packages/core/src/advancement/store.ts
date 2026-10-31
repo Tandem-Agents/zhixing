@@ -18,6 +18,7 @@ import {
   runReviewedEvents,
   type AdvancementFoldMap,
 } from "./reducer.js";
+import { advancementProposalSessionId } from "./proposal-identity.js";
 import type {
   AdvancementCompletedEvent,
   AdvancementEvidenceAttempt,
@@ -108,6 +109,53 @@ export class AdvancementStore {
       await this.appendEventInLock(conversationId, { type: "session_regenerated", sessionId: previousSessionId, nextSessionId, timestamp: draft.createdAt, pendingRubricDraft: draft, exit }, submission);
       const sessions = await this.loadConversationSessionsInLock(conversationId);
       return { exited: this.requireSession(sessions, previousSessionId), created: this.requireSession(sessions, nextSessionId) };
+    });
+  }
+
+  /** 接受主 Agent 提议：同一提议重复接受返回同一会话；已有未终结会话时记为未被接受（建会话并同批取消）。 */
+  async acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("../types/user-input.js").UserTurnInput }>): Promise<AdvancementSession> {
+    return this.withConversationLock(input.conversationId, async () => {
+      const sessionId = advancementProposalSessionId(input.proposalId);
+      const sessions = await this.loadConversationSessionsInLock(input.conversationId);
+      const existing = sessions.find((session) => session.id === sessionId);
+      if (existing) return existing;
+      const timestamp = new Date().toISOString();
+      const identity = {
+        timestamp,
+        sessionId,
+        conversationId: input.conversationId,
+        proposalId: input.proposalId,
+        runId: input.runId,
+        originalTurnId: input.originalTurnId,
+        originalUserTask: input.originalUserTask,
+      };
+      await this.appendEventsInLock(input.conversationId, [sessions.some(isOpenAdvancementSession)
+        ? { type: "proposal_rejected", ...identity, exit: { reason: "superseded", message: "提议未被接受：会话里已有未结束的推进。", occurredAt: timestamp } }
+        : { type: "proposal_accepted", ...identity }]);
+      return this.requireSession(await this.loadConversationSessionsInLock(input.conversationId), sessionId);
+    });
+  }
+
+  async supplementProposal(conversationId: string, sessionId: string, supplement: import("../types/user-input.js").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
+    return this.withConversationLock(conversationId, async () => {
+      await this.appendEventInLock(conversationId, { type: "proposal_supplemented", timestamp: new Date().toISOString(), sessionId, supplement }, submission);
+      return this.requireSession(await this.loadConversationSessionsInLock(conversationId), sessionId);
+    });
+  }
+
+  async transitionDraftAttempt(conversationId: string, sessionId: string, attempt: import("./types.js").AdvancementDraftAttempt): Promise<AdvancementSession> {
+    return await this.appendDomainEvent(conversationId, sessionId, { type: "draft_attempt_transitioned", timestamp: new Date().toISOString(), sessionId, attempt });
+  }
+
+  /** 写入已消费的尝试与草案（并入截至 revision 的补充），会话进入待确认。 */
+  async persistProposalDraft(conversationId: string, sessionId: string, attempt: import("./types.js").AdvancementDraftAttempt, revision: number, draft: RubricContractDraftSnapshot): Promise<AdvancementSession> {
+    return this.withConversationLock(conversationId, async () => {
+      const timestamp = new Date().toISOString();
+      await this.appendEventsInLock(conversationId, [
+        { type: "draft_attempt_transitioned", timestamp, sessionId, attempt },
+        { type: "proposal_drafted", timestamp, sessionId, revision, pendingRubricDraft: draft },
+      ]);
+      return this.requireSession(await this.loadConversationSessionsInLock(conversationId), sessionId);
     });
   }
 

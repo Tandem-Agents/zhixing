@@ -5,6 +5,7 @@ import {
   describeAdvancementExitReason,
   renderAdvancementControlEventLines,
   renderAdvancementDetailLines,
+  renderResumedAdvancementNotice,
   summarizeReview,
 } from "../advancement-presentation.js";
 import { stripAnsi } from "../tui/ansi.js";
@@ -51,6 +52,34 @@ describe("summarizeReview", () => {
     expect(
       summarizeReview(review({ decision: "passed", unmetCriteria: [] })),
     ).toBe("推进验收：已通过");
+  });
+});
+
+describe("推进提议阶段的呈现", () => {
+  it("草案失败或结果不明：说明原任务保留与可继续的操作", () => {
+    const failed = plain(renderAdvancementControlEventLines(
+      "advancement:proposal_draft_failed",
+      { advancementSessionId: "adv-1", outcome: "failed", message: "模型不可用" },
+      WIDTH * 2,
+    ));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toContain("验收标准起草失败：模型不可用");
+    expect(failed[0]).toContain("“直接执行”或“取消”");
+    const uncertain = plain(renderAdvancementControlEventLines(
+      "advancement:proposal_draft_failed",
+      { advancementSessionId: "adv-1", outcome: "uncertain" },
+      WIDTH * 2,
+    ));
+    expect(uncertain[0]).toContain("起草结果不明");
+    expect(uncertain[0]).toContain("原任务保留");
+    // 草案就绪由确认面承载，不出系统行
+    expect(renderAdvancementControlEventLines("advancement:contract_draft", { advancementSessionId: "adv-1" }, WIDTH)).toEqual([]);
+  });
+
+  it("恢复提示覆盖提议阶段状态", () => {
+    expect(stripAnsi(renderResumedAdvancementNotice({ status: "drafting" }, WIDTH))).toContain("已提出推进，正在起草验收标准");
+    expect(stripAnsi(renderResumedAdvancementNotice({ status: "draft-failed" }, WIDTH))).toContain("起草失败，原任务保留");
+    expect(stripAnsi(renderResumedAdvancementNotice({ status: "awaiting-rubric-confirmation" }, WIDTH))).toContain("待确认");
   });
 });
 

@@ -15,6 +15,7 @@ import {
   type ConfirmedRubricSnapshot,
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
+  advancementExecutionTurnId,
 } from "@zhixing/core/advancement";
 import type {
   UserTurnInput,
@@ -151,9 +152,12 @@ function createInput(
   };
 }
 
+/** 确认后执行原任务的派生执行身份：原始输入 turn-1 与被确认的草案 draft-1。 */
+const EXECUTION_TURN_ID = advancementExecutionTurnId("turn-1", "advancement", "draft-1");
+
 function originalTaskAdmissionIntent() {
   return {
-    turnId: "turn-1",
+    turnId: EXECUTION_TURN_ID,
     surfacePrincipal: "surface:user-1",
     turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:user-1" },
     inputDigest: protocolDigest(
@@ -273,7 +277,7 @@ describe("SessionAdvancementStore", () => {
       "session-1",
       confirmed(),
       {
-        turnId: "turn-1",
+        turnId: EXECUTION_TURN_ID,
         surfacePrincipal: "surface:user-1",
         turnOrigin: { channel: "rpc", triggeredBy: "surface:user-1" },
         inputDigest,
@@ -283,17 +287,17 @@ describe("SessionAdvancementStore", () => {
     expect(active.originalTaskAdmission).toEqual({
       mode: "advancement",
       status: "pending",
-      intent: expect.objectContaining({ inputDigest, turnId: "turn-1" }),
+      intent: expect.objectContaining({ inputDigest, turnId: EXECUTION_TURN_ID }),
     });
 
     const settled = await store.settleOriginalTaskAdmission(
       "conv-1",
       "session-1",
-      { turnId: "turn-1", inputDigest, runId: "run-1" },
+      { turnId: EXECUTION_TURN_ID, inputDigest, runId: "run-1" },
     );
     expect(settled.originalTaskAdmission).toEqual({
       status: "admitted", mode: "advancement",
-      intent: expect.objectContaining({ inputDigest, turnId: "turn-1" }),
+      intent: expect.objectContaining({ inputDigest, turnId: EXECUTION_TURN_ID }),
       runId: "run-1",
     });
   });

@@ -1413,10 +1413,28 @@ function validateTurnOrigin(value: NonNullable<StreamFrameMeta["turnOrigin"]>): 
       ...(value.triggeredBy === undefined ? [] : ["triggeredBy"]),
       ...(value.worksceneContinuation === undefined ? [] : ["worksceneContinuation"]),
       ...(value.messageIdentity === undefined ? [] : ["messageIdentity"]),
+      ...(value.enabledControls === undefined ? [] : ["enabledControls"]),
+      ...(value.advancementExecution === undefined ? [] : ["advancementExecution"]),
     ],
     "Stream turn origin",
   );
   assertProtocolIdentifier(value.channel, "Stream turn origin channel");
+  if (value.advancementExecution !== undefined) {
+    const execution = value.advancementExecution;
+    assertPlainObject(execution, "Stream turn origin advancement execution");
+    assertExactKeys(execution, ["sessionId", "mode", ...(execution.draftId === undefined ? [] : ["draftId"])], "Stream turn origin advancement execution");
+    assertProtocolIdentifier(execution.sessionId, "Stream turn origin advancement session");
+    if (execution.mode !== "advancement" && execution.mode !== "direct") throw new TypeError("Invalid stream turn origin advancement execution mode");
+    if ((execution.mode === "advancement") !== (execution.draftId !== undefined)) throw new TypeError("Stream turn origin advancement execution draft must match its mode");
+    if (execution.draftId !== undefined) assertProtocolIdentifier(execution.draftId, "Stream turn origin advancement draft");
+  }
+  if (value.enabledControls !== undefined) {
+    if (!Array.isArray(value.enabledControls) || value.enabledControls.length > 8 ||
+        new Set(value.enabledControls).size !== value.enabledControls.length) {
+      throw new TypeError("Stream turn origin enabledControls must be a short list of distinct names");
+    }
+    for (const name of value.enabledControls) assertProtocolIdentifier(name, "Stream turn origin enabled control");
+  }
   if (value.messageIdentity !== undefined) validateMessageInputIdentity(value.messageIdentity);
   if (value.worksceneContinuation !== undefined) {
     assertPlainObject(value.worksceneContinuation, "Stream continuation");

@@ -3,10 +3,12 @@ import type { ConversationCommitSummary } from "../contracts/conversation-recove
 
 /** 提交读摘要的结构校验：契约文件只承载类型，校验逻辑住在协议层。 */
 export function validateConversationCommitSummary(value: unknown): asserts value is ConversationCommitSummary {
-  assertRecordKeys(value, ['runIndex', 'handedOff', 'conflict'], ['usage', 'navigation', 'controlRecovery'], 'Committed read summary');
+  assertRecordKeys(value, ['runIndex', 'handedOff', 'conflict'], ['usage', 'navigation', 'controlRecovery', 'advancementProposal'], 'Committed read summary');
   assertNonNegativeSafeInteger(value.runIndex, 'Committed run index');
   if (typeof value.handedOff !== 'boolean' || typeof value.conflict !== 'boolean') throw new TypeError('Committed control summary must contain boolean facts');
   if (value.controlRecovery !== undefined && typeof value.controlRecovery !== 'boolean') throw new TypeError('Committed recovery summary must be boolean');
+  // 推进提议标记只在带提议时出现，取值只能是 true
+  if (value.advancementProposal !== undefined && value.advancementProposal !== true) throw new TypeError('Committed advancement proposal mark must be true when present');
   if (value.usage !== undefined) {
     assertRecordKeys(value.usage, ['inputTokens', 'outputTokens'], ['totalInputTokens', 'cacheReadTokens', 'cacheWriteTokens'], 'Committed usage');
     for (const [key, number] of Object.entries(value.usage)) if (number !== undefined) assertNonNegativeSafeInteger(number, `Committed usage ${key}`);

@@ -1,5 +1,6 @@
 import type { CommandDef, ArgChoiceProvider } from '@zhixing/core/typeahead';
 import type { PostTurnControlOutcome } from '@zhixing/core/types';
+import { ADVANCEMENT_PROPOSED_NOTICE, describeAdvancementProposalStage } from '@zhixing/core/advancement/proposal-messages';
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import type { ActiveConversation, ConversationController, TurnOutcome } from '../runtime/conversation-controller.js';
 import type { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
@@ -12,11 +13,13 @@ export interface TerminalTurnOutcome {
   readonly reason: TurnOutcome['result']['reason'];
   readonly message: string;
   readonly bodyPending?: true;
-  readonly control?: { readonly navigation?: Navigation; readonly handedOff: boolean; readonly conflict: boolean };
+  readonly control?: { readonly navigation?: Navigation; readonly handedOff: boolean; readonly conflict: boolean; readonly advancementProposal?: true };
 }
 export function projectCommittedTerminalOutcome(summary: import('@zhixing/core/contracts').ConversationCommitSummary): TerminalTurnOutcome {
-  return { reason: 'completed', message: '本次运行已提交。', bodyPending: true,
-    control: { navigation: summary.navigation, handedOff: summary.handedOff, conflict: summary.conflict } };
+  // 提议运行结束不是任务完成：状态取推进领域的“已提出推进”
+  return { reason: 'completed', message: summary.advancementProposal ? ADVANCEMENT_PROPOSED_NOTICE : '本次运行已提交。', bodyPending: true,
+    control: { navigation: summary.navigation, handedOff: summary.handedOff, conflict: summary.conflict,
+      ...(summary.advancementProposal ? { advancementProposal: true as const } : {}) } };
 }
 
 /** Keep navigation, never the task handoff body or the complete agent result. */
@@ -32,6 +35,9 @@ export function projectTerminalTurnOutcome(outcome: TurnOutcome): TerminalTurnOu
   }
   const control = outcome.postTurnControl, intent = control?.intent;
   if (!control || !intent) return { reason, message };
+  if (intent.kind === 'propose_advancement' && reason === 'completed') {
+    return { reason, message: ADVANCEMENT_PROPOSED_NOTICE, control: { handedOff: false, conflict: !!control.conflict, advancementProposal: true } };
+  }
   const handedOff = !!intent.handoff?.remaining.length;
   const navigation = handedOff ? undefined : intent.kind === 'enter' ? { kind: 'enter' as const, sceneId: intent.sceneId }
     : intent.kind === 'exit' ? { kind: 'exit' as const }
@@ -90,7 +96,8 @@ export class TerminalSessionCommands {
     const entries = command === 'resume'
       ? (await this.options.controller()!.listConversationPage({ limit: 100, query })).conversations.map(item => ({ id: item.conversationId, name: item.name,
         description: item.advancementPreparing ? '升级校验中' : item.advancement?.status === 'awaiting-rubric-confirmation' ? '待确认推进任务'
-          : item.advancement?.status === 'active' ? '推进中' : item.lastActiveAt }))
+          : item.advancement?.status === 'active' ? '推进中'
+            : item.advancement ? describeAdvancementProposalStage(item.advancement.status) : item.lastActiveAt }))
       : (await this.options.workscene.list()).map(item => ({ id: item.sceneId, name: item.name,
         description: item.workspace ? [item.workspace.deviceName, item.workspace.workspaceName].filter(Boolean).join(' / ') : '未绑定工作区' }));
     return boundedControlProjection(entries, 1024 * 1024);

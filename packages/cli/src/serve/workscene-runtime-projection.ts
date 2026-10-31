@@ -15,6 +15,8 @@ import {
   type WorksceneWorkspaceReference,
 } from "@zhixing/core/workscene/application";
 import { zhixingProfile } from "./zhixing-agent-profile.js";
+import { createAdvancementProposalTool } from "./advancement-proposal-tool.js";
+import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing/core/advancement/proposal-identity";
 import { powerProfile } from "./workscene-agent-guidance.js";
 import {
   createKernelWindowPromptProjection,
@@ -143,6 +145,8 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
           .map((tool) => tool.name),
         ...mcp.tools.map((tool) => tool.name),
         ...Object.values(WORKSCENE_PRODUCT_TOOL_IDS),
+        // 推进提议常驻会话运行时；冻结的执行画像按本目录过滤工具
+        ADVANCEMENT_PROPOSAL_TOOL,
       ]);
       return Object.freeze({
         tools: Object.freeze([...tools].sort()),
@@ -161,6 +165,8 @@ function mainProductTools(
     ...createWorksceneTaskTools(createWorksceneRunToolApplication()),
     createWorksceneChangeApproveTool(application, workscenes),
     createWorksceneListTool(application, workscenes),
+    // 推进提议常驻会话运行时；只有宿主发送路径判定为新任务作用域的运行才启用
+    createAdvancementProposalTool(),
   ];
 }
 
@@ -176,6 +182,7 @@ function sceneProductTools(
     createWorksceneRenameCurrentTool(identity, application),
     createWorksceneSetWorkdirCurrentTool(identity, application, workscenes, createWorksceneRunToolApplication()),
     createWorksceneClearWorkdirCurrentTool(identity, application, createWorksceneRunToolApplication()),
+    createAdvancementProposalTool(),
   ];
 }
 

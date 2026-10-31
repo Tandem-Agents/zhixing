@@ -6,6 +6,11 @@ import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
 import { RpcClientClosedError } from '@zhixing/server';
 import { PendingInputReceiptError, RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js';
 import { boundedControlProjection } from '../../runtime/control-projection.js';
+import { ADVANCEMENT_PROPOSED_NOTICE, advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
+import { projectCommittedTerminalOutcome } from '../session-commands.js';
+import type { AdvancementProposalFact } from '@zhixing/core/advancement';
+import { createControlSessionEventEnvelope } from '@zhixing/rpc/session-events';
+import { advancementProposalEvent } from '../../serve/advancement-proposal-events.js';
 
 // Run the production page methods with controlled transport/controller results.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
@@ -154,4 +159,102 @@ it.each([false,true])('hands off a saved revision across an epoch change (receip
     expect(mutations).toBe(1);expect(queries).toBe(recovery?1:0);
     expect(facade.hasPendingAdvancement('conv-1')).toBe(false);
   } finally {controller.dispose();}
+});
+
+// 提议后的草案异步就绪或起草失败：生产方法原样抽出，其余协作者替身
+const proposalMethods = ['#proposalDraftReady', '#proposalDraftStalled', '#followTurn'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source).replace(/#/gu, '')).join('\n');
+const DraftReadyFixture = new Function('advancementProposalStalledMessage', ts.transpile('class DraftReadyFixture {' + proposalMethods + '} return DraftReadyFixture;', {target: ts.ScriptTarget.ES2022}))(advancementProposalStalledMessage);
+function draftReadyFixture(overrides: Record<string, unknown> = {}) {
+  const target = new DraftReadyFixture();
+  Object.assign(target, { abort: new AbortController(), controller: {current: {conversationId: 'conv-1'}}, state: {activeTurnPromise: null},
+    mainView: {connected: true}, submittingInput: false, resolveRubric: vi.fn(async () => {}), publish: vi.fn(async () => {}),
+    background: vi.fn((run: () => Promise<void>) => { void run(); }),
+    processSession: {end: vi.fn()}, outputProjection: {end: vi.fn(), drain: vi.fn(async () => {})} }, overrides);
+  return target;
+}
+const stageParser = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'proposalStageEvent')!.getText(source);
+const proposalStageEvent = new Function(ts.transpile(stageParser + '\nreturn proposalStageEvent;', {target: ts.ScriptTarget.ES2022}))();
+// 提议运行的结束结果由测试控制何时到达
+function proposalTurn(turnId: string) {
+  let settle!: () => void;
+  const outcome = new Promise<unknown>(resolve => { settle = () => resolve(projectCommittedTerminalOutcome({runIndex: 1, handedOff: false, conflict: false, advancementProposal: true})); });
+  return {turn: {conversationId: 'conv-1', turnId, runId: turnId, outcome}, settle};
+}
+
+describe('proposal draft ready surfaces the rubric confirmation', () => {
+  it('opens the confirmation from the current snapshot when the originating page is idle', () => {
+    const target = draftReadyFixture();
+    target.proposalDraftReady('conv-1', 'turn-1');
+    expect(target.background).toHaveBeenCalledTimes(1);
+    expect(target.resolveRubric).toHaveBeenCalledTimes(1);
+  });
+  it('leaves a reachable entry instead of interrupting a running operation', () => {
+    const target = draftReadyFixture({state: {activeTurnPromise: Promise.resolve()}, mainView: {connected: true, choices: [{id: 'other', label: '其他'}]}});
+    target.proposalDraftReady('conv-1', 'turn-1');
+    expect(target.background).not.toHaveBeenCalled();
+    expect(target.mainView.choices).toEqual([{id: 'other', label: '其他'}, {id: 'rubric-resume', label: '确认验收标准'}]);
+    expect(target.publish).toHaveBeenCalledTimes(1);
+  });
+  it('ignores another conversation and an already pending confirmation', () => {
+    const other = draftReadyFixture();
+    other.proposalDraftReady('conv-2', 'turn-1');
+    const pending = draftReadyFixture({deferredRubric: {...identity}});
+    pending.proposalDraftReady('conv-1', 'turn-1');
+    for (const target of [other, pending]) {
+      expect(target.background).not.toHaveBeenCalled();
+      expect(target.publish).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('proposal stage notice follows the latest draft outcome', () => {
+  it('replaces the drafting notice when the draft fails after the proposal run ended', async () => {
+    const target = draftReadyFixture(), {turn, settle} = proposalTurn('turn-1');
+    target.followTurn(turn); settle(); await target.state.activeTurnPromise;
+    expect(target.mainView.message).toBe(ADVANCEMENT_PROPOSED_NOTICE);
+    target.proposalDraftStalled('conv-1', 'turn-1', 'failed');
+    expect(target.mainView.message).toBe(advancementProposalStalledMessage('failed'));
+    expect(target.mainView.message).not.toMatch(/正在起草/u);
+    expect(target.publish).toHaveBeenLastCalledWith(target.mainView);
+  });
+  it('keeps the failed outcome when it arrives before the proposal run settles', async () => {
+    const target = draftReadyFixture(), {turn, settle} = proposalTurn('turn-1');
+    target.followTurn(turn);
+    target.proposalDraftStalled('conv-1', 'turn-1', 'uncertain');
+    settle(); await target.state.activeTurnPromise;
+    expect(target.mainView.message).toBe(advancementProposalStalledMessage('uncertain'));
+  });
+  it('keeps the ready entry when the draft is ready before the proposal run settles', async () => {
+    const target = draftReadyFixture(), {turn, settle} = proposalTurn('turn-1');
+    target.followTurn(turn);
+    target.proposalDraftReady('conv-1', 'turn-1');
+    settle(); await target.state.activeTurnPromise;
+    expect(target.mainView.message).toBe('验收标准已就绪，可以确认。');
+    expect(target.mainView.choices).toEqual([{id: 'rubric-resume', label: '确认验收标准'}]);
+  });
+  it('does not carry an earlier turn outcome into a new proposal, nor act on another conversation', async () => {
+    const target = draftReadyFixture(), {turn, settle} = proposalTurn('turn-2');
+    target.proposalDraftStalled('conv-1', 'turn-1', 'failed');
+    target.followTurn(turn); settle(); await target.state.activeTurnPromise;
+    expect(target.mainView.message).toBe(ADVANCEMENT_PROPOSED_NOTICE);
+    target.proposalDraftStalled('conv-2', 'turn-2', 'failed');
+    expect(target.mainView.message).toBe(ADVANCEMENT_PROPOSED_NOTICE);
+  });
+  it('reads the outcome from the envelope the advancement event exit actually sends', () => {
+    const base = {conversationId: 'conv-1', advancementSessionId: 'adv-1', originalTurnId: 'turn-1'};
+    const wire = (fact: AdvancementProposalFact) => createControlSessionEventEnvelope(advancementProposalEvent(fact));
+    expect(proposalStageEvent(wire({...base, kind: 'advancement-proposal-drafted', rubricDraft: {draftId: 'draft-1'} as never})))
+      .toEqual({kind: 'ready', conversationId: 'conv-1', turnId: 'turn-1'});
+    expect(proposalStageEvent(wire({...base, kind: 'advancement-proposal-draft-failed', outcome: 'failed', message: 'no json'})))
+      .toEqual({kind: 'stalled', conversationId: 'conv-1', turnId: 'turn-1', outcome: 'failed'});
+    expect(proposalStageEvent(wire({...base, kind: 'advancement-proposal-draft-failed', outcome: 'uncertain', message: 'interrupted'})))
+      .toMatchObject({kind: 'stalled', outcome: 'uncertain'});
+    expect(proposalStageEvent({...wire({...base, kind: 'advancement-proposal-draft-failed', outcome: 'failed', message: 'x'}), scope: 'run'})).toBeUndefined();
+  });
+  it('records the outcome without drawing over an open editor', () => {
+    const target = draftReadyFixture({editor: {}});
+    target.proposalDraftStalled('conv-1', 'turn-1', 'failed');
+    expect(target.mainView.message).toBe(advancementProposalStalledMessage('failed'));
+    expect(target.publish).not.toHaveBeenCalled();
+  });
 });

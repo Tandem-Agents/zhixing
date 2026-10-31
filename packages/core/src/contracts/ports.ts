@@ -107,6 +107,14 @@ export interface SessionStatePort {
   listPendingAdvancementOriginalTasks(
     conversationId: string, ctx: AuthorityCallContext, after?: string,
   ): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }>;
+  /** 已提交、尚未被推进应用接受或拒绝的提议运行，带原始输入身份与从运行记录还原的原任务。 */
+  listPendingAdvancementProposals(
+    conversationId: string, ctx: AuthorityCallContext,
+  ): Promise<readonly {
+    readonly runId: string;
+    readonly originalTurnId: string;
+    readonly originalUserTask: import("../types/user-input.js").UserTurnInput;
+  }[]>;
   mutate(
     conversationId: string,
     mutation: SessionControlMutation | SessionStagedMutation,

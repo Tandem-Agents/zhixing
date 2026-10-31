@@ -137,6 +137,13 @@ export function validateWorksceneContinuationCommit(
       "Workscene result origin differs from its durable assignment",
     );
   }
+  // 推进提议只在产品为这次运行启用时成立；启用记在耐久 ingress 上，提交时从它核对
+  if (
+    record.postTurnControl?.intent.kind === "propose_advancement" &&
+    !work.ingress.turnOrigin?.enabledControls?.includes("propose_advancement")
+  ) {
+    throw new Error("Advancement proposal was not enabled for this assignment");
+  }
   const issued = readWorksceneTaskContext(work.controlContext);
   for (const target of record.postTurnControl?.stops ?? []) {
     if (
@@ -650,7 +657,8 @@ export function worksceneContinuationTarget(
 ): string | undefined {
   const intent = source.control?.intent;
   if (!intent) return undefined;
-  if (intent.kind === "stop_task") return undefined;
+  // 推进提议由推进应用接受，不是 workscene 交接
+  if (intent.kind === "stop_task" || intent.kind === "propose_advancement") return undefined;
   if (intent.kind === "connect_mcp") return source.conversationId;
   if (intent.kind === "delegate_mcp") return supportConversation(source);
   const scope = parseConversationId(source.conversationId).scope;
@@ -768,6 +776,8 @@ export function validateWorksceneControl(
       ? ["kind", "candidate", "handoff"]
       : intent.kind === "stop_task"
       ? ["kind", "conversationId", "runId"]
+      : intent.kind === "propose_advancement"
+      ? ["kind"]
       : intent.kind === "enter"
         ? ["kind", "sceneId", "handoff"]
         : intent.kind === "exit"
@@ -785,6 +795,7 @@ export function validateWorksceneControl(
     intent.kind !== "connect_mcp" &&
     intent.kind !== "delegate_mcp" &&
     intent.kind !== "stop_task" &&
+    intent.kind !== "propose_advancement" &&
     (typeof intent.sceneId !== "string" ||
       !/^[a-zA-Z0-9_-]+$/.test(intent.sceneId))
   )

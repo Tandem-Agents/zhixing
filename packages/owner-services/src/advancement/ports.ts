@@ -1,6 +1,6 @@
 import type { RunRecordAdvancementMetadata } from "@zhixing/core/transcript";
 import type { TurnContext, UserTurnInput } from "@zhixing/core";
-import type { AdvancementSession } from "@zhixing/core/advancement";
+import type { AdvancementSession, RubricContractDraftSnapshot } from "@zhixing/core/advancement";
 import type { AdvancementReviewPresentationEvent } from "@zhixing/core/advancement/application";
 
 export type AdvancementProxyScheduleResult =
@@ -52,6 +52,30 @@ export interface AdvancementOriginalTaskAdmissionPort {
 
 export type AdvancementPresentationEvent =
   | AdvancementReviewPresentationEvent
+  /** 提议的草案就绪：与旧发送路径同一事件，接入面按待确认卡片呈现。 */
+  | {
+      readonly conversationId: string;
+      readonly runId: string;
+      readonly seq?: 0;
+      readonly event: "advancement:contract_draft";
+      readonly payload: {
+        readonly advancementSessionId: string;
+        readonly rubricDraftId: string;
+        readonly rubricDraft: RubricContractDraftSnapshot;
+      };
+    }
+  /** 提议的草案生成失败或结果不明：原任务保留，可降级或取消。 */
+  | {
+      readonly conversationId: string;
+      readonly runId: string;
+      readonly seq?: 0;
+      readonly event: "advancement:proposal_draft_failed";
+      readonly payload: {
+        readonly advancementSessionId: string;
+        readonly outcome: "failed" | "uncertain";
+        readonly message: string;
+      };
+    }
   | {
       readonly conversationId: string;
       readonly runId: string;

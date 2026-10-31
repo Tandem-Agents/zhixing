@@ -388,7 +388,10 @@ export async function worksceneContinuationHarness(nextControl?: (tasks: readonl
             content: { passCriteria: ['verified'], evidenceRequirements: evidence, failureHandling: [] }, createdAt: timestamp } },
         { type: 'rubric_confirmed', timestamp, sessionId: 'adv-continuation', confirmedRubric: { source: { kind: 'library', rubricId: 'fixture-rubric', rubricVersion: 'v1' }, title: 'report', description: 'finish',
           content: { passCriteria: [{ id: 'criterion', text: 'verified' }], evidenceRequirements: evidence, failureHandling: [] }, confirmedAt: timestamp, confirmedBy: 'user' },
-          admissionIntent: { turnId: 'original-task', surfacePrincipal: 'rpc:owner', turnOrigin: { channel: 'rpc', triggeredBy: 'rpc:owner' }, inputDigest: protocolDigest('AdvancementOriginalTaskInput', 1, input) } },
+          // 与宿主确认同形：执行身份由原始输入与被确认的草案派生，来源冻结执行标记
+          admissionIntent: { turnId: 'original-task:advancement:draft-continuation', surfacePrincipal: 'rpc:owner',
+            turnOrigin: { channel: 'rpc', triggeredBy: 'rpc:owner', advancementExecution: { sessionId: 'adv-continuation', mode: 'advancement', draftId: 'draft-continuation' } },
+            inputDigest: protocolDigest('AdvancementOriginalTaskInput', 1, input) } },
       ] }, { principal: { kind: 'host', component: 'continuation-advancement-fixture' }, requestId: 'activate-advancement', deadlineAt: new Date(Date.now() + 60_000).toISOString() });
     }
 

@@ -253,9 +253,37 @@ export function isAdvancementControlEvent(
           ...(event.exit !== undefined ? ["exit"] : []),
         ],
       ) && (event.exit === undefined || isExitShape(event.exit));
+    case "proposal_accepted":
+      return hasExactKeys(event, ["conversationId", "originalTurnId", "originalUserTask", "proposalId", "runId", "sessionId", "timestamp", "type"]) &&
+        isNonEmptyString(event.conversationId) && isNonEmptyString(event.proposalId) && isNonEmptyString(event.runId) &&
+        isNonEmptyString(event.originalTurnId) && isUserTurnInput(event.originalUserTask);
+    case "proposal_rejected":
+      return hasExactKeys(event, ["conversationId", "exit", "originalTurnId", "originalUserTask", "proposalId", "runId", "sessionId", "timestamp", "type"]) &&
+        isNonEmptyString(event.conversationId) && isNonEmptyString(event.proposalId) && isNonEmptyString(event.runId) &&
+        isNonEmptyString(event.originalTurnId) && isUserTurnInput(event.originalUserTask) && isExitShape(event.exit);
+    case "proposal_supplemented":
+      return hasExactKeys(event, ["sessionId", "supplement", "timestamp", "type"]) && isUserTurnInput(event.supplement);
+    case "draft_attempt_transitioned":
+      return hasExactKeys(event, ["attempt", "sessionId", "timestamp", "type"]) && isDraftAttemptShape(event.attempt);
+    case "proposal_drafted":
+      return hasExactKeys(event, ["pendingRubricDraft", "revision", "sessionId", "timestamp", "type"]) &&
+        isCount(event.revision) && isRubricDraftShape(event.pendingRubricDraft);
     default:
       return false;
   }
+}
+
+function isDraftAttemptShape(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const attempt = value as Record<string, unknown>;
+  return hasExactKeys(attempt, ["generation", "phase", "revision", ...(attempt.detail !== undefined ? ["detail"] : [])]) &&
+    isCount(attempt.generation) && (attempt.generation as number) > 0 && isCount(attempt.revision) &&
+    ["invoking", "consumed", "failed", "deferred"].includes(String(attempt.phase)) &&
+    (attempt.detail === undefined || isNonEmptyString(attempt.detail));
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isReviewAttemptShape(
@@ -616,10 +644,22 @@ function isAdmissionIntentShape(value: unknown): boolean {
   }
   const origin = intent.turnOrigin as Record<string, unknown>;
   return (
-    hasExactKeys(origin, ["channel", "triggeredBy"]) &&
+    hasExactKeys(origin, origin.advancementExecution === undefined
+      ? ["channel", "triggeredBy"]
+      : ["channel", "triggeredBy", "advancementExecution"]) &&
     origin.channel === "rpc" &&
-    origin.triggeredBy === intent.surfacePrincipal
+    origin.triggeredBy === intent.surfacePrincipal &&
+    (origin.advancementExecution === undefined || isAdvancementExecutionShape(origin.advancementExecution))
   );
+}
+
+/** 执行意向里的推进执行标记：会话、模式，确认执行时还有被确认的草案。 */
+function isAdvancementExecutionShape(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const marker = value as Record<string, unknown>;
+  return marker.mode === "advancement"
+    ? hasExactKeys(marker, ["sessionId", "mode", "draftId"]) && isNonEmptyString(marker.sessionId) && isNonEmptyString(marker.draftId)
+    : marker.mode === "direct" && hasExactKeys(marker, ["sessionId", "mode"]) && isNonEmptyString(marker.sessionId);
 }
 
 function isRunReviewShape(value: unknown): boolean {
