@@ -1,4 +1,5 @@
 import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError, holdForegroundObligation, type ForegroundActivityPort, type ForegroundObligation } from "@zhixing/core/resources";
+import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { retryControlAdmission } from "./conversation-admission-retry.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
@@ -153,6 +154,8 @@ export interface ConversationProtocolRuntimeOptions {
   readonly clock?: () => string;
   readonly interactions: DurableConversationInteractionObserver;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
+  /** 运行准备各步记为日志阶段的端口（只观测）。 */
+  readonly phaseRecords?: LogRecordPort;
   readonly assignmentArtifactAuthority: ConversationAssignmentArtifactAuthorityIndex;
   readonly assignmentStaging?: ConversationAssignmentStagingPort;
   readonly executeRecoveredPerspective?: (input: {
@@ -396,6 +399,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #recoverAuxiliary: (conversationId: string) => Promise<void>;
   readonly #advancementExecution: ConversationAdvancementExecutionPort | undefined;
   readonly #foreground: ForegroundActivityPort | undefined;
+  readonly #phaseRecords: LogRecordPort | undefined;
   readonly #lifecycleProjectionClaims = new Map<string, Promise<number>>();
   readonly #activeRecoveryClaims = new Map<string, number>();
   /** 本进程仍在执行的 assignment → run；覆盖完整运行生命期，也用于取消后的本机止损。 */
@@ -504,6 +508,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoverAuxiliary = options.recoverAuxiliary;
     this.#advancementExecution = options.advancementExecution;
     this.#foreground = options.foreground;
+    this.#phaseRecords = options.phaseRecords;
     this.#issuer = new ConversationAssignmentAuthority({
       signer: authority.signer,
       verifier: authority.verifier,
@@ -1555,7 +1560,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         );
       }
       const recentExecutorId = await journal.recentExecutorAffinity();
-      executorPlan = await this.#executorDispatch.plan({
+      executorPlan = await this.#phase("executor-plan", () => this.#executorDispatch.plan({
         conversationId: input.conversationId,
         requirement: conversationExecutorRequirement(
           input.invocation,
@@ -1567,7 +1572,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ...(appliedAdmission.environment
           ? { environment: appliedAdmission.environment }
           : {}),
-      });
+      }));
       const preparedAuthority = executorPlan.assignment;
       const targetExecutorId = preparedAuthority.executorId;
       const origin = reservationOriginForSource(input.options?.source);
@@ -1576,13 +1581,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         assignmentId,
         this.#clock(),
       );
-      await this.#executorDispatch.reconcileLocalReceipts();
-      await this.#authority.resources.enqueueRoot(
+      await this.#phase("reconcile-receipts", () => this.#executorDispatch.reconcileLocalReceipts());
+      await this.#phase("enqueue-root", () => this.#authority.resources.enqueueRoot(
         assignmentReservationId(assignmentId),
         { kind: "run", id: runId, attempt },
         origin,
         resourceContext,
-      );
+      ));
       // Resolve unrelated context before starting the short-lived fair slot.
       const controlContext = [
         ...worksceneTaskContext(await WorksceneContinuationApplication.tasks(
@@ -1621,17 +1626,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         policy: preparedAuthority.policy,
         environment: preparedAuthority.environment,
       });
-      let unsigned = issueEnvelope(await prepareResourceLease());
-      await executorPlan.prepare({
+      let unsigned = issueEnvelope(await this.#phase("resource-lease", prepareResourceLease));
+      const plannedDispatch = executorPlan;
+      await this.#phase("executor-prepare", () => plannedDispatch.prepare({
         assignmentId,
         manifest: unsigned.manifest,
         ...(input.adaptLocalRuntime
           ? { adaptRuntime: input.adaptLocalRuntime }
           : {}),
-      });
+      }));
       let dispatch: Awaited<ReturnType<typeof journal.assign>>;
       for (;;) {
-        try { dispatch = await journal.assign(unsigned); break; }
+        try { dispatch = await this.#phase("assign", () => journal.assign(unsigned)); break; }
         catch (error) {
           if (!(error instanceof ResourceCandidateStaleError)) throw error;
           if (["cancel-requested", "cancelled"].includes(await journal.runState(runId) ?? "")) {
@@ -1660,13 +1666,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           assignmentId,
           (report) => usageReporterContext(report.reporterId, report.digest, this.#clock()),
         );
-      await executorPlan.dispatch({
+      await this.#phase("dispatch", () => plannedDispatch.dispatch({
         journal,
         envelope: dispatch.envelope,
         activation: dispatch.activation,
         contexts: this.#capturedAssignmentRouting().contexts,
         submissionContext,
-      });
+      }));
       const streamRef = {
         execution: "conversation",
         conversationId: input.conversationId,
@@ -1719,13 +1725,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             surfacePrincipal: executionIngress.surfacePrincipal,
           },
         )}`;
-        const ticket = await journal.issueDataPlaneTicket({
+        const ticket = await this.#phase("ticket-issue", () => journal.issueDataPlaneTicket({
           ticketId,
           assignmentId,
           surfacePrincipal: executionIngress.surfacePrincipal,
           kind: "run-interact",
           ttlMs: 24 * 60 * 60 * 1_000,
-        });
+        }));
         firstPartyFinalitySession = this.#createFirstPartyFinality?.({
           lastSeen: [
             {
@@ -1749,10 +1755,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               }
             : {}),
         });
-        await firstPartyFinalitySession?.start();
+        await this.#phase("first-party-finality", async () => { await firstPartyFinalitySession?.start(); });
         const projectionFinality = firstPartyFinalitySession;
         firstPartySurfaceSession =
-          await losslessDataPlane.openFirstPartySurfaceSession({
+          await this.#phase("first-party-surface", () => losslessDataPlane.openFirstPartySurfaceSession({
             executorId: targetExecutorId,
             assignmentId,
             ref: streamRef,
@@ -1764,7 +1770,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               }
               await this.#onFirstPartyFrame?.(frame, readDisplay);
             },
-          });
+          }));
       }
       firstPartySurfaceSession?.start();
       const executeLocal = (async function* (
@@ -1772,9 +1778,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         effect: ConversationExecutorExecutionEffect,
       ): AsyncGenerator<AgentYield, RunResult> {
       const executionRuntime = effect.runtime;
-      await effect.startAndReport(submissionContext);
+      await this.#phase("start-and-report", () => effect.startAndReport(submissionContext));
 
-      const stream = await effect.createStream({ assignmentId, ref: streamRef });
+      const stream = await this.#phase("create-stream", () => effect.createStream({ assignmentId, ref: streamRef }));
+      // 首次模型调用之前的事件帧追加单独记阶段（只记录）：内核在发出这些事件时等追加完成
+      let beforeFirstModelCall = true;
       const appendObservedFrame = async (...args: Parameters<typeof stream.append>) => {
         const frame = await stream.append(...args);
         // 本机 Owner 没有远端流读者，直接转发已耐久写入的同一帧。
@@ -1886,7 +1894,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       try {
         releaseConfirmation = this.#requiredManager().bindExecutionConfirmation(input.conversationId, executionRuntime);
         inputPort = input.invocation.kind === "agent"
-          ? await journal.openRunInput(runId, assignmentId)
+          ? await this.#phase("open-run-input", () => journal.openRunInput(runId, assignmentId))
           : undefined;
         const generator = effect.runKernel(executionMessages, {
           ...input.options,
@@ -1895,13 +1903,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           // 主循环 provider 等待期间让出本尝试的前台义务，终结或失败后在本地结算之前重入
           modelProviderPhases: { entered: () => attemptForeground.pause(), settled: () => attemptForeground.resume() },
           onProtocolEvent: async (event, meta) => {
-            await appendObservedFrame(
+            const append = () => appendObservedFrame(
               { kind: "agent-event", event },
               {
                 ...streamMeta,
                 ...(meta.lineage ? { lineage: meta.lineage } : {}),
               },
             );
+            await (beforeFirstModelCall ? this.#phase(`event-append.${event.event}`, append) : append());
           },
           toolSideEffectObserver: this.#interactions,
           assignmentIssuedAt: dispatch.envelope.issuedAt,
@@ -1939,19 +1948,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           modelCallResourceMeter: {
             reserve: async ({ callIndex, tokenUpperBound }) => {
               const usageId = `usage:${assignmentId}:model:${callIndex}`;
-              await this.#requireExecutionResources().reserveUsage(
+              beforeFirstModelCall = false;
+              await this.#phase("model-usage-reserve", () => this.#requireExecutionResources().reserveUsage(
                 dispatch.envelope.resourceLease,
                 { usageId, tokens: tokenUpperBound, calls: 1 },
                 resourceSubmissionContext,
-              );
+              ));
               return { usageId };
             },
             consume: async ({ usageId, tokens }) => {
-              await this.#requireExecutionResources().consume(
+              await this.#phase("model-usage-consume", () => this.#requireExecutionResources().consume(
                 dispatch.envelope.resourceLease,
                 { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
                 resourceSubmissionContext,
-              );
+              ));
             },
           },
         });
@@ -3060,6 +3070,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#authority.acceptsConversationId(conversationId) ||
       this.#adoptedConversations.has(conversationId)
     );
+  }
+
+  /** 运行准备中决定下一步修法的实际调用记为日志阶段（只观测，不给端口时原样执行）。 */
+  #phase<T>(name: string, work: () => Promise<T>): Promise<T> {
+    return observeLogPhase(this.#phaseRecords, `run.${name}`, work);
   }
 
   #ownerEpochFor(conversationId: string): number {

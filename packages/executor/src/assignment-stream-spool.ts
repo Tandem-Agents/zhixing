@@ -67,6 +67,8 @@ export interface AssignmentStreamSpoolOptions {
   readonly clock?: () => IsoTime;
   readonly reclaimDelayMs?: number;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  /** 各分派流日志的存储工作计量（与权威日志同一端口）；只记录。 */
+  readonly records?: FileAuthorityCommitLogOptions['records'];
   readonly removeRetiredArtifact?: (
     store: FileArtifactStore,
     ref: ArtifactRef,
@@ -492,6 +494,7 @@ export class AssignmentStreamSpool {
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #runReadStep: FileArtifactStoreOptions['runReadStep'];
   readonly #runProjectionReadStep: AssignmentStreamSpoolOptions['runProjectionReadStep'];
+  readonly #records: AssignmentStreamSpoolOptions['records'];
   readonly #removeRetiredArtifact: NonNullable<
     AssignmentStreamSpoolOptions["removeRetiredArtifact"]
   >;
@@ -513,6 +516,7 @@ export class AssignmentStreamSpool {
     this.#storageMaintenance = options.storageMaintenance;
     this.#runReadStep = options.runReadStep;
     this.#runProjectionReadStep = options.runProjectionReadStep;
+    this.#records = options.records;
     this.#removeRetiredArtifact =
       options.removeRetiredArtifact ??
       ((store, ref) => rm(store.pathFor(ref), { force: true }));
@@ -1521,6 +1525,7 @@ export class AssignmentStreamSpool {
         clock: this.#clock,
         storageMaintenance: this.#storageMaintenance,
         runProjectionReadStep: this.#runProjectionReadStep,
+        ...(this.#records ? { records: this.#records } : {}),
       }),
       queue: new SerialTaskQueue(),
       waiters: new Set(),

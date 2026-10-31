@@ -133,7 +133,7 @@ import {
   rebindSurfaceAssetAuthority,
 } from "./serve/surface-asset-authority.js";
 import { openHomeAuthoritySources, type HomeAuthoritySourcesLease } from "./serve/home-authority-sources.js";
-import { beginLogPhase } from "@zhixing/core/logging";
+import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
@@ -278,6 +278,8 @@ export interface AuthorityRuntimeStack {
   readonly controlAdmission: ControlAdmissionJournal;
   readonly localControlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
+  /** 权威存储日志的工作计量端口（只记录），供同一宿主内的其他存储日志沿用。 */
+  readonly storageRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly resourceGovernor: AnchorResourceGovernor;
   readonly executorResourceGovernor: ExecutorResourceGovernor;
   readonly environment?: EnvironmentPort;
@@ -786,6 +788,7 @@ export async function setupAuthorityRuntime(
     let resourceGovernor = authorityLog
       ? new ownerRuntime!.AnchorResourceGovernor({
           log: authorityLog,
+          ...(options.phaseRecords ? { records: options.phaseRecords } : {}),
           signer: key,
           verifier,
           guard: resourceGuard,
@@ -830,6 +833,7 @@ export async function setupAuthorityRuntime(
     const executorResourceGovernor = executorLog
       ? new executorRuntime!.ExecutorResourceGovernor({
           log: executorLog,
+          ...(options.phaseRecords ? { records: options.phaseRecords } : {}),
           signer: key,
           verifier,
           guard: resourceGuard,
@@ -919,18 +923,20 @@ export async function setupAuthorityRuntime(
         workspaces,
         workspaceCatalog,
       );
-      const executionAssetSnapshot = await executionAssets.current().catch(() => undefined);
+      // 各步只加观测阶段，不改顺序与失败语义。
+      const phase = <T>(name: string, work: () => Promise<T>) => observeLogPhase(options.phaseRecords, `executor-snapshot.${name}`, work);
+      const executionAssetSnapshot = await phase("assets", () => executionAssets.current().catch(() => undefined));
       const inventoryDigest = protocolDigest("LocalTransitionInventory", 1, {
         deviceDigest,
         permissionSnapshotHighWater,
         executionAssetDigest: executionAssetSnapshot?.digest ?? null,
       });
-      const versionResolution = await versionStore.synchronize(
+      const versionResolution = await phase("version", () => versionStore.synchronize(
         executorId,
         deviceDigest,
         inventoryDigest,
         { allowInitialize: !capabilityDirectoryEstablished },
-      );
+      ));
       const capabilityRevision = versionResolution.deviceRevision;
       const versionedCredentialBindings = readiness.credentialBindings.map(
         (binding) => ({
@@ -981,32 +987,33 @@ export async function setupAuthorityRuntime(
         },
         key,
       );
-      const snapshotUpdate = await executorCapabilities.accept({
+      const snapshotUpdate = await phase("accept", () => executorCapabilities.accept({
         descriptor,
         inventory,
-      });
+      }));
       if (!snapshotUpdate.ok) {
         throw new Error(
           `Local executor capability snapshot rejected: ${snapshotUpdate.error.message}`,
         );
       }
-      if (authorityLog) {
-        await new CredentialExposureAuthority({
+      const exposureLog = authorityLog;
+      if (exposureLog) {
+        await phase("bindings", () => new CredentialExposureAuthority({
           deviceId: key.deviceId,
-          log: authorityLog,
+          log: exposureLog,
           secretStore: options.secretStore,
         }).ensureActiveBindings({
           bindings: descriptor.credentialBindings,
           markedAt: descriptor.at,
-        });
+        }));
       }
-      await versionStore.markCapabilityDirectoryEstablished({
+      await phase("establish", () => versionStore.markCapabilityDirectoryEstablished({
         executorId,
         deviceDigest,
         deviceRevision: versionResolution.deviceRevision,
         inventoryDigest,
         inventoryRevision: versionResolution.inventoryRevision,
-      });
+      }));
       capabilityDirectoryEstablished = true;
       const publication = {
         snapshot: snapshotUpdate.snapshot,
@@ -1179,7 +1186,7 @@ export async function setupAuthorityRuntime(
       readonly deviceDigest: string;
     }> => {
       if (workspaceBindings) {
-        await workspaceBindings.capabilitySnapshot();
+        await observeLogPhase(options.phaseRecords, "executor-snapshot.workspaces", () => workspaceBindings!.capabilitySnapshot());
         return publicationQueue.run(async () => {
           const refreshed = executorCapabilities.snapshotFor(executorId);
           if (
@@ -1276,12 +1283,16 @@ export async function setupAuthorityRuntime(
         input.executionProfile,
       );
       const parsedConversation = parseConversationId(input.conversationId);
+      // 各步只加观测阶段（发送关键路径的细分账），不改顺序、校验与失败语义。
+      const phase = <T>(name: string, work: () => Promise<T>) => observeLogPhase(options.phaseRecords, `assign.${name}`, work);
+      const worksceneId = parsedConversation.scope.kind === "workscene" ? parsedConversation.scope.sceneId : undefined;
+      const sceneState = worksceneGlobalState;
       const worksceneRead =
-        parsedConversation.scope.kind === "workscene" && worksceneGlobalState
-          ? await worksceneGlobalState.read(
+        worksceneId !== undefined && sceneState
+          ? await phase("workscene", () => sceneState.read(
               {
                 kind: "workscene-get",
-                sceneId: parsedConversation.scope.sceneId,
+                sceneId: worksceneId,
               },
               {
                 principal: {
@@ -1292,7 +1303,7 @@ export async function setupAuthorityRuntime(
                 authority: { domain: "global", anchorEpoch },
                 deadlineAt: new Date(Date.now() + 30_000).toISOString(),
               },
-            )
+            ))
           : undefined;
       const workscene =
         worksceneRead?.kind === "workscene-get"
@@ -1300,10 +1311,11 @@ export async function setupAuthorityRuntime(
           : undefined;
       // 场景已删、会话墓碑尚待后台清理写入的窗口内，不派发该场景会话的运行。按场景删除 tombstone 精确读，
       // 与输入准入、会话删除查询同一口径：只继承删除约束，不把“注册表里没有”当成删除。
-      if (parsedConversation.scope.kind === "workscene" && worksceneGlobalState && authorityLog) {
-        const sceneId = parsedConversation.scope.sceneId;
-        const deleted = (await authorityLog.transactDurableProjection(WORKSCENE_AUTHORITY_PROJECTION_ID,
-          async (view) => ({ kind: "return" as const, value: await isWorksceneDeletedAt(view, sceneId) }))).value;
+      const sceneLog = authorityLog;
+      if (worksceneId !== undefined && worksceneGlobalState && sceneLog) {
+        const sceneId = worksceneId;
+        const deleted = (await phase("workscene-deletion", () => sceneLog.transactDurableProjection(WORKSCENE_AUTHORITY_PROJECTION_ID,
+          async (view) => ({ kind: "return" as const, value: await isWorksceneDeletedAt(view, sceneId) })))).value;
         if (deleted) throw new Error("Conversation workscene has been durably deleted");
       }
       const environmentRequirement = deriveEnvironmentRequirement({
@@ -1321,11 +1333,11 @@ export async function setupAuthorityRuntime(
           executorDeviceId: target.descriptor.signature.keyId,
           capabilities: target.descriptor,
         }) ?? environmentProfile);
-      const permissionPublication = await permissionSnapshots.publishRules({
+      const permissionPublication = await phase("permission-rules", () => permissionSnapshots.publishRules({
         rules: input.permissionRules,
         signer: key,
         generatedAt: canonicalTime(clock(), "Permission snapshot time"),
-      });
+      }));
       const prepareTarget = (
         target: ExecutorCapabilitySnapshot,
         deviceDigest: string,
@@ -1375,7 +1387,7 @@ export async function setupAuthorityRuntime(
         deviceId: string;
         deviceDigest: string;
       }> = [];
-      for (const candidate of input.targets ?? []) {
+      if (input.targets?.length) await phase("remote-candidates", async () => { for (const candidate of input.targets!) {
         if (
           environmentRequirement.workspace &&
           candidate.deviceId !== environmentRequirement.workspace.deviceId
@@ -1414,15 +1426,15 @@ export async function setupAuthorityRuntime(
             error instanceof Error ? error : new Error(String(error)),
           );
         }
-      }
+      } });
       if (
         localExecutorEnabled &&
         (!environmentRequirement.workspace ||
           environmentRequirement.workspace.deviceId === key.deviceId)
       ) {
-        const publication = await refreshLocalExecutorSnapshot(
+        const publication = await phase("local-executor", () => refreshLocalExecutorSnapshot(
           permissionPublication.highWater,
-        );
+        ));
         const target = publication.snapshot;
         candidates.push({
           snapshot: target,
@@ -1466,7 +1478,9 @@ export async function setupAuthorityRuntime(
         if (!localExecutorEnabled) {
           throw new Error("Local executor role is not enabled on this device");
         }
-        const permissionSnapshot = await permissionSnapshots.latest();
+        // 各步只加观测阶段，不改顺序、校验与失败语义。
+        const phase = <T>(name: string, work: () => Promise<T>) => observeLogPhase(options.phaseRecords, `assign.${name}`, work);
+        const permissionSnapshot = await phase("permission-latest", () => permissionSnapshots.latest());
         if (!permissionSnapshot) {
           throw new SchedulerCapabilityGapError(
             "Local conversation is waiting for a synchronized permission snapshot",
@@ -1496,7 +1510,7 @@ export async function setupAuthorityRuntime(
           normalizeRuntimeExecutionProfile(input.executionProfile),
           environment,
         );
-        const publication = await refreshLocalExecutorSnapshot();
+        const publication = await phase("local-executor", () => refreshLocalExecutorSnapshot());
         const target = publication.snapshot;
         assertRuntimeAvailable(executionProfile, {
           tools: target.descriptor.tools,
@@ -1964,6 +1978,7 @@ export async function setupAuthorityRuntime(
       } satisfies Parameters<typeof createSurfaceAssetAuthority>[0];
       const nextResourceGovernor = new ownerRuntime.AnchorResourceGovernor({
         log: authorityLog,
+        ...(options.phaseRecords ? { records: options.phaseRecords } : {}),
         signer: key,
         verifier,
         guard: resourceGuard,
@@ -2121,6 +2136,7 @@ export async function setupAuthorityRuntime(
         return localControlAdmission;
       },
       executorCapabilities,
+      ...(options.records ? { storageRecords: options.records } : {}),
       get resourceGovernor() {
         if (!resourceGovernor)
           throw new Error("Anchor authority role is not enabled");

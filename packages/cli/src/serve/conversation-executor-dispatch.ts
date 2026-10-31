@@ -1,4 +1,5 @@
 import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { isWorksceneSupportConversation } from "@zhixing/core/workscene/application";
 import type { IConfirmationBroker } from "@zhixing/core/confirmation";
 import type {
@@ -282,6 +283,8 @@ export interface ConversationExecutorHostBoundaryOptions {
   readonly directory: ConversationExecutorTopologyDirectory;
   readonly clock: () => string;
   readonly maxPendingInteractions?: number;
+  /** 本机执行准备各步记为日志阶段的端口（只观测）。 */
+  readonly phaseRecords?: LogRecordPort;
   readonly local?: {
     readonly ledger?: ConversationAssignmentLedger;
     readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
@@ -443,6 +446,7 @@ export function createConversationExecutorHostBoundary(
     application: new DefaultConversationExecutorDispatchApplication({
       authority: options.authority,
       topology,
+      ...(options.phaseRecords ? { phaseRecords: options.phaseRecords } : {}),
     }),
     ...(local
       ? {
@@ -462,13 +466,16 @@ class DefaultConversationExecutorDispatchApplication
   implements ConversationExecutorDispatchApplication {
   readonly #authority: ConversationOwnerRuntimeStack;
   readonly #topology: ConversationExecutorTopologyAdapter;
+  readonly #phaseRecords: LogRecordPort | undefined;
 
   constructor(options: {
     readonly authority: ConversationOwnerRuntimeStack;
     readonly topology: ConversationExecutorTopologyAdapter;
+    readonly phaseRecords?: LogRecordPort;
   }) {
     this.#authority = options.authority;
     this.#topology = options.topology;
+    this.#phaseRecords = options.phaseRecords;
   }
 
   reconcileLocalReceipts(): Promise<number> {
@@ -484,7 +491,7 @@ class DefaultConversationExecutorDispatchApplication
   ): Promise<ConversationExecutorDispatchPlan> {
     const candidates = isWorksceneSupportConversation(input.conversationId)
       ? []
-      : await this.#topology.candidates(input.requirement);
+      : await observeLogPhase(this.#phaseRecords, "executor.candidates", () => this.#topology.candidates(input.requirement));
     if (candidates.length === 0 && !this.#topology.hasLocal()) {
       throw new Error("No authorized conversation executor is currently available");
     }
@@ -902,19 +909,20 @@ function createLocalConversationExecutorMechanism(
         };
       },
       async prepare(input) {
-        const preflight = await options.authority.preflightLocalConversationEnvironment(
-          input.manifest,
-          input.assignmentId,
-        );
+        const preflight = await observeLogPhase(options.phaseRecords, "executor.environment-preflight", () =>
+          options.authority.preflightLocalConversationEnvironment(
+            input.manifest,
+            input.assignmentId,
+          ));
         if (preflight.error) throw new Error(preflight.error.message);
         let baseRuntime: SessionRuntime | undefined;
         let runtime: SessionRuntime | undefined;
         let actual: ReturnType<NonNullable<SessionRuntime["executionProfile"]>>;
         try {
-          baseRuntime = await local.runtimeFactory.create(
+          baseRuntime = await observeLogPhase(options.phaseRecords, "executor.runtime-create", () => local.runtimeFactory.create(
             input.conversationId,
             { workspaceRoot: preflight.workspaceRoot, executionProfile: input.binding.executionProfile },
-          );
+          ));
           runtime = input.adaptRuntime?.(baseRuntime) ?? baseRuntime;
           const projected = runtime.executionProfile?.();
           if (!projected) {

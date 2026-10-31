@@ -165,6 +165,7 @@ export class ExecutorDataPlaneRuntime {
         storageMaintenance: options.storageMaintenance,
         runReadStep: artifactReadCapacity(options.deviceCapacity),
         runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
+        ...(options.authority.storageRecords ? { records: options.authority.storageRecords } : {}),
       },
     );
     this.#tickets = new options.module.DataPlaneTicketRegistry({

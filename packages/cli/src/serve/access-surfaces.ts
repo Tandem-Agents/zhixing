@@ -498,6 +498,8 @@ export async function createHostLosslessDataPlane(
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
+  /** 运行准备与本机执行准备记为日志阶段的端口（只观测）。 */
+  readonly phaseRecords?: import('@zhixing/core/logging').LogRecordPort;
   /** 宿主启动期日志：按子步骤记录装配耗时（只观测）。 */
   readonly startupRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly deviceCapacity: import('@zhixing/core/resources').DeviceCapacityArbiterPort;
@@ -637,6 +639,7 @@ export async function createConversationServices(
               authority: conversationAuthority,
               directory: topologyDirectory,
               clock: () => new Date().toISOString(),
+              ...(input.phaseRecords ? { phaseRecords: input.phaseRecords } : {}),
               local: {
                 ConversationAssignmentLedger:
                   inputExecutorRoleModule!.ConversationAssignmentLedger,
@@ -668,6 +671,7 @@ export async function createConversationServices(
         authority: conversationAuthority,
         directory: topologyDirectory,
         clock: () => new Date().toISOString(),
+        ...(input.phaseRecords ? { phaseRecords: input.phaseRecords } : {}),
       });
   const processProjection = new SessionProcessProjectionOwner({
     artifacts: input.meshBootstrap.bootstrapStore.artifactStore(),
@@ -683,6 +687,7 @@ export async function createConversationServices(
     manager: managerAssembly.resolve,
     recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
     ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
+    ...(input.phaseRecords ? { phaseRecords: input.phaseRecords } : {}),
     advancementExecution: {
       prepare: async ({ conversationId, turnId, binding }) => {
         if (!advancementExecutionSessions) throw new Error("推进组合尚未就绪，推进执行材料留待恢复时裁决");
@@ -1031,6 +1036,8 @@ export async function createConversationServices(
 
 /** Device-local owner: internal-only and present exactly when an executor is loaded. */
 export interface CreateLocalConversationOwnerInput {
+  /** 运行准备与本机执行准备记为日志阶段的端口（只观测）。 */
+  readonly phaseRecords?: import('@zhixing/core/logging').LogRecordPort;
   readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   /** 本机执行的运行计为宿主前台活动。 */
   readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
@@ -1107,6 +1114,7 @@ export async function createLocalConversationOwner(
     authority: localOwner,
     directory: NO_REMOTE_CONVERSATION_EXECUTORS,
     clock: () => new Date().toISOString(),
+    ...(input.phaseRecords ? { phaseRecords: input.phaseRecords } : {}),
     local: {
       ConversationAssignmentLedger:
         input.executorRoleModule.ConversationAssignmentLedger,
@@ -1126,6 +1134,7 @@ export async function createLocalConversationOwner(
     executorDispatch: localExecutorBoundary.application,
     assignmentStaging: localExecutorBoundary.staging,
     ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
+    ...(input.phaseRecords ? { phaseRecords: input.phaseRecords } : {}),
     runtimeFactory: input.assignmentRuntimeFactory,
     interactions: input.durableInteractions,
     advancementModelProvider: createHostAdvancementModelProviderFactory({

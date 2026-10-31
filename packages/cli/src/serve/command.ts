@@ -989,6 +989,7 @@ async function runServerProcess(
     onFailure: (error, context) => recordConversationFailure(startupRecords, error, context),
     deviceCapacity: deviceCapacity.arbiter,
     foregroundActivity: deviceCapacity.foreground,
+    phaseRecords: startupRecords,
     whenQuiet: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
     onRunStatus: createExtensionStatusObserver(extensionHandle.port),
     mcp: mcpApplication,
@@ -1111,6 +1112,7 @@ async function runServerProcess(
     const owner = await createLocalConversationOwner({
       onRunStatus: createExtensionStatusObserver(extensionHandle.port),
       foregroundActivity: deviceCapacity.foreground,
+      phaseRecords: startupRecords,
       executorRoleModule: executor,
       evidenceHandler: evidence,
       assignmentRuntimeFactory,

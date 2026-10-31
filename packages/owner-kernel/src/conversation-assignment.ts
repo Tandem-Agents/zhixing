@@ -1053,6 +1053,8 @@ export interface ConversationChannelFrameAdoption {
 class ConversationWorkingSetChanged extends StorageMaintenanceAdmissionError {
   constructor() {
     super({ kind: 'backpressured', blockedBy: 'derived-preparation', retryAfterMs: 1 });
+    // 只供观测：推迟事件据此区分“工作集在准备期间被改动后重做”与派生投影准备
+    (this as { observed?: unknown }).observed = { reason: 'conversation-working-set-changed', positions: [] };
     this.name = 'ConversationWorkingSetChanged';
     this.message = 'Conversation working set changed during preparation';
   }

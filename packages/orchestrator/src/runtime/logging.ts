@@ -25,6 +25,7 @@ export const KERNEL_LOG_SOURCE: LogSource = {
       thinking: "text", contextUnits: "number", maxOutputUnits: "number",
     } }, started: event("模型运行开始"),
     finished: event("模型运行已结束"), released: event("运行观察资源已释放"),
+    requestPrepared: event("模型请求输入已备好"),
     input: event("运行接纳后续输入"), toolStarted: event("工具调用开始"),
     toolFinished: event("工具调用已返回"), permission: event("工具权限已裁决"),
     childStarted: event("子任务开始"), childFinished: event("子任务已结束"),
@@ -75,6 +76,8 @@ export function observeKernelRun(bus: IEventBus<AgentEventMap>, records: LogReco
     })));
   };
   on("agent:run_start", (v) => ({ event: "started", data: { inputChars: v.prompt.length } }));
+  // 每次模型调用前发送视图已备好：切开“运行开始→适配器调用”之间的轮首准备与用量预留
+  on("llm:request_start", (v) => ({ event: "requestPrepared", data: { messageCount: v.messageCount } }));
   on("agent:run_end", (v) => ({ event: "finished", result: v.reason === "completed" ? "success" : v.reason === "aborted" ? "cancelled" : "failure", data: { reason: v.reason, error: v.error, errorType: v.errorType, duration: v.duration, inputUnits: v.usage.inputTokens, outputUnits: v.usage.outputTokens } }));
   on("agent:input_received", (v) => ({ event: "input", data: { messageCount: v.inputs.length } }));
   on("tool:call_start", (v) => ({ event: "toolStarted", refs: [{ kind: "toolCall", id: v.id }], data: { tool: v.name } }));

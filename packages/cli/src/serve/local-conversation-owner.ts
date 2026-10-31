@@ -222,6 +222,8 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly assignmentStaging: ConversationAssignmentStagingPort;
   /** 宿主前台活动：本机会话的运行拥有者按尝试持有前台义务（见协议运行时 foreground 选项）。 */
   readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
+  /** 运行准备各步记为日志阶段的端口（只观测，见协议运行时 phaseRecords 选项）。 */
+  readonly phaseRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly interactions: DurableConversationInteractionObserver;
   readonly advancementModelProvider: AdvancementModelProviderFactory;
@@ -830,6 +832,7 @@ export class LocalConversationOwnerAssembly {
       manager: managerAssembly.resolve,
       recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
       ...(options.foreground ? { foreground: options.foreground } : {}),
+      ...(options.phaseRecords ? { phaseRecords: options.phaseRecords } : {}),
       advancementExecution: {
         prepare: async ({ conversationId, turnId, binding }) => {
           if (!advancementExecutionSessions) throw new Error("推进应用尚未就绪，推进执行材料留待恢复时裁决");
