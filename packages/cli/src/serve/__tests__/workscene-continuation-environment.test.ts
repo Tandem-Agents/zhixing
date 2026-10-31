@@ -35,6 +35,7 @@ class MemorySecrets {
     return "unlocked" as const;
   }
 }
+// 两套真实 authority 的装配与多次准备，运行预算与 setup-delivery 的同类装配用例一致
 it("retains the original remote workspace through product continuation, admission adapter and assignment", async () => {
   const readiness = () => ({
     tools: [],
@@ -187,4 +188,4 @@ it("retains the original remote workspace through product continuation, admissio
     await anchor.startupCleanup.run();
     await remote.startupCleanup.run();
   }
-});
+}, 30_000);

@@ -1252,8 +1252,8 @@ export class AssignmentStreamSpool {
       readonly references: readonly ArtifactRef[];
     },
   ): Promise<AppendAttempt> {
-    await this.#reconcileRetention(handle);
-    const state = await this.#select(handle);
+    // 同一队列操作里最后一次已验状态作追加的候选；下面的追加事务照常重核开放、lastSeq 与容量，变了就重驱
+    const state = await this.#reconcileRetention(handle);
     assertOpen(state);
     assertSameExecution(state, input.ref);
     if (input.sourceId !== undefined) {
@@ -1388,15 +1388,20 @@ export class AssignmentStreamSpool {
       : { kind: "retry" };
   }
 
-  async #reconcileRetention(handle: AssignmentHandle): Promise<void> {
-    await this.#drainPendingDeletes(handle);
-    const before = await this.#select(handle);
-    if (before.ref === undefined) return;
+  /**
+   * 收拢待删除的旧帧并推进保留下界，返回这一队列操作里最后一次已验状态。在这份状态上没有要降级的消费者、
+   * 保留下界也不前移时，不为无变化再开保留期事务；有变化照原事务在当前状态上判定，之后确有待删除项才再收拢。
+   */
+  async #reconcileRetention(handle: AssignmentHandle): Promise<SpoolProjection> {
+    const before = await this.#drainPendingDeletes(handle);
+    if (before.ref === undefined) return before;
+    const preview = cloneProjection(before);
+    if (slowSurfaceConsumers(preview, []).length === 0 && retentionFloor(preview) <= before.prunedThrough) return before;
     const candidateReferences = artifactsReleasedByFrames(
       before,
       [...before.frames.values()],
     );
-    await this.#transact(handle, (state) => {
+    const result = await this.#transact(handle, (state) => {
       const projected = cloneProjection(state);
       const degraded = slowSurfaceConsumers(projected, []);
       for (const consumer of degraded) consumer.degraded = true;
@@ -1425,7 +1430,9 @@ export class AssignmentStreamSpool {
         value: undefined,
       };
     }, candidateReferences);
-    await this.#drainPendingDeletes(handle);
+    return result.state.pendingDeletes.size > 0
+      ? this.#drainPendingDeletes(handle, result.state)
+      : result.state;
   }
 
   async #readFrame(
