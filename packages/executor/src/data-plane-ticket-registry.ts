@@ -401,9 +401,12 @@ export class DataPlaneTicketRegistry {
         this.#pendingRevocations.delete(ticket.ticketId);
       }
       try {
+        // 资格授权所需的事实就是本队列内刚提交（或同一位置读到）的这次接纳与上面读到的分派绑定，
+        // 不再重读一次；之后的每次访问授权照常重查绑定。
         await this.#restoreAcceptedConsumer(
           accepted,
           transaction.value.existing,
+          binding,
         );
       } catch (error) {
         // 接纳已耐久、资格未登记：记为本进程欠下的确认，下一次新接纳耐久前重试，并计入同一上界
@@ -452,6 +455,7 @@ export class DataPlaneTicketRegistry {
           value: true,
         };
       });
+      this.#forgetRetired([input.ticketId]);
       if (ticket?.kind !== "abort") {
         await this.#revokeConsumerIdentity(
           input.assignmentId,
@@ -687,14 +691,28 @@ export class DataPlaneTicketRegistry {
       };
       },
     );
+    this.#forgetRetired(transaction.value.map(({ ticketId }) => ticketId));
     return transaction.value.length;
   }
 
+  /** 已耐久退休的票据不再写资格确认、也不再补登资格：移出进程内的待确认与欠账，合批确认不再读到它们。 */
+  #forgetRetired(ticketIds: readonly string[]): void {
+    for (const ticketId of ticketIds) {
+      this.#qualified.delete(ticketId);
+      this.#owed.delete(ticketId);
+    }
+  }
+
+  /** `current` 是调用方在登记表队列内刚读到的分派绑定；给出时资格授权直接用这次接纳与它，不重读。 */
   async #restoreAcceptedConsumer(
     accepted: AcceptedTicket,
     exactReplay: boolean,
+    current?: DataPlaneAssignmentBinding,
   ): Promise<void> {
     if (accepted.ticket.kind === "abort") return;
+    const known = current === undefined
+      ? undefined
+      : new Map<string, StoredTicket>([[accepted.ticket.ticketId, { s: "a", ...accepted }]]);
     const authorization = await this.#authorizeUnlocked(
       accepted.ticket.ticketId,
       "observe",
@@ -704,6 +722,8 @@ export class DataPlaneTicketRegistry {
         executorId: accepted.ticket.executorId,
         surfacePrincipal: accepted.ticket.surfacePrincipal,
       },
+      known,
+      current === undefined ? undefined : { value: current },
     );
     if (authorization.kind !== "authorized") {
       await this.#revokeConsumer(accepted.ticket);
@@ -938,6 +958,7 @@ export class DataPlaneTicketRegistry {
       }
       return entries.length ? { kind: "append", entries, value: undefined } : { kind: "return", value: undefined };
     });
+    this.#forgetRetired(retirements.map(({ ticketId }) => ticketId));
   }
 
   async #revokeConsumer(ticket: DataPlaneTicket): Promise<void> {

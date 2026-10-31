@@ -4,7 +4,7 @@
  * 尾部、不读检查点、停止不写；投影读取只随段层数与二分深度增长，段层填满之后（64 张起）
  * 总读量不再随历史增长。从日志起点重放（旧做法）的读量随日志线性增长，作为对照。
  */
-import { stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
 import type { DataPlaneTicket, ExecutionRef } from "@zhixing/core/contracts";
@@ -40,6 +40,31 @@ const category = (relative: string) => {
   return name.endsWith(".data") ? "projection:data" : name.endsWith(".offsets") ? "projection:offsets"
     : name.startsWith("manifest") ? "projection:manifest" : name.startsWith("directory") ? "projection:directory" : "projection:other";
 };
+/**
+ * 无债务对照的前置：停止前后台退役清理已做完（各投影清单不再带退役债务）。正常停止并不等清理做完——停止时仍未做完的
+ * 退役债务以清单为凭据、由下次启动续做：冷开的前台至多付固定额度、其余归后台，见 core projection-append-tail 的带债务冷开用例。
+ */
+async function settleRetirement(logRoot: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const pending = await retirementDebt(logRoot);
+    if (pending.length === 0) return;
+    if (Date.now() > deadline) throw new Error(`Projection retirement debt did not settle before stop: ${pending.join(", ")}`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+/** 清单上仍带退役债务（待清理的退役页或进行中的清理）的投影目录。 */
+async function retirementDebt(logRoot: string): Promise<string[]> {
+  const projections = path.join(logRoot, "projections");
+  const pending: string[] = [];
+  for (const name of await readdir(projections)) {
+    const manifest = await readFile(path.join(projections, name, "manifest.json"), "utf8").then(JSON.parse, () => undefined);
+    if (manifest?.retirementCleanup !== undefined || manifest?.retirementRoot !== undefined) pending.push(name);
+  }
+  return pending;
+}
+
 const summary = (io: FileIoSnapshot) => ({
   readBytes: io.readBytes, reads: io.reads, writeBytes: io.writeBytes, writes: io.writes, segmentEntryProbes: io.segmentEntryProbes,
   log: io.byCategory.log?.readBytes ?? 0, checkpoint: io.byCategory.checkpoint?.readBytes ?? 0,
@@ -80,6 +105,7 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
       await registry.revoke({ assignmentId: recent.assignmentId, ticketId: recent.ticketId });
       // 与生产停止顺序一致：日志停止前先冲刷待确认的资格，不留定时确认落到冷开的计量窗口里
       await registry.flushQualifications();
+      await settleRetirement(logRoot);
       await log.stopStorageMaintenance();
       const logBytes = (await stat(path.join(logRoot, "authority.log"))).size;
 
@@ -144,6 +170,7 @@ describe("data-plane ticket registry with fixed current tickets and growing ende
         await registry.revoke({ assignmentId: old.assignmentId, ticketId: old.ticketId });
       }
       await registry.flushQualifications();
+      await settleRetirement(logRoot);
       await log.stopStorageMaintenance();
       now = "2026-07-25T00:00:00.000Z"; monotonic += 48 * 60 * 60 * 1_000;
 

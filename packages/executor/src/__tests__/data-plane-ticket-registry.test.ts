@@ -233,6 +233,33 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     await log.stopStorageMaintenance();
   });
 
+  it("qualifies a newly accepted ticket from the binding read for its acceptance, while replays and accesses still recheck it", async () => {
+    const root = await createTempDir("ticket-accept-single-binding-read");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const clock = () => "2026-07-23T00:01:00.000Z";
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock });
+    const spool = new AssignmentStreamSpool(path.join(root, "spool"), artifacts, { clock });
+    await spool.open("assignment-fixed", ref);
+    const dataPlaneBinding = vi.fn(async () => ({ ref, executorId: "executor-fixed", ownerKeyId: "owner-fixed" }));
+    const registry = new DataPlaneTicketRegistry({ log, spool, clock, executorId: "executor-fixed", verifier: identity,
+      assignments: { dataPlaneBinding } });
+    const ticket = createTicket("run-interact");
+
+    await registry.accept(ticket);
+    // 接纳提交前读一次绑定，资格登记直接用这次接纳与它，资格照常耐久
+    expect(dataPlaneBinding).toHaveBeenCalledTimes(1);
+    expect((await spool.snapshot(ticket.assignmentId)).consumers).toEqual([
+      expect.objectContaining({ key: `surface:${ticket.ticketId}`, qualified: true }),
+    ]);
+    // 重放已接纳的同一张票据、之后的访问授权，都照常按当前绑定重新核对
+    await registry.accept(ticket);
+    expect(dataPlaneBinding).toHaveBeenCalledTimes(2);
+    await registry.authorizeSurface(ticket.ticketId, "observe", ticket.assignmentId, ticket.surfacePrincipal);
+    expect(dataPlaneBinding).toHaveBeenCalledTimes(3);
+    await registry.flushQualifications();
+    await log.stopStorageMaintenance();
+  });
+
   it("skips historical expiry, binds the active owner, and keeps the log time frontier across a wall-clock rollback", async () => {
     const root = await createTempDir("data-plane-ticket-registry-lifecycle");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
