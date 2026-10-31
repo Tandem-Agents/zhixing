@@ -131,3 +131,90 @@ it("rebases a complete in-memory rebuild instead of compacting when timed checkp
   await reference.prepareProjections(["memory-rebuild"]);
   expect(await dump(log)).toEqual(await dump(reference));
 }, 120_000);
+
+/** 每帧多条事实：写一个宽值并删除 20 条之前的那个，重建期的墓碑随历史增长。 */
+async function churnHistory(frames: number, perFrame: number) {
+  const root = await createTempDir("projection-rebuild-structure");
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const writer = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, { integrity });
+  for (let frame = 0; frame < frames; frame++) {
+    await writer.append(Array.from({ length: perFrame }, (_, i) => ({ stream: "control", body: { n: frame * perFrame + i + 1 } })));
+  }
+  await writer.stopStorageMaintenance();
+  return { root, artifacts };
+}
+
+const item = (n: number) => "item/" + String(n).padStart(6, "0");
+
+function churn(seen: number[] = []) {
+  return {
+    projectionId: "memory-rebuild", reducerVersion: 1, authenticated: true, inputs: { streams: ["control"] },
+    async reduce(envelope: CommitEnvelope<JsonValue>): Promise<DurableProjectionMutation[]> {
+      return envelope.entries.flatMap((entry) => {
+        const n = (entry.body as { n: number }).n;
+        seen.push(n);
+        return [{ kind: "put" as const, key: item(n), value: { n, pad: "x".repeat(200) } },
+          ...(n > 20 ? [{ kind: "tombstone" as const, key: item(n - 20) }] : [])];
+      });
+    },
+  };
+}
+
+async function liveItems(log: FileAuthorityCommitLog) {
+  return (await log.transactDurableProjection("memory-rebuild", async view =>
+    ({ kind: "return", value: (await view.scan({ gte: "item/", lt: "item/￿" }, 64)).entries.map(row => row.key) }))).value;
+}
+
+async function churnReference() {
+  const reference = open(await churnHistory(120, 50));
+  reference.durableProjection(churn());
+  await reference.prepareProjections(["memory-rebuild"]);
+  return dump(reference);
+}
+
+it("finishes a spilled rebuild inside its own recovery pages so ordinary reads start within the normal delta budget", async () => {
+  const fixture = await churnHistory(120, 50);
+  const physical: string[] = [];
+  const log = open(fixture, { projectionRebuildOverlayBytes: 256 * 1024, runProjectionReadStep: (step, operation) => { physical.push(step); return operation(); } });
+  log.durableProjection(churn());
+  await log.prepareProjections(["memory-rebuild"]);
+  const published = await manifest(fixture.root);
+  expect(published.rebuilding).toBeUndefined();
+  // 就绪时每个增量段都在普通覆盖层上限内：重建期按重建预算写下的大段连同其中的墓碑已并入只含存活值的基础段
+  for (const segment of published.deltaSegments) expect(segment.count).toBeLessThanOrEqual(512);
+  physical.length = 0;
+  expect(await liveItems(log)).toEqual(Array.from({ length: 20 }, (_, i) => item(6000 - 19 + i)));
+  // 小范围读取不再扫过重建期累积的上千条墓碑：至多一个普通增量段加存活条目
+  expect(physical.filter(step => step === "segment-entry").length).toBeLessThanOrEqual(512 + 64);
+  expect(await dump(log)).toEqual(await churnReference());
+}, 300_000);
+
+it("resumes an interrupted rebuild finish from its durable structure progress without replaying the source", async () => {
+  const fixture = await churnHistory(120, 50);
+  const first = open(fixture, { projectionRebuildOverlayBytes: 256 * 1024 });
+  first.durableProjection(churn());
+  const original = FileDurableProjectionIndex.prototype.completeRebuild;
+  let steps = 0;
+  let stopping: Promise<void> | undefined;
+  vi.spyOn(FileDurableProjectionIndex.prototype, "completeRebuild").mockImplementation(async function (this: FileDurableProjectionIndex, checkpoints, step) {
+    if (step && ++steps === 4) { stopping = first.stopStorageMaintenance(); throw new Error("interrupted"); }
+    return original.call(this, checkpoints, step);
+  });
+  await expect(first.prepareProjections(["memory-rebuild"])).rejects.toThrow();
+  await stopping;
+  vi.restoreAllMocks();
+  const interrupted = await manifest(fixture.root);
+  expect(interrupted.rebuilding).toBe(true);
+  expect(interrupted.compaction).toBeDefined();
+
+  const seen: number[] = [];
+  const resumed = open(fixture, { projectionRebuildOverlayBytes: 256 * 1024 });
+  resumed.durableProjection(churn(seen));
+  await resumed.prepareProjections(["memory-rebuild"]);
+  // 源头已追平并落盘：续做只推进结构收尾，不重放任何事实
+  expect(seen).toEqual([]);
+  const published = await manifest(fixture.root);
+  expect(published.rebuilding).toBeUndefined();
+  for (const segment of published.deltaSegments) expect(segment.count).toBeLessThanOrEqual(512);
+  expect(await dump(resumed)).toEqual(await churnReference());
+}, 300_000);

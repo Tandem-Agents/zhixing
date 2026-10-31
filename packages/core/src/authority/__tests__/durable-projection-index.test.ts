@@ -235,6 +235,33 @@ async function createLaggingCorruptedProjection(
 }
 
 describe("FileDurableProjectionIndex", () => {
+  it("reuses a manifest's verification only for byte-identical reads and fully re-verifies changed bytes", async () => {
+    const rootDir = await createTempDir("projection-manifest-reuse");
+    const options = { rootDir, projectionId: "manifest-reuse", reducerVersion: 1 };
+    const writer = new FileDurableProjectionIndex(options);
+    await writer.initialize({ authority: checkpoint(0) });
+    writer.publish(await writer.prepare([{ kind: "put" as const, key: "a", value: 1 }]), { authority: checkpoint(1) });
+    await writer.flush();
+    const reader = new FileDurableProjectionIndex(options);
+    await reader.initialize({ authority: checkpoint(0) });
+    try {
+      // 清单逐字节未变：再次刷新照常完成
+      await reader.refreshPublishedState();
+      expect(await reader.get("a")).toBe(1);
+      // 另一实例发布新清单（字节不同）：读到新代际，不沿用旧结果
+      writer.publish(await writer.prepare([{ kind: "put" as const, key: "b", value: 2 }]), { authority: checkpoint(2) });
+      await writer.flush();
+      await reader.refreshPublishedState();
+      expect(await reader.get("b")).toBe(2);
+      // 带外改成内容等价但不规范的字节：字节不同就完整验证，发现不规范
+      const file = path.join(rootDir, "manifest.json");
+      await writeFile(file, `${await readFile(file, "utf8")} `);
+      await expect(reader.refreshPublishedState()).rejects.toThrow(DurableProjectionStorageError);
+    } finally {
+      await Promise.all([writer.stopStorageMaintenance(), reader.stopStorageMaintenance()]);
+    }
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it("batches physical segment IO while preserving large entries and cold corruption checks", async () => {
     const rootDir = await createTempDir("projection-physical-batches");
     const options = { rootDir, projectionId: "physical-batches", reducerVersion: 1 };
@@ -283,10 +310,10 @@ describe("FileDurableProjectionIndex", () => {
     const coldEntries = steps.filter(step => step === 'segment-entry').length;
     expect(coldEntries).toBeGreaterThan(0);
     steps.length = 0;
-    // 同一查询再次执行：只核对一次段文件身份，不再打开文件、不再读条目。
+    // 同一查询再次执行：只核对一次段文件身份（segment-verify，与真正打开句柄的 segment-open 分开计），不再打开文件、不再读条目。
     const repeated = await reader.get('key-123') as { id: number };
     expect(repeated).toEqual({ id: 123, text: 'value-123' });
-    expect(steps).toEqual(['segment-open']);
+    expect(steps).toEqual(['segment-verify']);
     // 返回值每次重新解析：调用方改动不影响后续读取。
     repeated.id = -1;
     expect(await reader.getMany(['key-123', 'key-124'])).toEqual([{ id: 123, text: 'value-123' }, { id: 124, text: 'value-124' }]);
@@ -1471,8 +1498,10 @@ it('does not take the source fence again while an older read view still blocks r
     await index.flush();
     const retired = async () => (await readdir(root)).filter(file => file.startsWith('retirement-')).length;
     expect(await retired()).toBeGreaterThan(0);
-    // 第一次核对得到受阻；之后阻挡仍在，读取不再为退役取源锁
+    // 第一次核对得到受阻（由前台读或已接管的后台续跑做，等它落定：源锁计数一段时间内不再变化）；
+    // 之后阻挡仍在，读取不再为退役取源锁
     await index.get('absent');
+    for (let last = -1; last !== fences;) { last = fences; await new Promise(resolve => setTimeout(resolve, 20)); }
     const before = fences;
     for (let n = 0; n < 20; n++) { await index.get('absent'); await new Promise(resolve => setTimeout(resolve, 2)); }
     expect(fences).toBe(before);
@@ -1481,5 +1510,123 @@ it('does not take the source fence again while an older read view still blocks r
     index.releaseContinuation(page.continuation!);
     await vi.waitFor(async () => expect(await retired()).toBe(0));
     await expect(index.get('key-7')).resolves.toBe(7);
+  } finally { await index.stopStorageMaintenance(); }
+});
+
+it('lets the background continuation own retirement debt instead of charging every foreground read', async () => {
+  const root = await createTempDir('retirement-foreground-yield'), source = new SerialTaskQueue();
+  // 截住后台续跑：排定后不自动执行，由用例按需推进，期间它一直处于“已接管”状态
+  const pumps: (() => Promise<void>)[] = [];
+  // 源锁内持有维护互斥：重置时的回收只排定续跑、留下债务（与生产里写者持源锁时同一路径）
+  const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: 'retirement-yield', reducerVersion: 1,
+    withSourceLock: operation => isHoldingMaintenanceExclusion() ? operation() : source.run(() => runHoldingMaintenanceExclusion(operation)),
+    runDetached: (<T>(operation: () => T): T => { pumps.push(operation as unknown as () => Promise<void>); return new Promise(() => {}) as T; }) });
+  const key = storageMaintenanceWorkKey('projection-compaction', `retirement-yield:${root}`, { phase: 'retirement-cleanup' });
+  const retired = async () => (await readdir(root)).filter(file => file.startsWith('retirement-')).length;
+  const run = vi.spyOn(StorageMaintenanceTaskRunner.prototype, 'run');
+  try {
+    await index.initialize({ source: checkpoint(0) });
+    index.publish(await index.prepare([{ kind: 'put', key: 'retired', value: 'old' }]), { source: checkpoint(1) });
+    await index.flush({ compact: false });
+    await index.reset({ source: checkpoint(0) });
+    // 持互斥的读者只排定续跑、不推进：债务交给续跑
+    await source.run(() => runHoldingMaintenanceExclusion(async () => { await index.get('absent'); }));
+    await vi.waitFor(() => expect(pumps.length).toBeGreaterThan(0));
+    expect(await retired()).toBeGreaterThan(0);
+    // 续跑已接管：随后的前台读一步也不推进回收，不再各付一份
+    run.mockClear();
+    for (let n = 0; n < 10; n++) await expect(index.get('absent')).resolves.toBeUndefined();
+    expect(run.mock.calls.filter(([request]) => request.workKey === key)).toHaveLength(0);
+    // 由续跑推进到清完
+    for (let step = 0; step < 100 && await retired() > 0; step++) await pumps[0]!();
+    expect(await retired()).toBe(0);
+  } finally { run.mockRestore(); await index.stopStorageMaintenance(); }
+}, 20000);
+
+it('bounds a churned prefix scan by the delta window, not by how many times the prefix was rewritten', async () => {
+  // 全局活跃页一类前缀：条目随存活状态反复写入再删除，墓碑留在增量窗口直到并入基础段。
+  // 扫描读量＝目录路径＋每段二分探测＋增量窗口内该前缀的条目＋基础段内的存活条目：
+  // 增量窗口至多 MAX_DELTA_SEGMENTS(4)+1 段、每段至多覆盖层 512 条，与改写总次数无关
+  const entryReads = async (rewrites: number) => {
+    const root = await createTempDir(`churned-prefix-${rewrites}`);
+    const steps: string[] = [];
+    const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: `churned-prefix-${rewrites}`, reducerVersion: 1,
+      runReadStep: async (step, run) => { steps.push(step); return run(); } });
+    try {
+      await index.initialize({ source: checkpoint(0) });
+      let lsn = 0;
+      for (let n = 0; n < rewrites; n++) {
+        const key = `ix:ac:${String(n).padStart(6, '0')}`;
+        index.publish(await index.prepare([{ kind: 'put', key, value: n }, { kind: 'put', key: `z:${n % 7}`, value: n }]), { source: checkpoint(++lsn) });
+        index.publish(await index.prepare([{ kind: 'tombstone', key }]), { source: checkpoint(++lsn) });
+        if (n % 64 === 63) await index.flush();
+      }
+      await index.flush();
+      steps.length = 0;
+      await expect(index.scan({ gte: 'ix:ac:', lt: 'ix:ac:￿' }, 256)).resolves.toEqual({ entries: [] });
+      return steps.filter(step => step === 'segment-entry').length;
+    } finally { await index.stopStorageMaintenance(); }
+  };
+  const small = await entryReads(512), large = await entryReads(2048);
+  expect(large).toBeLessThanOrEqual(5 * 512);
+  // 改写次数翻四倍，读量不随之成比例增长
+  expect(large).toBeLessThanOrEqual(small + 5 * 16);
+}, 120000);
+
+it('keeps a caught-up rebuild with pending segment compaction building until recovery steps finish it one at a time', async () => {
+  // 增量窗口已满（5 段、每段 500 条，都在普通上限内）、无基础段、已有整理标记、覆盖层还有 1 条：
+  // 转就绪判定不做任何整理；收尾每次至多一步；中途换实例续做；最后内容与写入一致
+  const root = await createTempDir('rebuild-pending-compaction');
+  const manifest = async () => JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8'));
+  const create = () => new FileDurableProjectionIndex({ rootDir: root, projectionId: 'rebuild-pending-compaction', reducerVersion: 1,
+    managedRecovery: true, rebuildOverlayBytes: 4096 });
+  const target = { source: checkpoint(6) };
+  const expected = new Map<string, number>();
+  let index = create();
+  try {
+    await index.initialize({ source: checkpoint(0) }, target);
+    for (let batch = 1; batch <= 5; batch++) {
+      const rows = Array.from({ length: 500 }, (_, i) => ({ kind: 'put' as const, key: `k:${batch}:${String(i).padStart(4, '0')}`, value: batch }));
+      for (const row of rows) expected.set(row.key, row.value);
+      index.publish(await index.prepare(rows), { source: checkpoint(batch) });
+      await index.flush({ compact: false });
+    }
+    const full = await manifest();
+    expect(full).toMatchObject({ rebuilding: true, compaction: {} });
+    expect(full.baseRoot).toBeUndefined();
+    expect(full.deltaSegments.map((segment: { count: number }) => segment.count)).toEqual([500, 500, 500, 500, 500]);
+    const tail = [{ kind: 'put' as const, key: 'tail', value: 6 }];
+    expected.set('tail', 6);
+    index.publish(await index.prepare(tail), { source: checkpoint(6) });
+
+    expect(await index.completeRebuild(target, false)).toBe(false);
+    expect((await manifest()).generation).toBe(full.generation);
+    expect(index.readiness()).toBe('building');
+
+    expect(await index.completeRebuild(target, true)).toBe(false);
+    const stepped = await manifest();
+    expect(stepped).toMatchObject({ rebuilding: true, compaction: { afterKey: expect.any(String) } });
+    expect(stepped.deltaSegments).toHaveLength(5);
+
+    // 换实例续做：未落盘的覆盖层由源头重放，段整理从清单上的进度接着做
+    await index.stopStorageMaintenance();
+    index = create();
+    await index.initialize({ source: checkpoint(0) }, target);
+    expect(index.readiness()).toBe('building');
+    index.publish(await index.prepare(tail), { source: checkpoint(6) });
+    let steps = 0;
+    while (!await index.completeRebuild(target, true)) expect(++steps).toBeLessThanOrEqual(8);
+    expect(index.readiness()).toBe('ready');
+    const ready = await manifest();
+    expect(ready.rebuilding).toBeUndefined();
+    expect(ready.compaction).toBeUndefined();
+    const rows: { key: string; value: unknown }[] = [];
+    let continuation: string | undefined;
+    do {
+      const page = await index.scan({}, 256, continuation);
+      rows.push(...page.entries);
+      continuation = page.continuation;
+    } while (continuation);
+    expect(new Map(rows.map(row => [row.key, row.value]))).toEqual(expected);
   } finally { await index.stopStorageMaintenance(); }
 });

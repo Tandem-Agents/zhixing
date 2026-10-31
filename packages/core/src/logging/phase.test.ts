@@ -23,6 +23,22 @@ it("嵌套阶段关联开始、结束和底层失败，保留业务异常", asyn
   expect(JSON.stringify(stored)).not.toContain("secret input");
 });
 
+it("共享入口的阶段记下调用方给出的固定标签，经记录端口收下并随阶段开始关联", async () => {
+  const stored: LogCapture[] = [];
+  const status: LogStatus = { layout: "zxlog/1", storeId: "test", policy: { version: 1, effective: DEFAULT_LOG_POLICY }, bytes: 0, files: 0, upper: 0, retainedSegments: 0, pendingReclaims: 0, overdue: false };
+  const sink: LogSink = { initialize: async () => status, maintain: async () => status,
+    append: async entries => { stored.push(...entries); return { policy: status.policy }; }, close: async () => {} };
+  const recorder = new LogRecorder(sink);
+  const port = recorder.bind({ id: "test", version: 1, events: LOG_PHASE_EVENTS }, { scope: "storage" });
+  await observeLogPhase(port, "shared", async () => {}, { caller: "conversation-journal" });
+  await observeLogPhase(port, "shared", async () => {});
+  await recorder.close();
+  const started = stored.map(item => item.record).filter(record => record.event === "phaseStarted");
+  expect(started[0]!.data).toMatchObject({ phase: "shared", caller: "conversation-journal" });
+  // 不给标签就不记，不在入口另取调用栈
+  expect(started[1]!.data).not.toHaveProperty("caller");
+});
+
 it("错误证据只投影有限类别和平台码，恶意 getter 不越过故障边界", () => {
   expect(logFailureEvidence(new Error("NTSTATUS 0xc0000022 at private path"))).toEqual({ category: "platform", code: "NTSTATUS 0xc0000022" });
   const hostile = new Error("hidden");

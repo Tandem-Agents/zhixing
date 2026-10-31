@@ -265,7 +265,8 @@ export interface DurableProjectionDefinition<Body = JsonValue> {
   readonly authenticated?: boolean;
 }
 
-export type DurableProjectionReadStep = "manifest" | "segment-open" | "segment-entry" | "directory-page";
+/** segment-verify：复用已打开段的缓存前核对文件身份（stat），与真正打开句柄的 segment-open 预算相同、分开计数。 */
+export type DurableProjectionReadStep = "manifest" | "segment-open" | "segment-verify" | "segment-entry" | "directory-page";
 
 /** Physical read bounds stay beside the format constants that determine them. */
 export function durableProjectionReadBudget(step: DurableProjectionReadStep): {
@@ -273,7 +274,8 @@ export function durableProjectionReadBudget(step: DurableProjectionReadStep): {
 } {
   switch (step) {
     case "manifest": return { memoryReservationBytes: 4 * MAX_VALUE_BYTES, readBytes: MAX_VALUE_BYTES, ioOperations: 3 };
-    case "segment-open": return { memoryReservationBytes: 0, readBytes: 0, ioOperations: 2 };
+    case "segment-open":
+    case "segment-verify": return { memoryReservationBytes: 0, readBytes: 0, ioOperations: 2 };
     case "directory-page": return { memoryReservationBytes: 4 * MAX_DIRECTORY_PAGE_BYTES, readBytes: MAX_DIRECTORY_PAGE_BYTES, ioOperations: 3 };
     case "segment-entry": return { memoryReservationBytes: 2 * MAX_VALUE_BYTES + SEGMENT_OFFSET_BATCH_BYTES, readBytes: MAX_VALUE_BYTES + MAX_KEY_BYTES + SEGMENT_HEADER_BYTES + SEGMENT_OFFSET_BATCH_BYTES, ioOperations: 3 };
   }
@@ -744,6 +746,11 @@ export class FileDurableProjectionIndex {
   #rootDir: string;
   get rootDir(): string { return this.#rootDir; }
   #authenticated: boolean | undefined;
+  /** 按目录记住最近一次验证通过的清单原字节与解码结果：再次读到逐字节相同、且认证模式相同的清单时，复用解码与认证结果，
+   * 只省计算、不省读盘。结果是独立副本，不与发布流程会修改的清单对象共享；字节不同、文件不存在或读失败都照原路径处理。 */
+  readonly #verifiedManifests = new Map<string, { readonly bytes: Buffer; readonly authenticated: boolean; readonly manifest: ProjectionManifest }>();
+  /** 同一源锁会话内为紧接的重新采纳预读的当前清单（见 prefetchPublishedManifest）；被一次重新采纳消费或由调用方丢弃。 */
+  #prefetchedManifest: { readonly value: ProjectionManifest | undefined } | undefined;
   readonly projectionId: string;
   readonly reducerVersion: number;
   readonly #overlayEntries: number;
@@ -803,15 +810,34 @@ export class FileDurableProjectionIndex {
     await this.#serializeManifest(async () => undefined);
   }
 
+  /**
+   * 源头持锁、在同一已验位置内紧接着要重新采纳时，先读当前清单字节（与重新采纳同一读取、规范性与 MAC 核验），
+   * 交给下一次重新采纳代替它自己的读取；调用方在这一批结束时（含抛错）丢弃，不跨锁会话保留。
+   * 写意图待恢复、未初始化、读取失败或容量被拒时什么都不留，重新采纳照原路径自己读、按原规则处理失败。
+   */
+  async prefetchPublishedManifest(): Promise<void> {
+    this.#prefetchedManifest = undefined;
+    if (!this.#initialized || !this.#manifest || this.#writeIntent || this.#readOnly) return;
+    if (this.#requiresAuthentication && !this.#integrity) return;
+    try { this.#prefetchedManifest = { value: await this.#readManifest() }; }
+    catch { this.#prefetchedManifest = undefined; }
+  }
+
+  discardPrefetchedManifest(): void {
+    this.#prefetchedManifest = undefined;
+  }
+
   async #refreshFromDisk(): Promise<void> {
     if (!this.#initialized || !this.#manifest) return;
     if (this.#requiresAuthentication && !this.#integrity) return;
     // A read-only fallback has deliberately rejected the disk root. Re-reading
     // that same unusable root must not erase its strictly recovered memory page.
     if (this.#readOnly && !this.#hasPublishedManifest) return;
-      if (this.#writeIntent) await this.#recoverWriteIntent();
+      if (this.#writeIntent) { this.#prefetchedManifest = undefined; await this.#recoverWriteIntent(); }
       const current = this.#requireManifest();
-      const published = await this.#readManifest();
+      const prefetched = this.#prefetchedManifest;
+      this.#prefetchedManifest = undefined;
+      const published = prefetched ? prefetched.value : await this.#readManifest();
       if (!published && !this.#hasPublishedManifest) return;
       if (!published || published.projectionId !== this.projectionId || published.reducerVersion !== this.reducerVersion ||
           !sameCheckpointSources(published.checkpoints, current.checkpoints) || (this.#hasPublishedManifest && published.generation < current.generation)) {
@@ -984,6 +1010,81 @@ export class FileDurableProjectionIndex {
     this.#rebuildCache = undefined;
   }
 
+  /**
+   * 受管重建追平源头后转就绪。普通查询开始消费时结构须在普通读取预算内：重建期按重建预算写下的增量段
+   * （或尚未落盘的覆盖层）超出普通覆盖层上限时不转就绪。`step` 为真时只推进一步结构收尾——有待整理就做
+   * 一步段整理，否则落一次覆盖层，否则发布整理标记——由调用方在页与页之间放锁，中断后从清单上的整理进度续做；
+   * 为假时不做收尾、保持 building。结构在预算内时与 finishRebuild 相同。返回本次之后是否已就绪。
+   */
+  async completeRebuild(checkpoints: DurableProjectionCheckpoints, step: boolean): Promise<boolean> {
+    if (this.#writeIntent) await this.refreshPublishedState();
+    if (this.#rebuildStructureReadable()) {
+      await this.finishRebuild(checkpoints);
+      return true;
+    }
+    if (!step) return false;
+    if (this.#requireManifest().compaction) await this.#rebuildCompactionStep();
+    else if (this.#active.size > 0) await this.flush({ compact: false });
+    else await this.#requestRebuildCompaction();
+    return false;
+  }
+
+  /**
+   * 与就绪后普通落盘同一口径：每个增量段、待落盘覆盖层都不超过普通覆盖层上限。全部状态在内存里的重建直接发布只含存活值的基础段。
+   * 还有未完成的段整理时不判达标：转就绪的那次落盘遇到待整理且覆盖层非空会把整轮整理做完（#runFlush），这里留给恢复分页逐步推进。
+   */
+  #rebuildStructureReadable(): boolean {
+    if (!this.#persistent) return true;
+    const manifest = this.#requireManifest();
+    if (manifest.compaction) return false;
+    if (this.#rebuildCache?.complete) return true;
+    if (this.#active.size > this.#overlayEntries || this.#activeBytes > this.#overlayBytes) return false;
+    return manifest.deltaSegments.every(segment => segment.count <= this.#overlayEntries);
+  }
+
+  /** 重建收尾：只改清单、标记把全部增量段并入基础段（基础段只留存活值，重建期的墓碑随之消失）。 */
+  async #requestRebuildCompaction(): Promise<void> {
+    const input = { phase: "rebuild-structure", generation: this.#requireManifest().generation };
+    await this.#runMaintenanceObligation("projection-flush", input, "committed", () =>
+      this.#runMaintenanceStep("projection-flush", input, "committed", async () => {
+        const manifest = this.#requireManifest();
+        if (manifest.compaction || manifest.deltaSegments.length === 0) return;
+        const next: ProjectionManifest = { ...manifest, generation: manifest.generation + 1, compaction: {} };
+        await this.#writeManifest(next);
+        this.#manifest = next;
+        this.#hasPublishedManifest = true;
+        this.#publicationSequence++;
+      }));
+  }
+
+  /** 重建收尾的一步段整理：与普通整理同一维护义务与单步（暂存目录预算满时以单区间重做），每次调用至多推进一步。 */
+  async #rebuildCompactionStep(): Promise<void> {
+    const manifest = this.#requireManifest();
+    const frozenInput = { checkpoints: manifest.checkpoints, deltaSegments: manifest.deltaSegments.map(({ id }) => id) };
+    await this.#runMaintenanceObligation("projection-compaction", frozenInput, "committed", async () => {
+      for (const staged of [true, false]) {
+        const stepManifest = this.#requireManifest();
+        if (!stepManifest.compaction) return;
+        try {
+          await this.#runMaintenanceStep("projection-compaction", {
+            frozenInput,
+            generation: stepManifest.generation,
+            ...(stepManifest.compaction.afterKey === undefined ? {} : { afterKey: stepManifest.compaction.afterKey }),
+          }, "committed", () => this.#compactRanges(staged));
+        } catch (error) {
+          if (!(error instanceof CompactionDirectoryBudgetFull) || !staged) throw error;
+          continue;
+        }
+        if (this.#requireManifest().generation <= stepManifest.generation) {
+          throw new Error("Projection compaction made no durable progress");
+        }
+        await this.#runRetirementCleanup();
+        return;
+      }
+    });
+    await this.#runRetirementCleanup();
+  }
+
   async initialize(
     emptyCheckpoints: DurableProjectionCheckpoints,
     recoveryTarget: DurableProjectionCheckpoints = emptyCheckpoints,
@@ -1019,7 +1120,8 @@ export class FileDurableProjectionIndex {
       this.#initialized = true;
       return;
     }
-    await this.#runInitialStep("select-directory", () => this.#selectDirectory());
+    // 目录选择只读：至多一次 stat 与一次清单读，按正常打开的只读计划准入，不借写入型初始化的大预算
+    await this.#runOpenStep("select-directory", () => this.#selectDirectory());
     if (this.#readOnly) {
       await this.#runInitialStep("readonly-open", async () => {
       const manifest = await this.#readManifest().catch((error: unknown) => {
@@ -1829,6 +1931,8 @@ export class FileDurableProjectionIndex {
     options: {
       readonly drain?: boolean;
       readonly surfaceFailure?: boolean;
+      /** 后台续跑自己的调用：它就是接管余下债务的那一方。 */
+      readonly background?: boolean;
     } = {},
   ): Promise<void> {
     if (!this.#persistent || !this.#allowReclamation) return;
@@ -1856,6 +1960,10 @@ export class FileDurableProjectionIndex {
       if (this.#retirementIdentity()) this.#scheduleRetirementRetry(this.#clock() + RETIREMENT_CONTINUATION_DELAY_MS);
       return;
     }
+    // 后台续跑已接管余下债务（已排定或正在跑）：前台读不再逐次各付一份，
+    // 每段债务前台至多付首个触发者的固定额度，其余由续跑在前台之外推进。
+    if (!options.drain && !options.background &&
+        (this.#retirementRetryTimer !== undefined || this.#retirementRetryRunning)) return;
     try { await this.#runMaintenanceObligation(
       "projection-compaction",
       { phase: "retirement-cleanup" },
@@ -1971,7 +2079,7 @@ export class FileDurableProjectionIndex {
       this.#retirementRetryRunning = true;
       let failed = false;
       void this.#runDetached(() => runDetachedMaintenanceContext("background", () =>
-        this.#runRetirementCleanup({ surfaceFailure: false })
+        this.#runRetirementCleanup({ surfaceFailure: false, background: true })
       )).catch((error: unknown) => {
         failed = true;
         if (!this.#maintenanceStopped) this.#retirementCleanupFailure = { error };
@@ -3267,7 +3375,7 @@ export class FileDurableProjectionIndex {
       claimStorageIo("ioOperations", 1);
       handle = await open(file, "r");
     } catch (error) {
-      if (isNodeError(error, "ENOENT")) return undefined;
+      if (isNodeError(error, "ENOENT")) { this.#verifiedManifests.delete(directory); return undefined; }
       throw error;
     }
     try {
@@ -3284,6 +3392,9 @@ export class FileDurableProjectionIndex {
         throw projectionCorrupt("Projection manifest changed while reading");
       }
       onBytes?.(bytes);
+      const authenticated = this.#authenticated === true;
+      const verified = this.#verifiedManifests.get(directory);
+      if (verified && verified.authenticated === authenticated && verified.bytes.equals(bytes)) return structuredClone(verified.manifest);
       try {
       const value = JSON.parse(bytes.toString("utf8")) as unknown;
       if (canonicalize(value) !== bytes.toString("utf8")) {
@@ -3292,14 +3403,16 @@ export class FileDurableProjectionIndex {
       const stored = plainRecord(value);
       if (!stored) throw projectionCorrupt("Projection manifest is invalid");
       const { integrity, ...contents } = stored;
-      if (this.#authenticated) {
+      if (authenticated) {
         const expected = projectionIndexMac("manifest", [Buffer.from(canonicalize(contents), "utf8")], this.#integrity);
         if (!expected || typeof integrity !== "string" || !/^[a-f0-9]{64}$/u.test(integrity) ||
             !timingSafeEqual(expected, Buffer.from(integrity, "hex"))) {
           throw projectionCorrupt("Projection manifest authentication is invalid");
         }
       }
-      return validateManifest(contents);
+      const manifest = validateManifest(contents);
+      this.#verifiedManifests.set(directory, { bytes: Buffer.from(bytes), authenticated, manifest: structuredClone(manifest) });
+      return manifest;
       } catch (error) {
         if (error instanceof DurableProjectionStorageError) throw error;
         throw projectionCorrupt("Projection manifest contents are invalid", error);
@@ -3310,6 +3423,7 @@ export class FileDurableProjectionIndex {
   }
 
   async #writeManifest(manifest: ProjectionManifest): Promise<void> {
+    this.#prefetchedManifest = undefined;
     const contents = Buffer.from(canonicalize(manifest), "utf8");
     const signature = this.#authenticated ? projectionIndexMac("manifest", [contents], this.#integrity) : undefined;
     if (this.#authenticated && !signature) throw projectionCorrupt("Projection integrity key is unavailable");
@@ -4005,7 +4119,7 @@ class SegmentReader {
     const file = this.descriptor.dataFile;
     // 同一源操作里，同一段文件的同一缓存身份只核对一次；非协作写者在两次操作之间的替换由下一次操作发现
     if (this.cache!.identity(file) !== undefined && !this.cache!.verifiedInOperation(file)) {
-      const current = await runProjectionReadStep(this.runReadStep, "segment-open", async () => {
+      const current = await runProjectionReadStep(this.runReadStep, "segment-verify", async () => {
         claimStorageIo("ioOperations", 1);
         return stat(path.join(this.rootDir, file), { bigint: true }).then(segmentFileIdentity, () => undefined);
       });
@@ -4212,8 +4326,10 @@ function validateManifest(value: unknown): ProjectionManifest {
   if (
     deltaSegments.length >
       MAX_DELTA_SEGMENTS + (compaction === undefined ? 0 : 1) ||
+    // 就绪清单只在增量窗口溢出时进入整理；重建收尾（building，不对普通查询开放）把超出普通读取预算的段
+    // 并入基础段，窗口未满也带整理标记，整理完成后才转就绪
     (compaction !== undefined &&
-      deltaSegments.length <= MAX_DELTA_SEGMENTS) ||
+      deltaSegments.length <= MAX_DELTA_SEGMENTS && record.rebuilding !== true) ||
     deltaSegments.some(({ level }) => level !== 0)
   ) {
     throw new Error("Projection manifest delta segments are invalid");

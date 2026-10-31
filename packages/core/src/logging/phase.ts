@@ -5,7 +5,7 @@ import { LOG_FAILURE_FIELDS, logFailureEvidence } from "./failure.js";
 
 const context = new AsyncLocalStorage<{ refs: readonly LogRef[]; active: boolean }>();
 const fields = { phase: "text", durationMs: "number", waitFor: "text", queueMs: "number", count: "number", bytes: "number",
-  processCpuUserMs: "number", processCpuSystemMs: "number", loopDelayMs: "number", failure: { fields: LOG_FAILURE_FIELDS } } as const;
+  processCpuUserMs: "number", processCpuSystemMs: "number", loopDelayMs: "number", caller: "text", failure: { fields: LOG_FAILURE_FIELDS } } as const;
 export const LOG_PHASE_EVENTS: LogSource["events"] = {
   phaseStarted: { message: "运行阶段已进入", level: "info", tier: "critical", fields },
   phaseProgress: { message: "运行阶段仍在推进或等待", level: "info", tier: "critical", fields },
@@ -13,9 +13,12 @@ export const LOG_PHASE_EVENTS: LogSource["events"] = {
 };
 export function currentLogPhaseRefs(): readonly LogRef[] { const value = context.getStore(); return value?.active ? value.refs : []; }
 
-/** Observation only: never changes cancellation, errors or business scheduling. */
+/** 在任何调用者阶段之外运行：转交后台续跑的工作不记在发起它的前台阶段名下（只观测）。 */
+export function runOutsideLogPhase<T>(work: () => Promise<T>): Promise<T> { return context.run({ refs: [], active: false }, work); }
+
+/** Observation only: never changes cancellation, errors or business scheduling. caller 是调用方给出的固定标签（共享入口区分发起方）。 */
 export function beginLogPhase(records: LogRecordPort | undefined, phase: string,
-  options: { waitFor?: string; refs?: readonly LogRef[] } = {}) {
+  options: { waitFor?: string; refs?: readonly LogRef[]; caller?: string } = {}) {
   const ref: LogRef = { kind: "phase", id: randomUUID() };
   const parent = currentLogPhaseRefs().findLast(item => item.kind === "phase");
   const refs = [ref, ...(parent ? [{ kind: "parentPhase", id: parent.id }] : []), ...(options.refs ?? [])];
@@ -25,7 +28,7 @@ export function beginLogPhase(records: LogRecordPort | undefined, phase: string,
     try { records?.record({ event, refs, data: { phase, waitFor: options.waitFor, ...data }, ...(result ? { result } : {}) }); }
     catch { /* A foreign observation port cannot fail the observed operation. */ }
   };
-  record("phaseStarted", {});
+  record("phaseStarted", options.caller ? { caller: options.caller } : {});
   const timer = setInterval(() => {
     const now = performance.now();
     record("phaseProgress", { durationMs: Math.round(now - start), loopDelayMs: Math.max(0, Math.round(now - expected)) });
@@ -48,7 +51,7 @@ export function beginLogPhase(records: LogRecordPort | undefined, phase: string,
   };
 }
 
-export async function observeLogPhase<T>(records: LogRecordPort | undefined, phase: string, work: () => Promise<T>, options: { waitFor?: string; refs?: readonly LogRef[] } = {}): Promise<T> {
+export async function observeLogPhase<T>(records: LogRecordPort | undefined, phase: string, work: () => Promise<T>, options: { waitFor?: string; refs?: readonly LogRef[]; caller?: string } = {}): Promise<T> {
   if (!records) return work();
   const observation = beginLogPhase(records, phase, options);
   try { const value = await observation.run(work); observation.finish(); return value; }

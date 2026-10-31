@@ -8,6 +8,7 @@ import type { LogDraft, LogRecordPort } from "../../logging/contracts.js";
 import { observeLogPhase } from "../../logging/phase.js";
 import { AuthorityStorageError } from "../errors.js";
 import { StorageMaintenanceAdmissionError } from "../../resources/index.js";
+import { AuthorityPreparationRequired } from "../recovery-work.js";
 
 it('reports only finite validation branches and the failed transaction stage', () => {
   const { records, entries } = collector();
@@ -31,6 +32,15 @@ it("records a retryable admission deferral without reporting the operation as fa
   expect(entries.some(item => item.event === "failed")).toBe(false);
   expect(entries).toContainEqual(expect.objectContaining({ event: "deferred",
     data: expect.objectContaining({ operation: "transactProjection", waitFor: "candidate-validate", blockedBy: "derived-preparation", retryAfterMs: 1 }) }));
+  // 派生准备信号带出原因、所需位置与各投影当前位置，供首发取证与就绪水位对照；普通背压不带
+  const preparing = observer.begin("transactProjection"); preparing.stage("projection-decide");
+  const required = new AuthorityPreparationRequired(["assignment-ledger-v1"]);
+  required.observed = { reason: "behind", requiredLsn: 1107, positions: ["assignment-ledger-v1@1105"] };
+  preparing.finish(required);
+  observer.flush();
+  expect(entries).toContainEqual(expect.objectContaining({ event: "deferred", data: expect.objectContaining({
+    waitFor: "projection-decide", blockedBy: "derived-preparation", reason: "behind", requiredLsn: 1107, projections: ["assignment-ledger-v1@1105"] }) }));
+  expect(entries.filter(item => item.event === "deferred")[0]!.data).not.toHaveProperty("reason");
   // 容量缺口不可重试，仍是失败
   const gap = observer.begin("append");
   gap.finish(new StorageMaintenanceAdmissionError({ kind: "capacity-gap", blockedBy: "disk", required: 2, available: 1 } as never));

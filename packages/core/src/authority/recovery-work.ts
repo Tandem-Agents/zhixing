@@ -44,6 +44,8 @@ export class AuthorityPreparationRequired extends StorageMaintenanceAdmissionErr
   /** When isolating maintenance failures, these decision/write dependencies
    * must still complete successfully. Undefined preserves all-isolated mode. */
   requiredProjections?: readonly string[];
+  /** 只供观测：触发原因、本次需要追到的 lsn、各投影当前覆盖到的位置（“投影@lsn”）；不参与任何判定。 */
+  observed?: { readonly reason: string; readonly requiredLsn?: number; readonly positions: readonly string[] };
   constructor(readonly projections: readonly string[], readonly frameIndex = false,
     readonly coverage: readonly string[] = []) {
     super({ kind: "backpressured", blockedBy: "derived-preparation", retryAfterMs: 25 });

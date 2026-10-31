@@ -97,6 +97,20 @@ function request(
 }
 
 describe("DefaultDeviceCapacityArbiter", () => {
+  it("does not let an immediately fitting request bypass a waiter at the head of its class", async () => {
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(2), probe: pressure });
+    const signal = new AbortController().signal;
+    // 占去大部分内存，只剩 1 MiB
+    const holder = await arbiter.acquire(request("holder", budget(1, { memoryReservationBytes: 15 * MIB })), signal);
+    expect(holder.kind).toBe("granted");
+    // 需要 8 MiB 的请求放不下，在本类队首等待
+    const waiting = arbiter.acquire(request("waiting", budget(1, { memoryReservationBytes: 8 * MIB }), 60_000), signal);
+    // 只要 1 MiB、此刻放得下的同类请求不能越过队首的等待者
+    expect((await arbiter.acquire(request("bypass", budget(1, { memoryReservationBytes: MIB })), signal)).kind).toBe("backpressured");
+    if (holder.kind === "granted") holder.permit.release();
+    expect((await waiting).kind).toBe("granted");
+  });
+
   it("separates durable work from the caller permit without releasing or extending it", async () => {
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
     const signal = new AbortController().signal;

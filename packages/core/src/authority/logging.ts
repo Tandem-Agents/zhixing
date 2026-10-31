@@ -17,7 +17,7 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
     corrupted: { message: "业务权威历史字节与认证索引不符", level: "error", tier: "critical", fields: { error: "text" } },
     work: { message: "业务权威存储工作汇总", level: "info", tier: "critical", fields: {
       operation: "text", preparationMs: "number", releaseMs: "number", retryWaitMs: "number", recoveries: "number", operations: "number", scans: "number", readBytes: "number", queueMs: "number", lockWaitMs: "number", executionMs: "number", retries: "number",
-      preparedFrames: "number", segmentOpens: "number", maxExecutionMs: "number",
+      preparedFrames: "number", segmentOpens: "number", segmentVerifies: "number", segmentEntryReads: "number", directoryPageReads: "number", manifestReads: "number", maxExecutionMs: "number",
       lockAcquisitions: "number", lockAfterIdle: "number", lockAfterHoldLimit: "number", lockAfterBoundary: "number", lockAfterHandoff: "number",
     } },
     opened: { message: "上一个就绪准备边界以来本进程首次打开的持久投影（含清单与段边界核验、检查点核对），按耗时列出最慢的几个", level: "info", tier: "critical", fields: {
@@ -33,7 +33,8 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
       projection: "text", version: "number", outcome: "text", reason: "text",
     } },
     waiting: { message: "业务权威操作仍在等待或执行", level: "info", tier: "critical", fields: { operation: "text", waitFor: "text", durationMs: "number" } },
-    deferred: { message: "业务权威操作被资源准入推迟，由调用方重试", level: "info", tier: "detail", fields: { operation: "text", waitFor: "text", blockedBy: "text", retryAfterMs: "number", kind: "text" } },
+    deferred: { message: "业务权威操作被资源准入推迟，由调用方重试", level: "info", tier: "detail", fields: { operation: "text", waitFor: "text", blockedBy: "text", retryAfterMs: "number", kind: "text",
+      reason: "text", requiredLsn: "number", projections: { items: "text", maxItems: 8 } } },
     failed: { message: "业务权威操作未完成", level: "error", tier: "critical", fields: { operation: "text", waitFor: "text", validation: "text", sourceFrames: { items: "text", maxItems: 4 }, failure: { fields: LOG_FAILURE_FIELDS } } },
   },
 };
@@ -47,8 +48,14 @@ export interface AuthorityWork {
   lockWaitMs: number; executionMs: number; releaseMs: number; retryWaitMs: number; retries: number;
   /** 派生状态追平/候选构建实际处理的源帧数（锁内同步与锁外分页准备都计入）。 */
   preparedFrames: number;
-  /** 经准入实际做了的段文件身份核对次数（同一源操作内同一段只核一次）。 */
+  /** 经准入真正打开段文件句柄的次数。 */
   segmentOpens: number;
+  /** 复用已打开段前的文件身份核对次数（同一源操作内同一段只核一次；与真正打开句柄的 segmentOpens 分开计）。 */
+  segmentVerifies: number;
+  /** 投影的物理读：条目缓存未命中而从段文件读取的条目数、目录缓存未命中而读取的目录页数、读取的清单数。 */
+  segmentEntryReads: number;
+  directoryPageReads: number;
+  manifestReads: number;
   /** 新取得写者锁（新锁会话）的次数；沿用已有会话的操作不计。 */
   lockAcquisitions: number;
   /** 新取得锁之前，上一个会话的结束原因：空闲到期、持有上限、操作边界强制释放、同进程另一实例收回。 */
@@ -57,9 +64,20 @@ export interface AuthorityWork {
   lockAfterBoundary: number;
   lockAfterHandoff: number;
 }
+/** 派生准备信号上只供观测的原因与位置（见 AuthorityPreparationRequired.observed）；按形状读取，不引入准备模块的依赖。 */
+function preparationEvidence(error: unknown): { reason?: string; requiredLsn?: number; projections?: string[] } {
+  const observed = (error as { observed?: { reason?: unknown; requiredLsn?: unknown; positions?: unknown } } | null)?.observed;
+  if (!observed || typeof observed.reason !== "string") return {};
+  return {
+    reason: observed.reason,
+    ...(typeof observed.requiredLsn === "number" ? { requiredLsn: observed.requiredLsn } : {}),
+    ...(Array.isArray(observed.positions) ? { projections: observed.positions.filter((item): item is string => typeof item === "string").slice(0, 8) } : {}),
+  };
+}
+
 const emptyWork = (): AuthorityWork => ({ scans: 0, readBytes: 0, recoveries: 0, queueMs: 0, preparationMs: 0,
-  lockWaitMs: 0, executionMs: 0, releaseMs: 0, retryWaitMs: 0, retries: 0, preparedFrames: 0, segmentOpens: 0,
-  lockAcquisitions: 0, lockAfterIdle: 0, lockAfterHoldLimit: 0, lockAfterBoundary: 0, lockAfterHandoff: 0 });
+  lockWaitMs: 0, executionMs: 0, releaseMs: 0, retryWaitMs: 0, retries: 0, preparedFrames: 0, segmentOpens: 0, segmentVerifies: 0,
+  segmentEntryReads: 0, directoryPageReads: 0, manifestReads: 0, lockAcquisitions: 0, lockAfterIdle: 0, lockAfterHoldLimit: 0, lockAfterBoundary: 0, lockAfterHandoff: 0 });
 /** Bounded by phase and finite operation kind, never by business body or operation count. */
 export class AuthorityWorkObserver {
   #pending = new Map<string, { refs: readonly LogRef[]; data: AuthorityWork & { operation: AuthorityOperation; operations: number; maxExecutionMs: number } }>();
@@ -84,7 +102,7 @@ export class AuthorityWorkObserver {
         if (retryAfterMs === undefined || !this.records) return;
         const { admission, maintenanceKind } = error as StorageMaintenanceAdmissionError;
         emit("deferred", { waitFor, blockedBy: "blockedBy" in admission ? admission.blockedBy : undefined, retryAfterMs,
-          ...(maintenanceKind ? { kind: maintenanceKind } : {}) });
+          ...(maintenanceKind ? { kind: maintenanceKind } : {}), ...preparationEvidence(error) });
       },
       finish: (...failure: [] | [unknown]) => {
         if (finished) return;
@@ -94,7 +112,8 @@ export class AuthorityWorkObserver {
         if (retryAfterMs !== undefined && this.records) {
           // 可重试背压由调用方重试，只记推迟，不记“操作未完成”
           const { admission } = failure[0] as StorageMaintenanceAdmissionError;
-          emit("deferred", { waitFor, blockedBy: "blockedBy" in admission ? admission.blockedBy : undefined, retryAfterMs });
+          emit("deferred", { waitFor, blockedBy: "blockedBy" in admission ? admission.blockedBy : undefined, retryAfterMs,
+            ...preparationEvidence(failure[0]) });
         } else if (failure.length && this.records) {
           const error = failure[0];
           emit("failed",{ waitFor, sourceFrames: failureSourceFrames(error), ...(error instanceof AuthorityStorageError && error.validation ? { validation: error.validation } : {}), failure: error instanceof AuthorityStorageError && error.cause === undefined ? { category: "authority", code: error.code } : logFailureEvidence(error) }, true);

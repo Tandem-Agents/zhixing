@@ -262,6 +262,16 @@ export class DefaultDeviceCapacityArbiter
     if (lender && !releaseBorrowedSlot) {
       return Promise.resolve({ kind: "backpressured", blockedBy: "slots", retryAfterMs: this.#policy.retryAfterMs });
     }
+    // 没有任何等待者时，入队后 drain 必然选中本请求：按同一规则直接授予，游标同样前移到本服务类那一格之后，
+    // 不构造待批对象、不挂取消监听。本服务类不在调度表（权重 0）或授予不了，就走原路径（入队、等待、背压）。
+    if (!this.#hasPending()) {
+      const slot = this.#scheduleSlot(request.serviceClass);
+      const admission = slot === undefined ? undefined : this.#tryGrant(cloneRequest(request), pressure, releaseBorrowedSlot);
+      if (admission) {
+        this.#cursor = (slot! + 1) % this.#schedule.length;
+        return Promise.resolve(admission);
+      }
+    }
 
     return new Promise<DeviceCapacityAdmission>((resolve) => {
       const pending: PendingAdmission = {
@@ -556,6 +566,15 @@ export class DefaultDeviceCapacityArbiter
     pending.abort.removeEventListener("abort", pending.abortListener);
     if (admission.kind !== "granted") pending.releaseBorrowedSlot?.();
     pending.resolve(admission);
+  }
+
+  /** 从当前游标起，本服务类在调度表中的第一格（drain 会选中的那一格）；不在表中返回 undefined。 */
+  #scheduleSlot(serviceClass: DeviceCapacityClass): number | undefined {
+    for (let attempts = 0; attempts < this.#schedule.length; attempts += 1) {
+      const index = (this.#cursor + attempts) % this.#schedule.length;
+      if (this.#schedule[index] === serviceClass) return index;
+    }
+    return undefined;
   }
 
   #hasPending(): boolean {

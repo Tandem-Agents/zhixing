@@ -25,7 +25,8 @@ async function fixture() {
     index.publish(await index.prepare(keys.map((key) => ({ kind: "put" as const, key, value: key }))), { source: checkpoint(lsn) });
     await index.flush();
   }
-  const segmentOpens = () => opens.filter((step) => step === "segment-open").length;
+  // 复用缓存前的身份核对记作 segment-verify（与真正打开句柄的 segment-open 分开计数）
+  const segmentOpens = () => opens.filter((step) => step === "segment-verify").length;
   return { root, index, segmentOpens, enter: () => { operation = {}; }, leave: () => { operation = undefined; } };
 }
 

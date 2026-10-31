@@ -148,7 +148,11 @@ it("keeps bounded healthy catch-up in the transaction but waits for new candidat
   const index = log.durableProjection(def);
   const domain = new SerialTaskQueue();
   // The source starts recovery, but the domain turn does not wait for it.
-  await expect(domain.run(() => index.get("last"))).rejects.toBeInstanceOf(AuthorityPreparationRequired);
+  const pending = await domain.run(() => index.get("last")).catch((error: unknown) => error);
+  expect(pending).toBeInstanceOf(AuthorityPreparationRequired);
+  // 投影名与其当前覆盖位置一并带出
+  expect((pending as AuthorityPreparationRequired).observed).toMatchObject({ reason: expect.any(String),
+    positions: [expect.stringMatching(new RegExp(`^${def.projectionId}@`))] });
   await log.prepareProjections([def.projectionId]);
   expect(await domain.run(() => index.get("last"))).toBe(70);
   await domain.run(() => log.append([{ stream: "control", body: { n: 70 } }]));
@@ -235,8 +239,10 @@ it("returns ordinary backpressure to a writer holding a domain queue and admits 
   const consumer = tailConsumer(log, origin);
   const queue = new SerialTaskQueue();
   // 持有领域串行区：不在区内等待追平，按背压上抛，追平在后台进行。
-  await expect(queue.run(() => log.append([{ stream: "control", body: { queued: true } }])))
-    .rejects.toBeInstanceOf(AuthorityPreparationRequired);
+  const signal = await queue.run(() => log.append([{ stream: "control", body: { queued: true } }])).catch((error: unknown) => error);
+  expect(signal).toBeInstanceOf(AuthorityPreparationRequired);
+  // 只供观测的原因与所需位置随信号带出（推迟事件据此对照就绪水位）
+  expect((signal as AuthorityPreparationRequired).observed).toMatchObject({ reason: "tail-consumer", requiredLsn: AUTHORITY_RECOVERY_BUDGET.hardFrames });
   expect((await log.checkpoint()).lsn).toBe(AUTHORITY_RECOVERY_BUDGET.hardFrames);
   await vi.waitFor(() => expect(consumer.state.covered!.lsn).toBe(AUTHORITY_RECOVERY_BUDGET.hardFrames));
   await expect(queue.run(() => log.append([{ stream: "control", body: { queued: true } }]))).resolves.toBeDefined();

@@ -158,6 +158,83 @@ describe("authority projection physical reads", () => {
       else expect(manifests).toEqual([]);
     } finally { await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
   });
+
+  it("reads every re-adopted manifest in a new lock session in bounded concurrent batches with unchanged reads and results", async () => {
+    // 每次操作都开新会话：每个待重新采纳的投影照旧各读一次当前清单，只是这些读取在同一会话内有界并发；
+    // 读完按原顺序采纳，结果与串行相同（单槽下被拒的退回串行，见上一例）
+    const root = await mkdtemp(path.join(os.tmpdir(), "projection-readoption-prefetch-"));
+    const defaults = createDefaultDeviceCapacityPolicy();
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 8, memoryReservationBytes: 1024 ** 3 } },
+      probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+    const steps: string[] = [];
+    let inFlight = 0, maxInFlight = 0;
+    const leaf = leafProjectionReads(arbiter, steps);
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
+      storageMaintenance: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }), lockSessionMaxHoldMs: 0,
+      runProjectionReadStep: async (step, operation) => leaf(step, async () => {
+        if (step !== "manifest") return operation();
+        maxInFlight = Math.max(maxInFlight, ++inFlight);
+        try { return await operation(); } finally { inFlight--; }
+      }) });
+    try {
+      registerCounters(log);
+      for (const id of COUNTERS) await log.append([{ stream: `job:${id}`, body: { n: 1 } }]);
+      steps.length = 0; maxInFlight = 0;
+      await log.append([{ stream: "job:counter-a", body: { n: 2 } }]);
+      // 每个已登记的持久投影各读一次（含日志自带的保留引用投影）
+      expect(steps.filter((step) => step === "manifest")).toHaveLength(COUNTERS.length + 1);
+      expect(maxInFlight).toBeGreaterThan(1);
+      for (const id of COUNTERS) {
+        const latest = await log.transactDurableProjection(id, async (view) => ({ kind: "return", value: await view.get("latest") }));
+        expect(latest.value).toEqual({ n: id === "counter-a" ? 2 : 1 });
+      }
+    } finally { await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps at most one group of unconsumed re-adoption prefetches and clears the group when adoption fails midway", async () => {
+    // 预读按组：一组读完、按原顺序采纳、这一组清理之后才读下一组；未消费的预读不随候选总数累积。
+    // 某个采纳中途暂时失败时，本组已开始的读取已收束、预读被清掉，锁外重试照原路径完成
+    const root = await mkdtemp(path.join(os.tmpdir(), "projection-readoption-groups-"));
+    const ids = Array.from({ length: 12 }, (_, index) => `group-${String(index).padStart(2, "0")}`);
+    const outstanding = new Set<FileDurableProjectionIndex>();
+    let peak = 0, failOnce = true;
+    const prefetch = FileDurableProjectionIndex.prototype.prefetchPublishedManifest;
+    const refresh = FileDurableProjectionIndex.prototype.refreshPublishedState;
+    const discard = FileDurableProjectionIndex.prototype.discardPrefetchedManifest;
+    vi.spyOn(FileDurableProjectionIndex.prototype, "prefetchPublishedManifest").mockImplementation(async function (this: FileDurableProjectionIndex) {
+      await prefetch.call(this);
+      outstanding.add(this);
+      peak = Math.max(peak, outstanding.size);
+    });
+    vi.spyOn(FileDurableProjectionIndex.prototype, "refreshPublishedState").mockImplementation(async function (this: FileDurableProjectionIndex) {
+      if (failOnce && this.projectionId === "group-05") {
+        failOnce = false;
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "slots", retryAfterMs: 1 });
+      }
+      outstanding.delete(this);
+      return refresh.call(this);
+    });
+    vi.spyOn(FileDurableProjectionIndex.prototype, "discardPrefetchedManifest").mockImplementation(function (this: FileDurableProjectionIndex) {
+      outstanding.delete(this);
+      return discard.call(this);
+    });
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), { lockSessionMaxHoldMs: 0 });
+    try {
+      for (const id of ids) {
+        log.durableProjection({ projectionId: id, reducerVersion: 1, inputs: { streams: [`job:${id}`] },
+          reduce: (envelope) => envelope.entries.filter((entry) => entry.stream === `job:${id}`).map((entry) => ({ kind: "put" as const, key: "latest", value: entry.body })) });
+      }
+      for (const id of ids) await log.append([{ stream: `job:${id}`, body: { n: 1 } }]);
+      peak = 0;
+      await log.append([{ stream: "job:group-00", body: { n: 2 } }]);
+      expect(failOnce).toBe(false);
+      expect(peak).toBeGreaterThan(1);
+      expect(peak).toBeLessThanOrEqual(4);
+      expect(outstanding.size).toBe(0);
+      const latest = await log.transactDurableProjection("group-00", async (view) => ({ kind: "return", value: await view.get("latest") }));
+      expect(latest.value).toEqual({ n: 2 });
+    } finally { vi.restoreAllMocks(); await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
+  });
 });
 
 const COUNTERS = ["counter-a", "counter-b", "counter-c", "counter-d"] as const;

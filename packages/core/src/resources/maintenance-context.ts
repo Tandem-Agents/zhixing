@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { runOutsideLogPhase } from "../logging/phase.js";
 import { runDetachedDeviceCapacity } from "./device-capacity.js";
 import type { StorageMaintenanceUrgency } from "./storage-maintenance.js";
 
@@ -74,13 +75,14 @@ export function runInMaintenanceContext<T>(
  * 自身 owner 接管生命周期的后台续跑可以使用本原语。
  *
  * 同时退出调用者的设备容量步骤：后台续跑可能比该步骤活得长，其读写也不得
- * 记在调用者的计划上，叶级操作各自取得准入。
+ * 记在调用者的计划上，叶级操作各自取得准入。同理退出调用者的日志阶段：
+ * 它的工作不计入发起它的前台阶段。
  */
 export function runDetachedMaintenanceContext<T>(
   urgency: StorageMaintenanceUrgency,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return runDetachedDeviceCapacity(() => maintenanceContext.run(
+  return runDetachedDeviceCapacity(() => runOutsideLogPhase(() => maintenanceContext.run(
     {
       urgency: () => urgency,
       abort: neverAbortMaintenance,
@@ -88,7 +90,7 @@ export function runDetachedMaintenanceContext<T>(
       cancelWhenAbandoned: neverCancelWhenAbandoned,
     },
     operation,
-  ));
+  )));
 }
 
 /**
