@@ -870,8 +870,19 @@ async function runConversationScenario(
       });
   const conversationLosslessDataPlane =
     createConversationLosslessDataPlaneAssemblyHandle();
+  // 记录运行拥有者的前台登记序列（进入/让出），核对本地与远端拓扑的义务收束
+  const foregroundLog: Array<"enter" | "release"> = [];
+  const foreground = {
+    enter() {
+      foregroundLog.push("enter");
+      let released = false;
+      return () => { if (!released) { released = true; foregroundLog.push("release"); } };
+    },
+    pulse() {},
+  };
   protocol = new ConversationProtocolRuntime({
     authority,
+    foreground,
     losslessDataPlane: Object.freeze({
       kind: "available",
       port: conversationLosslessDataPlane.port,
@@ -1117,6 +1128,7 @@ async function runConversationScenario(
     statuses,
     finals,
     frames: firstPartyFrames,
+    foregroundLog,
   };
 }
 
@@ -1878,6 +1890,10 @@ describe("S6 production-composition conformance", () => {
     async (surface, topology) => {
       const result = await runConversationScenario(surface, topology);
       expect(result.assignmentId).toMatch(/^assignment:/u);
+      // 接纳起登记、终局关闭；远端开始运行后宿主让出，看到提交后重入至回放完成
+      expect(result.foregroundLog).toEqual(topology === "remote"
+        ? ["enter", "release", "enter", "release"]
+        : ["enter", "release"]);
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );

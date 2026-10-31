@@ -1161,6 +1161,7 @@ async function runServerProcess(
             secretStore: bootstrap.secretStore,
             onTrustApplied,
             lifecycleContributions,
+            foregroundActivity: deviceCapacity.foreground,
           }));
         })()
       : undefined;
@@ -3310,7 +3311,13 @@ async function runServerProcess(
     const authorityIdleMaintenance = new AuthorityIdleMaintenance({
       logs: [homeAuthority.authority, homeAuthority.executor],
       whenQuiet: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
+      // 整理一步在开始下一个区间之前查询前台：与启动新步同一安静口径，前台到来时本步发布已完成区间后让路
+      yieldRequested: () => !deviceCapacity.foreground.quiet(FOREGROUND_QUIET_MS),
       onError: (error) => console.warn(chalk.yellow(`[server] authority idle maintenance paused: ${error.message}`)),
+      // 每一轮记为一个阶段：轮内的投影整理等存储工作带上这一轮的引用，可与前台请求的排队对照
+      observe: (work) => observeLogPhase(startupRecords, "authority-idle-maintenance", work),
+      // 每轮末尾、前台安静时把就绪所需派生投影追到日志头：下次终端接入的 terminal-usable 准备只剩其后的新事实
+      afterRound: (signal) => homeAuthority.catchUpRuntime(signal),
     });
     lifecycleContributions.acquire("authorityIdleMaintenance.stop", () => authorityIdleMaintenance.stop());
     authorityIdleMaintenance.start();

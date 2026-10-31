@@ -297,6 +297,7 @@ export interface PrepareMeshRuntimeInput {
   readonly secretStore: SecretStorePort;
   readonly onTrustApplied?: (record: import("@zhixing/mesh/trust-chain").CurrentTrustProjection) => void | Promise<void>;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
+  readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
 }
 
 export async function prepareMeshRuntime(
@@ -316,6 +317,7 @@ export async function prepareMeshRuntime(
   const pairedCheckpointDeviceId = input.authorityRuntime.deviceId;
   const mesh = new MeshRuntimeAssembly({
     zhixingHome: input.zhixingHome,
+    ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
     trust: bootstrap.trust,
     configuration: bootstrap.configuration,
     endpoints: bootstrap.endpoints,
@@ -643,7 +645,6 @@ export async function createConversationServices(
                 dataPlaneTickets: dataPlaneAssembly.assignmentTickets,
                 runtimeFactory: inputAssignmentRuntimeFactory,
                 createStream: dataPlaneAssembly.createStream,
-                ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
               },
             });
             if (!boundary.localLedger) {
@@ -681,6 +682,7 @@ export async function createConversationServices(
     storedIdentityExists: (conversationId) => inputConversationIdentityLifecycle.identityExists(conversationId),
     manager: managerAssembly.resolve,
     recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
+    ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
     advancementExecution: {
       prepare: async ({ conversationId, turnId, binding }) => {
         if (!advancementExecutionSessions) throw new Error("推进组合尚未就绪，推进执行材料留待恢复时裁决");
@@ -1113,7 +1115,6 @@ export async function createLocalConversationOwner(
       runtimeFactory: input.assignmentRuntimeFactory,
       dataPlaneTickets: inputExecutorDataPlane.assignmentTickets,
       createStream: (input) => inputExecutorDataPlane!.createStream(input),
-      ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
     },
   });
   if (!localExecutorBoundary.staging) {
@@ -1124,6 +1125,7 @@ export async function createLocalConversationOwner(
     owner: localOwner,
     executorDispatch: localExecutorBoundary.application,
     assignmentStaging: localExecutorBoundary.staging,
+    ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
     runtimeFactory: input.assignmentRuntimeFactory,
     interactions: input.durableInteractions,
     advancementModelProvider: createHostAdvancementModelProviderFactory({

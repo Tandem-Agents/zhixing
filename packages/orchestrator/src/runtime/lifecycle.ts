@@ -20,7 +20,7 @@
  * 无注意力窗口换代，by-construction 不携带本钩子。
  */
 
-import type { LifecycleWarningInput, Message } from "@zhixing/core/types";
+import type { ImageSource, LifecycleWarningInput, Message, TurnOrigin } from "@zhixing/core/types";
 import type { KernelRunCompletion } from "./kernel-terminal.js";
 import type { SystemPromptSegment } from "./system-prompt.js";
 
@@ -124,6 +124,10 @@ export interface LifecycleWindowOpenContext extends LifecycleContextBase {
 export interface LifecycleBeforeRunContext extends LifecycleContextBase {
   readonly conversationId?: string;
   readonly turnIndex: number;
+  /** 本次运行的耐久输入身份（ingress id）；无会话身份的运行没有。 */
+  readonly turnId?: string;
+  /** 本次运行耐久 ingress 上的来源（宿主写入，不由消息正文或模型指定）。 */
+  readonly turnOrigin?: TurnOrigin;
   /** 该 run 是否其所在注意力窗口的首个 run（窗口可在 run 内换代，按 run 入口时
    *  所在窗口判定）—— 供订阅者区分「每窗口首 run 才做」与「每 run 都做」。 */
   readonly isWindowFirstRun: boolean;
@@ -135,8 +139,16 @@ export interface LifecycleBeforeRunContext extends LifecycleContextBase {
    * 注到哪条、怎么包、什么顺序归运行体（与 onWindowOpen 的 updateSystemPromptSegment
    * 同范式）—— 订阅者不改 messages、不自己找位置或去重。
    */
-  injectUserContext(content: string | null): void;
+  injectUserContext(content: UserContextContribution | null): void;
 }
+
+/**
+ * 注入贡献：文字进 <context> 块；图片按贡献顺序附在当前 run 用户消息之后。都只进本次 run 的发送视图，
+ * 不落盘；模型不支持图片时由输入能力校验按现有规则结束本次 run。
+ */
+export type UserContextContribution =
+  | string
+  | { readonly text: string; readonly images?: readonly ImageSource[] };
 
 export interface LifecycleAfterRunContext extends LifecycleContextBase {
   readonly conversationId?: string;

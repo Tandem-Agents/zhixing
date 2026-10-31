@@ -10,6 +10,35 @@ export interface ForegroundActivityPort {
   pulse(): void;
 }
 
+/**
+ * 一次运行尝试持有的前台义务：创建即登记；等待模型等可让出的阶段 pause、阶段结束 resume，尝试结束 close。
+ * 重复调用无副作用；close 之后的 pause/resume（例如旧尝试的迟到回调）不再改变登记。
+ */
+export interface ForegroundObligation {
+  pause(): void;
+  resume(): void;
+  close(): void;
+}
+
+export function holdForegroundObligation(port: ForegroundActivityPort): ForegroundObligation {
+  let release: (() => void) | undefined = port.enter();
+  let closed = false;
+  return {
+    pause() {
+      release?.();
+      release = undefined;
+    },
+    resume() {
+      if (!closed && !release) release = port.enter();
+    },
+    close() {
+      closed = true;
+      release?.();
+      release = undefined;
+    },
+  };
+}
+
 /** 前台仍在活动时复查的间隔。 */
 const ACTIVE_RECHECK_MS = 50;
 

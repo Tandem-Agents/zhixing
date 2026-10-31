@@ -39,6 +39,25 @@ describe("MeshRequestChannel", () => {
     await Promise.all([left.close(), right.close()]);
   });
 
+  it("counts a peer request as this device's foreground while it is handled, including failures", async () => {
+    const [leftConnection, rightConnection] = connections();
+    let active = 0;
+    const foreground = { enter: () => { active++; let left = false; return () => { if (!left) { left = true; active--; } }; } };
+    const registry = new MeshServiceRegistry({ foreground });
+    const seen: number[] = [];
+    registry.register("right.work", { access: "write", availability: "negotiated-version",
+      handler: async (payload) => { seen.push(active); await new Promise((resolve) => setTimeout(resolve, 20)); return payload; } });
+    registry.register("right.fail", { access: "write", availability: "negotiated-version",
+      handler: async () => { seen.push(active); throw new Error("handler failed"); } });
+    const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry());
+    const right = new MeshRequestChannel(rightConnection, registry);
+    await left.request("right.work", Buffer.from("x"));
+    await expect(left.request("right.fail", Buffer.from("x"))).rejects.toThrow();
+    expect(seen).toEqual([1, 1]);
+    expect(active).toBe(0);
+    await Promise.all([left.close(), right.close()]);
+  });
+
   it("publishes only fixed protocol failures and rejects unknown services", async () => {
     const [leftConnection, rightConnection] = connections();
     const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry());

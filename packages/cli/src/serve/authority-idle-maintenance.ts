@@ -5,16 +5,25 @@ const AUTHORITY_IDLE_FIRST_DELAY_MS = 5_000;
 const AUTHORITY_IDLE_INTERVAL_MS = 30_000;
 
 export interface AuthorityIdleMaintenanceLog {
-  maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal): Promise<void>;
+  maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal, yieldRequested?: () => boolean): Promise<void>;
 }
 
 export interface AuthorityIdleMaintenanceOptions {
   readonly logs: readonly AuthorityIdleMaintenanceLog[];
   /** 等前台安静；每个投影开始前与每个整理步之间调用，前台到来时在步边界让路。 */
   readonly whenQuiet: (signal: AbortSignal) => Promise<void>;
+  /** 前台此刻是否有活动（同步）：整理步在开始下一个区间之前据此提前收尾、发布已完成部分，前台至多等当前一个区间。 */
+  readonly yieldRequested?: () => boolean;
   readonly onError?: (error: Error) => void;
   readonly firstDelayMs?: number;
   readonly intervalMs?: number;
+  /** 给出时每一轮维护在它之内运行（例如记为一个日志阶段），轮内的存储工作随之带上这一轮的引用；只观测。 */
+  readonly observe?: <T>(work: () => Promise<T>) => Promise<T>;
+  /**
+   * 每轮整理完成后、前台安静时调用一次：例如把就绪边界所需的派生投影追到日志头，下次接入时的就绪准备只剩其后的新事实。
+   * 只做派生准备；失败经 onError 报告，不影响后续轮次。
+   */
+  readonly afterRound?: (signal: AbortSignal) => Promise<unknown>;
 }
 
 /**
@@ -66,11 +75,15 @@ export class AuthorityIdleMaintenance {
   #run(): Promise<void> {
     const signal = this.#abort.signal;
     const betweenSteps = () => this.options.whenQuiet(signal);
-    return runWithMaintenanceUrgency(() => "background", signal, async () => {
+    const observe = this.options.observe ?? (<T>(work: () => Promise<T>) => work());
+    return runWithMaintenanceUrgency(() => "background", signal, () => observe(async () => {
       for (const log of this.options.logs) {
         if (signal.aborted) return;
-        await log.maintainIdleProjections(betweenSteps, signal);
+        await log.maintainIdleProjections(betweenSteps, signal, this.options.yieldRequested);
       }
-    }, () => true);
+      if (!this.options.afterRound || signal.aborted) return;
+      await this.options.whenQuiet(signal);
+      if (!signal.aborted) await this.options.afterRound(signal);
+    }), () => true);
   }
 }

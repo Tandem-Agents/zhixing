@@ -87,6 +87,8 @@ export interface DurableConversationAdmissionResult {
   readonly runId: string;
   /** False when the same durable run already owns an in-memory execution slot. */
   readonly shouldSchedule: boolean;
+  /** 需要调度时这份接纳的序号：调度任务结束时凭它收束未被运行接管的准备，不触及同一运行后来的接纳。 */
+  readonly admissionId?: string;
 }
 
 export class DurableConversationAdmissionRejectedError extends Error {
@@ -219,6 +221,8 @@ export interface DurableConversationTurnExecutor {
   confirmScheduled(conversationId: string, runId: string): void;
   /** Returns an accepted-but-unscheduled run to durable recovery ownership. */
   deferScheduling(conversationId: string, runId: string): void;
+  /** 调度任务执行结束：它持有的那份接纳若始终没被 run() 接管，按 deferScheduling 交回耐久恢复；已接管或已由其他出口收束则不做任何事。 */
+  scheduledTaskSettled(conversationId: string, admissionId: string): void;
   cancelAdmitted(conversationId: string, runId: string): Promise<void>;
   cancel(
     input: DurableConversationCancelInput,

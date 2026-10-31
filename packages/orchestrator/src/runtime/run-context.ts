@@ -19,7 +19,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgentEventMap, PostTurnControlIntent, TurnOrigin } from "@zhixing/core/types";
+import type { AgentEventMap, ModelProviderPhases, PostTurnControlIntent, TurnOrigin } from "@zhixing/core/types";
 import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
 import type { EventBus } from "@zhixing/core/events";
 import type {
@@ -77,6 +77,11 @@ export interface RunContext {
     readonly meter: ModelCallResourceMeter;
     readonly nextCallIndex: () => number;
   };
+  /**
+   * 主循环模型调用阶段回调：只在运行主循环发起 provider 调用的同步入口期间存在，由角色通道包装层当场取走；
+   * 子 Agent、段摘要等辅助调用的上下文里没有它。
+   */
+  modelProviderPhases?: ModelProviderPhases;
   /** Unified assignment-local staged write and read-own-writes overlay. */
   assignmentMutations?: AssignmentMutationPort;
   /** Read-only global authority view bound to this assignment. */

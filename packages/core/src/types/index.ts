@@ -90,6 +90,7 @@ export type {
   LLMRole,
   LLMRoles,
   ModelInfo,
+  ModelProviderPhases,
   StopReason,
   StreamError,
   StreamEvent,

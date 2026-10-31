@@ -48,6 +48,22 @@ describe("Host static construction graph", () => {
       .toBeLessThan(command.indexOf("startupRollback.commit()"));
   });
 
+  it("counts the Host's peer mesh requests as this device's foreground, like RPC requests", async () => {
+    const [command, factories, mesh] = await Promise.all(["command.ts", "access-surfaces.ts", "mesh-runtime-assembly.ts"].map(read));
+    const segment = (source: string, start: string, end: string) => {
+      const from = source.indexOf(start);
+      expect(from, start).toBeGreaterThanOrEqual(0);
+      return source.slice(from, source.indexOf(end, from));
+    };
+    expect(segment(command, "() => prepareMeshRuntime({", "}));"))
+      .toContain("foregroundActivity: deviceCapacity.foreground,");
+    expect(segment(factories, "const mesh = new MeshRuntimeAssembly({", "});"))
+      .toContain("foreground: input.foregroundActivity");
+    const construction = segment(mesh, "constructor(private readonly options: MeshRuntimeAssemblyOptions) {", "this.connections = options.connections;");
+    expect(construction).toContain("this.services = new MeshServiceRegistry(foreground);");
+    expect(construction).toContain("this.#terminalOnlyServices = new MeshServiceRegistry(foreground);");
+  });
+
   it("uses finite readonly inputs and returns products rather than a writable service bus", async () => {
     const sources = await Promise.all(["command.ts", "access-surface.ts", "access-surfaces.ts"].map(read));
     for (const source of sources) {

@@ -362,6 +362,15 @@ export class HomeAuthoritySources {
     ]);
   }
 
+  /**
+   * 空闲时把就绪边界所需的派生投影追到日志头：只做派生准备，不记边界水位；之后各就绪边界的准备照旧执行，只剩其后的新事实。
+   * 走两本日志的空闲追平入口，持锁步骤按空闲维护的后台等级准入；两本依次进行，中止后不再发起下一本。
+   */
+  async catchUpRuntime(signal: AbortSignal): Promise<void> {
+    await this.authority.catchUpIdleProjections(AUTHORITY_REQUIRED, signal);
+    await this.executor.catchUpIdleProjections(this.#executorRequired, signal);
+  }
+
   /** 两本日志当前已验位置，供就绪边界记录水位。 */
   async checkpoints(): Promise<readonly DurableLogCheckpoint[]> {
     return Promise.all([this.authority.checkpoint(), this.executor.checkpoint()]);

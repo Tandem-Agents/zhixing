@@ -220,6 +220,8 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly owner: LocalConversationOwnerRuntimeStack;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
   readonly assignmentStaging: ConversationAssignmentStagingPort;
+  /** 宿主前台活动：本机会话的运行拥有者按尝试持有前台义务（见协议运行时 foreground 选项）。 */
+  readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly interactions: DurableConversationInteractionObserver;
   readonly advancementModelProvider: AdvancementModelProviderFactory;
@@ -827,6 +829,7 @@ export class LocalConversationOwnerAssembly {
       owner,
       manager: managerAssembly.resolve,
       recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
+      ...(options.foreground ? { foreground: options.foreground } : {}),
       advancementExecution: {
         prepare: async ({ conversationId, turnId, binding }) => {
           if (!advancementExecutionSessions) throw new Error("推进应用尚未就绪，推进执行材料留待恢复时裁决");

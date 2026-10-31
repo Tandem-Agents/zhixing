@@ -1,4 +1,4 @@
-import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
+import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError, holdForegroundObligation, type ForegroundActivityPort, type ForegroundObligation } from "@zhixing/core/resources";
 import { retryControlAdmission } from "./conversation-admission-retry.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
@@ -193,6 +193,11 @@ export interface ConversationProtocolRuntimeOptions {
    * 读取推进状态失败时抛出（运行留在队列由恢复重试）；身份不符等确定结果以“不可用”裁决交给执行体失败。
    */
   readonly advancementExecution?: ConversationAdvancementExecutionPort;
+  /**
+   * 宿主前台活动：运行拥有者按尝试持有前台义务——立即可调度的接纳起登记，主循环 provider 等待期间让出、
+   * 终结后在本地结算前重入，运行终局（提交可见、失败或取消结算）时关闭；后台维护据此让路。
+   */
+  readonly foreground?: ForegroundActivityPort;
 }
 
 export interface ConversationAdvancementExecutionPort {
@@ -219,6 +224,10 @@ interface PreparedConversationAdmission {
   readonly attachments: PendingConversationInput["attachments"];
   readonly invocation: ConversationInvocation;
   readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
+  /** 立即可调度时接纳起登记的前台义务；接管这份准备的 run() 取走，未被接管就随准备的清除关闭。 */
+  readonly foreground?: ForegroundObligation;
+  /** 这份接纳的序号：调度任务结束时凭它认出自己的准备，不误收同一运行后来的接纳。 */
+  readonly admissionId: string;
 }
 
 export interface ConversationLosslessDataPlanePort {
@@ -359,6 +368,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #ownerPublishedFirstPartyFinals = new Set<string>();
   readonly #pendingFirstPartyFinals = new Set<string>();
   readonly #preparedAdmissions = new Map<string, PreparedConversationAdmission>();
+  #admissionSequence = 0;
   readonly #terminalOperations = new SerialTaskQueue();
   readonly #contexts: InProcessDispatchContextFactory;
   readonly #interactions: DurableConversationInteractionObserver;
@@ -385,6 +395,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | undefined;
   readonly #recoverAuxiliary: (conversationId: string) => Promise<void>;
   readonly #advancementExecution: ConversationAdvancementExecutionPort | undefined;
+  readonly #foreground: ForegroundActivityPort | undefined;
   readonly #lifecycleProjectionClaims = new Map<string, Promise<number>>();
   readonly #activeRecoveryClaims = new Map<string, number>();
   /** 本进程仍在执行的 assignment → run；覆盖完整运行生命期，也用于取消后的本机止损。 */
@@ -488,6 +499,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     this.#recoverAuxiliary = options.recoverAuxiliary;
     this.#advancementExecution = options.advancementExecution;
+    this.#foreground = options.foreground;
     this.#issuer = new ConversationAssignmentAuthority({
       signer: authority.signer,
       verifier: authority.verifier,
@@ -816,6 +828,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#firstPartyPublishedFinals.clear();
     this.#ownerPublishedFirstPartyFinals.clear();
     this.#pendingFirstPartyFinals.clear();
+    // 装入新权威基底：旧准备连同它们的前台义务一起结束（在跑的运行各自持有自己的义务，由运行收束）
+    for (const prepared of this.#preparedAdmissions.values()) prepared.foreground?.close();
     this.#preparedAdmissions.clear();
     this.#pendingConversationRetirements.clear();
     this.#shutdownDraining = false;
@@ -931,27 +945,32 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         return { runId: admission.runId, shouldSchedule: false };
       }
     }
-    const shouldSchedule =
+    const scheduling =
       state === "queued" &&
       !this.#schedulingRuns.has(admission.runId) &&
-      !this.#scheduledRuns.has(admission.runId) &&
-      await this.#mayScheduleInput(input.conversationId, admission.runId);
-    if (shouldSchedule) {
-      this.#schedulingRuns.add(admission.runId);
-      this.#preparedAdmissions.set(key, {
-        conversationId: input.conversationId,
-        surfacePrincipal: admission.ingress.surfacePrincipal,
-        admission,
-        input: normalizeUserTurnInput(input.input),
-        attachments: [...(input.attachments ?? [])],
-        invocation: input.invocation,
-        ...(input.environment
-          ? { environment: structuredClone(input.environment) }
-          : {}),
-      });
-      this.#markRecovery(input.conversationId);
-    }
-    return { runId: admission.runId, shouldSchedule };
+      !this.#scheduledRuns.has(admission.runId)
+        ? await this.#inputScheduling(input.conversationId, admission.runId)
+        : "blocked";
+    const shouldSchedule = scheduling !== "blocked";
+    if (!shouldSchedule) return { runId: admission.runId, shouldSchedule };
+    const admissionId = `admission-${++this.#admissionSequence}`;
+    this.#schedulingRuns.add(admission.runId);
+    this.#preparedAdmissions.set(key, {
+      admissionId,
+      conversationId: input.conversationId,
+      surfacePrincipal: admission.ingress.surfacePrincipal,
+      admission,
+      input: normalizeUserTurnInput(input.input),
+      attachments: [...(input.attachments ?? [])],
+      invocation: input.invocation,
+      ...(input.environment
+        ? { environment: structuredClone(input.environment) }
+        : {}),
+      // 立即可调度、不排在前一运行之后：准备段从接纳起登记前台，跨过接纳返回到执行端装配的空档，由接管的 run() 取走
+      ...(scheduling === "ready" && this.#foreground ? { foreground: holdForegroundObligation(this.#foreground) } : {}),
+    });
+    this.#markRecovery(input.conversationId);
+    return { runId: admission.runId, shouldSchedule, admissionId };
   }
 
   confirmScheduled(conversationId: string, runId: string): void {
@@ -968,6 +987,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   deferScheduling(conversationId: string, runId: string): void {
     this.#clearRunClaims(runId);
     this.#markRecovery(conversationId);
+  }
+
+  scheduledTaskSettled(conversationId: string, admissionId: string): void {
+    const prepared = [...this.#preparedAdmissions.values()].find(
+      (candidate) =>
+        candidate.conversationId === conversationId &&
+        candidate.admissionId === admissionId,
+    );
+    // 已被 run() 接管，或已由取消、延后、重置收束：这份接纳另有所有者
+    if (!prepared) return;
+    // 任务没把它交给 run() 就结束了（执行体前置失败、提前返回）：结束准备与声明，交恢复按耐久状态重新调度
+    this.deferScheduling(conversationId, prepared.admission.runId);
   }
 
   async cancelAdmitted(conversationId: string, runId: string): Promise<void> {
@@ -1417,38 +1448,51 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const requestId = inputControlRequestId(appliedAdmission.ingress);
     const journal = this.#journal(input.conversationId);
     const runId = appliedAdmission.runId;
+    // 接管：登记调度声明、取走这份准备及其前台义务（没有就新建）。此后这次调用拥有它们，任何出口都由本调用收束
     if (this.#schedulingRuns.has(runId)) {
       this.confirmScheduled(input.conversationId, runId);
     } else {
       this.#scheduledRuns.add(runId);
     }
     if (preparedKey) this.#preparedAdmissions.delete(preparedKey);
+    const attemptForeground = prepared?.foreground ??
+      (this.#foreground ? holdForegroundObligation(this.#foreground) : NO_FOREGROUND_OBLIGATION);
     let executionIngress = appliedAdmission.ingress;
-    if (appliedAdmission.replayed) {
-      const committed = await journal.committedRun(runId);
-      if (committed) {
-        this.#clearRunClaims(runId);
-        return replayCommittedRun(committed.runRecord, committed.windowCompact);
-      }
-      const replayedState = await journal.runState(runId);
-      if (replayedState !== "queued") {
-        throw new Error(
-          `Conversation input ${requestId} already resolved to run ${runId} in state ${replayedState ?? "unknown"}`,
+    let attempt: number;
+    try {
+      if (appliedAdmission.replayed) {
+        const committed = await journal.committedRun(runId);
+        if (committed) {
+          attemptForeground.close();
+          this.#clearRunClaims(runId);
+          return replayCommittedRun(committed.runRecord, committed.windowCompact);
+        }
+        const replayedState = await journal.runState(runId);
+        if (replayedState !== "queued") {
+          throw new Error(
+            `Conversation input ${requestId} already resolved to run ${runId} in state ${replayedState ?? "unknown"}`,
+          );
+        }
+        const pending = (await journal.pendingInputs()).find(
+          (candidate) => candidate.runId === runId,
         );
+        if (!pending) {
+          throw new Error(`Queued conversation run ${runId} has no durable input`);
+        }
+        executionIngress = pending.ingress;
       }
-      const pending = (await journal.pendingInputs()).find(
-        (candidate) => candidate.runId === runId,
-      );
-      if (!pending) {
-        throw new Error(`Queued conversation run ${runId} has no durable input`);
-      }
-      executionIngress = pending.ingress;
+      attempt = await journal.nextAssignmentAttempt(runId);
+    } catch (error) {
+      // 接管之后、尝试开始之前退出：结束本调用的前台义务与调度声明，交恢复按耐久状态重新调度
+      attemptForeground.close();
+      this.#clearRunClaims(runId);
+      this.#markRecovery(input.conversationId);
+      throw error;
     }
     const executionMessages = input.messages.map((message, index) =>
       index === input.messages.length - 1 && message.role === "user" && executionIngress.turnOrigin?.messageIdentity
         ? { ...message, inputIdentity: structuredClone(executionIngress.turnOrigin.messageIdentity) }
         : message);
-    const attempt = await journal.nextAssignmentAttempt(runId);
     const assignmentId = conversationAssignmentId(runId, attempt);
     this.#activeAssignmentClaims.set(assignmentId, runId);
     let channelSession: LosslessDataPlaneSession | undefined;
@@ -1840,6 +1884,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ...input.options,
           inputPort,
           turnContext: executionTurnContext(dispatch.envelope.work, input.options?.turnContext),
+          // 主循环 provider 等待期间让出本尝试的前台义务，终结或失败后在本地结算之前重入
+          modelProviderPhases: { entered: () => attemptForeground.pause(), settled: () => attemptForeground.resume() },
           onProtocolEvent: async (event, meta) => {
             await appendObservedFrame(
               { kind: "agent-event", event },
@@ -2050,6 +2096,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }).bind(this);
       return yield* executorPlan.run({
         execute: executeLocal,
+        foreground: attemptForeground,
         onCommitted: (committed) =>
           replayCommittedRun(committed.runRecord, committed.windowCompact),
         onRemoteSettled: () => {
@@ -2098,6 +2145,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await release(() => executorPlan?.dispose());
       // Local execution has left this frame; the claim must not outlive it even
       // when session cleanup fails, or recovery would skip this attempt forever.
+      // 本尝试的前台义务在运行终局结束（只关本调用持有的这一份，不碰后来的尝试）
+      attemptForeground.close();
       this.#clearRunClaims(runId);
       this.#activeAssignmentClaims.delete(assignmentId);
       try {
@@ -3206,12 +3255,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async #mayScheduleInput(conversationId: string, runId: string): Promise<boolean> {
-    if (!await this.#settleTargetCancellations(conversationId, runId)) return false;
+    return await this.#inputScheduling(conversationId, runId) !== "blocked";
+  }
+
+  // ready：可以立即执行；behind-active：排在本会话正在执行的运行之后（交给原内存队列）；blocked：不调度
+  async #inputScheduling(conversationId: string, runId: string): Promise<"ready" | "behind-active" | "blocked"> {
+    if (!await this.#settleTargetCancellations(conversationId, runId)) return "blocked";
     const state = await this.#journal(conversationId).assignmentSchedulingState(runId);
-    if (state.ready) return true;
+    if (state.ready) return "ready";
     // 正常执行中的后续输入仍交给原内存队列；无人执行的待确认项只留耐久队列。
     return state.blockingRunId !== undefined && this.#scheduledRuns.has(state.blockingRunId) &&
-      this.#manager()?.getSession(conversationId)?.busy === true;
+      this.#manager()?.getSession(conversationId)?.busy === true ? "behind-active" : "blocked";
   }
 
   async #resumeQueuedInputs(
@@ -3519,7 +3573,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#schedulingRuns.delete(runId);
     this.#scheduledRuns.delete(runId);
     for (const [key, prepared] of this.#preparedAdmissions) {
-      if (prepared.admission.runId === runId) this.#preparedAdmissions.delete(key);
+      if (prepared.admission.runId !== runId) continue;
+      // 未被接管的准备随清除结束它的前台义务；已接管的义务归接管它的 run()，由那次运行收束
+      prepared.foreground?.close();
+      this.#preparedAdmissions.delete(key);
     }
   }
 
@@ -3775,6 +3832,9 @@ function inputControlRequestId(ingress: IngressContext): string {
     ingressId: ingress.ingressId,
   })}`;
 }
+
+/** 没有前台端口时的空义务。 */
+const NO_FOREGROUND_OBLIGATION: ForegroundObligation = Object.freeze({ pause() {}, resume() {}, close() {} });
 
 function runOptionsForPending(
   pending: PendingConversationInput,

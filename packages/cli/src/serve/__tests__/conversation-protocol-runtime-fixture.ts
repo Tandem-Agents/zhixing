@@ -112,7 +112,6 @@ export function createProtocol(
       readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
       readonly runtimeFactory: RuntimeFactory;
       readonly createStream?: (input: { readonly assignmentId: string; readonly ref: import("@zhixing/core/contracts").ExecutionRef }) => Promise<AssignmentStreamWriter>;
-      readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
     };
   },
 ): ConversationProtocolRuntime {

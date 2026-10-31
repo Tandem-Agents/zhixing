@@ -326,6 +326,8 @@ function routedSubmissionMeshRole(
 
 export interface MeshRuntimeAssemblyOptions {
   readonly onTrustApplied?: (record: CurrentTrustProjection) => void | Promise<void>;
+  /** 本设备的前台活动：对端请求在本机处理期间登记，后台维护据此让路（宿主装配传入；执行设备没有按安静推进的后台）。 */
+  readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
   readonly zhixingHome: string;
   readonly trust: CurrentTrustProjection;
   readonly configuration: MeshRoleBootConfig;
@@ -550,8 +552,8 @@ export class DeviceAdministrationDutyMigrationAdmissionAdapter
 /** Production composition for authenticated control services and their durable role owners. */
 export class MeshRuntimeAssembly
   implements AssignmentDataPlaneRemoteDirectory, AdvancementEvidenceRemoteDirectory {
-  readonly services = new MeshServiceRegistry();
-  readonly #terminalOnlyServices = new MeshServiceRegistry();
+  readonly services: MeshServiceRegistry;
+  readonly #terminalOnlyServices: MeshServiceRegistry;
   #removalRetrieval: ExecutorRemovalRetrievalOwner | undefined;
   readonly connections: MeshConnectionRegistry;
   readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter;
@@ -590,6 +592,10 @@ export class MeshRuntimeAssembly
   #observedIssuerDeviceId: string;
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
+    // 对端请求（含远端执行端的开始上报、提交、用量与产物）在本机处理期间计为前台，与 RPC 请求同一口径
+    const foreground = options.foreground ? { foreground: options.foreground } : {};
+    this.services = new MeshServiceRegistry(foreground);
+    this.#terminalOnlyServices = new MeshServiceRegistry(foreground);
     this.connections = options.connections;
     this.deviceRemovalTargetEffects = new DeviceRemovalTargetEffectAdapter(
       this.connections,

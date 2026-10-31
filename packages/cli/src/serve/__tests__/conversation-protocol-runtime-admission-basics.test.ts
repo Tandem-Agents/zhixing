@@ -648,16 +648,23 @@ describe("ConversationProtocolRuntime", () => {
     } finally { raced.mockRestore(); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
-  it("counts a local assignment as host foreground activity from runtime assembly until its disposal", async () => {
-    const home = await createTempDir("conversation-dispatch-foreground");
+  // 运行拥有者按尝试持有前台义务：准备（含执行体装配）与收束受保护，主循环 provider 等待让出，终局关闭
+  async function foregroundHarness(name: string, behavior: "complete" | "fail") {
+    const home = await createTempDir(name);
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
-    const conversationId = "dispatch-foreground";
     const foreground = new ForegroundActivity();
-    let activeDuringRun: boolean | undefined;
-    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
-      async *run(messages) {
-        // 模型与工具执行期间没有请求在途、也可能没有推送：派发本身就是前台活动。
-        activeDuringRun = !foreground.quiet(0);
+    const observed: Record<string, boolean> = {};
+    let phases: import("@zhixing/core/types").ModelProviderPhases | undefined;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: name,
+      async *run(messages, options) {
+        phases = options?.modelProviderPhases;
+        observed.beforeProvider = !foreground.quiet(0);
+        // 主循环第一次模型调用：预留之后进入 provider（让出），终结后回来（重入）
+        phases?.entered();
+        observed.duringProvider = !foreground.quiet(0);
+        phases?.settled();
+        observed.afterProvider = !foreground.quiet(0);
+        if (behavior === "fail") throw new Error("model failed after settling");
         const assistant: Message = { role: "assistant", content: [{ type: "text", text: "complete" }] };
         const usage = { inputTokens: 0, outputTokens: 0 };
         return { agentResult: { reason: "completed" as const, message: assistant, usage },
@@ -666,18 +673,185 @@ describe("ConversationProtocolRuntime", () => {
       }, abort: () => false, async dispose() {},
     };
     let manager!: ConversationManager;
-    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
-      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => runtime }, foreground } });
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(), foreground,
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => { observed.duringAssembly = !foreground.quiet(0); return runtime; } } } });
     manager = new ConversationManager({ create: async () => runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
-    try {
-      const managed = await getOrCreateActiveConversation(authority, manager, conversationId);
-      expectSettled(await projectSessionTurn({ manager, managed, text: "hello", turnId: "foreground-turn",
-        runOptions: { source: "interactive", turnContext: { turnId: "foreground-turn" } }, notify: () => {} }));
-      expect(activeDuringRun).toBe(true);
-      // 派发结束、运行时释放后不再计为前台。
+    const managed = await getOrCreateActiveConversation(authority, manager, name);
+    const quietSoon = async () => {
       for (let n = 0; n < 100 && !foreground.quiet(0); n++) await new Promise(resolve => setTimeout(resolve, 20));
-      expect(foreground.quiet(0)).toBe(true);
-    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+      return foreground.quiet(0);
+    };
+    return { authority, protocol, manager, managed, foreground, observed, phases: () => phases, quietSoon,
+      close: async () => { await protocol.stopRecoveryLoop(); await manager.disposeAll(); } };
+  }
+
+  it("holds the attempt's foreground through preparation and settlement, yields only while the provider is waiting", async () => {
+    const h = await foregroundHarness("foreground-attempt", "complete");
+    try {
+      expectSettled(await projectSessionTurn({ manager: h.manager, managed: h.managed, text: "hello", turnId: "foreground-turn",
+        runOptions: { source: "interactive", turnContext: { turnId: "foreground-turn" } }, notify: () => {} }));
+      expect(h.observed).toEqual({ duringAssembly: true, beforeProvider: true, duringProvider: false, afterProvider: true });
+      expect(await h.quietSoon()).toBe(true);
+      // 尝试已收束：迟到的阶段回调不再改变登记
+      h.phases()?.settled();
+      h.phases()?.entered();
+      h.phases()?.settled();
+      expect(h.foreground.quiet(0)).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("closes the attempt's foreground when the run fails without a normal model end", async () => {
+    const h = await foregroundHarness("foreground-failure", "fail");
+    try {
+      const outcome = await projectSessionTurn({ manager: h.manager, managed: h.managed, text: "hello", turnId: "foreground-fail",
+        runOptions: { source: "interactive", turnContext: { turnId: "foreground-fail" } }, notify: () => {} });
+      expect(outcome.kind).toBe("error");
+      expect(h.observed.afterProvider).toBe(true);
+      expect(await h.quietSoon()).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("rejects an invocation that does not bind the prepared admission without ending that preparation's foreground", async () => {
+    const h = await foregroundHarness("foreground-mismatch", "complete");
+    try {
+      const admitted = await h.protocol.admit({ conversationId: "foreground-mismatch", input: "prepared",
+        invocation: { kind: "agent", source: "interactive" }, surfacePrincipal: "rpc:owner",
+        options: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "turn-mismatch" } } });
+      expect(admitted.shouldSchedule).toBe(true);
+      const foreign = h.protocol.run({ conversationId: "foreground-mismatch", input: "another input", messages: [],
+        baseRevision: 0, runtime: h.managed.runtime, invocation: { kind: "agent", source: "interactive" },
+        options: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "turn-mismatch" } } } as never);
+      await expect(foreign.next()).rejects.toThrow("Prepared conversation admission does not bind this invocation");
+      // 被拒的不是这份准备的主人：准备与它的前台义务都还在
+      expect(h.foreground.quiet(0)).toBe(false);
+      h.protocol.deferScheduling("foreground-mismatch", admitted.runId);
+      expect(await h.quietSoon()).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["nextAssignmentAttempt", "committedRun"] as const)("ends the taken-over foreground when %s fails before the attempt, and recovery re-registers the retried run", async (failing) => {
+    const name = `foreground-${failing === "committedRun" ? "committed-run" : "next-attempt"}`;
+    const h = await foregroundHarness(name, "complete");
+    const original = ConversationRunJournal.prototype[failing] as (...args: unknown[]) => Promise<unknown>;
+    let failures = 0;
+    const spy = vi.spyOn(ConversationRunJournal.prototype, failing).mockImplementation(function (this: ConversationRunJournal, ...args: unknown[]) {
+      if (failures === 0) { failures++; return Promise.reject(new Error(`${failing} read failed`)); }
+      return original.apply(this, args);
+    } as never);
+    try {
+      const options = { source: "interactive" as const, surfacePrincipal: "rpc:owner", turnContext: { turnId: `turn-${failing}` } };
+      if (failing === "committedRun") {
+        // 重放：先接纳并转入排队，再由同一输入经 manager 执行，接管后读取已提交运行失败
+        const admitted = await h.protocol.admit({ conversationId: name, input: "hello", invocation: { kind: "agent", source: "interactive" },
+          surfacePrincipal: "rpc:owner", options });
+        h.protocol.deferScheduling(name, admitted.runId);
+      }
+      const outcome = await projectSessionTurn({ manager: h.manager, managed: h.managed, text: "hello", turnId: `turn-${failing}`, notify: () => {}, runOptions: options });
+      expect(outcome.kind).toBe("error");
+      expect(failures).toBe(1);
+      // 接管之后、尝试开始之前失败：本调用的前台义务与调度声明都结束
+      expect(await h.quietSoon()).toBe(true);
+      expect(h.observed.duringProvider).toBeUndefined();
+      // 恢复按耐久状态重新调度：重试的运行重新登记前台并收束
+      await vi.waitFor(async () => {
+        await h.protocol.recoverConversation(name);
+        expect(h.observed.afterProvider).toBe(true);
+      }, { timeout: 20_000, interval: 100 });
+      expect(h.observed).toMatchObject({ duringAssembly: true, beforeProvider: true, duringProvider: false, afterProvider: true });
+      expect(await h.quietSoon()).toBe(true);
+    } finally { spy.mockRestore(); await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("ends untaken preparations' foreground together with the scheduling claims on an authority-base install", async () => {
+    const h = await foregroundHarness("foreground-install", "complete");
+    try {
+      const admitted = await h.protocol.admit({ conversationId: "foreground-install", input: "prepared",
+        invocation: { kind: "agent", source: "interactive" }, surfacePrincipal: "rpc:owner",
+        options: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "turn-install" } } });
+      expect(admitted.shouldSchedule).toBe(true);
+      expect(h.foreground.quiet(0)).toBe(false);
+      // 单纯暂停恢复循环不是结束：准备的义务仍在
+      await h.protocol.stopRecoveryLoop();
+      expect(h.foreground.quiet(0)).toBe(false);
+      await h.protocol.recoverInstalledAuthority();
+      // 安装后的恢复按耐久状态重新调度这条已接纳运行，它的尝试合法地再登记前台义务；先等它执行完，
+      // 再断言前台安静——准备的义务若随重置漏关，前台不会再安静
+      await vi.waitFor(() => expect(h.observed.afterProvider).toBe(true), { timeout: 20_000, interval: 50 });
+      expect(await h.quietSoon()).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["deferred", "cancelled"] as const)("releases the admission-time foreground when the admitted run is %s", async (exit) => {
+    const h = await foregroundHarness(`foreground-${exit}`, "complete");
+    try {
+      const admitted = await h.protocol.admit({ conversationId: `foreground-${exit}`, input: "queued",
+        invocation: { kind: "agent", source: "interactive" }, surfacePrincipal: "rpc:owner",
+        options: { source: "interactive", turnContext: { turnId: `turn-${exit}` } } });
+      expect(admitted.shouldSchedule).toBe(true);
+      // 接纳后、执行之前：准备段已登记
+      expect(h.foreground.quiet(0)).toBe(false);
+      if (exit === "deferred") h.protocol.deferScheduling(`foreground-${exit}`, admitted.runId);
+      else await h.protocol.cancelAdmitted(`foreground-${exit}`, admitted.runId);
+      expect(await h.quietSoon()).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("returns a scheduled admission to recovery when its task ends before reaching the durable run, and recovery re-registers the retried run", async () => {
+    const name = "foreground-unstarted";
+    const h = await foregroundHarness(name, "complete");
+    try {
+      const options = { source: "interactive" as const, surfacePrincipal: "rpc:owner", turnContext: { turnId: "turn-unstarted" } };
+      // 真实 manager 接纳：预接纳走耐久协议，任务被调度；执行体在调用耐久运行之前就失败（如运行时投影准备抛错）
+      const admitted = await h.manager.admitTurn({
+        conversationId: name,
+        source: "interactive",
+        beforeEnqueue: (managed) => h.manager.admitDurableTurn({ conversationId: managed.conversationId, input: "hello",
+          invocation: { kind: "agent", source: "interactive" }, surfacePrincipal: "rpc:owner", options }),
+        makeTask: () => ({
+          source: "interactive",
+          execute: async () => {
+            try { throw new Error("runtime projection unavailable"); } finally { h.manager.setBusy(name, false); }
+          },
+          cancel: () => {},
+        }),
+      });
+      if (admitted.status !== "immediate") throw new Error(`unexpected admission ${admitted.status}`);
+      expect(h.foreground.quiet(0)).toBe(false);
+      await expect(admitted.task.execute()).rejects.toThrow("runtime projection unavailable");
+      // 任务终点交回：准备的前台义务与调度声明结束，运行没有开始
+      expect(await h.quietSoon()).toBe(true);
+      expect(h.observed.beforeProvider).toBeUndefined();
+      // 恢复不再被残留声明挡住：按耐久状态重新调度，重试的运行重新登记前台并收束
+      await vi.waitFor(async () => {
+        await h.protocol.recoverConversation(name);
+        expect(h.observed.afterProvider).toBe(true);
+      }, { timeout: 20_000, interval: 100 });
+      expect(h.observed).toMatchObject({ duringAssembly: true, beforeProvider: true, duringProvider: false, afterProvider: true });
+      expect(await h.quietSoon()).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("lets a late task settlement end only its own admission, never a later admission of the same run", async () => {
+    const name = "foreground-late-settle";
+    const h = await foregroundHarness(name, "complete");
+    try {
+      const request = { conversationId: name, input: "hello", invocation: { kind: "agent" as const, source: "interactive" as const },
+        surfacePrincipal: "rpc:owner", options: { source: "interactive" as const, surfacePrincipal: "rpc:owner", turnContext: { turnId: "turn-late-settle" } } };
+      const first = await h.protocol.admit(request);
+      expect(first.admissionId).toBeDefined();
+      h.protocol.deferScheduling(name, first.runId);
+      expect(await h.quietSoon()).toBe(true);
+      // 同一输入重放：同一运行的新接纳，带新的准备与前台义务
+      const second = await h.protocol.admit(request);
+      expect(second).toMatchObject({ runId: first.runId, shouldSchedule: true });
+      expect(second.admissionId).not.toBe(first.admissionId);
+      expect(h.foreground.quiet(0)).toBe(false);
+      // 旧任务迟到的收尾不碰新接纳；新接纳自己的收尾才结束它
+      h.protocol.scheduledTaskSettled(name, first.admissionId!);
+      expect(h.foreground.quiet(0)).toBe(false);
+      h.protocol.scheduledTaskSettled(name, second.admissionId!);
+      expect(await h.quietSoon()).toBe(true);
+    } finally { await h.close(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("keeps committed transcript identity monotonic after clearing the visible conversation", async () => {

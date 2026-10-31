@@ -30,6 +30,12 @@ type RegisteredMeshService = MeshServiceDefinition;
 export class MeshServiceRegistry {
   private readonly services = new Map<string, RegisteredMeshService>();
 
+  /**
+   * foreground：本设备的前台活动。对端请求在本机处理期间（核验与处理）计为前台，后台维护在请求在途时让路，
+   * 与 RPC 请求处理同一口径。
+   */
+  constructor(private readonly options: { readonly foreground?: { enter(): () => void } } = {}) {}
+
   register(serviceId: string, definition: MeshServiceDefinition): () => void {
     if (!/^[a-z][a-z0-9.-]{0,63}$/.test(serviceId)) {
       throw new TypeError(`Invalid mesh service id: ${serviceId}`);
@@ -79,22 +85,27 @@ export class MeshServiceRegistry {
         `Mesh service is not registered: ${serviceId}`,
       );
     }
-    // 授权可以是异步的精确核验：等到结果再放行，不把 Promise 当放行值
-    if (service.authorize && !(await service.authorize(connection))) {
-      throw new MeshProtocolError(
-        "unauthorized-peer",
-        `Mesh peer is not authorized for service: ${serviceId}`,
-      );
+    const leave = this.options.foreground?.enter();
+    try {
+      // 授权可以是异步的精确核验：等到结果再放行，不把 Promise 当放行值
+      if (service.authorize && !(await service.authorize(connection))) {
+        throw new MeshProtocolError(
+          "unauthorized-peer",
+          `Mesh peer is not authorized for service: ${serviceId}`,
+        );
+      }
+      if (
+        connection.compatibility.mode === "read-only" &&
+        service.availability !== "version-independent"
+      ) {
+        throw new MeshProtocolError(
+          "incompatible-version",
+          `Mesh service is unavailable during protocol-version skew: ${serviceId}`,
+        );
+      }
+      return await service.handler(payload, connection, signal);
+    } finally {
+      leave?.();
     }
-    if (
-      connection.compatibility.mode === "read-only" &&
-      service.availability !== "version-independent"
-    ) {
-      throw new MeshProtocolError(
-        "incompatible-version",
-        `Mesh service is unavailable during protocol-version skew: ${serviceId}`,
-      );
-    }
-    return service.handler(payload, connection, signal);
   }
 }

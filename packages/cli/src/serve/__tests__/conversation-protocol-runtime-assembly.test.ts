@@ -504,6 +504,7 @@ describe("ConversationProtocolRuntime", () => {
     await expect(replayProtocol.admit(firstParty)).resolves.toEqual({
       runId: admitted.runId,
       shouldSchedule: true,
+      admissionId: expect.any(String),
     });
     replayProtocol.deferScheduling(conversationId, admitted.runId);
     const conflictingReplay = replayProtocol.admit({

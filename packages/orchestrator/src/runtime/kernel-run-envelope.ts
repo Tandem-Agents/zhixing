@@ -1,6 +1,7 @@
 import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
 import type {
   Message,
+  ModelProviderPhases,
   SessionEventProjection,
   ToolSideEffectObserver,
   TurnContext,
@@ -42,6 +43,8 @@ export interface KernelRunEnvelope {
     readonly abortSignal?: AbortSignal;
     readonly watchdog?: WatchdogPolicy;
     readonly modelCallResourceMeter?: ModelCallResourceMeter;
+    /** 运行拥有者提供的主循环模型调用阶段回调（只作用于本次运行主循环的 provider 调用）。 */
+    readonly modelProviderPhases?: ModelProviderPhases;
   };
   readonly correctness: {
     readonly inputPort?: import("@zhixing/core/loop").RunInputPort;
@@ -126,6 +129,7 @@ export function captureKernelRunEnvelope(
         ? cloneAndFreezePlainValue(input.control.watchdog)
         : undefined,
       modelCallResourceMeter: input.control.modelCallResourceMeter,
+      modelProviderPhases: input.control.modelProviderPhases,
     }),
     correctness: Object.freeze({
       inputPort: input.correctness.inputPort,

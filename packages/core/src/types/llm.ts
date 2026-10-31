@@ -502,3 +502,13 @@ export type TextCallLLMWithUsageFn = (
   messages: Message[],
   opts?: { abortSignal?: AbortSignal },
 ) => Promise<TextCallLLMResult>;
+
+/**
+ * 运行主循环模型调用的物理阶段：用量预留完成、即将进入 provider 时 entered；provider 原始终结或失败后、
+ * 本地结算（用量消耗等）之前 settled。每次 provider 调用至多各一次；只由运行拥有者为本次运行的主循环提供，
+ * 子 Agent 与辅助调用不触发。
+ */
+export interface ModelProviderPhases {
+  entered(): void;
+  settled(): void;
+}

@@ -1523,12 +1523,17 @@ export class FileDurableProjectionIndex {
      * 发起时已有的进度，前台持续写入时不追着新行一段接一段地落盘。
      */
     readonly singleFlush?: boolean;
+    /**
+     * 前台此刻是否有活动（同步）：段整理的一步在开始下一个区间之前据此提前收尾，照原路径发布已完成的区间，
+     * 不再在持有维护栅栏时继续合并；下一步之前照常经 betweenSteps 等前台安静。
+     */
+    readonly yieldRequested?: () => boolean;
   } = {}): Promise<void> {
     if (!this.#persistent) return;
     if (this.#writeIntent) await this.refreshPublishedState();
     // 紧急度继承调用语境,不在这里声明:前台请求触发的提交按前台准入,
     // 启动恢复触发的按恢复,周期回收触发的才是后台。
-    await this.#runFlush("committed", options.compact !== false, false, options.betweenSteps, options.singleFlush === true);
+    await this.#runFlush("committed", options.compact !== false, false, options.betweenSteps, options.singleFlush === true, options.yieldRequested);
   }
 
   async flushCheckpoint(): Promise<void> {
@@ -1548,7 +1553,7 @@ export class FileDurableProjectionIndex {
   }
 
   async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false,
-    betweenSteps?: () => Promise<void>, singleFlush = false): Promise<void> {
+    betweenSteps?: () => Promise<void>, singleFlush = false, yieldRequested?: () => boolean): Promise<void> {
     await this.#runRetirementCleanup();
     let flushed = false;
     for (;;) {
@@ -1595,7 +1600,7 @@ export class FileDurableProjectionIndex {
                       : { afterKey: stepManifest.compaction.afterKey }),
                   },
                   obligation,
-                  () => this.#compactRanges(staged),
+                  () => this.#compactRanges(staged, yieldRequested),
                 );
               } catch (error) {
                 if (!(error instanceof CompactionDirectoryBudgetFull) || !staged) throw error;
@@ -2576,7 +2581,7 @@ export class FileDurableProjectionIndex {
       ...(this.#authenticated ? { authenticated: true as const } : {}) };
   }
 
-  async #compactRanges(staged: boolean): Promise<void> {
+  async #compactRanges(staged: boolean, yieldRequested?: () => boolean): Promise<void> {
     if (this.#writeIntent) {
       await this.#completeWriteIntent(
         isCommittedIntent(this.#writeIntent, this.#requireManifest()),
@@ -2596,7 +2601,9 @@ export class FileDurableProjectionIndex {
       const obsoleteFiles = new Set<string>();
 
       let merged = 0;
-      for (let range = 0; range < (staged ? COMPACTION_RANGES_PER_STEP : 1) && merged < COMPACTION_STEP_MUTATIONS; range++) {
+      // 第一个区间之后，前台此刻有活动就不再开始下一个区间：本步照原路径发布已完成的区间，持锁至多一个区间
+      for (let range = 0; range < (staged ? COMPACTION_RANGES_PER_STEP : 1) && merged < COMPACTION_STEP_MUTATIONS &&
+          !(range > 0 && yieldRequested?.()); range++) {
         const priorRoot = baseRoot;
         const priorCompaction = compaction;
         const priorObsolete = new Set(obsoleteFiles);

@@ -67,6 +67,8 @@ export interface RunTurnOptions {
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** Durable per-provider-call resource accounting for this assigned run. */
   modelCallResourceMeter?: ModelCallResourceMeter;
+  /** 运行拥有者的主循环模型调用阶段回调（预留之后进入 provider、终结或失败后回到本地处理）。 */
+  modelProviderPhases?: import("@zhixing/core").ModelProviderPhases;
   /** Unified assignment-local staged write/overlay inherited by descendants. */
   assignmentMutations?: AssignmentMutationPort;
   /** Read-only global authority facade bound to this assignment. */

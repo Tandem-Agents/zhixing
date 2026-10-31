@@ -323,6 +323,7 @@ function createDurableReplayExecutor(
     admit: async () => ({ runId, shouldSchedule: false }),
     confirmScheduled: () => {},
     deferScheduling: () => {},
+    scheduledTaskSettled: () => {},
     cancelAdmitted: async () => {},
     cancel: async () => ({ dispositions: [] }),
     findRunByIngress: async () => undefined,

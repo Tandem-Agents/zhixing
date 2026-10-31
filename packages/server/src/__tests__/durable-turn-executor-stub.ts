@@ -26,6 +26,7 @@ export function stubDurableTurnExecutor(
     }),
     confirmScheduled: () => {},
     deferScheduling: () => {},
+    scheduledTaskSettled: () => {},
     cancelAdmitted: reject("cancelAdmitted"),
     cancel: reject("cancel"),
     findRunByIngress: reject("findRunByIngress"),

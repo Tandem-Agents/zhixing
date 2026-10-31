@@ -244,6 +244,8 @@ export interface ConversationExecutorDispatchPlan {
       committed: NonNullable<Awaited<ReturnType<ConversationRunJournal["committedRun"]>>>,
     ) => RunResult;
     readonly onRemoteSettled: () => void;
+    /** 本尝试的前台义务：远端执行开始后让出，看到提交后重入直到回放完成（本地执行的阶段由运行体回调） */
+    readonly foreground?: Pick<import("@zhixing/core/resources").ForegroundObligation, "pause" | "resume">;
   }): AsyncGenerator<AgentYield, RunResult>;
   dispose(): Promise<void>;
 }
@@ -288,8 +290,6 @@ export interface ConversationExecutorHostBoundaryOptions {
     readonly dataPlaneTickets?: ConstructorParameters<
       typeof ConversationAssignmentLedger
     >[0]["dataPlaneTickets"];
-    /** 派发的运行时存续期间（派发、内核、提交收尾）计为宿主前台活动：后台维护据此让路。 */
-    readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
     readonly createStream?: (input: {
       readonly assignmentId: string;
       readonly ref: import("@zhixing/core/contracts").ExecutionRef;
@@ -723,6 +723,7 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
       committed: NonNullable<Awaited<ReturnType<ConversationRunJournal["committedRun"]>>>,
     ) => RunResult;
     readonly onRemoteSettled: () => void;
+    readonly foreground?: Pick<import("@zhixing/core/resources").ForegroundObligation, "pause" | "resume">;
   }): AsyncGenerator<AgentYield, RunResult> {
     const assignmentId = this.#assignmentId!;
     const journal = this.#journal!;
@@ -745,6 +746,8 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
           this.#runId!,
         );
         if (committed) {
+          // 提交已到：宿主侧回放与投影发布是收束段，重新登记前台直到运行终局
+          input.foreground?.resume();
           input.onRemoteSettled();
           return input.onCommitted(committed);
         }
@@ -754,6 +757,8 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
         if (state === "failed" || state === "cancelled") {
           throw new Error(`Remote conversation run terminated in state ${state}`);
         }
+        // 远端已开始运行：模型与工具在执行设备上，宿主这边只是等待，让出前台
+        if (state === "running") input.foreground?.pause();
         try {
           await dispatcher.recoverStarted();
           await dispatcher.recoverAssignments();
@@ -932,7 +937,6 @@ function createLocalConversationExecutorMechanism(
         }
         const execution = new ConversationKernelExecution(runtime!);
         executions.set(input.assignmentId, execution);
-        const releaseForeground = local.foreground?.enter();
         return {
           runtime: runtime!,
           bindRuntime(binding) {
@@ -995,16 +999,14 @@ function createLocalConversationExecutorMechanism(
             };
           },
           async dispose(reason) {
-            try {
-              bindings.delete(input.assignmentId);
-              await runtime!.dispose(reason);
-              if (baseRuntime !== runtime) await baseRuntime!.dispose(reason);
-              executions.delete(input.assignmentId);
-              options.authority.releaseLocalConversationEnvironmentPreflight(
-                input.manifest,
-                input.assignmentId,
-              );
-            } finally { releaseForeground?.(); }
+            bindings.delete(input.assignmentId);
+            await runtime!.dispose(reason);
+            if (baseRuntime !== runtime) await baseRuntime!.dispose(reason);
+            executions.delete(input.assignmentId);
+            options.authority.releaseLocalConversationEnvironmentPreflight(
+              input.manifest,
+              input.assignmentId,
+            );
           },
         };
       },

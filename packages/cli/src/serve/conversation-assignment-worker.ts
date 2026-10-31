@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { readWorksceneTaskContext } from "@zhixing/core/workscene/application";
+import { executionTurnContext } from "./execution-turn-context.js";
 import { type ArtifactStore } from "@zhixing/core/authority";
 import { type Message } from "@zhixing/core";
 import { type RunResult } from "@zhixing/core/loop";
@@ -346,16 +346,8 @@ export class ConversationAssignmentWorker {
         abortSignal,
         turnIndex: envelope.work.baseRevision,
         source: envelope.work.ingress.kind === "channel" ? "channel" : "interactive",
-        turnContext: {
-          worksceneTasks: readWorksceneTaskContext(envelope.work.controlContext),
-          turnId: envelope.work.ingress.ingressId,
-          ...(envelope.work.ingress.kind === "channel"
-            ? { emissionTarget: envelope.work.ingress.replyTarget }
-            : {}),
-          ...(envelope.work.ingress.turnOrigin
-            ? { turnOrigin: envelope.work.ingress.turnOrigin }
-            : {}),
-        },
+        // 与本地执行同一规则：身份取耐久 ingress，委托与推进材料取指派投影；材料不可用时在这里失败
+        turnContext: executionTurnContext(envelope.work),
         onProtocolEvent: async (event, meta) => {
           protocolEventOrdinal += 1;
           await activeStream.append(

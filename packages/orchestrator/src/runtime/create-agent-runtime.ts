@@ -19,6 +19,7 @@ import {
   type LLMProvider,
   type LLMRole,
   type LLMRoles,
+  type ModelProviderPhases,
   type TextCallLLMResult,
   type ToolDefinition,
   type TurnContext,
@@ -1332,8 +1333,15 @@ export async function createAgentRuntime(
             nextCallIndex: () => ++providerCallIndex,
           }
         : undefined;
-      const callProvider = (request: ChatRequest) =>
-        roles[primaryRole].provider.chat(request);
+      // 主循环的模型调用带上运行拥有者的阶段回调：只在发起调用的同步入口期间放进上下文，角色通道包装层当场取走，
+      // 子 Agent、段摘要等辅助调用拿不到
+      const providerPhases = envelope.control.modelProviderPhases;
+      const callProvider = (request: ChatRequest) => {
+        const store = runContextStorage.getStore();
+        return providerPhases && store
+          ? runContextStorage.run({ ...store, modelProviderPhases: providerPhases }, () => roles[primaryRole].provider.chat(request))
+          : roles[primaryRole].provider.chat(request);
+      };
       const resilientCallLLM = withRetry(
         callProvider,
         { eventBus },
@@ -1884,16 +1892,19 @@ function resourceAwareRoles(
       id: role.provider.id,
       models: role.provider.models,
       chat(request) {
-        const metering = runContextStorage.getStore()?.modelCallMetering;
+        const store = runContextStorage.getStore();
+        const metering = store?.modelCallMetering;
+        const phases = store?.modelProviderPhases;
         const call = (providerRequest: ChatRequest) => observeProviderCall(
           (next) => role.provider.chat(next), providerRequest, role.provider.id, records,
         );
-        if (!metering) return call(request);
+        if (!metering) return phasedProviderCall(call, phases)(request);
         return meteredProviderCall({
           call,
           meter: metering.meter,
           nextCallIndex: metering.nextCallIndex,
           defaultMaxOutputTokens: fallback,
+          ...(phases ? { phases } : {}),
         })(request);
       },
       ...(role.provider.countTokens
@@ -1951,6 +1962,8 @@ export function meteredProviderCall(input: {
   readonly meter: ModelCallResourceMeter;
   readonly nextCallIndex: () => number;
   readonly defaultMaxOutputTokens: number;
+  /** 主循环调用的物理阶段：预留完成后 entered，provider 终结或失败后、consume 之前 settled。 */
+  readonly phases?: ModelProviderPhases;
 }): (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined> {
   return async function* (request) {
     const maxTokens = request.maxTokens ?? input.defaultMaxOutputTokens;
@@ -1977,17 +1990,62 @@ export function meteredProviderCall(input: {
       tokenUpperBound,
     });
     let consumed = false;
-    for await (const event of input.call(providerRequest)) {
-      if (event.type === "message_end") {
-        if (consumed) {
-          throw new TypeError("Model provider emitted more than one terminal usage event");
+    const phase = providerPhase(input.phases);
+    phase.enter();
+    try {
+      for await (const event of input.call(providerRequest)) {
+        if (event.type === "message_end") {
+          if (consumed) {
+            throw new TypeError("Model provider emitted more than one terminal usage event");
+          }
+          phase.settle();
+          const tokens = getTotalInputTokens(event.usage) + event.usage.outputTokens;
+          await input.meter.consume({ usageId: reservation.usageId, tokens });
+          consumed = true;
         }
-        const tokens = getTotalInputTokens(event.usage) + event.usage.outputTokens;
-        await input.meter.consume({ usageId: reservation.usageId, tokens });
-        consumed = true;
+        yield event;
       }
-      yield event;
+    } finally {
+      // provider 失败、被中止或消费方提前结束，都没有 message_end：同样回到本地处理
+      phase.settle();
     }
+  };
+}
+
+/** 无计量的 provider 调用同样按 provider 前后报告阶段。 */
+function phasedProviderCall(
+  call: (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined>,
+  phases: ModelProviderPhases | undefined,
+): (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined> {
+  if (!phases) return call;
+  return async function* (request) {
+    const phase = providerPhase(phases);
+    phase.enter();
+    try {
+      for await (const event of call(request)) {
+        if (event.type === "message_end") phase.settle();
+        yield event;
+      }
+    } finally {
+      phase.settle();
+    }
+  };
+}
+
+/** 一次 provider 调用的阶段：entered 与 settled 各至多一次，且 settled 只在 entered 之后。 */
+function providerPhase(phases: ModelProviderPhases | undefined): { enter(): void; settle(): void } {
+  let state: "idle" | "entered" | "settled" = "idle";
+  return {
+    enter() {
+      if (state !== "idle") return;
+      state = "entered";
+      phases?.entered();
+    },
+    settle() {
+      if (state !== "entered") return;
+      state = "settled";
+      phases?.settled();
+    },
   };
 }
 

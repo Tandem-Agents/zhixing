@@ -44,6 +44,46 @@ it("instantiates the exact signed profile when new tools appear before execution
   expect(errors).toEqual(["RUN_REACHED"]);
 });
 
+// 远端执行体：推进执行运行的原任务与契约来自指派材料，身份取耐久 ingress；材料不可用时运行体不启动
+it.each(["ready", "unavailable", "missing"] as const)("hands the adjudicated advancement material to the runtime only when it binds (%s)", async (status) => {
+  const marker = { sessionId: "session-a", mode: "direct" as const };
+  const origin = { channel: "rpc", triggeredBy: "rpc:owner", advancementExecution: marker };
+  const material = status === "ready"
+    ? { status, turnId: "turn-1:direct", binding: marker, context: [{ text: "推进中的原任务：TASK_A", images: [{ type: "base64", mediaType: "image/png", data: "AA==" }] }] }
+    : { status, turnId: "turn-1:direct", binding: marker, reason: "推进会话 session-a 不存在" };
+  const seen: unknown[] = [];
+  const create = vi.fn(async (_id: string, environment: Parameters<RuntimeFactory["create"]>[1]) => ({ executionProfile: () => environment?.executionProfile,
+    run: (_messages: unknown, options: { turnContext?: unknown }) => { seen.push(options.turnContext); throw new Error("RUN_REACHED"); }, dispose: vi.fn(async () => {}) }));
+  const errors: string[] = [];
+  const worker = new ConversationAssignmentWorker({
+    InProcessAssignmentSubmission,
+    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, hasPendingOwnerCancellation: async () => false, failExecution: vi.fn(async () => {}) },
+    runtimeFactory: { create }, artifacts: {},
+    submissionFor: () => ({ reportStarted: async () => {}, mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof: vi.fn() }),
+    finalizeUsage: async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 }),
+    interactions: { withBinding: (_binding: unknown, operation: () => unknown) => operation(), drainAssignment: async () => {}, releaseAssignment: () => {} },
+    preflightEnvironment: async () => ({ workspaceRoot: "D:\\fixture" }),
+    releasePreflightEnvironment: () => {},
+    onError: (_id: string, error: Error) => { errors.push(error.message); },
+  } as never);
+  worker.accept({ execution: "conversation", assignmentId: `material-${status}`, capabilities: [globalAuthorityCapability(`material-${status}`, "conv-1")],
+    manifest: { tools: [], mcpServers: [], environment: { deviceId: "remote" } },
+    work: { conversationId: "conv-1", controlContext: status === "missing" ? [] : [{ source: "advancement-execution", block: JSON.stringify(material) }], windowInput: { t: "full", messages: [] },
+      ingress: { kind: "first-party", ingressId: "turn-1:direct", turnOrigin: origin } } } as never);
+  await worker.drain();
+  if (status === "ready") {
+    expect(seen).toEqual([expect.objectContaining({ turnId: "turn-1:direct", turnOrigin: origin, requiredUserContext: material.context })]);
+    expect(errors).toEqual(["RUN_REACHED"]);
+  } else {
+    // 带推进标记却没有可用材料：在输入准备时失败，运行体（以及模型与工具）不启动
+    expect(seen).toEqual([]);
+    expect(create).toHaveBeenCalledOnce();
+    expect(errors).toEqual([status === "missing"
+      ? "推进执行运行缺少必需的原任务材料：指派里没有推进材料"
+      : "推进执行运行缺少必需的原任务材料：推进会话 session-a 不存在"]);
+  }
+});
+
 function interactionObserver(): DurableConversationInteractionObserver {
   return {
     withBinding: vi.fn((_binding: unknown, operation: () => Promise<unknown>) => operation()),

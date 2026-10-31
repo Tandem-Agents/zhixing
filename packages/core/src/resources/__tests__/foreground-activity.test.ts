@@ -1,5 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { ForegroundActivity } from "../foreground-activity.js";
+import { ForegroundActivity, holdForegroundObligation } from "../foreground-activity.js";
+
+// 运行尝试的前台义务：可让出、可重入，关闭后迟到的让出与重入都不再改变登记
+describe("holdForegroundObligation", () => {
+  it("pauses and resumes exactly once per phase and ignores calls after close", () => {
+    let now = 0;
+    const activity = new ForegroundActivity(() => now);
+    const obligation = holdForegroundObligation(activity);
+    now = 10_000;
+    expect(activity.quiet(500)).toBe(false);
+    obligation.pause();
+    obligation.pause();
+    now += 500;
+    expect(activity.quiet(500)).toBe(true);
+    obligation.resume();
+    obligation.resume();
+    expect(activity.quiet(500)).toBe(false);
+    obligation.pause();
+    now += 500;
+    expect(activity.quiet(500)).toBe(true);
+    obligation.close();
+    obligation.resume();
+    obligation.close();
+    now += 500;
+    expect(activity.quiet(500)).toBe(true);
+    // 同时持有两份义务：一份关闭不影响另一份
+    const first = holdForegroundObligation(activity), second = holdForegroundObligation(activity);
+    first.close();
+    now += 500;
+    expect(activity.quiet(500)).toBe(false);
+    second.close();
+    now += 500;
+    expect(activity.quiet(500)).toBe(true);
+  });
+});
 
 // 后台维护据此让路：请求在途或最近有推送时不安静，安静后才推进；取消时立即返回。
 describe("ForegroundActivity", () => {

@@ -1150,6 +1150,52 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     expect(consumed).toEqual(["usage-1", "usage-2", "usage-3"]);
   });
 
+  it("主循环模型调用在预留之后让出、provider 终结后于消耗记账之前回来；子 Agent 的调用不触发", async () => {
+    providerRef.current = new MockLLMProvider([
+      { toolCalls: [{ id: "tk1", name: "Task", input: { description: "deep dive", prompt: "research X" } }] },
+      { text: "child result" },
+      { text: "main result" },
+    ]);
+    const order: string[] = [];
+    const meter: ModelCallResourceMeter = {
+      async reserve({ callIndex }) { order.push(`reserve-${callIndex}`); return { usageId: `usage-${callIndex}` }; },
+      async consume({ usageId }) { order.push(`consume-${usageId.slice(6)}`); },
+    };
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
+    await runKernel(runtime, {
+      modelInput: { messages: [userMessage("research X please")] },
+      identity: { turnIndex: 0 },
+      control: { modelCallResourceMeter: meter, modelProviderPhases: { entered: () => order.push("entered"), settled: () => order.push("settled") } },
+      correctness: {}, observation: {},
+    });
+    // 第 2 次是 Task 子 Agent 的调用：照常计量，但不让出主运行的登记
+    expect(order).toEqual([
+      "reserve-1", "entered", "settled", "consume-1",
+      "reserve-2", "consume-2",
+      "reserve-3", "entered", "settled", "consume-3",
+    ]);
+  });
+
+  it("provider 失败没有终结事件时同样回到本地处理", async () => {
+    const phases: string[] = [];
+    providerRef.current = {
+      ...new MockLLMProvider([]),
+      // eslint-disable-next-line require-yield
+      async *chat() { throw new Error("provider down"); },
+    } as never;
+    const runtime = await createAgentRuntime({});
+    const completion = await runKernel(runtime, {
+      modelInput: { messages: [userMessage("hi")] },
+      identity: { turnIndex: 0 },
+      control: { modelProviderPhases: { entered: () => phases.push("entered"), settled: () => phases.push("settled") } },
+      correctness: {}, observation: {},
+    });
+    expect(completion.terminal.reason).toBe("error");
+    expect(phases.length).toBeGreaterThan(0);
+    expect(phases.length % 2).toBe(0);
+    expect(phases.filter((value, index) => value !== (index % 2 === 0 ? "entered" : "settled"))).toEqual([]);
+  });
+
   it("profile 含 Task:LLM 调 Task → 子 agent 跑完 → 主收到 tool_result 综合输出", async () => {
     // 主 + 子共用同一 MockLLMProvider 序列(provider 实例共享),按 chat 调用顺序消费:
     //   1. 主 LLM:派 Task tool_use

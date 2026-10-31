@@ -83,4 +83,42 @@ describe("授权投影空闲维护调度", () => {
     expect(errors).toEqual(["capacity busy"]);
     await maintenance.stop();
   });
+
+  it("每轮整理完两本日志后、前台安静时追平一次；追平失败只报告，下一轮照常", async () => {
+    vi.useFakeTimers();
+    const order: string[] = [];
+    const authority = log(async () => { order.push("authority"); }), executor = log(async () => { order.push("executor"); });
+    const quiet = vi.fn(async (_signal: AbortSignal) => { order.push("quiet"); });
+    const errors: string[] = [];
+    let rounds = 0;
+    const afterRound = vi.fn(async (_signal: AbortSignal) => {
+      order.push("catch-up");
+      if (++rounds === 1) throw new Error("catch-up failed");
+    });
+    const maintenance = new AuthorityIdleMaintenance({ logs: [authority, executor], whenQuiet: quiet, afterRound,
+      onError: (error) => errors.push(error.message), firstDelayMs: 0, intervalMs: 1_000 });
+    maintenance.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual(["authority", "executor", "quiet", "catch-up"]);
+    expect(afterRound.mock.calls[0]![0]).toBe(authority.calls[0]!.signal);
+    expect(errors).toEqual(["catch-up failed"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(afterRound).toHaveBeenCalledTimes(2);
+    expect(errors).toEqual(["catch-up failed"]);
+    await maintenance.stop();
+  });
+
+  it("停止时不再追平", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const authority = log(() => new Promise<void>((resolve) => { release = resolve; }));
+    const afterRound = vi.fn(async () => undefined);
+    const maintenance = new AuthorityIdleMaintenance({ logs: [authority], whenQuiet: async () => undefined, afterRound, firstDelayMs: 0 });
+    maintenance.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const stopping = maintenance.stop();
+    release();
+    await stopping;
+    expect(afterRound).not.toHaveBeenCalled();
+  });
 });

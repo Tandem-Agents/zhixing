@@ -276,6 +276,8 @@ export interface TurnPreAdmissionResult {
   readonly onDeferred?: () => void;
   /** Called when an admitted task is removed before execution. */
   readonly onCancelled?: () => void | Promise<void>;
+  /** 已调度的任务执行结束时调用（成功、失败或没进入耐久运行就返回）。 */
+  readonly onSettled?: () => void;
 }
 
 type ConversationExists = () => Promise<boolean>;
@@ -527,6 +529,12 @@ export class ConversationManager implements ConversationCommitProjection {
         executor.deferScheduling(input.conversationId, admission.runId),
       onCancelled: () =>
         executor.cancelAdmitted(input.conversationId, admission.runId),
+      ...(admission.admissionId
+        ? {
+            onSettled: () =>
+              executor.scheduledTaskSettled(input.conversationId, admission.admissionId!),
+          }
+        : {}),
     };
   }
 
@@ -875,6 +883,18 @@ export class ConversationManager implements ConversationCommitProjection {
       ? {
           ...createdTask,
           ...(preAdmission.runId ? { durableRunId: preAdmission.runId } : {}),
+          // 执行体可能没走到耐久运行就结束：任务终点统一交回，未被运行接管的接纳由耐久侧收束
+          ...(preAdmission.onSettled
+            ? {
+                execute: async () => {
+                  try {
+                    await createdTask.execute();
+                  } finally {
+                    preAdmission.onSettled?.();
+                  }
+                },
+              }
+            : {}),
           cancelLocally: createdTask.cancel,
           cancel: createdTask.cancel,
           ...(preAdmission.onCancelled

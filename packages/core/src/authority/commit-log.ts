@@ -1034,7 +1034,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
    * 之间经 betweenSteps 等待（宿主传入“前台安静”），前台到来时在步边界让路；停止或中止后不再发起。
    * 其持锁步骤按调用方声明的维护等级准入（宿主为后台），不因持有日志锁提为前台。
    */
-  async maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal): Promise<void> {
+  async maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal, yieldRequested?: () => boolean): Promise<void> {
     // 每个投影的整理墙钟（含步间让路）记入本轮汇总，供定位一次会话后哪些投影需要大量整理；只观测
     const maintained: { projection: string; durationMs: number }[] = [];
     const round = performance.now();
@@ -1046,7 +1046,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         await betweenSteps();
         if (signal.aborted || this.#maintenanceStopped) return;
         const scope = { active: true }, started = performance.now();
-        try { await this.#idleScope.run(scope, () => projection.state.flush({ compact: true, betweenSteps, singleFlush: true })); }
+        try { await this.#idleScope.run(scope, () => projection.state.flush({ compact: true, betweenSteps, singleFlush: true, ...(yieldRequested ? { yieldRequested } : {}) })); }
         finally {
           scope.active = false;
           maintained.push({ projection: projection.state.projectionId, durationMs: Math.round(performance.now() - started) });
