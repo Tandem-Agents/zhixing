@@ -4,7 +4,9 @@ import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseCloc
 import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentChangedAfter, assignmentIdFromStream, readAssignmentEnvelopes, readRecoveryCandidates,
   registerAssignmentLedgerIndex } from "./assignment-ledger-index.js";
 import { Buffer } from "node:buffer";
-import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
+import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError, currentMaintenanceAbortSignal, currentMaintenanceUrgency,
+  isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runDetachedDeviceCapacity, runDetachedMaintenanceContext, runWithMaintenanceUrgency, waitForMaintenanceRetry,
+  type StorageMaintenanceUrgency } from "@zhixing/core/resources";
 import {
   AuthorityStorageError,
   awaitAuthorityPreparation,
@@ -15,6 +17,7 @@ import {
   resolveSealedBundleArtifactClosure,
   type ArtifactStore,
   type AuthorityCommitLog,
+  type DurableLogCheckpoint,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
   type ProjectionCursor,
@@ -597,6 +600,23 @@ interface StoredDataPlaneBinding {
   readonly active?: DataPlaneAssignmentBinding;
 }
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
+const RECEIPT_URGENCY_RANK: Record<StorageMaintenanceUrgency, number> = { background: 0, recovery: 1, foreground: 2 };
+
+/** 等一轮回执对账的请求：发起时的准入紧急度与交付回调（只交付一次）。 */
+interface ReceiptWaiter {
+  readonly urgency: StorageMaintenanceUrgency;
+  settled: boolean;
+  readonly resolve: (value: number) => void;
+  readonly reject: (error: unknown) => void;
+}
+
+function strongestReceiptUrgency(waiters: readonly ReceiptWaiter[]): StorageMaintenanceUrgency {
+  let strongest: StorageMaintenanceUrgency = "background";
+  for (const waiter of waiters) {
+    if (!waiter.settled && RECEIPT_URGENCY_RANK[waiter.urgency] > RECEIPT_URGENCY_RANK[strongest]) strongest = waiter.urgency;
+  }
+  return strongest;
+}
 
 /** Durable executor-side assignment protocol shared by conversation and job execution. */
 export class ConversationAssignmentLedger implements
@@ -623,6 +643,10 @@ export class ConversationAssignmentLedger implements
   readonly #maxCachedAssignments: number;
   readonly #assignmentRecordV2Writes: boolean;
   readonly #operations = new SerialTaskQueue();
+  /** 回执对账：等下一轮的请求、是否有驱动者在推进轮次，以及上一轮无释放的完整对账开始时的日志头。 */
+  #receiptWaiters: ReceiptWaiter[] = [];
+  #receiptDriving = false;
+  #receiptsSettledAt: DurableLogCheckpoint | undefined;
   readonly #jobRecoveryIndex: RebuildableDurableProjectionIndex;
   readonly #leaseClockProjectionId: string;
   readonly #projections = new Map<
@@ -2652,11 +2676,68 @@ export class ConversationAssignmentLedger implements
     return this.#conversationAssignmentsInPhases(new Set(["sealed"]));
   }
 
-  /** Recover only receipts backed by an exact, durable never-started fence. */
-  async reconcileSupersededReceipts(): Promise<number> {
-    if (!this.#resources) return 0;
+  /**
+   * Recover only receipts backed by an exact, durable never-started fence.
+   *
+   * 执行端同一时刻只有一轮对账：派发前、恢复轮与可用后准备的请求进同一队列，由单一驱动者按轮推进——
+   * 每轮服务它开始时已到达的请求，进行中到达的请求等下一轮（起点晚于它们），旧一轮的结论不覆盖其后
+   * 提交的回执或围栏。回执（治理流）与围栏（账本流）都在本账本的日志上：自上一轮无释放的完整对账开始
+   * 以来日志头未前进，结论不变，直接返回。每笔释放仍在各自事务内按当前事实复验。
+   * 调用方在这些边界之外等待（账本串行权只在 #transact 内取，治理协调与容量由叶级操作各自取得）；
+   * 等待者取消即退出等待，不影响同批其他等待者；一轮失败如实交给本批等待者。
+   */
+  reconcileSupersededReceipts(): Promise<number> {
+    if (!this.#resources) return Promise.resolve(0);
+    const abort = currentMaintenanceAbortSignal();
+    if (abort.aborted) return Promise.reject(new StorageMaintenanceCancelledError());
+    return new Promise<number>((resolve, reject) => {
+      const cancel = () => {
+        this.#receiptWaiters = this.#receiptWaiters.filter((item) => item !== waiter);
+        waiter.reject(new StorageMaintenanceCancelledError());
+      };
+      const waiter: ReceiptWaiter = {
+        urgency: currentMaintenanceUrgency(),
+        settled: false,
+        resolve: (value) => { if (waiter.settled) return; waiter.settled = true; abort.removeEventListener("abort", cancel); resolve(value); },
+        reject: (error) => { if (waiter.settled) return; waiter.settled = true; abort.removeEventListener("abort", cancel); reject(error); },
+      };
+      abort.addEventListener("abort", cancel, { once: true });
+      this.#receiptWaiters.push(waiter);
+      if (!this.#receiptDriving) void this.#driveReceiptPasses();
+    });
+  }
+
+  /** 单一驱动者：取走此刻已到达的请求作为本轮，跑完交付后再看是否有新到达的，直到没有等待者为止。 */
+  async #driveReceiptPasses(): Promise<void> {
+    this.#receiptDriving = true;
+    try {
+      while (this.#receiptWaiters.length) {
+        const served = this.#receiptWaiters;
+        this.#receiptWaiters = [];
+        // 准入紧急度取当下仍在等的最强者（排到下一轮的也在等本轮结束）；没人再等前台就不再按前台
+        const urgency = () => strongestReceiptUrgency([...served, ...this.#receiptWaiters]);
+        try {
+          // 脱离发起者的维护语境与容量步骤，各叶级操作按上面的紧急度自行准入；取消由各等待者自己的信号决定
+          const value = await runDetachedDeviceCapacity(() => runDetachedMaintenanceContext("background", () =>
+            runWithMaintenanceUrgency(urgency, currentMaintenanceAbortSignal(), () => this.#reconcileReceiptsOnce())));
+          for (const waiter of served) waiter.resolve(value);
+        } catch (error) {
+          for (const waiter of served) waiter.reject(error);
+        }
+      }
+    } finally {
+      this.#receiptDriving = false;
+    }
+  }
+
+  async #reconcileReceiptsOnce(): Promise<number> {
+    const settled = this.#receiptsSettledAt;
+    // 读视图未变时原样返回同一检查点；变了就以这次读到的新头作本轮起点，不再另读一次
+    const head = settled ? await this.#log.checkpoint(settled) : await this.#log.checkpoint();
+    if (head === settled) return 0;
+    this.#receiptsSettledAt = undefined;
     // End the governor read before entering ledger -> governor -> authority locks.
-    const candidates = await this.#resources.activeAssignmentReceipts();
+    const candidates = await this.#resources!.activeAssignmentReceipts();
     let released = 0;
     for (const lease of candidates) {
       const result = await this.#transact(lease.activation.assignmentId, state => {
@@ -2669,6 +2750,8 @@ export class ConversationAssignmentLedger implements
       }, [], true);
       released += result.value;
     }
+    // 只有本轮从头到尾没有释放（日志头未因本轮前进）才记下起点：其后任何提交都会让下次核对不相等
+    if (released === 0) this.#receiptsSettledAt = head;
     return released;
   }
 
@@ -3804,11 +3887,24 @@ export class ConversationAssignmentLedger implements
    * 在段外等准备完成再重做；调用方仍处在别的排他段内时照原样交出，由外层重做。
    */
   async #repeatPrepared<Value>(operation: () => Promise<Value>): Promise<Value> {
+    // 可重试的维护准入背压（例如后台整理正占用共享额度时首次打开投影）同样在段外接续：与会话日志的
+    // 工作集重做同一规则——未取消、未持有维护互斥时有界等待后重做；被拒的一次在准入处即止、未产生效果
+    const abort = currentMaintenanceAbortSignal();
+    let deadline: number | undefined;
     for (let rounds = 0; ; rounds++) {
       try {
         return await operation();
       } catch (error) {
-        if (rounds >= 64 || !(await awaitAuthorityPreparation(error))) throw error;
+        if (rounds >= 64) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        deadline ??= performance.now() + 5_000;
+        if (performance.now() >= deadline) throw error;
+        await waitForMaintenanceRetry(Math.min(delay, deadline - performance.now()), abort);
+        // 醒来后先查取消与期限，再重新进入操作：等待中取消或已到期都不再执行
+        if (abort.aborted) throw new StorageMaintenanceCancelledError();
+        if (performance.now() >= deadline) throw error;
       }
     }
   }

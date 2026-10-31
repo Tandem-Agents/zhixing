@@ -710,8 +710,14 @@ export function maintenanceRetryDelayMs(error: unknown): number | undefined {
 }
 
 /** 段外等待。必须在互斥区之外调用,否则等待又落回区内。 */
-export function waitForMaintenanceRetry(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
+/** 背压后的等待：给了取消信号时，已取消即返回、等待中取消即提前醒来（调用方醒来后自行检查取消与期限）。 */
+export function waitForMaintenanceRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const wake = () => { clearTimeout(timer); signal?.removeEventListener("abort", wake); resolve(); };
+    const timer = setTimeout(wake, delayMs);
+    signal?.addEventListener("abort", wake, { once: true });
+  });
 }
 
 export class StorageMaintenanceCancelledError extends Error {
