@@ -29,6 +29,7 @@ import {
   buildSessionSubscribeMethod,
   buildSessionUnsubscribeMethod,
   buildSessionRenameMethod,
+  buildSessionPrepareAfterUsableMethod,
   buildSessionClearMethod,
   buildSessionCompactMethod,
   buildSessionContextBudgetMethod,
@@ -123,6 +124,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionSubscribeMethod(),
     buildSessionUnsubscribeMethod(),
     buildSessionRenameMethod(),
+    buildSessionPrepareAfterUsableMethod(),
     // session 命令执行体(cli 命令 handler 变薄后的宿主侧执行)
     buildSessionClearMethod(),
     buildSessionCompactMethod(),

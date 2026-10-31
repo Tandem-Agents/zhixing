@@ -124,6 +124,7 @@ export {
   createProvider,
   createProviderDirect,
   createProviderRoles,
+  prepareProviderRoles,
 } from "./create-provider.js";
 export type {
   ProviderRolesOptions,

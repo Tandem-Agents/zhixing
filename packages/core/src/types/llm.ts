@@ -399,6 +399,12 @@ export interface LLMProvider {
    * 并非所有 Provider 都支持精确计数。
    */
   countTokens?(messages: Message[], model: string): Promise<number>;
+
+  /**
+   * 提前装载 SDK 并构造客户端，不发请求、不握手、不消耗用量。与首次真实调用共享同一份加载；
+   * 失败不影响之后的调用照常重试。供宿主在真正可用之后、首次发送之前于后台触发。
+   */
+  prepare?(): Promise<void>;
 }
 
 // ─── LLM 角色（会话级 capability） ───

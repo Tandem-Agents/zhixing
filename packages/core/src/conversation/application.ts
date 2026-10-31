@@ -346,6 +346,14 @@ export interface ConversationAgentTurnIdentityPort {
 }
 
 /**
+ * 表面真正可用（输入准入已开放）之后的消息无关准备，由宿主装配给出：只登记开始、立即返回，不等待、可丢弃；
+ * 发送一直开放，准备的所属、去重、换会话与关闭时的停止都归装配给出的实现。
+ */
+export interface ConversationAfterUsablePort {
+  prepare(conversationId: string): void;
+}
+
+/**
  * Correctness mechanism behind Conversation identity and local storage-shell
  * lifecycle. The mechanism knows how to touch the durable stores, while the
  * application below owns which shell a product identity is allowed to create.
@@ -953,6 +961,11 @@ export type ConversationDirectoryCommand =
       caller: ConversationCommandCaller;
     }>
   | Readonly<{
+      kind: "prepare-after-usable";
+      conversationId: string;
+      caller: ConversationCommandCaller;
+    }>
+  | Readonly<{
       kind: "admit-agent-turn";
       /** 通信仅发送消息，不订阅或切换接收方界面。默认保留交互入口的订阅。 */
       observe?: boolean;
@@ -1211,6 +1224,12 @@ export interface ConversationDirectoryApplication {
       { readonly kind: "prepare-agent-turn-identity" }
     >,
   ): ConversationPreparedAgentTurnIdentity;
+  prepareAfterUsable(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "prepare-after-usable" }
+    >,
+  ): null;
   admitAgentTurn(
     command: Extract<
       ConversationDirectoryCommand,
@@ -1265,6 +1284,7 @@ export class ConversationDirectoryApplicationService
       runControl?: ConversationRunControlPort;
       agentTurns?: ConversationAgentTurnAdmissionPort;
       agentTurnIdentity?: ConversationAgentTurnIdentityPort;
+      afterUsable?: ConversationAfterUsablePort;
       perspectives?: ConversationPerspectivesApplication;
       taskLists?: ConversationTaskListPort;
       compact?: ConversationCompactPort;
@@ -2200,6 +2220,19 @@ export class ConversationDirectoryApplicationService
     });
   }
 
+  prepareAfterUsable(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "prepare-after-usable" }
+    >,
+  ): null {
+    assertConversationControlCaller(command.caller);
+    assertConversationIdentity(command.conversationId, "after-usable preparation");
+    // 只登记开始，不等待准备：准备的所属与停止归装配给出的实现；没有该装配时什么也不做
+    this.input.afterUsable?.prepare(command.conversationId);
+    return null;
+  }
+
   prepareAgentTurnIdentity(
     command: Extract<
       ConversationDirectoryCommand,
@@ -2637,6 +2670,17 @@ export const CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND =
     never
   >("conversation-run.command.prepare-agent-turn-identity", []);
 
+export const CONVERSATION_PREPARE_AFTER_USABLE_COMMAND =
+  defineProductApiCommand<
+    "conversation-run.command.prepare-after-usable",
+    Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "prepare-after-usable" }
+    >,
+    null,
+    never
+  >("conversation-run.command.prepare-after-usable", []);
+
 export const CONVERSATION_UPDATE_TASK_LIST_COMMAND = defineProductApiCommand<
   "conversation-task-list.command.update",
   Extract<
@@ -2676,6 +2720,7 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_ABORT_COMMAND,
       CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
       CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
+      CONVERSATION_PREPARE_AFTER_USABLE_COMMAND,
       CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
       CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND,
       CONVERSATION_UPDATE_TASK_LIST_COMMAND,
@@ -2773,6 +2818,13 @@ export function createConversationDirectoryProductApiContribution(
         CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
         async (command) => ({
           result: application.prepareAgentTurnIdentity(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        CONVERSATION_PREPARE_AFTER_USABLE_COMMAND,
+        async (command) => ({
+          result: application.prepareAfterUsable(command),
           facts: [],
         }),
       ),

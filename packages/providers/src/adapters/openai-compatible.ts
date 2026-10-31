@@ -89,6 +89,10 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
     id: provider.id,
     models: provider.declaredModels,
 
+    async prepare(): Promise<void> {
+      await connect();
+    },
+
     async *chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
       const openaiMessages = convertMessages(request.messages);
       const tools = request.tools ? convertTools(request.tools) : undefined;

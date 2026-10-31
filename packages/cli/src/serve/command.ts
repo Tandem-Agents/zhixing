@@ -139,7 +139,7 @@ import {
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
-import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath } from "@zhixing/providers";
+import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath, prepareProviderRoles } from "@zhixing/providers";
 import chalk from "chalk";
 import { ExecutionStatusHub, FirstPartyFinalitySession } from "./first-party-finality-session.js";
 import { isProcessAlive } from "@zhixing/server";
@@ -1059,6 +1059,15 @@ async function runServerProcess(
   let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
   let removalAdmissionOperationId: string | undefined;
   let removalBootstrapAdmissionClosed = true;
+
+  // 表面可用之后的 SDK 模块预导入（主模型 provider；不发请求）。同一宿主只做一次，失败下次可用时再触发。
+  // 首发照原路径创建自己的 provider 实例与客户端，复用的只是进程内已装好的 SDK 模块
+  let modelProviderPreparation: Promise<void> | undefined;
+  const prepareModelProviderAfterUsable = () => {
+    modelProviderPreparation ??= observeLogPhase(startupRecords, "after-usable-model-provider", () =>
+      prepareProviderRoles({ config: modelConfiguration, credentials: providerCredentials }))
+      .catch(() => { modelProviderPreparation = undefined; });
+  };
 
   // Runtime factories are dormant during Conversation construction. Close the
   // one RuntimeHost/Advancement cycle before any owner starts executing work.
@@ -2774,6 +2783,15 @@ async function runServerProcess(
     agentTurns: createConversationAgentTurnAdmissionPort({
       manager: boundConversations!,
     }),
+    // 表面真正可用后由终端触发的消息无关准备：只登记开始、立即返回；SDK 模块预导入与会话准备各由所属组件执行，
+    // 会话准备同一时刻只有一份（协议运行时负责去重、换会话中止与停止收尾）。各记一个阶段，量“发送前已完成”
+    afterUsable: {
+      prepare: (conversationId) => {
+        prepareModelProviderAfterUsable();
+        void observeLogPhase(startupRecords, "after-usable-preparation", () =>
+          boundConversationProtocol.prepareAfterUsable(conversationId)).catch(() => undefined);
+      },
+    },
     agentTurnIdentity: {
       exists: (conversationId) =>
         conversationIdentityLifecycle.identityExists(conversationId),

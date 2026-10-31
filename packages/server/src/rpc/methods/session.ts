@@ -59,6 +59,7 @@ import {
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_IDENTITY_EXISTS_QUERY,
   CONVERSATION_LIST_QUERY,
+  CONVERSATION_PREPARE_AFTER_USABLE_COMMAND,
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
@@ -2079,6 +2080,44 @@ export function buildSessionAbortMethod(): MethodEntry {
       } catch (error) {
         throw mapConversationRunControlError(error, "abort", id);
       }
+    },
+  };
+}
+
+/**
+ * 表面真正可用（输入准入已开放）之后的消息无关准备：只登记开始、立即返回，不等待准备；
+ * 终端在可用之后不等待地调用一次，失败不影响输入与发送。
+ */
+export function buildSessionPrepareAfterUsableMethod(): MethodEntry {
+  return {
+    name: "session.prepareAfterUsable",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as { conversationId?: unknown };
+      if (typeof params.conversationId !== "string") {
+        throw RpcErrors.invalidParams(
+          "session.prepareAfterUsable requires 'conversationId'",
+        );
+      }
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_PREPARE_AFTER_USABLE_COMMAND,
+      );
+      try {
+        await productApi.command(CONVERSATION_PREPARE_AFTER_USABLE_COMMAND, {
+          kind: "prepare-after-usable",
+          conversationId: params.conversationId,
+          caller: conversationControlCaller(ctx),
+        });
+      } catch (error) {
+        if (error instanceof ConversationApplicationError && error.code === "invalid-input") {
+          throw RpcErrors.invalidParams(
+            "session.prepareAfterUsable requires a valid 'conversationId'",
+          );
+        }
+        throw error;
+      }
+      return null;
     },
   };
 }

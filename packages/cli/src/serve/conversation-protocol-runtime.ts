@@ -403,6 +403,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #pendingConversationRetirements = new Set<string>();
   #deliveryDrain: (() => Promise<void>) | undefined;
   #recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 可用后准备的当前一份（见 prepareAfterUsable）。 */
+  #afterUsable: { readonly conversationId: string; readonly abort: AbortController; readonly done: Promise<void> } | undefined;
+  /** 所有尚未结束的可用后准备（含已被换掉、仍在收尾当前一步的旧份）：停止时全部中止并等待，不丢收尾责任。 */
+  readonly #afterUsableUnfinished = new Set<{ readonly abort: AbortController; readonly done: Promise<void> }>();
   // 控制准入基线（检查点恢复或整份归约）只做一次：首发与恢复后的后台预备共享进行中的任务。
   #controlBasis: Promise<void> | undefined;
   #pendingCancellationAfter: string | undefined;
@@ -784,6 +788,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoveryStopped = true;
     if (this.#recoveryTimer) clearTimeout(this.#recoveryTimer);
     this.#recoveryTimer = undefined;
+    // 可用后准备不跨停止：中止所有尚未结束的准备（含被换掉的旧份）并等它们在当前一步之后收尾
+    const unfinished = [...this.#afterUsableUnfinished];
+    for (const preparation of unfinished) preparation.abort.abort();
+    await Promise.allSettled(unfinished.map((preparation) => preparation.done));
     await this.#recoveryRunning?.catch(() => 0);
     await this.#controlBasis?.catch(() => undefined);
   }
@@ -2668,6 +2676,39 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#markRecovery(conversationId);
     await this.prepareConversationReadiness(conversationId);
     return this.recover();
+  }
+
+  /**
+   * 表面真正可用（输入准入已开放）之后、首次发送之前的消息无关准备（不等待、不推迟可用，发送一直开放）：
+   * 推进所选会话已过期票据的同步前沿（既有维护义务的耐久写，由本 owner 执行），并对首发的固定依赖各读一次
+   * （会话运行状态工作集、本机执行端的活跃收据）。只暖缓存，不产出供首发取用的结果；之后的操作照常做当前性与身份核对。
+   * 同一时刻只有一份：同会话在途时复用；换到另一会话即中止旧的，旧准备在步与步之间察觉后不再起新工作；
+   * 运行时停止后不再开始，停止时中止在途的一份并等它收尾。失败只丢弃。
+   */
+  prepareAfterUsable(conversationId: string): Promise<void> {
+    if (this.#recoveryStopped) return Promise.resolve();
+    const current = this.#afterUsable;
+    if (current && current.conversationId === conversationId && !current.abort.signal.aborted) return current.done;
+    current?.abort.abort();
+    const abort = new AbortController();
+    const steps = [
+      () => this.#journal(conversationId).dataPlaneTicketFacts(),
+      () => this.#journal(conversationId).recentExecutorAffinity(),
+      () => this.#executorDispatch.reconcileLocalReceipts(),
+    ];
+    const done = (async () => {
+      for (const step of steps) {
+        if (abort.signal.aborted || this.#recoveryStopped) return;
+        await step();
+      }
+    })().finally(() => {
+      this.#afterUsableUnfinished.delete(entry);
+      if (this.#afterUsable?.abort === abort) this.#afterUsable = undefined;
+    });
+    const entry = { abort, done };
+    this.#afterUsableUnfinished.add(entry);
+    this.#afterUsable = { conversationId, abort, done };
+    return done;
   }
 
   /** The selected conversation must be prepared before a surface reports ready. */

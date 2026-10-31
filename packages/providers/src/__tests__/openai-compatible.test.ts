@@ -140,6 +140,27 @@ describe("createOpenAICompatibleProvider", () => {
     MockOpenAI.mockClear();
   });
 
+  it("prepare 只装载 SDK 并构造客户端、不发请求；之后首次调用复用同一个客户端", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    await provider.prepare?.();
+    expect(MockOpenAI).toHaveBeenCalledTimes(1);
+    expect(mockCreate).not.toHaveBeenCalled();
+    await collectEvents(provider.chat({ model: "test-model", messages: [userMessage("hi")] }));
+    expect(MockOpenAI).toHaveBeenCalledTimes(1);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("prepare 失败不影响之后的调用照常重试", async () => {
+    MockOpenAI.mockImplementationOnce(function () { throw new Error("load failed"); });
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    await expect(provider.prepare!()).rejects.toThrow("load failed");
+    await collectEvents(provider.chat({ model: "test-model", messages: [userMessage("hi")] }));
+    expect(MockOpenAI).toHaveBeenCalledTimes(2);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("应正确创建 provider 实例（网关型默认 declaredModels=[]，不再造伪条目）", () => {
     const provider = createOpenAICompatibleProvider(makeProvider());
 

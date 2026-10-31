@@ -5164,6 +5164,25 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
+  // ─── session.prepareAfterUsable ───
+
+  it("session.prepareAfterUsable:须鉴权；鉴权后立即返回 null（只登记准备开始）；缺 conversationId 为 INVALID_PARAMS", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    expect(isErrorResponse(await client.request("session.prepareAfterUsable", { conversationId: "x" }))).toBe(true);
+    await client.request("auth", { token: TEST_TOKEN });
+    const sendResp = await client.request("session.send", { text: "hi" });
+    const conversationId = (sendResp as { result: { conversationId: string } }).result.conversationId;
+    await client.waitNotification("session.complete");
+    const r = await client.request("session.prepareAfterUsable", { conversationId });
+    expect(isSuccessResponse(r)).toBe(true);
+    if (isSuccessResponse(r)) expect(r.result).toBeNull();
+    const invalid = await client.request("session.prepareAfterUsable", {});
+    expect(isErrorResponse(invalid)).toBe(true);
+    if (isErrorResponse(invalid)) expect(invalid.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    client.close();
+  });
+
   // ─── session.rename ───
 
   it("session.rename:改名并组播 session.changed{renamed};未知对话 NOT_FOUND", async () => {

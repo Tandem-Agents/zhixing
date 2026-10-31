@@ -18,6 +18,7 @@ import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGU
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
 import { LocalLogStore } from '@zhixing/core/logging/storage';
+import { observeLogPhase } from '@zhixing/core/logging';
 import { LogFilesProcess } from '../logging/files-process.js';
 import { createLogWriterProbe } from '../logging/writers.js';
 import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
@@ -922,6 +923,9 @@ class TerminalApplication {
     void this.#tasks?.refresh();
     // 待处理确认的核对与运行中随时到达的确认通知同性质，不是提交前置；宿主不会因未核对而放行任何操作
     void this.#confirmations.refresh().catch(error => this.#confirmationRefreshFailed(error));
+    // 输入准入已开放、可发送画面已发布：请宿主开始所选会话的消息无关准备。不等待，失败不影响输入与发送
+    const usableConversationId = this.#controller?.current.conversationId;
+    if (usableConversationId) void this.#prepareAfterUsable(usableConversationId).catch(() => {});
     } catch (error) {
       // 尚未建立会话就失败：没有可接纳输入的对象，如实呈现为可重试的不可用；已有会话时按常规操作失败处理
       if (this.#controller || this.#abort.signal.aborted) throw error;
@@ -1394,7 +1398,7 @@ class TerminalApplication {
     const releaseOutput = this.#outputProjection.hold();
     try {
       if (this.#displayUnavailable || this.#display.paused || this.#outputProjection.paused) throw Error('正文保留已暂停，当前不能接纳新输入；草稿已保留。可处理确认、中止工作或退出后重试。');
-      await this.#inputs.retainDraft(`frozen:${inputId}`, inputId);
+      await this.#sendPhase('send-retain', () => this.#inputs.retainDraft(`frozen:${inputId}`, inputId));
       const completed = await this.#submitPrepared(inputId, submission);
       if (!completed) return;
       releaseOutput();
@@ -1458,14 +1462,21 @@ class TerminalApplication {
     return { result, notice };
   }
 
+  /** 回车到宿主收到 session.send 之间的一段（只观测）：与宿主侧首个产品调用对账。 */
+  #sendPhase<T>(name: string, work: () => Promise<T>): Promise<T> {
+    return observeLogPhase(this.#logging.records, `terminal.${name}`, work, { refs: [{ kind: 'terminal', id: this.instance }] });
+  }
+
   async #beginPrepared(inputId: string, submission: ReturnType<typeof createUserSubmission>): Promise<BeginReferencedUserTurnResult<TerminalTurnOutcome> | undefined> {
-    await this.#display.admit();
+    await this.#sendPhase('send-admit', () => this.#display.admit());
     this.#mainView = { ...this.#mainView, busy: true, message: '正在提交…' };
-    await this.#publish(this.#mainView);
+    // “正在提交”画面与随后的发送准备并行：发布按最新视图合流、按序送达（#publish），迟到的这一帧不会盖过之后的状态；
+    // 送达失败按视图送不达处理，不改变这次输入的提交结果（草稿已保留，不重发）
+    void this.#sendPhase('send-present', () => this.#publish(this.#mainView)).catch(() => this.#close(70, 'view-undelivered'));
     let recorded = false;
     try {
       return await this.#controller!.beginReferencedUserTurn((conversationId, turnId) =>
-        this.#conversation.sendPrepared((identity, signal, maximum) => this.#prepareSendSource(inputId, identity, signal, maximum),
+        this.#conversation.sendPrepared((identity, signal, maximum) => this.#sendPhase('send-prepare', () => this.#prepareSendSource(inputId, identity, signal, maximum)),
           conversationId, turnId, this.#abort.signal, (result): SessionSendReferenceResult => {
             if ('status' in result && result.status === 'awaiting-rubric-confirmation') {
               const { rubricDraft: _draft, ...identity } = result;
@@ -1916,6 +1927,12 @@ class TerminalApplication {
   #holdNoticeDisplay(): void {
     this.#resumeNoticeDisplay();
     this.#noticeDisplayReady = new Promise(resolve => { this.#releaseNoticeDisplay = resolve; });
+  }
+
+  /** 请宿主开始所选会话的消息无关准备：宿主只登记开始、立即返回，准备本身不在这条请求里等。 */
+  async #prepareAfterUsable(conversationId: string): Promise<void> {
+    const client = await this.#connection.getClient();
+    await client.request('session.prepareAfterUsable', { conversationId });
   }
 
   #resumeNoticeDisplay(): void {

@@ -63,6 +63,10 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
     id: resolved.id,
     models: resolved.declaredModels,
 
+    async prepare(): Promise<void> {
+      await connect();
+    },
+
     async *chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
       const messages = convertMessages(request.messages);
       const tools = request.tools ? convertTools(request.tools) : undefined;

@@ -151,3 +151,12 @@ export function createProviderRoles(
     },
   };
 }
+
+/**
+ * 按与 createProviderRoles 相同的解析，提前装载主角色 provider 的 SDK 并构造客户端（不发请求）。
+ * 首发用主角色；SDK 模块在进程内共享，之后每次创建运行时新建的实例直接复用已装载的模块。
+ */
+export async function prepareProviderRoles(options: ProviderRolesOptions): Promise<void> {
+  const { roles } = createProviderRoles(options);
+  await roles.main.provider.prepare?.();
+}
