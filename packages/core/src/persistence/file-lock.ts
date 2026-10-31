@@ -108,6 +108,10 @@ export async function acquireFileLock(
   await cleanupAbandonedClaimsAtInterval(lockPath, options.staleMs, now, resolver);
   await cleanupAbandonedClaimsAtInterval(`${lockPath}.reclaim`, options.staleMs, now, resolver);
 
+  // 持有者是否已消失的核验在后台进行：慢的身份查询（如 Windows 回退要起 PowerShell）不串行挡住
+  // 普通的创建重试，否则会错过持有者已放锁的空档。同一时刻只为当前看到的持有者记录跑一个核验；
+  // 核验只读不删，结论只在本次取锁过程内、经带守卫的回收按新鲜身份复验后才生效，结束后迟到的结果作废。
+  let check: OwnerCheck | undefined;
   while (true) {
     if (await tryCreateLockFile(lockPath, JSON.stringify(record))) {
       activeTokens.add(token);
@@ -121,16 +125,52 @@ export async function acquireFileLock(
         await releaseLockFile(lockPath, token, resourceName);
       };
     }
-    if (await reclaimDeadLock(lockPath, options.staleMs, now, resourceName, resolver)) {
-      // Recovery progress is not contention. This includes reclaiming a dead
-      // reclaimer left by a crash; a zero-wait caller must finish that recovery.
-      continue;
-    }
-    if (performance.now() - startedAt >= options.waitMs) {
-      throw new FileLockBusyError(resourceName);
+    check ??= startOwnerCheck(lockPath, options.staleMs, now, resolver);
+    const expired = performance.now() - startedAt >= options.waitMs;
+    // 到期时（含零等待调用方）等完正在进行的核验：恢复进度不算争用
+    if (check.settled || expired) {
+      const observed = await check.result;
+      check = undefined;
+      if (observed && await reclaimObservedOwner(lockPath, observed, options.staleMs, now, resourceName, resolver)) {
+        // Recovery progress is not contention. This includes reclaiming a dead
+        // reclaimer left by a crash; a zero-wait caller must finish that recovery.
+        continue;
+      }
+      if (expired) throw new FileLockBusyError(resourceName);
     }
     await new Promise<void>((resolve) => setTimeout(resolve, retryMs));
   }
+}
+
+/** 一次后台持有者核验：结果为可回收时的那份持有者记录，否则 undefined；出错照原样在取用时抛出。 */
+interface OwnerCheck {
+  readonly result: Promise<LockOwnerReading | undefined>;
+  settled: boolean;
+}
+
+function startOwnerCheck(
+  lockPath: string,
+  staleMs: number,
+  now: () => number,
+  resolver: ProcessIdentityResolver,
+): OwnerCheck {
+  const check: OwnerCheck = { settled: false, result: observeReclaimableOwner(lockPath, staleMs, now, resolver) };
+  // 取锁成功后不再取用的核验也要收束：不留未处理的拒绝
+  check.result.then(() => { check.settled = true; }, () => { check.settled = true; });
+  return check;
+}
+
+async function observeReclaimableOwner(
+  lockPath: string,
+  staleMs: number,
+  now: () => number,
+  resolver: ProcessIdentityResolver,
+): Promise<LockOwnerReading | undefined> {
+  const age = await stat(lockPath)
+    .then((value) => now() - value.mtimeMs)
+    .catch(() => 0);
+  const observedOwner = await readLockFile(lockPath);
+  return await isReclaimable(observedOwner, age, staleMs, resolver) ? observedOwner : undefined;
 }
 
 async function reclaimDeadLock(
@@ -140,12 +180,19 @@ async function reclaimDeadLock(
   resourceName: string,
   resolver: ProcessIdentityResolver,
 ): Promise<boolean> {
-  const age = await stat(lockPath)
-    .then((value) => now() - value.mtimeMs)
-    .catch(() => 0);
-  const observedOwner = await readLockFile(lockPath);
-  if (!(await isReclaimable(observedOwner, age, staleMs, resolver))) return false;
+  const observedOwner = await observeReclaimableOwner(lockPath, staleMs, now, resolver);
+  return observedOwner !== undefined && reclaimObservedOwner(lockPath, observedOwner, staleMs, now, resourceName, resolver);
+}
 
+/** 带守卫回收一份已观察到可回收的持有者记录：守卫内重读记录，只有仍是同一持有者且按新鲜身份仍可回收才删除。 */
+async function reclaimObservedOwner(
+  lockPath: string,
+  observedOwner: LockOwnerReading,
+  staleMs: number,
+  now: () => number,
+  resourceName: string,
+  resolver: ProcessIdentityResolver,
+): Promise<boolean> {
   const reclaimPath = `${lockPath}.reclaim`;
   const reclaimRecord: LockRecord = {
     v: 1,

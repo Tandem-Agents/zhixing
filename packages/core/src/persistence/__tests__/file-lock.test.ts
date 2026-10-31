@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
@@ -336,6 +336,89 @@ describe("file lock atomic publication", () => {
     clock += 2_000;
     await (await acquireFileLock(lockPath, options))();
     await expect(stat(claimPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+/** 按调用次序给出持有者身份（可带延迟，模拟 Windows 回退起 PowerShell 的慢查询）；本进程身份立即返回。 */
+function scriptedResolver(owner: (call: number) => { readonly delayMs?: number; readonly reading: ProcessIdentityReading }): ProcessIdentityResolver {
+  let calls = 0;
+  return {
+    read: async (pid) => {
+      if (pid === process.pid) return { kind: "present", birth: "self" };
+      const { delayMs = 0, reading } = owner(calls++);
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return reading;
+    },
+  };
+}
+
+describe("持有者身份核验不串行挡住普通重试", () => {
+  it("核验很慢时普通创建重试照常进行，持有者放锁后随即取得", async () => {
+    const lockPath = path.join(await createTempDir("file-lock-slow-identity"), "resource.lock");
+    await writeFile(lockPath, versionedLockRecord("a".repeat(32), "owner", 424_242), "utf8");
+    const started = performance.now();
+    const acquiring = acquireFileLock(lockPath, { staleMs: 30_000, waitMs: 5_000, retryMs: 5,
+      processIdentityResolver: scriptedResolver(() => ({ delayMs: 1_500, reading: { kind: "present", birth: "owner" } })) });
+    setTimeout(() => { void rm(lockPath, { force: true }); }, 40);
+    const release = await acquiring;
+    // 身份查询要 1.5 s；若普通重试在它之后才进行，取得时刻不会早于 1.5 s
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
+    await release();
+  });
+
+  it.each([
+    [{ kind: "absent" } as const, "等待期间持有者退出"],
+    [{ kind: "present", birth: "successor" } as const, "同一 PID 换了出生时间"],
+  ])("先确认存活、之后 %j 时照常回收（%s）", async (later) => {
+    const lockPath = path.join(await createTempDir("file-lock-owner-gone"), "resource.lock");
+    const staleToken = "b".repeat(32);
+    await writeFile(lockPath, versionedLockRecord(staleToken, "owner", 424_242), "utf8");
+    const release = await acquireFileLock(lockPath, { staleMs: 30_000, waitMs: 2_000, retryMs: 5,
+      processIdentityResolver: scriptedResolver((call) => call === 0
+        ? { delayMs: 20, reading: { kind: "present", birth: "owner" } } : { reading: later }) });
+    const owner = JSON.parse(await readFile(lockPath, "utf8"));
+    expect(owner.pid).toBe(process.pid);
+    expect(owner.token).not.toBe(staleToken);
+    await release();
+  });
+
+  it("核验期间持有者换成另一份存活记录：旧记录的“可回收”结论不删新锁", async () => {
+    const lockPath = path.join(await createTempDir("file-lock-owner-replaced"), "resource.lock");
+    await writeFile(lockPath, versionedLockRecord("c".repeat(32), "owner", 424_242), "utf8");
+    const successor = versionedLockRecord("d".repeat(32), "owner-2", 525_252);
+    const resolver: ProcessIdentityResolver = {
+      read: async (pid) => {
+        if (pid === process.pid) return { kind: "present", birth: "self" };
+        if (pid === 424_242) {
+          // 慢查询进行中，锁换成另一位存活的持有者；查询最终说旧持有者已退出
+          await writeFile(lockPath, successor, "utf8");
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return { kind: "absent" };
+        }
+        return { kind: "present", birth: "owner-2" };
+      },
+    };
+    await expect(acquireFileLock(lockPath, { staleMs: 30_000, waitMs: 300, retryMs: 5, processIdentityResolver: resolver }))
+      .rejects.toThrow(/busy/u);
+    expect(await readFile(lockPath, "utf8")).toBe(successor);
+  });
+
+  it("取得锁之后迟到的“旧持有者已退出”结论不删除后来的锁", async () => {
+    const lockPath = path.join(await createTempDir("file-lock-late-check"), "resource.lock");
+    await writeFile(lockPath, versionedLockRecord("e".repeat(32), "owner", 424_242), "utf8");
+    let settled!: () => void;
+    const late = new Promise<void>((resolve) => { settled = resolve; });
+    const resolver = scriptedResolver(() => ({ delayMs: 300, reading: { kind: "absent" } }));
+    const acquiring = acquireFileLock(lockPath, { staleMs: 30_000, waitMs: 5_000, retryMs: 5,
+      processIdentityResolver: { read: async (pid) => { const value = await resolver.read(pid); if (pid !== process.pid) settled(); return value; } } });
+    setTimeout(() => { void rm(lockPath, { force: true }); }, 30);
+    const release = await acquiring;
+    const ours = await readFile(lockPath, "utf8");
+    await late;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await readFile(lockPath, "utf8")).toBe(ours);
+    await release();
   });
 });
 
