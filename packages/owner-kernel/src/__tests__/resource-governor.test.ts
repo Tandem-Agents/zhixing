@@ -407,6 +407,37 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     expect(types.flat()).toContain("dequeue");
   });
 
+  it("treats a coordination preparation hint only as preparation: the same governor decides identically with correct, stale, malformed or no hint", async () => {
+    const fixture = await createHarness();
+    const interactive = { admissionClass: "interactive", entry: "conversation-input" } as const;
+    const workload = { kind: "run", id: "run-hinted", attempt: 1 } as const;
+    await fixture.governor.enqueueRoot(assignmentReservationId("assignment-hinted"), workload, interactive, hostContext);
+    const lease = await fixture.governor.prepareAssignmentRoot({
+      assignmentId: "assignment-hinted", executorId: "executor-1", workload,
+      scopeBinding: { kind: "conversation", conversationId: "conversation-1", ownerEpoch: 1 },
+      budget: { maxCalls: 1 },
+    }, interactive, hostContext);
+    const hints = {
+      none: undefined,
+      correct: { prepare: [{ reservationId: lease.reservationId, workload }] },
+      stale: { prepare: [{ reservationId: assignmentReservationId("assignment-never-existed"), workload: { kind: "run", id: "run-never-existed", attempt: 1 } as const }] },
+      malformed: { prepare: [{ reservationId: lease.reservationId, workload: { ...workload, attempt: 0 } }] },
+    };
+    const decided: Record<string, unknown> = {};
+    for (const [name, hint] of Object.entries(hints)) {
+      // 另一写者在同类别后面排入一条无关预留：日志头被外来信封推进，下一次协调换新会话、从空工作集开始；当前候选仍在前，判定不受影响
+      await fixture.log.append([{ stream: "governor", body: { t: "queued", reservationId: assignmentReservationId(`assignment-behind-${name}`),
+        admissionClass: "interactive", workload: { kind: "run", id: `run-behind-${name}`, attempt: 1 } } }]);
+      // 生产协调路径：同一治理实例在协调内做同步激活判定（会话缺键时由协调补齐重做）
+      decided[name] = await fixture.governor.coordinate(async () => fixture.governor.prepareActivation(lease), hint);
+    }
+    // 提示正确、过时、形状不合或没有提示，同一实例的激活判定产出完全相同的记录；过时/不合的提示下实际键照原路径装入
+    expect(decided.correct).toEqual(decided.none);
+    expect(decided.stale).toEqual(decided.none);
+    expect(decided.malformed).toEqual(decided.none);
+    expect((decided.none as readonly unknown[]).length).toBeGreaterThan(0);
+  });
+
   it("conservatively consumes unfinished metered usage when settling a control root", async () => {
     const fixture = await createHarness();
     const workload = { kind: "control", id: "control-unfinished-usage", attempt: 1 } as const;

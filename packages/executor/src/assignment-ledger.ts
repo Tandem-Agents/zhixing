@@ -150,7 +150,7 @@ import {
   type StreamDataFramePayload,
   type StreamVerifierCheckpoint,
 } from "@zhixing/core/protocol";
-import type { ExecutorAssignmentResourceCoordinator } from "./resource-governor.js";
+import type { ExecutorAssignmentResourceCoordinator, ExecutorCoordinationOptions } from "./resource-governor.js";
 import type { DataPlaneAssignmentBinding, DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 
@@ -1012,6 +1012,12 @@ export class ConversationAssignmentLedger implements
         };
       },
       [artifact.ref, ...envelopeReferences],
+      false,
+      [],
+      // 本次分派所指的执行端预留与工作负载来自已签信封：协调前由治理层一次装齐其判定必读键
+      requiresExecutorResourceReceipt(envelope.resourceLease)
+        ? { resourcePreparation: [{ reservationId: envelope.resourceLease.reservationId, workload: envelope.resourceLease.workload }] }
+        : {},
     );
 
     if (transaction.value.kind === "accepted") {
@@ -3854,6 +3860,7 @@ export class ConversationAssignmentLedger implements
     candidateReferences: readonly ArtifactRef[] = [],
     receiptRetirement = false,
     readProjectionIds: readonly string[] = [],
+    options: { readonly resourcePreparation?: NonNullable<ExecutorCoordinationOptions["prepare"]> } = {},
   ) {
     assertIdentifier(assignmentId, "Assignment id");
     return this.#repeatPrepared(() => this.#operations.run(async () => {
@@ -3889,7 +3896,9 @@ export class ConversationAssignmentLedger implements
           },
         );
         const transaction = await (
-          this.#resources ? this.#resources.coordinate(transact) : transact()
+          this.#resources
+            ? this.#resources.coordinate(transact, { caller: "assignment-ledger", ...(options.resourcePreparation ? { prepare: options.resourcePreparation } : {}) })
+            : transact()
         );
         // A retirement view never certifies the execution artifact closure.
         if (!receiptRetirement) this.#cacheProjection(assignmentId, {

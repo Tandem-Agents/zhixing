@@ -57,8 +57,8 @@ type MapName =
   | "reservations" | "leaseAcceptances" | "usages" | "usageReservations" | "nextUsageSeqByRoot"
   | "queued" | "queuedWorkloads" | "queuedByWorkload" | "dequeued" | "dequeuedAt";
 
-/** 一页二级索引：前缀加可选的键区间。 */
-interface IndexPage { readonly prefix: string; readonly gte?: string; readonly lte?: string }
+/** 一页二级索引：前缀加可选的键区间（下界含、上界不含，与投影扫描区间同一口径）。 */
+interface IndexPage { readonly prefix: string; readonly gte?: string; readonly lt?: string }
 type GovernorNeed = { readonly key: string } | { readonly page: IndexPage } | { readonly fair: true };
 
 const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
@@ -92,9 +92,10 @@ const pages = {
   workloadRoots: (workload: string): IndexPage => ({ prefix: `ix:wr:${hash(workload)}:` }),
   openByReservation: (reservation: string): IndexPage => ({ prefix: `ix:uo:${hash(reservation)}:` }),
   openByRoot: (root: string): IndexPage => ({ prefix: `ix:ur:${hash(root)}:` }),
+  // 序号键定长补零：[from, to] 恰是 [seqKey(from), seqKey(to + 1))
   usageBlock: (root: string, rd: string, from: number, to: number): IndexPage => {
     const prefix = `ix:ub:${hash(root)}:${hash(rd)}:`;
-    return { prefix, gte: `${prefix}${seqKey(from)}`, lte: `${prefix}${seqKey(to)}` };
+    return { prefix, gte: `${prefix}${seqKey(from)}`, lt: `${prefix}${seqKey(to + 1)}` };
   },
 };
 
@@ -117,6 +118,9 @@ export class GovernorStateRequired extends AuthorityPreparationRequired {
     super([]);
     this.name = "GovernorStateRequired";
     this.message = "Resource governor state is being loaded";
+    // 只供观测：推迟事件据此区分治理工作集缺键装入与派生投影准备，并带出所缺的键/页
+    this.observed = { reason: "governor-state", positions: needs.slice(0, 8).map((need) =>
+      "key" in need ? `key:${need.key.slice(0, 48)}` : "page" in need ? `page:${need.page.prefix.slice(0, 6)}` : "fair") };
     // 同一次缺键只装一次：日志在持外层串行权时先在后台发起，协调者随后等待的是同一次装入
     if (load) { let pending: Promise<void> | undefined; this.prepareOutside = () => pending ??= load(); }
   }
@@ -618,11 +622,28 @@ function cloneQueues(queues: Record<AdmissionClass, string[]>): Record<Admission
  * 把缺的键与索引页装入工作集。终态根过前沿视为不存在；依附在根上的行，根已不在或换代
  * （摘要不符）同样视为不存在。索引页一并装入页内实体，免得逐条再缺一轮。
  */
+/**
+ * 同一预留的固定键族一起装：判定读到缺失的预留、排队项或序号键时，同一预留的另外两个通常紧接着被读，
+ * 逐个发现会让整笔判定多重做几轮。只多读这几个固定键（不存在即记为已确认不存在），不改变任何判定。
+ */
+function withSiblingKeys(needs: readonly GovernorNeed[]): readonly GovernorNeed[] {
+  const expanded = [...needs];
+  const seen = new Set(needs.flatMap((need) => "key" in need ? [need.key] : []));
+  const add = (key: string) => { if (!seen.has(key)) { seen.add(key); expanded.push({ key }); } };
+  for (const need of needs) {
+    if (!("key" in need)) continue;
+    const reservation = /^(r|q|s):(.+)$/u.exec(need.key);
+    if (reservation) for (const key of [keys.reservation(reservation[2]!), keys.queued(reservation[2]!), keys.seq(reservation[2]!)]) add(key);
+  }
+  return expanded;
+}
+
 export async function loadGovernorNeeds(
   set: GovernorWorkingSet,
   needs: readonly GovernorNeed[],
   read: DurableProjectionReadContext,
 ): Promise<void> {
+  needs = withSiblingKeys(needs);
   const wanted: string[] = [];
   for (const need of needs) {
     if ("fair" in need) {
@@ -637,10 +658,8 @@ export async function loadGovernorNeeds(
     const entries: { key: string; id: string }[] = [];
     let continuation: string | undefined;
     do {
-      const page = await read.scan({
-        ...(need.page.gte === undefined ? { gte: need.page.prefix } : { gte: need.page.gte }),
-        ...(need.page.lte === undefined ? { lt: `${need.page.prefix}￿` } : { lte: need.page.lte }),
-      }, PAGE_LIMIT, continuation);
+      const page = await read.scan({ gte: need.page.gte ?? need.page.prefix, lt: need.page.lt ?? `${need.page.prefix}￿` },
+        PAGE_LIMIT, continuation);
       for (const entry of page.entries) entries.push({ key: entry.key, id: (entry.value as { id: string }).id });
       continuation = page.continuation;
     } while (continuation);
@@ -724,6 +743,22 @@ function dependentRoot(key: string, value: JsonValue | undefined): string | unde
 export function requireGovernorRecordNeeds(state: GovernorProjection, records: readonly { readonly body: unknown }[]): void {
   if (!(state instanceof GovernorWorkingSet)) return;
   state.requireNeeds(records.flatMap((record) => governorRecordNeeds(record.body)));
+}
+
+/**
+ * 一次终结结算的确切依赖一次报全：用量终证要读的这一段已结用量块，与随后同根终结记录归约必读的预留键和索引页。
+ * 只报由已装入的根能得出的部分（根或序号键未装入时照常由惰性读取补齐），缺页照缺处理，不预读别的根或历史。
+ * 非按键工作集（完整投影）不需要装入。
+ */
+export function requireGovernorSettlementNeeds(state: GovernorProjection, root: string, fromUsageSeq: number, watermark: number): void {
+  if (!(state instanceof GovernorWorkingSet)) return;
+  const needs = governorRecordNeeds({ t: "release", reservationId: root });
+  const reservation = state.reservations.get(root);
+  // 水位为 0 时用量终证不读用量块
+  if (reservation !== undefined && reservation.depth === 0 && fromUsageSeq >= 1 && watermark >= fromUsageSeq) {
+    needs.push({ page: pages.usageBlock(root, reservation.lease.digest, fromUsageSeq, watermark) });
+  }
+  state.requireNeeds(needs);
 }
 
 /** 一条调控记录归约时必读、可从记录本身得出的键与索引页。 */
@@ -918,6 +953,14 @@ export class GovernorSession {
     await loadGovernorNeeds(this.#set, needs, this.store.index);
   }
 
+  /**
+   * 协调前按真实命令给出的预留身份一次装齐它的判定必读键：预留键族、该工作负载的排队索引与出队记录、公平状态。
+   * 只是准备：装入沿原批读与已装入判定，提示缺失、过时或不完整时，判定照原路径读到未装入再补齐重做。
+   */
+  async prepareReservation(reservationId: string, workloadKey: string): Promise<void> {
+    await this.load([{ key: keys.reservation(reservationId) }, { key: keys.queuedByWorkload(workloadKey) },
+      { key: keys.dequeued(workloadKey) }, { fair: true }]);
+  }
   /** 锁外运行一段只读判断，缺什么装什么。 */
   async resolve<Value>(operation: (state: GovernorWorkingSet) => Value): Promise<Value> {
     const { value, attempt } = await runWithGovernorNeeds(this.#set, this.store.index, operation);

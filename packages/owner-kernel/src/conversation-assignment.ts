@@ -276,7 +276,8 @@ import type {
   ConversationDeliveryParticipant,
   ConversationStatusDeliveryInput,
 } from "./delivery-participant.js";
-import type { AssignmentResourceCoordinator } from "./resource-governor.js";
+import type { AssignmentResourceCoordinator, CoordinationOptions } from "./resource-governor.js";
+import type { RootResourceWorkload } from "@zhixing/core/contracts";
 import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
 import {
   advanceChannelInteractionJournal,
@@ -1670,7 +1671,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             if (abort.aborted) throw new StorageMaintenanceCancelledError();
             if (this.#readBaseGeneration !== baseGeneration) throw new Error("Conversation recovery read base changed");
             const validate = async () => { for (const check of checks) await verifyProtocolStep(check); };
-            if (checks.length && this.#resources) await this.#resources.coordinate(validate);
+            if (checks.length && this.#resources) await this.#resources.coordinate(validate, { caller: "conversation-journal.recovery-validate" });
             else await validate();
             // coordinate may wait and performs a final synchronization. A base
             // replacement/cancellation during that wait must not publish a view.
@@ -2322,7 +2323,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#withRunProjection((basis, publish) => {
       const application = () => apply(basis, publish);
       const transact = () => this.#delivery ? this.#delivery.coordinate(application) : application();
-      return this.#resources ? this.#resources.coordinate(transact) : transact();
+      return this.#resources ? this.#resources.coordinate(transact, { caller: "conversation-journal.input" }) : transact();
     }, conversationDecisionScope({ input }));
   }
 
@@ -2819,6 +2820,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         };
       },
       [artifact.ref, ...envelopeReferences], [CONTROL_PROJECTION_ID], this.#exactCommandScope({ unsignedEnvelope }),
+      // 本次分派所指的预留与工作负载来自已签信封：协调前由治理层一次装齐其判定必读键
+      { resourcePreparation: [{ reservationId: envelope.resourceLease.reservationId, workload: envelope.resourceLease.workload as RootResourceWorkload }] },
     );
     const assigned = transaction.state.assignedById.get(transaction.value.assignmentId);
     if (!assigned) throw new Error("Assigned commit did not rebuild its outbox fact");
@@ -3716,7 +3719,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#withRunProjection((basis, publish) => {
       const application = () => applyAuthority(basis, publish);
       const apply = () => this.#delivery ? this.#delivery.coordinate(application) : application();
-      return this.#resources ? this.#resources.coordinate(apply) : apply();
+      return this.#resources ? this.#resources.coordinate(apply, { caller: "conversation-journal.control" }) : apply();
     }, conversationDecisionScope({ input }));
   }
 
@@ -6523,7 +6526,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async #transact<Value>(decide: (state: RunProjection, prefix: ProjectionTransactionContext) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
-    candidateReferences: readonly ArtifactRef[] = [], readProjectionIds: readonly string[] = [], scope: ConversationDecisionScope = {}) {
+    candidateReferences: readonly ArtifactRef[] = [], readProjectionIds: readonly string[] = [], scope: ConversationDecisionScope = {},
+    options: { readonly resourcePreparation?: NonNullable<CoordinationOptions["prepare"]> } = {}) {
     if (this.#readBaseGeneration !== 0) return this.#transactLegacy(decide, candidateReferences, readProjectionIds);
     return this.#repeatWorkingSet(async () => {
       return this.#operations.run(async () => {
@@ -6549,7 +6553,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             readProjectionIds: [...new Set([CONVERSATION_RUN_STATE_PROJECTION_ID, ...this.#deliveryProjectionIds(), ...readProjectionIds, ...(this.#currentAuthority ? [CONVERSATION_TRANSFER_PROJECTION_ID, ...conversationAnchorProjectionIds(this.#log)] : [])])],
             createState: () => { candidateLsn = undefined; return createConversationProjectionDraft(prepared.state).state; } });
         const coordinate = () => this.#delivery ? this.#delivery.coordinate(run) : run();
-        const result = await (this.#resources ? this.#resources.coordinate(coordinate) : coordinate());
+        const result = await (this.#resources
+          ? this.#resources.coordinate(coordinate, { caller: "conversation-journal", ...(options.resourcePreparation ? { prepare: options.resourcePreparation } : {}) })
+          : coordinate());
         // This cache owns only immutable current payloads; every next decision
         // obtains its metadata again from the same-head indexed authority.
         // A subject-local decision does not establish the complete input basis.
@@ -6612,7 +6618,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             }
           };
           const transaction = await (
-            this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
+            this.#resources ? this.#resources.coordinate(replay, { readOnly: true, caller: "conversation-journal.legacy-read" }) : replay()
           );
           if (abort.aborted) throw new StorageMaintenanceCancelledError();
           this.#runProjection = {
@@ -7029,7 +7035,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ? this.#delivery.coordinate(runTransaction)
           : runTransaction();
         const transaction = await (
-          this.#resources ? this.#resources.coordinate(transact) : transact()
+          this.#resources ? this.#resources.coordinate(transact, { caller: "conversation-journal.legacy" }) : transact()
         );
         this.#runProjection = {
           state: draft && transaction.state === draft.state ? draft.finish() : transaction.state,

@@ -4801,6 +4801,10 @@ function withoutRetirementCleanup(
 function normalizeRange(
   range: DurableProjectionScanRange,
 ): NormalizedScanRange {
+  // 只认 gte/gt/lt：未知字段（如 lte）若被静默忽略，上界会退成键空间末尾
+  for (const field of Object.keys(range)) {
+    if (field !== "gte" && field !== "gt" && field !== "lt") throw new TypeError(`Projection scan range has unknown bound ${field}`);
+  }
   if (range.gte !== undefined && range.gt !== undefined) {
     throw new TypeError("Projection scan range cannot combine gte and gt");
   }

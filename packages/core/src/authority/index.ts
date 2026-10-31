@@ -158,6 +158,7 @@ export {
   RESOURCE_GOVERNOR_INDEX_PROJECTION_ID,
   ResourceGovernorIndexStore,
   requireGovernorRecordNeeds,
+  requireGovernorSettlementNeeds,
   consumedUsageBlock,
   governorRetentionCutoff,
   liveGovernorReservations,

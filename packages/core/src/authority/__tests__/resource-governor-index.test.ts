@@ -178,6 +178,20 @@ describe("resource governor keyed index", () => {
     await log.stopStorageMaintenance();
   }, 240_000);
 
+  it("loads a reservation's fixed key family together so a decision does not redo once per missing sibling", async () => {
+    const root = await createTempDir("governor-index-siblings");
+    const now = "2026-07-20T00:00:00.000Z";
+    const { log, store } = await harness(root, () => now);
+    const session = await store.refresh(undefined);
+    // 判定读到一个新预留的预留键（本不存在）：同一预留的排队项与序号键随这次装入一起装上，记为已确认不存在
+    await session.load([{ key: "r:new-root" }]);
+    expect(["r:new-root", "q:new-root", "s:new-root"].map((key) => session.state.isLoaded(key))).toEqual([true, true, true]);
+    expect(session.state.reservations.peek("new-root")).toBeUndefined();
+    // 别的预留不受影响
+    expect(session.state.isLoaded("q:other-root")).toBe(false);
+    await log.stopStorageMaintenance();
+  }, 120_000);
+
   it("reuses a session only while no other governor envelope has arrived", async () => {
     const root = await createTempDir("governor-index-session");
     const now = "2026-07-20T00:00:00.000Z";

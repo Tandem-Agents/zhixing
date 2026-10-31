@@ -9,6 +9,7 @@ import {
   readCapabilityActivation,
   registerResourceCapabilityActivations,
   requireGovernorRecordNeeds,
+  requireGovernorSettlementNeeds,
   type GovernorDecision,
   type GovernorSession,
 } from "@zhixing/core/authority";
@@ -37,6 +38,7 @@ import type {
 } from "@zhixing/core/contracts";
 import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
+import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   applyGovernorRecord,
@@ -99,6 +101,8 @@ export interface AnchorResourceGovernorOptions {
   readonly candidateTtlMs?: number;
   readonly clock?: () => string;
   readonly monotonicClock?: () => number;
+  /** 阶段事件的记录端口（与启动阶段同一端口，日志库接收阶段事件）：候选等待与协调各记一个日志阶段，其间的授权工作汇总据此按来源分开（只观测）。 */
+  readonly records?: LogRecordPort;
 }
 
 /** 需按租约与主体授权的资源动作；结算并释放同时要求其中两项。 */
@@ -119,9 +123,17 @@ interface CandidateOccupancy {
   readonly expiresAt: number;
 }
 
+export interface CoordinationOptions {
+  readonly readOnly?: true;
+  readonly prepare?: readonly { readonly reservationId: string; readonly workload: RootResourceWorkload }[];
+  /** 发起这次协调的子系统固定标签（只观测，记在协调阶段上）。 */
+  readonly caller?: string;
+}
+
 export interface AssignmentResourceCoordinator {
-  /** Read-only callbacks may inspect/validate facts, but must not append authority records. */
-  coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T>;
+  /** Read-only callbacks may inspect/validate facts, but must not append authority records.
+   * prepare：发起协调的真实命令给出本次所指的预留与工作负载，协调前一次装齐其判定必读键；只是准备，不作授权或不存在证明。 */
+  coordinate<T>(operation: () => Promise<T>, options?: CoordinationOptions): Promise<T>;
   prepareQueuedTerminal(input: {
     readonly workload: RootResourceWorkload;
     readonly reason: Extract<GovernorRecord, { t: "dequeue" }>["reason"];
@@ -172,6 +184,7 @@ export class AnchorResourceGovernor
   readonly #candidateTtlMs: number;
   readonly #clock: () => string;
   readonly #monotonicClock: () => number;
+  readonly #records: LogRecordPort | undefined;
   readonly #operations: SerialTaskQueue;
   readonly #candidates = new Map<AdmissionClass, CandidateOccupancy>();
   /** 同一任务的并发重试共享申请资格，最后一个等待者离开才撤销。 */
@@ -214,6 +227,7 @@ export class AnchorResourceGovernor
     }
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
+    this.#records = options.records;
     const shared = sharedGovernorOperations.get(options.log) ?? new SerialTaskQueue();
     sharedGovernorOperations.set(options.log, shared);
     this.#operations = shared;
@@ -221,14 +235,27 @@ export class AnchorResourceGovernor
     this.#activations = registerResourceCapabilityActivations(options.log);
   }
 
-  async coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T> {
+  async coordinate<T>(operation: () => Promise<T>, options?: CoordinationOptions): Promise<T> {
+    // 整次协调记一个阶段；只有真发生缺键重做的轮次另记子阶段（只观测）
+    // 发起方由调用点给出固定标签（只观测）：区分共享协调入口上是哪个子系统发起的
+    return observeLogPhase(this.#records, "resource-governor.coordinate", () => this.#coordinate(operation, options),
+      { caller: options?.caller ?? "unknown" });
+  }
+
+  async #coordinate<T>(operation: () => Promise<T>, options?: CoordinationOptions): Promise<T> {
     return this.#operations.run(async () => {
       await this.#refreshSession();
+      // 真实命令给出的预留身份：首次判定前一次装齐，免得整笔协调事务逐轮读到未装入再重做
+      // 提示只是准备：形状不合或装入失败都不影响本次操作，判定照原路径补齐缺键
+      for (const { reservationId, workload } of options?.prepare ?? []) {
+        try { await this.#session!.prepareReservation(reservationId, rootResourceWorkloadKey(workload)); }
+        catch { /* 回到原缺键路径 */ }
+      }
       try {
         // 协调期内的同步判断缺键时抛出待装入：装入本会话后重做（日志层已在锁外重做的不会到这里）
         for (let rounds = 0; ; rounds++) {
           try {
-            return await operation();
+            return await (rounds === 0 ? operation() : observeLogPhase(this.#records, "resource-governor.coordinate-redo", operation));
           } catch (error) {
             if (!(error instanceof GovernorStateRequired) || !error.prepareOutside || rounds >= 64) throw error;
             await error.prepareOutside();
@@ -981,6 +1008,8 @@ export class AnchorResourceGovernor
   }): void{
     const state = this.#currentState();
     const watermark = (state.nextUsageSeqByRoot.get(input.reservationId) ?? 1) - 1;
+    // 用量终证之后紧接同根终结：两者的确切依赖一次报全，只重做一次
+    requireGovernorSettlementNeeds(state, input.reservationId, usageBlockStart(watermark), watermark);
     assertAssignmentUsageEvidence({ root: state.reservations.get(input.reservationId), watermark,
       block: () => usageReportEntriesAtWatermark(state, input.reservationId, watermark),
     }, input, this.#verifier);
@@ -1324,7 +1353,8 @@ export class AnchorResourceGovernor
   ): Promise<Lease> {
     this.#candidateWaiters.set(reservationId, (this.#candidateWaiters.get(reservationId) ?? 0) + 1);
     try {
-      return await waitForResourceAdmissionCandidate({
+      // 整次候选等待记一个阶段：等待期内每次尝试的授权工作都带它的引用，按来源分开（只观测）
+      return await observeLogPhase(this.#records, "resource-governor.candidate-wait", () => waitForResourceAdmissionCandidate({
         attempt,
         isPending: (error) => error instanceof ResourceAdmissionPendingError,
         deadline: deadlineFromContext(
@@ -1336,7 +1366,7 @@ export class AnchorResourceGovernor
         onDeadline: () => {
           throw new ResourceAdmissionDeferredError(reservationId);
         },
-      });
+      }));
     } finally {
       const remaining = (this.#candidateWaiters.get(reservationId) ?? 1) - 1;
       if (remaining > 0) this.#candidateWaiters.set(reservationId, remaining);
@@ -1839,8 +1869,13 @@ function assertUsageReportWorkload(
   }
 }
 
+/** 水位所在那一段（每段至多 256 条）的起始序号。 */
+function usageBlockStart(watermark: number): number {
+  return Math.floor((watermark - 1) / 256) * 256 + 1;
+}
+
 function usageReportEntriesAtWatermark(state: GovernorProjection, reservationId: string, watermark: number): UsageReport["usages"] {
-  const fromUsageSeq = Math.floor((watermark - 1) / 256) * 256 + 1;
+  const fromUsageSeq = usageBlockStart(watermark);
   // 至多 256 条的一段，经按根与序号排序的索引读取
   const usages = consumedUsageBlock(state, reservationId, fromUsageSeq, watermark)
     .map(([usageId, entry]) => ({

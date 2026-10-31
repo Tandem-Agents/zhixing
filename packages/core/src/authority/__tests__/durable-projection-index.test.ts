@@ -1573,6 +1573,17 @@ it('bounds a churned prefix scan by the delta window, not by how many times the 
   expect(large).toBeLessThanOrEqual(small + 5 * 16);
 }, 120000);
 
+it('rejects a scan range bound it does not recognize instead of scanning to the end of the keyspace', async () => {
+  const root = await createTempDir('scan-unknown-bound');
+  const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: 'scan-unknown-bound', reducerVersion: 1 });
+  try {
+    await index.initialize({ source: checkpoint(0) });
+    index.publish(await index.prepare([{ kind: 'put', key: 'a', value: 1 }, { kind: 'put', key: 'z', value: 2 }]), { source: checkpoint(1) });
+    await expect(index.scan({ gte: 'a', lte: 'b' } as never, 8)).rejects.toThrow(TypeError);
+    await expect(index.scan({ gte: 'a', lt: 'b' }, 8)).resolves.toEqual({ entries: [{ key: 'a', value: 1 }] });
+  } finally { await index.stopStorageMaintenance(); }
+});
+
 it('keeps a caught-up rebuild with pending segment compaction building until recovery steps finish it one at a time', async () => {
   // 增量窗口已满（5 段、每段 500 条，都在普通上限内）、无基础段、已有整理标记、覆盖层还有 1 条：
   // 转就绪判定不做任何整理；收尾每次至多一步；中途换实例续做；最后内容与写入一致

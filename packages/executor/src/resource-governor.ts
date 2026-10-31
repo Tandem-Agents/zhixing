@@ -37,6 +37,7 @@ import type {
 } from "@zhixing/core/contracts";
 import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
+import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
   applyGovernorRecord,
@@ -103,6 +104,8 @@ export interface ExecutorResourceGovernorOptions {
   readonly candidateTtlMs?: number;
   readonly clock?: () => string;
   readonly monotonicClock?: () => number;
+  /** 阶段事件的记录端口（与启动阶段同一端口，日志库接收阶段事件）：候选等待与协调各记一个日志阶段，其间的授权工作汇总据此按来源分开（只观测）。 */
+  readonly records?: LogRecordPort;
 }
 
 type LocalRootResourceCandidate = AssignmentResourceLease | ImmediateRootResourceLease;
@@ -112,8 +115,15 @@ interface LocalCandidateOccupancy {
   readonly expiresAt: number;
 }
 
+/** prepare：发起协调的真实命令给出本次所指的预留与工作负载，协调前一次装齐其判定必读键；只是准备，不作授权或不存在证明。 */
+export interface ExecutorCoordinationOptions {
+  readonly prepare?: readonly { readonly reservationId: string; readonly workload: AssignmentResourceLease["workload"] }[];
+  /** 发起这次协调的子系统固定标签（只观测，记在协调阶段上）。 */
+  readonly caller?: string;
+}
+
 export interface ExecutorAssignmentResourceCoordinator {
-  coordinate<T>(operation: () => Promise<T>): Promise<T>;
+  coordinate<T>(operation: () => Promise<T>, options?: ExecutorCoordinationOptions): Promise<T>;
   prepareReceipt(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
   activeAssignmentReceipts(): Promise<readonly AssignmentResourceLease[]>;
   prepareSupersededReceiptRelease(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
@@ -171,6 +181,7 @@ export class ExecutorResourceGovernor
   readonly #candidateTtlMs: number;
   readonly #clock: () => string;
   readonly #monotonicClock: () => number;
+  readonly #records: LogRecordPort | undefined;
   readonly #stream: string;
   readonly #operations = new SerialTaskQueue();
   readonly #candidates = new Map<AdmissionClass, LocalCandidateOccupancy>();
@@ -219,19 +230,33 @@ export class ExecutorResourceGovernor
     }
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
+    this.#records = options.records;
     this.#stream = "governor";
     this.#store = new ResourceGovernorIndexStore(options.log, options.verifier, MAX_LEASE_TTL_MS, this.#clock);
     this.#activations = registerResourceCapabilityActivations(options.log);
   }
 
-  async coordinate<T>(operation: () => Promise<T>): Promise<T> {
+  async coordinate<T>(operation: () => Promise<T>, options?: ExecutorCoordinationOptions): Promise<T> {
+    // 整次协调记一个阶段；只有真发生缺键重做的轮次另记子阶段（只观测）
+    // 发起方由调用点给出固定标签（只观测）：区分共享协调入口上是哪个子系统发起的
+    return observeLogPhase(this.#records, "resource-governor.coordinate", () => this.#coordinate(operation, options),
+      { caller: options?.caller ?? "unknown" });
+  }
+
+  async #coordinate<T>(operation: () => Promise<T>, options?: ExecutorCoordinationOptions): Promise<T> {
     return this.#operations.run(async () => {
       await this.#refreshSession();
+      // 真实命令给出的预留身份：首次判定前一次装齐，免得整笔协调事务逐轮读到未装入再重做
+      // 提示只是准备：形状不合或装入失败都不影响本次操作，判定照原路径补齐缺键
+      for (const { reservationId, workload } of options?.prepare ?? []) {
+        try { await this.#session!.prepareReservation(reservationId, rootResourceWorkloadKey(workload as RootResourceWorkload)); }
+        catch { /* 回到原缺键路径 */ }
+      }
       try {
         // 协调期内的同步判断缺键时抛出待装入：装入本会话后重做（日志层已在锁外重做的不会到这里）
         for (let rounds = 0; ; rounds++) {
           try {
-            return await operation();
+            return await (rounds === 0 ? operation() : observeLogPhase(this.#records, "resource-governor.coordinate-redo", operation));
           } catch (error) {
             if (!(error instanceof GovernorStateRequired) || !error.prepareOutside || rounds >= 64) throw error;
             await error.prepareOutside();
@@ -249,13 +274,13 @@ export class ExecutorResourceGovernor
     return this.coordinate(() => this.#session!.resolve((state) => liveGovernorReservations(state)
       .filter(reservation => reservation.depth === 0 && reservation.state === "active" &&
         "activation" in reservation.lease && reservation.lease.activation?.kind === "assignment")
-      .map(reservation => reservation.lease as AssignmentResourceLease)));
+      .map(reservation => reservation.lease as AssignmentResourceLease)), { caller: "executor-governor.active-receipts" });
   }
 
   /** 仍为 active 的预留，经活跃目录定位，不读整份调控状态；收束核对用它判断本机仍占着的租约。 */
   async activeReservations(): Promise<readonly ResourceReservationProjection[]> {
     return this.coordinate(() => this.#session!.resolve((state) => liveGovernorReservations(state)
-      .filter(reservation => reservation.state === "active")));
+      .filter(reservation => reservation.state === "active")), { caller: "executor-governor.active-reservations" });
   }
 
   /** Called in coordinate after the ledger proves a durable never-started fence. */
@@ -1143,7 +1168,8 @@ export class ExecutorResourceGovernor
     ctx: AuthorityCallContext,
     attempt: () => Promise<Lease>,
   ): Promise<Lease> {
-    return waitForResourceAdmissionCandidate({
+    // 整次候选等待记一个阶段：等待期内每次尝试的授权工作都带它的引用，按来源分开（只观测）
+    return observeLogPhase(this.#records, "resource-governor.candidate-wait", () => waitForResourceAdmissionCandidate({
       attempt,
       isPending: (error) => error instanceof ExecutorResourceAdmissionPendingError,
       deadline: deadlineFromContext(
@@ -1155,7 +1181,7 @@ export class ExecutorResourceGovernor
       onDeadline: () => {
         throw new ResourceAdmissionDeferredError(reservationId);
       },
-    });
+    }));
   }
 
   #assertCurrentCandidate(
