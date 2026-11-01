@@ -47,3 +47,25 @@ it("reads only probed entries for point lookups and batches sequential scan read
     expect(io.snapshot().byCategory.data?.reads ?? 0).toBeLessThan(40);
   } finally { await cold.stopStorageMaintenance(); }
 }, 60_000);
+
+it("reads a small probed entry's header and payload in one bounded read", async () => {
+  const root = await createTempDir("projection-point-read-small");
+  const options = { rootDir: path.join(root, "index"), projectionId: "point-read-small", reducerVersion: 1 };
+  const writer = new FileDurableProjectionIndex(options);
+  await writer.initialize({ source: checkpoint(0) });
+  writer.publish(await writer.prepare(Array.from({ length: ROWS }, (_, n) => ({ kind: "put" as const, key: key(n), value: n }))), { source: checkpoint(1) });
+  await writer.flush();
+  await writer.stopStorageMaintenance();
+
+  const io = await captureFileIo(root, relative => relative.endsWith(".data") ? "data" : "other");
+  const cold = new FileDurableProjectionIndex({ ...options, readOnly: true });
+  try {
+    await cold.initialize({ source: checkpoint(0) });
+    io.reset();
+    expect(await cold.get(key(123))).toBe(123);
+    // 一次点查至多探测 log2(400)+1 个条目；小条目的头与载荷在同一个有界窗口里一次读完
+    const { reads = 0, readBytes = 0 } = io.snapshot().byCategory.data ?? {};
+    expect(reads).toBeLessThanOrEqual(10);
+    expect(readBytes).toBeLessThanOrEqual(10 * 1024);
+  } finally { await cold.stopStorageMaintenance(); }
+}, 60_000);

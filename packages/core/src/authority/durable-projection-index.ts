@@ -49,6 +49,12 @@ const RETIREMENT_PAGE_FORMAT_VERSION = 1;
 const WRITE_INTENT_FORMAT_VERSION = 1;
 const SEGMENT_HEADER_BYTES = 52;
 const SEGMENT_IO_BATCH_BYTES = 64 * 1024;
+// 点查读头时顺带读入的窗口上限：窗口取本读取器已读到的最大条目，同一段里相近大小的条目头与载荷一次读完，
+// 更大的条目只再读窗口外的余量
+const POINT_ENTRY_WINDOW_BYTES = 1024;
+// 二分剩余区间不超过这么多条时一次读入区间内全部偏移（至多 256 字节）；比它大的区间每次探测仍只读 8 字节，
+// 每次查找多读的偏移至多这么多条，与段大小和历史无关
+const POINT_OFFSET_RANGE_ENTRIES = 32;
 const SEGMENT_IO_BATCH_ENTRIES = 128;
 const SEGMENT_TOMBSTONE = 1;
 const MAX_KEY_BYTES = 2_048;
@@ -3942,6 +3948,8 @@ class SegmentReader {
   // 点查（二分定位、按键取值）进行中：二分收尾时探测常落在相邻序号上，那不是顺序访问，不预读
   #pointLookups = 0;
   #cacheChecked = false;
+  // 点查窗口：本读取器已读到的最大条目（头＋载荷，至多 POINT_ENTRY_WINDOW_BYTES）；首个探测按头精确读
+  #entryWindowBytes = 0;
   #files: { readonly data: FileHandle; readonly offsets: FileHandle } | undefined;
   #opening: Promise<{ readonly data: FileHandle; readonly offsets: FileHandle }> | undefined;
   private constructor(
@@ -4045,7 +4053,7 @@ class SegmentReader {
       const { low, high, from, to } = pending.pop()!;
       if (low >= high || from >= to) continue;
       const middle = low + Math.floor((high - low) / 2);
-      const entry = await this.#verified(middle);
+      const entry = await this.#verified(middle, low, high);
       if (!entry) throw projectionCorrupt('Projection segment offset is invalid');
       let left = from, right = to;
       while (left < right) {
@@ -4069,7 +4077,7 @@ class SegmentReader {
     let high = this.descriptor.count;
     while (low < high) {
       const middle = low + Math.floor((high - low) / 2);
-      const entry = await this.#verified(middle);
+      const entry = await this.#verified(middle, low, high);
       if (!entry) {
         throw projectionCorrupt("Projection segment offset is invalid");
       }
@@ -4095,13 +4103,13 @@ class SegmentReader {
       bytes: Buffer.byteLength(entry.key, 'utf8') + (encoded === undefined ? 0 : Buffer.byteLength(encoded, 'utf8')) + SEGMENT_HEADER_BYTES };
   }
 
-  /** 读取并核验一个条目；已核验的条目直接复用，只用于比较键时不解析值。 */
-  async #verified(index: number): Promise<VerifiedSegmentEntry | undefined> {
+  /** 读取并核验一个条目；已核验的条目直接复用，只用于比较键时不解析值。low/high 是二分探测时的剩余区间。 */
+  async #verified(index: number, low?: number, high?: number): Promise<VerifiedSegmentEntry | undefined> {
     if (index < 0 || index >= this.descriptor.count) return undefined;
     if (this.cache && !this.#cacheChecked) await this.#checkCache();
     const cached = this.cache?.get(this.descriptor.dataFile, index);
     if (cached) return cached;
-    const entry = await this.#read(index);
+    const entry = await this.#read(index, low, high);
     if (entry) {
       this.cache?.put(
         this.descriptor.dataFile,
@@ -4137,21 +4145,23 @@ class SegmentReader {
     return { key: entry.key, value: JSON.parse(encoded) as JsonValue, tombstone: false };
   }
 
-  async #read(index: number): Promise<VerifiedSegmentEntry | undefined> {
+  async #read(index: number, low?: number, high?: number): Promise<VerifiedSegmentEntry | undefined> {
     await this.#handles();
-    const operation = () => this.readEntry(index);
+    const operation = () => this.readEntry(index, low, high);
     return runProjectionReadStep(this.runReadStep, "segment-entry", operation);
   }
 
-  private async readEntry(index: number): Promise<VerifiedSegmentEntry | undefined> {
+  private async readEntry(index: number, low?: number, high?: number): Promise<VerifiedSegmentEntry | undefined> {
     const { offsets } = this.#files!;
     let window = this.#offsetWindow;
     if (!window || index < window.startIndex || (index - window.startIndex + 1) * 8 > window.bytes.length) {
-      // Only the sequential maintenance path pays for an offsets page.
-      // A point lookup must not prefetch unrelated historical positions.
+      // 顺序访问按页读偏移；二分探测的剩余区间收窄到 POINT_OFFSET_RANGE_ENTRIES 条以内时一次读入整个区间，
+      // 之后落在区间里的探测不再逐条读偏移；区间更大时只读本条的 8 字节，不预读与查找无关的位置
+      const range = !this.#sequentialOffsets && low !== undefined && high !== undefined && low <= index && index < high &&
+        high - low <= POINT_OFFSET_RANGE_ENTRIES ? { startIndex: low, entries: high - low } : undefined;
       const limit = this.#sequentialOffsets ? SEGMENT_OFFSET_BATCH_BYTES : 8;
-      const startIndex = index - index % (limit / 8);
-      const bytes = Buffer.allocUnsafe(Math.min(limit, (this.descriptor.count - startIndex) * 8));
+      const startIndex = range?.startIndex ?? index - index % (limit / 8);
+      const bytes = Buffer.allocUnsafe(range ? range.entries * 8 : Math.min(limit, (this.descriptor.count - startIndex) * 8));
       claimStorageIo("readBytes", bytes.byteLength);
       claimStorageIo("ioOperations", 1);
       const read = await offsets.read(bytes, 0, bytes.length, startIndex * 8);
@@ -4162,8 +4172,12 @@ class SegmentReader {
     if (offset > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw projectionCorrupt("Projection segment offset exceeds the safe range");
     }
+    // 只有顺序访问（扫描的下一条或维护路径的顺序遍历）预读后续条目；二分查找的探测只读本条目附近的
+    // 有界窗口，单次探测的读量不随段大小增长
+    const sequential = this.#sequentialOffsets || (this.#pointLookups === 0 && index === this.#lastReadIndex + 1);
+    this.#lastReadIndex = index;
     const header = Buffer.allocUnsafe(SEGMENT_HEADER_BYTES);
-    const headerRead = await this.#readData(header, Number(offset), false);
+    const headerRead = await this.#readData(header, Number(offset), !sequential && this.#entryWindowBytes > 0 ? "entry" : "exact");
     if (headerRead.bytesRead !== header.byteLength) {
       throw projectionCorrupt("Projection segment entry header is truncated");
     }
@@ -4185,11 +4199,8 @@ class SegmentReader {
       throw projectionCorrupt("Projection segment entry header is invalid");
     }
     const payload = Buffer.allocUnsafe(keyBytes + valueBytes);
-    // 只有顺序访问（扫描的下一条或维护路径的顺序遍历）预读后续条目；二分查找的探测按条目
-    // 实际大小读取，单次探测的读量不随段大小增长
-    const sequential = this.#sequentialOffsets || (this.#pointLookups === 0 && index === this.#lastReadIndex + 1);
-    this.#lastReadIndex = index;
-    const payloadRead = await this.#readData(payload, Number(offset) + SEGMENT_HEADER_BYTES, sequential);
+    const payloadRead = await this.#readData(payload, Number(offset) + SEGMENT_HEADER_BYTES, sequential ? "batch" : "exact");
+    if (!sequential) this.#entryWindowBytes = Math.min(POINT_ENTRY_WINDOW_BYTES, Math.max(this.#entryWindowBytes, SEGMENT_HEADER_BYTES + payload.length));
     if (
       payloadRead.bytesRead !== payload.byteLength ||
       !timingSafeEqual(segmentEntryChecksum(this.descriptor.dataFile, this.descriptor.authenticated === true,
@@ -4215,18 +4226,36 @@ class SegmentReader {
     return { key, encoded, tombstone: false };
   }
 
-  async #readData(target: Buffer, position: number, readAhead: boolean): Promise<{ bytesRead: number }> {
+  /**
+   * exact：只读目标本身（窗口已含其前段时只读余量）；entry：点查读头时顺带读本条目起点起的窗口
+   * （本读取器已读到的最大条目大小），载荷落在窗口内就不再读；batch：顺序访问按 SEGMENT_IO_BATCH_BYTES 预读。
+   */
+  async #readData(target: Buffer, position: number, mode: "exact" | "entry" | "batch"): Promise<{ bytesRead: number }> {
     const window = this.#dataWindow;
     if (window && position >= window.start && position + target.length <= window.start + window.bytes.length) {
       window.bytes.copy(target, 0, position - window.start, position - window.start + target.length);
       return { bytesRead: target.length };
     }
+    if (mode === "entry") {
+      const bytes = Buffer.allocUnsafe(Math.max(this.#entryWindowBytes, target.length));
+      claimStorageIo("readBytes", bytes.length);
+      claimStorageIo("ioOperations", 1);
+      const read = await this.#files!.data.read(bytes, 0, bytes.length, position);
+      this.#dataWindow = { start: position, bytes: bytes.subarray(0, read.bytesRead) };
+      bytes.copy(target, 0, 0, Math.min(target.length, read.bytesRead));
+      return { bytesRead: Math.min(target.length, read.bytesRead) };
+    }
     // Read the exact header first. Only a validated small payload may prefetch,
     // so the largest legal entry still fits the unchanged per-entry IO budget.
-    if (!readAhead || target.length > SEGMENT_IO_BATCH_BYTES) {
-      claimStorageIo("readBytes", target.length);
+    if (mode === "exact" || target.length > SEGMENT_IO_BATCH_BYTES) {
+      // 窗口已含目标前段（点查窗口截在载荷中间）：拷出已读部分，只读余量，同一字节不读两次
+      const covered = window && position >= window.start && position < window.start + window.bytes.length
+        ? window.start + window.bytes.length - position : 0;
+      if (covered > 0) window!.bytes.copy(target, 0, position - window!.start);
+      claimStorageIo("readBytes", target.length - covered);
       claimStorageIo("ioOperations", 1);
-      return this.#files!.data.read(target, 0, target.length, position);
+      const read = await this.#files!.data.read(target, covered, target.length - covered, position + covered);
+      return { bytesRead: covered + read.bytesRead };
     }
     const bytes = Buffer.allocUnsafe(SEGMENT_IO_BATCH_BYTES);
     claimStorageIo("readBytes", bytes.length);

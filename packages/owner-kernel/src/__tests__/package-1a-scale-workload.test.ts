@@ -21,8 +21,8 @@ import { BASE_CONVERSATION, BASE_NOW, BASE_TRANSFER, baseVerifier, createConvers
  * save/stop are measured, not just API call counts.
  */
 
-type Work = { operations: number; scans: number; readBytes: number; preparedFrames: number; executionMs: number; physicalReadBytes: number; physicalWriteBytes: number; physicalWrites: number; materializations: number; materializedRuns: number; materializedAssignments: number; segmentEntryProbes: number; otherReadBytes: number; maxSegmentReadRequest: number };
-const emptyWork = (): Work => ({ operations: 0, scans: 0, readBytes: 0, preparedFrames: 0, executionMs: 0, physicalReadBytes: 0, physicalWriteBytes: 0, physicalWrites: 0, materializations: 0, materializedRuns: 0, materializedAssignments: 0, segmentEntryProbes: 0, otherReadBytes: 0, maxSegmentReadRequest: 0 });
+type Work = { operations: number; scans: number; readBytes: number; preparedFrames: number; executionMs: number; physicalReadBytes: number; physicalWriteBytes: number; physicalWrites: number; materializations: number; materializedRuns: number; materializedAssignments: number; segmentEntryProbes: number; segmentOffsetReads: number; otherReadBytes: number; maxSegmentReadRequest: number };
+const emptyWork = (): Work => ({ operations: 0, scans: 0, readBytes: 0, preparedFrames: 0, executionMs: 0, physicalReadBytes: 0, physicalWriteBytes: 0, physicalWrites: 0, materializations: 0, materializedRuns: 0, materializedAssignments: 0, segmentEntryProbes: 0, segmentOffsetReads: 0, otherReadBytes: 0, maxSegmentReadRequest: 0 });
 
 async function workCapture(root: string) {
   // Instrument actual FileHandle I/O, including projection pages/checkpoints.
@@ -39,7 +39,7 @@ async function workCapture(root: string) {
   });
   syncBuiltinESMExports();
 
-  const physical = { physicalReadBytes: 0, physicalWriteBytes: 0, physicalWrites: 0, materializations: 0, materializedRuns: 0, materializedAssignments: 0, segmentEntryProbes: 0, otherReadBytes: 0, maxSegmentReadRequest: 0 };
+  const physical = { physicalReadBytes: 0, physicalWriteBytes: 0, physicalWrites: 0, materializations: 0, materializedRuns: 0, materializedAssignments: 0, segmentEntryProbes: 0, segmentOffsetReads: 0, otherReadBytes: 0, maxSegmentReadRequest: 0 };
   const depth = new WeakMap<object, number>();
   const spies = ['read', 'readv', 'readFile', 'write', 'writev', 'writeFile', 'appendFile'].map(method => {
     const original = prototype[method];
@@ -53,7 +53,7 @@ async function workCapture(root: string) {
           if (method.startsWith('read')) {
             const bytes = result?.bytesRead ?? Buffer.byteLength(result);
             physical.physicalReadBytes += bytes; value.read += bytes; value.reads++;
-            if (file.endsWith('.offsets')) physical.segmentEntryProbes += bytes / 8;
+            if (file.endsWith('.offsets')) { physical.segmentEntryProbes += bytes / 8; physical.segmentOffsetReads++; }
             else if (file.endsWith('.data')) {
               const requested = method === 'read' ? (typeof args[2] === 'number' ? args[2] : args[0]?.length ?? bytes) : bytes;
               physical.maxSegmentReadRequest = Math.max(physical.maxSegmentReadRequest, requested);
@@ -120,7 +120,7 @@ async function workCapture(root: string) {
     backgroundWork: aggregate(background.slice(from.backgroundBucket)),
     ...aggregate(foreground.slice(from.foregroundBucket)), physicalReadBytes: physical.physicalReadBytes - from.physicalReadBytes,
     physicalWriteBytes: physical.physicalWriteBytes - from.physicalWriteBytes, physicalWrites: physical.physicalWrites - from.physicalWrites,
-    segmentEntryProbes: physical.segmentEntryProbes - from.segmentEntryProbes, otherReadBytes: physical.otherReadBytes - from.otherReadBytes, maxSegmentReadRequest: physical.maxSegmentReadRequest,
+    segmentEntryProbes: physical.segmentEntryProbes - from.segmentEntryProbes, segmentOffsetReads: physical.segmentOffsetReads - from.segmentOffsetReads, otherReadBytes: physical.otherReadBytes - from.otherReadBytes, maxSegmentReadRequest: physical.maxSegmentReadRequest,
     materializations: physical.materializations - from.materializations, materializedRuns: physical.materializedRuns - from.materializedRuns, materializedAssignments: physical.materializedAssignments - from.materializedAssignments,
   }) };
 }
@@ -159,9 +159,17 @@ afterAll(() => {
       // returns fewer bytes at EOF than a full segment for the same bounded
       // lookup. Compare probes and non-segment reads; separately enforce the
       // fixed physical request bound and keep raw bytes in the evidence.
-      expect(large[phase]!.segmentEntryProbes, `${mode}/${phase}/segmentEntryProbes`).toBeLessThanOrEqual(small[phase]!.segmentEntryProbes * 1.5 + 32);
+      // 点查的二分区间收窄到 32 条以内时一次读入该区间的偏移：按字节折算的条数会把整个区间算进去，
+      // 每个触及的段多计一个小常数；这里比较偏移读的次数（每次一个物理请求），倍数与原先相同。
+      // 偏移逐条 8 字节读取时两者相等。
+      expect(large[phase]!.segmentOffsetReads, `${mode}/${phase}/segmentOffsetReads`).toBeLessThanOrEqual(small[phase]!.segmentOffsetReads * 1.5 + 32);
+      // 偏移字节另守总量：偏移读入条数不超过偏移读次数×32（点查区间批读的上限），与上一条合起来，
+      // 偏移读入量至多 256 字节×（小档次数×1.5＋32）。这是总量约束，不证明每次读都不超过 256 字节，
+      // 也不保证检出任意一次整页读；固定段上的区间批读次数与字节由点查用例守护
+      for (const scale of [small, large])
+        expect(scale[phase]!.segmentEntryProbes, `${mode}/${phase}/offsetEntriesPerRead`).toBeLessThanOrEqual(scale[phase]!.segmentOffsetReads * 32);
       expect(large[phase]!.maxSegmentReadRequest).toBeLessThanOrEqual(64 * 1024);
-      for (const metric of ['readBytes', 'otherReadBytes', 'physicalWriteBytes'] as const)
+      for (const metric of ['readBytes', 'otherReadBytes', 'physicalReadBytes', 'physicalWriteBytes'] as const)
         expect(large[phase]![metric], `${mode}/${phase}/${metric}`).toBeLessThanOrEqual(small[phase]![metric] * 1.5 + 256 * 1024);
     }
   }

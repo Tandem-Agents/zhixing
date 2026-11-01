@@ -230,10 +230,13 @@ it('compacts authenticated rows with bounded offset reads and reuses their verif
     // One canonical validation per source payload; compaction must not parse
     // and re-serialize unchanged historical values for sizing and writing.
     expect(work.canonicalizations).toBeLessThanOrEqual(520);
-    work.offsetBytes = 0; work.enabled = true;
+    work.offsetBytes = 0; work.offsetReads = 0; work.enabled = true;
     expect(await cold.get('key-00300')).toEqual({ kind: 'compaction-fixture', id: 300, data: ['preserved', { nested: true }] });
     work.enabled = false;
-    expect(work.offsetBytes).toBeLessThanOrEqual(16 * 8);
+    // 点查的二分区间大于 32 条时每次探测只读本条 8 字节偏移，收窄到 32 条以内时一次读入该区间（至多 256 字节），
+    // 其余探测不再读偏移
+    expect(work.offsetReads).toBeLessThanOrEqual(5);
+    expect(work.offsetBytes).toBeLessThanOrEqual(4 * 8 + 32 * 8);
     expect(await cold.get('key-00000')).toEqual({ kind: 'compaction-fixture', id: 10, data: ['updated'] });
     expect(await cold.get('key-00300')).toEqual({ kind: 'compaction-fixture', id: 300, data: ['preserved', { nested: true }] });
     expect(cold.checkpoints()).toEqual(checkpoint(10));
