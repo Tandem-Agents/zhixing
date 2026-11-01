@@ -77,6 +77,22 @@ describe('single-root Node configuration transaction', () => {
     expect(logs.records()).toContainEqual(expect.objectContaining({ source: CONFIGURATION_LOG_SOURCE.id, event: 'saved' }));
   });
 
+  it('returns to the row the user entered from instead of the first row', async () => {
+    const h = setup();
+    await h.choose('主模型'); await h.choose('DeepSeek');
+    const modelRow = h.current().choices!.find(item => item.label.includes('使用模型'))!.id;
+    expect(modelRow).not.toBe(h.current().choices![0]!.id);
+    await h.action(modelRow);
+    await h.action('back');
+    expect(h.current().initialItemId).toBe(modelRow);
+    while (!h.current().configurationHome) await h.action('back');
+    expect(h.current().choices!.find(item => item.id === h.current().initialItemId)?.label).toContain('主模型');
+    // 恢复只作用于返回后的那一次发布，之后的页面不带旧行
+    await h.choose('主模型');
+    expect(h.current().initialItemId).toBeUndefined();
+    h.editor.cancel(); await h.result;
+  });
+
   it('preserves the selected thinking option when completing the provider page', async () => {
     const h = setup();
     await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型');

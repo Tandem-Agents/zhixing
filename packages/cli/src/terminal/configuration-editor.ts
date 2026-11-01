@@ -44,6 +44,10 @@ export class TerminalConfigurationEditor {
   #fieldSecret = false;
   #probeBlocked = false;
   #choices = new Set<string>();
+  // 每进入一层子面记下来时所在行；返回时恢复该行（含分页），不回到首行
+  #returnIndexes: number[] = [];
+  #restoreIndex?: number;
+  #actIndex = 0;
 
   constructor(readonly options: {
     session: NodeConfigurationEditSession;
@@ -81,7 +85,7 @@ export class TerminalConfigurationEditor {
     if (this.#loading) {
       if (operation !== 'back') throw Error('正在处理，可按 Esc 返回。');
       this.#loading.abort(); this.#loading = undefined;
-      if (this.#stack.length > 1) this.#stack.pop();
+      if (this.#stack.length > 1) { this.#stack.pop(); this.#restoreIndex = this.#returnIndexes.pop(); }
       this.#state = setInputBuffer(this.#state, '');
       await this.#publish(); return;
     }
@@ -99,7 +103,7 @@ export class TerminalConfigurationEditor {
     else if (operation === 'complete') {
       const result = handleMainPanelKey(this.#context, this.#state, { index: 0 }, { type: 'ctrl-s' });
       this.#error = result.errorMessage;
-      if (this.#error) this.#stack = [{ kind: 'main' }];
+      if (this.#error) { this.#stack = [{ kind: 'main' }]; this.#returnIndexes = []; }
       await this.#apply(result.action); return;
     } else if (operation === 'field') {
       const value = intent.value;
@@ -111,6 +115,7 @@ export class TerminalConfigurationEditor {
       if (!this.#choices.has(operation) || !/^select:\d+$/u.test(operation)) throw Error('配置选项已失效。');
       index = Number(operation.slice(7));
     }
+    this.#actIndex = index;
 
     let action: PanelAction;
     switch (descriptor.kind) {
@@ -171,7 +176,7 @@ export class TerminalConfigurationEditor {
         }
         if (this.#disposed) { this.#finish({ kind: 'cancelled' }); return; }
         this.#error = '配置未完成保存；请检查运行记录后重试或取消。';
-        this.#stack = [{ kind: 'main' }]; await this.#publish();
+        this.#stack = [{ kind: 'main' }]; this.#returnIndexes = []; await this.#publish();
       }
       return;
     }
@@ -179,9 +184,10 @@ export class TerminalConfigurationEditor {
     if (action.type === 'navigate') {
       if (this.#stack.length >= 12) throw Error('配置导航层级超限。');
       this.#stack.push(action.panel);
+      this.#returnIndexes.push(this.#actIndex);
     } else if (action.type === 'replace') this.#stack[this.#stack.length - 1] = action.panel;
     else if (action.type === 'pop') {
-      if (this.#stack.length > 1) this.#stack.pop(); else { this.cancel(); return; }
+      if (this.#stack.length > 1) { this.#stack.pop(); this.#restoreIndex = this.#returnIndexes.pop(); } else { this.cancel(); return; }
     }
     await this.#publish();
   }
@@ -307,6 +313,10 @@ export class TerminalConfigurationEditor {
         break;
       }
     }
+    const restore = this.#restoreIndex;
+    this.#restoreIndex = undefined;
+    const initialItemId = !targetPaging && restore !== undefined && restore < choices.length ? `select:${restore}` : undefined;
+    if (initialItemId) this.#page = Math.floor(restore! / PAGE_ITEMS);
     if (!targetPaging) this.#page = Math.min(Math.max(0, this.#page), Math.max(0, Math.ceil(choices.length / PAGE_ITEMS) - 1));
     const visible = targetPaging ? choices : choices.slice(this.#page * PAGE_ITEMS, (this.#page + 1) * PAGE_ITEMS);
     if (!targetPaging && this.#page > 0) visible.unshift({ id: 'previous', label: '上一页' });
@@ -318,6 +328,7 @@ export class TerminalConfigurationEditor {
       chromeDetails: panel.kind === 'main' ? this.options.headerDetails?.map(value => this.#safe(value)) : undefined,
       message: targetPaging ? boundMessage([message, this.#error ? this.#safe(this.#error) : ''].filter(Boolean).join('\n'))
         : this.#safe([message, this.#error].filter(Boolean).join('\n')), field,
+      ...(initialItemId ? { initialItemId } : {}),
       choices: visible.map(choice => ({ ...choice, label: this.#safe(choice.label), detail: choice.detail ? this.#safe(choice.detail) : undefined })) };
     await this.options.publish(this.#current);
   }
