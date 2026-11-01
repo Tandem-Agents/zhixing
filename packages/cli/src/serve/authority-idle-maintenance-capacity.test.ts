@@ -66,8 +66,9 @@ async function hostLog(onAdmission?: (admission: Admission) => void) {
     const errors: Error[] = [];
     const owner = new AuthorityIdleMaintenance({
       logs: [{
-        maintainIdleProjections: async (betweenSteps, signal) => {
-          try { await log.maintainIdleProjections(betweenSteps, signal); } finally { if (!afterRound) finished(); }
+        beginIdleMaintenance: (betweenSteps, signal) => {
+          const round = log.beginIdleMaintenance(betweenSteps, signal);
+          return { step: () => round.step(), finish: () => { try { round.finish(); } finally { if (!afterRound) finished(); } } };
         },
       }],
       ...(afterRound ? { afterRound: async (signal: AbortSignal) => { try { await afterRound(signal); } finally { finished(); } } } : {}),

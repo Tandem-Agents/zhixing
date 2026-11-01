@@ -68,6 +68,12 @@ const DEFAULT_REBUILD_OVERLAY_BYTES = 16 * 1024 * 1024;
 const REBUILD_CHECKPOINT_INTERVAL_MS = 5_000;
 const PROJECTION_ADMISSION_DEADLINE_MS = 5_000;
 const MAX_DELTA_SEGMENTS = 4;
+/** 空闲轮转一步的预算：至多做 steps 个原子维护步；flush 为 false 时不再落盘；kind 记实际做了哪种。 */
+interface MaintenanceStepBudget {
+  steps: number;
+  readonly flush: boolean;
+  kind?: "compaction" | "flush";
+}
 /**
  * 覆盖层条目数达到它时（整批发布，例如旧资料迁移），落盘的逐条编码（规范字节与校验和）在维护步骤之外
  * 分片预先完成，步骤内只写字节：落盘不再按批量大小占住与日志共用的维护栅栏，也不长时间阻塞事件循环。
@@ -1644,6 +1650,22 @@ export class FileDurableProjectionIndex {
     await this.#runFlush("committed", options.compact !== false, false, options.betweenSteps, options.singleFlush === true, options.yieldRequested);
   }
 
+  /**
+   * 空闲轮转的一步：与 flush 同一路径（挂起的段整理优先，其后落盘），至多做一个原子维护步、照原路径发布进度后返回
+   * 做了哪种；allowFlush 为 false 时只推进段整理（本轮已落过盘，之后到达的行留给以后）。没有可做的返回 undefined。
+   */
+  async maintenanceStep(options: {
+    readonly betweenSteps?: () => Promise<void>;
+    readonly yieldRequested?: () => boolean;
+    readonly allowFlush: boolean;
+  }): Promise<"compaction" | "flush" | undefined> {
+    if (!this.#persistent) return undefined;
+    if (this.#writeIntent) await this.refreshPublishedState();
+    const budget: MaintenanceStepBudget = { steps: 1, flush: options.allowFlush };
+    await this.#runFlush("committed", true, false, options.betweenSteps, true, options.yieldRequested, budget);
+    return budget.kind;
+  }
+
   async flushCheckpoint(): Promise<void> {
     if (!this.#persistent) return;
     if (this.#writeIntent) await this.refreshPublishedState();
@@ -1661,10 +1683,12 @@ export class FileDurableProjectionIndex {
   }
 
   async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false,
-    betweenSteps?: () => Promise<void>, singleFlush = false, yieldRequested?: () => boolean): Promise<void> {
+    betweenSteps?: () => Promise<void>, singleFlush = false, yieldRequested?: () => boolean, budget?: MaintenanceStepBudget): Promise<void> {
     await this.#runRetirementCleanup();
     let flushed = false;
     for (;;) {
+      // 轮转的一步已做完：剩下的段整理或落盘留给下一次轮到本投影
+      if (budget && budget.steps <= 0) return;
       const manifest = this.#requireManifest();
       // 退出/启动检查点不承担与历史规模成正比的合并；未落盘覆盖层由权威尾部恢复。
       if (checkpointOnly && manifest.compaction && this.#active.size > 0) {
@@ -1694,6 +1718,7 @@ export class FileDurableProjectionIndex {
           async () => {
             let staged = true;
             while (this.#requireManifest().compaction) {
+              if (budget && budget.steps <= 0) break;
               await this.#betweenCompactionSteps(betweenSteps);
               const stepManifest = this.#requireManifest();
               const previousGeneration = stepManifest.generation;
@@ -1720,6 +1745,7 @@ export class FileDurableProjectionIndex {
               if (this.#requireManifest().generation <= previousGeneration) {
                 throw new Error("Projection compaction made no durable progress");
               }
+              if (budget) { budget.steps--; budget.kind = "compaction"; }
               // Retirement debt has one stable owner independent of whichever
               // compaction produced it. The owner layer holds no permit, so
               // joining it here preserves both ownership and leaf-step locking.
@@ -1737,8 +1763,9 @@ export class FileDurableProjectionIndex {
         this.#resetActiveProgress();
         return;
       }
-      // 已落过一次：此后到达的行留给之后的落盘
+      // 已落过一次：此后到达的行留给之后的落盘（轮转时本轮已落过盘的投影同样只推进段整理）
       if (singleFlush && flushed) return;
+      if (budget && !budget.flush) return;
       if (this.#active.size >= PREENCODE_MIN_ENTRIES && !this.#rebuildCache?.complete) await this.#preEncodeActive();
       const frozenInput = {
         manifestGeneration: manifest.generation,
@@ -1764,6 +1791,7 @@ export class FileDurableProjectionIndex {
             ),
       );
       flushed = true;
+      if (budget) { budget.steps--; budget.kind = "flush"; }
       await this.#runRetirementCleanup();
     }
   }

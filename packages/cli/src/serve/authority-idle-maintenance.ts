@@ -5,12 +5,16 @@ const AUTHORITY_IDLE_FIRST_DELAY_MS = 5_000;
 const AUTHORITY_IDLE_INTERVAL_MS = 30_000;
 
 export interface AuthorityIdleMaintenanceLog {
-  maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal, yieldRequested?: () => boolean): Promise<void>;
+  /** 开始本日志的一轮：step 做至多一个原子维护步，本轮已无可做时返回 false；finish 记本轮汇总。 */
+  beginIdleMaintenance(betweenSteps: () => Promise<void>, signal: AbortSignal, yieldRequested?: () => boolean): {
+    step(): Promise<boolean>;
+    finish(): void;
+  };
 }
 
 export interface AuthorityIdleMaintenanceOptions {
   readonly logs: readonly AuthorityIdleMaintenanceLog[];
-  /** 等前台安静；每个投影开始前与每个整理步之间调用，前台到来时在步边界让路。 */
+  /** 等前台安静；每个维护步之前调用，前台到来时在步边界让路。 */
   readonly whenQuiet: (signal: AbortSignal) => Promise<void>;
   /** 前台此刻是否有活动（同步）：整理步在开始下一个区间之前据此提前收尾、发布已完成部分，前台至多等当前一个区间。 */
   readonly yieldRequested?: () => boolean;
@@ -77,9 +81,18 @@ export class AuthorityIdleMaintenance {
     const betweenSteps = () => this.options.whenQuiet(signal);
     const observe = this.options.observe ?? (<T>(work: () => Promise<T>) => work());
     return runWithMaintenanceUrgency(() => "background", signal, () => observe(async () => {
-      for (const log of this.options.logs) {
-        if (signal.aborted) return;
-        await log.maintainIdleProjections(betweenSteps, signal, this.options.yieldRequested);
+      // 两本日志逐步轮转：每本做完一个原子步就轮到下一本，一本的持续工作不独占整轮；全体一遍无步可做即结束本轮
+      const rounds = this.options.logs.map((log) => log.beginIdleMaintenance(betweenSteps, signal, this.options.yieldRequested));
+      try {
+        for (let progressed = true; progressed;) {
+          progressed = false;
+          for (const round of rounds) {
+            if (signal.aborted) return;
+            if (await round.step()) progressed = true;
+          }
+        }
+      } finally {
+        for (const round of rounds) round.finish();
       }
       if (!this.options.afterRound || signal.aborted) return;
       await this.options.whenQuiet(signal);

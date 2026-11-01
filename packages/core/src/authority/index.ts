@@ -113,6 +113,7 @@ export {
   TransactionArtifactReferenceError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type FileAuthorityCommitLogOptions,
+  type IdleMaintenanceRound,
   type PlannedAnchorPrefixInstallation,
 } from "./commit-log.js";
 export { AuthorityCacheIntegrity, DEFAULT_HOST_AUTHORITY_LOG_PROFILE, projectionCheckpointKey, type HostAuthorityLogProfile } from "./startup-proofs.js";

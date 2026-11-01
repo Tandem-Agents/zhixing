@@ -91,6 +91,38 @@ it("维护期间新到的写入留给之后：段整理照常完成，这一轮�
   expect(second.reduce.mock.calls.length).toBeGreaterThan(0);
 });
 
+it("按步轮转：每步只服务一个投影做一个原子步，各投影轮流，本轮每投影至多落盘一次", async () => {
+  const root = await createTempDir("commit-log-idle-rotation");
+  const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")),
+    { startupProofs: true, integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 41)) });
+  onTestFinished(() => log.stopStorageMaintenance());
+  const served: string[] = [];
+  for (const projectionId of ["rotation-a", "rotation-b"]) {
+    log.durableProjection({ projectionId, reducerVersion: 1, authenticated: true, inputs: { streams: ["control"] },
+      reduce: (envelope: { lsn: number }) => [{ kind: "put" as const, key: "last", value: envelope.lsn }] });
+  }
+  for (let n = 0; n < 3; n++) await log.append([{ stream: "control", body: { value: n } }]);
+  await log.prepareProjections(["rotation-a", "rotation-b"]);
+  let gates = 0;
+  const round = log.beginIdleMaintenance(async () => { gates++; }, new AbortController().signal);
+  // 日志自己也登记内部持久投影：有工作的投影各落盘一次，之后本轮无可做；每一步之前恰好等一次闸门
+  for (let guard = 0; guard < 16; guard++) {
+    const before = gates;
+    if (!await round.step()) break;
+    served.push(String(gates - before));
+  }
+  round.finish();
+  expect(served.length).toBeGreaterThanOrEqual(2);
+  expect(served.every((count) => count === "1")).toBe(true);
+  expect(await round.step()).toBe(false);
+  // 落过盘的不再在本轮被追着落盘：新写入之后同一轮仍无可做，下一轮才落
+  await log.append([{ stream: "control", body: { value: 3 } }]);
+  expect(await round.step()).toBe(false);
+  const next = log.beginIdleMaintenance(async () => undefined, new AbortController().signal);
+  expect(await next.step()).toBe(true);
+  next.finish();
+});
+
 it("已中止时不等待闸门、不做任何维护", async () => {
   const gate = vi.fn(async () => undefined);
   const abort = new AbortController();

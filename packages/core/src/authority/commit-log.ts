@@ -182,6 +182,14 @@ interface CommitLogLockSession {
   comparison?: Buffer;
 }
 
+/** 一本日志的一轮空闲维护（见 FileAuthorityCommitLog.beginIdleMaintenance）。 */
+export interface IdleMaintenanceRound {
+  /** 做至多一个原子维护步；本轮已无可做（或已中止、停止）时返回 false。 */
+  step(): Promise<boolean>;
+  /** 结束本轮并记汇总；可重复调用。 */
+  finish(): void;
+}
+
 export interface FileAuthorityCommitLogOptions {
   /** Read authority facts without creating or repairing persistent state. */
   readonly readOnly?: boolean;
@@ -347,6 +355,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #sourceScope = new AsyncLocalStorage<{ active: boolean }>();
   /** 空闲维护入口发起的投影维护：持锁时没有权威操作在等它，紧急度沿用所属维护义务。返回即失效，不随定时器等后续工作外泄。 */
   readonly #idleScope = new AsyncLocalStorage<{ active: boolean }>();
+  /** 空闲维护的进程内轮转位置（投影登记顺序中的下标），跨轮保留。 */
+  #idleCursor = 0;
   readonly #readOnly: boolean;
   readonly #owner: boolean;
   #readOnlyLegacyId: string | undefined;
@@ -1038,37 +1048,69 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
 
   /**
    * 空闲维护：对本实例已打开的持久投影完成挂起的段整理并发布已有进度，使正常停止时的检查点能保存
-   * 覆盖层、重启只需回放很短的尾部，点读也少探查增量段。不打开未用索引；每个投影开始前与每个整理步
-   * 之间经 betweenSteps 等待（宿主传入“前台安静”），前台到来时在步边界让路；停止或中止后不再发起。
+   * 覆盖层、重启只需回放很短的尾部，点读也少探查增量段。不打开未用索引；按 beginIdleMaintenance 的轮转逐步做到
+   * 本轮无可做，每一步之前经 betweenSteps 等待（宿主传入“前台安静”），前台到来时在步边界让路；停止或中止后不再发起。
    * 其持锁步骤按调用方声明的维护等级准入（宿主为后台），不因持有日志锁提为前台。
    */
   async maintainIdleProjections(betweenSteps: () => Promise<void>, signal: AbortSignal, yieldRequested?: () => boolean): Promise<void> {
-    // 每个投影的整理墙钟（含步间让路）记入本轮汇总，供定位一次会话后哪些投影需要大量整理；只观测
-    const maintained: { projection: string; durationMs: number }[] = [];
+    const round = this.beginIdleMaintenance(betweenSteps, signal, yieldRequested);
+    try { while (await round.step()) { /* 逐步做到本轮无可做 */ } }
+    finally { round.finish(); }
+  }
+
+  /**
+   * 空闲维护的一轮（本日志），按步推进：step 从进程内轮转位置起挑下一个有工作的已打开投影，做至多一个原子维护步
+   * （段整理的一步，或一次落盘），照原路径发布进度后返回 true；本轮已无可做时返回 false。每投影每轮至多落盘一次
+   * （之后到达的行留给以后），段整理照常推进到完。每步之前经 betweenSteps 等待，停止或中止后不再发起。
+   * 宿主据此在两本日志之间逐步轮转，一本日志的持续工作不独占整轮；轮转位置跨轮保留，同一本日志里各投影也轮流。
+   * finish 记本轮汇总（只观测），可重复调用。
+   */
+  beginIdleMaintenance(betweenSteps: () => Promise<void>, signal: AbortSignal, yieldRequested?: () => boolean): IdleMaintenanceRound {
+    const flushed = new Set<RegisteredDurableProjection>();
+    // 每次维护步调用的起止（含步内让路等待）与步类型，供定位一次会话后哪些投影需要大量整理；只观测
+    const steps: { projection: string; kind: string; durationMs: number; startedAt: number }[] = [];
     const round = performance.now();
-    try {
-      for (const projection of [...this.#durableProjections.values()]) {
-        if (signal.aborted || this.#maintenanceStopped) return;
+    let finished = false;
+    const step = async (): Promise<boolean> => {
+      const projections = [...this.#durableProjections.values()];
+      for (let offset = 0; offset < projections.length; offset++) {
+        if (signal.aborted || this.#maintenanceStopped) return false;
+        const index = (this.#idleCursor + offset) % projections.length;
+        const projection = projections[index]!;
         if (!projection.opened || projection.failure !== undefined || !projection.state.isPersistent()) continue;
-        if (!projection.state.hasPendingCompaction() && !hasUnpublishedProgress(projection)) continue;
+        const allowFlush = !flushed.has(projection);
+        if (!projection.state.hasPendingCompaction() && !(allowFlush && hasUnpublishedProgress(projection))) continue;
         await betweenSteps();
-        if (signal.aborted || this.#maintenanceStopped) return;
-        const scope = { active: true }, started = performance.now();
-        try { await this.#idleScope.run(scope, () => projection.state.flush({ compact: true, betweenSteps, singleFlush: true, ...(yieldRequested ? { yieldRequested } : {}) })); }
-        finally {
-          scope.active = false;
-          maintained.push({ projection: projection.state.projectionId, durationMs: Math.round(performance.now() - started) });
-        }
-      }
-    } finally {
-      if (maintained.length) {
+        if (signal.aborted || this.#maintenanceStopped) return false;
+        const scope = { active: true }, started = performance.now(), startedAt = Date.now();
+        let kind: "compaction" | "flush" | undefined;
         try {
-          const slowest = [...maintained].sort((a, b) => b.durationMs - a.durationMs).slice(0, 8).map(item => `${item.durationMs}ms ${item.projection}`);
-          this.#records?.record({ event: "maintained", refs: [...currentLogPhaseRefs(), ...(this.#logId ? [{ kind: "authority", id: this.#logId }] : [])],
-            data: { count: maintained.length, durationMs: Math.round(performance.now() - round), slowest } });
-        } catch { /* Observation never changes authority outcome. */ }
+          kind = await this.#idleScope.run(scope, () =>
+            projection.state.maintenanceStep({ betweenSteps, allowFlush, ...(yieldRequested ? { yieldRequested } : {}) }));
+        } finally {
+          scope.active = false;
+          steps.push({ projection: projection.state.projectionId, kind: kind ?? "none", durationMs: Math.round(performance.now() - started), startedAt });
+        }
+        if (kind === "flush") flushed.add(projection);
+        if (kind === undefined) continue;
+        this.#idleCursor = (index + 1) % projections.length;
+        return true;
       }
-    }
+      return false;
+    };
+    const finish = () => {
+      if (finished || !steps.length) { finished = true; return; }
+      finished = true;
+      try {
+        const totals = new Map<string, number>();
+        for (const item of steps) totals.set(item.projection, (totals.get(item.projection) ?? 0) + item.durationMs);
+        const slowest = [...totals].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([projection, durationMs]) => `${durationMs}ms ${projection}`);
+        this.#records?.record({ event: "maintained", refs: [...currentLogPhaseRefs(), ...(this.#logId ? [{ kind: "authority", id: this.#logId }] : [])],
+          data: { count: totals.size, durationMs: Math.round(performance.now() - round), slowest,
+            steps: steps.slice(0, 32).map(item => `${item.startedAt}+${item.durationMs} ${item.projection} ${item.kind}`) } });
+      } catch { /* Observation never changes authority outcome. */ }
+    };
+    return { step, finish };
   }
 
   /**

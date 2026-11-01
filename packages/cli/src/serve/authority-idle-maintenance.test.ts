@@ -4,13 +4,23 @@ import { AuthorityIdleMaintenance, type AuthorityIdleMaintenanceLog } from "./au
 
 afterEach(() => { vi.useRealTimers(); });
 
-function log(work: (betweenSteps: () => Promise<void>, signal: AbortSignal) => Promise<void> = async () => undefined) {
+/** 每轮有 steps 个原子步的假日志：每一步执行 work；calls 记每轮开始时的中止信号与维护等级。 */
+function log(work: (betweenSteps: () => Promise<void>, signal: AbortSignal) => Promise<void> = async () => undefined, steps = 1) {
   const calls: { signal: AbortSignal; urgency: string }[] = [];
   const entry: AuthorityIdleMaintenanceLog & { calls: typeof calls } = {
     calls,
-    async maintainIdleProjections(betweenSteps, signal) {
+    beginIdleMaintenance(betweenSteps, signal) {
       calls.push({ signal, urgency: currentMaintenanceUrgency() });
-      await work(betweenSteps, signal);
+      let remaining = steps;
+      return {
+        async step() {
+          if (remaining <= 0) return false;
+          remaining--;
+          await work(betweenSteps, signal);
+          return true;
+        },
+        finish() {},
+      };
     },
   };
   return entry;
@@ -106,6 +116,31 @@ describe("授权投影空闲维护调度", () => {
     expect(afterRound).toHaveBeenCalledTimes(2);
     expect(errors).toEqual(["catch-up failed"]);
     await maintenance.stop();
+  });
+
+  it("一本日志有多步工作时另一本在其间得到服务：逐步轮转，不等前一本整轮做完", async () => {
+    vi.useFakeTimers();
+    const order: string[] = [];
+    const authority = log(async () => { order.push("authority"); }, 4), executor = log(async () => { order.push("executor"); }, 2);
+    const maintenance = new AuthorityIdleMaintenance({ logs: [authority, executor], whenQuiet: async () => undefined, firstDelayMs: 0 });
+    maintenance.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual(["authority", "executor", "authority", "executor", "authority", "authority"]);
+    await maintenance.stop();
+  });
+
+  it("停止后不再起新步：进行中的一步照常做完", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    let started = 0;
+    const authority = log(() => { started++; return new Promise<void>((resolve) => { release = resolve; }); }, 3);
+    const maintenance = new AuthorityIdleMaintenance({ logs: [authority], whenQuiet: async () => undefined, firstDelayMs: 0 });
+    maintenance.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const stopping = maintenance.stop();
+    release();
+    await stopping;
+    expect(started).toBe(1);
   });
 
   it("停止时不再追平", async () => {
