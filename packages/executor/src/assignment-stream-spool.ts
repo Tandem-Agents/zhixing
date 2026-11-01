@@ -1610,18 +1610,20 @@ export class AssignmentStreamSpool {
       }
       handle.producers++;
     });
-    let failed = false;
-    try { return await operation(); }
-    catch (error) { failed = true; throw error; }
-    finally {
+    let value: T;
+    try { value = await operation(); }
+    catch (error) {
       await handle.queue.run(async () => {
         handle.producers--;
-        if (failed) {
-          handle.cleanupComplete = false;
-          await this.#cleanupOrphanFrames(handle, await this.#select(handle), true);
-        }
+        handle.cleanupComplete = false;
+        await this.#cleanupOrphanFrames(handle, await this.#select(handle), true);
       });
+      throw error;
     }
+    // 成功时帧与内容引用已在追加事务里提交：回收与孤儿清理只在回合开头读计数，之后的回合看到 0
+    // 会保留它们，不必为减计数再排在其他消费者的提交之后
+    handle.producers--;
+    return value;
   }
 
   async #drainPendingDeletes(handle: AssignmentHandle, current?: SpoolProjection): Promise<SpoolProjection> {
