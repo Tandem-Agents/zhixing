@@ -293,7 +293,8 @@ describe('bounded authoritative recovery consumer', () => {
       workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {},
     }, { conversationId: 'conv-1', name: 'old', mode: { kind: 'main' } });
     try {
-      f.emit.status(notice(1)); expect(pages).toHaveBeenCalledOnce();
+      // 控制页在本次唤醒的同步调用栈结束、合批封闭后才发出
+      f.emit.status(notice(1)); await Promise.resolve(); expect(pages).toHaveBeenCalledOnce();
       controller.setActive({ conversationId: 'conv-2', name: 'new', mode: { kind: 'main' } });
       f.emit.status({ ...notice(2), ref: { ...notice(2).ref, conversationId: 'conv-2' } });
       failOld(Error('Old read failed'));

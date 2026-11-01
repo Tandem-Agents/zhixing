@@ -375,6 +375,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   private readonly continuationFinalLookups = new Map<string, Promise<void>>();
   private readonly continuationStatusLookups = new Map<string, Promise<void>>();
   private readonly notificationHistoryBatches = new Map<string, { consume(page: RunsPage): void; reject(error: unknown): void }[]>();
+  private readonly controlPageBatches = new Map<string, { resolve(page: ConversationControlPage): void; reject(error: unknown): void }[]>();
   private lookupScheduled?: ReturnType<typeof setImmediate>;
   private recoveryCursor?: ConversationControlCursor;
   private recoveryRequested = false;
@@ -1337,7 +1338,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (!current()) return;
           this.finishRecoveryReset(conversationId);
         }
-        const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.(), this.recoveryCursor ? undefined : this.opts.historyThrough?.());
+        const page = await this.batchedControlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.(), this.recoveryCursor ? undefined : this.opts.historyThrough?.());
         if (!current()) return;
         if (page.reset) {
           this.recoveryResetRequested = true;
@@ -1426,7 +1427,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (this.completionCursor?.conversationId !== conversationId) this.completionCursor = undefined;
       do {
         this.completionScanRequested = false;
-        const page = await this.opts.conversation.controlPage(conversationId, this.completionCursor,
+        const page = await this.batchedControlPage(conversationId, this.completionCursor,
           this.completionCursor ? undefined : this.opts.historyRunIds?.(), this.completionCursor ? undefined : this.opts.historyThrough?.());
         if (!current()) return;
         if (page.reset) {
@@ -1733,6 +1734,31 @@ export class ConversationController<Outcome = TurnOutcome> {
       cursor = page.cursor;
     }
     if (!current()) throw new RecoveryGenerationChanged();
+  }
+
+  /**
+   * 同一次唤醒里参数与恢复代际完全相同的控制元数据页只查一次（终态扫描与控制恢复各自起步时请求相同）：
+   * 同键请求在本次同步调用栈内加入同一批，微任务里封批、移出可加入入口后才发出查询——查询开始后到达的
+   * 请求另起新批，不当作已被旧快照覆盖。两条消费链各自拿到自己的一份页（除第一位外为克隆），各自推进游标、
+   * 失败与重试；只合并这一种控制页，不合并消费链，也不缓存正文或历史。
+   */
+  private batchedControlPage(conversationId: string, cursor: ConversationControlCursor | undefined,
+    historyRunIds: readonly string[] | undefined, historyThrough: Parameters<RpcConversationFacade["controlPage"]>[3]): Promise<ConversationControlPage> {
+    const key = JSON.stringify([conversationId, this.recoveryVersion, cursor ?? null, historyRunIds ?? null, historyThrough ?? null]);
+    return new Promise<ConversationControlPage>((resolve, reject) => {
+      const pending = this.controlPageBatches.get(key);
+      if (pending) { pending.push({ resolve, reject }); return; }
+      const readers = [{ resolve, reject }]; this.controlPageBatches.set(key, readers);
+      queueMicrotask(() => {
+        if (this.controlPageBatches.get(key) === readers) this.controlPageBatches.delete(key);
+        if (this.disposed) { for (const reader of readers) reader.reject(Error('Conversation controller disposed')); return; }
+        this.opts.conversation.controlPage(conversationId, cursor, historyRunIds, historyThrough).then(page => {
+          readers.forEach((reader, index) => {
+            try { reader.resolve(index === 0 ? page : structuredClone(page)); } catch (error) { reader.reject(error); }
+          });
+        }, error => { for (const reader of readers) reader.reject(error); });
+      });
+    });
   }
 
   private notificationHistory<T>(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1], consume: (page: RunsPage) => T): Promise<T> {

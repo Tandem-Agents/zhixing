@@ -100,7 +100,8 @@ class Owner {
   }
 }
 
-function harness(mode: Mode) {
+/** controlPageGate：控制页按查询开始那一刻的日志取快照，之后挂起到闸门放行再返回；inputGate：恢复链展示某次输入正文前等它 */
+function harness(mode: Mode, gates: { controlPageGate?: () => Promise<void>; inputGate?: (runId: string) => Promise<void> } = {}) {
   const owners = new Map<string, Owner>([['conv-1', new Owner('conv-1', mode)], ['conv-2', new Owner('conv-2', mode)]]);
   const owner = owners.get('conv-1')!;
   const visible: string[] = [], effects: string[] = [], runFactCalls: string[][] = [];
@@ -119,7 +120,11 @@ function harness(mode: Mode) {
     history: vi.fn(async () => ({ runs: [], hasMore: false })),
     controlTargets: vi.fn(async () => ({ targets: [] })),
     statusHistory: vi.fn(async () => ({ notices: [], next: [] })),
-    controlPage: vi.fn(async (conversationId: string, cursor?: ConversationControlCursor, _runs?: readonly string[], through?: unknown) => owners.get(conversationId)!.controlPage(cursor, through)),
+    controlPage: vi.fn(async (conversationId: string, cursor?: ConversationControlCursor, _runs?: readonly string[], through?: unknown) => {
+      const page = owners.get(conversationId)!.controlPage(cursor, through);
+      await gates.controlPageGate?.();
+      return page;
+    }),
     runFacts: vi.fn(async (conversationId: string, runIds: readonly string[], through: number) => {
       runFactCalls.push([...runIds]); expect(through).toBe(owners.get(conversationId)!.through); return owners.get(conversationId)!.runFacts(runIds, through);
     }),
@@ -146,7 +151,7 @@ function harness(mode: Mode) {
     conversation: conversation as unknown as RpcConversationFacade, workscene: workscene as unknown as RpcWorksceneFacade, pagedRecovery: true,
     onYield: () => {}, projectCommittedOutcome: summary => summary,
     onRecoveryYield: async (event, source) => { visible.push(`yield:${source.runId}:${source.kind}:${'text' in event ? event.text : event.type}`); },
-    onObservedInputFragment: async input => { visible.push(`input:${input.runId}:${input.text}`); },
+    onObservedInputFragment: async input => { await gates.inputGate?.(input.runId); visible.push(`input:${input.runId}:${input.text}`); },
     onNotice: message => { visible.push('notice:' + message); },
     onObservedTurnComplete: turn => { effects.push('observed-complete:' + turn.runId); },
     onRecoveryDrain: async turn => { effects.push('drain:' + turn.runId); },
@@ -358,6 +363,100 @@ describe('local turn display ownership', () => {
       expect(deleted.mock.calls.map(call => call[0]).filter(key => String(key).startsWith('pending-'))).toEqual([]);
       expect(h.resets()).toBeGreaterThan(before);
       expect(local.size).toBe(0);
+    } finally { h.controller.dispose(); }
+  }, 30_000);
+});
+
+describe('same-wakeup control page batching', () => {
+  const callsAfter = (h: Harness, from: number) => h.conversation.controlPage.mock.calls.length - from;
+
+  it('reads a control page once when both recovery chains request it with the same parameters in one wakeup', async () => {
+    const h = harness('new');
+    try {
+      h.owner.admit('done-1'); h.owner.state('done-1', 'running'); h.owner.commit('done-1', 'reply 1');
+      h.owner.freezeHistory(); await h.controller.start(); await h.settle();
+      const from = h.conversation.controlPage.mock.calls.length;
+      h.wake(); await h.settle();
+      // 终态扫描与控制恢复在同一次唤醒里各自起步，游标相同：只查一次，两条链都照常回到空闲
+      expect(callsAfter(h, from)).toBe(1);
+    } finally { h.controller.dispose(); }
+  }, 30_000);
+
+  it('a fact arriving after the query started is not treated as covered: a later query still happens and delivers it', async () => {
+    let hold: (() => void) | undefined;
+    const h = harness('new', { controlPageGate: async () => { const release = hold; hold = undefined; release?.(); } });
+    try {
+      h.owner.freezeHistory(); await h.controller.start(); await h.settle();
+      const from = h.conversation.controlPage.mock.calls.length;
+      // 查询开始（已取快照）后、返回前落下新事实并再次唤醒
+      hold = () => { h.owner.admit('late'); h.owner.state('late', 'cancelled'); h.wake(); };
+      h.wake();
+      await vi.waitFor(() => expect(h.effects).toContain('terminal:late'));
+      await vi.waitFor(() => expect(h.visible).toContain('input:late:input late'));
+      expect(callsAfter(h, from)).toBeGreaterThanOrEqual(2);
+    } finally { h.controller.dispose(); }
+  }, 30_000);
+
+  it('a body consumer blocked on the shared page does not hold back the completion consumer', async () => {
+    let unblock!: () => void;
+    const blocked = new Promise<void>(resolve => { unblock = resolve; });
+    const h = harness('new', { inputGate: runId => runId === 'stuck' ? blocked : Promise.resolve() });
+    try {
+      h.owner.freezeHistory(); await h.controller.start(); await h.settle();
+      h.owner.admit('stuck'); h.owner.state('stuck', 'cancelled'); h.wake();
+      await vi.waitFor(() => expect(h.effects).toContain('terminal:stuck'));
+      expect(h.visible).not.toContain('input:stuck:input stuck');
+      unblock();
+      await vi.waitFor(() => expect(h.visible).toContain('input:stuck:input stuck'));
+    } finally { unblock(); h.controller.dispose(); }
+  }, 30_000);
+
+  it('a same-key request issued while the query is in flight gets its own later query, never the older snapshot', async () => {
+    let release: (() => void) | undefined;
+    const h = harness('new', { controlPageGate: () => release ? Promise.resolve() : new Promise<void>(resolve => { release = resolve; }) });
+    try {
+      // 开场用放行状态（release 先置为空函数），之后再挂起
+      release = () => {}; h.owner.freezeHistory(); await h.controller.start(); await h.settle(); release = undefined;
+      const batch = h.controller as unknown as {
+        batchedControlPage(conversationId: string, cursor: undefined, runs: undefined, through: unknown): Promise<ConversationControlPage> };
+      const through = checkpoint(h.owner.through), from = h.conversation.controlPage.mock.calls.length;
+      const older = batch.batchedControlPage('conv-1', undefined, undefined, through);
+      await vi.waitFor(() => expect(release).toBeDefined());
+      // 查询已开始（快照已取），返回之前落下新事实，再发同键请求
+      h.owner.admit('later'); h.owner.state('later', 'cancelled');
+      const held = release!; release = () => {};
+      const newer = batch.batchedControlPage('conv-1', undefined, undefined, through);
+      held();
+      const [olderPage, newerPage] = await Promise.all([older, newer]);
+      expect(callsAfter(h, from)).toBe(2);
+      const runs = (page: ConversationControlPage) => page.facts.flatMap(fact => fact.kind === 'status' ? [fact.notice.ref.runId] : []);
+      expect(runs(olderPage)).not.toContain('later');
+      expect(runs(newerPage)).toContain('later');
+    } finally { h.controller.dispose(); }
+  }, 30_000);
+
+  it('does not share a query across different cursors or recovery generations', async () => {
+    const h = harness('new');
+    try {
+      h.owner.freezeHistory(); await h.controller.start(); await h.settle();
+      const batch = h.controller as unknown as { recoveryVersion: number;
+        batchedControlPage(conversationId: string, cursor: ConversationControlCursor | undefined, runs: undefined, through: unknown): Promise<ConversationControlPage> };
+      const through = checkpoint(h.owner.through);
+      let from = h.conversation.controlPage.mock.calls.length;
+      const [first, second] = await Promise.all([batch.batchedControlPage('conv-1', undefined, undefined, through), batch.batchedControlPage('conv-1', undefined, undefined, through)]);
+      expect(callsAfter(h, from)).toBe(1);
+      // 各读者拿到自己的一份：改一份不影响另一份
+      expect(second).toEqual(first); expect(second).not.toBe(first);
+      from = h.conversation.controlPage.mock.calls.length;
+      await Promise.all([batch.batchedControlPage('conv-1', undefined, undefined, through), batch.batchedControlPage('conv-1', first.cursor, undefined, undefined)]);
+      expect(callsAfter(h, from)).toBe(2);
+      from = h.conversation.controlPage.mock.calls.length;
+      const before = batch.batchedControlPage('conv-1', first.cursor, undefined, undefined);
+      batch.recoveryVersion++;
+      const after = batch.batchedControlPage('conv-1', first.cursor, undefined, undefined);
+      batch.recoveryVersion--;
+      await Promise.all([before, after]);
+      expect(callsAfter(h, from)).toBe(2);
     } finally { h.controller.dispose(); }
   }, 30_000);
 });
