@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { PROCESS_LOG_SOURCE } from "@zhixing/core/interrupt";
 import type { IEventBus } from "@zhixing/core/events";
-import type { BindLogSource, LogDraft, LogRecordPort, LogRef, LogSource } from "@zhixing/core/logging";
+import { LOG_FAILURE_FIELDS, type BindLogSource, type LogDraft, type LogRecordPort, type LogRef, type LogSource } from "@zhixing/core/logging";
 import type { AgentEventMap, ChatRequest, StreamEvent } from "@zhixing/core/types";
 import { runContextStorage } from "./run-context.js";
 
@@ -14,7 +14,7 @@ const fields = {
   inputUnits: "number", outputUnits: "number", thinking: "text",
   tools: { items: "text", maxItems: 32 },
 } as const;
-const event = (message: string, level: "info" | "warn" | "error" = "info") =>
+const event =(message: string, level: "info" | "warn" | "error" = "info") =>
   ({ message, level, tier: "critical" as const, fields });
 export const KERNEL_LOG_SOURCE: LogSource = {
   id: "kernel", version: 1,
@@ -32,7 +32,11 @@ export const KERNEL_LOG_SOURCE: LogSource = {
     retry: event("模型调用重试裁决", "warn"), recovered: event("模型调用重试后成功"),
     exhausted: event("模型调用重试已耗尽", "error"),
     interrupted: event("运行取消已观察到", "warn"),
-    error: event("运行边界发生错误", "error"), warning: event("运行已降级", "warn"),
+    // 基础设施失败的首因只挂在 error 事件上：类别与包内源码位置，不含异常正文。
+    // 各事件共用 fields，整份日志源有 512 个字段节点的上限，不能把新字段加进共用集合。
+    error: { message: "运行边界发生错误", level: "error", tier: "critical", fields: {
+      ...fields, failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: "text", maxItems: 4 },
+    } }, warning: event("运行已降级", "warn"),
     window: event("上下文窗口发生变化"),
   },
 };

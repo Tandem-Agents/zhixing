@@ -41,6 +41,8 @@ import type {
 } from "@zhixing/core/resources";
 import { runChildAgent, type RunChildAgentOptions } from "../factory.js";
 import { runContextStorage, type RunContext } from "../../runtime/run-context.js";
+import { KERNEL_LOG_SOURCE } from "../../runtime/logging.js";
+import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogStatus } from "@zhixing/core/logging";
 
 // ConfirmationBroker.prototype.cancelAll 的 spy 验证仍依赖该类作为
 // 子 broker 实例化目标(factory 内部 new ConfirmationBroker())
@@ -660,6 +662,34 @@ describe("runChildAgent · 永不抛契约", () => {
     } finally {
       runSpy.mockRestore();
     }
+  });
+
+  it("loop 基础设施失败经真实记录器留下首因类别与源码位置，不含异常正文", async () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const captures: LogCapture[] = [];
+    const status: LogStatus = { storeId: "fixture-store", layout: "zxlog/1", policy: { version: 1, effective: DEFAULT_LOG_POLICY }, bytes: 0, files: 0, retainedSegments: 0, pendingReclaims: 0, overdue: false, upper: 0 };
+    const recorder = new LogRecorder({
+      initialize: async () => status,
+      append: async (batch) => { captures.push(...structuredClone(batch)); return status; },
+      maintain: async () => status,
+      close: async () => {},
+    });
+    const kernel = recorder.bind(KERNEL_LOG_SOURCE, { scope: "storage" });
+    const failure = new Error("secret detail must stay out of logs");
+    failure.stack = "Error: secret detail must stay out of logs\n    at admit (file:///E:/Dev/longxia/zhixing/packages/cli/dist/bundle/chunk-FIXTURE.js:77:9)";
+    const parent = { bus: createEventBus<AgentEventMap>(), lineage: "main", logPorts: { kernel, provider: kernel, process: kernel } } as unknown as RunContext;
+    const result = await runContextStorage.run(parent, async () => {
+      // 只让子任务内层那一次 run 失败；外层运行上下文（含日志端口）保持
+      const runSpy = vi.spyOn(runContextStorage, "run").mockImplementationOnce(() => { throw failure; });
+      try { return await runChildAgent(makeBaseOpts(provider)); } finally { runSpy.mockRestore(); }
+    });
+    await recorder.close(3000);
+    expect(result.status).toBe("failed");
+    expect(result.error?.type).toBe("loop_error");
+    expect(recorder.health().captureFailures).toBe(0);
+    const record = captures.map((capture) => capture.record).find((item) => item.event === "error");
+    expect(record?.data).toMatchObject({ errorType: "loop_error", failure: { category: "Error" }, sourceFrames: ["cli/bundle/chunk-FIXTURE.js:77:9"] });
+    expect(JSON.stringify(captures)).not.toContain("secret detail");
   });
 
   it("durationMs 总是 >= 0,即使瞬时返回也不为负", async () => {

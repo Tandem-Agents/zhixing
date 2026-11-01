@@ -41,6 +41,7 @@ import { type IConfirmationBroker } from "@zhixing/core/confirmation";
 import { type SecurityPipeline } from "@zhixing/core/security";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { protocolDigest } from "@zhixing/core/protocol";
+import { failureSourceFrames, logFailureEvidence } from "@zhixing/core/logging";
 import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing/core/contracts";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
 import {
@@ -449,6 +450,13 @@ async function runChildAgentInner(
   } catch (loopError) {
     // 仅 runSubAgentLoop 基础设施崩才到这里(LLM/tool 异常已被 loop 内部 catch 转 reason="error")
     caughtError = loopError;
+    // 结果只带 message 回给主模型；首因类别与源码位置进本机日志，供定位基础设施故障
+    try {
+      parentContext?.logPorts?.kernel.record(() => ({ event: "error", data: {
+        errorType: "loop_error", lineage: childLineage,
+        failure: logFailureEvidence(loopError), sourceFrames: [...failureSourceFrames(loopError)],
+      } }));
+    } catch { /* 观测不能替代原失败 */ }
   } finally {
     // cleanup discipline —— 永远执行,与 happy/failed/abort 路径无关:
     //   - childBus.removeAllListeners 防止子 bus 的 listener 跨 dispatch 累积
