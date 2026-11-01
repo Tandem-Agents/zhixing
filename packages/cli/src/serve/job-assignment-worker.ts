@@ -44,6 +44,7 @@ import {
   createAssignmentMutationPort,
 } from "./assignment-global-state-ports.js";
 import type { JobRuntimeCapabilities } from "./job-runtime-tool-selection.js";
+import { retryResourceUsage } from "./conversation-admission-retry.js";
 
 const COMMIT_REJECTION_PREFIX = "Job commit rejected";
 const JOB_RECOVERY_PAGE_SIZE = 32;
@@ -531,19 +532,19 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
             tokenUpperBound: number;
           }) => {
             const usageId = `usage:${assignmentId}:model:${callIndex}`;
-            await this.options.resources.reserveUsage(
+            await retryResourceUsage(() => this.options.resources.reserveUsage(
               envelope.resourceLease,
               { usageId, tokens: tokenUpperBound, calls: 1 },
               jobResourceContext(envelope, usageId),
-            );
+            ), abortSignal);
             return { usageId };
           },
           consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
-            await this.options.resources.consume(
+            await retryResourceUsage(() => this.options.resources.consume(
               envelope.resourceLease,
               { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
               jobResourceContext(envelope, usageId),
-            );
+            ), abortSignal);
           },
         },
       });

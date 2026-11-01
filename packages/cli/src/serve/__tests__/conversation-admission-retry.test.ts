@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion } from "@zhixing/core/resources";
-import { retryControlAdmission } from "../conversation-admission-retry.js";
+import { retryControlAdmission, retryResourceUsage } from "../conversation-admission-retry.js";
 afterEach(()=>vi.useRealTimers());
 const pressure=()=>new StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"probe-unavailable",retryAfterMs:10});
 it("recovers only outside exclusion then retries the same caller", async()=>{
@@ -70,4 +70,30 @@ it.each(["cancel","deadline"] as const)("does not start a new attempt after reco
   const rejected=mode==="cancel"?expect(pending).rejects.toThrow("cancelled"):expect(pending).rejects.toBe(failure);
   await vi.advanceTimersByTimeAsync(5200);await rejected;
   expect(operation).toHaveBeenCalledOnce();
+});
+
+it("retries model usage reservations under the same usage identity after memory backpressure", async()=>{
+  const memory=new StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"memoryReservationBytes",retryAfterMs:5});
+  const seen:string[]=[];
+  const reserve=vi.fn(async(usageId:string)=>{seen.push(usageId);if(seen.length===1)throw memory;});
+  await retryResourceUsage(()=>reserve("usage:a:model:1"));
+  expect(seen).toEqual(["usage:a:model:1","usage:a:model:1"]);
+  // 另一个子任务的预留独立，不被前一个的背压连累
+  const other=vi.fn(async()=>"ok");
+  expect(await retryResourceUsage(other)).toBe("ok"); expect(other).toHaveBeenCalledOnce();
+});
+it("does not retry usage reservation content conflicts or capacity gaps, and stops waiting on cancellation", async()=>{
+  const conflict=new TypeError("Resource usage reservation id was reused with different content");
+  const conflicting=vi.fn(async()=>{throw conflict});
+  await expect(retryResourceUsage(conflicting)).rejects.toBe(conflict); expect(conflicting).toHaveBeenCalledOnce();
+  const gap=new StorageMaintenanceAdmissionError({kind:"capacity-gap",blockedBy:"memoryReservationBytes"} as never);
+  const gapped=vi.fn(async()=>{throw gap});
+  await expect(retryResourceUsage(gapped)).rejects.toBe(gap); expect(gapped).toHaveBeenCalledOnce();
+  vi.useFakeTimers();
+  const abort=new AbortController();
+  const pressured=vi.fn(async()=>{throw new StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"memoryReservationBytes",retryAfterMs:200})});
+  const pending=retryResourceUsage(pressured,abort.signal);
+  const cancelled=expect(pending).rejects.toThrow("cancelled");
+  await vi.advanceTimersByTimeAsync(50); abort.abort(); await vi.advanceTimersByTimeAsync(1); await cancelled;
+  expect(pressured).toHaveBeenCalledOnce();
 });

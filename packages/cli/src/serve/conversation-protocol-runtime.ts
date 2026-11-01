@@ -1,6 +1,6 @@
 import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError, holdForegroundObligation, type ForegroundActivityPort, type ForegroundObligation } from "@zhixing/core/resources";
 import { beginLogPhase, observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
-import { retryControlAdmission } from "./conversation-admission-retry.js";
+import { retryControlAdmission, retryResourceUsage } from "./conversation-admission-retry.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 import { AuthorityStorageError } from "@zhixing/core/authority";
@@ -1949,19 +1949,19 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             reserve: async ({ callIndex, tokenUpperBound }) => {
               const usageId = `usage:${assignmentId}:model:${callIndex}`;
               beforeFirstModelCall = false;
-              await this.#phase("model-usage-reserve", () => this.#requireExecutionResources().reserveUsage(
+              await this.#phase("model-usage-reserve", () => retryResourceUsage(() => this.#requireExecutionResources().reserveUsage(
                 dispatch.envelope.resourceLease,
                 { usageId, tokens: tokenUpperBound, calls: 1 },
                 resourceSubmissionContext,
-              ));
+              ), input.options?.abortSignal));
               return { usageId };
             },
             consume: async ({ usageId, tokens }) => {
-              await this.#phase("model-usage-consume", () => this.#requireExecutionResources().consume(
+              await this.#phase("model-usage-consume", () => retryResourceUsage(() => this.#requireExecutionResources().consume(
                 dispatch.envelope.resourceLease,
                 { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
                 resourceSubmissionContext,
-              ));
+              ), input.options?.abortSignal));
             },
           },
         });

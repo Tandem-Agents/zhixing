@@ -51,3 +51,11 @@ export async function retryControlAdmission<T>(
     }
   } finally { if (timer) clearTimeout(timer); }
 }
+
+/**
+ * 模型用量预留/结算：同一 usageId 在资源权威内幂等，可重试背压在运行层有限退避后重试；
+ * 容量缺口、取消与内容不符照原样上抛。调用处不持锁与许可。
+ */
+export function retryResourceUsage<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return retryControlAdmission(operation, async () => {}, signal);
+}
