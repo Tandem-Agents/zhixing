@@ -18,6 +18,7 @@ import {
 } from "./proxy-scheduler.js";
 
 import { hasPendingWorksceneTask } from "@zhixing/core/workscene/application";
+import { runWithLogAttribution } from "@zhixing/core/logging";
 
 const RECOVERY_SCAN_PAGE_SIZE = 50;
 
@@ -169,7 +170,8 @@ class DefaultAdvancementRecoveryMaintenance
     if (this.stopped || this.draining || this.timer || this.loop) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.loop = this.recoverAllOpenSessions().then(() => {}, error => {
+      // 轮询发起的存储工作带固定归属标签（只记录）
+      this.loop = runWithLogAttribution("advancement:recovery", () => this.recoverAllOpenSessions()).then(() => {}, error => {
         if (!this.stopped) this.options.logger?.warn(`[advancement-recovery] ${String(error)}`);
       }).finally(() => { this.loop = undefined; this.start(); });
     }, 1000);

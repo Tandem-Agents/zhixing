@@ -9,6 +9,7 @@ import type {
   StreamSubscribe,
 } from "@zhixing/core/contracts";
 import { assertArtifactRef } from "@zhixing/core/authority";
+import { runWithLogAttribution } from "@zhixing/core/logging";
 import {
   canonicalize,
   streamConsumerKey,
@@ -248,9 +249,7 @@ export function createAssignmentStreamServiceHandler(
     return epoch;
   };
 
-  return async (payload, connection, signal) => {
-    signal.throwIfAborted();
-    const request = decodeRequest(payload);
+  const serve = async (request: StreamServiceRequest, connection: SecureMeshConnection, signal: AbortSignal): Promise<Uint8Array> => {
     if (request.t === "subscribe") {
       const authorization = await options.authorize({
         operation: "subscribe",
@@ -356,6 +355,13 @@ export function createAssignmentStreamServiceHandler(
       consumer: request.ack.consumer,
       ackSeq: request.ack.ackSeq,
     });
+  };
+
+  return async (payload, connection, signal) => {
+    signal.throwIfAborted();
+    const request = decodeRequest(payload);
+    // 订阅、读工件与确认的存储工作按请求类型归组（固定标签，只观测）
+    return runWithLogAttribution(`stream:${request.t}`, () => serve(request, connection, signal));
   };
 }
 

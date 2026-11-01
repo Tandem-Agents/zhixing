@@ -1,5 +1,5 @@
 import type { LogRecordPort, LogRef, LogSource } from "../logging/contracts.js";
-import { currentLogPhaseRefs } from "../logging/phase.js";
+import { currentLogAttributionRefs, currentLogPhaseOriginRefs, currentLogPhaseRefs, runOutsideLogPhase } from "../logging/phase.js";
 import { LOG_FAILURE_FIELDS, logFailureEvidence, failureSourceFrames } from "../logging/failure.js";
 import { AuthorityStorageError } from "./errors.js";
 import { observationRefs } from "../logging/producer.js";
@@ -19,12 +19,15 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
       operation: "text", preparationMs: "number", releaseMs: "number", retryWaitMs: "number", recoveries: "number", operations: "number", scans: "number", readBytes: "number", queueMs: "number", lockWaitMs: "number", executionMs: "number", retries: "number",
       preparedFrames: "number", segmentOpens: "number", segmentVerifies: "number", segmentEntryReads: "number", directoryPageReads: "number", manifestReads: "number", maxExecutionMs: "number",
       lockAcquisitions: "number", lockAfterIdle: "number", lockAfterHoldLimit: "number", lockAfterBoundary: "number", lockAfterHandoff: "number",
+      firstStartedAt: "number", lastFinishedAt: "number",
     } },
     opened: { message: "上一个就绪准备边界以来本进程首次打开的持久投影（含清单与段边界核验、检查点核对），按耗时列出最慢的几个", level: "info", tier: "critical", fields: {
       boundary: "text", count: "number", totalMs: "number", slowest: { items: "text", maxItems: 8 },
     } },
     maintained: { message: "一轮空闲维护整理过的投影，按耗时列出最慢的几个", level: "info", tier: "critical", fields: {
       count: "number", durationMs: "number", slowest: { items: "text", maxItems: 8 },
+      // 每个投影整理的开始时刻（墙钟毫秒）与时长（含步间让路），按开始顺序；用于与前台持有/让出的时刻对齐
+      steps: { items: "text", maxItems: 32 },
     } },
     prepared: { message: "就绪边界依赖的派生状态已在该位置就绪", level: "info", tier: "critical", fields: {
       boundary: "text", lsn: "number", frameEndOffset: "number", projections: "number", durationMs: "number",
@@ -80,11 +83,16 @@ const emptyWork = (): AuthorityWork => ({ scans: 0, readBytes: 0, recoveries: 0,
   segmentEntryReads: 0, directoryPageReads: 0, manifestReads: 0, lockAcquisitions: 0, lockAfterIdle: 0, lockAfterHoldLimit: 0, lockAfterBoundary: 0, lockAfterHandoff: 0 });
 /** Bounded by phase and finite operation kind, never by business body or operation count. */
 export class AuthorityWorkObserver {
-  #pending = new Map<string, { refs: readonly LogRef[]; data: AuthorityWork & { operation: AuthorityOperation; operations: number; maxExecutionMs: number } }>();
+  // firstStartedAt／lastFinishedAt：桶内操作实际执行的最早开始与最晚结束（墙钟毫秒）；汇总按约 1 秒合并刷出，
+  // 窗口归属按这两个边界判，不按刷出时刻
+  #pending = new Map<string, { refs: readonly LogRef[]; data: AuthorityWork & { operation: AuthorityOperation; operations: number; maxExecutionMs: number; firstStartedAt: number; lastFinishedAt: number } }>();
   #timer: ReturnType<typeof setTimeout> | undefined;
   constructor(private readonly records: LogRecordPort | undefined, private readonly authority: () => string | undefined) {}
   begin(operation: AuthorityOperation) {
-    const refs = currentLogPhaseRefs();
+    // 阶段引用只取开始这一刻；阶段已结束的续跑记来源阶段；发起方固定标签另行并入（都只观测）
+    const phaseRefs = currentLogPhaseRefs();
+    const refs = [...(phaseRefs.length ? phaseRefs : currentLogPhaseOriginRefs()), ...currentLogAttributionRefs()];
+    const startedAt = Date.now();
     const data = emptyWork();
     let waitFor = "local-queue", since = performance.now(), finished = false;
     const emit = (event: string, value: Record<string, unknown>, failed = false) => {
@@ -123,9 +131,13 @@ export class AuthorityWorkObserver {
           const id = this.authority();
           const key = JSON.stringify([operation, refs]);
           if (!this.#pending.has(key) && this.#pending.size >= 8) this.flush();
-          const bucket = this.#pending.get(key) ?? { refs: [...refs, ...(id ? [{ kind: "authority", id }] : [])], data: { ...emptyWork(), operation, operations: 0, maxExecutionMs: 0 } };
+          const finishedAt = Date.now();
+          const bucket = this.#pending.get(key) ?? { refs: [...refs, ...(id ? [{ kind: "authority", id }] : [])],
+            data: { ...emptyWork(), operation, operations: 0, maxExecutionMs: 0, firstStartedAt: startedAt, lastFinishedAt: finishedAt } };
           for (const name of Object.keys(data) as (keyof AuthorityWork)[]) bucket.data[name] += Math.round(data[name]);
           bucket.data.operations++;
+          bucket.data.firstStartedAt = Math.min(bucket.data.firstStartedAt, startedAt);
+          bucket.data.lastFinishedAt = Math.max(bucket.data.lastFinishedAt, finishedAt);
           // 汇总里单次操作的最长锁内执行：用来核对最长一步，而不只看合计与平均
           bucket.data.maxExecutionMs = Math.max(bucket.data.maxExecutionMs, Math.round(data.executionMs));
           this.#pending.set(key, bucket);
@@ -138,10 +150,15 @@ export class AuthorityWorkObserver {
   flush(): void {
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
-    for (const { refs, data } of this.#pending.values()) {
-      try { this.records?.record({ event: "work", refs, data: { ...data } }); } catch { /* Observation is best effort. */ }
-    }
+    const pending = [...this.#pending.values()];
     this.#pending.clear();
+    // 在任何阶段之外写出：记录器不把刷出时刻所在阶段（触发刷出的那次操作或计时器的上下文）补进别的桶；
+    // 回调里没有 await，写出在这次调用内同步完成
+    void runOutsideLogPhase(async () => {
+      for (const { refs, data } of pending) {
+        try { this.records?.record({ event: "work", refs, data: { ...data } }); } catch { /* Observation is best effort. */ }
+      }
+    });
   }
 }
 

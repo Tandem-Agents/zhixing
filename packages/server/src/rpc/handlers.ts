@@ -12,7 +12,7 @@
  * - dispatcher 自身无状态，可重用于多个连接
  */
 
-import { failureDiagnostic } from "@zhixing/core/logging";
+import { failureDiagnostic, runWithLogAttribution } from "@zhixing/core/logging";
 import type { RpcConnection } from "./connection.js";
 import type { ServerContext } from "../context.js";
 import { RPC_ERROR_CODES, type JsonRpcError } from "./protocol.js";
@@ -119,15 +119,17 @@ export class HandlerRegistry {
       throw RpcErrors.unauthorized(`Method requires authentication: ${method}`);
     }
 
-    const routed = await ctx.server.conversationRpc?.dispatch({
-      method,
-      params,
-      connection: ctx.connection,
-      dispatchCanonical: () => this.dispatchCanonical(method, params, ctx),
+    // 经这次请求发起的存储工作按方法名归属（只取已注册方法，标签集合有限；内层产品接口的标签照旧覆盖）；只记录
+    return runWithLogAttribution(`rpc:${method}`, async () => {
+      const routed = await ctx.server.conversationRpc?.dispatch({
+        method,
+        params,
+        connection: ctx.connection,
+        dispatchCanonical: () => this.dispatchCanonical(method, params, ctx),
+      });
+      if (routed?.handled) return routed.result;
+      return this.dispatchCanonical(method, params, ctx);
     });
-    if (routed?.handled) return routed.result;
-
-    return this.dispatchCanonical(method, params, ctx);
   }
 
   /** Dispatches the registered method without re-entering an ingress router. */

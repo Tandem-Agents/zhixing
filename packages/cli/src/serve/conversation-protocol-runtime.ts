@@ -1,5 +1,5 @@
 import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError, holdForegroundObligation, type ForegroundActivityPort, type ForegroundObligation } from "@zhixing/core/resources";
-import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
+import { beginLogPhase, observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { retryControlAdmission } from "./conversation-admission-retry.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
@@ -980,7 +980,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ? { environment: structuredClone(input.environment) }
         : {}),
       // 立即可调度、不排在前一运行之后：准备段从接纳起登记前台，跨过接纳返回到执行端装配的空档，由接管的 run() 取走
-      ...(scheduling === "ready" && this.#foreground ? { foreground: holdForegroundObligation(this.#foreground) } : {}),
+      ...(scheduling === "ready" && this.#foreground ? { foreground: this.#holdObservedForeground(this.#foreground) } : {}),
     });
     this.#markRecovery(input.conversationId);
     return { runId: admission.runId, shouldSchedule, admissionId };
@@ -1469,7 +1469,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     if (preparedKey) this.#preparedAdmissions.delete(preparedKey);
     const attemptForeground = prepared?.foreground ??
-      (this.#foreground ? holdForegroundObligation(this.#foreground) : NO_FOREGROUND_OBLIGATION);
+      (this.#foreground ? this.#holdObservedForeground(this.#foreground) : NO_FOREGROUND_OBLIGATION);
     let executionIngress = appliedAdmission.ingress;
     let attempt: number;
     try {
@@ -3075,6 +3075,30 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   /** 运行准备中决定下一步修法的实际调用记为日志阶段（只观测，不给端口时原样执行）。 */
   #phase<T>(name: string, work: () => Promise<T>): Promise<T> {
     return observeLogPhase(this.#phaseRecords, `run.${name}`, work);
+  }
+
+  /**
+   * 前台义务的持有与让出记为两个观测阶段（只记事件、不进入阶段上下文，不改登记与让路）：
+   * run.foreground-held 从登记到关闭，run.foreground-yielded 从让出到恢复。
+   */
+  #holdObservedForeground(port: ForegroundActivityPort): ForegroundObligation {
+    const obligation = holdForegroundObligation(port);
+    const records = this.#phaseRecords;
+    if (!records) return obligation;
+    const held = beginLogPhase(records, "run.foreground-held");
+    let yielded: ReturnType<typeof beginLogPhase> | undefined;
+    let closed = false;
+    return {
+      pause() { obligation.pause(); if (!closed && !yielded) yielded = beginLogPhase(records, "run.foreground-yielded"); },
+      resume() { obligation.resume(); yielded?.finish(); yielded = undefined; },
+      close() {
+        obligation.close();
+        if (closed) return;
+        closed = true;
+        yielded?.finish(); yielded = undefined;
+        held.finish();
+      },
+    };
   }
 
   #ownerEpochFor(conversationId: string): number {

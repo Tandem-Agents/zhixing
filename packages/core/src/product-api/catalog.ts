@@ -1,4 +1,5 @@
 import { failureSourceFrames, logFailureEvidence } from "../logging/failure.js";
+import { runWithLogAttribution } from "../logging/phase.js";
 import { randomUUID } from "node:crypto";
 import type { LogRecordPort } from "../logging/contracts.js";
 import { productObservationRefs } from "./logging.js";
@@ -307,7 +308,8 @@ export class ProductApiDispatcher {
     const started = performance.now();
     records?.record(() => ({ event: "requested", refs: [...refs, ...productObservationRefs(input)], data: { action: descriptor.identity, kind: descriptor.kind } }));
     try {
-      const invocation = await operation.invoke(input);
+      // 调用体内的存储工作按动作名归组（固定标签，只观测）
+      const invocation = await runWithLogAttribution(`product:${descriptor.identity}`, () => operation.invoke(input));
       this.#validateInvocation(descriptor, invocation);
       records?.record(() => ({ event: "returned", refs: [...refs, ...productObservationRefs(input), ...productObservationRefs(invocation.result)].filter((ref, index, all) => all.findIndex((item) => item.kind === ref.kind && item.id === ref.id) === index).slice(0, 12), result: "success", data: {
         action: descriptor.identity, duration: performance.now() - started,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceIdentity } from "@zhixing/core/contracts";
+import { currentLogAttributionRefs, runWithLogAttribution } from "@zhixing/core/logging";
 import { MeshProtocolError } from "./errors.js";
 import { MeshRequestChannel } from "./request-channel.js";
 import { MAX_RUNTIME_TIMER_DELAY_MS } from "./runtime-time.js";
@@ -55,6 +56,25 @@ describe("MeshRequestChannel", () => {
     await expect(left.request("right.fail", Buffer.from("x"))).rejects.toThrow();
     expect(seen).toEqual([1, 1]);
     expect(active).toBe(0);
+    await Promise.all([left.close(), right.close()]);
+  });
+
+  it("attributes work started by a peer request to the service, and a more specific inner label still wins", async () => {
+    const [leftConnection, rightConnection] = connections();
+    const registry = new MeshServiceRegistry();
+    // 处理函数里跨过计时器后再取归属：存储观测在操作开始时读的就是这份上下文
+    const callers = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return Buffer.from(JSON.stringify(currentLogAttributionRefs()));
+    };
+    registry.register("right.read", { access: "write", availability: "negotiated-version", handler: callers });
+    registry.register("right.stream", { access: "write", availability: "negotiated-version",
+      handler: () => runWithLogAttribution("stream:ack", callers) });
+    const left = new MeshRequestChannel(leftConnection, new MeshServiceRegistry());
+    const right = new MeshRequestChannel(rightConnection, registry);
+    const decode = (value: Uint8Array) => JSON.parse(Buffer.from(value).toString("utf8"));
+    expect(decode(await left.request("right.read", Buffer.from("x")))).toEqual([{ kind: "caller", id: "mesh:right.read" }]);
+    expect(decode(await left.request("right.stream", Buffer.from("x")))).toEqual([{ kind: "caller", id: "stream:ack" }]);
     await Promise.all([left.close(), right.close()]);
   });
 

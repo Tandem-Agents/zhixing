@@ -16,6 +16,33 @@ export function currentLogPhaseRefs(): readonly LogRef[] { const value = context
 /** 在任何调用者阶段之外运行：转交后台续跑的工作不记在发起它的前台阶段名下（只观测）。 */
 export function runOutsideLogPhase<T>(work: () => Promise<T>): Promise<T> { return context.run({ refs: [], active: false }, work); }
 
+/** 阶段已结束、续跑仍在这个上下文里运行时，返回该阶段为 originPhase（只观测，区分合法续跑与无来源工作）。 */
+export function currentLogPhaseOriginRefs(): readonly LogRef[] {
+  const value = context.getStore();
+  if (!value || value.active) return [];
+  const phase = value.refs.find(ref => ref.kind === "phase");
+  return phase ? [{ kind: "originPhase", id: phase.id }] : [];
+}
+
+// 发起方的固定标签随异步上下文下传，只供存储工作汇总按发起方归组；与阶段上下文分开，阶段结束不清它，也不进记录器的阶段合并
+const attribution = new AsyncLocalStorage<readonly LogRef[]>();
+export function currentLogAttributionRefs(): readonly LogRef[] { return attribution.getStore() ?? []; }
+
+/**
+ * 以固定标签（有限集合，例如产品接口动作名）运行一段工作（只观测，不改返回值、错误与取消）。
+ * trigger 为真时把进入前的发起方标签与当前活动阶段记为 trigger／triggerPhase，用于转交后台续跑的入口。
+ */
+export function runWithLogAttribution<T>(caller: string, work: () => Promise<T>, options: { trigger?: boolean } = {}): Promise<T> {
+  const refs: LogRef[] = [{ kind: "caller", id: caller }];
+  if (options.trigger) {
+    const previous = currentLogAttributionRefs().find(ref => ref.kind === "caller");
+    const phase = currentLogPhaseRefs().find(ref => ref.kind === "phase");
+    if (previous) refs.push({ kind: "trigger", id: previous.id });
+    if (phase) refs.push({ kind: "triggerPhase", id: phase.id });
+  }
+  return attribution.run(refs, work);
+}
+
 /** Observation only: never changes cancellation, errors or business scheduling. caller 是调用方给出的固定标签（共享入口区分发起方）。 */
 export function beginLogPhase(records: LogRecordPort | undefined, phase: string,
   options: { waitFor?: string; refs?: readonly LogRef[]; caller?: string } = {}) {

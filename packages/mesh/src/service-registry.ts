@@ -1,3 +1,4 @@
+import { runWithLogAttribution } from "@zhixing/core/logging";
 import { MeshProtocolError } from "./errors.js";
 import {
   assertSecureMeshConnection,
@@ -103,7 +104,8 @@ export class MeshServiceRegistry {
           `Mesh service is unavailable during protocol-version skew: ${serviceId}`,
         );
       }
-      return await service.handler(payload, connection, signal);
+      // 经这次服务调用发起的存储工作按服务归属（已注册服务，标签集合有限；内层更具体的标签照旧覆盖）；只记录
+      return await runWithLogAttribution(`mesh:${serviceId}`, () => service.handler(payload, connection, signal));
     } finally {
       leave?.();
     }

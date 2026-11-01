@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { runOutsideLogPhase } from "../logging/phase.js";
+import { runOutsideLogPhase, runWithLogAttribution } from "../logging/phase.js";
 import { runDetachedDeviceCapacity } from "./device-capacity.js";
 import type { StorageMaintenanceUrgency } from "./storage-maintenance.js";
 
@@ -82,7 +82,8 @@ export function runDetachedMaintenanceContext<T>(
   urgency: StorageMaintenanceUrgency,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return runDetachedDeviceCapacity(() => runOutsideLogPhase(() => maintenanceContext.run(
+  // 后台续跑的存储工作记为 detached:<紧急度>，并把转交前的发起方与阶段记为触发来源（只观测）
+  return runWithLogAttribution(`detached:${urgency}`, () => runDetachedDeviceCapacity(() => runOutsideLogPhase(() => maintenanceContext.run(
     {
       urgency: () => urgency,
       abort: neverAbortMaintenance,
@@ -90,7 +91,7 @@ export function runDetachedMaintenanceContext<T>(
       cancelWhenAbandoned: neverCancelWhenAbandoned,
     },
     operation,
-  )));
+  ))), { trigger: true });
 }
 
 /**
