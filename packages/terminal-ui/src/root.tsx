@@ -239,6 +239,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     queueMicrotask(() => { if (!value.isDestroyed) {
       if (view().kind === 'conversation') {
         changingDraft = true; try { setEditorUtf16Cursor(value, draft.text, draft.cursor, renderer.widthMethod); } finally { changingDraft = false; }
+      } else if (view().field && !view().field!.secret) {
+        // 预填的字段（改名、模型 id 等）光标放在末尾：退格直接修改原值，输入接在原值后面
+        const initial = view().field!.value ?? '';
+        setEditorUtf16Cursor(value, initial, initial.length, renderer.widthMethod);
       }
       value.focus();
       syncEditor();
@@ -399,6 +403,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : current.connectionState === 'starting' ? '可先输入 · Ctrl+C 退出'
       : current.connectionState === 'unavailable' ? hint('Enter 重试 · F2 历史 · F3 配置 · Ctrl+C 退出', 'Enter 重试 · F2 历史 · F3 配置')
       : current.kind === 'conversation' ? hint('Enter 发送 · Esc 清空 · Ctrl+C 中止/退出', 'Enter 发送 · Ctrl+C 退出')
+      // 权限确认外层：Esc 即拒绝本次授权，不是一般面板的返回；内层（二次确认、理由、详情）仍先返回选择
+      : current.kind === 'confirmation' && (current.selectionLayer ?? 'select') === 'select'
+        ? (current.detailsActionId || current.choices?.some(choice => choice.detailsActionId))
+          ? hint('Enter 确认 · → 详情 · Esc 拒绝 · PgUp/PgDn 阅读', 'Enter 确认 · → 详情 · Esc 拒绝')
+          : hint('Enter 确认 · Esc 拒绝 · PgUp/PgDn 阅读', 'Enter 确认 · Esc 拒绝')
       : (current.detailsActionId || current.choices?.some(choice => choice.detailsActionId)) ? hint('Enter 确认 · → 详情 · Esc 返回 · PgUp/PgDn 阅读', 'Enter 确认 · → 详情 · Esc 返回')
       : hint('Enter 确认 · Esc 返回 · PgUp/PgDn 阅读', 'Enter 确认 · Esc 返回');
     const copy = copyAvailable() && size().width >= 12 ? '复制选区' : '';

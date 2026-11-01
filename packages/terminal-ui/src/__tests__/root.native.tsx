@@ -283,6 +283,11 @@ try {
   assert.ok(text().includes('确认执行'), 'keyboard selection must reveal the selected action after long content');
   await show({ kind: 'recovery', title: '保密显示', requestId: 'recovery-hint', recovery: { requestId: 'recovery-hint', pages: 1, input: false } });
   assert.ok(text().includes('Esc 返回')); assert.ok(!text().includes('Enter 确认'));
+  // 权限确认外层 Esc 即拒绝；内层二次确认仍先返回
+  await show({ kind: 'confirmation', title: '工具权限', requestId: 'permission-hint', choices: [{ id: 'allow', label: '允许这一次' }, { id: 'deny', label: '拒绝本次操作' }] });
+  assert.ok(text().includes('Esc 拒绝') && !text().includes('Esc 返回'), 'outer permission page names Esc as deny');
+  await show({ kind: 'confirmation', title: '保存这条授权规则？', requestId: 'permission-inner', selectionLayer: 'confirm', choices: [{ id: 'return', label: '返回' }, { id: 'confirm', label: '确认保存并允许' }] });
+  assert.ok(text().includes('Esc 返回') && !text().includes('Esc 拒绝'), 'inner confirmation still returns first');
   checks.push('long selection scrolls the selected action into view; private display has truthful contextual hints');
   test.resize(40, 16); await flush();
   await show({ kind: 'configuration', title: '模型', editId: 'model-narrow', choices: [
@@ -299,6 +304,12 @@ try {
   await show({ kind: 'configuration', title: '配置', editId: 'edit', choices: [{ id: 'a', label: '第一项' }, { id: 'b', label: '第二项' }], message: '状态更新' });
   test.mockInput.pressEnter(); await flush();
   assert.ok(actions.some(action => action.kind === 'configuration-action' && action.action === 'b'));
+  // 预填字段（如改名）光标在末尾：退格直接删原值末字，不在开头插入
+  await show({ kind: 'selection', title: '对话名称', requestId: 'rename-field', field: { id: 'name', label: '输入新名称', secret: false, value: '旧名称' }, choices: [{ id: 'save', label: '保存名称' }] });
+  await flush();
+  assert.equal(editor().cursorOffset, 6, 'prefilled field cursor starts at the end (three full-width cells each)');
+  test.mockInput.pressBackspace(); await flush();
+  assert.equal(editor().plainText, '旧名', 'backspace edits the prefilled value');
   await show({ kind: 'configuration', title: '字段', editId: 'edit', field: { id: 'test', label: '输入地址', secret: false } });
   await test.mockInput.typeText('本机字段'); await flush();
   await show({ kind: 'configuration', title: '字段', editId: 'edit', field: { id: 'test', label: '输入地址', secret: false }, message: '刷新' });

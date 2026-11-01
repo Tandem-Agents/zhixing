@@ -28,8 +28,9 @@ export function CandidateView(props: { value?: TerminalCandidates; loading: bool
       verticalScrollbarOptions={{ width: 1, showArrows: false }}>
       <Show when={!props.loading && props.value?.items.length} fallback={<text fg={props.error || props.value?.error ? tone.warn : tone.dim}>{props.loading ? '  正在读取…' : props.error ?? props.value?.error ?? props.value?.argumentHint ?? '  没有匹配项'}</text>}>
         <For each={props.value?.items}>{(item, index) => <box id={`candidate-${index()}`} flexShrink={0}>
+          {/* 内容宽 = 终端宽 − 左右外边距 − 两侧边框 − 滚动条；多算会让描述按更宽折行，行尾字被裁掉 */}
           <ChoiceView choice={{ ...item, danger: props.danger && props.selected === index() }} selected={props.selected === index()}
-            width={Math.max(1, props.width - 3)} configuration measure={props.measure} />
+            width={Math.max(1, props.width - 2 * spacing.frame - 2 - spacing.scrollbar)} configuration measure={props.measure} />
         </box>}</For>
       </Show>
     </scrollbox>
