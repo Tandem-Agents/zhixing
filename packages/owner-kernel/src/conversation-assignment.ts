@@ -962,6 +962,8 @@ interface PreparedStored<T> {
 
 interface AssignDecision {
   readonly assignmentId: string;
+  /** 本次事务写入了这次分派（不是命中已有分派）。 */
+  readonly appended?: true;
 }
 
 export interface InProcessDispatchContextFactory {
@@ -2710,6 +2712,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       this.#signer,
       this.#verifier,
     );
+    const dispatchDigest = dispatchEnvelopeDigest(envelope);
     const existingState = await this.#select((state) => {
       const currentAssignmentId = state.assignmentByRun.get(envelope.work.runId);
       const currentAssignment = currentAssignmentId
@@ -2726,7 +2729,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (currentAssignment) {
       if (
         currentAssignment.record.assignmentId !== envelope.assignmentId ||
-        currentAssignment.record.dispatchDigest !== dispatchEnvelopeDigest(envelope)
+        currentAssignment.record.dispatchDigest !== dispatchDigest
       ) {
         throw new Error("Run already has a different durable assignment");
       }
@@ -2755,7 +2758,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (existing) {
           if (
             existing.record.assignmentId !== envelope.assignmentId ||
-            existing.record.dispatchDigest !== dispatchEnvelopeDigest(envelope)
+            existing.record.dispatchDigest !== dispatchDigest
           ) {
             throw new Error("Run already has a different durable assignment");
           }
@@ -2788,7 +2791,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           executorId: envelope.executorId,
           ownerEpoch: envelope.work.ownerEpoch,
           baseRevision: envelope.work.baseRevision,
-          dispatchDigest: dispatchEnvelopeDigest(envelope),
+          dispatchDigest,
           manifestDigest: envelope.manifest.digest,
           dispatchRef: artifact.ref,
           permissionLeaseDigest: permissionSnapshotLeaseDigest(envelope),
@@ -2818,7 +2821,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               statusRevision: (current?.statusRevision ?? 0) + 1,
             }),
           ],
-          value: { assignmentId: envelope.assignmentId },
+          value: { assignmentId: envelope.assignmentId, appended: true },
         };
       },
       [artifact.ref, ...envelopeReferences], [CONTROL_PROJECTION_ID], this.#exactCommandScope({ unsignedEnvelope }),
@@ -2827,8 +2830,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     );
     const assigned = transaction.state.assignedById.get(transaction.value.assignmentId);
     if (!assigned) throw new Error("Assigned commit did not rebuild its outbox fact");
+    // 本次事务写入的分派：它引用的就是上面写入 CAS 的同一份已签已验信封，激活仍绑定事务实际的提交；
+    // 命中已有分派时照常从原事实读取
+    const written = transaction.value.appended === true && assigned.record.dispatchRef.digest === artifact.ref.digest &&
+      assigned.record.dispatchDigest === dispatchDigest;
     return this.#materializeDispatch(
       snapshot(assigned, "Assigned outbox projection"),
+      written ? snapshot(envelope, "Written dispatch envelope") : undefined,
     );
   }
 
@@ -6439,12 +6447,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }, [], [], conversationDecisionScope({ proof }));
   }
 
+  /** `written` 只由刚写入这次分派的同一调用给出：它就是该分派引用的那份已签已验信封，不再回读 CAS。 */
   async #materializeDispatch(
     assigned: AssignedProjection,
+    written?: PendingConversationDispatch["envelope"],
   ): Promise<PendingConversationDispatch> {
-    const bytes = await this.#artifacts.get(assigned.record.dispatchRef);
-    const envelope = await verifyProtocolStep(() => validateConversationEnvelope(
-      JSON.parse(Buffer.from(bytes).toString("utf8")) as PendingConversationDispatch["envelope"],
+    const envelope = written ?? await verifyProtocolStep(async () => validateConversationEnvelope(
+      JSON.parse(Buffer.from(await this.#artifacts.get(assigned.record.dispatchRef)).toString("utf8")) as PendingConversationDispatch["envelope"],
       this.#verifier,
     ));
     const payload = buildConversationActivationPayload({
