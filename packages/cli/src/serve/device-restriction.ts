@@ -21,7 +21,9 @@ export type DeviceRestriction =
   | { readonly kind: "removed" }
   | { readonly kind: "uninstalled" }
   /** 重新配对已在值班设备提交，本机还没完成接续（旧移除仍约束本机），重试 zz pair 续做 */
-  | { readonly kind: "rejoin-pending" };
+  | { readonly kind: "rejoin-pending" }
+  /** 分布式 home 还没建立恢复根：宿主只开着恢复副本通道，等已配对设备协助建根，可能等很久 */
+  | { readonly kind: "recovery-root-pending" };
 
 /** 设备受限时宿主启动的结果：消息保留原有英文以便日志检索，restriction 供呈现。 */
 export class DeviceRestrictedError extends Error {
@@ -66,6 +68,15 @@ export async function publishDeviceRestriction(
 ): Promise<void> {
   const target = deviceRestrictionMarkerPath(zhixingHome);
   if (!restriction) {
+    // 外来标记只有确证原进程已退出（PID 不在）或 PID 已被复用（出生时间不同）才清；
+    // 身份不可证（读不到出生、标记没有出生时间而 PID 仍在）一律留着。本进程的标记照常清
+    const current = await readDeviceRestriction(zhixingHome);
+    if (current && current.pid !== process.pid) {
+      const birth = await readBirth(current.pid).catch((): PlatformProcessBirth => ({ kind: "unknown" }));
+      const exited = birth.kind === "absent" ||
+        (birth.kind === "present" && current.startTime !== null && birth.startTime !== current.startTime);
+      if (!exited) return;
+    }
     await rm(target, { force: true });
     return;
   }
@@ -95,7 +106,9 @@ const readBirth: ProcessBirthReader = pid => readPlatformProcessBirth(pid, noFal
  * 读不到出生时间（任一侧）按未知处理，不冒称正在取回，调用方照常拉起或预拉起。
  */
 export async function retrievingHostAlive(marker: DeviceRestrictionMarker | undefined, birth: ProcessBirthReader = readBirth): Promise<boolean> {
-  if (marker?.restriction.kind !== "removal-retrieving" || marker.startTime === null) return false;
+  // 两种长等待的受限宿主都在运行并占着这个 home：移除取回、等配对设备协助建恢复根
+  const waiting = marker?.restriction.kind === "removal-retrieving" || marker?.restriction.kind === "recovery-root-pending";
+  if (!marker || !waiting || marker.startTime === null) return false;
   const current = await birth(marker.pid).catch((): PlatformProcessBirth => ({ kind: "unknown" }));
   return current.kind === "present" && current.startTime === marker.startTime;
 }
@@ -116,7 +129,8 @@ export function restrictionOfLaunch(marker: DeviceRestrictionMarker | undefined,
 function parseRestriction(value: unknown): DeviceRestriction | undefined {
   if (!value || typeof value !== "object") return undefined;
   const { kind, state, cleanup } = value as { kind?: unknown; state?: unknown; cleanup?: unknown };
-  if (kind === "removal-retrieving" || kind === "removed" || kind === "uninstalled" || kind === "rejoin-pending") return { kind };
+  if (kind === "removal-retrieving" || kind === "removed" || kind === "uninstalled" || kind === "rejoin-pending" ||
+      kind === "recovery-root-pending") return { kind };
   if (kind === "removal-domain-state" &&
       (state === "target-suspended" || state === "membership-mismatch" || state === "domain-incompatible" || state === "superseded")) {
     return { kind, state };
@@ -134,6 +148,8 @@ export function deviceRestrictionNotice(restriction: DeviceRestriction): string 
   switch (restriction.kind) {
     case "removal-retrieving":
       return "这台设备正在被移出它所在的家庭，正在联系值班设备完成最后一步。网络恢复后会自动继续，期间不能开始新的对话；可以直接退出。";
+    case "recovery-root-pending":
+      return "这个家庭还没有建立恢复根，本机只开着恢复副本通道，等已配对设备协助建立。期间不能开始新的对话；可以直接退出，后台等待可用 zz stop 结束。";
     case "removal-domain-state":
       switch (restriction.state) {
         case "target-suspended":
@@ -163,4 +179,55 @@ export function deviceRestrictionNotice(restriction: DeviceRestriction): string 
       return "这台设备上的家庭已被永久卸载。如需恢复，请用完整恢复备份接管值班（zz backup recover）。";
   }
   throw new TypeError("Unknown device restriction");
+}
+
+/** 受限宿主的停止请求：长等待期间还没有进程锁与服务通道，zz stop 经它协作式地请等待中的宿主退出。 */
+export function restrictedStopRequestPath(zhixingHome: string): string {
+  return path.join(zhixingHome, "server.restricted.stop.json");
+}
+
+/** 向标记里那台受限宿主提出停止：请求绑定它的进程身份，宿主核对是自己才退出，不杀进程。 */
+export async function requestRestrictedHostStop(zhixingHome: string, marker: DeviceRestrictionMarker): Promise<void> {
+  const target = restrictedStopRequestPath(zhixingHome);
+  const pending = `${target}.${process.pid}.pending`;
+  await writeFile(pending, JSON.stringify({ v: 1, pid: marker.pid, startTime: marker.startTime, requestedAt: Date.now() }), { mode: 0o600 });
+  await rename(pending, target);
+}
+
+/**
+ * 受限宿主长等待期间的停止信号：进程中断、终止，或收到与本进程身份相符的停止请求即中止。
+ * dispose 撤掉监听与轮询，并清掉已处理的请求。
+ */
+export function watchRestrictedHostStop(
+  zhixingHome: string,
+  startTime: Promise<number | null> = deviceRestrictionHostStartTime(),
+  pollMs = 250,
+): { readonly signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const stop = () => controller.abort(new Error("Restricted host stop requested"));
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  const timer = setInterval(() => {
+    void (async () => {
+      let value: { v?: unknown; pid?: unknown; startTime?: unknown } | undefined;
+      try { value = JSON.parse(await readFile(restrictedStopRequestPath(zhixingHome), "utf8")); } catch { return; }
+      if (value?.v === 1 && value.pid === process.pid && value.startTime === await startTime) stop();
+    })();
+  }, pollMs);
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearInterval(timer);
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+      // 只清发给本进程身份的请求：若已换成发给继任宿主的请求，留给它处理
+      if (controller.signal.aborted) void (async () => {
+        const requestPath = restrictedStopRequestPath(zhixingHome);
+        let value: { pid?: unknown; startTime?: unknown } | undefined;
+        try { value = JSON.parse(await readFile(requestPath, "utf8")); } catch { return; }
+        if (value?.pid === process.pid && value.startTime === await startTime) await rm(requestPath, { force: true });
+      })().catch(() => undefined);
+    },
+  };
 }

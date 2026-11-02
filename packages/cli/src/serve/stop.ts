@@ -14,11 +14,19 @@ import {
   isProcessAlive,
   readLock,
   releaseLock,
+  resolveProcessStartTime,
   type PidFileContents,
 } from "@zhixing/server/client";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { recordedHostMayBeAlive } from "./startup-server-owner.js";
-import type { PlatformProcessBirth } from "../platform/secret-platform.js";
+import { readPlatformProcessBirth, type PlatformProcessBirth } from "../platform/secret-platform.js";
+import {
+  readDeviceRestriction,
+  requestRestrictedHostStop,
+  retrievingHostAlive,
+  type DeviceRestrictionMarker,
+  type ProcessBirthReader,
+} from "./device-restriction.js";
 import {
   createManagedServiceAdapter,
   managedServiceDefinitionDigest,
@@ -49,6 +57,7 @@ export interface StopDeps {
   ) => Promise<void>;
   /** Retained only so older injected fixtures remain source-compatible; never invoked. */
   taskkillFn?: (pid: number, force: boolean) => Promise<void>;
+  readRestrictionFn?: (zhixingHome: string) => Promise<DeviceRestrictionMarker | undefined>;
   clock?: () => number;
   sleep?: (ms: number) => Promise<void>;
   console?: Pick<Console, "log" | "warn" | "error">;
@@ -62,7 +71,7 @@ export interface StopDeps {
 
 export type StopResult =
   | { status: "nothing-to-stop" }
-  | { status: "stopped"; pid: number; tookMs: number; path: "rpc" }
+  | { status: "stopped"; pid: number; tookMs: number; path: "rpc" | "restricted-request" }
   | { status: "refused"; pid: number; reason: string; blockers: string[] }
   | { status: "error"; pid: number; reason: string };
 
@@ -95,6 +104,24 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
   const verbose = opts.verbose ?? true;
   const lock = await readLockFn().catch(() => null);
   if (!lock) {
+    // 指定了要停的那个实例而它的进程锁已经消失：这个停止目标已不再匹配，跳过；不把停止转移到别的（受限的）宿主
+    if (opts.expectedLock) {
+      if (verbose) con.log(chalk.dim("知行运行实例已变化，跳过停止"));
+      return { status: "nothing-to-stop" };
+    }
+    // 长等待中的受限宿主（移除取回、等配对设备协助建恢复根）还没有进程锁：按受限标记里的进程身份找到它，协作式请它退出
+    const restricted = await (deps.readRestrictionFn ?? readDeviceRestriction)(zhixingHome);
+    const birth = deps.readProcessBirthFn ??
+      ((pid: number) => readPlatformProcessBirth(pid, resolveProcessStartTime, undefined, isAlive));
+    if (restricted && await retrievingHostAlive(restricted, birth)) {
+      return stopRestrictedHost(restricted, {
+        zhixingHome, verbose, con, birth,
+        clock: deps.clock ?? Date.now,
+        sleep: deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+        timeoutMs: opts.timeoutMs ?? 30_000,
+        pollMs: opts.pollMs ?? 300,
+      });
+    }
     if (verbose) con.log(chalk.dim("知行未运行"));
     return { status: "nothing-to-stop" };
   }
@@ -342,4 +369,33 @@ function getStopBlockers(info: ServerStopInfo): string[] {
   );
   if (keepAlive > 0) blockers.push(`还有 ${keepAlive} 个已启用定时任务`);
   return blockers;
+}
+
+/** 请标记里那台受限宿主退出并等到它真正结束；不杀进程，期限内没退出如实报错。 */
+async function stopRestrictedHost(marker: DeviceRestrictionMarker, input: {
+  readonly zhixingHome: string;
+  readonly verbose: boolean;
+  readonly con: Pick<Console, "log" | "warn" | "error">;
+  readonly birth: ProcessBirthReader;
+  readonly clock: () => number;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly timeoutMs: number;
+  readonly pollMs: number;
+}): Promise<StopResult> {
+  const startedAt = input.clock();
+  if (input.verbose) input.con.log(chalk.dim("正在请等待中的知行退出..."));
+  await requestRestrictedHostStop(input.zhixingHome, marker);
+  while (input.clock() - startedAt < input.timeoutMs) {
+    const current = await input.birth(marker.pid).catch((): PlatformProcessBirth => ({ kind: "unknown" }));
+    // 进程已不在、或同一 PID 已换成别的进程：原宿主已经退出
+    if (current.kind === "absent" || (current.kind === "present" && current.startTime !== marker.startTime)) {
+      const tookMs = input.clock() - startedAt;
+      if (input.verbose) input.con.log(chalk.green(`知行已停止，用时 ${(tookMs / 1000).toFixed(1)}s`));
+      return { status: "stopped", pid: marker.pid, tookMs, path: "restricted-request" };
+    }
+    await input.sleep(input.pollMs);
+  }
+  const reason = "等待中的知行没有在期限内退出；可稍后再运行 zz stop";
+  if (input.verbose) input.con.error(chalk.red(reason));
+  return { status: "error", pid: marker.pid, reason };
 }

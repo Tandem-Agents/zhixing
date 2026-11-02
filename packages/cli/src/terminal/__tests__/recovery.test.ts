@@ -32,6 +32,15 @@ describe('volatile recovery interaction', () => {
     await f.recovery.act({ kind: 'recovery-cancel', requestId: f.id() }); await finish; expect(dismissed).toBe(true);
     await f.recovery.show('ongoing-invitation'); await f.recovery.finishDisplay(); f.recovery.close();
   });
+  it('回读提示与页面一致：展示过恢复包时指向下方内容，只回读时只请输入', async () => {
+    const shown = fixture(); await shown.recovery.show('display-only-value');
+    void shown.recovery.read().catch(() => {}); await Promise.resolve();
+    expect(shown.publish).toHaveBeenLastCalledWith(expect.objectContaining({ message: '请保存下方的恢复包，再实际粘贴或输入回读。Enter 提交；Esc 取消。' }));
+    shown.recovery.close();
+    const readOnly = fixture(); void readOnly.recovery.read().catch(() => {}); await Promise.resolve();
+    expect(readOnly.publish).toHaveBeenLastCalledWith(expect.objectContaining({ message: '请粘贴或输入恢复包。Enter 提交；Esc 取消。' }));
+    readOnly.recovery.close();
+  });
   it('rejects an in-flight read when the owning application is closed', async () => {
     const f = fixture(), read = f.recovery.read(); void read.catch(() => {}); await Promise.resolve(); f.abort.abort();
     await expect(read).rejects.toThrow('取消');

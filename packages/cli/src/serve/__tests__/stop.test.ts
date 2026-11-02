@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
-import { writeFile, access } from "node:fs/promises";
+import { writeFile, access, readFile } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import { StopRefusedError, runStopCommand, type StopDeps } from "../stop.js";
 
@@ -63,6 +63,56 @@ describe("runStopCommand durable safety boundary", () => {
       await expect(access(path.join(other, "server.state"))).resolves.toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("没有进程锁时按受限标记找到等待中的宿主，协作式请它退出并等到它结束，不杀进程", async () => {
+    const home = await createTempDir("stop-restricted-host");
+    const marker = { pid: 4242, startTime: 7, publishedAt: 1, restriction: { kind: "recovery-root-pending" as const } };
+    let exited = false;
+    const input = deps({
+      readLockFn: vi.fn(async () => null),
+      readRestrictionFn: vi.fn(async () => marker),
+      readProcessBirthFn: vi.fn(async () => exited ? { kind: "absent" as const } : { kind: "present" as const, startTime: 7 }),
+      sleep: vi.fn(async () => { exited = true; }),
+    });
+    await expect(runStopCommand({ zhixingHome: home, deps: input })).resolves.toMatchObject({
+      status: "stopped", pid: 4242, path: "restricted-request",
+    });
+    expect(JSON.parse(await readFile(path.join(home, "server.restricted.stop.json"), "utf8"))).toMatchObject({ v: 1, pid: 4242, startTime: 7 });
+    expect(input.killFn).not.toHaveBeenCalled();
+    expect(input.taskkillFn).not.toHaveBeenCalled();
+
+    // 期限内没有退出：如实报错，仍不强杀
+    const stuck = deps({
+      readLockFn: vi.fn(async () => null),
+      readRestrictionFn: vi.fn(async () => marker),
+      readProcessBirthFn: vi.fn(async () => ({ kind: "present" as const, startTime: 7 })),
+    });
+    await expect(runStopCommand({ zhixingHome: home, deps: stuck, timeoutMs: 500 })).resolves.toMatchObject({ status: "error", pid: 4242 });
+    expect(stuck.killFn).not.toHaveBeenCalled();
+  });
+
+  it("指定旧实例时不把停止转移到继任的受限宿主；同 PID 出生时间已变或身份未知时也不停", async () => {
+    const home = await createTempDir("stop-restricted-identity");
+    const successor = { pid: 424202, startTime: 200, publishedAt: 1, restriction: { kind: "recovery-root-pending" as const } };
+    const expected = { ...LOCK, pid: 424201, startTime: 100 };
+    const pinned = deps({
+      readLockFn: vi.fn(async () => null),
+      readRestrictionFn: vi.fn(async () => successor),
+      readProcessBirthFn: vi.fn(async () => ({ kind: "present" as const, startTime: 200 })),
+    });
+    await expect(runStopCommand({ zhixingHome: home, deps: pinned, expectedLock: expected })).resolves.toEqual({ status: "nothing-to-stop" });
+    await expect(access(path.join(home, "server.restricted.stop.json"))).rejects.toThrow();
+
+    for (const birth of [{ kind: "present" as const, startTime: 999 }, { kind: "unknown" as const }]) {
+      const changed = deps({
+        readLockFn: vi.fn(async () => null),
+        readRestrictionFn: vi.fn(async () => successor),
+        readProcessBirthFn: vi.fn(async () => birth),
+      });
+      await expect(runStopCommand({ zhixingHome: home, deps: changed })).resolves.toEqual({ status: "nothing-to-stop" });
+      await expect(access(path.join(home, "server.restricted.stop.json"))).rejects.toThrow();
     }
   });
 

@@ -1,13 +1,17 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
+import { readPlatformProcessBirth } from "../platform/secret-platform.js";
 import {
   deviceRestrictionMarkerPath,
   deviceRestrictionNotice,
   publishDeviceRestriction,
   readDeviceRestriction,
+  requestRestrictedHostStop,
+  restrictedStopRequestPath,
   restrictionOfLaunch,
   retrievingHostAlive,
+  watchRestrictedHostStop,
   type DeviceRestriction,
 } from "./device-restriction.js";
 
@@ -23,6 +27,7 @@ const ALL: readonly DeviceRestriction[] = [
   { kind: "removed" },
   { kind: "uninstalled" },
   { kind: "rejoin-pending" },
+  { kind: "recovery-root-pending" },
 ];
 
 describe("device restriction presentation", () => {
@@ -86,5 +91,68 @@ describe("device restriction host identity", () => {
     expect(restrictionOfLaunch({ ...retrieving, pid: 9002, startTime: 2_000, publishedAt: 10_200 }, launch)).toBe(false);
     expect(restrictionOfLaunch({ ...retrieving, pid: 4321, startTime: null, publishedAt: 3_000 }, launch)).toBe(false);
     expect(restrictionOfLaunch(undefined, launch)).toBe(false);
+  });
+
+  it("等配对设备协助建恢复根的宿主同样算长等待：存活核验与移除取回同一规则", async () => {
+    const waiting = { ...retrieving, restriction: { kind: "recovery-root-pending" as const } };
+    expect(await retrievingHostAlive(waiting, async () => ({ kind: "present", startTime: 77 }))).toBe(true);
+    expect(await retrievingHostAlive(waiting, async () => ({ kind: "absent" }))).toBe(false);
+  });
+
+  it("清除受限提示时不删另一个仍存活宿主的标记，本进程或已退出宿主的标记照常清掉", async () => {
+    const home = await createTempDir("restricted-marker-owner");
+    const other = { v: 2, pid: process.pid + 100000, startTime: 1, publishedAt: 1, restriction: { kind: "recovery-root-pending" } };
+    await writeFile(deviceRestrictionMarkerPath(home), JSON.stringify(other));
+    // 另一个 PID 的进程在本机不存在：已退出宿主留下的标记，照常清掉
+    await publishDeviceRestriction(home, undefined);
+    expect(await readDeviceRestriction(home)).toBeUndefined();
+    // 本进程自己的标记
+    await publishDeviceRestriction(home, { kind: "recovery-root-pending" }, Promise.resolve(123));
+    await publishDeviceRestriction(home, undefined);
+    expect(await readDeviceRestriction(home)).toBeUndefined();
+    // 另一个仍存活的进程（测试进程的父进程，按平台读出它的出生时间）写的标记留着
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const parent = await readPlatformProcessBirth(process.ppid, async () => null, undefined, alive);
+    if (parent.kind === "present") {
+      await writeFile(deviceRestrictionMarkerPath(home), JSON.stringify({ ...other, pid: process.ppid, startTime: parent.startTime }));
+      await publishDeviceRestriction(home, undefined);
+      expect((await readDeviceRestriction(home))?.pid).toBe(process.ppid);
+    }
+    // 外来标记没有出生时间、PID 仍在：身份不可证，留着
+    await writeFile(deviceRestrictionMarkerPath(home), JSON.stringify({ ...other, pid: process.ppid, startTime: null }));
+    await publishDeviceRestriction(home, undefined);
+    expect((await readDeviceRestriction(home))?.pid).toBe(process.ppid);
+    // 外来标记没有出生时间、PID 已不在：确证已退出，清掉
+    await writeFile(deviceRestrictionMarkerPath(home), JSON.stringify({ ...other, startTime: null }));
+    await publishDeviceRestriction(home, undefined);
+    expect(await readDeviceRestriction(home)).toBeUndefined();
+  });
+
+  it("处理过的停止请求若已换成发给继任宿主的请求，不被旧宿主清掉", async () => {
+    const home = await createTempDir("restricted-stop-successor");
+    const self = watchRestrictedHostStop(home, Promise.resolve(123), 5);
+    await requestRestrictedHostStop(home, { pid: process.pid, startTime: 123, publishedAt: 1, restriction: { kind: "recovery-root-pending" } });
+    for (let i = 0; i < 40 && !self.signal.aborted; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(self.signal.aborted).toBe(true);
+    await requestRestrictedHostStop(home, { pid: process.pid + 100000, startTime: 456, publishedAt: 2, restriction: { kind: "recovery-root-pending" } });
+    self.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(JSON.parse(await readFile(restrictedStopRequestPath(home), "utf8"))).toMatchObject({ pid: process.pid + 100000, startTime: 456 });
+  });
+
+  it("受限宿主只响应与自己进程身份相符的停止请求，处理后清掉请求", async () => {
+    const home = await createTempDir("restricted-stop-request");
+    const other = watchRestrictedHostStop(home, Promise.resolve(123), 5);
+    await requestRestrictedHostStop(home, { pid: process.pid, startTime: 999, publishedAt: 1, restriction: { kind: "recovery-root-pending" } });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(other.signal.aborted).toBe(false);
+    other.dispose();
+    const self = watchRestrictedHostStop(home, Promise.resolve(123), 5);
+    await requestRestrictedHostStop(home, { pid: process.pid, startTime: 123, publishedAt: 1, restriction: { kind: "recovery-root-pending" } });
+    for (let i = 0; i < 40 && !self.signal.aborted; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(self.signal.aborted).toBe(true);
+    self.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(readFile(restrictedStopRequestPath(home), "utf8")).rejects.toThrow();
   });
 });

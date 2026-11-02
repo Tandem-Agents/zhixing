@@ -63,7 +63,10 @@ export class TerminalRecovery {
   async #publish(): Promise<void> {
     const current = this.#current; if (!current) return;
     await this.ports.publish({ kind: 'recovery', title: current.title, requestId: current.id,
-      message: current.input ? '请保存上方内容，再实际粘贴或输入恢复包回读。Enter 提交；Esc 取消。' : '保密内容仅在当前页面显示。可选择复制，PgUp/PgDn 翻页。',
+      // 提示在保密内容之上（页面先显示提示、再显示内容），所以指向“下方”；只回读、没有展示内容时只请输入
+      message: !current.input ? '保密内容仅在当前页面显示。可选择复制，PgUp/PgDn 翻页。'
+        : current.value ? '请保存下方的恢复包，再实际粘贴或输入回读。Enter 提交；Esc 取消。'
+          : '请粘贴或输入恢复包。Enter 提交；Esc 取消。',
       recovery: { requestId: current.id, input: current.input, pages: Math.max(1, Math.ceil(current.value.length / PAGE_UNITS)) } });
     if (this.#current === current) await this.#page(0);
   }

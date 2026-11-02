@@ -40,7 +40,7 @@ import {
   type ServeTopologyPlan,
 } from "./role-topology.js";
 import type { HostProcessMode } from "./self-exec.js";
-import { DeviceRestrictedError, deviceRestrictionHostStartTime, publishDeviceRestriction, type DeviceRestriction } from "./device-restriction.js";
+import { DeviceRestrictedError, deviceRestrictionHostStartTime, publishDeviceRestriction, watchRestrictedHostStop, type DeviceRestriction } from "./device-restriction.js";
 import { resolveProcessStartTime } from "@zhixing/server/client";
 import {
   projectRuntimeConfiguration,
@@ -100,6 +100,8 @@ export interface PersistentApplicationHostDependencies<Options> {
   readonly runRemovalRetrieval: typeof runExecutorRemovalRetrieval;
   /** 设备受限状态的呈现标记：拉起方据此如实显示，不等成泛化的启动超时；不注入时不写。 */
   readonly publishDeviceRestriction?: (zhixingHome: string, restriction: DeviceRestriction | undefined) => Promise<void>;
+  /** 受限长等待的停止信号（zz stop 的协作请求与进程信号）；不注入时只响应进程信号。 */
+  readonly watchRestrictedStop?: (zhixingHome: string) => { readonly signal: AbortSignal; dispose(): void };
   readonly acquireLocalWorkspaceOwner: typeof acquireExecutorLocalWorkspaceOwner;
   readonly defineLocalWorkspaceIdentity: typeof defineLocalWorkspaceAssemblyIdentity;
   readonly importAnchorRole: () => Promise<AnchorRoleModule<Options>>;
@@ -223,12 +225,26 @@ export class PersistentApplicationHost<Options> {
         // 撤销阶段的本机移除只运行专用取回，不装配普通业务；完成后重新准备，落到既有退休路径。
         // 取回可能等很久（网络不可达时一直退避）：先发布受限状态，前台据此如实显示，不等成启动超时
         await publishRestriction({ kind: "removal-retrieving" });
-        const retrieval = await this.#dependencies.runRemovalRetrieval({
-          mesh: prepared,
-          secretStore: this.#input.secretStore,
-          zhixingHome: this.#input.zhixingHome,
-          storageGovernor: deviceCapacity.storage,
-        });
+        const stop = this.#watchRestrictedStop();
+        let retrieval: Awaited<ReturnType<typeof runExecutorRemovalRetrieval>> | undefined;
+        try {
+          retrieval = await this.#dependencies.runRemovalRetrieval({
+            mesh: prepared,
+            secretStore: this.#input.secretStore,
+            zhixingHome: this.#input.zhixingHome,
+            storageGovernor: deviceCapacity.storage,
+            signal: stop.signal,
+          });
+        } catch (error) {
+          if (!stop.signal.aborted) throw error;
+        } finally {
+          stop.dispose();
+        }
+        // 取回中被 zz stop 或进程信号停止：清掉提示，按正常停止收尾；取回进度已耐久，下次启动接着做
+        if (stop.signal.aborted) {
+          await publishRestriction(undefined).catch(() => undefined);
+          return;
+        }
         // 取回没有让本机终结：领域结论与按失联移出如实交给呈现，下次启动重新判断；不装配普通业务
         if (retrieval?.kind === "domain-state") {
           throw new DeviceRestrictedError({ kind: "removal-domain-state", state: retrieval.state },
@@ -259,6 +275,9 @@ export class PersistentApplicationHost<Options> {
 
     if (requiresRecoveryRootEstablishment(mesh)) {
       this.#input.onRecoveryRootRequired();
+      // 等已配对设备协助建根可能很久，期间还没有进程锁：先发布受限状态，前台据此如实显示、
+      // 拉起方不再起第二个宿主、zz stop 能按标记里的进程身份找到它
+      await publishRestriction({ kind: "recovery-root-pending" });
       const pairedCheckpointReceiver =
         this.#dependencies.createRecoveryRootPairedCheckpointReceiver({
           zhixingHome: this.#input.zhixingHome,
@@ -267,11 +286,23 @@ export class PersistentApplicationHost<Options> {
           bootstrapStore: mesh.bootstrapStore,
           storageMaintenance: deviceCapacity.storage,
         });
-      await this.#dependencies.runRecoveryRoot({
-        mesh,
-        secretStore: this.#input.secretStore,
-        pairedCheckpointReceiver,
-      });
+      const stop = this.#watchRestrictedStop();
+      try {
+        await this.#dependencies.runRecoveryRoot({
+          mesh,
+          secretStore: this.#input.secretStore,
+          pairedCheckpointReceiver,
+          signal: stop.signal,
+        });
+      } catch (error) {
+        if (!stop.signal.aborted) throw error;
+      } finally {
+        stop.dispose();
+        // 离开等待（建根完成、被停止或失败）即清掉提示；清不掉不影响后续，存活核验会判它已失效
+        await publishRestriction(undefined).catch(() => undefined);
+      }
+      // 等待中被停止：按正常停止收尾（外层释放资源），不当作启动失败
+      if (stop.signal.aborted) return;
       await this.#releaseCurrentMesh();
       const reprepared = await this.#prepareMesh(
         deviceCapacity,
@@ -399,6 +430,16 @@ export class PersistentApplicationHost<Options> {
     this.#localWorkspaceOwner = own(lease, () => lease.release());
   }
 
+  #watchRestrictedStop(): { readonly signal: AbortSignal; dispose(): void } {
+    if (this.#dependencies.watchRestrictedStop) return this.#dependencies.watchRestrictedStop(this.#input.zhixingHome);
+    // 测试与未注入的装配：只把进程中断、终止转成停止信号
+    const controller = new AbortController();
+    const stop = () => controller.abort(new Error("Restricted host stop requested"));
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    return { signal: controller.signal, dispose: () => { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); } };
+  }
+
   async #releaseCurrentMesh(): Promise<void> {
     const mesh = this.#mesh;
     this.#mesh = undefined;
@@ -463,6 +504,8 @@ export function createPersistentApplicationHost(
     // 宿主自己的出生时间带非原生平台回退（与 PID 锁同源）
     publishDeviceRestriction: (zhixingHome, restriction) =>
       publishDeviceRestriction(zhixingHome, restriction, deviceRestrictionHostStartTime(resolveProcessStartTime)),
+    watchRestrictedStop: (zhixingHome) =>
+      watchRestrictedHostStop(zhixingHome, deviceRestrictionHostStartTime(resolveProcessStartTime)),
     acquireLocalWorkspaceOwner: acquireExecutorLocalWorkspaceOwner,
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,
     importAnchorRole: () => import("./command.js"),

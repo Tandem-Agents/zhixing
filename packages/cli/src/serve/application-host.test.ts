@@ -196,6 +196,33 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     ]);
   });
 
+  it("等配对设备协助建根时先发布受限状态；被 zz stop 协作请求停止时按正常停止收尾、清掉提示、不装配普通业务", async () => {
+    const harness = createHarness({ roles: ["anchor", "executor"], recoveryRequired: true });
+    const published: unknown[] = [];
+    const stop = new AbortController();
+    const disposed = vi.fn();
+    const runRecoveryRoot = vi.fn(async ({ signal }: { signal?: AbortSignal }) => {
+      expect(published).toEqual([undefined, { kind: "recovery-root-pending" }]);
+      stop.abort(new Error("stop requested"));
+      if (signal?.aborted) throw signal.reason;
+    });
+    const host = new PersistentApplicationHost(createInput("on-demand"), {
+      ...harness.dependencies,
+      runRecoveryRoot: runRecoveryRoot as never,
+      publishDeviceRestriction: async (_home: string, restriction: unknown) => { published.push(restriction); },
+      watchRestrictedStop: () => ({ signal: stop.signal, dispose: disposed }),
+    });
+
+    await expect(host.run()).resolves.toBeUndefined();
+
+    expect(runRecoveryRoot.mock.calls[0]?.[0].signal).toBe(stop.signal);
+    expect(disposed).toHaveBeenCalledOnce();
+    expect(published).toEqual([undefined, { kind: "recovery-root-pending" }, undefined]);
+    expect(harness.prepareMesh).toHaveBeenCalledOnce();
+    expect(harness.roleInvocations()).toBe(0);
+    expect(harness.meshStops[0]).toHaveBeenCalledOnce();
+  });
+
   it("仅本机拓扑从未建立恢复根时不进入等待配对设备的根建立通道，普通本机运行照常装配", async () => {
     const harness = createHarness({ roles: ["anchor", "executor"], localOnlyWithoutRoot: true });
     const recoveryNotice = vi.fn();
