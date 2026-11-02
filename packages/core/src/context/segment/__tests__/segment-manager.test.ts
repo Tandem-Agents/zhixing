@@ -432,6 +432,14 @@ describe("evaluate — trigger 成功完整契约", () => {
     expect(meta.tokensAfter).toBeGreaterThan(0);
   });
 
+  it("压缩前后 token 数同口径：都含系统提示与工具定义的固定开销", async () => {
+    const sm = createSegmentManager(makeConfig({ estimator: fakeEstimator({ toolPerItem: 100 }) }));
+    const result = await sm.evaluate(makeInput(makeBigMessages()));
+    const fixed = "sys".length + TOOLS.length * 100;
+    expect(result.windowCompact!.tokensAfter).toBeGreaterThanOrEqual(fixed);
+    expect(result.windowCompact!.tokensAfter).toBeLessThan(result.windowCompact!.tokensBefore);
+  });
+
   it("事件顺序：transition_start → summarize_complete → new_started", async () => {
     const { bus, events } = captureSegmentEvents();
     const sm = createSegmentManager(makeConfig({ eventBus: bus }));

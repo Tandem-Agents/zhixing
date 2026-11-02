@@ -211,6 +211,8 @@ export type AgentEventMap = {
     model: string;
     duration: number;
     usage: TokenUsage;
+    /** 模型是否真的报了用量；false 表示请求在用量到达前中止或失败，usage 只是占位零值。缺省按已报处理。 */
+    usageReported?: boolean;
     stopReason: StopReason;
   };
 
@@ -675,7 +677,8 @@ export function projectSessionEvent(
   }
   if (event === "llm:request_end") {
     const p = payload as AgentEventMap["llm:request_end"], u = p.usage;
-    return { event, payload: { model: p.model, duration: p.duration, stopReason: p.stopReason, usage: {
+    return { event, payload: { model: p.model, duration: p.duration, stopReason: p.stopReason,
+      ...(p.usageReported === false ? { usageReported: false } : {}), usage: {
       inputTokens: u.inputTokens, outputTokens: u.outputTokens,
       ...(u.totalInputTokens === undefined ? {} : { totalInputTokens: u.totalInputTokens }),
       ...(u.cacheReadTokens === undefined ? {} : { cacheReadTokens: u.cacheReadTokens }),

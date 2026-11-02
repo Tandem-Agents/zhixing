@@ -126,8 +126,8 @@ export interface ProxyDescription {
   resolved: string | null;
   /**
    * 已脱敏的人类可读字符串，可直接打印到终端/日志/LLM 上下文。
-   * 形如：`"off (explicitly disabled)"` / `"http://***@proxy:8080 (auto: from env)"` /
-   * `"direct (auto: no HTTP_PROXY/HTTPS_PROXY env detected)"`。
+   * 形如：`"已关闭（配置中关闭了代理）"` / `"http://***@proxy:8080（来自环境变量）"` /
+   * `"直连（未检测到 HTTP_PROXY/HTTPS_PROXY 环境变量）"`。
    */
   display: string;
 }

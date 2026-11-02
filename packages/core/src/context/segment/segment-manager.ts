@@ -267,6 +267,7 @@ export class SegmentManager {
           decision,
           segmentId,
           tokensBefore,
+          this.estimateFixedTokens(input),
           toSummarize,
           toPreserve,
           errorMessage(e),
@@ -322,7 +323,8 @@ export class SegmentManager {
       summary,
       recentTurns: toPreserve,
     });
-    const tokensAfter = this.cfg.estimator.estimateMessages(newSegmentMessages);
+    // 与 tokensBefore 同口径（系统提示＋工具＋消息），压缩前后才可比
+    const tokensAfter = this.estimateFixedTokens(input) + this.cfg.estimator.estimateMessages(newSegmentMessages);
     const turnsCompacted = computeTurnsCompacted(toSummarize);
 
     const windowCompact: WindowCompact = {
@@ -381,11 +383,12 @@ export class SegmentManager {
 
   private estimateTotalTokens(input: SegmentManagerInput): number {
     const messagesForThreshold = input.providerMessages ?? input.messages;
-    return (
-      this.cfg.estimator.estimateText(input.systemPrompt) +
-      this.cfg.estimator.estimateMessages(messagesForThreshold) +
-      this.cfg.estimator.estimateTools(input.tools)
-    );
+    return this.estimateFixedTokens(input) + this.cfg.estimator.estimateMessages(messagesForThreshold);
+  }
+
+  /** 与消息无关的固定开销（系统提示＋工具定义）：压缩前后都要计入，前后数字才可比。 */
+  private estimateFixedTokens(input: SegmentManagerInput): number {
+    return this.cfg.estimator.estimateText(input.systemPrompt) + this.cfg.estimator.estimateTools(input.tools);
   }
 
   /**
@@ -444,6 +447,7 @@ export class SegmentManager {
     decision: SegmentDecision & { kind: "trigger" },
     segmentId: string,
     tokensBefore: number,
+    fixedTokens: number,
     toSummarize: readonly Message[],
     toPreserve: readonly Message[],
     summarizeError: string,
@@ -453,7 +457,7 @@ export class SegmentManager {
       buildDroppedTurnsMessage(droppedTurns),
       ...toPreserve,
     ];
-    const tokensAfter = this.cfg.estimator.estimateMessages(newSegmentMessages);
+    const tokensAfter = fixedTokens + this.cfg.estimator.estimateMessages(newSegmentMessages);
 
     const windowCompact: WindowCompact = {
       summary: `因上下文超限且摘要生成失败，前 ${droppedTurns} 轮对话已被机械截断，完整原文保存在对话历史中`,

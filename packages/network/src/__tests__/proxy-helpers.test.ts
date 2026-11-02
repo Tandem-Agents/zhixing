@@ -196,29 +196,26 @@ describe("describeProxy", () => {
   const EMPTY: NodeJS.ProcessEnv = {};
   const WITH_ENV: NodeJS.ProcessEnv = { HTTPS_PROXY: PROXY_URL };
 
-  it('"off" → mode=off, resolved=null, display 含 "off"', () => {
+  it('"off" → mode=off, resolved=null, display 说明已关闭', () => {
     const d = describeProxy("off", WITH_ENV);
     expect(d.mode).toBe("off");
     expect(d.resolved).toBeNull();
-    expect(d.display).toContain("off");
-    expect(d.display).toContain("disabled");
+    expect(d.display).toBe("已关闭（配置中关闭了代理）");
   });
 
-  it('"auto" + 有 env → mode=auto, resolved=URL, display 含 "auto: from env"', () => {
+  it('"auto" + 有 env → mode=auto, resolved=URL, display 说明来自环境变量', () => {
     const d = describeProxy("auto", WITH_ENV);
     expect(d.mode).toBe("auto");
     expect(d.resolved).toBe(PROXY_URL);
-    expect(d.display).toContain("auto");
-    expect(d.display).toContain("from env");
+    expect(d.display).toContain("来自环境变量");
     expect(d.display).toContain("127.0.0.1:7890");
   });
 
-  it('"auto" + 无 env → mode=auto, resolved=null, display 含 "direct"', () => {
+  it('"auto" + 无 env → mode=auto, resolved=null, display 说明直连', () => {
     const d = describeProxy("auto", EMPTY);
     expect(d.mode).toBe("auto");
     expect(d.resolved).toBeNull();
-    expect(d.display).toContain("direct");
-    expect(d.display).toContain("no");
+    expect(d.display).toBe("直连（未检测到 HTTP_PROXY/HTTPS_PROXY 环境变量）");
   });
 
   it("undefined 等价于 auto(任何 env 下行为一致)", () => {
@@ -226,11 +223,11 @@ describe("describeProxy", () => {
     expect(describeProxy(undefined, WITH_ENV)).toEqual(describeProxy("auto", WITH_ENV));
   });
 
-  it('explicit URL → mode=explicit, resolved=URL, display 含 "from config"', () => {
+  it('explicit URL → mode=explicit, resolved=URL, display 说明来自配置', () => {
     const d = describeProxy("http://explicit:1234", EMPTY);
     expect(d.mode).toBe("explicit");
     expect(d.resolved).toBe("http://explicit:1234");
-    expect(d.display).toContain("config");
+    expect(d.display).toContain("来自配置");
     expect(d.display).toContain("explicit:1234");
   });
 

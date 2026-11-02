@@ -88,6 +88,14 @@ describe('terminal process fold', () => {
     expect(s.p.snapshot().usage).toMatchObject({ inputTokens: 18, outputTokens: 6, contextTokens: 900 });
     expect(s.p.snapshot().usage.cacheReadTokens).toBeUndefined();
   });
+  it('用量没有真正报来的请求（中止在用量到达前）不累计、不把未知显示成 0', () => {
+    const s = setup();
+    const unknown = request(0);
+    s.event({ ...unknown, payload: { ...unknown.payload, usage: { inputTokens: 0, outputTokens: 0 }, usageReported: false } }, 'main', 1);
+    expect(s.p.snapshot().usage).toEqual({});
+    s.event(request(4), 'main', 2);
+    expect(s.p.snapshot().usage).toMatchObject({ inputTokens: 4, outputTokens: 2 });
+  });
   it('keeps real child identity, ignores wrong/duplicate terminal facts, and never closes parent on child end', () => {
     const s = setup();
     s.event({ event: 'tool:child_start', payload: { ...child, label: '检查' } });

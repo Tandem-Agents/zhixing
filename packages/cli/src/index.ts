@@ -12,6 +12,7 @@ import { Command, CommanderError, Help, InvalidArgumentError, Option } from "com
 import { terminalCommand, terminalCommandFor, commandUsesManagement } from "./terminal/command-route.js";
 import type { ManagedCommandPorts } from "./terminal/managed-command.js";
 import { realpathSync } from "node:fs";
+import { stripVTControlCharacters } from "node:util";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
@@ -70,6 +71,18 @@ const ROOT_HELP_TITLES: Readonly<Record<string, string>> = Object.freeze({
 
 function localizeHelpSyntax(value: string): string {
   return value.replaceAll("[options]", "[选项]").replaceAll("[command]", "[命令]");
+}
+
+/**
+ * 帮助排版的显示宽度：本地化后的“[选项]”等是全角，commander 默认按字符数补齐会让说明列错位。
+ * 这里只判全角区间（入口在冷启动路径上，不引入终端宽度模块）。
+ */
+function helpDisplayWidth(value: string): number {
+  let width = 0;
+  for (const char of stripVTControlCharacters(value)) {
+    width += /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(char) ? 2 : 1;
+  }
+  return width;
 }
 
 export interface CliCommandDescriptor {
@@ -177,6 +190,10 @@ program
   .helpCommand(false)
   .version(ZHIXING_CLI_VERSION, "-V, --version", "显示版本")
   .configureHelp({
+    displayWidth: helpDisplayWidth,
+    // commander 给选项说明追加的“(default: …)”“(choices: …)”换成中文
+    optionDescription: (option) => COMMANDER_HELP.optionDescription(option).replace("(default: ", "(默认：").replace("choices: ", "可选值："),
+    argumentDescription: (argument) => COMMANDER_HELP.argumentDescription(argument).replace("(default: ", "(默认：").replace("choices: ", "可选值："),
     styleTitle: (title) => ROOT_HELP_TITLES[title] ?? title,
     commandUsage: (command) => localizeHelpSyntax(COMMANDER_HELP.commandUsage(command)),
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
@@ -288,8 +305,10 @@ program
   .action(async () => {
     try {
       const { inspectDefaultLocalHealth, printDoctorReport } = await import("./maintenance/doctor.js");
-      printDoctorReport(await inspectDefaultLocalHealth());
-      return await exitCommand(0);
+      const report = await inspectDefaultLocalHealth();
+      printDoctorReport(report);
+      // 只有健康才算成功；检出需处理也是非零，便于脚本与用户按退出码判断
+      return await exitCommand(report.code === "healthy" ? 0 : 1);
     } catch (err) {
       await renderActionError(err);
       return await exitCommand(1);
@@ -736,20 +755,20 @@ workspaceCmd
   .command("status")
   .description("查看本机工作区目录状态")
   .action(async () => {
-    const { runWorkspaceCommand } = await import(
+    const { runWorkspaceCommand, describeWorkspaceResult } = await import(
       "./runtime/workspace-command.js"
     );
-    await runWorkspaceCommand((workspace) => workspace.status(), commandLogging);
+    await runWorkspaceCommand((workspace) => workspace.status(), commandLogging, describeWorkspaceResult.status);
   });
 
 workspaceCmd
   .command("list")
   .description("列出本机已授权工作区")
   .action(async () => {
-    const { runWorkspaceCommand } = await import(
+    const { runWorkspaceCommand, describeWorkspaceResult } = await import(
       "./runtime/workspace-command.js"
     );
-    await runWorkspaceCommand((workspace) => workspace.list(), commandLogging);
+    await runWorkspaceCommand((workspace) => workspace.list(), commandLogging, describeWorkspaceResult.list);
   });
 
 workspaceCmd
@@ -758,12 +777,12 @@ workspaceCmd
   .argument("<name>", "工作区名称")
   .argument("<path>", "本机目录路径")
   .action(async (name: string, targetPath: string) => {
-    const { runWorkspaceCommand } = await import(
+    const { runWorkspaceCommand, describeWorkspaceResult } = await import(
       "./runtime/workspace-command.js"
     );
     await runWorkspaceCommand((workspace) =>
       workspace.create(name, targetPath),
-     commandLogging);
+     commandLogging, describeWorkspaceResult.created);
   });
 
 workspaceCmd
@@ -790,12 +809,12 @@ workspaceCmd
       name: string,
       options: { revision: number },
     ) => {
-      const { runWorkspaceCommand } = await import(
+      const { runWorkspaceCommand, describeWorkspaceResult } = await import(
         "./runtime/workspace-command.js"
       );
       await runWorkspaceCommand((workspace) =>
         workspace.rename(currentName, name, options.revision),
-       commandLogging);
+       commandLogging, describeWorkspaceResult.renamed);
     },
   );
 
@@ -811,12 +830,12 @@ workspaceCmd
       targetPath: string,
       options: { revision: number },
     ) => {
-      const { runWorkspaceCommand } = await import(
+      const { runWorkspaceCommand, describeWorkspaceResult } = await import(
         "./runtime/workspace-command.js"
       );
       await runWorkspaceCommand((workspace) =>
         workspace.repath(name, targetPath, options.revision),
-       commandLogging);
+       commandLogging, describeWorkspaceResult.repathed);
     },
   );
 
@@ -826,13 +845,13 @@ workspaceCmd
   .argument("<name>", "工作区名称")
   .requiredOption("--revision <n>", "当前记录 revision", parseRevision)
   .action(async (name: string, options: { revision: number }) => {
-    const { runWorkspaceCommand } = await import(
+    const { runWorkspaceCommand, describeWorkspaceResult } = await import(
       "./runtime/workspace-command.js"
     );
     await runWorkspaceCommand(async (workspace) => {
       await workspace.remove(name, options.revision);
-      return { removed: name };
-    }, commandLogging);
+      return name;
+    }, commandLogging, describeWorkspaceResult.removed);
   });
 
 workspaceCmd
@@ -854,7 +873,11 @@ workspaceCmd
           expiresAt: preview.expiresAt,
           confirmation: encodeLocalWorkspaceResetPreview(preview),
         };
-      }, commandLogging);
+      }, commandLogging, (preview) => [
+        `重置影响：${typeof preview.impact === "string" ? preview.impact : JSON.stringify(preview.impact)}`,
+        `确认凭据有效至：${preview.expiresAt}`,
+        `确认重置请运行：zz workspace reset --generation ${options.generation} --confirm ${preview.confirmation}`,
+      ]);
       return;
     }
     const preview = decodeLocalWorkspaceResetPreview(options.confirm);
@@ -863,7 +886,7 @@ workspaceCmd
     }
     await runWorkspaceCommand((workspace) =>
       workspace.confirmReset(preview, preview.impact),
-     commandLogging);
+     commandLogging, () => ["已完成本机工作区目录重置。可用 zz workspace list 查看重置后的工作区。"]);
   });
 
 // ─── zhixing serve（常驻服务模式） ───
@@ -928,6 +951,14 @@ serveCmd
     }
   });
 
+
+// 带子命令的组各自用中文的帮助子命令：根命令关闭了自己的，子组否则会懒建 commander 默认的英文“display help for command”
+(function localizeHelpCommands(command: Command): void {
+  for (const child of command.commands) {
+    if (child.commands.length) child.helpCommand("help [命令]", "显示命令帮助");
+    localizeHelpCommands(child);
+  }
+})(program);
 
 export function usesInteractiveTerminal(args: readonly string[]): boolean {
   return terminalCommandFor(program, args) !== undefined;

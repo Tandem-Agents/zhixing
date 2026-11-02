@@ -23,7 +23,7 @@ export function informationText(text: string): string {
 
 export function informationModelLines(model: RuntimePrimaryModelDisplayProjection): readonly string[] {
   boundedControlProjection(model, PROJECTION_BYTES);
-  return finish([`Model: ${model.model || '(未配置)'}`, `Provider: ${model.providerId || '(未配置)'}`]);
+  return finish([`模型：${model.model || '(未配置)'}`, `服务商：${model.providerId || '(未配置)'}`]);
 }
 
 export function informationUsageLines(view: TerminalUsageProjection): readonly string[] {
@@ -74,7 +74,7 @@ export function informationCompactLines(result: SessionCompactResult): readonly 
     `⚠ 摘要服务不可用（${label(result.emergencyFloor.error, 512)}）。`,
     `已应急保留最近对话，较早的 ${number(result.emergencyFloor.droppedTurns)} 轮已截断；完整原文仍在对话历史中。`);
   const detail = known(result.tokensBefore) && known(result.tokensAfter)
-    ? `${Math.round(result.tokensBefore / 1000)}k → ${Math.round(result.tokensAfter / 1000)}k tokens` : '窗口已折叠';
+    ? `${tokens(result.tokensBefore)} → ${tokens(result.tokensAfter)} tokens` : '窗口已折叠';
   lines.push(`✓ 压缩完成，${detail}。`);
   return finish(lines);
 }

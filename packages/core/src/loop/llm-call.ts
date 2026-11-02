@@ -114,6 +114,8 @@ export async function* streamLLMCall(
 
   let stopReason: StopReason = "end_turn";
   let usage: TokenUsage = emptyUsage();
+  // 模型是否真的报了用量：中止或失败在 message_end 之前时 usage 只是占位零值，展示方不能当成真实的 0
+  let usageReported = false;
   // provider error event 路径用 —— 与 abort 分离 (abort 走 aborted variant，不走 error)
   let providerError: AgentError | undefined;
 
@@ -173,6 +175,7 @@ export async function* streamLLMCall(
         case "message_end":
           stopReason = event.stopReason;
           usage = event.usage;
+          usageReported = true;
           break;
 
         case "error":
@@ -214,6 +217,7 @@ export async function* streamLLMCall(
         model,
         duration,
         usage,
+        usageReported,
         stopReason,
       });
 
@@ -251,6 +255,7 @@ export async function* streamLLMCall(
       model,
       duration,
       usage,
+      usageReported,
       stopReason,
     });
     return {
@@ -271,6 +276,7 @@ export async function* streamLLMCall(
     model,
     duration,
     usage,
+    usageReported,
     stopReason,
   });
 

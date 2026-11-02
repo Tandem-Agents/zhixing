@@ -8,8 +8,8 @@ const text = (lines: readonly string[]) => lines.join('\n');
 
 describe('terminal information presentation', () => {
   it('displays only the supplied current model projection, including unconfigured state', () => {
-    expect(informationModelLines({ model: 'model-a', providerId: 'provider-a' })).toEqual(['Model: model-a', 'Provider: provider-a']);
-    expect(informationModelLines({ model: '', providerId: '' })).toEqual(['Model: (未配置)', 'Provider: (未配置)']);
+    expect(informationModelLines({ model: 'model-a', providerId: 'provider-a' })).toEqual(['模型：model-a', '服务商：provider-a']);
+    expect(informationModelLines({ model: '', providerId: '' })).toEqual(['模型：(未配置)', '服务商：(未配置)']);
   });
   it('distinguishes request capacity, effective window, nominal window and optional calibration', () => {
     const rendered = text(informationUsageLines(usage()));
@@ -48,11 +48,13 @@ describe('terminal information presentation', () => {
   });
   it('renders each compression result and puts mechanical truncation cost before success', () => {
     expect(informationCompactLines({ modified: false })).toEqual(['已无可压缩内容。']);
-    expect(text(informationCompactLines({ modified: true, tokensBefore: 82_000, tokensAfter: 12_000 }))).toContain('82k → 12k');
+    expect(text(informationCompactLines({ modified: true, tokensBefore: 82_000, tokensAfter: 12_000 }))).toContain('82.0k → 12.0k');
+    // 与 /usage 同一格式：剩余几百 token 时如实显示，不取整成 0k
+    expect(text(informationCompactLines({ modified: true, tokensBefore: 10_300, tokensAfter: 240 }))).toContain('10.3k → 240 tokens');
     expect(text(informationCompactLines({ modified: true, tokensAfter: 0 }))).toContain('窗口已折叠');
     const emergency = informationCompactLines({ modified: true, tokensBefore: 20_000, tokensAfter: 0, emergencyFloor: { droppedTurns: 7, error: 'summary unavailable' } });
     expect(emergency[0]).toContain('摘要服务不可用'); expect(emergency[1]).toContain('7 轮已截断');
-    expect(emergency[1]).toContain('完整原文仍在对话历史中'); expect(emergency[2]).toContain('20k → 0k');
+    expect(emergency[1]).toContain('完整原文仍在对话历史中'); expect(emergency[2]).toContain('20.0k → 0 tokens');
   });
   it('removes terminal and directional controls while retaining Chinese, emoji and line structure', () => {
     const rendered = informationText('\x1b[31m中文👩‍💻\x1b[0m\r\n下一行\x1b]0;title\x07\u202e\x00');

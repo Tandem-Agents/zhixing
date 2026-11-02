@@ -795,7 +795,14 @@ export function validateSessionEventProjection(value: SessionEventProjection): v
     return;
   }
   if (value.event === "llm:request_end") {
-    assertExactKeys(value.payload, ["model", "duration", "usage", "stopReason"], value.event);
+    // usageReported 只在“用量未到达”时出现且只能为 false：缺省即已报，接收方不必区分两种写法
+    if ("usageReported" in value.payload && value.payload.usageReported !== false) {
+      throw new TypeError("LLM usage report flag is invalid");
+    }
+    assertExactKeys(value.payload, [
+      "model", "duration", "usage", "stopReason",
+      ...("usageReported" in value.payload ? ["usageReported"] : []),
+    ], value.event);
     assertProtocolIdentifier(value.payload.model, "LLM model"); assertNonNegativeFinite(value.payload.duration, "LLM duration");
     validateTokenUsage(value.payload.usage);
     assertOneOf(value.payload.stopReason, ["end_turn", "max_tokens", "tool_use", "stop_sequence"], "LLM stop reason");

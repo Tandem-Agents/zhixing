@@ -82,7 +82,7 @@ describe('terminal information commands', () => {
     await f.owner.run('compact');
     expect(f.publish.mock.calls[0]?.[0]).toMatchObject({ busy: true, message: '正在压缩上下文…' });
     expect(f.messages()).toContain('摘要服务不可用'); expect(f.messages()).toContain('3 轮已截断');
-    expect(f.messages()).toContain('完整原文仍在对话历史中'); expect(f.text()).toContain('40k → 0k');
+    expect(f.messages()).toContain('完整原文仍在对话历史中'); expect(f.text()).toContain('40.0k → 0 tokens');
     f.controller.compact.mockResolvedValueOnce({ modified: false }); await f.owner.run('compact'); expect(f.text()).toContain('已无可压缩内容');
     f.controller.compact.mockResolvedValueOnce({ modified: true }); await f.owner.run('compact'); expect(f.text()).toContain('窗口已折叠');
     f.publish.mockClear(); f.choose.mockClear(); f.controller.compact.mockRejectedValueOnce(Error('no summarizer'));

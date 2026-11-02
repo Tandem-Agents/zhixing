@@ -5,7 +5,7 @@ import { activeWork, countWork, formatWorkItems, liveChannels, otherRpcConnectio
 /** Shared, read-only status projection. Neither surface reads backup credentials. */
 export function serverStatusLines(name: string, model: RuntimePrimaryModelDisplayProjection,
   proxy: RuntimeNetworkProxyDisplayProjection, info: ServerInfoResult | null): string[] {
-  const lines = [`对话：${name}`, `模型：${model.model || '(未配置)'}`, `提供方：${model.providerId || '(未配置)'}`, `网络代理：${proxy.display}`];
+  const lines = [`对话：${name}`, `模型：${model.model || '(未配置)'}`, `服务商：${model.providerId || '(未配置)'}`, `网络代理：${proxy.display}`];
   if (!info) return [...lines, '宿主状态暂不可用。'];
   const work = activeWork(info), other = otherRpcConnections(info), live = liveChannels(info);
   lines.push(`运行服务：pid ${info.pid} · ${info.host ?? '127.0.0.1'}:${info.port ?? '?'}`,

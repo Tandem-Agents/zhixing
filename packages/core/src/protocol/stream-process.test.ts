@@ -32,6 +32,11 @@ describe('finite process events and canonical display read', () => {
     expect(() => validateSessionEventProjection(p)).not.toThrow();
     expect(() => validateSessionEventProjection({ ...p, payload: { ...p.payload, arbitrary: true } } as SessionEventProjection)).toThrow();
   });
+  it('用量未报来的请求结束只接受 usageReported: false 一种写法', () => {
+    const ended = { model: 'm', duration: 1, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
+    expect(() => validateSessionEventProjection({ event: 'llm:request_end', payload: { ...ended, usageReported: false } })).not.toThrow();
+    expect(() => validateSessionEventProjection({ event: 'llm:request_end', payload: { ...ended, usageReported: true } })).toThrow();
+  });
   it('rejects non-finite usage and invalid child terminal states', () => {
     expect(() => validateSessionEventProjection({ event: 'llm:request_end', payload: { model: 'm', duration: 1, usage: { inputTokens: Infinity, outputTokens: 1 }, stopReason: 'end_turn' } })).toThrow();
     expect(() => validateSessionEventProjection({ event: 'tool:child_end', payload: { parentToolCallId: 'p', childLineage: 'main/sub-a', childAgentId: 'c', status: 'running', duration: 0 } } as unknown as SessionEventProjection)).toThrow();

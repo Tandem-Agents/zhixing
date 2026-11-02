@@ -104,7 +104,7 @@ export function describeProxy(
   env: NodeJS.ProcessEnv = process.env,
 ): ProxyDescription {
   if (proxy === "off") {
-    return { mode: "off", resolved: null, display: "off (explicitly disabled)" };
+    return { mode: "off", resolved: null, display: "已关闭（配置中关闭了代理）" };
   }
   if (proxy === undefined || proxy === "auto") {
     const resolved = resolveProxy(proxy, env);
@@ -112,18 +112,18 @@ export function describeProxy(
       return {
         mode: "auto",
         resolved: null,
-        display: "direct (auto: no HTTP_PROXY/HTTPS_PROXY env detected)",
+        display: "直连（未检测到 HTTP_PROXY/HTTPS_PROXY 环境变量）",
       };
     }
     return {
       mode: "auto",
       resolved,
-      display: `${redactProxyUrl(resolved)} (auto: from env)`,
+      display: `${redactProxyUrl(resolved)}（来自环境变量）`,
     };
   }
   return {
     mode: "explicit",
     resolved: proxy,
-    display: `${redactProxyUrl(proxy)} (from config)`,
+    display: `${redactProxyUrl(proxy)}（来自配置）`,
   };
 }

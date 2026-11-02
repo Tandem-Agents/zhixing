@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import { streamLLMCall } from "../llm-call.js";
 import type { AgentLoopDeps, AgentYield, LLMCallResult } from "../types.js";
 import type { StreamEvent } from "../../types/llm.js";
+import type { AgentEventMap } from "../../types/agent-events.js";
+import type { IEventBus } from "../../events/types.js";
 
 // ─── 辅助 ───
 
@@ -166,6 +168,34 @@ describe("streamLLMCall · abort 路径", () => {
       expect(result.usage.inputTokens).toBe(10);
       expect(result.usage.outputTokens).toBe(1);
     }
+  });
+
+  it("请求结束事件如实标出用量是否报来：用量到达前中止为 false，到达后为 true", async () => {
+    const ended: AgentEventMap["llm:request_end"][] = [];
+    const eventBus = {
+      emit: async (event: string, payload: unknown) => { if (event === "llm:request_end") ended.push(payload as AgentEventMap["llm:request_end"]); },
+    } as unknown as IEventBus<AgentEventMap>;
+    const before = new AbortController();
+    await drain(streamLLMCall({
+      deps: {
+        callLLM: async function* () { yield { type: "message_start" }; yield { type: "text_delta", text: "半" }; before.abort(); yield { type: "text_delta", text: "截" }; },
+        executeTool: noopExecuteTool,
+      },
+      messages: [], model: "test", toolSpecs: [], controller: before, eventBus,
+    }));
+    const after = new AbortController();
+    await drain(streamLLMCall({
+      deps: {
+        callLLM: async function* () {
+          yield { type: "message_start" };
+          yield { type: "message_end", stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 1 } };
+          after.abort();
+        },
+        executeTool: noopExecuteTool,
+      },
+      messages: [], model: "test", toolSpecs: [], controller: after, eventBus,
+    }));
+    expect(ended.map((payload) => payload.usageReported)).toEqual([false, true]);
   });
 });
 

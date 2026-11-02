@@ -226,6 +226,8 @@ export class TerminalProcessProjection {
         }
         break;
       case 'llm:request_end': {
+        // 用量没有真正报来（请求在用量到达前中止或失败）：未知不累计、不显示成 0
+        if (event.payload.usageReported === false) break;
         const u = event.payload.usage, input = getTotalInputTokens(u);
         const inputTokens = (this.#usage.inputTokens ?? 0) + input, outputTokens = (this.#usage.outputTokens ?? 0) + u.outputTokens;
         if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) { this.pause('请求用量超出展示范围'); return; }
