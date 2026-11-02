@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import {
+  resolveExecutionTrustScope,
   TrustAdministrationExecutionApplicationService,
 } from "../../trust-administration/application.js";
 import { PermissionStore } from "../permission-store.js";
@@ -14,8 +15,12 @@ describe("PermissionStore Trust Administration final mechanism", () => {
       () => store,
     );
     let id = 0;
+    const context = resolveExecutionTrustScope({
+      workspace: { deviceId: "device-1", bindingRef: "binding-1", workspaceBindingRevision: 1 },
+    });
     const application = new TrustAdministrationExecutionApplicationService({
       repository,
+      context,
       workspacePath: "/workspace",
       createRuleId: () => `rule-${++id}`,
       now: () => 100 + id,
@@ -25,9 +30,9 @@ describe("PermissionStore Trust Administration final mechanism", () => {
       arguments: { command: "npm install package" },
     })[1]!;
 
-    application.recordApproval({ kind: "allow-session", pattern });
-    application.recordApproval({ kind: "allow-context", pattern });
-    application.recordApproval({ kind: "allow-global", pattern });
+    await application.recordApproval({ kind: "allow-session", pattern });
+    await application.recordApproval({ kind: "allow-context", pattern });
+    await application.recordApproval({ kind: "allow-global", pattern });
     expect(application.securitySnapshot().userRules.map((rule) => rule.scope)).toEqual([
       "session",
       "context",
@@ -40,6 +45,7 @@ describe("PermissionStore Trust Administration final mechanism", () => {
     );
     const restarted = new TrustAdministrationExecutionApplicationService({
       repository: restartedRepository,
+      context,
       workspacePath: "/workspace",
     });
     expect(restarted.securitySnapshot().userRules.map((rule) => rule.scope)).toEqual([
@@ -59,6 +65,7 @@ describe("PermissionStore Trust Administration final mechanism", () => {
       repository: createPermissionStoreTrustAdministrationRepository(
         () => new PermissionStore({ rootDir }),
       ),
+      context,
       workspacePath: "/workspace",
     });
     expect(afterRevoke.securitySnapshot().userRules).toMatchObject([

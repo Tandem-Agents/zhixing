@@ -365,8 +365,8 @@ export interface AgentRuntime {
   subAgentUsages: (messages: readonly Message[]) => readonly TaskUsageEntry[];
   /** 当前运行体安全状态只读快照（/security 的宿主数据面）。 */
   securitySnapshot: () => RuntimeSecuritySnapshot;
-  /** Complete immutable permission input captured when issuing a durable assignment. */
-  executionPermissionRules: () => readonly PermissionRule[];
+  /** Complete immutable permission input captured when issuing a durable assignment; scope selects the run's authorization scope. */
+  executionPermissionRules: (scope?: PermissionContextId) => readonly PermissionRule[];
   /** Exact non-secret dependencies of this immutable assembled runtime. */
   executionProfile: () => RuntimeExecutionProfile;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
@@ -1207,8 +1207,8 @@ export async function createAgentRuntime(
       };
     },
 
-    executionPermissionRules(): readonly PermissionRule[] {
-      return securityExecution.executionPermissionRules();
+    executionPermissionRules(scope?: PermissionContextId): readonly PermissionRule[] {
+      return securityExecution.executionPermissionRules(scope);
     },
 
     executionProfile(): RuntimeExecutionProfile {

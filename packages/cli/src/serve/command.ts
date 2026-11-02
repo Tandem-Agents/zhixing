@@ -19,6 +19,7 @@ import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import { currentMaintenanceAbortSignal } from '@zhixing/core/resources';
 import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
+import { hostToolPermissionRuleSets } from "../runtime/kernel-tool-implementation.js";
 import { isMainConversationId } from "../conversation-selection.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
@@ -67,6 +68,7 @@ import {
 import {
   createTrustAdministrationProductApiContribution,
   TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET,
+  workspaceTrustIdentity,
 } from "@zhixing/core/trust-administration";
 import {
   createDeliveryResolutionProductApiContribution,
@@ -204,7 +206,7 @@ import {
   createAnchorWorksceneConversationStorageProjectionCleanup,
 } from "./workscene-application-adapter.js";
 import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
-import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
+import { createTrustAdministrationApplication, type WorkspaceTrustDirectory } from "./trust-administration-adapter.js";
 import { definePostAdoptionReviewLifecycleContribution } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
@@ -470,7 +472,8 @@ async function runServerProcess(
   const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(
     workspaceConfiguration,
   );
-  const permissionStorage = createPermissionStorageInfrastructure({ zhixingHome });
+  // 本宿主是持久规则的权威（锚点），显式"始终允许"在这里落地
+  const permissionStorage = createPermissionStorageInfrastructure({ zhixingHome, persistentApprovals: true });
 
   // ============================================================================
   // 恒定核心前置 —— 接入面 setup 从这里读依赖。
@@ -654,10 +657,11 @@ async function runServerProcess(
     createAnchorWorksceneAssignmentToolApplication();
   // Trust Administration owns management semantics; the adapter below only
   // maps its finite repository port to the existing storage mechanism.
+  // 其他范围的工作区命名取本机工作区登记（权威运行时装配后才可用，之前查询不带名称）
+  let workspaceTrustDirectory: WorkspaceTrustDirectory | undefined;
   const trustAdministration = createTrustAdministrationApplication({
-    configuration: workspaceConfiguration,
     repository: permissionStorage.management,
-    workspaceIdentity: permissionStorage.workspaceIdentity,
+    workspaces: async () => workspaceTrustDirectory ? workspaceTrustDirectory() : new Map(),
   });
   // serve 模式无 spinner —— 不传 renderer,pauseUI 退化为 no-op。
   // 写屏走 stdout writer（后台宿主无 chrome），retry/compact 等事件
@@ -794,6 +798,15 @@ async function runServerProcess(
     "authorityRuntime.stopStorageMaintenance",
     authorityRuntime.startupCleanup,
   );
+  workspaceTrustDirectory = async () => {
+    const environment = authorityRuntime.environment;
+    if (!environment) return new Map();
+    const descriptor = await environment.capabilitySnapshot();
+    return new Map(descriptor.workspaces.map((workspace) => [
+      workspaceTrustIdentity(descriptor.signature.keyId, workspace.bindingRef),
+      { name: workspace.displayName, revision: workspace.workspaceBindingRevision },
+    ]));
+  };
   const worksceneAuthority = createAnchorWorksceneAuthorityProjection({
     authority: authorityRuntime,
     remoteWorkspaceProbe,
@@ -833,7 +846,10 @@ async function runServerProcess(
     taskListService: builtinExtraTools.taskListService,
   });
 
-  const durableInteractions = new DurableConversationInteractionObserver();
+  const durableInteractions = new DurableConversationInteractionObserver({
+    ...(permissionStorage.explicitApprovals ? { explicitApprovals: permissionStorage.explicitApprovals } : {}),
+  });
+  permissionStorage.addTrustSedimentRecorder((sediment) => durableInteractions.recordTrustSediment(sediment));
   const advancementEvidenceRuntime = new AdvancementEvidenceHostBinding();
   const advancementConversationComposition: AdvancementConversationComposition =
     Object.freeze({
@@ -944,8 +960,8 @@ async function runServerProcess(
     : runtimeFactory;
   const jobRuntime = executor
     ? createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker, capabilities) => {
-          const projection = anchorRuntimeProjections.job(instruction, capabilities);
+        create: (instruction, confirmationBroker, capabilities, workspaceBinding) => {
+          const projection = anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null);
           return runtimeHost.createJobRuntime({
             confirmationBroker,
             ...projection,
@@ -1002,6 +1018,8 @@ async function runServerProcess(
     meshConnections,
     meshExecutorTopologyTrust,
     durableInteractions,
+    // 镜像里的信任沉淀由本宿主规则所有者接纳：构造协议运行时即交入，不留后绑定窗口
+    ...(permissionStorage.trustSediments ? { trustSediments: permissionStorage.trustSediments } : {}),
     runtimeFactory,
     conversationRuntimeStorage: conversationStorage.runtime,
     confirmationHub,
@@ -1121,6 +1139,7 @@ async function runServerProcess(
       evidenceHandler: evidence,
       assignmentRuntimeFactory,
       durableInteractions,
+      ...(permissionStorage.trustSediments ? { trustSediments: permissionStorage.trustSediments } : {}),
       advancementConfiguration,
       providerCredentials,
       lifecycleContributions,
@@ -1138,6 +1157,7 @@ async function runServerProcess(
       executorDataPlane: dataPlane,
       records: startupRecords,
     });
+    permissionStorage.addTrustSedimentRecorder((sediment) => jobs.owner.recordTrustSediment(sediment));
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
   }) : undefined;
   await observeLogPhase(startupRecords, "start-asset-maintenance", () => startAssetMaintenance({
@@ -1274,6 +1294,48 @@ async function runServerProcess(
   const boundJobRelayObligations = losslessDataPlane.jobRelayObligations;
   const boundConversationExecutorLedger = conversationServices.conversationExecutorLedger;
   const boundConversations = conversationServices.conversations;
+  // job 沉淀按任务日志核对：调度运行时在稍后的锚点装配里创建，核对等它定下来；
+  // 锚点角色未启用时定为不可查（保留不生效）
+  let settleSchedulerSedimentLookup!: (runtime: AnchorSchedulerRuntime | undefined) => void;
+  const schedulerSedimentLookup = new Promise<AnchorSchedulerRuntime | undefined>((resolve) => {
+    settleSchedulerSedimentLookup = resolve;
+  });
+  // 显式持久批准的待生效记录重开后按耐久决定核对：先查执行端台账（接纳边界），
+  // 台账已不保留该指派时查 owner 侧的耐久交互结果；都查不到的保留不生效
+  permissionStorage.bindExplicitApprovalVerifier(async (entry) => {
+    // 沉淀的待生效记录：接纳依据是 owner 日志里该指派的镜像批次；查不到的保留不生效
+    // （执行端会按既有镜像义务重放，届时重新准备并接纳），不在核对里删除
+    const sedimentSeparator = entry.requestId.indexOf("/trust-sediment:");
+    if (sedimentSeparator > 0) {
+      const sedimentId = entry.requestId.slice(sedimentSeparator + 1);
+      if (!entry.assignmentId) return "unknown";
+      if (entry.taskId) {
+        const scheduler = await schedulerSedimentLookup;
+        return scheduler && await scheduler
+          .trustSedimentMirrored(entry.taskId, entry.assignmentId, sedimentId)
+          .catch(() => false)
+          ? "accepted"
+          : "unknown";
+      }
+      if (!entry.conversationId || !boundConversationProtocol) return "unknown";
+      return await boundConversationProtocol
+        .trustSedimentMirrored(entry.conversationId, entry.assignmentId, sedimentId)
+        .catch(() => false)
+        ? "accepted"
+        : "unknown";
+    }
+    const fromLedger = entry.assignmentId && boundConversationExecutorLedger
+      ? await boundConversationExecutorLedger
+          .conversationInteractionOutcome(entry.assignmentId, entry.requestId)
+          .catch(() => undefined)
+      : undefined;
+    const outcome = fromLedger ?? (entry.conversationId && boundConversations
+      ? await boundConversations.findDurableInteractionOutcome(entry.conversationId, entry.requestId)
+      : undefined);
+    if (!outcome) return "unknown";
+    if (outcome.t !== "answered") return "rejected";
+    return outcome.decisionDigest === entry.decisionDigest ? "accepted" : "rejected";
+  });
   const boundInboundRouter = delivery?.inboundRouter;
   const boundDeliveryStack = delivery?.deliveryStack;
   const boundAdvancementRecovery = conversationServices.advancementRecovery;
@@ -1458,7 +1520,10 @@ async function runServerProcess(
     }
   }
   const startAnchorRuntime = await observeLogPhase(startupRecords, "prepare-anchor-runtime", async () => {
-    if (!boundEnabledRoles.includes("anchor")) return async () => {};
+    if (!boundEnabledRoles.includes("anchor")) {
+      settleSchedulerSedimentLookup(undefined);
+      return async () => {};
+    }
     if (
       !boundAuthorityRuntime ||
       !boundConversationProtocol ||
@@ -1533,6 +1598,9 @@ async function runServerProcess(
       ]),
       onError: (error) =>
         console.error(chalk.red(`[scheduler] ${error.message}`)),
+      ...(permissionStorage.jobTrustSediments ? { trustSediments: permissionStorage.jobTrustSediments } : {}),
+      jobPermissionRules: ({ scope, tools }) =>
+        permissionStorage.executionRulesFor(scope, hostToolPermissionRuleSets(tools)),
     });
     const prepareSchedulerGeneration = async (runtime: AnchorSchedulerRuntime) => {
       await runtime.start();
@@ -1575,6 +1643,7 @@ async function runServerProcess(
       }
     };
     const schedulerRuntime = await observeLogPhase(startupRecords, "create-scheduler", () => createSchedulerRuntime());
+    settleSchedulerSedimentLookup(schedulerRuntime);
     schedulerCleanup = startupRollback.register(
       "scheduler.stop",
       () => schedulerGenerationOwner.stopAndRelease(),
@@ -2782,6 +2851,10 @@ async function runServerProcess(
     security: createAnchorConversationSecurityProjectionPort({
       conversations: boundConversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
+      ...(boundConversationProtocol
+        ? { activeRun: (conversationId: string) => boundConversationProtocol.activeRunSecurityFacts(conversationId) }
+        : {}),
+      permissionSnapshotFor: async (digest: string) => authorityRuntime.permissionSnapshotFor(digest),
     }),
     taskLists: createAnchorConversationTaskListPort({
       conversations: boundConversations!,

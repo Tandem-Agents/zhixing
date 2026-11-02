@@ -6,6 +6,7 @@ import type { SkillMode } from "@zhixing/core/skills/catalog";
 import type {
   JobExecutionInstruction,
 } from "@zhixing/core/contracts";
+import { jobRunTrustScopeInput, type ExecutionTrustScopeInput } from "@zhixing/core/trust-administration";
 import {
   WorksceneApplicationError,
   isWorksceneSupportConversation,
@@ -49,7 +50,10 @@ import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
 import { createSkillCatalogWindowPromptProjection } from "../runtime/skill-catalog-window-projection.js";
-import type { RuntimeSecurityExecutionInfrastructure } from "./permission-storage-infrastructure.js";
+import type {
+  RuntimeSecurityExecutionBindOptions,
+  RuntimeSecurityExecutionInfrastructure,
+} from "./permission-storage-infrastructure.js";
 import type { RuntimeExecutionProfile } from "@zhixing/core/types";
 
 /** Conversation inventories are device-local, not a task's declared tool requirements.
@@ -82,15 +86,29 @@ type WorksceneRuntimeSceneIdentity = Extract<
   { readonly kind: "scene" }
 >["scene"];
 
+type RuntimeWorkspaceBinding = NonNullable<
+  NonNullable<Parameters<import("@zhixing/owner-kernel/types").RuntimeFactory["create"]>[1]>["workspaceBinding"]
+>;
+
 export interface AnchorRuntimeProjectionAssembly {
-  main(workspace?: string | null, isolated?: boolean): ConversationRuntimeProjection;
+  /** workspaceBinding 为本次运行清单里的工作区绑定，主对话的授权范围由它决定。 */
+  main(
+    workspace?: string | null,
+    isolated?: boolean,
+    workspaceBinding?: RuntimeWorkspaceBinding | null,
+  ): ConversationRuntimeProjection;
   scene(input: {
     readonly scene: WorksceneRuntimeSceneIdentity;
     readonly absolutePath: string | null;
   }): ConversationRuntimeProjection;
   ephemeral(): RuntimeProductProjection;
   jobCapabilities(): JobRuntimeCapabilities;
-  job(instruction: JobExecutionInstruction, capabilities: JobRuntimeCapabilities): {
+  /** workspaceBinding 为 job 清单里的工作区绑定，授权范围由它决定（没有则主范围）。 */
+  job(
+    instruction: JobExecutionInstruction,
+    capabilities: JobRuntimeCapabilities,
+    workspaceBinding?: RuntimeWorkspaceBinding | null,
+  ): {
     readonly profile: ConversationRuntimeProjection["profile"];
     readonly runtimeTools: RuntimeToolProjection;
     readonly windowPrompt: RuntimeProductProjection["windowPrompt"];
@@ -210,7 +228,8 @@ export function createAnchorRuntimeProjectionAssembly(input: {
   const runtimeProduct = (
     mode: SkillMode,
     productTools: readonly ToolDefinition[] = [],
-    sceneId?: string,
+    trustScope: ExecutionTrustScopeInput = {},
+    securityOptions: RuntimeSecurityExecutionBindOptions = {},
   ): RuntimeProductProjection => {
     const mcp = input.mcpTools.snapshot();
     return createRuntimeProductProjection({
@@ -232,17 +251,18 @@ export function createAnchorRuntimeProjectionAssembly(input: {
         })),
       }),
       windowPrompt: createSkillCatalogWindowPromptProjection(mode),
-      securityExecution: input.securityExecution.bind(
-        sceneId === undefined
-          ? Object.freeze({ kind: "default" })
-          : Object.freeze({ kind: "scene", sceneId }),
-      ),
+      securityExecution: input.securityExecution.bind(Object.freeze(trustScope), securityOptions),
     });
   };
-  const main = (workspace?: string | null, isolated = false): ConversationRuntimeProjection => {
+  const main = (
+    workspace?: string | null,
+    isolated = false,
+    workspaceBinding?: RuntimeWorkspaceBinding | null,
+  ): ConversationRuntimeProjection => {
     const product = runtimeProduct(
       "main",
       mainProductTools(input.worksceneAssignmentTools, input.workscenes),
+      workspaceBinding ? { workspace: workspaceBinding } : {},
     );
     return createConversationRuntimeProjection({
       ...(workspace === undefined ? {} : { workspace }),
@@ -264,7 +284,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
         input.workscenes,
         options.scene,
       ),
-      options.scene.sceneId,
+      { sceneId: options.scene.sceneId },
     );
     return createConversationRuntimeProjection({
       workspace: options.absolutePath,
@@ -279,7 +299,9 @@ export function createAnchorRuntimeProjectionAssembly(input: {
       ...product,
     });
   };
-  const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");
+  // 定时任务与 job 的确认只能答仅本次/拒绝，不提供"始终允许"
+  const ephemeral = (): RuntimeProductProjection =>
+    runtimeProduct("main", [], {}, { persistentApprovals: false });
   const jobCapabilities = (): JobRuntimeCapabilities => {
     const available = runtimeProduct("main");
     return {
@@ -290,9 +312,18 @@ export function createAnchorRuntimeProjectionAssembly(input: {
       mcpServers: [...available.runtimeTools.executionMcpServers],
     };
   };
-  const job = (instruction: JobExecutionInstruction, capabilities: JobRuntimeCapabilities) => {
+  const job = (
+    instruction: JobExecutionInstruction,
+    capabilities: JobRuntimeCapabilities,
+    workspaceBinding?: RuntimeWorkspaceBinding | null,
+  ) => {
     const baseProfile = zhixingProfile({ agentIdentity: input.agentIdentity });
-    const available = runtimeProduct("main");
+    const available = runtimeProduct(
+      "main",
+      [],
+      jobRunTrustScopeInput({ workspace: workspaceBinding }),
+      { persistentApprovals: false },
+    );
     const selection = selectJobRuntimeTools({
       instruction,
       capabilities,
@@ -335,7 +366,7 @@ export function createWorksceneConversationRuntimeFactory(input: {
   ) => Promise<void>;
 }): (
   sessionId: string,
-  environment?: { readonly workspaceRoot: string | null; readonly executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile },
+  environment?: Parameters<import("@zhixing/owner-kernel/types").RuntimeFactory["create"]>[1],
 ) => Promise<AgentRuntime> {
   return async (sessionId, environment) => {
     const issue = (projection: ConversationRuntimeProjection) => input.issue(selectFrozenRuntimeCapabilities(projection, environment?.executionProfile));
@@ -343,8 +374,11 @@ export function createWorksceneConversationRuntimeFactory(input: {
       conversationId: sessionId,
     });
     if (current.kind === "main") {
-      if (isWorksceneSupportConversation(sessionId)) return issue(input.projections.main(null, true));
-      return issue(input.projections.main(environment?.workspaceRoot));
+      const binding = environment?.workspaceBinding ?? null;
+      if (isWorksceneSupportConversation(sessionId)) return issue(input.projections.main(null, true, binding));
+      // 无显式环境的主对话按执行侧同一默认：不带工作区（执行侧冻结环境 workspaceRoot=null）。
+      // 授权范围只由清单的工作区绑定决定，与 owner 派发快照的范围同源，不从本机路径推导。
+      return issue(input.projections.main(environment ? environment.workspaceRoot : null, false, binding));
     }
     if (environment) {
       return issue(

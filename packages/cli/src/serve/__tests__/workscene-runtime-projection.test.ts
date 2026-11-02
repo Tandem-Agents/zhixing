@@ -212,9 +212,18 @@ describe("Workscene product runtime projection", () => {
     expect(withWorkspace.primaryRole).toBe("power");
     expect(withWorkspace).not.toHaveProperty("runtimeIdentity");
     expect(withWorkspace.securityExecution).toMatchObject({
-      context: { kind: "scene", sceneId: "scene-1" },
+      context: { sceneId: "scene-1" },
     });
-    expect(main.securityExecution).toMatchObject({ context: { kind: "default" } });
+    expect((main.securityExecution as never as { context: unknown }).context).toEqual({});
+    const binding = { deviceId: "device-1", bindingRef: "binding-1", workspaceBindingRevision: 3 };
+    expect((assembly.main("/workspace", false, binding).securityExecution as never as { context: unknown }).context)
+      .toEqual({ workspace: binding });
+    // job 的范围同样只从清单工作区推导：有绑定按工作区，没有才主范围
+    const capabilities = assembly.jobCapabilities();
+    expect((assembly.job({ kind: "agent-turn", prompt: "task" }, capabilities).securityExecution as never as { context: unknown }).context)
+      .toEqual({});
+    expect((assembly.job({ kind: "agent-turn", prompt: "task" }, capabilities, binding).securityExecution as never as { context: unknown }).context)
+      .toEqual({ workspace: binding });
     expect((withWorkspace.runtimeTools.implementation as never as { binding: unknown }).binding)
       .toMatchObject({ kind: "assignment", mode: "work" });
     const query = {
@@ -404,8 +413,11 @@ describe("Anchor conversation runtime routing", () => {
     await create("ws:scene-1:provided", { workspaceRoot: "/provided" });
     await create("ws:scene-2:no-workspace");
     await create("ws:scene-1:resolved");
+    // owner 侧不带环境建主对话运行时：与执行侧默认相同，不回落到配置根
+    await create("conversation-main-owner");
 
-    expect(issued).toHaveLength(4);
+    expect(issued).toHaveLength(5);
+    expect(issued[4]).toMatchObject({ workspace: null, primaryRole: "main" });
     expect(issued[0]).toMatchObject({ workspace: "/main", primaryRole: "main" });
     expect(issued[1]).toMatchObject({ workspace: "/provided", primaryRole: "power" });
     expect(issued[2]).toMatchObject({ workspace: null, primaryRole: "power" });
@@ -416,7 +428,7 @@ describe("Anchor conversation runtime routing", () => {
       { deviceId: "device-1", bindingRef: "binding-1" },
     );
     expect(prepareWorkspaceRoot).toHaveBeenCalledWith("scene-1", "/resolved");
-    expect(projectConversationRuntime).toHaveBeenCalledTimes(5);
+    expect(projectConversationRuntime).toHaveBeenCalledTimes(6);
   });
 
   it("fails before publication when reread loses the scene workspace", async () => {

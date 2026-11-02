@@ -8,10 +8,13 @@
 
 import chalk from "chalk";
 import type { PermissionContextId } from "@zhixing/core/security";
-import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
+import type {
+  TrustAdministrationRule,
+  TrustAdministrationScopeGroup,
+} from "@zhixing/core/trust-administration";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
-import { formatRuleDescription } from "./trust-rule-format.js";
+import { formatGroupedRuleDescription, formatRuleDescription } from "./trust-rule-format.js";
 
 // ─── /security ───
 
@@ -74,12 +77,12 @@ async function showSecurityOverview(opts: SecurityOptions): Promise<boolean> {
   const denyCount = rules.filter((r) => r.decision === "deny").length;
 
   const bypassCount = snapshot.builtinRules.filter((r) => r.bypassImmune).length;
+  // 两类互斥：不可覆盖的规则里也有"确认"动作的，按是否可被用户批准划分，两项之和等于总数
   const confirmCount = snapshot.builtinRules.filter(
-    (r) => r.action === "confirm",
+    (r) => !r.bypassImmune && r.action === "confirm",
   ).length;
 
   const ctxLabel = formatContextKindLabel(snapshot.contextId);
-  const ctxIdDisplay = formatContextIdInline(snapshot.contextId);
 
   if (opts.framed !== false) {
     writer.line("");
@@ -90,17 +93,26 @@ async function showSecurityOverview(opts: SecurityOptions): Promise<boolean> {
     `${edge} ${chalk.dim("上下文:")}    ${chalk.cyan(ctxLabel)}` +
       (snapshot.workspacePath ? `  ${chalk.dim(snapshot.workspacePath)}` : ""),
   );
-  writer.line(`${edge} ${chalk.dim("contextId:")} ${chalk.dim(ctxIdDisplay)}`);
+  const scope = snapshot.scope;
+  if (scope?.kind === "run") {
+    // 正在执行的运行：按它的已验签清单推导的实际范围与冻结快照
+    writer.line(
+      `${edge} ${chalk.dim("本次运行:")}  ${chalk.cyan(formatContextKindLabel(scope.contextId))}  ` +
+        chalk.dim(`冻结规则 ${scope.permissionRules.length} 条`),
+    );
+  } else {
+    writer.line(`${edge} ${chalk.dim("以上为对话默认概览；显式选择工作区的运行按该工作区范围生效")}`);
+  }
   writer.line(edge);
   writer.line(`${edge} ${chalk.bold("── 策略规则 ──")}`);
   writer.line(
-    `${edge} 内置: ${snapshot.builtinRules.length} 条 (${chalk.red(`${bypassCount} bypassImmune`)} + ${chalk.yellow(`${confirmCount} confirm`)})`,
+    `${edge} 内置: ${snapshot.builtinRules.length} 条（${chalk.red(`${bypassCount} 条禁区，每次确认`)} · ${chalk.yellow(`${confirmCount} 条需确认`)}）`,
   );
   writer.line(edge);
   writer.line(`${edge} ${chalk.bold("── 权限规则 ──")}`);
   writer.line(
     `${edge} 会话: ${sessionCount} · 上下文: ${ctxCount} · 全局: ${globalCount}` +
-      (denyCount > 0 ? chalk.red(`  (含 ${denyCount} 条 deny)`) : ""),
+      (denyCount > 0 ? chalk.red(`（含 ${denyCount} 条拒绝规则）`) : ""),
   );
   if (rules.length > 0) {
     writer.line(chalk.dim(`${edge} Tip: /trust 查看详情`));
@@ -170,6 +182,13 @@ interface TrustOptions {
   listRules: () => Promise<TrustAdministrationRule[]>;
   /** 撤销规则(宿主 trust.revoke);不存在返回 false */
   revokeRule: (id: string) => Promise<boolean>;
+  /** 当前范围以外的其他范围（分页，宿主 trust.list 的 otherScopes） */
+  listOtherScopes?: (after?: string) => Promise<{
+    readonly groups: readonly TrustAdministrationScopeGroup[];
+    readonly next?: string;
+  }>;
+  /** 撤销其他范围里的规则（带该规则所在分组的范围） */
+  revokeRuleIn?: (id: string, context: TrustAdministrationScopeGroup["context"]) => Promise<boolean>;
   writer: CliWriter;
 }
 
@@ -192,7 +211,49 @@ export async function handleTrustCommand(
   if (sub === "help") {
     printTrustHelp(opts.writer); return true;
   }
+  if (sub === "others") {
+    return listOtherTrustScopes(trimmed.slice("others".length).trim() || undefined, opts);
+  }
   return listTrustRules(opts);
+}
+
+function printScopeGroups(
+  writer: CliWriter,
+  page: { readonly groups: readonly TrustAdministrationScopeGroup[]; readonly next?: string },
+): void {
+  for (const group of page.groups) {
+    writer.line(`\n  ${chalk.bold(group.label)}${group.effective ? "" : chalk.yellow("（不再生效）")}`);
+    if (group.note) writer.line(`    ${chalk.dim(group.note)}`);
+    for (const rule of group.rules) {
+      writer.line(
+        `  ${chalk.cyan(rule.id)}  ${chalk.white(`${rule.pattern.tool} ${rule.pattern.argument}`)}`,
+      );
+      writer.line(`    ${chalk.dim(formatGroupedRuleDescription(group.label, rule))}`);
+    }
+  }
+  if (page.next) writer.line(chalk.dim(`\n  还有更多范围: /trust others ${page.next}`));
+}
+
+async function listOtherTrustScopes(after: string | undefined, opts: TrustOptions): Promise<boolean> {
+  const { writer } = opts;
+  if (!opts.listOtherScopes) {
+    writer.line(chalk.dim("\n  当前前端不支持列出其他范围\n"));
+    return true;
+  }
+  try {
+    const page = await opts.listOtherScopes(after);
+    if (page.groups.length === 0) {
+      writer.line(chalk.dim("\n  没有其他范围的信任规则\n"));
+      return true;
+    }
+    writer.line(`\n${chalk.bold("  其他范围")}`);
+    printScopeGroups(writer, page);
+    writer.line(chalk.dim("\n  撤销: /trust revoke <id>\n"));
+    return true;
+  } catch (err) {
+    writer.line(chalk.red(`\n  其他范围不可用: ${err instanceof Error ? err.message : String(err)}\n`));
+    return false;
+  }
 }
 
 async function listTrustRules(opts: TrustOptions): Promise<boolean> {
@@ -208,16 +269,25 @@ async function listTrustRules(opts: TrustOptions): Promise<boolean> {
     );
     return false;
   }
-  if (rules.length === 0) {
+  // 其他范围取不到不影响当前范围的列表
+  const others = await opts.listOtherScopes?.().catch(() => undefined);
+  const hasOthers = (others?.groups.length ?? 0) > 0;
+  if (rules.length === 0 && !hasOthers) {
     writer.line(chalk.dim("\n  暂无信任规则\n"));
     return true;
   }
-  writer.line(`\n${chalk.bold(`  信任规则 (${rules.length} 条)`)}`);
+  // 只有存在其他范围时才分组显示，否则保持原来的单一列表
+  writer.line(`\n${chalk.bold(hasOthers ? `  当前范围与全局 (${rules.length} 条)` : `  信任规则 (${rules.length} 条)`)}`);
+  if (rules.length === 0) writer.line(chalk.dim("  暂无"));
   for (const rule of rules) {
     writer.line(
       `  ${chalk.cyan(rule.id)}  ${chalk.white(`${rule.pattern.tool} ${rule.pattern.argument}`)}`,
     );
     writer.line(`    ${chalk.dim(formatRuleDescription(rule))}`);
+  }
+  if (hasOthers) {
+    writer.line(`\n${chalk.bold("  其他范围")}`);
+    printScopeGroups(writer, others!);
   }
   writer.line(chalk.dim("\n  撤销: /trust revoke <id>\n"));
   return true;
@@ -230,7 +300,14 @@ async function revokeTrustRule(id: string, opts: TrustOptions): Promise<boolean>
     return false;
   }
   try {
-    const ok = await opts.revokeRule(id);
+    let ok = await opts.revokeRule(id);
+    if (!ok && opts.listOtherScopes && opts.revokeRuleIn) {
+      // 当前范围里没有：按其他范围首页找到该规则所在分组再撤销（宿主再核一次可见）
+      // 其他范围查不到时按当前范围的结果报告（不把"不存在"变成撤销失败）
+      const others = await opts.listOtherScopes().catch(() => undefined);
+      const group = others?.groups.find((entry) => entry.rules.some((rule) => rule.id === id));
+      if (group) ok = await opts.revokeRuleIn(id, group.context);
+    }
     if (ok) {
       writer.line(chalk.dim(`\n  已撤销信任规则 ${chalk.cyan(id)}\n`));
     } else {
@@ -253,6 +330,7 @@ function printTrustHelp(writer: CliWriter): void {
   writer.line("");
   writer.line("  /trust                列出用户信任规则");
   writer.line("  /trust revoke <id>    撤销指定规则");
+  writer.line("  /trust others [游标]  列出其他范围（显式工作区、已失效工作区等）");
   writer.line("");
   writer.line(
     chalk.dim("  typeahead 模式下可在 /trust 面板浏览并 Ctrl+D 双击撤销"),
@@ -280,17 +358,3 @@ function formatContextKindLabel(
   }
 }
 
-/**
- * PermissionContextId → 紧凑 inspect 字符串（/security 概览展示用）。
- * 与 toStorageKey 格式约定一致，但属 CLI 展示层独立函数。
- */
-function formatContextIdInline(contextId: PermissionContextId): string {
-  switch (contextId.kind) {
-    case "main":
-      return "main";
-    case "workspace":
-      return `workspace-${contextId.hash}`;
-    case "scene":
-      return `scene-${contextId.sceneId}`;
-  }
-}

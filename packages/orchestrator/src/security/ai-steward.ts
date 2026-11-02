@@ -36,6 +36,8 @@ export interface StewardVerdict {
   decision: "safe" | "needs-confirm" | "escalate";
   reason: string;
   confidence: number;
+  /** 没能完成判断（调用失败、输出不可解析）时的兜底：reason 是诊断原因，只进审计，不作为察觉到的风险给用户。 */
+  unassessed?: true;
 }
 
 const SYSTEM_PROMPT = `你是知行 AI 助手的安全裁判。你独立于执行任务的主 agent，只负责判断一次"灰色地带"的外部操作是否可以安全放行。
@@ -120,5 +122,5 @@ function parseVerdict(text: string): StewardVerdict {
 }
 
 function failSafe(reason: string): StewardVerdict {
-  return { decision: "needs-confirm", reason, confidence: 0 };
+  return { decision: "needs-confirm", reason, confidence: 0, unassessed: true };
 }

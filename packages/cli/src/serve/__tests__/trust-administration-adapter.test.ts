@@ -5,11 +5,12 @@ import {
   createPermissionStoreTrustAdministrationRepository,
   PermissionStore,
 } from "@zhixing/core/security";
-import type { TrustAdministrationRepositoryRule } from "@zhixing/core/trust-administration";
+import {
+  workspaceTrustIdentity,
+  type TrustAdministrationRepositoryRule,
+} from "@zhixing/core/trust-administration";
 import { createTempDir } from "@zhixing/test-utils";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";
-import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
-import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
 import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 
 let originalHome: string | undefined;
@@ -45,6 +46,7 @@ function makeRule(
 function permissionStorage() {
   return createPermissionStorageInfrastructure({
     zhixingHome: process.env.ZHIXING_HOME!,
+    persistentApprovals: true,
   });
 }
 
@@ -55,31 +57,20 @@ function seedRepository() {
   );
 }
 
-function workspaceConfiguration(
-  configuration: Parameters<typeof createRuntimeConfigurationSnapshot>[0],
-) {
-  return projectRuntimeConfiguration(
-    createRuntimeConfigurationSnapshot(configuration),
-  ).workspace;
-}
-
 describe("Trust Administration PermissionStore adapter", () => {
   it("projects scene/global rules and preserves same-context durable revoke", async () => {
     const seed = seedRepository();
-    seed.createExecutionRule(
+    await seed.createExecutionRule(
       { kind: "scene", sceneId: "s1" },
       makeRule("rule-scene", "context", { kind: "scene", sceneId: "s1" }),
     );
-    seed.createExecutionRule(
+    await seed.createExecutionRule(
       { kind: "main" },
       makeRule("rule-global", "global"),
     );
     const storage = permissionStorage();
     const application = createTrustAdministrationApplication({
-      configuration: workspaceConfiguration({}),
       repository: storage.management,
-      workspaceIdentity: storage.workspaceIdentity,
-      sessionType: "ci",
     });
     const sceneConversation = worksceneConversationId("s1", "conversation-1");
 
@@ -100,37 +91,44 @@ describe("Trust Administration PermissionStore adapter", () => {
     })).resolves.toMatchObject({ rules: [{ id: "rule-global" }] });
   });
 
-  it("uses the same configured and cwd workspace projections as runtime assembly", async () => {
+  it("lists the main-mode context for the main conversation, the same context its execution records into", async () => {
     const storage = permissionStorage();
-    const configuredHash = storage.workspaceIdentity("/proj");
-    const cwdHash = storage.workspaceIdentity(process.cwd());
+    const bindingHash = workspaceTrustIdentity("device-1", "binding-1");
     const seed = seedRepository();
-    seed.createExecutionRule(
-      { kind: "workspace", hash: configuredHash },
-      makeRule("configured", "context", {
-        kind: "workspace",
-        hash: configuredHash,
-      }),
+    // 执行侧对无显式环境的主对话按 main 记录“始终允许（仅主模式生效）”
+    await seed.createExecutionRule({ kind: "main" }, makeRule("main-approval", "context", { kind: "main" }));
+    await seed.createExecutionRule(
+      { kind: "workspace", hash: bindingHash, revision: 1 },
+      makeRule("configured", "context", { kind: "workspace", hash: bindingHash, revision: 1 }),
     );
-    seed.createExecutionRule(
-      { kind: "workspace", hash: cwdHash },
-      makeRule("cwd", "context", { kind: "workspace", hash: cwdHash }),
-    );
+    const application = createTrustAdministrationApplication({ repository: storage.management });
+    await expect(application.query({ kind: "list" })).resolves.toMatchObject({
+      rules: [{ id: "main-approval" }],
+    });
+    await expect(application.execute({ kind: "revoke", ruleId: "main-approval" })).resolves.toMatchObject({ revoked: true });
+    await expect(application.query({ kind: "list" })).resolves.toMatchObject({ rules: [] });
+  });
 
-    await expect(createTrustAdministrationApplication({
-      configuration: workspaceConfiguration({ workspace: { root: "/proj" } }),
-      repository: storage.management,
-      workspaceIdentity: storage.workspaceIdentity,
-    }).query({ kind: "list" })).resolves.toMatchObject({
-      rules: [{ id: "configured" }],
+  it("a rule recorded by one runtime is in another runtime's dispatch snapshot, and a management revoke removes it", async () => {
+    const storage = permissionStorage();
+    const request = Object.freeze({
+      extractArgument: () => "npm test",
+      builtinRuleSets: Object.freeze([]),
+      workspacePath: null,
     });
-    await expect(createTrustAdministrationApplication({
-      configuration: workspaceConfiguration({}),
-      repository: storage.management,
-      workspaceIdentity: storage.workspaceIdentity,
-      sessionType: "interactive",
-    }).query({ kind: "list" })).resolves.toMatchObject({
-      rules: [{ id: "cwd" }],
+    const owner = storage.runtime.bind({}).create(request);
+    const executor = storage.runtime.bind({}).create(request);
+    expect(owner.executionPermissionRules()).toEqual([]);
+    const recorded = await executor.recordApproval({
+      kind: "allow-context",
+      pattern: { pattern: { tool: "bash", argument: "npm test" }, label: "npm test" },
+      requestId: "request-1",
     });
+    expect(recorded.kind).toBe("rule-created");
+    const ruleId = recorded.kind === "recorded" ? "" : recorded.rule.id;
+    expect(owner.executionPermissionRules({ kind: "main" }).map((rule) => rule.id)).toEqual([ruleId]);
+    const application = createTrustAdministrationApplication({ repository: storage.management });
+    await expect(application.execute({ kind: "revoke", ruleId })).resolves.toMatchObject({ revoked: true });
+    expect(owner.executionPermissionRules({ kind: "main" })).toEqual([]);
   });
 });

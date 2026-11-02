@@ -4,11 +4,13 @@ import { createTrustRuleArgProvider } from '../security/trust-rule-arg-provider.
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { stripAnsi } from '../tui/ansi.js';
+import { formatGroupedRuleDescription } from '../security/trust-rule-format.js';
+import type { TrustAdministrationScopeGroup } from '@zhixing/core/trust-administration';
 
 export interface TerminalTrustController { readonly current: { readonly conversationId: string } }
 export interface TerminalTrustCandidateOptions {
   readonly controller: () => TerminalTrustController | undefined;
-  readonly management: Pick<RpcManagementFacade, 'trustList' | 'trustRevoke'>;
+  readonly management: Pick<RpcManagementFacade, 'trustList' | 'trustRevoke' | 'trustOtherScopes'>;
   readonly signal: AbortSignal;
 }
 interface Context {
@@ -16,8 +18,10 @@ interface Context {
   readonly conversationId: string;
   readonly generation: number;
 }
-interface Listed extends Context { readonly ids: ReadonlySet<string>; readonly signal: AbortSignal }
-interface Retained extends Context { readonly revision: number; readonly items: ReadonlyMap<string, string> }
+type ScopeContext = TrustAdministrationScopeGroup['context'];
+/** scopes：其他范围规则 id → 它所在的范围（撤销时随请求下发，宿主再核可见）。 */
+interface Listed extends Context { readonly ids: ReadonlySet<string>; readonly signal: AbortSignal; readonly scopes: ReadonlyMap<string, ScopeContext> }
+interface Retained extends Context { readonly revision: number; readonly items: ReadonlyMap<string, string>; readonly scopes: ReadonlyMap<string, ScopeContext> }
 export interface TerminalTrustRevokeResult { readonly revoked: boolean; readonly message: string }
 
 /** Query formatting stays in the existing provider; authority and context
@@ -58,7 +62,7 @@ export class TerminalTrustCandidates {
       retained.set(item.id, id);
     }
     this.#retained = { controller: listed.controller, conversationId: listed.conversationId,
-      generation: listed.generation, revision, items: retained };
+      generation: listed.generation, revision, items: retained, scopes: listed.scopes };
   }
 
   async revoke(revision: number, id: string): Promise<TerminalTrustRevokeResult> {
@@ -68,7 +72,10 @@ export class TerminalTrustCandidates {
     this.#writing = true; this.#retained = undefined; this.#listed = undefined; ++this.#query;
     try {
       // No await may substitute a new current conversation for this identity.
-      const revoked = await this.options.management.trustRevoke(ruleId, retained.conversationId);
+      const otherScope = retained.scopes.get(ruleId);
+      const revoked = otherScope
+        ? await this.options.management.trustRevoke(ruleId, retained.conversationId, otherScope)
+        : await this.options.management.trustRevoke(ruleId, retained.conversationId);
       this.#assertCurrent(retained);
       this.#retained = undefined; this.#listed = undefined;
       return { revoked, message: revoked ? '已撤销信任规则。' : '规则已不存在；请刷新当前列表。' };
@@ -92,10 +99,27 @@ export class TerminalTrustCandidates {
     });
     // The legacy provider converts failure to []; preserve that failure at this
     // edge so the new root renders an error management panel, never an empty success.
-    const choices = await original.list(context, signal);
+    const current = await original.list(context, signal);
     this.#assertCurrent(scope);
     if (signal.aborted || query !== this.#query) throw Error('信任候选已失效，请刷新。');
     if (failed) throw failure;
+    // 其他范围（显式工作区、已失效工作区等）跟在当前范围之后；取不到不影响当前范围
+    const others = await (async () => this.options.management.trustOtherScopes(scope.conversationId))()
+      .catch(() => undefined);
+    this.#assertCurrent(scope);
+    if (signal.aborted || query !== this.#query) throw Error('信任候选已失效，请刷新。');
+    if (others) boundedControlProjection(others, 1024 * 1024);
+    const scopes = new Map<string, ScopeContext>();
+    const filter = context.query.toLowerCase();
+    const choices: ArgChoice[] = [...current];
+    for (const group of others?.groups ?? []) {
+      for (const rule of group.rules) {
+        if (filter && !`${rule.pattern.tool} ${rule.pattern.argument} ${rule.id}`.toLowerCase().includes(filter)) continue;
+        scopes.set(rule.id, group.context);
+        choices.push({ value: rule.id, label: `${rule.pattern.tool} ${rule.pattern.argument}`,
+          description: formatGroupedRuleDescription(`${group.label}${group.effective ? '' : ' · 不再生效'}`, rule) });
+      }
+    }
     const retained: ArgChoice[] = []; const ids = new Set<string>(); let bytes = 0;
     for (const originalChoice of choices) {
       const choice = typeof originalChoice === 'string' ? originalChoice : { ...originalChoice,
@@ -108,7 +132,7 @@ export class TerminalTrustCandidates {
       retained.push(choice); ids.add(id); bytes += charge;
     }
     if (choices.length > 0 && retained.length === 0) throw Error('信任规则描述超过当前展示容量，请使用 /trust 查看。');
-    this.#listed = { ...scope, signal, ids };
+    this.#listed = { ...scope, signal, ids, scopes };
     return retained;
   }
 

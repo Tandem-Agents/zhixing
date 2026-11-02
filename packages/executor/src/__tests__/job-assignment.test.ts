@@ -27,6 +27,7 @@ import type {
   TaskDeliveryDto,
   TaskDefinition,
   TrustRuleSnapshot,
+  TrustSedimentFact,
 } from "@zhixing/core/contracts";
 import {
   advanceAssignmentLedger,
@@ -43,6 +44,7 @@ import {
   channelResponderPrincipal,
   confirmationDecisionDigest,
   createSignedTrustRuleSnapshot,
+  createSignedInteractionSettlementStreamProof,
   dataPlaneTicketDigest,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
@@ -86,6 +88,7 @@ import {
   type PendingJobDispatch,
   type SystemJobHandler,
   type SystemJobResourceCoordinator,
+  type JobTrustSedimentPort,
 } from "@zhixing/owner-kernel/job-assignment";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -470,6 +473,7 @@ async function createUserHarness(
       log: FileAuthorityCommitLog,
       artifacts: FileArtifactStore,
     ) => NonNullable<ConstructorParameters<typeof JobJournal>[0]["commitParticipant"]>;
+    trustSediments?: JobTrustSedimentPort;
   } = {},
 ) {
   const trackLog = trackTestAuthorityLogs();
@@ -522,6 +526,7 @@ async function createUserHarness(
     schedulerFailureThreshold: options.schedulerFailureThreshold,
     schedulerNotices,
     commitParticipant: options.commitParticipant?.(log, artifacts),
+    trustSediments: options.trustSediments,
   });
   const executorLog = options.governed ? trackLog(new FileAuthorityCommitLog(path.join(root,"executor-authority"), artifacts,{clock,lockWaitMs:2000})) : log;
   const executorResources = options.governed ? new ExecutorResourceGovernor({log:executorLog, signer:executorIdentity, verifier:identity,
@@ -611,8 +616,10 @@ function reopenUserJournal(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
   artifacts: ArtifactStore = harness.artifacts,
   clock: () => string = () => NOW,
+  trustSediments?: JobTrustSedimentPort,
 ): JobJournal {
   return new JobJournal({
+    trustSediments,
     taskId: TASK_ID,
     anchorEpoch: 3,
     log: harness.trackLog(
@@ -2825,20 +2832,30 @@ describe("user job durable protocol", {
     await expect(
       harness.ledger.markInteractionSettlementOwnerAccepted(
         ASSIGNMENT_ID,
-        { ...proof, ticketDigest: SHA256_ZERO },
+        { settlementVersion: 2, streamProof: { ...proof, ticketDigest: SHA256_ZERO } },
       ),
     ).rejects.toThrow("signature invalid");
+    // 有真实交互的前缀省略证明拒绝
+    await expect(
+      harness.ledger.markInteractionSettlementOwnerAccepted(
+        ASSIGNMENT_ID,
+        { settlementVersion: 2 },
+      ),
+    ).rejects.toThrow("does not bind a completed audit-only settlement");
+    const { signature: _signature, ...proofPayload } = proof;
+    await expect(harness.ledger.interactionSettlementRequest(ASSIGNMENT_ID))
+      .resolves.toMatchObject({ settlementVersion: 2, streamProof: proofPayload });
 
     await expect(
       harness.ledger.markInteractionSettlementOwnerAccepted(
         ASSIGNMENT_ID,
-        proof,
+        { settlementVersion: 2, streamProof: proof },
       ),
     ).resolves.toBe(true);
     await expect(
       harness.ledger.markInteractionSettlementOwnerAccepted(
         ASSIGNMENT_ID,
-        proof,
+        { settlementVersion: 2, streamProof: proof },
       ),
     ).resolves.toBe(true);
     expect(await harness.ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).toBe(
@@ -4359,6 +4376,25 @@ describe("system job local protocol", {
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
   });
 
+  it.each([false, true])("系统任务终态资源预检缺键时锁外装入后重做，终态照常写下（恢复路径：%s）", async (recovered) => {
+    const harness = await createSystemHarness({ terminalNeedsLoad: true, crashAfterStart: recovered });
+    await harness.journal.trigger({
+      jobRunId: JOB_RUN_ID,
+      scheduledFor: NOW,
+      context: hostContext("system-trigger-terminal-load"),
+      source: "system",
+    });
+    if (recovered) {
+      await expect(harness.journal.runSystem(JOB_RUN_ID, hostContext("system-first"))).rejects.toThrow("simulated process loss");
+      harness.crashAfterStart.value = false;
+      await expect(harness.journal.resumeSystemJobs(hostContext("system-recover-terminal-load"))).resolves.toBe(1);
+    } else {
+      await expect(harness.journal.runSystem(JOB_RUN_ID, hostContext("system-terminal-load"))).resolves.toBe("committed");
+    }
+    expect(harness.terminalLoads).toBe(1);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
+  });
+
   it("redrives a queued system occurrence after resource admission is deferred", async () => {
     const harness = await createSystemHarness({ deferFirstPrepare: true });
     await harness.journal.trigger({
@@ -5603,6 +5639,7 @@ async function createSystemHarness(
   let prepareCalls = 0;
   let recoverCalls = 0;
   let terminalCalls = 0;
+  const terminalLoads = { value: 0 };
   let handlerCalls = 0;
   const resources: SystemJobResourceCoordinator = {
     async coordinate(operation) {
@@ -5659,6 +5696,9 @@ async function createSystemHarness(
     terminal({ outcome, lease }) {
       terminalCalls += 1;
       if (crashAfterStart.value) throw new Error("simulated process loss");
+      if (options.terminalNeedsLoad && terminalLoads.value === 0) {
+        throw new GovernorStateRequired([{ key: "reservation:system" }], async () => { terminalLoads.value += 1; });
+      }
       const reservationId =
         options.invalidResourceBinding === "terminal"
           ? "wrong-reservation"
@@ -5751,6 +5791,9 @@ async function createSystemHarness(
     },
     get terminalCalls() {
       return terminalCalls;
+    },
+    get terminalLoads() {
+      return terminalLoads.value;
     },
     get handlerCalls() {
       return handlerCalls;
@@ -7981,5 +8024,329 @@ describe("user assigned state edges are closed by domain", {
     await expect(
       harness.journal.reportStarted(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
     ).rejects.toThrow("verified executor failure");
+  });
+});
+
+// job 的信任沉淀与交互结果共用镜像链：中止结算的镜像目标覆盖沉淀，流投影目标只看
+// 前缀里最后一条交互结果；两侧按同一前缀事实推导，重放一致。
+describe("job trust sediments through the abort-ticket settlement", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
+  const sedimentFact = (requestId?: string): TrustSedimentFact => ({
+    pattern: { tool: "notify", argument: "*" },
+    riskLevel: "medium",
+    operation: { tool: "notify", arguments: { target: "external-service" } },
+    contributors: [
+      ...(requestId ? [{ origin: "user" as const, timestamp: 1, requestId }] : []),
+      { origin: "steward" as const, timestamp: 2 },
+      { origin: "steward" as const, timestamp: 3 },
+    ],
+  });
+
+  function recordingPort() {
+    const calls: string[] = [];
+    const answered: Record<string, boolean> = {};
+    const port: JobTrustSedimentPort = {
+      async prepare(input) {
+        calls.push(`prepare:${input.entry.requestId}`);
+        expect(input).toMatchObject({ taskId: TASK_ID, assignmentId: ASSIGNMENT_ID, executorId: EXECUTOR_ID });
+        for (const contributor of input.entry.sediment.contributors) {
+          if (contributor.requestId) answered[contributor.requestId] = await input.answered(contributor.requestId);
+        }
+      },
+      async accept(input) {
+        calls.push(`accept:${input.entry.requestId}`);
+      },
+    };
+    return { port, calls, answered };
+  }
+
+  async function finishedInteraction(
+    harness: Awaited<ReturnType<typeof createUserHarness>>,
+    requestId: string,
+  ) {
+    await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
+      requestId,
+      toolName: "notify",
+      display: { title: "Notify?", lines: ["external effect"] },
+      issuedAt: NOW,
+      ttlMs: 60_000,
+      expiresAt: "2026-07-15T09:01:00.000Z",
+    });
+    await harness.ledger.finishInteraction(ASSIGNMENT_ID, requestId, {
+      t: "auto-resolved",
+      decision: "denied",
+      reason: "no-interactive-surface",
+    });
+  }
+
+  /** 开副作用并按中止票中止，owner 按账本证据建立结算围栏；返回围栏与各条镜像事实的序号。 */
+  async function abortWithFence(harness: Awaited<ReturnType<typeof createUserHarness>>) {
+    const seqs = new Map(
+      (await harness.ledger.pendingInteractionMirrors(ASSIGNMENT_ID)).map((entry) => [entry.requestId, entry.seq]),
+    );
+    await harness.ledger.startSideEffect(ASSIGNMENT_ID, {
+      kind: "external-call",
+      toolName: "notify",
+      summary: "unknown external effect",
+      target: "external-service",
+    });
+    await harness.ledger.abortFromSurface(ASSIGNMENT_ID, surfaceAbortInput());
+    await reconcileOpenAbort(harness);
+    const [fence] = await harness.journal.pendingInteractionSettlements();
+    if (!fence) throw new Error("abort did not open an interaction settlement");
+    return { fence, seq: (requestId: string) => seqs.get(requestId)! };
+  }
+
+  /** 投影（启用时）并把整条未镜像链交 owner，返回结算请求形态。 */
+  async function projectAndMirror(
+    harness: Awaited<ReturnType<typeof createUserHarness>>,
+    journal: JobJournal = harness.journal,
+  ) {
+    if (await harness.ledger.interactionStreamProjectionEnabled(ASSIGNMENT_ID)) {
+      const spool = new AssignmentStreamSpool(path.join(harness.root, "settlement-stream"), harness.artifacts, { clock: () => NOW });
+      const writer = await AssignmentStreamWriter.open(spool, ASSIGNMENT_ID, {
+        execution: "job",
+        taskId: TASK_ID,
+        jobRunId: JOB_RUN_ID,
+        anchorEpoch: 3,
+      });
+      const projection = await projectAssignmentInteractionStream({
+        assignmentId: ASSIGNMENT_ID,
+        ledger: harness.ledger,
+        writer,
+        meta: {},
+      });
+      await harness.ledger.markInteractionStreamProjected(ASSIGNMENT_ID, projection.receipts);
+    }
+    const batch = await harness.ledger.pendingInteractionMirrorBatch(ASSIGNMENT_ID);
+    if (!batch) throw new Error("settlement mirror batch is missing");
+    const receipt = await journal.mirrorInteractions(ASSIGNMENT_ID, batch, submissionContext(harness.unsigned));
+    return { batch, receipt };
+  }
+
+  async function completeSettlement(
+    harness: Awaited<ReturnType<typeof createUserHarness>>,
+    journal: JobJournal = harness.journal,
+  ) {
+    const request = await harness.ledger.interactionSettlementRequest(ASSIGNMENT_ID);
+    await journal.completeInteractionSettlement(
+      ASSIGNMENT_ID,
+      request.settlementVersion === 2 ? request.streamProof : undefined,
+      submissionContext(harness.unsigned),
+    );
+    await expect(harness.ledger.markInteractionSettlementOwnerAccepted(ASSIGNMENT_ID, request)).resolves.toBe(true);
+    return request;
+  }
+
+  function reopenLedger(harness: Awaited<ReturnType<typeof createUserHarness>>) {
+    return new ConversationAssignmentLedger({
+      log: harness.trackLog(new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, { clock: () => NOW, lockWaitMs: 2_000 })),
+      artifacts: harness.artifacts,
+      executorId: EXECUTOR_ID,
+      signer: new TestProtocolIdentity(EXECUTOR_ID),
+      verifier: harness.identity,
+      ownerControl,
+      snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: (digest) => matchingPermissionSnapshotFor(harness.identity, digest),
+      clock: () => NOW,
+    });
+  }
+
+  async function expectSettledOnBothSides(harness: Awaited<ReturnType<typeof createUserHarness>>) {
+    await expect(reopenUserJournal(harness).pendingInteractionSettlements()).resolves.toEqual([]);
+    const ledger = reopenLedger(harness);
+    await expect(ledger.hasPendingTicketCancellation(ASSIGNMENT_ID)).resolves.toBe(false);
+    await expect(ledger.pendingInteractionMirrors(ASSIGNMENT_ID)).resolves.toEqual([]);
+    expect((await allJobRecoveryObligations(ledger)).filter((obligation) =>
+      obligation.envelope.assignmentId === ASSIGNMENT_ID && (obligation.cancellation || obligation.interaction))).toEqual([]);
+  }
+
+  it("mirrors a trailing sediment while the stream proof targets the last interaction", async () => {
+    const { port, calls, answered } = recordingPort();
+    const harness = await createUserHarness({ trustSediments: port });
+    await start(harness);
+    await finishedInteraction(harness, "interaction-a");
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact("interaction-a"));
+    const { fence, seq } = await abortWithFence(harness);
+    expect(fence).toMatchObject({
+      v: 2,
+      targetUpTo: seq("trust-sediment:1"),
+      targetInteractionRecordSeq: seq("interaction-a"),
+    });
+    const { receipt } = await projectAndMirror(harness);
+    expect(receipt).toMatchObject({
+      mirroredUpTo: seq("trust-sediment:1"),
+      ordinal: fence.targetOrdinal,
+      mirrorDigest: fence.targetMirrorDigest,
+    });
+    expect(calls).toEqual(["prepare:trust-sediment:1", "accept:trust-sediment:1"]);
+    // 自动拒绝不是用户答复，不算用户贡献
+    expect(answered).toEqual({ "interaction-a": false });
+    await harness.ledger.markInteractionsMirrored(ASSIGNMENT_ID, receipt);
+    const request = await completeSettlement(harness);
+    expect(request).toMatchObject({
+      settlementVersion: 2,
+      streamProof: { targetInteractionRecordSeq: seq("interaction-a") },
+    });
+    await expect(harness.journal.trustSedimentMirrored(ASSIGNMENT_ID, "trust-sediment:1")).resolves.toBe(true);
+    await expectSettledOnBothSides(harness);
+  });
+
+  it("targets the interaction itself when the sediment precedes it", async () => {
+    const { port, calls } = recordingPort();
+    const harness = await createUserHarness({ trustSediments: port });
+    await start(harness);
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact());
+    await finishedInteraction(harness, "interaction-a");
+    const { fence, seq } = await abortWithFence(harness);
+    expect(seq("interaction-a")).toBeGreaterThan(seq("trust-sediment:1"));
+    expect(fence).toMatchObject({
+      v: 2,
+      targetUpTo: seq("interaction-a"),
+      targetInteractionRecordSeq: seq("interaction-a"),
+    });
+    const { receipt } = await projectAndMirror(harness);
+    await harness.ledger.markInteractionsMirrored(ASSIGNMENT_ID, receipt);
+    await completeSettlement(harness);
+    expect(calls).toEqual(["prepare:trust-sediment:1", "accept:trust-sediment:1"]);
+    await expectSettledOnBothSides(harness);
+  });
+
+  it("rejects stream proofs for an earlier interaction or a missing proof in an interleaved prefix", async () => {
+    const { port } = recordingPort();
+    const harness = await createUserHarness({ trustSediments: port });
+    await start(harness);
+    await finishedInteraction(harness, "interaction-a");
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact("interaction-a"));
+    await finishedInteraction(harness, "interaction-b");
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact("interaction-b"));
+    const { fence, seq } = await abortWithFence(harness);
+    expect(fence).toMatchObject({
+      v: 2,
+      targetUpTo: seq("trust-sediment:2"),
+      targetInteractionRecordSeq: seq("interaction-b"),
+    });
+    const { receipt } = await projectAndMirror(harness);
+    await harness.ledger.markInteractionsMirrored(ASSIGNMENT_ID, receipt);
+    const proof = await harness.ledger.interactionSettlementStreamProof(ASSIGNMENT_ID);
+    expect(proof.targetInteractionRecordSeq).toBe(seq("interaction-b"));
+    const { signature: _signature, ...payload } = proof;
+    // 合法签名但目标是更早的交互：任意小于镜像目标的数都不行
+    const earlier = createSignedInteractionSettlementStreamProof({
+      ...payload,
+      targetInteractionRecordSeq: seq("interaction-a"),
+      signer: new TestProtocolIdentity(EXECUTOR_ID),
+    });
+    await expect(harness.journal.completeInteractionSettlement(ASSIGNMENT_ID, earlier, submissionContext(harness.unsigned)))
+      .rejects.toThrow("lacks its executor stream proof");
+    await expect(harness.journal.completeInteractionSettlement(ASSIGNMENT_ID, undefined, submissionContext(harness.unsigned)))
+      .rejects.toThrow("lacks its executor stream proof");
+    await expect(harness.ledger.markInteractionSettlementOwnerAccepted(ASSIGNMENT_ID, { settlementVersion: 2, streamProof: earlier }))
+      .rejects.toThrow("does not bind a completed audit-only settlement");
+    await expect(harness.ledger.markInteractionSettlementOwnerAccepted(ASSIGNMENT_ID, { settlementVersion: 1 }))
+      .rejects.toThrow("does not bind a completed audit-only settlement");
+    const request = await completeSettlement(harness);
+    if (request.settlementVersion !== 2 || !request.streamProof) throw new Error("expected a versioned settlement proof");
+    // 完成后的重放：同一证明幂等，换证明或省证明冲突
+    await harness.journal.completeInteractionSettlement(ASSIGNMENT_ID, request.streamProof, submissionContext(harness.unsigned));
+    await expect(harness.journal.completeInteractionSettlement(ASSIGNMENT_ID, earlier, submissionContext(harness.unsigned)))
+      .rejects.toThrow("conflicting stream proof");
+    await expect(harness.journal.completeInteractionSettlement(ASSIGNMENT_ID, undefined, submissionContext(harness.unsigned)))
+      .rejects.toThrow("conflicting stream proof");
+    await expectSettledOnBothSides(harness);
+  });
+
+  it("keeps the v2 identity without a stream target when projection is enabled but no interaction follows it", async () => {
+    const { port, calls } = recordingPort();
+    const harness = await createUserHarness({ trustSediments: port });
+    await start(harness);
+    await harness.ledger.enableInteractionStreamProjection(ASSIGNMENT_ID);
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact());
+    const { fence, seq } = await abortWithFence(harness);
+    expect(fence).toMatchObject({ v: 2, targetUpTo: seq("trust-sediment:1") });
+    expect(fence).not.toHaveProperty("targetInteractionRecordSeq");
+    const { receipt } = await projectAndMirror(harness);
+    await harness.ledger.markInteractionsMirrored(ASSIGNMENT_ID, receipt);
+    await expect(harness.ledger.interactionSettlementStreamProof(ASSIGNMENT_ID))
+      .rejects.toThrow("not yet derivable");
+    await expect(harness.ledger.interactionSettlementRequest(ASSIGNMENT_ID)).resolves.toEqual({ settlementVersion: 2 });
+    const forged = createSignedInteractionSettlementStreamProof({
+      v: 2,
+      assignmentId: ASSIGNMENT_ID,
+      executorId: EXECUTOR_ID,
+      ticketDigest: fence.ticketDigest,
+      sourceLastSeq: fence.sourceLastSeq,
+      sourceChainDigest: fence.sourceChainDigest,
+      targetInteractionRecordSeq: 1,
+      projectedRecordSeq: 2,
+      upToRecordSeq: 1,
+      lastStreamSeq: 1,
+      streamDigest: SHA256_ZERO,
+      ledgerChainDigest: SHA256_ZERO,
+      signer: new TestProtocolIdentity(EXECUTOR_ID),
+    });
+    // 空义务带证明、启用投影却降成旧版，两侧都拒绝
+    await expect(harness.journal.completeInteractionSettlement(ASSIGNMENT_ID, forged, submissionContext(harness.unsigned)))
+      .rejects.toThrow("without a stream target cannot consume");
+    await expect(harness.ledger.markInteractionSettlementOwnerAccepted(ASSIGNMENT_ID, { settlementVersion: 2, streamProof: forged }))
+      .rejects.toThrow("empty projection obligation");
+    await expect(harness.ledger.markInteractionSettlementOwnerAccepted(ASSIGNMENT_ID, { settlementVersion: 1 }))
+      .rejects.toThrow("does not bind a completed audit-only settlement");
+    await expect(completeSettlement(harness)).resolves.toEqual({ settlementVersion: 2 });
+    expect(calls).toEqual(["prepare:trust-sediment:1", "accept:trust-sediment:1"]);
+    await expectSettledOnBothSides(harness);
+  });
+
+  it("settles a sediment-only job without projection on the original contract", async () => {
+    const { port, calls } = recordingPort();
+    const harness = await createUserHarness({ trustSediments: port });
+    await start(harness);
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact());
+    const { fence, seq } = await abortWithFence(harness);
+    expect(fence).not.toHaveProperty("v");
+    expect(fence).toMatchObject({ targetUpTo: seq("trust-sediment:1") });
+    const { receipt } = await projectAndMirror(harness);
+    await harness.ledger.markInteractionsMirrored(ASSIGNMENT_ID, receipt);
+    await expect(harness.ledger.markInteractionSettlementOwnerAccepted(ASSIGNMENT_ID, { settlementVersion: 2 }))
+      .rejects.toThrow("empty projection obligation");
+    await expect(completeSettlement(harness)).resolves.toEqual({ settlementVersion: 1 });
+    expect(calls).toEqual(["prepare:trust-sediment:1", "accept:trust-sediment:1"]);
+    await expectSettledOnBothSides(harness);
+  });
+
+  it("replays a mirror whose receipt was lost: the reopened owner accepts again without preparing twice", async () => {
+    const first = recordingPort();
+    const harness = await createUserHarness({ trustSediments: first.port });
+    await start(harness);
+    await finishedInteraction(harness, "interaction-a");
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact("interaction-a"));
+    await abortWithFence(harness);
+    const { batch, receipt: lost } = await projectAndMirror(harness);
+    expect(first.calls).toEqual(["prepare:trust-sediment:1", "accept:trust-sediment:1"]);
+    // 执行端没收到回执：重开的 owner 收到同一批次，按重放返回原回执
+    const second = recordingPort();
+    const reopened = reopenUserJournal(harness, harness.artifacts, () => NOW, second.port);
+    const receipt = await reopened.mirrorInteractions(ASSIGNMENT_ID, batch, submissionContext(harness.unsigned));
+    expect(receipt).toEqual(lost);
+    expect(second.calls).toEqual(["accept:trust-sediment:1"]);
+    await harness.ledger.markInteractionsMirrored(ASSIGNMENT_ID, receipt);
+    await completeSettlement(harness, reopened);
+    await expect(reopened.trustSedimentMirrored(ASSIGNMENT_ID, "trust-sediment:1")).resolves.toBe(true);
+    await expectSettledOnBothSides(harness);
+  });
+
+  it("delivers a sediment before an executor failure can close the run", async () => {
+    const { port, calls } = recordingPort();
+    const harness = await createUserHarness({ trustSediments: port });
+    await start(harness);
+    await harness.ledger.recordTrustSediment(ASSIGNMENT_ID, sedimentFact());
+    const failure = { reason: "runtime failed", usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 } };
+    // 未镜像的沉淀是未结义务：失败终态不能越过它
+    await expect(harness.ledger.failExecution(ASSIGNMENT_ID, failure)).rejects.toThrow("no clean started prefix");
+    const adapter = new InProcessAssignmentSubmission({ ledger: harness.ledger, owner: harness.journal });
+    await adapter.flushInteractionMirrors(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    expect(calls).toEqual(["prepare:trust-sediment:1", "accept:trust-sediment:1"]);
+    await expect(harness.ledger.failExecution(ASSIGNMENT_ID, failure)).resolves.toBeDefined();
   });
 });

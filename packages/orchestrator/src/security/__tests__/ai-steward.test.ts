@@ -60,6 +60,14 @@ describe("AISecuritySteward", () => {
     const v = await stewardWith(emitting("这不是 JSON")).review(INPUT);
     expect(v.decision).toBe("needs-confirm");
     expect(v.confidence).toBe(0);
+    // 兜底标为没能完成判断：诊断原因保留给审计，不作为察觉到的风险
+    expect(v.unassessed).toBe(true);
+    expect(v.reason).toBe("管家输出无 JSON");
+  });
+
+  it("正常研判不带兜底标记", async () => {
+    const v = await stewardWith(emitting('{"decision":"needs-confirm","reason":"不确定","confidence":0.4}')).review(INPUT);
+    expect(v.unassessed).toBeUndefined();
   });
 
   it("无效 decision 值 → fail-safe needs-confirm", async () => {

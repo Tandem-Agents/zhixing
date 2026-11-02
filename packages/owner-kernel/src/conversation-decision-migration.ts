@@ -291,7 +291,7 @@ export async function encodeConversationDecisionRows(id: string, run: RunProject
   for (const [digest, record] of run.mirrorBatches) {
     for (const entry of record.batch.entries) {
       extra('mirrorRequests', record.assignmentId + '\0' + entry.requestId, true);
-      if (!outcomes.has(entry.requestId)) {
+      if (entry.kind === "allow-once" && !outcomes.has(entry.requestId)) {
         outcomes.add(entry.requestId);
         extra('interactionOutcome', entry.requestId, entry.outcome.t === 'answered' ? { t: 'answered', decisionDigest: entry.outcome.decisionDigest } : { t: 'closed' });
       }

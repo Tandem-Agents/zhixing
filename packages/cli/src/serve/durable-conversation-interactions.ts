@@ -8,9 +8,11 @@ import type {
   ConfirmationResolutionSource,
 } from "@zhixing/core/confirmation";
 import type { ToolDefinition, ToolSideEffectObserver } from "@zhixing/core";
+import type { ExplicitApprovalEffects } from "@zhixing/core/security";
 import type {
   AuthorityCallContext,
   IngressContext,
+  TrustSedimentFact,
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
@@ -31,6 +33,8 @@ import {
 
 export interface DurableInteractionBinding {
   readonly assignmentId: string;
+  /** 指派所属对话；显式持久批准的待生效记录据此在重开后查 owner 耐久结果。 */
+  readonly conversationId?: string;
   readonly ledger: ConversationAssignmentLedger;
   readonly submission: InProcessAssignmentSubmission;
   readonly context: AuthorityCallContext;
@@ -77,6 +81,12 @@ export class DurableConversationInteractionObserver
 {
   readonly #bindings = new AsyncLocalStorage<DurableInteractionBinding>();
   readonly #requests = new Map<string, DurableInteractionBinding>();
+  readonly #explicitApprovals: ExplicitApprovalEffects | undefined;
+
+  /** explicitApprovals 只在持久规则权威所在的锚点宿主装配。 */
+  constructor(options: { readonly explicitApprovals?: ExplicitApprovalEffects } = {}) {
+    this.#explicitApprovals = options.explicitApprovals;
+  }
   readonly #projector = new AssignmentInteractionProjector();
   readonly #surfaceAnswers = new Map<
     string,
@@ -140,6 +150,12 @@ export class DurableConversationInteractionObserver
       ? { delivery: "durable" as const } : {}) };
   }
 
+  /**
+   * 决定的接纳边界是执行端台账里的耐久交互结果。接纳前的失败（显式持久批准的待生效
+   * 记录写失败、耐久结果未提交）上抛，broker 让决定回到待确认；接纳后决定已固定，
+   * 镜像冲刷与规则物化的失败都不再回队：镜像由运行结束、取消与下次交互的既有义务补冲，
+   * 规则按已接纳决定立即生效、物化由同一所有者补做。
+   */
   async afterResolved(
     request: ConfirmationRequest,
     decision: ConfirmationDecision,
@@ -156,6 +172,24 @@ export class DurableConversationInteractionObserver
       active.surfacePrincipal,
       this.#surfaceAnswers.get(request.id),
     );
+    const persistent =
+      source.kind === "surface" &&
+      (decision.kind === "allow-context" || decision.kind === "allow-global")
+        ? decision
+        : undefined;
+    if (persistent) {
+      if (!this.#explicitApprovals) {
+        throw new Error("当前执行端不支持持久授权，请改为仅本次允许");
+      }
+      await this.#explicitApprovals.prepare({
+        requestId: request.id,
+        ...(active.conversationId ? { conversationId: active.conversationId } : {}),
+        assignmentId: active.assignmentId,
+        contextId: request.contextId,
+        decision: persistent,
+        decisionDigest: confirmationDecisionDigest(request.id, decision),
+      });
+    }
     try {
       await active.submission.finishAndMirror(
         active.assignmentId,
@@ -171,14 +205,35 @@ export class DurableConversationInteractionObserver
       if (!durableResolutionSupersedesRuntime(durable, outcome, source)) {
         throw error;
       }
-      await active.submission.flushInteractionMirrors(
-        active.assignmentId,
-        active.context,
-      );
+      await active.submission
+        .flushInteractionMirrors(active.assignmentId, active.context)
+        .catch(() => undefined);
     }
-    await this.drainAssignment(active);
+    if (persistent) {
+      await this.#explicitApprovals!.accept(request.id);
+    } else {
+      await this.#explicitApprovals?.discard(request.id);
+    }
+    await this.drainAssignment(active).catch(() => undefined);
     this.#requests.delete(request.id);
     this.#surfaceAnswers.delete(request.id);
+  }
+
+  /**
+   * 在当前耐久对话指派内记一条信任沉淀并冲刷镜像，随同一条镜像链回到 owner。
+   * 不在耐久对话指派内（job、定时任务）返回 undefined；冲刷失败时事实已在台账，
+   * 由运行结束、取消与下次交互的既有镜像义务补冲。
+   */
+  async recordTrustSediment(sediment: TrustSedimentFact): Promise<
+    { readonly assignmentId: string; readonly requestId: string; readonly mirrored: boolean } | undefined
+  > {
+    const active = this.#bindings.getStore();
+    if (!active) return undefined;
+    const recorded = await active.ledger.recordTrustSediment(active.assignmentId, sediment);
+    const mirrored = await active.submission
+      .flushInteractionMirrors(active.assignmentId, active.context)
+      .then(() => true, () => false);
+    return { assignmentId: active.assignmentId, requestId: recorded.requestId, mirrored };
   }
 
   async resolveWithSurfaceTicket(

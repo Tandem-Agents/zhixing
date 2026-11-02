@@ -199,8 +199,11 @@ export interface SessionRuntime {
   subAgentUsages?(messages: readonly Message[]): readonly RuntimeSubAgentUsageEntry[];
   /** 查询运行体当前安全状态(/security 的宿主数据面)。 */
   securitySnapshot?(): RuntimeSecuritySnapshot;
-  /** Complete immutable permission input for a newly issued durable assignment. */
-  executionPermissionRules?(): readonly PermissionRule[];
+  /**
+   * Complete immutable permission input for a newly issued durable assignment.
+   * 传入范围时按该运行的授权范围组合（owner 派发用），不传时按运行体自己的范围。
+   */
+  executionPermissionRules?(scope?: PermissionContextId): readonly PermissionRule[];
   /** Exact non-secret dependencies of this immutable assembled runtime. */
   executionProfile?(): import("@zhixing/core").RuntimeExecutionProfile;
   /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
@@ -297,6 +300,8 @@ export interface RuntimeFactory {
         readonly workspaceRoot: string | null;
         /** Select the already-frozen capability set when newer additive capabilities exist. */
         readonly executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile;
+        /** 已验签清单里的工作区绑定，授权范围由它推导；清单不带工作区时为 null。 */
+        readonly workspaceBinding?: import("@zhixing/core/contracts").EnvironmentRequirement["workspace"] | null;
     },
   ): Promise<SessionRuntime>;
 }

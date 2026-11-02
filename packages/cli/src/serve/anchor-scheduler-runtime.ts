@@ -1,5 +1,7 @@
 import type { IEventBus } from "@zhixing/core";
 import type { SchedulerFacade, SchedulerEventMap, SystemHandler } from "@zhixing/core/scheduler";
+import type { PermissionRule } from "@zhixing/core/security";
+import { jobRunTrustScopeInput, type ExecutionTrustScopeInput } from "@zhixing/core/trust-administration";
 import { LocalSchedulerFacade } from "@zhixing/core/scheduler";
 import {
   ScheduleApplicationService,
@@ -62,6 +64,7 @@ import {
   type JobLifecycleEvent,
   type PendingJobDispatch,
   type SystemJobHandler,
+  type JobTrustSedimentPort,
 } from "@zhixing/owner-kernel/job-assignment";
 import {
   type AssignmentSubmissionAuthorizer,
@@ -123,6 +126,13 @@ export interface AnchorSchedulerRuntimeOptions {
   >;
   readonly now?: () => Date;
   readonly onError?: (error: Error) => void;
+  /** job 镜像里的信任沉淀交规则权威接纳；只在规则权威所在的锚点宿主装配。 */
+  readonly trustSediments?: JobTrustSedimentPort;
+  /** job 派发冻结快照的规则：范围按 jobRunTrustScopeInput 推导，内置规则随签发的工具集合。 */
+  readonly jobPermissionRules?: (input: {
+    readonly scope: ExecutionTrustScopeInput;
+    readonly tools: readonly string[];
+  }) => readonly PermissionRule[];
 }
 
 /**
@@ -795,9 +805,16 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     };
     let prepared;
     try {
+      const jobPermissionRules = this.#options.jobPermissionRules;
       prepared = await this.#options.authority.prepareJobAssignment({
         instruction,
         capabilities: this.#options.capabilities(),
+        ...(jobPermissionRules
+          ? {
+              permissionRulesFor: ({ environment, tools }) =>
+                jobPermissionRules({ scope: jobRunTrustScopeInput(environment), tools }),
+            }
+          : {}),
         ...(await this.#remoteTargets()),
       });
     } catch (error) {
@@ -1164,6 +1181,11 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     return retirement;
   }
 
+  /** 某条 job 信任沉淀是否已随镜像被该任务日志接纳（重开核对待生效记录用）。 */
+  trustSedimentMirrored(taskId: string, assignmentId: string, requestId: string): Promise<boolean> {
+    return this.#journal(taskId).trustSedimentMirrored(assignmentId, requestId);
+  }
+
   #journal(taskId: string): JobJournal {
     let journal = this.#journals.get(taskId);
     if (journal) return journal;
@@ -1190,6 +1212,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       schedulerNotices: this.schedulerNotices,
       localExecutorId: this.#options.authority.executorId,
       clock: this.#clock,
+      ...(this.#options.trustSediments ? { trustSediments: this.#options.trustSediments } : {}),
     });
     this.#journals.set(taskId, journal);
     this.#journalLifecycleDisposers.set(

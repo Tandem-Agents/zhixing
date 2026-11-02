@@ -105,6 +105,8 @@ export interface JobRuntimePort {
     readonly jobRunId: string;
     readonly confirmationBroker: IConfirmationBroker;
     readonly capabilities: JobRuntimeCapabilities;
+    /** 清单里的工作区绑定：运行的授权范围由它决定（没有则主范围）。 */
+    readonly workspaceBinding?: NonNullable<JobEnvelope["manifest"]["environment"]["workspace"]>;
   }): Promise<JobRuntimeHandle>;
 }
 
@@ -245,6 +247,13 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
   async deliverGrant(grant: ChannelInteractionGrant): Promise<void> {
     await this.#interactions.deliverGrant(grant);
     await this.#wakeInteractionRecovery(grant.assignmentId);
+  }
+
+  /** 当前 job 运行内的信任沉淀记入台账；不在 job 运行内返回 undefined。 */
+  recordTrustSediment(
+    sediment: Parameters<DurableJobInteractionCoordinator["recordTrustSediment"]>[0],
+  ): ReturnType<DurableJobInteractionCoordinator["recordTrustSediment"]> {
+    return this.#interactions.recordTrustSediment(sediment);
   }
 
   async resolveNoInteractiveSurface(input: {
@@ -491,6 +500,9 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
           tools: envelope.manifest.tools,
           mcpServers: envelope.manifest.mcpServers,
         },
+        ...(envelope.manifest.environment.workspace
+          ? { workspaceBinding: envelope.manifest.environment.workspace }
+          : {}),
       });
       const generator = runtime.run(envelope.work.instruction, {
         runId: envelope.work.jobRunId,
@@ -855,14 +867,11 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
           return;
         }
         if (await this.options.ledger.hasOpenSideEffects(assignmentId)) {
+          // 版本与是否带流证明都由账本前缀事实推导，owner 按同一事实核对
+          const settlement =
+            await this.options.ledger.interactionSettlementRequest(assignmentId);
           const streamProof =
-            await this.options.ledger.interactionStreamProjectionEnabled(
-              assignmentId,
-            )
-              ? await this.options.ledger.interactionSettlementStreamProof(
-                  assignmentId,
-                )
-              : undefined;
+            settlement.settlementVersion === 2 ? settlement.streamProof : undefined;
           try {
             await owner.completeInteractionSettlement(
               assignmentId,
@@ -875,7 +884,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
             await this.options.ledger
               .markInteractionSettlementOwnerAccepted(
                 assignmentId,
-                streamProof,
+                settlement,
               );
           } catch (error) {
             if (!isRetryableInteractionRecoveryFailure(error)) throw error;

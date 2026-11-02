@@ -249,6 +249,17 @@ describe("buildConfirmationOptions", () => {
     expect(opts.some((o) => o.kind === "allow-global")).toBe(false);
   });
 
+  it("答复路径不支持持久批准（远程执行端、job）时只给 allow-once + deny-with-reason", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "npm install" },
+      { kind: "main" },
+      "interactive",
+      { persistentApprovals: false },
+    );
+    expect(opts.map((o) => o.kind)).toEqual(["allow-once", "deny-with-reason"]);
+  });
+
   it("逐次拍板工具只给 allow-once + deny-with-reason", () => {
     const opts = buildConfirmationOptions(
       "workscene_change_approve",
@@ -306,6 +317,14 @@ describe("buildConfirmationOptions", () => {
     if (ws && ws.kind === "allow-context") {
       expect(ws.pattern.pattern.argument).toBe("npm install *");
     }
+  });
+
+  it("参数为 * 的持久选项说成“该工具的任意调用”，不显示裸 *", () => {
+    const opts = buildConfirmationOptions("mcp__srv__echo", {}, { kind: "main" }, "interactive");
+    const context = opts.find((o) => o.kind === "allow-context");
+    expect(context?.kind === "allow-context" && context.pattern.pattern.argument).toBe("*");
+    expect(context?.label).toBe("始终允许该工具的任意调用（仅主模式生效）");
+    expect(opts.find((o) => o.kind === "allow-global")?.label).toBe("始终允许该工具的任意调用（全局，所有场景生效）");
   });
 
   it("子命令型命令同样：git push origin main → 'git push *'", () => {

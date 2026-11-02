@@ -1,6 +1,9 @@
 import type { ArtifactStore } from "@zhixing/core/authority";
 import type { SkillMode } from "@zhixing/core/skills/catalog";
-import type { KernelToolImplementationPort } from "@zhixing/orchestrator/runtime";
+import type {
+  KernelToolImplementationPort,
+  KernelToolPermissionRuleSet,
+} from "@zhixing/orchestrator/runtime";
 import {
   BUILTIN_TOOL_FACTORIES,
   WEB_FETCH_DEFAULT_RULES,
@@ -24,6 +27,18 @@ export type HostSkillToolBinding =
 export type HostKernelToolImplementationFactory = (
   binding: HostSkillToolBinding,
 ) => KernelToolImplementationPort;
+
+/**
+ * 内置工具随工具集合贡献的权限规则（纯规则，不构造工具）。运行时装配与没有 owner 侧
+ * 运行时的派发（job 冻结快照）都从这里取，保证两处是同一份贡献。
+ */
+export function hostToolPermissionRuleSets(
+  toolNames: readonly string[],
+): readonly KernelToolPermissionRuleSet[] {
+  return Object.freeze(toolNames.includes("web_fetch")
+    ? [Object.freeze({ namespace: "web_fetch", rules: Object.freeze([...WEB_FETCH_DEFAULT_RULES]) })]
+    : []);
+}
 
 /** The Host edge is the only production selector for concrete built-in tools. */
 export function createHostKernelToolImplementation(
@@ -62,12 +77,7 @@ export function createHostKernelToolImplementation(
       });
       return Object.freeze({
         tools: Object.freeze(tools),
-        permissionRuleSets: Object.freeze([
-          Object.freeze({
-            namespace: "web_fetch",
-            rules: Object.freeze([...WEB_FETCH_DEFAULT_RULES]),
-          }),
-        ]),
+        permissionRuleSets: hostToolPermissionRuleSets(request.requestedToolNames),
       });
     }) satisfies KernelToolImplementationPort["create"],
   });

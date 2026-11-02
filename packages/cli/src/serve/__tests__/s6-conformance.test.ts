@@ -2,7 +2,11 @@ import path from "node:path";
 import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
 import { type ChannelChallengeMessage } from "@zhixing/core/channels";
-import { type Message } from "@zhixing/core";
+import { type Message, type ToolDefinition } from "@zhixing/core";
+import { SecurityPipeline, type PermissionRule } from "@zhixing/core/security";
+import { createSecureExecuteTool } from "@zhixing/orchestrator/security";
+import type { KernelSecurityExecution } from "@zhixing/orchestrator/runtime";
+import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -372,6 +376,7 @@ function executorSnapshot(
   executorId: string,
   signer: ProtocolSigner,
   permissionSnapshotVersion: number,
+  inventoryRevision = 1,
 ): ExecutorCapabilitySnapshot {
   return {
     descriptor: createSignedCapabilityDescriptor(
@@ -391,7 +396,7 @@ function executorSnapshot(
     inventory: createSignedExecutorVersionInventory(
       {
         executorId,
-        inventoryRevision: 1,
+        inventoryRevision,
         capabilityRevision: 1,
         configVersions: {
           runtimeConfigRev: 1,
@@ -451,6 +456,12 @@ interface RemoteExecutorHarness {
   readonly mesh: AssignmentDataPlaneRemoteDirectory;
   /** 远端 executor worker 的失败出口:静默会让 owner 侧只表现为挂起。 */
   readonly workerErrors: readonly Error[];
+  /** 执行端经 mesh 提交口送出的镜像批次（原参数）。 */
+  readonly mirrorCalls: readonly Parameters<MeshRunSubmissionPort["mirrorInteractions"]>[];
+  /** 经同一 mesh 提交口原样重发一次镜像批次。 */
+  replayMirror(call: Parameters<MeshRunSubmissionPort["mirrorInteractions"]>): ReturnType<MeshRunSubmissionPort["mirrorInteractions"]>;
+  /** 执行端已同步的冻结权限快照。 */
+  permissionSnapshot(digest: string): TrustRuleSnapshot | undefined;
   close(): Promise<void>;
 }
 
@@ -615,6 +626,13 @@ async function createRemoteConversationExecutor(input: {
     authorizationFor: authorizationForExecutor,
     clock: () => Date.now(),
   });
+  // 观察口：记下执行端经 mesh 提交口送出的镜像批次，供重放场景原样重发（仍走同一提交口）
+  const mirrorCalls: Parameters<MeshRunSubmissionPort["mirrorInteractions"]>[] = [];
+  const mirrorInteractions = submission.mirrorInteractions.bind(submission);
+  submission.mirrorInteractions = async (...call) => {
+    mirrorCalls.push(call);
+    return mirrorInteractions(...call);
+  };
   ownerHandlers.set(
     RESOURCE_USAGE_SERVICE,
     createResourceUsageMeshServiceHandler({
@@ -697,21 +715,25 @@ async function createRemoteConversationExecutor(input: {
     clock: () => Date.now(),
   });
   const remoteDataPlane = remoteDataPlaneDirectory(executorId, ownerToExecutor);
+  // 与真实执行端一致：权限高水位只增不减，高水位前进才发新的清单修订（内容去重可能复用旧版本号）
+  let permissionHighWater = 1;
+  let inventoryRevision = 1;
+  const synchronizePermission = async (permission: TrustRuleSnapshot) => {
+    permissions.set(permission.digest, permission);
+    if (permission.snapshotVersion > permissionHighWater) {
+      permissionHighWater = permission.snapshotVersion;
+      inventoryRevision += 1;
+    }
+    snapshot = executorSnapshot(executorId, executorKey, permissionHighWater, inventoryRevision);
+    return snapshot;
+  };
   const directory: ConversationExecutorTopologyDirectory = {
     async candidates() {
       return [{
         executorId,
         deviceId: executorDeviceId,
         executor,
-        async synchronizePermission(permission) {
-          permissions.set(permission.digest, permission);
-          snapshot = executorSnapshot(
-            executorId,
-            executorKey,
-            permission.snapshotVersion,
-          );
-          return snapshot;
-        },
+        synchronizePermission,
       }];
     },
     forExecutor(candidate) {
@@ -720,15 +742,7 @@ async function createRemoteConversationExecutor(input: {
             executorId,
             deviceId: executorDeviceId,
             executor,
-            async synchronizePermission(permission) {
-              permissions.set(permission.digest, permission);
-              snapshot = executorSnapshot(
-                executorId,
-                executorKey,
-                permission.snapshotVersion,
-              );
-              return snapshot;
-            },
+            synchronizePermission,
           }
         : undefined;
     },
@@ -741,6 +755,9 @@ async function createRemoteConversationExecutor(input: {
     directory,
     mesh: remoteDataPlane,
     workerErrors,
+    mirrorCalls,
+    replayMirror: (call) => mirrorInteractions(...call),
+    permissionSnapshot: (digest) => permissions.get(digest),
     async close() {
       await worker.close();
       await dataPlane.close();
@@ -1130,6 +1147,306 @@ async function runConversationScenario(
     frames: firstPartyFrames,
     foregroundLog,
   };
+}
+
+interface TrustChainRun {
+  confirmations: number;
+  frozen: readonly PermissionRule[];
+}
+
+/**
+ * 远端执行端的运行时：工具调用走生产安全执行器与安全管线，安全执行体来自执行端自己的
+ * 权限存储；确认由第一方答复（仅本次允许）。模型层由固定命令序列代替，不连外部服务。
+ */
+/** 一步工具调用（命令），或在运行中途、指派仍活跃时执行的检查。 */
+type TrustChainStep = string | (() => Promise<void>);
+
+function createTrustChainRuntime(input: {
+  readonly home: string;
+  readonly interactions: DurableConversationInteractionObserver;
+  readonly security: KernelSecurityExecution;
+  readonly steps: () => readonly TrustChainStep[];
+  readonly runs: TrustChainRun[];
+}): SessionRuntime {
+  const broker = new ConfirmationBroker({ lifecycleObserver: input.interactions });
+  const record: TrustChainRun = { confirmations: 0, frozen: [] };
+  broker.onRequest((request) => {
+    record.confirmations += 1;
+    queueMicrotask(() => broker.resolve(request.id, { kind: "allow-once" }));
+  });
+  const pipeline = new SecurityPipeline({
+    trustContext: input.security.trustContext,
+    sessionType: "interactive",
+    permissionRuleSource: input.security.permissionRuleSource,
+  });
+  const bash: ToolDefinition = {
+    name: "bash",
+    description: "bash",
+    inputSchema: { type: "object" },
+    needsPermission: true,
+    permissionArgumentKey: "command",
+    call: async () => ({ content: "ok" }),
+  };
+  const assistant: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+  return {
+    ...runtimeAuthorityFacts,
+    sessionId: "s6-trust-executor",
+    confirmationBroker: broker,
+    async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
+      input.runs.push(record);
+      const authorize = options?.authorizeToolExecution;
+      if (!authorize) throw new Error("Assigned run lacks its durable tool authorizer");
+      const execute = createSecureExecuteTool({
+        pipeline,
+        securityApproval: input.security,
+        broker,
+        sessionType: "interactive",
+        originalExecute: async () => ({ content: "executed" }),
+        authorizeToolExecution: async (call) => {
+          record.frozen = await authorize(call);
+          return record.frozen;
+        },
+      });
+      for (const [index, step] of input.steps().entries()) {
+        if (typeof step === "function") {
+          await step();
+          continue;
+        }
+        const result = await execute(bash, { command: step }, { workingDirectory: input.home, toolCallId: `tool-${index}` });
+        expect(result.isError).not.toBe(true);
+      }
+      yield { type: "text_delta", text: "done" };
+      return {
+        agentResult: { reason: "completed", message: assistant, usage: { inputTokens: 1, outputTokens: 1 } },
+        runRecord: {
+          timestamp: NOW,
+          messages: [messages.at(-1)!, assistant],
+          usage: { inputTokens: 1, outputTokens: 1 },
+          source: "interactive",
+        },
+        newMessages: [assistant],
+        durationMs: 1,
+      };
+    },
+    abort: () => false,
+    async dispose() {},
+  };
+}
+
+/**
+ * 跨 home 信任沉淀全链：远端执行端运行时达阈值 → 执行端台账 → mesh 镜像 → 锚点 owner
+ * 接纳 → 锚点规则所有者 → 下一次派发冻结快照 → 远端冻结匹配 → 撤销 → 原批次重放不复活。
+ */
+async function runTrustSedimentChain() {
+  refreshScenarioClock();
+  const home = await createTempDir("s6-trust-chain");
+  const remoteExecutorKey = await loadOrCreateDeviceKey(new MemorySecretStore());
+  const authority = await setupAuthorityRuntime({
+    zhixingHome: home,
+    secretStore: new MemorySecretStore(),
+    executorReadiness,
+    enableLocalExecutor: false,
+    authorizedDeviceIds: [remoteExecutorKey.deviceId],
+    trustedIdentities: [
+      enrollDeviceIdentity(remoteExecutorKey, {
+        displayName: "s6-trust-remote-executor",
+        platform: "linux",
+        enrolledAt: NOW,
+      }),
+    ],
+    clock: () => new Date().toISOString(),
+  });
+  const interactions = new DurableConversationInteractionObserver();
+  // 两台宿主各自的权限存储：锚点是规则权威，远端执行端不是（与 command.ts / executor-role-runtime 同一装配）
+  const anchorPermissions = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+  const executorPermissions = createPermissionStorageInfrastructure({ zhixingHome: path.join(home, "remote-executor") });
+  executorPermissions.addTrustSedimentRecorder((sediment) => interactions.recordTrustSediment(sediment));
+  const securityRequest = Object.freeze({
+    extractArgument: (request: { readonly arguments: Readonly<Record<string, unknown>> }) =>
+      String(request.arguments.command ?? ""),
+    builtinRuleSets: Object.freeze([]),
+    workspacePath: null,
+  });
+  const anchorSecurity = anchorPermissions.runtime.bind(Object.freeze({})).create(securityRequest);
+  const anchorRuntime: SessionRuntime = {
+    ...runtimeAuthorityFacts,
+    // 派发按运行范围从锚点规则所有者组合冻结规则（与运行时 executionPermissionRules 同一路径）
+    executionPermissionRules: (scope) => anchorSecurity.executionPermissionRules(scope),
+    sessionId: "s6-trust-anchor",
+    confirmationBroker: new ConfirmationBroker(),
+    async *run(): AsyncGenerator<AgentYield, RunResult> {
+      throw new Error("Remote topology executes the run on the executor");
+    },
+    abort: () => false,
+    async dispose() {},
+  };
+  const runs: TrustChainRun[] = [];
+  let steps: readonly TrustChainStep[] = [];
+  const remoteRuntimeFactory: RuntimeFactory = {
+    create: async () => createTrustChainRuntime({
+      home,
+      interactions,
+      security: executorPermissions.runtime.bind(Object.freeze({})).create(securityRequest),
+      steps: () => steps,
+      runs,
+    }),
+  };
+  const statusHub = new ExecutionStatusHub({
+    conversationHistory: (requests) => protocol.statusHistory(requests),
+    jobHistory: async (requests) => ({ notices: [], next: requests }),
+    deliveryHistory: async (cursors) => ({ notices: [], next: cursors }),
+  });
+  let remote: RemoteExecutorHarness | undefined;
+  let manager!: ConversationManager;
+  const conversationLosslessDataPlane = createConversationLosslessDataPlaneAssemblyHandle();
+  const protocol: ConversationProtocolRuntime = new ConversationProtocolRuntime({
+    authority,
+    foreground: { enter: () => () => {}, pulse() {} },
+    losslessDataPlane: Object.freeze({ kind: "available", port: conversationLosslessDataPlane.port }),
+    executorDispatch: createConversationExecutorHostBoundary({
+      authority: anchorConversationOwnerRuntime(authority),
+      directory: {
+        candidates: async () => remote!.directory.candidates(),
+        forExecutor: (executorId) => remote!.directory.forExecutor(executorId),
+      },
+      clock: () => new Date().toISOString(),
+    }).application,
+    assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
+    manager: () => manager,
+    recoverAuxiliary: async () => {},
+    interactions,
+    // 规则权威宿主构造即交入接纳端口（与 command.ts → access-surfaces 同一装配）
+    trustSediments: anchorPermissions.trustSediments!,
+    clock: () => new Date().toISOString(),
+    onStatus: (notice) => statusHub.publish(notice),
+    createFirstPartyFinality: (input) => new FirstPartyFinalitySession({ sources: statusHub, ...input }),
+  });
+  remote = await createRemoteConversationExecutor({
+    home,
+    authority,
+    protocol,
+    runtimeFactory: remoteRuntimeFactory,
+    interactions,
+    executorKey: remoteExecutorKey,
+  });
+  const backgroundErrors: Error[] = [];
+  const composition = createLosslessDataPlaneComposition({
+    verifier: authority.verifier,
+    targets: new AssignmentDataPlaneTopologyAdapter({ remote: remote.mesh }),
+    channelChallenges: Object.freeze({ kind: "available", delivery: fakeChannels(vi.fn()) }),
+    isCurrentOwner: () => true,
+    jobStatus: new JobStatusDirectory(),
+    onDataPlaneError: (error) => backgroundErrors.push(error),
+    onCoordinatorError: (error) => backgroundErrors.push(error),
+  });
+  conversationLosslessDataPlane.complete(composition.coordinator);
+  manager = new ConversationManager({ create: async () => anchorRuntime }, undefined, {
+    loadHistory: async () => undefined,
+    initTranscript: async () => {},
+    appendRun: async () => ({ runIndex: 0, shardId: "legacy" }),
+    appendCommittedRun: async (_conversationId, record) => ({ runIndex: record.runIndex, shardId: "durable", appended: true }),
+    durableTurnExecutor: protocol,
+    onTurnCommitted: () => {},
+  });
+  const conversationId = "conversation-trust-chain";
+  const source = {
+    principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "connection:trust" },
+  };
+  await authority.controlAdmission.apply({
+    envelope: createInitialControlEnvelope({
+      requestId: "session-create:trust",
+      source,
+      at: NOW,
+      body: { t: "session-create", requestedName: conversationId },
+    }),
+    source,
+    prepare: () => ({
+      result: { v: 1, status: "ok", body: { t: "session-create", conversationId } },
+      authorityRevision: 1,
+    }),
+  });
+  const managed = await manager.getOrCreate(conversationId);
+  // 与生产启动顺序一致：启动历史预读经会话状态端口先创建并缓存该对话的日志；接纳端口在构造
+  // 协议运行时就已交入，缓存的日志实例同样带着它
+  await protocol.sessionState.readSessionMeta(conversationId, {
+    principal: { kind: "host", component: "conversation-bootstrap" },
+    requestId: "conversation-bootstrap-prefetch",
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const driveTurn = async (turnId: string, next: readonly TrustChainStep[]) => {
+    steps = next;
+    const settled = await Promise.race([
+      projectSessionTurn({
+        manager,
+        managed,
+        text: "run",
+        turnId,
+        runOptions: { source: "interactive", surfacePrincipal: "surface:rpc:owner", turnContext: { turnId } },
+        notify: () => {},
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
+        `Trust chain turn ${turnId} did not settle; background=${backgroundErrors.map((error) => error.message).join("; ")}; ` +
+        `remoteWorker=${(remote?.workerErrors ?? []).map((error) => error.message).join("; ")}`,
+      )), 25_000).unref()),
+    ]);
+    if (settled.kind === "error") {
+      const error = settled.error;
+      throw error instanceof AggregateError
+        ? new Error(`${error.message}: [${error.errors.map((entry) =>
+            entry instanceof Error ? entry.message : String(entry)).join(" | ")}]`, { cause: error })
+        : error;
+    }
+    expect(settled.kind).toBe("settled");
+    return runs.at(-1)!;
+  };
+  const anchorRules = async () => anchorPermissions.management.list({ kind: "main" });
+  const curl = "curl https://example.com/foo";
+  const install = "npm install left-pad";
+  const lastSedimentMirror = () => [...remote!.mirrorCalls].reverse().find(([, batch]) =>
+    batch.entries.some((entry) => entry.kind === "trust-sediment"));
+
+  try {
+    // 第 1 轮：远端运行时连续 3 次仅本次允许达阈值 → 沉淀经执行端台账与 mesh 镜像到锚点接纳
+    const first = await driveTurn("trust:1", [curl, curl, curl]);
+    expect(first.confirmations).toBe(3);
+    const accepted = await anchorRules();
+    expect(accepted).toMatchObject([{ decision: "allow", scope: "context", pattern: { tool: "bash" } }]);
+    const curlRule = accepted[0]!;
+    expect(curlRule.id).toMatch(/^sediment-/u);
+    // 远端不是规则权威：本机库不写
+    await expect(executorPermissions.management.list({ kind: "main" })).resolves.toEqual([]);
+
+    // 第 2 轮：下一次派发的冻结快照带上该规则，同命令不再确认；同一轮里另一类命令再次达阈值，
+    // 在指派仍活跃时撤销它、经同一 mesh 提交口原样重发它的镜像批次：日志按重放回执，规则不复活
+    let installRuleId: string | undefined;
+    const second = await driveTurn("trust:2", [curl, install, install, install, async () => {
+      const installRule = (await anchorRules()).find((rule) => rule.id !== curlRule.id);
+      expect(installRule).toMatchObject({ decision: "allow", pattern: { tool: "bash" } });
+      installRuleId = installRule!.id;
+      const replayed = lastSedimentMirror();
+      expect(replayed).toBeDefined();
+      await expect(anchorPermissions.management.revoke({ kind: "main" }, installRuleId)).resolves.toBe(true);
+      await remote!.replayMirror(replayed!);
+      expect((await anchorRules()).map((rule) => rule.id)).toEqual([curlRule.id]);
+    }]);
+    expect(second.frozen.map((entry) => entry.id)).toContain(curlRule.id);
+    expect(second.confirmations).toBe(3);
+    expect(installRuleId).toBeDefined();
+
+    // 第 3 轮：撤销另一条后，派发快照两条都不带，两类命令都重新确认
+    await expect(anchorPermissions.management.revoke({ kind: "main" }, curlRule.id)).resolves.toBe(true);
+    const third = await driveTurn("trust:3", [curl, install]);
+    expect(third.frozen.map((entry) => entry.id)).not.toContain(curlRule.id);
+    expect(third.frozen.map((entry) => entry.id)).not.toContain(installRuleId);
+    expect(third.confirmations).toBe(2);
+    await expect(anchorRules()).resolves.toEqual([]);
+    expect(backgroundErrors).toEqual([]);
+    expect(remote.workerErrors).toEqual([]);
+  } finally {
+    await composition.close();
+    await remote.close();
+    await authority.stopStorageMaintenance();
+  }
 }
 
 function createJobUnsignedEnvelope(input: {
@@ -1894,6 +2211,14 @@ describe("S6 production-composition conformance", () => {
       expect(result.foregroundLog).toEqual(topology === "remote"
         ? ["enter", "release", "enter", "release"]
         : ["enter", "release"]);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "closes the trust sediment chain across homes: remote threshold, anchor acceptance, next dispatch, revoke replay",
+    async () => {
+      await runTrustSedimentChain();
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );

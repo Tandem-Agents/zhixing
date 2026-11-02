@@ -18,18 +18,16 @@
  */
 
 import * as crypto from "node:crypto";
-import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { getZhixingHome } from "../paths.js";
+import { DurablePermissionRuleStore } from "./durable-permission-rules.js";
 import type {
   IPermissionStore,
   PermissionContextId,
   PermissionRule,
   PermissionRuleExecutionSource,
-  PermissionScope,
   SecurityRequest,
-  TrustContribution,
 } from "./types.js";
 
 // ─── PermissionContextId ↔ 紧凑 string（Map key + 磁盘文件名） ───
@@ -152,9 +150,7 @@ export function globSpecificity(pattern: string): number {
 
 // ─── 存储配置 ───
 
-const STORAGE_VERSION = 1;
 const PERMISSIONS_SUBDIR = "permissions";
-const GLOBAL_FILE = "global.json";
 
 /**
  * 默认权限存储根目录——~/.zhixing/permissions/（含 ZHIXING_HOME 覆盖）。
@@ -172,6 +168,11 @@ export interface PermissionStoreOptions {
    * - 传 null：禁用持久化（纯内存，用于测试和临时会话）
    */
   rootDir?: string | null;
+  /**
+   * 进程内共享的持久规则所有者。宿主装配传入同一个，使各运行时与管理面看到同一份
+   * 落盘规则；传入时忽略 rootDir。
+   */
+  durable?: DurablePermissionRuleStore;
   /** 时钟注入（便于测试） */
   now?: () => number;
   /**
@@ -202,62 +203,6 @@ function cloneRule(rule: PermissionRule): PermissionRule {
       ? rule.contributors.map((c) => ({ ...c }))
       : undefined,
   };
-}
-
-/**
- * 把 unknown 反序列化为合法的 TrustContribution 数组。
- *
- * 不合法（非数组 / 某条结构错）整体降级为 undefined（与"字段缺失"等价）；
- * 单条结构错的不会污染其余条目（剩余合法条目正常恢复，损坏条丢弃）。
- */
-function sanitizeContributors(
-  raw: unknown,
-): TrustContribution[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const out: TrustContribution[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const c = item as Partial<TrustContribution>;
-    if (
-      (c.origin !== "user" && c.origin !== "steward") ||
-      typeof c.timestamp !== "number"
-    ) {
-      continue;
-    }
-    out.push({ origin: c.origin, timestamp: c.timestamp });
-  }
-  return out;
-}
-
-/**
- * 把 unknown 反序列化为合法的 PermissionContextId discriminated union。
- *
- * 不合法（非 object / kind 不在白名单 / payload 字段类型错）返回 undefined。
- * sanitizeRules 调用此函数恢复 `PermissionRule.contextId` —— magic prefix string
- * （旧 schema 残留如裸 `"main"` 字符串）一律识别失败，整条 rule 不丢但 contextId
- * 字段变 undefined（与设计"未识别 prefix 整条丢弃 contextId"对齐）。
- */
-function sanitizePermissionContextId(
-  raw: unknown,
-): PermissionContextId | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const c = raw as Partial<PermissionContextId> & { kind?: unknown };
-  switch (c.kind) {
-    case "main":
-      return { kind: "main" };
-    case "workspace": {
-      const hash = (c as { hash?: unknown }).hash;
-      if (typeof hash !== "string" || !hash) return undefined;
-      return { kind: "workspace", hash };
-    }
-    case "scene": {
-      const sceneId = (c as { sceneId?: unknown }).sceneId;
-      if (typeof sceneId !== "string" || !sceneId) return undefined;
-      return { kind: "scene", sceneId };
-    }
-    default:
-      return undefined;
-  }
 }
 
 /**
@@ -293,31 +238,12 @@ export function defaultExtractArgument(request: SecurityRequest): string {
   return "";
 }
 
-/**
- * 磁盘 JSON 文件 schema。
- *
- * `contextStorageKey` 字段是 `toStorageKey(contextId)` 输出（紧凑 string，如
- * `"main"` / `"workspace-<hash>"` / `"scene-<sceneId>"`），仅供人工 inspect 磁盘
- * 文件时知道这是哪个上下文 —— 不参与运行时匹配（运行时上下文身份由文件名决定）。
- *
- * `PermissionRule.contextId` 字段在 JSON 中是 discriminated union object（`{kind,
- * ...}`）——JSON 序列化 / 反序列化天然支持 object round-trip，sanitizeRules 校验
- * shape 合法。
- */
-interface StorageFile {
-  version: number;
-  scope?: "global";
-  contextStorageKey?: string;
-  contextPath?: string;
-  rules: PermissionRule[];
-}
-
 // ─── PermissionStore 实现 ───
 
 export class PermissionStore implements IPermissionStore {
   private readonly sessionRules = new Map<string, PermissionRule[]>();
-  private readonly contextRules = new Map<string, PermissionRule[]>();
-  private globalRules: PermissionRule[] = [];
+  /** 落盘作用域（context/global）的唯一所有者；同进程的实例共享同一个。 */
+  private readonly durable: DurablePermissionRuleStore;
   /**
    * 系统预置规则池（in-memory，不持久化）—— 按 namespace 分组管理。
    *
@@ -330,21 +256,18 @@ export class PermissionStore implements IPermissionStore {
    * 于用户池（ADR-TPE-008）。
    */
   private readonly builtinRulesByNamespace = new Map<string, PermissionRule[]>();
-  private readonly loadedContexts = new Set<string>();
-  private globalLoaded = false;
 
-  private readonly rootDir: string | null;
   private readonly now: () => number;
   private readonly extractArgumentFn: (request: SecurityRequest) => string;
 
   constructor(options: PermissionStoreOptions = {}) {
-    if (options.rootDir === null) {
-      this.rootDir = null;
-    } else if (options.rootDir !== undefined) {
-      this.rootDir = options.rootDir;
-    } else {
-      this.rootDir = getPermissionsDir();
-    }
+    this.durable = options.durable ?? new DurablePermissionRuleStore(
+      options.rootDir === null
+        ? null
+        : options.rootDir !== undefined
+          ? options.rootDir
+          : getPermissionsDir(),
+    );
     this.now = options.now ?? (() => Date.now());
     this.extractArgumentFn = options.extractArgument ?? defaultExtractArgument;
   }
@@ -372,16 +295,13 @@ export class PermissionStore implements IPermissionStore {
       }
     }
 
-    this.ensureContextLoaded(storageKey);
-    const ctxList = this.contextRules.get(storageKey);
-    if (ctxList) {
-      for (const rule of ctxList) {
-        if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
+    for (const rule of this.durable.context(storageKey)) {
+      if (ruleAppliesToContext(rule, contextId) && this.ruleMatches(rule, tool, argument)) {
+        userCandidates.push(rule);
       }
     }
 
-    this.ensureGlobalLoaded();
-    for (const rule of this.globalRules) {
+    for (const rule of this.durable.global()) {
       if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
     }
 
@@ -437,7 +357,7 @@ export class PermissionStore implements IPermissionStore {
     return null;
   }
 
-  create(contextId: PermissionContextId, rule: PermissionRule): void {
+  async create(contextId: PermissionContextId, rule: PermissionRule): Promise<void> {
     const storageKey = toStorageKey(contextId);
     switch (rule.scope) {
       case "session": {
@@ -446,20 +366,12 @@ export class PermissionStore implements IPermissionStore {
         this.sessionRules.set(storageKey, list);
         return;
       }
-      case "context": {
-        this.ensureContextLoaded(storageKey);
-        const list = this.contextRules.get(storageKey) ?? [];
-        list.push(rule);
-        this.contextRules.set(storageKey, list);
-        this.persistContext(storageKey);
+      case "context":
+        await this.durable.addContextRule(storageKey, rule);
         return;
-      }
-      case "global": {
-        this.ensureGlobalLoaded();
-        this.globalRules.push(rule);
-        this.persistGlobal();
+      case "global":
+        await this.durable.addGlobalRule(rule);
         return;
-      }
       case "builtin": {
         throw new Error(
           "builtin 作用域的规则不能通过 create() 注入——应在启动时通过 registerBuiltinRules() 一次性注册",
@@ -473,13 +385,10 @@ export class PermissionStore implements IPermissionStore {
     const result: PermissionRule[] = [];
     const sessionList = this.sessionRules.get(storageKey);
     if (sessionList) result.push(...sessionList);
-
-    this.ensureContextLoaded(storageKey);
-    const ctxList = this.contextRules.get(storageKey);
-    if (ctxList) result.push(...ctxList);
-
-    this.ensureGlobalLoaded();
-    result.push(...this.globalRules);
+    for (const rule of this.durable.context(storageKey)) {
+      if (ruleAppliesToContext(rule, contextId)) result.push(rule);
+    }
+    result.push(...this.durable.global());
     return result;
   }
 
@@ -491,8 +400,7 @@ export class PermissionStore implements IPermissionStore {
     return result;
   }
 
-  revoke(ruleId: string): boolean {
-    // 会话
+  async revoke(ruleId: string): Promise<boolean> {
     for (const [key, rules] of this.sessionRules) {
       const idx = rules.findIndex((r) => r.id === ruleId);
       if (idx !== -1) {
@@ -501,55 +409,22 @@ export class PermissionStore implements IPermissionStore {
         return true;
       }
     }
-    // 上下文：storageKey 直接复用作 persistContext 入参
-    for (const [storageKey, rules] of this.contextRules) {
-      const idx = rules.findIndex((r) => r.id === ruleId);
-      if (idx !== -1) {
-        rules.splice(idx, 1);
-        this.persistContext(storageKey);
-        return true;
-      }
-    }
-    // 全局
-    this.ensureGlobalLoaded();
-    const gIdx = this.globalRules.findIndex((r) => r.id === ruleId);
-    if (gIdx !== -1) {
-      this.globalRules.splice(gIdx, 1);
-      this.persistGlobal();
-      return true;
-    }
-    return false;
+    return this.durable.revoke(ruleId);
   }
 
-  reset(contextId: PermissionContextId): void {
+  async reset(contextId: PermissionContextId): Promise<void> {
     const storageKey = toStorageKey(contextId);
     this.sessionRules.delete(storageKey);
-    this.contextRules.set(storageKey, []);
-    this.persistContext(storageKey);
+    await this.durable.resetContext(storageKey);
   }
 
-  resetAll(): void {
+  async resetAll(): Promise<void> {
     // 注意：不清 builtinRulesByNamespace —— 它们是 boot-time 系统配置，
     // 由各模块（cli / WebFetch / 子 agent 等）在启动时通过 registerBuiltinRules
     // 注入；runtime 的 resetAll（用户清自己规则）不该牵连系统配置。
     // 测试套件需要"完全重置"时应创建新 PermissionStore 实例，而不是 resetAll。
     this.sessionRules.clear();
-    this.contextRules.clear();
-    this.globalRules = [];
-    this.loadedContexts.clear();
-    this.globalLoaded = false;
-
-    if (this.rootDir && fs.existsSync(this.rootDir)) {
-      for (const entry of fs.readdirSync(this.rootDir)) {
-        if (entry.endsWith(".json") || entry.endsWith(".json.tmp")) {
-          try {
-            fs.rmSync(path.join(this.rootDir, entry));
-          } catch {
-            // 忽略：可能是并发或权限问题
-          }
-        }
-      }
-    }
+    await this.durable.resetAll();
   }
 
   /**
@@ -632,24 +507,6 @@ export class PermissionStore implements IPermissionStore {
   // ─── 静态辅助 ───
 
   /**
-   * 根据工作区绝对路径生成稳定的 hash（SHA-256 前 16 字符），作为
-   * `PermissionContextId{kind:"workspace"}` 的 `hash` payload。
-   * Windows 平台规范化为小写以吸收大小写差异。
-   *
-   * 仅 workspace 信任上下文用此 hash；主模式与 scene 信任有独立 payload，
-   * 不经此函数。
-   */
-  static workspaceHashFromPath(workspacePath: string): string {
-    const abs = path.resolve(workspacePath);
-    const normalized = process.platform === "win32" ? abs.toLowerCase() : abs;
-    return crypto
-      .createHash("sha256")
-      .update(normalized)
-      .digest("hex")
-      .slice(0, 16);
-  }
-
-  /**
    * 构造一条权限规则，自动填充 id / createdAt / 统计字段。
    *
    * 字段语义：
@@ -718,144 +575,16 @@ export class PermissionStore implements IPermissionStore {
     }
     return best;
   }
+}
 
-  // ─── 内部：持久化 ───
-  //
-  // 公共 API 接受 `PermissionContextId`（discriminated union）；私有 helper 全部
-  // 接受 `storageKey: string`（即 `toStorageKey(contextId)` 输出）。两层签名让
-  // 文件名 / Map key / 锁等"物理路径段"细节集中在私有层；公共 API 永远只对
-  // discriminated union 表态，namespace 隔离由类型系统强制。
-
-  private ensureGlobalLoaded(): void {
-    if (this.globalLoaded) return;
-    this.globalLoaded = true;
-
-    if (!this.rootDir) return;
-    const file = path.join(this.rootDir, GLOBAL_FILE);
-    if (!fs.existsSync(file)) return;
-
-    try {
-      const raw = fs.readFileSync(file, "utf-8");
-      const data = JSON.parse(raw) as StorageFile;
-      this.globalRules = this.sanitizeRules(data.rules ?? [], "global");
-    } catch {
-      // 损坏文件：视为空，不中断程序
-      this.globalRules = [];
-    }
-  }
-
-  private ensureContextLoaded(storageKey: string): void {
-    if (this.loadedContexts.has(storageKey)) return;
-    this.loadedContexts.add(storageKey);
-
-    if (!this.rootDir) return;
-    const file = path.join(this.rootDir, `${storageKey}.json`);
-    if (!fs.existsSync(file)) return;
-
-    try {
-      const raw = fs.readFileSync(file, "utf-8");
-      const data = JSON.parse(raw) as StorageFile;
-      this.contextRules.set(
-        storageKey,
-        this.sanitizeRules(data.rules ?? [], "context"),
-      );
-    } catch {
-      this.contextRules.set(storageKey, []);
-    }
-  }
-
-  /**
-   * 对从磁盘读取的规则做基本校验：过滤掉结构不对的条目，
-   * 防止损坏数据传染到后续决策。同时恢复 contributors / contextId / contextPath
-   * 字段（这些字段写盘自然走 JSON.stringify、读盘必须显式恢复才不会丢）。
-   *
-   * **scope 处理**：
-   * - `session` / `context` / `global` 通过白名单
-   * - `builtin` 显式**拒绝**——builtin 规则永远不该写磁盘（仅 in-memory，由
-   *   `registerBuiltinRules` 注入）。磁盘上若出现（旧版本 bug 或人工编辑），
-   *   立即跳过避免幽灵规则进 builtin 池
-   * - 其他未知 scope（含未来扩展或旧 schema 残留如 "workspace"）一律跳过
-   */
-  private sanitizeRules(
-    rules: unknown[],
-    expectedScope: PermissionScope,
-  ): PermissionRule[] {
-    const out: PermissionRule[] = [];
-    for (const raw of rules) {
-      if (!raw || typeof raw !== "object") continue;
-      const r = raw as Partial<PermissionRule>;
-      if (
-        typeof r.id !== "string" ||
-        !r.pattern ||
-        typeof r.pattern.tool !== "string" ||
-        typeof r.pattern.argument !== "string" ||
-        (r.decision !== "allow" && r.decision !== "deny") ||
-        (r.scope !== "session" &&
-          r.scope !== "context" &&
-          r.scope !== "global")
-      ) {
-        continue;
-      }
-      // global 文件不应包含其他作用域规则；context 文件可含任何用户作用域
-      if (r.scope !== expectedScope && expectedScope === "global") continue;
-      out.push({
-        id: r.id,
-        pattern: { tool: r.pattern.tool, argument: r.pattern.argument },
-        decision: r.decision,
-        scope: r.scope,
-        createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
-        lastMatchedAt:
-          typeof r.lastMatchedAt === "number" ? r.lastMatchedAt : 0,
-        matchCount: typeof r.matchCount === "number" ? r.matchCount : 0,
-        contextId: sanitizePermissionContextId(r.contextId),
-        contextPath:
-          typeof r.contextPath === "string" ? r.contextPath : undefined,
-        contributors: sanitizeContributors(r.contributors),
-      });
-    }
-    return out;
-  }
-
-  private persistContext(storageKey: string): void {
-    if (!this.rootDir) return;
-    this.ensureDir();
-    const file = path.join(this.rootDir, `${storageKey}.json`);
-    const rules = this.contextRules.get(storageKey) ?? [];
-    // contextPath 取首条规则的字段值（同一上下文内所有规则的 contextPath 应一致，
-    // 取首条即代表）；主模式或无 path 上下文为 undefined
-    const data: StorageFile = {
-      version: STORAGE_VERSION,
-      contextStorageKey: storageKey,
-      contextPath: rules.find((r) => r.contextPath)?.contextPath,
-      rules,
-    };
-    this.atomicWriteJson(file, data);
-  }
-
-  private persistGlobal(): void {
-    if (!this.rootDir) return;
-    this.ensureDir();
-    const file = path.join(this.rootDir, GLOBAL_FILE);
-    const data: StorageFile = {
-      version: STORAGE_VERSION,
-      scope: "global",
-      rules: this.globalRules,
-    };
-    this.atomicWriteJson(file, data);
-  }
-
-  private atomicWriteJson(file: string, data: StorageFile): void {
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-    fs.renameSync(tmp, file);
-  }
-
-  private ensureDir(): void {
-    if (!this.rootDir) return;
-    if (!fs.existsSync(this.rootDir)) {
-      fs.mkdirSync(this.rootDir, { recursive: true });
-    }
-  }
+/**
+ * 工作区规则只在创建它的绑定修订下生效：运行上下文带修订时，修订不同（目录已改）的
+ * 工作区规则不适用；不带修订（管理视图）时全部列出。其他范围与全局规则不受影响。
+ */
+function ruleAppliesToContext(rule: PermissionRule, contextId: PermissionContextId): boolean {
+  if (contextId.kind !== "workspace" || contextId.revision === undefined) return true;
+  if (rule.scope !== "context" || rule.contextId?.kind !== "workspace") return true;
+  return rule.contextId.revision === contextId.revision;
 }
 
 /** Bind one already-decided Trust context without exposing mutable storage. */
@@ -866,10 +595,11 @@ export function bindPermissionRuleExecutionSource(
   const context = cloneContextId(contextId);
   return Object.freeze({
     match: (request: SecurityRequest) => store.match(context, request),
+    // 冻结快照按工作区绑定取全部修订，这里按本次运行已认证的修订过滤
     matchFrozen: (
       rules: readonly PermissionRule[],
       request: SecurityRequest,
-    ) => store.matchFrozen(rules, request),
+    ) => store.matchFrozen(rules.filter((rule) => ruleAppliesToContext(rule, context)), request),
   });
 }
 
@@ -878,7 +608,11 @@ function cloneContextId(context: PermissionContextId): PermissionContextId {
     case "main":
       return Object.freeze({ kind: "main" });
     case "workspace":
-      return Object.freeze({ kind: "workspace", hash: context.hash });
+      return Object.freeze({
+        kind: "workspace",
+        hash: context.hash,
+        ...(context.revision === undefined ? {} : { revision: context.revision }),
+      });
     case "scene":
       return Object.freeze({ kind: "scene", sceneId: context.sceneId });
   }

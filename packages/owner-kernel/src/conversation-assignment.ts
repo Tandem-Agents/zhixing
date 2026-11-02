@@ -126,6 +126,7 @@ import type {
   TranscriptCursor,
   TranscriptPage,
   TranscriptRunRecord,
+  TrustSedimentMirrorEntry,
   UserTurnInput,
   UncertainResolutionFact,
 } from "@zhixing/core/contracts";
@@ -446,6 +447,31 @@ export interface ConversationRunJournalOptions {
     readonly deviceId: string;
     readonly executorId?: string;
   };
+  /** 镜像批次里的信任沉淀交给规则权威接纳；不装配时沉淀条目只进日志、无效果。 */
+  readonly trustSediments?: ConversationTrustSedimentPort;
+}
+
+/**
+ * 信任沉淀的接纳端口（规则权威所在宿主实现）。`prepare` 在镜像批次提交前调用：校验
+ * 并写待生效记录，写失败上抛使本批不接纳、由执行端按既有义务重试；校验不过的条目
+ * 不上抛（不堵镜像通道），只是没有效果。`accept` 在批次提交后（含重放）调用，幂等、
+ * 不上抛。
+ */
+export interface ConversationTrustSedimentPort {
+  prepare(input: {
+    readonly conversationId: string;
+    readonly assignmentId: string;
+    readonly executorId: string;
+    readonly environment: import("@zhixing/core/contracts").EnvironmentRequirement;
+    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+    /** 用户贡献引用的确认请求是否是本对话已答复的交互（同批或更早的镜像）。 */
+    readonly answered: (requestId: string) => Promise<boolean>;
+  }): Promise<void>;
+  accept(input: {
+    readonly conversationId: string;
+    readonly assignmentId: string;
+    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+  }): Promise<void>;
 }
 
 export interface ConversationAbortTicketAuthorizer {
@@ -1089,6 +1115,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly deviceId: string;
     readonly executorId?: string;
   } | undefined;
+  readonly #trustSediments: ConversationTrustSedimentPort | undefined;
   readonly #operations = new SerialTaskQueue();
   #readBaseGeneration = 0;
   readonly #statusListeners = new Set<
@@ -1128,6 +1155,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     registerConversationRunProjection(options.log, options.artifacts, options.verifier, options.legacyAbortTickets,
       { delivery: options.delivery, currentAuthority: options.currentAuthority, resources: options.resources });
     this.#currentAuthority = options.currentAuthority;
+    this.#trustSediments = options.trustSediments;
     registerConversationIdentityProjection(options.log, options.artifacts);
     registerControlAdmissionProjection(options.log, options.artifacts);
     if (options.currentAuthority) {
@@ -2982,7 +3010,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => {
       for (const batch of state.mirrorBatches.values()) {
         for (const entry of batch.batch.entries) {
-          if (entry.requestId !== requestId) continue;
+          // 沉淀条目不是交互，不参与交互结果查询
+          if (entry.kind !== "allow-once" || entry.requestId !== requestId) continue;
           return entry.outcome.t === "answered"
             ? { t: "answered" as const, decisionDigest: entry.outcome.decisionDigest }
             : { t: "closed" as const };
@@ -2990,6 +3019,43 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       }
       return undefined;
     }, conversationDecisionScope({ requestId }));
+  }
+
+  /**
+   * 某指派的授权事实：已验签清单的环境要求与它冻结的权限快照摘要（/security 展示该运行
+   * 实际范围与快照用）。指派不在本日志或信封已不保留时返回 undefined。
+   */
+  async assignmentSecurityFacts(assignmentId: string): Promise<
+    | {
+        readonly runId: string;
+        readonly environment: import("@zhixing/core/contracts").EnvironmentRequirement;
+        readonly permissionSnapshotDigest: string;
+      }
+    | undefined
+  > {
+    assertIdentifier(assignmentId, "Assignment id");
+    return this.#select((state) => {
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned?.envelope) return undefined;
+      return {
+        runId: assigned.record.runId,
+        environment: structuredClone(assigned.envelope.manifest.environment),
+        permissionSnapshotDigest: assigned.envelope.permissionLease.snapshotDigest,
+      };
+    }, conversationDecisionScope({ assignmentId }));
+  }
+
+  /** 某条信任沉淀是否已随镜像批次被本日志接纳（重开核对待生效记录用）。 */
+  async trustSedimentMirrored(assignmentId: string, requestId: string): Promise<boolean> {
+    assertIdentifier(assignmentId, "Assignment id");
+    assertIdentifier(requestId, "Trust sediment identity");
+    if (this.#readBaseGeneration === 0) {
+      return (await readConversationExactValue(this.#log, this.#conversationId, 'mirrorRequests', `${assignmentId}\u0000${requestId}`)) === true;
+    }
+    return this.#select(
+      (state) => state.mirrorStateByAssignment.get(assignmentId)?.requestIds.has(requestId) ?? false,
+      conversationDecisionScope({ assignmentId }),
+    );
   }
 
   async runByIngress(
@@ -4533,6 +4599,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       throw new TypeError("Interaction mirror batch names a different assignment");
     }
     const batchDigest = interactionMirrorBatchDigest(batch);
+    const sediments = this.#trustSediments
+      ? batch.entries.filter((entry): entry is TrustSedimentMirrorEntry => entry.kind === "trust-sediment")
+      : [];
+    if (sediments.length > 0) await this.#prepareTrustSediments(assignmentId, batch, batchDigest, sediments);
     const transaction = await this.#transact<{
       mirroredUpTo: number;
       ordinal: number;
@@ -4633,7 +4703,45 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         },
       };
     }, [], [], conversationDecisionScope({ assignmentId, rawBatch, ctx }));
+    // 日志已接纳（含同批重放）：沉淀生效并物化；失败由规则权威下次写入或重开核对补做
+    for (const entry of sediments) {
+      await this.#trustSediments!.accept({ conversationId: this.#conversationId, assignmentId, entry })
+        .catch(() => undefined);
+    }
     return transaction.value;
+  }
+
+  /** 镜像批次提交前：把其中的信任沉淀交规则权威写待生效（重放的批次已写过，跳过）。 */
+  async #prepareTrustSediments(
+    assignmentId: string,
+    batch: ConversationInteractionMirrorBatch,
+    batchDigest: string,
+    sediments: readonly TrustSedimentMirrorEntry[],
+  ): Promise<void> {
+    const assigned = await this.#select((state) => {
+      const current = state.assignedById.get(assignmentId);
+      if (!current?.envelope || state.mirrorBatches.has(batchDigest)) return undefined;
+      return {
+        executorId: current.record.executorId,
+        environment: structuredClone(current.envelope.manifest.environment),
+      };
+      // 读取范围带上批次本身：按需装入的工作集据此装入已接纳批次（判断是否重放）
+    }, conversationDecisionScope({ assignmentId, batch }));
+    if (!assigned) return;
+    const answeredInBatch = new Set(batch.entries.flatMap((entry) =>
+      entry.kind === "allow-once" && entry.outcome.t === "answered" ? [entry.requestId] : []));
+    const answered = async (requestId: string) =>
+      answeredInBatch.has(requestId) || (await this.interactionOutcome(requestId))?.t === "answered";
+    for (const entry of sediments) {
+      await this.#trustSediments!.prepare({
+        conversationId: this.#conversationId,
+        assignmentId,
+        executorId: assigned.executorId,
+        environment: assigned.environment,
+        entry,
+        answered,
+      });
+    }
   }
 
   async submitCancelProof(

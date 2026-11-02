@@ -114,6 +114,7 @@ function makePipeline(): {
   );
   const trustAdministration = new TrustAdministrationExecutionApplicationService({
     repository,
+    context: { kind: "workspace", hash: "binding-ws", revision: 1 },
     workspacePath: "/tmp/ws",
   });
   const pipeline = new SecurityPipeline({
@@ -266,7 +267,7 @@ describe("createSecureExecuteTool", () => {
       const broker = new ConfirmationBroker();
       const exec = mockExecute();
       const { pipeline, store } = makePipeline();
-      store.create(
+      await store.create(
         contextOf(pipeline),
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
@@ -366,6 +367,24 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(1);
       // 管家研判理由透传到确认请求的展示信息，供 UI 向用户说明为何要确认
       expect(capturedReq?.display.stewardReason).toBe("不确定");
+    });
+
+    it("管家没能完成判断（输出不可解析）→ 照常确认，诊断原因不作为察觉到的风险展示", async () => {
+      const broker = new ConfirmationBroker();
+      let capturedReq: ConfirmationRequest | undefined;
+      broker.onRequest((req) => {
+        capturedReq = req;
+        queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+      });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({ pipeline, originalExecute: exec.fn, broker });
+
+      const result = await wrapped(makeTool("bash"), { command: "echo gray" }, makeContextWithSteward("不是 JSON 的输出"));
+
+      expect(result.content).toBe("executed");
+      expect(capturedReq).toBeDefined();
+      expect(capturedReq?.display.stewardReason).toBeUndefined();
     });
 
     it("无 ctx.llm → 不触发管家，走 broker", async () => {
@@ -475,7 +494,7 @@ describe("createSecureExecuteTool", () => {
       const { pipeline, store } = makePipeline();
 
       // 显式注册 deny 规则:`bash` 工具的 `dangerous *` 命令
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "dangerous *" },
@@ -504,7 +523,7 @@ describe("createSecureExecuteTool", () => {
       const exec = mockExecute();
       const { pipeline, store } = makePipeline();
 
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "dangerous *" },
@@ -690,7 +709,7 @@ describe("createSecureExecuteTool", () => {
       });
       const exec = mockExecute();
       const { pipeline, store } = makePipeline();
-      store.create(
+      await store.create(
         contextOf(pipeline),
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },

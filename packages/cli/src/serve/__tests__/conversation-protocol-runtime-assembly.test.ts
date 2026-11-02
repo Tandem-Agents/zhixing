@@ -85,7 +85,7 @@ describe("ConversationProtocolRuntime", () => {
 
     releaseReplacement();
     expect(() => protocol.bindMutationPublisher(foreignPublisher)).not.toThrow();
-  });
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("requires executor dispatch and an immutable Host topology directory", async () => {
     const home = await createTempDir("conversation-protocol-dispatch-owner");
@@ -813,7 +813,7 @@ describe("ConversationProtocolRuntime", () => {
     };
     const runtime: SessionRuntime = {
       sessionId: "runtime-binding",
-      executionPermissionRules: () => [rule],
+      executionPermissionRules: vi.fn(() => [rule]),
       securitySnapshot: () => ({
         contextId: { kind: "main" },
         workspacePath: null,
@@ -884,6 +884,8 @@ describe("ConversationProtocolRuntime", () => {
         "Local executor rejected a freshly issued assignment",
       );
       expect(validateBindingSpy).toHaveBeenCalledOnce();
+      // 派发快照按本次运行的授权范围组合：无显式环境的主对话为 main
+      expect(runtime.executionPermissionRules).toHaveBeenCalledWith({ kind: "main" });
       expect(readinessReads).toEqual([["web_fetch"], ["web_fetch"], []]);
       expect(bindingResults).toMatchObject([
         { code: "capability-gap", retryable: true },

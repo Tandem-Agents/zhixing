@@ -6,6 +6,7 @@
  */
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { observeLogPhase } from "@zhixing/core/logging";
+import { recordRuntimeFailure } from "../logging/runtime.js";
 import { WorksceneContinuationApplication } from "@zhixing/core/workscene/application";
 import { createWorksceneContinuationPort } from "./workscene-continuation-adapter.js";
 import {
@@ -515,6 +516,8 @@ export interface CreateConversationServicesInput {
   readonly meshConnections?: MeshConnectionRegistry;
   readonly meshExecutorTopologyTrust?: import("./mesh-runtime-assembly.js").MeshExecutorTopologyTrustState;
   readonly durableInteractions: DurableConversationInteractionObserver;
+  /** 本宿主是规则权威时的沉淀接纳端口，构造协议运行时即交入。 */
+  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly conversationRuntimeStorage: ConversationRuntimeStoragePort;
   readonly confirmationHub: ConfirmationHub;
@@ -705,6 +708,7 @@ export async function createConversationServices(
       ? { assignmentStaging: executorBoundary.staging }
       : {}),
     interactions: input.durableInteractions,
+    ...(input.trustSediments ? { trustSediments: input.trustSediments } : {}),
     executeRecoveredPerspective: async (input) => {
       const execution = await conversationPerspectives.executePerspectiveWork({
         runtime: projectConversationPerspectivesRuntime(
@@ -1045,6 +1049,8 @@ export interface CreateLocalConversationOwnerInput {
   readonly evidenceHandler: EvidenceHandlerPort & { stopAccepting(): void };
   readonly assignmentRuntimeFactory: RuntimeFactory;
   readonly durableInteractions: DurableConversationInteractionObserver;
+  /** 本宿主是规则权威时的沉淀接纳端口（本地对话同样由它接纳）。 */
+  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
   readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;
   readonly providerCredentials?: ProviderCredentialProjection;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
@@ -1137,6 +1143,7 @@ export async function createLocalConversationOwner(
     ...(input.phaseRecords ? { phaseRecords: input.phaseRecords } : {}),
     runtimeFactory: input.assignmentRuntimeFactory,
     interactions: input.durableInteractions,
+    ...(input.trustSediments ? { trustSediments: input.trustSediments } : {}),
     advancementModelProvider: createHostAdvancementModelProviderFactory({
       configuration: input.advancementConfiguration,
       credentials: input.providerCredentials ?? {},
@@ -1166,6 +1173,8 @@ export interface CreateExecutorJobOwnerInput {
   readonly jobRelayObligations: JobRelayObligationDirectory;
   readonly conversationExecutorLedger: ConversationAssignmentLedger;
   readonly executorDataPlane: ExecutorDataPlaneRuntime;
+  /** job 执行与收束失败的首因进宿主日志；标准输出只记“已观察到”，正文不采集。 */
+  readonly records?: import("@zhixing/core/logging").LogRecordPort;
 }
 
 export async function createExecutorJobOwner(
@@ -1208,8 +1217,10 @@ export async function createExecutorJobOwner(
       input.executorRoleModule.InProcessAssignmentSubmission,
     resources: input.authorityRuntime.executorResourceGovernor,
     createStream: (input) => inputExecutorDataPlane!.createStream(input),
-    onError: (_assignmentId, error) =>
-      console.warn(chalk.yellow(`[job-worker] ${error.message}`)),
+    onError: (_assignmentId, error) => {
+      recordRuntimeFailure(input.records, error, "job-worker");
+      console.warn(chalk.yellow(`[job-worker] ${error.message}`));
+    },
   });
   return assembly;
 }

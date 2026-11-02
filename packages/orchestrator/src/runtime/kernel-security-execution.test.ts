@@ -21,7 +21,8 @@ function binding(): KernelSecurityExecution {
       match: () => null,
       matchFrozen: () => null,
     }),
-    recordApproval: () => Object.freeze({ kind: "recorded" as const }),
+    persistentApprovals: true,
+    recordApproval: async () => Object.freeze({ kind: "recorded" as const }),
     securitySnapshot: () => Object.freeze({
       contextId: Object.freeze({ kind: "main" as const }),
       workspacePath: null,

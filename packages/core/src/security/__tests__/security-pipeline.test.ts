@@ -62,7 +62,7 @@ describe("SecurityPipeline", () => {
   });
 
   describe("管线组件", () => {
-    it("包含必要的中间件", () => {
+    it("包含必要的中间件", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -74,7 +74,7 @@ describe("SecurityPipeline", () => {
       expect(names).toContain("PathResolve");
     });
 
-    it("中间件按正确顺序排列（authorize → guard）", () => {
+    it("中间件按正确顺序排列（authorize → guard）", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -91,7 +91,7 @@ describe("SecurityPipeline", () => {
       }
     });
 
-    it("包含 OperationClassifier 中间件", () => {
+    it("包含 OperationClassifier 中间件", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -268,7 +268,7 @@ describe("SecurityPipeline", () => {
   describe("权限匹配集成", () => {
     it("用户 allow 规则可以免除 confirm（curl 场景）", async () => {
       const store = new PermissionStore({ rootDir: null });
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
@@ -298,7 +298,7 @@ describe("SecurityPipeline", () => {
 
     it("用户 deny 规则将 confirm 操作降级为 block", async () => {
       const store = new PermissionStore({ rootDir: null });
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
@@ -343,7 +343,7 @@ describe("SecurityPipeline", () => {
 
     it("CI 模式 + 预配置 allow 规则 → 放行", async () => {
       const store = new PermissionStore({ rootDir: null });
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
@@ -374,10 +374,10 @@ describe("SecurityPipeline", () => {
       const wsPath = "/home/user/project";
       const wsCtx = {
         kind: "workspace" as const,
-        hash: PermissionStore.workspaceHashFromPath(wsPath),
+        hash: "binding-project",
       };
 
-      store.create(
+      await store.create(
         wsCtx,
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "npm install *" },
@@ -393,7 +393,7 @@ describe("SecurityPipeline", () => {
 
       // npm install 本身是 internal（不会触发 confirm），
       // 用一个会触发 confirm 的命令来验证
-      store.create(
+      await store.create(
         wsCtx,
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "sudo *" },
@@ -414,7 +414,7 @@ describe("SecurityPipeline", () => {
 
     it("deny 规则 + 短路：guards 不应运行", async () => {
       const store = new PermissionStore({ rootDir: null });
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "*" },
@@ -442,7 +442,7 @@ describe("SecurityPipeline", () => {
       expect(result.executionConstraints).toBeUndefined();
     });
 
-    it("包含 PermissionMatcher 中间件", () => {
+    it("包含 PermissionMatcher 中间件", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -451,7 +451,7 @@ describe("SecurityPipeline", () => {
       expect(names).toContain("PermissionMatcher");
     });
 
-    it("pipeline 不暴露可写 store、上下文规则创建或 tracker", () => {
+    it("pipeline 不暴露可写 store、上下文规则创建或 tracker", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -471,7 +471,7 @@ describe("SecurityPipeline", () => {
   describe("信任执行投影集成", () => {
     it("权限规则 allow 命中后直接放行，不再触发 confirm", async () => {
       const store = new PermissionStore({ rootDir: null });
-      store.create(
+      await store.create(
         { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
@@ -632,7 +632,7 @@ describe("SecurityPipeline", () => {
       expect(limiter.check("write").used).toBe(0);
     });
 
-    it("包含 ExecutionGuard 中间件", () => {
+    it("包含 ExecutionGuard 中间件", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -641,7 +641,7 @@ describe("SecurityPipeline", () => {
       expect(names).toContain("ExecutionGuard");
     });
 
-    it("pipeline.getExecutionGuard 暴露访问", () => {
+    it("pipeline.getExecutionGuard 暴露访问", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
@@ -748,7 +748,7 @@ describe("SecurityPipeline", () => {
       expect(access.commandAnalysis).toBeDefined();
     });
 
-    it("包含 CommandAnalyzer 中间件且位于最前", () => {
+    it("包含 CommandAnalyzer 中间件且位于最前", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });

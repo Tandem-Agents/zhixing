@@ -67,6 +67,9 @@ function createTrustRuntime(
 ) {
   const trustAdministration = new TrustAdministrationExecutionApplicationService({
     repository: createPermissionStoreTrustAdministrationRepository(() => store),
+    context: workspacePath
+      ? { kind: "workspace", hash: "binding-ws", revision: 1 }
+      : { kind: "main" },
     workspacePath,
   });
   const pipeline = new SecurityPipeline({

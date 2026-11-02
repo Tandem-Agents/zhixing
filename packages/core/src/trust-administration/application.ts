@@ -12,7 +12,7 @@ import {
 /** Trust Administration's own stable context identity. */
 export type TrustAdministrationContext =
   | { readonly kind: "main" }
-  | { readonly kind: "workspace"; readonly hash: string }
+  | { readonly kind: "workspace"; readonly hash: string; readonly revision?: number }
   | { readonly kind: "scene"; readonly sceneId: string };
 
 export interface TrustAdministrationContribution {
@@ -52,17 +52,41 @@ export interface TrustAdministrationRepositoryRule
 export type TrustAdministrationQuery = {
   readonly kind: "list";
   readonly conversationId?: string;
+  /** 同时按页列出当前范围以外的其他范围（显式工作区、已失效工作区、旧格式等）。 */
+  readonly otherScopes?: { readonly after?: string; readonly limit?: number };
 };
 
 export type TrustAdministrationCommand = {
   readonly kind: "revoke";
   readonly ruleId: string;
   readonly conversationId?: string;
+  /** 规则所在的其他范围（取自列表结果的分组）；不传为当前对话的范围。 */
+  readonly context?: TrustAdministrationContext;
 };
+
+export interface TrustAdministrationScopeGroup {
+  readonly context: TrustAdministrationContext;
+  readonly label: string;
+  /** false：该范围不再对任何运行生效（目录已变更、已移除或旧格式），规则只供撤销。 */
+  readonly effective: boolean;
+  readonly note?: string;
+  readonly rules: readonly TrustAdministrationRule[];
+}
 
 export interface TrustAdministrationRuleView {
   readonly rules: readonly TrustAdministrationRule[];
+  readonly otherScopes?: {
+    readonly groups: readonly TrustAdministrationScopeGroup[];
+    /** 下一页游标；没有更多时缺省。 */
+    readonly next?: string;
+  };
 }
+
+/** 范围的展示描述（名称与是否仍对运行生效），由宿主按本机登记给出。 */
+export type TrustAdministrationScopeDescriber = (
+  context: TrustAdministrationContext,
+  rules: readonly TrustAdministrationRule[],
+) => Promise<{ readonly label: string; readonly effective: boolean; readonly note?: string }>;
 
 export interface TrustAdministrationRuleRevokedFact {
   readonly kind: "trust-administration-rule-revoked";
@@ -85,17 +109,30 @@ export interface TrustAdministrationRepository {
     context: TrustAdministrationContext,
   ): Promise<readonly TrustAdministrationRepositoryRule[]>;
   revoke(context: TrustAdministrationContext, ruleId: string): Promise<boolean>;
+  /** 按页列出有落盘规则的范围（只按范围身份排序分页，不读规则以外的数据）。 */
+  listScopes?(input: { readonly after?: string; readonly limit: number }): Promise<{
+    readonly scopes: readonly {
+      readonly cursor: string;
+      readonly context: TrustAdministrationContext;
+      readonly rules: readonly TrustAdministrationRepositoryRule[];
+    }[];
+    readonly next?: string;
+  }>;
 }
 
 export interface TrustAdministrationApplicationOptions {
   readonly repository: TrustAdministrationRepository;
   readonly defaultContext: () => TrustAdministrationContext;
+  readonly describeScope?: TrustAdministrationScopeDescriber;
 }
 
 export {
   TrustAdministrationExecutionApplicationService,
   suggestTrustAdministrationPatterns,
+  trustSedimentIsConsistent,
 } from "./execution.js";
+export { conversationRunTrustScope, jobRunTrustScopeInput, resolveExecutionTrustScope, workspaceTrustIdentity } from "./scope.js";
+export type { ExecutionTrustScopeInput } from "./scope.js";
 export type {
   TrustAdministrationApproval,
   TrustAdministrationApprovalResult,
@@ -107,6 +144,9 @@ export type {
   TrustAdministrationOperation,
   TrustAdministrationRiskLevel,
   TrustAdministrationSuggestedPattern,
+  TrustSedimentSubmission,
+  TrustSedimentSubmissionPort,
+  TrustSedimentSubmissionResult,
 } from "./execution.js";
 
 export type TrustAdministrationApplicationErrorCode =
@@ -138,12 +178,51 @@ export class TrustAdministrationApplicationService
     }
     const context = this.#contextFor(query.conversationId);
     const rules = await this.options.repository.list(context);
+    const otherScopes = query.otherScopes && this.options.repository.listScopes
+      ? await this.#otherScopes(context, query.otherScopes)
+      : undefined;
     return Object.freeze({
       rules: Object.freeze(
         rules
           .filter(isManageableTrustAdministrationRule)
           .map(freezeTrustAdministrationRule),
       ),
+      ...(otherScopes ? { otherScopes } : {}),
+    });
+  }
+
+  /** 当前范围以外、有可管规则的范围，按页给出；全局规则已在当前列表里，不重复。 */
+  async #otherScopes(
+    current: TrustAdministrationContext,
+    page: NonNullable<TrustAdministrationQuery["otherScopes"]>,
+  ): Promise<NonNullable<TrustAdministrationRuleView["otherScopes"]>> {
+    const limit = Math.max(1, Math.min(50, Math.trunc(page.limit ?? 20)));
+    const listed = await this.options.repository.listScopes!({
+      ...(page.after ? { after: page.after } : {}),
+      limit,
+    });
+    const groups: TrustAdministrationScopeGroup[] = [];
+    for (const scope of listed.scopes) {
+      const context = freezeTrustAdministrationContext(scope.context);
+      if (sameScopeIdentity(context, current)) continue;
+      const rules = scope.rules
+        .filter(isManageableTrustAdministrationRule)
+        .filter((rule) => rule.scope === "context")
+        .map(freezeTrustAdministrationRule);
+      if (rules.length === 0) continue;
+      const described = await this.options.describeScope?.(context, rules)
+        .catch(() => undefined) ?? { label: defaultScopeLabel(context), effective: true };
+      groups.push(Object.freeze({
+        context,
+        label: described.label,
+        effective: described.effective,
+        ...(described.note ? { note: described.note } : {}),
+        rules: Object.freeze(rules),
+      }));
+    }
+    return Object.freeze({
+      groups: Object.freeze(groups),
+      ...(listed.next ? { next: listed.next } : {}),
     });
   }
 
@@ -157,7 +236,10 @@ export class TrustAdministrationApplicationService
       );
     }
     const ruleId = requireNonEmpty(command.ruleId, "Trust rule id");
-    const context = this.#contextFor(command.conversationId);
+    // 其他范围的撤销同样先核该范围下可见（与列表同一可管口径），不扩大可撤销的规则
+    const context = command.context
+      ? freezeTrustAdministrationContext(command.context)
+      : this.#contextFor(command.conversationId);
     const visible = await this.options.repository.list(context);
     if (
       !visible.some(
@@ -256,6 +338,25 @@ function requireNonEmpty(value: unknown, label: string): string {
   return value;
 }
 
+/** 同一范围身份（工作区按绑定身份，不看修订）。 */
+function sameScopeIdentity(left: TrustAdministrationContext, right: TrustAdministrationContext): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "workspace" && right.kind === "workspace") return left.hash === right.hash;
+  if (left.kind === "scene" && right.kind === "scene") return left.sceneId === right.sceneId;
+  return true;
+}
+
+function defaultScopeLabel(context: TrustAdministrationContext): string {
+  switch (context.kind) {
+    case "main":
+      return "主模式";
+    case "scene":
+      return `工作场景 ${context.sceneId}`;
+    case "workspace":
+      return `工作区 ${context.hash.slice(0, 8)}`;
+  }
+}
+
 function freezeTrustAdministrationContext(
   context: TrustAdministrationContext,
 ): TrustAdministrationContext {
@@ -266,6 +367,7 @@ function freezeTrustAdministrationContext(
       return Object.freeze({
         kind: "workspace",
         hash: requireNonEmpty(context.hash, "Workspace identity"),
+        ...(context.revision === undefined ? {} : { revision: context.revision }),
       });
     case "scene":
       return Object.freeze({

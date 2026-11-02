@@ -365,6 +365,14 @@ export interface AuthorityRuntimeStack {
       readonly tools: readonly string[];
       readonly mcpServers: readonly string[];
     };
+    /**
+     * 按本次清单将写入的工作区要求与签发的工具集合给出冻结快照规则（范围推导见
+     * jobRunTrustScopeInput，内置规则随工具集合）；不给时快照为空。
+     */
+    readonly permissionRulesFor?: (input: {
+      readonly environment: Pick<EnvironmentRequirement, "workspace">;
+      readonly tools: readonly string[];
+    }) => readonly PermissionRule[];
     readonly targets?: readonly {
       readonly executorId: string;
       readonly deviceId: string;
@@ -1590,8 +1598,10 @@ export async function setupAuthorityRuntime(
         ? [...new Set(input.instruction.tools)].sort()
         : [...new Set(input.capabilities.tools)].sort();
       const requestedMcpServers = [...new Set(input.capabilities.mcpServers)].sort();
+      // job 清单不带工作区要求：快照规则与写入清单的环境按同一份要求推导
+      const workspaceRequirement: Pick<EnvironmentRequirement, "workspace"> = {};
       const permissionPublication = await permissionSnapshots.publishRules({
-        rules: [],
+        rules: input.permissionRulesFor?.({ environment: workspaceRequirement, tools: requestedTools }) ?? [],
         signer: key,
         generatedAt: canonicalTime(clock(), "Permission snapshot time"),
       });
@@ -1671,6 +1681,7 @@ export async function setupAuthorityRuntime(
           budget: { maxCalls: 64, maxTokens: 256_000 },
         },
         environment: {
+          ...workspaceRequirement,
           credentialBindings: credentialBindings.map(
             ({ service, bindingId }) => ({ service, bindingId }),
           ),

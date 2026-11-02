@@ -40,7 +40,7 @@ it("instantiates the exact signed profile when new tools appear before execution
   } as never);
   worker.accept({ execution: "conversation", assignmentId: "probe", capabilities: [globalAuthorityCapability("probe", "ws:reports:primary")], manifest: { tools: ["mcp_discover"], mcpServers: [], environment: { deviceId: "remote" } }, work: { conversationId: "ws:reports:primary", controlContext: [], windowInput: { t: "full", messages: [] }, ingress: { kind: "first-party" } } } as never);
   await worker.drain();
-  expect(create.mock.calls[0]?.[1]).toEqual({ workspaceRoot: "D:\\fixture", executionProfile: { tools: ["mcp_discover"], mcpServers: [], providerIds: [] } });
+  expect(create.mock.calls[0]?.[1]).toEqual({ workspaceRoot: "D:\\fixture", executionProfile: { tools: ["mcp_discover"], mcpServers: [], providerIds: [] }, workspaceBinding: null });
   expect(errors).toEqual(["RUN_REACHED"]);
 });
 
@@ -303,7 +303,12 @@ describe("ConversationAssignmentWorker", () => {
     );
     expect(createRuntime).toHaveBeenCalledWith(
       envelope.work.conversationId,
-      { workspaceRoot: "D:\\workspace-a", executionProfile: { tools: undefined, mcpServers: undefined, providerIds: [] } },
+      {
+        workspaceRoot: "D:\\workspace-a",
+        executionProfile: { tools: undefined, mcpServers: undefined, providerIds: [] },
+        // 授权范围由清单里的工作区绑定决定，原样交给运行时工厂
+        workspaceBinding: { deviceId: "device-a", bindingRef: "workspace-a", workspaceBindingRevision: 2 },
+      },
     );
     expect(releasePreflightEnvironment).toHaveBeenCalledWith(
       envelope.manifest,
@@ -526,7 +531,7 @@ describe("ConversationAssignmentWorker", () => {
     const envelope = {
       execution: "conversation",
       assignmentId,
-      manifest: { tools: [], mcpServers: [] },
+      manifest: { tools: [], mcpServers: [], environment: {} },
       capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
       resourceLease: {},
@@ -766,7 +771,7 @@ describe("ConversationAssignmentWorker", () => {
     const envelope = {
       execution: "conversation",
       assignmentId,
-      manifest: { tools: [], mcpServers: [] },
+      manifest: { tools: [], mcpServers: [], environment: {} },
       capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
       resourceLease: {},
@@ -1006,7 +1011,7 @@ describe("ConversationAssignmentWorker", () => {
     const envelope = {
       execution: "conversation",
       assignmentId,
-      manifest: { tools: [], mcpServers: [] },
+      manifest: { tools: [], mcpServers: [], environment: {} },
       capabilities: [globalAuthorityCapability(assignmentId, conversationId)],
       permissionLease: {},
       resourceLease: {},

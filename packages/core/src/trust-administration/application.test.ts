@@ -176,4 +176,53 @@ describe("TrustAdministrationApplicationService", () => {
       facts: [{ kind: "trust-administration-rule-revoked", ruleId: "rule-1" }],
     });
   });
+
+  it("lists other scopes by page beside the current scope, described by the host, and revokes only what that scope shows", async () => {
+    const workspaceA = { kind: "workspace", hash: "hash-a" } as const;
+    const workspaceB = { kind: "workspace", hash: "hash-b" } as const;
+    const base = repository({
+      main: [rule("main-rule", "context", { kind: "main" })],
+      "workspace:hash-a": [rule("a-rule", "context", { ...workspaceA, revision: 2 })],
+      "workspace:hash-b": [rule("b-rule", "context", { ...workspaceB, revision: 1 })],
+      global: [rule("global-rule", "global")],
+    });
+    const scopes = [
+      { cursor: "k-main", context: { kind: "main" } as const, rules: [rule("main-rule", "context", { kind: "main" })] },
+      { cursor: "k-a", context: workspaceA, rules: [rule("a-rule", "context", { ...workspaceA, revision: 2 }), rule("builtin", "builtin")] },
+      { cursor: "k-b", context: workspaceB, rules: [rule("b-rule", "context", { ...workspaceB, revision: 1 })] },
+    ];
+    const listScopes = vi.fn(async (input: { after?: string; limit: number }) => {
+      const remaining = scopes.filter((scope) => input.after === undefined || scope.cursor > input.after);
+      const page = remaining.slice(0, input.limit);
+      return { scopes: page, ...(remaining.length > input.limit ? { next: page.at(-1)!.cursor } : {}) };
+    });
+    const application = new TrustAdministrationApplicationService({
+      repository: { ...base, listScopes },
+      defaultContext: () => ({ kind: "main" }),
+      describeScope: async (context) => context.kind === "workspace" && context.hash === "hash-b"
+        ? { label: "工作区「B」", effective: false, note: "目录已变更" }
+        : { label: context.kind === "workspace" ? "工作区「A」" : "主模式", effective: true },
+    });
+
+    // 当前范围（主模式）不重复出现在其他范围里；内置规则不进管理视图
+    const first = await application.query({ kind: "list", otherScopes: { limit: 2 } });
+    expect(first.rules.map((entry) => entry.id)).toEqual(["main-rule", "global-rule"]);
+    expect(first.otherScopes).toMatchObject({
+      groups: [{ label: "工作区「A」", effective: true, rules: [{ id: "a-rule" }] }],
+      next: "k-a",
+    });
+    const second = await application.query({ kind: "list", otherScopes: { after: first.otherScopes!.next } });
+    expect(second.otherScopes).toEqual({
+      groups: [expect.objectContaining({ label: "工作区「B」", effective: false, note: "目录已变更" })],
+    });
+    // 不传 otherScopes 的旧调用方结果不变
+    expect(await application.query({ kind: "list" })).not.toHaveProperty("otherScopes");
+
+    await expect(application.execute({ kind: "revoke", ruleId: "b-rule", context: workspaceB }))
+      .resolves.toMatchObject({ revoked: true });
+    expect(base.revoke).toHaveBeenLastCalledWith(workspaceB, "b-rule");
+    // 规则不在所给范围可见：拒绝，不扩大可撤销的规则
+    await expect(application.execute({ kind: "revoke", ruleId: "b-rule", context: workspaceA }))
+      .rejects.toMatchObject({ code: "not-found" });
+  });
 });

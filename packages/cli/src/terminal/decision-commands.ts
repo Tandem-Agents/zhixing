@@ -25,7 +25,7 @@ export interface TerminalDecisionResult {
 export interface TerminalDecisionOptions {
   /** Return undefined while disconnected; invalidate on every context/connection generation change. */
   readonly controller: () => TerminalDecisionController | undefined;
-  readonly management: Pick<RpcManagementFacade, 'trustList' | 'trustRevoke' | 'securityStatus'>;
+  readonly management: Pick<RpcManagementFacade, 'trustList' | 'trustRevoke' | 'trustOtherScopes' | 'securityStatus'>;
   readonly signal: AbortSignal;
   readonly choose: TerminalSelectionPort;
   readonly publish: (result: TerminalDecisionResult) => Promise<void>;
@@ -92,6 +92,16 @@ export class TerminalDecisionCommands {
             if (!rules.some(rule => rule.id === id)) return false;
             scope.assertCurrent();
             const revoked = await this.options.management.trustRevoke(id, conversationId);
+            scope.assertCurrent(); return revoked;
+          },
+          listOtherScopes: async after => {
+            scope.assertCurrent();
+            const page = await this.options.management.trustOtherScopes(conversationId, after);
+            scope.assertCurrent(); return boundedControlProjection(page, 1024 * 1024);
+          },
+          revokeRuleIn: async (id, context) => {
+            scope.assertCurrent();
+            const revoked = await this.options.management.trustRevoke(id, conversationId, context);
             scope.assertCurrent(); return revoked;
           },
         });

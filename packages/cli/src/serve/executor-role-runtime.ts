@@ -25,6 +25,7 @@ import { createWorkmodeEnterTool, createWorkmodeExitTool, createWorksceneListToo
 import { createAdvancementProposalTool } from "./advancement-proposal-tool.js";
 import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing/core/advancement/proposal-identity";
 import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
+import { jobRunTrustScopeInput } from "@zhixing/core/trust-administration";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { mcpConfigurationRevision } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
@@ -320,6 +321,8 @@ async function runExecutorProcess(
     };
     await mcpRuntime.lifecycle.connect();
     const interactions = new DurableConversationInteractionObserver();
+    // 本宿主不是规则权威：沉淀记入指派台账、随镜像回到 owner 接纳
+    permissionStorage.addTrustSedimentRecorder((sediment) => interactions.recordTrustSediment(sediment));
     let authority: AuthorityRuntimeStack | undefined;
     const communicationHandle = createConversationCommunicationAssemblyHandle();
     const extensionHandle = createExtensionManagementHandle();
@@ -507,6 +510,7 @@ async function runExecutorProcess(
           environment?.workspaceRoot,
           sessionId,
           environment?.executionProfile,
+          environment?.workspaceBinding ?? null,
         ),
     });
     const runtimeFactory =
@@ -548,8 +552,8 @@ async function runExecutorProcess(
     const jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker, capabilities) =>
-          runtime.createJobRuntime(instruction, confirmationBroker, capabilities),
+        create: (instruction, confirmationBroker, capabilities, workspaceBinding) =>
+          runtime.createJobRuntime(instruction, confirmationBroker, capabilities, workspaceBinding ?? null),
       }),
       submissionFor: () => {
         if (!mesh) throw new Error("Executor submission transport is not ready");
@@ -569,6 +573,7 @@ async function runExecutorProcess(
       onError: (_assignmentId, error) =>
         writer.notify(`[job-worker] ${error.message}`),
     });
+    permissionStorage.addTrustSedimentRecorder((sediment) => jobOwnerAssembly.owner.recordTrustSediment(sediment));
     const coordinateRuntimeTrustTransition = async () => {
       const result = await coordinateManagedHostTrustTransition({
         processMode,
@@ -1156,6 +1161,7 @@ export class ExecutorRuntimeSubstrate {
     workspaceRoot?: string | null,
     sessionId?: string,
     executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile,
+    workspaceBinding: import("@zhixing/core/contracts").EnvironmentRequirement["workspace"] | null = null,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
@@ -1193,8 +1199,8 @@ export class ExecutorRuntimeSubstrate {
       ),
       securityExecution: this.options.permissionStorage.bind(
         workscene
-          ? Object.freeze({ kind: "scene", sceneId: workscene.sceneId })
-          : Object.freeze({ kind: "default" }),
+          ? Object.freeze({ sceneId: workscene.sceneId })
+          : Object.freeze(workspaceBinding ? { workspace: workspaceBinding } : {}),
       ),
       profile: executionProfile ? { ...profile, enabledTools: profile.enabledTools.filter(name => executionProfile.tools.includes(name)) } : profile,
       lifecycle: [createZhixingGuidanceLifecycle({
@@ -1231,6 +1237,7 @@ export class ExecutorRuntimeSubstrate {
     instruction: import("@zhixing/core/contracts").JobExecutionInstruction,
     confirmationBroker: import("@zhixing/core/confirmation").IConfirmationBroker,
     capabilities: JobRuntimeCapabilities,
+    workspaceBinding: import("@zhixing/core/contracts").EnvironmentRequirement["workspace"] | null = null,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const runtimeEnvironment = this.#runtimeEnvironment.create({});
@@ -1261,7 +1268,7 @@ export class ExecutorRuntimeSubstrate {
       toolImplementation: selection.runtimeTools.implementation,
       windowPrompt: createSkillCatalogWindowPromptProjection("main"),
       securityExecution: this.options.permissionStorage.bind(
-        Object.freeze({ kind: "default" }),
+        jobRunTrustScopeInput({ workspace: workspaceBinding }),
       ),
       profile: selection.profile,
       extraTools: [...selection.runtimeTools.extraTools],

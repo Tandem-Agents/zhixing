@@ -133,8 +133,8 @@ async function runDurablePerspective(
       if (!snapshot) throw new Error("Perspective runtime lacks a security snapshot");
       return snapshot;
     },
-    executionPermissionRules: () => {
-      const rules = baseRuntime.executionPermissionRules?.();
+    executionPermissionRules: (scope) => {
+      const rules = baseRuntime.executionPermissionRules?.(scope);
       if (!rules) {
         throw new Error("Perspective runtime lacks an execution permission snapshot");
       }

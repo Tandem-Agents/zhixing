@@ -75,7 +75,7 @@ function makeBuiltinRule(
 
 describe("PermissionStore builtin scope", () => {
   describe("两阶段匹配（用户池严格优先）", () => {
-    it("用户池为空 → builtin 池接管", () => {
+    it("用户池为空 → builtin 池接管", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({
@@ -92,12 +92,12 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.scope).toBe("builtin");
     });
 
-    it("用户 allow 命中 → builtin 不参与（即便 builtin 也命中）", () => {
+    it("用户 allow 命中 → builtin 不参与（即便 builtin 也命中）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }, "deny"),
       ]);
-      store.create(
+      await store.create(
         MAIN,
         makeRule({
           pattern: { tool: "web_fetch", argument: "https://example.com/*" },
@@ -114,12 +114,12 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.scope).toBe("session");
     });
 
-    it("冻结快照保持用户池优先语义且不读取当前规则", () => {
+    it("冻结快照保持用户池优先语义且不读取当前规则", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }, "deny"),
       ]);
-      store.create(
+      await store.create(
         MAIN,
         makeRule({
           pattern: { tool: "web_fetch", argument: "https://example.com/*" },
@@ -129,7 +129,7 @@ describe("PermissionStore builtin scope", () => {
       );
       const frozen = store.snapshot(MAIN);
 
-      store.reset(MAIN);
+      await store.reset(MAIN);
       store.registerBuiltinRules("test", [
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }, "allow"),
       ]);
@@ -142,7 +142,7 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.scope).toBe("session");
     });
 
-    it("用户通配 deny + builtin 高特异性 allow → user 决定（核心产品语义）", () => {
+    it("用户通配 deny + builtin 高特异性 allow → user 决定（核心产品语义）", async () => {
       // 这是 ADR-TPE-008 选择两阶段匹配而非合并匹配的关键场景
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
@@ -151,7 +151,7 @@ describe("PermissionStore builtin scope", () => {
           argument: "https://docs.npmjs.com/cli",
         }),
       ]);
-      store.create(
+      await store.create(
         MAIN,
         makeRule({
           pattern: { tool: "web_fetch", argument: "*" },
@@ -168,7 +168,7 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.scope).toBe("session");
     });
 
-    it("user 池有但全不命中 + builtin 命中 → builtin 接管", () => {
+    it("user 池有但全不命中 + builtin 命中 → builtin 接管", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({
@@ -176,7 +176,7 @@ describe("PermissionStore builtin scope", () => {
           argument: "https://npmjs.com/*",
         }),
       ]);
-      store.create(
+      await store.create(
         MAIN,
         makeRule({
           pattern: { tool: "bash", argument: "npm install *" },
@@ -193,7 +193,7 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.scope).toBe("builtin");
     });
 
-    it("两阶段都无命中 → null", () => {
+    it("两阶段都无命中 → null", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({ tool: "web_fetch", argument: "https://a.com/*" }),
@@ -207,7 +207,7 @@ describe("PermissionStore builtin scope", () => {
       ).toBeNull();
     });
 
-    it("builtin 池内仍走 deny-wins + globSpecificity（同 namespace）", () => {
+    it("builtin 池内仍走 deny-wins + globSpecificity（同 namespace）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({ tool: "bash", argument: "npm *" }, "allow"),
@@ -221,7 +221,7 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.decision).toBe("deny");
     });
 
-    it("跨 namespace 的 deny-wins（namespace 间平级，多 ns 命中走统一 resolveConflict）", () => {
+    it("跨 namespace 的 deny-wins（namespace 间平级，多 ns 命中走统一 resolveConflict）", async () => {
       // ADR-TPE-008 语义守卫：namespace 间不分优先级，多 ns 同时命中合并参与
       // resolveConflict（deny-wins + globSpecificity）。守卫这条契约，防止未来误改
       // 成"先注册先优先"等其他策略。
@@ -237,7 +237,7 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.decision).toBe("deny");
     });
 
-    it("跨 namespace 的 globSpecificity（同决策，特异性高的胜出）", () => {
+    it("跨 namespace 的 globSpecificity（同决策，特异性高的胜出）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("ns_general", [
         makeBuiltinRule(
@@ -262,7 +262,7 @@ describe("PermissionStore builtin scope", () => {
       expect(result?.id).toBe("specific-rule");
     });
 
-    it("builtin 命中后 matchCount / lastMatchedAt 正确更新", () => {
+    it("builtin 命中后 matchCount / lastMatchedAt 正确更新", async () => {
       let nowValue = 12345;
       const store = new PermissionStore({
         rootDir: null,
@@ -292,7 +292,7 @@ describe("PermissionStore builtin scope", () => {
   // ─── registerBuiltinRules 行为 ───
 
   describe("registerBuiltinRules namespace 追加式", () => {
-    it("多 namespace 独立累加", () => {
+    it("多 namespace 独立累加", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("web_fetch", [
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }),
@@ -310,7 +310,7 @@ describe("PermissionStore builtin scope", () => {
       ).toBe("allow");
     });
 
-    it("同 namespace 重复调用：替换该 namespace 内规则（不影响其他 namespace）", () => {
+    it("同 namespace 重复调用：替换该 namespace 内规则（不影响其他 namespace）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("a", [
         makeBuiltinRule({ tool: "tool_a", argument: "*" }),
@@ -334,7 +334,7 @@ describe("PermissionStore builtin scope", () => {
       ).toBe("allow");
     });
 
-    it("register 拒空数组 throw（fail-fast，不混入 unregister 语义）", () => {
+    it("register 拒空数组 throw（fail-fast，不混入 unregister 语义）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("web_fetch", [
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }),
@@ -351,7 +351,7 @@ describe("PermissionStore builtin scope", () => {
       ).toBe("allow");
     });
 
-    it("严格 scope：传入 scope!=='builtin' 的规则 → throw", () => {
+    it("严格 scope：传入 scope!=='builtin' 的规则 → throw", async () => {
       const store = new PermissionStore({ rootDir: null });
       expect(() =>
         store.registerBuiltinRules("test", [
@@ -363,7 +363,7 @@ describe("PermissionStore builtin scope", () => {
       ).toThrow(/scope 必须为 "builtin"/);
     });
 
-    it("严格 scope：scope=='global' 也 throw（不静默改写）", () => {
+    it("严格 scope：scope=='global' 也 throw（不静默改写）", async () => {
       const store = new PermissionStore({ rootDir: null });
       expect(() =>
         store.registerBuiltinRules("test", [
@@ -375,14 +375,14 @@ describe("PermissionStore builtin scope", () => {
       ).toThrow(/scope 必须为 "builtin"/);
     });
 
-    it("namespace 必须是非空字符串", () => {
+    it("namespace 必须是非空字符串", async () => {
       const store = new PermissionStore({ rootDir: null });
       expect(() => store.registerBuiltinRules("", [])).toThrow(
         /非空字符串/,
       );
     });
 
-    it("不修改 caller 传入的原 rule 对象（防御性拷贝）", () => {
+    it("不修改 caller 传入的原 rule 对象（防御性拷贝）", async () => {
       const store = new PermissionStore({ rootDir: null });
       const original = makeBuiltinRule({ tool: "x", argument: "*" });
 
@@ -399,13 +399,13 @@ describe("PermissionStore builtin scope", () => {
   // ─── resetAll **不**清 builtin ───
 
   describe("resetAll", () => {
-    it("resetAll 不清除 builtin 规则（boot-time 系统配置语义）", () => {
+    it("resetAll 不清除 builtin 规则（boot-time 系统配置语义）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.registerBuiltinRules("test", [
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }),
       ]);
 
-      store.resetAll();
+      await store.resetAll();
 
       // builtin 规则仍生效
       const result = store.match(MAIN, makeRequest("web_fetch", { url: "x" }));
@@ -414,9 +414,9 @@ describe("PermissionStore builtin scope", () => {
       expect(store.listBuiltinNamespaces()).toContain("test");
     });
 
-    it("resetAll 仍清除 user 池（session/workspace/global）", () => {
+    it("resetAll 仍清除 user 池（session/workspace/global）", async () => {
       const store = new PermissionStore({ rootDir: null });
-      store.create(
+      await store.create(
         MAIN,
         makeRule({
           pattern: { tool: "x", argument: "*" },
@@ -425,11 +425,11 @@ describe("PermissionStore builtin scope", () => {
         }),
       );
 
-      store.resetAll();
+      await store.resetAll();
       expect(store.match(MAIN, makeRequest("x", { foo: "y" }))).toBeNull();
     });
 
-    it("测试隔离推荐：每 test 创建新 store 实例（resetAll 不再保证完全隔离）", () => {
+    it("测试隔离推荐：每 test 创建新 store 实例（resetAll 不再保证完全隔离）", async () => {
       // 文档化推荐做法——这条测试本身验证 resetAll 的新语义
       const store1 = new PermissionStore({ rootDir: null });
       store1.registerBuiltinRules("ns", [
@@ -446,9 +446,9 @@ describe("PermissionStore builtin scope", () => {
   // ─── create 拒绝 builtin ───
 
   describe("create", () => {
-    it("create 调 'builtin' scope 抛错（应走 registerBuiltinRules）", () => {
+    it("create 调 'builtin' scope 抛错（应走 registerBuiltinRules）", async () => {
       const store = new PermissionStore({ rootDir: null });
-      expect(() =>
+      await expect(
         store.create(
           MAIN,
           makeRule({
@@ -457,14 +457,14 @@ describe("PermissionStore builtin scope", () => {
             scope: "builtin",
           }),
         ),
-      ).toThrow(/builtin.*registerBuiltinRules/);
+      ).rejects.toThrow(/builtin.*registerBuiltinRules/);
     });
   });
 
   // ─── 调试 API ───
 
   describe("调试 / 可观测性 API", () => {
-    it("listBuiltinNamespaces 返回所有已注册的 namespace", () => {
+    it("listBuiltinNamespaces 返回所有已注册的 namespace", async () => {
       const store = new PermissionStore({ rootDir: null });
       expect(store.listBuiltinNamespaces()).toEqual([]);
 
@@ -481,7 +481,7 @@ describe("PermissionStore builtin scope", () => {
       expect(namespaces).toHaveLength(2);
     });
 
-    it("getBuiltinRules 返回指定 namespace 的规则拷贝", () => {
+    it("getBuiltinRules 返回指定 namespace 的规则拷贝", async () => {
       const store = new PermissionStore({ rootDir: null });
       const rule = makeBuiltinRule({ tool: "x", argument: "*" });
       store.registerBuiltinRules("test", [rule]);
@@ -496,7 +496,7 @@ describe("PermissionStore builtin scope", () => {
       expect(refetched[0]!.pattern.argument).toBe("*");
     });
 
-    it("getBuiltinRules 不存在 namespace → 空数组", () => {
+    it("getBuiltinRules 不存在 namespace → 空数组", async () => {
       const store = new PermissionStore({ rootDir: null });
       expect(store.getBuiltinRules("nonexistent")).toEqual([]);
     });
@@ -511,7 +511,7 @@ describe("PermissionStore builtin scope", () => {
       tmpDir = await createTempDir("permstore-builtin");
     });
 
-    it("旧 global.json（仅含 session/workspace/global scope）能正常加载", () => {
+    it("旧 global.json（仅含 session/workspace/global scope）能正常加载", async () => {
       const file = path.join(tmpDir, "global.json");
       const oldFile = {
         version: 1,
@@ -557,7 +557,7 @@ describe("PermissionStore builtin scope", () => {
       expect(denyMatch?.scope).toBe("global");
     });
 
-    it("S4: 磁盘上含 'builtin' scope 的规则被拒绝（不污染 builtin 池）", () => {
+    it("S4: 磁盘上含 'builtin' scope 的规则被拒绝（不污染 builtin 池）", async () => {
       // 防御性场景：磁盘文件意外含 builtin scope（旧 bug 或人工编辑）
       // sanitizeRules 应**显式拒绝**，避免幽灵规则
       const file = path.join(tmpDir, "global.json");

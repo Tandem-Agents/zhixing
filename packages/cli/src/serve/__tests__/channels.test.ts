@@ -11,7 +11,7 @@ import { Readable } from "node:stream";
 import ts from "typescript";
 import { FileAuthorityCommitLog, FileArtifactStore, DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "@zhixing/core/authority";
 import { protocolDigest } from "@zhixing/core/protocol";
-import { HostStopCoordinator, freezeHostStopAcceptedWork, settleHostStopAcceptedWork, type HostStopAcceptedWorkPorts } from "../host-stop-lifecycle.js";
+import { HostStopAcceptedWorkPendingError, HostStopCoordinator, freezeHostStopAcceptedWork, settleHostStopAcceptedWork, type HostStopAcceptedWorkPorts } from "../host-stop-lifecycle.js";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionApplyConfiguration, extensionList, extensionRefresh, extensionSetEnabled } from "@zhixing/core/extensions/application";
 import { validateExtensionManifest } from "@zhixing/core/extensions/contracts";
@@ -580,7 +580,8 @@ describe("managed Channel production composition", () => {
       boundInboundRouter: inbound, boundAuthorityRuntime: authority, boundDeliveryStack: { lifecycle: delivery },
       boundChannelStatuses: channel.statuses, boundChannelConnections: channel,
       schedulerApplication, settleScheduleForTransfer: async () => {}, channel, delivery, inbound, jobOwner,
-      jobRelays: { listOpen: async () => [] }, recoverFrozenOwners: async () => {}, authority, removalBootstrapAdmissionClosed: false });
+      jobRelays: { listOpen: async () => [] }, recoverFrozenOwners: async () => {}, authority, removalBootstrapAdmissionClosed: false,
+      schedulerGenerationOwner: { reconcileExecutionTerminals: async () => {} }, HostStopAcceptedWorkPendingError });
     if (kind === "paired-removal") {
       await binding.removal.closeAdmission("removal");
       const ownerItems = await binding.removal.captureAcceptedWork("removal");

@@ -230,7 +230,8 @@ export type JobJournalRecord =
       readonly targetUpTo: number;
       readonly targetOrdinal: number;
       readonly targetMirrorDigest: string;
-      readonly targetInteractionRecordSeq: number;
+      /** 前缀里最后一条交互结果；只有投影启用之后有交互结果时才存在，此时完成必须带流证明 */
+      readonly targetInteractionRecordSeq?: number;
     }
   | {
       readonly t: "interaction-settlement-completed";
@@ -253,8 +254,8 @@ export type JobJournalRecord =
       readonly targetUpTo: number;
       readonly targetOrdinal: number;
       readonly targetMirrorDigest: string;
-      readonly targetInteractionRecordSeq: number;
-      readonly streamProof: InteractionSettlementStreamProof;
+      readonly targetInteractionRecordSeq?: number;
+      readonly streamProof?: InteractionSettlementStreamProof;
     }
   | {
       readonly t: "state";
@@ -527,11 +528,16 @@ export function validateJobJournalRecord(
             "executorId",
             "sourceChainDigest",
             "sourceLastSeq",
-            ...(type === "interaction-settlement-completed"
-              ? ["streamProof"]
+            // 流目标与流证明同进同退：有目标的完成记录必须带证明，无目标则两者都不出现
+            ...(value.targetInteractionRecordSeq !== undefined
+              ? [
+                  "targetInteractionRecordSeq",
+                  ...(type === "interaction-settlement-completed"
+                    ? ["streamProof"]
+                    : []),
+                ]
               : []),
             "t",
-            "targetInteractionRecordSeq",
             "targetMirrorDigest",
             "targetOrdinal",
             "targetUpTo",
@@ -794,20 +800,23 @@ export function validateJobJournalRecord(
           value.executorId,
           "Job interaction settlement executorId",
         );
-        assertPositive(
-          value.targetInteractionRecordSeq,
-          "Job interaction settlement target interaction sequence",
-        );
-        if (value.targetInteractionRecordSeq !== value.targetUpTo) {
-          throw corruptJobJournal(
-            "Job interaction settlement stream target differs from mirror target",
+        if (value.targetInteractionRecordSeq !== undefined) {
+          assertPositive(
+            value.targetInteractionRecordSeq,
+            "Job interaction settlement target interaction sequence",
           );
-        }
-        if (value.t === "interaction-settlement-completed") {
-          validateInteractionSettlementStreamProof(
-            value.streamProof,
-            verifier,
-          );
+          // 镜像目标可能是其后的信任沉淀，流目标只是最后一条交互结果
+          if ((value.targetInteractionRecordSeq as number) > (value.targetUpTo as number)) {
+            throw corruptJobJournal(
+              "Job interaction settlement stream target exceeds its mirror target",
+            );
+          }
+          if (value.t === "interaction-settlement-completed") {
+            validateInteractionSettlementStreamProof(
+              value.streamProof,
+              verifier,
+            );
+          }
         }
       }
       break;
@@ -1782,8 +1791,9 @@ export function assertJobInteractionSettlementCompletionReplayContract(input: {
     input.mirrored?.upTo !== input.fence.targetUpTo ||
     input.mirrored.ordinal !== input.fence.targetOrdinal ||
     input.mirrored.digest !== input.fence.targetMirrorDigest ||
-    (input.fence.v === 2 &&
-      (!input.streamProof ||
+    (input.fence.targetInteractionRecordSeq === undefined
+      ? input.streamProof !== undefined
+      : !input.streamProof ||
         input.streamProof.assignmentId !== input.fence.assignmentId ||
         input.streamProof.executorId !== input.fence.executorId ||
         input.streamProof.ticketDigest !== input.fence.ticketDigest ||
@@ -1793,7 +1803,7 @@ export function assertJobInteractionSettlementCompletionReplayContract(input: {
         input.streamProof.targetInteractionRecordSeq !==
           input.fence.targetInteractionRecordSeq ||
         input.streamProof.upToRecordSeq <
-          input.fence.targetInteractionRecordSeq!))
+          input.fence.targetInteractionRecordSeq)
   ) {
     throw corruptJobJournal(
       "Job interaction settlement completion lacks its exact mirrored fence",

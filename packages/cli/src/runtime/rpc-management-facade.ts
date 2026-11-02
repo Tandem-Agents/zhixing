@@ -9,7 +9,11 @@
 
 import type { ChannelStatus } from "@zhixing/core/channels";
 import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
-import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
+import type {
+  TrustAdministrationRule,
+  TrustAdministrationRuleView,
+  TrustAdministrationScopeGroup,
+} from "@zhixing/core/trust-administration";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
@@ -140,12 +144,30 @@ export class RpcManagementFacade {
     return result.rules;
   }
 
-  async trustRevoke(ruleId: string, conversationId?: string): Promise<boolean> {
+  /** 当前范围以外的其他范围（分页）；游标取自上一页结果。 */
+  async trustOtherScopes(
+    conversationId?: string,
+    after?: string,
+  ): Promise<NonNullable<TrustAdministrationRuleView["otherScopes"]>> {
+    const client = await this.link.getClient();
+    const result = await client.request<TrustAdministrationRuleView>("trust.list", {
+      conversationId,
+      otherScopes: after ? { after } : {},
+    });
+    return result.otherScopes ?? { groups: [] };
+  }
+
+  async trustRevoke(
+    ruleId: string,
+    conversationId?: string,
+    context?: TrustAdministrationScopeGroup["context"],
+  ): Promise<boolean> {
     const client = await this.link.getClient();
     try {
       const result = await client.request<{ revoked: boolean }>("trust.revoke", {
         ruleId,
         conversationId,
+        ...(context ? { context } : {}),
       });
       return result.revoked;
     } catch (err) {

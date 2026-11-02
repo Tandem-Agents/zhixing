@@ -19,6 +19,12 @@ export function formatRuleDescription(rule: TrustAdministrationRule): string {
   return `${scope} · ${contributors} · ${matched}`;
 }
 
+/** 其他范围的规则行：范围段由分组名取代（分组名已说明是哪个范围、是否生效）。 */
+export function formatGroupedRuleDescription(groupLabel: string, rule: TrustAdministrationRule): string {
+  const matched = rule.matchCount > 0 ? `${rule.matchCount} 次` : "未匹配";
+  return `${groupLabel} · ${formatContributorsList(rule.contributors)} · ${matched}`;
+}
+
 function formatScope(rule: TrustAdministrationRule): string {
   if (rule.scope === "global") return "全局";
   return formatContextKindLabel(rule.contextId);

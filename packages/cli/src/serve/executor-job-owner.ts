@@ -123,6 +123,13 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     await this.#worker.abortWithTicket(request);
   }
 
+  /** 运行中的沉淀只在活动的 job 绑定里记录，与就绪状态无关。 */
+  recordTrustSediment(
+    sediment: Parameters<JobAssignmentWorker["recordTrustSediment"]>[0],
+  ): ReturnType<JobAssignmentWorker["recordTrustSediment"]> {
+    return this.#worker.recordTrustSediment(sediment);
+  }
+
   stopAccepting(): void {
     if (this.#state === "closed") return;
     this.#state = "closed";

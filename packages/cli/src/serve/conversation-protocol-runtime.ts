@@ -13,6 +13,8 @@ import { executionTurnContext, withoutRecoveredSurfaceCapabilities } from "./exe
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
 import { parseConversationId, parseLocalConversationId } from "@zhixing/core/conversation";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { toPermissionContext } from "@zhixing/core/security";
+import { conversationRunTrustScope } from "@zhixing/core/trust-administration";
 import type {
   AuthorityCapability,
   AuthorityCallContext,
@@ -153,6 +155,11 @@ export interface ConversationProtocolRuntimeOptions {
   readonly storedIdentityExists?: (conversationId: string) => Promise<boolean>;
   readonly clock?: () => string;
   readonly interactions: DurableConversationInteractionObserver;
+  /**
+   * 镜像里的信任沉淀交本宿主规则所有者接纳；规则权威宿主在构造时就给出（日志实例创建即可用，
+   * 不存在后绑定窗口）。不给的宿主（非规则权威）沉淀条目只进日志、无效果。
+   */
+  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
   /** 运行准备各步记为日志阶段的端口（只观测）。 */
   readonly phaseRecords?: LogRecordPort;
@@ -390,6 +397,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | undefined;
   readonly #onFirstPartyFrame: ConversationProtocolRuntimeOptions['onFirstPartyFrame'];
   readonly #onFirstPartyAssignment: ConversationProtocolRuntimeOptions['onFirstPartyAssignment'];
+  readonly #trustSediments: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort | undefined;
   #createFirstPartyFinality:
     | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
     | undefined;
@@ -492,6 +500,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Conversation protocol received an invalid data-plane topology");
     }
     this.#interactions = options.interactions;
+    this.#trustSediments = options.trustSediments;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
     this.#onFailure = options.onFailure;
     this.#onStatus = options.onStatus;
@@ -1060,6 +1069,29 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return this.#journal(conversationId).interactionOutcome(requestId);
   }
 
+  /**
+   * 对话当前正在执行的运行的授权事实（指派的已验签清单环境与冻结权限快照摘要）；
+   * 没有在执行的运行时返回 undefined。只读本宿主已登记的活跃指派，不遍历历史。
+   */
+  async activeRunSecurityFacts(conversationId: string): Promise<
+    | (NonNullable<Awaited<ReturnType<ConversationRunJournal["assignmentSecurityFacts"]>>> & { readonly assignmentId: string })
+    | undefined
+  > {
+    for (const [assignmentId] of this.#activeAssignmentClaims) {
+      if (this.#assignmentConversations.get(assignmentId) !== conversationId) continue;
+      await this.#adopt(conversationId);
+      const facts = await this.#journal(conversationId).assignmentSecurityFacts(assignmentId);
+      if (facts) return { ...facts, assignmentId };
+    }
+    return undefined;
+  }
+
+  /** 信任沉淀是否已被该对话日志接纳（规则权威重开核对待生效记录用）。 */
+  async trustSedimentMirrored(conversationId: string, assignmentId: string, requestId: string): Promise<boolean> {
+    await this.#adopt(conversationId);
+    return this.#journal(conversationId).trustSedimentMirrored(assignmentId, requestId);
+  }
+
   async touchWorksceneSession(input: {
     readonly conversationId: string;
     readonly sceneId: string;
@@ -1553,7 +1585,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw new Error("Conversation has been durably deleted");
       }
       const executionProfile = input.runtime.executionProfile?.();
-      const permissionRules = input.runtime.executionPermissionRules?.();
+      const permissionRules = input.runtime.executionPermissionRules?.(
+        runTrustScope(input.conversationId, appliedAdmission.environment),
+      );
       if (executionProfile === undefined || permissionRules === undefined) {
         throw new Error(
           "Durable conversation runtime must expose execution and permission snapshots",
@@ -1840,6 +1874,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       };
       let toolCalls = 0;
       const interactionScope = effect.createInteractionScope({
+        conversationId: input.conversationId,
         interactions: this.#interactions,
         context: submissionContext,
         surfacePrincipal: executionIngress.surfacePrincipal,
@@ -3159,6 +3194,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         deviceId: this.#authority.deviceId,
         executorId: this.#authority.executorId,
       },
+      ...(this.#trustSediments ? { trustSediments: this.#trustSediments } : {}),
     });
     journal.onStatus(async (notice) => {
       this.#markRecovery(conversationId);
@@ -3494,8 +3530,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         abort: (reason) => baseRuntime.abort(reason),
         async dispose() {},
         securitySnapshot: () => requireRuntimeSecuritySnapshot(baseRuntime),
-        executionPermissionRules: () =>
-          requireRuntimeExecutionPermissionRules(baseRuntime),
+        executionPermissionRules: (scope) =>
+          requireRuntimeExecutionPermissionRules(baseRuntime, scope),
         executionProfile: () => requireRuntimeExecutionProfile(baseRuntime),
       });
       const runtime = createRuntime(managed.runtime);
@@ -4194,14 +4230,23 @@ function requireRuntimeExecutionProfile(
 
 function requireRuntimeExecutionPermissionRules(
   runtime: SessionRuntime,
+  scope: Parameters<NonNullable<SessionRuntime["executionPermissionRules"]>>[0],
 ): ReturnType<NonNullable<SessionRuntime["executionPermissionRules"]>> {
-  const rules = runtime.executionPermissionRules?.();
+  const rules = runtime.executionPermissionRules?.(scope);
   if (rules === undefined) {
     throw new Error(
       "Recovered conversation runtime lacks an execution permission snapshot",
     );
   }
   return rules;
+}
+
+/** 本次运行的授权范围（推导见 conversationRunTrustScope），按派发快照的范围参数形态给出。 */
+function runTrustScope(
+  conversationId: string,
+  environment: import("@zhixing/core/contracts").ExplicitEnvironmentSelection | undefined,
+): import("@zhixing/core/security").PermissionContextId {
+  return toPermissionContext(conversationRunTrustScope(conversationId, environment));
 }
 
 /** 运行的权威终态（不再可取消）；cancel-requested、uncertain 不算已终结。 */
@@ -4225,6 +4270,7 @@ function asConversationMirrorBatch(
 ): ConversationInteractionMirrorBatch {
   for (const entry of batch.entries) {
     if (
+      entry.kind === "allow-once" &&
       entry.outcome.t === "answered" &&
       entry.outcome.authority.via !== "surface-ticket"
     ) {

@@ -210,7 +210,7 @@ export type AssignmentTerminationProof =
   | Extract<SupersedeProof, { decision: "not-started-fenced" }>
   | NotStartedCancelProof;
 
-export interface InteractionMirrorEntry {
+export interface InteractionAnswerMirrorEntry {
   ordinal: number;
   seq: number;
   requestId: string;
@@ -235,6 +235,31 @@ export interface InteractionMirrorEntry {
     | { t: "expired" };
   at: IsoTime;
 }
+
+/**
+ * 执行端运行时在本指派里累计达阈值的信任沉淀事实（不是交互）。随交互镜像回到 owner，
+ * 由 owner 按已认证清单推导范围、核对模式与贡献后接纳为 context 规则。
+ */
+export interface TrustSedimentFact {
+  pattern: { tool: string; argument: string };
+  riskLevel: "low" | "medium" | "high";
+  /** 触发沉淀的那次操作；owner 据此核对模式是它的代表建议模式。 */
+  operation: { tool: string; arguments: Record<string, unknown> };
+  /** 贡献时间线；用户贡献带产生它的确认请求 id。 */
+  contributors: Array<{ origin: "user" | "steward"; timestamp: number; requestId?: string }>;
+}
+
+export interface TrustSedimentMirrorEntry {
+  ordinal: number;
+  seq: number;
+  /** 沉淀在本指派内的身份（`trust-sediment:<序号>`），与交互请求 id 不冲突。 */
+  requestId: string;
+  kind: "trust-sediment";
+  sediment: TrustSedimentFact;
+  at: IsoTime;
+}
+
+export type InteractionMirrorEntry = InteractionAnswerMirrorEntry | TrustSedimentMirrorEntry;
 
 export interface InteractionMirrorBatchPayload
   extends WireSchemaV1<"InteractionMirrorBatch"> {
@@ -316,6 +341,11 @@ type AssignmentRecordV1Body =
                 | "backpressure";
             }
           | { t: "expired" };
+      }
+    | {
+        t: "trust-sediment";
+        requestId: string;
+        sediment: TrustSedimentFact;
       }
     | {
         t: "staged-mutation";
@@ -405,7 +435,11 @@ type AssignmentRecordV2 =
       readonly assignmentId: string;
       readonly ticketDigest: Digest;
       readonly settlementVersion: 2;
-      readonly streamProof: InteractionSettlementStreamProof;
+      /**
+       * 结算前缀里有启用投影之后的交互结果时必带；只有沉淀等非交互镜像条目时，流投影
+       * 义务为空、不带（由同一已验证前缀推导，不由请求方选择）。
+       */
+      readonly streamProof?: InteractionSettlementStreamProof;
     };
 
 type AssignmentRecordV3 =

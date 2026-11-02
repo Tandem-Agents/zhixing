@@ -296,6 +296,7 @@ export class ConversationAssignmentWorker {
       stream = activeStream;
       const activeInteractionBinding: DurableInteractionBinding = {
         assignmentId,
+        conversationId: envelope.work.conversationId,
         ledger: this.options.ledger,
         submission: durableSubmission,
         context,
@@ -317,7 +318,7 @@ export class ConversationAssignmentWorker {
           tools: envelope.manifest.tools,
           mcpServers: envelope.manifest.mcpServers,
           providerIds: [],
-        } },
+        }, workspaceBinding: envelope.manifest.environment.workspace ?? null },
       );
       const runtimeProfile = runtime.executionProfile?.();
       if (

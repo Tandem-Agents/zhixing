@@ -429,8 +429,8 @@ export function createOwnerRuntimeAdapter(
       return agentRuntime.securitySnapshot();
     },
 
-    executionPermissionRules() {
-      return agentRuntime.executionPermissionRules();
+    executionPermissionRules(scope) {
+      return agentRuntime.executionPermissionRules(scope);
     },
 
     executionProfile() {

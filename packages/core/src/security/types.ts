@@ -216,9 +216,14 @@ export type PermissionScope =
  * 未来扩展新 kind（如 "remote-scene"、"project"）仅需追加 union 成员 + 更新
  * `toStorageKey` 分支，所有 caller 由 TypeScript exhaustive 自动 highlight。
  */
+/**
+ * 授权范围身份。workspace 的 hash 是工作区绑定（设备＋bindingRef）的身份摘要；
+ * revision 是该绑定的路径修订：运行上下文带修订时，只认同一修订下创建的工作区规则
+ * （改名不变修订，改路径后旧规则自然不再生效）；不带修订（管理视图）时列出全部修订。
+ */
 export type PermissionContextId =
   | { kind: "main" }
-  | { kind: "workspace"; hash: string }
+  | { kind: "workspace"; hash: string; revision?: number }
   | { kind: "scene"; sceneId: string };
 
 /**
@@ -343,8 +348,9 @@ export interface IPermissionStore {
    * - session 作用域：不落盘
    * - context 作用域：落盘到当前上下文文件（按入参 contextId 路由）
    * - global 作用域：落盘到全局文件
+   * 落盘作用域在耐久写完成后才对读取可见；写失败时内存不变并拒绝。
    */
-  create(contextId: PermissionContextId, rule: PermissionRule): void;
+  create(contextId: PermissionContextId, rule: PermissionRule): Promise<void>;
 
   /** 列出当前上下文可见的所有规则（session + 该上下文 + global） */
   list(contextId: PermissionContextId): PermissionRule[];
@@ -356,14 +362,14 @@ export interface IPermissionStore {
    */
   snapshot(contextId: PermissionContextId): PermissionRule[];
 
-  /** 撤销某条规则。返回是否找到并撤销。 */
-  revoke(ruleId: string): boolean;
+  /** 撤销某条规则。返回是否找到并撤销；落盘规则在耐久写完成后才从读取中消失。 */
+  revoke(ruleId: string): Promise<boolean>;
 
   /** 清除当前上下文的规则（session + context 作用域，不影响 global） */
-  reset(contextId: PermissionContextId): void;
+  reset(contextId: PermissionContextId): Promise<void>;
 
   /** 清除全部规则（包括 global 和所有上下文）。不影响 builtin（boot-time 系统配置）。 */
-  resetAll(): void;
+  resetAll(): Promise<void>;
 }
 
 /**

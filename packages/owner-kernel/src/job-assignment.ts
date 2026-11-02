@@ -57,7 +57,8 @@ import type {
   JobRunState,
   JobStatusNotice,
   JobUncertainClosure,
-  InteractionMirrorEntry,
+  InteractionAnswerMirrorEntry,
+  TrustSedimentMirrorEntry,
   InteractionMirrorBatch,
   InteractionSettlementStreamProof,
   IngressContext,
@@ -132,6 +133,7 @@ import {
   validateIngressContext,
   validateAssignmentInteractionMirrorBatch,
   validateInteractionSettlementStreamProof,
+  interactionSettlementNeedsStreamProof,
   validateJobSealedBundle,
   validateLedgerEvidencePage,
   validateLedgerSnapshot,
@@ -401,7 +403,7 @@ interface JobSubmissionGuardProjection {
       readonly requestIds: ReadonlySet<string>;
       readonly outcomes: ReadonlyMap<
         string,
-        import("@zhixing/core/contracts").InteractionMirrorEntry["outcome"]
+        import("@zhixing/core/contracts").InteractionAnswerMirrorEntry["outcome"]
       >;
     }
   >;
@@ -490,7 +492,7 @@ interface JobProjection {
       readonly requestIds: ReadonlySet<string>;
       readonly outcomes: ReadonlyMap<
         string,
-        import("@zhixing/core/contracts").InteractionMirrorEntry["outcome"]
+        import("@zhixing/core/contracts").InteractionAnswerMirrorEntry["outcome"]
       >;
     }
   >;
@@ -1308,6 +1310,30 @@ export interface JobJournalOptions {
   readonly schedulerFailureThreshold?: number;
   readonly schedulerNotices?: SchedulerUserNoticeJournal;
   readonly localExecutorId?: string;
+  /** 镜像批次里的信任沉淀交给规则权威接纳；不装配时沉淀条目只进日志、无效果。 */
+  readonly trustSediments?: JobTrustSedimentPort;
+}
+
+/**
+ * job 信任沉淀的接纳端口（规则权威所在宿主实现），与对话侧同一语义：`prepare` 在镜像
+ * 批次提交前校验并写待生效记录，写失败上抛使本批不接纳、由执行端按既有镜像义务重试；
+ * 校验不过的条目不上抛、只是没有效果。`accept` 在批次提交后（含重放）调用，幂等、不上抛。
+ */
+export interface JobTrustSedimentPort {
+  prepare(input: {
+    readonly taskId: string;
+    readonly assignmentId: string;
+    readonly executorId: string;
+    readonly environment: import("@zhixing/core/contracts").EnvironmentRequirement;
+    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+    /** 用户贡献引用的确认请求是否是本指派已答复的交互（同批或更早的镜像）。 */
+    readonly answered: (requestId: string) => Promise<boolean>;
+  }): Promise<void>;
+  accept(input: {
+    readonly taskId: string;
+    readonly assignmentId: string;
+    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+  }): Promise<void>;
 }
 
 /** Pure assignment metadata checked before the authority is allowed to issue credentials. */
@@ -2181,7 +2207,7 @@ export class JobReduction {
           completionAlreadyExists:
             state.completedInteractionSettlements.has(body.assignmentId),
           mirrored: state.interactionMirrors.get(body.assignmentId),
-          ...("v" in body && body.v === 2
+          ...("v" in body && body.v === 2 && body.streamProof
             ? { streamProof: body.streamProof }
             : {}),
         });
@@ -2421,9 +2447,9 @@ export class JobReduction {
           ]),
           outcomes: new Map([
             ...mirrored.outcomes,
-            ...batch.entries.map(
-              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
-            ),
+            // 沉淀条目不是交互，不进交互结果表
+            ...batch.entries.flatMap((entry) =>
+              entry.kind === "allow-once" ? [[entry.requestId, snapshot(entry.outcome)] as const] : []),
           ]),
         });
         return state;
@@ -3558,7 +3584,7 @@ export class JobReduction {
           completionAlreadyExists:
             state.completedInteractionSettlements.has(body.assignmentId),
           mirrored: state.interactionMirrors.get(body.assignmentId),
-          ...("v" in body && body.v === 2
+          ...("v" in body && body.v === 2 && body.streamProof
             ? { streamProof: body.streamProof }
             : {}),
         });
@@ -3629,9 +3655,9 @@ export class JobReduction {
           ]),
           outcomes: new Map([
             ...mirrored.outcomes,
-            ...batch.entries.map(
-              (entry) => [entry.requestId, snapshot(entry.outcome)] as const,
-            ),
+            // 沉淀条目不是交互，不进交互结果表
+            ...batch.entries.flatMap((entry) =>
+              entry.kind === "allow-once" ? [[entry.requestId, snapshot(entry.outcome)] as const] : []),
           ]),
         });
         return state;
@@ -4389,6 +4415,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #schedulerFailureThreshold: number;
   readonly #schedulerNotices: SchedulerUserNoticeJournal | undefined;
   readonly #localExecutorId: string | undefined;
+  readonly #trustSediments: JobTrustSedimentPort | undefined;
   readonly #reduction: JobReduction;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
@@ -4426,6 +4453,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       options.schedulerFailureThreshold ?? DEFAULT_SCHEDULE_FAILURE_THRESHOLD;
     this.#schedulerNotices = options.schedulerNotices;
     this.#localExecutorId = options.localExecutorId;
+    this.#trustSediments = options.trustSediments;
     this.#reduction = new JobReduction({
       taskId: this.#taskId,
       anchorEpoch: this.#anchorEpoch,
@@ -5995,10 +6023,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       await this.markUncertain(assignmentId, "job-cancel-unknown");
       return true;
     }
+    // 镜像目标覆盖整条镜像链（含沉淀）；流目标由同一前缀事实推导，只在投影启用之后
+    // 有交互结果时存在，且正是最后一条交互结果
     const targetUpTo = Math.max(...validation.unmirroredFinished.keys());
     const settlement =
-      validation.streamProjectionEnabledAfter !== undefined &&
-      targetUpTo > validation.streamProjectionEnabledAfter
+      validation.streamProjectionEnabledAfter !== undefined
         ? {
             v: 2 as const,
             t: "interaction-settlement-fence" as const,
@@ -6010,7 +6039,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             targetUpTo,
             targetOrdinal: validation.finishedInteractionCount,
             targetMirrorDigest: validation.interactionMirrorDigest,
-            targetInteractionRecordSeq: targetUpTo,
+            ...(interactionSettlementNeedsStreamProof(validation)
+              ? { targetInteractionRecordSeq: validation.lastFinishedInteractionRecordSeq }
+              : {}),
           }
         : {
             t: "interaction-settlement-fence" as const,
@@ -6386,7 +6417,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     if (batch.assignmentId !== assignmentId) {
       throw new TypeError("Interaction mirror batch names a different assignment");
     }
-    return (
+    const sediments = this.#trustSediments
+      ? batch.entries.filter((entry): entry is TrustSedimentMirrorEntry => entry.kind === "trust-sediment")
+      : [];
+    if (sediments.length > 0) await this.#prepareTrustSediments(assignmentId, batch, sediments);
+    const mirrored = (
       await this.#transact<{
         mirroredUpTo: number;
         ordinal: number;
@@ -6482,6 +6517,54 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         };
       })
     ).value;
+    // 日志已接纳（含同批重放）：沉淀生效并物化；失败由规则权威下次写入或重开核对补做
+    for (const entry of sediments) {
+      await this.#trustSediments!.accept({ taskId: this.#taskId, assignmentId, entry })
+        .catch(() => undefined);
+    }
+    return mirrored;
+  }
+
+  /** 镜像批次提交前：把其中的信任沉淀交规则权威写待生效（重放的批次已写过，跳过）。 */
+  async #prepareTrustSediments(
+    assignmentId: string,
+    batch: InteractionMirrorBatch,
+    sediments: readonly TrustSedimentMirrorEntry[],
+  ): Promise<void> {
+    const batchKey = `${assignmentId}:${interactionMirrorBatchDigest(batch)}`;
+    const assigned = await this.#select((state) => {
+      const current = state.assignedById.get(assignmentId);
+      if (!current || state.interactionMirrorBatches.has(batchKey)) return undefined;
+      return {
+        executorId: current.record.executorId,
+        environment: structuredClone(current.envelope.manifest.environment),
+        outcomes: new Map(state.interactionMirrors.get(assignmentId)?.outcomes ?? []),
+      };
+    });
+    if (!assigned) return;
+    // job 的答复只经渠道 grant（answered），无合法应答者或过期不算用户贡献
+    const answered = async (requestId: string) =>
+      batch.entries.some((entry) =>
+        entry.kind !== "trust-sediment" && entry.requestId === requestId && entry.outcome.t === "answered") ||
+      assigned.outcomes.get(requestId)?.t === "answered";
+    for (const entry of sediments) {
+      await this.#trustSediments!.prepare({
+        taskId: this.#taskId,
+        assignmentId,
+        executorId: assigned.executorId,
+        environment: assigned.environment,
+        entry,
+        answered,
+      });
+    }
+  }
+
+  /** 某条信任沉淀是否已随镜像批次被本日志接纳（重开核对待生效记录用）。 */
+  async trustSedimentMirrored(assignmentId: string, requestId: string): Promise<boolean> {
+    assertIdentifier(assignmentId, "Assignment id");
+    assertIdentifier(requestId, "Trust sediment identity");
+    return this.#select((state) =>
+      state.interactionMirrors.get(assignmentId)?.requestIds.has(requestId) ?? false);
   }
 
   async completeInteractionSettlement(
@@ -6508,11 +6591,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       const completed =
         state.completedInteractionSettlements.get(assignmentId);
       if (completed) {
+        const completedProof =
+          "v" in completed && completed.v === 2 ? completed.streamProof : undefined;
         if (
-          ("v" in completed && completed.v === 2
-            ? !proof ||
-              canonicalize(completed.streamProof) !== canonicalize(proof)
-            : proof !== undefined)
+          completedProof === undefined
+            ? proof !== undefined
+            : !proof || canonicalize(completedProof) !== canonicalize(proof)
         ) {
           throw new Error(
             "Job interaction settlement replay has a conflicting stream proof",
@@ -6541,7 +6625,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           "Job interaction settlement has not reached its durable mirror target",
         );
       }
-      if ("v" in fence && fence.v === 2) {
+      // 流证明只在围栏带流目标时要求；空义务（无目标）带证明同样拒绝
+      if ("v" in fence && fence.v === 2 && fence.targetInteractionRecordSeq !== undefined) {
         if (
           !proof ||
           proof.assignmentId !== assignmentId ||
@@ -6559,7 +6644,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         }
       } else if (proof !== undefined) {
         throw new Error(
-          "Legacy interaction settlement cannot consume a versioned stream proof",
+          "Interaction settlement without a stream target cannot consume a stream proof",
         );
       }
       this.#authorizeSubmission(state, context, {
@@ -6573,9 +6658,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           jobRecord(this.#taskId, {
             ...fence,
             t: "interaction-settlement-completed",
-            ...("v" in fence && fence.v === 2
-              ? { streamProof: proof! }
-              : {}),
+            ...(proof ? { streamProof: proof } : {}),
           }),
         ],
         value: undefined,
@@ -10214,7 +10297,7 @@ function relayAdoptionAtCursor(
 }
 
 function channelRelayFinishedOutcome(
-  outcome: InteractionMirrorEntry["outcome"],
+  outcome: InteractionAnswerMirrorEntry["outcome"],
 ): "allowed" | "denied" | "cancelled" | "expired" {
   switch (outcome.t) {
     case "answered":

@@ -12,6 +12,7 @@ import type {
   AuthorityCallContext,
   ChannelInteractionGrant,
   IngressContext,
+  TrustSedimentFact,
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
@@ -359,6 +360,21 @@ export class DurableJobInteractionCoordinator
         "Job interaction request is not yet restored in the executor runtime",
       );
     }
+  }
+
+  /**
+   * 在当前耐久 job 指派内记一条信任沉淀，随同一条镜像链回到 owner：镜像冲刷交给收束
+   * 循环（与交互结果同一义务），因此这里只报已记录、不报已接纳。不在 job 指派内返回
+   * undefined。
+   */
+  async recordTrustSediment(sediment: TrustSedimentFact): Promise<
+    { readonly assignmentId: string; readonly requestId: string; readonly mirrored: boolean } | undefined
+  > {
+    const active = this.#bindings.getStore();
+    if (!active) return undefined;
+    const recorded = await active.ledger.recordTrustSediment(active.assignmentId, sediment);
+    this.wakeConvergence(active.assignmentId, active);
+    return { assignmentId: active.assignmentId, requestId: recorded.requestId, mirrored: false };
   }
 
   async drainAssignment(binding: DurableJobInteractionBinding): Promise<void> {

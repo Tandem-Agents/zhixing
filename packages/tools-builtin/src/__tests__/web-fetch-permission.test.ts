@@ -30,7 +30,7 @@ interface PipelineSetup {
   userRules?: PermissionRule[];
 }
 
-function makePipeline(opts: PipelineSetup): SecurityPipeline {
+async function makePipeline(opts: PipelineSetup): Promise<SecurityPipeline> {
   const tools = [createWebFetchTool()];
   const extractor: IToolArgumentExtractor = ToolArgumentExtractor.fromTools(tools);
   const store = new PermissionStore({
@@ -42,7 +42,7 @@ function makePipeline(opts: PipelineSetup): SecurityPipeline {
   }
   if (opts.userRules) {
     for (const rule of opts.userRules) {
-      store.create(PERMISSION_CONTEXT, rule);
+      await store.create(PERMISSION_CONTEXT, rule);
     }
   }
   return new SecurityPipeline({
@@ -55,7 +55,7 @@ function makePipeline(opts: PipelineSetup): SecurityPipeline {
 
 describe("WebFetch + SecurityPipeline — preapproved host (builtin allow)", () => {
   it("docs.anthropic.com 自动 allow,无需确认", async () => {
-    const p = makePipeline({ sessionType: "interactive", injectBuiltin: true });
+    const p = await makePipeline({ sessionType: "interactive", injectBuiltin: true });
     const r = await p.evaluate(
       "web_fetch",
       { url: "https://docs.anthropic.com/claude/docs" },
@@ -66,7 +66,7 @@ describe("WebFetch + SecurityPipeline — preapproved host (builtin allow)", () 
   });
 
   it("github.com 嵌套路径自动 allow", async () => {
-    const p = makePipeline({ sessionType: "interactive", injectBuiltin: true });
+    const p = await makePipeline({ sessionType: "interactive", injectBuiltin: true });
     const r = await p.evaluate(
       "web_fetch",
       { url: "https://github.com/anthropics/sdk/blob/main/README.md" },
@@ -77,7 +77,7 @@ describe("WebFetch + SecurityPipeline — preapproved host (builtin allow)", () 
   });
 
   it("不在 preapproved 列表的 host 不自动通过(待 confirmation)", async () => {
-    const p = makePipeline({ sessionType: "interactive", injectBuiltin: true });
+    const p = await makePipeline({ sessionType: "interactive", injectBuiltin: true });
     const r = await p.evaluate("web_fetch", { url: "https://random.example/" }, CWD);
     // interactive 语义: allowed=true + requiresConfirmation=true → 需用户确认才能放行
     expect(r.requiresConfirmation).toBe(true);
@@ -86,7 +86,7 @@ describe("WebFetch + SecurityPipeline — preapproved host (builtin allow)", () 
 
 describe("WebFetch + SecurityPipeline — interactive 触发 confirmation", () => {
   it("未配置 host + interactive → requiresConfirmation=true", async () => {
-    const p = makePipeline({ sessionType: "interactive", injectBuiltin: true });
+    const p = await makePipeline({ sessionType: "interactive", injectBuiltin: true });
     const r = await p.evaluate("web_fetch", { url: "https://random.example/" }, CWD);
     expect(r.requiresConfirmation).toBe(true);
   });
@@ -94,7 +94,7 @@ describe("WebFetch + SecurityPipeline — interactive 触发 confirmation", () =
 
 describe("WebFetch + SecurityPipeline — 非交互灰色操作交 broker 兜底", () => {
   it("ci 模式 + 未配置 host → pipeline 保持 confirm（deny 由 broker fail-to-deny 兜底）", async () => {
-    const p = makePipeline({ sessionType: "ci", injectBuiltin: true });
+    const p = await makePipeline({ sessionType: "ci", injectBuiltin: true });
     const r = await p.evaluate("web_fetch", { url: "https://random.example/" }, CWD);
     expect(r.allowed).toBe(true);
     expect(r.requiresConfirmation).toBe(true);
@@ -108,7 +108,7 @@ describe("WebFetch + SecurityPipeline — 用户池击败 builtin (ADR-TPE-008)"
       decision: "deny",
       scope: "global",
     });
-    const p = makePipeline({
+    const p = await makePipeline({
       sessionType: "interactive",
       injectBuiltin: true,
       userRules: [denyRule],
@@ -127,7 +127,7 @@ describe("WebFetch + SecurityPipeline — 用户池击败 builtin (ADR-TPE-008)"
       decision: "allow",
       scope: "global",
     });
-    const p = makePipeline({
+    const p = await makePipeline({
       sessionType: "interactive",
       injectBuiltin: true,
       userRules: [allowAllRule],
@@ -139,7 +139,7 @@ describe("WebFetch + SecurityPipeline — 用户池击败 builtin (ADR-TPE-008)"
 
 describe("WebFetch + SecurityPipeline — permissionArgumentKey 自描述生效", () => {
   it("ToolArgumentExtractor 提取 url 字段(不是 prompt 等其他 string 字段)", async () => {
-    const p = makePipeline({ sessionType: "interactive", injectBuiltin: true });
+    const p = await makePipeline({ sessionType: "interactive", injectBuiltin: true });
     // url 是 preapproved host,但 prompt 含一个非 preapproved 的 URL 字符串
     // 验证 extractor 用 url 字段而非 prompt
     const r = await p.evaluate(

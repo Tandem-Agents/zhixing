@@ -246,6 +246,7 @@ function createTestSecurityExecution(
         contextId,
         trustContext: Object.freeze({ ...binding.trustContext }),
         permissionRuleSource: bindPermissionRuleExecutionSource(store, contextId),
+        persistentApprovals: true,
         recordApproval(approval) {
           if (approval.kind === "allow-once") {
             return Object.freeze({ kind: "recorded" as const });

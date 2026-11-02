@@ -6,6 +6,9 @@ import {
   createAnchorRuntimeProjectionAssembly,
 } from "../workscene-runtime-projection.js";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
+import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
+import { hostToolPermissionRuleSets } from "../../runtime/kernel-tool-implementation.js";
+import { jobRunTrustScopeInput } from "@zhixing/core/trust-administration";
 import type { SecretRef } from "@zhixing/core/contracts";
 
 class MemorySecrets {
@@ -156,10 +159,88 @@ async function fixture() {
       servers = ["alpha", "beta"];
     },
     authority,
+    schedulerCapabilities,
   };
 }
 
 describe("whole-module job capability probe", () => {
+  it("freezes a complete job snapshot from the production rule owner and matches it on the executor", async () => {
+    const f = await fixture();
+    const anchor = createPermissionStorageInfrastructure({
+      zhixingHome: await createTempDir("job-snapshot-anchor"),
+      persistentApprovals: true,
+    });
+    const executor = createPermissionStorageInfrastructure({ zhixingHome: await createTempDir("job-snapshot-executor") });
+    const runtimeRequest = Object.freeze({
+      extractArgument: (request: { readonly arguments: Readonly<Record<string, unknown>> }) =>
+        String(request.arguments.url ?? request.arguments.command ?? ""),
+      builtinRuleSets: Object.freeze([]),
+      workspacePath: null,
+    });
+    const allow = (scope: Parameters<typeof anchor.runtime.bind>[0], kind: "allow-context" | "allow-session", argument: string) =>
+      anchor.runtime.bind(scope).create(runtimeRequest).recordApproval({
+        kind,
+        pattern: { pattern: { tool: "bash", argument }, label: argument },
+        requestId: `request:${kind}:${argument}`,
+      });
+    const binding = (workspaceBindingRevision: number) =>
+      ({ deviceId: "device-1", bindingRef: "binding-1", workspaceBindingRevision });
+    try {
+      await allow({}, "allow-context", "npm test");
+      // 对话运行里的会话授权只在那个运行时里：job 派发时不存在运行时，会话池为空
+      await allow({}, "allow-session", "npm run lint");
+      await allow({ workspace: binding(2) }, "allow-context", "npm run build");
+      // 用户在主范围拒绝一个预批准站点（准备条件，不是被测提交）
+      await (anchor.management as unknown as {
+        createExecutionRule(context: unknown, rule: unknown): Promise<void>;
+      }).createExecutionRule({ kind: "main" }, {
+        id: "user-deny-npm", pattern: { tool: "web_fetch", argument: "https://npmjs.com/**" }, decision: "deny",
+        scope: "context", createdAt: 1, lastMatchedAt: 0, matchCount: 0, contextId: { kind: "main" },
+      });
+
+      const asked: unknown[] = [];
+      const prepared = await f.authority.prepareJobAssignment({
+        instruction: { kind: "agent-turn", prompt: "查询并交付原任务", tools: ["web_fetch", "bash"] },
+        capabilities: f.schedulerCapabilities(),
+        // 与锚点调度器同一组合：范围由清单工作区推导，内置规则随签发工具集合
+        permissionRulesFor: ({ environment, tools }) => {
+          asked.push({ environment, tools });
+          return anchor.executionRulesFor(jobRunTrustScopeInput(environment), hostToolPermissionRuleSets(tools));
+        },
+      });
+      expect(asked).toEqual([{ environment: {}, tools: ["bash", "web_fetch"] }]);
+      expect(prepared.environment).not.toHaveProperty("workspace");
+      const frozen = prepared.policy.permissionSnapshot.rules;
+
+      // 执行端只用已验冻结快照匹配（不并入本地规则）
+      const source = executor.runtime.bind({}).create(runtimeRequest).permissionRuleSource;
+      const match = (tool: string, args: Record<string, unknown>) => source.matchFrozen(frozen, {
+        tool,
+        arguments: args,
+        context: { cwd: "/", trust: { kind: "global" }, sessionType: "ci" },
+      });
+      expect(match("web_fetch", { url: "https://docs.python.org/3/library/" })).toMatchObject({ scope: "builtin", decision: "allow" });
+      expect(match("web_fetch", { url: "https://npmjs.com/package/left-pad" })).toMatchObject({ id: "user-deny-npm", decision: "deny" });
+      expect(match("web_fetch", { url: "https://unapproved.example/x" })).toBeNull();
+      expect(match("bash", { command: "npm test" })).toMatchObject({ decision: "allow", scope: "context" });
+      expect(match("bash", { command: "npm run lint" })).toBeNull();
+      expect(match("bash", { command: "npm run build" })).toBeNull();
+
+      // 工具集合不含 web_fetch 时不带它的内置规则
+      expect(anchor.executionRulesFor({}, hostToolPermissionRuleSets(["bash"])).some((rule) => rule.scope === "builtin"))
+        .toBe(false);
+      // 工作区修订隔离：同修订带上，改路径后的新修订不带
+      const workspaceSource = executor.runtime.bind({ workspace: binding(2) }).create(runtimeRequest).permissionRuleSource;
+      const build = { tool: "bash", arguments: { command: "npm run build" },
+        context: { cwd: "/", trust: { kind: "global" as const }, sessionType: "ci" as const } };
+      expect(workspaceSource.matchFrozen(anchor.executionRulesFor({ workspace: binding(2) }), build))
+        .toMatchObject({ decision: "allow" });
+      const repathedSource = executor.runtime.bind({ workspace: binding(3) }).create(runtimeRequest).permissionRuleSource;
+      expect(repathedSource.matchFrozen(anchor.executionRulesFor({ workspace: binding(3) }), build)).toBeNull();
+    } finally {
+      await f.authority.startupCleanup.run();
+    }
+  }, 30_000);
   it("does not sign conversation-only tools for jobs even if the device advertises them", async () => {
     const f = await fixture();
     try {
@@ -172,7 +253,7 @@ describe("whole-module job capability probe", () => {
     } finally {
       await f.authority.startupCleanup.run();
     }
-  });
+  }, 30_000);
   it("issues new jobs from the current eligible product inventory after MCP activation", async () => {
     const f = await fixture();
     try {
@@ -194,7 +275,7 @@ describe("whole-module job capability probe", () => {
     } finally {
       await f.authority.startupCleanup.run();
     }
-  });
+  }, 30_000);
   it("keeps a previously issued job frozen through the production agent job bridge", async () => {
     const f = await fixture();
     try {
@@ -214,5 +295,5 @@ describe("whole-module job capability probe", () => {
     } finally {
       await f.authority.startupCleanup.run();
     }
-  });
+  }, 30_000);
 });

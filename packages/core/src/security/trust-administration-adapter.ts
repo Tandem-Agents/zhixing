@@ -4,7 +4,6 @@ import type {
   TrustAdministrationRepository,
   TrustAdministrationRepositoryRule,
 } from "../trust-administration/application.js";
-import { PermissionStore } from "./permission-store.js";
 import type {
   IPermissionStore,
   PermissionContextId,
@@ -39,9 +38,6 @@ export function createPermissionStoreTrustAdministrationRepository(
       store.list(toPermissionContext(context));
       return store.revoke(ruleId);
     },
-    workspaceIdentity(workspacePath: string): string {
-      return PermissionStore.workspaceHashFromPath(workspacePath);
-    },
     listExecutionRules(
       context: TrustAdministrationContext,
     ): readonly TrustAdministrationRepositoryRule[] {
@@ -59,8 +55,8 @@ export function createPermissionStoreTrustAdministrationRepository(
     createExecutionRule(
       context: TrustAdministrationContext,
       rule: TrustAdministrationRepositoryRule,
-    ): void {
-      storeProvider().create(
+    ): Promise<void> {
+      return storeProvider().create(
         toPermissionContext(context),
         toPermissionRule(rule),
       );
@@ -75,7 +71,11 @@ export function toPermissionContext(
     case "main":
       return { kind: "main" };
     case "workspace":
-      return { kind: "workspace", hash: context.hash };
+      return {
+        kind: "workspace",
+        hash: context.hash,
+        ...(context.revision === undefined ? {} : { revision: context.revision }),
+      };
     case "scene":
       return { kind: "scene", sceneId: context.sceneId };
   }
@@ -128,7 +128,11 @@ function toTrustAdministrationContext(
     case "main":
       return { kind: "main" };
     case "workspace":
-      return { kind: "workspace", hash: context.hash };
+      return {
+        kind: "workspace",
+        hash: context.hash,
+        ...(context.revision === undefined ? {} : { revision: context.revision }),
+      };
     case "scene":
       return { kind: "scene", sceneId: context.sceneId };
   }

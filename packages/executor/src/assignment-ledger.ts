@@ -66,6 +66,7 @@ import type {
   InteractionMirrorBatch,
   InteractionMirrorEntry,
   InteractionSettlementStreamProof,
+  TrustSedimentFact,
   ChannelInteractionGrant,
   RunDispatchArguments,
   RunExecutorPort,
@@ -124,6 +125,9 @@ import {
   validateTranscriptRunRecord,
   validateAssignmentInteractionMirrorEntry,
   validateAssignmentInteractionOutcome,
+  validateTrustSedimentFact,
+  TRUST_SEDIMENT_REQUEST_PREFIX,
+  interactionSettlementNeedsStreamProof,
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionOutcome,
   assertChannelInteractionGrantActiveAt,
@@ -445,6 +449,17 @@ interface FinishedInteraction {
   readonly mirrorDigest: string;
 }
 
+/** 信任沉淀事实：与交互结果共用镜像顺序与摘要链，但不是交互。 */
+interface RecordedTrustSediment {
+  readonly body: Extract<AssignmentRecord, { t: "trust-sediment" }>;
+  readonly recordSeq: number;
+  readonly at: string;
+  readonly ordinal: number;
+  readonly mirrorDigest: string;
+}
+
+type MirrorChainItem = FinishedInteraction | RecordedTrustSediment;
+
 interface RequestedInteraction {
   readonly body: Extract<AssignmentRecord, { t: "interaction-requested" }>;
   readonly recordSeq: number;
@@ -503,7 +518,7 @@ interface LedgerProjection {
   readonly requested: Map<string, RequestedInteraction>;
   readonly pendingRequests: Map<string, RequestedInteraction>;
   readonly finished: Map<string, FinishedInteraction>;
-  readonly finishedOrder: FinishedInteraction[];
+  readonly finishedOrder: MirrorChainItem[];
   readonly finishedIndexBySeq: Map<number, number>;
   readonly stagedMutations: Array<Extract<AssignmentRecord, { t: "staged-mutation" }>>;
   readonly mutationRequestIds: Set<string>;
@@ -525,13 +540,16 @@ interface LedgerProjection {
 }
 
 interface JobRecoveryIndexValue {
-  readonly v: 4;
+  readonly v: 5;
   readonly assignmentId: string;
   readonly envelopeRef: ArtifactRef;
   readonly phase: LedgerSnapshot["phase"];
   readonly pendingInteractions: number;
   readonly hasInteractionFacts: boolean;
+  /** 镜像义务水位：交互结果与信任沉淀都算 */
   readonly maxFinishedSeq: number;
+  /** 流投影义务水位：只算交互结果，沉淀不进流 */
+  readonly maxFinishedInteractionSeq: number;
   readonly mirroredUpTo: number;
   readonly streamProjectionEnabledAfter?: number;
   readonly streamProjectedUpTo: number;
@@ -1615,6 +1633,37 @@ export class ConversationAssignmentLedger implements
     }, this.#verifier));
   }
 
+  /**
+   * 记一条信任沉淀事实（对话或 job 指派运行中）：进入与交互结果同一条镜像链，随下一次
+   * 镜像冲刷回到 owner。返回其在本指派内的身份。
+   */
+  async recordTrustSediment(
+    assignmentId: string,
+    sediment: TrustSedimentFact,
+  ): Promise<{ readonly requestId: string; readonly recordSeq: number }> {
+    const validated = validateTrustSedimentFact(snapshot(sediment, "Trust sediment"));
+    const transaction = await this.#transact<{ readonly requestId: string; readonly recordSeq: number }>(
+      assignmentId,
+      (state) => {
+        if (state.phase !== "started" || state.aborts.length > 0) {
+          throw new Error("Trust sediments can only be recorded by a started assignment");
+        }
+        const requestId = `${TRUST_SEDIMENT_REQUEST_PREFIX}${state.validation.trustSedimentCount + 1}`;
+        const body = snapshot(
+          { v: 1 as const, t: "trust-sediment" as const, requestId, sediment: validated },
+          "Trust sediment record",
+        );
+        const entry = nextEntry(state, body);
+        return {
+          kind: "append",
+          entries: [assignmentRecord(assignmentId, entry)],
+          value: { requestId, recordSeq: entry.recordSeq },
+        };
+      },
+    );
+    return transaction.value;
+  }
+
   async jobInteractionOutcome(
     assignmentId: string,
     requestId: string,
@@ -2176,13 +2225,35 @@ export class ConversationAssignmentLedger implements
     });
   }
 
+  /**
+   * 中止结算的请求形态，由本前缀事实决定：未启用投影为 v1；启用投影为 v2，前缀里有启用
+   * 之后的交互结果时带流证明，否则（只有沉淀）不带。
+   */
+  async interactionSettlementRequest(
+    assignmentId: string,
+  ): Promise<
+    | { readonly settlementVersion: 1 }
+    | { readonly settlementVersion: 2; readonly streamProof?: InteractionSettlementStreamProof }
+  > {
+    const shape = await this.#select(assignmentId, (state) => ({
+      enabled: state.streamProjectionEnabledAfter !== undefined,
+      needsProof: interactionSettlementNeedsStreamProof(state.validation),
+    }));
+    if (!shape.enabled) return { settlementVersion: 1 };
+    if (!shape.needsProof) return { settlementVersion: 2 };
+    return { settlementVersion: 2, streamProof: await this.interactionSettlementStreamProof(assignmentId) };
+  }
+
   async interactionSettlementStreamProof(
     assignmentId: string,
   ): Promise<InteractionSettlementStreamProof> {
     return this.#select(assignmentId, (state) => {
       const abort = [...state.validation.aborts.values()]
         .find((candidate) => candidate.via === "abort-ticket");
-      const target = state.finishedOrder.at(-1);
+      // 流投影目标是本前缀最后一条交互结果（沉淀不算），与校验状态同源
+      const target = interactionSettlementNeedsStreamProof(state.validation)
+        ? { recordSeq: state.validation.lastFinishedInteractionRecordSeq }
+        : undefined;
       if (
         !abort ||
         !target ||
@@ -2990,7 +3061,9 @@ export class ConversationAssignmentLedger implements
    */
   async markInteractionSettlementOwnerAccepted(
     assignmentId: string,
-    streamProof: InteractionSettlementStreamProof | undefined,
+    settlement:
+      | { readonly settlementVersion: 1 }
+      | { readonly settlementVersion: 2; readonly streamProof?: InteractionSettlementStreamProof },
   ): Promise<boolean> {
     return (
       await this.#transact<boolean>(assignmentId, (state) => {
@@ -3002,14 +3075,14 @@ export class ConversationAssignmentLedger implements
             "Interaction settlement acceptance has no durable abort ticket",
           );
         }
-        const body = streamProof
+        const body = settlement.settlementVersion === 2
           ? ({
               v: 2,
               t: "interaction-settlement-owner-accepted",
               assignmentId,
               ticketDigest: abort.refId,
               settlementVersion: 2,
-              streamProof,
+              ...(settlement.streamProof ? { streamProof: settlement.streamProof } : {}),
             } as const)
           : ({
               v: 2,
@@ -4393,13 +4466,13 @@ function emptyProjection(assignmentId: string): LedgerProjection {
 }
 
 function hasPendingInteractionObligations(state: LedgerProjection): boolean {
-  const lastFinishedRecordSeq = state.finishedOrder.at(-1)?.recordSeq ?? 0;
+  // 镜像义务覆盖整条镜像链（含沉淀）；流投影义务只到最后一条交互结果
   return (
     state.pendingRequests.size > 0 ||
     state.mirroredFinishedCount !== state.finishedOrder.length ||
     (state.received?.body.activation.ref.execution === "job" &&
       state.streamProjectionEnabledAfter !== undefined &&
-      state.streamProjectedUpTo < lastFinishedRecordSeq)
+      state.streamProjectedUpTo < state.validation.lastFinishedInteractionRecordSeq)
   );
 }
 
@@ -4533,13 +4606,14 @@ async function reduceJobRecoveryIndex(
         continue;
       }
       pending.value = {
-        v: 4,
+        v: 5,
         assignmentId,
         envelopeRef: body.envelope.ref,
         phase: "received",
         pendingInteractions: 0,
         hasInteractionFacts: false,
         maxFinishedSeq: 0,
+        maxFinishedInteractionSeq: 0,
         mirroredUpTo: 0,
         streamProjectedUpTo: 0,
         hasAbort: false,
@@ -4573,6 +4647,15 @@ async function reduceJobRecoveryIndex(
         next = {
           ...next,
           pendingInteractions: Math.max(0, next.pendingInteractions - 1),
+          hasInteractionFacts: true,
+          maxFinishedSeq: Math.max(next.maxFinishedSeq, entry.recordSeq),
+          maxFinishedInteractionSeq: Math.max(next.maxFinishedInteractionSeq, entry.recordSeq),
+        };
+        break;
+      case "trust-sediment":
+        // 待镜像义务与交互结果相同：镜像水位追上之前不算结清；沉淀不进流投影
+        next = {
+          ...next,
           hasInteractionFacts: true,
           maxFinishedSeq: Math.max(next.maxFinishedSeq, entry.recordSeq),
         };
@@ -4673,6 +4756,7 @@ function validateJobRecoveryIndexValue(
     "hasAbortTicket",
     "hasInteractionFacts",
     "interactionSettlementOwnerAccepted",
+    "maxFinishedInteractionSeq",
     "maxFinishedSeq",
     "mirroredUpTo",
     "pendingInteractions",
@@ -4690,7 +4774,7 @@ function validateJobRecoveryIndexValue(
   }
   const ref = value.envelopeRef;
   if (
-    value.v !== 4 ||
+    value.v !== 5 ||
     typeof value.assignmentId !== "string" ||
     !ref ||
     typeof ref !== "object" ||
@@ -4707,6 +4791,9 @@ function validateJobRecoveryIndexValue(
     typeof value.hasInteractionFacts !== "boolean" ||
     !Number.isSafeInteger(value.maxFinishedSeq) ||
     (value.maxFinishedSeq as number) < 0 ||
+    !Number.isSafeInteger(value.maxFinishedInteractionSeq) ||
+    (value.maxFinishedInteractionSeq as number) < 0 ||
+    (value.maxFinishedInteractionSeq as number) > (value.maxFinishedSeq as number) ||
     !Number.isSafeInteger(value.mirroredUpTo) ||
     (value.mirroredUpTo as number) < 0 ||
     (value.streamProjectionEnabledAfter !== undefined &&
@@ -4758,7 +4845,7 @@ function classifyJobRecoveryObligation(
       (value.pendingInteractions > 0 ||
         value.maxFinishedSeq > value.mirroredUpTo ||
         (value.streamProjectionEnabledAfter !== undefined &&
-          value.maxFinishedSeq > value.streamProjectedUpTo)),
+          value.maxFinishedInteractionSeq > value.streamProjectedUpTo)),
   };
 }
 
@@ -4865,6 +4952,21 @@ function applyEntry(
       state.finishedIndexBySeq.set(entry.recordSeq, state.finishedOrder.length);
       state.finishedOrder.push(finished);
       return;
+    case "trust-sediment": {
+      const sedimentCheckpoint = state.validation.unmirroredFinished.get(entry.recordSeq);
+      if (!sedimentCheckpoint) {
+        throw corruptLedger("Validated trust sediment lost its mirror checkpoint");
+      }
+      state.finishedIndexBySeq.set(entry.recordSeq, state.finishedOrder.length);
+      state.finishedOrder.push({
+        body,
+        recordSeq: entry.recordSeq,
+        at,
+        ordinal: sedimentCheckpoint.ordinal,
+        mirrorDigest: sedimentCheckpoint.mirrorDigest,
+      });
+      return;
+    }
     case "staged-mutation":
       state.stagedMutations.push(body);
       state.mutationRequestIds.add(body.requestId);
@@ -5199,7 +5301,17 @@ function validateInteractionRequest(
   assertInteractionRecordSize(body, "Interaction request");
 }
 
-function mirrorEntry(finished: FinishedInteraction): InteractionMirrorEntry {
+function mirrorEntry(finished: MirrorChainItem): InteractionMirrorEntry {
+  if (finished.body.t === "trust-sediment") {
+    return {
+      ordinal: finished.ordinal,
+      seq: finished.recordSeq,
+      requestId: finished.body.requestId,
+      kind: "trust-sediment",
+      sediment: snapshot(finished.body.sediment, "Trust sediment"),
+      at: finished.at,
+    };
+  }
   return {
     ordinal: finished.ordinal,
     seq: finished.recordSeq,
@@ -5521,7 +5633,7 @@ export function registerExecutorJobRecoveryProjection(log: AuthorityCommitLog, v
   return log.durableProjection({
       projectionId: "executor-job-interaction-obligations",
       inputs: { families: ["assignment:"] },
-      reducerVersion: 5,
+      reducerVersion: 6,
       reduce: (envelope, current) =>
         reduceJobRecoveryIndex(
           envelope,

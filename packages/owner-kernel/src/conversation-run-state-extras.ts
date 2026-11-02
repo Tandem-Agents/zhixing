@@ -224,7 +224,7 @@ export async function foldConversationRunExtras(input: {
         const entry = validateConversationInteractionMirrorEntry(raw), key = body.assignmentId + '\0' + entry.requestId;
         if (entry.ordinal !== ordinal + 1 || entry.seq <= seq || await get('mirrorRequests', key)) throw corruptRunJournal('Interaction mirror sequence or request identity is invalid');
         ordinal = entry.ordinal; seq = entry.seq; put('mirrorRequests', key, true);
-        if (await get('interactionOutcome', entry.requestId) === undefined) put('interactionOutcome', entry.requestId,
+        if (entry.kind === 'allow-once' && await get('interactionOutcome', entry.requestId) === undefined) put('interactionOutcome', entry.requestId,
           entry.outcome.t === 'answered' ? { t: 'answered', decisionDigest: entry.outcome.decisionDigest } : { t: 'closed' });
       }
       put('mirrorStateByAssignment', body.assignmentId, { ordinal, mirroredUpTo: seq, mirrorDigest: batch.mirrorDigest });

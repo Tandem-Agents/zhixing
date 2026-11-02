@@ -26,6 +26,9 @@ describe("Host Kernel Tool implementation", () => {
     expect(first.permissionRuleSets.map(({ namespace }) => namespace))
       .toEqual(["web_fetch"]);
     expect(first.permissionRuleSets[0]!.rules.length).toBeGreaterThan(0);
+    // 贡献随实际工具集合：没有 web_fetch 就没有它的内置规则
+    expect(implementation.create({ ...request, requestedToolNames: Object.freeze(["read"]) }).permissionRuleSets)
+      .toEqual([]);
     expect(request).not.toHaveProperty("skillMode");
     expect(request).not.toHaveProperty("artifactStore");
     expect(request).not.toHaveProperty("skillCatalogLoad");

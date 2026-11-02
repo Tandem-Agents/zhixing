@@ -20,9 +20,12 @@ import type {
   Digest,
   ExecutionRef,
   ExecutionKind,
+  InteractionAnswerMirrorEntry,
   InteractionMirrorBatch,
   InteractionMirrorEntry,
   InteractionSettlementStreamProof,
+  TrustSedimentFact,
+  TrustSedimentMirrorEntry,
   IngressContext,
   LedgerEvidencePage,
   LedgerSnapshot,
@@ -147,19 +150,21 @@ export type ConversationInteractionOutcome =
       readonly decisionDigest: Digest;
       readonly by: string;
     }
-  | Exclude<InteractionMirrorEntry["outcome"], { t: "answered" }>;
+  | Exclude<InteractionAnswerMirrorEntry["outcome"], { t: "answered" }>;
 
-export type ConversationInteractionMirrorEntry = Omit<
-  InteractionMirrorEntry,
-  "outcome"
-> & { readonly outcome: ConversationInteractionOutcome };
+export type ConversationInteractionMirrorEntry =
+  | (Omit<InteractionAnswerMirrorEntry, "outcome"> & { readonly outcome: ConversationInteractionOutcome })
+  | TrustSedimentMirrorEntry;
 
 export type ConversationInteractionMirrorBatch = Omit<
   InteractionMirrorBatch,
   "entries"
 > & { readonly entries: ConversationInteractionMirrorEntry[] };
 
-export type AssignmentInteractionOutcome = InteractionMirrorEntry["outcome"];
+export type AssignmentInteractionOutcome = InteractionAnswerMirrorEntry["outcome"];
+
+/** 沉淀条目在一个指派内的身份前缀；与交互请求 id 不冲突。 */
+export const TRUST_SEDIMENT_REQUEST_PREFIX = "trust-sediment:";
 
 export function confirmationDecisionDigest(
   requestId: string,
@@ -228,10 +233,22 @@ export interface AssignmentLedgerValidationState {
     { readonly t: "interaction-settlement-owner-accepted" }
   >;
   stagedMutationCount: number;
+  trustSedimentCount: number;
   readonly mutationRequestIds: Set<string>;
   sideEffectCount: number;
   readonly openSideEffects: Set<number>;
   mirroredUpTo: number;
+}
+
+/**
+ * 中止结算是否有流投影义务：已启用交互流投影，且本前缀里最后一条交互结果在启用点之后。
+ * 只有沉淀等非交互镜像条目时义务为空。owner 生成围栏与执行端接纳都用它，判断同一前缀。
+ */
+export function interactionSettlementNeedsStreamProof(
+  state: Pick<AssignmentLedgerValidationState, "streamProjectionEnabledAfter" | "lastFinishedInteractionRecordSeq">,
+): boolean {
+  return state.streamProjectionEnabledAfter !== undefined &&
+    state.lastFinishedInteractionRecordSeq > state.streamProjectionEnabledAfter;
 }
 
 export function createAssignmentLedgerValidationState(
@@ -258,6 +275,7 @@ export function createAssignmentLedgerValidationState(
     lastFinishedInteractionRecordSeq: 0,
     cancelProofOwnerAccepted: false,
     stagedMutationCount: 0,
+    trustSedimentCount: 0,
     mutationRequestIds: new Set(),
     sideEffectCount: 0,
     openSideEffects: new Set(),
@@ -740,24 +758,32 @@ export function interactionMirrorSeed(assignmentId: string): Digest {
   return protocolDigest("InteractionMirrorSeed", 1, { assignmentId });
 }
 
+/** 对联合逐个成员去掉字段（内置 Omit 会把联合压成公共键）。 */
+type WithoutField<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
 export function advanceInteractionMirrorDigest(
   previous: Digest,
-  entry: Omit<ConversationInteractionMirrorEntry, "at">,
+  entry: WithoutField<ConversationInteractionMirrorEntry, "at">,
 ): Digest {
-  validateConversationInteractionOutcome(entry.outcome);
-  return advanceAssignmentInteractionMirrorDigest(previous, entry);
+  if (entry.kind === "allow-once") validateConversationInteractionOutcome(entry.outcome);
+  return advanceAssignmentInteractionMirrorDigest(previous, entry as WithoutField<InteractionMirrorEntry, "at">);
 }
 
 export function advanceAssignmentInteractionMirrorDigest(
   previous: Digest,
-  entry: Omit<InteractionMirrorEntry, "at">,
+  entry: WithoutField<InteractionMirrorEntry, "at">,
 ): Digest {
   assertDigest(previous, "Previous interaction mirror digest");
   assertPositiveInteger(entry.ordinal, "Interaction mirror ordinal");
   assertPositiveInteger(entry.seq, "Interaction mirror record sequence");
   assertIdentifier(entry.requestId, "Interaction mirror requestId");
-  if (entry.kind !== "allow-once") {
-    throw new TypeError("Conversation interaction kind must be allow-once");
+  if (entry.kind === "trust-sediment") {
+    validateTrustSedimentFact(entry.sediment);
+    if (!entry.requestId.startsWith(TRUST_SEDIMENT_REQUEST_PREFIX)) {
+      throw new TypeError("Trust sediment mirror identity is invalid");
+    }
+  } else if (entry.kind !== "allow-once") {
+    throw new TypeError("Interaction mirror entry kind is invalid");
   }
   return protocolDigest("InteractionMirrorStep", 1, {
     previous,
@@ -1364,6 +1390,33 @@ export function applyValidatedAssignmentEntry(
         state.unprojectedFinished.add(entry.recordSeq);
       }
       break;
+    case "trust-sediment":
+      // 沉淀与交互结果共用镜像序号与摘要链（随同一批镜像回到 owner），但不是交互：
+      // 不进待决交互集合、不推进最后交互序号、不产生流投影义务。job 中止结算的镜像目标
+      // 覆盖它，流投影目标只看交互结果（interactionSettlementNeedsStreamProof）。
+      if (state.phase !== "started" || state.aborts.size > 0) {
+        throw new TypeError("trust sediment is outside a started assignment");
+      }
+      if (body.requestId !== `${TRUST_SEDIMENT_REQUEST_PREFIX}${state.trustSedimentCount + 1}`) {
+        throw new TypeError("trust sediment identity is not the next in sequence");
+      }
+      state.trustSedimentCount += 1;
+      state.finishedInteractionCount += 1;
+      state.interactionMirrorDigest = advanceAssignmentInteractionMirrorDigest(
+        state.interactionMirrorDigest,
+        {
+          ordinal: state.finishedInteractionCount,
+          seq: entry.recordSeq,
+          requestId: body.requestId,
+          kind: "trust-sediment",
+          sediment: body.sediment,
+        },
+      );
+      state.unmirroredFinished.set(entry.recordSeq, {
+        ordinal: state.finishedInteractionCount,
+        mirrorDigest: state.interactionMirrorDigest,
+      });
+      break;
     case "staged-mutation":
       if (state.phase !== "started" || state.aborts.size > 0) {
         throw new TypeError("staged mutation is outside a started assignment");
@@ -1487,6 +1540,17 @@ export function applyValidatedAssignmentEntry(
     case "interaction-settlement-owner-accepted": {
       const abort = state.aborts.get(`abort-ticket\0${body.ticketDigest}`);
       const proof = body.settlementVersion === 2 ? body.streamProof : undefined;
+      // 流投影义务由本前缀的事实决定：启用投影之后有交互结果才需要证明
+      const needsProof = interactionSettlementNeedsStreamProof(state);
+      if (
+        body.settlementVersion === 2 &&
+        !needsProof &&
+        (proof !== undefined || state.streamProjectionEnabledAfter === undefined)
+      ) {
+        throw new TypeError(
+          "interaction-settlement-owner-accepted does not fit an empty projection obligation",
+        );
+      }
       if (
         state.ref?.execution !== "job" ||
         state.phase !== "started" ||
@@ -1499,7 +1563,7 @@ export function applyValidatedAssignmentEntry(
         body.assignmentId !== state.assignmentId ||
         (body.settlementVersion === 1 &&
           state.streamProjectionEnabledAfter !== undefined) ||
-        (body.settlementVersion === 2 &&
+        (body.settlementVersion === 2 && needsProof &&
           (state.streamProjectionEnabledAfter === undefined ||
             state.unprojectedFinished.size > 0 ||
             proof === undefined ||
@@ -2132,6 +2196,71 @@ export function validateAssignmentInteractionOutcome(
   } as AssignmentInteractionOutcome;
 }
 
+const MAX_TRUST_SEDIMENT_CONTRIBUTORS = 256;
+const MAX_TRUST_PATTERN_LENGTH = 8192;
+
+/** 信任沉淀事实的结构校验；语义核对（模式、阈值、引用的交互）由接纳方完成。 */
+export function validateTrustSedimentFact(input: unknown): TrustSedimentFact {
+  assertObject(input, "Trust sediment");
+  assertExactKeys(input, ["contributors", "operation", "pattern", "riskLevel"], "Trust sediment");
+  const pattern = input.pattern;
+  assertObject(pattern, "Trust sediment pattern");
+  assertExactKeys(pattern, ["argument", "tool"], "Trust sediment pattern");
+  if (typeof pattern.tool !== "string" || !pattern.tool || pattern.tool.length > 256) {
+    throw new TypeError("Trust sediment pattern tool is invalid");
+  }
+  if (typeof pattern.argument !== "string" || pattern.argument.length > MAX_TRUST_PATTERN_LENGTH) {
+    throw new TypeError("Trust sediment pattern argument is invalid");
+  }
+  if (input.riskLevel !== "low" && input.riskLevel !== "medium" && input.riskLevel !== "high") {
+    throw new TypeError("Trust sediment risk level is invalid");
+  }
+  const operation = input.operation;
+  assertObject(operation, "Trust sediment operation");
+  assertExactKeys(operation, ["arguments", "tool"], "Trust sediment operation");
+  if (typeof operation.tool !== "string" || !operation.tool || operation.tool.length > 256) {
+    throw new TypeError("Trust sediment operation tool is invalid");
+  }
+  assertObject(operation.arguments, "Trust sediment operation arguments");
+  const contributors = input.contributors;
+  if (!Array.isArray(contributors) || contributors.length === 0 ||
+    contributors.length > MAX_TRUST_SEDIMENT_CONTRIBUTORS) {
+    throw new TypeError("Trust sediment contributors are invalid");
+  }
+  for (const contributor of contributors) {
+    assertObject(contributor, "Trust sediment contributor");
+    assertExactKeys(contributor, ["origin", "requestId", "timestamp"], "Trust sediment contributor", true);
+    if (contributor.origin !== "user" && contributor.origin !== "steward") {
+      throw new TypeError("Trust sediment contributor origin is invalid");
+    }
+    if (typeof contributor.timestamp !== "number" || !Number.isFinite(contributor.timestamp) || contributor.timestamp < 0) {
+      throw new TypeError("Trust sediment contributor time is invalid");
+    }
+    if (contributor.requestId !== undefined) assertIdentifier(contributor.requestId, "Trust sediment contributor request");
+  }
+  return input as unknown as TrustSedimentFact;
+}
+
+function validateTrustSedimentMirrorEntry(
+  entry: Record<string, unknown>,
+  label: string,
+): TrustSedimentMirrorEntry {
+  assertExactKeys(entry, ["at", "kind", "ordinal", "requestId", "sediment", "seq"], label);
+  if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal as number) <= 0) {
+    throw new TypeError("Interaction mirror ordinal must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(entry.seq) || (entry.seq as number) <= 0) {
+    throw new TypeError("Interaction mirror sequence must be a positive safe integer");
+  }
+  assertIdentifier(entry.requestId, "Trust sediment identity");
+  if (!entry.requestId.startsWith(TRUST_SEDIMENT_REQUEST_PREFIX)) {
+    throw new TypeError("Trust sediment mirror identity is invalid");
+  }
+  validateTrustSedimentFact(entry.sediment);
+  assertCanonicalTime(entry.at, "Interaction mirror time");
+  return entry as unknown as TrustSedimentMirrorEntry;
+}
+
 export function validateConversationInteractionMirrorEntry(
   input: unknown,
 ): ConversationInteractionMirrorEntry {
@@ -2140,6 +2269,9 @@ export function validateConversationInteractionMirrorEntry(
     unknown
   >;
   assertObject(entry, "Conversation interaction mirror entry");
+  if (entry.kind === "trust-sediment") {
+    return validateTrustSedimentMirrorEntry(entry, "Conversation interaction mirror entry");
+  }
   assertExactKeys(
     entry,
     ["at", "kind", "ordinal", "outcome", "requestId", "seq"],
@@ -2169,6 +2301,9 @@ export function validateAssignmentInteractionMirrorEntry(
     unknown
   >;
   assertObject(entry, "Assignment interaction mirror entry");
+  if (entry.kind === "trust-sediment") {
+    return validateTrustSedimentMirrorEntry(entry, "Assignment interaction mirror entry");
+  }
   assertExactKeys(
     entry,
     ["at", "kind", "ordinal", "outcome", "requestId", "seq"],
@@ -2270,7 +2405,7 @@ function assertAssignmentRecord(
         [
           "assignmentId",
           "settlementVersion",
-          ...(value.settlementVersion === 2 ? ["streamProof"] : []),
+          ...(value.settlementVersion === 2 && value.streamProof !== undefined ? ["streamProof"] : []),
           "t",
           "ticketDigest",
           "v",
@@ -2293,7 +2428,7 @@ function assertAssignmentRecord(
           "Interaction settlement accepted version must be 1 or 2",
         );
       }
-      if (value.settlementVersion === 2) {
+      if (value.settlementVersion === 2 && value.streamProof !== undefined) {
         validateInteractionSettlementStreamProof(value.streamProof, verifier);
       }
       return;
@@ -2382,6 +2517,14 @@ function assertAssignmentRecord(
       assertIdentifier(value.requestId, "finished interaction requestId");
       if (value.kind !== "allow-once") throw new TypeError("Finished interaction kind is invalid");
       validateAssignmentInteractionOutcome(value.outcome, verifier);
+      return;
+    case "trust-sediment":
+      assertExactKeys(value, ["requestId", "sediment", "t", "v"], "trust-sediment record");
+      assertIdentifier(value.requestId, "trust sediment identity");
+      if (!value.requestId.startsWith(TRUST_SEDIMENT_REQUEST_PREFIX)) {
+        throw new TypeError("Trust sediment record identity is invalid");
+      }
+      validateTrustSedimentFact(value.sediment);
       return;
     case "staged-mutation":
       assertExactKeys(
@@ -3542,10 +3685,10 @@ function assertExactKeys(
 function withoutField<T extends object, K extends keyof T>(
   value: T,
   field: K,
-): Omit<T, K> {
+): WithoutField<T, K> {
   const output = { ...value };
   delete output[field];
-  return output;
+  return output as unknown as WithoutField<T, K>;
 }
 
 function snapshot<T>(value: T, label: string): T {

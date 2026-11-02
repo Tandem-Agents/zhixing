@@ -297,8 +297,8 @@ export function createSecureExecuteTool(
           fallbackStrategy,
           onUserDenied,
           auditor,
-          // needs-confirm 时管家给出了研判理由；未触发管家时为 undefined
-          stewardReason: verdict?.reason,
+          // needs-confirm 时管家给出了研判理由；未触发管家或管家没能完成判断时为 undefined（诊断原因已入审计）
+          stewardReason: verdict && !verdict.unassessed ? verdict.reason : undefined,
           requiresExplicitConfirmation,
           confirmationDisplayContext: tool.confirmationDisplayContext,
         });
@@ -427,6 +427,7 @@ async function handleBrokerPath(params: {
     turnOrigin: context.turnOrigin,
     stewardReason,
     requiresExplicitConfirmation,
+    ...(securityApproval.persistentApprovals ? {} : { persistentApprovals: false }),
     confirmationDisplayContext,
   });
 
@@ -457,9 +458,10 @@ async function handleBrokerPath(params: {
     }
 
     case "cancelled": {
+      // 原因码只放结构化字段（第三个参数），文字给用户和模型看
       const label = cancelLabel(decision.cause);
       throw new SecurityBlockError(
-        `确认${label}（${decision.cause}）`,
+        `确认${label}。`,
         toolName,
         decision.cause,
       );
@@ -491,6 +493,7 @@ async function handleBrokerPath(params: {
       }
       await applyBrokerDecision({
         decision,
+        requestId: request.id,
         securityApproval,
         toolName,
         input,
@@ -543,7 +546,7 @@ function cancelLabel(cause: string): string {
     case "session-end":
       return "因会话结束被清场";
     case "aborted":
-      return "被外部 abort";
+      return "已中止";
     case "backpressure":
       return "因队列过载被拒绝";
     default:
@@ -650,6 +653,7 @@ async function recordTrustApproval(params: {
   toolName: string;
   toolInput: Record<string, unknown>;
   auditor: SecurityAuditor | null;
+  requestId?: string;
 }): Promise<void> {
   const {
     securityApproval,
@@ -660,13 +664,15 @@ async function recordTrustApproval(params: {
     toolName,
     toolInput,
     auditor,
+    requestId,
   } = params;
-  const outcome = securityApproval.recordApproval({
+  const outcome = await securityApproval.recordApproval({
     kind: "allow-once",
     operation,
     riskLevel,
     origin,
     bypassImmune,
+    ...(requestId ? { requestId } : {}),
   });
   if (outcome.kind === "rule-sedimented" && auditor) {
     const context = outcome.rule.contextId;
@@ -698,6 +704,7 @@ async function applyBrokerDecision(params: {
         | "allow-global";
     }
   >;
+  requestId: string;
   securityApproval: KernelSecurityApprovalPort;
   toolName: string;
   input: Record<string, unknown>;
@@ -707,6 +714,7 @@ async function applyBrokerDecision(params: {
 }): Promise<void> {
   const {
     decision,
+    requestId,
     securityApproval,
     toolName,
     input,
@@ -726,27 +734,25 @@ async function applyBrokerDecision(params: {
         toolName,
         toolInput: input,
         auditor,
+        requestId,
       });
       return;
 
     case "allow-session":
-      securityApproval.recordApproval({
+      await securityApproval.recordApproval({
         kind: "allow-session",
         pattern: decision.pattern,
       });
       return;
 
     case "allow-context":
-      securityApproval.recordApproval({
-        kind: "allow-context",
-        pattern: decision.pattern,
-      });
-      return;
-
     case "allow-global":
-      securityApproval.recordApproval({
-        kind: "allow-global",
+      // 显式持久批准的效果在决定生命周期上落地（接纳前失败已让决定回到待确认）；
+      // 这里读取本请求的结果，没有耐久生命周期的运行由端口直接发布
+      await securityApproval.recordApproval({
+        kind: decision.kind,
         pattern: decision.pattern,
+        requestId,
       });
       return;
   }

@@ -38,6 +38,17 @@ describe('terminal trust candidates', () => {
     await expect(f.binding.revoke(4, items[2]!.id)).resolves.toEqual({ revoked: true, message: '已撤销信任规则。' });
     expect(f.management.trustRevoke).toHaveBeenCalledWith('scene', 'conv-1');
   });
+  it('lists other-scope rules after the current scope and revokes them with their own scope', async () => {
+    const f = fixture([rule('main')]);
+    const stale = { kind: 'workspace', hash: 'hash-b' } as const;
+    Object.assign(f.management, { trustOtherScopes: vi.fn(async () => ({ groups: [{ context: stale, label: '工作区「B」',
+      effective: false, rules: [{ ...rule('stale'), contextId: { kind: 'workspace', hash: 'hash-b', revision: 1 } }] }] })) });
+    const items = await f.query();
+    expect(items.map(item => item.description)).toEqual(['主模式 · [—] · 未匹配', expect.stringMatching(/^工作区「B」 · 不再生效 · /u)]);
+    f.binding.retain(5, items);
+    await f.binding.revoke(5, items[1]!.id);
+    expect(f.management.trustRevoke).toHaveBeenCalledWith('stale', 'conv-1', stale);
+  });
   it('only revokes the retained N-side row and consumes it exactly once', async () => {
     const f = fixture(), items = await f.query(); f.binding.retain(3, items);
     await expect(f.binding.revoke(2, items[0]!.id)).rejects.toThrow('变化');

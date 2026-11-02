@@ -189,7 +189,7 @@ describe("executor role conversation runtime production assembly", () => {
       expect(issued.primaryRole).toBe("power");
       expect(runtimeMocks.modelProviderCreate).toHaveBeenCalledWith({ primaryRole: "power" });
       expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenCalledWith({ workspace });
-      expect(issued.securityExecution).toMatchObject({ context: { kind: "scene", sceneId: "scene-a" } });
+      expect(issued.securityExecution).toMatchObject({ context: { sceneId: "scene-a" } });
       expect(createToolImplementation).toHaveBeenCalledWith(expect.objectContaining({ kind: "assignment", mode: "work" }));
       const workPrompt = await issued.windowPrompt.project(skillProjectionQuery);
       expect(workPrompt.content).toContain("ZX_EXECUTOR_WORK_SKILL");
@@ -240,7 +240,7 @@ describe("executor role conversation runtime production assembly", () => {
     const worksceneSecurity = runtimeMocks.createAgentRuntime.mock.calls[0]![0]
       .securityExecution;
     expect(worksceneSecurity).toMatchObject({
-      context: { kind: "scene", sceneId: "scene-a" },
+      context: { sceneId: "scene-a" },
     });
     expect(Object.isFrozen(worksceneSecurity)).toBe(true);
     expect(createToolImplementation).toHaveBeenNthCalledWith(
@@ -269,9 +269,16 @@ describe("executor role conversation runtime production assembly", () => {
       workspace: "/ordinary-workspace",
     });
     expect(mainParams).not.toHaveProperty("runtimeIdentity");
-    expect(mainParams.securityExecution).toMatchObject({
-      context: { kind: "default" },
-    });
+    expect(mainParams.securityExecution.context).toEqual({});
+    const binding = { deviceId: "device-1", bindingRef: "binding-1", workspaceBindingRevision: 2 };
+    await substrate.createConversationRuntime(
+      "/ordinary-workspace",
+      "ordinary-conversation",
+      undefined,
+      binding,
+    );
+    expect(runtimeMocks.createAgentRuntime.mock.lastCall![0].securityExecution.context)
+      .toEqual({ workspace: binding });
     expect(mainParams.primaryRole).toBeUndefined();
     expect(createToolImplementation).toHaveBeenNthCalledWith(
       2,
@@ -305,6 +312,14 @@ describe("executor role job runtime production assembly", () => {
     expect(issued.profile.enabledTools).toEqual(["read"]);
     expect(issued.extraTools.map(t => t.name)).toEqual(["mcp__alpha__tool"]);
     expect(issued.executionMcpServers).toEqual(["alpha"]);
+    // 无工作区的 job 是主范围
+    expect(issued.securityExecution.context).toEqual({});
+
+    // 清单带工作区绑定：授权范围按该绑定及修订，不写死主范围
+    const workspace = { deviceId: "device-1", bindingRef: "binding-1", workspaceBindingRevision: 3 };
+    await substrate.createJobRuntime({ kind: "agent-turn", prompt: "task" }, {} as IConfirmationBroker,
+      { tools: ["read"], mcpServers: [] }, workspace);
+    expect(runtimeMocks.createAgentRuntime.mock.lastCall![0].securityExecution.context).toEqual({ workspace });
   });
   it("provides a real remote-main support entry without any workscene and returns its result to the original goal", async () => {
     runtimeMocks.createAgentRuntime.mockResolvedValue({} as AgentRuntime);

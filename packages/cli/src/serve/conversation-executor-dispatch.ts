@@ -148,6 +148,7 @@ export interface ConversationExecutorExecutionEffect {
   }): Promise<ConversationExecutorAssignmentRunStream>;
   startHeartbeat(): { stop(): Promise<void> };
   createInteractionScope(input: {
+    readonly conversationId: string;
     readonly interactions: DurableConversationInteractionObserver;
     readonly context: AuthorityCallContext;
     readonly surfacePrincipal: string;
@@ -334,6 +335,7 @@ interface LocalConversationSubmission {
   ): Promise<void>;
   createInteractionScope(input: {
     readonly assignmentId: string;
+    readonly conversationId: string;
     readonly interactions: DurableConversationInteractionObserver;
     readonly context: AuthorityCallContext;
     readonly surfacePrincipal: string;
@@ -879,6 +881,7 @@ function createLocalConversationExecutorMechanism(
           createInteractionScope(input) {
             const binding: DurableInteractionBinding = {
               assignmentId: input.assignmentId,
+              conversationId: input.conversationId,
               ledger,
               submission: implementation,
               context: input.context,
@@ -921,7 +924,11 @@ function createLocalConversationExecutorMechanism(
         try {
           baseRuntime = await observeLogPhase(options.phaseRecords, "executor.runtime-create", () => local.runtimeFactory.create(
             input.conversationId,
-            { workspaceRoot: preflight.workspaceRoot, executionProfile: input.binding.executionProfile },
+            {
+              workspaceRoot: preflight.workspaceRoot,
+              executionProfile: input.binding.executionProfile,
+              workspaceBinding: input.manifest.environment.workspace ?? null,
+            },
           ));
           runtime = input.adaptRuntime?.(baseRuntime) ?? baseRuntime;
           const projected = runtime.executionProfile?.();
@@ -971,6 +978,7 @@ function createLocalConversationExecutorMechanism(
               createInteractionScope(scopeInput) {
                 return submission.createInteractionScope({
                   assignmentId: effectInput.assignmentId,
+                  conversationId: scopeInput.conversationId,
                   interactions: scopeInput.interactions,
                   context: scopeInput.context,
                   surfacePrincipal: scopeInput.surfacePrincipal,

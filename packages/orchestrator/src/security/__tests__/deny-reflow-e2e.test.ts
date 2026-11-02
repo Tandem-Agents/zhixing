@@ -67,6 +67,7 @@ function createSecurityBoundary() {
   const store = new PermissionStore({ rootDir: null });
   const trustAdministration = new TrustAdministrationExecutionApplicationService({
     repository: createPermissionStoreTrustAdministrationRepository(() => store),
+    context: { kind: "workspace", hash: "binding-ws", revision: 1 },
     workspacePath: "/tmp/ws",
   });
   const pipeline = new SecurityPipeline({

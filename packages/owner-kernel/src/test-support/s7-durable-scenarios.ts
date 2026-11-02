@@ -13,7 +13,7 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
-import type { AdvancementControlEvent } from "@zhixing/core/advancement";
+import { advancementExecutionTurnId, type AdvancementControlEvent } from "@zhixing/core/advancement";
 import {
   ConversationRunJournal,
 } from "../conversation-assignment.js";
@@ -268,7 +268,8 @@ function advancementConfirmedEvent(): AdvancementControlEvent {
     timestamp: ADVANCEMENT_NOW,
     sessionId: "session-1",
     admissionIntent: {
-      turnId: "turn-1",
+      // 执行身份由原始轮次与被确认的草案派生（与 advancementCreatedEvent 的草案一致）
+      turnId: advancementExecutionTurnId("turn-1", "advancement", "draft-1"),
       surfacePrincipal: "surface:test",
       turnOrigin: { channel: "rpc", triggeredBy: "surface:test" },
       inputDigest: protocolDigest(

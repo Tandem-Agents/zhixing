@@ -724,6 +724,18 @@ export interface ConversationSecurityResult {
     count: number;
     highestRisk: "low" | "medium" | "high" | "critical";
   }>[];
+  /**
+   * 本次展示的授权口径：有正在执行的运行时，为该运行由已验签清单推导的实际范围与它冻结的
+   * 权限快照；否则为对话默认概览（上面的 contextId/permissionRules），不代表某次运行。
+   */
+  readonly scope?:
+    | Readonly<{ kind: "default" }>
+    | Readonly<{
+        kind: "run";
+        runId: string;
+        contextId: ConversationSecurityContextId;
+        permissionRules: readonly ConversationSecurityPermissionRule[];
+      }>;
 }
 
 /** Security/Owner mechanism consumed by the Conversation security query. */
@@ -3038,6 +3050,41 @@ function freezeConversationSecurityResult(
         }),
       ),
     ),
+    ...(snapshot.scope
+      ? {
+          scope: snapshot.scope.kind === "run"
+            ? Object.freeze({
+                kind: "run" as const,
+                runId: snapshot.scope.runId,
+                contextId: freezeConversationSecurityContextId(snapshot.scope.contextId),
+                permissionRules: Object.freeze(snapshot.scope.permissionRules.map(freezeSecurityPermissionRule)),
+              })
+            : Object.freeze({ kind: "default" as const }),
+        }
+      : {}),
+  });
+}
+
+function freezeSecurityPermissionRule(
+  rule: ConversationSecurityPermissionRule,
+): ConversationSecurityPermissionRule {
+  return Object.freeze({
+    id: rule.id,
+    pattern: Object.freeze({ tool: rule.pattern.tool, argument: rule.pattern.argument }),
+    decision: rule.decision,
+    scope: rule.scope,
+    createdAt: rule.createdAt,
+    lastMatchedAt: rule.lastMatchedAt,
+    matchCount: rule.matchCount,
+    ...(rule.contextId ? { contextId: freezeConversationSecurityContextId(rule.contextId) } : {}),
+    ...(rule.contextPath !== undefined ? { contextPath: rule.contextPath } : {}),
+    ...(rule.contributors
+      ? {
+          contributors: Object.freeze(
+            rule.contributors.map((entry) => Object.freeze({ origin: entry.origin, timestamp: entry.timestamp })),
+          ),
+        }
+      : {}),
   });
 }
 

@@ -19,10 +19,18 @@ export type KernelSecurityApproval =
       readonly riskLevel: RiskLevel;
       readonly origin: "user" | "steward";
       readonly bypassImmune: boolean;
+      /** 用户批准所来自的确认请求（规则权威接纳沉淀时据此核对）。 */
+      readonly requestId?: string;
     }
   | {
-      readonly kind: "allow-session" | "allow-context" | "allow-global";
+      readonly kind: "allow-session";
       readonly pattern: SuggestedPattern;
+    }
+  | {
+      readonly kind: "allow-context" | "allow-global";
+      readonly pattern: SuggestedPattern;
+      /** 产生该决定的确认请求；显式持久批准的效果按它在决定生命周期上定位。 */
+      readonly requestId: string;
     };
 
 export type KernelSecurityApprovalResult =
@@ -35,7 +43,13 @@ export type KernelSecurityApprovalResult =
 /** Finite approval effect inherited by every execution in one runtime tree. */
 export interface KernelSecurityApprovalPort {
   readonly contextId: PermissionContextId;
-  recordApproval(approval: KernelSecurityApproval): KernelSecurityApprovalResult;
+  /**
+   * 本运行的答复路径是否支持显式持久批准（始终允许）。false 时确认不提供这些选项，
+   * 端口收到也拒绝，不当成仅本次。
+   */
+  readonly persistentApprovals: boolean;
+  /** 落盘规则在耐久写完成后才算记录成功；写失败时拒绝。 */
+  recordApproval(approval: KernelSecurityApproval): Promise<KernelSecurityApprovalResult>;
 }
 
 export interface KernelSecurityUserSnapshot {
@@ -60,7 +74,11 @@ export interface KernelSecurityExecution extends KernelSecurityApprovalPort {
   readonly trustContext: TrustContext;
   readonly permissionRuleSource: PermissionRuleExecutionSource;
   securitySnapshot(): KernelSecurityUserSnapshot;
-  executionPermissionRules(): readonly PermissionRule[];
+  /**
+   * 派发用的完整执行快照（内置＋会话＋范围持久＋全局）。传入范围时按该运行的范围
+   * 组合（owner 在派发时用），不传时按本绑定自己的范围。
+   */
+  executionPermissionRules(scope?: PermissionContextId): readonly PermissionRule[];
 }
 
 /** Finite mechanism inputs discovered while the Kernel assembles its tool set. */
@@ -111,6 +129,7 @@ export function assembleKernelSecurityExecution(
     typeof execution.permissionRuleSource.match !== "function" ||
     typeof execution.permissionRuleSource.matchFrozen !== "function" ||
     typeof execution.recordApproval !== "function" ||
+    typeof execution.persistentApprovals !== "boolean" ||
     typeof execution.securitySnapshot !== "function" ||
     typeof execution.executionPermissionRules !== "function"
   ) {

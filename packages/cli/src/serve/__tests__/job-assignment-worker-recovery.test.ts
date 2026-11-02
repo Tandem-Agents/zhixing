@@ -36,7 +36,7 @@ const streamProof = {
 const envelope = {
   assignmentId,
   execution: "job",
-  manifest: { tools: ["read"], mcpServers: ["alpha"] },
+  manifest: { tools: ["read"], mcpServers: ["alpha"], environment: { credentialBindings: [] } },
   work: {
     taskId: "task:recovery",
     jobRunId: "job-run:recovery",
@@ -79,7 +79,7 @@ describe("job assignment audit-only recovery", () => {
       continueTicketCancellation: vi.fn(async () => undefined),
       hasOpenSideEffects: vi.fn(async () => true),
       interactionStreamProjectionEnabled: vi.fn(async () => true),
-      interactionSettlementStreamProof: vi.fn(async () => streamProof),
+      interactionSettlementRequest: vi.fn(async () => ({ settlementVersion: 2, streamProof })),
       interactionStreamProjectedUpTo: vi.fn(async () => 3),
       interactionStreamEvents: vi.fn(async () => []),
       markInteractionStreamProjected: vi.fn(async () => undefined),
@@ -125,7 +125,7 @@ describe("job assignment audit-only recovery", () => {
       }),
     );
     expect(markTerminal).toHaveBeenCalledTimes(1);
-    expect(markAccepted).toHaveBeenCalledWith(assignmentId, streamProof);
+    expect(markAccepted).toHaveBeenCalledWith(assignmentId, { settlementVersion: 2, streamProof });
     expect(createRuntime).not.toHaveBeenCalled();
     await worker.close();
   });

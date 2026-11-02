@@ -72,6 +72,25 @@ export {
   globToRegex,
 } from "./permission-store.js";
 export type { PermissionStoreOptions } from "./permission-store.js";
+export { DurablePermissionRuleStore, GLOBAL_PERMISSION_BUCKET } from "./durable-permission-rules.js";
+export {
+  ExplicitApprovalEffects,
+  explicitApprovalBucket,
+  explicitApprovalRuleId,
+  trustSedimentRuleId,
+} from "./explicit-approvals.js";
+export type {
+  ExplicitApprovalDecision,
+  ExplicitApprovalInput,
+  ExplicitApprovalState,
+  ExplicitApprovalVerdict,
+} from "./explicit-approvals.js";
+export type {
+  DurablePermissionRuleStoreOptions,
+  PendingApprovalAcceptance,
+  PendingPermissionApproval,
+  PermissionRulePublication,
+} from "./durable-permission-rules.js";
 export {
   createPermissionStoreTrustAdministrationRepository,
   toPermissionContext,

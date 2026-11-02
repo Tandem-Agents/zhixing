@@ -237,6 +237,8 @@ export function buildConfirmationOptions(
     bypassImmune?: boolean;
     requiresExplicitConfirmation?: boolean;
     agentIdentity?: AgentIdentity;
+    /** false：答复路径不支持持久批准（远程执行端、job），不提供"始终允许"。 */
+    persistentApprovals?: boolean;
   },
 ): ConfirmationOption[] {
   void sessionType;
@@ -254,23 +256,26 @@ export function buildConfirmationOptions(
   // 1. 允许这一次（默认焦点）
   options.push({ kind: "allow-once", label: "允许这一次", hotkey: "y" });
 
-  // 2-3. 持久授权选项（禁区与逐次拍板工具都不能沉淀）
+  // 2-3. 持久授权选项（禁区、逐次拍板工具、不支持持久批准的答复路径都不提供）
   if (
     persistentPattern &&
     !flags?.bypassImmune &&
-    !flags?.requiresExplicitConfirmation
+    !flags?.requiresExplicitConfirmation &&
+    flags?.persistentApprovals !== false
   ) {
     const arg = persistentPattern.pattern.argument;
     const contextScopeLabel = formatContextScopeLabel(contextId);
+    // 参数为 * 时规则覆盖这个工具的全部调用：说清楚，不让 "*" 看起来像“允许一切”
+    const target = arg === "*" ? "该工具的任意调用" : ` "${arg}"`;
     options.push({
       kind: "allow-context",
-      label: `始终允许 "${arg}"（${contextScopeLabel}）`,
+      label: `始终允许${target}（${contextScopeLabel}）`,
       pattern: persistentPattern,
       hotkey: "a",
     });
     options.push({
       kind: "allow-global",
-      label: `始终允许 "${arg}"（全局，所有场景生效）`,
+      label: `始终允许${target}（全局，所有场景生效）`,
       pattern: persistentPattern,
       hotkey: "g",
     });
@@ -329,6 +334,8 @@ export interface BuildConfirmationRequestParams {
   stewardReason?: string;
   /** 工具要求逐次显式拍板时,确认面只给一次性批准与拒绝。 */
   requiresExplicitConfirmation?: boolean;
+  /** 本次运行的答复路径不支持持久批准(false)时,不提供"始终允许"选项。 */
+  persistentApprovals?: boolean;
   /** 工具定义时已知的同步展示上下文。 */
   confirmationDisplayContext?: ConfirmationDisplayContext;
 }
@@ -377,6 +384,7 @@ export function buildConfirmationRequest(
       agentIdentity: params.agentIdentity,
       bypassImmune: hasBypassImmune,
       requiresExplicitConfirmation: params.requiresExplicitConfirmation,
+      ...(params.persistentApprovals === false ? { persistentApprovals: false } : {}),
     },
   );
 
