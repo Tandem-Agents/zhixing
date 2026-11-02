@@ -10,6 +10,7 @@ export function parseJsonObject(text: string): unknown {
     if (start >= 0 && end > start) {
       return JSON.parse(trimmed.slice(start, end + 1));
     }
-    throw new Error("response does not contain JSON");
+    // 这条原因会随起草失败说明给用户看：说清是模型回复的格式问题
+    throw new Error("模型回复里没有可识别的结构化内容");
   }
 }

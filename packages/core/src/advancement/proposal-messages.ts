@@ -33,11 +33,14 @@ export function renderAdvancementOriginalTask(
 /** 提议阶段收到的输入如何处理：目标不变，或记为对原任务的补充。 */
 export type AdvancementProposalDisposition = "kept" | "supplemented";
 
-/** 提议阶段输入的回应文案。 */
+/**
+ * 提议阶段输入的回应文案。实时发送与回执核对两条路径同源，回执核对拿不到当时的提议状态，
+ * 所以“保持不变”的说明须在起草中、起草失败、结果不明各状态下都成立。
+ */
 export function advancementProposalDispositionMessage(disposition: AdvancementProposalDisposition): string {
   return disposition === "supplemented"
     ? "已把这条输入作为原任务的补充；验收标准会按补充更新后再请你确认。"
-    : "推进目标保持不变；验收标准就绪后会请你确认，确认前不执行原任务。";
+    : "本次输入未接纳，已保留在输入框；原推进目标保持不变，确认验收标准前不执行原任务；可以补充说明，也可以说“直接执行”或“取消”。";
 }
 
 /** 提议运行结束时的状态：已提出推进，不是任务完成。 */
@@ -46,7 +49,7 @@ export const ADVANCEMENT_PROPOSED_NOTICE = "已提出推进：正在起草验收
 /** 草案起草失败或结果不明时的说明与可继续的操作。 */
 export function advancementProposalStalledMessage(outcome: "failed" | "uncertain", detail?: string): string {
   const head = outcome === "failed"
-    ? `验收标准起草失败${detail ? `：${detail}` : "。"}`
+    ? `验收标准起草失败${detail ? `：${detail.replace(/[。.\s]+$/u, "")}。` : "。"}`
     : "验收标准起草结果不明（服务曾中断），不会自动重试。";
   return `${head}原任务保留：回复补充说明可重新起草，也可以说“直接执行”或“取消”。`;
 }

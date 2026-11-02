@@ -236,7 +236,8 @@ export class AdvancementProposalApplicationService {
         await this.#publishFailure(deferred, "uncertain", message);
         return deferred;
       }
-      const message = `Rubric 草案生成失败：${error instanceof Error ? error.message : String(error)}`;
+      // 原因本身：给用户的说明已带“验收标准起草失败”，不再叠一层内部前缀
+      const message = error instanceof Error ? error.message : String(error);
       const failed = await this.#mechanism.transitionDraftAttempt(conversationId, session.id, {
         ...invoking,
         phase: "failed",

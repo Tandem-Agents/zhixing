@@ -31,6 +31,70 @@ describe('pure process presentation', () => {
     expect(processViewRows({ ...view, notice: '本轮已结束；正文存在缺口' }, 80, 6)[0]!.text).toContain('正文存在缺口');
     expect(validateProcessView({ ...view, durationMs: Infinity })).toBe(false);
   });
+  describe('当前操作的说明完整可见', () => {
+    const kept = '本次输入未接纳，已保留在输入框；原推进目标保持不变，确认验收标准前不执行原任务；可以补充说明，也可以说“直接执行”或“取消”。';
+    const done = { revision: 1, phase: '本轮已结束', durationMs: 2000, tools: [], children: [], usage: { contextTokens: 162 } };
+    const idle = { revision: 0, phase: '', activity: 'complete' as const, tools: [], children: [], usage: {} };
+    const cells = (text: string) => [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].reduce((sum, { segment }) => sum + processCellWidth(segment), 0);
+    const joined = (rows: readonly { text: string; operation?: boolean }[]) => rows.filter(row => row.operation).map(row => row.text.replace(/^(◆ |  )/u, '')).join('');
+    // 100 列终端：过程区文字宽 96；既有窄窗口 40 列：文字宽 36
+    it.each([96, 36])('kept 说明在宽 %i 下按列宽折行、整段可见，并优先于用时', columns => {
+      const rows = processViewRows(done, columns, 6, { operation: kept });
+      expect(joined(rows)).toBe(kept);
+      expect(rows.every(row => cells(row.text) <= columns)).toBe(true);
+      const status = rows.findIndex(row => row.status);
+      expect(rows[status]!.text.startsWith('◆ 本次输入未接纳')).toBe(true);
+      expect(rows.slice(status).every(row => row.operation)).toBe(true);
+      // 用时退为附属信息：行数够时在说明之上，不够时让位
+      if (rows.length < 6) expect(rows[0]!.text).toContain('用时 2s');
+    });
+    it('按调用方给的字素宽度折行（真实终端把 ◆ 与弯引号算作两格时不再被渲染截断）', () => {
+      const wide = (grapheme: string) => /[◆“”]/u.test(grapheme) ? 2 : processCellWidth(grapheme);
+      const width = (text: string) => [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].reduce((sum, { segment }) => sum + wide(segment), 0);
+      for (const columns of [96, 36]) {
+        const rows = processViewRows(done, columns, 6, { operation: kept }, wide);
+        expect(joined(rows)).toBe(kept);
+        expect(rows.every(row => width(row.text) <= columns)).toBe(true);
+      }
+      // 句读等收尾标点不在行首
+      for (const columns of [96, 36, 20]) {
+        expect(processViewRows(done, columns, 6, { operation: kept }, wide).slice(1).every(row => !/^ {2}[，。、；：！？”]/u.test(row.text))).toBe(true);
+      }
+      // 内置宽度表下 96 列首行恰好放满，按真实终端宽度量会超出一格（渲染器随即从中间省略）；用调用方的测量就不超
+      expect(width(processViewRows(done, 96, 6, { operation: kept }).find(row => row.status)!.text)).toBeGreaterThan(96);
+      expect(width(processViewRows(done, 96, 6, { operation: kept }, wide).find(row => row.status)!.text)).toBeLessThanOrEqual(96);
+    });
+    it('候选压缩到一行时不标记已显示（调用方在输入框下保留说明），状态行不藏进“另 N 项提示”', () => {
+      const rows = processViewRows(done, 36, 1, { operation: kept, candidateCompressed: true });
+      expect(rows).toHaveLength(1);
+      expect(rows.some(row => row.operation)).toBe(false);
+      expect(rows[0]!.text.startsWith('◆ 本次输入未接纳')).toBe(true);
+    });
+    it('有必须的失败或正在运行时，说明紧挨状态行之上完整显示，附属信息让位', () => {
+      const failed = processViewRows(done, 36, 6, { operation: kept, failures: ['任务状态读取失败'] });
+      expect(failed.at(-1)).toMatchObject({ text: '◆ 任务状态读取失败', status: true, failed: true });
+      expect(joined(failed)).toBe(kept);
+      const running = processViewRows({ ...idle, phase: '正在处理…', activity: 'running', tools: ['读取 a.ts', '读取 b.ts', '读取 c.ts'], usage: { inputTokens: 3 } }, 36, 6, { operation: kept });
+      expect(running.at(-1)).toMatchObject({ text: '◆ 正在处理…', status: true });
+      expect(joined(running)).toBe(kept);
+      expect(running).toHaveLength(6);
+    });
+    it('长中文与英文、表情混排按字素与显示宽度折行，不拆字素、不超宽', () => {
+      const mixed = '推进准则生成失败：模型回复里没有可识别的结构化内容（structured JSON missing）👍🏽；输入已保留，可修改后重试。';
+      for (const columns of [20, 36, 96]) {
+        const rows = processViewRows(idle, columns, 6, { operation: mixed });
+        expect(joined(rows)).toBe(mixed);
+        expect(rows.every(row => cells(row.text) <= columns)).toBe(true);
+      }
+    });
+    it('既有窄窗口（40×16，预算 6 行）里与多项失败并存：说明仍完整，放不下的失败汇总成“另 N 项提示”', () => {
+      const children = [1, 2, 3].map(index => ({ id: `c${index}`, parentToolCallId: 'p', label: `子任务${index}`, status: 'failed' as const }));
+      const rows = processViewRows({ ...done, children }, 36, 6, { operation: kept, failures: ['A 失败', 'B 失败', 'C 失败'] });
+      expect(rows).toHaveLength(6);
+      expect(joined(rows)).toBe(kept);
+      expect(rows.at(-1)!.text).toMatch(/^◆ 另\d+项提示，放大窗口查看 · A 失败/u);
+    });
+  });
   it.each([1, 2, 8, 40, 80])('limits rolling thinking to two display rows at width %i', width => {
     const rows = thinkingTail('开头\n' + '汉🦞e\u0301'.repeat(1000) + '尾部', width);
     expect(rows.length).toBeLessThanOrEqual(2);

@@ -52,10 +52,35 @@ export function thinkingTail(text: string, columns: number): readonly string[] {
   if (row || !rows.length) push();
   return rows;
 }
-export function processLine(text: string, columns: number): string {
+const CLOSING = /^[，。、；：！？）」』】》〉”’,.;:!?)\]}]$/u;
+/**
+ * 按显示列宽与字素折行，不限行数；首行与续行各带前缀，原文换行另起一行。
+ * cell 是单个字素的显示宽度：界面传渲染器自己的测量（含歧义宽度字符），使折行与渲染时的截断同一口径。
+ */
+export function processWrap(text: string, columns: number, first = '', next = first, cell: (grapheme: string) => number = processCellWidth): readonly string[] {
+  const width = Math.max(1, Math.floor(columns) || 1), rows: string[] = [];
+  const cellsOf = (value: string) => [...graphemes().segment(value)].reduce((sum, { segment }) => sum + cell(segment), 0);
+  let lead = first, room = Math.max(1, width - cellsOf(lead)), row: { text: string; size: number }[] = [], cells = 0;
+  const push = (carry: { text: string; size: number }[] = []) => {
+    rows.push(lead + row.map(item => item.text).join('')); lead = next; room = Math.max(1, width - cellsOf(lead));
+    row = carry; cells = carry.reduce((sum, item) => sum + item.size, 0);
+  };
+  for (const { segment } of graphemes().segment(cleanProcessText(text.slice(0, 8192).replace(/\r\n?/gu, '\n')))) {
+    if (segment === '\n') { push(); continue; }
+    const size = cell(segment);
+    if (cells && cells + size > room) {
+      // 句读等收尾标点不放在行首：把上一行最后一个字素一起带到下一行
+      push(CLOSING.test(segment) && row.length > 1 ? row.splice(-1) : []);
+    }
+    row.push({ text: segment, size }); cells += size;
+  }
+  if (row.length || !rows.length) push();
+  return rows;
+}
+export function processLine(text: string, columns: number, cell: (grapheme: string) => number = processCellWidth): string {
   const width = Math.max(1, columns); let output = '', used = 0;
   for (const { segment } of graphemes().segment(cleanProcessText(text.slice(0, 8192)).replace(/\n/gu, ' '))) {
-    const size = processCellWidth(segment); if (used + size > width) break;
+    const size = cell(segment); if (used + size > width) break;
     output += segment; used += size;
   }
   return output;
@@ -77,15 +102,24 @@ export function validateProcessView(value: unknown): value is TerminalProcessVie
     (v.notice === undefined || short(v.notice, 1024));
 }
 
-export interface ProcessViewRow { readonly text: string; readonly failed?: boolean; readonly status?: boolean }
-export interface ProcessFeedback { readonly failures?: readonly string[]; readonly details?: readonly string[]; readonly notice?: string; readonly candidateCompressed?: boolean }
-export function processViewRows(view: TerminalProcessView, columns: number, height: number, feedback: ProcessFeedback = {}): readonly ProcessViewRow[] {
+/** operation：这一行属于当前操作的说明，且整段说明都已显示 */
+export interface ProcessViewRow { readonly text: string; readonly failed?: boolean; readonly status?: boolean; readonly operation?: boolean }
+/**
+ * operation 是当前操作的说明（结果或未接纳原因、输入是否保留、可采取的下一步），须完整可见：按宽度折行，
+ * 优先于子任务、工具、用量、用时等附属信息；整段放不下时不标记已显示，由调用方在别处保留可见说明。
+ */
+export interface ProcessFeedback { readonly failures?: readonly string[]; readonly details?: readonly string[]; readonly notice?: string; readonly operation?: string; readonly candidateCompressed?: boolean }
+export function processViewRows(view: TerminalProcessView, columns: number, height: number, feedback: ProcessFeedback = {},
+  cell: (grapheme: string) => number = processCellWidth): readonly ProcessViewRow[] {
   const budget = Math.max(1, Math.min(6, Math.floor(height)));
   const failures = [...new Set([...(feedback.failures ?? []), ...(view.notice ? [view.notice] : [])].filter(Boolean))];
   const complete = view.durationMs !== undefined && view.activity !== 'running' && view.activity !== 'reconciling';
   const tokens = view.usage.contextTokens;
   const context = tokens === undefined ? '' : '  │  ~ ' + (tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens);
   const normal = complete ? '用时 ' + Math.max(1, Math.round(view.durationMs! / 1000)) + 's' + context : view.phase || feedback.notice || '';
+  const operation = feedback.operation && !failures.includes(feedback.operation) ? feedback.operation : '';
+  // 没有必须的失败、也不在运行时，当前说明就是状态行；否则它紧挨在状态行之上
+  const leads = !!operation && !failures.length && view.activity !== 'running' && view.activity !== 'reconciling';
   const rows: ProcessViewRow[] = failures.slice(1).map(text => ({ text, failed: true }));
   if (!complete) for (const text of feedback.details ?? []) rows.push({ text });
   if (view.children.length && (!complete || view.children.some(child => child.status === 'failed' || child.status === 'aborted'))) {
@@ -102,14 +136,30 @@ export function processViewRows(view: TerminalProcessView, columns: number, heig
   if (usage.cacheWriteTokens !== undefined) parts.push('缓存写入 ' + usage.cacheWriteTokens);
   if (usage.contextTokens !== undefined) parts.push('上下文估算 ' + usage.contextTokens);
   if (!complete && parts.length) rows.push({ text: parts.join(' · ') });
+  // 当前说明占了状态行时，用时退为附属信息，行数够才显示
+  if (leads && complete) rows.push({ text: normal });
   // Required failures consume the detail budget before optional tool/usage
   // text; they remain visible when ordinary body space can yield to feedback.
   rows.sort((a, b) => Number(!!b.failed) - Number(!!a.failed));
-  const hidden = rows.slice(budget - 1).filter(row => row.failed).length;
-  let status = failures[0] ?? normal;
-  if (hidden) status = '另' + hidden + '项提示，' + (feedback.candidateCompressed ? 'Esc 收起候选查看' : '放大窗口查看') + ' · ' + status;
-  return [...rows.slice(0, budget - 1), { text: status ? '◆ ' + status : '', status: true, failed: !!failures.length || !!hidden }]
-    .map(row => ({ ...row, text: processLine(row.text, columns) }));
+  const above = operation && !leads ? processWrap(operation, columns, '  ', '  ', cell) : [];
+  let hidden = 0, status: readonly string[] = [], shown = false;
+  // 隐藏的失败数会改变状态行长度，再算一次即稳定
+  for (let pass = 0; pass < 2; pass++) {
+    const text = (hidden ? '另' + hidden + '项提示，' + (feedback.candidateCompressed ? 'Esc 收起候选查看' : '放大窗口查看') + ' · ' : '') + (failures[0] ?? (leads ? operation : normal));
+    status = leads ? processWrap(text, columns, '◆ ', '  ', cell) : [text ? '◆ ' + text : ''];
+    shown = !!operation && status.length + above.length <= budget;
+    if (leads && !shown) status = ['◆ ' + text];
+    // 放不下的当前说明也计入提示数，状态行告诉用户还有说明以及怎样看到（如收起候选）
+    const next = rows.slice(Math.max(0, budget - status.length - (shown ? above.length : 0))).filter(row => row.failed).length + (operation && !leads && !shown ? 1 : 0);
+    if (next === hidden) break;
+    hidden = next;
+  }
+  const room = Math.max(0, budget - status.length - (shown ? above.length : 0)), failed = !!failures.length || !!hidden;
+  return [
+    ...rows.slice(0, room),
+    ...(shown ? above.map(text => ({ text, operation: true })) : []),
+    ...status.map((text, index) => ({ text, ...(index ? {} : { status: true }), failed, ...(shown && leads ? { operation: true } : {}) })),
+  ].map(row => ({ ...row, text: processLine(row.text, columns, cell) }));
 }
 
 /** BodyView applies this at its actual text width (currently width - 4).

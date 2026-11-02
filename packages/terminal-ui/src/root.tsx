@@ -381,9 +381,14 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     informationRevision();
     const current = view(), blocks = information.snapshot(interactionKey(current));
     const candidate = current.kind === 'conversation' ? candidateValue() : undefined;
-    const left = current.inputReceiptPending ? [displayText(current.message ?? "输入结果待核对；草稿已保留。")] : [...blocks.left];
-    const process = shownProcess();
-    const operationNotice = process && current.message && current.connectionState !== 'starting' ? displayText(current.message) : '';
+    // 同一句说明可能经提交结清写进这里的状态槽；过程区已完整显示它时不再重复
+    const shownOperation = operationShown() ? displayText(current.message ?? '') : '';
+    const left = current.inputReceiptPending ? [displayText(current.message ?? "输入结果待核对；草稿已保留。")]
+      : blocks.left.filter(text => !shownOperation || displayText(text) !== shownOperation);
+    // 当前说明已在过程区完整显示时不再重复；过程区被候选压缩、放不下或未显示时仍在这里保留可见说明
+    // 断线时这句已作为必须的失败显示在过程区
+    const operationNotice = isBody() && current.message && current.connectionState !== 'starting' && current.connectionState !== 'unavailable' && !current.inputReceiptPending && !operationShown()
+      ? displayText(current.message) : '';
     if (operationNotice && !left.length) left.push(operationNotice);
     if (candidate?.error) left.push(candidate.error);
     // 列表为空时提示已显示在列表里，底部不再重复
@@ -469,15 +474,21 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const displayRecoveryNotice = () => view().displayPaused || view().bodyRecovery === 'blocked'
     ? view().kind === 'history' ? '历史展示已暂停，存在缺口 · 请释放空间后重新打开历史' : '正文保留已暂停 · Ctrl+R 重试展示'
     : view().displayGap ? view().kind === 'history' ? '历史展示存在缺口 · 请重新打开历史核对' : '展示已恢复；原缺口保留，可查看历史与用量' : '';
-  const footerFeedback = () => view().kind === 'history' ? { failures: [displayRecoveryNotice()].filter(Boolean), notice: displayText(view().message ?? '') } : ({ failures: [
+  // 当前操作的说明（结果、未接纳原因、输入是否保留、下一步）按宽度完整显示；待核对与启动中各有自己的位置
+  const operationText = () => view().inputReceiptPending || view().connectionState === 'starting' ? '' : displayText(view().message ?? '');
+  const footerFeedback = () => view().kind === 'history' ? { failures: [displayRecoveryNotice()].filter(Boolean), operation: operationText() } : ({ failures: [
     displayRecoveryNotice(),
     taskStatus().noticeGap ?? '',
     taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state === 'error' ? taskStatus().summary!.text : '',
     view().connectionState === 'unavailable' ? displayText(view().message ?? '') : '',
   ].filter(Boolean), details: !!taskStatus().summary && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state !== 'error'
-    ? [taskStatus().summary!.text] : [], notice: displayText(view().message || taskStatus().summary?.text || ''), candidateCompressed: candidateHeight() > 0 });
+    ? [taskStatus().summary!.text] : [], notice: displayText(view().inputReceiptPending || view().connectionState === 'starting' ? view().message || taskStatus().summary?.text || '' : taskStatus().summary?.text || ''),
+    operation: operationText(), candidateCompressed: candidateHeight() > 0 });
   const footerProcess = () => view().inputReceiptPending ? { revision: 0, phase: '原输入结果待核对，草稿已保留', activity: 'reconciling' as const, tools: [], children: [], usage: {} } : shownProcess() ?? { revision: 0, phase: view().busy ? view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',
     activity: view().busy ? 'running' as const : 'complete' as const, tools: [], children: [], usage: {} };
+  const processHeight = () => candidateHeight() ? candidateBudget().process : Math.max(1, Math.min(6, size().height - 6));
+  /** 过程区正在显示，且整段当前说明都在其中（此时输入框下不再重复） */
+  const operationShown = () => isBody() && processRows().some(row => row.operation);
   const ChoiceList = () => <box flexDirection="column" flexShrink={0} marginTop={view().message && choices().length ? 1 : 0}>
     <For each={choices()}>{(choice, index) => {
       const startsSection = () => !!choice.section && (index() === 0 || choices()[index() - 1]?.section !== choice.section);
@@ -540,8 +551,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           <Show when={view().recovery?.input}><text marginX={spacing.content} height={1} fg={tone.dim}>{'恢复包输入：' + recoveryLength() + ' 字节'}</text></Show>
         </Show>
       </>}>
-        <ProcessView view={footerProcess()} feedback={footerFeedback()} indicator={footerProcess().activity === 'running' ? animation() : '◆'} width={size().width}
-          height={candidateHeight() ? candidateBudget().process : Math.max(1, Math.min(6, size().height - 6))} />
+        <ProcessView rows={processRows()} indicator={footerProcess().activity === 'running' ? animation() : '◆'} />
       </Show>
       <Show when={view().kind !== 'configuration'}><box marginX={spacing.content} flexShrink={0}><ChoiceList /></box></Show>
       {/* 有待确认的选项时才说“可取消、放大后确认”；主对话等没有确认项的页面只提示放大 */}
@@ -631,6 +641,14 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     informationBuffer.setText(text);
     return informationView.logicalLineInfo.lineWidthCols[0] ?? 0;
   };
+  // 过程区按渲染器自己的字素宽度折行（歧义宽度字符与渲染截断同一口径）；按字素缓存，条数有界
+  const graphemeWidths = new Map<string, number>();
+  const graphemeWidth = (grapheme: string) => {
+    let width = graphemeWidths.get(grapheme);
+    if (width === undefined) { width = measureInformation(grapheme); if (graphemeWidths.size < 4096) graphemeWidths.set(grapheme, width); }
+    return width;
+  };
+  const processRows = createMemo(() => processViewRows(footerProcess(), Math.max(1, size().width - 4), processHeight(), footerFeedback(), graphemeWidth));
   const info = createMemo(computeInfo);
   let disposing: Promise<void> | undefined;
   const dispose = (): Promise<void> => {

@@ -194,6 +194,16 @@ export function renderAdvancementDetailLines(
   }
   const { facts } = detail;
 
+  // 提议阶段（草案尚未待确认）不是终态：说明所处阶段，起草失败或结果不明时给出可继续的操作
+  if (detail.status === "proposed" || detail.status === "drafting" || detail.status === "draft-failed" || detail.status === "draft-uncertain") {
+    return [
+      systemLine(`任务推进：${describeAdvancementProposalStage(detail.status)}`, width),
+      ...(detail.status === "draft-failed" || detail.status === "draft-uncertain"
+        ? [dimLine("回复补充说明可重新起草，也可以说“直接执行”或“取消”。", width)]
+        : [dimLine("验收标准就绪后会请你确认；确认前不执行原任务。", width)]),
+    ];
+  }
+
   if (detail.status !== "active" && detail.status !== "awaiting-rubric-confirmation") {
     // 终态回看：收场报告随查随算直出（unknown 人话已在 core 渲染层翻译）
     const header =

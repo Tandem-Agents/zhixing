@@ -1675,7 +1675,8 @@ describe("ConversationController", () => {
     ["not-saved", false, "本次新输入未保存"],
     [undefined, false, "无法确认"],
     ["wrong-submission", false, "无法确认"],
-    ["contract-failed", false, undefined],
+    // T04：说明生成失败的原因并保留输入
+    ["contract-failed", false, "推进准则生成失败：draft failed；输入已保留，可修改后重试。"],
     ["cancelled", true, undefined],
     ["accepted", true, undefined],
   ] as const)("旧输入结清消费当前提交事实：%s", async (disposition, committed, notice) => {
@@ -1701,6 +1702,8 @@ describe("ConversationController", () => {
     else expect(message).toBeUndefined();
     expect(draft.commit).toHaveBeenCalledTimes(committed ? 1 : 0);
     expect(draft.reject).toHaveBeenCalledTimes(committed ? 0 : 1);
+    // 结清带上同一份说明，输入框所在页面直接显示
+    if (notice) expect((committed ? draft.commit : draft.reject).mock.calls[0]?.[0]).toBe(message);
     if (result.kind === "awaiting-rubric-confirmation") {
       expect(result.turnId).toBe("turn-original");
       expect(result.submission?.turnId).toBe(f.conversation.send.mock.calls[0]![2]);

@@ -680,34 +680,13 @@ class TerminalApplication {
         }
         this.#background(() => this.#submit(action.inputId, action.version)); return { accepted: true };
       case 'abort':
-        if (this.#sceneCreateAbort) this.#sceneCreateAbort.abort(); else await this.#controller?.abort();
+        // Esc 与 Ctrl+C 请求停止当前运行时给同一即时反馈；Esc 在没有运行时不会关闭终端
+        if (this.#sceneCreateAbort) this.#sceneCreateAbort.abort();
+        else if (!await this.#requestRunStop('Esc')) await this.#controller?.abort();
         return { accepted: true };
       case 'interrupt':
         if (this.#sceneCreateAbort) { this.#sceneCreateAbort.abort(); return { accepted: true }; }
-        if (this.#submittingInput) {
-          // Record cancellation against the existing turn even before runId is
-          // known. Do not block this action reply on admission itself.
-          void this.#controller?.abort().catch(error => recordTerminalFailure(this.#logging.records, error, 'terminal-input-cancel-failed'));
-          this.#mainView = { ...this.#mainView, message: '已请求中止；正在核对原输入，确认接纳后停止。Ctrl+R 再次核对 · 连按 Ctrl+C 退出' };
-          await this.#publish(this.#mainView); this.#receiptRetry?.(); return { accepted: true };
-        }
-        const activeTurn = this.#state.activeTurnPromise;
-        if (activeTurn) {
-          // 停止要等 Owner 耐久裁决与执行收束；按键时先如实反馈“已请求”，
-          // 运行终态到达后由实际结果覆盖，不在此声称已经停止。
-          this.#mainView = { ...this.#mainView, message: '已请求中止，正在等待处理…' };
-          await this.#publish(this.#mainView);
-          try { await this.#controller?.abort(); }
-          catch (error) {
-            // 仅当同一运行仍未收束时改写提示；已到达的终态结果不被覆盖。
-            if (this.#state.activeTurnPromise === activeTurn) {
-              this.#mainView = { ...this.#mainView, message: '中止请求未完成；当前运行可能仍在继续，可再次按 Ctrl+C。' };
-              await this.#publish(this.#mainView);
-            }
-            throw error;
-          }
-          return { accepted: true };
-        }
+        if (await this.#requestRunStop('Ctrl+C')) return { accepted: true };
         if (this.#controller && await this.#controller.abortBackgroundTask()) {
           this.#mainView = { ...this.#mainView, message: '已请求停止当前后台工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView);
         } else void this.#close(this.args.length ? 130 : 0, 'user-interrupt');
@@ -740,6 +719,34 @@ class TerminalApplication {
     }).finally(release);
     if (!released) this.#operation = work;
     void work.catch(() => this.#close(70, 'application-operation-undelivered'));
+  }
+
+  /**
+   * 请求停止正在提交或运行的这一轮，并先如实反馈“已请求”；没有可停的运行时返回 false，由调用方决定后续。
+   * 停止要等 Owner 耐久裁决与执行收束，运行终态到达后由实际结果覆盖，这里不声称已经停止。
+   */
+  async #requestRunStop(key: 'Esc' | 'Ctrl+C'): Promise<boolean> {
+    if (this.#submittingInput) {
+      // Record cancellation against the existing turn even before runId is
+      // known. Do not block this action reply on admission itself.
+      void this.#controller?.abort().catch(error => recordTerminalFailure(this.#logging.records, error, 'terminal-input-cancel-failed'));
+      this.#mainView = { ...this.#mainView, message: '已请求中止；正在核对原输入，确认接纳后停止。Ctrl+R 再次核对 · 连按 Ctrl+C 退出' };
+      await this.#publish(this.#mainView); this.#receiptRetry?.(); return true;
+    }
+    const activeTurn = this.#state.activeTurnPromise;
+    if (!activeTurn) return false;
+    this.#mainView = { ...this.#mainView, message: '已请求中止，正在等待处理…' };
+    await this.#publish(this.#mainView);
+    try { await this.#controller?.abort(); }
+    catch (error) {
+      // 仅当同一运行仍未收束时改写提示；已到达的终态结果不被覆盖。
+      if (this.#state.activeTurnPromise === activeTurn) {
+        this.#mainView = { ...this.#mainView, message: `中止请求未完成；当前运行可能仍在继续，可再次按 ${key}。` };
+        await this.#publish(this.#mainView);
+      }
+      throw error;
+    }
+    return true;
   }
 
   async #independentCommand(): Promise<void> {
@@ -1437,16 +1444,17 @@ class TerminalApplication {
   async #submit(inputId: string, version: number): Promise<void> {
     this.#submittingInput = true;
     let settled = false;
-    const settle = (accepted: boolean) => {
+    const settle = (accepted: boolean, message?: string) => {
       if (settled) return; settled = true;
-      void this.#toUi({ type: 'submission', inputId, version, accepted }).catch(() => this.#close(70, 'terminal-submission-undelivered'));
+      // 带上本次输入发生了什么：输入框所在页面据此说明，而不是只说“未接纳”
+      void this.#toUi({ type: 'submission', inputId, version, accepted, ...(message ? { message } : {}) }).catch(() => this.#close(70, 'terminal-submission-undelivered'));
       if (accepted) {
         this.#inputs.transfer(`frozen:${inputId}`, `history:${inputId}`);
         this.#inputHistory.push(inputId);
         if (this.#inputHistory.length > 100) this.#inputs.forget(`history:${this.#inputHistory.shift()!}`);
       }
     };
-    const submission = createUserSubmission({ commit: () => settle(true), reject: () => settle(false) });
+    const submission = createUserSubmission({ commit: message => settle(true, message), reject: message => settle(false, message) });
     const releaseOutput = this.#outputProjection.hold();
     try {
       if (this.#displayUnavailable || this.#display.paused || this.#outputProjection.paused) throw Error('正文保留已暂停，当前不能接纳新输入；草稿已保留。可处理确认、中止工作或退出后重试。');
@@ -1470,7 +1478,7 @@ class TerminalApplication {
           this.#pendingRubricNotice = undefined;
           this.#mainView = { ...this.#mainView, choices: this.#mainView.choices?.filter(choice => choice.id !== 'rubric-resume') };
         }
-        this.#mainView = { ...this.#mainView, busy: false, message: result.kind === 'submission-settled' ? result.message : result.kind === 'contract-failed' ? '推进准则生成失败；输入已保留。' : '已取消这次任务。' };
+        this.#mainView = { ...this.#mainView, busy: false, message: result.kind === 'submission-settled' ? result.message : result.kind === 'contract-failed' ? (notice ?? '推进准则生成失败；输入已保留。') : '已取消这次任务。' };
         await this.#publish(this.#mainView);
       }
     } catch (error) {
@@ -1550,7 +1558,7 @@ class TerminalApplication {
               signal?.addEventListener('abort', abort, { once: true });
               if (signal?.aborted) abort(); else if (this.#receiptRetryRequested) finish();
             }),
-          }), { onAccepted: submission.accept });
+          }), { onAccepted: () => submission.accept() });
     } catch (error) {
       if (!(error instanceof EmptyTerminalSubmission)) throw error;
       submission.reject(); this.#mainView = { ...this.#mainView, busy: false };
@@ -1703,7 +1711,7 @@ class TerminalApplication {
         const { rubricDraft: _draft, ...identity } = pending;
         this.#deferredRubric = boundedControlProjection(identity, 8192);
         this.#pendingRubric = undefined;
-        this.#mainView = { ...this.#mainView, busy: false, message: [this.#pendingRubricNotice, '已收起确认面；任务保持待确认，可点击下方继续处理。'].filter(Boolean).join('\n'), choices: [{ id: 'rubric-resume', label: '继续确认任务' }] };
+        this.#mainView = { ...this.#mainView, busy: false, message: [this.#pendingRubricNotice, '已收起确认面；任务保持待确认，按 Enter 继续处理。'].filter(Boolean).join('\n'), choices: [{ id: 'rubric-resume', label: '继续确认任务' }] };
         await this.#publish(this.#mainView); return;
       }
       const controller = this.#controller!;

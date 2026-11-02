@@ -63,7 +63,7 @@ describe("推进提议阶段的呈现", () => {
       WIDTH * 2,
     ));
     expect(failed).toHaveLength(1);
-    expect(failed[0]).toContain("验收标准起草失败：模型不可用");
+    expect(failed[0]).toContain("验收标准起草失败：模型不可用。原任务保留");
     expect(failed[0]).toContain("“直接执行”或“取消”");
     const uncertain = plain(renderAdvancementControlEventLines(
       "advancement:proposal_draft_failed",
@@ -307,6 +307,19 @@ describe("renderAdvancementDetailLines", () => {
       ),
     );
     expect(lines.join("\n")).toContain("任务推进已退出");
+  });
+
+  it("提议阶段不是终态：说明所处阶段与可继续的操作，不显示“已退出”", () => {
+    const render = (status: "drafting" | "draft-failed" | "draft-uncertain") => plain(renderAdvancementDetailLines(
+      { conversationId: "conv-1", detail: { advancementSessionId: "adv-1", status, facts: { ...facts, status } } },
+      WIDTH,
+    )).join("\n");
+    expect(render("drafting")).toContain("已提出推进，正在起草验收标准");
+    const failed = render("draft-failed");
+    expect(failed).toContain("起草失败，原任务保留");
+    expect(failed).toContain("“直接执行”或“取消”");
+    expect(failed).not.toContain("已退出");
+    expect(render("draft-uncertain")).toContain("起草结果不明");
   });
 
   it("无推进记录时明确说明", () => {

@@ -116,6 +116,60 @@ try {
     h.test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25));
     await h.flush(); assertComplete(); h.capture('candidates-closed');
   }, 24);
+  await scenario('operation-notice-complete', async h => {
+    const kept = '本次输入未接纳，已保留在输入框；原推进目标保持不变，确认验收标准前不执行原任务；可以补充说明，也可以说“直接执行”或“取消”。';
+    const failed = '推进准则生成失败：模型回复里没有可识别的结构化内容（structured JSON missing）；输入已保留，可修改后重试。';
+    // 折行处的空格落在行尾，比较时两边都去掉空白
+    const flat = () => h.test.captureCharFrame().replace(/[│█\s]/gu, '');
+    const whole = (value: string) => flat().includes(value.replace(/\s/gu, ''));
+    const count = (value: string) => h.test.captureCharFrame().split(value).length - 1;
+    // 上一轮已结束（过程区原本只显示“用时”），再收到本次输入的结算说明
+    h.root.receive({ type: 'process-status', status: { conversationId: h.view.conversationId, view: { revision: 1, phase: '本轮已结束', activity: 'complete', durationMs: 2000, tools: [], children: [], usage: { contextTokens: 162 } } } });
+    for (const [cols, rows] of [[100, 32], [40, 16]] as const) {
+      h.test.resize(cols, rows);
+      for (const [label, message, error] of [['kept', kept, false], ['failed', failed, true]] as const) {
+        h.root.receive({ type: 'task-status', status: error ? { summary: { conversationId: h.view.conversationId, state: 'error', text: 'TASK_FAILED' } } : {} });
+        await h.show({ ...h.view, message });
+        assert.ok(whole(message), `${cols}x${rows} ${label}: 整段说明可见`);
+        assert.equal(count(message.slice(0, 7)), 1, `${cols}x${rows} ${label}: 输入框下不再重复`);
+        if (error) assert.ok(h.test.captureCharFrame().includes('TASK_FAILED'), '必须的失败仍可见');
+        h.capture(`${cols}x${rows}-${label}`);
+      }
+      // 真实提交路径：结清消息也写进输入框下的状态槽；过程区已完整显示时只出现一次，草稿保留
+      h.root.receive({ type: 'task-status', status: {} });
+      await h.show({ ...h.view, message: undefined });
+      await h.test.mockInput.typeText('进度怎么样了？'); await h.flush();
+      h.test.mockInput.pressEnter(); await new Promise(resolve => setTimeout(resolve, 25)); await h.flush();
+      const submit = h.requests.filter((a: TerminalAction) => a.kind === 'input-submit').at(-1) as Extract<TerminalAction, { kind: 'input-submit' }>;
+      assert.ok(submit, 'Enter 发起了提交');
+      h.root.receive({ type: 'submission', inputId: submit.inputId, version: submit.version, accepted: false, message: kept });
+      await h.show({ ...h.view, message: kept });
+      assert.ok(whole(kept), `${cols}x${rows} submission: 整段说明可见`);
+      assert.equal(count(kept.slice(0, 7)), 1, `${cols}x${rows} submission: 输入框下不再重复`);
+      const draft = h.nodes().find((n: any) => n.constructor.name === 'TerminalTextarea');
+      assert.equal(draft.plainText, '进度怎么样了？', '未接纳的输入留在输入框');
+      h.capture(`${cols}x${rows}-submission-kept`);
+      draft.setText(''); await h.flush();
+      // 候选打开压缩过程区：说明仍有可见的部分或去处，输入照常；收起候选后恢复整段
+      for (const error of [false, true]) {
+        h.root.receive({ type: 'task-status', status: error ? { summary: { conversationId: h.view.conversationId, state: 'error', text: 'TASK_FAILED' } } : {} });
+        await h.show({ ...h.view, message: kept });
+        await h.test.mockInput.typeText('/'); await h.flush();
+        const frame = h.test.captureCharFrame();
+        // 没有失败时说明本身就是状态行；有失败占了状态行时，状态行指明还有说明、按 Esc 收起候选查看
+        assert.ok(frame.includes('本次输入未接纳') || error && frame.includes('Esc 收起候选查看'), `${cols}x${rows} error=${error}: 候选打开时说明仍可见`);
+        // 宽窗口里失败原文与指引同行可见；窄窗口一行放不下时保留指引，收起候选后两者都完整
+        if (error) assert.ok(cols >= 100 ? frame.includes('TASK_FAILED') : frame.includes('Esc 收起候选查看'));
+        const editor = h.nodes().find((n: any) => n.constructor.name === 'TerminalTextarea');
+        assert.equal(editor.plainText, '/');
+        h.capture(`${cols}x${rows}-candidates-${error ? 'failed' : 'kept'}`);
+        h.test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await h.flush();
+        h.test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await h.flush();
+        assert.ok(whole(kept), `${cols}x${rows} error=${error}: 收起候选后整段可见`);
+        if (error) assert.ok(h.test.captureCharFrame().includes('TASK_FAILED'), '收起候选后失败原文可见');
+      }
+    }
+  }, 32);
   await scenario('history-gap-recovery-guidance', async h => {
     await h.show({ kind: 'history', title: '历史', conversationId: h.view.conversationId, connected: false, displayPaused: true, displayGap: true });
     let text = h.test.captureCharFrame();

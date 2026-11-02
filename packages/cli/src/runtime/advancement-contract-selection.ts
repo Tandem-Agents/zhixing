@@ -119,7 +119,8 @@ export function createAdvancementContractSelectionRequest(
       },
     ],
     initialValue: shouldOfferNearbyGovernance ? "update-existing" : "confirm",
-    submitLabel: "选择",
+    // 终端里它只标在输入层（“修改准则”的说明输入）的提交项上
+    submitLabel: "提交修改",
     cancelLabel: "取消任务",
   };
 }

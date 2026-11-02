@@ -36,6 +36,8 @@ describe("advancement contract selection adapter", () => {
     expect(request.body?.join("\n")).toContain("算不算完成");
     expect(request.body?.join("\n")).toContain("测试通过");
     expect(request.body?.join("\n")).toContain("确认后如果要改，随时可以说");
+    // “修改准则”输入页的提交项说明是提交修改，不是通用的“选择”
+    expect(request.submitLabel).toBe("提交修改");
     expect(request.options.map((option) => option.value)).toEqual([
       "confirm",
       "edit",
