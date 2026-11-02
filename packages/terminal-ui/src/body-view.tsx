@@ -68,6 +68,11 @@ export interface BodyViewProps {
   readonly renderer: CliRenderer;
   readonly anchor?: BodyAnchor;
   readonly hasEarlier?: boolean;
+  /**
+   * 对话页：跟随最新且已装入的正文不足一屏时，留白放在横幅与正文之间，让正文末尾贴近输入区。
+   * 只是显示布局——留白不计入正文几何与阅读位置，也不改变任何读取判定。
+   */
+  readonly alignEnd?: boolean;
   readonly requestPage: (start: number | undefined, follow: boolean) => Promise<unknown>;
   readonly requestPrevious: () => Promise<unknown>;
   readonly onAnchor: (anchor: BodyAnchor | undefined) => void;
@@ -167,10 +172,16 @@ export function BodyView(props: BodyViewProps) {
     return new Set(items.filter(item => state.selecting || (item.top + item.height >= top - height && item.top <= top + 2 * height)).map(item => item.key));
   });
   const heights = createMemo(() => new Map(geometry().map(item => [item.key, item.height])));
+  // 留白＝视口高度−自然内容高度。自然高度取正文几何（块高度即按它显式排版，横幅为排版回报），
+  // 不依赖留白自身的排版时序，因而不会自我回路；只在跟随最新、已有正文时存在
+  const geometryNatural = () => { const last = geometry().at(-1); return last ? last.top + last.height : prefixHeight(); };
+  const endSpacer = createMemo(() => props.alignEnd && following() && blocks().length > 0
+    ? Math.max(0, Math.max(1, props.height) - geometryNatural()) : 0);
   let box: TerminalScrollBox | undefined, disposed = false, paging = false;
   let gestureHold = false, gestureIntent = false, gestureHadSelection = false, navigationVersion = 0, heldVersion = 0;
   let selectionClearPending = false;
-  let anchorOffset = 0, headerTop: number | undefined;
+  // headerTop 只对记录它时横幅下的那一块有效：之后若在它前面载入了更早内容，横幅位置已不是用户在读的地方
+  let anchorOffset = 0, headerTop: number | undefined, headerFirst: string | undefined;
   let heldContent: BodyPage | undefined;
   const readQueue = new ReadingQueue(intent => disposed ? Promise.resolve() : intent.kind === 'previous'
     ? props.requestPrevious() : props.requestPage(intent.start, intent.follow));
@@ -324,6 +335,7 @@ export function BodyView(props: BodyViewProps) {
   const capture = (): BodyAnchor | undefined => {
     if (!box || disposed || restorePending) return saved;
     headerTop = prefixHeight() > box.scrollTop ? box.scrollTop : undefined;
+    headerFirst = headerTop === undefined ? undefined : blocks()[0]?.key;
     const top = box.viewport.y;
     let first: { block: BodyRenderBlock; view: TextRenderable } | undefined;
     for (const entry of mounted.values()) {
@@ -367,7 +379,7 @@ export function BodyView(props: BodyViewProps) {
     const scrollTop = box.scrollTop;
     if (align === 'bottom' || (following() && !gestureHold && !saved)) box.scrollTo(box.scrollHeight);
     else if (align === 'top') box.scrollTo(0);
-    else if (headerTop !== undefined && showHeader()) box.scrollTo(headerTop);
+    else if (headerTop !== undefined && showHeader() && blocks()[0]?.key === headerFirst) box.scrollTo(headerTop);
     else if (saved) {
       // A bounded thinking tail may have evicted the old anchor. Keep its
       // viewport offset at that same block's first retained source position.
@@ -642,6 +654,7 @@ export function BodyView(props: BodyViewProps) {
     reportReading();
     // A transport batch must not leave a short viewport looking like EOF.
     // Fetch one neighbour at a time; each accepted page is measured again.
+    // （滚动区内容高度至少等于视口；留白只在视口以内补齐，不改变这里的判定）
     if (!paging && !readError && !selecting && !restorePending && page !== prefetched && box.scrollHeight < box.viewport.height && page.segments.length) {
       const direction = page.start + page.segments.length < page.last ? 1 : page.start > page.first || props.hasEarlier ? -1 : undefined;
       prefetched = page;
@@ -693,6 +706,7 @@ export function BodyView(props: BodyViewProps) {
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
     }}>
     <Show when={showHeader()}><box width={Math.max(1, props.width - spacing.scrollbar)} flexShrink={0} onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}</box></Show>
+    <Show when={endSpacer() > 0}><box height={endSpacer()} flexShrink={0} /></Show>
     <For each={blockKeys()}>{key => {
       const block = createMemo(() => blockIndex().get(key)!);
       return <box flexDirection="column" flexShrink={0} marginX={spacing.content} width={contentWidth()} paddingLeft={layout(block()).indent} paddingTop={block().gapBefore ?? 0}

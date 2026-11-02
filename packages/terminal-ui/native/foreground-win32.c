@@ -436,6 +436,141 @@ static napi_value clipboard_write(napi_env env, napi_callback_info info) {
   }
   napi_create_string_utf8(env,status,NAPI_AUTO_LENGTH,&result);return result;
 }
+/* 经典控制台的单元格宽度与提示符字形探测。系统 conhost 按当前字体决定字符占 1 格还是 2 格（同为东亚
+   歧义字符，新宋体下“…”“·”“→”占 2 格、“─”占 1 格），且没有字体回退，缺字形的字符显示为方框。
+   只在 conhost 自己的窗口里测：ConPTY/Windows Terminal 的伪窗口类名不同，按其自身规则排版，不测。
+   在不激活的隐藏屏幕缓冲区里一次写入整段字符、按列读回，由单元格的前导/尾随标志得出每个码位的宽度；
+   不碰输入、不改可见内容。任一步失败按未知返回，UI 照旧按 Unicode 规则。 */
+#define MEASURE_FIRST 0x00A0
+#define MEASURE_LAST 0x2FFF
+#define MEASURE_COUNT (MEASURE_LAST - MEASURE_FIRST + 1)
+#define MEASURE_COLUMNS 30000
+#define MEASURE_READ 6000
+static char *measure_cell_widths(void) {
+  HANDLE hidden = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+  if (hidden == INVALID_HANDLE_VALUE) return NULL;
+  wchar_t *text = malloc(sizeof(wchar_t) * MEASURE_COUNT * 2);
+  unsigned char *widths = calloc(MEASURE_COUNT, 1);
+  CHAR_INFO *cells = malloc(sizeof(CHAR_INFO) * MEASURE_READ);
+  char *spec = NULL; BOOL ok = FALSE; int length = 0, index = 0, run = 0;
+  CONSOLE_SCREEN_BUFFER_INFO info; COORD origin = { 0, 0 }; DWORD written = 0;
+  if (!text || !widths || !cells) goto done;
+  for (unsigned cp = MEASURE_FIRST; cp <= MEASURE_LAST; cp++) { text[length++] = (wchar_t)cp; text[length++] = L'|'; }
+  /* 先把窗口缩到 1 格再改成单行宽缓冲区，conhost 只临时分配一行；不允许时退回窗口高度 */
+  SMALL_RECT tiny = { 0, 0, 0, 0 }; COORD single = { MEASURE_COLUMNS, 1 };
+  if (!SetConsoleWindowInfo(hidden, TRUE, &tiny) || !SetConsoleScreenBufferSize(hidden, single)) {
+    if (!GetConsoleScreenBufferInfo(hidden, &info)) goto done;
+    COORD tall = { MEASURE_COLUMNS, (SHORT)(info.srWindow.Bottom - info.srWindow.Top + 1) };
+    if (!SetConsoleScreenBufferSize(hidden, tall)) goto done;
+  }
+  if (!SetConsoleCursorPosition(hidden, origin)) goto done;
+  if (!WriteConsoleW(hidden, text, (DWORD)length, &written, NULL) || written != (DWORD)length) goto done;
+  if (!GetConsoleScreenBufferInfo(hidden, &info) || info.dwCursorPosition.Y != 0) goto done;
+  for (SHORT left = 0; left < info.dwCursorPosition.X && index < MEASURE_COUNT; left += MEASURE_READ) {
+    SHORT right = (SHORT)(left + MEASURE_READ - 1 < info.dwSize.X - 1 ? left + MEASURE_READ - 1 : info.dwSize.X - 1);
+    COORD bufferSize = { (SHORT)(right - left + 1), 1 }, at = { 0, 0 };
+    SMALL_RECT region = { left, 0, right, 0 };
+    if (!ReadConsoleOutputW(hidden, cells, bufferSize, at, &region)) goto done;
+    for (int x = 0; x <= region.Right - region.Left && index < MEASURE_COUNT; x++) {
+      if (cells[x].Char.UnicodeChar == L'|' && !(cells[x].Attributes & (COMMON_LVB_LEADING_BYTE | COMMON_LVB_TRAILING_BYTE))) {
+        widths[index++] = (unsigned char)run; run = 0;
+      } else run++;
+    }
+  }
+  if (index != MEASURE_COUNT) goto done;
+  /* 只登记 2 格的码位区间；表内其余按 1 格（零宽与控制字符由 UI 侧规则先行处理） */
+  size_t capacity = 64 + (size_t)MEASURE_COUNT * 12, used;
+  spec = malloc(capacity);
+  if (!spec) goto done;
+  used = (size_t)snprintf(spec, capacity, "1:%x:%x:", MEASURE_FIRST, MEASURE_LAST);
+  BOOL first = TRUE;
+  for (int i = 0; i < MEASURE_COUNT; i++) {
+    if (widths[i] != 2) continue;
+    int j = i;
+    while (j + 1 < MEASURE_COUNT && widths[j + 1] == 2) j++;
+    if (j > i) used += (size_t)snprintf(spec + used, capacity - used, "%s%x-%x", first ? "" : ",", MEASURE_FIRST + i, MEASURE_FIRST + j);
+    else used += (size_t)snprintf(spec + used, capacity - used, "%s%x", first ? "" : ",", MEASURE_FIRST + i);
+    if (used >= capacity) goto done;
+    first = FALSE; i = j;
+  }
+  ok = TRUE;
+done:
+  free(text); free(widths); free(cells); CloseHandle(hidden);
+  if (!ok) { free(spec); return NULL; }
+  return spec;
+}
+/* 1 有字形、0 缺字形、-1 未知。只有 GDI 实际选中的就是控制台当前字体时才下结论。 */
+static int prompt_glyph_state(void) {
+  HANDLE output = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+  if (output == INVALID_HANDLE_VALUE) return -1;
+  CONSOLE_FONT_INFOEX font = { sizeof font };
+  BOOL fontOk = GetCurrentConsoleFontEx(output, FALSE, &font);
+  CloseHandle(output);
+  if (!fontOk || !font.FaceName[0]) return -1;
+  HDC dc = CreateCompatibleDC(NULL);
+  if (!dc) return -1;
+  int state = -1;
+  HFONT handle = CreateFontW(-(font.dwFontSize.Y ? font.dwFontSize.Y : 16), 0, 0, 0, font.FontWeight ? (int)font.FontWeight : FW_NORMAL, 0, 0, 0,
+    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH, font.FaceName);
+  if (handle) {
+    HGDIOBJ previous = SelectObject(dc, handle);
+    wchar_t selected[LF_FACESIZE] = L""; WORD glyph = 0;
+    if (GetTextFaceW(dc, LF_FACESIZE, selected) && _wcsicmp(selected, font.FaceName) == 0 &&
+        GetGlyphIndicesW(dc, L"❯", 1, &glyph, GGI_MARK_NONEXISTING_GLYPHS) == 1) state = glyph == 0xFFFF ? 0 : 1;
+    SelectObject(dc, previous); DeleteObject(handle);
+  }
+  DeleteDC(dc);
+  return state;
+}
+/* 测量放到线程池执行：监督进程启动时就开始，与资产校验并行，UI 启动前只取结果，不占主线程关键路径 */
+typedef struct {
+  napi_async_work work; napi_deferred deferred;
+  BOOL conhost; char *spec; int glyph; double ms;
+} MeasureWork;
+static void measure_execute(napi_env env, void *data) {
+  (void)env;
+  MeasureWork *measure = data;
+  double started = monotonic_ms();
+  HWND window = GetConsoleWindow(); wchar_t windowClass[64] = L"";
+  measure->conhost = window && GetClassNameW(window, windowClass, 64) && wcscmp(windowClass, L"ConsoleWindowClass") == 0;
+  measure->glyph = -1;
+  if (measure->conhost) { measure->spec = measure_cell_widths(); measure->glyph = prompt_glyph_state(); }
+  measure->ms = monotonic_ms() - started;
+}
+static void measure_complete(napi_env env, napi_status status, void *data) {
+  MeasureWork *measure = data;
+  if (status == napi_ok) {
+    napi_value result, value; napi_create_object(env, &result);
+    napi_create_string_utf8(env, measure->conhost ? "conhost" : "other", NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "kind", value);
+    if (measure->conhost) {
+      if (measure->spec) { napi_create_string_utf8(env, measure->spec, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "cellWidths", value); }
+      napi_create_string_utf8(env, measure->glyph == 1 ? "present" : measure->glyph == 0 ? "missing" : "unknown", NAPI_AUTO_LENGTH, &value);
+      napi_set_named_property(env, result, "promptGlyph", value);
+    }
+    duration(env, result, "measureMs", measure->ms);
+    napi_resolve_deferred(env, measure->deferred, result);
+  } else {
+    napi_value error, message;
+    napi_create_string_utf8(env, "terminal-console-measure-cancelled", NAPI_AUTO_LENGTH, &message);
+    napi_create_error(env, NULL, message, &error);
+    napi_reject_deferred(env, measure->deferred, error);
+  }
+  napi_delete_async_work(env, measure->work);
+  free(measure->spec); free(measure);
+}
+static napi_value measure_console(napi_env env, napi_callback_info info) {
+  (void)info;
+  MeasureWork *measure = calloc(1, sizeof *measure);
+  if (!measure) return fail(env, "terminal-console-measure-unavailable");
+  napi_value promise, name;
+  napi_create_promise(env, &measure->deferred, &promise);
+  napi_create_string_utf8(env, "zhixing-console-cells", NAPI_AUTO_LENGTH, &name);
+  if (napi_create_async_work(env, NULL, name, measure_execute, measure_complete, measure, &measure->work) != napi_ok ||
+      napi_queue_async_work(env, measure->work) != napi_ok) {
+    free(measure); return fail(env, "terminal-console-measure-unavailable");
+  }
+  return promise;
+}
 static napi_value initialize(napi_env env, napi_value exports) {
   executionJob = CreateJobObjectW(NULL, NULL);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -445,6 +580,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
     { "writeClipboard", NULL, clipboard_write, NULL, NULL, NULL, napi_default, NULL },
     { "protectKey", NULL, protect_key, NULL, NULL, NULL, napi_default, NULL },
     { "processIdentity", NULL, process_identity, NULL, NULL, NULL, napi_default, NULL },
+    { "measureConsole", NULL, measure_console, NULL, NULL, NULL, napi_default, NULL },
     { "declareWriter", NULL, declare_writer, NULL, NULL, NULL, napi_default, NULL },
     { "closeWriterDeclaration", NULL, close_writer_declaration, NULL, NULL, NULL, napi_default, NULL },
     { "create", NULL, create, NULL, NULL, NULL, napi_default, NULL },

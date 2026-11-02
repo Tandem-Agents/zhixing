@@ -32,6 +32,8 @@ export interface TerminalRootOptions {
   readonly inputReady: (renderer: CliRenderer) => void;
   readonly usableFrame?: (frameId: number) => void;
   readonly exit: () => Promise<void>;
+  /** 入口在经典控制台实测当前字体缺 ❯ 字形时改用 ASCII 提示符；其余情况保持 ❯。 */
+  readonly promptGlyph?: 'ascii';
 }
 
 export async function createTerminalRoot(options: TerminalRootOptions, createRenderer = createCliRenderer) {
@@ -503,6 +505,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
           header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} />}
           hasEarlier={view().historyHasMore}
+          alignEnd={view().kind === 'conversation'}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
           requestPrevious={() => options.request({ kind: 'history-previous' })}
@@ -542,7 +545,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     </box>
     <Show when={view().kind === 'conversation' || view().field}>
       <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={surfaceGeometry(size().width).margin} paddingX={spacing.frameInner} flexDirection="row">
-        <text width={2} selectable={false} fg={teal}>❯ </text>
+        <text width={2} selectable={false} fg={teal}>{options.promptGlyph === 'ascii' ? '> ' : '❯ '}</text>
         <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), surfaceGeometry(size().width).editorWidth))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
             {(owner: string) => <textarea selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={surfaceGeometry(size().width).editorWidth} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}

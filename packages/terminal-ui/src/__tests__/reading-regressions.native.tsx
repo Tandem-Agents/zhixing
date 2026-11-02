@@ -4,7 +4,7 @@ import path from 'node:path';
 import { setRenderLibPath } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
-import type { BodyPage } from '../body-model.js';
+import { encodeBodyPage, type BodyPage, type BodyPageRevision } from '../body-model.js';
 import type { TerminalAction, TerminalView } from '../protocol.js';
 setRenderLibPath(process.env.ZHIXING_TERMINAL_RENDER_LIB!);
 const frames: Record<string, unknown> = {}, checks: string[] = [];
@@ -216,6 +216,51 @@ try {
     assert.equal(h.page.follow, true);
     assert.equal(h.box().scrollTop + h.box().viewport.height, h.box().scrollHeight, 'successful retry restores follow despite concurrent draft editing');
     h.capture('retry-success');
+  });
+  await scenario('earlier-history-tall-block-keeps-reading-position', async h => {
+    // 按宿主的显示序号复现：已载入 12 段较短内容（-12..-1）；更早一条记录是一个约 240 行的长回复段和它前面的用户短段，
+    // 宿主处理 history-previous 时每载入一项就发一页，起点为“原首项 − 4”
+    const short = Array.from({ length: 12 }, (_, i) => ({ blockId: `short-${i}`, role: i % 2 ? 'assistant' : 'user', contentOffset: 0, final: true,
+      text: Array.from({ length: 5 }, (_, row) => `SHORT-${i}-${row} 较短内容`).join('\n') }));
+    const tall = { blockId: 'tall', role: 'assistant', contentOffset: 0, final: true,
+      text: Array.from({ length: 120 }, (_, i) => `I-ROW-${i} 中文与英文 mixed words，滚动回看时保持这一行。\n`).join('\n') };
+    const opener = { blockId: 'opener', role: 'user', contentOffset: 0, final: true, text: 'E-OPENER 更早记录的用户输入' };
+    const store = new Map<number, any>(short.map((segment, i) => [i - 12, segment]));
+    let first = -12, sent: BodyPage | undefined;
+    const pageAt = (start: number | undefined, follow: boolean): BodyPage => {
+      const from = Math.max(first, Math.min(0, start ?? -4));
+      return sent = { first, last: 0, start: from, follow, segments: Array.from({ length: Math.min(0, from + 4) - from }, (_, i) => store.get(from + i)) };
+    };
+    const trace: unknown[] = [];
+    // 与宿主同一条投递路径：按修订号发 display-patch，界面解码后并入阅读窗口（display-page 消息会重置窗口，不是这条路径）
+    let revision = 1000, previous: BodyPageRevision | undefined;
+    const send = (page: BodyPage) => {
+      const patch = encodeBodyPage(page, ++revision, previous); previous = { revision, page };
+      h.root.receive({ type: 'display-patch', patch });
+    };
+    h.readWith(async (action: TerminalAction) => {
+      if (action.kind === 'display-page') { send(pageAt(action.start, !!action.follow)); return { accepted: true }; }
+      const start = first - 4;
+      store.set(-13, tall); first = -13; send(pageAt(start, false)); await h.flush();
+      store.set(-14, opener); first = -14; send(pageAt(start, false)); await h.flush();
+      trace.push({ previousServed: true });
+      return { accepted: true, hasEarlier: false };
+    });
+    await h.show({ ...h.view, historyHasMore: true });
+    send(pageAt(undefined, true)); await h.flush(); await h.latest();
+    const topRow = () => h.test.captureCharFrame().split('\n').map((row: string) => row.trim()).find((row: string) => /^(SHORT-|I-ROW-|E-OPENER)/u.test(row)) ?? '';
+    const seen: string[] = [];
+    for (let press = 0; press < 16; press++) {
+      h.test.mockInput.pressKey('\x1b[5~'); await h.flush(); await h.flush();
+      const row = topRow(); seen.push(row);
+      trace.push({ press, top: row, scrollTop: h.box().scrollTop, scrollHeight: h.box().scrollHeight, start: sent?.start, first: sent?.first });
+      if (row.startsWith('E-OPENER')) break;
+    }
+    console.log('EARLIER-TRACE ' + JSON.stringify(trace));
+    // 连续：第一次翻进长回复时停在它的末尾附近，而不是直接落到记录开头；之后逐页向上直到第 0 行，最后才看到用户输入
+    const firstTall = seen.find(row => row.startsWith('I-ROW-'));
+    assert.ok(firstTall && Number(/I-ROW-(\d+)/u.exec(firstTall)![1]) >= 100, `first page into the earlier record starts near its end: ${firstTall}`);
+    assert.ok(seen.some(row => row.startsWith('I-ROW-0 ')) || seen.at(-1)?.startsWith('E-OPENER'), 'reading reaches the record start page by page');
   });
   await scenario('configuration-action-group-boundaries', async h => {
     for (const width of [120, 45]) for (const section of [undefined, 'Actions']) {

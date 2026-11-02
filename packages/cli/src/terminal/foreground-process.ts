@@ -30,6 +30,14 @@ interface NativeEdge {
   detach(id: number): void;
   executionState(): { active: number; creating: number; ownedActive?: number; ownedCreating?: number };
   terminateExecution(): void;
+  /** 仅 Windows：在线程池里实测经典 conhost 的单元格宽度表与提示符字形；其他终端得到 kind=other。 */
+  measureConsole?(): Promise<TerminalConsoleCells>;
+}
+export interface TerminalConsoleCells {
+  readonly kind: 'conhost' | 'other';
+  readonly cellWidths?: string;
+  readonly promptGlyph?: 'present' | 'missing' | 'unknown';
+  readonly measureMs?: number;
 }
 export interface TerminalProcessOptions {
   readonly scope?: 'recovery' | 'execution' | 'host' | 'probe';

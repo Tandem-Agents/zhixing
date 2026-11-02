@@ -148,6 +148,28 @@ try {
     assert.ok(!(fallback.buffers.attributes[0]! & (TextAttributes.DIM | TextAttributes.INVERSE)));
   } finally { nativeView.destroy(); nativeText.destroy(); fallback.destroy(); }
   checks.push('default-color native selection fallback uses explicit contrasting RGB and clears dim/inverse');
+
+  // 恢复到最新、已装入正文不足一屏：正文末尾贴近输入区，留白在横幅与正文之间；不产生滚动、
+  // 不多读页；独立历史阅读页保持顶部对齐；正文超过一屏后回到自然布局。
+  test.resize(100, 36); await flush();
+  const short: BodyPage = { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'short', role: 'assistant', contentOffset: 0, final: true,
+    text: 'ALIGN-LAST 恢复后的最后一段' }] };
+  await show({ ...view, message: '已恢复最近对话。' }); await publish(short); await latest();
+  const rowOf = (needle: string) => test.captureCharFrame().split('\n').findIndex(row => row.includes(needle));
+  const lastRow = rowOf('ALIGN-LAST'), inputTop = editor().parent.y, bodyBottom = box().y + box().viewport.height - 1;
+  // 正文末行落在正文视口底部（其下只剩固定的状态/过程区与输入框）
+  assert.ok(lastRow >= bodyBottom - 1 && lastRow <= bodyBottom, `short body ends at the bottom of the body viewport (body ${lastRow}, viewport bottom ${bodyBottom})\n` +
+    test.captureCharFrame().split('\n').slice(Math.max(0, lastRow - 2), inputTop + 2).join('\n'));
+  assert.ok(rowOf('ALIGN-LAST') > rowOf('知行') + 3, 'whitespace sits between the header and the body');
+  assert.equal(box().scrollTop, 0); assert.ok(box().scrollHeight <= box().viewport.height, 'padding never creates scrollable height');
+  capture('align-end-short');
+  await show({ ...view, kind: 'history', title: '走查 · 只读', connected: false }); await publish(short);
+  assert.ok(rowOf('ALIGN-LAST') < inputTop - 10, 'history reading page keeps top alignment');
+  await show({ ...view, message: '已恢复最近对话。' });
+  await publish({ ...short, segments: [{ ...short.segments[0]!, text: Array.from({ length: 60 }, (_, i) => `ALIGN-ROW ${i}`).join('\n') }] });
+  await latest();
+  assert.ok(box().scrollHeight > box().viewport.height && box().scrollTop > 0, 'overflowing body follows the latest content naturally');
+  checks.push('short restored body is bottom-aligned without padding scroll height; history page and overflowing body keep their layouts');
   console.log(JSON.stringify({ checks, dragPositions: positions, initialGeometry: initial }));
 } finally {
   clearInterval(tick);

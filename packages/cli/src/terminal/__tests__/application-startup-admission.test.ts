@@ -30,6 +30,7 @@ const Fixture = new Function('terminalEnvironment', 'recordTerminalFailure', 'Co
   noticeResumes = 0;
   drainConfirmations() {} resumeNoticeDisplay() { this.noticeResumes++; } invalidateAuxiliary() {} close() { return Promise.resolve(); }
   skillsFailed() {} ensureSkillsBinding() { return Promise.resolve({ commands: { refresh: async () => {} } }); }
+  prepareAfterUsable() { return Promise.resolve(); }
   async submit(inputId) { this.submitted.push(inputId); }
   async resolveRubric() {}
   async finishStartup(release) {

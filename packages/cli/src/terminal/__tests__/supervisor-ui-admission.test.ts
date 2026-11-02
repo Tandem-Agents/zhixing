@@ -17,7 +17,7 @@ const methods = ['#admitUi', '#resume', '#live', '#uiEnvironment'].map(name => {
 const emitted = ts.transpileModule(`class Fixture {
   instance = 'fixture-instance'; #assets; #native = { child: {pid: 42}, spawnId: 'recovery' }; #nativeBirth = 'born';
   #abort = new AbortController(); #sealed = false; #roleIntents = {}; #startupTimer; #ui;
-  options = {}; #firstFramePhase; #application; #applicationSpawn; #applicationIntentRecorded = false;
+  options = {}; #firstFramePhase; #application; #applicationSpawn; #applicationIntentRecorded = false; #consoleCells;
   #phase(_name, work) { return work(); }
   constructor(ports) { this.ports = ports; this.#assets = ports.assets; this.#application = ports.application; this.#applicationSpawn = ports.applicationSpawn; }
   #beginApplication(instancePath) { this.ports.beginApplication(instancePath, this.#applicationIntentRecorded); }

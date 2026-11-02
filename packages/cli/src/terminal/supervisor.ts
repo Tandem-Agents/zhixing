@@ -13,7 +13,7 @@ import { connect, createServer, type Server, type Socket } from 'node:net';
 import { TerminalWindowsWriterAdmission, type TerminalHelperRole } from './host-launch.js';
 import { createDeviceCapacityRuntime } from '../serve/device-capacity-runtime.js';
 import { TerminalInstanceAssets, type TerminalIdentityResolver, type TerminalProcessIdentity } from './instance-assets.js';
-import { TerminalForegroundProcesses, type TerminalForegroundChild } from './foreground-process.js';
+import { TerminalForegroundProcesses, type TerminalConsoleCells, type TerminalForegroundChild } from './foreground-process.js';
 import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/store-process.js';
 import { resolveSelfExec } from '../serve/self-exec.js';
 import { terminalCloseDeadline, terminalWriterDeadline } from './close-budget.js';
@@ -142,6 +142,7 @@ class TerminalSupervisor {
   #interrupts = 0;
   #lastAssetRequest = 0;
   #processes?: TerminalForegroundProcesses;
+  #consoleCells?: Promise<TerminalConsoleCells | undefined>;
   readonly #helpers: { child: TerminalForegroundChild; drained: Promise<void> }[] = [];
   #assetFileWorker?: { child: TerminalForegroundChild; spawnId: string };
   readonly #writerSettlements = new Set<Promise<void>>();
@@ -208,6 +209,10 @@ class TerminalSupervisor {
         this.#processes = new TerminalForegroundProcesses(path.join(distribution, 'foreground.node'));
         nativePhase?.finish();
       } catch (error) { nativePhase?.finish(error); throw error; }
+      // 控制台测宽在线程池里与随后的资产校验并行，UI 启动前取结果；失败按未知处理
+      this.#consoleCells = process.platform === 'win32'
+        ? this.#processes.native.measureConsole?.().catch(() => undefined)
+        : undefined;
       await this.#phase('writer-declaration', () => beginTerminalWriterDeclaration(this.options.home, this.#processes!.artifact)); this.#live();
       if (process.platform === 'win32') {
         this.#creationServer = createServer(socket => this.#acceptCreation(socket));
@@ -264,7 +269,11 @@ class TerminalSupervisor {
     const uiSpawn = this.#roleIntents.ui = randomUUID();
     const startupDeadline = Date.now() + 5000;
     this.#startupTimer = setTimeout(() => void this.#close(78, 'terminal-startup-timeout'), 5000);
-    this.#ui = this.#spawn('ui', path.join(distribution, process.platform === 'win32' ? 'ui.exe' : 'ui'), [], [0, 1, 2, 'ipc'], this.#uiEnvironment(distribution, instancePath), uiSpawn);
+    // 经典控制台按当前字体决定字符宽度与字形：取早先已开始的实测结果交给 UI（其他终端不测，见原生说明）
+    const consoleCells = this.#consoleCells
+      ? await this.#phase('console-cells', () => this.#consoleCells!)
+      : undefined;
+    this.#ui = this.#spawn('ui', path.join(distribution, process.platform === 'win32' ? 'ui.exe' : 'ui'), [], [0, 1, 2, 'ipc'], this.#uiEnvironment(distribution, instancePath, consoleCells), uiSpawn);
     if (Date.now() >= startupDeadline) throw Error('terminal-creation-deadline');
     if (!await surfaceVerified) throw Error('terminal-package-integrity');
     this.#live(startupDeadline);
@@ -1128,7 +1137,7 @@ class TerminalSupervisor {
     return { pid: item.child.pid, birth: identity.birth, spawnId: item.spawnId };
   }
 
-  #uiEnvironment(distribution: string, instancePath?: string): NodeJS.ProcessEnv {
+  #uiEnvironment(distribution: string, instancePath?: string, consoleCells?: TerminalConsoleCells): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {};
     for (const key of ['SystemRoot', 'WINDIR', 'TERM', 'COLORTERM', 'TERM_PROGRAM', 'WT_SESSION', 'LANG', 'LC_ALL']) if (process.env[key]) env[key] = process.env[key];
     const library = process.platform === 'win32' ? 'opentui.dll' : process.platform === 'darwin' ? 'libopentui.dylib' : 'libopentui.so';
@@ -1138,6 +1147,10 @@ class TerminalSupervisor {
     if (instancePath) {
       const runtime = path.join(instancePath, 'runtime');
       Object.assign(env, { TEMP: runtime, TMP: runtime, USERPROFILE: runtime, HOME: runtime, LOCALAPPDATA: runtime, APPDATA: runtime });
+    }
+    if (consoleCells?.kind === 'conhost') {
+      if (consoleCells.cellWidths) env.ZHIXING_TERMINAL_CELL_WIDTHS = consoleCells.cellWidths;
+      if (consoleCells.promptGlyph === 'missing') env.ZHIXING_TERMINAL_PROMPT_GLYPH = 'ascii';
     }
     return env;
   }
