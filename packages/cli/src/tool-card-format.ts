@@ -16,6 +16,9 @@
  */
 
 import type { ToolResult } from "@zhixing/core";
+import type { TranscriptToolFacts } from "@zhixing/core/contracts";
+import { parseToolName } from "@zhixing/mcp/naming";
+import { builtinToolDisplayName } from "@zhixing/core/tool-display-names";
 import { conversationStateLabel } from "./conversation-state-label.js";
 
 const TARGET_TRUNCATE = 60;
@@ -24,25 +27,14 @@ const ERROR_TRUNCATE = 80;
 const BATCH_DETAIL_TARGET_TRUNCATE = 40;
 
 /**
- * 工具内部短名 → 终端展示名的显式映射。未注册工具走 `snake_case → PascalCase`
- * 通用规则（如 `web_fetch` → `WebFetch`），保证未来新增工具零配置自动获得合理展示名。
+ * 工具内部名 → 终端展示名。MCP 工具（`mcp__<server>__<tool>`）保留原始的工具名与服务名，
+ * 显示为"工具（服务）"；内置工具取 core 的统一名称表（与权限确认面同源）；表外的名字才走
+ * `snake_case → PascalCase` 兜底，大小写转换套在 MCP 名上会把服务名揉坏。
  */
-const TOOL_DISPLAY_NAME: Readonly<Record<string, string>> = Object.freeze({
-  read: "Read",
-  write: "Write",
-  edit: "Edit",
-  bash: "Bash",
-  grep: "Grep",
-  glob: "Glob",
-  web_fetch: "WebFetch",
-  schedule: "Schedule",
-  Task: "Task",
-  conversation: "对话通信",
-});
-
-/** 工具内部名 → 终端展示 PascalCase 名 */
 export function displayToolName(name: string): string {
-  return TOOL_DISPLAY_NAME[name] ?? snakeToPascal(name);
+  const mcp = parseToolName(name);
+  if (mcp) return `${mcp.tool}（${mcp.serverId}）`;
+  return builtinToolDisplayName(name) ?? snakeToPascal(name);
 }
 
 // ─── 工具 → 用户视角动作（batch 头部摘要用） ───
@@ -223,6 +215,27 @@ export function formatToolResult(
     default:
       return formatToolDuration(durationMs);
   }
+}
+
+/**
+ * 恢复历史里的工具卡片：标题与实时同一格式化（formatToolHeader、同一白名单输入）；结果只说读取器实际读到的事实——
+ * 成功只有结果总长度（没读原文，不推断行数），失败取有界开头的首行，未执行取持久处置事实；历史里没有用时，不显示。
+ * 格式变化时提升 TOOL_HISTORY_CARD_FORMAT，冷层里旧格式的卡片按需重建。
+ */
+export const TOOL_HISTORY_CARD_FORMAT = 1;
+
+export function formatHistoryToolCard(facts: TranscriptToolFacts): { readonly text: string; readonly failed: boolean } {
+  if (facts.kind === "call") {
+    return { text: `${formatToolHeader(facts.name, facts.input)}\n未记录结果`, failed: false };
+  }
+  const header = facts.call ? formatToolHeader(facts.call.name, facts.call.input) : "工具调用";
+  if (facts.disposition) {
+    return { text: `${header}\n未执行 · 本轮改为「${displayToolName(facts.disposition.selectedTool)}」`, failed: false };
+  }
+  if (facts.isError) {
+    return { text: `${header}\n${formatToolResult(facts.call?.name ?? "", { content: facts.head ?? "", isError: true }, 0)}`, failed: true };
+  }
+  return { text: `${header}\n${facts.length === 0 ? "完成（无输出）" : `完成 · 结果 ${facts.length} 字`}`, failed: false };
 }
 
 /**

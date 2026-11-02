@@ -72,6 +72,15 @@ describe("KernelTerminal", () => {
     }
   });
 
+  it("接纳结果块的封闭处置事实，拒绝其它形状", () => {
+    const disposition = { kind: "not-started", reason: "exclusive-control", selectedTool: "control" } as const;
+    const withResult = (value: unknown) => ({ role: "user" as const, content: [{ type: "tool_result" as const, toolUseId: "w1", content: "x", isError: true, disposition: value }] });
+    expect(projectAgentResultToKernelTerminal({ reason: "completed", message: withResult(disposition) as never, usage }))
+      .toMatchObject({ reason: "completed" });
+    expect(() => projectAgentResultToKernelTerminal({ reason: "completed", message: withResult({ ...disposition, kind: "failed" }) as never, usage }))
+      .toThrow();
+  });
+
   it("rejects unknown and incomplete internal or Kernel terminal variants", () => {
     expect(() =>
       projectAgentResultToKernelTerminal({ reason: "future", usage }),

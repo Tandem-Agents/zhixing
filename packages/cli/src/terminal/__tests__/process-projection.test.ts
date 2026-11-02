@@ -115,6 +115,16 @@ describe('terminal process fold', () => {
     expect(s.block).toHaveBeenCalledTimes(2); expect(s.block.mock.calls[0]![0].text).toContain('真实失败原因');
     expect(s.block.mock.calls[1]![0].text).toContain('1 个子任务');
   });
+  it('shows a call skipped by the exclusive control rule as not executed, not as a failure', () => {
+    const s = setup();
+    s.yieldValue({ type: 'tool_end', id: 'task', name: 'Task', duration: 0, result: { content: 'Not started: this batch selected the exclusive control call "propose_advancement".',
+      isError: true, presentation: { kind: 'not-started', toolCallId: 'task', reason: 'exclusive-control', selectedTool: 'propose_advancement' } } });
+    s.p.end(1);
+    const block = s.block.mock.calls[0]![0];
+    expect(block.role).toBe('tool');
+    expect(block.text).toBe('未执行 · 子任务\n本轮改为「提出推进」');
+    expect(block.text).not.toContain('Not started');
+  });
   it('uses one lifecycle aggregate when the observer receives no optional Task artifact', () => {
     const s = setup();
     s.event({ event: 'tool:child_start', payload: { ...child, label: '检查' } });

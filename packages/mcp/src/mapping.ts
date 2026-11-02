@@ -10,7 +10,7 @@
  */
 
 import type { JsonSchema, ToolDefinition, ToolResult } from "@zhixing/core";
-import { makeUniqueToolName } from "./naming.js";
+import { makeUniqueToolName, parseToolName } from "./naming.js";
 import type { McpCallFn, McpServerContext, McpToolDescriptor } from "./types.js";
 
 /** MCP server 巨结果上限 —— 防撑爆上下文（tool-executor 会据此自动截断）。 */
@@ -53,11 +53,14 @@ function mapOne(
 ): ToolDefinition {
   const readOnly = descriptor.readOnlyHint === true;
   const inputSchema = normalizeSchema(descriptor.inputSchema);
+  // 确认面的可读名与终端过程行同一规则（反解析三段名）：“工具（服务）”
+  const parsed = parseToolName(toolName);
 
   return {
     name: toolName,
     description: truncate(descriptor.description ?? "", MAX_DESCRIPTION_CHARS),
     inputSchema,
+    ...(parsed ? { confirmationDisplayContext: { toolDisplayName: `${parsed.tool}（${parsed.serverId}）` } } : {}),
     // 只读工具不改外部状态：可并发、经 boundary 分类自动放行。
     // fail-closed：缺 readOnlyHint 视为有副作用、不可并发。
     isReadOnly: readOnly,

@@ -1,7 +1,7 @@
 import type { AgentYield } from '@zhixing/core/loop';
 import type { SessionPresentationArtifact } from '@zhixing/rpc/session-wire';
-import { processText } from '@zhixing/rpc/session-wire';
-import { formatBatchDetailLine, formatBatchSummary, formatToolHeader, formatToolResult, formatToolDuration,
+import { PROCESS_TOOL_INPUT_KEYS, processText } from '@zhixing/rpc/session-wire';
+import { displayToolName, formatBatchDetailLine, formatBatchSummary, formatToolHeader, formatToolResult, formatToolDuration,
   type BatchEventSnapshot } from '../tool-card-format.js';
 export { getToolRenderStrategy } from '../tool-render-strategy.js';
 
@@ -12,7 +12,7 @@ export interface ProcessToolSnapshot extends BatchEventSnapshot { readonly trunc
 /** Keep only target fields used by the existing pure card formatter. */
 export function processToolInput(input: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const key of ['path', 'file_path', 'command', 'pattern', 'url', 'name', 'description', 'action', 'conversationId']) {
+  for (const key of PROCESS_TOOL_INPUT_KEYS) {
     if (typeof input[key] === 'string') result[key] = processText(input[key], 512);
   }
   return result;
@@ -29,7 +29,10 @@ export function processBatch(events: readonly ProcessToolSnapshot[]): string {
   const omitted = Math.max(0, events.length - 3);
   return `${formatBatchSummary(events)}${omitted ? '\n⋮ ' + omitted + ' 项已折叠' : ''}\n${events.slice(-3).map(e => formatBatchDetailLine(e) + (e.truncated ? '（结果片段）' : '')).join('\n')}`;
 }
-export function processArtifactText(artifact: SessionPresentationArtifact): string {
+export function processArtifactText(artifact: SessionPresentationArtifact, toolName?: string): string {
+  if (artifact.kind === 'not-started') {
+    return `未执行${toolName ? ` · ${displayToolName(toolName)}` : ''}\n本轮改为「${displayToolName(artifact.selectedTool)}」`;
+  }
   if (artifact.kind === 'sub-agent-result') {
     const status = { succeeded: '完成', failed: '失败', aborted: '已停止' }[artifact.status];
     return [`子任务${status} · [${artifact.subAgentId}] · ${artifact.description}`,

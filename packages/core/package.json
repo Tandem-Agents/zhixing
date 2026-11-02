@@ -180,6 +180,10 @@
       "types": "./dist/advancement/proposal-identity.d.ts",
       "import": "./dist/advancement/proposal-identity.js"
     },
+    "./tool-display-names": {
+      "types": "./dist/tool-display-names.d.ts",
+      "import": "./dist/tool-display-names.js"
+    },
     "./advancement/proposal-messages": {
       "types": "./dist/advancement/proposal-messages.d.ts",
       "import": "./dist/advancement/proposal-messages.js"

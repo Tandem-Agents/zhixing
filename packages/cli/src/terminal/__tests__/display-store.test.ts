@@ -8,7 +8,8 @@ import { projectHistorySegmentsReverse } from '../history-segments.js';
 import { TerminalBodyProjection, type BodyProjectionChange } from '../body-projection.js';
 import { TerminalManagedFiles } from '../managed-files.js';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
-import { TerminalDisplayReplay, type DisplayReplayRecord, type DisplayReplaySource } from '../display-replay.js';
+import { TerminalDisplayReplay, toolCardSegment, type DisplayReplayRecord, type DisplayReplaySource } from '../display-replay.js';
+import { TOOL_HISTORY_CARD_FORMAT } from '../../tool-card-format.js';
 import { TerminalOutputProjection } from '../output.js';
 import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
 
@@ -87,6 +88,41 @@ describe('display recovery retains the original cache', () => {
       expect(h.store.paused).toBe(false);
       expect((await h.store.page(-40, false)).segments).toHaveLength(4);
     } finally { replay.close(); }
+  });
+
+  it('工具卡片冷层只存结果块坐标与格式版本：回读按当前格式重建；同版本逐字校验，换版本按需重建，配对位置变了或来源清空则失效', async () => {
+    const facts = { kind: 'result' as const, call: { name: 'read', input: { path: 'a.ts' }, message: 1, block: 0 }, length: 12, isError: false };
+    let current: typeof facts | { kind: 'result'; call: { name: string; input: Record<string, string>; message: number; block: number }; length: number; isError: boolean } = facts;
+    let cleared = false;
+    const tool = vi.fn(async () => { if (cleared) throw Error('transcript-byte-generation-changed'); return current; });
+    const replay = new TerminalDisplayReplay(async () => { throw Error('text source not used'); }, tool), h = await setup(record => replay.read(record));
+    const source = (format: number): DisplayReplaySource => ({ kind: 'tool', via: 'owner', conversationId: 'test', runId: 'run', length: 0, markdown: false,
+      format, call: { message: 1, block: 0 }, cursor: { conversationId: 'test', ownerEpoch: 1, revision: 1, message: 2, block: 0, offset: 0 } });
+    try {
+      const card = toolCardSegment({ blockId: 'card', groupId: 'run:tool:t1' }, facts);
+      expect(card.text).toBe('Read(a.ts)\n完成 · 结果 12 字');
+      await h.store.append(card, true, undefined, true, source(TOOL_HISTORY_CARD_FORMAT));
+      // 旧格式的卡片：存的是旧文本，回读时按当前格式重建并被接受
+      await h.store.append({ blockId: 'stale', role: 'tool', text: '旧格式卡片', contentOffset: 0, final: true }, true, undefined, true, source(TOOL_HISTORY_CARD_FORMAT - 1));
+      for (let i = 0; i < 80; i++) await h.store.append({ blockId: `filler-${i}`, role: 'user', text: `filler ${i}`, contentOffset: 0, final: true });
+      const page = await h.store.page(-2, false);
+      expect(page.segments.slice(0, 2).map(item => [item.blockId, item.text])).toEqual([
+        ['stale', 'Read(a.ts)\n完成 · 结果 12 字'], ['card', 'Read(a.ts)\n完成 · 结果 12 字']]);
+      expect(tool).toHaveBeenCalled();
+    } finally { replay.close(); }
+    // 同版本来源事实变了：逐字校验失败；配对位置变了：来源已变；清空：失效
+    const direct = new TerminalDisplayReplay(async () => '', tool);
+    try {
+      current = { ...facts, length: 99 };
+      const segment = await direct.read({ replay: source(TOOL_HISTORY_CARD_FORMAT), blockId: 'card', role: 'tool', contentOffset: 0, length: 0, final: true, digest: '' });
+      expect(segment.text).toBe('Read(a.ts)\n完成 · 结果 99 字');
+      current = { ...facts, call: { ...facts.call, block: 3 } };
+      await expect(direct.read({ replay: source(TOOL_HISTORY_CARD_FORMAT), blockId: 'card', role: 'tool', contentOffset: 0, length: 0, final: true, digest: '' }))
+        .rejects.toThrow('source-changed');
+      cleared = true;
+      await expect(direct.read({ replay: source(TOOL_HISTORY_CARD_FORMAT), blockId: 'card', role: 'tool', contentOffset: 0, length: 0, final: true, digest: '' }))
+        .rejects.toThrow('generation-changed');
+    } finally { direct.close(); }
   });
 
   it('rejects unavailable capacity, then admits new content without deleting retained pages', async () => {

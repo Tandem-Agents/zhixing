@@ -124,6 +124,20 @@ describe("trackMessages", () => {
     expect(JSON.stringify(blocks)).not.toContain("file-diff");
   });
 
+  it("未执行展示件只把类型化处置事实写进结果块", () => {
+    const { newMessages, pending } = fresh();
+    trackMessages({ type: "tool_end", id: "w1", name: "write", duration: 0, result: {
+      content: "Not started: this batch selected the exclusive control call \"control\".", isError: true,
+      presentation: { kind: "not-started", toolCallId: "w1", reason: "exclusive-control", selectedTool: "control" },
+    } }, newMessages, pending);
+    trackMessages({ type: "turn_complete", turnCount: 1, usage: { inputTokens: 0, outputTokens: 0 } }, newMessages, pending);
+    expect((newMessages[0]?.content as ToolResultBlock[])[0]).toEqual({
+      type: "tool_result", toolUseId: "w1", isError: true,
+      content: "Not started: this batch selected the exclusive control call \"control\".",
+      disposition: { kind: "not-started", reason: "exclusive-control", selectedTool: "control" },
+    });
+  });
+
   it("tool_end 的 grep presentation 不进入 transcript", () => {
     const { newMessages, pending } = fresh();
 

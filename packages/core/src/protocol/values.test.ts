@@ -18,6 +18,15 @@ describe("消息来源协议", () => {
     expect(() => validateMessage({ ...message, content: [{ type: "tool_result", toolUseId: "tool-1", content: "ok" }], inputIdentity: identity })).toThrow();
   });
 
+  it("工具结果的处置事实只接受封闭联合里的确切形状", () => {
+    const disposition = { kind: "not-started", reason: "exclusive-control", selectedTool: "control" };
+    const block = (value: unknown) => ({ role: "user", content: [{ type: "tool_result", toolUseId: "tool-1", content: "x", isError: true, disposition: value }] });
+    expect(validateMessage(block(disposition))).toEqual(block(disposition));
+    for (const invalid of [{ ...disposition, kind: "failed" }, { ...disposition, extra: 1 }, { kind: "not-started" }, "not-started", null]) {
+      expect(() => validateMessage(block(invalid))).toThrow("disposition");
+    }
+  });
+
   it.each([
     { id: "", source: identity.source },
     { ...identity, source: { kind: "conversation" } },

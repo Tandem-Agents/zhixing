@@ -1,4 +1,5 @@
 import { artifactJsonIndex, assertArtifactRef, type ArtifactStore } from '@zhixing/core/authority';
+import { readTranscriptToolFacts } from '@zhixing/core/transcript';
 import type { ArtifactRef, ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, ConversationCommitSummary } from '@zhixing/core/contracts';
 import { ConversationReadIndex, type CommitPointer, type ReadMeta } from './conversation-read-index.js';
 import { assertConversationCommitSummary } from './conversation-run-contracts.js';
@@ -145,6 +146,25 @@ export class ConversationBodyReader {
       const keys = [...messagePath, 'content', block], read = (field: string) => this.json.value(source.ref, [...keys, field], 4096);
       const type = await read('type'), role = await this.json.value(source.ref, [...messagePath, 'role'], 128);
       if (typeof type !== 'string' || typeof role !== 'string') throw Error('conversation-body-kind');
+      if (type === 'tool_use' || type === 'tool_result') {
+        // 工具块按整块给出有界事实：倒序时偏移 0 表示该块已消费，正序只在偏移 0 处给出
+        const runIndex = await this.json.value(source.ref, [...source.keys, 'runIndex'], 128);
+        if (!Number.isSafeInteger(runIndex)) throw Error('conversation-body-run-index');
+        const due = reverse ? offset !== 0 : offset === 0;
+        const factsRead = due ? await readTranscriptToolFacts(this.json, source.ref, source.keys, message, block, type) : undefined;
+        // 配对还没查完：不消费这个块；已取到的片段先交付，否则按准备中返回原位置，稍后从保留的进度续查
+        if (factsRead?.kind === 'pending') return { fragments, hasMore: true, reset: false, cursor: position(),
+          ...(fragments.length ? {} : { preparing: { bytes: 0, total: 1 } }) };
+        const tool = factsRead?.kind === 'facts' ? factsRead.facts : undefined;
+        if (tool) {
+          const toolId = tool.kind === 'result' ? await read('toolUseId') : await read('id');
+          fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type,
+            ...(typeof toolId === 'string' ? { toolId } : {}), ...(tool.kind === 'result' && tool.isError ? { isError: true } : {}),
+            text: '', offset: 0, length: 0, final: true, tool });
+        }
+        if (!reverse) { block++; offset = 0; if (tool) return { fragments, hasMore: block < contents.units, reset: false, cursor: position() }; continue; }
+        block--; offset = MAX; continue;
+      }
       const field = type === 'text' ? 'text' : type === 'thinking' ? 'thinking' : type === 'tool_use' ? 'name' : type === 'tool_result' ? 'content' : undefined;
       const node = field && await this.json.node(source.ref, [...keys, field]);
       const runIndex = await this.json.value(source.ref, [...source.keys, 'runIndex'], 128);

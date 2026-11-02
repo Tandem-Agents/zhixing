@@ -7,6 +7,7 @@ import { TerminalManagedFiles } from './managed-files.js';
 import { terminalPhysicalStep } from './physical-step.js';
 import { createHash } from 'node:crypto';
 import type { DisplayReplayRecord, DisplayReplaySource } from './display-replay.js';
+import { TOOL_HISTORY_CARD_FORMAT } from '../tool-card-format.js';
 
 const PAGE_BYTES = 224 * 1024;
 const INDEX_BYTES = 16;
@@ -419,8 +420,10 @@ export class TerminalDisplayStore {
   async #replay(record: DisplayReplayRecord): Promise<TerminalDisplaySegment> {
     if (!this.replay) throw Error('terminal-display-replay-unavailable');
     const segment = await this.replay(record);
-    if (segment.blockId !== record.blockId || segment.role !== record.role || segment.contentOffset !== record.contentOffset ||
-        segment.text.length !== record.length || createHash('sha256').update(segment.text).digest('hex') !== record.digest)
+    // 工具卡片由当前格式重建：格式版本变了只按需重建这一段，不与旧文本逐字比对；同版本仍逐字校验
+    const rebuilt = record.replay.kind === 'tool' && record.replay.format !== TOOL_HISTORY_CARD_FORMAT;
+    if (segment.blockId !== record.blockId || segment.contentOffset !== record.contentOffset || !rebuilt && (segment.role !== record.role ||
+        segment.text.length !== record.length || createHash('sha256').update(segment.text).digest('hex') !== record.digest))
       throw Error('terminal-display-replay-source-changed');
     return segment;
   }

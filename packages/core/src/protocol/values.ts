@@ -1,8 +1,9 @@
 import type { EnvironmentRequirement } from "../contracts/protocol.js";
-import type {
-  ContentBlock,
-  ImageSource,
-  Message,
+import {
+  isToolResultDisposition,
+  type ContentBlock,
+  type ImageSource,
+  type Message,
 } from "../types/messages.js";
 import type { UserTurnInput } from "../types/user-input.js";
 import { canonicalize, compareCanonicalStrings } from "./canonical.js";
@@ -209,7 +210,7 @@ function validateContentBlock(value: unknown, label: string): ContentBlock {
       }
       return value as unknown as ContentBlock;
     case "tool_result":
-      assertAllowedKeys(value, ["content", "isError", "toolUseId", "type"], label);
+      assertAllowedKeys(value, ["content", "disposition", "isError", "toolUseId", "type"], label);
       if (!("content" in value) || !("toolUseId" in value)) {
         throw new TypeError(`${label} is incomplete`);
       }
@@ -217,6 +218,9 @@ function validateContentBlock(value: unknown, label: string): ContentBlock {
       assertString(value.content, `${label} content`);
       if (value.isError !== undefined && typeof value.isError !== "boolean") {
         throw new TypeError(`${label} isError must be boolean`);
+      }
+      if (value.disposition !== undefined && !isToolResultDisposition(value.disposition)) {
+        throw new TypeError(`${label} disposition is invalid`);
       }
       return value as unknown as ContentBlock;
     case "thinking":

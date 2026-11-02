@@ -1,5 +1,5 @@
 import type { AgentYield } from "@zhixing/core/loop";
-import type { ContentBlock, Message, TokenUsage, ToolResult } from "@zhixing/core/types";
+import { isToolResultDisposition, type ContentBlock, type Message, type TokenUsage, type ToolResult } from "@zhixing/core/types";
 
 /**
  * The finite event stream emitted by one Intelligence Kernel run.
@@ -106,10 +106,11 @@ function isContentBlock(value: unknown): value is ContentBlock {
       );
     case "tool_result":
       return (
-        hasExactKeys(value, ["type", "toolUseId", "content"], ["isError"]) &&
+        hasExactKeys(value, ["type", "toolUseId", "content"], ["isError", "disposition"]) &&
         typeof value.toolUseId === "string" &&
         typeof value.content === "string" &&
-        (value.isError === undefined || typeof value.isError === "boolean")
+        (value.isError === undefined || typeof value.isError === "boolean") &&
+        (value.disposition === undefined || isToolResultDisposition(value.disposition))
       );
     case "thinking":
       return (

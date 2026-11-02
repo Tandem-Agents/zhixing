@@ -49,6 +49,7 @@ const entry = [
     "src/advancement/proposal-identity.ts",
     "src/advancement/proposal-messages.ts",
     "src/advancement/execution-context.ts",
+    "src/tool-display-names.ts",
     "src/resources/index.ts",
     "src/security/index.ts",
     "src/confirmation/index.ts",

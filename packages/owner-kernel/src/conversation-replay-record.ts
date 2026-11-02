@@ -56,7 +56,7 @@ export async function readConversationReplayRecord(artifacts: ArtifactStore, ref
     for (let b = 0; b < content.units; b++) {
       const blockKeys = [...keys, 'content', b], type = await value([...blockKeys, 'type'], 128);
       const allowed = type === 'text' ? ['type', 'text'] : type === 'thinking' ? ['type', 'thinking', 'signature'] :
-        type === 'tool_result' ? ['type', 'content', 'toolUseId', 'isError'] : type === 'tool_use' ? ['type', 'id', 'name', 'input'] :
+        type === 'tool_result' ? ['type', 'content', 'toolUseId', 'isError', 'disposition'] : type === 'tool_use' ? ['type', 'id', 'name', 'input'] :
         type === 'image' ? ['type', 'source'] : [];
       const block: Record<string, unknown> = {};
       for (const node of await fields(blockKeys, allowed)) {

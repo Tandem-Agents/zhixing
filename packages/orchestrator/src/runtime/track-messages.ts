@@ -15,7 +15,7 @@
  */
 
 import type { AgentYield } from "@zhixing/core/loop";
-import type { Message, ToolResultBlock } from "@zhixing/core/types";
+import { toolResultDisposition, type Message, type ToolResultBlock } from "@zhixing/core/types";
 
 export function trackMessages(
   event: AgentYield,
@@ -27,14 +27,18 @@ export function trackMessages(
       newMessages.push(event.message);
       break;
 
-    case "tool_end":
+    case "tool_end": {
+      // 展示件只在实时事件里；持久的只是其中按常规未执行的类型化原因
+      const disposition = toolResultDisposition(event.result.presentation);
       pendingToolResults.push({
         type: "tool_result",
         toolUseId: event.id,
         content: event.result.content,
         ...(event.result.isError === undefined ? {} : { isError: event.result.isError }),
+        ...(disposition ? { disposition } : {}),
       });
       break;
+    }
 
     case "turn_complete":
       if (pendingToolResults.length > 0) {

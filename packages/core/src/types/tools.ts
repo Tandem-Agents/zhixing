@@ -138,6 +138,8 @@ export interface TurnContext {
 }
 
 export interface ConfirmationDisplayContext {
+  /** 工具的用户可读名称（例如 MCP 工具的“工具（服务）”）；内置工具由 core 的统一名称表给出，无需在此声明。 */
+  readonly toolDisplayName?: string;
   readonly executionDeviceId?: string;
   readonly workscene?: {
     readonly sceneId: string;
@@ -270,7 +272,20 @@ export interface ToolExecutionContext {
 export type ToolPresentationArtifact =
   | FileDiffPresentationArtifact
   | GrepResultsPresentationArtifact
-  | SubAgentResultPresentationArtifact;
+  | SubAgentResultPresentationArtifact
+  | NotStartedPresentationArtifact;
+
+/**
+ * 同批调用按调度规则没有启动（本批选了独占的控制调用）：给模型的结果原文照常，
+ * 用户侧据此显示“未执行”，不当成失败。
+ */
+export interface NotStartedPresentationArtifact {
+  kind: "not-started";
+  toolCallId: string;
+  reason: "exclusive-control";
+  /** 本批被选中执行的控制调用的工具名 */
+  selectedTool: string;
+}
 
 export interface SubAgentResultPresentationArtifact {
   kind: "sub-agent-result";

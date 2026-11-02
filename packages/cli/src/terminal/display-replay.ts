@@ -1,14 +1,20 @@
-import type { ConversationBodyCursor } from '@zhixing/core/contracts';
+import type { ConversationBodyCursor, TranscriptToolFacts } from '@zhixing/core/contracts';
 import type { TranscriptBodyCursor } from '@zhixing/core/transcript';
 import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
 import { sliceBodyNodes } from '@zhixing/terminal-ui/body-model';
 import { HistoryBodyRangeCache } from './body-projection.js';
+import { formatHistoryToolCard } from '../tool-card-format.js';
 
 /** Only a source already read from durable history can enter the cold tier.
  * Live output, notices and unpersisted tool presentations have no such locator. */
 export type DisplayReplaySource = { readonly conversationId: string; readonly length: number; readonly markdown: boolean } & (
   { readonly kind: 'owner'; readonly cursor: ConversationBodyCursor; readonly runId: string } |
-  { readonly kind: 'shard'; readonly cursor: TranscriptBodyCursor });
+  { readonly kind: 'shard'; readonly cursor: TranscriptBodyCursor } |
+  /** 工具卡片由结果块的有界事实派生：绑定结果块坐标、配对调用的位置与格式版本，回放时重读并按当前格式重建 */
+  ({ readonly kind: 'tool'; readonly format: number; readonly call?: { readonly message: number; readonly block: number } } & (
+    { readonly via: 'owner'; readonly cursor: ConversationBodyCursor; readonly runId: string } |
+    { readonly via: 'shard'; readonly cursor: TranscriptBodyCursor })));
+export type ToolReplaySource = Extract<DisplayReplaySource, { kind: 'tool' }>;
 export interface DisplayReplayRecord {
   readonly replay: DisplayReplaySource;
   readonly blockId: string; readonly groupId?: string; readonly role: string;
@@ -16,14 +22,32 @@ export interface DisplayReplayRecord {
   readonly digest: string;
 }
 
+/** 历史工具卡片的显示段：纯文本、整段一次给出。 */
+export function toolCardSegment(base: { readonly blockId: string; readonly groupId?: string }, facts: TranscriptToolFacts): TerminalDisplaySegment {
+  const card = formatHistoryToolCard(facts), text = card.text;
+  return { ...base, role: card.failed ? 'tool-error' : 'tool', text, contentOffset: 0, final: true,
+    body: { version: 1, revision: 1, kind: 'plain', end: true, context: { nodes: [{ kind: 'paragraph', origin: 0, from: 0, to: text.length,
+      anchor: true, runs: [{ from: 0, to: text.length, text, style: 0 }] }] } } };
+}
+
 /** Independent parser owner: a cold page read must not contend with the parser
  * which is currently producing an append inside the display queue. */
 export class TerminalDisplayReplay {
   readonly #parser = new HistoryBodyRangeCache();
-  constructor(readonly source: (source: DisplayReplaySource, offset: number) => Promise<string>) {}
+  constructor(readonly source: (source: DisplayReplaySource, offset: number) => Promise<string>,
+    readonly tool?: (source: ToolReplaySource) => Promise<TranscriptToolFacts>) {}
   close(): void { this.#parser.close(); }
   async read(record: DisplayReplayRecord): Promise<TerminalDisplaySegment> {
     const { replay, blockId, groupId, role, contentOffset, length, final } = record;
+    if (replay.kind === 'tool') {
+      // 重读结果块即复核可见性（清空、删除后报失效）；配对调用的位置不符说明来源已变
+      if (!this.tool) throw Error('terminal-display-replay-tool-unavailable');
+      const facts = await this.tool(replay);
+      const call = facts.kind === 'result' ? facts.call : undefined;
+      if ((replay.call?.message ?? -1) !== (call?.message ?? -1) || (replay.call?.block ?? -1) !== (call?.block ?? -1))
+        throw Error('terminal-display-replay-source-changed');
+      return toolCardSegment({ blockId, ...(groupId ? { groupId } : {}) }, facts);
+    }
     const end = contentOffset + length;
     // Even a fully cached parser range must revalidate source visibility. A
     // clear/delete can retire an unchanged immutable line or artifact.

@@ -63,7 +63,7 @@ import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import { isUserFacingError } from "../types/errors.js";
 import type { LLMRoles, ResolvedRoleThinking } from "../types/llm.js";
-import type { ToolResultBlock, ToolUseBlock } from "../types/messages.js";
+import { toolResultDisposition, type ToolResultBlock, type ToolUseBlock } from "../types/messages.js";
 import type {
   ToolDefinition,
   ToolExecutionContext,
@@ -179,8 +179,21 @@ function gateExclusiveControl(
     planned: toolCalls.map((call) =>
       call === only
         ? { kind: "run", call, tool: toolMap.get(call.name) }
-        : { kind: "reject", call, result: skipped }
+        // 给模型的原文不变；展示件让用户侧显示“未执行”而不是失败
+        : { kind: "reject", call, result: { ...skipped, presentation: { kind: "not-started", toolCallId: call.id, reason: "exclusive-control", selectedTool: only.name } } }
     ),
+  };
+}
+
+/** 未启动的调用：给模型的结果原文照常；按常规未执行的类型化原因随块持久，展示件不持久。 */
+function rejectedResultBlock(call: ToolUseBlock, result: ToolResult): ToolResultBlock {
+  const disposition = toolResultDisposition(result.presentation);
+  return {
+    type: "tool_result",
+    toolUseId: call.id,
+    content: result.content,
+    isError: true,
+    ...(disposition ? { disposition } : {}),
   };
 }
 
@@ -226,12 +239,7 @@ async function* runSerialBatch(
 
     if (planned.kind === "reject") {
       await observeToolOutcome(eventBus, call, "refused", planned.result.content);
-      results.push({
-        type: "tool_result",
-        toolUseId: call.id,
-        content: planned.result.content,
-        isError: true,
-      });
+      results.push(rejectedResultBlock(call, planned.result));
       yield {
         type: "tool_end",
         id: call.id,
@@ -518,12 +526,7 @@ async function* runParallelBatch(
 
     if (planned.kind === "reject") {
       await observeToolOutcome(eventBus, call, "refused", planned.result.content);
-      results.push({
-        type: "tool_result",
-        toolUseId: call.id,
-        content: planned.result.content,
-        isError: true,
-      });
+      results.push(rejectedResultBlock(call, planned.result));
 
       yield {
         type: "tool_end",

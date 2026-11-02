@@ -5,7 +5,7 @@ import { createPlatformSecretStore } from '@zhixing/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
-import type { ConversationBodyCursor, ConversationBodyPage } from '@zhixing/core/contracts';
+import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing/core/contracts';
 import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
 import { isAbsolute } from 'node:path';
 import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
@@ -51,7 +51,8 @@ import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
-import { TerminalDisplayReplay, type DisplayReplaySource } from './display-replay.js';
+import { TerminalDisplayReplay, toolCardSegment, type DisplayReplaySource, type ToolReplaySource } from './display-replay.js';
+import { TOOL_HISTORY_CARD_FORMAT } from '../tool-card-format.js';
 import { encodeBodyPage, type BodyPageRevision } from '@zhixing/terminal-ui/body-model';
 import { textFragments } from './history-segments.js';
 import { TerminalBodyWork } from './body-work.js';
@@ -180,7 +181,8 @@ class TerminalApplication {
   #selection?: { id: string; allowed: ReadonlySet<string>; field: boolean; resolve(selected?: TerminalSelectionResponse): void };
   #history?: TerminalHistoryState;
   readonly #historyParser = new HistoryBodyRangeCache();
-  readonly #displayReplay = new TerminalDisplayReplay((source, offset) => this.#readDisplaySource(source, offset));
+  readonly #displayReplay = new TerminalDisplayReplay((source, offset) => this.#readDisplaySource(source, offset),
+    source => this.#readToolFacts(source));
   #displayReplayReader?: { conversationId: string; reader: TranscriptByteReader };
   #displayStart?: number;
   #displayRevision = 0;
@@ -1104,7 +1106,14 @@ class TerminalApplication {
       const groupId = source.toolId ? `${source.cursor.shard}:${source.runIndex}:tool:${source.toolId}` : `${source.cursor.shard}:${source.runIndex}:${source.message}:${role}`;
       const replay: DisplayReplaySource = { kind: 'shard', conversationId: history.conversationId, cursor: source.cursor,
         length: source.length, markdown: source.type === 'text' && source.role === 'assistant' };
-      if (source.type === 'text' && source.role === 'assistant') {
+      if (source.tool) {
+        // 工具卡片由读取器给的有界事实派生；冷层只存结果块坐标与格式版本
+        const call = source.tool.kind === 'result' ? source.tool.call : undefined;
+        await this.#display.append(toolCardSegment({ blockId, groupId }, source.tool), true, undefined, true, { kind: 'tool', via: 'shard',
+          conversationId: history.conversationId, cursor: source.cursor, length: 0, markdown: false, format: TOOL_HISTORY_CARD_FORMAT,
+          ...(call ? { call: { message: call.message, block: call.block } } : {}) });
+        state.cursor = { ...source.cursor, offset: 0 }; projected++;
+      } else if (source.type === 'text' && source.role === 'assistant') {
         const before = state.cursor?.shard === source.cursor.shard && state.cursor.from === source.cursor.from && state.cursor.message === source.message && state.cursor.block === source.block
           ? Math.min(state.cursor.offset, source.length) : source.length;
         const parsed = await this.#bodyWork.run(() => this.#historyParser.read(`${history.conversationId}:${source.cursor.identity ?? ''}:${blockId}`, source.length, async offset => {
@@ -1186,7 +1195,13 @@ class TerminalApplication {
       const groupId = source.toolId ? `${source.runId}:tool:${source.toolId}` : `${source.runId}:${source.message}:${role}`;
       const replay: DisplayReplaySource = { kind: 'owner', conversationId: history.conversationId, runId: source.runId, cursor: source.cursor,
         length: source.length, markdown: source.type === 'text' && source.role === 'assistant' };
-      if (source.type === 'text' && source.role === 'assistant') {
+      if (source.tool) {
+        // 工具卡片由读取器给的有界事实派生；冷层只存结果块坐标与格式版本
+        const call = source.tool.kind === 'result' ? source.tool.call : undefined;
+        await append(toolCardSegment({ blockId, groupId }, source.tool), { kind: 'tool', via: 'owner', conversationId: history.conversationId,
+          runId: source.runId, cursor: source.cursor, length: 0, markdown: false, format: TOOL_HISTORY_CARD_FORMAT,
+          ...(call ? { call: { message: call.message, block: call.block } } : {}) }, { ...source.cursor, offset: 0 }); projected++;
+      } else if (source.type === 'text' && source.role === 'assistant') {
         const before = history.bodyCursor?.revision === source.cursor.revision && history.bodyCursor.message === source.message && history.bodyCursor.block === source.block
           ? Math.min(history.bodyCursor.offset, source.length) : source.length;
         const parsed = await this.#bodyWork.run(() => this.#historyParser.read(`${history.conversationId}:${source.cursor.ownerEpoch}:${source.cursor.revision}:${source.cursor.clearId ?? ''}:${blockId}`, source.length, async offset => {
@@ -1258,6 +1273,38 @@ class TerminalApplication {
     }
   }
 
+  /** 重读工具卡片的结果块：正序读该块即走读取器的可见性复核（清空、删除后报失效）。 */
+  async #readToolFacts(source: ToolReplaySource): Promise<TranscriptToolFacts> {
+    for (;;) {
+      this.#abort.signal.throwIfAborted();
+      let page: { readonly reset?: boolean; readonly preparing?: unknown; readonly fragments: readonly { readonly message: number; readonly block: number; readonly tool?: TranscriptToolFacts }[] };
+      if (source.via === 'owner') {
+        page = await this.#conversation.bodyPage(source.conversationId, { ...source.cursor, offset: 0 }, { direction: 'forward', runId: source.runId });
+      } else {
+        const cursor = source.cursor as import('@zhixing/core/transcript').TranscriptBodyCursor;
+        page = await (await this.#displayReplayBodyReader(source.conversationId)).page({ cursor: { ...cursor, offset: 0 }, forward: true, signal: this.#abort.signal });
+      }
+      if (page.reset) throw Error('terminal-history-generation-changed');
+      if (!page.preparing) {
+        const fragment = page.fragments[0];
+        if (!fragment?.tool || fragment.message !== source.cursor.message || fragment.block !== source.cursor.block)
+          throw Error('terminal-display-replay-source-range');
+        return fragment.tool;
+      }
+      await new Promise<void>(setImmediate);
+    }
+  }
+
+  async #displayReplayBodyReader(conversationId: string) {
+    if (this.#displayReplayReader?.conversationId !== conversationId) {
+      const storage = await this.#readOnlyStorage();
+      await this.#displayReplayReader?.reader.close();
+      this.#abort.signal.throwIfAborted();
+      this.#displayReplayReader = { conversationId, reader: storage.openBodyReader(conversationId) };
+    }
+    return this.#displayReplayReader.reader;
+  }
+
   async #readDisplaySource(source: DisplayReplaySource, offset: number): Promise<string> {
     for (;;) {
       this.#abort.signal.throwIfAborted();
@@ -1270,13 +1317,9 @@ class TerminalApplication {
           return fragment.text;
         }
       } else {
-        if (this.#displayReplayReader?.conversationId !== source.conversationId) {
-          const storage = await this.#readOnlyStorage();
-          await this.#displayReplayReader?.reader.close();
-          this.#abort.signal.throwIfAborted();
-          this.#displayReplayReader = { conversationId: source.conversationId, reader: storage.openBodyReader(source.conversationId) };
-        }
-        const page = await this.#displayReplayReader.reader.page({ cursor: { ...source.cursor, offset }, forward: true, signal: this.#abort.signal });
+        // 工具卡片不按原文回读，由 #readToolFacts 重建
+        if (source.kind !== 'shard') throw Error('terminal-display-replay-source-kind');
+        const page = await (await this.#displayReplayBodyReader(source.conversationId)).page({ cursor: { ...source.cursor, offset }, forward: true, signal: this.#abort.signal });
         if (!page.preparing) {
           const fragment = page.fragments[0];
           if (!fragment || fragment.offset !== offset) throw Error('terminal-display-replay-source-range');

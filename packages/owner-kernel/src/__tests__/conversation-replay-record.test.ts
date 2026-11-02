@@ -34,7 +34,14 @@ describe('bounded conversation replay validation', () => {
         const ref = await store.put(Buffer.from(text));
         await expect(readConversationReplayRecord(store, ref, 'run-1', [])).rejects.toThrow('not canonical');
       }
-      for (const content of [[{ type: 'text', text: 3 }], [{ type: 'tool_use', name: 'Read', id: 'a', input: [] }], [{ type: 'text', text: 'hi', extra: true }]]) {
+      // 结果块的处置事实是可选封闭字段：确切形状接受，其它形状拒绝
+      const disposition = { kind: 'not-started', reason: 'exclusive-control', selectedTool: 'control' };
+      const accepted = await store.put(Buffer.from(canonicalize({ ...record, messages: [record.messages[0],
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'write', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'a', content: 'x', isError: true, disposition }] }] })));
+      await expect(readConversationReplayRecord(store, accepted, 'run-1', [])).resolves.toBeDefined();
+      for (const content of [[{ type: 'text', text: 3 }], [{ type: 'tool_use', name: 'Read', id: 'a', input: [] }], [{ type: 'text', text: 'hi', extra: true }],
+        [{ type: 'tool_result', toolUseId: 'a', content: 'x', disposition: { ...disposition, kind: 'failed' } }]]) {
         const ref = await store.put(Buffer.from(canonicalize({ ...record, messages: [{ role: 'user', content }] })));
         await expect(readConversationReplayRecord(store, ref, 'run-1', [])).rejects.toThrow();
       }

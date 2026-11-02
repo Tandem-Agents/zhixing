@@ -60,6 +60,31 @@ export interface ConversationBodyFragment {
   readonly offset: number;
   readonly length: number;
   readonly final: boolean;
+  /** 工具块只给有界事实（text 为空串），不给原文；格式化留在接入面。 */
+  readonly tool?: TranscriptToolFacts;
+}
+
+/**
+ * 工具块的有界事实，只含实际读到的值。结果块在同一运行记录里按 toolId 配对它的调用；
+ * 有结果的调用块不单独给出，没有结果的调用块给出 kind 'call'。
+ */
+export type TranscriptToolFacts =
+  | {
+      readonly kind: 'result';
+      /** 配对到的调用：名称、白名单目标输入（每项有界）与它在运行记录里的位置；没配对到时缺省 */
+      readonly call?: TranscriptToolCallFacts & { readonly message: number; readonly block: number };
+      /** 结果原文总长度（UTF-16 单元，取自索引，不读原文） */
+      readonly length: number;
+      readonly isError: boolean;
+      /** 只在失败时读取的有界开头 */
+      readonly head?: string;
+      readonly disposition?: import('../types/messages.js').ToolResultDisposition;
+    }
+  | ({ readonly kind: 'call' } & TranscriptToolCallFacts);
+
+export interface TranscriptToolCallFacts {
+  readonly name: string;
+  readonly input: Readonly<Record<string, string>>;
 }
 export interface ConversationBodyPage {
   readonly historyThroughInputLsn?: number;

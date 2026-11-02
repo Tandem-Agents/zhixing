@@ -55,6 +55,38 @@ export interface ToolResultBlock {
   toolUseId: string;
   content: string;
   isError?: boolean;
+  /**
+   * 执行处置事实：只记录调用没有按常规执行的类型化原因，供恢复历史如实显示；不进模型、不进 provider 出站。
+   * 缺省即常规执行（含旧记录），不从 content 原文推断。
+   */
+  disposition?: ToolResultDisposition;
+}
+
+/** 封闭联合：目前只有“同批选了独占控制调用，本调用未启动”。 */
+export type ToolResultDisposition = {
+  kind: "not-started";
+  reason: "exclusive-control";
+  /** 本批被选中执行的控制调用的工具名 */
+  selectedTool: string;
+};
+
+/** 持久处置事实的严格形状校验：只接受封闭联合里的确切字段。 */
+export function isToolResultDisposition(value: unknown): value is ToolResultDisposition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).sort().join(",") === "kind,reason,selectedTool" &&
+    record.kind === "not-started" && record.reason === "exclusive-control" &&
+    typeof record.selectedTool === "string" && record.selectedTool.length > 0 && record.selectedTool.length <= 256;
+}
+
+/** 从调用结果的展示件导出要持久的处置事实；展示件本身不持久。 */
+export function toolResultDisposition(
+  presentation: { readonly kind: string; readonly reason?: unknown; readonly selectedTool?: unknown } | undefined,
+): ToolResultDisposition | undefined {
+  return presentation?.kind === "not-started" && presentation.reason === "exclusive-control" &&
+    typeof presentation.selectedTool === "string"
+    ? { kind: "not-started", reason: "exclusive-control", selectedTool: presentation.selectedTool }
+    : undefined;
 }
 
 /**

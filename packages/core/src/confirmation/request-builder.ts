@@ -26,6 +26,7 @@ import type {
 } from "./types.js";
 import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "../identity/index.js";
 import { validateMcpCandidate } from "../mcp-management/application.js";
+import { builtinToolDisplayName } from "../tool-display-names.js";
 import {
   suggestTrustAdministrationPatterns,
   type TrustAdministrationSuggestedPattern as SuggestedPattern,
@@ -126,9 +127,9 @@ export function buildDisplayBody(
     };
   }
 
-  // Fallback 通用格式
-  const summary = `${toolName} ${summarizeArgs(input)}`;
-  return { kind: "generic", summary };
+  // Fallback 通用格式：工具名已在标题里（buildPanelTitle），正文只列参数
+  const args = summarizeArgs(input);
+  return { kind: "generic", summary: !args || args === "{}" ? "无参数" : `参数：${args}` };
 }
 
 function asString(value: unknown): string {
@@ -148,13 +149,14 @@ function summarizeArgs(input: Record<string, unknown>): string {
 /**
  * 面板标题——按工具类型给出友好名。
  */
-export function buildPanelTitle(toolName: string): string {
+export function buildPanelTitle(toolName: string, displayContext?: ConfirmationDisplayContext): string {
   const name = toolName.toLowerCase();
   if (name === "bash" || name === "shell") return "Bash 命令";
   if (name === "write") return "写入文件";
   if (name === "edit" || name === "str_replace") return "编辑文件";
   if (name === "read") return "读取文件";
-  return toolName;
+  // 工具自己声明的可读名（MCP 的“工具（服务）”）优先，其次内置名称表；都没有才用原名
+  return displayContext?.toolDisplayName ?? builtinToolDisplayName(toolName) ?? toolName;
 }
 
 // ─── ConfirmationOption 构造 ───
@@ -355,7 +357,7 @@ export function buildConfirmationRequest(
     input,
     params.confirmationDisplayContext,
   );
-  const title = buildPanelTitle(toolName);
+  const title = buildPanelTitle(toolName, params.confirmationDisplayContext);
   if (toolName.toLowerCase() === "mcp_connect" && body.kind === "generic") {
     const reference = params.turnOrigin?.worksceneContinuation;
     const source = reference?.returnConversationId ?? reference?.conversationId;

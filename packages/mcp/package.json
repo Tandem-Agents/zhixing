@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./naming": {
+      "types": "./dist/naming.d.ts",
+      "import": "./dist/naming.js"
     }
   },
   "files": [

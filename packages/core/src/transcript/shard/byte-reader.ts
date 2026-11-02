@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { ArtifactJsonIndex, type ArtifactJsonIndexOptions } from '../../authority/artifact-json-index.js';
-import type { ArtifactRef } from '../../contracts/index.js';
+import type { ArtifactRef, TranscriptToolFacts } from '../../contracts/index.js';
+import { readTranscriptToolFacts } from '../tool-block-facts.js';
 import { publishedShardSize, readDirectoryView, strictOffsetOf } from './directory-view.js';
 import type { TranscriptView } from './types.js';
 
@@ -19,6 +20,7 @@ export interface TranscriptBodyFragment {
   readonly message: number; readonly block: number; readonly type: string; readonly role: string;
   readonly text: string; readonly offset: number; readonly length: number; readonly final: boolean;
   readonly toolId?: string; readonly isError?: boolean;
+  readonly tool?: TranscriptToolFacts;
 }
 export interface TranscriptBodyPage {
   readonly fragments: readonly TranscriptBodyFragment[]; readonly cursor?: TranscriptBodyCursor;
@@ -284,6 +286,24 @@ export class TranscriptByteReader {
       if (block >= content.units) return { fragments: [], cursor, hasMore: false };
       const keys = ['messages', message, 'content', block], kind = await value([...keys, 'type']), role = await value(['messages', message, 'role']);
       if (typeof kind !== 'string' || typeof role !== 'string') throw Error('transcript-byte-kind');
+      if (kind === 'tool_use' || kind === 'tool_result') {
+        // 工具块按整块给出有界事实：倒序时偏移 0 表示该块已消费，正序只在偏移 0 处给出
+        const runIndex = await value(['runIndex']), runId = await value(['runId']);
+        if (!Number.isSafeInteger(runIndex)) throw Error('transcript-byte-run-index');
+        const due = input.forward ? cursor.offset === 0 : cursor.offset !== 0;
+        const read = due ? await readTranscriptToolFacts(this.json, ref, [], message, block, kind) : undefined;
+        // 配对还没查完：不消费这个块，按准备中返回原位置，稍后重读时从保留的进度续查
+        if (read?.kind === 'pending') return { fragments: [], cursor: { ...cursor, message, block }, hasMore: true, preparing: { bytes: 0, total: 1 } };
+        const tool = read?.kind === 'facts' ? read.facts : undefined;
+        const fragmentCursor = { ...cursor, message, block, offset: 0 };
+        cursor = { ...cursor, message, ...(input.forward ? { block: block + 1, offset: 0 } : { block: block - 1, offset: MAX }) };
+        if (!tool) continue;
+        const toolId = tool.kind === 'result' ? await value([...keys, 'toolUseId']) : await value([...keys, 'id']);
+        return { fragments: [{ cursor: fragmentCursor, runIndex: runIndex as number, ...(typeof runId === 'string' ? { runId } : {}),
+          message, block, type: kind, role, text: '', offset: 0, length: 0, final: true,
+          ...(typeof toolId === 'string' ? { toolId } : {}), ...(tool.kind === 'result' && tool.isError ? { isError: true } : {}), tool }],
+          cursor, hasMore: input.forward ? cursor.block < content.units : true };
+      }
       const field = kind === 'text' ? 'text' : kind === 'thinking' ? 'thinking' : kind === 'tool_use' ? 'name' : kind === 'tool_result' ? 'content' : undefined;
       const node = field ? await this.json.node(ref, [...keys, field]) : undefined;
       const offset = cursor.offset;

@@ -9,6 +9,7 @@ export type {
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
+  ToolResultDisposition,
   ToolUseBlock,
 } from "./messages.js";
 export {
@@ -21,6 +22,8 @@ export {
   findLastUserIndex,
   hasToolCalls,
   replaceFirstText,
+  isToolResultDisposition,
+  toolResultDisposition,
   toolResultMessage,
   userMessage,
 } from "./messages.js";
@@ -65,6 +68,7 @@ export type {
   GrepResultsMatch,
   GrepResultsPresentationArtifact,
   GrepResultsQuerySummary,
+  NotStartedPresentationArtifact,
   SubAgentResultPresentationArtifact,
   ConfirmationDisplayContext,
   ToolDefinition,

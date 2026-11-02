@@ -7,8 +7,30 @@ import {
   formatToolDuration,
   formatToolHeader,
   formatToolResult,
+  formatHistoryToolCard,
 } from "../tool-card-format.js";
 import type { ToolResult } from "@zhixing/core";
+
+describe("formatHistoryToolCard（恢复历史的工具卡片）", () => {
+  const call = { name: "read", input: { path: "src/a.ts" }, message: 1, block: 0 };
+  it("标题与实时同一格式化，结果只说实际读到的事实，不显示用时", () => {
+    expect(formatHistoryToolCard({ kind: "result", call, length: 4096, isError: false }))
+      .toEqual({ text: "Read(src/a.ts)\n完成 · 结果 4096 字", failed: false });
+    expect(formatHistoryToolCard({ kind: "result", call, length: 0, isError: false }).text).toBe("Read(src/a.ts)\n完成（无输出）");
+    expect(formatHistoryToolCard({ kind: "result", call, length: 50_000, isError: true, head: "boom: disk full\nstack" }))
+      .toEqual({ text: "Read(src/a.ts)\nboom: disk full", failed: true });
+    expect(formatHistoryToolCard({ kind: "result", call, length: 40, isError: true, head: "用户拒绝了这次工具调用。用户的反馈:换个目录。请根据该反馈调整方案。" }).text)
+      .toBe("Read(src/a.ts)\n已拒绝 · 换个目录");
+    expect(formatHistoryToolCard({ kind: "result", call: { ...call, name: "write" }, length: 80, isError: true,
+      head: "Not started: this batch selected the exclusive control call \"propose_advancement\".",
+      disposition: { kind: "not-started", reason: "exclusive-control", selectedTool: "propose_advancement" } }))
+      .toEqual({ text: "Write(src/a.ts)\n未执行 · 本轮改为「提出推进」", failed: false });
+    expect(formatHistoryToolCard({ kind: "result", length: 3, isError: false }).text).toBe("工具调用\n完成 · 结果 3 字");
+    expect(formatHistoryToolCard({ kind: "call", name: "glob", input: { pattern: "*.ts" } }).text).toBe("Glob(*.ts)\n未记录结果");
+    // 缺处置事实的旧块不从英文原文推断“未执行”
+    expect(formatHistoryToolCard({ kind: "result", call, length: 80, isError: true, head: "Not started: this batch selected …" }).failed).toBe(true);
+  });
+});
 
 // ─── 测试用 event 工厂 ───
 
@@ -27,7 +49,14 @@ describe("displayToolName", () => {
     expect(displayToolName("write")).toBe("Write");
     expect(displayToolName("bash")).toBe("Bash");
     expect(displayToolName("web_fetch")).toBe("WebFetch");
-    expect(displayToolName("Task")).toBe("Task");
+    expect(displayToolName("Task")).toBe("子任务");
+    expect(displayToolName("schedule")).toBe("定时任务");
+  });
+
+  it("此前缺名的内置工具取统一名称表（与权限确认面同源），不再退回英文驼峰", () => {
+    expect(displayToolName("save_skill")).toBe("保存技能");
+    expect(displayToolName("mcp_connect")).toBe("接入 MCP 服务");
+    expect(displayToolName("workmode_enter")).toBe("进入工作场景");
   });
 
   it("未注册工具走 snake_case → PascalCase 通用规则", () => {
@@ -83,12 +112,12 @@ describe("formatToolHeader", () => {
 
   it("Task 工具——description 作 target", () => {
     expect(formatToolHeader("Task", { description: "research X" })).toBe(
-      "Task(research X)",
+      "子任务(research X)",
     );
   });
 
   it("target 为空时省略括号", () => {
-    expect(formatToolHeader("schedule", {})).toBe("Schedule");
+    expect(formatToolHeader("schedule", {})).toBe("定时任务");
     expect(formatToolHeader("read", {})).toBe("Read");
   });
 
@@ -312,6 +341,12 @@ describe("formatBatchSummary", () => {
         mkEvent("custom_op", { foo: "bar" }, "y", 20),
       ]),
     ).toBe("阅读 1 · CustomOp 1 · 30ms");
+    // MCP 工具保留原始工具名与服务名，不做大小写转换
+    expect(
+      formatBatchSummary([
+        mkEvent("mcp__stdio-echo-server-mjs__echo", {}, "x", 900),
+      ]),
+    ).toBe("调用 echo（stdio-echo-server-mjs） 1 次 · 900ms");
   });
 
   it("用时累加跨越秒级阈值——formatToolDuration 自动切换", () => {
@@ -374,7 +409,7 @@ describe("formatBatchDetailLine", () => {
 
   it("target 为空时省略空格 + target（避免双空格）", () => {
     expect(formatBatchDetailLine(mkEvent("schedule", {}, "ok", 123))).toBe(
-      "Schedule · 123ms",
+      "定时任务 · 123ms",
     );
   });
 

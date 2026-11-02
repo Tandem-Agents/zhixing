@@ -172,6 +172,9 @@ export class TerminalProcessProjection {
               this.#sealedChildren.add(artifact.subAgentId);
               this.#emit('tool-error', processArtifactText(artifact), `artifact:${delta.id}`);
             }
+          } else if (artifact.kind === 'not-started') {
+            // 同批按规则未启动是正常调度结果：中性显示，不当失败
+            this.#emit('tool', processArtifactText(artifact, delta.name), `artifact:${delta.id}`);
           } else this.#emit('tool-diff', processArtifactText(artifact), `artifact:${delta.id}`, processArtifactSpans(artifact), processArtifactLines(artifact));
         } else if (strategy === 'sub-agent-status' && [...this.#children.values()].some(c => c.parentToolCallId === delta.id)) {
           // Lifecycle-backed children already own their aggregate completion.

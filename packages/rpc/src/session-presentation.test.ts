@@ -73,6 +73,12 @@ describe('one bounded Server presentation egress', () => {
     expect(projectSessionArtifact({ kind: 'future', ref: { digest: 'private' } }, 'tool')).toBeUndefined();
     expect(projectSessionArtifact({ kind: 'sub-agent-result', toolCallId: 'other' }, 'tool')).toBeUndefined();
   });
+  it('projects a not-started call only with matching identity and the known reason', () => {
+    const value = { kind: 'not-started', toolCallId: 'task', reason: 'exclusive-control', selectedTool: 'propose_advancement', extra: 'private' };
+    expect(projectSessionArtifact(value, 'task')).toEqual({ kind: 'not-started', toolCallId: 'task', reason: 'exclusive-control', selectedTool: 'propose_advancement' });
+    expect(projectSessionArtifact(value, 'other')).toBeUndefined();
+    expect(projectSessionArtifact({ ...value, reason: 'future' }, 'task')).toBeUndefined();
+  });
   it('limits diff hunks, rows, encoded bytes and strips terminal controls with a truncation marker', () => {
     const value = diff(); value.hunks = Array.from({ length: 20 }, () => ({ oldStart: 1, oldLines: 900, newStart: 1, newLines: 900,
       lines: Array.from({ length: 900 }, (_, i) => ({ type: 'added' as const, newLineNumber: i + 1, content: '\x1b[31m汉'.repeat(1000) })) }));

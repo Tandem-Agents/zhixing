@@ -1,7 +1,8 @@
 import { stripVTControlCharacters } from 'node:util';
 import { stripPresentationFromAgentYield, type AgentYield } from '@zhixing/core/loop';
-import type { FileDiffPresentationArtifact, SubAgentResultPresentationArtifact, SessionEventProjection } from '@zhixing/core/types';
+import type { FileDiffPresentationArtifact, NotStartedPresentationArtifact, SubAgentResultPresentationArtifact, SessionEventProjection } from '@zhixing/core/types';
 import type { TurnContext } from '@zhixing/core/types';
+import { TOOL_TARGET_INPUT_KEYS } from '@zhixing/core/tool-display-names';
 import { validateAgentYield, validateSessionEventProjection } from '@zhixing/core/protocol/stream';
 
 export type SessionPresentationProfile = 'default' | 'bounded-v1';
@@ -20,7 +21,7 @@ export interface SessionProcessSource {
   /** Host-local monotonic admission time; display eligibility, not fact identity. */
   readonly observedAt?: number;
 }
-export type SessionPresentationArtifact = (FileDiffPresentationArtifact | SubAgentResultPresentationArtifact) & {
+export type SessionPresentationArtifact = (FileDiffPresentationArtifact | SubAgentResultPresentationArtifact | NotStartedPresentationArtifact) & {
   readonly wireTruncated?: boolean;
 };
 /** Observer projection, deliberately NOT a StreamFrame or an ACK/digest source. */
@@ -70,10 +71,18 @@ export function processText(value: string, bytes: number): string {
   return text;
 }
 
-/** Only the two approved artifacts, copied field-by-field with independent display budgets. */
+/** 过程卡片可见的工具输入字段：与恢复历史的工具事实读取同一份键表（core 定义）。 */
+export const PROCESS_TOOL_INPUT_KEYS = TOOL_TARGET_INPUT_KEYS;
+
+/** Only the approved artifacts, copied field-by-field with independent display budgets. */
 export function projectSessionArtifact(input: unknown, toolCallId: string): SessionPresentationArtifact | undefined {
   if (!input || typeof input !== 'object') return;
   const value = input as Record<string, unknown>;
+  if (value.kind === 'not-started') {
+    // 同批未启动：只带被选中的控制调用名，用户侧显示“未执行”
+    if (value.toolCallId !== toolCallId || value.reason !== 'exclusive-control' || typeof value.selectedTool !== 'string' || value.selectedTool.length > 256) return;
+    return { kind: 'not-started', toolCallId, reason: 'exclusive-control', selectedTool: processText(value.selectedTool, 512) };
+  }
   if (value.kind === 'sub-agent-result') {
     if (value.toolCallId !== toolCallId || typeof value.subAgentId !== 'string' || value.subAgentId.length > 512 || typeof value.description !== 'string' ||
         !['succeeded', 'failed', 'aborted'].includes(String(value.status))) return;
@@ -151,7 +160,7 @@ export function projectProcessYield(source: SessionProcessSource, delta: AgentYi
   }
   if (projected.type === 'tool_start') {
     const input: Record<string, unknown> = {};
-    for (const key of ['path', 'file_path', 'command', 'pattern', 'url', 'name', 'description', 'action', 'conversationId']) {
+    for (const key of PROCESS_TOOL_INPUT_KEYS) {
       const value = projected.input[key];
       if (typeof value === 'string') input[key] = processText(value, 512);
     }

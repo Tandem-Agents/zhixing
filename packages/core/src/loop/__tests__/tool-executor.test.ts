@@ -1016,6 +1016,19 @@ describe("executeToolCalls · 排他初始控制工具的批次门", () => {
     expect(result.completedResults.map((r) => [r.toolUseId, r.isError === true])).toEqual([["w1", true], ["c1", false], ["w2", true]]);
     expect(result.exclusive).toEqual({ id: "c1", outcome: "succeeded" });
     expect(result.startedTools).toBe(true);
+    // 未启动的同批调用带“未执行”展示件，用户侧不按失败显示
+    const skipped = yields.find((y) => y.type === "tool_end" && y.id === "w1");
+    expect(skipped?.type === "tool_end" && skipped.result.presentation).toEqual(
+      { kind: "not-started", toolCallId: "w1", reason: "exclusive-control", selectedTool: "control" },
+    );
+    // 持久到结果块的只是类型化处置事实；给模型的原文不变，展示件不进块
+    const persisted = result.completedResults.find((r) => r.toolUseId === "w1");
+    expect(persisted).toEqual({
+      type: "tool_result", toolUseId: "w1", isError: true,
+      content: 'Not started: this batch selected the exclusive control call "control".',
+      disposition: { kind: "not-started", reason: "exclusive-control", selectedTool: "control" },
+    });
+    expect(result.completedResults.find((r) => r.toolUseId === "c1")).not.toHaveProperty("disposition");
   });
 
   it("并行安全的业务调用与排他调用同批时，并行批也不启动", async () => {

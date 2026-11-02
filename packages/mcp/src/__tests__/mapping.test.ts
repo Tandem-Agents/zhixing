@@ -18,6 +18,8 @@ describe("mapServerTools — 字段映射", () => {
   it("只读工具：可并发、access=query、自动放行语义", () => {
     const t = mapServerTools(stdioGithub, [desc({ name: "list", readOnlyHint: true })], noop)[0]!;
     expect(t.name).toBe("mcp__github__list");
+    // 确认面的可读名与终端过程行同一规则：“工具（服务）”
+    expect(t.confirmationDisplayContext?.toolDisplayName).toBe("list（github）");
     expect(t.isReadOnly).toBe(true);
     expect(t.isParallelSafe).toBe(true);
     expect(t.boundaries).toEqual([

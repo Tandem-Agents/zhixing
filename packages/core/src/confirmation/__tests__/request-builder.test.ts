@@ -100,8 +100,12 @@ describe("buildDisplayBody", () => {
     });
     expect(body.kind).toBe("generic");
     if (body.kind === "generic") {
-      expect(body.summary).toContain("wechat_send");
+      // 工具名在标题里；正文只列参数，不重复内部标识
+      expect(body.summary).toContain("张三");
+      expect(body.summary).not.toContain("wechat_send");
     }
+    const empty = buildDisplayBody("mcp__srv__echo", {});
+    expect(empty.kind === "generic" && empty.summary).toBe("无参数");
   });
 
   it("generic summary 超长时截断", () => {
@@ -167,6 +171,11 @@ describe("buildPanelTitle", () => {
 
   it("未知工具原样返回", () => {
     expect(buildPanelTitle("wechat_send")).toBe("wechat_send");
+  });
+
+  it("工具声明的可读名优先，其次内置名称表", () => {
+    expect(buildPanelTitle("mcp__srv__echo", { toolDisplayName: "echo（srv）" })).toBe("echo（srv）");
+    expect(buildPanelTitle("save_skill")).toBe("保存技能");
   });
 });
 

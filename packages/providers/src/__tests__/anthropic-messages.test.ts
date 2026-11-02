@@ -469,6 +469,8 @@ describe("createAnthropicProvider", () => {
                 type: "tool_result",
                 toolUseId: "toolu_01",
                 content: "file contents here",
+                // 持久处置事实只给恢复历史用，出站逐字段映射不带它（下方整块精确断言）
+                disposition: { kind: "not-started", reason: "exclusive-control", selectedTool: "control" },
               },
             ],
           },

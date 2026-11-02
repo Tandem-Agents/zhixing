@@ -7,6 +7,7 @@ import {
   type TokenUsage,
 } from "@zhixing/core/types";
 import { type AgentResult } from "@zhixing/core/loop";
+import { isToolResultDisposition } from "@zhixing/core/types";
 import { type AbortReason } from "@zhixing/core/interrupt";
 import { type RunRecordInput } from "@zhixing/core/transcript";
 import { type WindowCompact } from "@zhixing/core/context";
@@ -145,10 +146,11 @@ function isContentBlock(value: unknown): value is ContentBlock {
       );
     case "tool_result":
       return (
-        hasExactKeys(value, ["type", "toolUseId", "content"], ["isError"]) &&
+        hasExactKeys(value, ["type", "toolUseId", "content"], ["isError", "disposition"]) &&
         typeof value.toolUseId === "string" &&
         typeof value.content === "string" &&
-        (value.isError === undefined || typeof value.isError === "boolean")
+        (value.isError === undefined || typeof value.isError === "boolean") &&
+        (value.disposition === undefined || isToolResultDisposition(value.disposition))
       );
     case "thinking":
       return (
