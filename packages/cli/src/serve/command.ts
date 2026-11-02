@@ -247,6 +247,7 @@ import {
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
+import { retryControlAdmission } from "./conversation-admission-retry.js";
 import { createBorrowedMeshPairedCheckpointTargetSessions } from "./paired-checkpoint-target-infrastructure.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
@@ -1403,7 +1404,8 @@ async function runServerProcess(
   if (authorityCheckpointOwner) {
     hostShellLifecycle.acquireCheckpointOwner(authorityCheckpointOwner);
   }
-  if (authorityCheckpointOwner) await observeLogPhase(startupRecords, "start-checkpoint-owner", () => authorityCheckpointOwner.start());
+  // 只装入备份配置供请求使用；每日备份在宿主就绪后才排程（见 publishReady），不与启动恢复争 IO
+  if (authorityCheckpointOwner) await observeLogPhase(startupRecords, "start-checkpoint-owner", () => authorityCheckpointOwner.start(false));
   const worksceneDirectory = boundWorksceneDirectory;
   const worksceneApplication = boundWorksceneApplication;
   if (!worksceneDirectory || !worksceneApplication) {
@@ -1499,7 +1501,14 @@ async function runServerProcess(
     });
   }
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
+  // 各步都是可重做的恢复（失败时复位标记、整段重来）。期间别的后台维护可能让某步遇到瞬时资源背压：
+  // 步内持有串行排他时不原地等待，由这里在区外有限退避后整段重做；取消、容量缺口与硬失败照原样上抛
   async function recoverStartupLifecycleAcceptedWork(
+    sources: readonly DeliveryLifecycleSourcePermit[],
+  ): Promise<void> {
+    await retryControlAdmission(() => recoverStartupLifecycleAcceptedWorkOnce(sources), async () => {});
+  }
+  async function recoverStartupLifecycleAcceptedWorkOnce(
     sources: readonly DeliveryLifecycleSourcePermit[],
   ): Promise<void> {
     if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
@@ -3615,6 +3624,8 @@ async function runServerProcess(
       await hostShellLifecycle.markRunning();
       assembly.finish();
       hostShellLifecycle.startHeartbeat();
+      // 启动恢复已完成：开始每日备份义务（建根后的首份完整备份也在这里开始）
+      await authorityCheckpointOwner?.start();
 
       if (processMode !== "managed") {
         console.log();

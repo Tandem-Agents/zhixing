@@ -19,6 +19,7 @@ import {
 } from "@zhixing/core/authority";
 import {
   runStorageMaintenanceStep,
+  currentMaintenanceUrgencyOr,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
@@ -81,7 +82,9 @@ async function captureFullAuthorityCheckpointAttempt(
   input: FullAuthorityCheckpointCaptureOptions,
 ): Promise<CapturedFullAuthorityCheckpoint> {
   const abort = input.abort ?? new AbortController().signal;
-  return runWithMaintenanceUrgency(() => "foreground", abort, async () => {
+  // 沿用外层义务的紧急度（每日备份为后台，让位给用户正在做的事）；没有外层义务的显式抓取有人在等，按前台
+  const urgency = currentMaintenanceUrgencyOr("foreground");
+  return runWithMaintenanceUrgency(() => urgency, abort, async () => {
     throwIfAborted(abort);
     const retentionSnapshot = await runStep(input, "retention-heads", 1, () =>
       input.retention.checkpointRetentionSnapshot(),

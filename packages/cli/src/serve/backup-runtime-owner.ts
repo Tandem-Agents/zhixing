@@ -69,6 +69,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
   #loading: Promise<RuntimeSlot> | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #started = false;
+  #scheduled = false;
 
   constructor(private readonly input: {
     readonly backupTargets: BackupTargetConfigurationRepository;
@@ -80,11 +81,19 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     readonly onError?: (error: unknown) => void;
   }) {}
 
-  async start(): Promise<void> {
-    if (this.#started) return;
-    this.#started = true;
-    await this.#reload();
-    this.#schedule(0);
+  /**
+   * schedule=false 只装入当前备份配置，供请求即时使用；每日义务另以 schedule=true 开始。
+   * 宿主启动时先只装入、就绪后再排程：每日备份是后台维护，不与前台启动恢复争 IO。
+   */
+  async start(schedule = true): Promise<void> {
+    if (!this.#started) {
+      this.#started = true;
+      await this.#reload();
+    }
+    if (schedule && !this.#scheduled) {
+      this.#scheduled = true;
+      this.#schedule(0);
+    }
   }
 
   async ensureDaily(): Promise<CheckpointPackage> {
@@ -117,6 +126,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
 
   async stop(): Promise<void> {
     this.#started = false;
+    this.#scheduled = false;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
     if (this.#slot.kind === "available") {

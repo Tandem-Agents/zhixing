@@ -9,7 +9,7 @@ import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
 import { decodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
 import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createBorrowedMeshPairedCheckpointTargetSessions } from "./paired-checkpoint-target-infrastructure.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
@@ -80,7 +80,18 @@ describe("recovery backup checkpoint owner", () => {
       }).directory,
     });
     expect(owner).toBeDefined();
-    await owner!.start();
+    // 宿主启动时只装入、不排程；就绪后以默认方式再调用才开始每日义务
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await owner!.start(false);
+      expect(vi.getTimerCount()).toBe(0);
+      await owner!.start();
+      expect(vi.getTimerCount()).toBe(1);
+      await owner!.start();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
     await expect(owner!.status()).resolves.toEqual({
       state: "unavailable",
       fullBackupReady: false,
@@ -126,7 +137,7 @@ describe("recovery backup checkpoint owner", () => {
     });
     await owner!.stop();
     await withoutRuntime!.stop();
-  });
+  }, 60_000);
 
   it("preserves durable readiness when the paired runtime is unavailable", async () => {
     const home = await createTempDir("recovery-owner-durable-unavailable");

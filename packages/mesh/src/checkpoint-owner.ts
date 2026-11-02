@@ -1,6 +1,7 @@
 import type { CheckpointPackage } from "./checkpoint.js";
 import type { RecoveryCheckpointRequest, RecoveryCheckpointVerification } from "@zhixing/core/contracts";
 import type { RecoveryRoot } from "./recovery-root.js";
+import { runWithMaintenanceUrgency, type StorageMaintenanceUrgency } from "@zhixing/core/resources";
 import type {
   AuthorityCheckpointService,
   RecoveryBackupStatus,
@@ -41,6 +42,7 @@ export class AuthorityCheckpointOwner implements AuthorityCheckpointOwnerPort {
     readonly candidateKey: string;
     readonly promise: Promise<CheckpointPackage>;
     readonly abort: AbortController;
+    readonly urgency: { value: StorageMaintenanceUrgency };
   } | undefined;
   #stopped = true;
 
@@ -89,18 +91,22 @@ export class AuthorityCheckpointOwner implements AuthorityCheckpointOwnerPort {
     if (this.#stopped) return Promise.reject(new Error("Authority checkpoint owner is stopped"));
     const candidateKey = this.options.service.candidateKey(request);
     if (this.#active) {
-      return this.#active.candidateKey === candidateKey
-        ? this.#active.promise
-        : Promise.reject(new Error("checkpoint-candidate-busy"));
+      if (this.#active.candidateKey !== candidateKey) return Promise.reject(new Error("checkpoint-candidate-busy"));
+      // 有人显式等着同一份检查点：整段义务提到前台
+      if (request.kind === "forced") this.#active.urgency.value = "foreground";
+      return this.#active.promise;
     }
     const abort = new AbortController();
-    const promise = this.options.service.recoverPending(abort.signal)
-      .then(() => this.options.service.createAndReplicate({ request, abort: abort.signal }))
-      .then(async (checkpoint) => {
-        await this.options.service.cleanupExpired(undefined, abort.signal);
-        return checkpoint;
-      });
-    this.#active = { candidateKey, promise, abort };
+    // 每日义务是后台维护，让位给用户正在做的事；显式触发（设置、迁移前）有人在等，按前台
+    const urgency: { value: StorageMaintenanceUrgency } = { value: request.kind === "daily" ? "background" : "foreground" };
+    const promise = runWithMaintenanceUrgency(() => urgency.value, abort.signal, () =>
+      this.options.service.recoverPending(abort.signal)
+        .then(() => this.options.service.createAndReplicate({ request, abort: abort.signal }))
+        .then(async (checkpoint) => {
+          await this.options.service.cleanupExpired(undefined, abort.signal);
+          return checkpoint;
+        }));
+    this.#active = { candidateKey, promise, abort, urgency };
     void promise.finally(() => {
       if (this.#active?.promise === promise) this.#active = undefined;
     }).catch(() => undefined);

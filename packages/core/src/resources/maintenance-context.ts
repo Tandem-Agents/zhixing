@@ -149,6 +149,11 @@ export function currentMaintenanceUrgency(): StorageMaintenanceUrgency {
   return maintenanceContext.getStore()?.urgency() ?? "background";
 }
 
+/** 外层已声明的紧急度；没有外层义务时用调用方给的缺省（例如有人等着的显式操作缺省为前台）。 */
+export function currentMaintenanceUrgencyOr(fallback: StorageMaintenanceUrgency): StorageMaintenanceUrgency {
+  return maintenanceContext.getStore()?.urgency() ?? fallback;
+}
+
 /** 叶级容量排队与安全检查点读取当前完整维护义务的共享取消信号。 */
 export function currentMaintenanceAbortSignal(): AbortSignal {
   return maintenanceContext.getStore()?.abort ?? neverAbortMaintenance;

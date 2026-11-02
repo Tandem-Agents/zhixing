@@ -44,6 +44,7 @@ import { keyIdForPublicKey, RecoveryRoot } from "./recovery-root.js";
 import { currentRecoveryEligibility } from "./recovery-eligibility.js";
 import {
   runStorageMaintenanceStep,
+  currentMaintenanceUrgencyOr,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
@@ -535,7 +536,9 @@ export class AuthorityCheckpointService {
     operation: () => Promise<T>,
   ): Promise<T> {
     const signal = abort ?? new AbortController().signal;
-    return runWithMaintenanceUrgency(() => "foreground", signal, () =>
+    // 与抓取同一规则：沿用外层义务的紧急度，没有外层义务时按前台
+    const urgency = currentMaintenanceUrgencyOr("foreground");
+    return runWithMaintenanceUrgency(() => urgency, signal, () =>
       runStorageMaintenanceStep(
         this.options.storageMaintenance,
         storageMaintenanceRequest(
