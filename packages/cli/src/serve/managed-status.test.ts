@@ -59,7 +59,7 @@ describe("managed host public status", () => {
     })).toEqual({
       state: "needs-attention",
       label: "需要处理",
-      action: "请重新运行配对设置",
+      action: "本机运行配置需要修复；可用 zz logs 查看具体原因",
     });
   });
 
@@ -77,7 +77,7 @@ describe("managed host public status", () => {
     })).toEqual({
       state: "needs-attention",
       label: "需要处理",
-      action: "请重新运行配对设置",
+      action: "本机运行配置需要修复；可用 zz logs 查看具体原因",
     });
   });
 

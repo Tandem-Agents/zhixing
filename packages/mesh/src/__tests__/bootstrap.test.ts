@@ -17,6 +17,7 @@ import {
   derivePairwiseRendezvousSecret,
   deriveTerminalRendezvousKey,
   deriveTerminalRouteLocator,
+  isLocalOnlyTopology,
   isTerminalRouteLocator,
   persistPairwiseRendezvousSecret,
   resolveEffectiveMeshRoles,
@@ -85,6 +86,32 @@ describe("production mesh bootstrap contracts", () => {
     });
   });
 
+  it("仅本机运行拓扑按需启动，不因建链托管；分布式与缺可达性的锚点不降级", () => {
+    const single = trustRecord(["anchor", "executor"]);
+    const local = { enabledRoles: ["anchor", "executor"] as const };
+    expect(isLocalOnlyTopology({ localDeviceId: LOCAL, trust: single, configuration: local })).toBe(true);
+    expect(resolveHostLaunchPlan({ localDeviceId: LOCAL, trust: single, configuration: local }))
+      .toEqual({ mode: "on-demand", roles: ["anchor", "executor"] });
+    // 用户明确选择自启时才托管
+    expect(resolveHostLaunchPlan({ localDeviceId: LOCAL, trust: single, configuration: { ...local, executorAutoStart: true } }))
+      .toEqual({ mode: "managed", roles: ["anchor", "executor"] });
+    // 已配置跨设备传输：照原网格合同托管
+    expect(resolveHostLaunchPlan({ localDeviceId: LOCAL, trust: single, configuration: { ...local, relayRegistration: { host: "relay.example", port: 8443 } } }))
+      .toEqual({ mode: "managed", roles: ["anchor", "executor"] });
+    // 链上有其他有效设备而缺可达性：拒绝，不借仅本机降级
+    const distributed = withOtherActiveMember(single);
+    expect(isLocalOnlyTopology({ localDeviceId: LOCAL, trust: distributed, configuration: local })).toBe(false);
+    expect(() => resolveHostLaunchPlan({ localDeviceId: LOCAL, trust: distributed, configuration: local }))
+      .toThrow(/requires direct or relay reachability/);
+    // 非当前 issuer 的值班候选缺可达性：拒绝
+    const candidate = trustRecordFor({ issuerDeviceId: "device:anchor", localRoles: ["anchor", "executor"] });
+    expect(() => resolveHostLaunchPlan({ localDeviceId: LOCAL, trust: candidate, configuration: local }))
+      .toThrow(/requires direct or relay reachability/);
+    // 角色越权照旧拒绝
+    expect(() => resolveHostLaunchPlan({ localDeviceId: LOCAL, trust: trustRecord(["executor"]), configuration: local }))
+      .toThrow(/not authorized/);
+  });
+
   it("keeps a fenced duty candidate online while failing closed on invalid trust or selection", () => {
     const dutyCandidate = trustRecordFor({
       issuerDeviceId: "device:anchor",
@@ -143,9 +170,16 @@ describe("production mesh bootstrap contracts", () => {
         enabledRoles: ["executor"],
       },
     })).toThrow(/not authorized/);
-    expect(() => resolveEffectiveMeshRoles({
+    // 本机是当前 issuer、链上唯一有效成员、未配置跨设备传输：仅本机运行拓扑，合法且不需要可达性
+    expect(resolveEffectiveMeshRoles({
       localDeviceId: LOCAL,
       trust,
+      configuration: { enabledRoles: ["anchor"] },
+    })).toEqual({ mode: "trusted-home", roles: ["anchor"] });
+    // 链上还有其他有效设备时，锚点要对它们服务，仍须直连或中继
+    expect(() => resolveEffectiveMeshRoles({
+      localDeviceId: LOCAL,
+      trust: withOtherActiveMember(trust),
       configuration: { enabledRoles: ["anchor"] },
     })).toThrow(/requires direct or relay reachability/);
     expect(resolveEffectiveMeshRoles({
@@ -162,6 +196,7 @@ describe("production mesh bootstrap contracts", () => {
   });
 
   it("rejects an anchor that listens only on a wildcard address without advertised reachability", () => {
+    // 配置了监听却无法公布：形状上即自相矛盾，不论链上下文
     expect(() => validateMeshRoleBootConfig({
       enabledRoles: ["anchor"],
       anchorListen: { bind: { host: "0.0.0.0", port: 7443 } },
@@ -517,6 +552,17 @@ function testConnection(connectionId: string, deviceId: string) {
       peerProtocolRange: { min: "1", max: "1" },
       peer,
     }),
+  };
+}
+
+function withOtherActiveMember(record: HomeTrustRecord): HomeTrustRecord {
+  return {
+    ...record,
+    members: [...record.members, {
+      device: { deviceId: "device:other", publicKey: "ed25519:other", displayName: "other", platform: "headless", enrolledAt: AT },
+      roles: ["executor"],
+      state: "active",
+    }],
   };
 }
 

@@ -8,6 +8,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   createMeshEndpointDescriptor,
+  isLocalOnlyTopology,
   resolveEffectiveMeshRoles,
   validateMeshRoleBootConfig,
   type MeshEndpointDirectory,
@@ -268,7 +269,9 @@ async function prepareWithBootstrapStore(
   }
   let endpoints = await bootstrapProjection.endpoints.loadEndpoints();
   let localEndpoint: MeshEndpointDescriptor | undefined;
-  if (effective.roles.includes("anchor")) {
+  // 仅本机运行拓扑不公布任何可达性：零监听、零中继，也不写端点描述
+  if (effective.roles.includes("anchor") &&
+      !isLocalOnlyTopology({ localDeviceId: deviceKey.deviceId, configuration: configuration!, trust })) {
     const current = endpoints.get(deviceKey.deviceId);
     const candidate = createMeshEndpointDescriptor({
       deviceId: deviceKey.deviceId,

@@ -18,6 +18,8 @@ import {
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { loadConfig } from "@zhixing/providers";
 
 describe("managed host trust transition", () => {
   it("keeps a current anchor online after reconciling the durable plan", async () => {
@@ -256,6 +258,42 @@ describe("managed service current-state intent", () => {
         } finally {
           await trust.stopStorageMaintenance();
         }
+      });
+    },
+    30_000,
+  );
+
+  it(
+    "接续被打断的本机初始化：启动时写下初始化选定的配置，查看只按接续结果投影、不写盘",
+    async () => {
+      const homeDir = await createTempDir("managed-local-initialization-continuation");
+      await writeFile(path.join(homeDir, "config.jsonc"), JSON.stringify({}));
+      await withManagedEnvironment(undefined, undefined, async () => {
+        const secrets = createPlatformSecretStore({ homeDir, context: "foreground" });
+        const key = await DeviceKey.generate();
+        await persistDeviceKey(secrets, key);
+        const trust = new FileMeshBootstrapStore(homeDir, key);
+        try {
+          await trust.initializeLocalHome({
+            key,
+            identity: enrollDeviceIdentity(key, {
+              displayName: "Local machine",
+              platform: "headless",
+              enrolledAt: "2026-08-14T00:00:00.000Z",
+            }),
+            roles: ["anchor", "executor"],
+            homeId: "home:local-initialization-test",
+            at: "2026-08-14T00:00:00.000Z",
+          });
+        } finally {
+          await trust.stopStorageMaintenance();
+        }
+        const inspected = await loadCurrentManagedServiceState("inspect", homeDir, secrets);
+        expect(resolveHostLaunchPlan(inspected)).toEqual({ mode: "on-demand", roles: ["anchor", "executor"] });
+        expect(loadConfig({ homeDir, noAutoCreate: true }).mesh).toBeUndefined();
+        const activated = await loadCurrentManagedServiceState("activate", homeDir, secrets);
+        expect(resolveHostLaunchPlan(activated).mode).toBe("on-demand");
+        expect(loadConfig({ homeDir, noAutoCreate: true }).mesh).toEqual({ enabledRoles: ["anchor", "executor"] });
       });
     },
     30_000,

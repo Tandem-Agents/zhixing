@@ -33,7 +33,7 @@ import {
   ManagedServiceError,
   type ManagedServiceAdapter,
 } from "./managed-service.js";
-import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { HostLaunchPlanError, resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import type { ManagedServiceCurrentState } from "./managed-service-reconciler.js";
 
@@ -243,6 +243,8 @@ function publicStatusError(error: unknown): ManagedHostActionCode {
     if (error.code === "permission-required") return "permission-required";
     if (error.code === "manager-unavailable") return "login-required";
   }
+  // 本机已不是信任里的有效成员：重新配对才能回到这个 home
+  if (error instanceof HostLaunchPlanError && error.code === "member-inactive") return "pairing-required";
   return "configuration-invalid";
 }
 

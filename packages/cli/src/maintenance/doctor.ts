@@ -19,10 +19,14 @@ export interface DoctorReport {
     | "local-runtime-needs-attention"
     | "local-state-unreadable"
     | "device-maintenance-required"
-    | "connection-state-unreadable";
+    | "connection-state-unreadable"
+    | "backup-setup-incomplete";
   readonly message: string;
   readonly action?: string;
 }
+
+/** 本机信任里的恢复根状态：no-trust 表示还没有建链（单机），不涉及恢复根。 */
+export type LocalRecoveryRootState = "established" | "missing" | "no-trust";
 
 export interface DoctorDeps {
   readonly homeDir: string;
@@ -31,6 +35,7 @@ export interface DoctorDeps {
   readonly configExists?: () => Promise<boolean>;
   readonly inspectConfig?: () => void;
   readonly inspectManaged?: () => Promise<{ readonly state: string; readonly action?: string }>;
+  readonly inspectRecoveryRoot?: () => Promise<LocalRecoveryRootState>;
 }
 
 export function inspectDefaultLocalHealth(): Promise<DoctorReport> {
@@ -53,7 +58,7 @@ export async function inspectLocalHealth(deps: DoctorDeps): Promise<DoctorReport
       };
     }
     (deps.inspectConfig ?? (() => { loadConfig({ homeDir, noAutoCreate: true }); }))();
-    await deps.backupTargets.load();
+    const backupTargets = await deps.backupTargets.load();
     const local = await readOfflineStatusSnapshot(deps.statusDeps);
     const managed = await (deps.inspectManaged ?? (async () => {
       return buildManagedHostPublicStatus(local.report);
@@ -96,6 +101,18 @@ export async function inspectLocalHealth(deps: DoctorDeps): Promise<DoctorReport
         };
       }
     }
+    // 已选定备份目标、恢复根却没建立：上次设置没走完。普通对话不受影响，但不能当作备份已就绪
+    if (backupTargets &&
+        await (deps.inspectRecoveryRoot ?? (() => readLocalRecoveryRoot(homeDir)))() === "missing") {
+      const current = backupTargets.bindings.find((binding) => binding.targetId === backupTargets.currentTargetId);
+      return {
+        code: "backup-setup-incomplete",
+        message: "恢复备份设置未完成，恢复根尚未建立，还没有可恢复的副本",
+        action: current?.kind === "directory"
+          ? `在完整交互终端运行 zz backup setup --directory "${current.directory}"，按提示保存并回读恢复包`
+          : "在完整交互终端重新运行 zz backup setup 选择原来的备份目标，按提示保存并回读恢复包",
+      };
+    }
     return { code: "healthy", message: "知行本机状态正常" };
   } catch {
     return {
@@ -113,6 +130,20 @@ export function printDoctorReport(
   output.log(report.message);
   if (report.code !== "healthy") output.log(`问题码：${report.code}`);
   if (report.action) output.log(`下一步：${report.action}`);
+}
+
+/** 只读取当前信任的恢复根状态；不解锁秘密存储、不创建权威文件。 */
+async function readLocalRecoveryRoot(homeDir: string): Promise<LocalRecoveryRootState> {
+  const { FileMeshBootstrapStore } = await import("../serve/mesh-bootstrap-store.js");
+  const store = await FileMeshBootstrapStore.open(homeDir, undefined, { readOnly: true });
+  try {
+    const trust = await store.loadCurrentTrust();
+    if (!trust) return "no-trust";
+    // 只有两把公钥都缺才是“从未建根”；只剩一把是不一致，由启动引导校验拒绝，不在这里当成设置未完成
+    return !trust.recoveryRootPublicKey && !trust.recoveryBackupPublicKey ? "missing" : "established";
+  } finally {
+    await store.stopStorageMaintenance();
+  }
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

@@ -133,6 +133,23 @@ export function resolveHostLaunchPlan(input: {
       "Current mesh issuer is not authorized for the anchor role",
     );
   }
+  // 仅本机运行：沿按需 Host 生命周期，不因建链就托管开机自启；用户明确选择自启时才托管
+  if (isLocalOnlyTopology({ localDeviceId: input.localDeviceId, configuration, trust: input.trust })) {
+    return Object.freeze({
+      mode: configuration.executorAutoStart === true ? "managed" as const : "on-demand" as const,
+      roles,
+    });
+  }
+  if (roleSet.has("anchor")) {
+    try {
+      assertAnchorReachability(configuration);
+    } catch (error) {
+      throw new HostLaunchPlanError(
+        "configuration-invalid",
+        error instanceof Error ? error.message : "Mesh anchor reachability is missing",
+      );
+    }
+  }
   if (isCurrentAnchor && roleSet.has("anchor")) {
     return Object.freeze({ mode: "managed" as const, roles });
   }
@@ -185,6 +202,10 @@ export function resolveEffectiveMeshRoles(input: {
         `Local mesh role is not authorized by the trust chain: ${role}`,
       );
     }
+  }
+  // 对其他设备提供锚点服务时仍须可达；仅本机运行拓扑不公布、不需要
+  if (!isLocalOnlyTopology({ localDeviceId: input.localDeviceId, configuration, trust: input.trust })) {
+    assertAnchorReachability(configuration);
   }
   return Object.freeze({
     mode: "trusted-home" as const,
@@ -773,14 +794,45 @@ function validateRoleParameters(configuration: MeshRoleBootConfig): void {
   if (!roles.has("anchor") && (configuration.anchorListen || configuration.relayRegistration)) {
     throw new TypeError("Only an enabled anchor may configure mesh listeners");
   }
+  // 配置了监听却无法公布（只绑通配地址、无公布地址也无中继）本身自相矛盾，与链上下文无关
+  if (configuration.anchorListen && !hasAnchorReachability(configuration)) {
+    throw new TypeError("An enabled trusted-home anchor requires direct or relay reachability");
+  }
+}
+
+function hasAnchorReachability(configuration: MeshRoleBootConfig): boolean {
   const advertisedDirect = configuration.anchorListen !== undefined && (
     configuration.anchorListen.advertised !== undefined
       ? configuration.anchorListen.advertised.length > 0
       : !isWildcardHost(configuration.anchorListen.bind.host)
   );
-  if (roles.has("anchor") && !advertisedDirect && !configuration.relayRegistration) {
+  return advertisedDirect || configuration.relayRegistration !== undefined;
+}
+
+/**
+ * 实际对其他设备提供锚点服务时的可达性要求：必须有可公布的直连或中继。
+ * 一个跨设备传输都没配时是否需要，取决于链上是否还有别的设备等上下文，所以由启动计划按拓扑判定，不放在形状校验里。
+ */
+export function assertAnchorReachability(configuration: MeshRoleBootConfig): void {
+  if (configuration.enabledRoles.includes("anchor") && !hasAnchorReachability(configuration)) {
     throw new TypeError("An enabled trusted-home anchor requires direct or relay reachability");
   }
+}
+
+/**
+ * 仅本机运行拓扑：本机是当前有效 issuer、链上没有其他有效成员、也没有配置任何跨设备传输。
+ * 例如未配对单机设置独立目录恢复备份后建立的链。此时锚点只服务本机：零监听、零中继、不公布可达性；
+ * 角色仍由链授权。首次配对或启用跨设备能力时会补上可达性，自然离开这一拓扑。
+ */
+export function isLocalOnlyTopology(input: {
+  readonly localDeviceId: string;
+  readonly configuration: MeshRoleBootConfig;
+  readonly trust: Pick<TrustProjection, "members" | "issuer">;
+}): boolean {
+  if (input.trust.issuer.deviceId !== input.localDeviceId) return false;
+  if (input.configuration.anchorListen || input.configuration.relayRegistration) return false;
+  const active = input.trust.members.filter((member) => member.state === "active");
+  return active.length === 1 && active[0]!.device.deviceId === input.localDeviceId;
 }
 
 function validateAnchorListen(value: unknown): NonNullable<MeshRoleBootConfig["anchorListen"]> {

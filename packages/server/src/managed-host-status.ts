@@ -56,7 +56,8 @@ const PUBLIC_ACTIONS: Readonly<Record<ManagedHostActionCode, string>> = {
   "credentials-locked": "请解锁本机凭据",
   "pairing-required": "请重新运行配对设置",
   "permission-required": "请检查本机权限",
-  "configuration-invalid": "请重新运行配对设置",
+  // 兜底码覆盖配置校验失败、启动失败与状态读不出，原因不一定与配对有关：如实指向具体原因所在
+  "configuration-invalid": "本机运行配置需要修复；可用 zz logs 查看具体原因",
 };
 
 export function projectManagedHostStatus(

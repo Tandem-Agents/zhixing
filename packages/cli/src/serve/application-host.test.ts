@@ -196,6 +196,33 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     ]);
   });
 
+  it("仅本机拓扑从未建立恢复根时不进入等待配对设备的根建立通道，普通本机运行照常装配", async () => {
+    const harness = createHarness({ roles: ["anchor", "executor"], localOnlyWithoutRoot: true });
+    const recoveryNotice = vi.fn();
+    const host = new PersistentApplicationHost(
+      { ...createInput("on-demand"), onRecoveryRootRequired: recoveryNotice },
+      harness.dependencies,
+    );
+
+    await host.run();
+
+    expect(recoveryNotice).not.toHaveBeenCalled();
+    expect(harness.createRecoveryRootPairedCheckpointReceiver).not.toHaveBeenCalled();
+    expect(harness.runRecoveryRoot).not.toHaveBeenCalled();
+    expect(harness.prepareMesh).toHaveBeenCalledOnce();
+    expect(harness.roleInvocations()).toBe(1);
+    expect(harness.events).toEqual([
+      "capacity",
+      "mesh:1",
+      "lease",
+      "load:anchor",
+      "load:executor-module",
+      "role:anchor",
+      "stop:1",
+      "release-lease",
+    ]);
+  });
+
   it("runs only the dedicated removal retrieval before the retirement path, never the resident topology", async () => {
     const removed = new Error("This device was removed; pair it again to create a new identity");
     const harness = createHarness({
@@ -422,6 +449,8 @@ function createInput(
 function createHarness(input: {
   readonly roles: readonly DeviceRole[];
   readonly recoveryRequired?: boolean;
+  /** 仅本机拓扑、从未建立恢复根（本机初始化后备份设置未走完） */
+  readonly localOnlyWithoutRoot?: boolean;
   readonly removalRetrieval?: boolean;
   readonly recoveryFailure?: Error;
   readonly secondBootstrapFailure?: Error;
@@ -460,7 +489,9 @@ function createHarness(input: {
     ? [createRetrievalMesh(), createMesh(true)]
     : input.recoveryRequired
       ? [createMesh(false), createMesh(true)]
-      : [createMesh(true)];
+      : input.localOnlyWithoutRoot
+        ? [createMesh(false, true)]
+        : [createMesh(true)];
   let meshIndex = 0;
   let rolePlan: unknown;
   let roleBootstrap:
@@ -579,18 +610,26 @@ function createHarness(input: {
     },
   };
 
-  function createMesh(established: boolean): MeshRuntimeBootstrap {
+  function createMesh(established: boolean, localOnly = false): MeshRuntimeBootstrap {
     const ordinal = meshStops.length + 1;
     const stop = vi.fn(async () => {
       events.push(`stop:${ordinal}`);
       if (input.meshStopFailure) throw input.meshStopFailure;
     });
     meshStops.push(stop);
+    // 默认是分布式 home：本机之外还有一台有效的值班设备
+    const members = [
+      { device: { deviceId: "target" }, roles: input.roles, state: "active" },
+      ...(localOnly ? [] : [{ device: { deviceId: "anchor-device" }, roles: ["anchor"], state: "active" }]),
+    ];
     return {
       mode: "trusted-home",
       roles: input.roles,
       deviceKey: { deviceId: "target" },
+      configuration: { enabledRoles: input.roles },
       trust: {
+        issuer: { deviceId: localOnly ? "target" : "anchor-device" },
+        members,
         ...(established
           ? {
               recoveryRootPublicKey: "root-key",

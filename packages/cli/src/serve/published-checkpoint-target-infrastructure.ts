@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { assertPhysicallyIndependentDirectory, FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import {
   type InventoryPublishedRecoveryCheckpointTarget,
   type PublishedCheckpointTargetInfrastructure,
@@ -20,6 +20,14 @@ const PAIRED_TARGET_ROOT_SEGMENTS = Object.freeze([
   "distributed-runtime",
   "recovery-checkpoints",
 ] as const);
+
+/** 只读预检独立目录目标与 home 权威数据是否在不同卷上；不创建目录，最终判定仍在打开目标时。 */
+export function preflightDirectoryCheckpointTarget(zhixingHome: string, directory: string): Promise<void> {
+  return assertPhysicallyIndependentDirectory({
+    sourceRoot: path.join(path.resolve(zhixingHome), ...AUTHORITY_ROOT_SEGMENTS),
+    targetRoot: directory,
+  });
+}
 
 /** The sole physical composition of published filesystem checkpoint targets. */
 export function createPublishedCheckpointTargetInfrastructure(input: {

@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import {
   runStorageMaintenanceStep,
@@ -69,6 +70,46 @@ export interface PairedFileRecoveryCheckpointTargetOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
 }
 
+export type RecoveryCheckpointTargetErrorCode = "not-physically-independent";
+
+/** 恢复备份目录不满足目标条件；码给呈现层翻译成可照做的说明。 */
+export class RecoveryCheckpointTargetError extends Error {
+  constructor(readonly code: RecoveryCheckpointTargetErrorCode, message: string) {
+    super(message);
+    this.name = "RecoveryCheckpointTargetError";
+  }
+}
+
+/**
+ * 只读预检：恢复备份目录与源数据是否在不同卷上。两侧都可能还没创建，各取最近已存在的上级目录比较；
+ * 不创建、不写任何东西。最终判定仍以打开目标时冻结的目录身份为准。
+ */
+export async function assertPhysicallyIndependentDirectory(input: {
+  readonly sourceRoot: string;
+  readonly targetRoot: string;
+}): Promise<void> {
+  const [source, target] = await Promise.all([
+    nearestExistingDevice(input.sourceRoot),
+    nearestExistingDevice(input.targetRoot),
+  ]);
+  if (source === target) {
+    throw new RecoveryCheckpointTargetError(
+      "not-physically-independent",
+      "Recovery checkpoint directory is not physically independent",
+    );
+  }
+}
+
+async function nearestExistingDevice(directory: string): Promise<bigint> {
+  for (let current = path.resolve(directory); ; current = path.dirname(current)) {
+    try {
+      return (await stat(current, { bigint: true })).dev;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(current) === current) throw error;
+    }
+  }
+}
+
 /** Independent-directory checkpoint target with frozen filesystem identity and atomic publication. */
 export class FileRecoveryCheckpointTarget implements InventoryRecoveryCheckpointTarget {
   readonly targetId: string;
@@ -94,7 +135,10 @@ export class FileRecoveryCheckpointTarget implements InventoryRecoveryCheckpoint
       const target = await freezeCheckpointDirectory(options.targetRoot, options.create ?? true);
       if (source.dev === target.dev) {
         await target.handle.close();
-        throw new TypeError("Recovery checkpoint directory is not physically independent");
+        throw new RecoveryCheckpointTargetError(
+          "not-physically-independent",
+          "Recovery checkpoint directory is not physically independent",
+        );
       }
       return new FileRecoveryCheckpointTarget(
         target,

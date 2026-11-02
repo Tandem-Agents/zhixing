@@ -198,4 +198,47 @@ describe("inspectLocalHealth", () => {
       statusDeps: runningStatus(state([])),
     })).resolves.toEqual({ code: "healthy", message: "知行本机状态正常" });
   });
+
+  it("已选定备份目标而恢复根未建立时如实报“设置未完成”并给出原目标上的交互设置命令", async () => {
+    const directory = "D:\\backup\\zhixing";
+    const configured = {
+      homeDir: "C:/zhixing-doctor-test",
+      backupTargets: {
+        load: vi.fn(async () => ({
+          currentTargetId: "backup-dir:1",
+          bindings: [{ kind: "directory" as const, targetId: "backup-dir:1", directory }],
+        })),
+        select: vi.fn(async () => undefined),
+      },
+      configExists: async () => true,
+      inspectConfig: vi.fn(),
+      inspectManaged: vi.fn(async () => ({ state: "not-running" })),
+      statusDeps: runningStatus(state([])),
+    };
+    await expect(inspectLocalHealth({
+      ...configured,
+      inspectRecoveryRoot: vi.fn(async () => "missing" as const),
+    })).resolves.toEqual({
+      code: "backup-setup-incomplete",
+      message: "恢复备份设置未完成，恢复根尚未建立，还没有可恢复的副本",
+      action: `在完整交互终端运行 zz backup setup --directory "${directory}"，按提示保存并回读恢复包`,
+    });
+    await expect(inspectLocalHealth({
+      ...configured,
+      inspectRecoveryRoot: vi.fn(async () => "established" as const),
+    })).resolves.toEqual({ code: "healthy", message: "知行本机状态正常" });
+  });
+
+  it("没有选定备份目标时不读取信任", async () => {
+    const inspectRecoveryRoot = vi.fn(async () => "missing" as const);
+    await expect(inspectLocalHealth({
+      ...createDeps(),
+      configExists: async () => true,
+      inspectConfig: vi.fn(),
+      inspectManaged: vi.fn(async () => ({ state: "ready" })),
+      statusDeps: runningStatus(state([])),
+      inspectRecoveryRoot,
+    })).resolves.toEqual({ code: "healthy", message: "知行本机状态正常" });
+    expect(inspectRecoveryRoot).not.toHaveBeenCalled();
+  });
 });

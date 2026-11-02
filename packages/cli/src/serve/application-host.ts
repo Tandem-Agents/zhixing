@@ -3,6 +3,7 @@ import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
 import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing/providers/configuration";
+import { isLocalOnlyTopology } from "@zhixing/mesh/bootstrap";
 import type { ServeOptions } from "./command.js";
 import type { StartupCheckResult } from "../startup.js";
 import {
@@ -483,12 +484,22 @@ async function releaseOnce(resource: OwnedResource): Promise<void> {
   await resource.release();
 }
 
+/**
+ * 缺恢复根时是否要先走受限的根建立通道（等已配对设备协助建根）。仅本机拓扑没有任何配对设备，
+ * 这条通道永远等不到对端：它的根只能由本机交互设置建立，普通本机运行照常装配，依赖根的能力
+ * （备份、灾备接管）各自按缺根处理。半边根（只有一把公钥）不是缺根，交给引导校验拒绝。
+ */
 function requiresRecoveryRootEstablishment(
   mesh: MeshRuntimeBootstrap,
 ): mesh is TrustedHomeBootstrap {
   return mesh.mode === "trusted-home" &&
     !mesh.trust.recoveryRootPublicKey &&
-    !mesh.trust.recoveryBackupPublicKey;
+    !mesh.trust.recoveryBackupPublicKey &&
+    !isLocalOnlyTopology({
+      localDeviceId: mesh.deviceKey.deviceId,
+      configuration: mesh.configuration,
+      trust: mesh.trust,
+    });
 }
 
 function hasEstablishedRecoveryRoot(mesh: MeshRuntimeBootstrap): boolean {

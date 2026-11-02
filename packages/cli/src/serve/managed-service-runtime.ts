@@ -5,7 +5,8 @@ import { resolveProgramEntry } from '../cli-entry.js';
 import type { SecretStorePort } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
-import { loadConfig } from "@zhixing/providers/configuration";
+import { loadConfig, writeConfig } from "@zhixing/providers/configuration";
+import { continuedLocalInitialization } from "./local-role-configuration.js";
 import {
   createPlatformSecretStore,
   readPlatformSecretStoreBackendBinding,
@@ -120,8 +121,17 @@ async function loadCurrentManagedServiceStateFromConfig(
   if (await readPlatformSecretStoreBackendBinding(homeDir) !== binding) {
     throw new Error("local-credentials-unavailable");
   }
+  // 接续被打断的本机初始化（信任已落盘、启动配置未写）：启动时写下；查看只按接续后的结果投影，不改动磁盘，
+  // 状态因此如实显示“启动即可”，而不是把程序造成的半成品当成配置无效
+  const continued = key && trust
+    ? continuedLocalInitialization({ config, trust, deviceId: key.deviceId })
+    : undefined;
+  if (continued && intent === "activate") {
+    await writeConfig(continued, { homeDir, expected: config });
+  }
+  const current = continued ?? config;
   return createCurrentManagedServiceStateProjector(homeDir)({
-    config,
+    config: current,
     binding,
     key,
     trust,

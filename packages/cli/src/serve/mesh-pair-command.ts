@@ -93,6 +93,7 @@ import { createPublishedCheckpointTargetInfrastructure } from "./published-check
 import type { PublishedCheckpointPairedSessions } from "./published-checkpoint-target.js";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig, writeConfig } from "@zhixing/providers";
+import { writeInitializedLocalRoles } from "./local-role-configuration.js";
 import {
   loadCandidateDeviceKey,
   loadOrCreateCandidateDeviceKey,
@@ -528,7 +529,7 @@ export async function activateInitialRecoveryRoot(input: {
 }
 
 async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
-  const config = loadConfig({ homeDir: input.zhixingHome });
+  let config = loadConfig({ homeDir: input.zhixingHome });
   let trustRecord = await input.store.loadTrustRecord();
   let projection = await input.store.loadTrustProjection();
   let identity: DeviceIdentity;
@@ -545,6 +546,8 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
     });
     projection = initialized.projection;
     trustRecord = initialized.record;
+    // 有链即须显式启用角色：随初始化立即写下，后面的配对步骤即使失败，这台单机仍按仅本机拓扑可启动
+    config = await writeInitializedLocalRoles({ homeDir: input.zhixingHome, config });
   } else {
     const local = trustRecord.members.find((member) =>
       member.device.deviceId === input.key.deviceId && member.state === "active");

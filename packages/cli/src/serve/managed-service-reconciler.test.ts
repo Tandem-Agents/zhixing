@@ -94,6 +94,21 @@ describe("managed service reconciliation", () => {
     },
   );
 
+  it("仅本机运行的有链单机（例如本机加密备份建链）按需启动，不调用任何系统服务的安装、启用或启动", async () => {
+    const adapter = fakeAdapter();
+    const state = current({ roles: ["anchor", "executor"], issuer: "device:local", spec });
+    const localOnly = { ...state, configuration: { enabledRoles: state.configuration.enabledRoles } };
+    const result = await reconcileManagedService({
+      homeKey: "home-local-only",
+      trigger: "host-missing",
+      loadCurrent: async () => localOnly,
+      adapter,
+      signal: new AbortController().signal,
+    });
+    expect(result.plan).toEqual({ mode: "on-demand", roles: ["anchor", "executor"] });
+    expect(adapter.calls.filter((call) => /install|enable|start/u.test(call))).toEqual([]);
+  });
+
   it("keeps one canonical-home worker across binding changes and drains a late wake", async () => {
     const adapter = fakeAdapter();
     const first = current({ roles: ["anchor"], issuer: "device:local", spec });

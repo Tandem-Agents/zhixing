@@ -27,6 +27,7 @@ import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { canonicalize } from "@zhixing/core/protocol";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig } from "@zhixing/providers";
+import { writeInitializedLocalRoles } from "./local-role-configuration.js";
 import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
 import {
   createCheckpointId,
@@ -68,7 +69,7 @@ import { createBackupTargetConfigurationInfrastructure } from "./backup-target-c
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
-import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
+import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
@@ -76,7 +77,11 @@ import { assertRecoveryPackageInputLimit, requireRecoveryPackageSurface } from "
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { createOwnedMeshPairedCheckpointTargetSession } from "./paired-checkpoint-target-infrastructure.js";
 import type { PairedRecoveryRootActivation } from "./paired-checkpoint-target.js";
-import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
+import {
+  createPublishedCheckpointTargetInfrastructure,
+  preflightDirectoryCheckpointTarget,
+} from "./published-checkpoint-target-infrastructure.js";
+import { RecoveryCheckpointTargetError } from "@zhixing/mesh/checkpoint-target";
 import type {
   PublishedCheckpointDirectorySessions,
   RetirablePublishedRecoveryCheckpointTarget,
@@ -97,6 +102,8 @@ export interface BackupCommandOptions {
     binding: BackupTargetBinding,
     recipientKeyId: string,
   ) => Promise<BackupTargetConnection>;
+  /** 独立目录目标的只读预检；缺省按卷标识判定与 home 权威数据物理独立。 */
+  readonly preflightDirectoryTarget?: (zhixingHome: string, directory: string) => Promise<void>;
 }
 
 export async function runBackupSetupCommand(
@@ -110,17 +117,46 @@ export async function runBackupSetupCommand(
   if ((selection.directory === undefined) === (selectedDevice === undefined)) {
     throw new TypeError("请选择一个独立目录或一台已配对设备作为恢复备份目标");
   }
-  const context = await openContext(options);
+  await mapCheckpointTargetError(async () => {
+    const firstRoot = await inspectSetupPreconditions(options);
+    if (selection.directory !== undefined) {
+      await (options.preflightDirectoryTarget ?? preflightDirectoryCheckpointTarget)(
+        options.zhixingHome ?? getZhixingHome(),
+        selection.directory,
+      );
+    }
+    // 首次独立目录备份：恢复包先经保密界面展示并回读，确认继续后才建 home 信任与角色配置；
+    // 取消或回读失败时本机原样可用。配对目标的首次建根要用已有的链，沿原顺序在 openContext 之后准备
+    const candidate = firstRoot && selection.directory !== undefined
+      ? await presentInitialRootCandidate(options.readRecoveryPackage, options.showRecoveryPackage)
+      : undefined;
+    const context = await openContext(options);
+    try {
+      const application = createBackupRecoveryAdministration(context, options, candidate);
+      const result = await mapBackupAdministrationError(() => application.setup(selection.directory !== undefined
+        ? { kind: "directory", directory: selection.directory }
+        : {
+            kind: "paired-device",
+            displayName: selectedDevice!,
+          }));
+      renderBackupSetupResult(context, result);
+    } finally { await context.close(); }
+  });
+}
+
+/** 恢复备份目录不满足目标条件时给出可照做的说明。 */
+async function mapCheckpointTargetError<Result>(action: () => Promise<Result>): Promise<Result> {
   try {
-    const application = createBackupRecoveryAdministration(context, options);
-    const result = await mapBackupAdministrationError(() => application.setup(selection.directory !== undefined
-      ? { kind: "directory", directory: selection.directory }
-      : {
-          kind: "paired-device",
-          displayName: selectedDevice!,
-        }));
-    renderBackupSetupResult(context, result);
-  } finally { await context.close(); }
+    return await action();
+  } catch (error) {
+    if (error instanceof RecoveryCheckpointTargetError && error.code === "not-physically-independent") {
+      throw new Error(
+        "恢复备份目录与知行数据在同一块磁盘上，磁盘损坏时会一起丢失；请换到另一块磁盘或移动存储上的目录后重试",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 export async function runRecoveryRootRotateCommand(
@@ -276,6 +312,7 @@ type BackupTargetConnection = BackupAdministrationTargetSession & {
 function createBackupRecoveryAdministration(
   context: BackupContext,
   options: BackupCommandOptions,
+  candidate?: InitialRootCandidate,
 ): BackupRecoveryAdministrationApplicationService<
   PreparedInitialRoot,
   BackupAdministrationTargetSession,
@@ -288,15 +325,23 @@ function createBackupRecoveryAdministration(
       active: member.state === "active",
       current: member.device.deviceId === context.key.deviceId,
     })),
-    readRootState: async () =>
-      context.trust.recoveryRootPublicKey && context.trust.recoveryBackupPublicKey
-        ? {
-            kind: "established" as const,
-            recipientKeyId: keyIdForPublicKey(context.trust.recoveryBackupPublicKey),
-            checkpointRevision: context.trust.chainHead.eventDigest,
-          }
-        : { kind: "missing" as const },
-    prepareInitialRoot: () => prepareInitialRoot(context, options.readRecoveryPackage, options.showRecoveryPackage),
+    readRootState: async () => {
+      if (!context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey) {
+        return { kind: "missing" as const };
+      }
+      // 预检时还没有根、展示过候选，此刻却已建立：另一次设置抢先完成，本次展示的恢复包不能当成已生效
+      if (candidate) {
+        throw new Error("恢复根已由另一次设置建立，本次展示的恢复包不会生效；请继续使用之前保存的恢复包");
+      }
+      return {
+        kind: "established" as const,
+        recipientKeyId: keyIdForPublicKey(context.trust.recoveryBackupPublicKey),
+        checkpointRevision: context.trust.chainHead.eventDigest,
+      };
+    },
+    prepareInitialRoot: () => candidate
+      ? completeInitialRoot(context, candidate)
+      : prepareInitialRoot(context, options.readRecoveryPackage, options.showRecoveryPackage),
     preparedRootRecipientKeyId: (prepared) => prepared.checkpoint.envelope.recipientKeyId,
     selectTarget: (binding) => context.backupTargets.select(toBackupTargetBinding(binding)),
     withDirectoryTarget: async (directory, use) => {
@@ -414,7 +459,7 @@ async function mapBackupAdministrationError<Result>(
       "current-target-binding-missing": "恢复备份目标配置缺少当前绑定",
       "verification-candidate-missing": "当前恢复根没有待验证的恢复备份",
       "verification-target-binding-missing": "待验证恢复备份的目标绑定不存在",
-      "recovery-root-missing": "当前 home 尚未建立恢复根",
+      "recovery-root-missing": "恢复备份设置未完成，恢复根尚未建立；请先在完整交互终端运行 zz backup setup",
     };
     throw new Error(messages[error.code]);
   }
@@ -683,9 +728,13 @@ function renderBackupSetupResult(
   result: BackupRecoveryAdministrationSetupResult,
 ): void {
   switch (result.kind) {
-    case "initial-root-established":
-      context.writeLine("恢复备份已创建、回读并验证，可用于恢复。");
+    case "initial-root-established": {
+      const devices = recoveryCapableDevices(context);
+      context.writeLine(devices.length
+        ? `恢复备份已创建、回读并验证。这台电脑损坏时，可在已配对设备${devices.map((name) => `「${name}」`).join("、")}上运行 zz backup recover 接管。`
+        : "恢复备份已创建、回读并验证。注意：恢复要在同一家庭里另一台已配对、有效且可值班的设备上进行；这台电脑目前没有这样的设备，整机损坏后暂时无法用这份备份恢复。");
       return;
+    }
     case "legacy-root-established":
       context.writeLine("旧恢复包中的恢复根已安全激活；请再次运行 zz backup setup 创建完整恢复备份。");
       return;
@@ -696,11 +745,32 @@ function renderBackupSetupResult(
   }
 }
 
+/** 能执行无源恢复的设备：同一家庭里除本机外、有效且具备值班（anchor）资格的已配对设备。 */
+function recoveryCapableDevices(context: BackupContext): readonly string[] {
+  return context.trust.members
+    .filter((member) => member.state === "active" && member.roles.includes("anchor") &&
+      member.device.deviceId !== context.key.deviceId)
+    .map((member) => member.device.displayName);
+}
+
+/** 在原目标上重新设置的命令；配对设备按显示名选择。 */
+function setupCommandFor(target: BackupRecoveryAdministrationTargetBinding, displayName?: string): string {
+  return target.kind === "directory"
+    ? `zz backup setup --directory "${target.directory}"`
+    : `zz backup setup --device ${displayName ?? "<配对设备名>"}`;
+}
+
 function renderBackupStatus(context: BackupContext, status: BackupRecoveryAdministrationStatus): void {
   switch (status.state) {
-    case "recoverable":
-      context.writeLine("恢复备份：可恢复。最近一份备份已从独立目标完整验证。");
+    case "recoverable": {
+      // 材料资格（仍属当前的已验证副本）与恢复入口分开说：恢复要由同一家庭里另一台合格的已配对设备执行；
+      // 更新的副本可能还在待验证，不说成“最近一份”
+      const devices = recoveryCapableDevices(context);
+      context.writeLine(devices.length
+        ? `恢复备份：可恢复。已有一份备份从独立目标完整验证；这台电脑损坏时，可在已配对设备${devices.map((name) => `「${name}」`).join("、")}上运行 zz backup recover 接管。`
+        : "恢复备份：备份已从独立目标完整验证，但还没有可执行恢复的设备。恢复要在同一家庭里另一台已配对、有效且可值班的设备上运行 zz backup recover；这台电脑整机损坏后，目前无法用这份备份恢复。");
       return;
+    }
     case "pending-verification":
       context.writeLine("恢复备份：待验证。下一步：运行 zz backup verify 并输入恢复包。");
       return;
@@ -710,6 +780,16 @@ function renderBackupStatus(context: BackupContext, status: BackupRecoveryAdmini
     case "configured-empty":
       context.writeLine("恢复备份：尚无可恢复副本。下一步：重新运行 zz backup setup。");
       return;
+    case "setup-incomplete": {
+      const target = status.target;
+      const displayName = target.kind === "paired-device"
+        ? context.trust.members.find((member) => member.device.deviceId === target.deviceId)?.device.displayName
+        : undefined;
+      context.writeLine(
+        `恢复备份：设置未完成，恢复根尚未建立，还没有可恢复的副本。下一步：在完整交互终端运行 ${setupCommandFor(target, displayName)}，按提示保存并回读恢复包。`,
+      );
+      return;
+    }
     case "unavailable":
       switch (status.nextAction) {
         case "repair-backup-configuration":
@@ -760,6 +840,8 @@ async function openContext(
       });
       projection = created.projection;
       trust = created.record;
+      // 有链即须显式启用角色：随初始化立即写下，单机落在仅本机运行拓扑，之后照常按需启动
+      await writeInitializedLocalRoles({ homeDir: home, config: loadConfig({ homeDir: home }) });
     } else {
       const member = trust.members.find((candidate) =>
         candidate.state === "active" && candidate.device.deviceId === key.deviceId);
@@ -808,6 +890,39 @@ async function openContext(
   } catch (error) { await close(); throw error; }
 }
 
+/**
+ * 设置前的只读判定：是否需要首次建立恢复根（还没有设备身份、信任或恢复根），以及与 openContext 相同的身份条件。
+ * 首次建根要用保密显示与回读两端，缺任一端就在任何持久变更（设备钥匙、信任、角色、恢复根）之前拒绝；
+ * 身份条件不满足的也在展示恢复包之前拒绝。已有恢复根的设置照原合同继续。
+ */
+async function inspectSetupPreconditions(options: BackupCommandOptions): Promise<boolean> {
+  const home = options.zhixingHome ?? getZhixingHome();
+  const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: home });
+  if (await secretStore.unlockState() !== "unlocked") {
+    throw new Error("设备秘密存储解锁后才能管理恢复备份");
+  }
+  const key = await loadExistingDeviceKey(secretStore);
+  let trust: Awaited<ReturnType<FileMeshBootstrapStore["loadTrustRecord"]>>;
+  if (key) {
+    const store = await FileMeshBootstrapStore.open(home, key, { secretStore, readOnly: true });
+    try { trust = await store.loadTrustRecord(); } finally { await store.stopStorageMaintenance(); }
+  }
+  if (key && trust) {
+    if (!trust.members.some((member) => member.state === "active" && member.device.deviceId === key.deviceId)) {
+      throw new Error("当前设备不在有效的 home 信任成员中");
+    }
+    const enabledRoles = loadConfig({ homeDir: home, noAutoCreate: true }).mesh?.enabledRoles;
+    if (trust.issuer.deviceId !== key.deviceId || (enabledRoles && !enabledRoles.includes("anchor"))) {
+      throw new Error("只有当前主设备可以管理恢复备份");
+    }
+  }
+  const firstRoot = !trust?.recoveryRootPublicKey;
+  if (firstRoot && !(options.showRecoveryPackage && options.readRecoveryPackage)) {
+    return requireRecoveryPackageSurface();
+  }
+  return firstRoot;
+}
+
 interface PreparedInitialRoot {
   readonly root: RecoveryRoot;
   readonly plan: Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["plan"];
@@ -815,31 +930,57 @@ interface PreparedInitialRoot {
   readonly legacyTrustOnly: boolean;
 }
 
-async function prepareInitialRoot(
-  context: BackupContext,
+/** 已展示并回读确认的首次恢复根候选：当前格式只含根材料，旧格式恢复包自带激活计划。 */
+type InitialRootCandidate =
+  | { readonly kind: "current"; readonly generated: RecoveryRoot; readonly root: RecoveryRoot }
+  | { readonly kind: "legacy"; readonly prepared: PreparedInitialRoot };
+
+/** 生成候选恢复根，经保密界面展示并回读核对；只在内存里，不做任何持久变更。 */
+async function presentInitialRootCandidate(
   readRecoveryPackage?: () => Promise<string>,
   showRecoveryPackage?: (encoded: string) => Promise<void>,
-): Promise<PreparedInitialRoot> {
-  const root = RecoveryRoot.generate();
-  const recoveryPackage = encodeRecoveryPackage(root);
-  if (showRecoveryPackage) await showRecoveryPackage(recoveryPackage);
-  else context.writeLine(`恢复包：${recoveryPackage}`);
+): Promise<InitialRootCandidate> {
+  // 恢复包只走专用保密界面：没有这个界面就在生成之前拒绝，绝不写进普通输出
+  if (!showRecoveryPackage) return requireRecoveryPackageSurface();
+  const generated = RecoveryRoot.generate();
+  await showRecoveryPackage(encodeRecoveryPackage(generated));
   const decoded = await readDecodedRecoveryPackage(readRecoveryPackage);
   if (decoded.version === 1) {
     if (decoded.checkpoint.envelope.manifest.purpose.kind !== "root-activation") {
       throw new Error("旧恢复包不包含根激活计划");
     }
     return {
-      root: decoded.root,
-      plan: decoded.checkpoint.envelope.manifest.purpose.plan,
-      checkpoint: decoded.checkpoint,
-      legacyTrustOnly: true,
+      kind: "legacy",
+      prepared: {
+        root: decoded.root,
+        plan: decoded.checkpoint.envelope.manifest.purpose.plan,
+        checkpoint: decoded.checkpoint,
+        legacyTrustOnly: true,
+      },
     };
   }
   if (
-    decoded.root.rootPublicKey !== root.rootPublicKey ||
-    decoded.root.backupPublicKey !== root.backupPublicKey
+    decoded.root.rootPublicKey !== generated.rootPublicKey ||
+    decoded.root.backupPublicKey !== generated.backupPublicKey
   ) throw new Error("回读的恢复包与本次生成的恢复根不一致");
+  return { kind: "current", generated, root: decoded.root };
+}
+
+async function prepareInitialRoot(
+  context: BackupContext,
+  readRecoveryPackage?: () => Promise<string>,
+  showRecoveryPackage?: (encoded: string) => Promise<void>,
+): Promise<PreparedInitialRoot> {
+  return completeInitialRoot(context, await presentInitialRootCandidate(readRecoveryPackage, showRecoveryPackage));
+}
+
+/** 依赖 home 的后半段：基于当时真实的信任生成根事件、激活计划与完整 checkpoint。 */
+async function completeInitialRoot(
+  context: BackupContext,
+  candidate: InitialRootCandidate,
+): Promise<PreparedInitialRoot> {
+  if (candidate.kind === "legacy") return candidate.prepared;
+  const { generated: root, root: decodedRoot } = candidate;
   const createdAt = new Date().toISOString();
   const generatedPlan = {
     v: 1 as const,
@@ -860,16 +1001,16 @@ async function prepareInitialRoot(
     purpose: { kind: "root-activation", plan },
     trust: context.trust,
     issuer,
-    recipient: decoded.root.publicIdentity(),
+    recipient: decodedRoot.publicIdentity(),
     log: context.store.authorityLog(),
     artifacts: context.store.artifactStore(),
     retention: context.store.checkpointRetention(),
     storageMaintenance: context.capacity.storage,
   })).checkpoint;
-  if (checkpoint.envelope.recipientKeyId !== keyIdForPublicKey(decoded.root.backupPublicKey)) {
+  if (checkpoint.envelope.recipientKeyId !== keyIdForPublicKey(decodedRoot.backupPublicKey)) {
     throw new Error("恢复包与恢复 checkpoint 的 recipient 身份不一致");
   }
-  return { root: decoded.root, plan, checkpoint, legacyTrustOnly: false };
+  return { root: decodedRoot, plan, checkpoint, legacyTrustOnly: false };
 }
 
 async function establishInitialRoot(
