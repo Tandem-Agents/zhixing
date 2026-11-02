@@ -116,6 +116,12 @@ describe("formatToolHeader", () => {
     );
   });
 
+  it("定时任务按动作写明对象", () => {
+    expect(formatToolHeader("schedule", { action: "create", name: "日报" })).toBe("定时任务(日报)");
+    expect(formatToolHeader("schedule", { action: "delete", id: "task-1" })).toBe("定时任务(删除 task-1)");
+    expect(formatToolHeader("schedule", { action: "list" })).toBe("定时任务(查看)");
+  });
+
   it("target 为空时省略括号", () => {
     expect(formatToolHeader("schedule", {})).toBe("定时任务");
     expect(formatToolHeader("read", {})).toBe("Read");

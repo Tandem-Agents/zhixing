@@ -135,9 +135,18 @@ describe('terminal task commands and current projection', () => {
         state: { runCount: 1, consecutiveErrors: 0, lastRunAt: new Date().toISOString(), lastStatus: 'ok', nextRunAt: '2026-10-07T08:00:00.000Z' } })),
     ]);
     await f.tasks.run('tasks');
-    for (const text of ['定时任务 (5 个)', 'Asia/Shanghai', '○ 日报 (once)', '一次性', '每 30 秒', '每 2 分钟', '每 2 小时', '上次: ok', '下次:', '未执行过']) expect(f.text()).toContain(text);
+    for (const text of ['定时任务 (5 个)', 'Asia/Shanghai', '○ 日报 (once)', '一次性', '每 30 秒', '每 2 分钟', '每 2 小时', '上次: 成功', '下次:', '未执行过']) expect(f.text()).toContain(text);
+    expect(f.text()).not.toContain('上次: ok');
     expect(f.text()).not.toContain('执行中'); expect(f.conversation.taskList).not.toHaveBeenCalled();
     f.scheduler.list.mockResolvedValueOnce([]); await f.tasks.run('tasks'); expect(f.text()).toContain('没有定时任务');
+    // 执行过、不再有下次运行的一次性任务显示为已完成，不与仍会触发的任务同一标记
+    f.scheduler.list.mockResolvedValueOnce([{ ...scheduled('done'), schedule: { kind: 'once', at: '2026-10-06T08:00:00.000Z' },
+      state: { runCount: 1, consecutiveErrors: 0, lastRunAt: new Date().toISOString(), lastStatus: 'ok' } }]);
+    await f.tasks.run('tasks'); expect(f.text()).toMatch(/✓ 日报 \(done\) · 已完成/u);
+    // 失败结束的一次性任务不打对勾
+    f.scheduler.list.mockResolvedValueOnce([{ ...scheduled('failed'), schedule: { kind: 'once', at: '2026-10-06T08:00:00.000Z' },
+      state: { runCount: 1, consecutiveErrors: 1, lastRunAt: new Date().toISOString(), lastStatus: 'error' } }]);
+    await f.tasks.run('tasks'); expect(f.text()).toMatch(/✗ 日报 \(failed\) · 已结束（失败）/u);
     f.scheduler.list.mockRejectedValueOnce(Error('schedule unavailable')); await f.tasks.run('tasks');
     expect(f.publish).toHaveBeenCalledWith(expect.objectContaining({ error: true, message: expect.stringContaining('schedule unavailable') }));
   });

@@ -3596,6 +3596,155 @@ describe("user job durable protocol", {
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
+  // 与锚点调度器的装配一致：取消提交与密封包由执行端自担
+  const anchorDispatcher = (journal: JobJournal, ledger: ConversationAssignmentLedger) =>
+    new InProcessJobDispatcher({
+      enabled: true,
+      journal,
+      executor: ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: { submitCancellation: async () => false },
+      bundleSubmission: {
+        submitSealedBundle: async () => {
+          throw new Error("Executor job owner retains sealed-bundle recovery");
+        },
+      },
+    });
+  const backpressureFailure = {
+    reason: "Storage maintenance was not admitted: backpressured:readBytes (projection-flush)",
+    usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+  };
+
+  it("lands an executor-side failure as the owner's failed terminal, replays it, and retires the assignment", async () => {
+    const harness = await createUserHarness();
+    const dispatcher = anchorDispatcher(harness.journal, harness.ledger);
+    const lifecycle: string[] = [];
+    harness.journal.onLifecycle((event) => {
+      lifecycle.push(event.kind);
+    });
+    await dispatcher.dispatchPending();
+    const submission = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await submission.startAndReport(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    // 执行端仍在运行：不动 owner 状态
+    await expect(dispatcher.reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(false);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("running");
+
+    await harness.ledger.failExecution(ASSIGNMENT_ID, backpressureFailure);
+    await expect(dispatcher.reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(true);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("failed");
+    expect(await harness.journal.assignmentAwaitingRecovery(ASSIGNMENT_ID)).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lifecycle).toContain("assignment-retired");
+    // 重复对账幂等；重开后按回放得到同一终态（回放校验失败接纳记录）
+    await expect(dispatcher.reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(false);
+    const reopened = reopenUserJournal(harness);
+    expect(await reopened.currentState(JOB_RUN_ID)).toBe("failed");
+    expect(await reopened.assignmentAwaitingRecovery(ASSIGNMENT_ID)).toBeUndefined();
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("lands an executor failure whose started report was lost, after a restart missed the notification", async () => {
+    const harness = await createUserHarness();
+    await anchorDispatcher(harness.journal, harness.ledger).dispatchPending();
+    // 执行端已开始并失败，但 owner 没收到 started 上报，也没收到失败通知
+    await harness.ledger.start(ASSIGNMENT_ID);
+    await harness.ledger.failExecution(ASSIGNMENT_ID, backpressureFailure);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("dispatched");
+    // 重启：新 journal 实例与新调度器按指派精确对账
+    const restarted = reopenUserJournal(harness);
+    await expect(anchorDispatcher(restarted, harness.ledger).reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(true);
+    expect(await restarted.currentState(JOB_RUN_ID)).toBe("failed");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("converges a missed executor failure through the dispatcher's own recovery driver", async () => {
+    const harness = await createUserHarness();
+    const dispatcher = new InProcessJobDispatcher({
+      enabled: true,
+      journal: harness.journal,
+      executor: harness.ledger,
+      contexts: { create: ownerContext },
+      cancellationSubmission: { submitCancellation: async () => false },
+      bundleSubmission: {
+        submitSealedBundle: async () => {
+          throw new Error("Executor job owner retains sealed-bundle recovery");
+        },
+      },
+      terminalReconciliation: { assignmentId: ASSIGNMENT_ID, intervalMs: 20 },
+    });
+    await dispatcher.dispatchPending();
+    await start(harness);
+    dispatcher.startRecoveryLoop(10);
+    onTestFinished(() => dispatcher.stopRecoveryLoop());
+    // 没有任何终态通知：只靠恢复驱动发现执行端已失败
+    await harness.ledger.failExecution(ASSIGNMENT_ID, backpressureFailure);
+    await expect.poll(() => harness.journal.currentState(JOB_RUN_ID), { timeout: 10_000 }).toBe("failed");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("does not let executor-terminal reconciliation overwrite a sealed result or touch an unknown assignment", async () => {
+    const harness = await createUserHarness();
+    const dispatcher = anchorDispatcher(harness.journal, harness.ledger);
+    await dispatcher.dispatchPending();
+    await start(harness);
+    await seal(harness);
+    // 密封包由执行端提交路径推进，对账不越权落终态
+    await expect(dispatcher.reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(false);
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("running");
+    await expect(dispatcher.reconcileExecutorTerminal("assignment:unknown")).resolves.toBe(false);
+    // 直接写失败也只接受当前进行中的指派
+    await expect(harness.journal.failAssigned(JOB_RUN_ID, "assignment:unknown", {
+      lastSeq: 3,
+      failure: backpressureFailure,
+    })).rejects.toThrow("current active job assignment");
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("observes an executor-acknowledged commit so the assignment leaves the owner's pending set", async () => {
+    const harness = await createUserHarness();
+    const dispatcher = anchorDispatcher(harness.journal, harness.ledger);
+    await dispatcher.dispatchPending();
+    const submission = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await submission.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    await seal(harness);
+    await submission.submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
+    await expect(
+      harness.ledger.queryLedger(ASSIGNMENT_ID, ownerContext(ASSIGNMENT_ID, "executor.queryLedger")),
+    ).resolves.toMatchObject({ phase: "acked" });
+    expect((await harness.journal.assignmentAwaitingRecovery(ASSIGNMENT_ID))?.state).toBe("committed");
+    await expect(dispatcher.reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(true);
+    expect(await harness.journal.assignmentAwaitingRecovery(ASSIGNMENT_ID)).toBeUndefined();
+    await expect(dispatcher.reconcileExecutorTerminal(ASSIGNMENT_ID)).resolves.toBe(false);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it("rejects on replay an assigned failure that carries no verified executor failure", async () => {
+    const harness = await createUserHarness();
+    await anchorDispatcher(harness.journal, harness.ledger).dispatchPending();
+    await start(harness);
+    await appendUnvalidated(harness.log, [
+      {
+        stream: `job:${TASK_ID}`,
+        body: {
+          t: "state" as const,
+          jobRunId: JOB_RUN_ID,
+          assignmentId: ASSIGNMENT_ID,
+          state: "failed" as const,
+          statusRevision: 4,
+          usageFinal: backpressureFailure.usageFinal,
+        },
+      },
+    ]);
+    await expect(reopenUserJournal(harness).currentState(JOB_RUN_ID)).rejects.toThrow(
+      "verified executor failure",
+    );
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it("keeps versioned cancellation pending until stream projection and closes on same-fence replay", async () => {
     const harness = await createUserHarness();
     const submission = new InProcessAssignmentSubmission({
@@ -5433,6 +5582,8 @@ async function createSystemHarness(
     deferFirstPrepare?: boolean;
     recovery?: "reuse" | "replace";
     invalidResourceBinding?: "activation" | "terminal";
+    /** 第一次终态预检缺键（激活提交后工作集已换），带锁外装入 */
+    terminalNeedsLoad?: boolean;
   } = {},
 ) {
   const trackLog = trackTestAuthorityLogs();
@@ -6551,6 +6702,7 @@ type JobBehaviorScenarioId =
   | "mirror"
   | "conflictAcked"
   | "cancelHalted"
+  | "executionFailure"
   | "cancelUncertainContained"
   | "supersedeStarted"
   | "supersedeNotStarted"
@@ -6973,6 +7125,26 @@ const JOB_BEHAVIOR_SCENARIOS: Record<
     const harness = await createUserHarness();
     await start(harness);
     await requestOwnerCancellation(harness, "matrix-cancel-halted", true);
+    return userBehaviorHarness(harness);
+  },
+  async executionFailure() {
+    const harness = await createUserHarness();
+    await start(harness);
+    await harness.ledger.failExecution(ASSIGNMENT_ID, {
+      reason: "matrix executor failure",
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    const ledger = await harness.journal.validateExecutorLedgerSnapshot(
+      await harness.ledger.queryLedger(
+        ASSIGNMENT_ID,
+        ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+      ),
+    );
+    if (!ledger.failure) throw new Error("matrix executor failure is not durable");
+    await harness.journal.failAssigned(JOB_RUN_ID, ASSIGNMENT_ID, {
+      lastSeq: ledger.lastSeq,
+      failure: ledger.failure,
+    });
     return userBehaviorHarness(harness);
   },
   async cancelUncertainContained() {
@@ -7545,6 +7717,10 @@ const JOB_RECORD_BEHAVIOR = {
     scenario: "cancelHalted",
     recovery: jobRecovery("cancellationOutbox"),
   },
+  "execution-failure-accepted": {
+    scenario: "executionFailure",
+    recovery: noJobRecovery("executor failure acceptance is a terminal fact consumed only by its atomic failed state"),
+  },
   "not-started-rejected": {
     scenario: "uncertainRejected",
     recovery: jobRecovery("contradictoryProofStop"),
@@ -7798,11 +7974,12 @@ describe("user assigned state edges are closed by domain", {
         },
       },
     ]);
+    // running→failed 只有同事务带已验证的执行端失败事实才合法；裸状态记录在两条回放里都被拒
     await expect(reopenUserJournal(harness).currentState(JOB_RUN_ID)).rejects.toThrow(
-      "legal assigned edge",
+      "verified executor failure",
     );
     await expect(
       harness.journal.reportStarted(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
-    ).rejects.toThrow("legal assigned edge");
+    ).rejects.toThrow("verified executor failure");
   });
 });

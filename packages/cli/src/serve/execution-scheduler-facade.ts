@@ -1,6 +1,7 @@
 import type { AssignmentMutationPort } from "@zhixing/core/contracts";
 import type { AgentTurnResult, ScheduleMutationContext, SchedulerFacade, SchedulerFacadeEventHandler, TaskPatch, TaskView } from "@zhixing/core/scheduler";
 import {
+  deriveScheduleNextRun,
   ScheduleManagementApplicationService,
   type ScheduleManagementRepository,
   type ScheduleTaskDraft,
@@ -143,12 +144,15 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
           operationId: operation.operationId,
         });
         const taskId = scheduleTaskIdForRequest(result.requestId);
-        const now = new Date().toISOString();
+        const at = new Date();
+        const now = at.toISOString();
+        // 暂存的新任务还没有发生记录：与锚点发布后同一推导给出下次运行（一次性任务即其时间）
+        const nextRunAt = spec.enabled === false ? undefined : deriveScheduleNextRun(spec.schedule, [], at);
         const view: TaskView = {
           id: taskId,
           taskRevision: 1,
           ...structuredClone(spec),
-          state: { consecutiveErrors: 0, runCount: 0 },
+          state: { consecutiveErrors: 0, runCount: 0, ...(nextRunAt ? { nextRunAt } : {}) },
           createdAt: now,
           updatedAt: now,
         };

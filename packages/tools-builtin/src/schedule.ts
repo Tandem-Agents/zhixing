@@ -331,7 +331,7 @@ function formatTask(task: ScheduledTask, header: string): string {
     `  Schedule: ${formatSchedule(task.schedule)}`,
     `  Priority: ${task.priority}`,
     `  Enabled: ${task.enabled}`,
-    `  Next run: ${task.state.nextRunAt ?? "N/A"}`,
+    `  Next run: ${task.state.nextRunAt ? withLocalTime(task.state.nextRunAt) : "N/A"}`,
   ];
   if (task.description) lines.push(`  Description: ${task.description}`);
   return lines.join("\n");
@@ -342,13 +342,24 @@ function formatTaskBrief(task: ScheduledTask): string {
   const lastRun = task.state.lastRunAt
     ? `last: ${task.state.lastStatus ?? "?"} at ${task.state.lastRunAt}`
     : "never run";
-  return `[${status}] ${task.name} (${task.id}, revision ${task.taskRevision ?? "N/A"})\n    ${formatSchedule(task.schedule)} | ${task.priority} | ${lastRun}\n    Next: ${task.state.nextRunAt ?? "N/A"}`;
+  return `[${status}] ${task.name} (${task.id}, revision ${task.taskRevision ?? "N/A"})\n    ${formatSchedule(task.schedule)} | ${task.priority} | ${lastRun}\n    Next: ${task.state.nextRunAt ? withLocalTime(task.state.nextRunAt) : "N/A"}`;
+}
+
+/** UTC 时刻附上本机时间与时区偏移：模型据此转述、用户读到原文也不会把 UTC 当本地时间。 */
+function withLocalTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const offset = -date.getTimezoneOffset();
+  const zone = `UTC${offset >= 0 ? "+" : "-"}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
+  return `${iso} (local ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${zone})`;
 }
 
 function formatSchedule(schedule: TaskSchedule): string {
   switch (schedule.kind) {
     case "once":
-      return `once at ${schedule.at}`;
+      return `once at ${withLocalTime(schedule.at)}`;
     case "interval":
       return `every ${humanDuration(schedule.everyMs)}`;
     case "cron":

@@ -200,6 +200,7 @@ import {
   assertJobMirrorReplayContract,
   assertJobResolutionBinding,
   assertJobStateReplayContract,
+  assertExecutionFailureAcceptedReplayContract,
   assertSystemJobActivationReplayContract,
   assertSystemJobDefinitionReplayContract,
   assertSystemMissCoalescedReplayContract,
@@ -1092,6 +1093,19 @@ export interface PendingJobFence {
   readonly fence: { readonly fenceSeq: number; readonly requestId: string };
 }
 
+/** 待恢复或待回执的单个指派（owner 侧收尾对账的输入）。 */
+export interface JobRecoveryCandidate {
+  readonly assignmentId: string;
+  readonly state:
+    | "dispatched"
+    | "running"
+    | "cancel-requested"
+    | "uncertain"
+    | "committed";
+  readonly stoppedProofKinds: readonly NotStartedProofKind[];
+  readonly dispatch: PendingJobDispatch;
+}
+
 /**
  * Process-local wakeups derived only after the authoritative journal commit.
  * They are never replay or recovery facts; consumers rebuild from JobJournal.
@@ -1147,6 +1161,14 @@ interface InProcessJobDispatcherBaseOptions {
     assignmentId: string,
   ) => void | Promise<void>;
   readonly onRecoveryError?: (error: Error) => void;
+  /**
+   * 本调度器负责的指派：恢复驱动每轮按此间隔对它做一次执行端终态对账。
+   * 终态通知是加速，丢一次时由这里在有界时间内收敛（本机与远程执行端一致）。
+   */
+  readonly terminalReconciliation?: {
+    readonly assignmentId: string;
+    readonly intervalMs?: number;
+  };
 }
 
 export type InProcessJobDispatcherOptions = InProcessJobDispatcherBaseOptions &
@@ -2214,6 +2236,9 @@ export class JobReduction {
         state.recoveryAssignments.delete(body.assignmentId);
         return state;
       }
+      case "execution-failure-accepted":
+        assertExecutionFailureAcceptanceReplay(state, body, envelopeRecords);
+        return state;
       case "not-started-rejected": {
         const assigned = requireReplayAssignment(state, body.assignmentId);
         const current = state.states.get(assigned.record.jobRunId);
@@ -2869,6 +2894,7 @@ export class JobReduction {
               record.jobRunId === body.jobRunId &&
               record.outcome === body.state,
           ),
+          hasAtomicExecutionFailure: recordsAcceptExecutionFailure(envelopeRecords, body),
         });
         if (
           previous.state === "queued" &&
@@ -3750,6 +3776,9 @@ export class JobReduction {
         state.acceptedCancellations.add(body.assignmentId);
         return state;
       }
+      case "execution-failure-accepted":
+        assertExecutionFailureAcceptanceReplay(state, body, envelopeRecords);
+        return state;
       case "capability-revoked": {
         const assigned = state.assignedById.get(body.assignmentId);
         const key = revokedCapabilityKey(body.assignmentId, body.capId);
@@ -4118,6 +4147,7 @@ export class JobReduction {
               record.jobRunId === body.jobRunId &&
               record.outcome === body.state,
           ),
+          hasAtomicExecutionFailure: recordsAcceptExecutionFailure(envelopeRecords, body),
         });
         if (
           previous.state === "queued" &&
@@ -5658,19 +5688,29 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     return assignments.map((assigned) => materializeDispatch(assigned, this.#signer));
   }
 
-  async assignmentsAwaitingRecovery(): Promise<
-    Array<{
-      readonly assignmentId: string;
-      readonly state:
-        | "dispatched"
-        | "running"
-        | "cancel-requested"
-        | "uncertain"
-        | "committed";
-      readonly stoppedProofKinds: readonly NotStartedProofKind[];
-      readonly dispatch: PendingJobDispatch;
-    }>
-  > {
+  async assignmentsAwaitingRecovery(): Promise<JobRecoveryCandidate[]> {
+    return this.#awaitingRecovery((state) => [...new Set([
+      ...state.recoveryAssignments.values(),
+      ...state.bundleAcknowledgementOutbox.values(),
+    ])]);
+  }
+
+  /** 按指派精确取单个待恢复项（待恢复或待回执集合）；不在其中返回 undefined。 */
+  async assignmentAwaitingRecovery(
+    assignmentId: string,
+  ): Promise<JobRecoveryCandidate | undefined> {
+    assertIdentifier(assignmentId, "Recovery assignment id");
+    return (await this.#awaitingRecovery((state) =>
+      state.recoveryAssignments.has(assignmentId) ||
+      state.bundleAcknowledgementOutbox.has(assignmentId)
+        ? [assignmentId]
+        : [],
+    )).at(0);
+  }
+
+  async #awaitingRecovery(
+    candidateIds: (state: JobProjection) => readonly string[],
+  ): Promise<JobRecoveryCandidate[]> {
     type RecoveryCandidate = {
       readonly assignmentId: string;
       readonly state:
@@ -5683,10 +5723,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       readonly assigned: AssignedJob;
     };
     const assignments = await this.#select((state): RecoveryCandidate[] =>
-      byAssignmentCommit(state, [...new Set([
-        ...state.recoveryAssignments.values(),
-        ...state.bundleAcknowledgementOutbox.values(),
-      ])])
+      byAssignmentCommit(state, [...candidateIds(state)])
         .flatMap<RecoveryCandidate>((assignmentId) => {
           const assigned = state.assignedById.get(assignmentId);
           if (!assigned) {
@@ -6567,13 +6604,21 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     return this.#closeQueued(jobRunId, "failed");
   }
 
+  /**
+   * 执行端台账已耐久失败的当前指派落成 failed：失败事实、能力吊销、failed 状态（带 usageFinal，
+   * 由此派生结算释放）同一事务。只接受 dispatched/running 的当前指派；已失败幂等返回。
+   */
   async failAssigned(
     jobRunId: string,
     assignmentId: string,
-    usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number },
+    executorFailure: {
+      readonly lastSeq: number;
+      readonly failure: NonNullable<LedgerSnapshot["failure"]>;
+    },
   ): Promise<void> {
     assertIdentifier(jobRunId, "Failed job run id");
     assertIdentifier(assignmentId, "Failed job assignment id");
+    const usageFinal = executorFailure.failure.usageFinal;
     await this.#transact<void>((state) => {
       const current = state.states.get(jobRunId);
       if (current?.state === "failed") return { kind: "return", value: undefined };
@@ -6589,6 +6634,18 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       return {
         kind: "append",
         entries: [
+          jobRecord(this.#taskId, {
+            t: "execution-failure-accepted",
+            assignmentId,
+            lastSeq: executorFailure.lastSeq,
+            failure: {
+              reason: executorFailure.failure.reason,
+              usageFinal: {
+                reportDigest: usageFinal.reportDigest,
+                upToUsageSeq: usageFinal.upToUsageSeq,
+              },
+            },
+          }),
           ...capabilityRevocations(this.#taskId, state, assigned),
           stateRecord(
             this.#taskId,
@@ -8311,7 +8368,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }),
       this.#artifacts,
     );
-    const terminalRecords = this.#systemResources.terminal({ lease, outcome });
+    // 终态资源预检在事务之外：激活提交后工作集已换，缺键时与事务同一机制锁外装入后重做
+    const systemResources = this.#systemResources;
+    const terminalRecords = await this.#repeatState(async () => systemResources.terminal({ lease, outcome }));
     assertForeignRecords(terminalRecords, jobStream(this.#taskId));
     this.#systemResources.assertTerminalRecords({
       fence,
@@ -9343,6 +9402,8 @@ export class InProcessJobDispatcher {
     | ((assignmentId: string) => void | Promise<void>)
     | undefined;
   readonly #onRecoveryError: ((error: Error) => void) | undefined;
+  readonly #terminalReconciliation: InProcessJobDispatcherBaseOptions["terminalReconciliation"];
+  #nextTerminalReconciliationAt = 0;
   readonly #cancellationDispatches = new Map<
     string,
     {
@@ -9369,6 +9430,7 @@ export class InProcessJobDispatcher {
     this.#onDispatchAccepted = options.onDispatchAccepted;
     this.#onCancelAccepted = options.onCancelAccepted;
     this.#onRecoveryError = options.onRecoveryError;
+    this.#terminalReconciliation = options.terminalReconciliation;
   }
 
   /**
@@ -9416,6 +9478,11 @@ export class InProcessJobDispatcher {
 
   async #recoverDurableOutboxes(): Promise<void> {
     await this.recoverCancellations();
+    const terminal = this.#terminalReconciliation;
+    if (terminal && Date.now() >= this.#nextTerminalReconciliationAt) {
+      this.#nextTerminalReconciliationAt = Date.now() + (terminal.intervalMs ?? 5_000);
+      await this.reconcileExecutorTerminal(terminal.assignmentId);
+    }
   }
 
   async dispatchPending(): Promise<readonly DispatchResult[]> {
@@ -9592,6 +9659,67 @@ export class InProcessJobDispatcher {
     return pending.length;
   }
 
+  /**
+   * 单个指派在执行端到达终态后的 owner 侧收尾：执行端耐久失败落成 failed；
+   * 执行端已确认的提交写回执观察（started 上报丢失时先补 running）。
+   * 只按指派精确读取一次 owner 待办与一次执行端台账；取消证明与密封包由各自
+   * 所属路径推进（锚点本机装配里由执行端自担），这里不碰。重复调用幂等。
+   */
+  async reconcileExecutorTerminal(assignmentId: string): Promise<boolean> {
+    if (!this.#enabled) return false;
+    const candidate = await this.#journal.assignmentAwaitingRecovery(assignmentId);
+    if (!candidate) return false;
+    if (
+      candidate.state !== "dispatched" &&
+      candidate.state !== "running" &&
+      candidate.state !== "committed"
+    ) {
+      return false;
+    }
+    const ledger = await this.#journal.validateExecutorLedgerSnapshot(
+      await this.#executor.queryLedger(
+        assignmentId,
+        this.#queryContext(assignmentId),
+      ),
+    );
+    if (ledger.assignmentId !== assignmentId) {
+      throw new TypeError("Executor ledger snapshot names another assignment");
+    }
+    if (ledger.phase === "failed" && candidate.state !== "committed") {
+      await this.#acceptExecutorFailure(candidate, ledger);
+      return true;
+    }
+    if (ledger.phase === "acked") {
+      await this.#observeAcknowledgement(candidate, ledger);
+      return true;
+    }
+    return false;
+  }
+
+  async #observeAcknowledgement(
+    candidate: JobRecoveryCandidate,
+    ledger: LedgerSnapshot,
+  ): Promise<void> {
+    if (candidate.state === "dispatched") {
+      await this.#journal.reconcileStarted(candidate.assignmentId, ledger);
+    }
+    await this.#journal.observeBundleAcknowledgement(candidate.assignmentId, ledger);
+  }
+
+  async #acceptExecutorFailure(
+    candidate: JobRecoveryCandidate,
+    ledger: LedgerSnapshot,
+  ): Promise<void> {
+    if (!ledger.failure) {
+      throw new Error("Failed executor job assignment has no durable failure fact");
+    }
+    await this.#journal.failAssigned(
+      candidate.dispatch.envelope.work.jobRunId,
+      candidate.assignmentId,
+      { lastSeq: ledger.lastSeq, failure: ledger.failure },
+    );
+  }
+
   async recoverAssignments(): Promise<number> {
     if (!this.#enabled) return 0;
     const candidates = await this.#journal.assignmentsAwaitingRecovery();
@@ -9624,14 +9752,7 @@ export class InProcessJobDispatcher {
         continue;
       }
       if (ledger.phase === "failed") {
-        if (!ledger.failure) {
-          throw new Error("Failed executor job assignment has no durable failure fact");
-        }
-        await this.#journal.failAssigned(
-          candidate.dispatch.envelope.work.jobRunId,
-          candidate.assignmentId,
-          ledger.failure.usageFinal,
-        );
+        await this.#acceptExecutorFailure(candidate, ledger);
         recovered += 1;
         continue;
       }
@@ -9653,13 +9774,7 @@ export class InProcessJobDispatcher {
         continue;
       }
       if (ledger.phase === "acked") {
-        if (candidate.state === "dispatched") {
-          await this.#journal.reconcileStarted(candidate.assignmentId, ledger);
-        }
-        await this.#journal.observeBundleAcknowledgement(
-          candidate.assignmentId,
-          ledger,
-        );
+        await this.#observeAcknowledgement(candidate, ledger);
         recovered += 1;
         continue;
       }
@@ -10628,6 +10743,66 @@ function allJobCapabilitiesRevoked(
           record.t === "ticket-revoked" && record.ticketId === ticketId,
       ),
   );
+}
+
+/** 带指派的 failed 状态同事务有绑定同一指派与同一 usageFinal 的执行端失败接纳。 */
+function recordsAcceptExecutionFailure(
+  envelopeRecords: readonly JobJournalRecord[],
+  failed: Extract<JobJournalRecord, { t: "state" }>,
+): boolean {
+  const usageFinal = failed.usageFinal;
+  return (
+    failed.assignmentId !== undefined &&
+    usageFinal !== undefined &&
+    envelopeRecords.some(
+      (record) =>
+        record.t === "execution-failure-accepted" &&
+        record.assignmentId === failed.assignmentId &&
+        canonicalize(record.failure.usageFinal) === canonicalize(usageFinal),
+    )
+  );
+}
+
+function assertExecutionFailureAcceptanceReplay(
+  state: Parameters<typeof allJobCapabilitiesRevoked>[1] & {
+    readonly assignedById: Pick<
+      ReadonlyMap<string, { readonly record: Extract<JobJournalRecord, { t: "assigned" }> }>,
+      "get"
+    >;
+    readonly states: Pick<
+      ReadonlyMap<string, { readonly state: JobRunState; readonly statusRevision: number }>,
+      "get"
+    >;
+    readonly assignmentByJob: Pick<ReadonlyMap<string, string>, "get">;
+  },
+  body: Extract<JobJournalRecord, { t: "execution-failure-accepted" }>,
+  envelopeRecords: readonly JobJournalRecord[],
+): void {
+  const assigned = state.assignedById.get(body.assignmentId);
+  const current = assigned ? state.states.get(assigned.record.jobRunId) : undefined;
+  assertExecutionFailureAcceptedReplayContract({
+    assignmentExists: assigned !== undefined,
+    assignmentIsCurrent:
+      assigned !== undefined &&
+      state.assignmentByJob.get(assigned.record.jobRunId) === body.assignmentId,
+    currentState: current?.state,
+    hasAtomicFailedState:
+      assigned !== undefined &&
+      current !== undefined &&
+      envelopeRecords.some(
+        (record) =>
+          record.t === "state" &&
+          record.jobRunId === assigned.record.jobRunId &&
+          record.assignmentId === body.assignmentId &&
+          record.state === "failed" &&
+          record.statusRevision === current.statusRevision + 1 &&
+          record.usageFinal !== undefined &&
+          canonicalize(record.usageFinal) === canonicalize(body.failure.usageFinal),
+      ),
+    allCapabilitiesRevoked:
+      assigned !== undefined &&
+      allJobCapabilitiesRevoked(envelopeRecords, state, { record: assigned.record }),
+  });
 }
 
 function validateJobTicketIssueRequest(input: DataPlaneTicketIssueRequest): void {

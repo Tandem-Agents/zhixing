@@ -122,6 +122,12 @@ export class AnchorScheduler {
   readonly #activeRunCountByTask = new Map<string, number>();
   readonly #queuedRunsByTask = new Map<string, readonly JobOccurrence[]>();
   readonly #completionTrackers = new Map<string, Promise<void>>();
+  /** 进行中的接纳决定：触发提交、用户激活与恢复派发、运行控制提交、取消。关准入后冻结前先等它们收束 */
+  readonly #decisions = new Set<Promise<unknown>>();
+  /** 准入代际：每次开放与关闭都换代；开始新工作的入口按开始时的代际核准，关闭后的晚到续行不能重新开工 */
+  #generation = 0;
+  /** 本进程正在执行的系统处理器（物理工作）：结清时等它跑完，不随冻结交接 */
+  readonly #systemRuns = new Map<string, Promise<unknown>>();
   readonly #taskByRun = new Map<string, string>();
   readonly #lifecycleUnsubscribers = new Map<string, () => void>();
   readonly #stateWaiters = new Map<string, Set<JobStateWaiter>>();
@@ -133,6 +139,8 @@ export class AnchorScheduler {
   #accepting = false;
   #prepared = false;
   #activationRecovery: Promise<void> | undefined;
+  /** 全部尚未结束的激活恢复回合（含已关闭的旧代）：停止与迁居暂停都要等它们确实退出 */
+  readonly #activationRecoveries = new Set<Promise<void>>();
   readonly #recoveringTaskIds = new Set<string>();
   #tickRunning = false;
   #queuedWakeRequested = false;
@@ -196,15 +204,19 @@ export class AnchorScheduler {
     if (!this.#prepared) throw new Error("Scheduler must be prepared before activation");
     if (this.#accepting) return;
     this.#accepting = true;
+    const generation = ++this.#generation;
     this.#arm();
-    this.#activationRecovery = this.#background(() => this.#recoverAfterActivation());
+    const recovery = this.#background(() => this.#recoverAfterActivation(generation));
+    this.#activationRecoveries.add(recovery);
+    void recovery.finally(() => this.#activationRecoveries.delete(recovery));
+    this.#activationRecovery = recovery;
   }
 
-  async #recoverAfterActivation(): Promise<void> {
+  async #recoverAfterActivation(generation: number): Promise<void> {
     const pending = [...this.#definitions];
     let cursor = 0;
     const worker = async (): Promise<void> => {
-      while (this.#accepting) {
+      while (this.#startsAllowed(generation)) {
         const entry = pending[cursor++];
         if (!entry) return;
         const [taskId, definition] = entry;
@@ -212,13 +224,14 @@ export class AnchorScheduler {
         this.#recoveringTaskIds.add(taskId);
         try {
           await this.#disableAfterRepeatedFailure(taskId);
-          if (definition.definition.kind === "system") {
-            await journal.resumeSystemJobs(
+          // 上面的等待期间可能已关准入：开始处理器或恢复派发前在入口重新核准，未开始的留给下一宿主
+          const started = definition.definition.kind === "system"
+            ? this.#startSystem(generation, `resume-system-${taskId}`, () => journal.resumeSystemJobs(
               this.#hostContext(`resume-system-${taskId}`),
-            );
-          } else {
-            await this.#options.recoverUserJobs?.(journal);
-          }
+            ))
+            : this.#startDecision(generation, async () => { await this.#options.recoverUserJobs?.(journal); });
+          if (!started) return;
+          await started;
         } catch (error) {
           this.#options.onError?.(
             error instanceof Error ? error : new Error(String(error)),
@@ -240,7 +253,9 @@ export class AnchorScheduler {
     await Promise.all(
       Array.from({ length: Math.min(4, pending.length) }, () => worker()),
     );
-    await this.#resumeQueuedUserJobs();
+    // 这一代已关闭：不再接着排队激活、补发错过摘要或接手追踪，直接退出
+    if (!this.#startsAllowed(generation)) return;
+    await this.#resumeQueuedUserJobs(generation);
     this.#missedSummaryPending = true;
     try {
       await this.#driveMissedSummaries();
@@ -252,6 +267,8 @@ export class AnchorScheduler {
     for (const [taskId, definition] of this.#definitions) {
       if (definition.definition.kind === "system") continue;
       for (const occurrence of await this.#journal(taskId).openOccurrences()) {
+        // 已关闭的这一代不再接手追踪：未激活的发生随冻结交接
+        if (!this.#startsAllowed(generation)) return;
         if (!TERMINAL_STATES.has(occurrence.state as never)) {
           this.#trackCompletion(taskId, occurrence.jobRunId);
         }
@@ -311,8 +328,9 @@ export class AnchorScheduler {
       for (const waiter of waiters) waiter.resolve(undefined);
     }
     this.#stateWaiters.clear();
-    await this.#activationRecovery?.catch(() => undefined);
-    this.#activationRecovery = undefined;
+    await this.#settleDecisions();
+    await this.#joinActivationRecoveries();
+    await Promise.allSettled([...this.#systemRuns.values()]);
     await Promise.allSettled(this.#completionTrackers.values());
     for (const unsubscribe of this.#lifecycleUnsubscribers.values()) unsubscribe();
     this.#lifecycleUnsubscribers.clear();
@@ -322,35 +340,45 @@ export class AnchorScheduler {
   /** Closes fresh scheduler triggers without waiting for already-owned runs. */
   closeAdmissionForLifecycle(): void {
     this.#accepting = false;
+    this.#generation += 1;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
   }
 
-  /** Exact in-process runs that still own physical scheduler completion work. */
+  /**
+   * 冻结集合：权威中全部未终结发生，逐任务由未终结目录派生（不扫全历史），与下一宿主恢复时核对的是同一集合。
+   * 关准入之后先等已进入接纳临界区的决定收束再取，集合才一致；排队中的发生随冻结交接，这里不等它执行。
+   */
   async acceptedWorkItems(): Promise<readonly { readonly id: string; readonly revision: string }[]> {
+    if (!this.#accepting) await this.#settleDecisions();
     const items: Array<{ id: string; revision: string }> = [];
-    for (const jobRunId of [...this.#completionTrackers.keys()].sort((left, right) =>
-      left.localeCompare(right, "en-US"),
-    )) {
-      const taskId = this.#taskByRun.get(jobRunId);
-      if (!taskId) continue;
-      const occurrence = await this.#journal(taskId).scheduleOccurrence(jobRunId);
-      if (!occurrence || TERMINAL_STATES.has(occurrence.state as never)) continue;
-      items.push(Object.freeze({
-        id: jobRunId,
-        revision: protocolDigest("SchedulerAcceptedWork", 1, {
-          taskId: occurrence.taskId,
-          jobRunId: occurrence.jobRunId,
-          scheduledFor: occurrence.scheduledFor,
-          taskRevision: occurrence.taskRevision,
-          deliveryPlan: occurrence.deliveryPlan,
-        }),
-      }));
+    for (const taskId of this.#definitions.keys()) {
+      for (const occurrence of await this.#journal(taskId).openOccurrences()) {
+        if (TERMINAL_STATES.has(occurrence.state as never)) continue;
+        items.push(Object.freeze({ id: occurrence.jobRunId, revision: acceptedWorkRevision(occurrence) }));
+      }
     }
-    return Object.freeze(items);
+    return Object.freeze(items.sort((left, right) => left.id.localeCompare(right.id, "en-US")));
   }
 
-  /** Recovers only the exact scheduler generation frozen by a lifecycle artifact. */
+  /**
+   * 本进程仍在执行、必须在本进程收尾的工作：追踪中的用户运行、在飞的系统处理器与接纳决定、激活恢复。
+   * 停止读回要求它为空；排队中的发生不在其中，随冻结交接。
+   */
+  inProcessWork(): readonly string[] {
+    return [
+      ...this.#completionTrackers.keys(),
+      ...this.#systemRuns.keys(),
+      ...(this.#decisions.size ? ["accepting-decisions"] : []),
+      ...(this.#activationRecoveries.size ? ["activation-recovery"] : []),
+    ].sort((left, right) => left.localeCompare(right, "en-US"));
+  }
+
+  /**
+   * 按冻结身份与修订精确接续：仍未终结且修订一致的接续；冻结之后已正确终结的确认已结，不再执行；
+   * 不在冻结集里的未终结发生、修订冲突或找不到的冻结项都拒绝。系统发生只核对，由激活后的恢复在后台执行，
+   * 不占启动路径。
+   */
   async recoverAcceptedWorkForLifecycle(
     frozen: readonly { readonly id: string; readonly revision: string }[],
   ): Promise<void> {
@@ -362,37 +390,40 @@ export class AnchorScheduler {
       const accepted = new Set<string>();
       for (const occurrence of await journal.openOccurrences()) {
         if (TERMINAL_STATES.has(occurrence.state as never)) continue;
-        const revision = protocolDigest("SchedulerAcceptedWork", 1, {
-          taskId: occurrence.taskId,
-          jobRunId: occurrence.jobRunId,
-          scheduledFor: occurrence.scheduledFor,
-          taskRevision: occurrence.taskRevision,
-          deliveryPlan: occurrence.deliveryPlan,
-        });
-        if (expected.get(occurrence.jobRunId) !== revision) {
+        if (expected.get(occurrence.jobRunId) !== acceptedWorkRevision(occurrence)) {
           throw new Error("Scheduler recovery observed an unfrozen accepted-work generation");
         }
         seen.add(occurrence.jobRunId);
         accepted.add(occurrence.jobRunId);
-        this.#trackCompletion(taskId, occurrence.jobRunId);
       }
-      if (accepted.size === 0) continue;
-      if (definition.definition.kind === "system") {
-        await journal.resumeSystemJobs(this.#hostContext(`resume-system-${taskId}`));
-      } else {
-        await this.#options.recoverUserJobs?.(journal, accepted);
-      }
+      if (accepted.size === 0 || definition.definition.kind === "system") continue;
+      for (const jobRunId of accepted) this.#trackCompletion(taskId, jobRunId);
+      await this.#options.recoverUserJobs?.(journal, accepted);
     }
-    if (seen.size !== expected.size || [...expected.keys()].some((id) => !seen.has(id))) {
-      throw new Error("Scheduler lifecycle artifact does not bind current durable work");
+    // 冻结后才终结的项：逐任务精确读取，修订一致且已终结才确认已结
+    for (const [jobRunId, revision] of expected) {
+      if (seen.has(jobRunId)) continue;
+      let confirmed = false;
+      for (const taskId of this.#definitions.keys()) {
+        const occurrence = await this.#journal(taskId).scheduleOccurrence(jobRunId);
+        if (!occurrence) continue;
+        if (acceptedWorkRevision(occurrence) !== revision || !TERMINAL_STATES.has(occurrence.state as never)) {
+          throw new Error("Scheduler lifecycle artifact conflicts with current durable work");
+        }
+        confirmed = true;
+        break;
+      }
+      if (!confirmed) throw new Error("Scheduler lifecycle artifact does not bind current durable work");
     }
   }
 
   /** Closes fresh triggers while preserving every durable schedule fact for pre-commit rollback. */
   async pauseForAuthorityTransfer(): Promise<void> {
     if (this.#accepting) this.closeAdmissionForLifecycle();
-    await this.#activationRecovery?.catch(() => undefined);
-    this.#activationRecovery = undefined;
+    await this.#settleDecisions();
+    await this.#joinActivationRecoveries();
+    // 本进程已开始的物理工作在本进程收尾：在飞的系统处理器跑完，追踪中的用户运行到终态
+    await Promise.allSettled([...this.#systemRuns.values()]);
     await Promise.allSettled(this.#completionTrackers.values());
   }
 
@@ -708,6 +739,7 @@ export class AnchorScheduler {
     controlSource?: SchedulerControlSource,
   ): Promise<AgentTurnResult> {
     this.#requireAccepting();
+    const generation = this.#generation;
     const definition = this.#requiredUserDefinition(taskId);
     const now = this.#now();
     const source = this.#manualSource(
@@ -715,7 +747,7 @@ export class AnchorScheduler {
       now.toISOString(),
       controlSource,
     );
-    const outcome = await this.#journal(taskId).applyControl({
+    const control = this.#startDecision(generation, () => this.#journal(taskId).applyControl({
       admission: this.#options.admission,
       envelope: createJobControlEnvelope({
         requestId,
@@ -728,7 +760,9 @@ export class AnchorScheduler {
         },
       }),
       source,
-    });
+    }));
+    if (!control) throw new Error("Scheduler is not accepting commands");
+    const outcome = await control;
     if (outcome.kind === "rejected" || outcome.result.status !== "ok") {
       throw new Error(
         outcome.kind === "rejected"
@@ -750,7 +784,7 @@ export class AnchorScheduler {
     });
     const startedAt = this.#now().getTime();
     if (occurrence.state === "queued") {
-      await this.#activateUser(definition, occurrence);
+      await this.#startDecision(generation, () => this.#activateUser(definition, occurrence));
     }
     return await this.#waitForResult(taskId, occurrence.jobRunId, startedAt);
   }
@@ -761,40 +795,44 @@ export class AnchorScheduler {
     controlSource?: SchedulerControlSource,
   ): Promise<boolean> {
     this.#requireAccepting();
-    const taskId = this.#taskForRun(jobRunId) ?? await this.#options.findTaskForRun?.(jobRunId);
-    if (!taskId) return false;
-    const journal = this.#journal(taskId);
-    const at = this.#now().toISOString();
-    const source = this.#manualSource(requestId, at, controlSource);
-    const outcome = await journal.applyControl({
-      admission: this.#options.admission,
-      envelope: createJobControlEnvelope({
-        requestId,
-        source,
-        at,
-        body: {
-          t: "job-cancel",
-          taskId,
-          jobRunId,
-          anchorEpoch: this.#options.anchorEpoch,
-        },
-      }),
-      source,
-    });
-    if (outcome.kind === "rejected" || outcome.result.status !== "ok") {
-      return false;
-    }
-    const context = this.#controlContext(requestId, controlSource);
-    const result = this.#options.cancelUserJob
-      ? await this.#options.cancelUserJob({
-          journal,
-          jobRunId,
+    // 取消只减少工作，关准入后照常收束：从入口起同步登记为决定，冻结等它（含查找所属任务的等待）结束
+    return this.#decide(async () => {
+      const taskId = this.#taskForRun(jobRunId) ?? await this.#options.findTaskForRun?.(jobRunId);
+      if (!taskId) return false;
+      const journal = this.#journal(taskId);
+      const at = this.#now().toISOString();
+      // 只有发起运行的控制带入口上下文；取消沿用同一主体，不带入口上下文（信封校验拒绝非运行控制带它）
+      const { ingress: _ingress, ...source } = this.#manualSource(requestId, at, controlSource);
+      const outcome = await journal.applyControl({
+        admission: this.#options.admission,
+        envelope: createJobControlEnvelope({
           requestId,
-          context,
-        })
-      : await journal.cancel({ jobRunId, requestId, context });
-    await this.#refreshTask(taskId);
-    return result.state === "cancelled" || result.state === "cancel-requested";
+          source,
+          at,
+          body: {
+            t: "job-cancel",
+            taskId,
+            jobRunId,
+            anchorEpoch: this.#options.anchorEpoch,
+          },
+        }),
+        source,
+      });
+      if (outcome.kind === "rejected" || outcome.result.status !== "ok") {
+        return false;
+      }
+      const context = this.#controlContext(requestId, controlSource);
+      const result = this.#options.cancelUserJob
+        ? await this.#options.cancelUserJob({
+            journal,
+            jobRunId,
+            requestId,
+            context,
+          })
+        : await journal.cancel({ jobRunId, requestId, context });
+      await this.#refreshTask(taskId);
+      return result.state === "cancelled" || result.state === "cancel-requested";
+    });
   }
 
   listTasks(): ScheduledTask[] {
@@ -853,13 +891,14 @@ export class AnchorScheduler {
       return;
     }
     this.#tickRunning = true;
+    const generation = this.#generation;
     try {
-      await this.#resumeQueuedUserJobs();
+      await this.#resumeQueuedUserJobs(generation);
       const now = this.#now();
       const due = selectDueScheduleEntries(this.#nextRunByTask, now);
       for (const [taskId, scheduledFor] of due) {
         try {
-          await this.#triggerScheduled(taskId, scheduledFor);
+          await this.#triggerScheduled(taskId, scheduledFor, generation);
         } catch (error) {
           this.#options.onError?.(
             error instanceof Error ? error : new Error(String(error)),
@@ -908,7 +947,7 @@ export class AnchorScheduler {
     this.#timer.unref?.();
   }
 
-  async #triggerScheduled(taskId: string, scheduledFor: string): Promise<void> {
+  async #triggerScheduled(taskId: string, scheduledFor: string, generation: number): Promise<void> {
     const definition = this.#definitions.get(taskId);
     if (!definition || definition.state !== "enabled") {
       this.#nextRunByTask.delete(taskId);
@@ -922,31 +961,34 @@ export class AnchorScheduler {
       ...(this.#onlineSince !== undefined ? { onlineSince: this.#onlineSince } : {}),
       missedGraceMs: this.#missedGraceMs,
     });
-    const occurrence = await journal.trigger({
+    const trigger = this.#startDecision(generation, () => journal.trigger({
       jobRunId: decision.jobRunId,
       scheduledFor: decision.effectiveScheduledFor,
       context: this.#hostContext(`schedule-trigger-${decision.jobRunId}`),
       source: definition.definition.kind,
       ...(decision.disposition ? { disposition: decision.disposition } : {}),
       ...(decision.missedNextFire ? { missedNextFire: decision.missedNextFire } : {}),
-    });
+    }));
+    if (!trigger) return;
+    const occurrence = await trigger;
     if (occurrence.state === "missed") {
       this.#missedSummaryPending = true;
     }
+    // 关准入后不再开始处理器或激活：排队中的发生留在权威里，随冻结交接给下一宿主
     if (occurrence.state === "queued") {
       if (definition.definition.kind === "system") {
-        await journal.runSystem(
+        await this.#startSystem(generation, occurrence.jobRunId, () => journal.runSystem(
           occurrence.jobRunId,
           this.#hostContext(`system-run-${occurrence.jobRunId}`),
-        );
+        ));
       } else {
         try {
-          await this.#activateUser(
+          await this.#startDecision(generation, () => this.#activateUser(
             definition as TaskDefinition & {
               readonly definition: Extract<TaskDefinition["definition"], { kind: "user" }>;
             },
             occurrence,
-          );
+          ));
         } catch (error) {
           // The durable queued occurrence remains the sole retry input. Its
           // activation gap must not pin this due timestamp forever; the
@@ -984,19 +1026,21 @@ export class AnchorScheduler {
     });
   }
 
-  async #resumeQueuedUserJobs(): Promise<void> {
+  async #resumeQueuedUserJobs(generation: number): Promise<void> {
     for (const [taskId, queued] of this.#queuedRunsByTask) {
       if (this.#recoveringTaskIds.has(taskId)) continue;
       const definition = this.#definitions.get(taskId);
       if (!definition || definition.definition.kind !== "user") continue;
       for (const occurrence of queued) {
         try {
-          await this.#activateUser(
+          const activation = this.#startDecision(generation, () => this.#activateUser(
             definition as TaskDefinition & {
               readonly definition: Extract<TaskDefinition["definition"], { kind: "user" }>;
             },
             occurrence,
-          );
+          ));
+          if (!activation) return;
+          await activation;
         } catch (error) {
           this.#options.onError?.(
             error instanceof Error ? error : new Error(String(error)),
@@ -1005,6 +1049,48 @@ export class AnchorScheduler {
       }
       await this.#refreshTask(taskId);
     }
+  }
+
+  /** 登记一个进行中的决定；不核准入（取消这类只减少工作的决定在关准入后照常收束） */
+  #decide<T>(operation: () => Promise<T>): Promise<T> {
+    const decision = operation();
+    const settled = decision.then(() => undefined, () => undefined);
+    this.#decisions.add(settled);
+    void settled.finally(() => this.#decisions.delete(settled));
+    return decision;
+  }
+
+  #startsAllowed(generation: number): boolean {
+    return this.#accepting && this.#generation === generation;
+  }
+
+  /**
+   * 开始新工作（触发提交、用户激活、恢复派发）的唯一入口：核准入与登记同步完成，中间没有等待；
+   * 准入已关或已换代则不开始，返回 undefined。
+   */
+  #startDecision<T>(generation: number, operation: () => Promise<T>): Promise<T> | undefined {
+    return this.#startsAllowed(generation) ? this.#decide(operation) : undefined;
+  }
+
+  /** 开始系统处理器的唯一入口：同上核准入；开始后作为本进程物理工作，结清时等它跑完 */
+  #startSystem<T>(generation: number, key: string, operation: () => Promise<T>): Promise<T> | undefined {
+    if (!this.#startsAllowed(generation)) return undefined;
+    const run = operation();
+    const settled = run.then(() => undefined, () => undefined);
+    this.#systemRuns.set(key, settled);
+    void settled.finally(() => { if (this.#systemRuns.get(key) === settled) this.#systemRuns.delete(key); });
+    return run;
+  }
+
+  /** 等全部激活恢复回合（新旧各代）确实退出；已关闭的代不再开工，只是走完已在进行的读取后返回 */
+  async #joinActivationRecoveries(): Promise<void> {
+    while (this.#activationRecoveries.size) await Promise.allSettled([...this.#activationRecoveries]);
+    this.#activationRecovery = undefined;
+  }
+
+  /** 关准入后，等已进入接纳临界区的决定收束（不等任务执行完） */
+  async #settleDecisions(): Promise<void> {
+    while (this.#decisions.size) await Promise.allSettled([...this.#decisions]);
   }
 
   #trackCompletion(taskId: string, jobRunId: string): void {
@@ -1409,6 +1495,19 @@ export class AnchorScheduler {
     if (!this.#accepting) throw new Error("Scheduler is not accepting commands");
   }
 
+}
+
+/** 已接纳工作的修订：只取身份与派发计划，不含状态，冻结后的状态推进不改变它 */
+function acceptedWorkRevision(
+  occurrence: Pick<JobOccurrence, "taskId" | "jobRunId" | "scheduledFor" | "taskRevision" | "deliveryPlan">,
+): string {
+  return protocolDigest("SchedulerAcceptedWork", 1, {
+    taskId: occurrence.taskId,
+    jobRunId: occurrence.jobRunId,
+    scheduledFor: occurrence.scheduledFor,
+    taskRevision: occurrence.taskRevision,
+    deliveryPlan: occurrence.deliveryPlan,
+  });
 }
 
 function definitionSource(ingress: IngressContext) {

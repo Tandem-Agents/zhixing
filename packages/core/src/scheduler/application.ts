@@ -170,6 +170,7 @@ export type ScheduleRuntimeEvent =
 
 export interface ScheduleRuntimeStatusView {
   readonly activeRunCount: number;
+  /** 已启用且仍会触发（有下次运行时刻）的用户任务数；执行完的一次性任务不计入。是常驻与停止提示的依据。 */
   readonly enabledUserTaskCount: number;
   readonly turnContext: TaskStatusSummary;
 }
@@ -205,7 +206,8 @@ export class ScheduleRuntimeApplicationService implements ScheduleRuntimeApplica
     const visible = snapshot.tasks.filter((task) => !isInternal(task));
     return Object.freeze({
       activeRunCount: requireNonNegativeInteger(snapshot.activeRunCount),
-      enabledUserTaskCount: visible.filter((task) => task.enabled).length,
+      // 一次性任务执行后不再有下次运行，仍标着 enabled 也不该让宿主常驻或在停止时被提示
+      enabledUserTaskCount: visible.filter((task) => task.enabled && task.state.nextRunAt !== undefined).length,
       turnContext: freezeStatusSummary(computeStatusSummary([...visible], this.now())),
     });
   }
@@ -232,7 +234,10 @@ export interface ScheduleLifecycleMechanismPort {
   stop(): Promise<void>;
   activate(): void;
   closeAdmission(): void;
+  /** 权威中全部未终结发生（冻结与恢复核对的同一集合） */
   listAcceptedWork(): Promise<readonly ScheduleAcceptedWorkItem[]>;
+  /** 本进程仍在执行、必须在本进程收尾的物理工作；排队中可交接的发生不在其中 */
+  listInProcessWork(): readonly string[];
   recoverAcceptedWork(frozen: readonly ScheduleAcceptedWorkItem[]): Promise<void>;
   pauseAndSettle(): Promise<void>;
   resumeAdmission(): void;
@@ -335,9 +340,10 @@ export class ScheduleApplicationService implements ScheduleApplication {
   ): Promise<void> {
     const expected = freezeAcceptedWork(frozen);
     if (!this.#mechanism && expected.length === 0) return;
-    const current = await this.#requireMechanism().listAcceptedWork();
-    assertAcceptedWorkSubset(current, expected);
-    if (current.length !== 0) {
+    const mechanism = this.#requireMechanism();
+    // 留在权威里的未终结发生随冻结交接；结清要求的是没有新代际，且本进程已开始的物理工作都已收尾
+    assertAcceptedWorkSubset(await mechanism.listAcceptedWork(), expected);
+    if (mechanism.listInProcessWork().length !== 0) {
       throw new Error("Schedule accepted work is not settled");
     }
   }

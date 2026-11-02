@@ -498,6 +498,22 @@ describe("Schedule runtime domain policy", () => {
 });
 
 describe("Schedule runtime application boundaries", () => {
+  it("counts only enabled user tasks that will still fire; a completed one-shot task keeps nothing alive", () => {
+    const projection: ScheduleRuntimeProjectionPort = {
+      snapshot: () => ({
+        tasks: [
+          view("pending", 1, { enabled: true, state: { consecutiveErrors: 0, runCount: 0, nextRunAt: "2026-08-30T01:00:00.000Z" } }),
+          // 一次性任务已执行：仍是 enabled，但没有下次运行
+          view("done-once", 1, { enabled: true, state: { consecutiveErrors: 0, runCount: 1, lastRunAt: "2026-08-29T01:00:00.000Z", lastStatus: "ok" } }),
+          view("disabled", 1, { enabled: false, state: { consecutiveErrors: 0, runCount: 0, nextRunAt: "2026-08-30T01:00:00.000Z" } }),
+        ],
+        activeRunCount: 0,
+      }),
+      onSignal: () => () => {},
+    };
+    expect(new ScheduleRuntimeApplicationService(projection, () => new Date(NOW)).readStatus().enabledUserTaskCount).toBe(1);
+  });
+
   it("owns user visibility, status projection and failure-event folding", () => {
     let listener: ((signal: ScheduleRuntimeSignal) => void) | undefined;
     const projection: ScheduleRuntimeProjectionPort = {
@@ -579,6 +595,7 @@ describe("Schedule runtime application boundaries", () => {
     "settles the same frozen accepted-work exact-set for %s",
     async (strategy) => {
       let current = [{ id: "run-1", revision: "rev-1" }];
+      let inProcess = ["run-1"];
       const settledExactSets: Array<readonly { readonly id: string; readonly revision: string }[]> = [];
       const mechanism: ScheduleLifecycleMechanismPort = {
         start: vi.fn(async () => undefined),
@@ -586,10 +603,12 @@ describe("Schedule runtime application boundaries", () => {
         activate: vi.fn(),
         closeAdmission: vi.fn(),
         listAcceptedWork: vi.fn(async () => current),
+        listInProcessWork: vi.fn(() => inProcess),
         recoverAcceptedWork: vi.fn(async () => undefined),
         pauseAndSettle: vi.fn(async () => {
           settledExactSets.push(structuredClone(current));
           current = [];
+          inProcess = [];
         }),
         resumeAdmission: vi.fn(),
         recoverInstalledAuthority: vi.fn(async () => undefined),
@@ -614,17 +633,57 @@ describe("Schedule runtime application boundaries", () => {
     },
   );
 
-  it("owns frozen accepted-work settlement and rejects foreign mechanisms", async () => {
-    let current = [{ id: "run-1", revision: "rev-1" }];
+  it("结清读回：排队中的发生留在权威里随冻结交接；本进程物理工作未收尾或出现未冻结的新代际仍不算结清", async () => {
+    let current = [{ id: "queued-system", revision: "rev-q" }, { id: "running-user", revision: "rev-r" }];
+    let inProcess = ["running-user"];
     const mechanism: ScheduleLifecycleMechanismPort = {
       start: vi.fn(async () => undefined),
       stop: vi.fn(async () => undefined),
       activate: vi.fn(),
       closeAdmission: vi.fn(),
       listAcceptedWork: vi.fn(async () => current),
+      listInProcessWork: vi.fn(() => inProcess),
+      recoverAcceptedWork: vi.fn(async () => undefined),
+      pauseAndSettle: vi.fn(async () => {
+        // 追踪中的用户运行在本进程跑到终态；排队中的系统维护不开始，留作交接
+        current = current.filter((item) => item.id !== "running-user");
+        inProcess = [];
+      }),
+      resumeAdmission: vi.fn(),
+      recoverInstalledAuthority: vi.fn(async () => undefined),
+      resumeManualSurfaces: vi.fn(async () => undefined),
+    };
+    const lifecycle = new ScheduleApplicationService({
+      readStatus: () => ({
+        activeRunCount: 0,
+        enabledUserTaskCount: 0,
+        turnContext: { active: [], recentlyCompleted: [], recentlyFailed: [] },
+      }),
+      onEvent: () => () => undefined,
+    });
+    lifecycle.install(mechanism);
+    const frozen = await lifecycle.captureAcceptedWork();
+    await expect(lifecycle.assertAcceptedWorkSettled(frozen)).rejects.toThrow("Schedule accepted work is not settled");
+    await lifecycle.settleAcceptedWork({ strategy: "drain", frozen });
+    await expect(lifecycle.assertAcceptedWorkSettled(frozen)).resolves.toBeUndefined();
+    current = [...current, { id: "late-trigger", revision: "rev-late" }];
+    await expect(lifecycle.assertAcceptedWorkSettled(frozen)).rejects.toThrow("outside the frozen accepted-work set");
+  });
+
+  it("owns frozen accepted-work settlement and rejects foreign mechanisms", async () => {
+    let current = [{ id: "run-1", revision: "rev-1" }];
+    let inProcess = ["run-1"];
+    const mechanism: ScheduleLifecycleMechanismPort = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      activate: vi.fn(),
+      closeAdmission: vi.fn(),
+      listAcceptedWork: vi.fn(async () => current),
+      listInProcessWork: vi.fn(() => inProcess),
       recoverAcceptedWork: vi.fn(async () => undefined),
       pauseAndSettle: vi.fn(async () => {
         current = [];
+        inProcess = [];
       }),
       resumeAdmission: vi.fn(),
       recoverInstalledAuthority: vi.fn(async () => undefined),

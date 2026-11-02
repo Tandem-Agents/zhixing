@@ -432,6 +432,253 @@ describe("AnchorScheduler authority", () => {
     await scheduler.stop();
   });
 
+  describe("停止冻结与启动恢复同源", () => {
+    const at = "2026-08-02T00:00:00.000Z";
+    const occurrenceOf = (taskId: string, jobRunId: string, state: JobRunState): JobOccurrence => ({
+      taskId, jobRunId, scheduledFor: at, taskRevision: 1, deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" }, state,
+    });
+    const revisionOf = (occurrence: JobOccurrence) => protocolDigest("SchedulerAcceptedWork", 1, {
+      taskId: occurrence.taskId, jobRunId: occurrence.jobRunId, scheduledFor: occurrence.scheduledFor,
+      taskRevision: occurrence.taskRevision, deliveryPlan: occurrence.deliveryPlan,
+    });
+    const systemJournal = () => {
+      const journal = new MemoryJobJournal();
+      journal.definition = { taskId: "__transcript-gc", taskRevision: 1, state: "enabled", definition: { kind: "system", handler: "__transcript-gc" } };
+      return journal;
+    };
+    const userJournal = (taskId: string) => {
+      const journal = new MemoryJobJournal();
+      journal.definition = { taskId, taskRevision: 1, state: "enabled", definition: { kind: "user", spec: {
+        name: taskId, enabled: true, priority: "normal", schedule: { kind: "interval", everyMs: 60_000 }, action: { kind: "agent-turn", prompt: "p" },
+      } } };
+      return journal;
+    };
+    const systemTasks = new Map([["__transcript-gc", {
+      id: "__transcript-gc", name: "transcript-gc", handler: "__transcript-gc", schedule: { kind: "interval" as const, everyMs: 60_000 },
+    }]]);
+
+    it("排队中的系统任务发生随冻结交接：A 停止、B 恢复不再被拒，恢复期间不执行它", async () => {
+      const journal = systemJournal();
+      journal.runs.push(occurrenceOf("__transcript-gc", "system-open", "queued"));
+      const journals = new Map([["__transcript-gc", journal]]);
+      const first = fixture({ journals, systemTasks });
+      await first.scheduler.prepare();
+      first.scheduler.activate();
+      await vi.waitFor(() => expect(journal.resumeSystemJobs).toHaveBeenCalledOnce());
+      first.scheduler.closeAdmissionForLifecycle();
+      const frozen = await first.scheduler.acceptedWorkItems();
+      expect(frozen.map((item) => item.id)).toEqual(["system-open"]);
+      await first.scheduler.pauseForAuthorityTransfer();
+      expect(first.scheduler.inProcessWork()).toEqual([]);
+      await first.scheduler.stop();
+
+      const second = fixture({ journals, systemTasks });
+      await expect(second.scheduler.recoverAcceptedWorkForLifecycle(frozen)).resolves.toBeUndefined();
+      // 系统发生只核对，交给激活后的恢复在后台执行
+      expect(journal.resumeSystemJobs).toHaveBeenCalledOnce();
+      await second.scheduler.stop();
+    });
+
+    it("关准入与在飞的运行控制提交交错：冻结等提交收束并含其发生，关准入后不再激活", async () => {
+      const journal = userJournal("task-run");
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const inside = new Promise<void>((resolve) => { entered = resolve; });
+      const apply = journal.applyControl.bind(journal);
+      journal.applyControl = (async (input: Parameters<typeof apply>[0]) => { entered(); await gate; return apply(input); }) as typeof journal.applyControl;
+      const activateUserJob = vi.fn(async () => {});
+      const { scheduler } = fixture({ journals: new Map([["task-run", journal]]), activateUserJob });
+      await scheduler.prepare();
+      scheduler.activate();
+      const run = scheduler.runTask("task-run", "req-1");
+      await inside;
+      scheduler.closeAdmissionForLifecycle();
+      let frozenReady = false;
+      const capture = scheduler.acceptedWorkItems().then((items) => { frozenReady = true; return items; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(frozenReady).toBe(false);
+      release();
+      const frozen = await capture;
+      expect(frozen.map((item) => item.id)).toEqual(["job:req-1"]);
+      expect(activateUserJob).not.toHaveBeenCalled();
+      await expect(run).resolves.toMatchObject({ status: "error" });
+      await scheduler.stop();
+    });
+
+    it("冻结时在跑、冻结后正常终结的发生：B 精确读到已终结即确认已结，不再执行", async () => {
+      const system = systemJournal(), user = userJournal("task-user");
+      system.runs.push(occurrenceOf("__transcript-gc", "system-running", "running"));
+      user.runs.push(occurrenceOf("task-user", "user-running", "running"));
+      const journals = new Map<string, MemoryJobJournal>([["__transcript-gc", system], ["task-user", user]]);
+      const first = fixture({ journals, systemTasks });
+      await first.scheduler.prepare();
+      const frozen = await first.scheduler.acceptedWorkItems();
+      expect(frozen.map((item) => item.id)).toEqual(["system-running", "user-running"]);
+      await first.scheduler.stop();
+      system.setState("system-running", "committed");
+      user.setState("user-running", "committed");
+
+      const recoverUserJobs = vi.fn(async () => undefined);
+      const second = fixture({ journals, systemTasks, recoverUserJobs });
+      await expect(second.scheduler.recoverAcceptedWorkForLifecycle(frozen)).resolves.toBeUndefined();
+      expect(recoverUserJobs).not.toHaveBeenCalled();
+      expect(system.resumeSystemJobs).not.toHaveBeenCalled();
+      await second.scheduler.stop();
+    });
+
+    it("未冻结的新代际、错修订、找不到、终结修订冲突仍明确拒绝", async () => {
+      const journal = userJournal("task-reject");
+      const open = occurrenceOf("task-reject", "open-run", "queued");
+      journal.runs.push(open, occurrenceOf("task-reject", "done-run", "committed"));
+      const journals = new Map([["task-reject", journal]]);
+      const recover = async (frozen: readonly { id: string; revision: string }[]) => {
+        const { scheduler } = fixture({ journals, recoverUserJobs: vi.fn(async () => undefined) });
+        try { await scheduler.recoverAcceptedWorkForLifecycle(frozen); } finally { await scheduler.stop(); }
+      };
+      await expect(recover([])).rejects.toThrow("unfrozen accepted-work generation");
+      await expect(recover([{ id: "open-run", revision: "other" }])).rejects.toThrow("unfrozen accepted-work generation");
+      const exact = { id: "open-run", revision: revisionOf(open) };
+      await expect(recover([exact, { id: "ghost-run", revision: "r" }])).rejects.toThrow("does not bind current durable work");
+      await expect(recover([exact, { id: "done-run", revision: "other" }])).rejects.toThrow("conflicts with current durable work");
+      await expect(recover([exact])).resolves.toBeUndefined();
+    });
+
+    // 激活恢复在读取调度策略时暂停，用来确定地在“已进入恢复、尚未开始处理器/派发”之间关准入
+    const pausePolicy = (journal: MemoryJobJournal) => {
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const inside = new Promise<void>((resolve) => { entered = resolve; });
+      const policy = journal.schedulerPolicy.bind(journal);
+      // prepare 也会读策略：准备完成后才布防，只拦激活恢复的那一次
+      let armed = false;
+      journal.schedulerPolicy = (async (...args: Parameters<typeof policy>) => {
+        if (armed) { armed = false; entered(); await gate; }
+        return policy(...args);
+      }) as typeof journal.schedulerPolicy;
+      return { arm: () => { armed = true; }, inside, release };
+    };
+
+    it.each(["system", "user"] as const)("%s 激活恢复等待中关准入：冻结后放开，不再开始处理器或恢复派发，排队发生交接给下一宿主", async (kind) => {
+      const journal = kind === "system" ? systemJournal() : userJournal("task-late");
+      const taskId = kind === "system" ? "__transcript-gc" : "task-late";
+      journal.runs.push(occurrenceOf(taskId, "late-open", "queued"));
+      const paused = pausePolicy(journal);
+      const recoverUserJobs = vi.fn(async () => undefined);
+      const journals = new Map([[taskId, journal]]);
+      const first = fixture({ journals, systemTasks, recoverUserJobs });
+      await first.scheduler.prepare();
+      paused.arm();
+      first.scheduler.activate();
+      await paused.inside;
+      first.scheduler.closeAdmissionForLifecycle();
+      const frozen = await first.scheduler.acceptedWorkItems();
+      expect(frozen.map((item) => item.id)).toEqual(["late-open"]);
+      paused.release();
+      await first.scheduler.pauseForAuthorityTransfer();
+      expect(journal.resumeSystemJobs).not.toHaveBeenCalled();
+      expect(recoverUserJobs).not.toHaveBeenCalled();
+      expect(first.scheduler.inProcessWork()).toEqual([]);
+      await first.scheduler.stop();
+      const second = fixture({ journals, systemTasks, recoverUserJobs: vi.fn(async () => undefined) });
+      await expect(second.scheduler.recoverAcceptedWorkForLifecycle(frozen)).resolves.toBeUndefined();
+      await second.scheduler.stop();
+    });
+
+    it("关闭后再开放：上一代晚到的续行不重新开工，新一代照常只执行一次", async () => {
+      const journal = systemJournal();
+      journal.runs.push(occurrenceOf("__transcript-gc", "regen-open", "queued"));
+      const paused = pausePolicy(journal);
+      const { scheduler } = fixture({ journals: new Map([["__transcript-gc", journal]]), systemTasks });
+      await scheduler.prepare();
+      paused.arm();
+      scheduler.activate();
+      await paused.inside;
+      scheduler.closeAdmissionForLifecycle();
+      scheduler.activate();
+      paused.release();
+      await vi.waitFor(() => expect(journal.resumeSystemJobs).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(journal.resumeSystemJobs).toHaveBeenCalledOnce();
+      await scheduler.stop();
+    });
+
+    it.each(["old-first", "new-first"] as const)("换代收束（%s）：迁居暂停与停止等全部激活恢复回合退出，返回后旧回合不再读取", async (order) => {
+      const journal = systemJournal();
+      journal.runs.push(occurrenceOf("__transcript-gc", "join-open", "queued"));
+      const paused = pausePolicy(journal);
+      let reads = 0;
+      const view = journal.schedulerReadView.bind(journal);
+      journal.schedulerReadView = (async (...args: Parameters<typeof view>) => { reads += 1; return view(...args); }) as typeof journal.schedulerReadView;
+      const { scheduler } = fixture({ journals: new Map([["__transcript-gc", journal]]), systemTasks });
+      await scheduler.prepare();
+      paused.arm();
+      scheduler.activate();
+      await paused.inside;
+      scheduler.closeAdmissionForLifecycle();
+      scheduler.activate();
+      if (order === "old-first") paused.release();
+      await vi.waitFor(() => expect(journal.resumeSystemJobs).toHaveBeenCalledOnce());
+      let pauseReturned = false;
+      const pause = scheduler.pauseForAuthorityTransfer().then(() => { pauseReturned = true; });
+      if (order === "new-first") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(pauseReturned).toBe(false);
+        expect(scheduler.inProcessWork()).toContain("activation-recovery");
+        paused.release();
+      }
+      await pause;
+      expect(scheduler.inProcessWork()).toEqual([]);
+      await scheduler.stop();
+      const settledReads = reads;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(reads).toBe(settledReads);
+      expect(journal.resumeSystemJobs).toHaveBeenCalledOnce();
+    });
+
+    it("在飞的取消在关准入后照常收束，冻结等它结束且与结果一致", async () => {
+      const journal = userJournal("task-cancel");
+      journal.runs.push(occurrenceOf("task-cancel", "cancel-me", "queued"));
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const inside = new Promise<void>((resolve) => { entered = resolve; });
+      const cancel = journal.cancel.bind(journal);
+      journal.cancel = (async (input: Parameters<typeof cancel>[0]) => { entered(); await gate; return cancel(input); }) as typeof journal.cancel;
+      // 这个替身的 applyControl 不区分控制种类；取消控制只需被接纳，不产生新的发生
+      journal.applyControl = (async () => ({ kind: "applied" as const, result: { status: "ok" as const, body: { t: "job-cancel" as const } } })) as unknown as typeof journal.applyControl;
+      const { scheduler } = fixture({ journals: new Map([["task-cancel", journal]]) });
+      await scheduler.prepare();
+      scheduler.activate();
+      const aborted = scheduler.abortRun("cancel-me", "cancel-1");
+      await inside;
+      scheduler.closeAdmissionForLifecycle();
+      let frozenReady = false;
+      const capture = scheduler.acceptedWorkItems().then((items) => { frozenReady = true; return items; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(frozenReady).toBe(false);
+      release();
+      await expect(aborted).resolves.toBe(true);
+      expect((await capture).map((item) => item.id)).toEqual([]);
+      await scheduler.stop();
+    });
+
+    it("追踪中的用户运行仍按结清收尾：在它到终态前本进程物理工作不空，迁居暂停等它", async () => {
+      const journal = userJournal("task-drain");
+      journal.runs.push(occurrenceOf("task-drain", "user-active", "queued"));
+      const { scheduler } = fixture({ journals: new Map([["task-drain", journal]]) });
+      await scheduler.prepare();
+      scheduler.activate();
+      await vi.waitFor(() => expect(scheduler.inProcessWork()).toContain("user-active"));
+      let paused = false;
+      const pause = scheduler.pauseForAuthorityTransfer().then(() => { paused = true; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(paused).toBe(false);
+      journal.setState("user-active", "committed");
+      await pause;
+      expect(scheduler.inProcessWork()).toEqual([]);
+      await scheduler.stop();
+    });
+  });
+
   it("prepares projections without recovery side effects and activates asynchronously", async () => {
     let releaseRecovery!: () => void;
     const recoveryGate = new Promise<void>((resolve) => {

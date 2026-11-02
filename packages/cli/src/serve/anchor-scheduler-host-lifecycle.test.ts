@@ -674,6 +674,7 @@ function mechanism(
     activate: vi.fn(),
     closeAdmission: vi.fn(),
     listAcceptedWork: vi.fn(async () => acceptedWork),
+    listInProcessWork: vi.fn(() => []),
     recoverAcceptedWork: vi.fn(async () => undefined),
     pauseAndSettle: vi.fn(async () => undefined),
     resumeAdmission: vi.fn(),

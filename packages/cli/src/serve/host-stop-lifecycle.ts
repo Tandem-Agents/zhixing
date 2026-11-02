@@ -76,6 +76,8 @@ export interface HostStopCoordinatorOptions {
     snapshot: HostStopAcceptedWorkSnapshot,
   ) => void | Promise<void>;
   readonly isHostStopped?: (host: StopHostGeneration) => Promise<boolean>;
+  /** 停止任一阶段失败时记录阶段与首因；线上错误只给稳定文案，真实原因只进本机日志。 */
+  readonly recordStageFailure?: (stage: string, error: unknown) => void;
 }
 
 export class HostStopCoordinator {
@@ -122,12 +124,23 @@ export class HostStopCoordinator {
       return { operation: accepted, strategy: input.strategy };
     });
     this.#admission = admission.catch(() => undefined);
-    const { operation, strategy } = await admission;
+    const { operation, strategy } = await this.#stage("admission", () => admission);
     const state = await this.#resumeOnce(operation, input.timeoutMs);
     if (state.phase !== "ready-to-stop") {
-      throw new Error("Stop operation did not reach a durable safe point");
+      return this.#stage("safe-point", async () => {
+        throw new Error("Stop operation did not reach a durable safe point");
+      });
     }
     return { requestId: input.requestId, phase: "ready-to-stop", strategy };
+  }
+
+  async #stage<T>(stage: string, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      try { this.options.recordStageFailure?.(stage, error); } catch { /* 观测不能替代原失败 */ }
+      throw error;
+    }
   }
 
   #resumeOnce(operation: DeviceLifecycleOperation, timeoutMs: number): Promise<DeviceLifecycleOperation> {
@@ -175,54 +188,58 @@ export class HostStopCoordinator {
   ): Promise<DeviceLifecycleOperation> {
     let state = initial;
     if (state.phase === "accepted") {
-      await this.options.runtime.closeAdmission(state.identity.operationId);
+      const operationId = state.identity.operationId;
+      await this.#stage("close-admission", () => this.options.runtime.closeAdmission(operationId));
       const evidence = this.options.acceptedWork
-        ? [await this.#freezeAcceptedWork(state.identity.operationId)]
+        ? [await this.#stage("freeze-accepted-work", () => this.#freezeAcceptedWork(operationId))]
         : [];
-      state = await this.options.journal.advance(state.identity.operationId, "gate-closed", evidence);
+      state = await this.#stage("gate-closed", () => this.options.journal.advance(operationId, "gate-closed", evidence));
     }
     if (state.phase === "gate-closed") {
       if (state.identity.kind !== "stop") throw new Error("Stop journal identity changed");
+      const gated = state;
+      const stopIdentity = state.identity;
       if (this.options.acceptedWork) {
+        const ports = this.options.acceptedWork;
         if (!this.options.artifactStore) {
           throw new Error("Accepted-work closure requires the lifecycle artifact store");
         }
-        const snapshot = await loadHostStopAcceptedWork(
-          state,
-          this.options.artifactStore,
-        );
-        await this.options.onAcceptedWorkFrozen?.(snapshot);
-        await settleHostStopAcceptedWork({
-          operationId: state.identity.operationId,
-          strategy: state.identity.strategy,
+        const artifactStore = this.options.artifactStore;
+        const snapshot = await this.#stage("load-accepted-work", () => loadHostStopAcceptedWork(gated, artifactStore));
+        await this.#stage("restore-accepted-work", async () => { await this.options.onAcceptedWorkFrozen?.(snapshot); });
+        await this.#stage("settle-accepted-work", () => settleHostStopAcceptedWork({
+          operationId: stopIdentity.operationId,
+          strategy: stopIdentity.strategy,
           timeoutMs,
           snapshot,
-          ports: this.options.acceptedWork,
-        });
+          ports,
+        }));
       } else if (state.identity.strategy === "cancel") {
-        await this.options.runtime.cancelAcceptedWork(timeoutMs);
-        await this.options.runtime.drainAcceptedWork(timeoutMs);
+        await this.#stage("cancel-accepted-work", () => this.options.runtime.cancelAcceptedWork(timeoutMs));
+        await this.#stage("drain-accepted-work", () => this.options.runtime.drainAcceptedWork(timeoutMs));
       } else if (state.identity.strategy === "drain") {
-        await this.options.runtime.drainAcceptedWork(timeoutMs);
+        await this.#stage("drain-accepted-work", () => this.options.runtime.drainAcceptedWork(timeoutMs));
       } else {
-        await this.options.runtime.settleImmediate(timeoutMs);
+        await this.#stage("settle-immediate", () => this.options.runtime.settleImmediate(timeoutMs));
       }
-      state = await this.options.journal.advance(state.identity.operationId, "work-settled", [{
+      state = await this.#stage("work-settled", () => this.options.journal.advance(stopIdentity.operationId, "work-settled", [{
         kind: "accepted-work",
         digest: protocolDigest("HostStopAcceptedWork", 1, {
-          operationId: state.identity.operationId,
-          strategy: state.identity.strategy,
-          snapshot: state.evidence.find((item) => item.kind === "accepted-work")?.digest ?? null,
+          operationId: stopIdentity.operationId,
+          strategy: stopIdentity.strategy,
+          snapshot: gated.evidence.find((item) => item.kind === "accepted-work")?.digest ?? null,
         }),
-      }]);
+      }]));
     }
     if (state.phase === "work-settled") {
-      const evidence = await this.options.runtime.flushDurableState();
-      state = await this.options.journal.advance(state.identity.operationId, "flushed", evidence);
+      const operationId = state.identity.operationId;
+      const evidence = await this.#stage("flush-durable-state", () => this.options.runtime.flushDurableState());
+      state = await this.#stage("flushed", () => this.options.journal.advance(operationId, "flushed", evidence));
     }
     if (state.phase === "flushed") {
-      await this.options.runtime.settlePhysicalSteps();
-      state = await this.options.journal.advance(state.identity.operationId, "ready-to-stop");
+      const operationId = state.identity.operationId;
+      await this.#stage("settle-physical-steps", () => this.options.runtime.settlePhysicalSteps());
+      state = await this.#stage("ready-to-stop", () => this.options.journal.advance(operationId, "ready-to-stop"));
     }
     return state;
   }
@@ -238,6 +255,33 @@ export class HostStopCoordinator {
     );
     return frozen.evidence;
   }
+}
+
+/** 停机读回时某类已受理工作仍未结清；停止入口据类别给用户原因与下一步，不强制停止。 */
+export class HostStopAcceptedWorkPendingError extends Error {
+  constructor(readonly owner: keyof HostStopAcceptedWorkPorts, detail: string) {
+    super(detail);
+    this.name = "HostStopAcceptedWorkPendingError";
+  }
+}
+
+const PENDING_WORK_REASONS: Readonly<Record<keyof HostStopAcceptedWorkPorts, string>> = {
+  conversation: "还有对话正在运行",
+  intent: "还有运行在完成收尾",
+  final: "还有运行在完成收尾",
+  assignment: "还有运行在完成收尾",
+  lease: "还有运行在完成收尾",
+  permit: "还有运行在完成收尾",
+  remote: "还有后台任务（如定时任务）在收尾",
+  channel: "渠道连接还没有断开",
+  scheduler: "定时任务还在收尾",
+  delivery: "还有消息在投递",
+};
+
+/** 用户可读的停机未完成原因；不是已受理工作未结清时返回 undefined，由调用方保持通用表述。 */
+export function hostStopPendingWorkReason(error: unknown): string | undefined {
+  if (!(error instanceof HostStopAcceptedWorkPendingError)) return undefined;
+  return `${PENDING_WORK_REASONS[error.owner]}，这次没有停止。稍后再运行 zz stop 会接着完成同一次安全停止；一直停不下来时，运行 zz logs search --level error 查看原因`;
 }
 
 export function hostStopAlreadySettled(

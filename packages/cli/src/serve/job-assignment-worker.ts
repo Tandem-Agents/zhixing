@@ -141,6 +141,11 @@ export interface JobAssignmentWorkerOptions {
     };
   }) => JobRunStream | Promise<JobRunStream>;
   readonly onError?: (assignmentId: string, error: Error) => void;
+  /**
+   * 执行端终态已耐久后通知（失败落盘、或提交已被 owner 确认）；owner 据此当场收尾对账，
+   * 漏掉的由启动恢复与停机收束补齐。
+   */
+  readonly onExecutionTerminal?: (assignmentId: string) => void;
 }
 
 export interface JobRunStream extends StreamFrameProducer {
@@ -226,6 +231,15 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     if (!controller || controller.signal.aborted) return false;
     controller.abort(reason);
     return true;
+  }
+
+  // 通知只是加速对账，不能反过来改变执行结果本身
+  #notifyExecutionTerminal(assignmentId: string): void {
+    try {
+      this.options.onExecutionTerminal?.(assignmentId);
+    } catch (error) {
+      this.options.onError?.(assignmentId, asError(error));
+    }
   }
 
   async deliverGrant(grant: ChannelInteractionGrant): Promise<void> {
@@ -418,6 +432,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         signal: this.#recoveryAbort.signal,
         rejectionPrefix: COMMIT_REJECTION_PREFIX,
       });
+      this.#notifyExecutionTerminal(assignmentId);
       return;
     }
     this.#executionStages.set(assignmentId, "started");
@@ -608,6 +623,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         reason: executionError.message,
         usageFinal,
       });
+      this.#notifyExecutionTerminal(assignmentId);
       throw executionError;
     }
     if (!stream) {
@@ -646,6 +662,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         reason: failure.message,
         usageFinal,
       });
+      this.#notifyExecutionTerminal(assignmentId);
       throw failure;
     }
     // 业务失败(status: "failed")也是合法终态,同样封包提交给 owner 裁决;
@@ -671,6 +688,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       signal: this.#recoveryAbort.signal,
       rejectionPrefix: COMMIT_REJECTION_PREFIX,
     });
+    this.#notifyExecutionTerminal(assignmentId);
   }
 
   async #pumpRecovery(

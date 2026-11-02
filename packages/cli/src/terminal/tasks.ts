@@ -173,7 +173,7 @@ function taskAction(rest: string): SessionTaskListAction {
     : { kind: 'add', content: first === 'new' ? remaining : rest };
 }
 function taskListLines(state: TaskListState | null): readonly string[] {
-  if (!state?.items.length) return ['任务列表为空。LLM 调用 task_list 工具或用 /task new <内容> 创建任务。'];
+  if (!state?.items.length) return ['任务列表为空。可以让助手在对话中建立任务，或用 /task new <内容> 添加。'];
   const counts = countTasks(state);
   return [`任务列表 · ${state.items.length} 项 · ${counts.active} 进行 · ${counts.pending} 待办 · ${counts.completed} 已完成`,
     ...state.items.map((item, index) => `${String(index + 1).padStart(2, ' ')}. ${item.status === 'in_progress' ? '●' : item.status === 'completed' ? '✓' : '○'} ${plain(item.content)}`)];
@@ -196,12 +196,18 @@ function countTasks(state: TaskListState): { active: number; pending: number; co
   }
   return { active, pending, completed };
 }
+const LAST_STATUS_LABEL = { ok: '成功', error: '失败', skipped: '跳过' } as const;
 function scheduledTaskLines(tasks: readonly TaskView[]): readonly string[] {
   if (!tasks.length) return ['没有定时任务。对话中说“每天早上8点提醒我…”可以创建任务。'];
   return [`定时任务 (${tasks.length} 个)`, ...tasks.flatMap(task => {
-    const last = task.state.lastRunAt ? ` · 上次: ${task.state.lastStatus ?? '?'} ${formatRelativeTime(new Date(task.state.lastRunAt))}` : ' · 未执行过';
+    const status = task.state.lastStatus ? LAST_STATUS_LABEL[task.state.lastStatus] : '结果未知';
+    const last = task.state.lastRunAt ? ` · 上次: ${status} ${formatRelativeTime(new Date(task.state.lastRunAt))}` : ' · 未执行过';
     const next = task.state.nextRunAt ? ` · 下次: ${new Date(task.state.nextRunAt).toLocaleString()}` : '';
-    return [`${task.enabled ? '●' : '○'} ${plain(task.name)} (${plain(task.id)})`, `  ${plain(scheduleText(task.schedule))}${last}${next}`];
+    // 执行过且不再有下次运行的一次性任务已经完成，不与仍会触发的任务用同一标记
+    const done = task.enabled && !task.state.nextRunAt && !!task.state.lastRunAt && task.schedule.kind === 'once';
+    const [mark, ended] = !done ? [task.enabled ? '●' : '○', ''] : task.state.lastStatus === 'error' ? ['✗', ' · 已结束（失败）']
+      : task.state.lastStatus === 'ok' ? ['✓', ' · 已完成'] : ['·', ' · 已结束'];
+    return [`${mark} ${plain(task.name)} (${plain(task.id)})${ended}`, `  ${plain(scheduleText(task.schedule))}${last}${next}`];
   })];
 }
 function scheduleText(schedule: TaskView['schedule']): string {

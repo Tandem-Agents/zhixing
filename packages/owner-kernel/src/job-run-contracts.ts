@@ -175,6 +175,19 @@ export type JobJournalRecord =
       readonly proof: CancelProofBody;
     }
   | {
+      /** owner 从当前指派的执行端台账取得的耐久失败事实，与 failed 状态、能力吊销、结算释放同事务。 */
+      readonly t: "execution-failure-accepted";
+      readonly assignmentId: string;
+      readonly lastSeq: number;
+      readonly failure: {
+        readonly reason: string;
+        readonly usageFinal: {
+          readonly reportDigest: string;
+          readonly upToUsageSeq: number;
+        };
+      };
+    }
+  | {
       readonly t: "not-started-rejected";
       readonly assignmentId: string;
       readonly proof: AssignmentTerminationProof;
@@ -392,6 +405,7 @@ export const JOB_JOURNAL_RECORD_SHAPES = {
     required: ["assignmentId", "openFactDigest", "proof", "t"],
   },
   "cancel-proof-accepted": { required: ["assignmentId", "proof", "t"] },
+  "execution-failure-accepted": { required: ["assignmentId", "failure", "lastSeq", "t"] },
   "not-started-rejected": { required: ["assignmentId", "proof", "t"] },
   "capability-revoked": { required: ["assignmentId", "capId", "t"] },
   "ticket-issued": {
@@ -703,6 +717,30 @@ export function validateJobJournalRecord(
       }
       validateCancelProof(value.proof as CancelProofBody, verifier);
       break;
+    case "execution-failure-accepted": {
+      assertIdentifier(value.assignmentId, "Executor failure assignmentId");
+      assertPositive(value.lastSeq, "Executor failure ledger sequence");
+      assertRecord(value.failure, "Executor failure fact");
+      assertKeys(value.failure, ["reason", "usageFinal"], "Executor failure fact");
+      if (
+        typeof value.failure.reason !== "string" ||
+        value.failure.reason.trim().length === 0 ||
+        Buffer.byteLength(value.failure.reason, "utf8") > 512
+      ) {
+        throw corruptJobJournal("Executor failure reason is invalid");
+      }
+      const usageFinal = value.failure.usageFinal;
+      assertRecord(usageFinal, "Executor failure final usage");
+      assertKeys(usageFinal, ["reportDigest", "upToUsageSeq"], "Executor failure final usage");
+      assertDigest(usageFinal.reportDigest, "Executor failure final usage report digest");
+      if (
+        !Number.isSafeInteger(usageFinal.upToUsageSeq) ||
+        (usageFinal.upToUsageSeq as number) < 0
+      ) {
+        throw corruptJobJournal("Executor failure final usage sequence is invalid");
+      }
+      break;
+    }
     case "capability-revoked":
       assertIdentifier(value.assignmentId, "Capability revocation assignmentId");
       assertIdentifier(value.capId, "Capability revocation capId");
@@ -1024,6 +1062,7 @@ const JOB_TRANSITIONS: Readonly<Record<JobRunState, ReadonlySet<JobRunState>>> =
     "committed",
     "cancelled",
     "uncertain",
+    "failed",
   ]),
   running: new Set([
     "cancel-requested",
@@ -1089,8 +1128,10 @@ const USER_ASSIGNED_TRANSITIONS: Readonly<
     "uncertain",
     "queued",
     "cancelled",
+    "failed",
   ]),
-  running: new Set(["cancel-requested", "committed", "cancelled", "uncertain"]),
+  // dispatched/running→failed 只在同事务有已验证的执行端失败事实时成立（见 assertJobStateReplayContract）
+  running: new Set(["cancel-requested", "committed", "cancelled", "uncertain", "failed"]),
   "cancel-requested": new Set(["cancelled", "committed", "uncertain"]),
   uncertain: new Set(["queued", "committed", "cancelled", "failed"]),
   committed: new Set(),
@@ -1471,6 +1512,8 @@ export function assertJobStateReplayContract(input: {
   readonly hasAtomicAssignment: boolean;
   readonly hasAtomicSystemActivation: boolean;
   readonly hasAtomicSystemResult: boolean;
+  /** 同事务有绑定本指派、同一 usageFinal 的 execution-failure-accepted；缺省按没有处理。 */
+  readonly hasAtomicExecutionFailure?: boolean;
 }): void {
   if (input.definitionKind === undefined) {
     throw corruptJobJournal("Job state transition has no task definition kind");
@@ -1531,12 +1574,40 @@ export function assertJobStateReplayContract(input: {
   if (input.nextState === "dispatched" && !input.hasAtomicAssignment) {
     throw corruptJobJournal("Dispatched state lacks atomic assignment");
   }
+  // 带指派的失败只有两种来源：用户对 uncertain 的裁决，或执行端已耐久、已验证的失败事实
   if (
     input.assignmentId !== undefined &&
     input.nextState === "failed" &&
-    input.currentState !== "uncertain"
+    input.currentState !== "uncertain" &&
+    !(
+      (input.currentState === "dispatched" || input.currentState === "running") &&
+      input.hasAtomicExecutionFailure === true
+    )
   ) {
-    throw corruptJobJournal("Assigned job failure lacks an uncertainty resolution");
+    throw corruptJobJournal(
+      "Assigned job failure lacks an uncertainty resolution or a verified executor failure",
+    );
+  }
+}
+
+/** 执行端失败接纳必须绑定当前指派、处于进行中，并与 failed 状态、全部能力吊销同事务。 */
+export function assertExecutionFailureAcceptedReplayContract(input: {
+  readonly assignmentExists: boolean;
+  readonly assignmentIsCurrent: boolean;
+  readonly currentState: JobRunState | undefined;
+  readonly hasAtomicFailedState: boolean;
+  readonly allCapabilitiesRevoked: boolean;
+}): void {
+  if (
+    !input.assignmentExists ||
+    !input.assignmentIsCurrent ||
+    (input.currentState !== "dispatched" && input.currentState !== "running") ||
+    !input.hasAtomicFailedState ||
+    !input.allCapabilitiesRevoked
+  ) {
+    throw corruptJobJournal(
+      "Executor failure acceptance is stale, detached, or not atomic with its failed state",
+    );
   }
 }
 

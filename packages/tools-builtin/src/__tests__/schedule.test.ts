@@ -132,6 +132,8 @@ describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
       expect(result.isError).toBeFalsy();
       expect(result.committedToUser).toBeUndefined();
       expect(result.content).toContain("Task created successfully");
+      // UTC 时刻附本机时间与时区偏移，免得读者把 UTC 当本地时间
+      expect(result.content).toMatch(/once at \S+Z \(local \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}:\d{2}\)/u);
     });
   });
 

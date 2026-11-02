@@ -11,7 +11,7 @@ import { resolvePlatformProcessStartTime } from '../platform/secret-platform.js'
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { recordConversationFailure } from "../logging/runtime.js";
+import { recordConversationFailure, recordRuntimeFailure } from "../logging/runtime.js";
 import { handoffLogging } from "../logging/handoff.js";
 import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
 import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
@@ -128,6 +128,8 @@ import {
   getDefaultReadyMarkerPath,
   getDefaultTokenPath,
   resolveProcessStartTime,
+  RPC_ERROR_CODES,
+  RpcAppError,
   type RunningServer,
   type ServerContext,
 } from "@zhixing/server";
@@ -283,10 +285,12 @@ import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-sta
 import { buildManagedHostPublicStatus } from "./status.js";
 import { createHostDefaultWorkspaceProjection } from "./host-default-workspace.js";
 import {
+  HostStopAcceptedWorkPendingError,
   HostStopCoordinator,
   freezeHostStopAcceptedWork,
   hostStopAlreadySettled,
   hostStopDeliveryLifecycleSources,
+  hostStopPendingWorkReason,
   loadHostStopAcceptedWork,
   settleHostStopAcceptedWork,
   type HostStopAcceptedWorkItem,
@@ -1132,6 +1136,7 @@ async function runServerProcess(
       jobRelayObligations: authorityServices.jobRelayObligations,
       conversationExecutorLedger: ledger,
       executorDataPlane: dataPlane,
+      records: startupRecords,
     });
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
   }) : undefined;
@@ -2090,7 +2095,7 @@ async function runServerProcess(
     assertAcceptedWorkSubset(current, frozen, `host-stop ${owner}`);
     if (owner === "conversation") {
       if ((boundConversations?.list() ?? []).some((item) => item.busy)) {
-        throw new Error("Conversation accepted work is still active");
+        throw new HostStopAcceptedWorkPendingError(owner, "Conversation accepted work is still active");
       }
       return;
     }
@@ -2105,25 +2110,25 @@ async function runServerProcess(
             : closure?.activeLocalLeases ?? 0;
       const durableImmediateOwner = owner === "intent" || owner === "final" || owner === "assignment";
       if (remaining !== 0 && !(strategy === "immediate" && durableImmediateOwner)) {
-        throw new Error(`${owner} accepted work is not settled`);
+        throw new HostStopAcceptedWorkPendingError(owner, `${owner} accepted work is not settled`);
       }
       return;
     }
     if (owner === "remote") {
       if (strategy !== "immediate" && current.length !== 0) {
-        throw new Error("Remote accepted work is not settled");
+        throw new HostStopAcceptedWorkPendingError(owner, "Remote accepted work is not settled");
       }
       return;
     }
     if (owner === "channel") {
       if ((boundChannelStatuses?.() ?? []).some((status) => status.state !== "disconnected")) {
-        throw new Error("Channel accepted work is not settled");
+        throw new HostStopAcceptedWorkPendingError(owner, "Channel accepted work is not settled");
       }
       return;
     }
     if (owner === "delivery") {
       if (strategy !== "immediate" && current.length !== 0) {
-        throw new Error("Delivery accepted work is not durably terminal");
+        throw new HostStopAcceptedWorkPendingError(owner, "Delivery accepted work is not durably terminal");
       }
       return;
     }
@@ -2196,6 +2201,8 @@ async function runServerProcess(
     remote: stopPort("remote", async () => {
       await boundInboundRouter?.drainAcceptedMessages();
       await boundExecutorJobOwner?.drain();
+      // 执行端已到终态（失败或提交已确认）的 job 在读回前于 owner 侧收尾，中继登记随退役解除
+      await schedulerGenerationOwner.reconcileExecutionTerminals();
     }),
     channel: stopPort("channel", async () => {
       await boundChannelConnections?.disconnectConfigured();
@@ -2259,6 +2266,7 @@ async function runServerProcess(
     localDeviceId: bootstrap.mesh.deviceKey.deviceId,
     host: stopHost,
     acceptedWork,
+    recordStageFailure: (stage, error) => recordRuntimeFailure(startupRecords, error, `host-stop:${stage}`),
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     onAcceptedWorkFrozen: async (snapshot) => {
       const sources = hostStopDeliveryLifecycleSources(snapshot);
@@ -3299,7 +3307,20 @@ async function runServerProcess(
         conversationId,
         afterCommitRevision,
       ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
-    lifecycleShutdown: stopCoordinator,
+    lifecycleShutdown: {
+      // 已受理工作未结清时把原因与下一步交给停止入口；其他失败仍由 server.shutdown 保持通用表述
+      prepare: async (input) => {
+        try {
+          return await stopCoordinator.prepare(input);
+        } catch (error) {
+          const reason = hostStopPendingWorkReason(error);
+          if (reason === undefined) throw error;
+          throw new RpcAppError(RPC_ERROR_CODES.INTERNAL_ERROR, reason, {
+            action: "retry-same-request",
+          });
+        }
+      },
+    },
     foregroundActivity: deviceCapacity.foreground,
   });
   boundDeliveryStack?.onStatus((notice) => {

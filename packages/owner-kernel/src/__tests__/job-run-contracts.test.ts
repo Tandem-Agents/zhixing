@@ -9,6 +9,7 @@ import {
   assertJobConflictContainmentReplayContract,
   assertJobOccurrenceReplayContract,
   assertJobStateReplayContract,
+  assertExecutionFailureAcceptedReplayContract,
   assertSystemJobActivationReplayContract,
   assertSystemJobDefinitionReplayContract,
   assertSystemMissCoalescedReplayContract,
@@ -621,6 +622,55 @@ describe("user assigned state edge closure", () => {
         hasAtomicSystemResult: false,
       }),
     ).toThrow("lacks assignment identity");
+  });
+
+  it("accepts an assigned failure from an active state only with an atomic verified executor failure", () => {
+    const attempt = (currentState: "dispatched" | "running" | "cancel-requested" | "uncertain", hasAtomicExecutionFailure: boolean) =>
+      () => assertJobStateReplayContract({
+        currentState,
+        currentRevision: 3,
+        nextState: "failed",
+        nextRevision: 4,
+        assignmentId: "asg-failure",
+        assignmentBindingValid: true,
+        systemFencePresent: false,
+        definitionKind: "user",
+        hasAtomicAssignment: true,
+        hasAtomicSystemActivation: false,
+        hasAtomicSystemResult: false,
+        hasAtomicExecutionFailure,
+      });
+    expect(attempt("running", true)).not.toThrow();
+    expect(attempt("dispatched", true)).not.toThrow();
+    expect(attempt("running", false)).toThrow("verified executor failure");
+    expect(attempt("dispatched", false)).toThrow("verified executor failure");
+    // 取消进行中不接受执行端失败直接收束；uncertain 仍只走用户裁决
+    expect(attempt("cancel-requested", true)).toThrow();
+    expect(attempt("uncertain", false)).not.toThrow();
+  });
+
+  it("binds executor failure acceptance to the current active assignment and its atomic failed state", () => {
+    const valid = {
+      assignmentExists: true,
+      assignmentIsCurrent: true,
+      currentState: "running" as const,
+      hasAtomicFailedState: true,
+      allCapabilitiesRevoked: true,
+    };
+    expect(() => assertExecutionFailureAcceptedReplayContract(valid)).not.toThrow();
+    expect(() => assertExecutionFailureAcceptedReplayContract({ ...valid, currentState: "dispatched" })).not.toThrow();
+    for (const broken of [
+      { assignmentExists: false },
+      { assignmentIsCurrent: false },
+      { currentState: "cancel-requested" as const },
+      { currentState: "committed" as const },
+      { currentState: "failed" as const },
+      { hasAtomicFailedState: false },
+      { allCapabilitiesRevoked: false },
+    ]) {
+      expect(() => assertExecutionFailureAcceptedReplayContract({ ...valid, ...broken }), JSON.stringify(broken))
+        .toThrow("stale, detached, or not atomic");
+    }
   });
 
   it("rejects an assigned user transition that carries a system fence", () => {

@@ -76,6 +76,8 @@ describe("ExecutionSchedulerFacade", () => {
       async () => {
         const created = await facade.create(SPEC, { operationId: "tool-1" });
         expect(created.id).toBe(scheduleTaskIdForRequest("request-1"));
+        // 暂存视图按发布后的同一推导给出下次运行，不再是“无下次运行”
+        expect(Date.parse(created.state.nextRunAt!)).toBeGreaterThan(Date.parse(created.createdAt));
         await facade.update("task-existing", { name: "renamed" }, {
           operationId: "tool-2",
         });

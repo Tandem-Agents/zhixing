@@ -253,6 +253,11 @@ export class AnchorSchedulerHostLifecycle {
     }
   }
 
+  /** 停机收束前兜底：执行端已到终态的指派在 owner 侧收尾，让其中继登记随退役解除。 */
+  reconcileExecutionTerminals(): Promise<void> {
+    return this.#current?.reconcileExecutionTerminals() ?? Promise.resolve();
+  }
+
   stopAndRelease(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
     this.#closed = true;
@@ -488,6 +493,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
   readonly #mutationPublisher: SchedulerConversationMutationPublisher;
   #schedulerNoticeDisposer: (() => void) | undefined;
   #capabilityReadyDisposer: (() => void) | undefined;
+  #executionTerminalDisposer: (() => void) | undefined;
   #mutationPublisherDisposer: (() => void) | undefined;
   #generationBound = false;
   readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
@@ -652,6 +658,10 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         this.#options.authority.executorCapabilities.onAccepted(
           () => this.#scheduler.wakeQueuedUserJobs(),
         );
+      this.#executionTerminalDisposer =
+        this.#options.localJobOwner?.observeExecutionTerminals(
+          (assignmentId) => void this.#reconcileExecutionTerminal(assignmentId),
+        );
       for (const [taskId, journal] of this.#journals) {
         this.#statusDisposers.set(
           taskId,
@@ -703,6 +713,10 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
 
   listAcceptedWork(): Promise<readonly { readonly id: string; readonly revision: string }[]> {
     return this.#scheduler.acceptedWorkItems();
+  }
+
+  listInProcessWork(): readonly string[] {
+    return this.#scheduler.inProcessWork();
   }
 
   recoverAcceptedWork(
@@ -864,6 +878,9 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     await this.#rememberPending(input.journal, pending);
     const dispatcher = this.#dispatcher(input.journal, pending);
     await dispatcher.dispatchPending();
+    // 与启动恢复的指派一样由恢复驱动负责：丢失的取消与终态通知都在有界时间内收敛。
+    // 指派若已在派发等待期间退役（调度器已移除），不再为它起驱动
+    if (this.#dispatchers.get(pending.assignmentId) === dispatcher) dispatcher.startRecoveryLoop();
   }
 
   async #cancel(input: {
@@ -897,6 +914,8 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         const dispatcher = this.#dispatcher(journal, candidate.dispatch);
         await dispatcher.dispatchPending();
         await dispatcher.recoverStarted();
+        // 执行端已到终态的指派在这里收尾，随后由生命周期事件退役，不再起恢复循环
+        if (await dispatcher.reconcileExecutorTerminal(candidate.dispatch.assignmentId)) continue;
         await dispatcher.recoverCancellations();
         dispatcher.startRecoveryLoop();
       } catch (error) {
@@ -1070,6 +1089,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
           }
         : {}),
       onRecoveryError: (error) => this.#options.onError?.(error),
+      terminalReconciliation: { assignmentId: pending.assignmentId },
     });
     this.#dispatchers.set(key, dispatcher);
     return dispatcher;
@@ -1198,9 +1218,36 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     this.#statusDisposers.clear();
     this.#capabilityReadyDisposer?.();
     this.#capabilityReadyDisposer = undefined;
+    this.#executionTerminalDisposer?.();
+    this.#executionTerminalDisposer = undefined;
     this.#schedulerNoticeDisposer?.();
     this.#schedulerNoticeDisposer = undefined;
     this.#generationBound = false;
+  }
+
+  /**
+   * 停机收束前的兜底对账：遍历仍在路由的指派（与中继登记同一集合，随退役移除），
+   * 执行端已到终态的在 owner 侧收尾，随后既有退役逻辑解除中继登记。
+   * 本机终态事件或启动恢复漏掉的都在这里补齐。
+   */
+  async reconcileExecutionTerminals(): Promise<void> {
+    for (const assignmentId of [...this.#dispatchers.keys()]) {
+      await this.#reconcileExecutionTerminal(assignmentId);
+    }
+    // 终态提交时生命周期事件已排进微任务，退役任务此刻已登记；等它解除中继再读回
+    await Promise.allSettled([...this.#retirementTasks.values()]);
+  }
+
+  async #reconcileExecutionTerminal(assignmentId: string): Promise<void> {
+    const dispatcher = this.#dispatchers.get(assignmentId);
+    if (!dispatcher) return;
+    try {
+      await dispatcher.reconcileExecutorTerminal(assignmentId);
+    } catch (error) {
+      this.#options.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   }
 
   /** 启动要恢复的任务：当前定义目录 ∪ 作业域持久投影里仍有未完义务的任务，不读全部历史任务。 */

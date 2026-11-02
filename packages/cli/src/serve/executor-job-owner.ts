@@ -27,6 +27,7 @@ type JobEnvelope = Extract<DispatchEnvelope, { readonly execution: "job" }>;
  */
 export class ExecutorJobOwner implements JobInteractionAnswerPort {
   readonly #worker: JobAssignmentWorker;
+  readonly #executionTerminalObservers = new Set<(assignmentId: string) => void>();
   #state: "created" | "recovering" | "ready" | "paused" | "closed" = "created";
   #starting: Promise<void> | undefined;
   #closing: Promise<void> | undefined;
@@ -35,7 +36,23 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     this.#worker =
       options instanceof JobAssignmentWorker
         ? options
-        : new JobAssignmentWorker(options);
+        : new JobAssignmentWorker({
+            ...options,
+            onExecutionTerminal: (assignmentId) => {
+              options.onExecutionTerminal?.(assignmentId);
+              for (const observer of [...this.#executionTerminalObservers]) {
+                observer(assignmentId);
+              }
+            },
+          });
+  }
+
+  /** 本机执行端终态已耐久后通知 owner 侧收尾对账；返回值取消订阅。 */
+  observeExecutionTerminals(observer: (assignmentId: string) => void): () => void {
+    this.#executionTerminalObservers.add(observer);
+    return () => {
+      this.#executionTerminalObservers.delete(observer);
+    };
   }
 
   get ready(): boolean {

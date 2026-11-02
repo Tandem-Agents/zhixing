@@ -5,11 +5,33 @@ import { protocolDigest } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
   HOST_STOP_ACCEPTED_WORK_OWNERS,
+  HostStopAcceptedWorkPendingError,
   HostStopCoordinator,
   hostStopAlreadySettled,
+  hostStopPendingWorkReason,
   type HostStopAcceptedWorkPorts,
   type HostStopRuntime,
 } from "./host-stop-lifecycle.js";
+
+describe("host stop pending-work reason", () => {
+  it("names every accepted-work owner in user terms with the next step", () => {
+    for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
+      const reason = hostStopPendingWorkReason(
+        new HostStopAcceptedWorkPendingError(owner, `${owner} accepted work is not settled`),
+      );
+      expect(reason).toMatch(/这次没有停止/);
+      expect(reason).toMatch(/zz stop/);
+      expect(reason).not.toMatch(/accepted work/);
+    }
+    expect(hostStopPendingWorkReason(
+      new HostStopAcceptedWorkPendingError("remote", "Remote accepted work is not settled"),
+    )).toMatch(/^还有后台任务（如定时任务）在收尾/);
+  });
+
+  it("leaves other stop failures to the generic wording", () => {
+    expect(hostStopPendingWorkReason(new Error("disk full"))).toBeUndefined();
+  });
+});
 
 describe("HostStopCoordinator", () => {
   it.each(["immediate", "drain", "cancel"] as const)(
@@ -92,6 +114,25 @@ describe("HostStopCoordinator", () => {
     expect(fixture.order.filter((item) => item === "close")).toHaveLength(1);
     expect(fixture.order.filter((item) => item === "settle:conversation:immediate")).toHaveLength(1);
     expect(fixture.order.filter((item) => item === "flush")).toHaveLength(2);
+  });
+
+  it("records the failed stop stage with the original failure and still rethrows it", async () => {
+    const recorded: { stage: string; error: unknown }[] = [];
+    const fixture = await createFixture({ failSettleOnce: true, recordStageFailure: (stage, error) => recorded.push({ stage, error }) });
+    const request = { requestId: "request-stage", reason: "test", strategy: "cancel" as const, timeoutMs: 2_000 };
+    await expect(fixture.coordinator.prepare(request)).rejects.toThrow("successor boundary");
+    expect(recorded.map((item) => item.stage)).toEqual(["settle-accepted-work"]);
+    expect((recorded[0]!.error as Error).message).toBe("successor boundary");
+    // 失败后同一耐久停止操作从已到达的阶段接续，成功路径不再记录
+    await expect(fixture.coordinator.prepare(request)).resolves.toMatchObject({ phase: "ready-to-stop" });
+    expect(recorded).toHaveLength(1);
+    expect(fixture.order.filter((item) => item === "close")).toHaveLength(1);
+  });
+
+  it("a throwing stage recorder cannot replace the stop failure", async () => {
+    const fixture = await createFixture({ failFlushOnce: true, recordStageFailure: () => { throw new Error("recorder down"); } });
+    await expect(fixture.coordinator.prepare({ requestId: "request-recorder", reason: "test", strategy: "immediate", timeoutMs: 2_000 }))
+      .rejects.toThrow("disk full");
   });
 
   it("appends terminal only after an exact old host is independently read back stopped", async () => {
@@ -249,6 +290,7 @@ async function createFixture(options: {
   failFlushOnce?: boolean;
   failSettleOnce?: boolean;
   failPhysicalOnce?: boolean;
+  recordStageFailure?: (stage: string, error: unknown) => void;
 } = {}) {
   const root = await createTempDir("host-stop-lifecycle");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -330,6 +372,7 @@ async function createFixture(options: {
       runtime,
       acceptedWork,
       artifactStore: artifacts,
+      ...(options.recordStageFailure ? { recordStageFailure: options.recordStageFailure } : {}),
     }),
   };
 }

@@ -415,8 +415,13 @@ function extractTarget(
       return truncate(stringField(input, "pattern") ?? "", TARGET_TRUNCATE);
     case "web_fetch":
       return truncate(stringField(input, "url") ?? "", TARGET_TRUNCATE);
-    case "schedule":
-      return stringField(input, "name") ?? "";
+    case "schedule": {
+      // 按动作写明对象：创建写名称，删除/修改/立即运行写名称或编号
+      const action = stringField(input, "action"), target = stringField(input, "name") ?? stringField(input, "id") ?? "";
+      const verb = { delete: "删除", update: "修改", run: "立即运行" }[action ?? ""];
+      if (action === "list") return "查看";
+      return verb ? `${verb} ${target}`.trim() : target;
+    }
     case "Task":
       return truncate(
         stringField(input, "description") ?? "",
