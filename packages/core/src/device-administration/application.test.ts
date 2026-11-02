@@ -1011,6 +1011,27 @@ describe("DeviceAdministrationApplicationService", () => {
     await expect(f.application.query({ kind: "preflight-current-device-removal" }))
       .resolves.toMatchObject({ recoveryBackupReady: true });
 
+    // 单机：备份材料已验证，但卸载后家庭里没有别的值班候选能执行恢复——恢复备份路径不可用，开始也被拒
+    f.currentRemovalRecovery.readiness.mockResolvedValueOnce({
+      state: "recoverable",
+      fullBackupReady: true,
+      checkpointId: "checkpoint-1",
+      targetId: "target-1",
+      upToLsn: 42,
+    });
+    f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([]);
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .resolves.toMatchObject({ migrationTargets: [], recoveryBackupReady: false });
+    f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([]);
+    await expect(f.application.execute({
+      kind: "begin-current-device-removal",
+      path: "recovery-backup",
+      requestId: "request:uninstall-single",
+      operationId: "uninstall-single",
+      recoveryPackage: "recovery-package",
+    })).rejects.toThrow("No other duty-capable device could recover this home from the backup");
+    expect(f.currentRemovalRecovery.begin).not.toHaveBeenCalled();
+
     f.currentRemovalAdmission.read.mockResolvedValueOnce({
       context: {
         localDeviceId: "device-duty",

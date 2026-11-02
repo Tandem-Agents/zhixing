@@ -200,6 +200,20 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     await expect(f.application.status()).resolves.toEqual(expected);
   });
 
+  it("已选定目标而恢复根未建立时报设置未完成并带出原目标，不去读目标上的备份状态", async () => {
+    const f = administrationFixture();
+    f.mechanism.readRootState.mockResolvedValue({ kind: "missing" });
+    const status = await f.application.status();
+    expect(status).toMatchObject({
+      state: "setup-incomplete",
+      fullBackupReady: false,
+      nextAction: "run-backup-setup",
+    });
+    expect((status as { readonly target?: { readonly targetId: string } }).target?.targetId)
+      .toBe((await f.mechanism.loadTargetConfiguration())?.currentTargetId);
+    expect(f.mechanism.readStatus).not.toHaveBeenCalled();
+  });
+
   it("owns the exact public status projection shared with host surfaces", () => {
     expect(projectBackupRecoveryPublicStatus({
       state: "recoverable",

@@ -72,6 +72,13 @@ export type BackupRecoveryAdministrationStatus =
       readonly state: "configured-empty";
       readonly fullBackupReady: false;
       readonly nextAction: "run-backup-setup";
+    }
+  | {
+      /** 已选定目标、恢复根还没建立：上次设置没走完，重新在该目标上设置即可。 */
+      readonly state: "setup-incomplete";
+      readonly fullBackupReady: false;
+      readonly nextAction: "run-backup-setup";
+      readonly target: BackupRecoveryAdministrationTargetBinding;
     };
 
 export interface BackupRecoveryPublicStatusSource {
@@ -303,6 +310,14 @@ export class BackupRecoveryAdministrationApplicationService<PreparedRoot, Target
       });
     }
     const binding = requireBinding(configured, configured.currentTargetId, "current");
+    if ((await this.mechanism.readRootState()).kind === "missing") {
+      return Object.freeze({
+        state: "setup-incomplete",
+        fullBackupReady: false,
+        nextAction: "run-backup-setup",
+        target: binding,
+      });
+    }
     const status = projectBackupRecoveryPublicStatus(
       await this.mechanism.readStatus(binding.targetId),
     );

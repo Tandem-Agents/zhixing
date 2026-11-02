@@ -40,7 +40,8 @@ export async function readCheckpointLifecycle<T>(log: AuthorityCommitLog, read: 
   return (await log.transactDurableProjection<never, T>(CHECKPOINT_LIFECYCLE_PROJECTION_ID,
     async (current) => ({ kind: "return", value: await read(new CheckpointLifecycleView(current)) }))).value;
 }
-import { keyIdForPublicKey, RecoveryRoot, verifyRecoverySignature } from "./recovery-root.js";
+import { keyIdForPublicKey, RecoveryRoot } from "./recovery-root.js";
+import { currentRecoveryEligibility } from "./recovery-eligibility.js";
 import {
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
@@ -98,23 +99,21 @@ export async function projectDurableRecoveryBackupStatus(
     trustChainHead: { ...options.trust.chainHead },
     targetId: options.targetId,
   };
-  // 只读当前（未被取代）的已验证记录，最新在前；配对的 created 与同代际最新的 created 按键读
-  const { verifiedPair, pending } = await readCheckpointLifecycle(options.log, async (view) => {
-    let found: { verified: Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>; created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> } | undefined;
+  // 只读当前（未被取代）的已验证记录，最新在前；配对的 created 与同代际最新的 created 按键读。
+  // 候选只留可能成立的两种：created 代际与当前全等，或无代际的根激活检查点；资格由同源判定逐个核定
+  const { candidates, pending } = await readCheckpointLifecycle(options.log, async (view) => {
+    const found: { verified: Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>; created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> }[] = [];
     for (const verified of await view.currentVerified(recipientKeyId)) {
       if (verified.targetId !== options.targetId) continue;
       const created = await view.created(verified.checkpointId);
-      if (created !== undefined && created.targetId === options.targetId && created.generation !== undefined &&
-          canonicalize(created.generation) === canonicalize(generation) &&
-          verified.envelopeDigest === created.envelopeDigest && validVerificationSignature(verified, options.trust)) {
-        found = { verified, created };
-        break;
-      }
+      if (created === undefined || created.targetId !== options.targetId || verified.envelopeDigest !== created.envelopeDigest) continue;
+      if (created.generation !== undefined
+        ? canonicalize(created.generation) === canonicalize(generation)
+        : created.purpose.kind === "root-activation") found.push({ verified, created });
     }
-    return { verifiedPair: found, pending: await view.latestCreated(generation) };
+    return { candidates: found, pending: await view.latestCreated(generation) };
   });
-  if (verifiedPair?.created) {
-    const created = verifiedPair.created;
+  for (const { verified, created } of candidates) {
     const abort = options.abort ?? new AbortController().signal;
     const envelopeBytes = Buffer.from(await runWithMaintenanceUrgency(
       () => "foreground",
@@ -141,7 +140,7 @@ export async function projectDurableRecoveryBackupStatus(
     ) {
       throw new TypeError("Stored checkpoint envelope does not match its created fact");
     }
-    if (isFullEnvelope(envelope)) {
+    if (currentRecoveryEligibility({ trust: options.trust, verified, created, envelope, targetId: options.targetId })) {
       return {
         state: "recoverable",
         fullBackupReady: true,
@@ -690,29 +689,6 @@ function sameAuthorityGeneration(
     canonicalize(left.trustChainHead) === canonicalize(right.trustChainHead);
 }
 
-function validVerificationSignature(
-  record: Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>,
-  trust: HomeTrustRecord,
-): boolean {
-  if (!trust.recoveryRootPublicKey) return false;
-  const { signature, ...unsigned } = record.verification;
-  try {
-    verifyRecoverySignature(
-      trust.recoveryRootPublicKey,
-      "RecoveryCheckpointVerification",
-      1,
-      unsigned,
-      signature,
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isFullEnvelope(envelope: CheckpointEnvelope): boolean {
-  return canonicalize(envelope.manifest.scope) === canonicalize(FULL_SCOPE);
-}
 
 function checkpointVerificationFailureCode(error: unknown): string {
   const message = error instanceof Error ? error.message.toLowerCase() : "";

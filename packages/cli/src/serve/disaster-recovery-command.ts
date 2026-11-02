@@ -280,10 +280,10 @@ function disasterAdmissionPublicError(error: BackupRecoveryDisasterAdmissionErro
         return "恢复请求身份摘要无效";
     }
   })();
-  return error.errorKind === "type-error" ? new TypeError(message) : new Error(message);
+  return publicRecoveryError(error.errorKind === "type-error" ? new TypeError(message) : new Error(message));
 }
 
-type DisasterAdmission = Awaited<ReturnType<typeof admitDisasterRecoveryCandidate>>;
+type DisasterAdmission =Awaited<ReturnType<typeof admitDisasterRecoveryCandidate>>;
 type DisasterTrustEvidence = Awaited<ReturnType<typeof collectDisasterRecoveryTrustEvidence>>;
 
 function createDisasterRecoveryLifecycleApplication(
@@ -458,15 +458,15 @@ function renderDisasterRecoveryCompletion(
 function disasterLifecyclePublicError(error: BackupRecoveryDisasterLifecycleError): Error {
   switch (error.code) {
     case "current-device-not-recovering":
-      return new Error("当前设备仍在值班，无需执行无源恢复");
+      return publicRecoveryError(new Error("当前设备仍在值班，无需执行无源恢复"));
     case "installation-generation-mismatch":
-      return new Error("Disaster recovery installation is not the current authority generation");
+      return publicRecoveryError(new Error("这次恢复的安装记录已不是当前的权威代际，请重新运行 zz backup recover"));
     case "finish-confirmation-required":
-      return new Error("请先确认旧值班设备已经隔离或擦除");
+      return publicRecoveryError(new Error("请先确认旧值班设备已经隔离或擦除"));
     case "finish-installation-missing":
-      return new Error("当前设备没有待完成的灾难恢复");
+      return publicRecoveryError(new Error("当前设备没有待完成的灾难恢复"));
     case "finish-installation-ineligible":
-      return new Error("灾难恢复尚未提交，不能确认旧设备隔离");
+      return publicRecoveryError(new Error("灾难恢复尚未提交，不能确认旧设备隔离"));
   }
 }
 
@@ -486,7 +486,15 @@ export async function runDisasterRecoveryFinishCommand(
   }
 }
 
-export function disasterRecoveryPublicError(_error: unknown): Error {
+/** 已写成用户说明的恢复错误（本机前提、准入与生命周期结论）：公开出口原样给出；其余内部错误不外露细节。 */
+const PUBLIC_RECOVERY_ERRORS = new WeakSet<Error>();
+function publicRecoveryError<T extends Error>(error: T): T {
+  PUBLIC_RECOVERY_ERRORS.add(error);
+  return error;
+}
+
+export function disasterRecoveryPublicError(error: unknown): Error {
+  if (error instanceof Error && PUBLIC_RECOVERY_ERRORS.has(error)) return error;
   return new Error("恢复未完成。请核对备份位置、恢复包和设备状态后重试；系统不会自动切换值班设备。");
 }
 
@@ -515,7 +523,7 @@ async function openRecoveryContext(
   const home = options.zhixingHome ?? getZhixingHome();
   const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: home });
   if (await secretStore.unlockState() !== "unlocked") {
-    throw new Error("设备秘密存储解锁后才能恢复");
+    throw publicRecoveryError(new Error("设备秘密存储解锁后才能恢复"));
   }
   const key = await loadOrCreateDeviceKey(secretStore);
   const ownedCapacity = !options.storageMaintenance && !options.logging
@@ -528,14 +536,21 @@ async function openRecoveryContext(
   };
   try {
     const trust = await store.loadTrustRecord();
-    if (!trust) throw new Error("本机没有可验证的 home 信任记录");
+    // 无源恢复由原家庭里另一台已配对、有效且可值班的设备接管；不属于家庭的新设备不能直接从备份恢复
+    if (!trust) {
+      throw publicRecoveryError(new Error(
+        "这台设备还不属于任何家庭，不能执行无源恢复：恢复要在原家庭里另一台已配对、有效且可值班的设备上运行 zz backup recover；新设备目前不能直接从备份恢复",
+      ));
+    }
     const member = trust.members.find((candidate) =>
       candidate.device.deviceId === key.deviceId && candidate.state === "active");
     if (!member || !member.roles.includes("anchor")) {
-      throw new Error("恢复目标必须是仍有效且可值班的已配对设备");
+      throw publicRecoveryError(new Error(
+        "这台设备不是原家庭里有效且可值班的已配对设备，不能执行无源恢复；请在具备值班资格的已配对设备上运行 zz backup recover",
+      ));
     }
     if (requireNonIssuer && trust.issuer.deviceId === key.deviceId) {
-      throw new Error("当前设备仍在值班，无需执行无源恢复");
+      throw publicRecoveryError(new Error("当前设备仍在值班，无需执行无源恢复"));
     }
     const config = loadConfig({ homeDir: home });
     return {

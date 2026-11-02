@@ -1230,6 +1230,10 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
         targetDeviceId: requireStableText(matches[0]!.deviceId, "Duty device id"),
       });
     } else if (command.path === "recovery-backup") {
+      // 卸载会撤走本机这个值班设备，之后只能由别的值班候选从备份恢复；材料资格仍由恢复机制的原守卫核定
+      if (!hasRecoveryCapableDevice((await this.#readCurrentRemovalPreflight()).migrationTargets)) {
+        throw new Error("No other duty-capable device could recover this home from the backup");
+      }
       lifecycle = await this.#currentRemovalRecovery().begin({
         requestId,
         operationId,
@@ -1279,12 +1283,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
       preflight: freezeCurrentRemovalPreflight({
         currentDeviceName: context.currentDeviceName ?? "当前设备",
         migrationTargets,
-        recoveryBackupReady:
-          backup.state === "recoverable" &&
-          backup.fullBackupReady &&
-          !!backup.checkpointId &&
-          !!backup.targetId &&
-          backup.upToLsn !== undefined,
+        recoveryBackupReady: recoveryBackupPathReady(backup, migrationTargets),
       }),
       migrationTargets,
     });
@@ -1570,6 +1569,30 @@ function freezeDutyMigrationTarget(
     ready: value.ready,
     ...(value.code === undefined ? {} : { code: value.code }),
   });
+}
+
+/**
+ * 永久卸载当前值班设备的“恢复备份”路径是否可用：材料资格（当前可恢复的完整备份及其覆盖位置）之外，
+ * 还要有能执行无源恢复的设备——同一家庭里另一台有效的值班候选（在线与否都算，恢复时再连接）。
+ * 单机卸载会撤走最后一个恢复条件，只凭“材料已验证”不能放行。
+ */
+function recoveryBackupPathReady(
+  backup: BackupRecoveryCurrentRemovalStatus,
+  migrationTargets: readonly DeviceAdministrationCurrentRemovalMigrationTarget[],
+): boolean {
+  return backup.state === "recoverable" &&
+    backup.fullBackupReady &&
+    !!backup.checkpointId &&
+    !!backup.targetId &&
+    backup.upToLsn !== undefined &&
+    hasRecoveryCapableDevice(migrationTargets);
+}
+
+/** 本机卸载后还有设备能执行无源恢复：另一台有效的值班候选。 */
+function hasRecoveryCapableDevice(
+  migrationTargets: readonly DeviceAdministrationCurrentRemovalMigrationTarget[],
+): boolean {
+  return migrationTargets.length > 0;
 }
 
 function freezeCurrentRemovalPreflight(

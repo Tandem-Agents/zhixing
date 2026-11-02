@@ -33,8 +33,9 @@ import {
   type PairingOfferRepository,
   type PairingPakeSuiteRegistry,
 } from "./pairing.js";
-import { keyIdForPublicKey, RecoveryRoot, verifyRecoverySignature } from "./recovery-root.js";
+import { keyIdForPublicKey, RecoveryRoot } from "./recovery-root.js";
 import { applyTrustEvent, homeTrustEventDigest, type TrustProjection } from "./trust-chain.js";
+import { currentRecoveryEligibility, isValidCurrentRootVerification } from "./recovery-eligibility.js";
 
 export interface PairingAttemptAdmission {
   readonly attemptId: string;
@@ -864,13 +865,10 @@ export function projectRecoveryReadiness(input: {
         candidate.purpose.activationDigest === input.trust.recoveryActivationDigest &&
         isValidCurrentRootVerification(candidate, input.trust.recoveryRootPublicKey!),
     );
+  // 完整备份资格与 status 同源：普通当前代际证明或仍对应当前链头的根激活证明
   const full = [...input.verifiedRecords]
     .reverse()
     .map((candidate) => {
-      if (
-        candidate.recipientKeyId !== expectedKeyId ||
-        !isValidCurrentRootVerification(candidate, input.trust.recoveryRootPublicKey!)
-      ) return undefined;
       const created = input.createdRecords?.find((entry) =>
         entry.checkpointId === candidate.checkpointId &&
         entry.recipientKeyId === candidate.recipientKeyId &&
@@ -880,24 +878,8 @@ export function projectRecoveryReadiness(input: {
       const envelope = input.checkpointEnvelopes?.find((entry) =>
         entry.checkpointId === candidate.checkpointId &&
         entry.digest === candidate.envelopeDigest);
-      if (
-        !created?.targetId ||
-        canonicalize(created.generation) !== canonicalize({
-          rootKeyId,
-          recipientKeyId: expectedKeyId,
-          trustChainHead: input.trust.chainHead,
-          targetId: created.targetId,
-        }) ||
-        !created.source || !created.request ||
-        !envelope ||
-        envelope.recipientKeyId !== expectedKeyId ||
-        canonicalize(envelope.manifest.scope) !== canonicalize([
-          "global-authority",
-          "conversation-authority",
-          "conversation-content",
-          "execution-assets",
-        ])
-      ) return undefined;
+      if (!created || !envelope ||
+          !currentRecoveryEligibility({ trust: input.trust, verified: candidate, created, envelope })) return undefined;
       return { created, envelope };
     })
     .find((candidate) => candidate !== undefined);
@@ -916,33 +898,4 @@ export function projectRecoveryReadiness(input: {
         }
       : {}),
   });
-}
-
-function isValidCurrentRootVerification(
-  record: Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }>,
-  recoveryRootPublicKey: string,
-): boolean {
-  const { signature, ...unsigned } = record.verification;
-  if (
-    unsigned.v !== 1 ||
-    record.checkpointId !== unsigned.checkpointId ||
-    record.recipientKeyId !== unsigned.recipientKeyId ||
-    record.targetId !== unsigned.targetId ||
-    record.envelopeDigest !== unsigned.envelopeDigest ||
-    canonicalize(record.purpose) !== canonicalize(unsigned.purpose)
-  ) {
-    return false;
-  }
-  try {
-    verifyRecoverySignature(
-      recoveryRootPublicKey,
-      "RecoveryCheckpointVerification",
-      1,
-      unsigned,
-      signature,
-    );
-    return true;
-  } catch {
-    return false;
-  }
 }

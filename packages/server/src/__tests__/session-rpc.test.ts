@@ -2096,6 +2096,9 @@ describe("session.* RPC (S2.D)", () => {
       disposition: "kept",
       message: advancementProposalDispositionMessage("kept"),
     });
+    // 目标不变时明说本次输入没被接纳、仍在输入框里，再给可继续的操作
+    expect((sendResp.result as { message: string }).message).toBe(
+      "本次输入未接纳，已保留在输入框；原推进目标保持不变，确认验收标准前不执行原任务；可以补充说明，也可以说“直接执行”或“取消”。");
     expect(recordsByConversation.get(conversationId) ?? []).toEqual([]);
     // 重连读取能看到提议阶段的推进状态
     const resumed = await client.request("session.resume", { conversationId });

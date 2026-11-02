@@ -393,6 +393,37 @@ describe("a removal target suspended on the current chain", () => {
   }
 });
 
+describe("首次备份建根的激活检查点经真实灾备入口恢复", () => {
+  it("合格的备用值班设备从激活检查点恢复：材料先即为当前可恢复，恢复后 B 值班、根与业务事实接续、旧值班不再是 issuer", async () => {
+    const f = await createHome({ rootVia: "activation" });
+    const business = await appendLocalBusinessRecord(f.sourceStore, "before-activation");
+    const { target } = await f.activateRoot();
+    const sourceRecord = (await f.sourceStore.loadTrustRecord())!;
+    expect(sourceRecord.recoveryRootPublicKey).toBe(f.recoveryRoot.rootPublicKey);
+    // 没有任何每日备份：激活检查点按同源资格判定即为当前可恢复
+    await expect(projectDurableRecoveryBackupStatus({
+      log: f.sourceStore.authorityLog(),
+      artifacts: f.sourceStore.artifactStore(),
+      trust: sourceRecord,
+      currentAnchor: true,
+      targetId: target.targetId,
+    })).resolves.toMatchObject({ state: "recoverable", fullBackupReady: true, targetId: target.targetId });
+
+    // A 损毁前 B 已对齐到含恢复根的链；B 用这份激活检查点走灾备的准备、提交与安装
+    await f.syncB();
+    const issuerKeyB = await f.recover();
+    const recovered = (await f.targetStore.loadTrustRecord())!;
+    expect(recovered.issuer.issuerKeyId).toBe(issuerKeyB.deviceId);
+    expect(recovered.issuer.deviceId).toBe(f.b.identity.deviceId);
+    expect(recovered.recoveryRootPublicKey).toBe(f.recoveryRoot.rootPublicKey);
+    expect(recovered.recoveryBackupPublicKey).toBe(f.recoveryRoot.backupPublicKey);
+    expect(recovered.trustEpoch).toBeGreaterThan(sourceRecord.trustEpoch);
+    expect(await hasLocalBusinessRecord(f.targetStore, business)).toBe(true);
+    // 家级材料随激活检查点里的密封记录交到 B
+    expect(await loadHomeRouteMaterial(f.secretsB, HOME_ID)).toEqual(await loadHomeRouteMaterial(f.secretsA, HOME_ID));
+  }, 150_000);
+});
+
 /** runPairCommand 需要按前缀列举的秘密存储（本文件的内存存储 list 不按前缀）。 */
 class PrefixSecretStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -1099,7 +1130,7 @@ async function device(name: string) {
   return { key, identity: enrollDeviceIdentity(key, { displayName: name, platform: "headless", enrolledAt: AT }) };
 }
 
-async function createHome() {
+async function createHome(options: { readonly rootVia?: "event" | "activation" } = {}) {
   const a = await device("值班电脑-A");
   const b = await device("值班电脑-B");
   const t = await device("工作电脑-T");
@@ -1129,10 +1160,13 @@ async function createHome() {
     });
   }
   const recoveryRoot = RecoveryRoot.generate();
-  trust = await sourceStore.appendTrustEvent({
-    event: createRecoveryRootEvent({ current: trust, op: "establish", candidate: recoveryRoot, outerSigner: a.key, at: AT }),
-    issuerKey: a.key,
-  });
+  // activation：根由 activateRoot() 沿首次备份设置的同一路径建立（激活检查点复制、真解封验证、原子激活）
+  if (options.rootVia !== "activation") {
+    trust = await sourceStore.appendTrustEvent({
+      event: createRecoveryRootEvent({ current: trust, op: "establish", candidate: recoveryRoot, outerSigner: a.key, at: AT }),
+      issuerKey: a.key,
+    });
+  }
   // 配对时 A 记下 B、T 的传输身份（随检查点交给 B）
   const aPorts = createMeshBootstrapProjectionPorts(sourceStore);
   for (const member of [b, t, e]) {
@@ -1205,6 +1239,46 @@ async function createHome() {
       const previous = (await eStore.loadTrustRecord())!.chainHead;
       const events = await sourceStore.loadTrustEvents();
       await eStore.reconcileTrustPage({ homeId: HOME_ID, previous, events: events.slice(previous.seq + 1), record: (await sourceStore.loadTrustRecord())! });
+    },
+    /**
+     * 与首次备份设置同一路径建根：生成根事件与激活计划，抓取完整激活检查点，经激活协调器复制到目标、
+     * 真解封验证并原子激活；随后灾备恢复用的就是这份激活检查点本身。
+     */
+    async activateRoot() {
+      const projection = (await sourceStore.loadTrustProjection())!;
+      const record = (await sourceStore.loadTrustRecord())!;
+      const plan = {
+        v: 1 as const,
+        kind: "establish" as const,
+        rootEvent: createRecoveryRootEvent({ current: projection, op: "establish", candidate: recoveryRoot, outerSigner: a.key, at: AT }),
+      };
+      const activation = (await captureFullAuthorityCheckpoint({
+        checkpointId: "01J000000000000000000000A1",
+        createdAt: new Date(NOW - 120_000).toISOString(),
+        purpose: { kind: "root-activation", plan },
+        trust: record,
+        issuer: Object.assign({}, a.identity, { sign: a.key.sign.bind(a.key) }),
+        recipient: recoveryRoot.publicIdentity(),
+        log: sourceStore.authorityLog(),
+        artifacts: sourceStore.artifactStore(),
+        retention: sourceStore.checkpointRetention(),
+      })).checkpoint;
+      const target = await FileRecoveryCheckpointTarget.openPaired({
+        targetRoot: await createTempDir("route-a-disaster-backup"),
+        targetDeviceId: b.identity.deviceId,
+      });
+      await new RecoveryActivationCoordinator(sourceStore.bootstrapAuthority()).activatePrepared({
+        current: projection,
+        plan,
+        checkpoint: activation,
+        candidateRoot: recoveryRoot,
+        issuerIdentity: a.identity,
+        target,
+        sourceIndependenceDomain: "filesystem:route-a-source",
+        now: () => new Date(NOW - 60_000).toISOString(),
+      });
+      checkpoint = activation;
+      return { target, plan };
     },
     async captureCheckpoint() {
       const record = (await sourceStore.loadTrustRecord())!;
