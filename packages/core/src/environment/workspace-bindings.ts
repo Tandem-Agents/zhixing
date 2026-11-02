@@ -21,6 +21,7 @@ import type {
   WorkspaceBindingAdminPort,
   WorkspaceBindingMigrationPort,
   WorkspaceBindingPatch,
+  WorkspaceBindingRequestOutcome,
   WorkspaceBindingResetReceipt,
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
@@ -304,6 +305,29 @@ export class WorkspaceBindingService
     });
   }
 
+  async requestOutcome(
+    control: LocalEnvironmentControlContext,
+  ): Promise<WorkspaceBindingRequestOutcome | undefined> {
+    this.#validateControl(control);
+    await this.#ensureOpen();
+    const transaction = await this.#log.transactDurableProjection<
+      WorkspaceBindingRecord,
+      RequestOutcome | undefined
+    >(BINDING_INDEX_ID, async (current) => {
+      const { state } = await readBindingIndex(current, { requestId: control.requestId });
+      if (!state.established || state.deviceId !== this.#deviceId) {
+        throw corruptDirectory("Workspace binding directory belongs to another device");
+      }
+      return { kind: "return", value: state.requests.get(control.requestId) };
+    });
+    const outcome = transaction.value;
+    if (!outcome) return undefined;
+    return {
+      ...(outcome.binding ? { binding: cloneBinding(outcome.binding) } : {}),
+      ...(outcome.removed ? { removed: { ...outcome.removed } } : {}),
+    };
+  }
+
   async create(
     input: { displayName: string; absolutePath: string },
     control: LocalEnvironmentControlContext,
@@ -345,6 +369,7 @@ export class WorkspaceBindingService
               }
               throw new WorkspaceBindingConflictError(
                 "Workspace display name is already in use",
+                "display-name-in-use",
               );
             }
             const candidateRef = await this.#nextBindingRef(current);
@@ -418,6 +443,7 @@ export class WorkspaceBindingService
             if (conflictingRef && conflictingRef !== bindingRef) {
               throw new WorkspaceBindingConflictError(
                 "Workspace display name is already in use",
+                "display-name-in-use",
               );
             }
             if (
@@ -2119,7 +2145,7 @@ export class WorkspaceBindingConflictError extends Error {
 
   constructor(
     message: string,
-    readonly reason: "conflict" | "legacy-name-conflict" = "conflict",
+    readonly reason: "conflict" | "legacy-name-conflict" | "display-name-in-use" = "conflict",
   ) {
     super(message);
     this.name = "WorkspaceBindingConflictError";

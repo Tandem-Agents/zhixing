@@ -142,6 +142,9 @@ describe("home authority sources", () => {
     expect(secrets.creates).toBe(1);
     expect(first.sources.integrity).toBeDefined();
     await expect(openHomeAuthoritySources({ home, secretStore: secrets, clock: () => AT })).rejects.toThrow("one commit clock");
+    // 先无读取准入打开后，后来的打开者不能带着仲裁器沿用它（日志不会补上读取准入）
+    const arbiter = { acquire: vi.fn() } as unknown as import("@zhixing/core/resources").DeviceCapacityArbiterPort;
+    await expect(openHomeAuthoritySources({ home, secretStore: secrets, deviceCapacity: arbiter })).rejects.toThrow("one device capacity arbiter");
     await first.close();
     // 另一个使用者仍持有：日志尚未停止，可以继续读写。
     await second.sources.authority.append([{ stream: "control", body: { t: "probe" } }]).catch((error: unknown) => {

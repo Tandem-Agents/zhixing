@@ -18,6 +18,7 @@ import {
   type WorkspaceAdministrationApplication,
 } from "@zhixing/core/environment/workspace-administration";
 import {
+  LocalWorkspaceHostNotWritableError,
   LocalWorkspaceManagementHost,
   createLocalWorkspaceClient,
   decodeLocalWorkspaceResetPreview,
@@ -32,7 +33,7 @@ import {
   acquireLocalWorkspaceOwner,
   callLocalWorkspaceHost,
 } from "./local-workspace-owner.js";
-import { useLocalWorkspaceClient } from "./workspace-command.js";
+import { localWorkspaceUserError, useLocalWorkspaceClient } from "./workspace-command.js";
 import { observeLocalWorkspaceDurableInfrastructureFailure } from "./local-workspace-durable-lifecycle-adapter.js";
 
 type TestWorkspaceApplications = Omit<
@@ -83,9 +84,11 @@ function createTestLocalWorkspaceManagementHost(input: {
   readonly lease: Awaited<ReturnType<typeof acquireLocalWorkspaceOwner>>;
   readonly applications: WorkspaceAdministrationApplication;
   readonly outbox: LocalWorkspaceOperationOutbox;
+  readonly recoveryWaitMs?: number;
 }): LocalWorkspaceManagementHost {
   return new LocalWorkspaceManagementHost({
     lease: input.lease,
+    ...(input.recoveryWaitMs === undefined ? {} : { recoveryWaitMs: input.recoveryWaitMs }),
     lifecycle: new WorkspaceAdministrationDurableLifecycleApplicationService({
       application: input.applications,
       mechanism: input.outbox,
@@ -1095,6 +1098,118 @@ describe("LocalWorkspaceManagementHost", () => {
     } finally {
       await secondHost.close();
       await secondLease.release();
+    }
+  });
+
+  it("写操作先等进行中的恢复：恢复结果先交付，再执行本次写入；等待有上限并给出具体状态", async () => {
+    const home = await createTempDir("workspace-host-await-recovery");
+    const rootDir = path.join(home, "runtime", "local-workspace-operation-outbox");
+    const blockedApplications = (gate: Promise<void>, calls: string[]) => testWorkspaceApplications({
+      status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+      previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
+      list: async () => [],
+      viewByReference: vi.fn(async () => null),
+      viewByName: vi.fn(),
+      create: async ({ displayName, absolutePath }, execution) => {
+        calls.push(displayName);
+        if (displayName === "paper") {
+          await Promise.race([
+            gate,
+            new Promise<never>((_resolve, reject) => execution?.abort?.addEventListener(
+              "abort",
+              () => reject(new WorkspaceBindingCancelledError()),
+              { once: true },
+            )),
+          ]);
+        }
+        return { name: displayName, path: absolutePath, revision: 1, workspaceBindingRevision: 1 };
+      },
+      authorizeForControl: vi.fn(),
+      rename: vi.fn(),
+      repath: vi.fn(),
+      remove: vi.fn(),
+      reset: vi.fn(),
+    });
+    // 上一次进程：paper 已提交但没执行完就退出
+    const never = new Promise<void>(() => undefined);
+    const firstLease = await acquireLocalWorkspaceOwner(home);
+    const firstHost = createTestLocalWorkspaceManagementHost({
+      lease: firstLease,
+      applications: blockedApplications(never, []),
+      outbox: new LocalWorkspaceOperationOutbox({ rootDir }),
+    });
+    await firstHost.start();
+    const prepared = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(home, {
+      kind: "prepare",
+      input: { kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" },
+    }));
+    const committing = callLocalWorkspaceHost(home, { kind: "commit", identity: operationIdentity(prepared) })
+      .catch(() => undefined);
+    await vi.waitFor(async () => expect((await readLocalWorkspaceHostStatus(home)).state).toBe("recovering"));
+    await firstHost.close();
+    await committing;
+    await firstLease.release();
+
+    // 等待上限内恢复完成：先交付 paper，再写 other
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: string[] = [];
+    const secondLease = await acquireLocalWorkspaceOwner(home);
+    const secondHost = createTestLocalWorkspaceManagementHost({
+      lease: secondLease,
+      applications: blockedApplications(gate, calls),
+      outbox: new LocalWorkspaceOperationOutbox({ rootDir }),
+    });
+    const order: string[] = [];
+    try {
+      await secondHost.start();
+      const writing = useLocalWorkspaceClient(
+        createLocalWorkspaceClient(home),
+        (workspace) => workspace.create("other", "C:\\other"),
+        {
+          result: async (view) => { order.push(`result:${view.name}`); return view; },
+          recovered: async (operations) => { order.push(...operations.map((operation) => `recovered:${operation.target}:${operation.outcome}`)); },
+          failure: async () => { throw new Error("unexpected failure"); },
+        },
+      );
+      await vi.waitFor(() => expect(calls).toEqual(["paper"]));
+      expect(order).toEqual([]);
+      release();
+      await expect(writing).resolves.toMatchObject({ name: "other" });
+      expect(order).toEqual(["recovered:paper:succeeded", "result:other"]);
+      expect(calls).toEqual(["paper", "other"]);
+    } finally {
+      await secondHost.close();
+      await secondLease.release();
+    }
+
+    // 超过上限仍未完成：如实报出当时状态与操作号，不开始新写入
+    const third = await createTempDir("workspace-host-await-recovery-bounded");
+    const thirdRoot = path.join(third, "runtime", "local-workspace-operation-outbox");
+    const blockedLease = await acquireLocalWorkspaceOwner(third);
+    const blockedHost = createTestLocalWorkspaceManagementHost({
+      lease: blockedLease,
+      applications: blockedApplications(never, []),
+      outbox: new LocalWorkspaceOperationOutbox({ rootDir: thirdRoot }),
+      recoveryWaitMs: 30,
+    });
+    try {
+      await blockedHost.start();
+      const stuck = validateLocalWorkspaceOperation(await callLocalWorkspaceHost(third, {
+        kind: "prepare",
+        input: { kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" },
+      }));
+      void callLocalWorkspaceHost(third, { kind: "commit", identity: operationIdentity(stuck) }).catch(() => undefined);
+      await vi.waitFor(async () => expect((await readLocalWorkspaceHostStatus(third)).state).toBe("recovering"));
+      const rejected = await createLocalWorkspaceClient(third).create("other", "C:\\other").catch((error: unknown) => error);
+      expect(rejected).toBeInstanceOf(LocalWorkspaceHostNotWritableError);
+      expect(rejected).toMatchObject({ hostState: "recovering", code: "LOCAL_WORKSPACE_COMMITTED_DRAIN", localSeq: stuck.localSeq });
+      expect((localWorkspaceUserError(rejected) as Error).message).toBe(
+        `本机工作区上次的第 ${stuck.localSeq} 号操作还没完成（正在执行已确认的操作，超过了等待上限）；再次运行会接着完成它。`,
+      );
+    } finally {
+      await blockedHost.close();
+      await blockedLease.release();
     }
   });
 

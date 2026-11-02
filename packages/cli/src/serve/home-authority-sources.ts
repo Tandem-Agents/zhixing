@@ -45,6 +45,8 @@ export interface HomeAuthoritySourcesLease {
 interface OwnerSlot {
   readonly opening: Promise<HomeAuthoritySources>;
   readonly clock: (() => string) | undefined;
+  /** 日志与制品库的读取准入在首次打开时定下；之后的打开者不能悄悄换成另一个仲裁器或补上缺失的仲裁器。 */
+  readonly deviceCapacity: DeviceCapacityArbiterPort | undefined;
   references: number;
   closing?: Promise<void>;
 }
@@ -85,10 +87,14 @@ export async function openHomeAuthoritySources(options: HomeAuthoritySourcesOpti
     slot = writers.get(key);
   }
   if (!slot) {
-    slot = { opening: HomeAuthoritySources.open({ ...options, home: physical }), clock: options.clock, references: 0 };
+    slot = { opening: HomeAuthoritySources.open({ ...options, home: physical }), clock: options.clock,
+      deviceCapacity: options.deviceCapacity, references: 0 };
     writers.set(key, slot);
   } else if (options.clock !== undefined && options.clock !== slot.clock) {
     throw new TypeError("Home authority writers in one process must share one commit clock");
+  } else if (options.deviceCapacity !== undefined && options.deviceCapacity !== slot.deviceCapacity) {
+    // 先无准入打开、后带准入装配时，已打开的日志不会补上读取准入：冷索引读取会落进只给写入的步骤预算
+    throw new TypeError("Home authority writers in one process must share one device capacity arbiter");
   }
   const owned = slot;
   owned.references++;

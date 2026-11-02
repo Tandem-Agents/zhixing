@@ -281,7 +281,7 @@ it.each([false, true])("preserves concurrent read-only workspace results without
     const results = await Promise.all([run(home, ["workspace", "list"]), run(home, ["workspace", "list"])]);
     for (const result of results) {
       expect(result.code, result.stdout + result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual([]);
+      expect(result.stdout).toContain("还没有已授权的本机工作区");
       expect(result.stderr).not.toContain("日志");
     }
     if (unavailable) {

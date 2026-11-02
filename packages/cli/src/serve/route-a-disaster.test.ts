@@ -25,6 +25,11 @@ import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
 import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
 import { loadActiveAnchorIssuerKey, persistDeviceKey } from "@zhixing/mesh/device-key-store";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
+import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
+import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { projectDurableRecoveryBackupStatus } from "@zhixing/mesh/checkpoint-service";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
@@ -514,7 +519,14 @@ async function forkedRejoinSetup(options: { readonly lost?: boolean } = {}) {
     const xHome = await createTempDir("route-a-fork-x");
     const xSecrets = new PrefixSecretStore();
     await persistDeviceKey(xSecrets, x.key);
-    const xStore = await FileMeshBootstrapStore.open(xHome, x.key, { secretStore: xSecrets });
+    // 同一进程里同一 home 的权威写者共用一个容量仲裁器：后面加入方的配对命令经 logging.capacity 用同一个
+    const xCapacity = createDeviceCapacityRuntime(path.join(xHome, "distributed-runtime", "capacity"));
+    homeCapacities.set(xHome, xCapacity);
+    const xStore = await FileMeshBootstrapStore.open(xHome, x.key, {
+      secretStore: xSecrets,
+      storageMaintenance: xCapacity.storage,
+      deviceCapacity: xCapacity.arbiter,
+    });
     onTestFinished(() => xStore.stopStorageMaintenance());
     await xStore.importTrustBootstrap({
       events: await f.sourceStore.loadTrustEvents(), record: (await f.sourceStore.loadTrustRecord())!, localDeviceId: x.identity.deviceId,
@@ -558,6 +570,9 @@ async function forkedRejoinSetup(options: { readonly lost?: boolean } = {}) {
 }
 
 /** 现任经真实配对入口发起（或按续接重新发布同一邀请）、X 完成（或续做）加入；两侧结果都交回。 */
+/** 测试进程里按 home 共用的容量运行时（生产中每个进程只有一个，配对命令经 logging.capacity 借用）。 */
+const homeCapacities = new Map<string, ReturnType<typeof createDeviceCapacityRuntime>>();
+
 async function pairWithRecoveredDuty(
   f: Awaited<ReturnType<typeof createHome>>,
   relayPort: number,
@@ -579,8 +594,10 @@ async function pairWithRecoveredDuty(
     writeLine: (line) => { if (line.startsWith("邀请内容：")) resolveInvitation(line.slice("邀请内容：".length)); },
   });
   const encoded = await Promise.race([invitation, issuing.then(() => { throw new Error("pairing issuer ended before its invitation"); })]);
+  const xCapacity = homeCapacities.get(xHome);
   const joining = runPairCommand({
     zhixingHome: xHome, secretStore: xSecrets, composition: "production",
+    ...(xCapacity ? { logging: { bind: recordingFixture().bind, capacity: xCapacity } } : {}),
     promptExecutorAutoStart: async () => false,
     ...(options.invite ? { invitation: encoded } : {}),
     ...(options.rejoinDiscoveryTimeoutMs ? { rejoinDiscoveryTimeoutMs: options.rejoinDiscoveryTimeoutMs } : {}),

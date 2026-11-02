@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm, chmod } from "node:fs/promises";
 import net, { type Server, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { acquireFileLock } from "@zhixing/core/persistence";
+import { acquireFileLock, captureFileLockProcessIdentity } from "@zhixing/core/persistence";
 import { canonicalize } from "@zhixing/core/protocol";
 
 const TRANSPORT_VERSION = 1;
@@ -76,6 +76,9 @@ interface ResponseEnvelope {
 export class LocalWorkspaceTransportServer {
   readonly #lease: LocalWorkspaceOwnerLease;
   readonly #handle: (body: unknown) => Promise<unknown>;
+  // socket 读事件拿不到接入时的异步上下文：组合根交给本服务的平台身份端口属于服务生命周期，
+  // 构造时捕获、每条请求只恢复它（与主 RPC 服务同一规则）；没有端口时按原样执行
+  readonly #withPlatformIdentity = captureFileLockProcessIdentity();
   #server: Server | undefined;
   #secret: TransportSecret | undefined;
 
@@ -165,7 +168,7 @@ export class LocalWorkspaceTransportServer {
       const newline = input.indexOf("\n");
       if (newline < 0 || settled) return;
       const line = input.slice(0, newline);
-      void this.#dispatch(line).then(reply);
+      void this.#withPlatformIdentity(() => this.#dispatch(line)).then(reply);
     });
     socket.on("error", () => undefined);
   }

@@ -291,10 +291,23 @@ export type WorkspaceBindingPatch =
   | { displayName: string; absolutePath?: string }
   | { absolutePath: string; displayName?: string };
 
+/** 绑定权威按稳定 requestId 记下的请求结果：创建与修改留下绑定，移除留下被移除的引用与修订。 */
+export interface WorkspaceBindingRequestOutcome {
+  readonly binding?: LocalWorkspaceBinding;
+  readonly removed?: {
+    readonly bindingRef: string;
+    readonly previousRevision: number;
+  };
+}
+
 export interface WorkspaceBindingAdminPort {
   list(
     control: LocalEnvironmentControlContext,
   ): Promise<LocalWorkspaceBinding[]>;
+  /** 读取 control.requestId 已记录的结果；该请求从未生效时返回 undefined。 */
+  requestOutcome(
+    control: LocalEnvironmentControlContext,
+  ): Promise<WorkspaceBindingRequestOutcome | undefined>;
   create(
     input: { displayName: string; absolutePath: string },
     control: LocalEnvironmentControlContext,

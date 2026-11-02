@@ -42,6 +42,7 @@ import { observeLocalWorkspaceDurableInfrastructureFailure } from "./local-works
 
 type HostRequest =
   | { readonly kind: "host-status" }
+  | { readonly kind: "await-recovery" }
   | { readonly kind: "status" }
   | { readonly kind: "list" }
   | { readonly kind: "view"; readonly displayName: string }
@@ -132,17 +133,23 @@ export function decodeLocalWorkspaceResetPreview(
   return structuredClone(record);
 }
 
+/** 写请求等待进行中恢复的上限；超过即按当时状态给出具体原因。 */
+const LOCAL_WORKSPACE_RECOVERY_WAIT_MS = 15_000;
+
 export class LocalWorkspaceManagementHost {
   readonly #lifecycle: WorkspaceAdministrationDurableLifecycleApplication;
   readonly #transport: LocalWorkspaceTransportServer;
+  readonly #recoveryWaitMs: number;
   #started = false;
   #closed = false;
 
   constructor(input: {
     readonly lease: LocalWorkspaceOwnerLease;
     readonly lifecycle: WorkspaceAdministrationDurableLifecycleApplication;
+    readonly recoveryWaitMs?: number;
   }) {
     this.#lifecycle = input.lifecycle;
+    this.#recoveryWaitMs = input.recoveryWaitMs ?? LOCAL_WORKSPACE_RECOVERY_WAIT_MS;
     this.#transport = new LocalWorkspaceTransportServer(input.lease, (request) =>
       this.#handle(validateHostRequest(request)),
     );
@@ -182,6 +189,9 @@ export class LocalWorkspaceManagementHost {
       throw new Error("Local workspace management host is shutting down");
     }
     if (request.kind === "host-status") return this.#lifecycle.hostStatus();
+    if (request.kind === "await-recovery") {
+      return this.#lifecycle.awaitRecovery(this.#recoveryWaitMs);
+    }
     if (request.kind === "status") return this.#lifecycle.catalogStatus();
     if (request.kind === "list") return this.#lifecycle.list();
     if (request.kind === "view") {
@@ -212,8 +222,8 @@ export function createLocalWorkspaceManagementHost(input: {
     readonly recovery: import("@zhixing/core/contracts").WorkspaceBindingRecoveryPort;
     readonly resources: Pick<
       ResourceReservationPort,
-      "acquireRoot" | "settle" | "release"
-    >;
+      "acquireRoot" | "settle" | "release" | "inspectImmediateRoot"
+    > & { reclaimExpired(): Promise<number> };
   };
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
 }): LocalWorkspaceManagementHost {
@@ -310,6 +320,7 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
     },
     previewReset: async (expectedCatalogGeneration) => {
       delivery.forgetCurrentClaim();
+      await awaitWritableHost(zhixingHome);
       const input = validateWorkspaceAdministrationDurableOperation({
         kind: "reset",
         expectedCatalogGeneration,
@@ -331,6 +342,7 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
         expectedCatalogGeneration: preview.expectedCatalogGeneration,
         impact: preview.impact,
       });
+      await awaitWritableHost(zhixingHome);
       const claimed = await delivery.recover({
         kind: "operation",
         identity: preview,
@@ -385,6 +397,32 @@ export async function readLocalWorkspaceHostStatus(
   );
 }
 
+/** 宿主没进入可写状态：带上当时的状态与诊断，供呈现层说出具体原因。 */
+export class LocalWorkspaceHostNotWritableError extends Error {
+  readonly code: string;
+  readonly hostState: WorkspaceAdministrationDurableLifecycleStatus["state"];
+  readonly localSeq?: number;
+
+  constructor(status: WorkspaceAdministrationDurableLifecycleStatus) {
+    super(status.diagnostic?.message ?? "Local workspace management host is not ready");
+    this.name = "LocalWorkspaceHostNotWritableError";
+    this.code = status.diagnostic?.code ?? "LOCAL_WORKSPACE_HOST_NOT_READY";
+    this.hostState = status.state;
+    if (status.diagnostic?.localSeq !== undefined) this.localSeq = status.diagnostic.localSeq;
+  }
+}
+
+/**
+ * 写操作开始前先等宿主完成进行中的恢复（有上限，宿主关闭即结束），再走恢复结果投递与新写入；
+ * 这样上次中断的结果先按既有路径呈现，不会在新写入完成时被一并确认掉。
+ */
+async function awaitWritableHost(zhixingHome: string): Promise<void> {
+  const status = validateHostStatus(
+    await callLocalWorkspaceHost(zhixingHome, { kind: "await-recovery" }),
+  );
+  if (status.state !== "ready") throw new LocalWorkspaceHostNotWritableError(status);
+}
+
 async function execute(
   zhixingHome: string,
   delivery: WorkspaceAdministrationResultDeliveryApplication,
@@ -395,6 +433,7 @@ async function execute(
   readonly operation: WorkspaceAdministrationDurableOperationRecord;
 }> {
   const normalized = validateWorkspaceAdministrationDurableOperation(input);
+  await awaitWritableHost(zhixingHome);
   const claimed = await delivery.recover({
     kind: "operation-input",
     input: normalized,
@@ -491,6 +530,7 @@ function validateHostRequest(value: unknown): HostRequest {
   const request = value as Record<string, unknown>;
   const allowed: Record<string, readonly string[]> = {
     "host-status": ["kind"],
+    "await-recovery": ["kind"],
     status: ["kind"],
     list: ["kind"],
     view: ["displayName", "kind"],
@@ -508,6 +548,7 @@ function validateHostRequest(value: unknown): HostRequest {
   }
   switch (request.kind) {
     case "host-status":
+    case "await-recovery":
     case "status":
     case "list":
       return { kind: request.kind };

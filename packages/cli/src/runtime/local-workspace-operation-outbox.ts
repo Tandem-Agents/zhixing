@@ -386,6 +386,28 @@ export class LocalWorkspaceOperationOutbox {
     });
   }
 
+  async advanceExecutionAttempt(
+    identity: WorkspaceAdministrationDurableOperationKey,
+    observed: number,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
+    await this.initialize();
+    return this.#serial(async () => {
+      const operation = this.#requireOperation(identity);
+      if (operation.state !== "committed") {
+        throw new Error("Only a committed local workspace operation may start another execution attempt");
+      }
+      const current = operation.executionAttempt ?? 1;
+      // 先前的推进已经落盘（含写入报错但实际成功、重读后看到的情况）：按已有的号继续
+      if (current > observed) return cloneOperation(operation);
+      if (current < observed) {
+        throw new Error("Local workspace execution attempt moved backwards");
+      }
+      const advanced = { ...operation, executionAttempt: current + 1 };
+      await this.#append(advanced);
+      return cloneOperation(advanced);
+    });
+  }
+
   operation(
     identity: WorkspaceAdministrationDurableOperationKey,
   ): WorkspaceAdministrationDurableOperationRecord {
@@ -507,15 +529,22 @@ export class LocalWorkspaceOperationOutbox {
       ...body,
       digest: protocolDigest("LocalWorkspaceOperationEvent", 1, body),
     };
-    await this.#storageStep({ eventSeq: event.eventSeq, localSeq: operation.localSeq }, async () => {
-      const handle = await open(this.#filePath, "a", 0o600);
-      try {
-        await handle.writeFile(`${canonicalize(event)}\n`, "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-    });
+    try {
+      await this.#storageStep({ eventSeq: event.eventSeq, localSeq: operation.localSeq }, async () => {
+        const handle = await open(this.#filePath, "a", 0o600);
+        try {
+          await handle.writeFile(`${canonicalize(event)}\n`, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      });
+    } catch (error) {
+      // 写入结果不明：这一行可能已落盘。按磁盘重读，下一次决定与下一次追加都以磁盘为准；
+      // 重读不出（如半行）就清空内存态，下一次调用重新初始化并如实报出损坏
+      this.#state = await this.#read().catch(() => undefined);
+      throw error;
+    }
     state.operations.set(operation.localSeq, cloneOperation(operation));
     state.nextEventSeq += 1;
     state.headDigest = event.digest;
@@ -707,7 +736,7 @@ export function validateLocalWorkspaceOperation(
 ): WorkspaceAdministrationDurableOperationRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Local workspace operation is invalid");
   const record = value as Record<string, unknown>;
-  const allowed = ["confirmationToken", "expiresAt", "input", "inputDigest", "localSeq", "operationId", "preparedAt", "result", "resultDigest", "state"];
+  const allowed = ["confirmationToken", "executionAttempt", "expiresAt", "input", "inputDigest", "localSeq", "operationId", "preparedAt", "result", "resultDigest", "state"];
   if (Object.keys(record).some((key) => !allowed.includes(key)) || !Object.keys(record).every((key) => allowed.includes(key))) {
     throw new Error("Local workspace operation fields are invalid");
   }
@@ -728,7 +757,12 @@ export function validateLocalWorkspaceOperation(
       : record.expiresAt !== undefined || record.confirmationToken !== undefined) ||
     (isTerminalState(record.state)
       ? typeof record.resultDigest !== "string" || record.resultDigest !== protocolDigest("LocalWorkspaceOperationResult", 1, record.result ?? null)
-      : record.result !== undefined || record.resultDigest !== undefined)
+      : record.result !== undefined || record.resultDigest !== undefined) ||
+    // 尝试号缺省即 1，只在已提交之后推进出来，所以出现时至少为 2
+    (record.executionAttempt !== undefined &&
+      (!Number.isSafeInteger(record.executionAttempt) ||
+        (record.executionAttempt as number) < 2 ||
+        (record.state !== "committed" && record.state !== "completed")))
   ) throw new Error("Local workspace operation is invalid");
   return structuredClone(
     value,
@@ -754,6 +788,16 @@ function validateTransition(
       ? new Set(["committed", "completed"])
       : new Set([previous.state]);
   if (!allowed.has(next.state)) throw new Error("Local workspace operation state moved backwards");
+  // 已提交 → 已提交只用于推进一位尝试号；完成沿用最后一次尝试号
+  const previousAttempt = previous.executionAttempt ?? 1;
+  const nextAttempt = next.executionAttempt ?? 1;
+  if (
+    previous.state === "committed" && next.state === "committed"
+      ? nextAttempt !== previousAttempt + 1
+      : nextAttempt !== previousAttempt
+  ) {
+    throw new Error("Local workspace execution attempt changed out of order");
+  }
 }
 
 function parseExact(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {

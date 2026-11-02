@@ -262,7 +262,10 @@ async function startServerWithOwner(
   const boundServer = opts.boundServer ?? await bindServer({ config });
   const httpServer = boundServer.httpServer;
 
-  const requestHandler: RequestHandler = (req, res) => {
+  // HTTP 请求与 WS 消息一样经 socket 事件到达、拿不到接入时的异步上下文：本服务的平台身份端口在装配时捕获，
+  // 每个请求只恢复它（通道回调与 REST 路由里取文件锁时用平台端口，不回落默认解析）
+  const withHttpPlatformIdentity = captureFileLockProcessIdentity();
+  const requestHandler: RequestHandler = (req, res) => withHttpPlatformIdentity(() => {
     const routePath = new URL(req.url ?? "/", "http://localhost").pathname;
     const channelRoute = ctx.channelHttpRoutes?.get(routePath);
     if (channelRoute) {
@@ -281,7 +284,7 @@ async function startServerWithOwner(
     // 未匹配 → 404
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
-  };
+  });
 
   // ─── WebSocket 集成 ───
   // 用 noServer 模式：手动处理 upgrade，便于路径过滤

@@ -13,6 +13,7 @@ import type {
   WorkspaceBindingMigrationPort,
   WorkspaceBindingPatch,
   WorkspaceBindingRecoveryPort,
+  WorkspaceBindingRequestOutcome,
   WorkspaceBindingResetReceipt,
   WorkspaceBindingRootManifest,
 } from "../contracts/index.js";
@@ -310,6 +311,12 @@ export class WorkspaceBindingCatalog
     control: LocalEnvironmentControlContext,
   ): Promise<LocalWorkspaceBinding[]> {
     return this.#withHealthy((service) => service.list(control));
+  }
+
+  async requestOutcome(
+    control: LocalEnvironmentControlContext,
+  ): Promise<WorkspaceBindingRequestOutcome | undefined> {
+    return this.#withHealthy((service) => service.requestOutcome(control));
   }
 
   async create(

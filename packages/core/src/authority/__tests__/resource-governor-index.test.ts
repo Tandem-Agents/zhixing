@@ -220,6 +220,41 @@ describe("resource governor keyed index", () => {
     await log.stopStorageMaintenance();
   }, 120_000);
 
+  it("锁外只读判断跨过一次提交时，不把读开始时的旧工作集写回会话", async () => {
+    const root = await createTempDir("governor-index-read-across-commit");
+    const now = "2026-07-20T00:00:00.000Z";
+    const { log, store } = await harness(root, () => now);
+    const lease = rootLease("committed-root", now, 8);
+    await log.append([{ stream: "governor", body: { t: "queued", reservationId: "committed-root", admissionClass: "interactive", workload: lease.workload } }]);
+    await log.append([{ stream: "governor", body: { t: "reserve", lease } }]);
+    const session = await store.refresh(undefined);
+    expect(await session.resolve((state) => state.reservations.get("committed-root")?.state)).toBe("active");
+    // 锁外判断要装一个新键：读到索引值后停在闸门上，期间本会话提交一次结算
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reached!: () => void;
+    const atGate = new Promise<void>((resolve) => { reached = resolve; });
+    const index = store.index as { getMany?: (keys: readonly string[]) => Promise<readonly unknown[]> };
+    const getMany = index.getMany!.bind(store.index);
+    index.getMany = async (keys) => {
+      const values = await getMany(keys);
+      if (keys.some((key) => key.startsWith("r:other-root"))) {
+        reached();
+        await gate;
+      }
+      return values;
+    };
+    const read = session.resolve((state) => state.reservations.get("other-root"));
+    await atGate;
+    await store.transact(session, () => ({ kind: "append", entries: [{ stream: "governor",
+      body: { t: "settle", reservationId: "committed-root" } }], value: undefined }));
+    expect(session.state.reservations.get("committed-root")?.state).toBe("settled");
+    release();
+    await expect(read).resolves.toBeUndefined();
+    expect(session.state.reservations.get("committed-root")?.state).toBe("settled");
+    await log.stopStorageMaintenance();
+  }, 120_000);
+
   it("never resurrects an expired root's usage when its reservation id is reused", async () => {
     const root = await createTempDir("governor-index-reuse");
     let now = "2026-07-20T00:00:00.000Z";

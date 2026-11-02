@@ -8,6 +8,7 @@ import {
   ExecutorResourceAdmissionPendingError,
   ExecutorResourceBackpressureError,
 } from "@zhixing/core/resources";
+import { LocalWorkspaceResidualRootPendingError } from "./local-workspace-control.js";
 
 /**
  * Projects concrete Correctness failures into the domain-owned lifecycle
@@ -28,6 +29,8 @@ export function observeLocalWorkspaceDurableInfrastructureFailure(
 }
 
 function retryDelayFrom(error: unknown): number | undefined {
+  // 残留根等治理器的到期判定覆盖到它；稍后再收敛，不推进新尝试
+  if (error instanceof LocalWorkspaceResidualRootPendingError) return 1_000;
   if (
     error instanceof ExecutorResourceBackpressureError ||
     error instanceof ExecutorResourceAdmissionPendingError ||

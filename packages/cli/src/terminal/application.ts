@@ -2200,8 +2200,9 @@ class TerminalApplication {
       create: async (name, workspace) => { current(); const result = await this.#workscene.create(name, workspace); current(); return result; },
       createWithLocalWorkspace: async (name, absolutePath) => {
         current();
-        const { withLocalWorkspaceClient, createWorksceneFromLocalWorkspaceAuthorization } = await import('../runtime/workspace-command.js');
+        const { withLocalWorkspaceClient, createWorksceneFromLocalWorkspaceAuthorization, localWorkspaceUserError } = await import('../runtime/workspace-command.js');
         current();
+        // 失败原因按用户可读说明回给创建助手（它据此告诉用户），诊断原文留在 cause 里
         return withLocalWorkspaceClient(workspace => { current(); return workspace.authorizeForControl(name, absolutePath); }, {
           result: async (workspace, credential) => {
             current(); if (!credential) throw Error('本机工作区授权缺少可恢复的消费凭据。');
@@ -2215,7 +2216,7 @@ class TerminalApplication {
             }
           },
           failure: async error => { throw error; },
-        }, this.home, this.#logging);
+        }, this.home, this.#logging).catch(error => { throw localWorkspaceUserError(error); });
       },
       confirm: async proposal => {
         current(); const selected = await chooseTerminalSelection(createWorksceneCreateSelectionRequest(proposal), view => this.#choosePage({ ...view, title: '创建工作场景', message: [view.title, view.message].filter(Boolean).join('\n') }));

@@ -5,6 +5,7 @@ import type {
   LocalWorkspaceBinding,
   WorkspaceBindingAdminPort,
   WorkspaceBindingRecoveryPort,
+  WorkspaceBindingRequestOutcome,
 } from "../contracts/ports.js";
 import {
   WorkspaceAdministrationApplicationService,
@@ -20,6 +21,7 @@ import {
   type WorkspaceAdministrationDurableOperationRecord,
   type WorkspaceAdministrationResultDeliveryMechanismPort,
   type WorkspaceAdministrationControlPort,
+  WorkspaceControlAttemptSpentError,
   validateWorkspaceAdministrationDurableOperation,
   validateWorkspaceAdministrationDurableResult,
   validateWorkspaceAdministrationDurableValue,
@@ -55,9 +57,12 @@ function harness(
 ) {
   let entries = initial.map((entry) => ({ ...entry }));
   const requestIds: string[] = [];
+  const attempts: (number | undefined)[] = [];
   const aborts: AbortSignal[] = [];
+  const outcomes = new Map<string, WorkspaceBindingRequestOutcome>();
   const admin: WorkspaceBindingAdminPort = {
     list: vi.fn(async () => entries.map((entry) => ({ ...entry }))),
+    requestOutcome: vi.fn(async (control) => outcomes.get(control.requestId)),
     create: vi.fn(async (input) => {
       const created = binding(
         `binding-${entries.length + 1}`,
@@ -89,8 +94,9 @@ function harness(
     }),
   };
   const control: WorkspaceAdministrationControlPort = {
-    async execute(requestId, abort, operation) {
+    async execute({ requestId, attempt }, abort, operation) {
       requestIds.push(requestId);
+      attempts.push(attempt);
       aborts.push(abort);
       if (abort.aborted) throw new WorkspaceBindingCancelledError();
       return operation({
@@ -123,7 +129,10 @@ function harness(
     admin,
     recovery,
     requestIds,
+    attempts,
     aborts,
+    outcomes,
+    entries: () => entries.map((entry) => ({ ...entry })),
     application: new WorkspaceAdministrationApplicationService({
       deviceId: "device-a",
       admin,
@@ -184,6 +193,18 @@ function durableLifecycleHarness(input?: {
         throw new Error("missing operation");
       }
       operation = { ...operation, state: "completed", result };
+      return structuredClone(operation);
+    }),
+    advanceExecutionAttempt: vi.fn(async (
+      identity: WorkspaceAdministrationDurableOperationKey,
+      observed: number,
+    ) => {
+      if (!operation || operation.localSeq !== identity.localSeq) {
+        throw new Error("missing operation");
+      }
+      if ((operation.executionAttempt ?? 1) === observed) {
+        operation = { ...operation, executionAttempt: observed + 1 };
+      }
       return structuredClone(operation);
     }),
     operation: vi.fn((identity: WorkspaceAdministrationDurableOperationKey) => {
@@ -251,6 +272,7 @@ describe("WorkspaceAdministrationApplicationService", () => {
         operationId: `workspace-operation-${localSeq}`,
         inputDigest: `sha256:${String(localSeq).padStart(64, "0")}`,
       },
+      attempt: 1,
       abort: new AbortController().signal,
       preparedAt: "2026-08-01T00:00:00.000Z",
     });
@@ -457,6 +479,49 @@ describe("WorkspaceAdministrationApplicationService", () => {
     expect(aborts).toEqual([abort.signal, abort.signal]);
   });
 
+  it("重放已生效的改名与移除时按稳定主体取回原结果，不按旧名称重新定位", async () => {
+    const renamed = binding("binding-a", "Renamed", "C:\\project", 2);
+    const fixture = harness([renamed]);
+    const identity = (localSeq: number) => ({
+      outboxId: "outbox-01234567890123456789012345678901",
+      localSeq,
+      operationId: `workspace-operation-${localSeq}`,
+      inputDigest: `sha256:${String(localSeq).padStart(64, "0")}`,
+    });
+    const subject = (localSeq: number) =>
+      "environment-admin:device-a:workspace-operation:outbox-01234567890123456789012345678901:" +
+      `${localSeq}:workspace-operation-${localSeq}:sha256:${String(localSeq).padStart(64, "0")}`;
+    fixture.outcomes.set(subject(1), { binding: renamed });
+    fixture.outcomes.set(subject(2), { removed: { bindingRef: "binding-gone", previousRevision: 3 } });
+    const abort = new AbortController().signal;
+
+    await expect(fixture.application.rename(
+      { currentName: "Project", displayName: "Renamed", expectedRevision: 1 },
+      { operation: identity(1), attempt: 2, abort },
+    )).resolves.toMatchObject({ name: "Renamed", revision: 2 });
+    await expect(fixture.application.remove(
+      { name: "Gone", expectedRevision: 3 },
+      { operation: identity(2), attempt: 3, abort },
+    )).resolves.toBeUndefined();
+    expect(fixture.admin.update).not.toHaveBeenCalled();
+    expect(fixture.admin.remove).not.toHaveBeenCalled();
+    expect(fixture.attempts).toEqual([2, 3]);
+
+    // 尝试 1 之前没有执行能生效，不读记录，照常按名称定位
+    await expect(fixture.application.repath(
+      { name: "Renamed", absolutePath: "D:\\project", expectedRevision: 2 },
+      { operation: identity(3), attempt: 1, abort },
+    )).resolves.toMatchObject({ path: "D:\\project" });
+    expect(fixture.admin.requestOutcome).toHaveBeenCalledTimes(2);
+
+    // 记录与操作种类不符是完整性问题，不当业务结果
+    fixture.outcomes.set(subject(4), { removed: { bindingRef: "binding-a", previousRevision: 3 } });
+    await expect(fixture.application.rename(
+      { currentName: "Renamed", displayName: "Other", expectedRevision: 3 },
+      { operation: identity(4), attempt: 2, abort },
+    )).rejects.toThrow("does not match the replayed operation");
+  });
+
   it("preserves revision conflicts and cancelled control admission", async () => {
     const revision = new WorkspaceBindingRevisionError("binding-a", 1, 2);
     const revisionHarness = harness([
@@ -523,6 +588,16 @@ describe("WorkspaceAdministrationApplicationService", () => {
     await expect(harness().application.status()).resolves.toEqual({
       state: "healthy",
       catalogGeneration: "catalog-a",
+    });
+    // 与重置执行同一判定：目录正常时预览就拒绝，不签发确认凭据
+    await expect(
+      harness().application.previewReset({
+        expectedCatalogGeneration: "catalog-a",
+        impact: WORKSPACE_CATALOG_RESET_IMPACT,
+      }),
+    ).rejects.toMatchObject({
+      code: "LOCAL_WORKSPACE_CATALOG_HEALTHY",
+      message: "本机工作区目录正常，无需也不能重置",
     });
   });
 
@@ -921,5 +996,145 @@ describe("WorkspaceAdministrationDurableLifecycleApplicationService", () => {
     expect(fixture.lifecycle.hostStatus()).toEqual({ state: "closed" });
     expect(fixture.operation()?.state).toBe("committed");
     expect(fixture.mechanism.complete).not.toHaveBeenCalled();
+  });
+
+  it("尝试用尽时先耐久推进尝试号，再以新号立即重派；缺字段的记录按尝试 1 续接", async () => {
+    const committed: WorkspaceAdministrationDurableOperationRecord = {
+      localSeq: 4,
+      operationId: "workspace-operation-legacy",
+      inputDigest: `sha256:${"4".repeat(64)}`,
+      input: createInput,
+      state: "committed",
+      preparedAt: "2026-08-30T00:00:00.000Z",
+    };
+    const fixture = durableLifecycleHarness({
+      committed,
+      execute: async (_input, execution) => {
+        if (execution.attempt === 1) throw new WorkspaceControlAttemptSpentError(1, "已释放");
+        return { name: "Project", path: "C:\\project", revision: 1, workspaceBindingRevision: 1 };
+      },
+    });
+    await fixture.lifecycle.start();
+    await vi.waitFor(() => expect(fixture.lifecycle.hostStatus()).toEqual({ state: "ready" }));
+
+    expect(fixture.execute.mock.calls.map(([, execution]) => execution.attempt)).toEqual([1, 2]);
+    expect(fixture.mechanism.advanceExecutionAttempt).toHaveBeenCalledTimes(1);
+    expect(fixture.mechanism.advanceExecutionAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ localSeq: 4, operationId: committed.operationId }),
+      1,
+    );
+    expect(fixture.operation()).toMatchObject({ state: "completed", executionAttempt: 2 });
+  });
+
+  it("刚推进出的尝试号又被判用尽时降级并给出原因，不无限推进", async () => {
+    const fixture = durableLifecycleHarness({
+      execute: async (_input, execution) => {
+        throw new WorkspaceControlAttemptSpentError(execution.attempt, "已释放");
+      },
+    });
+    await fixture.lifecycle.start();
+    const prepared = await fixture.lifecycle.prepare(createInput);
+    await expect(fixture.lifecycle.commit(prepared)).rejects.toMatchObject({
+      code: "LOCAL_WORKSPACE_CONTROL_ATTEMPT_SPENT",
+    });
+    expect(fixture.mechanism.advanceExecutionAttempt).toHaveBeenCalledTimes(1);
+    expect(fixture.lifecycle.hostStatus()).toMatchObject({
+      state: "degraded",
+      diagnostic: {
+        code: "LOCAL_WORKSPACE_CONTROL_ATTEMPT_SPENT",
+        message: expect.stringContaining("第 2 次执行尝试已用过"),
+      },
+    });
+    expect(fixture.operation()?.state).toBe("committed");
+  });
+
+  it("新尝试真实执行过、遇可恢复故障并收束后再判用尽，是常规进展：继续推进直到完成", async () => {
+    const calls: number[] = [];
+    let secondAttemptCalls = 0;
+    const fixture = durableLifecycleHarness({
+      execute: async (_input, execution) => {
+        calls.push(execution.attempt);
+        if (execution.attempt === 1) throw new WorkspaceControlAttemptSpentError(1, "已释放");
+        if (execution.attempt === 2) {
+          secondAttemptCalls += 1;
+          // 第一次：进入效果后遇一次可恢复故障（适配器随后正常释放根 2）；第二次派发：根 2 已释放
+          if (secondAttemptCalls === 1) throw new Error("retry");
+          throw new WorkspaceControlAttemptSpentError(2, "已释放");
+        }
+        return { ok: "third-attempt" };
+      },
+    });
+    await fixture.lifecycle.start();
+    const prepared = await fixture.lifecycle.prepare(createInput);
+    await expect(fixture.lifecycle.commit(prepared)).resolves.toMatchObject({
+      state: "completed",
+      executionAttempt: 3,
+      result: { ok: true, value: { ok: "third-attempt" } },
+    });
+    expect(calls).toEqual([1, 2, 2, 3]);
+    expect(fixture.mechanism.advanceExecutionAttempt).toHaveBeenCalledTimes(2);
+    expect(fixture.lifecycle.hostStatus()).toEqual({ state: "ready" });
+  });
+
+  it("推进写失败按基础设施分类重试，按重读后的记录继续", async () => {
+    const fixture = durableLifecycleHarness({
+      execute: async (_input, execution) => {
+        if (execution.attempt === 1) throw new WorkspaceControlAttemptSpentError(1, "已释放");
+        return { ok: "second-attempt" };
+      },
+    });
+    vi.mocked(fixture.mechanism.advanceExecutionAttempt).mockRejectedValueOnce(new Error("retry"));
+    await fixture.lifecycle.start();
+    const prepared = await fixture.lifecycle.prepare(createInput);
+    await expect(fixture.lifecycle.commit(prepared)).resolves.toMatchObject({
+      state: "completed",
+      executionAttempt: 2,
+    });
+    expect(fixture.mechanism.advanceExecutionAttempt).toHaveBeenCalledTimes(2);
+    expect(fixture.execute.mock.calls.map(([, execution]) => execution.attempt)).toEqual([1, 1, 2]);
+  });
+
+  it("写请求前的恢复等待有上限，排空结束即返回，关闭时不再等", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const committed: WorkspaceAdministrationDurableOperationRecord = {
+      localSeq: 1,
+      operationId: "workspace-operation-slow",
+      inputDigest: `sha256:${"1".repeat(64)}`,
+      input: createInput,
+      state: "committed",
+      preparedAt: "2026-08-30T00:00:00.000Z",
+    };
+    const fixture = durableLifecycleHarness({
+      committed,
+      execute: async () => {
+        await gate;
+        return { ok: true };
+      },
+    });
+    await fixture.lifecycle.start();
+    await expect(fixture.lifecycle.awaitRecovery(20)).resolves.toMatchObject({
+      state: "recovering",
+      diagnostic: { code: "LOCAL_WORKSPACE_RECOVERING_COMMITTED", localSeq: 1 },
+    });
+    const waiting = fixture.lifecycle.awaitRecovery(60_000);
+    release();
+    await expect(waiting).resolves.toEqual({ state: "ready" });
+
+    const blocked = durableLifecycleHarness({
+      committed,
+      execute: async (_input, execution) =>
+        new Promise((_resolve, reject) => {
+          execution.abort.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })),
+            { once: true },
+          );
+        }),
+    });
+    await blocked.lifecycle.start();
+    const pending = blocked.lifecycle.awaitRecovery(60_000);
+    await blocked.lifecycle.close();
+    await expect(pending).resolves.toMatchObject({ state: expect.stringMatching(/^(draining|closed)$/u) });
   });
 });

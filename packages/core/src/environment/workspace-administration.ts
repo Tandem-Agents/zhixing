@@ -5,6 +5,7 @@ import type {
   LocalWorkspaceBinding,
   WorkspaceBindingAdminPort,
   WorkspaceBindingRecoveryPort,
+  WorkspaceBindingRequestOutcome,
   WorkspaceBindingResetReceipt,
 } from "../contracts/ports.js";
 import { WorkspaceBindingCatalogConflictError } from "./workspace-binding-catalog.js";
@@ -39,6 +40,8 @@ export interface WorkspaceAdministrationOperationIdentity {
 
 export interface WorkspaceAdministrationExecution {
   readonly operation?: WorkspaceAdministrationOperationIdentity;
+  /** 已提交操作本次执行的耐久尝试号；只随 operation 出现。 */
+  readonly attempt?: number;
   readonly abort?: AbortSignal;
 }
 
@@ -80,6 +83,7 @@ export type WorkspaceAdministrationDurableOperation =
 
 export interface WorkspaceAdministrationDurableExecution {
   readonly operation: WorkspaceAdministrationOperationIdentity;
+  readonly attempt: number;
   readonly abort: AbortSignal;
   readonly preparedAt: string;
   readonly confirmationToken?: string;
@@ -111,6 +115,11 @@ export interface WorkspaceAdministrationDurableOperationRecord
   readonly preparedAt: string;
   readonly expiresAt?: string;
   readonly confirmationToken?: string;
+  /**
+   * 已提交操作当前的执行尝试号。缺省即尝试 1：提交本身分配尝试 1，旧实现也只用过尝试 1；
+   * 上一尝试的资源根已用尽时由生命周期耐久推进，只增不减。
+   */
+  readonly executionAttempt?: number;
   readonly result?: unknown;
   readonly resultDigest?: string;
 }
@@ -199,6 +208,14 @@ export interface WorkspaceAdministrationDurableOperationMechanismPort
     identity: WorkspaceAdministrationDurableOperationKey,
     result: unknown,
   ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+  /**
+   * 在单写者串行职责内把已提交操作的尝试号从 observed 推进一位；当前号已大于 observed（先前的写已落盘）
+   * 时原样返回，小于时拒绝。写入失败或结果不明时机理先按磁盘重读，调用方下一轮按重读后的记录决定。
+   */
+  advanceExecutionAttempt(
+    identity: WorkspaceAdministrationDurableOperationKey,
+    observed: number,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
   operation(
     identity: WorkspaceAdministrationDurableOperationKey,
   ): WorkspaceAdministrationDurableOperationRecord;
@@ -217,6 +234,8 @@ export interface WorkspaceAdministrationDurableLifecycleApplication {
   start(): Promise<void>;
   close(): Promise<void>;
   hostStatus(): WorkspaceAdministrationDurableLifecycleStatus;
+  /** 写请求开始前等待进行中的恢复，至多 timeoutMs；返回等待结束时的状态，不抛错。 */
+  awaitRecovery(timeoutMs: number): Promise<WorkspaceAdministrationDurableLifecycleStatus>;
   catalogStatus(): Promise<WorkspaceAdministrationCatalogStatus>;
   list(): Promise<readonly WorkspaceAdministrationView[]>;
   viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
@@ -304,12 +323,34 @@ export interface WorkspaceAdministrationResetPreview {
   readonly impact: string;
 }
 
+export interface WorkspaceAdministrationControlRequest {
+  readonly requestId: string;
+  /**
+   * 耐久执行尝试号，只由已提交操作的执行带入；缺省是一次性请求（每次新 requestId），按尝试 1 执行。
+   * 带入时控制适配器先核对该尝试的资源根：已被先前执行用过即收敛残留并抛
+   * WorkspaceControlAttemptSpentError，由生命周期推进尝试号后重派。
+   */
+  readonly attempt?: number;
+}
+
 export interface WorkspaceAdministrationControlPort {
   execute<T>(
-    requestId: string,
+    request: WorkspaceAdministrationControlRequest,
     abort: AbortSignal,
     operation: (control: LocalEnvironmentControlContext) => Promise<T>,
   ): Promise<T>;
+}
+
+/** 该执行尝试的资源根已被先前执行用过（已终态或已收敛），本尝试不得再执行；不是业务结果。 */
+export class WorkspaceControlAttemptSpentError extends Error {
+  readonly code = "LOCAL_WORKSPACE_CONTROL_ATTEMPT_SPENT";
+  readonly attempt: number;
+
+  constructor(attempt: number, detail: string) {
+    super(`本机工作区操作的第 ${attempt} 次执行尝试已用过（${detail}）`);
+    this.name = "WorkspaceControlAttemptSpentError";
+    this.attempt = attempt;
+  }
 }
 
 export interface WorkspaceAdministrationApplication {
@@ -443,6 +484,13 @@ export class WorkspaceAdministrationApplicationService
         "工作区目录世代已经变化，请重新查看恢复影响",
       );
     }
+    // 与重置执行同一判定：目录正常就不签发确认凭据，避免确认时才拒绝
+    if (status.state !== "degraded") {
+      throw new WorkspaceAdministrationBusinessError(
+        "LOCAL_WORKSPACE_CATALOG_HEALTHY",
+        "本机工作区目录正常，无需也不能重置",
+      );
+    }
     return Object.freeze({
       expectedCatalogGeneration: input.expectedCatalogGeneration,
       impact: WORKSPACE_CATALOG_RESET_IMPACT,
@@ -482,6 +530,8 @@ export class WorkspaceAdministrationApplicationService
     execution?: WorkspaceAdministrationExecution,
   ): Promise<WorkspaceAdministrationView> {
     return this.#execute("workspace-rename", execution, async (control) => {
+      const replayed = await this.#replayedBinding(execution, control);
+      if (replayed) return toView(replayed);
       const current = await this.#bindingByName(input.currentName, control);
       return toView(
         await this.#admin.update(
@@ -503,6 +553,8 @@ export class WorkspaceAdministrationApplicationService
     execution?: WorkspaceAdministrationExecution,
   ): Promise<WorkspaceAdministrationView> {
     return this.#execute("workspace-repath", execution, async (control) => {
+      const replayed = await this.#replayedBinding(execution, control);
+      if (replayed) return toView(replayed);
       const current = await this.#bindingByName(input.name, control);
       return toView(
         await this.#admin.update(
@@ -520,6 +572,11 @@ export class WorkspaceAdministrationApplicationService
     execution?: WorkspaceAdministrationExecution,
   ): Promise<void> {
     await this.#execute("workspace-remove", execution, async (control) => {
+      const outcome = await this.#replayedOutcome(execution, control);
+      if (outcome) {
+        if (!outcome.removed) throw replayedOutcomeMismatch();
+        return;
+      }
       const current = await this.#bindingByName(input.name, control);
       await this.#admin.remove(
         current.bindingRef,
@@ -541,7 +598,7 @@ export class WorkspaceAdministrationApplicationService
     }
     const requestId = this.#requestId("workspace-reset", execution);
     const abort = execution?.abort ?? new AbortController().signal;
-    await this.#control.execute(requestId, abort, (control) =>
+    await this.#control.execute(controlRequest(requestId, execution), abort, (control) =>
       this.#recovery.beginReset(
         { expectedCatalogGeneration: input.expectedCatalogGeneration },
         {
@@ -569,6 +626,7 @@ export class WorkspaceAdministrationApplicationService
     const operation = validateWorkspaceAdministrationDurableOperation(input);
     const commonExecution = {
       operation: execution.operation,
+      attempt: execution.attempt,
       abort: execution.abort,
     };
     let value: unknown;
@@ -667,10 +725,32 @@ export class WorkspaceAdministrationApplicationService
   ): Promise<T> {
     const requestId = this.#requestId(prefix, execution);
     return this.#control.execute(
-      requestId,
+      controlRequest(requestId, execution),
       execution?.abort ?? new AbortController().signal,
       operation,
     );
+  }
+
+  /**
+   * 先前尝试可能已经生效时，按稳定主体读绑定权威记下的结果，不再按名称重新定位（改名、移除后旧名已不在）。
+   * 尝试 1 之前没有任何执行能产生效果，不读。
+   */
+  async #replayedOutcome(
+    execution: WorkspaceAdministrationExecution | undefined,
+    control: LocalEnvironmentControlContext,
+  ): Promise<WorkspaceBindingRequestOutcome | undefined> {
+    if (!execution?.operation || (execution.attempt ?? 1) <= 1) return undefined;
+    return this.#admin.requestOutcome(control);
+  }
+
+  async #replayedBinding(
+    execution: WorkspaceAdministrationExecution | undefined,
+    control: LocalEnvironmentControlContext,
+  ): Promise<LocalWorkspaceBinding | undefined> {
+    const outcome = await this.#replayedOutcome(execution, control);
+    if (!outcome) return undefined;
+    if (!outcome.binding) throw replayedOutcomeMismatch();
+    return outcome.binding;
   }
 
   #requestId(
@@ -705,6 +785,11 @@ type DurableOperationDecision =
   | {
       readonly kind: "completed";
       readonly result: WorkspaceAdministrationDurableResult;
+    }
+  | {
+      readonly kind: "attempt-spent";
+      readonly attempt: number;
+      readonly message: string;
     }
   | DurableInfrastructureDecision;
 
@@ -1040,6 +1125,21 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
     });
   }
 
+  async awaitRecovery(
+    timeoutMs: number,
+  ): Promise<WorkspaceAdministrationDurableLifecycleStatus> {
+    const deadline = performance.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      // 排空与机理重试都会把状态留在 recovering；两者都结束（或关闭）即不再等
+      const pending = this.#state === "recovering"
+        ? (this.#drain ?? this.#recovery)
+        : undefined;
+      const remaining = deadline - performance.now();
+      if (!pending || remaining <= 0) return this.hostStatus();
+      await settledWithin(pending, remaining);
+    }
+  }
+
   catalogStatus(): Promise<WorkspaceAdministrationCatalogStatus> {
     return this.#application.status();
   }
@@ -1129,6 +1229,9 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
 
   async #drainLoop(): Promise<void> {
     let retryAttempt = 0;
+    // 安全止损只针对“刚推进出的尝试号第一次派发就已用尽”：那说明治理器里已有这个号的根，尝试号被重复分配。
+    // 派发过的号在执行中遇可恢复故障、正常收束后再判用尽是常规进展，照常推进
+    let advanced: { readonly localSeq: number; readonly attempt: number; readonly dispatched: boolean } | undefined;
     for (;;) {
       if (this.#state === "draining" || this.#state === "closed") return;
       let operation: WorkspaceAdministrationDurableOperationRecord | undefined;
@@ -1156,7 +1259,49 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
         this.#diagnostic = undefined;
         return;
       }
+      const freshlyAdvanced =
+        advanced?.localSeq === operation.localSeq &&
+        advanced.attempt === (operation.executionAttempt ?? 1);
+      const firstDispatch = freshlyAdvanced && !advanced!.dispatched;
+      if (freshlyAdvanced) advanced = { ...advanced!, dispatched: true };
       const decision = await this.#executeDecision(operation, retryAttempt);
+      if (decision.kind === "attempt-spent") {
+        if (firstDispatch) {
+          this.#degrade(
+            { kind: "degraded", code: "LOCAL_WORKSPACE_CONTROL_ATTEMPT_SPENT", message: decision.message },
+            operation.localSeq,
+          );
+          return;
+        }
+        try {
+          const next = await this.#mechanism.advanceExecutionAttempt(
+            operation,
+            decision.attempt,
+          );
+          advanced = {
+            localSeq: next.localSeq,
+            attempt: next.executionAttempt ?? 1,
+            dispatched: false,
+          };
+        } catch (error) {
+          const failure = this.#classifyInfrastructureFailure(
+            error,
+            retryAttempt,
+          );
+          if (failure.kind === "retry") {
+            retryAttempt += 1;
+            this.#setDiagnostic(failure, operation.localSeq);
+            if (!(await waitForWorkspaceAdministrationRetry(
+              failure.delayMs,
+              this.#retryAbort.signal,
+            ))) return;
+            continue;
+          }
+          this.#degrade(failure, operation.localSeq);
+          return;
+        }
+        continue;
+      }
       if (decision.kind === "retry") {
         retryAttempt += 1;
         this.#setDiagnostic(decision, operation.localSeq);
@@ -1199,6 +1344,7 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
   ): Promise<DurableOperationDecision> {
     const abort = new AbortController();
     this.#attemptAbort = abort;
+    const attempt = operation.executionAttempt ?? 1;
     try {
       const value = await this.#application.executeDurableOperation(
         operation.input,
@@ -1209,6 +1355,7 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
             operationId: operation.operationId,
             inputDigest: operation.inputDigest,
           },
+          attempt,
           abort: abort.signal,
           preparedAt: operation.preparedAt,
           ...(operation.confirmationToken
@@ -1221,6 +1368,9 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
         result: workspaceAdministrationDurableSuccess(value ?? null),
       };
     } catch (error) {
+      if (error instanceof WorkspaceControlAttemptSpentError) {
+        return { kind: "attempt-spent", attempt, message: error.message };
+      }
       return this.#classifyExecutionFailure(error, retryAttempt);
     } finally {
       if (this.#attemptAbort === abort) this.#attemptAbort = undefined;
@@ -1406,7 +1556,9 @@ function workspaceAdministrationDurableBusinessErrorCode(
     return "WORKSPACE_BINDING_NOT_FOUND";
   }
   if (error instanceof WorkspaceBindingConflictError) {
-    return "WORKSPACE_BINDING_CONFLICT";
+    return error.reason === "display-name-in-use"
+      ? "LOCAL_WORKSPACE_NAME_IN_USE"
+      : "WORKSPACE_BINDING_CONFLICT";
   }
   if (error instanceof WorkspaceBindingRevisionError) {
     return "WORKSPACE_BINDING_REVISION";
@@ -1453,6 +1605,32 @@ function waitForWorkspaceAdministrationRetry(
     };
     abort.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function settledWithin(pending: Promise<void>, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    void pending.then(
+      () => undefined,
+      () => undefined,
+    ).finally(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function controlRequest(
+  requestId: string,
+  execution: WorkspaceAdministrationExecution | undefined,
+): WorkspaceAdministrationControlRequest {
+  return execution?.operation && execution.attempt !== undefined
+    ? { requestId, attempt: execution.attempt }
+    : { requestId };
+}
+
+function replayedOutcomeMismatch(): Error {
+  return new Error("Workspace binding request outcome does not match the replayed operation");
 }
 
 function operationNonce(identity: WorkspaceAdministrationOperationIdentity): string {

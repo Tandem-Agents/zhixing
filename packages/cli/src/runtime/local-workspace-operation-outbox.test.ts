@@ -198,4 +198,87 @@ describe("LocalWorkspaceOperationOutbox", () => {
       })],
     });
   });
+
+  it("执行尝试号缺省为 1、只在已提交后逐位推进并跨重启保留，完成沿用最后一次", async () => {
+    const root = await createRoot();
+    const outbox = new LocalWorkspaceOperationOutbox({ rootDir: root });
+    const prepared = await outbox.prepare({ kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" });
+    await expect(outbox.advanceExecutionAttempt(prepared, 1)).rejects.toThrow("Only a committed");
+    const committed = await outbox.commit(prepared);
+    expect(committed.executionAttempt).toBeUndefined();
+
+    await expect(outbox.advanceExecutionAttempt(committed, 1)).resolves.toMatchObject({ executionAttempt: 2 });
+    // 观察到的号已过时（先前的推进已落盘）：原样返回，不再追加
+    const before = (await readFile(path.join(root, "operations.ndjson"), "utf8")).split("\n").filter(Boolean).length;
+    await expect(outbox.advanceExecutionAttempt(committed, 1)).resolves.toMatchObject({ executionAttempt: 2 });
+    expect((await readFile(path.join(root, "operations.ndjson"), "utf8")).split("\n").filter(Boolean)).toHaveLength(before);
+    await expect(outbox.advanceExecutionAttempt(committed, 3)).rejects.toThrow("moved backwards");
+
+    const restarted = new LocalWorkspaceOperationOutbox({ rootDir: root });
+    await expect(restarted.oldestCommitted()).resolves.toMatchObject({ executionAttempt: 2 });
+    await expect(restarted.advanceExecutionAttempt(committed, 2)).resolves.toMatchObject({ executionAttempt: 3 });
+    await expect(restarted.complete(committed, { ok: true, value: null })).resolves.toMatchObject({
+      state: "completed",
+      executionAttempt: 3,
+    });
+    await expect(new LocalWorkspaceOperationOutbox({ rootDir: root }).pending()).resolves.toMatchObject({
+      operations: [expect.objectContaining({ state: "completed", executionAttempt: 3 })],
+    });
+  });
+
+  it("拒绝越位或出现在未提交记录上的尝试号", async () => {
+    const root = await createRoot();
+    const outbox = new LocalWorkspaceOperationOutbox({ rootDir: root });
+    const prepared = await outbox.prepare({ kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" });
+    await outbox.commit(prepared);
+    const file = path.join(root, "operations.ndjson");
+    const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
+    const tamper = async (mutate: (operation: Record<string, unknown>) => void, index = lines.length - 1) => {
+      const rewritten = [...lines];
+      const event = JSON.parse(rewritten[index]!) as Record<string, unknown> & { operation: Record<string, unknown> };
+      mutate(event.operation);
+      const { digest: _digest, ...body } = event;
+      rewritten[index] = JSON.stringify({ ...body, digest: protocolDigest("LocalWorkspaceOperationEvent", 1, body) });
+      await writeFile(file, `${rewritten.join("\n")}\n`);
+      return new LocalWorkspaceOperationOutbox({ rootDir: root }).pending();
+    };
+    await expect(tamper((operation) => { operation.executionAttempt = 3; })).rejects.toThrow();
+    await expect(tamper((operation) => { operation.executionAttempt = 1; })).rejects.toThrow();
+    await expect(tamper((operation) => { operation.executionAttempt = 2; }, lines.length - 2)).rejects.toThrow();
+  });
+
+  it("追加结果不明时按磁盘重读，已落盘的推进不会再写第二次", async () => {
+    const root = await createRoot();
+    let failAfterWrite = false;
+    const storageMaintenance = {
+      acquire: async () => ({
+        kind: "granted" as const,
+        permit: {
+          granted: { occupancy: { memoryReservationBytes: 0, temporaryBytes: 0, slots: 0 }, quantum: { readBytes: 0, writeBytes: 0, ioOperations: 0 } },
+          tryBegin: () => ({
+            complete: () => {
+              if (failAfterWrite) {
+                failAfterWrite = false;
+                throw new Error("write outcome unknown");
+              }
+            },
+          }),
+          release: () => undefined,
+        },
+      }),
+      snapshot: () => ({}),
+    } as never;
+    const outbox = new LocalWorkspaceOperationOutbox({ rootDir: root, storageMaintenance });
+    const prepared = await outbox.prepare({ kind: "create", purpose: "settings", displayName: "paper", absolutePath: "C:\\paper" });
+    const committed = await outbox.commit(prepared);
+    failAfterWrite = true;
+    await expect(outbox.advanceExecutionAttempt(committed, 1)).rejects.toThrow("write outcome unknown");
+    // 内存态已按磁盘重读：看到推进已落盘，原样返回；后续追加接在真实链尾
+    expect(outbox.operation(committed).executionAttempt).toBe(2);
+    await expect(outbox.advanceExecutionAttempt(committed, 1)).resolves.toMatchObject({ executionAttempt: 2 });
+    await outbox.complete(committed, { ok: true, value: null });
+    await expect(new LocalWorkspaceOperationOutbox({ rootDir: root }).pending()).resolves.toMatchObject({
+      operations: [expect.objectContaining({ state: "completed", executionAttempt: 2 })],
+    });
+  });
 });

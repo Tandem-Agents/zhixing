@@ -961,10 +961,14 @@ export class GovernorSession {
     await this.load([{ key: keys.reservation(reservationId) }, { key: keys.queuedByWorkload(workloadKey) },
       { key: keys.dequeued(workloadKey) }, { fair: true }]);
   }
-  /** 锁外运行一段只读判断，缺什么装什么。 */
+  /**
+   * 锁外运行一段只读判断，缺什么装什么。判断期间本会话可能已经提交并换了工作集：
+   * 那时判断用的副本早于提交，不能写回，只在工作集未换时采纳新装入的键。
+   */
   async resolve<Value>(operation: (state: GovernorWorkingSet) => Value): Promise<Value> {
-    const { value, attempt } = await runWithGovernorNeeds(this.#set, this.store.index, operation);
-    this.#set.adopt(attempt);
+    const set = this.#set;
+    const { value, attempt } = await runWithGovernorNeeds(set, this.store.index, operation);
+    if (this.#set === set) set.adopt(attempt);
     return value;
   }
 
