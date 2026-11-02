@@ -4,12 +4,9 @@ import type { TerminalCandidates } from './protocol.js';
 import { ChoiceView } from './choice-view.js';
 import { spacing, tone } from './theme.js';
 
-export interface CandidateViewHandle { page(direction: -1 | 1): void }
-
-/** A stable physical viewport, including its empty/loading/error states. */
+/** A stable physical viewport, including its empty/loading/error states. 翻页移动的是选中项，视图随选中项跟随。 */
 export function CandidateView(props: { value?: TerminalCandidates; loading: boolean; error?: string; selected: number;
-  danger: boolean; width: number; height: number; renderer: CliRenderer; measure(text: string): number;
-  onReady(value: CandidateViewHandle | undefined): void }) {
+  danger: boolean; width: number; height: number; renderer: CliRenderer; measure(text: string): number }) {
   let box: ScrollBoxRenderable | undefined;
   const [above, setAbove] = createSignal(false), [below, setBelow] = createSignal(false);
   let bringIntoView = true;
@@ -20,8 +17,7 @@ export function CandidateView(props: { value?: TerminalCandidates; loading: bool
     setAbove(box.scrollTop > 0); setBelow(box.scrollTop + box.viewport.height < box.scrollHeight);
   };
   props.renderer.addPostProcessFn(postFrame);
-  props.onReady({ page: direction => box?.scrollBy(direction * Math.max(1, box.viewport.height - 1)) });
-  onCleanup(() => { props.renderer.removePostProcessFn(postFrame); props.onReady(undefined); });
+  onCleanup(() => { props.renderer.removePostProcessFn(postFrame); });
   return <box border borderStyle="rounded" borderColor={tone.border} marginX={spacing.frame} height={props.height} flexShrink={0} flexDirection="column">
     <text height={1} fg={tone.dim} selectable={false}>{above() ? '  ↑ 更多候选' : ''}</text>
     <scrollbox ref={value => { box = value; }} height={Math.max(1, props.height - 4)} scrollY scrollX={false}

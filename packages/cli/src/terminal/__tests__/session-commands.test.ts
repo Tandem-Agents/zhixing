@@ -4,6 +4,7 @@ import type { RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
 import { TerminalSessionCommands, projectCommittedTerminalOutcome, projectTerminalTurnOutcome, type TerminalTurnOutcome } from '../session-commands.js';
 import { ADVANCEMENT_PROPOSED_NOTICE } from '@zhixing/core/advancement/proposal-messages';
 import type { TerminalSelectionPort } from '../selection.js';
+import { TerminalCandidatesOwner } from '../candidates.js';
 
 function fixture() {
   let active: ActiveConversation = { conversationId: 'main-1', name: '主对话', mode: { kind: 'main' } };
@@ -19,7 +20,7 @@ function fixture() {
   };
   const workscene = { list: vi.fn(async () => [{ sceneId: 'scene-1', name: '场景' }]), rename: vi.fn(async () => ({})), delete: vi.fn(async () => {}) };
   const changed = vi.fn(async () => {}), publish = vi.fn(async () => {}), choose = vi.fn<TerminalSelectionPort>(async () => undefined);
-  const deletedCurrent = vi.fn(), settleDelete = vi.fn(), deleting = vi.fn(() => settleDelete), createScene = vi.fn(async () => {});
+  const deletedCurrent = vi.fn(), settleDelete = vi.fn(), deleting = vi.fn(() => settleDelete), createScene = vi.fn(async (): Promise<string | undefined> => undefined);
   const owner = new TerminalSessionCommands({ controller: () => controller as unknown as ConversationController<TerminalTurnOutcome>,
     workscene: workscene as unknown as RpcWorksceneFacade, changed, publish, choose, deletedCurrent, deleting, createScene,
     activeTurn: () => null, signal: new AbortController().signal });
@@ -34,6 +35,40 @@ describe('terminal session navigation', () => {
     await f.owner.run('exit', '');
     expect(f.controller.exitScene).toHaveBeenCalledWith({ conversationId: 'main-1', name: '主对话', mode: { kind: 'main' } });
     expect(f.controller.current.conversationId).toBe('main-1'); expect(f.changed).toHaveBeenCalledTimes(2);
+  });
+  it('guides instead of failing when /work targets another scene from inside a scene', async () => {
+    const f = fixture();
+    await f.owner.run('work', 'scene-1');
+    await expect(f.owner.run('work', 'scene-2')).resolves.toBeUndefined();
+    expect(f.publish).toHaveBeenLastCalledWith('已在工作场景中，请先 /exit 返回主对话。');
+    expect(f.controller.enterScene).toHaveBeenCalledTimes(1);
+  });
+  it('lists and manages scenes only from the main conversation; inside a scene /work shows the guidance', async () => {
+    const f = fixture();
+    f.workscene.list.mockResolvedValue([{ sceneId: 'scene-1', name: '场景' }, { sceneId: 'scene-2', name: '另一场景' }]);
+    const source = new TerminalCandidatesOwner(() => ({ cwd: process.cwd(), target: 'cli', features: { chrome: true }, now: 0, workspaceId: null, sessionBusy: false }));
+    source.bindCommands(f.owner.commands);
+    expect(await source.query(1, '/work ', 6)).toMatchObject({ canDelete: true, canRename: true, canCreate: true,
+      hint: 'Esc 返回 · Enter 进入 · Ctrl+D 删除 · Ctrl+R 改名 · Ctrl+N 新建', items: [{ label: '场景' }, { label: '另一场景' }] });
+    // 空列表只列此刻可用的操作，空提示在列表里
+    f.workscene.list.mockResolvedValueOnce([]);
+    expect(await source.query(2, '/work ', 6)).toMatchObject({ items: [], argumentHint: '暂无工作场景，Ctrl+N 新建', hint: 'Esc 返回 · Ctrl+N 新建' });
+    await f.owner.run('work', 'scene-1');
+    const inScene = await source.query(3, '/work ', 6);
+    expect(inScene).toMatchObject({ items: [], argumentHint: '已在工作场景中，请先 /exit 返回主对话。', canDelete: false, canRename: false, canCreate: false, hint: 'Esc 返回' });
+    expect(() => source.manage(3, 'create')).toThrow('不支持');
+  });
+  it('prefills a scene rename with its current name and confirms the save', async () => {
+    const f = fixture(); f.choose.mockResolvedValueOnce({ itemId: 'save', input: '新名' } as never);
+    await f.owner.manage('work', 'rename', 'scene-1', '场景');
+    expect(f.choose.mock.calls[0]![0]).toMatchObject({ title: '工作场景改名', message: '当前名称：场景', field: { value: '场景' } });
+    expect(f.workscene.rename).toHaveBeenCalledWith('scene-1', '新名'); expect(f.publish).toHaveBeenLastCalledWith('名称已保存。');
+  });
+  it('reports a created scene by name and stays quiet when nothing was created', async () => {
+    const f = fixture(); f.choose.mockResolvedValue({ itemId: 'save', input: '用途说明' } as never);
+    f.createScene.mockResolvedValueOnce('页面场景');
+    await f.owner.manage('work', 'create'); expect(f.publish).toHaveBeenLastCalledWith('已创建工作场景「页面场景」。');
+    f.publish.mockClear(); await f.owner.manage('work', 'create'); expect(f.publish).not.toHaveBeenCalled();
   });
   it('keeps a local delete echo owned until a replacement conversation is installed', async () => {
     const f = fixture();

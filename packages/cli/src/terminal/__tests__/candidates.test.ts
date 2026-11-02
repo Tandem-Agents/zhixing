@@ -133,6 +133,13 @@ it('projects progressive argument and empty-list hints from the shared provider'
   source.bindCommands([{ id: 'hint-empty', name: 'empty', description: 'empty', category: 'tools', tag: 'builtin', execution: 'local',
     args: [{ name: 'scene', kind: 'async-enum', required: true, provider: { mode: 'picker', emptyHint: '暂无场景', list: async () => [] } }] }]);
   expect((await source.query(2, '/empty ', 7)).argumentHint).toBe('暂无场景');
+  // 异步枚举的候选已经列出：不再显示程序写法的 `[名字: …]`
+  source.bindCommands([{ id: 'hint-listed', name: 'listed', description: 'listed', category: 'tools', tag: 'builtin', execution: 'local',
+    args: [{ name: 'conversation', kind: 'async-enum', description: '要切换的对话', required: true,
+      provider: { mode: 'picker', list: async () => [{ value: 'c1', label: '对话一' }] } }] }]);
+  const listed = await source.query(3, '/listed ', 8);
+  expect(listed.items).toHaveLength(1);
+  expect(listed.argumentHint).toBeUndefined();
 });
 it('accepts a ghost through the same draft snapshot guard without submitting', async () => {
   let resolve!: (value: unknown) => void;

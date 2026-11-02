@@ -192,8 +192,12 @@ try {
   assert.equal(editor().plainText, '');
   await test.mockInput.typeText('/resume '); await flush();
   assert.match(text(), /暂无可切换对话/); assert.equal(editor().plainText, '/resume ');
+  // 候选打开时第一次 Esc 只收起候选、保留草稿；第二次 Esc 才清空
   test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
-  checks.push('prefix Tab only fills alias; argument hint remains visible with no items and no inline placeholder');
+  assert.equal(editor().plainText, '/resume ');
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  assert.equal(editor().plainText, '');
+  checks.push('prefix Tab only fills alias; argument hint remains visible with no items and no inline placeholder; Esc collapses then clears');
   const selectionChoices = [{ id: 'disabled', label: '禁用', hotkey: 'x', disabled: true },
     { id: 'first', label: '第一项', hotkey: 'a', detailsActionId: 'detail-first' },
     { id: 'disabled-middle', label: '中间禁用', disabled: true }, { id: 'last', label: '末项', hotkey: 'z' }];
@@ -299,6 +303,15 @@ try {
   test.mockInput.pressArrow('down'); await flush(); test.mockInput.pressEnter(); await flush();
   assert.ok(actions.at(-1)?.kind === 'configuration-action' && (actions.at(-1) as any).action === 'pro');
   test.resize(80, 24); await flush();
+  // 缩放后配置页的选中项仍在可视区：标签随宽度重新折行，新尺寸布局要多帧才落定，落定后再定位
+  await show({ kind: 'configuration', title: '长配置', editId: 'resize-follow', choices: Array.from({ length: 30 }, (_, index) => ({ id: `row-${index}`, label: `配置项 ${index} ${'说明'.repeat(14)}` })) });
+  for (let step = 0; step < 25; step++) { test.mockInput.pressArrow('down'); await flush(); }
+  assert.match(text(), /配置项 25 说/);
+  test.resize(60, 12); await flush(); await flush();
+  assert.match(text(), /配置项 25 说/, 'selected configuration row stays visible after the window shrinks and labels rewrap');
+  test.resize(80, 24); await flush(); await flush();
+  assert.match(text(), /配置项 25 说/, 'selected configuration row stays visible after the window grows back');
+  checks.push('configuration selection stays visible across window resize');
   await show({ kind: 'configuration', title: '配置', editId: 'edit', choices: [{ id: 'a', label: '第一项' }, { id: 'b', label: '第二项' }] });
   test.mockInput.pressArrow('down'); await flush();
   await show({ kind: 'configuration', title: '配置', editId: 'edit', choices: [{ id: 'a', label: '第一项' }, { id: 'b', label: '第二项' }], message: '状态更新' });

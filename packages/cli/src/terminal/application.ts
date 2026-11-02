@@ -38,6 +38,7 @@ import type { TerminalTasks } from './tasks.js';
 import type { TerminalTaskNotices } from './task-notices.js';
 import type { TerminalInformationCommands } from './information-commands.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
+import { formatRelativeTimeText } from '../commands/format.js';
 import { advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
@@ -620,10 +621,16 @@ class TerminalApplication {
         if (this.#operation || this.#presentingConfirmation || this.#abort.signal.aborted) throw Error('另一个操作正在进行，请稍后重试。');
         if (!['delete', 'rename', 'create'].includes(action.action)) throw Error('候选操作无效。');
         const target = this.#candidates.manage(action.revision, action.action, action.id);
+        // 删除（两次 Ctrl+D 即确认）不弹页面：等它结束再回复，候选面板据此刷新并说明结果；
+        // 失败的说明仍由后台流程统一给出
+        let settled!: (deleted: boolean) => void;
+        const outcome = new Promise<boolean>(resolve => { settled = resolve; });
         this.#background(() => this.#selectionFlow(async () => {
-          try { await this.#ensureSessionBinding().manage(target.command, action.action, target.value); }
-          finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
+          let done = false;
+          try { await this.#ensureSessionBinding().manage(target.command, action.action, target.value, target.label); done = true; }
+          finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); settled(done); }
         }));
+        if (action.action === 'delete') return { accepted: true, deleted: await outcome };
         return { accepted: true };
       }
       case 'input-begin': this.#inputs.begin(action.inputId, action.purpose, action.bytes); return { accepted: true };
@@ -753,7 +760,7 @@ class TerminalApplication {
             secretStore: this.#secretStore, records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
             processIdentityResolver: this.#secretPlatform.processIdentityResolver,
             edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
-              writers: { save: async edit => { await session.save(edit); } } }, '设备初始配置', ['model', 'messaging']),
+              writers: { save: async edit => { await session.save(edit); } } }, '设备初始配置', ['model', 'messaging'], 'setup'),
           });
           this.#abort.signal.throwIfAborted();
           if (result.kind === 'ready' || result.kind === 'cancelled') return result.kind;
@@ -802,7 +809,7 @@ class TerminalApplication {
         processIdentityResolver: this.#secretPlatform.processIdentityResolver,
         records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
         edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
-          writers: { save: async edit => { await session.save(edit); } } }, '初始配置', ['model', 'messaging']),
+          writers: { save: async edit => { await session.save(edit); } } }, '初始配置', ['model', 'messaging'], 'setup'),
         });
       },
     });
@@ -1017,7 +1024,9 @@ class TerminalApplication {
         const entries = result.records;
         this.#abort.signal.throwIfAborted();
         if (!entries.length && pages.length === 1) { this.#mainView = { ...this.#mainView, message: '本机还没有可查看的对话历史。' }; return; }
-        const choices = entries.slice(0, 24).map(entry => ({ id: entry.conversationId, label: entry.name }));
+        // 与 /resume 同一列：最近活动时间，同名对话才分得开
+        const choices: { id: string; label: string; detail?: string }[] = entries.slice(0, 24)
+          .map(entry => ({ id: entry.conversationId, label: entry.name, detail: formatRelativeTimeText(entry.lastActiveAt) }));
         if (pages.length > 1) choices.push({ id: 'previous', label: '上一页' });
         if (result.next) choices.push({ id: 'next', label: '下一页' });
         choices.push({ id: 'cancel', label: '返回' });
@@ -1822,12 +1831,12 @@ class TerminalApplication {
     return [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? this.#resolvedLocalView?.workspaceLabel ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'];
   }
 
-  async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {
+  async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], purpose: 'setup' | 'edit', runtime?: ConfigEditorRuntime) {
     this.#abort.signal.throwIfAborted();
     const { TerminalConfigurationEditor } = await import('./configuration-editor.js');
     this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
-    const editor = new TerminalConfigurationEditor({ session, title, sections, runtime,
+    const editor = new TerminalConfigurationEditor({ session, title, sections, purpose, runtime,
       headerDetails: this.#configurationHeaderDetails(),
       publish: view => this.#publish(view) });
     this.#editor = editor;
@@ -1864,7 +1873,7 @@ class TerminalApplication {
       ...(connected ? { readExtensions: () => this.#management.extensions(), readExtensionLocalSetup: () => this.#management.extensionLocalSetup(),
         applyExtensionConfiguration: (ids: readonly string[]) => { this.#abort.signal.throwIfAborted(); return this.#management.applyExtensionConfiguration(ids); } } : {}),
       requestHostReload: options => this.#reload(options),
-    }, { kind, edit: session => this.#edit(session, kind === 'config' ? '配置' : 'MCP 管理', kind === 'config' ? ['model', 'messaging'] : ['mcp'], mcp?.runtime),
+    }, { kind, edit: session => this.#edit(session, kind === 'config' ? '配置' : 'MCP 管理', kind === 'config' ? ['model', 'messaging'] : ['mcp'], 'edit', mcp?.runtime),
       mcpApplication: mcp?.mcpApplication });
     this.#abort.signal.throwIfAborted();
     let message = result.kind === 'cancelled' ? '已取消本次配置编辑。'
@@ -2170,24 +2179,25 @@ class TerminalApplication {
     return this.#sessionCommands;
   }
 
-  async #createScene(input: string, current: () => void): Promise<void> {
+  async #createScene(input: string, current: () => void): Promise<string | undefined> {
     const abort = new AbortController(); this.#sceneCreateAbort = abort;
     const signal = AbortSignal.any([abort.signal, this.#abort.signal]);
     try {
       await this.#publish({ kind: 'selection', title: '创建工作场景', requestId: 'workscene-preparing', busy: true, message: '正在准备工作场景；Ctrl+C 可取消。' });
-      await this.#createSceneInner(input, () => { current(); signal.throwIfAborted(); }, signal);
+      return await this.#createSceneInner(input, () => { current(); signal.throwIfAborted(); }, signal);
     } finally {
       if (this.#sceneCreateAbort === abort) this.#sceneCreateAbort = undefined;
     }
   }
 
-  async #createSceneInner(input: string, current: () => void, signal: AbortSignal): Promise<void> {
+  /** 返回实际创建的场景名；取消或未创建时为空。 */
+  async #createSceneInner(input: string, current: () => void, signal: AbortSignal): Promise<string | undefined> {
     current();
     const { runWorksceneCreateAssist, createWorksceneCreateSelectionRequest } = await import('../runtime/workscene-create-assist.js');
     current();
-    const ask = async (title: string, prefill = '') => {
+    const ask = async (title: string, prefill = '', label = '输入说明') => {
       current();
-      const response = await this.#choosePage({ kind: 'selection', title: '创建工作场景', message: title, field: { id: 'scene-input', secret: false, label: '输入说明', value: prefill },
+      const response = await this.#choosePage({ kind: 'selection', title: '创建工作场景', message: title, field: { id: 'scene-input', secret: false, label, value: prefill },
         choices: [{ id: 'submit', label: '继续' }, { id: 'cancel', label: '取消' }] });
         current();
         const value = response?.itemId === 'submit' ? response.input?.trim() || null : null;
@@ -2228,10 +2238,12 @@ class TerminalApplication {
       askUser: question => ask(question),
     }, signal);
     current();
-    if (result.kind === 'fallback') {
-      const name = await ask('智能创建暂不可用 · 输入场景名称', result.prefill);
-      if (name) { await this.#workscene.create(name); current(); }
-    }
+    if (result.kind === 'created') return result.scene.name;
+    if (result.kind !== 'fallback') return undefined;
+    const name = await ask('智能创建暂不可用 · 输入场景名称', result.prefill, '场景名称');
+    if (!name) return undefined;
+    const scene = await this.#workscene.create(name); current();
+    return scene.name;
   }
 
   async #sessionCommand(name: string, argument: string): Promise<void> {
@@ -2244,7 +2256,12 @@ class TerminalApplication {
   async #command(name: string, argument: string): Promise<unknown> {
     if (typeof name !== 'string' || typeof argument !== 'string' || name.length > 128 || argument.length > 8192) throw Error('terminal-command-size');
     const definition = this.#candidates.registry.findByName(name);
-    if (!definition) throw Error('命令不可用，请用 /help 查看当前支持的命令。');
+    if (!definition) {
+      // 未知命令不是故障：说明原因、不受理，草稿留在输入框里供修改
+      this.#mainView = { ...this.#mainView, message: `未知命令 /${Array.from(name).slice(0, 48).join('')}；可用 /help 查看当前支持的命令。` };
+      void this.#publish(this.#mainView).catch(() => {});
+      return { accepted: false };
+    }
     name = definition.name;
     if (name === 'exit') {
       if (this.#controller?.current.mode.kind === 'workscene') this.#background(() => this.#sessionCommand(name, argument));

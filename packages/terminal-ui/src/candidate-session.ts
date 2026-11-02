@@ -20,14 +20,22 @@ export class TerminalCandidateSession {
     if (this.#deleteSignature === signature) { this.#deleteSignature = undefined; return true; }
     this.#deleteSignature = signature; return false;
   }
-  async manage(action: 'delete' | 'rename' | 'create'): Promise<void> {
+  /** 返回删除是否完成（只对删除有意义）；删除结束后按新状态重新取候选。 */
+  async manage(action: 'delete' | 'rename' | 'create'): Promise<boolean> {
     const value = this.value, item = value?.items[this.selected];
     if (!value || value.mode !== 'picker' || this.busy || (action !== 'create' && !item) ||
-        !(action === 'create' ? value.canCreate : action === 'rename' ? value.canRename : value.canDelete)) return;
+        !(action === 'create' ? value.canCreate : action === 'rename' ? value.canRename : value.canDelete)) return false;
     this.resetDelete(); this.busy = true; this.changed();
-    try { await this.request({ kind: 'candidate-manage', revision: value.revision, action, ...(item ? { id: item.id } : {}) }); }
-    finally { this.busy = false; this.changed(); }
+    // 管理之后列表会按新状态重取：改名回到原项，删除停在原位置（同一份草稿的下一次结果才恢复）
+    if (action !== 'create') this.#restore = { version: this.input.draft.version, index: this.selected, ...(action === 'rename' ? { id: item!.id } : {}) };
+    try {
+      const reply = await this.request({ kind: 'candidate-manage', revision: value.revision, action, ...(item ? { id: item.id } : {}) }) as { deleted?: unknown } | undefined;
+      if (action !== 'delete') return false;
+      if (this.value === value && this.#active) this.refresh();
+      return reply?.deleted === true;
+    } finally { this.busy = false; this.changed(); }
   }
+  #restore?: { version: number; index: number; id?: string };
   #revision = 0;
   #signature = '';
   #pending?: { version: number; cursor: number; text: string; offset: number; revision: number; atStart: boolean };
@@ -63,15 +71,21 @@ export class TerminalCandidateSession {
     void this.#drain();
   }
   dismiss(): void {
-    this.resetDelete();
+    this.resetDelete(); this.#restore = undefined;
     this.open = false; this.loading = false; this.error = undefined;
     ++this.#revision; this.#pending = undefined; this.value = undefined; this.#snapshot = undefined; this.changed();
   }
   refresh(): void { this.#signature = ''; this.sync(this.#active); }
+  /**
+   * 候选打开时 Esc 只收起候选，草稿原样保留（再按一次 Esc 才是清空）；收起后草稿不变就不
+   * 重新打开，继续输入才再查询。/trust 管理面板是独立的管理视图：先删掉面板里的查询词，
+   * 再按一次返回主输入。
+   */
   escape(): void {
     const value = this.value, snapshot = this.#snapshot;
     const draft = this.input.draft;
-    if (value?.items.length && snapshot && draft.version === snapshot.version && draft.cursor === snapshot.cursor && value.end > value.start) {
+    if (value?.mode !== 'management') { this.dismiss(); return; }
+    if (value.items.length && snapshot && draft.version === snapshot.version && draft.cursor === snapshot.cursor && value.end > value.start) {
       this.input.candidate({ text: '', execute: false }, { start: value.start + snapshot.offset, end: value.end + snapshot.offset });
       this.sync(this.#active);
     } else { this.input.clear(draft.version); this.dismiss(); }
@@ -92,10 +106,11 @@ export class TerminalCandidateSession {
       }
     } finally { this.busy = false; this.changed(); }
   }
-  move(direction: -1 | 1): void {
+  /** 按方向移动选中项；翻页时 step 为一页的条数，选中项随页移动，Enter 总作用于看得见的那一项。 */
+  move(direction: -1 | 1, step = 1): void {
     this.resetDelete();
     if (!this.value) return;
-    this.selected = Math.max(0, Math.min(this.value.items.length - 1, this.selected + direction)); this.changed();
+    this.selected = Math.max(0, Math.min(this.value.items.length - 1, this.selected + direction * step)); this.changed();
   }
   async accept(ghost = false): Promise<boolean> {
     const value = this.value, snapshot = this.#snapshot, item = value?.items[this.selected];
@@ -134,6 +149,11 @@ export class TerminalCandidateSession {
           if ((result.ghost !== undefined && (typeof result.ghost?.fullValue !== 'string' || !result.ghost.fullValue || Buffer.byteLength(result.ghost.fullValue) > 4096)) ||
               (result.argumentHint !== undefined && (typeof result.argumentHint !== 'string' || Buffer.byteLength(result.argumentHint) > 4096))) throw Error('terminal-candidate-result');
           this.value = result; this.#snapshot = query;
+          const restore = this.#restore; this.#restore = undefined;
+          if (restore?.version === query.version && result.items.length) {
+            const found = restore.id === undefined ? -1 : result.items.findIndex(item => item.id === restore.id);
+            this.selected = found >= 0 ? found : Math.min(restore.index, result.items.length - 1);
+          }
           this.open = result.active ?? !!(result.items.length || result.mode || result.argumentHint);
           this.loading = false; this.changed();
         } catch (error) {

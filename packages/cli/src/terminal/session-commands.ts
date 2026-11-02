@@ -6,7 +6,11 @@ import type { ActiveConversation, ConversationController, TurnOutcome } from '..
 import type { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
+import { formatRelativeTimeText } from '../commands/format.js';
 import type { TerminalSelectionPort } from './selection.js';
+
+/** 场景内选 /work 的引导：进入路径、命令路径与候选空提示同一说明。 */
+const SCENE_SWITCH_GUIDANCE = '已在工作场景中，请先 /exit 返回主对话。';
 
 type Navigation = Extract<PostTurnControlOutcome['intent'], { kind: 'enter' | 'exit' | 'set_workdir' }>;
 export interface TerminalTurnOutcome {
@@ -53,7 +57,8 @@ export interface TerminalSessionOptions {
   readonly publish: (message: string) => Promise<void>;
   readonly changed: (advancement?: SessionAdvancementStateSnapshot) => Promise<void>;
   readonly activeTurn: () => Promise<unknown> | null;
-  readonly createScene: (input: string, current: () => void) => Promise<void>;
+  /** 返回实际创建的场景名；取消或未创建时为空。 */
+  readonly createScene: (input: string, current: () => void) => Promise<string | undefined>;
   readonly deleting: (conversationId: string) => () => void;
   readonly deletedCurrent: () => void;
 }
@@ -66,10 +71,14 @@ export class TerminalSessionCommands {
   constructor(readonly options: TerminalSessionOptions) {
     const initial = options.controller()?.current;
     if (initial?.mode.kind === 'main') this.#mainReturn = { ...initial };
+    // 场景内不提供跨场景切换与场景管理：/work 不列可进入项，空提示直接说明怎么做
+    const inScene = () => { const mode = this.options.controller()?.current.mode.kind; return mode !== undefined && mode !== 'main'; };
     const provider = (command: 'resume' | 'work'): ArgChoiceProvider => ({
-      mode: 'picker', inlineActions: command === 'work' ? { delete: true, rename: true, create: true } : { delete: true },
-      emptyHint: command === 'work' ? '暂无工作场景，Ctrl+N 新建' : '暂无可切换对话',
+      mode: 'picker',
+      get inlineActions() { return command !== 'work' ? { delete: true } : inScene() ? {} : { delete: true, rename: true, create: true }; },
+      get emptyHint() { return command !== 'work' ? '暂无可切换对话' : inScene() ? SCENE_SWITCH_GUIDANCE : '暂无工作场景，Ctrl+N 新建'; },
       list: async (context, abort) => {
+        if (command === 'work' && inScene()) return [];
         const scope = this.#scope();
         const entries = await this.#entries(command, context.query); scope.current();
         if (abort.aborted) return [];
@@ -97,7 +106,7 @@ export class TerminalSessionCommands {
       ? (await this.options.controller()!.listConversationPage({ limit: 100, query })).conversations.map(item => ({ id: item.conversationId, name: item.name,
         description: item.advancementPreparing ? '升级校验中' : item.advancement?.status === 'awaiting-rubric-confirmation' ? '待确认推进任务'
           : item.advancement?.status === 'active' ? '推进中'
-            : item.advancement ? describeAdvancementProposalStage(item.advancement.status) : item.lastActiveAt }))
+            : item.advancement ? describeAdvancementProposalStage(item.advancement.status) : formatRelativeTimeText(item.lastActiveAt) }))
       : (await this.options.workscene.list()).map(item => ({ id: item.sceneId, name: item.name,
         description: item.workspace ? [item.workspace.deviceName, item.workspace.workspaceName].filter(Boolean).join(' / ') : '未绑定工作区' }));
     return boundedControlProjection(entries, 1024 * 1024);
@@ -126,7 +135,8 @@ export class TerminalSessionCommands {
     }
     if (name === 'exit') { await this.navigate({ kind: 'exit' }); return; }
     if (name !== 'resume' && name !== 'work') throw Error('未知会话命令。');
-    if (name === 'work' && scope.controller.current.mode.kind !== 'main') throw Error('已在工作场景中，请先 /exit 返回主对话。');
+    // 场景内不直接跨场景切换：这是规则引导不是故障，与进入路径同一说明
+    if (name === 'work' && scope.controller.current.mode.kind !== 'main') { await this.options.publish(SCENE_SWITCH_GUIDANCE); return; }
     if (name === 'resume') { await this.#resume(argument, scope); return; }
     const entries = await this.#entries(name); scope.current();
     const query = argument.trim().toLocaleLowerCase();
@@ -178,7 +188,7 @@ export class TerminalSessionCommands {
   async navigate(intent: Navigation): Promise<void> {
     const scope = this.#scope(), controller = scope.controller;
     if (intent.kind === 'enter') {
-      if (controller.current.mode.kind !== 'main') { await this.options.publish('已在工作场景中，请先 /exit 返回主对话。'); return; }
+      if (controller.current.mode.kind !== 'main') { await this.options.publish(SCENE_SWITCH_GUIDANCE); return; }
       this.#mainReturn = { ...controller.current };
       const entered = await controller.enterScene(intent.sceneId); scope.current(true);
       await this.options.changed(entered.advancement); await this.options.publish(`已进入工作场景 ${entered.active.name}`); return;
@@ -201,17 +211,26 @@ export class TerminalSessionCommands {
     await this.options.publish(exited.kind === 'fallback-new' ? '原主对话已不存在，已创建新主对话。'
       : exited.kind === 'fallback-latest' ? '原主对话已不存在，已回到最近主对话。' : '已退出工作场景，返回主对话。');
   }
-  async manage(command: 'resume' | 'work', action: 'delete' | 'rename' | 'create', id?: string): Promise<void> {
+  /** label 是候选上显示的当前名称：改名时预填并点明改的是哪个场景。 */
+  async manage(command: 'resume' | 'work', action: 'delete' | 'rename' | 'create', id?: string, label?: string): Promise<void> {
     const scope = this.#scope();
     if (action === 'create' || action === 'rename') {
       if (command !== 'work') throw Error('当前候选不支持此操作。');
+      const current = action === 'rename' ? label?.trim() : undefined;
       const response = await this.options.choose({ kind: 'selection', title: action === 'create' ? '新建工作场景' : '工作场景改名',
-        field: { id: 'scene', secret: false, label: action === 'create' ? '描述用途和工作目录，或输入名称' : '输入新名称' },
+        ...(current ? { message: `当前名称：${current}` } : {}),
+        field: { id: 'scene', secret: false, label: action === 'create' ? '描述用途和工作目录，或输入名称' : '输入新名称', ...(current ? { value: current } : {}) },
         choices: [{ id: 'save', label: action === 'create' ? '继续创建' : '保存名称' }, { id: 'cancel', label: '取消' }] });
       scope.current();
       if (response?.itemId !== 'save' || !response.input?.trim()) return;
-      if (action === 'create') await this.options.createScene(response.input.trim(), () => scope.current());
-      else { if (!id) throw Error('候选已失效。'); await this.options.workscene.rename(id, response.input.trim()); scope.current(); }
+      if (action === 'create') {
+        const created = await this.options.createScene(response.input.trim(), () => scope.current());
+        if (created) await this.options.publish(`已创建工作场景「${created}」。`);
+        return;
+      }
+      if (!id) throw Error('候选已失效。');
+      await this.options.workscene.rename(id, response.input.trim()); scope.current();
+      await this.options.publish('名称已保存。');
       return;
     }
     if (!id) throw Error('候选已失效。');

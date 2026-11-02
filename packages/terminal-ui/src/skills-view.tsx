@@ -5,6 +5,10 @@ import {
   type SkillsKey, type TerminalSkillsAction, type TerminalSkillsView,
 } from './skills-model.js';
 
+/** 技能的适用模式与来源（本地＝本机产生与编辑，接入＝外部源接入）的用户用语。 */
+const SKILL_MODE_LABEL = { main: '主模式', work: '工作场景' } as const;
+const SKILL_SOURCE_LABEL = { own: '本地', linked: '接入' } as const;
+
 export interface SkillsViewHandle { key(event: SkillsKey): boolean }
 export interface SkillsViewProps {
   readonly view: TerminalSkillsView;
@@ -74,14 +78,22 @@ export function SkillsView(props: SkillsViewProps) {
       <box flexGrow={1} flexDirection="column" overflow="hidden">
         <Show when={view().total > 0} fallback={<text>{view().state === 'loading' ? '正在读取技能…' : view().state === 'error' ? '技能暂不可用，按 r 重试。' : '还没有技能 —— 让 agent 把某摊事的做法沉淀成一个技能，即可在此管理。'}</text>}>
           <For each={items()}>{item => <box flexDirection="column" height={2} backgroundColor={item.id === view().selectedId ? tone.selected : undefined}>
-            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? tone.brand : tone.text}>{item.id === view().selectedId ? '› ' : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
-            <text height={1} wrapMode="none" truncate fg={tone.dim}>  [{item.mode}] {item.source}{item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · {skillsDisplayText(item.description)}</text>
+            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? tone.brand : tone.text}>{item.id === view().selectedId ? '▸ ' : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
+            <text height={1} wrapMode="none" truncate fg={tone.dim}>  {SKILL_MODE_LABEL[item.mode]} · {SKILL_SOURCE_LABEL[item.source]}{item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · {skillsDisplayText(item.description)}</text>
           </box>}</For>
         </Show>
       </box>
       <Show when={view().message}><text height={2} fg={view().state === 'error' ? tone.warn : tone.dim}>{skillsDisplayText(view().message ?? '')}</text></Show>
-      <text height={1} wrapMode="none" truncate fg={tone.dim}>{hint('Esc 返回 · ↑↓ 导航 · PgUp/PgDn 翻页 · r 刷新', 'Esc返回 ↑↓选择 PgUp/Dn翻页 r刷新', 'Esc返回 ↑↓选择 r刷新')}</text>
-      <text height={1} wrapMode="none" truncate fg={tone.dim}>{hint('p 置顶 · d 禁用 · m 改 mode · a 归档', 'p置顶 d禁用 m模式 a归档')}</text>
+      {/* 没有技能时只给返回与刷新；有技能时按当前项状态说下一次按键的效果 */}
+      <Show when={view().total > 0} fallback={<text height={1} wrapMode="none" truncate fg={tone.dim}>{hint('Esc 返回 · r 刷新', 'Esc返回 r刷新')}</text>}>
+        <text height={1} wrapMode="none" truncate fg={tone.dim}>{hint('Esc 返回 · ↑↓ 导航 · PgUp/PgDn 翻页 · r 刷新', 'Esc返回 ↑↓选择 PgUp/Dn翻页 r刷新', 'Esc返回 ↑↓选择 r刷新')}</text>
+        <text height={1} wrapMode="none" truncate fg={tone.dim}>{(() => {
+          const current = items().find(item => item.id === view().selectedId);
+          const pin = current?.pinned ? '取消置顶' : '置顶', toggle = current?.disabled ? '启用' : '禁用';
+          const mode = current?.mode === 'main' ? '改为工作场景' : '改为主模式';
+          return hint(`p ${pin} · d ${toggle} · m ${mode} · a 归档`, `p${pin} d${toggle} m${mode} a归档`);
+        })()}</text>
+      </Show>
     </Show>
   </box>;
 }

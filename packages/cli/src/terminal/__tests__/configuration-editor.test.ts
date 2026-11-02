@@ -10,13 +10,13 @@ import { recordingFixture } from '../../../../core/src/logging/__tests__/recordi
 import { RUNTIME_LOG_SOURCE } from '../../logging/runtime.js';
 import type { McpSetupCandidate } from '@zhixing/core/mcp-management';
 
-function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456') {
+function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456', purpose: 'setup' | 'edit' = 'edit') {
   const views: Omit<TerminalView, 'generation'>[] = [];
   const save = vi.fn(async (_edit: Extract<ConfigurationEditResult, { kind: 'completed' }>) => {});
   const editor = new TerminalConfigurationEditor({
     session: { initialConfig: { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
       initialCredentials: { providers: { deepseek: { apiKey } } }, writers: { save } },
-    title: '合成配置', sections: runtime ? ['mcp'] : ['model'], runtime,
+    title: '合成配置', sections: runtime ? ['mcp'] : ['model'], purpose, runtime,
     headerDetails: ['工作目录    fixture-workspace', '配置        fixture.json', '秘密存储    本机安全存储'],
     publish: async view => { views.push(view); },
   });
@@ -45,7 +45,7 @@ describe('single-root Node configuration transaction', () => {
     await expect(target.configuration(kind)).rejects.toBe(stopped);
     const loading = views[0]!;
     const editor = new TerminalConfigurationEditor({ session: { initialConfig: {}, initialCredentials: {}, writers: { save: vi.fn() } },
-      title: kind === 'config' ? '配置' : 'MCP 管理', sections: kind === 'config' ? ['model', 'messaging'] : ['mcp'],
+      title: kind === 'config' ? '配置' : 'MCP 管理', sections: kind === 'config' ? ['model', 'messaging'] : ['mcp'], purpose: 'edit',
       headerDetails: target.configurationHeaderDetails(), publish: async view => { views.push(view); } });
     const result = editor.run();
     expect(loading.configurationHome).toBe(true); expect(loading.chromeDetails).toHaveLength(3);
@@ -77,6 +77,14 @@ describe('single-root Node configuration transaction', () => {
     expect(logs.records()).toContainEqual(expect.objectContaining({ source: CONFIGURATION_LOG_SOURCE.id, event: 'saved' }));
   });
 
+  it.each([['setup', '保存并启动', '退出'], ['edit', '保存并生效', '放弃本次修改']] as const)(
+    'names the main actions by purpose (%s)', async (purpose, complete, cancel) => {
+      const h = setup(undefined, undefined, purpose);
+      await vi.waitFor(() => expect(h.current().choices?.some(item => item.label === '完成')).toBe(true));
+      expect(h.current().choices!.find(item => item.label === '完成')?.detail).toBe(complete);
+      expect(h.current().choices!.find(item => item.label === '取消')?.detail).toBe(cancel);
+      h.editor.cancel(); await h.result;
+    });
   it('returns to the row the user entered from instead of the first row', async () => {
     const h = setup();
     await h.choose('主模型'); await h.choose('DeepSeek');

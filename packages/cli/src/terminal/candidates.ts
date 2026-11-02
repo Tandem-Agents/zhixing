@@ -1,4 +1,4 @@
-import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing/core/typeahead';
+import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type InlineActionSupport, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing/core/typeahead';
 import type { TerminalTrustCandidates } from './trust-candidates.js';
 import { normalizeLeadingSlashAlias, type TerminalCandidates } from '@zhixing/terminal-ui/protocol';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
@@ -7,7 +7,7 @@ import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
 /** Commands delivered in this migration unit. Other command ownership stays in
  * the same catalog, without exposing an inoperative candidate. */
 const available = new Set(['help', 'status', 'stop', 'config', 'mcp', 'skills', 'exit', 'trust', 'security', 'advancement', 'resolve', 'tasklist', 'task', 'tasks', 'model', 'usage', 'context', 'compact']);
-interface CandidateQuery { revision: number; abort: AbortController; items: readonly SuggestionItem[]; ghost?: string; command?: 'resume' | 'work' }
+interface CandidateQuery { revision: number; abort: AbortController; items: readonly SuggestionItem[]; ghost?: string; command?: 'resume' | 'work'; actions?: InlineActionSupport }
 
 export class TerminalCandidatesOwner {
   readonly registry = new DefaultCommandRegistry();
@@ -26,13 +26,14 @@ export class TerminalCandidatesOwner {
     if (!this.#trust || this.#query?.revision !== revision || this.#query.abort.signal.aborted || !this.#query.items.some(item => item.id === id)) throw Error('候选已失效，请刷新。');
     return this.#trust.revoke(revision, id);
   }
-  manage(revision: number, action: 'delete' | 'rename' | 'create', id?: string): { command: 'resume' | 'work'; value?: string } {
+  manage(revision: number, action: 'delete' | 'rename' | 'create', id?: string): { command: 'resume' | 'work'; value?: string; label?: string } {
     const query = this.#query;
     if (!query || query.revision !== revision || query.abort.signal.aborted || !query.command) throw Error('候选已失效，请刷新。');
-    if (action !== 'delete' && query.command !== 'work') throw Error('此候选不支持该操作。');
+    // 只受理本次结果声明过的就地操作（例如场景内的 /work 不提供管理）
+    if (!query.actions?.[action]) throw Error('此候选不支持该操作。');
     const item = query.items.find(item => item.id === id), value = item?.acceptPayload.metadata?.argValue;
     if (action !== 'create' && (!item || item.providerId !== 'argument' || item.acceptPayload.metadata?.commandId !== `${query.command}:repl` || typeof value !== 'string')) throw Error('候选身份不匹配。');
-    const result = { command: query.command, ...(typeof value === 'string' ? { value } : {}) };
+    const result = { command: query.command, ...(typeof value === 'string' ? { value } : {}), ...(item ? { label: item.displayText } : {}) };
     query.abort.abort(); return result;
   }
   constructor(readonly runtime: () => RuntimeContext, fileRoot: () => string | null = () => runtime().cwd) {
@@ -75,13 +76,25 @@ export class TerminalCandidatesOwner {
       const ghost = provider.supportsGhostText ? provider.computeGhostText?.(match) : undefined;
       if (ghost && typeof ghost.fullValue === 'string' && ghost.fullValue.length > 0 && Buffer.byteLength(ghost.fullValue) <= 4096) query.ghost = ghost.fullValue;
       const argument = provider.computeArgumentHint?.(match);
-      const hintText = argument ? (!query.items.length && argument.emptyHint ? argument.emptyHint : argument.renderedHint) : undefined;
+      // 异步枚举参数（会话、规则等）的候选已经列出时，程序写法的 `[名字: …]` 不再显示；
+      // 没有候选时给空提示或该参数的中文说明
+      const current = argument?.currentArg;
+      const hintText = !argument ? undefined
+        : !query.items.length && argument.emptyHint ? argument.emptyHint
+        : current?.kind === 'async-enum' ? (query.items.length ? undefined : current.description)
+        : argument.renderedHint;
       const argumentHint = typeof hintText === 'string' ? Array.from(hintText).slice(0, 1024).join('') : undefined;
       if (trust) this.#trust?.retain(revision, query.items);
       query.command = command;
+      // 就地操作按 provider 本次声明（随模式变化）；底部只列此刻可用的操作，空列表不列针对条目的操作
+      const actions = command ? provider.computeInlineActions?.(match) ?? {} : {};
+      query.actions = actions;
+      const listed = query.items.length > 0;
+      const pickerHint = ['Esc 返回', ...(listed ? [command === 'work' ? 'Enter 进入' : 'Enter 切换'] : []),
+        ...(listed && actions.delete ? [command === 'work' ? 'Ctrl+D 删除' : '两次 Ctrl+D 删除'] : []),
+        ...(listed && actions.rename ? ['Ctrl+R 改名'] : []), ...(actions.create ? ['Ctrl+N 新建'] : [])].join(' · ');
       return { ...range, ...(query.ghost ? { ghost: { fullValue: query.ghost } } : {}), ...(argumentHint ? { argumentHint } : {}), ...(trust ? { mode: 'management' as const, canDelete: true, hint: 'Esc 返回 · ↑↓ 选择 · 两次 Ctrl+D 撤销 · Ctrl+R 刷新' }
-        : command ? { mode: 'picker' as const, canDelete: true, canRename: command === 'work', canCreate: command === 'work', hint: command === 'work'
-          ? 'Esc 返回 · Enter 进入 · Ctrl+D 删除 · Ctrl+R 改名 · Ctrl+N 新建' : 'Esc 返回 · Enter 切换 · 两次 Ctrl+D 删除' } : {}),
+        : command ? { mode: 'picker' as const, canDelete: !!actions.delete, canRename: !!actions.rename, canCreate: !!actions.create, hint: pickerHint } : {}),
         items: query.items.map(item => ({ id: item.id, label: item.displayText, detail: item.description })) };
     }
     return { revision, start: cursor, end: cursor, items: [] };

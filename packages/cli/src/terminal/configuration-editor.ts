@@ -53,6 +53,8 @@ export class TerminalConfigurationEditor {
     session: NodeConfigurationEditSession;
     title: string;
     sections: SectionId[];
+    /** setup：首次配置（完成即启动、取消即退出）；edit：会话中修改（完成即生效、取消即放弃本次修改）。 */
+    purpose: 'setup' | 'edit';
     runtime?: ConfigEditorRuntime;
     headerDetails?: readonly string[];
     publish(view: SurfaceView): Promise<void>;
@@ -226,7 +228,9 @@ export class TerminalConfigurationEditor {
         const pending = collectAllIssues(sections).length;
         for (const option of options) {
           add(option.kind === 'button' ? option.action === 'complete' ? '完成' : '取消' : option.label,
-            option.kind === 'section-entry' ? option.status.text : option.action === 'cancel' ? '退出' : pending ? '请先补全必填项' : '保存并启动');
+            option.kind === 'section-entry' ? option.status.text
+              : option.action === 'cancel' ? (this.options.purpose === 'setup' ? '退出' : '放弃本次修改')
+                : pending ? '请先补全必填项' : this.options.purpose === 'setup' ? '保存并启动' : '保存并生效');
           const choice = choices[choices.length - 1]!;
           choices[choices.length - 1] = { ...choice,
             ...(option.kind === 'section-entry'

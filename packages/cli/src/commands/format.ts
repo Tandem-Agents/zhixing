@@ -16,3 +16,9 @@ export function formatRelativeTime(date: Date): string {
   if (days === 1) return "昨天";
   return `${days} 天前`;
 }
+
+/** ISO 时间串的相对人读时间；无法解析时原样返回（对话列表的“最近活动”列共用）。 */
+export function formatRelativeTimeText(value: string): string {
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? formatRelativeTime(new Date(time)) : value;
+}

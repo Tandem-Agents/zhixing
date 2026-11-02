@@ -3,6 +3,7 @@ import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type T
 import { render, extend } from '@opentui/solid';
 import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
 import { ProcessView } from './process-view.js';
+import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
 import { TerminalInputSession, type TerminalAtomicRange } from './input-session.js';
 import { setEditorAtomicWrap } from './editor-atomic-wrap.js';
@@ -17,7 +18,7 @@ import { BodyReadingWindow } from './body-window.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
 import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
 import { interactionKey, inputRows, candidateLayout, initialChoiceIndex, nextChoiceIndex } from './surface-layout.js';
-import { CandidateView, type CandidateViewHandle } from './candidate-view.js';
+import { CandidateView } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
 import { tone, spacing, surfaceGeometry } from './theme.js';
@@ -172,7 +173,6 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const draft = input.draft;
   candidates = new TerminalCandidateSession(input, options.request, () => setCandidateRevision(value => value + 1));
   const candidateItems = () => { candidateRevision(); return candidates?.value?.items ?? []; };
-  let candidateView: CandidateViewHandle | undefined;
   const candidateOpen = () => { candidateRevision(); return view().kind === 'conversation' && !!candidates?.open; };
   const candidateLoading = () => { candidateRevision(); return !!candidates?.loading; };
   const candidateSelected = () => { candidateRevision(); return candidates?.selected ?? 0; };
@@ -386,7 +386,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const operationNotice = process && current.message && current.connectionState !== 'starting' ? displayText(current.message) : '';
     if (operationNotice && !left.length) left.push(operationNotice);
     if (candidate?.error) left.push(candidate.error);
-    else if (candidate?.argumentHint) left.push(candidate.argumentHint);
+    // 列表为空时提示已显示在列表里，底部不再重复
+    else if (candidate?.argumentHint && !(candidateOpen() && !candidate.items.length)) left.push(candidate.argumentHint);
     else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
     else if (current.kind === 'conversation' && editorEmpty() && !left.length) left.push('输入消息或 / 查看命令');
     const hint = (full: string, compact: string) => measureInformation(full) <= size().width - 4 ? full : compact;
@@ -395,6 +396,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : candidateOpen() && candidateLoading() ? '正在读取候选 · Esc 返回'
       : candidateOpen() && !candidate?.items.length && !candidate?.ghost && !candidate?.mode ? 'Esc 返回'
       : candidate?.ghost ? hint(`Tab 补全 ${candidate.ghost.fullValue} · ↑↓ 选择 · Enter 接纳 · Esc 返回`, `Tab 补全 ${candidate.ghost.fullValue} · Esc 返回`)
+      // 删除准备态：左侧说明下一步，右侧让出位置
+      : candidate?.mode === 'picker' && candidates?.deleteArmed ? 'Esc 返回'
       : candidate?.hint ? candidate.hint
       : candidate?.items.length || candidate?.mode ? hint('↑↓ 选择 · Tab/Enter 接纳 · Esc 返回', '↑↓ 选择 · Enter 接纳 · Esc 返回')
       : current.kind === 'skills' ? '' // The skill surface owns its two contextual hint rows.
@@ -541,7 +544,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           height={candidateHeight() ? candidateBudget().process : Math.max(1, Math.min(6, size().height - 6))} />
       </Show>
       <Show when={view().kind !== 'configuration'}><box marginX={spacing.content} flexShrink={0}><ChoiceList /></box></Show>
-      <Show when={!safeAction()}><text fg={tone.warn}>窗口较小：可取消；放大后继续确认。</text></Show>
+      {/* 有待确认的选项时才说“可取消、放大后确认”；主对话等没有确认项的页面只提示放大 */}
+      <Show when={!safeAction()}><text fg={tone.warn}>{view().choices?.length ? '窗口较小：可取消；放大后继续确认。' : '窗口较小：放大后可完整显示与操作。'}</text></Show>
     </box>
     <Show when={view().kind === 'conversation' || view().field}>
       <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={surfaceGeometry(size().width).margin} paddingX={spacing.frameInner} flexDirection="row">
@@ -555,7 +559,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     </Show>
     <Show when={candidateHeight() > 0}>
       <CandidateView value={candidateValue()} loading={candidateLoading()} error={candidateError()} selected={candidateSelected()} danger={candidateDanger()}
-        width={size().width} height={candidateHeight()} renderer={renderer} measure={measureInformation} onReady={value => { candidateView = value; }} />
+        width={size().width} height={candidateHeight()} renderer={renderer} measure={measureInformation} />
     </Show>
     <box height={1} flexShrink={0} flexDirection="row" paddingX={info().inset}>
       <text height={1} wrapMode="none" fg={tone.dim}>{info().left}</text>
@@ -646,12 +650,23 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const resize = () => { bodyView?.beforeUpdate(); setSize({ width: renderer.terminalWidth, height: renderer.terminalHeight }); };
   const pointerTakeover = () => { renderer.releasePointerCapture?.(); renderer.emit('terminal-pointer-cancel'); bodyView?.inputTakeover(); };
+  let followedSize = size();
   createEffect(() => {
     const index = selected(), current = view(), dimensions = size();
     if (current.kind !== 'configuration') return;
     // Native layout settles after the reactive page. Keep keyboard selection in
     // the scrollable configuration body without moving the input or footer.
-    queueMicrotask(() => { if (!disposed && view() === current && size() === dimensions) historyBox?.scrollChildIntoView(`choice-${index}`); });
+    // 窗口尺寸变化后，选项文字按新宽度重新折行，布局要经过几帧才落定；只在下一帧定位一次，
+    // 选中项会按旧行高停在可视区外。缩放后连续几帧跟随（每帧定位并请求重绘），直到布局落定。
+    const resized = dimensions !== followedSize; followedSize = dimensions;
+    const current_ = () => !disposed && view() === current && size() === dimensions;
+    const follow = () => { if (current_()) historyBox?.scrollChildIntoView(`choice-${index}`); };
+    const followFrames = (left: number) => renderer.once('frame', () => {
+      if (!current_()) return;
+      follow();
+      if (left > 1) { followFrames(left - 1); renderer.requestRender(); }
+    });
+    if (resized) followFrames(3); else queueMicrotask(follow);
   });
   const keypress = (event: KeyEvent) => {
     pointerTakeover();
@@ -702,9 +717,16 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         if (supported) {
           consume();
           if (size().height < 18 || size().width < 40) { candidates?.resetDelete(); setStatus('请放大窗口后管理；Esc 返回。'); return; }
-          if (operation === 'delete' && !candidates?.confirmDelete(view().generation)) { setStatus('再次按 Ctrl+D 删除当前候选；其他按键取消准备。'); return; }
-          setStatus('');
-          void candidates?.manage(operation).catch(reportStatus());
+          if (operation === 'delete' && !candidates?.confirmDelete(view().generation)) {
+            // 说清删的是哪一项；名字过长时截短，说明本身不能被右侧提示挤掉（准备态右侧只留 Esc）
+            const name = Array.from(value.items[candidates?.selected ?? 0]?.label ?? '');
+            setStatus(candidates?.deleteArmed ? `再次按 Ctrl+D 删除「${name.slice(0, 24).join('')}${name.length > 24 ? '…' : ''}」；其他键取消。` : '');
+            return;
+          }
+          setStatus(operation === 'delete' ? '正在删除…' : '');
+          void candidates?.manage(operation).then(deleted => {
+            if (operation === 'delete') setStatus(deleted ? '已删除。' : '');
+          }).catch(reportStatus());
           return;
         }
       }
@@ -739,9 +761,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     if (candidateOpen() && candidateHeight() && event.ctrl && event.name === 'r' && candidateValue()?.mode !== 'picker') { consume(); candidates?.refresh(); return; }
     if (candidateOpen() && candidateHeight() && !event.ctrl && !event.shift && !event.meta) {
-      if (event.name === 'pageup' || event.name === 'pagedown') { consume(); candidateView?.page(event.name === 'pageup' ? -1 : 1); return; }
+      // 翻页移动选中项（一页约为可见行数减一），视图随选中项跟随；只滚视图会让 Enter 作用到看不见的条目
+      if (event.name === 'pageup' || event.name === 'pagedown') { consume(); candidates?.move(event.name === 'pageup' ? -1 : 1, Math.max(1, candidateHeight() - 5)); return; }
       if (event.name === 'up' || event.name === 'down') { consume(); candidates?.move(event.name === 'up' ? -1 : 1); return; }
       if (event.name === 'tab' || event.name === 'return') {
+        // 没有匹配项时 Enter 照常提交：未知命令由宿主说明"命令不可用"，草稿保留供修改。
+        // 管理面板里 Enter 仍不提交（面板靠两次 Ctrl+D 与 Esc 操作）
+        if (event.name === 'return' && !candidateLoading() && !candidateItems().length && candidateValue()?.mode !== 'management') {
+          consume(); candidates?.dismiss(); void submit().catch(reportStatus()); return;
+        }
         if (candidateLoading() || !candidateItems().length) { consume(); return; }
         consume(); void candidates?.accept().then(execute => { if (execute) return submit(); }).catch(reportStatus()); return;
       }
