@@ -120,4 +120,18 @@ describe('terminal session navigation', () => {
     expect(project({ reason: 'error', error: { message: 'unavailable' } }).message).toBe('任务未完成：unavailable');
     expect(project({ reason: 'error', error: { message: 'x'.repeat(10000) } }).message.length).toBeLessThan(2100);
   });
+  it('explains a model service connection failure instead of showing the SDK text', () => {
+    const project = (message: string) => projectTerminalTurnOutcome({ result: { reason: 'error', error: { message }, usage: { inputTokens: 0, outputTokens: 0 } } as TurnOutcome['result'] }).message;
+    expect(project('Connection error.')).toBe('任务未完成：无法连接模型服务：请检查网络、代理或服务地址后重试。');
+    expect(project('Request timed out.')).toContain('模型服务响应超时');
+    // 已是中文说明或未知原因的保持原文
+    expect(project('当前模型不支持图片输入。请切换到支持图片输入的模型，或移除图片后重试。')).toBe('任务未完成：当前模型不支持图片输入。请切换到支持图片输入的模型，或移除图片后重试。');
+  });
+  it('states the real first cause before a budget stop and explains a real budget exhaustion', () => {
+    const project = (message: string) => projectTerminalTurnOutcome({ result: { reason: 'error', error: { message }, usage: { inputTokens: 0, outputTokens: 0 } } as TurnOutcome['result'] }).message;
+    expect(project('Model usage budget exhausted while retrying after: Connection error.'))
+      .toBe('任务未完成：无法连接模型服务：请检查网络、代理或服务地址后重试。（重试时本次运行的模型用量已达上限，已停止重试。）');
+    expect(project('Resource commitments tokens exceeds budget'))
+      .toBe('任务未完成：本次运行的模型用量已达上限，已停止：发送新消息会按新的额度继续；对话很长时可先用 /compact 整理上下文。');
+  });
 });

@@ -10,7 +10,16 @@ export { CircuitBreaker } from "./circuit-breaker.js";
 export {
   classifyProviderError,
   getRecoveryStrategy,
+  isConnectPhaseFailure,
+  markRequestUndelivered,
+  providerRequestNeverSent,
 } from "./classify.js";
+
+export {
+  budgetStopAfterFailure,
+  isResourceBudgetExceeded,
+  parseModelBudgetStop,
+} from "./budget-stop.js";
 
 export { withRetry } from "./with-retry.js";
 export type { CallLLMFn, WithRetryOptions } from "./with-retry.js";

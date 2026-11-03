@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ChatRequest, StreamEvent } from "@zhixing/core";
 import { userMessage } from "@zhixing/core";
+import { providerRequestNeverSent } from "@zhixing/core/resilience";
 import type { ResolvedProvider } from "../types.js";
 import { DEFAULT_QUIRKS } from "../types.js";
 import { createAnthropicProvider } from "../adapters/anthropic-messages.js";
@@ -170,6 +171,21 @@ describe("createAnthropicProvider", () => {
   });
 
   // ─── 纯文本响应 ───
+
+  it("错误码本身不构成未送达证明：没经过受控传输的拒连错误不判未送达（真实传输见 cli 回环用例）", async () => {
+    const refused = Object.assign(new Error("Connection error."), { cause: Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }) });
+    mockCreate.mockRejectedValue(refused);
+    const events = await collectEvents(createAnthropicProvider(makeProvider()).chat({ model: "claude-sonnet-4-20250514", messages: [userMessage("Hi")] }));
+    expect(events.map((event) => event.type)).toEqual(["message_start", "error"]);
+    expect(providerRequestNeverSent((events[1] as Extract<StreamEvent, { type: "error" }>).error)).toBe(false);
+    expect(MockAnthropic).toHaveBeenCalledWith(expect.objectContaining({ fetch: expect.any(Function) }));
+  });
+
+  it("SDK 内部不重试：重试只在 withRetry 一层", async () => {
+    mockCreate.mockResolvedValue(mockStream([messageStartEvent({ input_tokens: 1, output_tokens: 1 }), messageDelta("end_turn", 1), messageStop()]));
+    await collectEvents(createAnthropicProvider(makeProvider()).chat({ model: "claude-sonnet-4-20250514", messages: [userMessage("Hi")] }));
+    expect(MockAnthropic).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
+  });
 
   it("应正确处理纯文本流式响应", async () => {
     mockCreate.mockResolvedValue(

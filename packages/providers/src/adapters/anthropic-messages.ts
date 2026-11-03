@@ -20,6 +20,8 @@ import type {
 } from "@zhixing/core";
 import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
+import { markRequestUndelivered } from "@zhixing/core/resilience";
+import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
 import { buildAnthropicThinkingParam } from "./thinking-params.js";
 
 // ─── 内部类型 ───
@@ -50,6 +52,10 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
     client ??= import("@anthropic-ai/sdk").then(({ default: Anthropic }) => new Anthropic({
       apiKey: resolved.apiKey,
       baseURL: resolved.baseUrl || undefined,
+      // 重试只在 core 的 withRetry 一层：一次调用只发一次请求，界面显示的重试次数也是真实次数
+      maxRetries: 0,
+      // 受控传输按调用记账，只有整次调用都没送达才给错误打未送达标记（计量据此按 0 token 结算）
+      fetch: deliveryFetch,
     }));
     client.catch(() => { client = undefined; });
     return client;
@@ -115,11 +121,12 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
       let stopReason: StopReason = "end_turn";
       const blocks = new Map<number, BlockState>();
 
+      const delivery = newDelivery();
       try {
-        const stream = await (await connect()).messages.create(
+        const stream = await withDelivery(delivery, async () => (await connect()).messages.create(
           params as unknown as Anthropic.MessageCreateParamsStreaming,
           request.abortSignal ? { signal: request.abortSignal } : undefined,
-        );
+        ));
 
         for await (const event of stream) {
           switch (event.type) {
@@ -209,10 +216,9 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
           }
         }
       } catch (err) {
-        yield {
-          type: "error",
-          error: err instanceof Error ? err : new Error(String(err)),
-        };
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (provenUndelivered(delivery)) markRequestUndelivered(error);
+        yield { type: "error", error };
         return;
       }
 

@@ -5,6 +5,7 @@ import { boundedProcessValue, processText, projectSessionArtifact, validateSessi
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import type { TerminalProcessView, ProcessChildView } from '@zhixing/terminal-ui/process-model';
 import { cleanProcessText } from '@zhixing/terminal-ui/process-model';
+import { modelFailureText } from './model-failure.js';
 import { getToolRenderStrategy, processArtifactText, processArtifactSpans, processArtifactLines, processBatch, processToolInput, processToolSnapshot, processToolSummary, type ProcessBlock, type ProcessToolSnapshot } from './process-presentation.js';
 
 export interface ProcessScope {
@@ -253,7 +254,7 @@ export class TerminalProcessProjection {
       }
       case 'retry:attempt': if (main) this.#activityNotice = `请求重试 ${event.payload.attempt}/${event.payload.maxRetries} · ${event.payload.errorType}`; break;
       case 'retry:success': if (main) this.#activityNotice = undefined; break;
-      case 'retry:exhausted': if (main) this.#notice = `重试未成功：${processText(event.payload.lastError, 768)}`; break;
+      case 'retry:exhausted': if (main) this.#notice = `重试未成功：${modelFailureText(processText(event.payload.lastError, 768))}`; break;
       case 'segment:transition_start': if (main) this.#phase = '正在整理上下文'; break;
       case 'segment:new_started': if (main) this.#notice = '上下文已整理'; break;
       case 'segment:transition_failed': if (main) this.#notice = `上下文整理未完成：${processText(event.payload.error, 768)}`; break;

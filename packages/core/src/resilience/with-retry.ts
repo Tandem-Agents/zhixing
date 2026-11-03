@@ -24,6 +24,7 @@ import type { AgentEventMap } from "../types/agent-events.js";
 import type { ChatRequest, StreamEvent } from "../types/llm.js";
 import { resolveDelay, sleep } from "./backoff.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
+import { budgetStopAfterFailure, isResourceBudgetExceeded } from "./budget-stop.js";
 import { classifyProviderError, errorCauseSummary } from "./classify.js";
 import type { RetryConfig } from "./types.js";
 import { DEFAULT_RETRY_CONFIG } from "./types.js";
@@ -168,6 +169,7 @@ async function* retryableStream(
     if (request.abortSignal?.aborted) return;
 
     // ── 错误处理 ──
+    const previousError = lastError;
     lastError = streamError;
     const errorType = classifyProviderError(streamError);
     const isRetryable = config.retryableTypes.includes(errorType);
@@ -184,9 +186,12 @@ async function* retryableStream(
       yield {
         type: "error",
         error:
-          streamError instanceof Error
-            ? streamError
-            : new Error(String(streamError)),
+          // 重试尝试被资源额度挡下：额度只是停止重试的原因，真实首因是上一次失败
+          attempt > 0 && isResourceBudgetExceeded(streamError)
+            ? budgetStopAfterFailure(previousError, streamError as Error)
+            : streamError instanceof Error
+              ? streamError
+              : new Error(String(streamError)),
       };
       return;
     }

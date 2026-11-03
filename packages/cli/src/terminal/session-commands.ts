@@ -7,6 +7,7 @@ import type { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { formatRelativeTimeText } from '../commands/format.js';
+import { modelFailureText } from './model-failure.js';
 import type { TerminalSelectionPort } from './selection.js';
 
 /** 场景内选 /work 的引导：进入路径、命令路径与候选空提示同一说明。 */
@@ -34,7 +35,10 @@ export function projectTerminalTurnOutcome(outcome: TurnOutcome): TerminalTurnOu
     case 'completed': message = '本次运行已结束。'; break;
     case 'max_turns': message = `本次运行已达到轮次上限（${result.maxTurns}）并停止。`; break;
     case 'aborted': message = '本次运行已中止。'; break;
-    case 'error': message = `任务未完成：${result.error.message.slice(0, 2048)}${result.error.message.length > 2048 ? '…（完整错误见运行记录）' : ''}`; break;
+    case 'error': {
+      const text = modelFailureText(result.error.message);
+      message = `任务未完成：${text.slice(0, 2048)}${text.length > 2048 ? '…（完整错误见运行记录）' : ''}`; break;
+    }
     default: { const unhandled: never = result; throw Error(`terminal-turn-result:${unhandled}`); }
   }
   const control = outcome.postTurnControl, intent = control?.intent;

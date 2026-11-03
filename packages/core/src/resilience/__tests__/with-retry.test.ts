@@ -603,6 +603,39 @@ describe("withRetry", () => {
 
   // ─── abort fast-path: 协议层不变量 (abort = 主动终止意图, 永不重试) ───
 
+  describe("资源额度停止", () => {
+    const budgetError = () => new TypeError("Resource commitments tokens exceeds budget");
+
+    it("重试尝试被额度挡下：不再重试，错误以上一次失败为首因", async () => {
+      let callCount = 0;
+      const callLLM: CallLLMFn = async function* () {
+        callCount++;
+        if (callCount === 1) {
+          yield { type: "error", error: Object.assign(new Error("Connection error."), { cause: makeNetworkError("ECONNRESET") }) };
+          return;
+        }
+        throw budgetError();
+      };
+      const wrapped = withRetry(callLLM, {
+        config: { maxRetries: 3, backoff: { baseDelayMs: 50, maxDelayMs: 500, jitter: false } },
+      });
+      const resultPromise = collectEvents(wrapped(DUMMY_REQUEST));
+      await vi.advanceTimersByTimeAsync(50);
+      const events = await resultPromise;
+      expect(callCount).toBe(2);
+      const error = (events.at(-1) as Extract<StreamEvent, { type: "error" }>).error;
+      expect(error.message).toBe("Model usage budget exhausted while retrying after: Connection error.");
+      expect(error.cause).toBeInstanceOf(TypeError);
+    });
+
+    it("首次调用就被额度挡下：原样交出、不重试", async () => {
+      const callLLM = vi.fn<CallLLMFn>(async function* () { throw budgetError(); });
+      const events = await collectEvents(withRetry(callLLM)(DUMMY_REQUEST));
+      expect(callLLM).toHaveBeenCalledTimes(1);
+      expect((events.at(-1) as Extract<StreamEvent, { type: "error" }>).error.message).toBe("Resource commitments tokens exceeds budget");
+    });
+  });
+
   describe("abort 路径 fast-path: 永不重试", () => {
     it("循环顶 check: signal 已 aborted (defense pre-flight) → silent return 不 emit retry", async () => {
       vi.useRealTimers();

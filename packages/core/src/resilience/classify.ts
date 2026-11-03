@@ -13,6 +13,7 @@
  */
 
 import type { AgentErrorType } from "../types/errors.js";
+import { parseModelBudgetStop } from "./budget-stop.js";
 import type { RecoveryStrategy } from "./types.js";
 
 // ─── 错误分类 ───
@@ -32,6 +33,9 @@ export function classifyProviderError(error: unknown): AgentErrorType {
 
   // AbortError：用户主动取消
   if (isAbortError(error)) return "aborted";
+
+  // 资源额度停止（含重试时被额度挡下的组合错误）：不是服务端错误，重试也不会变，交给界面如实说明
+  if (error instanceof Error && parseModelBudgetStop(error.message)) return "invalid_request";
 
   // HTTP 状态码分类
   const status = getStatusCode(error);
@@ -121,8 +125,42 @@ const NETWORK_ERROR_CODES = new Set([
   "FETCH_ERROR",
 ]);
 
+// ─── 请求未发出 ───
+
+/** 连接建立前就失败的错误码：拒绝连接、域名解析失败、主机或网络不可达，这一次连接没有送出任何字节。
+ *  连接中断、超时等不在内：请求可能已经到达服务端。 */
+const UNSENT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+]);
+
 /** 错误链扫描上限；超过即视为原因无法辨清。 */
 const CAUSE_CHAIN_LIMIT = 8;
+
+/**
+ * 一次 fetch 的拒绝是否只来自连接阶段：整条 cause 链在上限内扫完，没有任何 HTTP 状态，
+ * 出现过连接阶段错误码，且 AggregateError（如 localhost 的多地址尝试）的每一条内层错误也都是连接阶段失败。
+ * 它只说明这一次连接没送出字节；整次调用是否送达由传输层结合跳转与响应记录判断。
+ */
+export function isConnectPhaseFailure(error: unknown, depth = 0): boolean {
+  let unsent = false;
+  let current: unknown = error;
+  for (; current && depth < CAUSE_CHAIN_LIMIT; depth++) {
+    if (getStatusCode(current) !== undefined) return false;
+    const code = getErrorCode(current);
+    if (code && UNSENT_ERROR_CODES.has(code)) unsent = true;
+    const inner = typeof current === "object" ? (current as { errors?: unknown }).errors : undefined;
+    if (Array.isArray(inner) && inner.length) {
+      if (!inner.every((item) => isConnectPhaseFailure(item, depth + 1))) return false;
+      unsent = true;
+    }
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return unsent && !current;
+}
 
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,40}$/u;
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,40}$/u;
@@ -171,6 +209,27 @@ export function errorCauseSummary(error: unknown): string | undefined {
   }
   const summary = merged.join(" ← ");
   return summary.length <= CAUSE_SUMMARY_CHARS ? summary : `${summary.slice(0, CAUSE_SUMMARY_CHARS - 1)}…`;
+}
+
+/** 传输层证明“整次调用都没送达”时打在错误上的标记；只有受控传输能打，错误码本身不构成证明。 */
+const REQUEST_UNDELIVERED = Symbol.for("zhixing.provider.request-undelivered");
+
+export function markRequestUndelivered(error: unknown): void {
+  if (error && typeof error === "object") Object.defineProperty(error, REQUEST_UNDELIVERED, { value: true });
+}
+
+/**
+ * 一次 provider 调用是否已证明整次都没送达：必须带传输层的未送达标记，且整条 cause 链在上限内扫完、没有任何 HTTP 状态。
+ * 跟随跳转后才被拒、链上有中间响应、链过长无法辨清，一律不成立（按可能已送达保守处理）。
+ */
+export function providerRequestNeverSent(error: unknown): boolean {
+  if (!error || typeof error !== "object" || (error as Record<symbol, unknown>)[REQUEST_UNDELIVERED] !== true) return false;
+  let current: unknown = error;
+  for (let depth = 0; current && depth < CAUSE_CHAIN_LIMIT; depth++) {
+    if (getStatusCode(current) !== undefined) return false;
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return !current;
 }
 
 // ─── 消息启发式分类 ───

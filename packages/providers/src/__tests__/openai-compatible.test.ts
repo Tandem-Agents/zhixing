@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ChatRequest, StreamEvent } from "@zhixing/core";
 import { userMessage } from "@zhixing/core";
+import { providerRequestNeverSent } from "@zhixing/core/resilience";
 import type { ResolvedProvider } from "../types.js";
 import { DEFAULT_QUIRKS } from "../types.js";
 import { createOpenAICompatibleProvider } from "../adapters/openai-compatible.js";
@@ -145,10 +146,21 @@ describe("createOpenAICompatibleProvider", () => {
     const provider = createOpenAICompatibleProvider(makeProvider());
     await provider.prepare?.();
     expect(MockOpenAI).toHaveBeenCalledTimes(1);
+    // SDK 内部不重试：重试只在 withRetry 一层
+    expect(MockOpenAI).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
     expect(mockCreate).not.toHaveBeenCalled();
     await collectEvents(provider.chat({ model: "test-model", messages: [userMessage("hi")] }));
     expect(MockOpenAI).toHaveBeenCalledTimes(1);
     expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("错误码本身不构成未送达证明：没经过受控传输的拒连错误不判未送达（真实传输见 cli 回环用例）", async () => {
+    const refused = Object.assign(new Error("Connection error."), { cause: Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }) });
+    mockCreate.mockRejectedValue(refused);
+    const events = await collectEvents(createOpenAICompatibleProvider(makeProvider()).chat({ model: "test-model", messages: [userMessage("hi")] }));
+    expect(events.map((event) => event.type)).toEqual(["message_start", "error"]);
+    expect(providerRequestNeverSent((events[1] as Extract<StreamEvent, { type: "error" }>).error)).toBe(false);
+    expect(MockOpenAI).toHaveBeenCalledWith(expect.objectContaining({ fetch: expect.any(Function) }));
   });
 
   it("prepare 失败不影响之后的调用照常重试", async () => {

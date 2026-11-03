@@ -28,6 +28,8 @@ import type {
 } from "@zhixing/core";
 import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
+import { markRequestUndelivered } from "@zhixing/core/resilience";
+import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
 import { parseOpenAICompatibleUsage } from "./openai-usage.js";
 import { buildOpenAICompatibleThinkingParams } from "./thinking-params.js";
 
@@ -80,6 +82,10 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
     client ??= import("openai").then(({ default: OpenAI }) => new OpenAI({
       baseURL: provider.baseUrl,
       apiKey: provider.apiKey,
+      // 重试只在 core 的 withRetry 一层：一次调用只发一次请求，界面显示的重试次数也是真实次数
+      maxRetries: 0,
+      // 受控传输按调用记账，只有整次调用都没送达才给错误打未送达标记（计量据此按 0 token 结算）
+      fetch: deliveryFetch,
     }));
     client.catch(() => { client = undefined; });
     return client;
@@ -155,10 +161,11 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
       //     的极端场景 thinking 段悬挂)
       let inThinking = false;
 
+      const delivery = newDelivery();
       try {
-        const stream = await (await connect()).chat.completions.create(params, {
+        const stream = await withDelivery(delivery, async () => (await connect()).chat.completions.create(params, {
           signal: request.abortSignal ?? undefined,
-        });
+        }));
 
         for await (const chunk of stream) {
           const choice = chunk.choices?.[0];
@@ -251,7 +258,9 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
           }
         }
       } catch (err) {
-        yield { type: "error", error: err instanceof Error ? err : new Error(String(err)) };
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (provenUndelivered(delivery)) markRequestUndelivered(error);
+        yield { type: "error", error };
         return;
       }
 

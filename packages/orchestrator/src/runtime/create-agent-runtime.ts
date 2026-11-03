@@ -79,7 +79,7 @@ import {
 } from "@zhixing/core/loop";
 import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { wrapStreamWithWatchdog } from "@zhixing/core/interrupt";
-import { withRetry } from "@zhixing/core/resilience";
+import { providerRequestNeverSent, withRetry } from "@zhixing/core/resilience";
 import type {
   AssignmentGlobalQueryPort,
   ModelCallResourceMeter,
@@ -1989,11 +1989,26 @@ export function meteredProviderCall(input: {
       callIndex: input.nextCallIndex(),
       tokenUpperBound,
     });
-    let consumed = false;
+    let consumed = false, received = false;
     const phase = providerPhase(input.phases);
+    // 连接阶段就失败（拒绝连接、域名解析失败等）且还没收到服务端的任何事件：请求没有发出。按 0 token 收束本次预占，
+    // 免得每次重试的预占累积成额度不足、盖住真实的连接失败；其余失败保留预占，由运行终结按上限保守结算。
+    // 适配器在发请求之前就先产出 message_start，它不说明请求已到达服务端，不算“收到”
+    const settleUnsent = async (error: unknown): Promise<void> => {
+      if (received || consumed || !providerRequestNeverSent(error)) return;
+      consumed = true;
+      phase.settle();
+      try {
+        await input.meter.consume({ usageId: reservation.usageId, tokens: 0 });
+      } catch {
+        // 收束失败只是保留预占（与发出后中断同样保守），不盖住原始失败
+      }
+    };
     phase.enter();
     try {
       for await (const event of input.call(providerRequest)) {
+        if (event.type === "error") await settleUnsent(event.error);
+        else if (event.type !== "message_start") received = true;
         if (event.type === "message_end") {
           if (consumed) {
             throw new TypeError("Model provider emitted more than one terminal usage event");
@@ -2005,6 +2020,9 @@ export function meteredProviderCall(input: {
         }
         yield event;
       }
+    } catch (error) {
+      await settleUnsent(error);
+      throw error;
     } finally {
       // provider 失败、被中止或消费方提前结束，都没有 message_end：同样回到本地处理
       phase.settle();
