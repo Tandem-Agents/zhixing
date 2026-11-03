@@ -63,6 +63,13 @@ describe("buildDisplayBody", () => {
     }
   });
 
+  it("save_skill → 技能名、说明、适用位置与正文全文，不给参数 JSON", () => {
+    const body = buildDisplayBody("save_skill", { name: "隔离验收技能", description: "仅用于本轮", body: "第一步\n\x1b[31m第二步\x1b[0m", mode: "work" });
+    expect(body).toEqual({ kind: "generic", summary: "保存技能「隔离验收技能」\n说明：仅用于本轮\n适用：工作场景\n正文（7 字）：\n第一步\n第二步" });
+    const unspecified = buildDisplayBody("save_skill", { name: "x", description: "y", body: "z" });
+    expect(unspecified.kind === "generic" && unspecified.summary).toContain("适用：未指定，按当前所在位置");
+  });
+
   it("shell 是 bash 的别名", () => {
     const body = buildDisplayBody("shell", { command: "echo hi" });
     expect(body.kind).toBe("bash");

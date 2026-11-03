@@ -48,6 +48,6 @@ export function createTrustRuleArgProvider(
     },
     inlineActions: { delete: true },
     emptyHint:
-      "暂无信任规则，触发 confirm 时选 [a]/[g] 显式创建，或同模式累计达阈值自动建立",
+      "暂无信任规则：出现操作确认时选“始终允许”（[a] 当前范围、[g] 全局）即可建立；同类操作确认多次后也会自动建立",
   };
 }

@@ -92,6 +92,18 @@ export function buildDisplayBody(
     return { kind: "generic", summary: `接入 MCP 服务「${candidate?.serverId ?? "未知"}」\n执行设备：${sanitizeCommandPreview(displayContext?.executionDeviceId ?? "当前执行设备")}\n${entry?.type === "http" ? `访问：${entry.url}` : `运行程序（可能下载安装）：${JSON.stringify([entry?.command, ...(entry?.args ?? [])])}`}\n允许保存配置并启动连接，实际可用后继续原任务；不向其他设备安装或复制凭据。服务工具的调用仍须分别获准。凭据仅通过安全配置面板输入，不发送到对话。` };
   }
 
+  if (name === "save_skill") {
+    // 保存的正文会影响之后的行为，批准前完整可见（确认页可滚动）；不把参数 JSON 原样给用户
+    const text = (key: string) => sanitizeCommandPreview(asString(input[key]).trim());
+    const body = text("body");
+    const mode = input["mode"] === "work" ? "工作场景" : input["mode"] === "main" ? "主模式" : "未指定，按当前所在位置";
+    return {
+      kind: "generic",
+      summary: [`保存技能「${text("name") || "未命名"}」`, `说明：${text("description") || "（空）"}`, `适用：${mode}`,
+        `正文（${[...body].length} 字）：`, body || "（空）"].join("\n"),
+    };
+  }
+
   if (name === "bash" || name === "shell") {
     const command = asString(input["command"]);
     return {

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { ConfirmationDecision, ConfirmationOption, ConfirmationRequest } from '@zhixing/core/confirmation';
 import { translate } from '../security/confirmation-decision.js';
 import type { SelectionRequest } from '../tui/selection/types.js';
@@ -10,6 +11,11 @@ export interface TerminalConfirmation {
   readonly options: ReadonlyMap<string, ConfirmationOption>;
 }
 
+/** Windows 绝对路径按工具实际作用的目标展示：统一本机分隔符并折叠 . 与 ..（混用分隔符或绕行段不改变目标，但会让人看错）。 */
+export function targetPath(value: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' && path.win32.isAbsolute(value) ? path.win32.normalize(value) : value;
+}
+
 /** Drops tool input immediately; the decision surface retains only its bounded
  * required consequences and the exact options supplied by the authority. */
 export function projectTerminalConfirmation(request: ConfirmationRequest): TerminalConfirmation {
@@ -17,9 +23,9 @@ export function projectTerminalConfirmation(request: ConfirmationRequest): Termi
   const lines = display.stewardReason ? [`安全助理察觉风险：${display.stewardReason}`, ''] : [];
   switch (body.kind) {
     case 'bash': lines.push(display.commandFull ?? body.command); break;
-    case 'file-write': lines.push(`写入 ${body.path}`, body.preview ?? ''); break;
-    case 'file-edit': lines.push(`编辑 ${body.path}`, body.diff ?? ''); break;
-    case 'file-read': lines.push(`读取 ${body.path}`); break;
+    case 'file-write': lines.push(`写入 ${targetPath(body.path)}`, body.preview ?? ''); break;
+    case 'file-edit': lines.push(`编辑 ${targetPath(body.path)}`, body.diff ?? ''); break;
+    case 'file-read': lines.push(`读取 ${targetPath(body.path)}`); break;
     case 'network': lines.push(`${body.direction === 'inbound' ? '入站' : '出站'}网络：${body.host}`); break;
     case 'messaging': lines.push(`消息 → ${body.recipient}`, body.content); break;
     case 'calendar': lines.push(body.title, ...body.invitees); break;

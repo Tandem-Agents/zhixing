@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { ConfirmationRequest } from '@zhixing/core/confirmation';
-import { projectTerminalConfirmation, resolveTerminalConfirmation } from '../confirmation.js';
+import { projectTerminalConfirmation, resolveTerminalConfirmation, targetPath } from '../confirmation.js';
+
+it('shows a Windows absolute path as its actual target with native separators', () => {
+  expect(targetPath('E:\\fixture\\entry-journey-9828/tool-proof.txt', 'win32')).toBe('E:\\fixture\\entry-journey-9828\\tool-proof.txt');
+  expect(targetPath('E:\\a\\..\\b/./c.txt', 'win32')).toBe('E:\\b\\c.txt');
+  expect(targetPath('notes/a.txt', 'win32')).toBe('notes/a.txt');
+  expect(targetPath('/tmp/a/../b', 'linux')).toBe('/tmp/a/../b');
+});
 
 function request(command = 'synthetic command'): ConfirmationRequest {
   return { id: 'own-request', tool: 'Bash', toolInput: { command }, workingDirectory: 'synthetic',
