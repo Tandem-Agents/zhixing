@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint, parseWindowsProcessBirth } from "./startup-server-owner.js";
 
 describe("production startup server ownership", () => {
   it("installs consumers before startup recovery and opens Channel transport only after recovery", async () => {
@@ -734,5 +734,83 @@ describe("host-stop old endpoint identity", () => {
   it("keeps an unreadable live process as potentially old despite port ownership", async () => {
     await expect(endpointProcessMayBeOldHost(owner(19128), old(10), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
     await expect(endpointProcessMayBeOldHost(owner(), old(10), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
+  });
+
+  it("excludes a PID whose direct read is denied only when the OS fallback birth is clearly later than the old generation", async () => {
+    const denied = { alive: () => true, birth: async () => ({ kind: 'unknown' as const }) };
+    const fallback = (startTime: number) => ({ ...denied, osBirth: async () => ({ kind: 'present' as const, startTime }) });
+    // 相同出生：仍可能是旧宿主
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), fallback(10))).resolves.toBe(true);
+    // 精度以内与更早（与记录矛盾）都不排除
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), fallback(11))).resolves.toBe(true);
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), fallback(5))).resolves.toBe(true);
+    // 明确晚于旧代：PID 已归新进程（Z102：svchost 出生晚于旧宿主约 30 秒）
+    await expect(endpointProcessMayBeOldHost(owner(), old(1793509535568), fallback(1793540279633))).resolves.toBe(false);
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), fallback(12))).resolves.toBe(false);
+    // 后备也读不到
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), { ...denied, osBirth: async () => ({ kind: 'unknown' }) })).resolves.toBe(true);
+    // 没有出生字段的旧记录按记录时刻比较
+    const recorded = Date.parse(old(null).startedAt);
+    await expect(endpointProcessMayBeOldHost(owner(), old(null), fallback(recorded))).resolves.toBe(true);
+    await expect(endpointProcessMayBeOldHost(owner(), old(null), fallback(recorded + 2))).resolves.toBe(false);
+  });
+
+  it("consults the OS fallback only when the direct read is unknown", async () => {
+    const unexpected = async () => { throw Error("fallback must not run"); };
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), { alive: () => true, birth: async () => ({ kind: 'present', startTime: 10 }), osBirth: unexpected })).resolves.toBe(true);
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), { alive: () => true, birth: async () => ({ kind: 'absent' }), osBirth: unexpected })).resolves.toBe(false);
+  });
+});
+
+describe("Windows WMI process birth", () => {
+  const zone = () => 480;
+  const now = Date.parse("2026-11-02T08:00:00.000Z");
+  const unknown = { kind: 'unknown' };
+
+  it("reads one matching row as Unix milliseconds floored like the native identity", () => {
+    expect(parseWindowsProcessBirth("18156 20261102120000.123999+480\r\n", 18156, zone, now))
+      .toEqual({ kind: 'present', startTime: Date.parse("2026-11-02T04:00:00.123Z"), toleranceMs: 0 });
+  });
+
+  // 出生时 -240、查询时已跨季到 -300（总控反例）
+  const eastern = (at: number) => at < Date.parse("2026-11-01T06:00:00.000Z") ? -240 : -300;
+
+  it("normalizes by the embedded offset even when the zone offset has changed since birth", () => {
+    expect(parseWindowsProcessBirth("18156 20261015120000.000000-240", 18156, eastern, now))
+      .toEqual({ kind: 'present', startTime: 1792080000000, toleranceMs: 0 });
+  });
+
+  it("counts an embedded offset that disagrees with the zone at that instant as tolerance", () => {
+    expect(parseWindowsProcessBirth("18156 20261015120000.000000-300", 18156, eastern, now))
+      .toEqual({ kind: 'present', startTime: 1792083600000, toleranceMs: 3_600_000 });
+  });
+
+  it("excludes a clearly later generation across the offset change and keeps the same generation", async () => {
+    const owner = { ownsEndpoint: () => false };
+    const old = (startTime: number) => ({ pid: 18156, port: 1, startTime, startedAt: "2026-10-15T15:00:00.000Z" });
+    const probes = (stdout: string) => ({ alive: () => true, birth: async () => ({ kind: 'unknown' as const }),
+      osBirth: async (pid: number) => parseWindowsProcessBirth(stdout, pid, eastern, now) });
+    // 确证样本：复用者出生明显晚于旧代
+    await expect(endpointProcessMayBeOldHost(owner, old(1792000000000), probes("18156 20261015120000.000000-240"))).resolves.toBe(false);
+    // 同代反例：同一出生不排除
+    await expect(endpointProcessMayBeOldHost(owner, old(1792080000000), probes("18156 20261015120000.000000-240"))).resolves.toBe(true);
+    // 串内偏移与时区不一致时的同代：换算差一小时也不被误排除；明显更晚仍排除
+    await expect(endpointProcessMayBeOldHost(owner, old(1792080000000), probes("18156 20261015120000.000000-300"))).resolves.toBe(true);
+    await expect(endpointProcessMayBeOldHost(owner, old(1792000000000), probes("18156 20261015120000.000000-300"))).resolves.toBe(false);
+  });
+
+  it.each([
+    ["no row", ""],
+    ["another PID", "18157 20261102120000.123456+480"],
+    ["two rows", "18156 20261102120000.123456+480\n18156 20261102120000.123456+480"],
+    ["masked microseconds", "18156 20261102120000.******+480"],
+    ["an invalid month", "18156 20261302120000.123456+480"],
+    ["a birth after now", "18156 20261102170000.000000+480"],
+  ])("returns unknown for %s", (_label, stdout) => {
+    expect(parseWindowsProcessBirth(stdout, 18156, zone, now)).toEqual(unknown);
+  });
+
+  it("returns unknown for an offset outside the valid range", () => {
+    expect(parseWindowsProcessBirth("18156 20261102120000.000000+900", 18156, zone, now)).toEqual(unknown);
   });
 });

@@ -23,7 +23,7 @@
  */
 
 import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, win32 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { getDefaultPidPath, getDefaultPortPath } from "./paths.js";
@@ -240,9 +240,11 @@ async function readLinuxStartTime(pid: number): Promise<number | null> {
 }
 
 async function readWindowsStartTime(pid: number): Promise<number | null> {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  // 出生时间是身份证明的依据：系统程序按系统目录绝对路径调用，不经 PATH 与当前目录查找
+  const root = process.env.SystemRoot ?? process.env.windir;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !root || !win32.isAbsolute(root)) return null;
   try {
-    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    const { stdout } = await execFileAsync(win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command",
       `[DateTimeOffset]::new((Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`],
       { timeout: 2000, maxBuffer: 4096, windowsHide: true });
     const birth = Number(stdout.trim());

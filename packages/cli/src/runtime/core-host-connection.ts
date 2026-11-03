@@ -38,6 +38,7 @@ import { randomUUID } from "node:crypto";
 import { serverShutdownRequest } from "./server-shutdown-request.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { observeStartupPhase } from "../logging/runtime.js";
+import { hostStartFailureNotice, occupiedHostPort } from "./host-port-occupancy.js";
 import type { LogRecordPort } from "@zhixing/core/logging";
 
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
@@ -203,7 +204,8 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
       return {
         ok: result.ok,
         reason: result.status === "starting" ? "等待本机服务就绪超时，可重试或用 zz logs 查看原因" : result.reason,
-        publicReason: result.launchMode === "none" ? "这台设备不需要后台运行" : result.status === "starting" ? "等待本机服务就绪超时。" : "本机服务启动失败。",
+        publicReason: result.launchMode === "none" ? "这台设备不需要后台运行" : result.status === "starting" ? "等待本机服务就绪超时。"
+          : result.ok ? "本机服务已就绪。" : hostStartFailureNotice(await occupiedHostPort(zhixingHome)),
         startupPending: result.status === "starting",
         // The daemon owner now observes this child for the whole attempt, including
         // exit and concurrent healthy-owner takeover. No second recovery window.
