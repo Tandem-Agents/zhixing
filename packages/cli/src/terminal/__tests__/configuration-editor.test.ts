@@ -53,6 +53,18 @@ describe('single-root Node configuration transaction', () => {
     editor.cancel(); await result;
   });
 
+  it('shows the recovered-save notice on the home page until the first operation', async () => {
+    const views: Omit<TerminalView, 'generation'>[] = [];
+    const editor = new TerminalConfigurationEditor({ session: { initialConfig: { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
+      initialCredentials: { providers: { deepseek: { apiKey: 'synthetic-key-123456' } } }, writers: { save: vi.fn() }, notice: '上次接纳的配置修改已保存完成。' },
+      title: '配置', sections: ['model'], purpose: 'edit', publish: async view => { views.push(view); } });
+    const result = editor.run();
+    await vi.waitFor(() => expect(views.at(-1)?.message).toContain('上次接纳的配置修改已保存完成。'));
+    await editor.act({ kind: 'configuration-action', editId: editor.editId, action: views.at(-1)!.choices![0]!.id });
+    expect(views.at(-1)?.message ?? '').not.toContain('上次接纳的配置修改已保存完成。');
+    editor.cancel(); await result;
+  });
+
   it('records terminal configuration saves with the configuration source without capture loss', async () => {
     const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
     const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
@@ -132,7 +144,9 @@ describe('single-root Node configuration transaction', () => {
     expect(h.current().message).toContain('密钥 2/2');
     expect(probe).not.toHaveBeenCalled();
     await h.editor.act({ kind: 'secret-value', editId: h.editor.editId, fieldId: 'ACCOUNT', value: 'synthetic-account-value' });
-    await vi.waitFor(() => expect(h.current().message).toContain('synthetic connection rejected'));
+    // 未知原因不外露探测原文，给中文说明与回到来源修改的入口
+    await vi.waitFor(() => expect(h.current().message).toContain('连接验证没有通过'));
+    expect(h.current().message).not.toContain('synthetic connection rejected');
     expect(probe).toHaveBeenCalledOnce();
     expect(probe.mock.calls[0]?.[0]).toMatchObject({ url: candidate.entry.url,
       credentials: { TOKEN: 'synthetic-token-value', ACCOUNT: 'synthetic-account-value' } });

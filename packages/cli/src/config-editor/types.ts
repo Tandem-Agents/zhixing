@@ -78,6 +78,8 @@ export type PanelDescriptor =
       inputs: Record<string, string>;
       fieldIndex: number;
       error?: string;
+      /** 用户输入的原始来源（预设名、网址、命令等）：验证失败后 Esc 带回来源输入供修改 */
+      source?: string;
     }
   /**
    * L3 (mcp)：搜索引导出的候选列表——用户输入关键词后搜真实 npm 包挑出的 ≤5 个候选，

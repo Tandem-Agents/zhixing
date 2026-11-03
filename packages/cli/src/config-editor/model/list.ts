@@ -11,7 +11,7 @@
 import { getPreset, ROLE_RECOMMENDATIONS, ROLE_SPECS } from "@zhixing/providers/configuration";
 import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
 import type { PanelAction, PanelDescriptor, WorkingState } from "../types.js";
-import { readModelRole, readModelThinking, readProviderEntry, writeModelRole, writeModelThinking } from "../state.js";
+import { clearModelRole, readModelRole, readModelThinking, readProviderEntry, writeModelRole, writeModelThinking } from "../state.js";
 import { SUPPORTED_PROVIDERS } from "../../registries/index.js";
 import type { KeyEvent } from "../../tui/key-event.js";
 
@@ -39,15 +39,21 @@ export interface ListPanelMeta {
 }
 
 export function buildProviderListMeta(
-  _state: WorkingState,
+  state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "provider-list" }>,
 ): ListPanelMeta {
   const roleLabel = ROLE_SPECS.find(spec => spec.id === descriptor.role)!.labelZh;
+  // 可选角色已单独配置时，提供撤回入口：回到沿用主模型
+  const revert: ListItem[] = descriptor.role !== "main" && readModelRole(state, descriptor.role) ? [{
+    label: "沿用主模型",
+    description: `不再单独配置${roleLabel}，改用主模型`,
+    onEnter: (s) => ({ type: "pop", state: clearModelRole(s, descriptor.role) }),
+  }] : [];
   return {
     title: `${roleLabel} · 选择服务商`,
     description: `选择 API 服务商作为${roleLabel}来源`,
     hasCurrentConcept: false,
-    items: SUPPORTED_PROVIDERS.map((p) => ({
+    items: [...revert, ...SUPPORTED_PROVIDERS.map((p): ListItem => ({
       label: p.label,
       description: p.description,
       onEnter: (s) => ({
@@ -55,7 +61,7 @@ export function buildProviderListMeta(
         state: s,
         panel: { kind: "provider-config", role: descriptor.role, providerId: p.id },
       }),
-    })),
+    }))],
   };
 }
 

@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "../state.js";
 import { modelSection } from "../sections/model.js";
+import { buildProviderListMeta } from "../model/list.js";
 import { deriveEntryIssues } from "../entry.js";
 import type { SectionEntry } from "../types.js";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
@@ -100,5 +101,24 @@ describe("model section · 可选角色就绪态派生（永不阻断，恒暗�
     // 未配置文案是"未启用"，不是"随主模型补 API Key"——两种 disabled 经
     // statusText 明确区分，用户不混淆
     expect(light.state.statusText).not.toContain("随主模型补 API Key");
+  });
+});
+
+describe("optional role revert", () => {
+  it("offers 沿用主模型 only for a configured optional role and clears that role", () => {
+    const state = createInitialState({
+      llm: { main: { provider: "siliconflow", model: "m-main" }, light: { provider: "deepseek", model: "m-light" } },
+    } as unknown as ZhixingConfig, {} as ZhixingCredentials);
+    const light = buildProviderListMeta(state, { kind: "provider-list", role: "light" });
+    expect(light.items[0]!.label).toBe("沿用主模型");
+    const action = light.items[0]!.onEnter(state);
+    expect(action.type).toBe("pop");
+    if (action.type === "pop") {
+      expect(action.state.config.llm?.light).toBeUndefined();
+      expect(action.state.config.llm?.main).toEqual({ provider: "siliconflow", model: "m-main" });
+    }
+    // 主模型必填、强力模型未单独配置：都不出现撤回项
+    expect(buildProviderListMeta(state, { kind: "provider-list", role: "main" }).items.some(item => item.label === "沿用主模型")).toBe(false);
+    expect(buildProviderListMeta(state, { kind: "provider-list", role: "power" }).items.some(item => item.label === "沿用主模型")).toBe(false);
   });
 });

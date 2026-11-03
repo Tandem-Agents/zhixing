@@ -13,6 +13,8 @@ export type ConfigurationEditResult =
 export interface NodeConfigurationEditSession {
   readonly initialConfig: ZhixingConfig;
   readonly initialCredentials: ZhixingCredentials;
+  /** 打开时需要先告诉用户的一句说明（如接续完成了上次的保存）；首次操作后不再显示 */
+  readonly notice?: string;
   readonly channelCatalog?: readonly SupportedChannel[];
   readonly channelSetup?: Readonly<Record<string, string>>;
   readonly channelStates?: Readonly<Record<string, {

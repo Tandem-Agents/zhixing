@@ -56,6 +56,16 @@ export function readModelRole(
  * 先放一个占位空 main 保持 schema 合法（写 main 时该占位被同次写入覆盖）。
  * 不再有 `role === "main" ? … : secondary` 的逐角色分支——新增角色零改动。
  */
+/** 撤回可选角色（轻量 / 强力）的单独配置，回到沿用主模型；主模型是必填键，不能撤回 */
+export function clearModelRole(state: WorkingState, role: ModelRole): WorkingState {
+  if (role === "main" || !state.config.llm?.[role]) return state;
+  const config = structuredClone(state.config);
+  const llm = { ...config.llm! };
+  delete llm[role];
+  config.llm = llm;
+  return { ...state, config };
+}
+
 export function writeModelRole(
   state: WorkingState,
   role: ModelRole,

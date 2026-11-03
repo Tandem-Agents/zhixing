@@ -173,11 +173,16 @@ describe("configuration and credential save", () => {
         await expect(writeConfig(baseline.config, options)).rejects.toThrow("尚未收束");
         await expect(addMcpServerConfiguration("other", { command: "node" }, options)).rejects.toThrow("尚未收束");
       }
+      // 只有接纳标记仍在、真的接续应用了已接纳的保存，才带出这个事实供界面说明；
+      // 标记已不在时只做清理，分不清“从未接纳”与“已应用后删了标记”，不声称完成
+      const accepted = fs.existsSync(marker);
       const recovered = await loadConfigurationSnapshot(options);
       expect(recovered.config).toEqual(point === "marker-before" ? baseline.config : next.config);
       expect(recovered.credentials).toEqual(point === "marker-before" ? baseline.credentials : next.credentials);
+      expect(recovered.recoveredEdit).toBe(accepted ? true : undefined);
       expect(await options.store.get(CONFIGURATION_EDIT_REF)).toBeNull();
       expect(fs.existsSync(marker)).toBe(false);
+      expect((await loadConfigurationSnapshot(options)).recoveredEdit).toBeUndefined();
     });
 
   it("recovers public-only intent and another config file sharing the same SecretStore", async () => {

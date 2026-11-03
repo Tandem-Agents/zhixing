@@ -15,6 +15,7 @@ import type {
 import { createInitialState, setInputBuffer } from "../state.js";
 import { mcpSection } from "../sections/mcp.js";
 import {
+  describeMcpProbeFailure,
   handleMcpAddInputPanelKey,
   handleMcpAddPanelKey,
   handleMcpChoicesPanelKey,
@@ -179,13 +180,34 @@ describe("handleMcpAddPanelKey — 接入向导", () => {
     const result = await action.run(new AbortController().signal);
     expect(result.type).toBe("replace");
     if (result.type === "replace") {
-      expect(result.panel).toMatchObject({ kind: "mcp-add", error: "401 bad token" });
+      // 探测原文不直接给用户：按类别给中文原因与下一步
+      expect(result.panel).toMatchObject({ kind: "mcp-add", error: "服务拒绝了凭据：请检查填写的密钥是否正确。" });
       if (result.panel.kind === "mcp-add") {
         expect(result.panel.candidate.serverId).toBe("github");
       }
       expect(result.state.inputBuffer).toBe("ghp_bad"); // 保留供修改重试
       expect(result.state.config.mcp?.servers?.github).toBeUndefined(); // 失败不写盘
     }
+  });
+
+  it("验证失败后 Esc 回到来源输入并带回原文；未失败时 Esc 照旧退回", () => {
+    const s0 = createInitialState({}, {});
+    const failed = { ...desc, error: "启动命令运行后立即退出了", source: "node ./missing-server.mjs" };
+    const back = handleMcpAddPanelKey(ctxWith(okProbe), s0, failed, { type: "escape" });
+    expect(back.type).toBe("replace");
+    if (back.type === "replace") {
+      expect(back.panel).toEqual({ kind: "mcp-add-input" });
+      expect(back.state.inputBuffer).toBe("node ./missing-server.mjs");
+    }
+    expect(handleMcpAddPanelKey(ctxWith(okProbe), s0, { ...desc, source: "github" }, { type: "escape" }).type).toBe("pop");
+  });
+
+  it("探测失败按类别说明：受限地址、启动即退出、未知原因不外露原文", () => {
+    expect(describeMcpProbeFailure("SSRF blocked: 127.0.0.1 is in restricted network 127.0.0.0/8", "http")).toContain("受限网络");
+    expect(describeMcpProbeFailure("MCP error -32000: Connection closed", "stdio")).toContain("启动命令运行后立即退出了");
+    const unknown = describeMcpProbeFailure("weird internal failure token=abc", "http");
+    expect(unknown).toContain("连接验证没有通过");
+    expect(unknown).not.toContain("token=abc");
   });
 
   it("未注入 probe → 防御性 replace 报错", () => {

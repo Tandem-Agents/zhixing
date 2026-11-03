@@ -40,6 +40,8 @@ export class TerminalConfigurationEditor {
   #loading?: AbortController;
   #current?: SurfaceView;
   #error?: string;
+  /** 打开时的一句说明（如接续完成了上次的保存），只显示在首页，第一次操作后清除 */
+  #notice?: string;
   #fieldId?: string;
   #fieldSecret = false;
   #probeBlocked = false;
@@ -62,6 +64,7 @@ export class TerminalConfigurationEditor {
     this.#state = { ...createInitialState(options.session.initialConfig, options.session.initialCredentials),
       channelCatalog: options.session.channelCatalog, channelSetup: options.session.channelSetup, channelStates: options.session.channelStates };
     this.#context = { sections: options.sections, runtime: options.runtime };
+    this.#notice = options.session.notice;
     this.#result = new Promise((resolve, reject) => { this.#resolve = resolve; this.#reject = reject; });
   }
 
@@ -98,7 +101,7 @@ export class TerminalConfigurationEditor {
     }
     const descriptor = this.#stack.at(-1)!;
     if (this.#probeBlocked && operation !== 'back') throw Error('请先查看完整连接目标，再确认验证。');
-    this.#error = undefined;
+    this.#error = undefined; this.#notice = undefined;
     let key: KeyEvent = { type: 'enter' };
     let index = 0;
     if (operation === 'back') key = { type: 'escape' };
@@ -239,6 +242,7 @@ export class TerminalConfigurationEditor {
               : { section: '操作', presentation: 'button' as const, primary: option.action === 'complete' && pending === 0,
                   shortcut: option.action === 'complete' ? 'Ctrl+S' : 'Esc' }) };
         }
+        if (this.#notice) message = this.#notice;
         break;
       }
       case 'provider-list': case 'model-list': case 'thinking-config': {

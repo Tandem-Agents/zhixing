@@ -29,7 +29,7 @@ export interface ConfigurationInteractionOptions {
   readonly mcpApplication?: (editor: McpManagementEditorPort) => McpManagementApplication;
 }
 export type ConfigurationApplicationResult =
-  | { readonly kind: "cancelled" | "non-tty" | "local-applied" }
+  | { readonly kind: "cancelled" | "non-tty" | "local-applied"; readonly recoveredEdit?: true }
   | { readonly kind: "saved-pending"; readonly stage: "channels" }
   | { readonly kind: "reloaded"; readonly effects: ConfigPostCommitEffects; readonly pendingChannels?: true }
   | { readonly kind: "mcp"; readonly result: Awaited<ReturnType<McpManagementApplication["edit"]>> };
@@ -128,7 +128,7 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
   const localConfiguration = createLocalConfigurationApplication({ homeDir, configPath, store: secretStore,
     records: deps.configurationRecords, processIdentityResolver: deps.processIdentityResolver });
-  const { config, credentials } = await localConfiguration.read();
+  const { config, credentials, recoveredEdit } = await localConfiguration.read();
   const managed = opts.kind === "config" && deps.readExtensions ? await deps.readExtensions() : undefined;
   const channelCatalog = managed ? listSupportedChannels(managed) : undefined;
   const channelSetup = managed && deps.readExtensionLocalSetup ? await deps.readExtensionLocalSetup() : undefined;
@@ -158,6 +158,8 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   const editorResult = await opts.edit({
     initialConfig: config,
     initialCredentials: credentials,
+    // 打开时接续完成了上次已接纳、收尾未完成的保存：页内说明，免得用户以为修改丢了
+    ...(recoveredEdit ? { notice: "上次接纳的配置修改已保存完成。" } : {}),
     ...(channelStates ? { channelStates } : {}),
     ...(channelCatalog ? { channelCatalog } : {}),
     ...(channelSetup ? { channelSetup } : {}),
@@ -177,7 +179,7 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
     },
   });
 
-  if (editorResult.kind !== "completed") return { kind: editorResult.kind };
+  if (editorResult.kind !== "completed") return { kind: editorResult.kind, ...(recoveredEdit ? { recoveredEdit: true as const } : {}) };
   if (opts.mcpApplication) {
     const application = opts.mcpApplication({
       save: async (edit) => {

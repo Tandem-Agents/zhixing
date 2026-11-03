@@ -87,23 +87,25 @@ export async function editConfiguration(expected: Snapshot, next: Snapshot, opti
 }
 
 /** Recover first, then issue the config and credentials from the same locked source pair. */
-export async function loadConfigurationSnapshot(options: Options): Promise<Snapshot & { generation: string | null }> {
-  await recoverConfigurationEdit(options);
+export async function loadConfigurationSnapshot(options: Options): Promise<Snapshot & { generation: string | null; recoveredEdit?: true }> {
+  const recovered = await recoverConfigurationEdit(options);
   const release = await lockConfiguration(path.resolve(options.configPath), options);
   try {
     return await mutationCoordinator(options).runExclusive(async () => {
       assertNoConfigurationCommit(path.resolve(options.configPath));
       const secrets = await loadCredentialSnapshotUnlocked(options);
-      return { config: loadConfig({ configPath: options.configPath }), ...secrets };
+      return { config: loadConfig({ configPath: options.configPath }), ...secrets, ...(recovered ? { recoveredEdit: true as const } : {}) };
     });
   } finally { await release(); }
 }
 
-async function recoverConfigurationEdit(options: Options): Promise<void> {
+/** 接续上次已接纳、收尾未完成的保存；返回这次是否真的完成了一次接续（供界面说明） */
+async function recoverConfigurationEdit(options: Options): Promise<boolean> {
   const encoded = await options.store.get(CONFIGURATION_EDIT_REF);
-  if (!encoded) return;
+  if (!encoded) return false;
   const observed = parseEdit(encoded);
   const release = await lockConfiguration(observed.configPath, options);
+  let recovered = false;
   try {
     await mutationCoordinator(options).runExclusive(async () => {
       const current = await options.store.get(CONFIGURATION_EDIT_REF);
@@ -118,9 +120,11 @@ async function recoverConfigurationEdit(options: Options): Promise<void> {
       // A marker rename can be visible even when its original directory sync failed.
       await syncDirectory(path.dirname(edit.configPath));
       await applySavedEdit(edit, options.store);
+      recovered = true;
       options.records?.record(() => { const context = runtimeConfigurationObservation(edit.config); return { event: "recovered", refs: [{ kind: "configurationEdit", id: edit.id }, { kind: "configuration", id: context.selectionDigest }], result: "success", data: context }; });
     });
   } finally { await release(); }
+  return recovered;
 }
 
 async function applySavedEdit(edit: SavedEdit, store: SecretStorePort): Promise<void> {

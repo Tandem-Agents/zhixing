@@ -2106,7 +2106,8 @@ class TerminalApplication {
     }, { kind, edit: session => this.#edit(session, kind === 'config' ? '配置' : 'MCP 管理', kind === 'config' ? ['model', 'messaging'] : ['mcp'], 'edit', mcp?.runtime),
       mcpApplication: mcp?.mcpApplication });
     this.#abort.signal.throwIfAborted();
-    let message = result.kind === 'cancelled' ? '已取消本次配置编辑。'
+    let message = result.kind === 'cancelled'
+      ? (result.recoveredEdit ? '上次接纳的配置修改已保存完成；本次编辑未保存新的内容。' : '已取消本次配置编辑。')
       : result.kind === 'non-tty' ? '配置编辑未完成。'
       : result.kind === 'mcp' ? result.result.message
       : result.kind === 'saved-pending' ? '配置已保存，但消息通道尚未确认应用；重新打开配置可重试。'

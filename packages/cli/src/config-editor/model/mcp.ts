@@ -88,6 +88,22 @@ export function handleMcpServerPanelKey(
   }
 }
 
+/**
+ * 连接验证失败给用户的说明：按已知类别给原因与下一步；不认识的原因给通用说明，不把探测原文直接给用户
+ * （探测端口同时供 agent 工具使用，原文在那条路径照常保留）。
+ */
+export function describeMcpProbeFailure(raw: string, transport: string): string {
+  const text = raw.toLowerCase();
+  if (raw.startsWith("SSRF blocked")) return "这个地址属于本机、内网或其他受限网络，出于安全不允许连接；请换成可公开访问的服务地址。按 Esc 回到来源修改。";
+  if (transport === "stdio" && /enoent|not found|not recognized|cannot find/.test(text)) return "找不到要运行的命令：请检查命令是否已安装、是否在 PATH 中，以及参数里的路径。按 Esc 回到来源修改。";
+  if (transport === "stdio" && /connection closed|exited|exit code/.test(text)) return "启动命令运行后立即退出了，没有完成连接：请检查命令、参数和脚本路径是否正确。按 Esc 回到来源修改。";
+  if (/timed? ?out|timeout/.test(text)) return "连接超时：服务没有在限定时间内响应，请检查地址或命令后重试。";
+  if (/\b40[13]\b|unauthorized|forbidden/.test(text)) return "服务拒绝了凭据：请检查填写的密钥是否正确。";
+  if (/\b404\b/.test(text)) return "服务地址不存在（404）：请检查地址是否正确。按 Esc 回到来源修改。";
+  if (/econnrefused|connection refused/.test(text)) return "无法连接到该地址：服务未运行或地址有误。按 Esc 回到来源修改。";
+  return "连接验证没有通过：请检查来源、命令或地址与密钥后重试。按 Esc 回到来源修改。";
+}
+
 export function handleMcpAddPanelKey(
   ctx: ConfigModelContext,
   state: WorkingState,
@@ -102,6 +118,10 @@ export function handleMcpAddPanelKey(
     case "ctrl-c":
       return { type: "exit", result: { kind: "cancelled" } };
     case "escape":
+      // 验证失败后回到来源输入并带回原文，改一处即可重试；其余情况照旧退回 MCP 总页
+      if (descriptor.error && descriptor.source !== undefined) {
+        return { type: "replace", state: setInputBuffer(state, descriptor.source), panel: { kind: "mcp-add-input" } };
+      }
       return { type: "pop", state: clearInputBuffer(state) };
     case "backspace": {
       if (!field || state.inputBuffer.length === 0) return { type: "stay", state };
@@ -169,7 +189,7 @@ export function handleMcpAddPanelKey(
           return {
             type: "replace",
             state,
-            panel: { ...descriptor, error: result.error },
+            panel: { ...descriptor, error: describeMcpProbeFailure(result.error, candidate.entry.type ?? "stdio") },
           };
         },
       };
@@ -252,11 +272,11 @@ export function handleMcpAddInputPanelKey(
           }
           // 用 replace（非 navigate）切到候选面板收集密钥：这样接入成功 / 取消时单次 pop
           // 即回到 MCP 服务主列表（看到刚接入的 server），而不是停在本输入页造成"没成功"
-          // 的错觉（无 label：候选面板标题用 serverId）。
+          // 的错觉（无 label：候选面板标题用 serverId）。记下原始来源，验证失败后可带回修改。
           return {
             type: "replace",
             state: clearInputBuffer(state),
-            panel: { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
+            panel: { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0, source: input },
           };
         },
       };
