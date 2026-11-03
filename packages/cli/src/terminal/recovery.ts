@@ -48,7 +48,8 @@ export class TerminalRecovery {
     if (!current) return;
     current.receiver?.close(); current.value = '';
     current.dismiss?.(); current.dismiss = undefined;
-    current.reject?.(new Error('保密输入已取消。')); current.resolve = undefined; current.reject = undefined;
+    // 带稳定的码，命令侧据此把用户取消与失败区分开
+    current.reject?.(Object.assign(new Error('保密输入已取消。'), { code: 'SECRET_INPUT_CANCELLED' })); current.resolve = undefined; current.reject = undefined;
   }
   async finishDisplay(): Promise<void> {
     const current = this.#current;

@@ -208,7 +208,7 @@ async function openResetApprovalContext(options: BackupCommandOptions): Promise<
   const home = options.zhixingHome ?? getZhixingHome();
   const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: home });
   if (await secretStore.unlockState() !== "unlocked") {
-    throw new Error("设备秘密存储解锁后才能共同确认恢复码重置");
+    throw new RecoveryRootUserError("设备秘密存储解锁后才能共同确认恢复码重置");
   }
   const refs = await secretStore.list("device-key/device/v1/");
   if (refs.length !== 1 || !refs[0]!.bindingId.startsWith("device/v1/")) {
@@ -249,9 +249,22 @@ export async function runRecoveryRootResetCommand(
   );
 }
 
-export function recoveryRootPublicError(_error: unknown): Error {
+/** 已写成用户说明的恢复码操作错误：命令入口照原样显示；其余错误只给统一说明 */
+export class RecoveryRootUserError extends Error {}
+
+export function recoveryRootPublicError(error: unknown): Error {
+  if (error instanceof RecoveryRootUserError) return error;
+  // 用户在保密页取消：恢复码操作都在回读之后才提交，此时什么都没有改变
+  if ((error as { code?: unknown } | undefined)?.code === "SECRET_INPUT_CANCELLED") {
+    return new RecoveryRootUserError("已取消；恢复码没有改变。", { cause: error });
+  }
+  if (error instanceof Error && (error as { code?: unknown }).code === "RECOVERY_PACKAGE_SURFACE_REQUIRED") {
+    return new RecoveryRootUserError(error.message, { cause: error });
+  }
+  // 统一说明之下保留原错误，运行日志沿 cause 记下真实首因的类别与位置
   return new Error(
     "恢复码操作未完成。请核对当前设备状态、独立备份和确认码后重试；系统不会绕过共同确认或自动重置安全域。",
+    { cause: error },
   );
 }
 
@@ -725,20 +738,21 @@ async function mapRootLifecycleError<Result>(
   } catch (error) {
     if (!(error instanceof BackupRecoveryRootLifecycleError)) throw error;
     const messages: Record<typeof error.code, string> = {
-      "rotate-confirmation-required": "请先确认已准备保存新的恢复码",
-      "invalidate-confirmation-required": "请先确认立即停用当前恢复码",
-      "approve-reset-confirmation-required": "请先在另一台已加入设备上确认重置恢复码",
-      "reset-confirmation-required": "请先确认旧恢复码已永久丢失并准备保存新恢复码",
+      // 缺确认时说清后果，并给出确实要执行时重新运行要加的参数；不涉及任何恢复材料
+      "rotate-confirmation-required": "请先确认已准备保存新的恢复码：轮换会生成新恢复码，旧恢复码随之永久失效。如确实要执行，请重新运行并加上 --confirm-save-new-code",
+      "invalidate-confirmation-required": "请先确认立即停用当前恢复码：停用后当前恢复码立即失效，创建新恢复码前恢复备份不可用于接管值班。如确实要执行，请重新运行并加上 --confirm-disable",
+      "approve-reset-confirmation-required": "请先在另一台已加入设备上确认重置恢复码：确认后会生成交给当前主设备的确认码。如确实要协助重置，请在本机重新运行并加上 --confirm-reset",
+      "reset-confirmation-required": "请先确认旧恢复码已永久丢失并准备保存新恢复码：重置会建立新恢复码，其他设备需要重新加入。如确实要执行，请重新运行并保留 --approval <确认码>，同时加上 --confirm-save-new-code",
       "current-issuer-required": "只有当前值班设备可以管理恢复根",
       "current-root-missing": "恢复包不是当前有效恢复根",
-      "reset-current-root-missing": "Domain reset requires an active recovery root",
+      "reset-current-root-missing": "当前没有有效的恢复码，不能执行重置；请先运行 zz backup status 查看恢复备份状态",
       "current-package-mismatch": "恢复包不是当前有效恢复根",
       "replacement-readback-mismatch": "回读的恢复码与本次生成的新恢复码不一致",
-      "approval-generation-mismatch": "Domain reset approval does not match the current trust generation",
+      "approval-generation-mismatch": "这个确认码与当前设备组的状态不符（设备或恢复码已变化），请在另一台设备上重新生成确认码",
       "approval-cosigner-ineligible": "只有当前安全域中的有效设备可以共同确认恢复码重置",
       "approval-cosigner-is-issuer": "当前主设备不能同时作为第二台共同确认设备",
     };
-    throw new Error(messages[error.code]);
+    throw new RecoveryRootUserError(messages[error.code]);
   }
 }
 

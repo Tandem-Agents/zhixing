@@ -1413,11 +1413,9 @@ export class MeshRuntimeAssembly
     const trust = this.#control.currentTrust();
     const named = trust.members.filter((candidate) =>
       candidate.device.displayName === input.targetName);
-    if (named.length !== 1) {
-      throw new Error(named.length === 0
-        ? "Paired device name is unknown"
-        : "Paired device name is not unique");
-    }
+    // 没有这个名字的成员设备，也就没有它的移除操作（移除完成后设备已不在成员里）
+    if (named.length === 0) return undefined;
+    if (named.length !== 1) throw new Error("Paired device name is not unique");
     const member = named[0]!;
     const operation = await this.#deviceRemovalAuthority?.operationForTarget(
       member.device.deviceId,

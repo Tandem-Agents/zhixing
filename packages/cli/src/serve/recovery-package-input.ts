@@ -14,5 +14,8 @@ export function assertRecoveryPackageInputLimit(
 
 /** Secret input belongs exclusively to the managed terminal surface. */
 export function requireRecoveryPackageSurface(): never {
-  throw new Error("恢复包需要交互式保密输入；请在完整交互终端中重新运行原命令。");
+  // 带稳定的码：命令的公共错误映射据此原样给出这条可照做的说明
+  throw Object.assign(new Error("恢复包需要交互式保密输入；请在完整交互终端中重新运行原命令。"), {
+    code: "RECOVERY_PACKAGE_SURFACE_REQUIRED",
+  });
 }

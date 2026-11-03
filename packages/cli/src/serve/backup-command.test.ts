@@ -556,6 +556,22 @@ describe("recovery root public lifecycle", () => {
     expect(writeLine).not.toHaveBeenCalled();
   });
 
+  it("缺确认时说清后果并给出重新运行要加的参数，不打开任何机制", async () => {
+    const readRecoveryPackage = vi.fn(async () => "must-not-read");
+    const openRecoveryTarget = vi.fn(async () => { throw new Error("must not open recovery target"); });
+    const options = { readRecoveryPackage, openRecoveryTarget, writeLine: vi.fn() };
+    await expect(runRecoveryRootRotateCommand({ userConfirmed: false }, options))
+      .rejects.toThrow(/旧恢复码随之永久失效.*--confirm-save-new-code/u);
+    await expect(runRecoveryRootInvalidateCommand({ userConfirmed: false }, options))
+      .rejects.toThrow(/不可用于接管值班.*--confirm-disable/u);
+    await expect(runRecoveryRootApproveResetCommand({ userConfirmed: false }, options))
+      .rejects.toThrow(/交给当前主设备的确认码.*--confirm-reset/u);
+    await expect(runRecoveryRootResetCommand({ approval: "malformed-reset-approval", userConfirmed: false }, options))
+      .rejects.toThrow(/其他设备需要重新加入.*--approval <确认码>.*--confirm-save-new-code/u);
+    expect(readRecoveryPackage).not.toHaveBeenCalled();
+    expect(openRecoveryTarget).not.toHaveBeenCalled();
+  });
+
   it("rotates through a verified independent checkpoint and can then invalidate the new code", async () => {
     const fixture = await pairedHomeWithoutRecoveryRoot("v2");
     const initialRuntime = createRecoveryRootEstablishmentRuntime({

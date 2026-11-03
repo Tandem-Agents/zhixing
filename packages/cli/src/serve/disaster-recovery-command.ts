@@ -495,7 +495,12 @@ function publicRecoveryError<T extends Error>(error: T): T {
 
 export function disasterRecoveryPublicError(error: unknown): Error {
   if (error instanceof Error && PUBLIC_RECOVERY_ERRORS.has(error)) return error;
-  return new Error("恢复未完成。请核对备份位置、恢复包和设备状态后重试；系统不会自动切换值班设备。");
+  // 需要交互式保密输入：原样给出这条可照做的说明
+  if (error instanceof Error && (error as { code?: unknown }).code === "RECOVERY_PACKAGE_SURFACE_REQUIRED") {
+    return publicRecoveryError(new Error(error.message, { cause: error }));
+  }
+  // 统一说明之下保留原错误，运行日志沿 cause 记下真实首因的类别与位置
+  return new Error("恢复未完成。请核对备份位置、恢复包和设备状态后重试；系统不会自动切换值班设备。", { cause: error });
 }
 
 interface RecoveryContext {

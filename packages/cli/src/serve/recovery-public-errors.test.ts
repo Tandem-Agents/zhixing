@@ -2,7 +2,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import type { SecretRef } from "@zhixing/core/contracts";
-import { recoveryRootPublicError } from "./backup-command.js";
+import { RecoveryRootUserError, recoveryRootPublicError } from "./backup-command.js";
+import { requireRecoveryPackageSurface } from "./recovery-package-input.js";
 
 /** 只在内存里的秘密存储：新设备身份在这里生成，不碰平台存储。 */
 function memorySecretStore() {
@@ -45,6 +46,27 @@ describe("recovery public errors", () => {
     }
     expect(disaster).toContain("不会自动切换值班设备");
     expect(lifecycle).toContain("不会绕过共同确认");
+  });
+
+  it("统一说明下保留原错误供日志取首因；保密页取消如实说明未改变", () => {
+    const internal = new Error("internal detail");
+    expect(recoveryRootPublicError(internal).cause).toBe(internal);
+    expect(disasterRecoveryPublicError(internal).cause).toBe(internal);
+    const cancelled = Object.assign(new Error("保密输入已取消。"), { code: "SECRET_INPUT_CANCELLED" });
+    const mapped = recoveryRootPublicError(cancelled);
+    expect(mapped).toBeInstanceOf(RecoveryRootUserError);
+    expect(mapped.message).toBe("已取消；恢复码没有改变。");
+    // 需要交互式保密输入：两条恢复出口都原样给出可照做的说明
+    let surface: unknown;
+    try { requireRecoveryPackageSurface(); } catch (error) { surface = error; }
+    expect(recoveryRootPublicError(surface).message).toBe("恢复包需要交互式保密输入；请在完整交互终端中重新运行原命令。");
+    expect(disasterRecoveryPublicError(surface).message).toBe("恢复包需要交互式保密输入；请在完整交互终端中重新运行原命令。");
+  });
+
+  it("恢复码命令的逐项说明原样给出，不被统一说明替换", () => {
+    const precise = new RecoveryRootUserError("请先确认立即停用当前恢复码");
+    expect(recoveryRootPublicError(precise)).toBe(precise);
+    expect(recoveryRootPublicError(new Error("请先确认立即停用当前恢复码")).message).toContain("恢复码操作未完成");
   });
 
   it("不属于任何家庭的新设备执行无源恢复时说出真实前提，公开出口原样给出、不笼统劝重试", async () => {

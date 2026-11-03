@@ -23,6 +23,7 @@ import { assertSupportedRuntime } from "./runtime-support.js";
 import type { RuntimeLogging } from "./logging/runtime.js";
 import { peekEntryLogging } from './logging/bootstrap.js';
 import { cliLoggingMode, normalizeCliArgs } from "./logging/entry-mode.js";
+import { localizeCommanderErrors } from "./commands/commander-errors.js";
 
 let commandLogging: RuntimeLogging | undefined;
 let managedCommand: ManagedCommandPorts | undefined;
@@ -693,7 +694,7 @@ const rootRotateCommand = recoveryRootCmd
   });
 terminalCommand(rootRotateCommand);
 
-recoveryRootCmd
+const rootInvalidateCommand = recoveryRootCmd
   .command("invalidate")
   .description("恢复码泄露且暂不能换新时，立即停用当前恢复码")
   .option("--confirm-disable", "确认立即停用当前恢复码")
@@ -708,6 +709,8 @@ recoveryRootCmd
       return await exitCommand(1);
     }
   });
+// 停用要回读当前恢复包，与轮换一样需要交互式保密输入页
+terminalCommand(rootInvalidateCommand);
 
 const rootApproveCommand = recoveryRootCmd
   .command("approve-reset")
@@ -959,6 +962,7 @@ serveCmd
     localizeHelpCommands(child);
   }
 })(program);
+localizeCommanderErrors(program);
 
 export function usesInteractiveTerminal(args: readonly string[]): boolean {
   return terminalCommandFor(program, args) !== undefined;
