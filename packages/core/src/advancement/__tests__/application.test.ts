@@ -5,6 +5,7 @@ import { ProductApiDispatcher } from "../../product-api/catalog.js";
 import { buildClosureFacts, renderClosureReport } from "../closure.js";
 import {
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+  ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND,
   ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
@@ -1186,6 +1187,57 @@ describe("AdvancementApplicationService detail query", () => {
     }
   });
 
+  it("提议阶段的整句“直接执行”“取消”不交模型分类，直达各自出口", async () => {
+    const proposal = { proposalId: "proposal-1", runId: "run-1", originalTurnId: "turn-1", supplements: [] };
+    const classify = vi.fn(async () => ({ action: "supplement" as const }));
+    const admit = vi.fn(async (input: Parameters<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>[0]) => ({
+      conversationId: input.conversationId, turnId: input.admissionIntent.turnId, runId: "run-direct", status: "immediate" as const,
+    }));
+    const direct = createRevisionFixture(session({ status: "draft-failed", confirmedRubric: undefined, proposal }), {
+      decideProposalStageAdmission: classify, confirmedOriginalTask: { admit },
+    });
+    await expect(direct.application.controlAwaitingRubric({
+      conversationId: "conv-1", userInput: userTurnInputFromText(" 直接执行。"), fact: { publish: vi.fn() }, surface: testSurface(),
+    })).resolves.toMatchObject({ result: { kind: "direct-original-task", runId: "run-direct" } });
+    const cancel = createRevisionFixture(session({ status: "draft-uncertain", confirmedRubric: undefined, proposal }), { decideProposalStageAdmission: classify });
+    await expect(cancel.application.controlAwaitingRubric({
+      conversationId: "conv-1", userInput: userTurnInputFromText("取消"), fact: { publish: vi.fn() }, surface: testSurface(),
+    })).resolves.toMatchObject({ result: { kind: "cancelled" } });
+    expect(classify).not.toHaveBeenCalled();
+    // 其他说法仍交分类
+    const other = createRevisionFixture(session({ status: "draft-failed", confirmedRubric: undefined, proposal }), { decideProposalStageAdmission: classify });
+    await other.application.controlAwaitingRubric({
+      conversationId: "conv-1", userInput: userTurnInputFromText("直接执行吧，不用推进"), fact: { publish: vi.fn() }, surface: testSurface(),
+    });
+    expect(classify).toHaveBeenCalledOnce();
+  });
+
+  it("起草失败页面的直接执行与取消按所见代次裁决：代次已变则拒绝且不执行", async () => {
+    const proposal = { proposalId: "proposal-1", runId: "run-1", originalTurnId: "turn-1", supplements: [],
+      draftAttempt: { generation: 2, revision: 0, phase: "failed" as const } };
+    const admit = vi.fn(async (input: Parameters<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>[0]) => ({
+      conversationId: input.conversationId, turnId: input.admissionIntent.turnId, runId: "run-direct", status: "immediate" as const,
+    }));
+    const stale = createRevisionFixture(session({ status: "draft-failed", confirmedRubric: undefined, proposal }), { confirmedOriginalTask: { admit } });
+    const publish = vi.fn();
+    await expect(stale.application.cancelRubric({
+      conversationId: "conv-1", advancementSessionId: "adv-1", executeOriginal: true, expectedDraftGeneration: 1, fact: { publish }, surface: testSurface(),
+    })).rejects.toThrow("任务状态已变化");
+    expect(admit).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    // 起草中（已重试）的会话不接受按失败页面发出的操作
+    const drafting = createRevisionFixture(session({ status: "drafting", confirmedRubric: undefined,
+      proposal: { ...proposal, draftAttempt: { generation: 3, revision: 0, phase: "invoking" as const } } }), { confirmedOriginalTask: { admit } });
+    await expect(drafting.application.cancelRubric({
+      conversationId: "conv-1", advancementSessionId: "adv-1", executeOriginal: false, expectedDraftGeneration: 2, fact: { publish }, surface: testSurface(),
+    })).rejects.toThrow();
+    const current = createRevisionFixture(session({ status: "draft-failed", confirmedRubric: undefined, proposal }), { confirmedOriginalTask: { admit } });
+    await expect(current.application.cancelRubric({
+      conversationId: "conv-1", advancementSessionId: "adv-1", executeOriginal: true, expectedDraftGeneration: 2, fact: { publish }, surface: testSurface(),
+    })).resolves.toMatchObject({ result: { kind: "direct-original-task", runId: "run-direct" } });
+    expect(admit).toHaveBeenCalledOnce();
+  });
+
   it("提议会话确认：执行身份与输入由提议与被确认的草案派生，不以原文作为新用户消息", async () => {
     const draft = pendingRubric("提议草案");
     const admit = vi.fn(async (input: Parameters<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>[0]) => ({
@@ -1423,7 +1475,7 @@ describe("AdvancementApplicationService detail query", () => {
       expect.objectContaining({ kind: "not-saved", sessionId: source.id, originalTurnId: source.pendingRubricDraft!.originalTurnId }));
   });
 
-  it("contributes three Queries plus six finite Commands and five Facts", async () => {
+  it("contributes three Queries plus seven finite Commands and five Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -1444,6 +1496,7 @@ describe("AdvancementApplicationService detail query", () => {
       ADVANCEMENT_REVISE_RUBRIC_COMMAND,
       ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
       ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+      ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND,
       ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
     ]);
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([

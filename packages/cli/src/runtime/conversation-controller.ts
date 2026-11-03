@@ -115,6 +115,14 @@ export interface ContractFailedTurn {
 }
 
 export type AwaitingRubricReferenceTurn = Omit<AwaitingRubricConfirmationTurn, 'rubricDraft'>;
+/** 推进操作的目标：原任务轮次与推进会话；待确认时另有草案号，起草失败或结果不明时另有起草代次。 */
+export interface AdvancementOperationTarget {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly advancementSessionId: string;
+  readonly rubricDraftId?: string;
+  readonly draftGeneration?: number;
+}
 export type SessionSendReferenceResult = Exclude<SessionSendResult, SessionAwaitingRubricResult> | Omit<SessionAwaitingRubricResult, 'rubricDraft'>;
 export type BeginReferencedUserTurnResult<Outcome = TurnOutcome> = Exclude<BeginUserTurnResult<Outcome>, AwaitingRubricConfirmationTurn> | AwaitingRubricReferenceTurn;
 
@@ -782,7 +790,7 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   /** Reconcile the original operation even after a refreshed draft changed its
    * parameters. This follows/cancels the original run, never the new button. */
-  async reconcileRubricSubmission(pending: AwaitingRubricReferenceTurn): Promise<BeginReferencedUserTurnResult<Outcome> | undefined> {
+  async reconcileRubricSubmission(pending: AdvancementOperationTarget): Promise<BeginReferencedUserTurnResult<Outcome> | undefined> {
     const turnId = this.pendingAdvancementTurnId(pending);
     if (!turnId) return undefined;
     const outcome = this.attachTurnWaiter(pending.conversationId, turnId);
@@ -801,7 +809,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   /** 尚待核对的推进操作会落到哪个 turn：确认由原始输入与被确认的草案派生，降级由原始输入派生；修订与单纯取消不执行，沿用原始输入身份。 */
-  private pendingAdvancementTurnId(pending: AwaitingRubricReferenceTurn): string | undefined {
+  private pendingAdvancementTurnId(pending: AdvancementOperationTarget): string | undefined {
     const operation = this.opts.conversation.pendingAdvancementOperation(pending.conversationId);
     if (!operation) return undefined;
     const { method, params } = operation;
@@ -815,7 +823,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   /** 推进操作的回执待核对时，只保留与待核对操作同一执行身份的等待；被门面拒绝的另一项操作撤回自己的等待，本地运行指针还给挂载前的运行。 */
-  private settleRejectedAdvancementWaiter(pending: AwaitingRubricReferenceTurn, turnId: string, previousLocal: string | undefined): void {
+  private settleRejectedAdvancementWaiter(pending: AdvancementOperationTarget, turnId: string, previousLocal: string | undefined): void {
     if (this.pendingAdvancementTurnId(pending) === turnId) return;
     this.discardTurnWaiter(pending.conversationId, turnId);
     if (previousLocal && previousLocal !== turnId && this.turnOutcomes.has(previousLocal)) {
@@ -878,7 +886,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   async cancelRubricContract(
-    pending: AwaitingRubricReferenceTurn,
+    pending: AdvancementOperationTarget,
     opts: { executeOriginal?: boolean; onAccepted?: BeginTurnOptions["onAccepted"] } = {},
   ): Promise<RubricContractCancelResult<Outcome>> {
     const executeOriginal = opts.executeOriginal ?? false;
@@ -894,7 +902,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       const result = await this.opts.conversation.cancelAdvancement(
         pending.conversationId,
         pending.advancementSessionId,
-        { executeOriginal, rubricDraftId: pending.rubricDraftId },
+        { executeOriginal, ...(pending.rubricDraftId ? { rubricDraftId: pending.rubricDraftId } : {}),
+          ...(pending.draftGeneration !== undefined ? { draftGeneration: pending.draftGeneration } : {}) },
       );
       if (isDirectExecutionCancelResult(result)) {
         if (!outcome) {

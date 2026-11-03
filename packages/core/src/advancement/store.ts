@@ -255,6 +255,14 @@ export class AdvancementStore {
     timestamp = new Date().toISOString(),
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
+      // 正常路径与恢复路径可能各自结算同一次接纳（恢复先读到待接纳、随后正常路径已结算）：
+      // 同一意图、同一运行的重复结算就是已完成的结算，幂等返回；不同运行仍由守卫判冲突
+      const current = this.requireSession(await this.loadConversationSessionsInLock(conversationId), sessionId);
+      const admission = current.originalTaskAdmission;
+      if (admission?.status === "admitted" && admission.runId === settlement.runId &&
+          admission.intent.turnId === settlement.turnId && admission.intent.inputDigest === settlement.inputDigest) {
+        return current;
+      }
       await this.appendEventInLock(conversationId, {
         type: "original_task_admitted",
         timestamp,

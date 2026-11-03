@@ -171,6 +171,38 @@ describe("AdvancementProposalApplicationService", () => {
     expect(f.facts).toEqual([]);
   });
 
+  it("起草失败后按所见代次重试：起新一代并在记为起草中后返回；重复请求不再起一代；代次不符或已取消不动", async () => {
+    let fail = true;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const f = await fixture({ build: async () => { if (fail) throw new Error("模型不可用"); await gate; return draft("draft-r"); } });
+    expect((await f.app.advance("conv-1"))?.status).toBe("draft-failed");
+    fail = false;
+    // 代次不符：不起草
+    expect(await f.app.retry("conv-1", f.sessionId, 2)).toMatchObject({ started: false, session: { status: "draft-failed" } });
+    const first = await f.app.retry("conv-1", f.sessionId, 1);
+    expect(first.started).toBe(true);
+    expect(first.session).toMatchObject({ status: "drafting", proposal: { draftAttempt: { generation: 2 } } });
+    // 同一代的重复点击、断线重放：并入在途，不起第三代
+    expect((await f.app.retry("conv-1", f.sessionId, 1)).started).toBe(true);
+    release();
+    await vi.waitFor(async () => expect((await f.store.loadSession("conv-1", f.sessionId))?.status).toBe("awaiting-rubric-confirmation"));
+    expect(f.build).toHaveBeenCalledTimes(2);
+    // 草案已到之后再按旧代次重试：不动
+    expect(await f.app.retry("conv-1", f.sessionId, 1)).toMatchObject({ started: false, session: { status: "awaiting-rubric-confirmation" } });
+    expect(f.build).toHaveBeenCalledTimes(2);
+  });
+
+  it("结果不明的会话可重试；已取消的提议不能经重试复活", async () => {
+    const f = await fixture();
+    await f.app.acceptPending("conv-1");
+    await f.store.transitionDraftAttempt("conv-1", f.sessionId, { generation: 1, revision: 0, phase: "invoking" });
+    expect((await f.app.advance("conv-1"))?.status).toBe("draft-uncertain");
+    await f.store.cancelSession("conv-1", f.sessionId, { reason: "user-cancelled", message: "取消", occurredAt: NOW });
+    expect(await f.app.retry("conv-1", f.sessionId, 1)).toMatchObject({ started: false, session: { status: "cancelled" } });
+    expect(f.build).not.toHaveBeenCalled();
+  });
+
   it("已有未终结会话时待接受提议记为未被接受（建会话并同批取消）", async () => {
     const f = await fixture();
     await f.app.acceptPending("conv-1");

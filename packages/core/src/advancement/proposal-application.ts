@@ -156,6 +156,34 @@ export class AdvancementProposalApplicationService {
     return await promise;
   }
 
+  /**
+   * 用户在起草失败或结果不明之后要求重试：只对仍停在用户所见那一代的会话起新一代，不等草案结果
+   * （就绪或失败沿草案事实送达），只等新一代记为起草中。同一代的重复请求并入在途；会话已离开那一代
+   * （另一入口已处理、已取消、草案已到）时不动，返回当前会话由调用方据实回应。
+   */
+  async retry(conversationId: string, sessionId: string, generation: number): Promise<Readonly<{
+    started: boolean;
+    session: AdvancementSession | null;
+  }>> {
+    const session = await this.acceptPending(conversationId);
+    const attempt = session?.proposal?.draftAttempt;
+    if (!session?.proposal || session.id !== sessionId) return { started: false, session };
+    // 在途的正是用户要重试的那一代之后的新一代（重复点击、断线重放）
+    if (this.#flights.has(session.id)) return { started: attempt?.generation === generation + 1, session };
+    if (this.#draining || (session.status !== "draft-failed" && session.status !== "draft-uncertain") || attempt?.generation !== generation) {
+      return { started: false, session };
+    }
+    const controller = new AbortController();
+    let begun!: (started: boolean) => void;
+    const started = new Promise<boolean>((resolve) => { begun = resolve; });
+    const promise = this.#draft(session, controller.signal, () => begun(true)).finally(() => {
+      if (this.#flights.get(session.id)?.promise === promise) this.#flights.delete(session.id);
+    });
+    this.#flights.set(session.id, { conversationId: session.conversationId, controller, promise });
+    void promise.then(() => begun(false), () => begun(false));
+    return { started: await started, session: await this.#mechanism.loadLatestSession(conversationId) };
+  }
+
   async #settleLostAttempt(session: AdvancementSession): Promise<AdvancementSession> {
     const attempt = session.proposal!.draftAttempt!;
     const message = "Rubric 草案生成结果不明，未自动重试；可以直接执行原任务或取消。";
@@ -168,7 +196,7 @@ export class AdvancementProposalApplicationService {
     return settled;
   }
 
-  async #draft(session: AdvancementSession, abortSignal: AbortSignal): Promise<AdvancementSession | null> {
+  async #draft(session: AdvancementSession, abortSignal: AbortSignal, started?: () => void): Promise<AdvancementSession | null> {
     const proposal = session.proposal!;
     const conversationId = session.conversationId;
     const invoking: AdvancementDraftAttempt = {
@@ -177,6 +205,7 @@ export class AdvancementProposalApplicationService {
       phase: "invoking",
     };
     await this.#mechanism.transitionDraftAttempt(conversationId, session.id, invoking);
+    started?.();
     let draft: RubricContractDraftSnapshot;
     let merged = 0;
     try {

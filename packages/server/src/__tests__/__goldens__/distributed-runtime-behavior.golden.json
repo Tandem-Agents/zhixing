@@ -828,6 +828,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "session.advancementRedraft",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "session.advancementRevise",
       "outcome": {
         "code": -32602,

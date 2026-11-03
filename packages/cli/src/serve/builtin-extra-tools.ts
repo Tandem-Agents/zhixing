@@ -53,6 +53,13 @@ export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
     runtimeKinds: ["main", "workscene"],
   },
   {
+    // 随运行提交写入耐久推进提议；不直接执行原任务，也不绕过验收标准确认
+    key: "advancement:propose",
+    toolName: "propose_advancement",
+    authorityWrite: true,
+    runtimeKinds: ["main", "workscene"],
+  },
+  {
     key: "workscene:enter",
     toolName: "workmode_enter",
     authorityWrite: true,

@@ -42,8 +42,9 @@ import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTe
 import { formatRelativeTimeText } from '../commands/format.js';
 import { advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
+import { parseConversationId } from '@zhixing/core/conversation';
 import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
-import { ConversationController, selectInitialConversation, type AcceptedTurn, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
+import { ConversationController, selectInitialConversation, type AcceptedTurn, type AdvancementOperationTarget, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
 import { PendingInputReceiptError, RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
@@ -130,6 +131,19 @@ function proposalStageEvent(value: unknown): ProposalStageEvent | undefined {
   return { kind: 'stalled', conversationId: event.conversationId, turnId: event.runId, outcome };
 }
 
+// 起草失败或结果不明的处理入口：与待确认任务同一入口动作，进入时按快照分流
+function stalledProposalChoices(choices: View['choices']): NonNullable<View['choices']> {
+  return [...(choices ?? []).filter(choice => choice.id !== 'rubric-resume'), { id: 'rubric-resume', label: '处理起草失败的任务' }];
+}
+
+type StalledProposal = AdvancementOperationTarget & { readonly draftGeneration: number; readonly outcome: 'failed' | 'uncertain' };
+/** 快照里起草失败或结果不明的提议；原任务轮次与起草代次齐全才可操作。 */
+function stalledProposal(conversationId: string, snapshot: SessionAdvancementStateSnapshot | undefined): StalledProposal | undefined {
+  if (!snapshot || (snapshot.status !== 'draft-failed' && snapshot.status !== 'draft-uncertain') || !snapshot.originalTurnId || snapshot.draftGeneration === undefined) return undefined;
+  return { conversationId, turnId: snapshot.originalTurnId, advancementSessionId: snapshot.advancementSessionId,
+    draftGeneration: snapshot.draftGeneration, outcome: snapshot.status === 'draft-failed' ? 'failed' : 'uncertain' };
+}
+
 class TerminalApplication {
   readonly #files: TerminalManagedFiles;
   readonly #channel: TerminalChannel;
@@ -171,6 +185,8 @@ class TerminalApplication {
   #pendingRubricNotice?: string;
   // 提议轮次最近一次起草结果的提示：草案事件可能先于本轮运行结束到达，运行结束时据此显示，不退回“正在起草”
   #proposalStage?: { conversationId: string; turnId: string; message: string };
+  // 起草失败或结果不明后已发出、回执待核对的直接执行或取消：按同一操作核对，不重发
+  #stalledOperation?: AdvancementOperationTarget;
   readonly #configPath: string;
   readonly #abort = new AbortController();
   readonly #clipboard = new TerminalClipboard(this.#abort.signal);
@@ -409,12 +425,13 @@ class TerminalApplication {
     if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => {});
   }
 
-  // 起草失败或结果不明：底部提示换成可继续的操作（失败详情已在历史行），不再停在“正在起草”
+  // 起草失败或结果不明：底部提示换成可继续的操作（失败详情已在历史行），不再停在“正在起草”；
+  // 处理入口可反复进入，进入时按会话快照的当前代次给出重试、直接执行与取消
   #proposalDraftStalled(conversationId: string, turnId: string, outcome: 'failed' | 'uncertain'): void {
     if (this.#abort.signal.aborted || this.#controller?.current.conversationId !== conversationId) return;
     const message = advancementProposalStalledMessage(outcome);
     this.#proposalStage = { conversationId, turnId, message };
-    this.#mainView = { ...this.#mainView, message };
+    this.#mainView = { ...this.#mainView, message, choices: stalledProposalChoices(this.#mainView.choices) };
     if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => {});
   }
 
@@ -786,6 +803,8 @@ class TerminalApplication {
 
   async #startup(release: () => void = () => {}): Promise<void> {
     const attempt = {};
+    // 恢复到的对话若停在起草失败或结果不明，就绪时给出处理入口
+    let stalled: StalledProposal | undefined;
     this.#startupAttempt = attempt;
     // 本次启动有了结果（可接纳、不可用或失败）：先清启动态、交还准入门，再发布结果视图
     const finish = () => { if (this.#startupAttempt === attempt) this.#startupAttempt = undefined; release(); };
@@ -849,6 +868,7 @@ class TerminalApplication {
       const preparing = setTimeout(() => {
         if (!this.#abort.signal.aborted) void this.#publish({ ...this.#mainView, message: '正在准备最近的对话…' }).catch(() => {});
       }, 300);
+      const resumed: { stalled?: StalledProposal } = {};
       const initial = await observeStartupPhase(this.#logging.records, 'terminal.select-conversation', () => selectInitialConversation({
         list: () => this.#conversation.list(), listPage: (page) => this.#conversation.listPage(page), newConversation: () => this.#conversation.newConversation(),
         pendingContinuationConfirmation: () => this.#conversation.pendingContinuationConfirmation(),
@@ -859,6 +879,7 @@ class TerminalApplication {
             this.#deferredRubric = boundedControlProjection({ kind: 'awaiting-rubric-confirmation', conversationId: id,
               turnId: draft.originalTurnId, advancementSessionId: snapshot.advancementSessionId, rubricDraftId: draft.draftId }, 8192);
           }
+          resumed.stalled = stalledProposal(id, snapshot);
           return boundedControlProjection({ ...result, advancement: undefined }, 256 * 1024);
         }); },
       }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) })).finally(() => clearTimeout(preparing));
@@ -923,9 +944,12 @@ class TerminalApplication {
       await observeStartupPhase(this.#logging.records, 'terminal.start-observer', () => this.#controller!.start());
       this.#ensureSessionBinding();
       if (initial.adoptionReview) this.#mainView = { ...this.#mainView, message: initial.adoptionReview.message };
+      if (resumed.stalled?.conversationId === initial.active.conversationId) stalled = resumed.stalled;
     }
     await displayPrepared;
     this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined, connectionState: undefined, readyForInput: true };
+    // 恢复到起草失败或结果不明的提议：给出处理入口与说明，不自动弹页
+    if (stalled) this.#mainView = { ...this.#mainView, message: advancementProposalStalledMessage(stalled.outcome), choices: stalledProposalChoices(undefined) };
     this.#startupWatch = undefined;
     this.#historyReturn = undefined;
     // 待确认的验收方式是接纳新输入前的必要前置：先由选择页处理（可收起），期间会话页仍投影为启动态
@@ -1598,7 +1622,7 @@ class TerminalApplication {
           epoch !== this.#conversationEpoch || !this.#mainView.connected || this.#abort.signal.aborted) throw Error('对话或连接已变化，请重新打开确认。');
     };
     current();
-    const original = this.#pendingRubric ?? this.#deferredRubric;
+    const original = this.#pendingRubric ?? this.#deferredRubric ?? this.#stalledOperation;
     const resolved = this.#pendingRubricResolution;
     if (original && ((resolved && resolved.controller === controller && resolved.conversationId === conversationId) || this.#conversation.hasPendingAdvancement(conversationId!))) {
       try {
@@ -1609,7 +1633,7 @@ class TerminalApplication {
         // result/Outcome, even if the run completes while the page is offline.
         if (result) this.#holdRubricResolution(controller!, conversationId!, result);
         current();
-        this.#pendingRubric = undefined; this.#deferredRubric = undefined;
+        this.#pendingRubric = undefined; this.#deferredRubric = undefined; this.#stalledOperation = undefined;
         this.#pendingRubricNotice = undefined;
         this.#pendingRubricResolution = undefined;
         if (result?.kind === 'accepted') {
@@ -1632,32 +1656,111 @@ class TerminalApplication {
           await this.#publish(this.#mainView); return;
         }
         if (!this.#conversation.hasPendingAdvancement(conversationId!)) {
-          this.#pendingRubric = undefined; this.#deferredRubric = undefined;
+          this.#pendingRubric = undefined; this.#deferredRubric = undefined; this.#stalledOperation = undefined;
         }
         throw error;
       }
     }
     if (!this.#pendingRubric && !this.#deferredRubric) {
-      const pending = await this.#conversation.consumeResume(conversationId!, result => {
+      const seen: { stalled?: StalledProposal; drafting?: boolean } = {};
+      const pending = await this.#advancementSnapshot(conversationId!, snapshot => {
         current();
-        const snapshot = result.advancement, draft = snapshot?.pendingRubricDraft;
+        seen.stalled = stalledProposal(conversationId!, snapshot);
+        seen.drafting = snapshot?.status === 'proposed' || snapshot?.status === 'drafting';
+        const draft = snapshot?.pendingRubricDraft;
         if (snapshot?.status !== 'awaiting-rubric-confirmation' || !draft) return undefined;
         return boundedControlProjection({ kind: 'awaiting-rubric-confirmation' as const, conversationId: conversationId!,
           turnId: draft.originalTurnId, advancementSessionId: snapshot.advancementSessionId,
           rubricDraftId: draft.draftId, rubricDraft: draft }, 256 * 1024);
       });
       current(); this.#pendingRubric = pending;
+      if (!pending) {
+        const target = seen.stalled;
+        if (target) { await this.#selectionFlow(() => this.#stalledProposalFlow(target, current)); return; }
+        // 入口所指的任务已在别处处理或进入下一阶段：按当前状态说明，收回入口
+        this.#mainView = { ...this.#mainView, busy: false, choices: this.#mainView.choices?.filter(choice => choice.id !== 'rubric-resume'),
+          message: seen.drafting ?'正在起草验收标准，就绪后会请你确认；确认前不执行原任务。' : '这项任务已处理或状态已变化，可用 /advancement 查看。' };
+        await this.#publish(this.#mainView); return;
+      }
     }
     await this.#selectionFlow(() => this.#rubricLoop(current));
+  }
+
+  /** 起草失败或结果不明：重试起草、直接执行原任务或取消任务；都按快照里的当前代次裁决，收起时任务保持原样。 */
+  async #stalledProposalFlow(target: StalledProposal, current: () => void): Promise<void> {
+    for (;;) {
+      const selection = await this.#choose({ kind: 'selection', title: target.outcome === 'failed' ? '验收标准起草失败' : '验收标准起草结果不明',
+        message: '原任务保留，尚未执行。可以重试起草、不做推进验收直接执行原任务，或取消任务；也可以收起后回复补充说明再起草。',
+        choices: [{ id: 'redraft', label: '重试起草' }, { id: 'direct', label: '直接执行原任务' }, { id: 'cancel', label: '取消任务' }, { id: 'return', label: '暂时收起' }] });
+      current();
+      if (selection === 'redraft') {
+        const result = await this.#conversation.redraftAdvancement(target.conversationId, target.advancementSessionId, target.draftGeneration);
+        current();
+        const stillStalled = result.advancementStatus === 'draft-failed' || result.advancementStatus === 'draft-uncertain';
+        this.#mainView = { ...this.#mainView, busy: false,
+          choices: stillStalled ? stalledProposalChoices(this.#mainView.choices) : this.#mainView.choices?.filter(choice => choice.id !== 'rubric-resume'),
+          message: result.status === 'drafting' ? '正在重新起草验收标准，就绪后会请你确认；确认前不执行原任务。'
+            : stillStalled ? '起草状态已更新，请重新进入查看当前可选操作。' : '这项任务已处理或状态已变化，可用 /advancement 查看。' };
+        await this.#publish(this.#mainView); return;
+      }
+      if (selection === 'direct' || selection === 'cancel') {
+        if (selection === 'cancel') {
+          const confirmed = await this.#choose({ kind: 'selection', title: '取消这次任务？', message: '取消后不会执行原任务。', choices: [{ id: 'cancel', label: '确认取消' }, { id: 'return', label: '返回' }] });
+          current();
+          if (confirmed !== 'cancel') continue;
+        }
+        const controller = this.#controller!;
+        this.#stalledOperation = target;
+        this.#mainView = { ...this.#mainView, choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+        let turn: AcceptedTurn<TerminalTurnOutcome> | undefined;
+        try {
+          const result = await controller.cancelRubricContract(target, { executeOriginal: selection === 'direct' });
+          if (result.kind === 'direct-execution') turn = result.turn;
+          this.#holdRubricResolution(controller, target.conversationId, turn ? { kind: 'accepted', turn }
+            : { kind: 'cancelled', conversationId: target.conversationId, turnId: target.turnId, advancementSessionId: target.advancementSessionId });
+          current();
+        } catch (error) {
+          current();
+          if (error instanceof PendingInputReceiptError) {
+            this.#mainView = { ...this.#mainView, busy: false, message: '上次操作结果尚待核对；不会重复执行。', choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+            await this.#publish(this.#mainView); return;
+          }
+          // 宿主按代次拒绝：已在别处处理、已重试或草案已到，这次没有执行任何操作
+          this.#stalledOperation = undefined;
+          this.#mainView = { ...this.#mainView, busy: false, choices: this.#mainView.choices?.filter(choice => choice.id !== 'rubric-resume'),
+            message: '这项任务已处理或状态已变化，本次未执行任何操作；可用 /advancement 查看。' };
+          await this.#publish(this.#mainView); return;
+        }
+        this.#stalledOperation = undefined; this.#pendingRubricResolution = undefined;
+        this.#mainView = { ...this.#mainView, choices: undefined, message: turn ? '开始执行…' : '已取消这次任务。', busy: !!turn };
+        if (turn) this.#followTurn(turn); else await this.#publish(this.#mainView);
+        return;
+      }
+      this.#mainView = { ...this.#mainView, busy: false, message: '已收起；任务保持原样，按 Enter 继续处理，也可以回复补充说明。',
+        choices: stalledProposalChoices(this.#mainView.choices) };
+      await this.#publish(this.#mainView); return;
+    }
+  }
+
+  /** 读取对话的推进快照（待确认任务的草案）：场景会话的快照随再次进入场景给出（与 resume 同一裁决），
+   *  不经普通对话目录；普通对话照旧走 session.resume */
+  async #advancementSnapshot<T>(conversationId: string, consume: (snapshot: SessionAdvancementStateSnapshot | undefined) => T): Promise<T> {
+    const { scope } = parseConversationId(conversationId);
+    if (scope.kind === 'workscene') {
+      const entered = await this.#workscene.enter(scope.sceneId);
+      if (entered.conversationId !== conversationId) throw Error('待确认任务状态已变化，请重新连接后核对。');
+      return consume(entered.advancement);
+    }
+    return this.#conversation.consumeResume(conversationId, result => consume(result.advancement));
   }
 
   async #loadPendingRubric(current: () => void): Promise<void> {
     current();
     if (!this.#pendingRubric && this.#deferredRubric) {
       const identity = this.#deferredRubric;
-      const pending = await this.#conversation.consumeResume(identity.conversationId, result => {
+      const pending = await this.#advancementSnapshot(identity.conversationId, snapshot => {
         current();
-        const snapshot = result.advancement, draft = snapshot?.pendingRubricDraft;
+        const draft = snapshot?.pendingRubricDraft;
         if (snapshot?.status !== 'awaiting-rubric-confirmation' || !draft || draft.originalTurnId !== identity.turnId || snapshot.advancementSessionId !== identity.advancementSessionId) throw Error('待确认任务状态已变化，请重新连接后核对。');
         return boundedControlProjection({ kind: 'awaiting-rubric-confirmation' as const, conversationId: identity.conversationId,
           turnId: draft.originalTurnId, advancementSessionId: snapshot.advancementSessionId,
@@ -2196,6 +2299,7 @@ class TerminalApplication {
     this.#invalidateConversation();
     this.#holdNoticeDisplay();
     this.#pendingRubric = undefined; this.#deferredRubric = undefined; this.#pendingRubricNotice = undefined; this.#pendingRubricResolution = undefined;
+    this.#stalledOperation = undefined;
     this.#mainView = { kind: 'conversation', title: controller.current.name, busy: false, connected: true };
     this.#taskNotices?.resume();
     await controller.reattachActiveObserver().finally(() => this.#resumeNoticeDisplay());
@@ -2208,6 +2312,8 @@ class TerminalApplication {
       this.#deferredRubric = boundedControlProjection({ kind: 'awaiting-rubric-confirmation', conversationId: controller.current.conversationId,
         turnId: draft.originalTurnId, advancementSessionId: advancement.advancementSessionId, rubricDraftId: draft.draftId }, 8192);
     }
+    const stalled = stalledProposal(controller.current.conversationId, advancement);
+    if (stalled) this.#mainView = { ...this.#mainView, message: advancementProposalStalledMessage(stalled.outcome), choices: stalledProposalChoices(undefined) };
     await this.#publish(this.#mainView);
     if (this.#deferredRubric) await this.#resolveRubric();
   }

@@ -101,6 +101,14 @@ function countVerdicts(review: AdvancementRunReview): {
  *   携收场报告，一处收束；
  * - payload 是 wire 数据，防御性解析，形状不符静默跳过（呈现层绝不抛错）。
  */
+const RECOVERY_FAILURE_TEXT: Readonly<Record<string, string>> = {
+  "not-found": "找不到要恢复的推进任务",
+  full: "推进待办已满，稍后会再试",
+  busy: "推进正在处理中，稍后会自动继续",
+  "missing-proxy": "推进的续推消息缺失",
+  failed: "恢复时出错",
+};
+
 export function renderAdvancementControlEventLines(
   event: string,
   payload: unknown,
@@ -158,10 +166,11 @@ export function renderAdvancementControlEventLines(
     case "advancement:proxy_recovered":
       return [systemLine("已恢复未完成的推进，继续执行", width)];
     case "advancement:recovery_failed": {
-      const message = isRecord(payload) ? payload["message"] : undefined;
-      const detail = typeof message === "string" && message ? `：${message}` : "";
+      // 原始错误由恢复服务记入日志；这里只给用户可理解的类别与去处，不展示内部错误原文
+      const status = isRecord(payload) ? payload["status"] : undefined;
+      const reason = typeof status === "string" ? RECOVERY_FAILURE_TEXT[status] : undefined;
       return [
-        line(chalk.yellow(`${layout.contentPrefix}⚠ 推进恢复失败${detail}`), width),
+        line(chalk.yellow(`${layout.contentPrefix}⚠ 推进恢复未完成：${reason ?? "恢复时出错"}。可在 /advancement 查看任务状态。`), width),
       ];
     }
     case "advancement:proposal_draft_failed": {

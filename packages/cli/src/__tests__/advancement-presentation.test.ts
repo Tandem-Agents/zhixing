@@ -76,6 +76,19 @@ describe("推进提议阶段的呈现", () => {
     expect(renderAdvancementControlEventLines("advancement:contract_draft", { advancementSessionId: "adv-1" }, WIDTH)).toEqual([]);
   });
 
+  it("推进恢复未完成：给类别与去处，不展示内部错误原文", () => {
+    const raw = 'AdvancementStore: session "advancement-proposal-x" has no pending original-task admission';
+    const failed = plain(renderAdvancementControlEventLines(
+      "advancement:recovery_failed",
+      { status: "failed", advancementSessionId: "adv-1", message: raw },
+      WIDTH * 2,
+    )).join("\n");
+    expect(failed).toContain("推进恢复未完成：恢复时出错。可在 /advancement 查看任务状态。");
+    expect(failed).not.toContain("AdvancementStore");
+    expect(plain(renderAdvancementControlEventLines("advancement:recovery_failed", { status: "busy" }, WIDTH * 2)).join("\n"))
+      .toContain("推进正在处理中，稍后会自动继续");
+  });
+
   it("恢复提示覆盖提议阶段状态", () => {
     expect(stripAnsi(renderResumedAdvancementNotice({ status: "drafting" }, WIDTH))).toContain("已提出推进，正在起草验收标准");
     expect(stripAnsi(renderResumedAdvancementNotice({ status: "draft-failed" }, WIDTH))).toContain("起草失败，原任务保留");

@@ -1000,6 +1000,8 @@ function createConversationProductApi(input: {
           proposals: {
             acceptPending: (conversationId) => advancement.loadLatestSession(conversationId),
             advance: (conversationId) => advancement.loadLatestSession(conversationId),
+            // 本夹具不起草：重试只回当前会话
+            retry: async (conversationId) => ({ started: false, session: await advancement.loadLatestSession(conversationId) }),
           },
           proposalStage: {
             supplementProposal: (request) => advancement.supplementProposal(request),
@@ -2719,6 +2721,36 @@ describe("session.* RPC (S2.D)", () => {
       }
     },
   );
+
+  it("session.advancementRedraft 校验起草代次；会话不在所见那一代时不起草并给当前状态", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+    const awaiting = await seedAwaitingViaProposal(client, "turn-redraft");
+    const invalid = await client.request("session.advancementRedraft", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      draftGeneration: 0,
+    });
+    expect(isErrorResponse(invalid) && invalid.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    const stale = await client.request("session.advancementRedraft", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      draftGeneration: 1,
+    });
+    expect(isSuccessResponse(stale) && stale.result).toEqual({
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      status: "unchanged",
+      advancementStatus: "awaiting-rubric-confirmation",
+    });
+    const session = await advancement.store.loadSession(awaiting.conversationId, awaiting.advancementSessionId);
+    expect(session?.status).toBe("awaiting-rubric-confirmation");
+    client.close();
+  });
 
   it("session.advancementCancel 不可取消已确认的 active 推进会话", async () => {
     const advancement = await createTestAdvancementHarness();

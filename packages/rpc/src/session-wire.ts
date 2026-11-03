@@ -287,6 +287,14 @@ export type SessionAdvancementCancelResult =
       runStatus: "immediate" | "queued";
     };
 
+/** 重试起草：drafting 已起新一代（结果沿推进事件送达）；unchanged 会话已不在所见那一代，advancementStatus 为当前状态。 */
+export interface SessionAdvancementRedraftResult {
+  conversationId: string;
+  advancementSessionId: string;
+  status: "drafting" | "unchanged";
+  advancementStatus?: AdvancementSessionStatus;
+}
+
 export interface SessionAdvancementStateSnapshot {
   advancementSessionId: string;
   /** 提议阶段（proposed、drafting、draft-failed、draft-uncertain）同属未终结推进。 */
@@ -298,6 +306,9 @@ export interface SessionAdvancementStateSnapshot {
   rubricDraftId?: string;
   /** awaiting 时携带草案全文——接入面重建确认面（主动浮现）的素材。 */
   pendingRubricDraft?: RubricContractDraftSnapshot;
+  /** 提议会话的原任务轮次与当前起草代次：起草失败页面据此重试、直接执行或取消。 */
+  originalTurnId?: string;
+  draftGeneration?: number;
   outstandingProxyMessageId?: string;
   lastReview?: {
     id: string;

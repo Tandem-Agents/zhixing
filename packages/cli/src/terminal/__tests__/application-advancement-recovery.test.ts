@@ -11,12 +11,16 @@ import { projectCommittedTerminalOutcome } from '../session-commands.js';
 import type { AdvancementProposalFact } from '@zhixing/core/advancement';
 import { createControlSessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { advancementProposalEvent } from '../../serve/advancement-proposal-events.js';
+import { parseConversationId } from '@zhixing/core/conversation';
 
 // Run the production page methods with controlled transport/controller results.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#resolveRubric', '#loadPendingRubric', '#holdRubricResolution', '#rubricLoop'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source).replace(/#/gu, '')).join('\n');
-const Fixture = new Function('PendingInputReceiptError', 'boundedControlProjection', 'chooseTerminalSelection', 'createAdvancementContractSelectionRequest', 'primaryNearbyCandidate', ts.transpile('class Fixture {' + methods + '} return Fixture;', {target: ts.ScriptTarget.ES2022}))(PendingInputReceiptError, boundedControlProjection, async (_request:any, choose:any)=>choose({}), (draft:unknown)=>draft, ()=>({id:'candidate'}));
+const methods = ['#resolveRubric', '#loadPendingRubric', '#advancementSnapshot', '#holdRubricResolution', '#rubricLoop', '#stalledProposalFlow'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source).replace(/#/gu, '')).join('\n');
+// 页面方法引用的模块级函数同样原样抽出
+const moduleFunction = (name: string) => new Function(ts.transpile(source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)!.getText(source) + `\nreturn ${name};`, {target: ts.ScriptTarget.ES2022}))();
+const stalledProposal = moduleFunction('stalledProposal'), stalledProposalChoices = moduleFunction('stalledProposalChoices');
+const Fixture = new Function('PendingInputReceiptError', 'boundedControlProjection', 'chooseTerminalSelection', 'createAdvancementContractSelectionRequest', 'primaryNearbyCandidate', 'parseConversationId', 'stalledProposal', 'stalledProposalChoices', ts.transpile('class Fixture {' + methods + '} return Fixture;', {target: ts.ScriptTarget.ES2022}))(PendingInputReceiptError, boundedControlProjection, async (_request:any, choose:any)=>choose({}), (draft:unknown)=>draft, ()=>({id:'candidate'}), parseConversationId, stalledProposal, stalledProposalChoices);
 const identity = { kind: 'awaiting-rubric-confirmation', conversationId: 'conv-1', turnId: 'turn-1', advancementSessionId: 'adv-1', rubricDraftId: 'draft-old' };
 function fixture(result: unknown) {
   const target = new Fixture(), events: string[] = [];
@@ -163,13 +167,13 @@ it.each([false,true])('hands off a saved revision across an epoch change (receip
 
 // 提议后的草案异步就绪或起草失败：生产方法原样抽出，其余协作者替身
 const proposalMethods = ['#proposalDraftReady', '#proposalDraftStalled', '#followTurn'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source).replace(/#/gu, '')).join('\n');
-const DraftReadyFixture = new Function('advancementProposalStalledMessage', ts.transpile('class DraftReadyFixture {' + proposalMethods + '} return DraftReadyFixture;', {target: ts.ScriptTarget.ES2022}))(advancementProposalStalledMessage);
+const DraftReadyFixture = new Function('advancementProposalStalledMessage', 'stalledProposalChoices', ts.transpile('class DraftReadyFixture {' + proposalMethods + '} return DraftReadyFixture;', {target: ts.ScriptTarget.ES2022}))(advancementProposalStalledMessage, stalledProposalChoices);
 function draftReadyFixture(overrides: Record<string, unknown> = {}) {
   const target = new DraftReadyFixture();
   Object.assign(target, { abort: new AbortController(), controller: {current: {conversationId: 'conv-1'}}, state: {activeTurnPromise: null},
     mainView: {connected: true}, submittingInput: false, resolveRubric: vi.fn(async () => {}), publish: vi.fn(async () => {}),
     background: vi.fn((run: () => Promise<void>) => { void run(); }),
-    processSession: {end: vi.fn()}, outputProjection: {end: vi.fn(), drain: vi.fn(async () => {})} }, overrides);
+    processSession: {end: vi.fn(), followLocal: vi.fn()}, outputProjection: {end: vi.fn(), drain: vi.fn(async () => {})} }, overrides);
   return target;
 }
 const stageParser = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'proposalStageEvent')!.getText(source);
@@ -256,5 +260,90 @@ describe('proposal stage notice follows the latest draft outcome', () => {
     target.proposalDraftStalled('conv-1', 'turn-1', 'failed');
     expect(target.mainView.message).toBe(advancementProposalStalledMessage('failed'));
     expect(target.publish).not.toHaveBeenCalled();
+  });
+  it('leaves one re-enterable entry for the failed draft', () => {
+    const target = draftReadyFixture({mainView: {connected: true, choices: [{id: 'other', label: '其他'}, {id: 'rubric-resume', label: '旧入口'}]}});
+    target.proposalDraftStalled('conv-1', 'turn-1', 'failed');
+    expect(target.mainView.choices).toEqual([{id: 'other', label: '其他'}, {id: 'rubric-resume', label: '处理起草失败的任务'}]);
+  });
+});
+
+// 起草失败或结果不明：入口进入后按快照的当前代次给出三项操作
+describe('stalled proposal page', () => {
+  const stalledSnapshot = {status: 'draft-failed', advancementSessionId: 'adv-1', originalTurnId: 'turn-1', draftGeneration: 2};
+  const target3 = {conversationId: 'conv-1', turnId: 'turn-1', advancementSessionId: 'adv-1', draftGeneration: 2, outcome: 'failed'};
+  function stalledFixture(choices: string[], snapshot: unknown = stalledSnapshot) {
+    const {target} = fixture(undefined);
+    target.deferredRubric = undefined;
+    target.conversation.hasPendingAdvancement = () => false;
+    target.conversation.consumeResume = vi.fn(async (_id: string, consume: (value: unknown) => unknown) => consume({advancement: snapshot}));
+    target.conversation.redraftAdvancement = vi.fn(async () => ({conversationId: 'conv-1', advancementSessionId: 'adv-1', status: 'drafting'}));
+    target.controller.cancelRubricContract = vi.fn(async (_target: unknown, options: {executeOriginal?: boolean}) => options.executeOriginal
+      ? {kind: 'direct-execution', advancementSessionId: 'adv-1', turn: {conversationId: 'conv-1', turnId: 'turn-1:direct', outcome: Promise.resolve({})}}
+      : {kind: 'cancelled', conversationId: 'conv-1', advancementSessionId: 'adv-1'});
+    const queue = [...choices];
+    target.choose = vi.fn(async () => queue.shift() ?? 'return');
+    target.mainView = {connected: true, choices: [{id: 'rubric-resume', label: '处理起草失败的任务'}]};
+    return target;
+  }
+  it('retries the draft for the generation the user saw and withdraws the entry', async () => {
+    const target = stalledFixture(['redraft']);
+    await target.resolveRubric();
+    expect(target.conversation.redraftAdvancement).toHaveBeenCalledWith('conv-1', 'adv-1', 2);
+    expect(target.mainView.message).toMatch(/正在重新起草/u);
+    expect(target.mainView.choices).toEqual([]);
+    expect(target.controller.cancelRubricContract).not.toHaveBeenCalled();
+  });
+  it('executes the original task directly, bound to the seen generation, without a draft id', async () => {
+    const target = stalledFixture(['direct']);
+    await target.resolveRubric();
+    expect(target.controller.cancelRubricContract).toHaveBeenCalledWith(target3, {executeOriginal: true});
+    expect(target.controller.cancelRubricContract.mock.calls[0][0]).not.toHaveProperty('rubricDraftId');
+    expect(target.followTurn).toHaveBeenCalledWith(expect.objectContaining({turnId: 'turn-1:direct'}));
+    expect(target.stalledOperation).toBeUndefined();
+  });
+  it('keeps the double confirmation for cancel; returning or Esc keeps the task and its entry', async () => {
+    const back = stalledFixture(['cancel', 'return', 'cancelled']);
+    await back.resolveRubric();
+    expect(back.controller.cancelRubricContract).not.toHaveBeenCalled();
+    expect(back.mainView.message).toMatch(/已收起；任务保持原样/u);
+    expect(back.mainView.choices).toEqual([{id: 'rubric-resume', label: '处理起草失败的任务'}]);
+    const confirmed = stalledFixture(['cancel', 'cancel']);
+    await confirmed.resolveRubric();
+    expect(confirmed.controller.cancelRubricContract).toHaveBeenCalledWith(target3, {executeOriginal: false});
+    expect(confirmed.mainView.message).toBe('已取消这次任务。');
+  });
+  it('reports a host refusal (already handled elsewhere) without executing or re-offering the entry', async () => {
+    const target = stalledFixture(['direct']);
+    target.controller.cancelRubricContract.mockRejectedValue(Error('任务状态已变化，请查看当前任务。'));
+    await target.resolveRubric();
+    expect(target.followTurn).not.toHaveBeenCalled();
+    expect(target.mainView.message).toMatch(/本次未执行任何操作/u);
+    expect(target.mainView.choices).toEqual([]);
+  });
+  it('reconciles the same operation after an unknown receipt instead of sending another', async () => {
+    const target = stalledFixture(['direct']);
+    target.controller.cancelRubricContract.mockRejectedValue(new PendingInputReceiptError());
+    await target.resolveRubric();
+    expect(target.mainView.choices).toEqual([{id: 'rubric-resume', label: '核对上次操作'}]);
+    expect(target.stalledOperation).toEqual(target3);
+    target.conversation.hasPendingAdvancement = () => true;
+    const turn = {conversationId: 'conv-1', turnId: 'turn-1:direct', outcome: Promise.resolve({})};
+    target.controller.reconcileRubricSubmission.mockResolvedValue({kind: 'accepted', turn});
+    await target.resolveRubric();
+    expect(target.controller.reconcileRubricSubmission).toHaveBeenCalledWith(target3);
+    expect(target.controller.cancelRubricContract).toHaveBeenCalledOnce();
+    expect(target.followTurn).toHaveBeenCalledWith(turn);
+    expect(target.stalledOperation).toBeUndefined();
+  });
+  it('withdraws a stale entry when the task is drafting again or already handled', async () => {
+    const drafting = stalledFixture([], {status: 'drafting', advancementSessionId: 'adv-1', originalTurnId: 'turn-1', draftGeneration: 3});
+    await drafting.resolveRubric();
+    expect(drafting.choose).not.toHaveBeenCalled();
+    expect(drafting.mainView.message).toMatch(/正在起草验收标准/u);
+    expect(drafting.mainView.choices).toEqual([]);
+    const gone = stalledFixture([], null);
+    await gone.resolveRubric();
+    expect(gone.mainView.message).toMatch(/已处理或状态已变化/u);
   });
 });

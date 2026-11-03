@@ -24,6 +24,7 @@ import type {
   SessionActivityPayload,
   SessionAdvancementCancelResult,
   SessionAdvancementConfirmResult,
+  SessionAdvancementRedraftResult,
   SessionAdvancementReviseResult,
   SessionCompactResult,
   SessionContextBudgetResult,
@@ -484,15 +485,25 @@ export class RpcConversationFacade {
   async cancelAdvancement(
     conversationId: string,
     advancementSessionId: string,
-    opts: { executeOriginal?: boolean; rubricDraftId?: string } = {},
+    opts: { executeOriginal?: boolean; rubricDraftId?: string; draftGeneration?: number } = {},
   ): Promise<SessionAdvancementCancelResult> {
     return this.#advancementRequest<SessionAdvancementCancelResult>("session.advancementCancel", conversationId,
-      { conversationId, advancementSessionId, executeOriginal: opts.executeOriginal ?? false, ...(opts.rubricDraftId ? { rubricDraftId: opts.rubricDraftId } : {}) },
+      { conversationId, advancementSessionId, executeOriginal: opts.executeOriginal ?? false, ...(opts.rubricDraftId ? { rubricDraftId: opts.rubricDraftId } : {}),
+        ...(opts.draftGeneration !== undefined ? { draftGeneration: opts.draftGeneration } : {}) },
       result => {
         if ("status" in result && result.status === "cancelled") return { conversationId, sessionId: conversationId, status: "cancelled", advancementSessionId };
         if ("status" in result || !result.runId) throw Error("任务状态已变化，请重新查看。");
         return { ...result, status: "direct-execution", advancementSessionId, runStatus: "queued" };
       });
+  }
+
+  /** 起草失败或结果不明后按所见代次重试起草；同一代重放不会再起一代，断线后原样重发即可。 */
+  async redraftAdvancement(conversationId: string, advancementSessionId: string, draftGeneration: number): Promise<SessionAdvancementRedraftResult> {
+    const result = await this.#requestWithReconnect<SessionAdvancementRedraftResult>("session.advancementRedraft", { conversationId, advancementSessionId, draftGeneration });
+    if (result.conversationId !== conversationId || result.advancementSessionId !== advancementSessionId || (result.status !== "drafting" && result.status !== "unchanged")) {
+      throw Error("重新起草的结果身份不一致，请重新查看任务。");
+    }
+    return boundedControlProjection(result, 1024);
   }
 
   /** 按用户反馈修订待审 Rubric 草案，仍停留在确认控制面。 */

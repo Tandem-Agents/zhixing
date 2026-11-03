@@ -99,7 +99,7 @@ const coverageGroups = [
   ["conversation-metadata", ["rpc:session.rename", "rpc:session.delete", "slash:name:repl"]],
   ["conversation-read", ["rpc:session.history", "rpc:session.inputReceipt", "rpc:session.statusHistory", "rpc:session.usage", "rpc:session.security", "rpc:session.contextBudget", "slash:usage:repl", "slash:context:repl", "slash:security:repl"]],
   ["task-list", ["rpc:session.taskList", "rpc:session.taskListUpdate", "slash:task:repl", "slash:tasklist:repl", "tool:extra:task-list"]],
-  ["advancement", ["rpc:session.advancementCancel", "rpc:session.advancementConfirm", "rpc:session.advancementDetail", "rpc:session.advancementRevise", "slash:advancement:repl"]],
+  ["advancement", ["rpc:session.advancementCancel", "rpc:session.advancementConfirm", "rpc:session.advancementDetail", "rpc:session.advancementRedraft", "rpc:session.advancementRevise", "slash:advancement:repl", "tool:extra:advancement:propose"]],
   ["workscene-manage", ["rpc:workscene.create", "rpc:workscene.delete", "rpc:workscene.rename", "rpc:workscene.setWorkdir", "tool:extra:workscene:change-approve", "tool:extra:workscene:rename-current", "tool:extra:workscene:set-workdir-current", "tool:extra:workscene:clear-workdir-current"]],
   ["workscene-switch", ["rpc:workscene.enter", "rpc:workscene.exit", "rpc:workscene.tasks", "rpc:workscene.stopTask", "slash:work:repl", "slash:exit:repl", "tool:extra:workscene:enter", "tool:extra:workscene:exit", "tool:extra:workscene:task-stop"]],
   ["schedule-manage", ["rpc:schedule.create", "rpc:schedule.update", "rpc:schedule.delete", "tool:extra:schedule:manage"]],
@@ -6384,6 +6384,13 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const cancel = cancelStart >= 0 && cancelEnd > cancelStart
     ? handler.slice(cancelStart, cancelEnd)
     : "";
+  const redraftStart = handler.indexOf(
+    "export function buildSessionAdvancementRedraftMethod()",
+  );
+  const redraftEnd = handler.indexOf("\nexport function ", redraftStart + 1);
+  const redraft = redraftStart >= 0
+    ? handler.slice(redraftStart, redraftEnd > redraftStart ? redraftEnd : undefined)
+    : "";
   const cancellationFact = application.lastIndexOf(
     "await command.fact.publish(decision.fact)",
   );
@@ -6861,7 +6868,10 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 2 ||
-    application.split("defineProductApiCommand<").length - 1 !== 6 ||
+    application.split("defineProductApiCommand<").length - 1 !== 7 ||
+    !application.includes('"advancement.command.redraft-proposal"') ||
+    application.split("ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND").length - 1 !== 3 ||
+    !application.includes("application.retryProposalDraft(command)") ||
     application.split("defineProductApiFactEvent<").length - 1 !== 5 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
@@ -6892,6 +6902,10 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     /requireAdvancement\(|runAdvancementMaintenance\(|\.confirmRubric\(|admitAndMaybeStartTurn\(|prepareConversationAgentTurnIdentity\(|settleOriginalTaskAdmission\(/u.test(
       confirm,
     ) ||
+    redraft.length === 0 ||
+    !redraft.includes("requireAdvancementProductApi(ctx.server, ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND)") ||
+    !redraft.includes("productApi.command(ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND,") ||
+    /requireAdvancement\(|runAdvancementMaintenance\(|\.retryProposalDraft\(/u.test(redraft) ||
     cancel.length === 0 ||
     !cancel.includes("requireAdvancementProductApi(") ||
     !cancel.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||

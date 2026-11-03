@@ -1457,6 +1457,8 @@ function projectAdvancementActiveState(
     session.pendingRubricDraft
       ? { pendingRubricDraft: session.pendingRubricDraft }
       : {}),
+    ...(session.proposal ? { originalTurnId: session.proposal.originalTurnId } : {}),
+    ...(session.proposal?.draftAttempt ? { draftGeneration: session.proposal.draftAttempt.generation } : {}),
     ...(session.outstandingProxyMessageId
       ? { outstandingProxyMessageId: session.outstandingProxyMessageId }
       : {}),
@@ -2249,7 +2251,7 @@ export interface AdvancementApplicationOptions {
   readonly submissions: AdvancementSubmissionMechanismPort;
   readonly confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
   /** 主 Agent 提议的接受与草案；控制输入处理前先接受待接受提议。 */
-  readonly proposals: Pick<AdvancementProposalApplicationService, "acceptPending" | "advance">;
+  readonly proposals: Pick<AdvancementProposalApplicationService, "acceptPending" | "advance" | "retry">;
   readonly proposalStage: AdvancementProposalStageMechanismPort;
 }
 
@@ -2438,6 +2440,9 @@ export interface AdvancementActiveStateProjection {
   readonly rubricTitle?: string;
   readonly rubricDraftId?: string;
   readonly pendingRubricDraft?: RubricContractDraftSnapshot;
+  /** 提议会话的原任务轮次与当前起草代次：接入面据此重试起草、直接执行或取消，按代次裁决。 */
+  readonly originalTurnId?: string;
+  readonly draftGeneration?: number;
   readonly outstandingProxyMessageId?: string;
   readonly lastReview?: Readonly<{
     id: string;
@@ -2449,6 +2454,21 @@ export interface AdvancementActiveStateProjection {
 }
 
 export type AdvancementActiveStateResult = AdvancementActiveStateProjection | null;
+
+export interface AdvancementProposalRedraftCommand {
+  readonly conversationId: string;
+  readonly advancementSessionId: string;
+  /** 用户所见的起草代次；会话已离开这一代时不重试。 */
+  readonly draftGeneration: number;
+}
+
+/** drafting：已起新一代（或同一请求的在途）；unchanged：会话已不在那一代，status 为当前状态。 */
+export type AdvancementProposalRedraftResult = Readonly<{
+  kind: "drafting" | "unchanged";
+  conversationId: string;
+  advancementSessionId: string;
+  status?: AdvancementSessionStatus;
+}>;
 
 export interface AdvancementRubricRevisionCommand {
   readonly expectedRubricDraftId?: string;
@@ -2479,6 +2499,8 @@ export interface AdvancementContractDraftRevisedFact extends ProductApiFact {
 
 export interface AdvancementRubricCancellationCommand {
   readonly expectedRubricDraftId?: string;
+  /** 提议会话起草失败或结果不明时用户所见的起草代次；代次或状态已变则拒绝。 */
+  readonly expectedDraftGeneration?: number;
   readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly advancementSessionId: string;
@@ -2653,6 +2675,7 @@ export interface AdvancementApplication {
     result: AdvancementRubricCancellationResult;
     fact: AdvancementContractCancelledFact;
   }>>;
+  retryProposalDraft(command: AdvancementProposalRedraftCommand): Promise<AdvancementProposalRedraftResult>;
   controlAwaitingRubric(
     command: AdvancementAwaitingRubricControlCommand,
   ): Promise<Readonly<{
@@ -2681,7 +2704,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #rubricConfirmation: AdvancementRubricConfirmationMechanismPort;
   readonly #rubricPublication?: RubricPublicationPort;
   readonly #confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
-  readonly #proposals: Pick<AdvancementProposalApplicationService, "acceptPending" | "advance">;
+  readonly #proposals: Pick<AdvancementProposalApplicationService, "acceptPending" | "advance" | "retry">;
   readonly #proposalStage: AdvancementProposalStageMechanismPort;
 
   constructor(options: AdvancementApplicationOptions) {
@@ -3663,7 +3686,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
   async #controlProposalStage(session: AdvancementSession, command: AdvancementAwaitingRubricControlCommand) {
     const proposal = session.proposal!;
     const conversationId = command.conversationId;
-    const decision = await this.#awaitingRubricAdmission.decideProposalStageAdmission({
+    // 提示里给出的整句“直接执行”“取消”按字面直达对应出口，不交模型分类
+    const decision = proposalStageLiteralDecision(command.userInput) ?? await this.#awaitingRubricAdmission.decideProposalStageAdmission({
       conversationId,
       userInput: freezeSnapshot(command.userInput),
     });
@@ -3729,6 +3753,22 @@ export class AdvancementApplicationService implements AdvancementApplication {
     }
   }
 
+  /** 起草失败或结果不明后按用户所见代次重试起草；不经模型分类，结果沿草案事实送达。 */
+  async retryProposalDraft(command: AdvancementProposalRedraftCommand): Promise<AdvancementProposalRedraftResult> {
+    assertRubricRevisionIdentity(command.conversationId, "conversation");
+    assertRubricRevisionIdentity(command.advancementSessionId, "Advancement session");
+    if (!Number.isSafeInteger(command.draftGeneration) || command.draftGeneration < 1) {
+      throw new TypeError("Advancement proposal redraft requires a positive draft generation");
+    }
+    const { started, session } = await this.#proposals.retry(command.conversationId, command.advancementSessionId, command.draftGeneration);
+    return Object.freeze({
+      kind: started ? "drafting" as const : "unchanged" as const,
+      conversationId: command.conversationId,
+      advancementSessionId: command.advancementSessionId,
+      ...(session?.id === command.advancementSessionId ? { status: session.status } : {}),
+    });
+  }
+
   async cancelRubric(
     command: AdvancementRubricCancellationCommand,
   ): Promise<Readonly<{
@@ -3742,6 +3782,9 @@ export class AdvancementApplicationService implements AdvancementApplication {
     );
     if (typeof command.executeOriginal !== "boolean") {
       throw new TypeError("Advancement rubric cancellation requires an executeOriginal decision");
+    }
+    if (command.expectedDraftGeneration !== undefined && (!Number.isSafeInteger(command.expectedDraftGeneration) || command.expectedDraftGeneration < 1)) {
+      throw new TypeError("Advancement rubric cancellation draft generation must be a positive integer");
     }
     if (typeof command.fact?.publish !== "function") {
       throw new TypeError("Advancement rubric cancellation requires a Fact projection port");
@@ -3792,6 +3835,11 @@ export class AdvancementApplicationService implements AdvancementApplication {
         }
 
         if (command.expectedRubricDraftId && session.pendingRubricDraft?.draftId !== command.expectedRubricDraftId) throw await this.#rejectSubmission(command, new AdvancementApplicationError("rubric-draft-stale", "草案已变化，请查看最新版本。"));
+        // 按起草失败页面发出的操作只对用户所见的那一代成立：已重试、草案已到或换了会话都按状态已变拒绝
+        if (command.expectedDraftGeneration !== undefined &&
+            (!proposalStalled || session.proposal?.draftAttempt?.generation !== command.expectedDraftGeneration)) {
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("rubric-draft-stale", "任务状态已变化，请查看当前任务。"));
+        }
         const committed = command.executeOriginal
           ? await this.#persistDirectOriginalTask(session, command.surface, command.submission)
           : await this.#rubricCancellation.persistRubricCancellation({
@@ -3980,6 +4028,13 @@ export const ADVANCEMENT_CANCEL_RUBRIC_COMMAND = defineProductApiCommand<
   ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
 ]);
 
+export const ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND = defineProductApiCommand<
+  "advancement.command.redraft-proposal",
+  AdvancementProposalRedraftCommand,
+  AdvancementProposalRedraftResult,
+  never
+>("advancement.command.redraft-proposal", []);
+
 export const ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND =
   defineProductApiCommand<
     "advancement.command.control-awaiting-rubric",
@@ -4000,6 +4055,7 @@ export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
     ADVANCEMENT_REVISE_RUBRIC_COMMAND,
     ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
     ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+    ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND,
     ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ],
   factEvents: [
@@ -4059,6 +4115,10 @@ export function createAdvancementProductApiContribution(
           const cancelled = await application.cancelRubric(command);
           return { result: cancelled.result, facts: [cancelled.fact] };
         },
+      ),
+      bindProductApiOperation(
+        ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND,
+        async (command) => ({ result: await application.retryProposalDraft(command), facts: [] }),
       ),
       bindProductApiOperation(
         ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
@@ -4205,6 +4265,15 @@ function assertAdvancementSessionIdentity(
       { advancementSessionId: command.advancementSessionId },
     );
   }
+}
+
+/** 提议阶段提示过的两句整句输入（只含文字、去掉首尾空白与句末标点后完全一致）对应的出口；其余交模型分类。 */
+function proposalStageLiteralDecision(input: Readonly<UserTurnInput>): AdvancementProposalStageAdmissionDecision | undefined {
+  if (input.parts.some((part) => part.type !== "text")) return undefined;
+  const text = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("").trim().replace(/[。.!！]+$/u, "");
+  if (text === "直接执行") return Object.freeze({ action: "downgrade-to-direct" as const });
+  if (text === "取消") return Object.freeze({ action: "cancel-pending-task" as const });
+  return undefined;
 }
 
 /** 提议阶段降级、取消或换目标后的可见事实；提议阶段没有草案，原始输入取自提议。 */

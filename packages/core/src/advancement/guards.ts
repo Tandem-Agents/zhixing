@@ -137,8 +137,10 @@ export function assertAdvancementEventBatchLegal(
         const proposal = session.proposal;
         const prior = proposal?.draftAttempt;
         const attempt = event.attempt;
+        // 起新一代：提议待起草，或用户在失败、结果不明之后明确要求重试
+        const retryable = session.status === "draft-failed" || session.status === "draft-uncertain";
         const legal = !!proposal && (attempt.phase === "invoking"
-          ? session.status === "proposed" && attempt.generation === (prior?.generation ?? 0) + 1 &&
+          ? (session.status === "proposed" || retryable) && attempt.generation === (prior?.generation ?? 0) + 1 &&
             attempt.revision === proposal.supplements.length
           : session.status === "drafting" && prior?.phase === "invoking" &&
             prior.generation === attempt.generation && prior.revision === attempt.revision);

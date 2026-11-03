@@ -83,6 +83,7 @@ import {
   ADVANCEMENT_SUBMISSION_QUERY,
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
+  ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
   type AdvancementContractConfirmedFact,
@@ -118,6 +119,7 @@ import {
   type SessionAdvancementCancelResult,
   type SessionAdvancementConfirmResult,
   type SessionAdvancementDetailResult,
+  type SessionAdvancementRedraftResult,
   type SessionAdvancementReviseResult,
   type SessionRubricPersistenceChoice,
   type SessionAdvancementStateSnapshot,
@@ -618,6 +620,13 @@ interface SessionAdvancementActionParams extends ConversationIdParams {
 interface SessionAdvancementCancelParams
   extends SessionAdvancementActionParams {
   executeOriginal?: unknown;
+  /** 起草失败页面所见的起草代次；代次已变时拒绝。 */
+  draftGeneration?: unknown;
+}
+
+interface SessionAdvancementRedraftParams extends ConversationIdParams {
+  advancementSessionId?: unknown;
+  draftGeneration?: unknown;
 }
 
 interface SessionAdvancementReviseParams
@@ -804,7 +813,9 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
         "session.advancementCancel",
       );
       const executeOriginal = params.executeOriginal === true;
-      const submission = submissionIdentity(ctx, params.submissionId, "session.advancementCancel", { conversationId, advancementSessionId, executeOriginal, rubricDraftId: params.rubricDraftId ?? null });
+      const draftGeneration = params.draftGeneration === undefined ? undefined : requireDraftGeneration(params, "session.advancementCancel");
+      const submission = submissionIdentity(ctx, params.submissionId, "session.advancementCancel", { conversationId, advancementSessionId, executeOriginal, rubricDraftId: params.rubricDraftId ?? null,
+        ...(draftGeneration !== undefined ? { draftGeneration } : {}) });
       const recovered = await recoverSubmission(ctx, conversationId, submission);
       if (recovered) { if ("status" in recovered && recovered.status === "cancelled") return { conversationId, sessionId: conversationId, status: "cancelled", advancementSessionId }; if ("status" in recovered || !recovered.runId) throw RpcErrors.invalidParams("任务状态已变化，请查看当前任务。"); return { ...recovered, status: "direct-execution", advancementSessionId, runStatus: "queued" }; }
       const manager = requireConversations(ctx.server);
@@ -822,6 +833,7 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
             executeOriginal,
             submission,
             ...(typeof params.rubricDraftId === "string" ? { expectedRubricDraftId: params.rubricDraftId } : {}),
+            ...(draftGeneration !== undefined ? { expectedDraftGeneration: draftGeneration } : {}),
             fact: {
               publish: (fact) =>
                 publishAdvancementCancellationFact(
@@ -847,6 +859,40 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
       }
     },
   };
+}
+
+/** 起草失败或结果不明后重试起草：按用户所见代次裁决，不等草案结果（就绪或失败沿推进事件送达）。 */
+export function buildSessionAdvancementRedraftMethod(): MethodEntry {
+  return {
+    name: "session.advancementRedraft",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionAdvancementRedraftResult> {
+      const params = (rawParams ?? {}) as SessionAdvancementRedraftParams;
+      const conversationId = requireConversationId(params, "session.advancementRedraft");
+      const advancementSessionId = requireAdvancementSessionId(params, "session.advancementRedraft");
+      const draftGeneration = requireDraftGeneration(params, "session.advancementRedraft");
+      const productApi = requireAdvancementProductApi(ctx.server, ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND);
+      try {
+        const redrafted = await productApi.command(ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND, { conversationId, advancementSessionId, draftGeneration });
+        return {
+          conversationId,
+          advancementSessionId,
+          status: redrafted.result.kind,
+          ...(redrafted.result.status ? { advancementStatus: redrafted.result.status } : {}),
+        };
+      } catch (error) {
+        throw mapAdvancementRubricCancellationError(error, conversationId, advancementSessionId);
+      }
+    },
+  };
+}
+
+function requireDraftGeneration(params: { draftGeneration?: unknown }, method: string): number {
+  const value = params.draftGeneration;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw RpcErrors.invalidParams(`${method} requires a positive integer draftGeneration`);
+  }
+  return value;
 }
 
 function createAdvancementOriginalTaskSurface(input: Readonly<{
@@ -2943,6 +2989,8 @@ export function projectAdvancementState(
     ...(state.pendingRubricDraft
       ? { pendingRubricDraft: state.pendingRubricDraft }
       : {}),
+    ...(state.originalTurnId ? { originalTurnId: state.originalTurnId } : {}),
+    ...(state.draftGeneration !== undefined ? { draftGeneration: state.draftGeneration } : {}),
     ...(state.outstandingProxyMessageId
       ? { outstandingProxyMessageId: state.outstandingProxyMessageId }
       : {}),

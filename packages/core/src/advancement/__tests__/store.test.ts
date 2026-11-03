@@ -211,6 +211,22 @@ describe("AdvancementStore", () => {
     expect((await recovered.loadSession("conv-1", "session-2"))?.originalTaskAdmission).toBeUndefined();
   });
 
+  it("treats a repeated settlement of the same direct admission as already done, and still rejects a different run", async () => {
+    // Z108：正常路径已结算后，恢复路径用同一意图、同一运行再结算一次，不应报“没有待接纳”
+    const { root, store } = await makeStore();
+    await store.createSession(createInput());
+    const intent = originalTaskAdmissionIntent("direct");
+    await store.directOriginalTask("conv-1", "session-1", intent,
+      { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" });
+    const settlement = { turnId: intent.turnId, inputDigest: intent.inputDigest, runId: "run-direct" };
+    await store.settleOriginalTaskAdmission("conv-1", "session-1", settlement);
+    const recovery = new AdvancementStore(root);
+    await expect(recovery.settleOriginalTaskAdmission("conv-1", "session-1", settlement)).resolves
+      .toMatchObject({ originalTaskAdmission: { status: "admitted", runId: "run-direct" } });
+    await expect(recovery.settleOriginalTaskAdmission("conv-1", "session-1", { ...settlement, runId: "run-other" })).rejects
+      .toThrow("has no pending original-task admission");
+  });
+
   it("permanent direct rejection is durable and no longer recoverable", async () => {
     const { root, store } = await makeStore();
     await store.createSession(createInput());

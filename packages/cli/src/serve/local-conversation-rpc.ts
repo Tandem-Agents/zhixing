@@ -41,6 +41,7 @@ export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.advancementCancel",
   "session.advancementConfirm",
   "session.advancementDetail",
+  "session.advancementRedraft",
   "session.advancementRevise",
   "session.clear",
   "session.compact",
@@ -517,6 +518,7 @@ export class LocalConversationRpcRouter
       }
       case "session.advancementCancel":
       case "session.advancementConfirm":
+      case "session.advancementRedraft":
       case "session.advancementRevise":
         throw RpcErrors.busy(
           "这项确认当前暂不可处理；当前对话已保留，完整能力恢复后可继续。",

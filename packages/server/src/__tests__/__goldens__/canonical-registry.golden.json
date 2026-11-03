@@ -167,6 +167,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.advancementRedraft",
+        "requiresAuth": true
+      },
+      {
         "name": "session.advancementRevise",
         "requiresAuth": true
       },
@@ -466,6 +470,10 @@
       },
       {
         "name": "session.advancementDetail",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementRedraft",
         "requiresAuth": true
       },
       {
@@ -771,6 +779,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.advancementRedraft",
+        "requiresAuth": true
+      },
+      {
         "name": "session.advancementRevise",
         "requiresAuth": true
       },
@@ -1070,6 +1082,10 @@
       },
       {
         "name": "session.advancementDetail",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.advancementRedraft",
         "requiresAuth": true
       },
       {
@@ -1439,6 +1455,7 @@
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
           "rpc:session.advancementDetail",
+          "rpc:session.advancementRedraft",
           "rpc:session.advancementRevise",
           "rpc:session.clear",
           "rpc:session.compact",
@@ -1499,6 +1516,7 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
           "tool:extra:task-list",
@@ -1647,6 +1665,7 @@
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
           "rpc:session.advancementDetail",
+          "rpc:session.advancementRedraft",
           "rpc:session.advancementRevise",
           "rpc:session.clear",
           "rpc:session.compact",
@@ -1707,6 +1726,7 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
           "tool:extra:task-list",
@@ -1840,6 +1860,7 @@
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
           "rpc:session.advancementDetail",
+          "rpc:session.advancementRedraft",
           "rpc:session.advancementRevise",
           "rpc:session.clear",
           "rpc:session.compact",
@@ -2021,6 +2042,7 @@
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
           "rpc:session.advancementDetail",
+          "rpc:session.advancementRedraft",
           "rpc:session.advancementRevise",
           "rpc:session.clear",
           "rpc:session.compact",
@@ -2166,6 +2188,7 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
           "tool:extra:task-list",
@@ -2265,6 +2288,7 @@
           "slash:work:repl",
           "tool:builtin:admit_skill",
           "tool:builtin:save_skill",
+          "tool:extra:advancement:propose",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
           "tool:extra:task-list",
@@ -3677,6 +3701,15 @@
         }
       },
       {
+        "name": "session.advancementRedraft",
+        "requiresAuth": true,
+        "key": "rpc:session.advancementRedraft",
+        "category": "rpc",
+        "target": {
+          "rowId": "advancement"
+        }
+      },
+      {
         "name": "session.advancementRevise",
         "requiresAuth": true,
         "key": "rpc:session.advancementRevise",
@@ -4286,6 +4319,19 @@
         "category": "tool",
         "target": {
           "rowId": "skill-manage"
+        }
+      },
+      {
+        "key": "tool:extra:advancement:propose",
+        "toolName": "propose_advancement",
+        "authorityWrite": true,
+        "runtimeKinds": [
+          "main",
+          "workscene"
+        ],
+        "category": "tool",
+        "target": {
+          "rowId": "advancement"
         }
       },
       {
