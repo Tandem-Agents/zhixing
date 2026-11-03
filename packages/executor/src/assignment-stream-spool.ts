@@ -46,7 +46,12 @@ import {
   ensureDurableDirectory,
   syncDirectory,
 } from "@zhixing/core/persistence";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import {
+  isHoldingMaintenanceExclusion,
+  maintenanceRetryDelayMs,
+  waitForMaintenanceRetry,
+  type StorageMaintenanceGovernorPort,
+} from "@zhixing/core/resources";
 
 export const DEFAULT_ASSIGNMENT_STREAM_SPOOL_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_ASSIGNMENT_STREAM_RECLAIM_DELAY_MS =
@@ -73,7 +78,12 @@ export interface AssignmentStreamSpoolOptions {
     store: FileArtifactStore,
     ref: ArtifactRef,
   ) => Promise<void>;
+  /** 追加连续遇存储维护背压、始终没有进展时的最长等待；超过即交出最后一次背压错误，不永久占住生产者。 */
+  readonly maintenancePressureWindowMs?: number;
 }
+
+/** 维护单步有界且会在步骤边界为前台让路；连续半分钟仍拿不到配额说明不是短暂争用，按失败交回。 */
+const DEFAULT_MAINTENANCE_PRESSURE_WINDOW_MS = 30_000;
 
 export interface AppendStreamFrameInput {
   readonly assignmentId: string;
@@ -499,6 +509,9 @@ export class AssignmentStreamSpool {
     AssignmentStreamSpoolOptions["removeRetiredArtifact"]
   >;
   readonly #handles = new Map<string, AssignmentHandle>();
+  readonly #maintenancePressureWindowMs: number;
+  /** spool 停止时结束所有在队列外等待维护背压的追加 */
+  readonly #stopped = new AbortController();
   #assignmentScan: Dir | undefined;
 
   constructor(
@@ -506,6 +519,8 @@ export class AssignmentStreamSpool {
     sourceArtifacts: ArtifactStore,
     options: AssignmentStreamSpoolOptions = {},
   ) {
+    this.#maintenancePressureWindowMs = options.maintenancePressureWindowMs ?? DEFAULT_MAINTENANCE_PRESSURE_WINDOW_MS;
+    assertPositiveInteger(this.#maintenancePressureWindowMs, "Stream maintenance pressure window");
     this.#rootDir = path.resolve(rootDir);
     this.#sourceArtifacts = sourceArtifacts;
     this.#capacityBytes =
@@ -734,16 +749,46 @@ export class AssignmentStreamSpool {
         this.#sourceArtifacts,
         handle.frames,
       );
+      const pressure: { since?: number } = {};
       for (;;) {
         throwIfAborted(input.signal);
-        const attempt = await handle.queue.run(() =>
+        const attempt = await this.#queuedAttempt(handle, () =>
           this.#tryAppend(handle, input, prepared),
-        );
+        input.signal, pressure);
         if (attempt.kind === "appended") return attempt.frame;
         if (attempt.kind === "retry") continue;
         await this.#waitForCapacity(handle, input.signal);
       }
     });
+  }
+
+  /**
+   * 队列内的一次追加尝试。尝试里的存储维护步骤（如提交前的投影落盘）拿不到读写配额时会以背压失败：
+   * 维护步骤在产生副作用之前取得准入，这次事务没有提交、校验链没有推进。维护契约要求背压由调用方
+   * 在锁外重试——按给出的间隔在队列外等待后重来，不把生产者（运行）判死；持有维护栅栏时照原样上抛。
+   */
+  async #queuedAttempt(
+    handle: AssignmentHandle,
+    attempt: () => Promise<AppendAttempt>,
+    signal: AbortSignal | undefined,
+    pressure: { since?: number },
+  ): Promise<AppendAttempt> {
+    try {
+      const result = await handle.queue.run(attempt);
+      pressure.since = undefined;
+      return result;
+    } catch (error) {
+      const delay = maintenanceRetryDelayMs(error);
+      if (delay === undefined || isHoldingMaintenanceExclusion()) throw error;
+      // 退路：调用方取消、spool 停止，或连续背压超过无进展截止，都把这次背压错误交回，不再等待
+      pressure.since ??= Date.now();
+      if (signal?.aborted || this.#stopped.signal.aborted ||
+          Date.now() - pressure.since >= this.#maintenancePressureWindowMs) throw error;
+      const waiting = signal ? AbortSignal.any([signal, this.#stopped.signal]) : this.#stopped.signal;
+      await waitForMaintenanceRetry(Math.max(1, Math.min(delay, 250)), waiting);
+      if (signal?.aborted || this.#stopped.signal.aborted) throw error;
+      return { kind: "retry" };
+    }
   }
 
   /**
@@ -766,11 +811,12 @@ export class AssignmentStreamSpool {
         this.#sourceArtifacts,
         handle.frames,
       );
+      const pressure: { since?: number } = {};
       for (;;) {
         throwIfAborted(input.signal);
-        const attempt = await handle.queue.run(() =>
+        const attempt = await this.#queuedAttempt(handle, () =>
           this.#tryAppend(handle, input, prepared),
-        );
+        input.signal, pressure);
         if (attempt.kind === "appended") {
           return {
             sourceId: input.sourceId,
@@ -792,6 +838,7 @@ export class AssignmentStreamSpool {
   }): Promise<StreamFrame> {
     await this.open(input.assignmentId, input.ref);
     const handle = this.#handle(input.assignmentId);
+    const pressure: { since?: number } = {};
     try {
       for (;;) {
         throwIfAborted(input.signal);
@@ -806,7 +853,7 @@ export class AssignmentStreamSpool {
         }
         const chain = new StreamDigestChain(input.assignmentId, state.verifier);
         const final = chain.final();
-        const attempt = await handle.queue.run(() =>
+        const attempt = await this.#queuedAttempt(handle, () =>
           this.#tryAppend(handle, {
             ...input,
             payload: {
@@ -822,7 +869,7 @@ export class AssignmentStreamSpool {
             } as never,
             references: [],
           }),
-        );
+        input.signal, pressure);
         if (attempt.kind === "appended") return attempt.frame;
         if (attempt.kind === "retry") continue;
         await this.#waitForCapacity(handle, input.signal);
@@ -1171,6 +1218,7 @@ export class AssignmentStreamSpool {
   }
 
   async stopStorageMaintenance(): Promise<void> {
+    this.#stopped.abort(new Error("Stream spool storage maintenance stopped"));
     await Promise.all(
       [...this.#handles.values()].map((handle) => handle.log.stopStorageMaintenance()),
     );

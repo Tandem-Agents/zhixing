@@ -649,7 +649,7 @@ describe("ConversationProtocolRuntime", () => {
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   // 运行拥有者按尝试持有前台义务：准备（含执行体装配）与收束受保护，主循环 provider 等待让出，终局关闭
-  async function foregroundHarness(name: string, behavior: "complete" | "fail") {
+  async function foregroundHarness(name: string, behavior: "complete" | "fail" | "progress") {
     const home = await createTempDir(name);
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     const foreground = new ForegroundActivity();
@@ -662,6 +662,13 @@ describe("ConversationProtocolRuntime", () => {
         // 主循环第一次模型调用：预留之后进入 provider（让出），终结后回来（重入）
         phases?.entered();
         observed.duringProvider = !foreground.quiet(0);
+        if (behavior === "progress") {
+          // provider 让出前台后安静超过空闲门槛，再产出一段进展（此时没有任何客户端在收推送）
+          await new Promise(resolve => setTimeout(resolve, 600));
+          observed.quietBeforeProgress = foreground.quiet(500);
+          yield { type: "text_delta", text: "progress" } as never;
+          observed.quietAfterProgress = foreground.quiet(500);
+        }
         phases?.settled();
         observed.afterProvider = !foreground.quiet(0);
         if (behavior === "fail") throw new Error("model failed after settling");
@@ -697,6 +704,17 @@ describe("ConversationProtocolRuntime", () => {
       h.phases()?.entered();
       h.phases()?.settled();
       expect(h.foreground.quiet(0)).toBe(true);
+    } finally { await h.close(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("counts durable run progress as foreground activity while the provider is yielded, with no client attached", async () => {
+    // Z104：终端退出后没有推送脉冲，空闲维护在仍流式产出的运行中途开始，运行被存储背压打断
+    const h = await foregroundHarness("foreground-progress", "progress");
+    try {
+      expectSettled(await projectSessionTurn({ manager: h.manager, managed: h.managed, text: "hello", turnId: "foreground-progress",
+        runOptions: { source: "interactive", turnContext: { turnId: "foreground-progress" } }, notify: () => {} }));
+      expect(h.observed.quietBeforeProgress).toBe(true);
+      expect(h.observed.quietAfterProgress).toBe(false);
     } finally { await h.close(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 

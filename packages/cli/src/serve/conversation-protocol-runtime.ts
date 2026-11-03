@@ -1820,6 +1820,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       // 首次模型调用之前的事件帧追加单独记阶段（只记录）：内核在发出这些事件时等追加完成
       let beforeFirstModelCall = true;
       const appendObservedFrame = async (...args: Parameters<typeof stream.append>) => {
+        // 运行产出的耐久进展就是给用户的进展：没有终端连着时（没有推送脉冲）也算前台活动，
+        // 后台空闲维护不在运行流式产出期间开始抢占存储配额（Z104：终端退出后后台运行曾被维护背压打断）。
+        // 这里不传运行的中止信号：取消之后内核仍要追加中断与运行结束等收尾帧；持续背压的退出由 spool 的无进展截止与停止负责
+        this.#foreground?.pulse();
         const frame = await stream.append(...args);
         // 本机 Owner 没有远端流读者，直接转发已耐久写入的同一帧。
         if (executionIngress.kind === "first-party" && this.#losslessDataPlane.kind === "absent" && this.#onFirstPartyFrame) {

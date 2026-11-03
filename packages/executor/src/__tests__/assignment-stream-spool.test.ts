@@ -15,11 +15,12 @@ import {
   canonicalize,
   streamLogicalFrameDigest,
 } from "@zhixing/core/protocol";
-import type {
-  DeviceCapacityAdmission,
-  DeviceCapacityDimension,
-  StorageMaintenanceGovernorPort,
-  StorageMaintenanceRequest,
+import {
+  StorageMaintenanceAdmissionError,
+  type DeviceCapacityAdmission,
+  type DeviceCapacityDimension,
+  type StorageMaintenanceGovernorPort,
+  type StorageMaintenanceRequest,
 } from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -120,6 +121,56 @@ describe(
     const frames = await fixture.spool.subscribe({request:subscribe(surface,0),streamEpoch:epoch,expiresAt:SURFACE_EXPIRY});
     expect(frames).toHaveLength(1);
     expect((await readFile(filename)).byteLength).toBeGreaterThan(32000);
+  });
+  it('waits outside the queue and retries when a storage maintenance step is backpressured, committing the frame once', async () => {
+    // Z104：投影落盘等维护步骤拿不到读写配额时以背压失败；生产者（运行）不应被判死，也不能重复提交
+    const fixture = await createFixture();
+    await fixture.spool.append({assignmentId:'assignment-fixed',ref,payload:{kind:'agent-yield',yield:{type:'text_delta',text:'first'}}});
+    const put = FileArtifactStore.prototype.put;
+    let rejected = 0;
+    const spy = vi.spyOn(FileArtifactStore.prototype, 'put').mockImplementation(async function (this: FileArtifactStore, ...args: Parameters<typeof put>) {
+      if (this.rootDir.startsWith(fixture.spoolRoot) && rejected === 0) {
+        rejected++;
+        throw new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'readBytes', retryAfterMs: 5 }, 'projection-flush');
+      }
+      return put.apply(this, args);
+    });
+    onTestFinished(() => spy.mockRestore());
+    const second = await fixture.spool.append({assignmentId:'assignment-fixed',ref,payload:{kind:'agent-yield',yield:{type:'text_delta',text:'second'}}});
+    expect(rejected).toBe(1);
+    expect(second.seq).toBe(2);
+    const epoch = await qualifyAndConnect(fixture.spool, 'assignment-fixed', ref, surface, SURFACE_EXPIRY);
+    const frames = await fixture.spool.subscribe({request:subscribe(surface,0),streamEpoch:epoch,expiresAt:SURFACE_EXPIRY});
+    expect(frames.map(frame => frame.seq)).toEqual([1, 2]);
+  });
+  it('ends a persistent maintenance backpressure wait: after the no-progress window, on cancellation, and when the spool stops', async () => {
+    // 退出边界：持续拒绝不能永久占住生产者；三种退路都交回背压错误且不提交帧
+    const persistent = async (setup: (fixture: Awaited<ReturnType<typeof createFixture>>, abort: AbortController) => void, windowMs = 60_000) => {
+      const fixture = await createFixture(undefined, windowMs);
+      await fixture.spool.append({assignmentId:'assignment-fixed',ref,payload:{kind:'agent-yield',yield:{type:'text_delta',text:'first'}}});
+      const put = FileArtifactStore.prototype.put;
+      const spy = vi.spyOn(FileArtifactStore.prototype, 'put').mockImplementation(async function (this: FileArtifactStore, ...args: Parameters<typeof put>) {
+        if (this.rootDir.startsWith(fixture.spoolRoot)) throw new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'readBytes', retryAfterMs: 5 }, 'projection-flush');
+        return put.apply(this, args);
+      });
+      onTestFinished(() => spy.mockRestore());
+      const abort = new AbortController();
+      const pending = fixture.spool.append({assignmentId:'assignment-fixed',ref,signal:abort.signal,payload:{kind:'agent-yield',yield:{type:'text_delta',text:'second'}}});
+      setup(fixture, abort);
+      const started = Date.now();
+      await expect(pending).rejects.toThrow();
+      spy.mockRestore();
+      const snapshot = await fixture.spool.snapshot('assignment-fixed');
+      return { elapsed: Date.now() - started, lastSeq: snapshot.lastSeq };
+    };
+    const windowed = await persistent(() => {}, 50);
+    expect(windowed.lastSeq).toBe(1);
+    const cancelled = await persistent((_fixture, abort) => { setTimeout(() => abort.abort(new Error('run cancelled')), 30); });
+    expect(cancelled.elapsed).toBeLessThan(5_000);
+    expect(cancelled.lastSeq).toBe(1);
+    const stopped = await persistent((fixture) => { setTimeout(() => void fixture.spool.stopStorageMaintenance(), 30); });
+    expect(stopped.elapsed).toBeLessThan(5_000);
+    expect(stopped.lastSeq).toBe(1);
   });
   it('protects prepared content across a capacity wait and releases it on cancellation', async () => {
     const fixture = await createFixture(64 * 1024);
@@ -1564,7 +1615,7 @@ async function qualifyAndConnect(
   return spool.beginConnection(assignmentId, executionRef, consumer);
 }
 
-async function createFixture(capacityBytes?: number) {
+async function createFixture(capacityBytes?: number, maintenancePressureWindowMs?: number) {
   const resources = trackTestSpoolResources();
   const root = await createTempDir("assignment-stream-spool");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -1575,6 +1626,7 @@ async function createFixture(capacityBytes?: number) {
     new AssignmentStreamSpool(spoolRoot, artifacts, {
       clock,
       ...(capacityBytes === undefined ? {} : { capacityBytes }),
+      ...(maintenancePressureWindowMs === undefined ? {} : { maintenancePressureWindowMs }),
     }),
   );
   return {
