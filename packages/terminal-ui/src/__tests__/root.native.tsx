@@ -366,7 +366,7 @@ try {
   const local = root.information.source(interactionKey({ kind: 'conversation', title: '知行', conversationId: 'test', generation }));
   local.set('left', 'notice', '主场景公告');
   await show({ kind: 'selection', title: '临时选择', requestId: 'pick', choices: [{ id: 'a', label: '普通  行' }, { id: 'cancel', label: '取消', danger: true }] });
-  assert.ok(!text().includes('主场景公告')); assert.match(text(), /共享公告/); assert.match(text(), /普通  行 ░/);
+  assert.ok(!text().includes('主场景公告')); assert.match(text(), /共享公告/); assert.match(text(), /普通  行 \./);
   const late = root.information.source(interactionKey({ kind: 'selection', title: '临时选择', requestId: 'pick', generation }));
   await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
   late.set('left', 'notice', '迟到的旧页面'); await flush();
@@ -914,7 +914,7 @@ try {
       assertBold(title, false);
       if (!busy) {
         assertBold('ChoiceOne', true); assertBold('ChoiceTwo', false);
-        const texture = spansFor('░'); assert.ok(texture.length);
+        const texture = spansFor('...'); assert.ok(texture.length);
         assert.ok(texture.every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)), 'texture is independently dim, never inherited bold');
         test.mockInput.pressArrow('down'); await flush();
         assertBold('ChoiceOne', false); assertBold('ChoiceTwo', true);
@@ -928,7 +928,7 @@ try {
   candidateReply = async action => ({ revision: action.revision, active: true, start: 0, end: action.text.length, items: [{ id: 'clip', label: 'ClipChoice', detail: 'Detail' }] });
   test.resize(100, 16); editor().setText('/clip'); await flush(); await flush();
   assertBold('ClipChoice', true);
-  assert.ok(spansFor('░').every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)));
+  assert.ok(spansFor('...').every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)));
   const clipSegments: BodyPage['segments'][number][] = [];
   for await (const part of projectBodyHistory('| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | eps | zeta | eta | theta |\n', 'markdown', 'forward', async () => {}))
     clipSegments.push({ blockId: 'clip-table', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });

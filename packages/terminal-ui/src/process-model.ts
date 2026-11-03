@@ -146,9 +146,10 @@ export function processViewRows(view: TerminalProcessView, columns: number, heig
   // 隐藏的失败数会改变状态行长度，再算一次即稳定
   for (let pass = 0; pass < 2; pass++) {
     const text = (hidden ? '另' + hidden + '项提示，' + (feedback.candidateCompressed ? 'Esc 收起候选查看' : '放大窗口查看') + ' · ' : '') + (failures[0] ?? (leads ? operation : normal));
-    status = leads ? processWrap(text, columns, '◆ ', '  ', cell) : [text ? '◆ ' + text : ''];
+    // 当前说明与必须的失败说明都按宽度完整显示（失败说明常带“输入保留、可重试”等下一步）；放不下预算才退回单行
+    status = leads || failures.length ? processWrap(text, columns, '◆ ', '  ', cell) : [text ? '◆ ' + text : ''];
     shown = !!operation && status.length + above.length <= budget;
-    if (leads && !shown) status = ['◆ ' + text];
+    if (leads && !shown || !leads && status.length > budget) status = ['◆ ' + text];
     // 放不下的当前说明也计入提示数，状态行告诉用户还有说明以及怎样看到（如收起候选）
     const next = rows.slice(Math.max(0, budget - status.length - (shown ? above.length : 0))).filter(row => row.failed).length + (operation && !leads && !shown ? 1 : 0);
     if (next === hidden) break;

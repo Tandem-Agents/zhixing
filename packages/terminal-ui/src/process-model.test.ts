@@ -16,6 +16,20 @@ describe('pure process presentation', () => {
     expect(processViewRows(view, 80, 1, { failures: ['恢复阻碍', '任务失败'], candidateCompressed: true })[0]!.text).toContain('Esc 收起候选查看');
     expect(processViewRows(view, 80, 1, { failures: ['恢复阻碍', '任务失败'] })[0]!.text).toContain('放大窗口查看');
   });
+  it('wraps a long failure explanation on the status line instead of cutting it off, and falls back to one row when it cannot fit', () => {
+    // Z103：断连时的说明（含“输入与已有内容保留，可重试”）在 100 列下曾被截断
+    const text = '启动未完成：配置修改已接纳，保存收尾尚未完成；重新打开配置入口或重启将继续恢复。输入与已有内容保留，可重试。';
+    const view = { revision: 1, phase: '', activity: 'complete' as const, tools: [], children: [], usage: {} };
+    for (const columns of [96, 40]) {
+      const rows = processViewRows(view, columns, 6, { failures: [text], operation: text });
+      expect(rows.length).toBeGreaterThan(1);
+      expect(rows[0]).toMatchObject({ status: true, failed: true });
+      expect(rows.map(row => row.text.replace(/^◆ |^ {2}/u, '')).join('')).toBe(text);
+    }
+    const tight = processViewRows(view, 40, 1, { failures: [text], operation: text });
+    expect(tight).toHaveLength(1);
+    expect(tight[0]).toMatchObject({ status: true, failed: true });
+  });
   it('keeps failed children ahead of optional details, including after completion', () => {
     const view = { revision: 1, phase: 'complete', activity: 'complete' as const, durationMs: 1000, tools: [],
       children: [{ id: 'child', parentToolCallId: 'parent', label: 'failed task', status: 'failed' as const }], usage: {} };

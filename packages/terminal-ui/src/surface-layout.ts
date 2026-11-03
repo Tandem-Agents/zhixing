@@ -24,7 +24,8 @@ export function candidateLayout(height: number) {
 export function selectedLabel(text: string, selected: boolean, danger: boolean, width: number, measure: (text: string) => number): string {
   const label = fitInformation(text, width, measure);
   if (!selected || danger) return label;
-  return label + '░'.repeat(Math.max(0, width - measure(label)));
+  // ASCII 点：控制台西文字体在纯 ASCII 行里也能显示（“░”会渲染成缺字方框）
+  return label + '.'.repeat(Math.max(0, width - measure(label)));
 }
 
 /** Preserve a still-enabled selection, otherwise honor the requested default. */

@@ -1,4 +1,5 @@
 import { tone, spacing } from './theme.js';
+import { SELECTED_MARK } from './choice-view.js';
 import { createEffect, createMemo, For, onCleanup, Show } from 'solid-js';
 import {
   skillsActionForKey, skillsDisplayText, skillsPageSize, skillsVisibleItems, validateSkillsView,
@@ -78,7 +79,7 @@ export function SkillsView(props: SkillsViewProps) {
       <box flexGrow={1} flexDirection="column" overflow="hidden">
         <Show when={view().total > 0} fallback={<text>{view().state === 'loading' ? '正在读取技能…' : view().state === 'error' ? '技能暂不可用，按 r 重试。' : '还没有技能 —— 让 agent 把某摊事的做法沉淀成一个技能，即可在此管理。'}</text>}>
           <For each={items()}>{item => <box flexDirection="column" height={2} backgroundColor={item.id === view().selectedId ? tone.selected : undefined}>
-            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? tone.brand : tone.text}>{item.id === view().selectedId ? '▸ ' : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
+            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? tone.brand : tone.text}>{item.id === view().selectedId ? `${SELECTED_MARK} ` : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
             <text height={1} wrapMode="none" truncate fg={tone.dim}>  {SKILL_MODE_LABEL[item.mode]} · {SKILL_SOURCE_LABEL[item.source]}{item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · {skillsDisplayText(item.description)}</text>
           </box>}</For>
         </Show>

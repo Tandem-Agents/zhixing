@@ -13,7 +13,7 @@ it('reserves one physical candidate viewport and leaves the editor/reading budge
     const result = candidateLayout(height);
     if (result.rows) expect(2 + result.process + result.editor + 2 + result.rows).toBeLessThan(height);
   }
-  expect(selectedLabel('a  b', true, false, 7, text => text.length)).toBe('a  b░░░');
+  expect(selectedLabel('a  b', true, false, 7, text => text.length)).toBe('a  b...');
 });
 it('honors initial choice, preserves an enabled selection on refresh, and skips disabled defaults', () => {
   expect(initialChoiceIndex(view)).toBe(3); expect(initialChoiceIndex(view, 'first')).toBe(1);

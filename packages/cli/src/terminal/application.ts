@@ -1072,7 +1072,7 @@ class TerminalApplication {
   async #unavailable(message: string, retryable = true): Promise<void> {
     this.#invalidateAuxiliary();
     this.#mainView = { ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
-      message: retryable ? `${message} 输入与已有内容保留，可重试。` : message, busy: false,
+      message: retryable ? `${message}${/[。！？]$/u.test(message) ? '' : '。'}输入与已有内容保留，可重试。` : message, busy: false,
       connected: false, connectionState: 'unavailable', choices: undefined };
     await this.#publish(this.#mainView);
   }
@@ -2556,7 +2556,7 @@ class TerminalApplication {
         try {
           await chooseTerminalSelection({ title: '命令帮助',
             body: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`),
-            options: [{ value: 'return', label: '返回对话' }],
+            options: [{ value: 'return', label: '返回输入' }],
           }, view => this.#choosePage(view));
         } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
       }));
@@ -2587,7 +2587,7 @@ class TerminalApplication {
       try {
         await chooseTerminalSelection({ id: 'server-status', title: '运行状态',
           body: serverStatusLines(name, this.#localView.primaryModel, this.#localView.networkProxy, status),
-          options: [{ value: 'return', label: '返回对话' }],
+          options: [{ value: 'return', label: '返回输入' }],
         }, view => this.#choosePage(view));
       } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
     });

@@ -6,7 +6,7 @@ export const BUILTIN_COMMANDS = {
   "skills:repl": {
     id: "skills:repl",
     name: "skills",
-    description: "管理技能(浏览 / 置顶 / 禁用 / 改适用模式 / 归档)",
+    description: "管理技能（浏览 / 置顶 / 禁用 / 改适用模式 / 归档）",
     category: "tools",
     execution: "local",
     tag: "builtin",
@@ -169,7 +169,7 @@ export const BUILTIN_COMMANDS = {
   "work:repl": {
     id: "work:repl",
     name: "work",
-    description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
+    description: "进入工作场景（↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建）",
     category: "tools",
     execution: "local",
     tag: "builtin"
