@@ -422,7 +422,28 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   // 控制准入基线（检查点恢复或整份归约）只做一次：首发与恢复后的后台预备共享进行中的任务。
   #controlBasis: Promise<void> | undefined;
   #pendingCancellationAfter: string | undefined;
+  /** 同一时刻唯一的一轮恢复（定时或显式）：后到的请求并入它。 */
   #recoveryRunning: Promise<number> | undefined;
+  /** 定时循环自己发起或并入的这一轮：循环的启动与暂停后补轮只看它，不被显式请求的一轮挡住。 */
+  #recoveryLoopRound: Promise<number> | undefined;
+  /**
+   * 首发窗口：立即可调度的接纳登记，直到本机持有者退出（这次运行的调度声明清除）、执行计划落到远端执行者、停止、换代或
+   * 退役为止；deferred 记这个窗口已让过一轮。
+   */
+  readonly #firstSendWindows = new Map<string, { readonly runId: string; deferred: boolean }>();
+  /**
+   * 待恢复登记的归属账：会话自上次被处理以来的登记若全都是同一次运行的例行登记（这次接纳自己的登记，以及该运行排队、
+   * 派发、运行中的状态通知），记那次运行的 id；一旦出现外来登记或第二次运行，记 null，直到队列条目被处理删除、退役
+   * 或换代时清空——每个会话只占一项，后来的接纳也不能把 null 洗回纯例行。
+   */
+  readonly #recoveryMarkLedger = new Map<string, string | null>();
+  /** 定时轮序号；被让开、尚未被处理的会话及让开它的那一轮：被处理之前不再让路（新运行也不能刷新）。 */
+  #periodicRecoveryRound = 0;
+  /** 真正开始过的恢复轮数（定时与显式）：显式请求据此判断自己开的一轮是否确实运行过。 */
+  #recoveryRoundsStarted = 0;
+  readonly #recoveryDeferredRounds = new Map<string, number>();
+  /** 处理后仍待恢复的会话最近一次被处理时的登记代际：显式请求据此判断本次登记之后是否已处理过。 */
+  readonly #recoveryAttempted = new Map<string, number>();
   #readinessRecovery: Promise<number> | undefined;
   #recoveryStopped = false;
   /** 收束核对等稳定检查进行中：计时器到点不开新的一轮，只记下欠一轮。 */
@@ -754,7 +775,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   startRecoveryLoop(intervalMs = 5_000): void {
-    if (this.#recoveryTimer || this.#recoveryRunning) return;
+    if (this.#recoveryTimer || this.#recoveryLoopRound) return;
     this.#recoveryStopped = false;
     const run = () => {
       if (this.#recoveryStopped) return;
@@ -762,10 +783,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         this.#recoveryDeferred = true;
         return;
       }
-      const active = this.recover();
-      this.#recoveryRunning = active;
+      // 在途的是显式请求的一轮时并入它，结束后照常排下一轮
+      const active = this.recover(true);
+      this.#recoveryLoopRound = active;
       void active.catch(() => 0).finally(() => {
-        if (this.#recoveryRunning === active) this.#recoveryRunning = undefined;
+        if (this.#recoveryLoopRound === active) this.#recoveryLoopRound = undefined;
         if (!this.#recoveryStopped) {
           this.#recoveryTimer = setTimeout(() => {
             this.#recoveryTimer = undefined;
@@ -787,13 +809,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async whileRecoveryPaused<Value>(operation: () => Promise<Value>): Promise<Value> {
     this.#recoveryPauses += 1;
     try {
-      await this.#recoveryRunning?.catch(() => 0);
+      await Promise.all([this.#recoveryRunning, this.#recoveryLoopRound].map((round) => round?.catch(() => 0)));
       return await operation();
     } finally {
       this.#recoveryPauses -= 1;
       if (this.#recoveryPauses === 0 && this.#recoveryDeferred) {
         this.#recoveryDeferred = false;
-        if (!this.#recoveryStopped && !this.#recoveryTimer && !this.#recoveryRunning) this.#recoveryRun?.();
+        if (!this.#recoveryStopped && !this.#recoveryTimer && !this.#recoveryLoopRound) this.#recoveryRun?.();
       }
     }
   }
@@ -802,11 +824,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoveryStopped = true;
     if (this.#recoveryTimer) clearTimeout(this.#recoveryTimer);
     this.#recoveryTimer = undefined;
+    // 首发窗口不跨停止：重新开始后的定时轮按登记照常处理
+    this.#firstSendWindows.clear();
     // 可用后准备不跨停止：中止所有尚未结束的准备（含被换掉的旧份）并等它们在当前一步之后收尾
     const unfinished = [...this.#afterUsableUnfinished];
     for (const preparation of unfinished) preparation.abort.abort();
     await Promise.allSettled(unfinished.map((preparation) => preparation.done));
-    await this.#recoveryRunning?.catch(() => 0);
+    await Promise.all([this.#recoveryRunning, this.#recoveryLoopRound].map((round) => round?.catch(() => 0)));
     await this.#controlBasis?.catch(() => undefined);
   }
 
@@ -838,6 +862,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoveryDiscovered = false;
     this.#recoveryDiscoveryAfter = undefined;
     this.#recoveryConversations.clear();
+    this.#recoveryMarkLedger.clear();
+    this.#firstSendWindows.clear();
+    this.#recoveryDeferredRounds.clear();
+    this.#recoveryAttempted.clear();
     this.#journals.clear();
     this.#adoptedConversations.clear();
     this.#unavailableTransfers.clear();
@@ -957,7 +985,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     const admission = await this.#applyInputAdmission(input);
     // New user input also invalidates unconsumed continuations from older runs.
-    this.#markRecovery(input.conversationId);
+    // 这次接纳自己的登记归属这次运行；接纳之前已有的、跨 await 期间到达的登记各自保留原归属
+    this.#markRecovery(input.conversationId, admission.runId);
     let state: Awaited<ReturnType<ConversationRunJournal["runState"]>> = "queued";
     if (admission.replayed || input.options?.turnContext?.turnOrigin?.messageIdentity) {
       try {
@@ -991,7 +1020,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       // 立即可调度、不排在前一运行之后：准备段从接纳起登记前台，跨过接纳返回到执行端装配的空档，由接管的 run() 取走
       ...(scheduling === "ready" && this.#foreground ? { foreground: this.#holdObservedForeground(this.#foreground) } : {}),
     });
-    this.#markRecovery(input.conversationId);
+    this.#markRecovery(input.conversationId, admission.runId);
+    // 立即可调度的这次接纳由本机持有者接着执行：首发窗口直到持有者退出；定时补漏只在会话的待恢复登记全都归属这次运行时
+    // 至多让开一轮
+    if (scheduling === "ready") {
+      this.#firstSendWindows.set(input.conversationId, { runId: admission.runId, deferred: false });
+    }
     return { runId: admission.runId, shouldSchedule, admissionId };
   }
 
@@ -1609,6 +1643,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }));
       const preparedAuthority = executorPlan.assignment;
       const targetExecutorId = preparedAuthority.executorId;
+      // 落到远端执行者：本机不再持续负责这次运行，首发窗口照原路径关闭
+      if (targetExecutorId !== this.#authority.executorId) this.#closeFirstSendWindow(runId);
       const origin = reservationOriginForSource(input.options?.source);
       const resourceContext = resourceHostContext(
         "reservation.prepareAssignmentRoot",
@@ -2616,8 +2652,28 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
   }
 
-  async recover(): Promise<number> {
+  /**
+   * 一轮恢复：periodic 只由定时循环传入（首发窗口内的让路只在定时轮生效）；first 是显式请求的目标，排在本轮队首。
+   */
+  recover(periodic = false, first?: string): Promise<number> {
+    return this.#recoverRound(periodic, first);
+  }
+
+  /**
+   * 同一时刻只有一轮恢复：在途时后到的请求并入它。periodic 为定时循环的一轮；first 给出时排在本轮队首。
+   * 在途登记在本轮结束（含失败）之前清掉，等它的调用方醒来即可开下一轮。
+   */
+  #recoverRound(periodic: boolean, first?: string): Promise<number> {
     if (this.#recoveryRunning) return this.#recoveryRunning;
+    const active: Promise<number> = this.#recoverOnce(periodic, first).finally(() => {
+      if (this.#recoveryRunning === active) this.#recoveryRunning = undefined;
+    });
+    this.#recoveryRunning = active;
+    return active;
+  }
+
+  async #recoverOnce(periodic: boolean, first: string | undefined): Promise<number> {
+    this.#recoveryRoundsStarted += 1;
     await this.recoverReadinessProjections();
     if (this.#recoveryStopped) return 0;
     if (this.#recoveryDiscoveryAfter) {
@@ -2628,7 +2684,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
       this.#recoveryDiscoveryAfter = page.after;
     }
-    const queue = [...this.#recoveryConversations.entries()].slice(0, 32);
+    const pending = [...this.#recoveryConversations.entries()];
+    const head = first === undefined ? -1 : pending.findIndex(([id]) => id === first);
+    if (head > 0) pending.unshift(...pending.splice(head, 1));
+    const queue = pending.slice(0, 32);
+    const round = periodic ? ++this.#periodicRecoveryRound : undefined;
     // Received control obligations precede dispatch of queued inputs. The
     // owner still commits applied before issuing any local abort signal.
     let recovered = await this.#recoverReceivedCancellations();
@@ -2696,6 +2756,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           const entry = queue.shift();
           if (!entry) return;
           const [conversationId, claimedGeneration] = entry;
+          if (round !== undefined && this.#deferFirstSendRecovery(conversationId, round)) continue;
           try {
             recovered += await recoverConversation(conversationId);
             if (!this.#recoveryStopped && await conversationRecoveryPending(this.#authority.authorityLog, this.#authority.artifacts, conversationId)) {
@@ -2706,6 +2767,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               this.#recoveryConversations.get(conversationId) === claimedGeneration
             ) {
               this.#recoveryConversations.delete(conversationId);
+              this.#recoveryMarkLedger.delete(conversationId);
             }
           } catch (error) {
             this.#observeFailure(error, { phase: "recovery", conversationId });
@@ -2715,6 +2777,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               this.#recoveryConversations.delete(conversationId);
               this.#recoveryConversations.set(conversationId, claimedGeneration);
             }
+            this.#recoveryDeferredRounds.delete(conversationId);
+            if (!this.#recoveryConversations.has(conversationId)) this.#recoveryAttempted.delete(conversationId);
+            else this.#recoveryAttempted.set(conversationId, Math.max(this.#recoveryAttempted.get(conversationId) ?? 0, claimedGeneration));
           }
         }
       },
@@ -2723,10 +2788,52 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return recovered;
   }
 
+  /**
+   * 定时轮的首发让路：会话自上次被处理以来的待恢复登记全都归属首发窗口的这次运行（归属账里没有外来登记、也没有别的运行），
+   * 窗口没让过、这个会话也没有让开后尚未处理的记录，就让开这一轮——登记与代际保留并轮转到队尾，下一轮照常处理。
+   * 接纳之前已有的、跨 await 到达的独立登记都留在账上，不会被这次接纳的登记盖掉。
+   */
+  #deferFirstSendRecovery(conversationId: string, round: number): boolean {
+    const window = this.#firstSendWindows.get(conversationId);
+    const pending = this.#recoveryConversations.get(conversationId);
+    if (!window || window.deferred || pending === undefined) return false;
+    if (this.#recoveryMarkLedger.get(conversationId) !== window.runId) return false;
+    if (this.#recoveryDeferredRounds.has(conversationId)) return false;
+    window.deferred = true;
+    this.#recoveryDeferredRounds.set(conversationId, round);
+    this.#recoveryConversations.delete(conversationId);
+    this.#recoveryConversations.set(conversationId, pending);
+    return true;
+  }
+
+  /** 状态通知带来的登记归属：运行排队、派发、运行中是它的例行进展，其余状态（取消、失败、不确定等）算外来义务。 */
+  #routineStatusRun(notice: ConversationStatusNotice): string | undefined {
+    return notice.state === "queued" || notice.state === "dispatched" || notice.state === "running" ? notice.ref.runId : undefined;
+  }
+
+  /** 首发窗口按运行身份关闭（重复调用无副作用）：这次运行的调度声明被清除（本机持有者退出），或执行落到远端。 */
+  #closeFirstSendWindow(runId: string): void {
+    for (const [conversationId, window] of this.#firstSendWindows) {
+      if (window.runId === runId) this.#firstSendWindows.delete(conversationId);
+    }
+  }
+
   async recoverConversation(conversationId: string): Promise<number> {
     this.#markRecovery(conversationId);
+    const requested = this.#recoveryGeneration;
     await this.prepareConversationReadiness(conversationId);
-    return this.recover();
+    // 显式请求要实际处理到目标：并入的在途一轮可能在本次登记之前就选定了队列；结束后目标仍待恢复、且本次登记之后
+    // 没被处理过，就以它为先再开一轮（不与在途的一轮并发）
+    let recovered = 0;
+    for (;;) {
+      const joining = this.#recoveryRunning !== undefined, started = this.#recoveryRoundsStarted;
+      recovered += await this.recover(false, conversationId);
+      if (this.#recoveryStopped || !this.#recoveryConversations.has(conversationId) ||
+        (this.#recoveryAttempted.get(conversationId) ?? 0) >= requested) break;
+      // 自己开的一轮并没有真正开始（例如被替身取代），再开也不会处理到目标
+      if (!joining && this.#recoveryRoundsStarted === started) break;
+    }
+    return recovered;
   }
 
   /**
@@ -3203,7 +3310,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ...(this.#trustSediments ? { trustSediments: this.#trustSediments } : {}),
     });
     journal.onStatus(async (notice) => {
-      this.#markRecovery(conversationId);
+      this.#markRecovery(conversationId, this.#routineStatusRun(notice));
       await this.#onStatus?.(notice);
       for (const listener of this.#statusListeners) await listener(notice);
     });
@@ -3685,15 +3792,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     try { this.#onFailure?.(error, context); } catch { /* Observation must not replace recovery. */ }
   }
 
-  #markRecovery(conversationId: string): void {
+  /** routineRun：这次登记是该运行的例行登记（它自己的接纳，或它排队、派发、运行中的状态通知）；不给出即算外来。 */
+  #markRecovery(conversationId: string, routineRun?: string): void {
     this.#recoveryGeneration += 1;
     this.#recoveryConversations.delete(conversationId);
     this.#recoveryConversations.set(conversationId, this.#recoveryGeneration);
+    const owner = this.#recoveryMarkLedger.get(conversationId);
+    if (owner === undefined) this.#recoveryMarkLedger.set(conversationId, routineRun ?? null);
+    else if (owner !== null && owner !== routineRun) this.#recoveryMarkLedger.set(conversationId, null);
   }
 
   #clearRunClaims(runId: string): void {
     this.#schedulingRuns.delete(runId);
     this.#scheduledRuns.delete(runId);
+    this.#closeFirstSendWindow(runId);
     for (const [key, prepared] of this.#preparedAdmissions) {
       if (prepared.admission.runId !== runId) continue;
       // 未被接管的准备随清除结束它的前台义务；已接管的义务归接管它的 run()，由那次运行收束
@@ -3715,6 +3827,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#journals.get(conversationId)?.discardProjectionCheckpoints();
     this.#journals.delete(conversationId);
     this.#recoveryConversations.delete(conversationId);
+    this.#recoveryMarkLedger.delete(conversationId);
+    this.#firstSendWindows.delete(conversationId);
+    this.#recoveryDeferredRounds.delete(conversationId);
+    this.#recoveryAttempted.delete(conversationId);
     for (const [assignmentId, assignedConversationId] of this.#assignmentConversations) {
       if (assignedConversationId === conversationId) this.#forgetAssignment(assignmentId);
     }
