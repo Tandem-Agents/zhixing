@@ -25,10 +25,22 @@ export async function runLogsCommand(opts: LogsOptions = {}): Promise<void> {
   const home = opts.home ?? getZhixingHome();
   let filter: LogFilter = {}, cursor: string | undefined, storeId: string | undefined;
   let ring: LogRecord[] = [], bytes = 0, first = true, pages = 0, byteTruncated = false;
+  // 存储一页读不完时，从最旧处往后扫只能看到前若干页的“尾部”。先用第一页拿到存储序位上界，
+  // 再从上界前 lines 条处起读，显示的才是最新记录；持续跟踪也从这里接着往后。一页读得完时直接用这一页
+  let pending: (LogPage & { detail?: unknown }) | undefined;
+  try {
+    const probe = await query(home, {}, undefined);
+    if (probe.detail === undefined && probe.cursor && probe.coverage.upper > lines) {
+      filter = { afterSequence: probe.coverage.upper - lines };
+    } else pending = probe;
+  } catch (error) { con.error(error instanceof Error ? error.message : "日志暂不可读"); return; }
   do {
     let page: LogPage & { detail?: unknown };
-    try { page = await query(home, filter, cursor); }
-    catch (error) { con.error(error instanceof Error ? error.message : "日志暂不可读"); return; }
+    if (pending) { page = pending; pending = undefined; }
+    else {
+      try { page = await query(home, filter, cursor); }
+      catch (error) { con.error(error instanceof Error ? error.message : "日志暂不可读"); return; }
+    }
     if (page.detail !== undefined) {
       con.log(JSON.stringify(page));
       con.error("历史日志尚未登记，按上方 address 使用 zz logs read --view detail 查阅；续页附加 --cursor。此视图仅定位当前本机。");

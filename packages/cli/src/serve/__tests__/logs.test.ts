@@ -11,8 +11,19 @@ describe("serve logs compatibility through the unified reader", () => {
     const con = output();
     const query = vi.fn().mockResolvedValueOnce(page([record(1), record(2)], 4, "next")).mockResolvedValueOnce(page([record(3), record(4)], 4));
     await runLogsCommand({ home: "isolated", lines: 2, deps: { query, console: con } });
-    expect(query.mock.calls).toEqual([["isolated", {}, undefined], ["isolated", {}, "next"]]);
+    // 一页读不完：按第一页给出的存储上界，从上界前 N 条起读
+    expect(query.mock.calls).toEqual([["isolated", {}, undefined], ["isolated", { afterSequence: 2 }, undefined]]);
     expect(con.log.mock.calls.map(([line]) => JSON.parse(line).seq)).toEqual([3, 4]);
+  });
+  it("shows the newest records even when the store is larger than the page scan budget", async () => {
+    // 存储有 100 页：从最旧处扫 16 页只能看到前 16 页；尾部必须是最新的那几条
+    const con = output();
+    const query = vi.fn(async (_home: string, filter: { afterSequence?: number }) => filter.afterSequence === undefined
+      ? page([record(1)], 1000, "older-pages")
+      : page([record(filter.afterSequence + 1), record(filter.afterSequence + 2), record(filter.afterSequence + 3)], 1000));
+    await runLogsCommand({ home: "isolated", lines: 3, deps: { query, console: con } });
+    expect(con.log.mock.calls.map(([line]) => JSON.parse(line).seq)).toEqual([998, 999, 1000]);
+    expect(con.error).not.toHaveBeenCalled();
   });
   it("follows the publication watermark, including late records with old wall time", async () => {
     const con = output();
@@ -35,7 +46,9 @@ describe("serve logs compatibility through the unified reader", () => {
     const query = vi.fn(async () => page([record(1)], 99, "next"));
     const con = output();
     await runLogsCommand({ deps: { query, console: con } });
-    expect(query).toHaveBeenCalledTimes(16);
+    // 探测一页取上界，再从上界前默认 50 条起扫，至多 16 页
+    expect(query).toHaveBeenCalledTimes(17);
+    expect(query.mock.calls[1]).toEqual([expect.any(String), { afterSequence: 49 }, undefined]);
     expect(con.error).toHaveBeenCalledWith(expect.stringContaining("--cursor next"));
   });
   it("keeps pre-migration legacy evidence explicitly local and read-only", async () => {

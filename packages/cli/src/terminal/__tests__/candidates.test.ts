@@ -113,6 +113,12 @@ describe('terminal candidates and control commands', () => {
 });
 
 
+it('/config 的可选分区参数在候选里列出，不只写在说明里', async () => {
+  const source = owner();
+  const value = await source.query(1, '/config ', 8);
+  expect(value.items.map(item => item.label)).toContain('logs');
+});
+
 it('projects alias prefix ghosts separately and accepts them without execution', async () => {
   const source = owner(); const value = await source.query(1, '/qui', 4);
   expect(value.ghost).toEqual({ fullValue: '/quit' });

@@ -83,7 +83,15 @@ export const BUILTIN_COMMANDS = {
     category: "config",
     execution: "local",
     tag: "builtin",
-    visibility: chromeOnlyVisibility
+    visibility: chromeOnlyVisibility,
+    // 可选的分区参数在候选里列出，不只写在说明里；不带参数仍打开基础配置
+    args: [{
+      kind: "enum",
+      name: "section",
+      required: false,
+      description: "配置分区",
+      choices: [{ value: "logs", label: "logs", description: "查看或调整日志容量与保留期限" }],
+    }],
   },
   "mcp:repl": {
     id: "mcp:repl",
