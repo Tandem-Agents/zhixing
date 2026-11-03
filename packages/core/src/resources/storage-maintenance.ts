@@ -15,6 +15,7 @@ import {
   currentMaintenanceUrgency,
   isHoldingMaintenanceExclusion,
   runWithMaintenanceUrgency,
+  yieldMaintenanceToForeground,
 } from "./maintenance-context.js";
 
 export const STORAGE_MAINTENANCE_KINDS = [
@@ -638,6 +639,9 @@ export async function runStorageMaintenanceStep<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   const abort = currentMaintenanceAbortSignal();
+  throwIfMaintenanceCancelled(abort);
+  // 可推迟的后台义务先在步骤边界为前台让路（此时不持互斥、不持许可），再申请本步容量
+  await yieldMaintenanceToForeground(abort);
   throwIfMaintenanceCancelled(abort);
   if (!governor) return operation();
   validateStorageRequest(request);

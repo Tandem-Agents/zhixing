@@ -5,9 +5,10 @@ import path from "node:path";
 import fs, { writeFile } from "node:fs/promises";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
-import type {
-  DeviceCapacityAdmission,
-  StorageMaintenanceGovernorPort,
+import {
+  StorageMaintenanceAdmissionError,
+  type DeviceCapacityAdmission,
+  type StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
 import { createRootActivationCheckpoint } from "@zhixing/mesh/checkpoint";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
@@ -34,6 +35,7 @@ import {
   runRecoveryRootInvalidateCommand,
   runRecoveryRootResetCommand,
   runRecoveryRootRotateCommand,
+  withBackupBusyMessage,
 } from "./backup-command.js";
 import {
   prepareMeshRuntimeBootstrap,
@@ -499,6 +501,19 @@ describe("recovery root reset co-signer", () => {
         writeLine: () => undefined,
       },
     )).rejects.toThrow(/主设备|第二台/u);
+  });
+});
+
+describe("backup administration error mapping", () => {
+  it("重试后仍被存储维护背压时说明本机正忙，不显示内部英文原文", async () => {
+    const busy = new StorageMaintenanceAdmissionError(
+      { kind: "backpressured", blockedBy: "ioOperations", retryAfterMs: 25 },
+      "lifecycle-reconcile",
+    );
+    const failure = await withBackupBusyMessage(async () => { throw busy; }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("本机数据正忙，暂时无法完成恢复备份，请稍后重试");
+    expect((failure as Error).cause).toBe(busy);
   });
 });
 

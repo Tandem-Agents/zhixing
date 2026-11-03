@@ -1400,6 +1400,8 @@ async function runServerProcess(
       chalk.red("[recovery-backup]"),
       error instanceof Error ? error.message : String(error),
     ),
+    // 每日备份是可推迟的后台维护：前台运行在途时，在步骤边界等它安静再继续
+    yieldToForeground: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
   }));
   if (authorityCheckpointOwner) {
     hostShellLifecycle.acquireCheckpointOwner(authorityCheckpointOwner);

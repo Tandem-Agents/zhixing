@@ -37,6 +37,8 @@ export async function createConfiguredCheckpointOwner(input: {
   readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
   readonly checkpointRetention?: ArtifactCheckpointRetentionPort;
   readonly onError?: (error: unknown) => void;
+  /** 每日备份在步骤边界为前台让路（等前台安静） */
+  readonly yieldToForeground?: (signal: AbortSignal) => Promise<void>;
 }): Promise<AuthorityCheckpointOwnerPort | undefined> {
   const trust = await input.mesh.bootstrapStore.loadTrustRecord();
   if (!trust) return undefined;
@@ -79,6 +81,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
     readonly checkpointRetention?: ArtifactCheckpointRetentionPort;
     readonly onError?: (error: unknown) => void;
+    readonly yieldToForeground?: (signal: AbortSignal) => Promise<void>;
   }) {}
 
   /**
@@ -244,6 +247,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       service,
       identitySeed: `${trust.homeId}:${trust.issuer.deviceId}:${binding.targetId}`,
       ...(this.input.onError ? { onError: this.input.onError } : {}),
+      ...(this.input.yieldToForeground ? { yieldToForeground: this.input.yieldToForeground } : {}),
     });
     try {
       await service.recoverPending();

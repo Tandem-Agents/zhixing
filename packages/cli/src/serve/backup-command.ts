@@ -23,7 +23,7 @@ import type {
   MeshRoleBootConfig,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { StorageMaintenanceAdmissionError, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { canonicalize } from "@zhixing/core/protocol";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig } from "@zhixing/providers";
@@ -117,7 +117,7 @@ export async function runBackupSetupCommand(
   if ((selection.directory === undefined) === (selectedDevice === undefined)) {
     throw new TypeError("请选择一个独立目录或一台已配对设备作为恢复备份目标");
   }
-  await mapCheckpointTargetError(async () => {
+  await withBackupBusyMessage(() => mapCheckpointTargetError(async () => {
     const firstRoot = await inspectSetupPreconditions(options);
     if (selection.directory !== undefined) {
       await (options.preflightDirectoryTarget ?? preflightDirectoryCheckpointTarget)(
@@ -141,7 +141,7 @@ export async function runBackupSetupCommand(
           }));
       renderBackupSetupResult(context, result);
     } finally { await context.close(); }
-  });
+  }));
 }
 
 /** 恢复备份目录不满足目标条件时给出可照做的说明。 */
@@ -256,23 +256,27 @@ export function recoveryRootPublicError(_error: unknown): Error {
 }
 
 export async function runBackupVerifyCommand(options: BackupCommandOptions = {}): Promise<void> {
-  const context = await openContext(options, false);
-  try {
-    await mapBackupAdministrationError(() =>
-      createBackupRecoveryAdministration(context, options).verify());
-    context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
-  } finally { await context.close(); }
+  await withBackupBusyMessage(async () => {
+    const context = await openContext(options, false);
+    try {
+      await mapBackupAdministrationError(() =>
+        createBackupRecoveryAdministration(context, options).verify());
+      context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
+    } finally { await context.close(); }
+  });
 }
 
 export async function runBackupStatusCommand(options: BackupCommandOptions = {}): Promise<void> {
-  const context = await openContext(options, false);
-  try {
-    renderBackupStatus(
-      context,
-      await mapBackupAdministrationError(() =>
-        createBackupRecoveryAdministration(context, options).status()),
-    );
-  } finally { await context.close(); }
+  await withBackupBusyMessage(async () => {
+    const context = await openContext(options, false);
+    try {
+      renderBackupStatus(
+        context,
+        await mapBackupAdministrationError(() =>
+          createBackupRecoveryAdministration(context, options).status()),
+      );
+    } finally { await context.close(); }
+  });
 }
 
 interface BackupContext {
@@ -442,6 +446,21 @@ function toBackupTargetBinding(
         targetId: binding.targetId,
         directory: binding.directory,
       };
+}
+
+/**
+ * 备份命令的最外层：打开上下文（含索引追平）与执行过程中，有界重试后仍被存储维护背压，
+ * 说明本机正在做别的存储维护，不是设置或目标有误。
+ */
+export async function withBackupBusyMessage<Result>(action: () => Promise<Result>): Promise<Result> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof StorageMaintenanceAdmissionError) {
+      throw new Error("本机数据正忙，暂时无法完成恢复备份，请稍后重试", { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function mapBackupAdministrationError<Result>(

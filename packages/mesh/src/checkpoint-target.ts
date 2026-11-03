@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import {
+  currentMaintenanceUrgencyOr,
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
@@ -170,7 +171,9 @@ export class FileRecoveryCheckpointTarget implements InventoryRecoveryCheckpoint
 
   async writeDurable(checkpoint: CheckpointPackage, signal?: AbortSignal): Promise<void> {
     const operationSignal = signal ?? new AbortController().signal;
-    await runWithMaintenanceUrgency(() => "foreground", operationSignal, async () => {
+    // 沿用外层义务的紧急度（每日备份的复制为后台）；没有外层义务的显式写入有人在等，按前台
+    const urgency = currentMaintenanceUrgencyOr("foreground");
+    await runWithMaintenanceUrgency(() => urgency, operationSignal, async () => {
       await this.#assertRoot();
       const checkpointId = safeCheckpointId(checkpoint.envelope.checkpointId);
       const existing = await this.#readIfPresent(checkpointId);
@@ -491,7 +494,8 @@ export class FileRecoveryCheckpointTarget implements InventoryRecoveryCheckpoint
   }
 
   #step<T>(identity: string, bytes: number, signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
-    return runWithMaintenanceUrgency(() => "foreground", signal, () =>
+    const urgency = currentMaintenanceUrgencyOr("foreground");
+    return runWithMaintenanceUrgency(() => urgency, signal, () =>
       runStorageMaintenanceStep(
         this.#storageMaintenance,
         storageMaintenanceRequest(

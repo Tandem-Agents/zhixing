@@ -1188,6 +1188,11 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             checkpoints.push(boundary);
             return commits.length < limit;
           },
+          0,
+          undefined,
+          undefined,
+          // 只要 limit 帧：扫描范围随之收紧，读窗口不为其后的帧读满；只限帧数、不另限字节
+          { frames: limit, bytes: Number.MAX_SAFE_INTEGER },
         );
         if (scanned.incompleteTail) {
           await this.#quarantineTail(

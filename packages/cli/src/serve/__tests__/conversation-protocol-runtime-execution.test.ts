@@ -1,5 +1,5 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：execution。
-import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion } from "@zhixing/core/resources";
+import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, isHoldingMaintenanceExclusion } from "@zhixing/core/resources";
 import { FileArtifactStore } from "@zhixing/core/authority";
 import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { type Message } from "@zhixing/core";
@@ -664,6 +664,51 @@ describe("ConversationProtocolRuntime", () => {
         tail.resolve(); await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
       }
     } finally { stopped.resolve(); tail.resolve(); await running; await generator.return(undefined as never); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("票据接纳遇临时背压、在区外退避期间取消本次运行：不再接纳同一张票据，运行以取消结束", async () => {
+    const home = await createTempDir("conversation-surface-retry-cancel");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let accepts = 0;
+    const pressured = Promise.withResolvers<void>();
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "surface-retry-cancel",
+      async *run(): AsyncGenerator<AgentYield, RunResult> { throw new Error("kernel must not start before the surface opens"); },
+      abort: () => true, async dispose() {} };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      onFirstPartyFrame: async () => {},
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => runtime } },
+      losslessDataPlane: { kind: "available", port: {
+        ...TEST_ANCHOR_LOSSLESS_DATA_PLANE.port,
+        openFirstPartySurfaceSession: async () => {
+          accepts += 1;
+          pressured.resolve();
+          throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "ioOperations", retryAfterMs: 200 });
+        },
+      } },
+    });
+    manager = new ConversationManager({ create: async () => runtime }, undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const conversationId = "surface-retry-cancel";
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const input = { conversationId, input: "cancel while the ticket waits",
+      invocation: { kind: "agent", source: "interactive" } as const,
+      options: { source: "interactive" as const, turnContext: { turnId: "surface-retry-cancel" } }, surfacePrincipal: "rpc:owner" };
+    await protocol.admit(input);
+    const abort = new AbortController();
+    const generator = protocol.run({ ...input, options: { ...input.options, abortSignal: abort.signal }, messages: [], baseRevision: 0, runtime });
+    const running = (async () => { try { for await (const _ of generator) {} return undefined; } catch (error) { return error; } })();
+    try {
+      await pressured.promise;
+      abort.abort();
+      const settled = await Promise.race([running, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 5_000))]);
+      expect(settled).not.toBe("hung");
+      expect(settled).toBeInstanceOf(StorageMaintenanceCancelledError);
+      // 退避等待中已取消：不再以同一张票据第二次接纳
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(accepts).toBe(1);
+    } finally { abort.abort(); await running; await generator.return(undefined as never); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   function cancellableStreamFixture(name: string) {

@@ -37,9 +37,20 @@ export interface MaintenanceExecutionContext {
    * 才变为真，外层借此等到它发起的内层义务真正停下。
    */
   readonly cancelWhenAbandoned: () => boolean;
+  /**
+   * 可推迟的后台义务在步骤边界为前台让路：等到前台安静（取消时立即返回）。只由义务 owner
+   * 提供（例如每日备份）；叶级在不持互斥、紧急度为后台时才调用，前台或被提级后不再让路。
+   */
+  readonly yieldToForeground?: (signal: AbortSignal) => Promise<void>;
 }
 
 const maintenanceContext = new AsyncLocalStorage<MaintenanceExecutionContext>();
+
+/** 让路函数随语境向内继承；脱离语境的后台续跑由它自己的 owner 决定，不继承。 */
+function inheritedYield(): Pick<MaintenanceExecutionContext, "yieldToForeground"> {
+  const yieldToForeground = maintenanceContext.getStore()?.yieldToForeground;
+  return yieldToForeground ? { yieldToForeground } : {};
+}
 const neverAbortMaintenance = new AbortController().signal;
 const neverCancelWhenAbandoned = () => false;
 
@@ -62,6 +73,7 @@ export function runInMaintenanceContext<T>(
       abort: maintenanceContext.getStore()?.abort ?? neverAbortMaintenance,
       holdingExclusion: maintenanceContext.getStore()?.holdingExclusion ?? false,
       cancelWhenAbandoned: maintenanceContext.getStore()?.cancelWhenAbandoned ?? neverCancelWhenAbandoned,
+      ...inheritedYield(),
     },
     operation,
   );
@@ -116,9 +128,38 @@ export function runWithMaintenanceUrgency<T>(
         cancelWhenAbandoned ??
         maintenanceContext.getStore()?.cancelWhenAbandoned ??
         neverCancelWhenAbandoned,
+      ...inheritedYield(),
     },
     operation,
   );
+}
+
+/** 义务 owner 声明：这段义务内的物理步骤在边界为前台让路（见 `yieldToForeground`）。 */
+export function runWithMaintenanceForegroundYield<T>(
+  yieldToForeground: (signal: AbortSignal) => Promise<void>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const store = maintenanceContext.getStore();
+  return maintenanceContext.run(
+    {
+      urgency: store?.urgency ?? (() => "background"),
+      abort: store?.abort ?? neverAbortMaintenance,
+      holdingExclusion: store?.holdingExclusion ?? false,
+      cancelWhenAbandoned: store?.cancelWhenAbandoned ?? neverCancelWhenAbandoned,
+      yieldToForeground,
+    },
+    operation,
+  );
+}
+
+/**
+ * 步骤边界的让路点：语境提供了让路函数、不持互斥、当前紧急度为后台时，等前台安静；
+ * 否则立即返回。等待可被取消打断，返回后由调用方照常核对取消。
+ */
+export async function yieldMaintenanceToForeground(abort: AbortSignal): Promise<void> {
+  const store = maintenanceContext.getStore();
+  if (!store?.yieldToForeground || store.holdingExclusion || store.urgency() !== "background") return;
+  await store.yieldToForeground(abort);
 }
 
 /**
@@ -133,6 +174,7 @@ export function runHoldingMaintenanceExclusion<T>(
       abort: maintenanceContext.getStore()?.abort ?? neverAbortMaintenance,
       holdingExclusion: true,
       cancelWhenAbandoned: maintenanceContext.getStore()?.cancelWhenAbandoned ?? neverCancelWhenAbandoned,
+      ...inheritedYield(),
     },
     operation,
   );

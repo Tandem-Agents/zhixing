@@ -1,7 +1,11 @@
 import type { CheckpointPackage } from "./checkpoint.js";
 import type { RecoveryCheckpointRequest, RecoveryCheckpointVerification } from "@zhixing/core/contracts";
 import type { RecoveryRoot } from "./recovery-root.js";
-import { runWithMaintenanceUrgency, type StorageMaintenanceUrgency } from "@zhixing/core/resources";
+import {
+  runWithMaintenanceForegroundYield,
+  runWithMaintenanceUrgency,
+  type StorageMaintenanceUrgency,
+} from "@zhixing/core/resources";
 import type {
   AuthorityCheckpointService,
   RecoveryBackupStatus,
@@ -22,6 +26,8 @@ export interface AuthorityCheckpointOwnerOptions {
   readonly clock?: () => Date;
   readonly retryMs?: number;
   readonly onError?: (error: unknown) => void;
+  /** 每日义务（后台）在步骤边界等前台安静；取消时立即返回。forced 为前台，不让路。 */
+  readonly yieldToForeground?: (signal: AbortSignal) => Promise<void>;
 }
 
 export interface AuthorityCheckpointOwnerPort {
@@ -99,13 +105,16 @@ export class AuthorityCheckpointOwner implements AuthorityCheckpointOwnerPort {
     const abort = new AbortController();
     // 每日义务是后台维护，让位给用户正在做的事；显式触发（设置、迁移前）有人在等，按前台
     const urgency: { value: StorageMaintenanceUrgency } = { value: request.kind === "daily" ? "background" : "foreground" };
-    const promise = runWithMaintenanceUrgency(() => urgency.value, abort.signal, () =>
+    const work = () => runWithMaintenanceUrgency(() => urgency.value, abort.signal, () =>
       this.options.service.recoverPending(abort.signal)
         .then(() => this.options.service.createAndReplicate({ request, abort: abort.signal }))
         .then(async (checkpoint) => {
           await this.options.service.cleanupExpired(undefined, abort.signal);
           return checkpoint;
         }));
+    // 让路只在紧急度为后台时生效：forced 合流提级后，步骤边界立即不再等待
+    const yieldToForeground = this.options.yieldToForeground;
+    const promise = yieldToForeground ? runWithMaintenanceForegroundYield(yieldToForeground, work) : work();
     this.#active = { candidateKey, promise, abort, urgency };
     void promise.finally(() => {
       if (this.#active?.promise === promise) this.#active = undefined;

@@ -20,8 +20,12 @@ import {
 import {
   runStorageMaintenanceStep,
   currentMaintenanceUrgencyOr,
+  isHoldingMaintenanceExclusion,
+  maintenanceRetryDelayMs,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
+  waitForMaintenanceRetry,
+  yieldMaintenanceToForeground,
   type StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
@@ -33,6 +37,7 @@ import {
 } from "./checkpoint.js";
 
 const RECORD_PAGE_COMMITS = 64;
+const RETENTION_ADMISSION_DEADLINE_MS = 5_000;
 const CHECKPOINT_CHUNK_BYTES = 1024 * 1024;
 const MAX_REGISTERED_ROOT_BYTES = 1024 * 1024;
 const MAX_RETENTION_SNAPSHOT_ATTEMPTS = 4;
@@ -86,9 +91,10 @@ async function captureFullAuthorityCheckpointAttempt(
   const urgency = currentMaintenanceUrgencyOr("foreground");
   return runWithMaintenanceUrgency(() => urgency, abort, async () => {
     throwIfAborted(abort);
-    const retentionSnapshot = await runStep(input, "retention-heads", 1, () =>
-      input.retention.checkpointRetentionSnapshot(),
-    );
+    // 保留集归生命周期索引所有：它的追平与点查按叶各自准入。这里若再包一层抓取步骤，
+    // 读取会全部记到这一步上，候选随历史增长就超出单步上界，追平时还会在许可内再取许可。
+    const retentionSnapshot = await retryOutsideExclusion(abort, () =>
+      input.retention.checkpointRetentionSnapshot());
     const origin = await runStep(input, "origin", 1, () => input.log.originCheckpoint());
     const target = retentionSnapshot.sourceHeads[origin.logId];
     if (!target) throw new TypeError("Artifact retention snapshot does not contain the authority log");
@@ -166,9 +172,8 @@ async function captureFullAuthorityCheckpointAttempt(
       await runStep(input, `verify:${target.lsn}`, 1024 * 1024, () => input.log.readEnvelopeAt(target));
     }
 
-    const retention = await runStep(input, "retention-filter", 1, () =>
-      input.retention.retainedAtCheckpoint(retentionSnapshot, [...retained.values()]),
-    );
+    const retention = await retryOutsideExclusion(abort, () =>
+      input.retention.retainedAtCheckpoint(retentionSnapshot, [...retained.values()]));
     if (retention.status !== "current") throw new RetentionSnapshotMoved();
     const retainedArtifacts = [...retention.retained].sort(compareRefs);
     const finalHead = await runStep(input, "head-final", 1, () => input.log.checkpoint());
@@ -611,10 +616,35 @@ async function runStep<T>(
       "authority-checkpoint",
       input.trust.homeId,
       { checkpointId: input.checkpointId ?? input.captureIdentity ?? "source-freeze", identity, bytes },
-      { obligation: "pre-commit" },
+      // 准入时不持有日志、投影或制品库的互斥（各自在操作内部取得），宿主里其他维护在排队时
+      // 可以有界等待公平容量；零等待会把一次瞬时竞争升级成整次抓取失败。调用方持有排他区时
+      // 由 storageMaintenanceRequest 强制零等待。
+      { obligation: "pre-commit", maxWaitMs: 5_000 },
     ),
     operation,
   );
+}
+
+/**
+ * 生命周期索引在自己的串行区内按叶零等待准入，背压原样交还调用方，由区外重试。
+ * 两次保留调用都只读：过滤重入时用的仍是同一份冻结快照，源头已移动就按快照移动处理；
+ * 取头只在尚未得到快照时重取。调用方自身持有排他区时不在原地等待，交给更外层。
+ * 截止按单调时钟计，墙钟校正不会拉长或提前耗尽窗口。
+ */
+async function retryOutsideExclusion<T>(abort: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  const deadline = performance.now() + RETENTION_ADMISSION_DEADLINE_MS;
+  for (;;) {
+    // 过滤的读叶都在索引串行区内，不能在叶级让路；每日备份在调用之前的边界为前台让路
+    await yieldMaintenanceToForeground(abort);
+    throwIfAborted(abort);
+    try {
+      return await operation();
+    } catch (error) {
+      const delay = maintenanceRetryDelayMs(error);
+      if (delay === undefined || isHoldingMaintenanceExclusion() || performance.now() >= deadline) throw error;
+      await waitForMaintenanceRetry(Math.min(delay, Math.max(0, deadline - performance.now())), abort);
+    }
+  }
 }
 
 function throwIfAborted(abort: AbortSignal): void {

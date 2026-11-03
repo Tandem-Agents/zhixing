@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
+  currentMaintenanceUrgencyOr,
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
@@ -454,7 +455,9 @@ export class PairedRecoveryCheckpointTarget implements InventoryRecoveryCheckpoi
       return Promise.reject(new TypeError("Paired recovery target returned an oversized range"));
     }
     const effective = signal ?? new AbortController().signal;
-    return runWithMaintenanceUrgency(() => "foreground", effective, () =>
+    // 沿用外层义务的紧急度；没有外层义务的显式读回有人在等，按前台
+    const urgency = currentMaintenanceUrgencyOr("foreground");
+    return runWithMaintenanceUrgency(() => urgency, effective, () =>
       runStorageMaintenanceStep(
         this.options.storageMaintenance,
         storageMaintenanceRequest(
@@ -859,7 +862,9 @@ export class FilePairedCheckpointStaging {
 
   #step<T>(checkpointId: string, identity: unknown, signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
     const effective = signal ?? new AbortController().signal;
-    return runWithMaintenanceUrgency(() => "foreground", effective, () =>
+    // 沿用外层义务的紧急度（每日备份写到配对设备为后台）；没有外层义务时按前台
+    const urgency = currentMaintenanceUrgencyOr("foreground");
+    return runWithMaintenanceUrgency(() => urgency, effective, () =>
       runStorageMaintenanceStep(
         this.options.storageMaintenance,
         storageMaintenanceRequest(

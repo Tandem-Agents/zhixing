@@ -26,6 +26,7 @@ import {
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
   waitForMaintenanceRetry,
+  yieldMaintenanceToForeground,
   type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
 import {
@@ -37,11 +38,13 @@ import {
 import {
   bindDurableProjectionMutations,
   createBoundDurableProjectionReadContext,
+  durableProjectionReadBudget,
   DurableProjectionStorageError,
   FileDurableProjectionIndex,
   type DurableProjectionCheckpoints,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
+  type DurableProjectionReadStep,
 } from "./durable-projection-index.js";
 import { AuthorityStorageError } from "./errors.js";
 import type {
@@ -332,8 +335,7 @@ export class ArtifactLifecycleIndex {
       runDetached: (operation) => this.#queueScope.exit(() => this.#writerLock.exit(operation)),
       // 只包数据读取本身；投影退休清理由投影 owner 在该 permit 释放后独立准入，
       // 否则 lifecycle-reconcile 与 projection-compaction 会形成容量嵌套。
-      runReadStep: (inputIdentity, operation) =>
-        this.#runLifecycleStep(inputIdentity, operation),
+      runReadStep: (step, operation) => this.#runLifecycleReadLeaf(step, operation),
     });
     this.#records = createBoundDurableProjectionReadContext(this.#index);
   }
@@ -421,11 +423,15 @@ export class ArtifactLifecycleIndex {
       ),
       currentMaintenanceAbortSignal(),
       async () => {
-        const admissionDeadline = Date.now() + LIFECYCLE_ADMISSION_DEADLINE_MS;
+        // 截止只限制无进展的时间：每完成一步就重新计时，长追平按容量节奏推进而不是整体超时
+        let admissionDeadline = Date.now() + LIFECYCLE_ADMISSION_DEADLINE_MS;
         let more = true;
         while (more) {
+          // 步间在串行区之外：每日备份这类可推迟的后台义务在这里为前台让路
+          await yieldMaintenanceToForeground(currentMaintenanceAbortSignal());
           try {
             more = await step();
+            admissionDeadline = Date.now() + LIFECYCLE_ADMISSION_DEADLINE_MS;
           } catch (error) {
             const retryAfterMs = maintenanceRetryDelayMs(error);
             // `#synchronizeBounded` 已退出自己的串行区，正常调用可在这里等待后
@@ -615,6 +621,29 @@ export class ArtifactLifecycleIndex {
         inputIdentity,
         { obligation: "committed" },
       ),
+      operation,
+    );
+  }
+
+  /**
+   * 投影读叶按读叶自身的物理上界准入（与 commit-log 的投影读同一规则）。整步的 lifecycle-reconcile
+   * 预算是给整页追平准备的：一次点查若也按它预留，余量低于半个桶时每个读叶都会被拒。
+   */
+  #runLifecycleReadLeaf<T>(step: DurableProjectionReadStep, operation: () => Promise<T>): Promise<T> {
+    const leaf = durableProjectionReadBudget(step);
+    const bound = {
+      occupancy: { memoryReservationBytes: leaf.memoryReservationBytes, temporaryBytes: 0, slots: 1 },
+      quantum: { readBytes: leaf.readBytes, writeBytes: 0, ioOperations: leaf.ioOperations },
+    };
+    const request = storageMaintenanceRequest(
+      "lifecycle-reconcile",
+      this.#maintenanceResourceId,
+      { step: "projection-read", leaf: step },
+      { obligation: "committed" },
+    );
+    return runStorageMaintenanceStep(
+      this.#storageMaintenance,
+      { ...request, atomic: bound, preferred: bound },
       operation,
     );
   }

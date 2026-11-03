@@ -1791,8 +1791,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         });
         await this.#phase("first-party-finality", async () => { await firstPartyFinalitySession?.start(); });
         const projectionFinality = firstPartyFinalitySession;
+        // 票据按 ticketId 幂等接纳：执行器串行区内零等待遇到临时背压时，在区外按短退避接续同一张票据，
+        // 不交给 5 秒一轮的恢复循环；非背压错误、取消与有限窗口到期照原样上抛
         firstPartySurfaceSession =
-          await this.#phase("first-party-surface", () => losslessDataPlane.openFirstPartySurfaceSession({
+          await this.#phase("first-party-surface", () => retryControlAdmission(() => losslessDataPlane.openFirstPartySurfaceSession({
             executorId: targetExecutorId,
             assignmentId,
             ref: streamRef,
@@ -1804,7 +1806,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               }
               await this.#onFirstPartyFrame?.(frame, readDisplay);
             },
-          }));
+          }), async () => {}, input.options?.abortSignal));
       }
       firstPartySurfaceSession?.start();
       const executeLocal = (async function* (

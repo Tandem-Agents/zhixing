@@ -888,6 +888,66 @@ describe("ArtifactLifecycleIndex", () => {
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it(
+    "长追平的背压截止只按无进展的时间计：前几步已推进时，后来的一次背压照常在区外重试",
+    async () => {
+      const root = await createTempDir("artifact-lifecycle-progress-deadline");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+      const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1_024 });
+      const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, { clock: () => "2026-07-25T00:00:00.000Z" });
+      // 每步至多追 4 页、每页 64 条：260 条要分两步，第二步的第一页即第 5 次整页准入
+      for (let index = 0; index < 260; index += 1) {
+        await log.append([{ stream: `run:conv-${index}`, body: { t: "session-lifecycle", mutation: "delete" } }]);
+      }
+      const realNow = Date.now.bind(Date);
+      let offset = 0;
+      let pages = 0;
+      let rejected = 0;
+      const storageMaintenance: StorageMaintenanceGovernorPort = {
+        acquire: async (request): Promise<DeviceCapacityAdmission> => {
+          // 整页追平按整步预算准入；每页推进 1.1 秒，第 5 页（已过开始后 5 秒）被拒一次
+          if (request.kind === "lifecycle-reconcile" && request.atomic.quantum.ioOperations > 3) {
+            pages += 1;
+            offset += 1_100;
+            if (pages === 5 && rejected === 0) {
+              rejected += 1;
+              return { kind: "backpressured", blockedBy: "ioOperations", retryAfterMs: 1 };
+            }
+          }
+          return {
+            kind: "granted",
+            permit: {
+              granted: request.preferred,
+              tryBegin: () => ({ claim: () => undefined, complete: () => undefined }),
+              release: () => undefined,
+            },
+          };
+        },
+        snapshot: () => ({ queued: {}, inFlight: {} }),
+      };
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root, { storageMaintenance }),
+        receiver,
+        storageMaintenance,
+      });
+      const now = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+      try {
+        await expect(lifecycle.catchUp()).resolves.toBeUndefined();
+        expect(rejected).toBe(1);
+        expect(pages).toBeGreaterThan(5);
+      } finally {
+        now.mockRestore();
+        await lifecycle.stopStorageMaintenance();
+      }
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
     "redrives lifecycle backpressure outside its queue without waiting under a caller exclusion",
     async () => {
       const root = await createTempDir("artifact-lifecycle-backpressure-redrive");

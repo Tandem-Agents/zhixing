@@ -12,12 +12,15 @@ import {
   currentMaintenanceAbortSignal,
   currentMaintenanceUrgency,
   runDetachedMaintenanceContext,
+  runHoldingMaintenanceExclusion,
+  runWithMaintenanceForegroundYield,
   runWithMaintenanceUrgency,
 } from "../maintenance-context.js";
 import {
   DefaultStorageMaintenanceGovernor,
   runStorageMaintenanceStep,
   StorageMaintenanceAdmissionError,
+  StorageMaintenanceCancelledError,
   StorageMaintenanceConflictError,
   STORAGE_MAINTENANCE_KINDS,
   STORAGE_MAINTENANCE_TASK_OWNERS,
@@ -738,6 +741,50 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
     expect(recordError).toHaveBeenCalledTimes(1);
     expect(recordError).toHaveBeenCalledWith("projection-rebuild", failure);
     expect(port.snapshot().lastError?.code).toBeDefined();
+  });
+});
+
+describe("runStorageMaintenanceStep foreground yield", () => {
+  it("只在后台紧急度、区外的步骤边界让路；前台、排他区内与提级之后不让路；中止时让路返回并以取消结束", async () => {
+    const calls: string[] = [];
+    let release!: () => void;
+    const yieldToForeground = vi.fn((signal: AbortSignal) => new Promise<void>((resolve) => {
+      calls.push("yield");
+      release = resolve;
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }));
+    const step = (label: string) => runStorageMaintenanceStep(undefined, stepRequest(label), async () => { calls.push(label); });
+    const abort = new AbortController();
+    let urgency: "background" | "foreground" = "background";
+    await runWithMaintenanceForegroundYield(yieldToForeground, () =>
+      runWithMaintenanceUrgency(() => urgency, abort.signal, async () => {
+        // 后台：先让路，前台安静后才执行
+        const pending = step("background");
+        await Promise.resolve();
+        expect(calls).toEqual(["yield"]);
+        release();
+        await pending;
+        expect(calls).toEqual(["yield", "background"]);
+        // 排他区内零等待，也不让路
+        await runHoldingMaintenanceExclusion(() => step("exclusive"));
+        expect(calls.at(-1)).toBe("exclusive");
+        // 被提级为前台（例如显式请求并入）后不再让路
+        urgency = "foreground";
+        await step("raised");
+        expect(calls.slice(-1)).toEqual(["raised"]);
+        expect(yieldToForeground).toHaveBeenCalledTimes(1);
+        // 让路中被中止：让路返回，本步以取消结束、不执行
+        urgency = "background";
+        const cancelled = step("never");
+        await Promise.resolve();
+        abort.abort();
+        await expect(cancelled).rejects.toBeInstanceOf(StorageMaintenanceCancelledError);
+        expect(calls).not.toContain("never");
+      }));
+    // 没有义务 owner 提供让路时，后台步骤照常直接执行
+    await runWithMaintenanceUrgency(() => "background", new AbortController().signal, () => step("plain"));
+    expect(calls.at(-1)).toBe("plain");
+    expect(yieldToForeground).toHaveBeenCalledTimes(2);
   });
 });
 

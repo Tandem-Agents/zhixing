@@ -14,10 +14,16 @@ import {
   type DurableLogCheckpoint,
 } from "@zhixing/core/authority";
 import { MAX_SURFACE_ASSET_BYTES, type CheckpointStreamRecord, type HomeTrustRecord } from "@zhixing/core/contracts";
-import type {
-  DeviceCapacityAdmission,
-  StorageMaintenanceGovernorPort,
-  StorageMaintenanceRequest,
+import {
+  DefaultDeviceCapacityArbiter,
+  DefaultStorageMaintenanceGovernor,
+  StorageMaintenanceAdmissionError,
+  createDefaultDeviceCapacityPolicy,
+  runWithMaintenanceUrgency,
+  storageMaintenanceRequest,
+  type DeviceCapacityAdmission,
+  type StorageMaintenanceGovernorPort,
+  type StorageMaintenanceRequest,
 } from "@zhixing/core/resources";
 import { projectRecoveryReadiness } from "../bootstrap-authority.js";
 import { byteDigest, canonicalize, protocolDigest } from "../canonical.js";
@@ -306,6 +312,220 @@ describe("full authority recovery checkpoints", () => {
 
     expect(captured.source.payload.retainedArtifacts.entries).toContainEqual(large);
     expect(captured.source.payload.retainedArtifacts.entries).not.toContainEqual(deleted);
+  }, 120_000);
+
+  it("目标写入沿用外层义务的紧急度：每日备份的复制按后台，没有外层义务的显式写入按前台", async () => {
+    const fixture = await authorityFixture();
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000016",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention: fixture.lifecycle,
+    });
+    const root = await createTempDir("checkpoint-target-urgency");
+    const write = async (name: string, urgency?: "background") => {
+      const governor = recordingGovernor();
+      const sourceGovernor = recordingGovernor();
+      const durable = await FileRecoveryCheckpointTarget.openPaired({
+        targetRoot: path.join(root, name, "target"),
+        targetDeviceId: "device-target",
+        storageMaintenance: governor.port,
+      });
+      const receiver = new PairedCheckpointReceiver({
+        homeId: fixture.trust.homeId,
+        sourceDeviceId: fixture.identity.deviceId,
+        targetDeviceId: "device-target",
+        recipientKeyId: keyIdForPublicKey(fixture.trust.recoveryBackupPublicKey!),
+        staging: new FilePairedCheckpointStaging({
+          root: path.join(root, name, "incoming"),
+          target: durable,
+          storageMaintenance: governor.port,
+        }),
+      });
+      const source = new PairedRecoveryCheckpointTarget({
+        homeId: fixture.trust.homeId,
+        sourceDeviceId: fixture.identity.deviceId,
+        targetDeviceId: "device-target",
+        recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+        transport: receiver,
+        storageMaintenance: sourceGovernor.port,
+      });
+      const signal = new AbortController().signal;
+      await (urgency
+        ? runWithMaintenanceUrgency(() => urgency, signal, () => source.writeDurable(captured.checkpoint))
+        : source.writeDurable(captured.checkpoint));
+      return [...governor.requests, ...sourceGovernor.requests].map((request) => request.urgency);
+    };
+
+    const daily = await write("daily", "background");
+    expect(daily.length).toBeGreaterThan(0);
+    expect(new Set(daily)).toEqual(new Set(["background"]));
+    const explicit = await write("explicit");
+    expect(explicit.length).toBeGreaterThan(0);
+    expect(new Set(explicit)).toEqual(new Set(["foreground"]));
+  }, 120_000);
+
+  it("保留集调用在生命周期索引串行区内被背压拒绝时，抓取在区外重试后完成", async () => {
+    const fixture = await authorityFixture();
+    const leaf = await fixture.artifacts.put(Buffer.from("retried-leaf"));
+    await fixture.log.append([{
+      stream: "run:conversation-retried",
+      body: { t: "admitted", attachments: [{ ...leaf, kind: "file" }] },
+    }]);
+    const backpressure = () => new StorageMaintenanceAdmissionError(
+      { kind: "backpressured", blockedBy: "ioOperations", retryAfterMs: 5 },
+      "lifecycle-reconcile",
+    );
+    const calls = { heads: 0, filter: 0 };
+    const retention: ArtifactCheckpointRetentionPort = {
+      checkpointRetentionSnapshot: async () => {
+        if (++calls.heads === 1) throw backpressure();
+        return fixture.lifecycle.checkpointRetentionSnapshot();
+      },
+      retainedAtCheckpoint: async (snapshot, candidates) => {
+        if (++calls.filter === 1) throw backpressure();
+        return fixture.lifecycle.retainedAtCheckpoint(snapshot, candidates);
+      },
+    };
+
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000015",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention,
+    });
+
+    expect(calls).toEqual({ heads: 2, filter: 2 });
+    expect(captured.source.payload.retainedArtifacts.entries).toContainEqual(leaf);
+  }, 120_000);
+
+  it("抓取步骤遇到瞬时的容量竞争时有界等待，不把背压升级成整次抓取失败", async () => {
+    const fixture = await authorityFixture();
+    const leaf = await fixture.artifacts.put(Buffer.from("contended-leaf"));
+    await fixture.log.append([{
+      stream: "run:conversation-contended",
+      body: { t: "admitted", attachments: [{ ...leaf, kind: "file" }] },
+    }]);
+    const policy = createDefaultDeviceCapacityPolicy();
+    const governor = new DefaultStorageMaintenanceGovernor({
+      capacity: new DefaultDeviceCapacityArbiter({
+        policy: { ...policy, occupancy: { ...policy.occupancy, slots: 1 } },
+        probe: () => ({
+          cpuBusyRatio: 0,
+          availableMemoryBytes: 1024 ** 3,
+          processRssBytes: 0,
+          temporaryBytesAvailable: 8 * 1024 ** 3,
+        }),
+      }),
+    });
+    // 另一项维护正占着唯一的槽位，稍后释放
+    const holder = await governor.acquire(
+      storageMaintenanceRequest("authority-checkpoint", "other-work", "hold", { obligation: "committed" }),
+      new AbortController().signal,
+    );
+    if (holder.kind !== "granted") throw new Error("holder was not admitted");
+    setTimeout(() => holder.permit.release(), 200);
+
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000014",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention: fixture.lifecycle,
+      storageMaintenance: governor,
+    });
+
+    expect(captured.source.payload.retainedArtifacts.entries).toContainEqual(leaf);
+  }, 120_000);
+
+  it("生命周期索引的投影读叶按读叶自身的上界准入，不按整页追平的预算预留", async () => {
+    const fixture = await authorityFixture();
+    for (let batch = 0; batch < 2; batch += 1) {
+      const entries = [];
+      for (let item = 0; item < 20; item += 1) {
+        const leaf = await fixture.artifacts.put(Buffer.from(`leaf-budget-${batch}-${item}`));
+        entries.push({ stream: `run:conversation-${batch}-${item}`, body: { t: "admitted", attachments: [{ ...leaf, kind: "file" }] } });
+      }
+      await fixture.log.append(entries);
+    }
+    await fixture.lifecycle.synchronize();
+    await fixture.lifecycle.checkpoint();
+    await fixture.lifecycle.stopStorageMaintenance();
+    const governor = recordingGovernor();
+    const lifecycle = fixture.openLifecycle(governor.port);
+    const snapshot = await lifecycle.checkpointRetentionSnapshot();
+    const candidates = (await fixture.log.readTail(await fixture.log.originCheckpoint(), 256)).commits
+      .flatMap((commit) => commit.entries.flatMap((entry) =>
+        ((entry.body as { attachments?: { digest: string; bytes: number }[] }).attachments ?? [])
+          .map(({ digest, bytes }) => ({ digest, bytes }))));
+    governor.requests.length = 0;
+    await lifecycle.retainedAtCheckpoint(snapshot, candidates);
+    const leaves = governor.requests.filter((request) => request.kind === "lifecycle-reconcile");
+    // 冷索引的点查要读段文件：每个读叶一次准入
+    expect(leaves.length).toBeGreaterThan(0);
+    for (const request of leaves) expect(request.atomic.quantum.ioOperations).toBeLessThanOrEqual(3);
+  }, 120_000);
+
+  it("大历史的保留集由生命周期索引按读叶准入，总读量不受抓取单步 IO 上界限制", async () => {
+    const fixture = await authorityFixture();
+    const leaves: Awaited<ReturnType<ArtifactStore["put"]>>[] = [];
+    for (let batch = 0; batch < 4; batch += 1) {
+      const entries = [];
+      for (let item = 0; item < 20; item += 1) {
+        const leaf = await fixture.artifacts.put(Buffer.from(`retained-leaf-${batch}-${item}`));
+        leaves.push(leaf);
+        entries.push({
+          stream: `run:conversation-${batch}-${item}`,
+          body: { t: "admitted", attachments: [{ ...leaf, kind: "file" }] },
+        });
+      }
+      await fixture.log.append(entries);
+    }
+    // 追平并落成段文件后换新实例：覆盖层为空，保留过滤的每次点查都读段文件
+    await fixture.lifecycle.synchronize();
+    await fixture.lifecycle.checkpoint();
+    await fixture.lifecycle.stopStorageMaintenance();
+    const governor = new DefaultStorageMaintenanceGovernor({
+      capacity: new DefaultDeviceCapacityArbiter({
+        policy: createDefaultDeviceCapacityPolicy(),
+        probe: () => ({
+          cpuBusyRatio: 0,
+          availableMemoryBytes: 1024 ** 3,
+          processRssBytes: 0,
+          temporaryBytesAvailable: 8 * 1024 ** 3,
+        }),
+      }),
+    });
+    const lifecycle = fixture.openLifecycle(governor);
+
+    const captured = await captureFullAuthorityCheckpoint({
+      checkpointId: "01J00000000000000000000013",
+      createdAt: AT,
+      purpose: { kind: "periodic" },
+      trust: fixture.trust,
+      issuer: fixture.issuer,
+      recipient: fixture.root.publicIdentity(),
+      log: fixture.log,
+      artifacts: fixture.artifacts,
+      retention: lifecycle,
+      storageMaintenance: governor,
+    });
+
+    expect(captured.source.payload.retainedArtifacts.entries).toEqual(expect.arrayContaining(leaves));
   }, 120_000);
 
   it("rejects an oversized retention directory while refs are entering the fixed header budget", async () => {
@@ -1190,16 +1410,23 @@ async function authorityFixture() {
     path.join(directory, "partials"),
     { maxArtifactBytes: MAX_SURFACE_ASSET_BYTES },
   );
-  const lifecycle = new ArtifactLifecycleIndex({
-    rootDir: path.join(directory, "derived"),
-    logs: [log],
-    artifacts,
-    temporaryArtifacts,
-    temporaryPresence: new FileArtifactTemporaryPresenceStore(path.join(directory, "presence")),
-    receiver,
-  });
-  onTestFinished(() => lifecycle.stopStorageMaintenance());
+  // 同一目录上另开实例：可接设备容量治理，或在落盘后以空覆盖层冷读
+  const openLifecycle = (storageMaintenance?: StorageMaintenanceGovernorPort) => {
+    const index = new ArtifactLifecycleIndex({
+      rootDir: path.join(directory, "derived"),
+      logs: [log],
+      artifacts,
+      temporaryArtifacts,
+      temporaryPresence: new FileArtifactTemporaryPresenceStore(path.join(directory, "presence")),
+      receiver,
+      ...(storageMaintenance ? { storageMaintenance } : {}),
+    });
+    onTestFinished(() => index.stopStorageMaintenance());
+    return index;
+  };
+  const lifecycle = openLifecycle();
   return {
+    openLifecycle,
     key,
     identity,
     issuer: Object.assign({}, identity, { sign: key.sign.bind(key) }),
