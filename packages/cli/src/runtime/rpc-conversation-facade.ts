@@ -696,6 +696,13 @@ export class RpcConversationFacade {
     return boundedControlProjection({ entries: page.entries.map(({ order, fact }) => ({ order, fact: fact.kind === 'status' && 'reason' in fact.notice
       ? { ...fact, notice: { ...fact.notice, reason: fact.notice.reason?.slice(0, 2048) } } : fact })) }, 512 * 1024);
   }
+  /** 指定运行（至多 32 个）的当前状态：历史据此在每个运行末尾标出结果，只读 */
+  async runOutcomes(conversationId: string, runIds: readonly string[]): Promise<import('@zhixing/core/contracts').ConversationRunOutcomesPage> {
+    const client = await this.link.getClient();
+    const page = await client.request<import('@zhixing/core/contracts').ConversationRunOutcomesPage>('session.statusHistory', { mode: 'run-outcomes', conversationId, runIds });
+    return boundedControlProjection({ entries: page.entries.filter(entry => runIds.includes(entry.runId))
+      .map(({ runId, state, reason }) => ({ runId, state, ...(reason ? { reason: reason.slice(0, 512) } : {}) })) }, 64 * 1024);
+  }
   async completion(conversationId: string, runId: string, ownerEpoch?: number): Promise<import('@zhixing/core/contracts').ConversationCompletionPage> {
     const client = await this.link.getClient();
     return boundedControlProjection(await client.request('session.statusHistory', { mode: 'completion', conversationId, runId, ownerEpoch }), 32 * 1024);

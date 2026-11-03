@@ -54,7 +54,7 @@ import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
-import { TerminalDisplayReplay, toolCardSegment, type DisplayReplaySource, type ToolReplaySource } from './display-replay.js';
+import { TerminalDisplayReplay, runOutcomeSegment, runOutcomeText, toolCardSegment, type DisplayReplaySource, type RunOutcomeState, type ToolReplaySource } from './display-replay.js';
 import { TOOL_HISTORY_CARD_FORMAT } from '../tool-card-format.js';
 import { encodeBodyPage, type BodyPageRevision } from '@zhixing/terminal-ui/body-model';
 import { textFragments } from './history-segments.js';
@@ -92,6 +92,25 @@ interface TerminalHistoryState {
   conversationId: string;
   buffered?: ConversationBodyPage;
   bodyCursor?: ConversationBodyCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[];
+  /** 已读到的运行状态与已标出结果的运行：每个运行的结果行只出一次（逆序读到它的第一个片段时） */
+  outcomes?: Map<string, { readonly state: RunOutcomeState; readonly reason?: string }>;
+  outcomeShown?: ReadonlySet<string>;
+  /** 本次阅读里状态读取失败的运行：不再重试、不标记，重新载入历史时补出 */
+  outcomeUnread?: ReadonlySet<string>;
+}
+
+const HISTORY_OUTCOME_RUNS = 4096;
+// 有界记忆：逆序阅读时先记入的是更新的运行，超出时先忘掉它们
+function rememberOutcomeRun(outcomes: Map<string, { readonly state: RunOutcomeState; readonly reason?: string }>, runId: string,
+  value: { readonly state: RunOutcomeState; readonly reason?: string }): void {
+  outcomes.set(runId, value);
+  while (outcomes.size > HISTORY_OUTCOME_RUNS) outcomes.delete(outcomes.keys().next().value!);
+}
+// 已标出结果的运行按值更新：首屏批量写入的进度快照只含已确认写入的部分，部分确认后重读不漏标
+function withOutcomeShown(shown: ReadonlySet<string> | undefined, ...runIds: readonly string[]): ReadonlySet<string> {
+  const next = new Set(shown); for (const runId of runIds) next.add(runId);
+  while (next.size > HISTORY_OUTCOME_RUNS) next.delete(next.keys().next().value!);
+  return next;
 }
 
 /** This private role is only admitted by S. It owns the single application
@@ -936,6 +955,11 @@ class TerminalApplication {
         },
         onObservedTurnComplete: source => this.#outputProjection.end(source.conversationId, source.turnId, source.runId),
         onNotice: () => { /* Durable/current-owner state is refreshed at the next page boundary. */ },
+        // 结果待确认的运行（宿主中途失联、重启后等）：按权威状态在状态行指向 /resolve，不改写历史正文
+        onUncertainRun: message => {
+          this.#mainView = { ...this.#mainView, message };
+          if (!this.#editor && !this.#selection && this.#mainView.readyForInput) void this.#publish(this.#mainView).catch(() => {});
+        },
       }, initial.active);
       await observeStartupPhase(this.#logging.records, 'terminal.local-description', () => this.#localView.refresh());
       this.#mainView = { kind: 'conversation', title: initial.active.name, message: initial.resumedConversationName ? '已恢复最近对话。' : '准备就绪，开始你的第一条消息。', connected: true };
@@ -1203,12 +1227,30 @@ class TerminalApplication {
     const history = stageInitial ? { ...owner } : owner;
     const staged: InitialHistoryDisplaySegment[] = [], progressAfter: TerminalHistoryState[] = [];
     const current = () => this.#history === owner && !this.#abort.signal.aborted;
-    const append = async (segment: InitialHistoryDisplaySegment['segment'], replay: DisplayReplaySource, cursor: ConversationBodyCursor) => {
+    // 结果行不推进来源游标（cursor 缺省），只随这一项的写入记下“已标出”（mark）
+    const append = async (segment: InitialHistoryDisplaySegment['segment'], replay: DisplayReplaySource, cursor?: ConversationBodyCursor, mark?: () => void) => {
       if (stageInitial) {
         if (progressAfter.length) progressAfter[progressAfter.length - 1] = { ...history };
-        history.bodyCursor = cursor; staged.push({ segment, replay }); progressAfter.push({ ...history });
+        if (cursor) history.bodyCursor = cursor;
+        mark?.(); staged.push({ segment, replay }); progressAfter.push({ ...history });
       } else {
-        await this.#display.append(segment, true, undefined, true, replay); history.bodyCursor = cursor;
+        await this.#display.append(segment, true, undefined, true, replay); if (cursor) history.bodyCursor = cursor; mark?.();
+      }
+    };
+    // 本页出现、尚未读过状态的运行一次批量读取（每批至多 32 个）。读取失败不当作结果：这次阅读不再重试、
+    // 也不标记已标出，历史照常显示；重连或重新载入历史（新的历史状态）时再读并补出
+    const readOutcomes = async (page: ConversationBodyPage) => {
+      const outcomes = history.outcomes ??= new Map();
+      const missing = [...new Set(page.fragments.map(fragment => fragment.runId))].filter(runId => !outcomes.has(runId) && !history.outcomeUnread?.has(runId));
+      for (let offset = 0; offset < missing.length && current(); offset += 32) {
+        const batch = missing.slice(offset, offset + 32);
+        const read = await this.#conversation.runOutcomes(history.conversationId, batch).catch(() => undefined);
+        if (!read) { history.outcomeUnread = withOutcomeShown(history.outcomeUnread, ...batch); continue; }
+        const found = new Map(read.entries.map(entry => [entry.runId, entry]));
+        for (const runId of batch) {
+          const entry = found.get(runId);
+          rememberOutcomeRun(outcomes, runId, entry ? { state: entry.state, ...(entry.reason ? { reason: entry.reason } : {}) } : { state: 'unknown' as const });
+        }
       }
     };
     let projected = 0;
@@ -1233,6 +1275,18 @@ class TerminalApplication {
       history.buffered = page;
       const source = page.fragments[0];
       if (!source) { history.buffered = undefined; history.bodyCursor = page.cursor; history.hasMore = page.hasMore; continue; }
+      if (!history.outcomes?.has(source.runId) && !history.outcomeUnread?.has(source.runId)) { await readOutcomes(page); if (!current()) return; }
+      // 逆序读到一个运行的第一个片段，就是它在正文里的末尾：结果行先前插，落在该运行之后
+      if (!history.outcomeShown?.has(source.runId)) {
+        const outcome = history.outcomes?.get(source.runId), text = outcome && runOutcomeText(outcome.state, outcome.reason);
+        const mark = () => { history.outcomeShown = withOutcomeShown(history.outcomeShown, source.runId); };
+        if (outcome && text) {
+          await append(runOutcomeSegment({ blockId: `owner-log:${source.runId}:outcome`, groupId: `${source.runId}:outcome` }, text),
+            { kind: 'outcome', conversationId: history.conversationId, runId: source.runId, state: outcome.state,
+              ...(outcome.reason ? { reason: outcome.reason } : {}), length: text.length, markdown: false }, undefined, mark);
+          if (++projected === 4) continue;
+        } else if (outcome) mark();
+      }
       const blockId = `owner-log:${source.runId}:${source.cursor.history?.key ?? source.cursor.revision}:${source.message}:${source.block}`;
       const role = source.type === 'thinking' ? 'thinking' : source.type === 'tool_use' ? 'tool' : source.type === 'tool_result' ? (source.isError ? 'tool-error' : 'tool') : source.role;
       const groupId = source.toolId ? `${source.runId}:tool:${source.toolId}` : `${source.runId}:${source.message}:${role}`;

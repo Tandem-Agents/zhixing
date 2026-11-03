@@ -1,6 +1,7 @@
 import type { DurableLogCheckpoint } from '../authority/interfaces.js';
 import type { MessageInputIdentity } from '../types/messages.js';
 import type { ConversationStatusNotice, FinalFrame } from './protocol.js';
+import type { ConversationRunState } from './foundation.js';
 import type { TokenUsage } from '../types/llm.js';
 
 /** Commit metadata is separate from replaying the committed body. This is a
@@ -170,7 +171,16 @@ export type ConversationRecoveryRequest =
   /** 指定运行在历史边界之前的控制事实（已不在当前集合里的终态与已提交的 final），按运行精确读取，每次至多 32 个。
    * 边界之后的事实由控制页的尾部按日志顺序给出，未结束运行由当前集合给出，这里都不重复。 */
   | { readonly mode: 'run-facts'; readonly conversationId: string; readonly runIds: readonly string[]; readonly historyThroughInputLsn: number }
+  /** 指定运行（每次至多 32 个）的当前状态，供历史在每个运行末尾标出它的结果；只读，不经恢复链。 */
+  | { readonly mode: 'run-outcomes'; readonly conversationId: string; readonly runIds: readonly string[] }
   | { readonly mode: 'input-page'; readonly conversationId: string; readonly runId: string; readonly cursor?: ConversationInputCursor };
 /** 按源顺序排列；order 是源顺序键（来源段、位置、条目序号），与控制页当前集合段的 currentOrder 可比较 */
 export interface ConversationRunFactsPage { readonly entries: readonly { readonly order: string; readonly fact: Exclude<ConversationControlFact, { readonly kind: 'input' }> }[] }
-export type ConversationRecoveryPage = ConversationControlPage | ConversationInputPage | ConversationCompletionPage | ConversationBodyPage | ConversationContextPage | ConversationControlTargets | ConversationRunFactsPage;
+/**
+ * 运行的当前状态：missing 表示该对话里确实没有这次运行的记录；unknown 表示无法据记录判断
+ * （导入的历史基底不带运行记录），接入面不据此下结论。reason 只在失败类状态给出，有界。
+ */
+export interface ConversationRunOutcomesPage {
+  readonly entries: readonly { readonly runId: string; readonly state: ConversationRunState | 'missing' | 'unknown'; readonly reason?: string }[];
+}
+export type ConversationRecoveryPage = ConversationControlPage | ConversationInputPage | ConversationCompletionPage | ConversationBodyPage | ConversationContextPage | ConversationControlTargets | ConversationRunFactsPage | ConversationRunOutcomesPage;

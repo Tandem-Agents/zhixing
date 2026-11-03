@@ -48,6 +48,11 @@ export function parseConversationRecoveryRequest(raw: unknown): ConversationReco
         value.runIds.length === 0 || value.runIds.length > 32 || value.runIds.some(id => !isProtocolIdentifier(id)) || !integer(value.historyThroughInputLsn)) fail();
     return value as unknown as ConversationRecoveryRequest;
   }
+  if (value.mode === 'run-outcomes') {
+    if (!keys(value, ['mode', 'conversationId', 'runIds']) || !isProtocolIdentifier(value.conversationId) || !Array.isArray(value.runIds) ||
+        value.runIds.length === 0 || value.runIds.length > 32 || value.runIds.some(id => !isProtocolIdentifier(id))) fail();
+    return value as unknown as ConversationRecoveryRequest;
+  }
   if (!['control-page', 'input-page'].includes(value.mode as string) || !isProtocolIdentifier(value.conversationId) ||
       !keys(value, value.mode === 'input-page' ? ['mode', 'conversationId', 'runId', 'cursor'] : ['mode', 'conversationId', 'cursor', 'historyRunIds', 'historyThrough'])) fail();
   if (value.historyThrough !== undefined) { checkpoint(value.historyThrough); if (value.cursor !== undefined) fail(); }

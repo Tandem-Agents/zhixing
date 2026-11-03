@@ -39,7 +39,7 @@ import type { RunInputPort } from "@zhixing/core/loop";
 import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
-import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
+import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage, ConversationRunOutcomesPage } from '@zhixing/core/contracts';
 import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
 import { ConversationReadIndex, openRunState, sourceOrder, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
@@ -1514,6 +1514,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     });
   }
 
+  /** 当前读取基底：导入记录装入（代次）与迁入基底视图（来源）都会换基底，按两者一起判断一次读取是否同基底。 */
+  #readBase(): { readonly generation: number; readonly source: ConversationBaseSource | undefined } {
+    return { generation: this.#readBaseGeneration, source: this.#importedBaseSource };
+  }
+  #sameReadBase(base: { readonly generation: number; readonly source: ConversationBaseSource | undefined }): boolean {
+    return base.generation === this.#readBaseGeneration && base.source === this.#importedBaseSource;
+  }
+
   async installImportedBase(source: ConversationBaseSource): Promise<void> {
     await this.#operations.run(async () => {
       this.#importedBaseSource = source;
@@ -2479,6 +2487,34 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if ('ready' in summary) throw Error('Committed metadata index is being prepared');
       return { conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch, commitRevision: commit.commitRevision, summary };
     }
+    if (request.mode === 'run-outcomes') {
+      if (!Array.isArray(request.runIds) || request.runIds.length > 32) throw new TypeError('Run outcome request exceeds 32 runs');
+      for (const runId of request.runIds) assertIdentifier(runId, 'Run outcome id');
+      // 换基底时整批重读，同一页的状态只来自同一份读取基底
+      for (;;) {
+        const base = this.#readBase();
+        const visibility = await this.#readIndex.outsideVisibility(this.#conversationId);
+        if (visibility.deleted) return { entries: [] };
+        const runIds = [...new Set(request.runIds)], controls = await this.#readIndex.control(this.#conversationId, runIds);
+        const statusAt = await this.#readIndex.statusAt(this.#conversationId, runIds);
+        // 导入的历史基底不带运行记录：缺记录时不能断定这次运行不存在
+        const imported = !!this.#importedBaseSource || !!legacyBase;
+        const entries = runIds.map((runId: string, index: number) => {
+          const status = controls.get(runId), at = statusAt[index];
+          type State = ConversationRunOutcomesPage['entries'][number]['state'];
+          if (!status?.entry) return { runId, state: (status?.commit ? 'committed' : imported ? 'unknown' : 'missing') as State };
+          // 与历史外候选同一可见性：本地按本地 clear，导入基底在本地 clear 后整体隐藏、否则按基底 clear；
+          // 状态与其位置须是同一修订。清空或换基底之前的运行不把旧状态与原因挂回当前视图
+          const visible = !!at && at.statusRevision === status.entry.statusRevision &&
+            (at.local ? at.lsn > visibility.localClearedLsn : !visibility.baseHidden && at.lsn > visibility.baseClearedLsn);
+          if (!visible) return { runId, state: 'unknown' as State };
+          const state: State = status.entry.state;
+          const reason = status.entry.reason && (state === 'failed' || state === 'expired' || state === 'cancelled') ? status.entry.reason.slice(0, 512) : undefined;
+          return { runId, state, ...(reason ? { reason } : {}) };
+        });
+        if (this.#sameReadBase(base)) return { entries };
+      }
+    }
     if (request.mode === 'run-facts') {
       if (!Array.isArray(request.runIds) || request.runIds.length > 32) throw new TypeError('Run fact request exceeds 32 runs');
       for (const runId of request.runIds) assertIdentifier(runId, 'Run fact id');
@@ -2486,7 +2522,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (!Number.isSafeInteger(through) || through < 0) throw new TypeError('Invalid ordered history boundary');
       // 换基底时整批重读，同一页的事实只来自同一份读取基底
       for (;;) {
-        const generation = this.#readBaseGeneration;
+        const base = this.#readBase();
         if ((await this.#readIndex.state(this.#conversationId)).deleted) return { entries: [] };
         const runIds = [...new Set(request.runIds)], controls = await this.#readIndex.control(this.#conversationId, runIds);
         const statusAt = await this.#readIndex.statusAt(this.#conversationId, runIds);
@@ -2505,7 +2541,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         // 按源顺序返回：调用方跨批合并时以这个顺序键为准
         entries.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
-        if (generation === this.#readBaseGeneration) return { entries };
+        if (this.#sameReadBase(base)) return { entries };
       }
     }
     const importedSource = this.#importedBaseSource;

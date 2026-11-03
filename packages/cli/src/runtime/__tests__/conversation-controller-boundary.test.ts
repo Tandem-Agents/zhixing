@@ -104,7 +104,7 @@ class Owner {
 function harness(mode: Mode, gates: { controlPageGate?: () => Promise<void>; inputGate?: (runId: string) => Promise<void> } = {}) {
   const owners = new Map<string, Owner>([['conv-1', new Owner('conv-1', mode)], ['conv-2', new Owner('conv-2', mode)]]);
   const owner = owners.get('conv-1')!;
-  const visible: string[] = [], effects: string[] = [], runFactCalls: string[][] = [];
+  const visible: string[] = [], effects: string[] = [], runFactCalls: string[][] = [], uncertain: string[] = [];
   let resets = 0, afterFreeze: (() => void) | undefined;
   let nextRun = 0;
   const handlers = new Map<string, ((value: never) => void)[]>();
@@ -153,6 +153,7 @@ function harness(mode: Mode, gates: { controlPageGate?: () => Promise<void>; inp
     onRecoveryYield: async (event, source) => { visible.push(`yield:${source.runId}:${source.kind}:${'text' in event ? event.text : event.type}`); },
     onObservedInputFragment: async input => { await gates.inputGate?.(input.runId); visible.push(`input:${input.runId}:${input.text}`); },
     onNotice: message => { visible.push('notice:' + message); },
+    onUncertainRun: message => { uncertain.push(message); },
     onObservedTurnComplete: turn => { effects.push('observed-complete:' + turn.runId); },
     onRecoveryDrain: async turn => { effects.push('drain:' + turn.runId); },
     onRunTerminal: turn => { effects.push('terminal:' + turn.runId); },
@@ -168,7 +169,7 @@ function harness(mode: Mode, gates: { controlPageGate?: () => Promise<void>; inp
     }
   };
   const wake = (conversationId = 'conv-1') => { for (const handler of handlers.get('status') ?? []) handler({ v: 1, ref: { execution: 'conversation', conversationId, ownerEpoch: 1, runId: 'wake' }, state: 'cancelled', statusRevision: 0, actions: [], at: NOW } as never); };
-  return { controller, owner, owners, visible, effects, runFactCalls, conversation, settle, wake, resets: () => resets,
+  return { controller, owner, owners, visible, effects, runFactCalls, uncertain, conversation, settle, wake, resets: () => resets,
     /** 下一次历史快照冻结之后、首个控制页之前落下的事实 */
     afterNextFreeze: (append: () => void) => { afterFreeze = append; } };
 }
@@ -216,6 +217,17 @@ describe('control recovery from the history boundary keeps client-visible behavi
     expect(old.visible.some(line => line.includes('unsure'))).toBe(true);
     expect(old.effects.filter(effect => effect.startsWith('terminal:')).length).toBeGreaterThan(next.effects.filter(effect => effect.startsWith('terminal:')).length);
     expect(next.runFactCalls).toEqual([]);
+  }, 30_000);
+
+  it('tells the surface about an uncertain run found while opening the conversation', async () => {
+    const h = harness('new');
+    try {
+      h.owner.admit('done'); h.owner.state('done', 'running'); h.owner.commit('done', 'reply');
+      h.owner.admit('unsure'); h.owner.state('unsure', 'running'); h.owner.state('unsure', 'uncertain');
+      h.owner.freezeHistory();
+      await h.controller.start(); await h.settle();
+      expect(h.uncertain).toEqual(['本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。']);
+    } finally { h.controller.dispose(); }
   }, 30_000);
 
   it.each(['switch-back', 'reconnect'] as const)('%s: a local waiter whose final was lost before the new boundary still completes', async how => {

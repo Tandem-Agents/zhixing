@@ -1,6 +1,23 @@
 import { expect, it } from 'vitest';
-import { TerminalDisplayReplay } from '../display-replay.js';
+import { TerminalDisplayReplay, runOutcomeText } from '../display-replay.js';
 import { HistoryBodyRangeCache } from '../body-projection.js';
+
+it('rebuilds a run outcome line from its locator and states each outcome in user terms', async () => {
+  const replay = new TerminalDisplayReplay(async () => { throw Error('outcome lines never read the transcript'); });
+  const text = runOutcomeText('failed', 'Storage maintenance was not admitted: backpressured:readBytes (projection-flush)')!;
+  expect(text).toBe('⚠ 这次运行未完成：本机存储当时正忙于维护，运行写入未被接纳而中断。');
+  const segment = await replay.read({ replay: { kind: 'outcome', conversationId: 'c', runId: 'r', state: 'failed',
+    reason: 'Storage maintenance was not admitted: backpressured:readBytes (projection-flush)', length: text.length, markdown: false },
+    blockId: 'owner-log:r:outcome', groupId: 'r:outcome', role: 'notice', contentOffset: 0, length: text.length, final: true, digest: '' });
+  expect(segment).toMatchObject({ blockId: 'owner-log:r:outcome', role: 'notice', text });
+  expect(runOutcomeText('failed', 'Connection error.')).toBe('⚠ 这次运行未完成：无法连接模型服务：请检查网络、代理或服务地址后重试。');
+  expect(runOutcomeText('cancelled')).toBe('这次运行已停止。');
+  expect(runOutcomeText('uncertain')).toContain('/resolve');
+  expect(runOutcomeText('running')).toContain('仍在进行');
+  expect(runOutcomeText('missing')).toContain('找不到这次运行的记录');
+  for (const quiet of ['committed', 'unknown'] as const) expect(runOutcomeText(quiet)).toBeUndefined();
+  replay.close();
+});
 
 it('revalidates a fully cached Markdown range after its source is retired', async () => {
   const text = '**old saved body**'; let cleared = false;

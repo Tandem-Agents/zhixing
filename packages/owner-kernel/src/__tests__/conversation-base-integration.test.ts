@@ -4,7 +4,7 @@ import { ReferenceMessageInputReader } from './reference-message-input-reader.js
 import { ConversationReadIndex } from '../conversation-read-index.js';
 import type { ConversationRunJournal } from '../conversation-assignment.js';
 import type { DurableLogCheckpoint, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage } from '@zhixing/core/contracts';
+import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunOutcomesPage } from '@zhixing/core/contracts';
 import { conversationRecoveryPage, conversationRecoveryPending } from '../conversation-recovery-index.js';
 import { ConversationBaseSource } from '../conversation-base-source.js';
 import { conversationBaseKey, openConversationBase, type ConversationBaseBinding } from '../conversation-base-registry.js';
@@ -265,4 +265,24 @@ it('moves a base run out of the current set when the target changes its state', 
   expect(await scan(before)).toEqual([['base-queued-1', 'queued', true], ['base-queued-0', 'cancelled', false]]);
   // 边界在取消之后：只剩仍在排队的基底运行
   expect(await scan(await boundary())).toEqual([['base-queued-1', 'queued', true]]);
+}, 240_000);
+
+it('reads run outcomes from one read base across a base switch and hides the imported base after a local clear', async () => {
+  const h = await createConversationBaseHarness();
+  await h.input(h.sourceJournal, 'old', 0);
+  const outcomes = async () => ((await h.targetJournal.recoveryPage({ mode: 'run-outcomes', conversationId: BASE_CONVERSATION, runIds: ['old'] })) as ConversationRunOutcomesPage).entries;
+  // 第一次读控制记录时完成迁入（装入基底、读基底换代）：整批按新基底重读，不混用换代前读到的部分
+  const control = ConversationReadIndex.prototype.control;
+  let reads = 0;
+  const probe = vi.spyOn(ConversationReadIndex.prototype, 'control').mockImplementation(async function (this: ConversationReadIndex, ...args: Parameters<typeof control>) {
+    if (reads++ === 0) await h.transfer();
+    return control.apply(this, args);
+  });
+  try {
+    expect(await outcomes()).toEqual([{ runId: 'old', state: 'cancelled' }]);
+  } finally { probe.mockRestore(); }
+  expect(reads).toBe(2);
+  // 本地 clear 后导入基底整体隐藏：基底运行只得到“无法判断”，不带旧状态
+  expect((await h.mutate(h.targetJournal, h.target, 'clear-target', { kind: 'window-op', op: 'clear' })).kind).toBe('applied');
+  expect(await outcomes()).toEqual([{ runId: 'old', state: 'unknown' }]);
 }, 240_000);

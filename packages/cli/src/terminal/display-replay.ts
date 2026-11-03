@@ -1,9 +1,10 @@
-import type { ConversationBodyCursor, TranscriptToolFacts } from '@zhixing/core/contracts';
+import type { ConversationBodyCursor, ConversationRunOutcomesPage, TranscriptToolFacts } from '@zhixing/core/contracts';
 import type { TranscriptBodyCursor } from '@zhixing/core/transcript';
 import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
 import { sliceBodyNodes } from '@zhixing/terminal-ui/body-model';
 import { HistoryBodyRangeCache } from './body-projection.js';
 import { formatHistoryToolCard } from '../tool-card-format.js';
+import { modelFailureText } from './model-failure.js';
 
 /** Only a source already read from durable history can enter the cold tier.
  * Live output, notices and unpersisted tool presentations have no such locator. */
@@ -13,8 +14,38 @@ export type DisplayReplaySource = { readonly conversationId: string; readonly le
   /** 工具卡片由结果块的有界事实派生：绑定结果块坐标、配对调用的位置与格式版本，回放时重读并按当前格式重建 */
   ({ readonly kind: 'tool'; readonly format: number; readonly call?: { readonly message: number; readonly block: number } } & (
     { readonly via: 'owner'; readonly cursor: ConversationBodyCursor; readonly runId: string } |
-    { readonly via: 'shard'; readonly cursor: TranscriptBodyCursor })));
+    { readonly via: 'shard'; readonly cursor: TranscriptBodyCursor })) |
+  /** 运行末尾的结果行：由读到的运行状态确定性生成，定位里只存状态与有界原因 */
+  { readonly kind: 'outcome'; readonly runId: string; readonly state: RunOutcomeState; readonly reason?: string });
 export type ToolReplaySource = Extract<DisplayReplaySource, { kind: 'tool' }>;
+export type RunOutcomeState = ConversationRunOutcomesPage['entries'][number]['state'];
+
+// 存储维护未放行写入：运行记录里是内部原文，给用户说清是本机存储繁忙
+const STORAGE_NOT_ADMITTED = /^Storage maintenance was not admitted\b/u;
+
+/** 历史里一次运行末尾的结果行；已完成与无法判断不出行。仍在进行、结果待确认如实说明，不笼统建议重发。 */
+export function runOutcomeText(state: RunOutcomeState, reason?: string): string | undefined {
+  switch (state) {
+    case 'failed': {
+      const cause = reason?.trim();
+      return `⚠ 这次运行未完成：${!cause ? '原因未记录' : STORAGE_NOT_ADMITTED.test(cause) ? '本机存储当时正忙于维护，运行写入未被接纳而中断。' : modelFailureText(cause)}`;
+    }
+    case 'expired': return '⚠ 这次运行等待过久已失效，没有执行完成。';
+    case 'cancelled': return '这次运行已停止。';
+    case 'cancel-requested': return '这次运行正在停止。';
+    case 'uncertain': return '⚠ 这次运行的结果尚待确认：可用 /resolve 查看并处理。';
+    case 'queued': case 'dispatched': case 'running': return '这次运行仍在进行，结果会接在后面。';
+    case 'missing': return '⚠ 找不到这次运行的记录。';
+    default: return undefined;
+  }
+}
+
+/** 结果行的显示段：纯文本、整段一次给出，与该运行同组。 */
+export function runOutcomeSegment(base: { readonly blockId: string; readonly groupId?: string }, text: string): TerminalDisplaySegment {
+  return { ...base, role: 'notice', text, contentOffset: 0, final: true,
+    body: { version: 1, revision: 1, kind: 'plain', end: true, context: { nodes: [{ kind: 'paragraph', origin: 0, from: 0, to: text.length,
+      anchor: true, runs: [{ from: 0, to: text.length, text, style: 0 }] }] } } };
+}
 export interface DisplayReplayRecord {
   readonly replay: DisplayReplaySource;
   readonly blockId: string; readonly groupId?: string; readonly role: string;
@@ -39,6 +70,11 @@ export class TerminalDisplayReplay {
   close(): void { this.#parser.close(); }
   async read(record: DisplayReplayRecord): Promise<TerminalDisplaySegment> {
     const { replay, blockId, groupId, role, contentOffset, length, final } = record;
+    if (replay.kind === 'outcome') {
+      const text = runOutcomeText(replay.state, replay.reason);
+      if (!text) throw Error('terminal-display-replay-source-changed');
+      return runOutcomeSegment({ blockId, ...(groupId ? { groupId } : {}) }, text);
+    }
     if (replay.kind === 'tool') {
       // 重读结果块即复核可见性（清空、删除后报失效）；配对调用的位置不符说明来源已变
       if (!this.tool) throw Error('terminal-display-replay-tool-unavailable');

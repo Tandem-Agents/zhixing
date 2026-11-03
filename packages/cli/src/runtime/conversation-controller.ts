@@ -224,6 +224,8 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
   onActivity?: (activity: SessionActivityPayload) => void;
   onNotice?: (message: string) => void;
+  /** 当前对话出现结果待确认的运行（按权威状态）：接入面据此提示用户经 /resolve 处理 */
+  onUncertainRun?: (message: string) => void;
   /** Consume the complete result synchronously, including when completion
    * precedes the send receipt. Only this surface's projection remains in its
    * waiter promise; legacy consumers retain the original outcome by default. */
@@ -1184,7 +1186,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (prior && prior.statusRevision > notice.statusRevision) return;
       rememberBounded(this.pendingStatuses, runId, notice);
       if (notice.state === "uncertain" && prior?.statusRevision !== notice.statusRevision) {
-        this.opts.onNotice?.("本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。");
+        this.opts.onNotice?.(UNCERTAIN_RUN_NOTICE);
+        if (notice.ref.conversationId === this.active.conversationId) this.opts.onUncertainRun?.(UNCERTAIN_RUN_NOTICE);
       }
       const observed = this.observedContinuations.get(runId);
       const result = terminalResultForStatus(notice);
@@ -1527,7 +1530,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       watch.statusRevision = notice.statusRevision;
       if (result) { progress.localSettled = true; this.finishTurn(watch.conversationId, watch.turnId, result); }
     }
-    if (notice.state === 'uncertain') this.opts.onNotice?.('本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。');
+    if (notice.state === 'uncertain') { this.opts.onNotice?.(UNCERTAIN_RUN_NOTICE); this.opts.onUncertainRun?.(UNCERTAIN_RUN_NOTICE); }
     if (!result) return;
     if (!current()) return;
     let observed = this.observedContinuations.get(runId);
@@ -2501,13 +2504,15 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 }
 
+const UNCERTAIN_RUN_NOTICE = "本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。";
+
 function terminalResultForStatus(
   notice: ConversationStatusNotice,
 ): WireAgentResult | undefined {
   const resultingState =
     notice.state === "uncertain-closed" ? notice.resultingState : notice.state;
   if (resultingState === "uncertain") {
-    return { reason: "error", error: { name: "RunUncertain", message: "本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。" }, usage: { inputTokens: 0, outputTokens: 0 } };
+    return { reason: "error", error: { name: "RunUncertain", message: UNCERTAIN_RUN_NOTICE }, usage: { inputTokens: 0, outputTokens: 0 } };
   }
   if (resultingState === "cancelled") {
     return {

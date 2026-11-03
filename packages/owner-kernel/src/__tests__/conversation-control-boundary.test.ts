@@ -8,7 +8,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing/core/authority';
-import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunFactsPage, Signature } from '@zhixing/core/contracts';
+import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunFactsPage, ConversationRunOutcomesPage, Signature } from '@zhixing/core/contracts';
 import { protocolDigest } from '@zhixing/core/protocol';
 import { AnchorResourceGovernor } from '../resource-governor.js';
 import { ConversationRunJournal } from '../conversation-assignment.js';
@@ -130,6 +130,39 @@ describe('control page from the history boundary', () => {
     await expect(journal.recoveryPage({ mode: 'run-facts', conversationId: ID, runIds: Array.from({ length: 33 }, (_, n) => 'run-' + n), historyThroughInputLsn: head })).rejects.toThrow('32');
     await f.append(f.r.lifecycle('delete'));
     expect(await facts(head, ['stopped'])).toEqual([]);
+  }, 60_000);
+});
+
+describe('current outcome of named runs', () => {
+  it('reports each named run once with its current state, distinguishing a run that has no record', async () => {
+    const f = await fixture();
+    await run(f, 'done', 'committed'); await run(f, 'stopped', 'cancelled'); await run(f, 'broken', 'failed');
+    await run(f, 'waiting', 'queued'); await run(f, 'unsure', 'uncertain');
+    const { journal } = reader(f);
+    const outcomes = async (runIds: string[]) => ((await journal.recoveryPage({ mode: 'run-outcomes', conversationId: ID, runIds })) as ConversationRunOutcomesPage).entries;
+    expect((await outcomes(['done', 'stopped', 'broken', 'waiting', 'unsure', 'nope', 'done'])).map(({ runId, state }) => [runId, state])).toEqual([
+      ['done', 'committed'], ['stopped', 'cancelled'], ['broken', 'failed'], ['waiting', 'queued'], ['unsure', 'uncertain'], ['nope', 'missing'],
+    ]);
+    // 状态晚于读取变化时读到的就是新状态
+    await f.append(f.r.state('waiting', 'cancelled'));
+    expect((await outcomes(['waiting']))[0]).toMatchObject({ state: 'cancelled' });
+    await expect(journal.recoveryPage({ mode: 'run-outcomes', conversationId: ID, runIds: Array.from({ length: 33 }, (_, n) => 'run-' + n) })).rejects.toThrow('32');
+    await f.append(f.r.lifecycle('delete'));
+    expect(await outcomes(['done'])).toEqual([]);
+  }, 60_000);
+
+  it('does not hang an old run state or failure reason back onto the view after a clear', async () => {
+    const f = await fixture();
+    await run(f, 'broken', 'failed'); await run(f, 'stopped', 'cancelled');
+    const { journal } = reader(f);
+    const outcomes = async (runIds: string[]) => ((await journal.recoveryPage({ mode: 'run-outcomes', conversationId: ID, runIds })) as ConversationRunOutcomesPage).entries;
+    expect((await outcomes(['broken', 'stopped'])).map(entry => entry.state)).toEqual(['failed', 'cancelled']);
+    await f.append(f.r.lifecycle('clear'));
+    await run(f, 'after-clear', 'failed');
+    // 清空之前的运行：已知旧 runId 也只得到“无法判断”，不带原因；清空后的运行照常
+    expect(await outcomes(['broken', 'stopped', 'after-clear'])).toEqual([
+      { runId: 'broken', state: 'unknown' }, { runId: 'stopped', state: 'unknown' }, expect.objectContaining({ runId: 'after-clear', state: 'failed' }),
+    ]);
   }, 60_000);
 });
 
