@@ -29,8 +29,10 @@ export const KERNEL_LOG_SOURCE: LogSource = {
     input: event("运行接纳后续输入"), toolStarted: event("工具调用开始"),
     toolFinished: event("工具调用已返回"), permission: event("工具权限已裁决"),
     childStarted: event("子任务开始"), childFinished: event("子任务已结束"),
-    retry: event("模型调用重试裁决", "warn"), recovered: event("模型调用重试后成功"),
-    exhausted: event("模型调用重试已耗尽", "error"),
+    // 重试的真实首因摘要只挂在这两个事件上（安全字段、生产端有界），不进共用集合
+    retry: { ...event("模型调用重试裁决", "warn"), fields: { ...fields, cause: "text" } },
+    recovered: event("模型调用重试后成功"),
+    exhausted: { ...event("模型调用重试已耗尽", "error"), fields: { ...fields, cause: "text" } },
     interrupted: event("运行取消已观察到", "warn"),
     // 基础设施失败的首因只挂在 error 事件上：类别与包内源码位置，不含异常正文。
     // 各事件共用 fields，整份日志源有 512 个字段节点的上限，不能把新字段加进共用集合。
@@ -89,7 +91,7 @@ export function observeKernelRun(bus: IEventBus<AgentEventMap>, records: LogReco
   on("tool:child_start", (v) => ({ event: "childStarted", refs: [{ kind: "toolCall", id: v.parentToolCallId }, { kind: "task", id: v.childAgentId }] }));
   on("tool:child_end", (v) => ({ event: "childFinished", refs: [{ kind: "toolCall", id: v.parentToolCallId }, { kind: "task", id: v.childAgentId }], result: v.status === "succeeded" ? "success" : v.status === "aborted" ? "cancelled" : "failure", data: { duration: v.duration } }));
   on("retry:attempt", (v) => ({ event: "retry", data: { ...v } }));
-  on("retry:exhausted", (v) => ({ event: "exhausted", result: "failure", data: { error: v.lastError, errorType: v.errorType, attempt: v.totalAttempts } }));
+  on("retry:exhausted", (v) => ({ event: "exhausted", result: "failure", data: { error: v.lastError, errorType: v.errorType, attempt: v.totalAttempts, ...(v.cause ? { cause: v.cause } : {}) } }));
   on("retry:success", (v) => ({ event: "recovered", result: "success", data: { attempt: v.attemptsTaken, duration: v.totalDelayMs } }));
   on("interrupt:fired", (v) => ({ event: "interrupted", result: "cancelled", data: { reason: v.reason?.kind, duration: v.exitDelayMs } }));
   on("error:fatal", (v) => ({ event: "error", result: "failure", data: { error: v.message, errorType: v.type } }));

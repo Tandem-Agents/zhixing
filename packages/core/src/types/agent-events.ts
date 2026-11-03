@@ -510,12 +510,15 @@ export type AgentEventMap = {
     maxRetries: number;
     delayMs: number;
     willRetry: boolean;
+    /** 沿 cause 链的原因摘要（有界）；外层一句之外没有更深原因时缺省。 */
+    cause?: string;
   };
 
   "retry:exhausted": {
     errorType: AgentErrorType;
     totalAttempts: number;
     lastError: string;
+    cause?: string;
   };
 
   "retry:success": {

@@ -1,5 +1,65 @@
 import { describe, expect, it } from "vitest";
-import { classifyProviderError, getRecoveryStrategy } from "../classify.js";
+import { CAUSE_SUMMARY_CHARS, classifyProviderError, errorCauseSummary, getRecoveryStrategy } from "../classify.js";
+
+const fetchFailed = (cause: unknown) => Object.assign(new TypeError("fetch failed"), { cause });
+const wrapped = (cause: unknown) => Object.assign(new Error("Connection error."), { cause: fetchFailed(cause) });
+
+describe("errorCauseSummary", () => {
+  const refused = (address: string) => Object.assign(new Error(`connect ECONNREFUSED ${address}`), { code: "ECONNREFUSED", syscall: "connect", address, port: 54001 });
+
+  it("保留拒绝连接的因果链，只用类名、错误码、系统调用与 HTTP 状态", () => {
+    const aggregate = Object.assign(new AggregateError([refused("::1"), refused("127.0.0.1")]), { code: "ECONNREFUSED" });
+    expect(errorCauseSummary(wrapped(aggregate))).toBe("Error ← TypeError ← AggregateError ECONNREFUSED ← Error ECONNREFUSED connect ×2");
+    expect(errorCauseSummary(Object.assign(new Error("Upstream failed"), { cause: Object.assign(new Error("Bad gateway"), { status: 502 }) })))
+      .toBe("Error ← Error HTTP 502");
+    // 只有外层一句、或各层都没有错误码与状态：没有摘要
+    expect(errorCauseSummary(Object.assign(new Error("Bad gateway"), { status: 502 }))).toBeUndefined();
+    expect(errorCauseSummary(Object.assign(new Error("a"), { cause: new Error("b") }))).toBeUndefined();
+  });
+
+  it("不带任何消息文本：私有查询值、路径与地址不进摘要", () => {
+    const marker = "PRIVATE-MARKER-7f3a";
+    const inner = Object.assign(new Error(`request to https://example.invalid/v1?token=${marker} failed at C:\\Users\\someone\\${marker}`), {
+      code: "ECONNREFUSED", syscall: "connect", address: `10.0.0.1-${marker}`, name: `Bad${marker}Name!`,
+    });
+    const summary = errorCauseSummary(Object.assign(new Error(`outer ${marker}`), { cause: Object.assign(new TypeError(`fetch ${marker}`), { cause: inner }) }))!;
+    expect(summary).toBe("Error ← TypeError ← Error ECONNREFUSED connect");
+    expect(summary).not.toContain(marker);
+  });
+
+  it("节点总数有界，环、重复与读取出错都不抛出", () => {
+    let deep: Error = Object.assign(new Error("root"), { code: "ECONNRESET" });
+    for (let i = 0; i < 20; i++) deep = Object.assign(new Error(`wrap ${i}`), { code: "ECONNRESET", cause: deep });
+    expect(errorCauseSummary(deep)).toBe("Error ECONNRESET ×8");
+    // 首因若在遍历上限之外则不臆测
+    let beyond: Error = Object.assign(new Error("root"), { code: "ECONNREFUSED" });
+    for (let i = 0; i < 20; i++) beyond = Object.assign(new Error(`wrap ${i}`), { cause: beyond });
+    expect(errorCauseSummary(beyond)).toBeUndefined();
+    const a = Object.assign(new Error("a"), { code: "ECONNRESET" }) as Error & { cause?: unknown }, b = new Error("b") as Error & { cause?: unknown };
+    a.cause = b; b.cause = a;
+    expect(errorCauseSummary(a)).toBe("Error ECONNRESET ← Error");
+    const hostile = new Error("hostile");
+    Object.defineProperty(hostile, "cause", { get() { throw new Error("getter boom"); } });
+    Object.defineProperty(hostile, "code", { get() { throw new Error("getter boom"); } });
+    expect(() => errorCauseSummary(Object.assign(new Error("outer"), { code: "ECONNREFUSED", cause: hostile }))).not.toThrow();
+    expect(errorCauseSummary(Object.assign(new Error("outer"), { code: "ECONNREFUSED", cause: hostile }))).toBe("Error ECONNREFUSED ← Error");
+  });
+
+  it("摘要长度有上界，与事件流协议的校验上界一致", () => {
+    // 每层都是最长的安全类名、错误码与系统调用，且互不相同、无法合并
+    const layer = (i: number, cause?: unknown) => Object.assign(new Error(`layer ${i}`), {
+      name: `N${String(i).padStart(2, "0")}${"x".repeat(38)}`, code: `C${String(i).padStart(2, "0")}${"X".repeat(38)}`,
+      syscall: `s${"y".repeat(20)}`, ...(cause ? { cause } : {}),
+    });
+    const inners = Array.from({ length: 4 }, (_, i) => layer(20 + i));
+    let chain: unknown = Object.assign(new AggregateError(inners, "agg"), { code: "ECONNREFUSED" });
+    for (let i = 0; i < 7; i++) chain = layer(i, chain);
+    const summary = errorCauseSummary(chain)!;
+    expect(summary.length).toBe(CAUSE_SUMMARY_CHARS);
+    expect(summary.endsWith("…")).toBe(true);
+  });
+});
+
 
 describe("classifyProviderError", () => {
   // ─── HTTP 状态码 ───
@@ -75,6 +135,19 @@ describe("classifyProviderError", () => {
         expect(classifyProviderError(error)).toBe("network");
       });
     }
+
+    it("SDK 连接错误：错误码在 cause 链里 → network", () => {
+      // OpenAI 兼容 SDK 的 APIConnectionError：消息只有 "Connection error."，底层 fetch 错误再包一层
+      const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:54001"), { code: "ECONNREFUSED" });
+      const fetchFailed = new Error("request failed", { cause: refused });
+      class APIConnectionError extends Error {}
+      const sdk = new APIConnectionError("Retry: ", { cause: fetchFailed });
+      expect(classifyProviderError(sdk)).toBe("network");
+    });
+
+    it("消息为 Connection error. → network", () => {
+      expect(classifyProviderError(new Error("Connection error."))).toBe("network");
+    });
   });
 
   // ─── AbortError ───

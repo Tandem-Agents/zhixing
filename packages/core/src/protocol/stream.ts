@@ -890,7 +890,10 @@ function validateProjectedPassthroughPayload(
     case "retry:attempt":
       assertExactKeys(
         payload,
-        ["attempt", "delayMs", "errorType", "maxRetries", "willRetry"],
+        [
+          "attempt", "delayMs", "errorType", "maxRetries", "willRetry",
+          ...(payload.cause === undefined ? [] : ["cause"]),
+        ],
         event,
       );
       validateAgentErrorType(payload.errorType);
@@ -898,6 +901,7 @@ function validateProjectedPassthroughPayload(
       assertNonNegativeInteger(payload.maxRetries, "Retry maximum");
       assertNonNegativeFinite(payload.delayMs, "Retry delay");
       assertBoolean(payload.willRetry, "Retry decision");
+      if (payload.cause !== undefined) assertRetryCause(payload.cause);
       return;
     case "retry:success":
       assertExactKeys(
@@ -912,12 +916,16 @@ function validateProjectedPassthroughPayload(
     case "retry:exhausted":
       assertExactKeys(
         payload,
-        ["errorType", "lastError", "totalAttempts"],
+        [
+          "errorType", "lastError", "totalAttempts",
+          ...(payload.cause === undefined ? [] : ["cause"]),
+        ],
         event,
       );
       validateAgentErrorType(payload.errorType);
       assertPositiveInteger(payload.totalAttempts, "Retry total attempts");
       assertString(payload.lastError, "Retry last error");
+      if (payload.cause !== undefined) assertRetryCause(payload.cause);
       return;
     case "segment:transition_start":
       assertExactKeys(
@@ -1529,6 +1537,13 @@ function assertVersion(value: unknown, label: string): asserts value is 1 {
 
 function assertString(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string") throw new TypeError(`${label} must be a string`);
+}
+
+/** 重试原因摘要只含类名、错误码、系统调用与 HTTP 状态，生产端有界；这里按同一上界拒收越界值。 */
+function assertRetryCause(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) {
+    throw new TypeError("Retry cause must be a bounded non-empty string");
+  }
 }
 
 function assertBoolean(

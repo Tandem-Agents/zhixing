@@ -24,7 +24,7 @@ import type { AgentEventMap } from "../types/agent-events.js";
 import type { ChatRequest, StreamEvent } from "../types/llm.js";
 import { resolveDelay, sleep } from "./backoff.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
-import { classifyProviderError } from "./classify.js";
+import { classifyProviderError, errorCauseSummary } from "./classify.js";
 import type { RetryConfig } from "./types.js";
 import { DEFAULT_RETRY_CONFIG } from "./types.js";
 
@@ -206,12 +206,14 @@ async function emitRetryAttempt(
   delayMs: number,
   willRetry: boolean,
 ): Promise<void> {
+  const cause = errorCauseSummary(error);
   await eventBus?.emit("retry:attempt", {
     errorType: classifyProviderError(error),
     attempt,
     maxRetries,
     delayMs,
     willRetry,
+    ...(cause ? { cause } : {}),
   });
 }
 
@@ -232,9 +234,11 @@ async function emitRetryExhausted(
   error: unknown,
   totalAttempts: number,
 ): Promise<void> {
+  const cause = errorCauseSummary(error);
   await eventBus?.emit("retry:exhausted", {
     errorType: classifyProviderError(error),
     totalAttempts,
     lastError: error instanceof Error ? error.message : String(error),
+    ...(cause ? { cause } : {}),
   });
 }

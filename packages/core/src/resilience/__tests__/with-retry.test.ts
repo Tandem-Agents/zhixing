@@ -529,6 +529,27 @@ describe("withRetry", () => {
           lastError: "Server error",
         }),
       );
+      // 只有外层一句时不附原因摘要
+      expect(exhaustedHandler.mock.calls[0]![0]).not.toHaveProperty("cause");
+    });
+
+    it("重试与耗尽事件带上沿 cause 链的真实首因", async () => {
+      const eventBus = createEventBus<AgentEventMap>();
+      const attemptHandler = vi.fn(), exhaustedHandler = vi.fn();
+      eventBus.on("retry:attempt", attemptHandler);
+      eventBus.on("retry:exhausted", exhaustedHandler);
+      const marker = "PRIVATE-MARKER-9b1c";
+      const refused = Object.assign(new Error(`connect ECONNREFUSED 127.0.0.1:54001?key=${marker}`), { code: "ECONNREFUSED", syscall: "connect" });
+      const callLLM = makeErrorStream(Object.assign(new Error("Connection error."), { cause: Object.assign(new TypeError(`fetch failed ${marker}`), { cause: refused }) }));
+      const wrapped = withRetry(callLLM, { config: { maxRetries: 1, backoff: { baseDelayMs: 50, maxDelayMs: 200, jitter: false } }, eventBus });
+      const resultPromise = collectEvents(wrapped(DUMMY_REQUEST));
+      await vi.advanceTimersByTimeAsync(100);
+      await resultPromise;
+      const cause = "Error ← TypeError ← Error ECONNREFUSED connect";
+      expect(attemptHandler).toHaveBeenCalledWith(expect.objectContaining({ errorType: "network", cause }));
+      expect(exhaustedHandler).toHaveBeenCalledWith(expect.objectContaining({ lastError: "Connection error.", cause }));
+      // 摘要不带原始消息：事件里没有私有值
+      expect(JSON.stringify([attemptHandler.mock.calls, exhaustedHandler.mock.calls])).not.toContain(marker);
     });
   });
 

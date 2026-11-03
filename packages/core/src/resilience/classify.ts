@@ -39,10 +39,12 @@ export function classifyProviderError(error: unknown): AgentErrorType {
     return classifyHttpStatus(status);
   }
 
-  // Node.js 网络错误码
-  const code = getErrorCode(error);
-  if (code && NETWORK_ERROR_CODES.has(code)) {
-    return "network";
+  // Node.js 网络错误码：SDK 常把底层错误包进 cause 链（如 OpenAI 兼容 SDK 的 APIConnectionError
+  // 消息只是 "Connection error."，ECONNREFUSED 在 cause.cause 里），沿链有界查找
+  for (let current: unknown = error, depth = 0; current && depth < 5; depth++) {
+    const code = getErrorCode(current);
+    if (code && NETWORK_ERROR_CODES.has(code)) return "network";
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
   }
 
   // 消息启发式
@@ -119,6 +121,58 @@ const NETWORK_ERROR_CODES = new Set([
   "FETCH_ERROR",
 ]);
 
+/** 错误链扫描上限；超过即视为原因无法辨清。 */
+const CAUSE_CHAIN_LIMIT = 8;
+
+const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,40}$/u;
+const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,40}$/u;
+const SAFE_SYSCALL = /^[a-z][a-z0-9_]{0,20}$/u;
+const CAUSE_SUMMARY_NODES = 16;
+/** 摘要长度上界；事件流协议按同一上界校验。 */
+export const CAUSE_SUMMARY_CHARS = 512;
+
+/**
+ * 沿 cause 链（含 AggregateError 的内层）的首因摘要，供日志与事件记下真实原因而不只外层一句。只用安全字段：
+ * 错误类名、错误码、系统调用名与 HTTP 状态；不带任何消息、请求或响应文本、地址、路径与查询。访问节点总数有界，
+ * 环与重复节点只走一次，读取字段出错只少记、不替换业务错误。各层都没有错误码与状态时没有摘要。
+ */
+export function errorCauseSummary(error: unknown): string | undefined {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  let budget = CAUSE_SUMMARY_NODES;
+  const read = (value: object, key: string): unknown => {
+    try { return (value as Record<string, unknown>)[key]; } catch { return undefined; }
+  };
+  const visit = (value: unknown, depth: number): void => {
+    let current = value;
+    for (; current && typeof current === "object" && depth < CAUSE_CHAIN_LIMIT && budget > 0 && !seen.has(current); depth++) {
+      seen.add(current); budget--;
+      const name = read(current, "name"), code = read(current, "code"), syscall = read(current, "syscall");
+      const status = read(current, "status") ?? read(current, "statusCode");
+      parts.push([
+        typeof name === "string" && SAFE_ERROR_NAME.test(name) ? name : "Error",
+        typeof code === "string" && SAFE_ERROR_CODE.test(code) ? code : undefined,
+        typeof syscall === "string" && SAFE_SYSCALL.test(syscall) ? syscall : undefined,
+        typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? `HTTP ${status}` : undefined,
+      ].filter(Boolean).join(" "));
+      const inner = read(current, "errors");
+      if (Array.isArray(inner)) for (const item of inner.slice(0, 4)) visit(item, depth + 1);
+      current = read(current, "cause");
+    }
+  };
+  try { visit(error, 0); } catch { /* 摘要只是附加证据，失败时不记 */ }
+  if (parts.length < 2 || !parts.some((part) => part.includes(" "))) return undefined;
+  // 相邻的相同层合并计数（如 localhost 两个地址各一次拒绝连接）
+  const merged: string[] = [];
+  for (const part of parts) {
+    const last = merged.at(-1), match = last?.match(/^(.*?)(?: ×(\d+))?$/u);
+    if (match && match[1] === part) merged[merged.length - 1] = `${part} ×${Number(match[2] ?? 1) + 1}`;
+    else merged.push(part);
+  }
+  const summary = merged.join(" ← ");
+  return summary.length <= CAUSE_SUMMARY_CHARS ? summary : `${summary.slice(0, CAUSE_SUMMARY_CHARS - 1)}…`;
+}
+
 // ─── 消息启发式分类 ───
 
 function classifyByMessage(message: string): AgentErrorType {
@@ -140,6 +194,7 @@ function classifyByMessage(message: string): AgentErrorType {
   if (
     lower.includes("econnreset") ||
     lower.includes("econnrefused") ||
+    lower.includes("connection error") ||
     lower.includes("fetch failed") ||
     lower.includes("network") ||
     lower.includes("socket hang up") ||

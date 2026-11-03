@@ -6,6 +6,7 @@ import { FileArtifactStore } from '../authority/artifact-store.js';
 import { projectSessionEvent, type SessionEventProjection } from '../types/agent-events.js';
 import { prepareStreamDataPayload, readStreamDisplayPayload, validateSessionEventProjection } from './stream.js';
 import { stripPresentationFromAgentYield } from '../loop/presentation.js';
+import { errorCauseSummary } from '../resilience/classify.js';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function store() { const root = await mkdtemp(join(tmpdir(), 'zhixing-process-')); roots.push(root); return new FileArtifactStore(root); }
@@ -36,6 +37,27 @@ describe('finite process events and canonical display read', () => {
     const ended = { model: 'm', duration: 1, usage: { inputTokens: 0, outputTokens: 0 }, stopReason: 'end_turn' as const };
     expect(() => validateSessionEventProjection({ event: 'llm:request_end', payload: { ...ended, usageReported: false } })).not.toThrow();
     expect(() => validateSessionEventProjection({ event: 'llm:request_end', payload: { ...ended, usageReported: true } })).toThrow();
+  });
+  it('carries the bounded retry cause summary from the real producer through projection and the exact stream validator', async () => {
+    // 生产端真实摘要 → 事件 → 会话投影 → 流协议精确校验：这一跳曾漏校验，导致首次重试即中止运行
+    const refused = (address: string) => Object.assign(new Error(`connect ECONNREFUSED ${address}`), { code: 'ECONNREFUSED', syscall: 'connect' });
+    const error = Object.assign(new Error('Connection error.'), { cause: Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new AggregateError([refused('::1:1'), refused('127.0.0.1:1')]), { code: 'ECONNREFUSED' }) }) });
+    const cause = errorCauseSummary(error)!;
+    expect(cause).toBe('Error ← TypeError ← AggregateError ECONNREFUSED ← Error ECONNREFUSED connect ×2');
+    for (const [event, payload] of [
+      ['retry:attempt', { errorType: 'network', attempt: 1, maxRetries: 3, delayMs: 10, willRetry: true, cause }],
+      ['retry:exhausted', { errorType: 'network', totalAttempts: 4, lastError: 'Connection error.', cause }],
+      ['retry:attempt', { errorType: 'network', attempt: 1, maxRetries: 3, delayMs: 10, willRetry: true }],
+    ] as const) {
+      const projected = projectSessionEvent(event, payload as never)!;
+      expect(() => validateSessionEventProjection(projected)).not.toThrow();
+    }
+    const exhausted = { event: 'retry:exhausted', payload: { errorType: 'network', totalAttempts: 4, lastError: 'x' } } as SessionEventProjection;
+    for (const bad of [1, '', 'x'.repeat(513)]) {
+      expect(() => validateSessionEventProjection({ ...exhausted, payload: { ...exhausted.payload, cause: bad } } as SessionEventProjection)).toThrow();
+    }
+    expect(() => validateSessionEventProjection({ ...exhausted, payload: { ...exhausted.payload, other: 'x' } } as SessionEventProjection)).toThrow();
   });
   it('rejects non-finite usage and invalid child terminal states', () => {
     expect(() => validateSessionEventProjection({ event: 'llm:request_end', payload: { model: 'm', duration: 1, usage: { inputTokens: Infinity, outputTokens: 1 }, stopReason: 'end_turn' } })).toThrow();
