@@ -254,9 +254,17 @@ export interface ServerInfoRuntimeBinding {
       readonly afterStatusRevision: number;
     }[];
   }>;
-  readonly schedulerNotices?: (afterRevision: number) => Promise<{
+  readonly schedulerNotices?: (afterRevision: number, skip?: number, cursorSource?: string) => Promise<{
     readonly notices: readonly SchedulerUserNotice[];
     readonly nextRevision: number;
+    /** 同一信封里已给出的条数，续读时原样带回。 */
+    readonly nextSkip?: number;
+    /** 源端有界分页：还有下一页。 */
+    readonly more?: boolean;
+    /** 通知源代际；调度源尚未就绪时缺省。 */
+    readonly source?: string;
+    /** 请求游标属于另一代：本页是这一代从起点读的结果。 */
+    readonly reset?: true;
   }>;
 }
 

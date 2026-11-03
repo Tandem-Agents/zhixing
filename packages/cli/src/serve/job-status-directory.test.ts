@@ -43,9 +43,11 @@ describe("JobStatusDirectory", () => {
       (notice: SchedulerUserNotice) => void | Promise<void>
     >();
     const records = [schedulerNotice(4), schedulerNotice(7)];
+    await expect(directory.schedulerHistory(4)).resolves.toEqual({ notices: [], nextRevision: 4, nextSkip: 0, more: false });
     directory.registerScheduler({
-      async history(afterRevision) {
-        return records.filter((record) => record.revision > afterRevision);
+      async page(afterRevision) {
+        const notices = records.filter((record) => record.revision > afterRevision);
+        return { notices, nextRevision: 9, nextSkip: 0, more: false, source: "log-a" };
       },
       onNotice(listener) {
         listeners.add(listener);
@@ -57,9 +59,13 @@ describe("JobStatusDirectory", () => {
 
     for (const listener of listeners) void listener(schedulerNotice(7));
     expect(live).toHaveBeenCalledWith(schedulerNotice(7));
+    // 续读位置与源代际照源端分页给出，不在聚合层另算
     await expect(directory.schedulerHistory(4)).resolves.toEqual({
       notices: [schedulerNotice(7)],
-      nextRevision: 7,
+      nextRevision: 9,
+      nextSkip: 0,
+      more: false,
+      source: "log-a",
     });
   });
 });

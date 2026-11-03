@@ -31,6 +31,8 @@ const Fixture = new Function('terminalEnvironment', 'recordTerminalFailure', 'Co
   drainConfirmations() {} resumeNoticeDisplay() { this.noticeResumes++; } invalidateAuxiliary() {} close() { return Promise.resolve(); }
   skillsFailed() {} ensureSkillsBinding() { return Promise.resolve({ commands: { refresh: async () => {} } }); }
   prepareAfterUsable() { return Promise.resolve(); }
+  schedulerCatchUps = 0;
+  catchUpSchedulerNotices() { this.schedulerCatchUps++; }
   async submit(inputId) { this.submitted.push(inputId); }
   async resolveRubric() {}
   async finishStartup(release) {
@@ -63,6 +65,8 @@ describe('startup admission matches the ready frame', () => {
     expect(views.at(-1)).toMatchObject({ readyForInput: true, busy: false });
     expect(views.at(-1).connectionState).toBeUndefined();
     expect(target.operation).toBeUndefined();
+    // 定时通知补读在可发送画面之后才开始，且不等待
+    expect(target.schedulerCatchUps).toBe(1);
     await expect(submit()).resolves.toEqual({ accepted: true });
     expect(submissions.filter(message => message.accepted === false)).toEqual([]);
     refresh.opened.resolve(); await settle(target);

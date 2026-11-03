@@ -30,6 +30,28 @@ export interface SchedulerNoticeFact {
   readonly reason: string;
   readonly actions: readonly string[];
   readonly missedMembers?: readonly string[];
+  readonly audience?: "first-party" | "channel";
+}
+
+/**
+ * 有界补读的一页：至多这么多个含通知的信封，投影后的通知至多这么多字节。超出时在条目边界截断，同一信封
+ * 里没给完的条目用 nextSkip 续读，不丢不重。单条通知总能放进一页：逻辑记录正文内联上限 32 KiB
+ * （core authority MAX_INLINE_LOGICAL_RECORD_BYTES），投影只少不多；一页至少给出一条以保证前进。
+ */
+export const SCHEDULER_NOTICE_PAGE_COMMITS = 32;
+export const SCHEDULER_NOTICE_PAGE_BYTES = 64 * 1024;
+
+export interface SchedulerNoticePage {
+  readonly notices: readonly SchedulerUserNotice[];
+  /** 这个修订及之前的通知都已给完（含其间不含通知的提交）。 */
+  readonly nextRevision: number;
+  /** 大于 0 时，nextRevision 之后第一个含通知的信封里已给出这么多条，续读时原样带回。 */
+  readonly nextSkip: number;
+  readonly more: boolean;
+  /** 通知源代际：权威日志身份的摘要，日志换代后游标不能沿用。 */
+  readonly source: string;
+  /** 请求游标属于另一代：本页是这一代从起点读的结果，调用方应丢弃旧位置、按本页接续。 */
+  readonly reset?: true;
 }
 
 
@@ -71,6 +93,7 @@ export class SchedulerUserNoticeJournal {
     (notice: SchedulerUserNotice) => void | Promise<void>
   >();
   #publishedRevision = 0;
+  #publishedSkip = 0;
 
   constructor(options: {
     readonly log: AuthorityCommitLog;
@@ -101,6 +124,7 @@ export class SchedulerUserNoticeJournal {
       reason: draft.reason,
       actions: [...draft.actions],
       ...(draft.missedMembers ? { missedMembers: [...draft.missedMembers] } : {}),
+      ...(draft.audience ? { audience: draft.audience } : {}),
     };
     const records: LogicalRecord<unknown>[] = [
       { stream: SCHEDULER_NOTICE_STREAM, body: fact },
@@ -152,25 +176,63 @@ export class SchedulerUserNoticeJournal {
     await this.publishNew();
   }
 
-  async history(afterRevision: number): Promise<readonly SchedulerUserNotice[]> {
-    if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
+  /**
+   * 游标之后的一页通知。源端有界：按流至多读 limit 个含通知的信封（帧索引跳过其他流），投影超过字节
+   * 上限时在条目边界截断；skip 是上一页在同一信封里已给出的条数，续读不丢不重。
+   * cursorSource 是游标所属的代际：先认代际，属于另一代的游标不按这一代校验位置，而是明确返回这一代
+   * 从起点读的一页（reset）；同一代的非法续读仍然拒收。
+   */
+  async page(
+    requestedAfter: number,
+    requestedSkip = 0,
+    limit = SCHEDULER_NOTICE_PAGE_COMMITS,
+    cursorSource?: string,
+  ): Promise<SchedulerNoticePage> {
+    if (!Number.isSafeInteger(requestedAfter) || requestedAfter < 0 || !Number.isSafeInteger(requestedSkip) || requestedSkip < 0) {
       throw new TypeError("Scheduler notice cursor must be a non-negative safe integer");
     }
-    // 游标已在日志末尾或之后（例如客户端带来的旧游标）：没有更新的通知。
-    if (afterRevision >= (await this.#log.checkpoint()).lsn) return [];
-    // 只读通知流中游标之后的记录：日志按流与 LSN 筛选，不为它解析整份历史。
-    const initial: SchedulerUserNotice[] = [];
-    const read = await this.#log.readProjection<SchedulerUserNotice[], unknown>(
-      initial,
-      (current, entry, envelope) => {
-        // 日志内部重试时从未改动的空起点重新收集。
-        const notices = current === initial ? [] : current;
-        notices.push(projectNotice(validateNoticeFact(entry.body), envelope));
-        return notices;
-      },
-      { stream: SCHEDULER_NOTICE_STREAM, afterLsn: afterRevision },
-    );
-    return [...read.state].sort((a, b) => a.revision - b.revision);
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > SCHEDULER_NOTICE_PAGE_COMMITS) {
+      throw new RangeError("Scheduler notice page limit is invalid");
+    }
+    if (cursorSource !== undefined && (typeof cursorSource !== "string" || cursorSource.length === 0 || cursorSource.length > 256)) {
+      throw new TypeError("Scheduler notice cursor source is invalid");
+    }
+    const head = await this.#log.checkpoint();
+    const source = protocolDigest("SchedulerNoticeSource", 1, { logId: head.logId });
+    const reset = cursorSource !== undefined && cursorSource !== source;
+    const afterRevision = reset ? 0 : requestedAfter, skip = reset ? 0 : requestedSkip;
+    const generation = reset ? { source, reset: true as const } : { source };
+    // 游标已在日志末尾或之后（例如客户端带来的旧游标）：没有更新的通知；此时不存在可续读的信封。
+    if (afterRevision >= head.lsn) {
+      if (skip > 0) throw new TypeError("Scheduler notice continuation does not match its envelope");
+      return { notices: [], nextRevision: afterRevision, nextSkip: 0, more: false, ...generation };
+    }
+    if (!this.#log.readStreamEnvelopes) throw new Error("Bounded scheduler notice read is unavailable");
+    const read = await this.#log.readStreamEnvelopes<unknown>([SCHEDULER_NOTICE_STREAM], afterRevision, head.lsn, limit);
+    const notices: SchedulerUserNotice[] = [];
+    let bytes = 0;
+    for (let index = 0; index < read.commits.length; index++) {
+      const envelope = read.commits[index]!;
+      const entries = envelope.entries.filter((entry) => entry.stream === SCHEDULER_NOTICE_STREAM);
+      const start = index === 0 ? skip : 0;
+      // 续读游标只能指向紧接其后的那个信封；条数等于该信封条数表示它已处理完，接着读后面的信封
+      if (start > 0 && (envelope.lsn !== afterRevision + 1 || start > entries.length)) {
+        throw new TypeError("Scheduler notice continuation does not match its envelope");
+      }
+      for (let position = start; position < entries.length; position++) {
+        const notice = projectNotice(validateNoticeFact(entries[position]!.body), envelope);
+        const size = Buffer.byteLength(JSON.stringify(notice));
+        if (notices.length > 0 && bytes + size > SCHEDULER_NOTICE_PAGE_BYTES) {
+          return position > 0
+            ? { notices, nextRevision: envelope.lsn - 1, nextSkip: position, more: true, ...generation }
+            : { notices, nextRevision: read.commits[index - 1]!.lsn, nextSkip: 0, more: true, ...generation };
+        }
+        notices.push(notice);
+        bytes += size;
+      }
+    }
+    if (skip > 0 && read.commits.length === 0) throw new TypeError("Scheduler notice continuation does not match its envelope");
+    return { notices, nextRevision: read.lastLsn, nextSkip: 0, more: read.hasMore, ...generation };
   }
 
   onNotice(listener: (notice: SchedulerUserNotice) => void | Promise<void>): () => void {
@@ -181,14 +243,21 @@ export class SchedulerUserNoticeJournal {
   async initializeLiveCursor(): Promise<void> {
     // 只需要日志当前末尾的 LSN，不读取历史。
     this.#publishedRevision = (await this.#log.checkpoint()).lsn;
+    this.#publishedSkip = 0;
   }
 
   async publishNew(): Promise<void> {
-    for (const notice of await this.history(this.#publishedRevision)) {
-      this.#publishedRevision = Math.max(this.#publishedRevision, notice.revision);
-      for (const listener of this.#listeners) {
-        await listener(notice);
+    for (;;) {
+      const page = await this.page(this.#publishedRevision, this.#publishedSkip);
+      for (const notice of page.notices) {
+        for (const listener of this.#listeners) {
+          await listener(notice);
+        }
       }
+      // 按页推进到源端给出的续读位置（含同一信封里已发出的条数）
+      this.#publishedRevision = page.nextRevision;
+      this.#publishedSkip = page.nextSkip;
+      if (!page.more) return;
     }
   }
 }
@@ -200,6 +269,7 @@ function validateNoticeFact(value: unknown): SchedulerNoticeFact {
   const fact = value as Partial<SchedulerNoticeFact>;
   const allowedKeys = new Set([
     "actions",
+    "audience",
     "kind",
     "missedMembers",
     "noticeId",
@@ -219,6 +289,7 @@ function validateNoticeFact(value: unknown): SchedulerNoticeFact {
     typeof fact.reason !== "string" || fact.reason.length === 0 ||
     !Array.isArray(fact.actions) || !fact.actions.every((item) => typeof item === "string") ||
     !validNoticeRef(fact.ref, fact.kind) ||
+    (fact.audience !== undefined && fact.audience !== "first-party" && fact.audience !== "channel") ||
     (fact.missedMembers !== undefined &&
       (!Array.isArray(fact.missedMembers) ||
         !fact.missedMembers.every((item) => typeof item === "string" && item.length > 0)))
@@ -275,6 +346,7 @@ function projectNotice(
     reason: fact.reason,
     actions: [...fact.actions],
     at: envelope.at,
+    ...(fact.audience ? { audience: fact.audience } : {}),
   };
 }
 

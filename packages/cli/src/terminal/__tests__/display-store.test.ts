@@ -157,6 +157,32 @@ describe('display recovery retains the original cache', () => {
   });
 });
 
+describe('notices arriving while a reply streams', () => {
+  it('keeps the earlier reply text, the notice and the rest of the reply all on the page', async () => {
+    const h = await setup(), display = h.store;
+    // 与终端应用同一接线：输出投影的正文追加与通知追加走同一个正文存储
+    const projection = new TerminalOutputProjection((segment, stable) => display.append(segment, false, undefined, stable), async () => {}, async () => {}, {
+      get last() { return display.last; }, work: action => action(),
+      amend: (blockId, change) => display.amend(blockId, change), seal: blockId => display.seal(blockId) });
+    const source = { conversationId: 'conversation', turnId: 'turn', kind: 'delta' } as import('../../runtime/conversation-output.js').ConversationOutputSource;
+    try {
+      for (let i = 0; i < 139; i++) projection.accept({ type: 'text_delta', text: `E-STREAM-${i} 正文片段。\n` }, source);
+      await projection.drain();
+      await display.append({ blockId: 'notice:schedule', role: 'notice', text: '定时任务 · ✓ 定时任务完成: 隔离到点任务 (0s)', contentOffset: 0, final: true }, false, () => true);
+      for (let i = 139; i < 150; i++) projection.accept({ type: 'text_delta', text: `E-STREAM-${i} 正文片段。\n` }, source);
+      projection.end('conversation', 'turn');
+      await projection.drain();
+      const text = (await display.page()).segments.map(segment => segment.text).join('');
+      expect(text).toContain('E-STREAM-0 正文片段。');
+      expect(text).toContain('E-STREAM-138 正文片段。');
+      expect(text).toContain('定时任务完成');
+      expect(text).toContain('E-STREAM-149 正文片段。');
+      expect(text.indexOf('E-STREAM-138')).toBeLessThan(text.indexOf('定时任务完成'));
+      expect(text.indexOf('定时任务完成')).toBeLessThan(text.indexOf('E-STREAM-139'));
+    } finally { await projection.close(); }
+  });
+});
+
 describe('bounded terminal display projection', () => {
   it('retains a real empty diff EOF row when encoded metadata forces carrier splitting', async () => {
     const h = await setup(), gap = vi.fn(), code = 'a'.repeat(28000);

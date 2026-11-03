@@ -539,6 +539,8 @@ export interface SchedulerUserNotice {
   readonly reason: string;
   readonly actions: readonly string[];
   readonly at: IsoTime;
+  /** 由调度 owner 按原分组落下的受众：first-party 为无通道来源的本机第一方产品通知；未落受众的不归任何接入面认领。 */
+  readonly audience?: "first-party" | "channel";
 }
 
 export type StreamFramePayload =

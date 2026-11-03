@@ -794,7 +794,7 @@ describe("user job durable protocol", {
     });
     await harness.journal.assign(assignmentPlan(harness.unsigned));
 
-    const history = await harness.schedulerNotices.history(0);
+    const history = (await harness.schedulerNotices.page(0)).notices;
     expect(history).toHaveLength(3);
     expect(history.map((notice) => notice.state)).toEqual([
       "open",
@@ -843,7 +843,7 @@ describe("user job durable protocol", {
     const notices = harness.schedulerNotices!;
     await harness.journal.noteCapabilityGap({ jobRunId: JOB_RUN_ID, capabilityRevision: 1, reason: "tool unavailable", context: hostContext("gap-open") });
     await harness.journal.noteCapabilityGap({ jobRunId: JOB_RUN_ID, capabilityRevision: 2, reason: "still unavailable", context: hostContext("gap-update") });
-    const before = await notices.history(0);
+    const before = (await notices.page(0)).notices;
     expect(before.map((notice) => notice.state)).toEqual(["open", "updated"]);
     const live: unknown[] = [];
     notices.onNotice((notice) => { live.push(notice); });
@@ -856,7 +856,7 @@ describe("user job durable protocol", {
     });
     const result = await harness.journal.applyControl({ admission: new ControlAdmissionJournal(harness.log, harness.artifacts), envelope, source });
     expect(result).toMatchObject({ kind: "applied", result: { status: "ok" } });
-    const history = await notices.history(0);
+    const history = (await notices.page(0)).notices;
     expect(history.map((notice) => notice.state)).toEqual(["open", "updated", "closed"]);
     expect(history[2]).toMatchObject({ noticeId: before[0]!.noticeId, ref: before[0]!.ref, actions: [] });
     expect(live).toEqual([history[2]]);
@@ -878,7 +878,7 @@ describe("user job durable protocol", {
     expect(replay).toMatchObject({ kind: "replayed", result: result.result });
     expect(await harness.log.readAll()).toHaveLength(commits.length);
     const coldNotices = new SchedulerUserNoticeJournal({ log: harness.log, delivery: deliveryParticipant(harness.log) });
-    expect(await coldNotices.history(0)).toEqual(history);
+    expect((await coldNotices.page(0)).notices).toEqual(history);
     await notices.publishNew();
     expect(live).toEqual([history[2]]);
   });
@@ -2434,7 +2434,7 @@ describe("user job durable protocol", {
         },
       ],
     });
-    await expect(harness.schedulerNotices.history(0)).resolves.toMatchObject([
+    await expect(harness.schedulerNotices.page(0).then((page) => page.notices)).resolves.toMatchObject([
       {
         kind: "publish-result",
         state: "closed",
@@ -7404,7 +7404,7 @@ const JOB_RECOVERY_PROBES = {
       context: hostContext("matrix-notice-recovery-update"),
     });
     await harness.journal.assign(assignmentPlan(harness.unsigned));
-    await expect(harness.schedulerNotices.history(0)).resolves.toMatchObject([
+    await expect(harness.schedulerNotices.page(0).then((page) => page.notices)).resolves.toMatchObject([
       { kind: "capability-gap", state: "open" },
       { kind: "capability-gap", state: "updated" },
       { kind: "capability-gap", state: "closed" },

@@ -176,6 +176,27 @@ export function buildServerInfoMethod(): MethodEntry {
     requiresAuth: true,
     async handler(params, ctx) {
       if (params && typeof params === 'object' && 'projection' in params) {
+        if (params.projection === 'scheduler-notices') {
+          // 接入面按自己的游标补读定时通知：只读源端有界的一页，不读其他状态
+          const keys = Object.keys(params);
+          const { schedulerNoticeAfter: after, schedulerNoticeSkip: skip = 0, schedulerNoticeSource: cursorSource } =
+            params as { schedulerNoticeAfter?: unknown; schedulerNoticeSkip?: unknown; schedulerNoticeSource?: unknown };
+          if (!keys.includes('schedulerNoticeAfter') || keys.some(key => !['projection', 'schedulerNoticeAfter', 'schedulerNoticeSkip', 'schedulerNoticeSource'].includes(key)) ||
+              !Number.isSafeInteger(after) || (after as number) < 0 || !Number.isSafeInteger(skip) || (skip as number) < 0 ||
+              (cursorSource !== undefined && (typeof cursorSource !== 'string' || cursorSource.length === 0 || cursorSource.length > 256))) {
+            throw RpcErrors.invalidParams('server.info scheduler-notices projection');
+          }
+          // 游标的代际与位置一起交给源端：先认代际，属于另一代时源端从这一代起点读并标明换代
+          const page = await ctx.server.serverInfoRuntime?.schedulerNotices?.(after as number, skip as number, cursorSource as string | undefined);
+          return {
+            notices: page?.notices ?? [],
+            next: page?.nextRevision ?? after,
+            ...(page?.nextSkip ? { skip: page.nextSkip } : {}),
+            more: page?.more === true,
+            ...(page?.source ? { source: page.source } : {}),
+            ...(page?.reset ? { reset: true } : {}),
+          };
+        }
         if (Object.keys(params).length !== 1 || params.projection !== 'description') throw RpcErrors.invalidParams('server.info projection');
         // Welcome/workspace consumers do not open finality streams or read work,
         // scheduler and backup projections. Full status retains its own contract.

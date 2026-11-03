@@ -17,6 +17,7 @@ export interface SchedulerNoticeDraft {
   readonly target?: DeliveryTargetDto;
   readonly channelText?: string;
   readonly missedMembers?: readonly string[];
+  readonly audience?: SchedulerUserNotice["audience"];
 }
 
 export interface MissedSummaryMember {
@@ -213,6 +214,8 @@ export function decideScheduleMissedSummary(
     ref: { kind: "missed-summary", batchId: noticeId, memberCount: members.length },
     reason: text, actions: ["查看任务状态", "按需重新运行"], at,
     ...(group.target ? { target: group.target, channelText: text } : {}),
+    // 受众随分组事实落下：无通道来源的一组是本机第一方汇总
+    audience: group.target ? "channel" : "first-party",
     missedMembers: memberKeys,
   };
 }

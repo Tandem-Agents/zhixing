@@ -56,7 +56,11 @@ describe("Schedule notification decisions", () => {
     expect(remaining.ref).toMatchObject({ memberCount: 1 });
     expect(remaining.noticeId).not.toBe(draft.noticeId);
     expect(schedulerNoticeGroupKey(undefined)).toBe("first-party");
-    expect(decideScheduleMissedSummary({ groupKey: "first-party", members }, new Set(), at)?.channelText).toBeUndefined();
+    const firstParty = decideScheduleMissedSummary({ groupKey: "first-party", members }, new Set(), at);
+    expect(firstParty?.channelText).toBeUndefined();
+    // 受众由分组事实决定，不从文案或散列推断
+    expect(firstParty?.audience).toBe("first-party");
+    expect(draft.audience).toBe("channel");
   });
 
   it("owns user/origin/status selection without turning successful or missed runs into status deliveries", () => {

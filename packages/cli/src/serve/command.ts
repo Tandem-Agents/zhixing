@@ -3382,8 +3382,8 @@ async function runServerProcess(
       jobStatus: (after) =>
         boundJobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
-      schedulerNotices: (afterRevision) =>
-        boundJobStatus?.schedulerHistory(afterRevision) ??
+      schedulerNotices: (afterRevision, skip, cursorSource) =>
+        boundJobStatus?.schedulerHistory(afterRevision, skip, cursorSource) ??
         Promise.resolve({ notices: [], nextRevision: afterRevision }),
     },
     conversationFinalHistory: async (conversationId, afterCommitRevision) =>

@@ -45,6 +45,27 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
   } finally { clearInterval(tick); await root?.dispose(); test.renderer.destroy(); }
 }
 try {
+  await scenario('notice-between-one-paragraph-keeps-both-parts', async h => {
+    // 按实测记录复现：回复写到一半时到点通知落盘，同一段落被通知隔成两段，两段的来源节点起点都是 0
+    const line = (i: number) => `E-STREAM-${i} 正文片段。\n`;
+    const head = Array.from({ length: 139 }, (_, i) => line(i)).join(''), tail = Array.from({ length: 11 }, (_, i) => line(139 + i)).join('');
+    const part = (text: string, from: number, end: boolean) => ({ blockId: 'live:run-long:0', role: 'assistant', contentOffset: from, final: end, text,
+      body: { version: 1 as const, revision: end ? 2 : 1, kind: 'markdown' as const, end, context: { nodes: [{ from, to: from + text.length, kind: 'paragraph' as const,
+        depth: 0, anchor: from === 0, origin: 0, runs: [{ from, to: from + text.length, text, style: 0 }] }] } } });
+    await h.publish({ first: 0, last: 5, start: 1, follow: true, segments: [
+      { blockId: 'thinking', role: 'thinking', contentOffset: 0, final: true, text: '第一段思考\n第二段思考\n' },
+      part(head, 0, false),
+      { blockId: 'notice:schedule', role: 'notice', contentOffset: 0, final: true, text: '定时任务 · ✓ 定时任务完成: 隔离到点任务 (0s)' },
+      part(tail, head.length, true),
+    ] });
+    await h.latest();
+    const frame = h.test.captureCharFrame();
+    assert.equal(frame.split('定时任务完成').length - 1, 1, 'the notice is shown exactly once');
+    assert.ok(frame.includes('E-STREAM-138 ') && frame.includes('E-STREAM-149 '), 'text before and after the notice both stay in the body');
+    assert.ok(frame.indexOf('E-STREAM-138 ') < frame.indexOf('定时任务完成') && frame.indexOf('定时任务完成') < frame.indexOf('E-STREAM-139 '), 'the notice sits where it arrived');
+    assert.ok(h.box().scrollHeight >= 150, 'the earlier part keeps its full height for reading back');
+    h.capture('notice-between');
+  });
   await scenario('virtual-reading-resize-roundtrip', async h => {
     await h.publish({ first: 0, start: 0, last: 1, follow: true, segments: [{
       blockId: 'resize-long', role: 'assistant', contentOffset: 0, final: true,

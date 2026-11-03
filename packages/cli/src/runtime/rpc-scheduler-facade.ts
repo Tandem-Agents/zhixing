@@ -90,6 +90,25 @@ export class RpcSchedulerFacade implements SchedulerFacade {
     }
   }
 
+  /**
+   * 按接入面自己的游标读一页定时通知（源端有界）；游标的代际与位置一起带上，属于另一代时源端从这一代
+   * 起点读并标明 reset。返回的 source 缺省表示调度源尚未就绪。
+   */
+  async noticePage(after: number, skip = 0, cursorSource?: string): Promise<SchedulerNoticePage> {
+    const client = await this.link.getClient();
+    return toNoticePage(await client.request<unknown>("server.info", {
+      projection: "scheduler-notices",
+      schedulerNoticeAfter: after,
+      ...(skip > 0 ? { schedulerNoticeSkip: skip } : {}),
+      ...(cursorSource ? { schedulerNoticeSource: cursorSource } : {}),
+    }), after, skip, cursorSource);
+  }
+
+  /** 实时定时通知只作补读触发：内容一律从权威分页读取，与补读同源。 */
+  onNotice(handler: () => void): () => void {
+    return this.link.onNotification("scheduler.notice", () => handler());
+  }
+
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
     const offs = [
       this.link.onNotification("schedule.accepted", (p) => handler(toAccepted(p))),
@@ -203,6 +222,73 @@ function toDisabled(payload: unknown): SchedulerFacadeEvent {
     ...(p.lastError !== undefined
       ? { lastError: requiredString(p.lastError, "schedule.disabled lastError") }
       : {}),
+  };
+}
+
+export interface SchedulerNoticeView {
+  readonly noticeId: string;
+  readonly revision: number;
+  readonly kind: string;
+  readonly reason: string;
+  readonly audience?: "first-party" | "channel";
+}
+
+export interface SchedulerNoticePage {
+  readonly notices: readonly SchedulerNoticeView[];
+  /** 这个修订及之前的通知都已给完。 */
+  readonly next: number;
+  /** 大于 0 时，next 之后紧接的那个信封里已给出这么多条，续读时原样带回。 */
+  readonly skip: number;
+  readonly more: boolean;
+  readonly source?: string;
+  /** 游标属于另一代：本页是这一代从起点读的结果，调用方丢弃旧位置、按本页接续。 */
+  readonly reset?: true;
+}
+
+function toNoticePage(payload: unknown, requestedAfter: number, requestedSkip: number, cursorSource?: string): SchedulerNoticePage {
+  const p = exactRecord(payload, ["more", "next", "notices"], ["reset", "skip", "source"]);
+  const nextSkip = p.skip ?? 0;
+  if (!Array.isArray(p.notices) || p.notices.length > 4096 || typeof p.more !== "boolean" ||
+      !Number.isSafeInteger(p.next) || !Number.isSafeInteger(nextSkip) || (nextSkip as number) < 0 ||
+      (p.skip !== undefined && nextSkip === 0) || ((nextSkip as number) > 0 && !p.more) ||
+      (p.reset !== undefined && (p.reset !== true || !cursorSource || p.source === undefined || p.source === cursorSource)) ||
+      // 没有标明换代时，带回的代际必须就是游标所属的那一代
+      (p.reset === undefined && cursorSource !== undefined && p.source !== undefined && p.source !== cursorSource)) {
+    throw new TypeError("Invalid scheduler notice page");
+  }
+  // 换代页从这一代起点读：按 (0, 0) 校验前进与顺序
+  const after = p.reset ? 0 : requestedAfter, skip = p.reset ? 0 : requestedSkip;
+  const next = p.next as number;
+  // 续读位置必须前进：(修订, 条数) 按字典序大于请求位置，且有通知时才可能停在同一修订
+  if (next < after || (next === after && (nextSkip as number) <= skip && p.notices.length > 0)) {
+    throw new TypeError("Invalid scheduler notice page");
+  }
+  const notices = p.notices.map(toNoticeView);
+  // 页内按修订递增，都在游标之后；截在信封中间时最后一个修订是 next + 1
+  const limit = (nextSkip as number) > 0 ? next + 1 : next;
+  if (notices.some((notice, index) => notice.revision <= after || notice.revision > limit ||
+      (index > 0 && notice.revision < notices[index - 1]!.revision))) {
+    throw new TypeError("Invalid scheduler notice page order");
+  }
+  return {
+    notices, next, skip: nextSkip as number, more: p.more,
+    ...(p.source !== undefined ? { source: requiredString(p.source, "scheduler notice source") } : {}),
+    ...(p.reset ? { reset: true as const } : {}),
+  };
+}
+
+function toNoticeView(value: unknown): SchedulerNoticeView {
+  const p = exactRecord(value, ["actions", "at", "kind", "noticeId", "reason", "ref", "revision", "state"], ["audience"]);
+  if (!Number.isSafeInteger(p.revision) || (p.revision as number) <= 0 ||
+      (p.audience !== undefined && p.audience !== "first-party" && p.audience !== "channel")) {
+    throw new TypeError("Invalid scheduler notice");
+  }
+  return {
+    noticeId: requiredString(p.noticeId, "scheduler notice id"),
+    revision: p.revision as number,
+    kind: requiredString(p.kind, "scheduler notice kind"),
+    reason: requiredString(p.reason, "scheduler notice reason"),
+    ...(p.audience ? { audience: p.audience as "first-party" | "channel" } : {}),
   };
 }
 

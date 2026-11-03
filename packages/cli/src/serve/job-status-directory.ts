@@ -17,7 +17,14 @@ export interface JobStatusCursor {
 }
 
 export interface SchedulerNoticeSource {
-  history(afterRevision: number): Promise<readonly SchedulerUserNotice[]>;
+  page(afterRevision: number, skip?: number, limit?: number, cursorSource?: string): Promise<{
+    readonly notices: readonly SchedulerUserNotice[];
+    readonly nextRevision: number;
+    readonly nextSkip: number;
+    readonly more: boolean;
+    readonly source: string;
+    readonly reset?: true;
+  }>;
   onNotice(listener: (notice: SchedulerUserNotice) => void | Promise<void>): () => void;
 }
 
@@ -58,18 +65,20 @@ export class JobStatusDirectory {
     return () => this.#schedulerListeners.delete(listener);
   }
 
-  async schedulerHistory(afterRevision: number): Promise<{
+  /** 源端有界的一页；调度源尚未登记时不给源代际，调用方据此不推进自己的进度。 */
+  async schedulerHistory(afterRevision: number, skip = 0, cursorSource?: string): Promise<{
     readonly notices: readonly SchedulerUserNotice[];
     readonly nextRevision: number;
+    readonly nextSkip: number;
+    readonly more: boolean;
+    readonly source?: string;
+    readonly reset?: true;
   }> {
-    if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
+    if (!Number.isSafeInteger(afterRevision) || afterRevision < 0 || !Number.isSafeInteger(skip) || skip < 0) {
       throw new TypeError("Scheduler notice cursor is invalid");
     }
-    const notices = await this.#schedulerSource?.source.history(afterRevision) ?? [];
-    return {
-      notices,
-      nextRevision: notices.at(-1)?.revision ?? afterRevision,
-    };
+    return await this.#schedulerSource?.source.page(afterRevision, skip, undefined, cursorSource) ??
+      { notices: [], nextRevision: afterRevision, nextSkip: skip, more: false };
   }
 
   register(taskId: string, source: JobStatusSource): () => void {

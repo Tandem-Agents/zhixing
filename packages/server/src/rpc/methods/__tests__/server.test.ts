@@ -1065,6 +1065,54 @@ describe("server.info", () => {
     expect(result.schedulerNoticeNext).toBe(9);
   });
 
+  it("serves the scheduler notice projection as one bounded page without reading other status", async () => {
+    const notice = {
+      noticeId: "scheduler-missed:1", revision: 7, kind: "missed-summary", state: "prepared",
+      ref: { kind: "missed-summary", batchId: "scheduler-missed:1", memberCount: 1 },
+      reason: "设备离线期间，日报共错过 1 次执行；可查看状态并按需重新运行。", actions: ["查看任务状态"],
+      at: "2026-08-02T00:00:00.000Z", audience: "first-party",
+    };
+    const schedulerNotices = vi.fn(async () => ({ notices: [notice], nextRevision: 9, more: true, source: "source-a" }));
+    const forbidden = vi.fn(() => { throw new Error("projection must not read full status"); });
+    const ctx = mkCtx({ serverInfoRuntime: { schedulerNotices, openFirstPartyFinality: forbidden, deliveryUncertain: forbidden } as any,
+      recoveryBackupStatus: forbidden });
+    const method = buildServerInfoMethod();
+
+    await expect(method.handler({ projection: "scheduler-notices", schedulerNoticeAfter: 4 }, ctx)).resolves.toEqual({
+      notices: [notice], next: 9, more: true, source: "source-a",
+    });
+    expect(schedulerNotices).toHaveBeenCalledWith(4, 0, undefined);
+    // 同一信封内续读：请求带回条数，源端给出的续读条数原样回传
+    schedulerNotices.mockResolvedValueOnce({ notices: [notice], nextRevision: 6, nextSkip: 3, more: true, source: "source-a" } as never);
+    await expect(method.handler({ projection: "scheduler-notices", schedulerNoticeAfter: 6, schedulerNoticeSkip: 2 }, ctx)).resolves.toEqual({
+      notices: [notice], next: 6, skip: 3, more: true, source: "source-a",
+    });
+    expect(schedulerNotices).toHaveBeenLastCalledWith(6, 2, undefined);
+    // 游标的代际随位置一起交给源端；源端标明换代时原样回传
+    schedulerNotices.mockResolvedValueOnce({ notices: [notice], nextRevision: 9, nextSkip: 0, more: false, source: "source-b", reset: true } as never);
+    await expect(method.handler({ projection: "scheduler-notices", schedulerNoticeAfter: 20, schedulerNoticeSkip: 1, schedulerNoticeSource: "source-a" }, ctx)).resolves.toEqual({
+      notices: [notice], next: 9, more: false, source: "source-b", reset: true,
+    });
+    expect(schedulerNotices).toHaveBeenLastCalledWith(20, 1, "source-a");
+    // 调度源尚未就绪：不给源代际，续读位置原样
+    const notReady = mkCtx({ serverInfoRuntime: { schedulerNotices: vi.fn(async () => ({ notices: [], nextRevision: 4, more: false })) } as any });
+    await expect(method.handler({ projection: "scheduler-notices", schedulerNoticeAfter: 4 }, notReady)).resolves.toEqual({
+      notices: [], next: 4, more: false,
+    });
+    for (const params of [
+      { projection: "scheduler-notices" },
+      { projection: "scheduler-notices", schedulerNoticeAfter: -1 },
+      { projection: "scheduler-notices", schedulerNoticeAfter: 1.5 },
+      { projection: "scheduler-notices", schedulerNoticeAfter: 1, extra: true },
+      { projection: "scheduler-notices", schedulerNoticeAfter: 1, schedulerNoticeSkip: -1 },
+      { projection: "scheduler-notices", schedulerNoticeSkip: 1 },
+      { projection: "scheduler-notices", schedulerNoticeAfter: 1, schedulerNoticeSource: "" },
+      { projection: "scheduler-notices", schedulerNoticeAfter: 1, schedulerNoticeSource: 7 },
+    ]) {
+      await expect(method.handler(params, ctx)).rejects.toMatchObject({ code: -32602 });
+    }
+  });
+
   it("returns conversation status history after each run cursor", async () => {
     const conversationStatus = vi.fn(async () => ({
       notices: [{

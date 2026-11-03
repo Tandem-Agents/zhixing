@@ -7,7 +7,7 @@ import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
 import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing/core/contracts';
 import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join as joinPath } from 'node:path';
 import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 import type { TerminalPreloadRelease } from './application-preload.js';
@@ -36,6 +36,7 @@ import type { TerminalDecisionCommands } from './decision-commands.js';
 import type { TerminalTrustCandidates } from './trust-candidates.js';
 import type { TerminalTasks } from './tasks.js';
 import type { TerminalTaskNotices } from './task-notices.js';
+import type { TerminalSchedulerNotices } from './scheduler-notices.js';
 import type { TerminalInformationCommands } from './information-commands.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
 import { formatRelativeTimeText } from '../commands/format.js';
@@ -214,6 +215,7 @@ class TerminalApplication {
   #sessionCommands?: TerminalSessionCommands;
   #tasks?: TerminalTasks;
   #taskNotices?: TerminalTaskNotices;
+  #schedulerNotices?: Promise<TerminalSchedulerNotices>;
   #tasksBinding?: Promise<void>;
   #information?: TerminalInformationCommands;
   #informationBinding?: Promise<void>;
@@ -937,6 +939,7 @@ class TerminalApplication {
     // admission graph. A directly typed skill awaits this same refresh owner.
     void this.#ensureSkillsBinding().then(binding => binding.commands.refresh()).catch(error => this.#skillsFailed(error));
     void this.#tasks?.refresh();
+    this.#catchUpSchedulerNotices();
     // 待处理确认的核对与运行中随时到达的确认通知同性质，不是提交前置；宿主不会因未核对而放行任何操作
     void this.#confirmations.refresh().catch(error => this.#confirmationRefreshFailed(error));
     // 输入准入已开放、可发送画面已发布：请宿主开始所选会话的消息无关准备。不等待，失败不影响输入与发送
@@ -1923,6 +1926,7 @@ class TerminalApplication {
         await this.#localView.refresh(); await this.#controller?.reattachActiveObserver();
         await this.#confirmations.refresh();
         await this.#tasks?.refresh();
+        this.#catchUpSchedulerNotices();
         return status ? { channels: status.channels } : undefined;
       },
     }).finally(() => this.#resumeNoticeDisplay());
@@ -2011,6 +2015,43 @@ class TerminalApplication {
         if (signal.aborted) resolve();
       });
     } finally { signal.removeEventListener('abort', cancel); }
+  }
+
+  /** 就绪后补读第一方定时通知：首次调用时才加载并接好实时触发，不在启动关键路径上；不等待。 */
+  #catchUpSchedulerNotices(): void {
+    if (this.#abort.signal.aborted || this.#closing) return;
+    const binding = this.#schedulerNotices ??= (async () => {
+      const [{ TerminalSchedulerNotices, schedulerNoticeProgressFile }, { RpcSchedulerFacade }] = await Promise.all([
+        import('./scheduler-notices.js'), import('../runtime/rpc-scheduler-facade.js'),
+      ]);
+      this.#abort.signal.throwIfAborted();
+      const scheduler = new RpcSchedulerFacade({ connection: this.#connection });
+      return new TerminalSchedulerNotices({
+        read: (after, skip, source) => scheduler.noticePage(after, skip, source), subscribe: arrived => scheduler.onNotice(arrived),
+        // 展示进度归本机第一方终端，跨进程重开沿用；绑定 home 与通知源代际
+        progress: schedulerNoticeProgressFile(joinPath(this.home, 'runtime', 'terminal-scheduler-notices.json')),
+        show: message => this.#showSchedulerNotice(message), signal: this.#abort.signal,
+        failed: error => recordTerminalFailure(this.#logging.records, error, 'terminal-scheduler-notice-failed'),
+      });
+    })();
+    void binding.then(notices => notices.catchUp(), error => {
+      if (this.#schedulerNotices === binding) this.#schedulerNotices = undefined;
+      if (!this.#abort.signal.aborted) recordTerminalFailure(this.#logging.records, error, 'terminal-scheduler-notice-failed');
+    });
+  }
+
+  /** 只有确实写入当前展示才算已显示；不在可显示状态（离线历史、换了对话或连接）时返回 false。 */
+  async #showSchedulerNotice(message: string): Promise<boolean> {
+    await this.#waitNoticeDisplay(this.#abort.signal);
+    const controller = this.#controller, epoch = this.#conversationEpoch;
+    let shown = false;
+    const current = () => (shown = !this.#abort.signal.aborted && !this.#closing && !!controller && this.#controller === controller &&
+      this.#conversationEpoch === epoch && this.#mainView.connected === true && !this.#history?.offline);
+    if (!current()) return false;
+    await this.#display.append({ blockId: `notice:${randomUUID()}`, role: 'notice', text: `定时任务 · ${message}`, contentOffset: 0, final: true }, false, current);
+    if (!shown) return false;
+    await this.#displayPage();
+    return true;
   }
 
   #sendTaskStatus(): void {
@@ -2161,6 +2202,7 @@ class TerminalApplication {
     await this.#localView.refresh();
     if (this.#controller !== controller || this.#abort.signal.aborted) return;
     void this.#tasks?.refresh();
+    this.#catchUpSchedulerNotices();
     const draft = advancement?.pendingRubricDraft;
     if (advancement?.status === 'awaiting-rubric-confirmation' && draft) {
       this.#deferredRubric = boundedControlProjection({ kind: 'awaiting-rubric-confirmation', conversationId: controller.current.conversationId,
@@ -2393,6 +2435,7 @@ class TerminalApplication {
     this.#channel.beginClose();
     this.#closeDeadline = terminalCloseDeadline(this.#closeDeadline);
     this.#taskNotices?.dispose(); this.#tasks?.dispose(); this.#information?.dispose();
+    void this.#schedulerNotices?.then(notices => notices.dispose(), () => {});
     this.#resumeNoticeDisplay();
     this.#abort.abort(); this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#skills?.close(); this.#skillCommands?.dispose(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); this.#selection = undefined;
     void (async () => {

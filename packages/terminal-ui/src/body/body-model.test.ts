@@ -53,6 +53,19 @@ describe('finite body page source positions', () => {
     expect(sourceToRendered(blocks[0]!, { blockId: 'plain', contentOffset: 11 })).toBe(11);
     expect(blocks[1]?.text).toBe('下条');
   });
+  it('gives a source node split by other content a distinct stable key and still joins its adjacent continuation', () => {
+    const part = (from: number, text: string) => ({ blockId: 'live', contentOffset: from, role: 'assistant', text, final: false,
+      body: { version: 1 as const, revision: 1, kind: 'markdown' as const, end: false, context: { nodes: [{ from, to: from + text.length, origin: 0,
+        kind: 'paragraph' as const, runs: [{ from, to: from + text.length, text, style: 0 }] }] } } });
+    const split = (tail: string): BodyPage => ({ first: 0, last: 4, start: 0, follow: true, segments: [
+      part(0, '前段'), { blockId: 'notice', contentOffset: 0, role: 'notice', text: '到点通知', final: true }, part(2, '后段'), part(4, tail),
+    ] });
+    const blocks = bodyRenderBlocks(split('续写'));
+    expect(blocks.map(block => block.text)).toEqual(['前段', '到点通知', '后段续写']);
+    expect(new Set(blocks.map(block => block.key)).size).toBe(3);
+    // 续写增长不改键：视图沿用同一挂载块
+    expect(bodyRenderBlocks(split('续写更多'))[2]?.key).toBe(blocks[2]?.key);
+  });
   it('reuses only the exact previous wire page and rejects stale or missing bases', () => {
     const source = page(), first = decodeBodyPage(encodeBodyPage(source, 1));
     const next = { ...source, follow: true, segments: [source.segments[0]!, { ...source.segments[1]!, text: 'different', body: undefined }] };

@@ -27,6 +27,10 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
   const windows = bodyWindows(page);
   const segments = bodyPageSegments(page);
   for (const key of cache?.keys() ?? []) if (!segments.includes(key)) cache!.delete(key);
+  // 视图按键挂载与测高，同页内键必须唯一。同一来源节点被别的内容隔开（如运行中插入的通知）时，
+  // 后一段另起键：取该段在来源中的起点，续写增长时不变；紧邻的续段仍按来源键并入前一段
+  const used = new Set<string>();
+  let previousSource: string | undefined;
   for (let index = 0; index < windows.length; index++) {
     const window = windows[index]!, segment = segments[index]!;
     let projected = cache?.get(segment);
@@ -41,11 +45,17 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
     for (const block of projected) {
     const { key, node, runs } = block;
     const previous = result.at(-1);
-    if (previous?.key === key && previous.node.to === node.from) {
+    if (previous && previousSource === key && previous.node.to === node.from) {
       const joined = [...previous.runs, ...runs];
       result[result.length - 1] = { ...previous, node: { ...previous.node, to: node.to, runs: joined }, runs: joined,
         text: joined.map(run => run.text).join('') };
-    } else result.push(block);
+    } else {
+      let unique = key;
+      if (used.has(unique)) unique = `${key}@${node.from}`;
+      if (used.has(unique)) unique = `${key}@${node.from}#${result.length}`;
+      used.add(unique); result.push(unique === key ? block : { ...block, key: unique });
+    }
+    previousSource = key;
     }
   }
   return bodyBlockGaps(result);
