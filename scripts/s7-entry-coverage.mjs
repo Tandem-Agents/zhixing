@@ -86,7 +86,7 @@ const segmentLifecyclePhases = [...SEGMENT_TRANSITION_HOOK_PHASES];
 const builtinRpcNames = new Set(captureBuiltinRegistryDescriptor().map((item) => item.name));
 
 const coverageGroups = [
-  ["session-send", ["rpc:session.send", "slash:skill:<catalog-id>"]],
+  ["session-send", ["rpc:session.send", "rpc:session.prepareAfterUsable", "slash:skill:<catalog-id>"]],
   ["run-cancel", ["rpc:session.abort"]],
   ["uncertain-resolution", ["rpc:session.resolve", "rpc:delivery.resolve", "slash:resolve:repl"]],
   ["confirmation-resolve", ["rpc:confirmation.resolve"]],

@@ -207,6 +207,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.prepareAfterUsable",
+        "requiresAuth": true
+      },
+      {
         "name": "session.rename",
         "requiresAuth": true
       },
@@ -510,6 +514,10 @@
       },
       {
         "name": "session.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.prepareAfterUsable",
         "requiresAuth": true
       },
       {
@@ -819,6 +827,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.prepareAfterUsable",
+        "requiresAuth": true
+      },
+      {
         "name": "session.rename",
         "requiresAuth": true
       },
@@ -1125,6 +1137,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.prepareAfterUsable",
+        "requiresAuth": true
+      },
+      {
         "name": "session.rename",
         "requiresAuth": true
       },
@@ -1343,6 +1359,7 @@
           "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityIdleMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1352,6 +1369,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
+          "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
@@ -1465,6 +1483,7 @@
           "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
+          "rpc:session.prepareAfterUsable",
           "rpc:session.rename",
           "rpc:session.resolve",
           "rpc:session.resume",
@@ -1553,6 +1572,7 @@
           "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityIdleMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1562,6 +1582,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
+          "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
@@ -1675,6 +1696,7 @@
           "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
+          "rpc:session.prepareAfterUsable",
           "rpc:session.rename",
           "rpc:session.resolve",
           "rpc:session.resume",
@@ -1760,6 +1782,7 @@
           "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityIdleMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1769,6 +1792,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
+          "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
@@ -1870,6 +1894,7 @@
           "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
+          "rpc:session.prepareAfterUsable",
           "rpc:session.rename",
           "rpc:session.resolve",
           "rpc:session.resume",
@@ -1942,6 +1967,7 @@
           "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
+          "cleanup:anchor-host:runtime:authorityIdleMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1951,6 +1977,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
+          "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
@@ -2052,6 +2079,7 @@
           "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
+          "rpc:session.prepareAfterUsable",
           "rpc:session.rename",
           "rpc:session.resolve",
           "rpc:session.resume",
@@ -2575,6 +2603,17 @@
       {
         "owner": "anchor-host",
         "role": "runtime",
+        "id": "authorityIdleMaintenance.stop",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:authorityIdleMaintenance.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
         "id": "conversationProtocol.stopRecovery",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
@@ -2666,6 +2705,17 @@
         "id": "scheduler.stop",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:scheduler.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
+        "id": "startupHistoryPrefetch.close",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -3788,6 +3838,15 @@
         "category": "rpc",
         "target": {
           "rowId": "conversation-manage"
+        }
+      },
+      {
+        "name": "session.prepareAfterUsable",
+        "requiresAuth": true,
+        "key": "rpc:session.prepareAfterUsable",
+        "category": "rpc",
+        "target": {
+          "rowId": "session-send"
         }
       },
       {
