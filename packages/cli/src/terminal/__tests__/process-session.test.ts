@@ -154,3 +154,36 @@ describe('terminal process session ownership', () => {
     expect(f.changed).not.toHaveBeenCalled(); expect(f.block).not.toHaveBeenCalled();
   });
 });
+
+describe('terminal process session activity', () => {
+  it('reports whether the run shown in the activity area is still in progress', () => {
+    const f = fixture();
+    expect(f.session.running).toBe(false);
+    // 重进后接上的运行：只有过程帧，没有本地等待者
+    f.emit('adopted', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'still streaming' } });
+    expect(f.session.running).toBe(true);
+    f.session.end('conversation', undefined, 'adopted');
+    expect(f.session.running).toBe(false);
+    f.emit('next', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'another' } });
+    f.switchConversation();
+    expect(f.session.running).toBe(false);
+  });
+  it('shows the run duration only for runs this terminal started; attached runs have no trusted start', () => {
+    const f = fixture();
+    const duration = () => f.changed.mock.calls.at(-1)![0].view.durationMs;
+    // 接上的运行（不是本终端提交的）：重进后回放几秒就收尾，本地计时不是运行用时
+    f.emit('attached', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'replayed' } });
+    f.session.end('conversation', undefined, 'attached');
+    expect(duration()).toBeUndefined();
+    // 接纳先于首帧到达
+    f.session.followLocal('conversation', 'turn-early', 'early');
+    f.emit('early', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'local' } });
+    f.session.end('conversation', 'turn-early', 'early');
+    expect(duration()).toEqual(expect.any(Number));
+    // 首帧先于接纳到达
+    f.emit('late', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'local' } });
+    f.session.followLocal('conversation', 'turn-late', 'late');
+    f.session.end('conversation', 'turn-late', 'late');
+    expect(duration()).toEqual(expect.any(Number));
+  });
+});

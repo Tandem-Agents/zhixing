@@ -85,7 +85,7 @@ export function buildStopOptions(
       {
         value: "wait",
         label: "等待完成后停止",
-        description: "先 flush 可投递消息，再请求宿主退出",
+        description: "等当前工作完成、待发送的消息送达后再停止",
         hotkey: "w",
         tone: "primary",
       },

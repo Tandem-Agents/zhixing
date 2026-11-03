@@ -38,6 +38,13 @@ describe('application replies during terminal retirement', () => {
     expect(target.logging.records).toEqual([{error,reason:'terminal-request-failed'}]);
     expect(packets).toHaveLength(0); expect(target.close).not.toHaveBeenCalled(); target.channel.close();
   });
+  it('does not report the closed-application rejection caused by its own exit as a request failure', async () => {
+    const {target, packets} = fixture(), result = Promise.withResolvers();
+    target.reply(1, 'control', result.promise, 'interrupt'); await target.close(); target.close.mockClear();
+    result.reject(Error('terminal-application-closed')); await settle();
+    expect(target.logging.records).toEqual([]);
+    expect(packets).toHaveLength(0); expect(target.close).not.toHaveBeenCalled(); target.channel.close();
+  });
   it.each([false,true])('retains actual send failures when closing=%s', async closing => {
     const {target} = fixture(), delivery = Promise.withResolvers<void>(), error = Error('EPIPE');
     target.channel = {send: () => delivery.promise, beginClose: () => {}};

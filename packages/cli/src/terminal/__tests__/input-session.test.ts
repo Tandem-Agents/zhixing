@@ -365,3 +365,38 @@ describe('terminal draft receipts and asynchronous paste', () => {
     expect(uploads.get(request.mock.calls.map(([action]) => action).findLast(action => action.kind === 'input-splice')!.replacementId)).toBe('tail');
   });
 });
+
+describe('cancelling a send before it is handed over', () => {
+  it('cancels while the draft is still being saved, keeps the draft and never sends input-submit', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const request = vi.fn(async (action: TerminalAction) => { if (action.kind === 'input-begin') await gate; return {}; });
+    const session = new TerminalInputSession(request, vi.fn());
+    session.edit('发送前取消', 5);
+    const submitted = session.submit();
+    await vi.waitFor(() => expect(request.mock.calls.some(([action]) => action.kind === 'input-begin')).toBe(true));
+    expect(session.cancelPreparedSubmit()).toBe(true);
+    release();
+    await expect(submitted).rejects.toThrow('已取消发送，草稿已保留。');
+    expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(false);
+    expect(session.draft.text).toBe('发送前取消');
+    expect(session.pending).toBe(false);
+    // 取消后照常编辑：取消不改写草稿，随后的编辑原样保留
+    session.edit('发送前取消 再改', 9);
+    expect(session.draft.text).toBe('发送前取消 再改');
+    expect(session.cancelPreparedSubmit()).toBe(false);
+  });
+
+  it('does not cancel locally once input-submit has been handed over', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const request = vi.fn(async (action: TerminalAction) => { if (action.kind === 'input-submit') await gate; return {}; });
+    const session = new TerminalInputSession(request, vi.fn());
+    session.edit('已交出', 3);
+    const submitted = session.submit();
+    await vi.waitFor(() => expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(true));
+    expect(session.cancelPreparedSubmit()).toBe(false);
+    release(); await submitted;
+    expect(session.cancelPreparedSubmit()).toBe(false);
+  });
+});

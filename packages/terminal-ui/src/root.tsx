@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show, ErrorBoundary } from 'solid-js';
 import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
+import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget } from './protocol.js';
 import { ProcessView } from './process-view.js';
 import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
@@ -471,6 +471,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     finally { finish?.(); clipboardPending = false; }
   };
   const shownProcess = () => view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId ? processStatus()?.view : undefined;
+  // 按键时屏上显示的运行：停止请求带上它所在的对话与过程状态里的身份，由 N 按权威状态决定能否停；屏上空闲时不带
+  const stopTarget = (): TerminalStopTarget | undefined => {
+    const current = view(), shown = shownProcess(), status = processStatus();
+    const running = shown?.activity === 'running' || shown?.activity === 'reconciling';
+    if (current.kind !== 'conversation' || !current.conversationId || (!running && !current.busy)) return undefined;
+    const inputId = input.pendingSubmissionId;
+    return { conversationId: current.conversationId, ...(running && status?.turnId ? { turnId: status.turnId } : {}),
+      ...(running && status?.runId ? { runId: status.runId } : {}), ...(inputId ? { inputId } : {}) };
+  };
   const displayRecoveryNotice = () => view().displayPaused || view().bodyRecovery === 'blocked'
     ? view().kind === 'history' ? '历史展示已暂停，存在缺口 · 请释放空间后重新打开历史' : '正文保留已暂停 · Ctrl+R 重试展示'
     : view().displayGap ? view().kind === 'history' ? '历史展示存在缺口 · 请重新打开历史核对' : '展示已恢复；原缺口保留，可查看历史与用量' : '';
@@ -717,13 +726,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     if (event.ctrl && event.name === 'c') {
       consume();
-      if (view().kind === 'confirmation' || view().kind === 'selection') { void cancelPage('ctrl-c'); return; }
+      // 页面上的 Ctrl+C 只作用于当时的页面，不算主对话双击退出的首击
+      if (view().kind === 'confirmation' || view().kind === 'selection') { ctrlC = 0; void cancelPage('ctrl-c'); return; }
       if (view().kind === 'unavailable' || view().kind === 'history' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
       if (view().editId) { releaseSecret(); void action({ kind: 'configuration-action', editId: view().editId!, action: 'cancel' }); ctrlC = 0; return; }
       if (view().kind !== 'conversation') { void cancelPage(); ctrlC = 0; return; }
       const now = performance.now();
       if (ctrlC > 0 && now - ctrlC < 750) { void options.exit(); return; }
-      ctrlC = now; void action({ kind: 'interrupt' }); return;
+      ctrlC = now;
+      // 发送尚未交出：本地取消，草稿保留（提示由提交的失败回报给出）；已交出才请求中止运行
+      if (input.cancelPreparedSubmit()) return;
+      const stop = stopTarget();
+      void action({ kind: 'interrupt', ...(stop ? { stop } : {}) }); return;
     }
     if (event.ctrl && event.name === 'd' && (view().kind === 'selection' || view().kind === 'confirmation')) { consume(); void cancelPage('ctrl-d'); return; }
     if (view().kind === 'conversation') {
@@ -771,8 +785,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (event.name === 'escape') {
       consume();
       if (candidateOpen()) { candidates?.escape(); return; }
+      // 发送尚未交出时 Esc 取消这次发送而不是清空草稿
+      if (view().kind === 'conversation' && input.cancelPreparedSubmit()) return;
       if (view().kind === 'conversation' && draft.text) { input.clear(draft.version); return; }
-      if (view().kind === 'conversation' && view().busy) void action({ kind: 'abort' }); else void cancelPage(); return;
+      if (view().kind === 'conversation' && view().busy) { const stop = stopTarget(); void action({ kind: 'abort', ...(stop ? { stop } : {}) }); } else void cancelPage(); return;
     }
     if (view().kind === 'conversation' && candidateValue()?.ghost && event.name === 'tab' && !event.ctrl && !event.shift && !event.meta) {
       consume(); void candidates?.accept(true).catch(reportStatus()); return;

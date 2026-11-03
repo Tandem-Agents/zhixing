@@ -83,7 +83,9 @@ export type TerminalAction =
   | { readonly kind: 'recovery-part'; readonly requestId: string; readonly index: number; readonly encoded: string; readonly final: boolean }
   | { readonly kind: 'recovery-page'; readonly requestId: string; readonly page: number }
   | { readonly kind: 'recovery-cancel'; readonly requestId: string }
-  | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
+  | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "exit" | "status" }
+  /** Esc／Ctrl+C 请求停止。stop 是按键时屏上显示的那次运行（意图与身份，不是授权）；缺省表示按键时屏上空闲。 */
+  | { readonly kind: "abort" | "interrupt"; readonly stop?: TerminalStopTarget }
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
   | { readonly kind: 'command-route'; readonly name: string }
   | { readonly kind: 'skills-action'; readonly action: TerminalSkillsAction }
@@ -172,6 +174,13 @@ export interface TerminalDisplayPage {
 export interface TerminalTaskStatus {
   readonly summary?: { readonly conversationId: string; readonly state: 'loading' | 'ready' | 'error'; readonly text: string };
   readonly noticeGap?: string;
+}
+/** 按键时屏上显示的运行：所在对话，以及过程状态给出的轮次与运行身份；还没有运行身份时是当时在途提交的输入身份。 */
+export interface TerminalStopTarget {
+  readonly conversationId: string;
+  readonly turnId?: string;
+  readonly runId?: string;
+  readonly inputId?: string;
 }
 export interface TerminalProcessStatus {
   readonly conversationId: string;

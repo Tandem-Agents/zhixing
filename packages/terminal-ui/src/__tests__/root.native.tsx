@@ -942,5 +942,34 @@ try {
   }
   candidateReply = undefined;
   checks.push('production table border crossing a one-row viewport never overwrites the adjacent reading notice');
+  // 停止请求带上按键时屏上运行的身份；空闲时不带；页面上的 Ctrl+C 不算主对话双击退出的首击
+  {
+    const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const lastStop = () => actions.findLast(action => action.kind === 'interrupt' || action.kind === 'abort') as Extract<TerminalAction, { kind: 'interrupt' | 'abort' }> | undefined;
+    const processView = (activity: 'running' | 'complete') => ({ revision: activity === 'running' ? 1 : 2, phase: activity === 'running' ? '正在回复' : '', activity, tools: [], children: [], usage: {} });
+    await show({ kind: 'conversation', title: '知行', conversationId: 'conv-stop', connected: true, busy: true });
+    root.receive({ type: 'process-status', status: { conversationId: 'conv-stop', turnId: 'turn-stop', runId: 'run-stop', view: processView('running') } }); await flush();
+    await pause(800); const exitsBefore = exits;
+    test.mockInput.pressKey('\x03'); await flush();
+    assert.deepEqual(lastStop(), { kind: 'interrupt', stop: { conversationId: 'conv-stop', turnId: 'turn-stop', runId: 'run-stop' } });
+    // 前面步骤留在输入框里的文字先被第一次 Esc 清空（既定行为），第二次才请求停止
+    for (let press = 0; press < 2 && lastStop()?.kind !== 'abort'; press++) { test.mockInput.pressEscape(); await pause(25); await flush(); }
+    assert.deepEqual(lastStop(), { kind: 'abort', stop: { conversationId: 'conv-stop', turnId: 'turn-stop', runId: 'run-stop' } });
+    await pause(800);
+    root.receive({ type: 'process-status', status: { conversationId: 'conv-stop', turnId: 'turn-stop', runId: 'run-stop', view: processView('complete') } });
+    await show({ kind: 'conversation', title: '知行', conversationId: 'conv-stop', connected: true, busy: false });
+    test.mockInput.pressKey('\x03'); await flush();
+    assert.deepEqual(lastStop(), { kind: 'interrupt' }, 'an idle page carries no stop target');
+    // 主对话刚按过一次：750 ms 内在确认页按 Ctrl+C、回到主对话再按，不得凑成双击退出
+    const firstPress = performance.now();
+    await show({ kind: 'confirmation', title: '确认', requestId: 'stop-confirm', choices: [{ id: 'allow', label: '允许' }] });
+    test.mockInput.pressKey('\x03'); await flush();
+    await show({ kind: 'conversation', title: '知行', conversationId: 'conv-stop', connected: true, busy: true });
+    test.mockInput.pressKey('\x03'); await flush();
+    assert.ok(performance.now() - firstPress < 750, 'the sequence stays inside the double-press window');
+    assert.equal(exits, exitsBefore, 'a page Ctrl+C is not the first press of a double press');
+    assert.equal(lastStop()?.kind, 'interrupt');
+    checks.push('stop requests carry the shown run identity; idle carries none; a page Ctrl+C never arms the double-press exit');
+  }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

@@ -12,7 +12,7 @@ import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 import type { TerminalPreloadRelease } from './application-preload.js';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
-import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget } from '@zhixing/terminal-ui/protocol';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
@@ -150,6 +150,16 @@ function proposalStageEvent(value: unknown): ProposalStageEvent | undefined {
   return { kind: 'stalled', conversationId: event.conversationId, turnId: event.runId, outcome };
 }
 
+/** 停止请求里按键时屏上运行的身份：只收有界的标识字符串；没给出即按键时屏上空闲，格式不符拒绝这次请求。 */
+function terminalStopTarget(value: unknown): TerminalStopTarget | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { conversationId, turnId, runId, inputId } = value as Record<string, unknown>;
+  const id = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 512;
+  if (!id(conversationId) || [turnId, runId, inputId].some(item => item !== undefined && !id(item))) throw Error('terminal-stop-target');
+  return { conversationId: conversationId as string, ...(turnId ? { turnId: turnId as string } : {}), ...(runId ? { runId: runId as string } : {}),
+    ...(inputId ? { inputId: inputId as string } : {}) };
+}
+
 // 起草失败或结果不明的处理入口：与待确认任务同一入口动作，进入时按快照分流
 function stalledProposalChoices(choices: View['choices']): NonNullable<View['choices']> {
   return [...(choices ?? []).filter(choice => choice.id !== 'rubric-resume'), { id: 'rubric-resume', label: '处理起草失败的任务' }];
@@ -206,6 +216,8 @@ class TerminalApplication {
   #proposalStage?: { conversationId: string; turnId: string; message: string };
   // 起草失败或结果不明后已发出、回执待核对的直接执行或取消：按同一操作核对，不重发
   #stalledOperation?: AdvancementOperationTarget;
+  // 本终端正在跟随的本地轮次的身份：停止请求按按键时屏上的身份与它比对，不停后来的轮次
+  #activeTurn?: { readonly conversationId: string; readonly turnId: string; readonly runId?: string; readonly inputId?: string; readonly settled: Promise<unknown> };
   readonly #configPath: string;
   readonly #abort = new AbortController();
   readonly #clipboard = new TerminalClipboard(this.#abort.signal);
@@ -239,6 +251,8 @@ class TerminalApplication {
   readonly #uiReady = new Promise<void>(resolve => { this.#openUi = resolve; });
   #operation?: Promise<void>;
   #submittingInput = false;
+  // 在途提交的输入身份：停止请求在还没有运行身份时只按它绑定目标
+  #submittingInputId?: string;
   #receiptRetry?: () => void;
   #receiptRetryRequested = false;
   #skills?: TerminalSkillsOwner;
@@ -569,8 +583,12 @@ class TerminalApplication {
       },
       error => {
         this.#requests.delete(id);
-        recordTerminalFailure(this.#logging.records, error, 'terminal-request-failed',
-          { requestId: id, action, active: this.#requests.size, durationMs: Math.round(performance.now() - started) });
+        // 终端已在关闭、后续发布因此被拒：这是用户退出的结果，不是操作失败；真实的领域失败照常记录
+        const closedByExit = this.#closing && error instanceof Error && error.message === 'terminal-application-closed';
+        if (!closedByExit) {
+          recordTerminalFailure(this.#logging.records, error, 'terminal-request-failed',
+            { requestId: id, action, active: this.#requests.size, durationMs: Math.round(performance.now() - started) });
+        }
         if (this.#closing) return;
         return this.#channel.send({ type: 'reply', id, error: '操作未完成；请查看当前页面，不会自动重发。' });
       },
@@ -720,15 +738,9 @@ class TerminalApplication {
       case 'abort':
         // Esc 与 Ctrl+C 请求停止当前运行时给同一即时反馈；Esc 在没有运行时不会关闭终端
         if (this.#sceneCreateAbort) this.#sceneCreateAbort.abort();
-        else if (!await this.#requestRunStop('Esc')) await this.#controller?.abort();
+        else await this.#stopShown(terminalStopTarget(action.stop), 'Esc');
         return { accepted: true };
-      case 'interrupt':
-        if (this.#sceneCreateAbort) { this.#sceneCreateAbort.abort(); return { accepted: true }; }
-        if (await this.#requestRunStop('Ctrl+C')) return { accepted: true };
-        if (this.#controller && await this.#controller.abortBackgroundTask()) {
-          this.#mainView = { ...this.#mainView, message: '已请求停止当前后台工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView);
-        } else void this.#close(this.args.length ? 130 : 0, 'user-interrupt');
-        return { accepted: true };
+      case 'interrupt': await this.#interrupt(terminalStopTarget(action.stop)); return { accepted: true };
       case 'status': this.#background(() => this.#status()); return { accepted: true };
       case 'command-route': return this.#commandRoute(action.name);
       case 'skills-action': return { handled: await this.#skills?.act(action.action) ?? false };
@@ -757,6 +769,51 @@ class TerminalApplication {
     }).finally(release);
     if (!released) this.#operation = work;
     void work.catch(() => this.#close(70, 'application-operation-undelivered'));
+  }
+
+  /** Ctrl+C：先停本终端提交的这一轮，再停接上的运行；都没有时空闲才退出终端。 */
+  async #interrupt(stop?: TerminalStopTarget): Promise<void> {
+    if (this.#sceneCreateAbort) { this.#sceneCreateAbort.abort(); return; }
+    // 按键时屏上显示着运行：只停那一次，停不到也不退出终端；按键时空闲且也没有可停的，才照原约定退出
+    if (await this.#stopShown(stop, 'Ctrl+C') || stop) return;
+    void this.#close(this.args.length ? 130 : 0, 'user-interrupt');
+  }
+
+  /**
+   * 按按键时屏上的运行裁决停止，返回是否已请求停止。stop 只是意图与身份，能否停以权威状态为准：
+   * 本地活动轮次与之匹配就停它；否则只停仍在可停目标（或委托任务）里的那一次运行。它已结束、对话已切换
+   * 或无法确定时只说明，不停后来的运行。按键时空闲（没有 stop）：只停本终端仍在提交的输入或委托任务。
+   */
+  async #stopShown(stop: TerminalStopTarget | undefined, key: 'Esc' | 'Ctrl+C'): Promise<boolean> {
+    const controller = this.#controller;
+    const requested = async () => {
+      this.#mainView = { ...this.#mainView, message: '已请求停止当前工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView); return true;
+    };
+    if (!stop) {
+      if (this.#submittingInput) return this.#requestRunStop(key);
+      return !!controller && await controller.abortWorksceneTask() && requested();
+    }
+    if (controller && stop.conversationId === controller.current.conversationId) {
+      // 只按按键时的精确身份绑定：轮次、运行（两者都给时须一致），或当时在途提交的输入身份；
+      // 当前本地运行不能顶替旧目标，绑定不上就不停
+      const local = this.#activeTurn;
+      // 缺少可比字段不算同一身份：带轮次/运行时只由二者之一的精确相等证明，输入身份只在没有轮次/运行时作证明；
+      // 两边都有的字段任一不同即否决
+      const proven = !!local && (stop.turnId || stop.runId
+        ? (!!stop.turnId && local.turnId === stop.turnId) || (!!stop.runId && !!local.runId && local.runId === stop.runId)
+        : !!stop.inputId && local.inputId === stop.inputId);
+      const conflicting = !!local && ((!!stop.turnId && local.turnId !== stop.turnId) ||
+        (!!stop.runId && !!local.runId && local.runId !== stop.runId) || (!!stop.inputId && !!local.inputId && local.inputId !== stop.inputId));
+      const sameLocal = !!local && local.conversationId === stop.conversationId && proven && !conflicting;
+      const sameSubmission = this.#submittingInput && !!stop.inputId && this.#submittingInputId === stop.inputId && !stop.turnId && !stop.runId;
+      // “停当前”会作用于在途提交：另有一份新的提交在途时，匹配上的旧轮次只按它自己的运行身份停
+      const otherSubmission = this.#submittingInput && this.#submittingInputId !== local?.inputId;
+      if ((sameSubmission || (sameLocal && !otherSubmission)) && await this.#requestRunStop(key)) return true;
+      const runId = stop.runId ?? (sameLocal ? local?.runId : undefined);
+      if (runId && !sameSubmission && await controller.abortRunIfActive(runId)) return requested();
+    }
+    this.#mainView = { ...this.#mainView, message: '这次运行已经结束，无需再停止。' }; await this.#publish(this.#mainView);
+    return false;
   }
 
   /**
@@ -1523,7 +1580,7 @@ class TerminalApplication {
   }
 
   async #submit(inputId: string, version: number): Promise<void> {
-    this.#submittingInput = true;
+    this.#submittingInput = true; this.#submittingInputId = inputId;
     let settled = false;
     const settle = (accepted: boolean, message?: string) => {
       if (settled) return; settled = true;
@@ -1544,7 +1601,7 @@ class TerminalApplication {
       if (!completed) return;
       releaseOutput();
       const { result, notice } = completed;
-      if (result.kind === 'accepted') this.#followTurn(result.turn);
+      if (result.kind === 'accepted') this.#followTurn(result.turn, inputId);
       else if (result.kind === 'awaiting-rubric-confirmation') {
         this.#pendingRubric = undefined;
         this.#deferredRubric = result;
@@ -1567,7 +1624,7 @@ class TerminalApplication {
       this.#mainView = { ...this.#mainView, busy: false };
       throw error;
     } finally {
-      this.#submittingInput = false; this.#receiptRetry = undefined; this.#receiptRetryRequested = false;
+      this.#submittingInput = false; this.#submittingInputId = undefined; this.#receiptRetry = undefined; this.#receiptRetryRequested = false;
       this.#mainView = { ...this.#mainView, inputReceiptPending: false };
       releaseOutput();
       await this.#display.cancelAdmission();
@@ -1948,8 +2005,9 @@ class TerminalApplication {
     this.#mainView = { ...this.#mainView, choices: [{ id: 'rubric-resume', label: '查看任务结果' }] };
   }
 
-  #followTurn(turn: AcceptedTurn<TerminalTurnOutcome>): void {
+  #followTurn(turn: AcceptedTurn<TerminalTurnOutcome>, inputId?: string): void {
     const { conversationId, turnId, runId } = turn;
+    this.#processSession.followLocal(conversationId, turnId, runId);
     // The controller already consumed the result, even for an early complete
     // notification. Waiting for send acceptance retains only this summary.
     const completion = turn.outcome;
@@ -1990,8 +2048,12 @@ class TerminalApplication {
         this.#mainView = { ...this.#mainView, busy: false, message: '运行结果尚未确认；请重连后查看，不会自动重发。' };
         if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
       }
-    }).finally(() => { if (this.#state.activeTurnPromise === settled) this.#state.activeTurnPromise = null; });
+    }).finally(() => {
+      if (this.#state.activeTurnPromise === settled) this.#state.activeTurnPromise = null;
+      if (this.#activeTurn?.settled === settled) this.#activeTurn = undefined;
+    });
     this.#state.activeTurnPromise = settled;
+    this.#activeTurn = { conversationId, turnId, ...(runId ? { runId } : {}), ...(inputId ? { inputId } : {}), settled };
     void settled.catch(() => this.#close(70, 'terminal-outcome-undelivered'));
   }
 

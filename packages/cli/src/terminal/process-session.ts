@@ -16,6 +16,7 @@ export class TerminalProcessSession {
   readonly #perspectives = new Map<string, { seq: number; runId: string; cross: boolean; convergence: boolean; started: boolean }>();
   readonly #retired = new Set<string>();
   readonly #completed = new Set<string>();
+  readonly #local = new Set<string>();
   #generation = 0;
   #active?: string;
   #paused = false;
@@ -82,6 +83,11 @@ export class TerminalProcessSession {
     } catch { this.ports.gap('多视角进度暂不可显示，请核对最终结果。'); }
     return true;
   }
+  /** 活动区当前展示的运行仍未结束（尚未收到业务完成，也未关闭） */
+  get running(): boolean {
+    const entry = this.#active === undefined ? undefined : this.#scopes.get(this.#active);
+    return !!entry && entry.scope.generation === this.#generation && !entry.projection.complete && !entry.projection.closed;
+  }
   end(conversationId: string, turnId?: string, runId?: string): void {
     if (conversationId !== this.ports.currentConversation()) return;
     for (const [kind, id] of [['run', runId], ['turn', turnId]]) if (id) {
@@ -92,6 +98,17 @@ export class TerminalProcessSession {
       if (entry.scope.conversationId !== conversationId ||
           !(runId && entry.scope.runId === runId || turnId && entry.scope.turnId === turnId)) continue;
       entry.projection.end(this.#generation, true);
+    }
+  }
+  /** 本终端提交被接纳的运行：只有它们显示用时（接上的运行没有可信起点）。过程帧可能早于接纳到达，先到的范围当场补记。 */
+  followLocal(conversationId: string, turnId?: string, runId?: string): void {
+    for (const [kind, id] of [['run', runId], ['turn', turnId]]) if (id) {
+      this.#local.add(JSON.stringify([conversationId, kind, id]));
+      if (this.#local.size > 512) this.#local.delete(this.#local.values().next().value!);
+    }
+    for (const entry of this.#scopes.values()) {
+      if (entry.scope.conversationId === conversationId &&
+          (runId && entry.scope.runId === runId || turnId && entry.scope.turnId === turnId)) entry.projection.markLocal();
     }
   }
   pause(reason: string): void {
@@ -136,6 +153,8 @@ export class TerminalProcessSession {
     // away from the current run or briefly publish a running state.
     if (!completed || !this.#active) this.#active = key;
     projection.begin(scope, completed);
+    if (source.runId && this.#local.has(JSON.stringify([source.conversationId, 'run', source.runId])) ||
+        source.turnId && this.#local.has(JSON.stringify([source.conversationId, 'turn', source.turnId]))) projection.markLocal();
     if (this.#paused) projection.pause('过程展示已暂停；请先重试展示。');
     return entry;
   }

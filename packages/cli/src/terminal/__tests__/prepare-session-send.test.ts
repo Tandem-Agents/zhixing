@@ -66,6 +66,15 @@ describe('terminal fixed-schema session.send preparation', () => {
     }
   });
 
+  it('names a material whose file disappeared before sending, without the raw file system text', async () => {
+    const h = await fixture();
+    await rm(h.file);
+    const failure = await prepareSessionSendSnapshot(`读取 ${h.fileToken}`, identity,
+      { workspaceRoot: h.directory, materialRegistry: h.registry, signal: new AbortController().signal }, async () => {}).catch((error: unknown) => error);
+    expect((failure as Error).message).toBe('材料「note.txt」的文件已不存在：请恢复该文件，或删掉输入里的这项材料后重新发送；草稿已保留。');
+    expect((failure as Error).message).not.toContain('ENOENT');
+  });
+
   it('reuses the first file contents for the original input and engage question', async () => {
     const h = await fixture(); const pages: Buffer[] = []; let changed = false;
     // Make the first part flush before question generation and mutate only our

@@ -78,14 +78,31 @@ export class ConversationReadIndex {
     const validated = validatePublishDecisionForBatch(decision, batch);
     return validated.outcomes.filter(item => item.outcome.t === 'conflicted').length;
   }
+  /**
+   * 第一方界面的停止目标：当前未结束运行里状态可中断的，含用户自己发起的运行（终端退出后仍在宿主里
+   * 运行、重进后没有本地等待者的那种）；有已开始的取已开始的，否则取排队的，至多两条。
+   * 消息工具的可中断候选（controlCandidates）仍只含会话来源的运行，不随此扩大。
+   */
   async controlTargets(conversationId: string): Promise<ConversationControlTargets> {
+    const visibility = await this.outsideVisibility(conversationId);
+    if (visibility.deleted) return { targets: [] };
     const queued: ConversationControlTargets['targets'][number][] = [], active: typeof queued = [];
-    for (const candidate of await this.controlCandidates(conversationId)) {
-      const target = { runId: candidate.runId, state: candidate.state };
-      if (candidate.state === 'queued') { if (queued.length < 2) queued.push(target); }
-      else active.push(target);
-      if (active.length === 2) break;
-    }
+    let after: string | undefined;
+    do {
+      const page = await this.openRunPage(conversationId, after);
+      // 与控制页同一可见性：本地按本地 clear，导入基底在本地 clear 后整体隐藏、否则按基底 clear
+      const visible = page.entries.filter(({ run }) => run.local ? run.lsn > visibility.localClearedLsn
+        : !visibility.baseHidden && run.lsn > visibility.baseClearedLsn);
+      const statuses = await this.control(conversationId, visible.map(({ run }) => run.runId));
+      for (const { run } of visible) {
+        const state = statuses.get(run.runId)?.entry?.state;
+        if (!interruptible(state)) continue;
+        if (state === 'queued') { if (queued.length < 2) queued.push({ runId: run.runId, state }); }
+        else active.push({ runId: run.runId, state });
+        if (active.length === 2) return { targets: active };
+      }
+      after = page.continuation;
+    } while (after);
     return { targets: active.length ? active : queued };
   }
   /** 当前可中断的会话来源运行（clear / delete 之后可见的），带首个输入的位置；只读当前候选行 */

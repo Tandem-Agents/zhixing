@@ -266,7 +266,7 @@ class MaterialSnapshots {
     this.#charge(512 + Buffer.byteLength(entry.filePath) * 4 + Buffer.byteLength(entry.name) * 2);
     let value: SnapshotValue;
     if (entry.kind === 'image') {
-      const bytes = await readBoundedInputFile(entry.filePath, 5 * MiB, this.options.signal);
+      const bytes = await readMaterialFile(entry.name, () => readBoundedInputFile(entry.filePath, 5 * MiB, this.options.signal));
       const mediaType = detectMimeType(entry.filePath, bytes);
       if (!mediaType.startsWith('image/')) throw Error('文件内容不是可识别图片；草稿已保留。');
       value = { kind: 'image', data: bytes.toString('base64'), mediaType, name: entry.name, size: bytes.length };
@@ -296,12 +296,27 @@ class MaterialSnapshots {
     this.#values.set(key, value);
   }
   async #textFile(absolute: string): Promise<SnapshotValue> {
-    const bytes = await readBoundedInputFile(absolute, 100 * 1024, this.options.signal);
+    const bytes = await readMaterialFile(path.basename(absolute), () => readBoundedInputFile(absolute, 100 * 1024, this.options.signal));
     return { kind: 'text', text: `<file path="${absolute.replace(/\\/g, '/')}">\n${bytes.toString('utf8')}\n</file>` };
   }
   #charge(bytes: number): void {
     if (this.#metadata + bytes > 8 * MiB) throw Error(CAPACITY_ERROR);
     this.#metadata += bytes;
+  }
+}
+
+/** 材料文件在发送时读不到：已知的文件系统原因说明是哪个材料、怎么处理；其他错误照原样抛出 */
+async function readMaterialFile<T>(name: string, read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw Error(`材料「${name}」的文件已不存在：请恢复该文件，或删掉输入里的这项材料后重新发送；草稿已保留。`);
+    }
+    if (code === 'EACCES' || code === 'EPERM' || code === 'EBUSY' || code === 'EISDIR') {
+      throw Error(`材料「${name}」的文件现在无法读取：请检查文件是否被占用、有无读取权限，或删掉这项材料后重新发送；草稿已保留。`);
+    }
+    throw error;
   }
 }
 

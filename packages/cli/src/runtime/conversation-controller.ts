@@ -2168,6 +2168,25 @@ export class ConversationController<Outcome = TurnOutcome> {
     return this.abortWorksceneTask();
   }
 
+  /**
+   * 只停指定的这一次运行（按键时屏上显示的那次）：它仍是可停目标或委托任务时才停；已结束、不在其中都返回 false，
+   * 不改停当前别的运行。
+   */
+  async abortRunIfActive(runId: string): Promise<boolean> {
+    const conversationId = this.active.conversationId;
+    const { targets } = await this.opts.conversation.controlTargets(conversationId);
+    if (this.active.conversationId !== conversationId) return false;
+    if (targets.some((target) => target.runId === runId)) {
+      await this.opts.conversation.abort(conversationId, `cancel:${generateTurnId()}`, runId);
+      return true;
+    }
+    const task = (await this.opts.workscene.tasks(conversationId)).find((item) => item.runId === runId);
+    if (!task || this.active.conversationId !== conversationId) return false;
+    await this.opts.workscene.stopTask(conversationId, task, `stop-task:${generateTurnId()}`);
+    if (this.focusedTaskByConversation.get(conversationId) === runId) this.focusedTaskByConversation.delete(conversationId);
+    return true;
+  }
+
   /** Resolve current entrusted work from owner facts even without a local send waiter or stream. */
   async abortWorksceneTask(): Promise<boolean> {
     const conversationId = this.active.conversationId;

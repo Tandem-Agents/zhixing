@@ -10,6 +10,11 @@ const EDIT_WINDOW_BYTES = 128 * 1024;
 const COMPACT_WINDOW_BYTES = 48 * 1024;
 const inputIdValid = (id: unknown): id is string => typeof id === 'string' && /^[a-f0-9-]{36}$/u.test(id);
 
+/** 发送在交出前被用户取消；草稿与材料保留 */
+export class TerminalSubmitCancelledError extends Error {
+  constructor() { super('已取消发送，草稿已保留。'); }
+}
+
 /** Surface-owned edits; an application receipt can only settle its own version.
  * Paste uploads hold a visible marker so intervening edits remain independent. */
 export class TerminalInputSession {
@@ -33,6 +38,9 @@ export class TerminalInputSession {
   #working?: DraftSnapshot & { inputId?: string };
   #paging = false;
   #preparing = false;
+  /** 本地取消准备中的发送：代际递增即作废，input-submit 一旦发出就不再可本地取消 */
+  #submitCancel = 0;
+  #submitSent = false;
   #historyOffset = -1;
   #historyLoading = false;
   #historyEpoch = 0;
@@ -95,26 +103,41 @@ export class TerminalInputSession {
     if (this.pending) throw Error('输入仍在处理，请稍候；草稿已保留。');
     if (this.completeWindow && !this.draft.text.trim()) return;
     this.#preparing = true;
+    const cancel = this.#submitCancel;
+    const cancelled = () => cancel !== this.#submitCancel;
     try {
       if (this.#referenceError && !this.#referenceWork) { this.#referenceSignature = '\0'; this.#syncReferences(); }
       await this.#referenceWork;
+      if (cancelled()) throw new TerminalSubmitCancelledError();
       if (this.#referenceError) throw Error('输入引用保留尚未确认，草稿已保留；请重新核对后再提交。');
       const frozenText = this.draft.text;
       // Every user submission has a distinct immutable identity, including a
       // resubmitted history entry. Its earlier history owner stays independent.
       const frozen = await this.#persist(true);
+      if (cancelled()) throw new TerminalSubmitCancelledError();
       const submission = { ...frozen, text: frozenText };
       this.#submission = submission; this.#syncReferences();
       // Persisting and freezing change reference ownership even when text is
       // unchanged. Complete their collection before N admits the frozen owner;
       // otherwise a normal Enter races the maintenance delete it just started.
       await this.#referenceWork;
-      if (this.#referenceError) {
+      if (cancelled() || this.#referenceError) {
         this.#submission = undefined;
-        throw Error('输入引用保留尚未确认，草稿已保留；请重新核对后再提交。');
+        throw cancelled() ? new TerminalSubmitCancelledError() : Error('输入引用保留尚未确认，草稿已保留；请重新核对后再提交。');
       }
+      // 从这里起发送已交出：结果未知也不再称“未发送”，停止交给运行中止路径
+      this.#submitSent = true;
       await this.request({ kind: 'input-submit', inputId: submission.inputId, version: submission.version });
-    } finally { this.#preparing = false; }
+    } finally { this.#preparing = false; this.#submitSent = false; }
+  }
+  /** 已交出、尚未收到接纳结果的这次提交的输入身份；停止请求在还没有运行身份时据此绑定目标。 */
+  get pendingSubmissionId(): string | undefined { return this.#submission?.inputId; }
+  /** 准备提交期间（input-submit 尚未发出）在本地取消这次发送，草稿与材料原样保留；
+   *  已发出或没有准备中的提交时返回 false，由调用方走运行中止或其他路径。 */
+  cancelPreparedSubmit(): boolean {
+    if (!this.#preparing || this.#submitSent) return false;
+    this.#submitCancel++;
+    return true;
   }
   settle(result: Submission & { accepted: boolean }): boolean {
     if (this.#submission?.inputId !== result.inputId || this.#submission.version !== result.version) return false;

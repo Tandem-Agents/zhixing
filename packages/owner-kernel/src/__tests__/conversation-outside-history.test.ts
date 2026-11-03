@@ -139,3 +139,28 @@ describe('outside-history candidates against the full fold', () => {
     await f.compare();
   }, 30_000);
 });
+
+describe('first-party control targets', () => {
+  it('include the user\'s own running run while messaging candidates stay conversation-sourced', async () => {
+    const f = await fixture();
+    await run(f, 'remote', 'queued', { conversation: true });
+    await run(f, 'mine-done', 'committed');
+    await run(f, 'mine-uncertain', 'uncertain');
+    await run(f, 'mine-running', 'running');
+    // 消息工具的可中断目标仍只含会话来源的运行
+    expect((await f.compare()).interruptibleRuns).toEqual([{ runId: 'remote', state: 'queued' }]);
+    // 终端重进后没有本地等待者：自己发起、仍在运行的回复也能被找到并停止
+    expect(await f.directory.controlTargets(ID)).toEqual({ targets: [{ runId: 'mine-running', state: 'running' }] });
+  }, 30_000);
+
+  it('fall back to at most two queued runs and hide runs from before a clear', async () => {
+    const f = await fixture();
+    await run(f, 'before-clear', 'queued');
+    await f.append(f.r.lifecycle('clear'));
+    await run(f, 'queued-a', 'queued');
+    await run(f, 'queued-b', 'queued');
+    await run(f, 'queued-c', 'queued');
+    expect(await f.directory.controlTargets(ID)).toEqual({ targets: [
+      { runId: 'queued-a', state: 'queued' }, { runId: 'queued-b', state: 'queued' }] });
+  }, 30_000);
+});

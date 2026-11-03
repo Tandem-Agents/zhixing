@@ -38,10 +38,16 @@ export class TerminalProcessProjection {
   #published?: string;
   #startedAt = 0;
   #durationMs?: number;
+  #local = false;
   constructor(readonly ports: ProcessProjectionPorts) {}
+  /** 这次运行由本终端发起（提交被接纳），本地计时即运行用时。 */
+  markLocal(): void {
+    if (this.#local) return;
+    this.#local = true; this.#publish();
+  }
   begin(scope: ProcessScope, confirmed = false): void {
     this.#thinkingId = undefined; this.#thinkingOffset = 0;
-    this.#startedAt = performance.now(); this.#durationMs = undefined;
+    this.#startedAt = performance.now(); this.#durationMs = undefined; this.#local = false;
     this.#scope = { ...scope }; this.#closed = false; this.#confirmed = confirmed; this.#paused = false; this.#block = 0;
     this.#phase = '正在准备'; this.#notice = undefined; this.#activityNotice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
     this.#assignmentSource = undefined;
@@ -325,7 +331,8 @@ export class TerminalProcessProjection {
     // Derive presentation without repeatedly decorating the stored diagnostic.
     const notice = this.#notice ? processText(`${this.#closed || this.#confirmed ? phase + '；' : ''}${this.#notice}`, 1024)
       : !this.#confirmed ? this.#activityNotice : undefined;
-    return { revision: ++this.#revision, phase, activity: this.#confirmed ? 'complete' : this.#closed || this.#paused ? 'reconciling' : 'running', ...(this.#durationMs === undefined ? {} : { durationMs: this.#durationMs }),
+    // 用时是本终端从开始观察到结束的本地计时，只有本终端发起的运行才等于运行用时；接上的运行没有可信起点，不显示
+    return { revision: ++this.#revision, phase, activity: this.#confirmed ? 'complete' : this.#closed || this.#paused ? 'reconciling' : 'running', ...(this.#durationMs === undefined || !this.#local ? {} : { durationMs: this.#durationMs }),
       ...(this.#thinking ? { thinking: { text: this.#thinking, active: !this.#confirmed && this.#thinkingActive } } : {}),
       tools: this.#batch.slice(-3).map(e => processText(processToolSummary(e), 1024)), children: [...this.#children.values()].map(({ lineage: _lineage, toolUses: _toolUses, ...child }) => child),
       usage: { ...this.#usage }, ...(notice ? { notice } : {}) };
