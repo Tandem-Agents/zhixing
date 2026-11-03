@@ -21,6 +21,13 @@ let startupRequested = false;
 const input = new TerminalInputOwner(reason => void close(reason, 71));
 const channel = new TerminalChannel(instance, (packet, done) => transport.send(packet, done), receive, reason => void close(reason, 71));
 
+// 模式查询失败按已知原因细分（应答超时、当前模式不兼容或矛盾、非 TTY），S 据此给用户说明；其余仍是笼统的查询失败
+const MODE_QUERY_FAILURES = new Set(['terminal-mode-query-timeout', 'terminal-original-modes-unavailable', 'terminal-original-modes-contradictory',
+  'terminal-mode-query-contradictory', 'terminal-tty-required']);
+function modeQueryFailureReason(error: unknown): string {
+  return error instanceof Error && MODE_QUERY_FAILURES.has(error.message) ? error.message : 'terminal-mode-query-failed';
+}
+
 function request(action: TerminalAction): Promise<unknown> {
   if (abort.signal.aborted) return Promise.reject(Error('terminal-closed'));
   if (!applicationReady && (action.kind === 'interrupt' || action.kind === 'exit')) {
@@ -62,7 +69,7 @@ function receive(message: TerminalMessage): void {
         abort.signal.throwIfAborted(); phase = 'ready';
         await channel.send({ type: 'modes', ...baseline });
       });
-      void initializing.catch(() => close('terminal-mode-query-failed', 71)); return;
+      void initializing.catch(error => close(modeQueryFailureReason(error), 71)); return;
     }
     case 'grant': {
       if (phase !== 'ready') throw Error('terminal-grant-order');

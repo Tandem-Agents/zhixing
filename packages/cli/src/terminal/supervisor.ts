@@ -57,6 +57,8 @@ export interface TerminalSupervisorOptions {
   readonly admitted?: (createStore: LogStoreWorkerFactory, capacity: ReturnType<typeof createDeviceCapacityRuntime>) => Promise<void>;
   readonly drain?: (deadline: number, code: number) => Promise<void>;
   readonly commandOutput?: (stream: 'stdout' | 'stderr', text: string) => void;
+  /** 首个关闭原因（与 closing 生命周期记录同一原因），供入口挑选最终给用户的说明 */
+  readonly closed?: (reason: string) => void;
 }
 
 /** 实例存储账户一次请求在 S 内的整体期限：从收到请求起算，含排队、每次尝试与接续等待。
@@ -1262,6 +1264,7 @@ class TerminalSupervisor {
     // Preserve the first finite lifecycle cause before logging is drained.
     // Observation failure must not re-enter or delay this closing path.
     try { this.options.records?.record({ event: 'terminalLifecycle', data: { instance: this.instance, phase: 'closing', reason, exitCode: this.#result } }); } catch { /* Close remains authoritative. */ }
+    try { this.options.closed?.(reason); } catch { /* 入口只用它挑选最终说明，不影响关闭 */ }
     this.#deadline = deadline;
     // The deadline also covers unknown native creation or in-process cleanup.
     // Failure cannot authorize R while an old writer remains unproved.
