@@ -248,9 +248,10 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
     // 日志头未前进时对账结论不变、不再重扫：先写一笔无关提交，让下一次对账真正去读回执
     await h.log.append([{ stream: "control", body: { value: 1 } }]);
-    const get = vi.spyOn(h.artifacts, "get").mockRejectedValueOnce(new Error("receipt read failed"));
+    // 已开始的分派不需要释放回执，对账不再为它读取制品；让本轮对账在读当前回执处失败
+    const receipts = vi.spyOn(h.governor, "activeAssignmentReceipts").mockRejectedValueOnce(new Error("receipt read failed"));
     try { await expect(h.ledger.reconcileSupersededReceipts()).rejects.toThrow("receipt read failed"); }
-    finally { get.mockRestore(); }
+    finally { receipts.mockRestore(); }
     await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
   });
 

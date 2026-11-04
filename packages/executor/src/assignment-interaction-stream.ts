@@ -47,6 +47,7 @@ export async function projectAssignmentInteractionStream(
     durableAfterRecordSeq ?? options.afterRecordSeq ?? 0;
   const events = await options.ledger.interactionStreamEvents(
     options.assignmentId,
+    afterRecordSeq,
   );
   let projected = 0;
   let lastRecordSeq = afterRecordSeq;

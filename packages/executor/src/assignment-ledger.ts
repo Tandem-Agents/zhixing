@@ -1,7 +1,8 @@
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
 import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime,
   leaseClockProjectionId, readLeaseClockSummary, registerLeaseClockProjection, type LeaseClockSummary } from "./assignment-lease-clock.js";
-import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentChangedAfter, assignmentIdFromStream, readAssignmentEnvelopes, readRecoveryCandidates,
+import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentChangedAfter, assignmentIdFromStream, hasAssignmentHistoryKeys, readAssignmentEnvelopes, readAssignmentEnvelopesAfter,
+  readAssignmentHistory, readAssignmentPhases, readRecoveryCandidateClasses, type AssignmentHistoryNeeds, type RecoveryCandidateClass,
   registerAssignmentLedgerIndex } from "./assignment-ledger-index.js";
 import { Buffer } from "node:buffer";
 import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError, currentMaintenanceAbortSignal, currentMaintenanceUrgency,
@@ -536,7 +537,24 @@ interface LedgerProjection {
   lastInteractionStreamSeq: number;
   interactionStreamDigest?: string;
   lastStreamProjectionRecordSeq?: number;
+  /** lastStreamProjectionRecordSeq 那条记录的账本链摘要：流投影续链只需要它，不必保留整份 ledgerBySeq */
+  lastStreamProjectionDigest?: string;
   acknowledgedCommitRevision?: number;
+  /**
+   * 从决定状态检查点恢复时，entries 与 ledgerBySeq 只含此序号之后的记录（0 表示完整历史）。需要更早历史的
+   * 证据查询另行完整重放。
+   */
+  historyBase?: number;
+  /** 已完成历史在领域索引里按键可取：此时 historyBase 之前已了结的请求、结果与副作用不在内存，按需补入 */
+  keyed?: boolean;
+  /** 镜像链省去的前缀项数（均已镜像）：finishedOrder[0] 的全局下标 */
+  finishedBase?: number;
+  /** 被省去的交互记录的最大序号：交互流事件需要更早的位置时另行完整重放 */
+  historyInteractionUpTo?: number;
+  /** 本内存状态已按键核过的请求 ID（含查无此键的）；不保存 */
+  historyChecked?: Set<string>;
+  /** 按键补入的已镜像镜像链项（按记录序号）；不保存 */
+  historicMirror?: Map<number, MirrorChainItem>;
 }
 
 interface JobRecoveryIndexValue {
@@ -607,6 +625,21 @@ type AbortCause =
 
 const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
 const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
+/**
+ * 分派决定状态检查点的规则版本：分派协议、记录校验或归约规则任一改变就递增，旧检查点随之失效、改为完整重放。
+ * 键里另有归约与校验函数的源码指纹，但被它们调用的函数改变时不会自动反映，所以这个常量必须随规则一起维护。
+ */
+const LEDGER_DECISION_STATE_VERSION = 2;
+/** 决定状态合并落盘的间隔。 */
+const DECISION_STATE_SAVE_DELAY_MS = 5_000;
+/**
+ * 一个分派经严格完整校验到 coveredLsn 的当前状态：计数、续链摘要与仍未了结的义务；已完成的交互、副作用与已镜像的
+ * 镜像链项在领域索引里按键取（本格式之前创建的分派没有按键行，仍保存完整集合）。
+ */
+type DecisionState = { readonly coveredLsn: number; readonly state: LedgerProjection };
+
+/** 省略态的状态遇到尚未按键核过的交互请求 ID（他方写入的尾部）：丢弃缓存，经冷恢复路径预取后重做。 */
+class HistoryLookupRequired extends Error {}
 /** 一次绑定查询的分派数上限（票据恢复一次查询全部有效票据）。 */
 export const DATA_PLANE_BINDING_BATCH_LIMIT = 4096;
 /** 冷恢复绑定时每次在领域索引上读取的分派数，单次持锁的读取量因此有界。 */
@@ -671,6 +704,11 @@ export class ConversationAssignmentLedger implements
     string,
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
   >();
+  /** 待落盘的严格决定状态（分派 → 去掉历史后的状态与它覆盖到的游标）。 */
+  readonly #decisionPending = new Map<string, { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }>();
+  #decisionSave: NodeJS.Timeout | undefined;
+  /** 决定状态的写入串行进行；flushDecisionStates 等它写完 */
+  #decisionWrite: Promise<void> = Promise.resolve();
 
   constructor(options: AssignmentLedgerOptions) {
     assertIdentifier(options.executorId, "Executor id");
@@ -1115,15 +1153,31 @@ export class ConversationAssignmentLedger implements
       requestId: ctx.requestId,
       body: { range: range ?? null },
     });
-    return this.#select(assignmentId, (state) => {
+    const selected = await this.#select(assignmentId, (state) => {
       if (!range) return snapshot(ledgerSnapshot(state), "Ledger snapshot");
+      // 从决定状态恢复的视图不含较早的记录：取证页落在那之前时，另行完整重放后再取
+      if ((state.historyBase ?? 0) > 0 && range.fromSeq <= state.historyBase!) return undefined;
+      return this.#evidencePage(assignmentId, state, range);
+    });
+    if (selected !== undefined) return selected;
+    const full = (await this.#repeatPrepared(() => this.#operations.run(() =>
+      this.#recoverProjections([assignmentId], false, true)))).states.get(assignmentId)!;
+    return this.#evidencePage(assignmentId, full, range!);
+  }
+
+  /** 按完整历史视图取一页账本证据：页内记录、链摘要与签名，与原来逐字相同。 */
+  #evidencePage(assignmentId: string, state: LedgerProjection, range: { fromSeq: number; limit: number }): LedgerEvidencePage {
+    {
+      const offset = state.historyBase ?? 0;
       const candidates = state.entries.slice(
-        range.fromSeq - 1,
-        range.fromSeq - 1 + range.limit,
+        range.fromSeq - 1 - offset,
+        range.fromSeq - 1 - offset + range.limit,
       );
       if (candidates.length === 0) {
         throw new RangeError("Ledger evidence range starts beyond the durable ledger");
       }
+      // 链摘要按序号取：ledgerBySeq 只含 historyBase 之后的记录，试算与最终签名用同一个换算
+      const chainDigestAt = (recordSeq: number) => state.ledgerBySeq[recordSeq - 1 - offset]!;
       let lower = 1;
       let upper = candidates.length;
       let selected = 0;
@@ -1133,7 +1187,7 @@ export class ConversationAssignmentLedger implements
           assignmentId,
           this.#executorId,
           candidates.slice(0, count),
-          state.ledgerBySeq,
+          chainDigestAt,
         );
         if (
           Buffer.byteLength(canonicalize(payload), "utf8") <=
@@ -1152,7 +1206,7 @@ export class ConversationAssignmentLedger implements
         assignmentId,
         this.#executorId,
         candidates.slice(0, selected),
-        state.ledgerBySeq,
+        chainDigestAt,
       );
       return snapshot(
         {
@@ -1161,7 +1215,7 @@ export class ConversationAssignmentLedger implements
         },
         "Ledger evidence page",
       );
-    });
+    }
   }
 
   async cancel(
@@ -1431,7 +1485,8 @@ export class ConversationAssignmentLedger implements
         if (state.phase !== "started" || state.aborts.length > 0) {
           throw new Error("Side effects require an active, unfenced assignment");
         }
-        const effectSeq = state.sideEffects.size + 1;
+        // 已完成的副作用可能不在内存（按键取）：序号按校验状态的连续计数
+        const effectSeq = state.validation.sideEffectCount + 1;
         return {
           kind: "append",
           entries: [
@@ -1491,7 +1546,7 @@ export class ConversationAssignmentLedger implements
         entries: [assignmentRecord(assignmentId, nextEntry(state, body))],
         value: undefined,
       };
-    });
+    }, [], false, [], { history: () => ({ effects: [effectSeq] }) });
   }
 
   async requestInteraction(
@@ -1550,6 +1605,9 @@ export class ConversationAssignmentLedger implements
         };
       },
       prepared.references,
+      false,
+      [],
+      { history: () => ({ requests: [body.requestId] }) },
     );
     return transaction.value;
   }
@@ -1603,7 +1661,7 @@ export class ConversationAssignmentLedger implements
         throw new Error("Interaction result cannot overtake a durable cancellation");
       }
       const entry = nextEntry(state, body);
-      const ordinal = state.finishedOrder.length + 1;
+      const ordinal = finishedCount(state) + 1;
       const mirrorDigest = advanceAssignmentInteractionMirrorDigest(
         state.validation.interactionMirrorDigest,
         {
@@ -1619,7 +1677,7 @@ export class ConversationAssignmentLedger implements
         entries: [assignmentRecord(assignmentId, entry)],
         value: { recordSeq: entry.recordSeq, ordinal, mirrorDigest },
       };
-    });
+    }, [], false, [], { history: () => ({ requests: [requestId] }) });
     if (transaction.value.existing) {
       return mirrorEntry(transaction.value.existing);
     }
@@ -1682,7 +1740,7 @@ export class ConversationAssignmentLedger implements
       return finished
         ? snapshot(finished.body.outcome, "Interaction outcome")
         : undefined;
-    });
+    }, () => ({ requests: [requestId] }));
   }
 
   async conversationInteractionOutcome(
@@ -1706,7 +1764,7 @@ export class ConversationAssignmentLedger implements
             "Interaction outcome",
           )
         : undefined;
-    });
+    }, () => ({ requests: [requestId] }));
   }
 
   async pendingInteractionRequests(
@@ -1722,46 +1780,19 @@ export class ConversationAssignmentLedger implements
     );
   }
 
+  /**
+   * 交互流事件（按记录序号）。调用方只消费 afterRecordSeq 之后的事件：内存状态省去的交互记录都在该位置之前时
+   * 直接从内存给出；否则临时完整重放这个分派取事件（不缓存）。不传时给出完整事件。
+   */
   async interactionStreamEvents(
     assignmentId: string,
+    afterRecordSeq = 0,
   ): Promise<readonly DurableInteractionStreamEvent[]> {
-    return this.#select(assignmentId, (state) => {
-      const events: DurableInteractionStreamEvent[] = [];
-      for (const requested of state.requested.values()) {
-        events.push({
-          recordSeq: requested.recordSeq,
-          payload: {
-            kind: "interaction",
-            event: {
-              t: "requested",
-              requestId: requested.body.requestId,
-              toolName: requested.body.toolName,
-              display: snapshot(
-                requested.body.display,
-                "Interaction stream display",
-              ),
-              issuedAt: requested.body.issuedAt,
-              ttlMs: requested.body.ttlMs,
-              expiresAt: requested.body.expiresAt,
-            },
-          },
-        });
-      }
-      for (const finished of state.finished.values()) {
-        events.push({
-          recordSeq: finished.recordSeq,
-          payload: {
-            kind: "interaction",
-            event: {
-              t: "finished",
-              requestId: finished.body.requestId,
-              outcome: streamInteractionOutcome(finished.body.outcome),
-            },
-          },
-        });
-      }
-      return events.sort((left, right) => left.recordSeq - right.recordSeq);
-    });
+    const local = await this.#select(assignmentId, (state) =>
+      (state.historyInteractionUpTo ?? 0) > afterRecordSeq ? undefined : interactionStreamEventsOf(state));
+    if (local) return local;
+    const full = await this.#repeatPrepared(() => this.#operations.run(() => this.#recoverProjections([assignmentId], false, true)));
+    return interactionStreamEventsOf(full.states.get(assignmentId)!);
   }
 
   async prepareInteractionAnswerFromSurface(input: {
@@ -1780,7 +1811,7 @@ export class ConversationAssignmentLedger implements
     });
     const existing = await this.#select(input.assignmentId, (state) =>
       state.finished.get(input.requestId),
-    );
+    () => ({ requests: [input.requestId] }));
     if (existing) {
       if (
         canonicalize(existing.body.outcome) !== canonicalize(expectedOutcome)
@@ -1841,7 +1872,7 @@ export class ConversationAssignmentLedger implements
         state.phase === "started" &&
         state.aborts.length === 0 &&
         !state.supersedeFence,
-    }));
+    }), () => ({ requests: [input.requestId] }));
     assertAnsweredInteractionAuthority(
       { via: "channel-grant", grant },
       {
@@ -2029,9 +2060,12 @@ export class ConversationAssignmentLedger implements
       throw new TypeError("Interaction mirror ordinal must be a positive safe integer");
     }
     await this.#transact<void>(assignmentId, (state) => {
-      const finishedIndex = state.finishedIndexBySeq.get(receipt.mirroredUpTo);
+      // 已镜像的项可能已按键省去：过期回执按键补入后照原样判定
+      const historic = state.historicMirror?.get(receipt.mirroredUpTo);
+      const finishedIndex = state.finishedIndexBySeq.get(receipt.mirroredUpTo) ??
+        (historic ? historic.ordinal - 1 : undefined);
       const finished =
-        finishedIndex === undefined ? undefined : state.finishedOrder[finishedIndex];
+        finishedIndex === undefined ? undefined : finishedAt(state, finishedIndex) ?? historic;
       if (
         finishedIndex === undefined ||
         !finished ||
@@ -2060,7 +2094,7 @@ export class ConversationAssignmentLedger implements
         ],
         value: undefined,
       };
-    });
+    }, [], false, [], { history: () => ({ mirrorSeqs: [receipt.mirroredUpTo] }) });
   }
 
   async enableInteractionStreamProjection(
@@ -2279,7 +2313,7 @@ export class ConversationAssignmentLedger implements
         lastStreamSeq: state.lastInteractionStreamSeq,
         streamDigest: state.interactionStreamDigest,
         ledgerChainDigest:
-          state.ledgerBySeq[state.lastStreamProjectionRecordSeq - 1]!,
+          state.lastStreamProjectionDigest!,
         signer: this.#signer,
       });
     });
@@ -2317,7 +2351,7 @@ export class ConversationAssignmentLedger implements
         };
       }
       let nextSeq = state.lastSeq;
-      let ordinal = state.finishedOrder.length;
+      let ordinal = finishedCount(state);
       const appended = toResolve.map((request) => {
         const outcome: InteractionOutcome =
           terminal || cancellation
@@ -2809,8 +2843,15 @@ export class ConversationAssignmentLedger implements
     this.#receiptsSettledAt = undefined;
     // End the governor read before entering ledger -> governor -> authority locks.
     const candidates = await this.#resources!.activeAssignmentReceipts();
+    // 只有尚未开始且已接收的分派才可能需要释放：先读小阶段行排除其余，不为它们重放历史。没有阶段行的照原路径核对
+    const phases = candidates.length === 0 ? new Map() : (await this.#repeatPrepared(() => this.#log.transactDurableProjection<unknown, ReadonlyMap<string, { readonly started: boolean; readonly received: boolean }>>(
+      ASSIGNMENT_LEDGER_INDEX_ID,
+      async current => ({ kind: "return", value: await readAssignmentPhases(current, candidates.map(lease => lease.activation.assignmentId)) }),
+    ))).value;
     let released = 0;
     for (const lease of candidates) {
+      const phase = phases.get(lease.activation.assignmentId);
+      if (phase && (phase.started || !phase.received)) continue;
       const result = await this.#transact(lease.activation.assignmentId, state => {
         if (!state.supersedeFence || state.started || !state.received ||
           canonicalize(state.received.resourceLease) !== canonicalize(lease))
@@ -2833,6 +2874,7 @@ export class ConversationAssignmentLedger implements
     const phases = new Set<LedgerSnapshot["phase"]>(["received", "sealed"]);
     return this.#conversationAssignmentsMatching(
       (state) => phases.has(state.phase) && state.aborts.length === 0,
+      (candidate) => phases.has(candidate.phase) && candidate.aborts === 0,
     );
   }
 
@@ -2847,6 +2889,11 @@ export class ConversationAssignmentLedger implements
         (state.phase === "received" ||
           state.phase === "started" ||
           state.phase === "halted"),
+      (candidate) =>
+        candidate.ticketAbortPending &&
+        (candidate.phase === "received" ||
+          candidate.phase === "started" ||
+          candidate.phase === "halted"),
     );
   }
 
@@ -3124,24 +3171,39 @@ export class ConversationAssignmentLedger implements
   async #conversationAssignmentsInPhases(
     phases: ReadonlySet<LedgerSnapshot["phase"]>,
   ): Promise<readonly ConversationEnvelope[]> {
-    return this.#conversationAssignmentsMatching((state) =>
-      phases.has(state.phase),
+    return this.#conversationAssignmentsMatching(
+      (state) => phases.has(state.phase),
+      (candidate) => phases.has(candidate.phase),
     );
   }
 
+  /**
+   * predicate 是完整核对用的原条件；classify 是同一条件在候选行分类上的等价写法，只用来排除确定不属于本类的
+   * 候选。两者必须一致：classify 判否的候选，按完整状态 predicate 也必然为否（阶段与取消请求按同一校验状态机推进）。
+   */
   async #conversationAssignmentsMatching(
     predicate: (state: LedgerProjection) => boolean,
+    classify: (classification: RecoveryCandidateClass) => boolean,
   ): Promise<readonly ConversationEnvelope[]> {
     const envelopes: ConversationEnvelope[] = [];
     for (
-      const { assignmentId, envelopeRef } of
-      await this.#assignmentEnvelopeRefsMatching(predicate)
+      const { assignmentId, envelopeRef, indexed } of
+      await this.#assignmentEnvelopeRefsMatching(predicate, classify)
     ) {
       const envelope = await this.#loadConversationEnvelope(
         assignmentId,
         envelopeRef,
       );
-      if (envelope) envelopes.push(envelope);
+      if (!envelope) continue;
+      if (indexed) {
+        // 未经重放的命中：补做重放时 received 分支对本执行端绑定与制品当前在场的同样核对，缺失照原样报告
+        if (envelope.executorId !== this.#executorId ||
+            canonicalize(dispatchEnvelopeArtifact(envelope).ref) !== canonicalize(envelopeRef)) {
+          throw corruptLedger("received dispatch targets a different assignment or executor");
+        }
+        await this.#assertEnvelopeArtifactsPresent(envelope);
+      }
+      envelopes.push(envelope);
     }
     return envelopes;
   }
@@ -3170,23 +3232,52 @@ export class ConversationAssignmentLedger implements
 
   async #assignmentEnvelopeRefsMatching(
     predicate: (state: LedgerProjection) => boolean,
+    classify: (classification: RecoveryCandidateClass) => boolean,
   ): Promise<
     readonly {
       readonly assignmentId: string;
       readonly envelopeRef: ArtifactRef;
+      readonly indexed?: true;
     }[]
   > {
-    // 只遍历对话恢复候选目录（三个恢复查询的并集），候选再按调用方的原条件逐个核对
-    const assignmentIds = (await this.#repeatPrepared(() => this.#log.transactDurableProjection<unknown, readonly string[]>(
+    // 只遍历对话恢复候选目录（三个恢复查询的并集）。候选行带同一提交写下的恢复分类：分类确定不属于本类的
+    // 直接排除，不读整份状态、不重放；其余（属于本类、没有分类或 corrupt）离开索引读事务后按原条件逐个完整核对
+    const candidates = (await this.#repeatPrepared(() => this.#log.transactDurableProjection<unknown, readonly { readonly assignmentId: string; readonly classification?: RecoveryCandidateClass; readonly envelopeRef?: unknown }[]>(
       ASSIGNMENT_LEDGER_INDEX_ID,
-      async current => ({ kind: "return", value: await readRecoveryCandidates(current) }),
+      async current => ({ kind: "return", value: await readRecoveryCandidateClasses(current) }),
     ))).value;
     const refs: Array<{
       readonly assignmentId: string;
       readonly envelopeRef: ArtifactRef;
+      readonly indexed?: true;
     }> = [];
-    for (const assignmentId of [...assignmentIds].sort((left, right) =>
-      left.localeCompare(right, "en-US"))) {
+    const selected = candidates
+      .filter(({ classification }) => classification === undefined || classify(classification))
+      .sort((left, right) => left.assignmentId.localeCompare(right.assignmentId, "en-US"));
+    // 分类命中的候选先取经严格完整校验的决定状态（锁外；含 received 的激活绑定、资源回执与租约时钟伴随核对），
+    // 再在同一索引读视图里核对该分派在决定状态之后没有新信封：此时决定状态就是它当下的严格状态，按原条件判定，
+    // 信封引用取自它，由调用方读取信封时补做执行端身份与制品在场核对。有新信封（尾部未经严格校验）或没有决定
+    // 状态的，照原路径严格续算并重核条件；不拿候选行与旧快照拼接
+    const decided = new Map<string, DecisionState>();
+    for (const { assignmentId, classification } of selected) {
+      if (!classification) continue;
+      const saved = (await this.#loadDecisionStates([assignmentId])).get(assignmentId);
+      if (saved) decided.set(assignmentId, saved);
+    }
+    const current = decided.size === 0 ? new Set<string>() : (await this.#repeatPrepared(() =>
+      this.#log.transactDurableProjection<unknown, ReadonlySet<string>>(ASSIGNMENT_LEDGER_INDEX_ID, async view => {
+        const unchanged = new Set<string>();
+        for (const [assignmentId, saved] of decided) {
+          if (!await assignmentChangedAfter(view, assignmentId, saved.coveredLsn)) unchanged.add(assignmentId);
+        }
+        return { kind: "return", value: unchanged };
+      }))).value;
+    for (const { assignmentId } of selected) {
+      const saved = current.has(assignmentId) ? decided.get(assignmentId)!.state : undefined;
+      if (saved) {
+        if (predicate(saved) && saved.received) refs.push({ assignmentId, envelopeRef: saved.received.body.envelope.ref, indexed: true });
+        continue;
+      }
       const envelopeRef = await this.#select(assignmentId, (state) =>
         predicate(state) && state.received
           ? state.received.body.envelope.ref
@@ -3730,7 +3821,7 @@ export class ConversationAssignmentLedger implements
             ...(decision === "halted"
               ? {
                   decision: "halted" as const,
-                  lastEffectSeq: Math.max(0, ...state.sideEffects.keys()),
+                  lastEffectSeq: state.validation.sideEffectCount,
                 }
               : { decision: "not-started" as const }),
           },
@@ -3917,39 +4008,45 @@ export class ConversationAssignmentLedger implements
   async #select<Value>(
     assignmentId: string,
     select: (state: LedgerProjection) => Value,
+    history?: (state: LedgerProjection) => AssignmentHistoryNeeds,
   ): Promise<Value> {
     assertIdentifier(assignmentId, "Assignment id");
     return this.#repeatPrepared(() => this.#operations.run(async () => {
       let state: LedgerProjection;
-      try {
-        const cached = this.#takeCachedProjection(assignmentId) ?? await this.#recoverProjection(assignmentId);
-        // 只重放这个分派自己的流；当前租约时钟在同一位置从时钟投影读出
-        const transaction = await this.#log.transactProjection<
-          LedgerProjection,
-          AssignmentEntry,
-          LeaseClockSummary
-        >(
-          cached.state,
-          (state, record, envelope) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, envelope),
-          async (_state, context) => ({
-            kind: "return",
-            value: await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)),
-          }),
-          {
-            streams: [assignmentStream(assignmentId)],
-            cursor: cached.cursor,
-            readProjectionIds: [this.#leaseClockProjectionId],
-          },
-        );
-        withLeaseClock(transaction.state, transaction.value);
-        this.#cacheProjection(assignmentId, {
-          state: transaction.state,
-          cursor: transaction.cursor,
-        });
-        state = transaction.state;
-      } catch (error) {
-        this.#projections.delete(assignmentId);
-        throw error;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const cached = this.#takeCachedProjection(assignmentId) ?? await this.#recoverProjection(assignmentId);
+          const keyed = history !== undefined && omitsHistory(cached.state);
+          // 只重放这个分派自己的流；当前租约时钟在同一位置从时钟投影读出，所需的已完成历史也在同一位置按键补入
+          const transaction = await this.#log.transactProjection<
+            LedgerProjection,
+            AssignmentEntry,
+            LeaseClockSummary
+          >(
+            cached.state,
+            (state, record, envelope) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, envelope),
+            async (state, context) => {
+              if (keyed) await this.#hydrateHistory(state, context.readProjection(ASSIGNMENT_LEDGER_INDEX_ID), history!(state));
+              return { kind: "return", value: await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)) };
+            },
+            {
+              streams: [assignmentStream(assignmentId)],
+              cursor: cached.cursor,
+              readProjectionIds: keyed ? [this.#leaseClockProjectionId, ASSIGNMENT_LEDGER_INDEX_ID] : [this.#leaseClockProjectionId],
+            },
+          );
+          withLeaseClock(transaction.state, transaction.value);
+          this.#cacheProjection(assignmentId, {
+            state: transaction.state,
+            cursor: transaction.cursor,
+          });
+          state = transaction.state;
+          break;
+        } catch (error) {
+          this.#projections.delete(assignmentId);
+          if (error instanceof HistoryLookupRequired && attempt === 0) continue;
+          throw error;
+        }
       }
       return select(state);
     }));
@@ -3997,27 +4094,204 @@ export class ConversationAssignmentLedger implements
   async #recoverProjections(
     assignmentIds: readonly string[],
     receiptRetirement = false,
+    fullHistory = false,
   ): Promise<{ readonly states: ReadonlyMap<string, LedgerProjection>; readonly cursor: ProjectionCursor }> {
-    const read = await this.#log.transactDurableProjection<unknown, ReadonlyMap<string, readonly CommitEnvelope<unknown>[]>>(
+    // 严格视图且不要求完整历史时，先取各分派经认证的决定状态（锁外），索引读事务里只读它覆盖位置之后的信封
+    const decisions = receiptRetirement || fullHistory ? new Map<string, DecisionState>() : await this.#loadDecisionStates(assignmentIds);
+    type Recovered = { readonly envelopes: readonly CommitEnvelope<unknown>[]; readonly keyed: boolean;
+      readonly history?: Awaited<ReturnType<typeof readAssignmentHistory>> };
+    const read = await this.#log.transactDurableProjection<unknown, ReadonlyMap<string, Recovered>>(
       ASSIGNMENT_LEDGER_INDEX_ID,
       async current => {
-        const envelopes = new Map<string, readonly CommitEnvelope<unknown>[]>();
-        for (const assignmentId of assignmentIds) envelopes.set(assignmentId, await readAssignmentEnvelopes(current, assignmentId));
-        return { kind: "return", value: envelopes };
+        const recovered = new Map<string, Recovered>();
+        for (const assignmentId of assignmentIds) {
+          const saved = decisions.get(assignmentId);
+          if (saved) {
+            // 尾部的交互请求在同一读视图里按键预取：决定状态之前已用过的 ID 照完整重放一样参与去重
+            const envelopes = await readAssignmentEnvelopesAfter(current, assignmentId, saved.coveredLsn);
+            const requests = omitsHistory(saved.state) ? tailInteractionRequestIds(assignmentId, envelopes) : [];
+            recovered.set(assignmentId, { envelopes, keyed: saved.state.keyed === true,
+              ...(requests.length > 0 ? { history: await readAssignmentHistory(current, assignmentId, { requests }, saved.state.historyBase!) } : {}) });
+          } else {
+            const envelopes = await readAssignmentEnvelopes(current, assignmentId);
+            // 尚无记录的分派由本格式写下第一条；已有记录而无标记的是本格式之前创建的，照旧保存完整集合
+            recovered.set(assignmentId, { envelopes, keyed: envelopes.length === 0 || await hasAssignmentHistoryKeys(current, assignmentId) });
+          }
+        }
+        return { kind: "return", value: recovered };
       },
     );
     const states = new Map<string, LedgerProjection>();
     for (const assignmentId of assignmentIds) {
+      const saved = decisions.get(assignmentId);
+      const recovered = read.value.get(assignmentId)!;
+      if (saved) {
+        // 从已严格校验的决定状态起，只归约之后的增量（逐条完整校验），再按调用方重做仍依赖的制品在场核对。
+        // 出错时丢弃这份决定状态并完整重放一次：记录不合法就报完整重放的结论；完整重放成立则如实报告这次的错误
+        try {
+          let state = restoreDecisionState(saved.state);
+          if (omitsHistory(state)) {
+            await this.#applyHistory(state, tailInteractionRequestIds(assignmentId, recovered.envelopes), [], [], recovered.history);
+          }
+          const stream = assignmentStream(assignmentId);
+          for (const envelope of recovered.envelopes) {
+            for (const record of envelope.entries) {
+              if (record.stream === stream) state = await this.#reduce(state, record, envelope, receiptRetirement);
+            }
+          }
+          await this.#recheckRestoredState(state);
+          states.set(assignmentId, state);
+          this.#scheduleDecisionSave(assignmentId, state, read.cursor);
+          continue;
+        } catch (error) {
+          this.#decisionPending.delete(assignmentId);
+          await this.#recoverProjections([assignmentId], receiptRetirement, true);
+          throw error;
+        }
+      }
+      // 没有可用的决定状态：从空状态逐条完整校验重放（原路径），成立后写下决定状态，下次只追平尾部
       const stream = assignmentStream(assignmentId);
       let state = emptyProjection(assignmentId);
-      for (const envelope of read.value.get(assignmentId)!) {
+      if (recovered.keyed) state.keyed = true;
+      for (const envelope of recovered.envelopes) {
         for (const record of envelope.entries) {
           if (record.stream === stream) state = await this.#reduce(state, record, envelope, receiptRetirement);
         }
       }
       states.set(assignmentId, state);
+      // 退休视图不核对执行制品闭包，它的结果不能当作严格决定状态保存
+      if (!receiptRetirement) this.#scheduleDecisionSave(assignmentId, state, read.cursor);
     }
     return { states, cursor: read.cursor };
+  }
+
+  #decisionStateKey(assignmentId: string): string {
+    return `${projectionCheckpointKey("executor-assignment-decision", LEDGER_DECISION_STATE_VERSION,
+      this.#reduce, validateAssignmentEntry, applyValidatedAssignmentEntry, emptyProjection)}:${this.#executorId}:${assignmentId}`;
+  }
+
+  /**
+   * 读取各分派经日志认证（MAC、日志身份、已核验帧链边界）的决定状态；尚未落盘的最新一份优先。
+   * 形态不符、不属于该分派或覆盖位置越过检查点边界的一律不用，由调用方完整重放。
+   */
+  async #loadDecisionStates(assignmentIds: readonly string[]): Promise<Map<string, DecisionState>> {
+    const decisions = new Map<string, DecisionState>();
+    for (const assignmentId of assignmentIds) {
+      const pending = this.#decisionPending.get(assignmentId);
+      if (pending) { decisions.set(assignmentId, { coveredLsn: pending.cursor.lsn, state: pending.state }); continue; }
+      const saved = await this.#log.loadProjectionCheckpoint?.<unknown>(this.#decisionStateKey(assignmentId));
+      const item = saved?.state as { coveredLsn?: unknown; state?: LedgerProjection } | undefined;
+      if (saved && item && Number.isSafeInteger(item.coveredLsn) && (item.coveredLsn as number) > 0 &&
+          (item.coveredLsn as number) <= saved.cursor.lsn && item.state && typeof item.state === "object" &&
+          item.state.assignmentId === assignmentId && Number.isSafeInteger(item.state.lastSeq) && item.state.lastSeq > 0) {
+        decisions.set(assignmentId, { coveredLsn: item.coveredLsn as number, state: item.state });
+      }
+    }
+    return decisions;
+  }
+
+  /**
+   * 从决定状态恢复后，补做完整重放时 received 与仍未结的交互请求所做的制品在场核对：认证日志不能代替制品当前在场。
+   * 已完成交互的显示制品不再被当前义务读取，不在这里核对。
+   */
+  async #recheckRestoredState(state: LedgerProjection): Promise<void> {
+    if (state.received) {
+      const envelope = await this.#loadAssignmentEnvelope(state.assignmentId, state.received.body.envelope.ref);
+      if (envelope.executorId !== this.#executorId) {
+        throw corruptLedger("received dispatch targets a different assignment or executor");
+      }
+      await this.#assertEnvelopeArtifactsPresent(envelope);
+    }
+    for (const request of state.pendingRequests.values()) {
+      await materializeInteractionDisplay(request.body.display, this.#artifacts);
+    }
+  }
+
+  /**
+   * 在同一锁定前缀按键补入 decide 需要的已完成历史。只在省略态（已完成历史不在内存）时读取，已在内存或已核过的跳过。
+   */
+  async #hydrateHistory(state: LedgerProjection, view: DurableProjectionReadContext, needs: AssignmentHistoryNeeds): Promise<void> {
+    const requests = (needs.requests ?? []).filter(id => !state.requested.has(id) && !state.historyChecked?.has(id));
+    const effects = (needs.effects ?? []).filter(effectSeq => !state.sideEffects.has(effectSeq));
+    const mirrorSeqs = (needs.mirrorSeqs ?? []).filter(seq => !state.finishedIndexBySeq.has(seq) && !state.historicMirror?.has(seq));
+    if (requests.length === 0 && effects.length === 0 && mirrorSeqs.length === 0) return;
+    const rows = await readAssignmentHistory(view, state.assignmentId, { requests, effects, mirrorSeqs }, state.historyBase!);
+    await this.#applyHistory(state, requests, effects, mirrorSeqs, rows);
+  }
+
+  /**
+   * 把按键取到的已完成历史放回内存：请求照完整重放一样进入去重集合并核对显示制品在场，已有结果的一并放入；
+   * 查过的请求 ID（含查无此键的）记为已核，之后的归约据此判断首次使用。
+   */
+  async #applyHistory(
+    state: LedgerProjection,
+    requests: readonly string[],
+    effects: readonly number[],
+    mirrorSeqs: readonly number[],
+    rows: Awaited<ReturnType<typeof readAssignmentHistory>> | undefined,
+  ): Promise<void> {
+    const checked = state.historyChecked ??= new Set();
+    for (const requestId of requests) {
+      checked.add(requestId);
+      const found = rows?.requests.get(requestId);
+      if (!found) continue;
+      const body = found.body as unknown as RequestedInteraction["body"];
+      await materializeInteractionDisplay(body.display, this.#artifacts);
+      state.requested.set(requestId, { body, recordSeq: found.seq });
+      state.validation.requestedInteractions.add(requestId);
+      if (found.finished) state.finished.set(requestId, found.finished as unknown as FinishedInteraction);
+    }
+    for (const effectSeq of effects) {
+      const found = rows?.effects.get(effectSeq);
+      if (!found) continue;
+      state.sideEffects.set(effectSeq, {
+        started: found.started as unknown as Extract<AssignmentRecord, { t: "side-effect-started" }>,
+        ...(found.completed ? { completed: found.completed as unknown as Extract<AssignmentRecord, { t: "side-effect-completed" }> } : {}),
+      });
+    }
+    for (const seq of mirrorSeqs) {
+      const found = rows?.mirror.get(seq);
+      if (found) (state.historicMirror ??= new Map()).set(seq, found as unknown as MirrorChainItem);
+    }
+  }
+
+  /**
+   * 合并落盘严格决定状态：多次冷恢复与提交在一个间隔内每个分派只写一次。保存件按字段挑选（见 decisionSnapshot），
+   * 不先整份复制历史。已终结的分派删除它的检查点，文件数随实际未决的分派而不随历史增长。只是缓存，未写或失败都无妨。
+   */
+  #scheduleDecisionSave(assignmentId: string, state: LedgerProjection, cursor: ProjectionCursor): void {
+    if (!this.#log.saveProjectionCheckpoint || state.lastSeq <= 0) return;
+    this.#decisionPending.set(assignmentId, { state: decisionSnapshot(state), cursor });
+    if (this.#decisionSave) return;
+    this.#decisionSave = setTimeout(() => {
+      this.#decisionSave = undefined;
+      void this.#writeDecisionStates();
+    }, DECISION_STATE_SAVE_DELAY_MS);
+    this.#decisionSave.unref?.();
+  }
+
+  #writeDecisionStates(): Promise<void> {
+    const batch = [...this.#decisionPending];
+    this.#decisionPending.clear();
+    this.#decisionWrite = this.#decisionWrite.then(async () => {
+      for (const [id, { state: item, cursor: at }] of batch) {
+        if (item.phase === "acked" || item.phase === "dispatch-rejected") {
+          await this.#log.deleteProjectionCheckpoint?.(this.#decisionStateKey(id))?.catch(() => {});
+        } else {
+          await this.#log.saveProjectionCheckpoint?.(this.#decisionStateKey(id), at, { coveredLsn: at.lsn, state: item })?.catch(() => {});
+        }
+      }
+    });
+    return this.#decisionWrite;
+  }
+
+  /** 立即写下待落盘的决定状态并等待写完（含已在写的一批）：调用方据此确定检查点是否存在，不依赖合并间隔。 */
+  async flushDecisionStates(): Promise<void> {
+    if (this.#decisionSave) {
+      clearTimeout(this.#decisionSave);
+      this.#decisionSave = undefined;
+    }
+    await this.#writeDecisionStates();
   }
 
   async #transact<Value>(
@@ -4029,57 +4303,66 @@ export class ConversationAssignmentLedger implements
     candidateReferences: readonly ArtifactRef[] = [],
     receiptRetirement = false,
     readProjectionIds: readonly string[] = [],
-    options: { readonly resourcePreparation?: NonNullable<ExecutorCoordinationOptions["prepare"]> } = {},
+    options: {
+      readonly resourcePreparation?: NonNullable<ExecutorCoordinationOptions["prepare"]>;
+      /** decide 需要的已完成历史（请求 ID、副作用序号、镜像链序号）：省略态的状态在同一锁定前缀按键补入 */
+      readonly history?: (state: LedgerProjection) => AssignmentHistoryNeeds;
+    } = {},
   ) {
     assertIdentifier(assignmentId, "Assignment id");
     return this.#repeatPrepared(() => this.#operations.run(async () => {
-      try {
-        // 退休视图不沿用缓存：它不核对执行制品闭包，归约结果与正常视图不同
-        const cached = (receiptRetirement ? undefined : this.#takeCachedProjection(assignmentId)) ??
-          await this.#recoverProjection(assignmentId, receiptRetirement);
-        const transact = () => this.#log.transactProjection<
-          LedgerProjection,
-          unknown,
-          Value
-        >(
-          cached.state,
-          (state, record, commit) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, commit, receiptRetirement),
-          async (state, context) => {
-            withLeaseClock(state, await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)));
-            const decision = await decide(state, context);
-            if (decision.kind !== "append") return decision;
-            const resourceRecords = this.#prepareResourceTerminalRecords(
-              state,
-              decision.entries,
-            );
-            return {
-              ...decision,
-              entries: [...resourceRecords, ...this.#leaseCompanions(decision.entries), ...decision.entries],
-            };
-          },
-          {
-            streams: [assignmentStream(assignmentId)],
-            cursor: cached.cursor,
-            candidateReferences,
-            readProjectionIds: [...readProjectionIds, this.#leaseClockProjectionId],
-          },
-        );
-        const transaction = await (
-          this.#resources
-            ? this.#resources.coordinate(transact, { caller: "assignment-ledger", ...(options.resourcePreparation ? { prepare: options.resourcePreparation } : {}) })
-            : transact()
-        );
-        // A retirement view never certifies the execution artifact closure.
-        if (!receiptRetirement) this.#cacheProjection(assignmentId, {
-          state: transaction.state,
-          cursor: transaction.cursor,
-        });
-        return transaction;
-      } catch (error) {
-        if (!receiptRetirement) {
-          this.#projections.delete(assignmentId);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          // 退休视图不沿用缓存：它不核对执行制品闭包，归约结果与正常视图不同
+          const cached = (receiptRetirement ? undefined : this.#takeCachedProjection(assignmentId)) ??
+            await this.#recoverProjection(assignmentId, receiptRetirement);
+          const keyed = options.history !== undefined && omitsHistory(cached.state);
+          const transact = () => this.#log.transactProjection<
+            LedgerProjection,
+            unknown,
+            Value
+          >(
+            cached.state,
+            (state, record, commit) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, commit, receiptRetirement),
+            async (state, context) => {
+              withLeaseClock(state, await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)));
+              if (keyed) await this.#hydrateHistory(state, context.readProjection(ASSIGNMENT_LEDGER_INDEX_ID), options.history!(state));
+              const decision = await decide(state, context);
+              if (decision.kind !== "append") return decision;
+              const resourceRecords = this.#prepareResourceTerminalRecords(
+                state,
+                decision.entries,
+              );
+              return {
+                ...decision,
+                entries: [...resourceRecords, ...this.#leaseCompanions(decision.entries), ...decision.entries],
+              };
+            },
+            {
+              streams: [assignmentStream(assignmentId)],
+              cursor: cached.cursor,
+              candidateReferences,
+              readProjectionIds: [...readProjectionIds, this.#leaseClockProjectionId, ...(keyed ? [ASSIGNMENT_LEDGER_INDEX_ID] : [])],
+            },
+          );
+          const transaction = await (
+            this.#resources
+              ? this.#resources.coordinate(transact, { caller: "assignment-ledger", ...(options.resourcePreparation ? { prepare: options.resourcePreparation } : {}) })
+              : transact()
+          );
+          // A retirement view never certifies the execution artifact closure.
+          if (!receiptRetirement) this.#cacheProjection(assignmentId, {
+            state: transaction.state,
+            cursor: transaction.cursor,
+          });
+          return transaction;
+        } catch (error) {
+          if (!receiptRetirement) {
+            this.#projections.delete(assignmentId);
+          }
+          if (error instanceof HistoryLookupRequired && attempt === 0) continue;
+          throw error;
         }
-        throw error;
       }
     }));
   }
@@ -4140,6 +4423,8 @@ export class ConversationAssignmentLedger implements
     cached: { readonly state: LedgerProjection; readonly cursor: ProjectionCursor },
   ): void {
     this.#projections.set(assignmentId, cached);
+    // 同一状态也作为严格决定状态落盘：下次冷恢复从它起只追平之后的尾部
+    this.#scheduleDecisionSave(assignmentId, cached.state, cached.cursor);
     while (this.#projections.size > this.#maxCachedAssignments) {
       const oldest = this.#projections.keys().next().value as string | undefined;
       if (oldest === undefined) break;
@@ -4155,6 +4440,14 @@ export class ConversationAssignmentLedger implements
   ): Promise<LedgerProjection> => {
     if (record.stream !== assignmentStream(state.assignmentId)) {
       throw corruptLedger("Assignment projection received a different stream");
+    }
+    // 省略态：尾部出现尚未按键核过的交互请求 ID（他方写入）时，回到带预取的冷恢复，去重才与完整重放一致
+    if (omitsHistory(state)) {
+      const raw = (record.body as { readonly body?: { readonly t?: unknown; readonly requestId?: unknown } } | null)?.body;
+      if (raw?.t === "interaction-requested" && typeof raw.requestId === "string" &&
+          !state.validation.requestedInteractions.has(raw.requestId) && !state.historyChecked?.has(raw.requestId)) {
+        throw new HistoryLookupRequired();
+      }
     }
     const entry = await verifyProtocolStep(() => validateAssignmentEntry(record.body, this.#verifier));
     if (entry.recordSeq !== state.lastSeq + 1) {
@@ -4354,6 +4647,7 @@ export class ConversationAssignmentLedger implements
     }
     state.entries.push(entry);
     state.ledgerBySeq.push(digest);
+    if (entry.body.t === "interaction-stream-projected") state.lastStreamProjectionDigest = digest;
     return state;
   };
 
@@ -4434,6 +4728,90 @@ function authorityForExecutionRef(
       };
 }
 
+/**
+ * 保存用的决定状态：按字段挑出当下需要的部分再复制，不先整份复制历史。
+ * - 已完成历史按键可取（keyed）时只留计数、续链摘要与未了结的义务：未结交互请求、未镜像的镜像链后缀、未完成的
+ *   副作用，以及暂存变更（封存并确认前都是待交付的输出，acked 时检查点整份删除）。job 已启用交互流投影时，
+ *   投影位置之后的交互项仍是投影义务，一并保留。
+ * - 本格式之前创建的分派没有按键行，照旧保存完整集合，只去掉随记录增长的 entries 与 ledgerBySeq。
+ */
+function decisionSnapshot(state: LedgerProjection): LedgerProjection {
+  const {
+    entries: _entries, ledgerBySeq: _ledgerBySeq, historyChecked: _checked, historicMirror: _historic,
+    requested, finished, finishedOrder, finishedIndexBySeq, sideEffects, validation, ...rest
+  } = state;
+  if (!state.keyed) {
+    return structuredClone({ ...rest, validation, requested, finished, finishedOrder, finishedIndexBySeq, sideEffects,
+      entries: [], ledgerBySeq: [], historyBase: state.lastSeq });
+  }
+  const streamFloor = state.received?.body.activation.ref.execution === "job" && state.streamProjectionEnabledAfter !== undefined
+    ? state.streamProjectedUpTo : Number.POSITIVE_INFINITY;
+  let omittedUpTo = state.historyInteractionUpTo ?? 0;
+  const keptRequested = new Map<string, RequestedInteraction>();
+  for (const [requestId, item] of requested) {
+    if (state.pendingRequests.has(requestId) || item.recordSeq > streamFloor) keptRequested.set(requestId, item);
+    else omittedUpTo = Math.max(omittedUpTo, item.recordSeq);
+  }
+  const keptFinished = new Map<string, FinishedInteraction>();
+  for (const [requestId, item] of finished) {
+    if (item.recordSeq > streamFloor) keptFinished.set(requestId, item);
+    else omittedUpTo = Math.max(omittedUpTo, item.recordSeq);
+  }
+  const base = state.finishedBase ?? 0;
+  const keepFrom = Math.max(base, state.mirroredFinishedCount);
+  const keptIndex = new Map([...finishedIndexBySeq].filter(([, index]) => index >= keepFrom));
+  const keptEffects = new Map([...sideEffects].filter(([, effect]) => !effect.completed));
+  return structuredClone({
+    ...rest,
+    validation: { ...validation, requestedInteractions: new Set(keptRequested.keys()) },
+    requested: keptRequested,
+    finished: keptFinished,
+    finishedOrder: finishedOrder.slice(keepFrom - base),
+    finishedIndexBySeq: keptIndex,
+    finishedBase: keepFrom,
+    sideEffects: keptEffects,
+    entries: [],
+    ledgerBySeq: [],
+    historyBase: state.lastSeq,
+    historyInteractionUpTo: omittedUpTo,
+  });
+}
+
+/** 恢复用的决定状态：独立拷贝，之后归约追加的记录从 historyBase 之后接上。 */
+function restoreDecisionState(state: LedgerProjection): LedgerProjection {
+  return structuredClone(state);
+}
+
+/** 内存状态省去了已完成历史（从按键化的决定状态恢复）：需要的项按键补入。 */
+function omitsHistory(state: LedgerProjection): boolean {
+  return state.keyed === true && (state.historyBase ?? 0) > 0;
+}
+
+/** 尾部信封里该分派的交互请求 ID（按记录顺序，去重前）：冷恢复在索引读事务里据此预取。 */
+function tailInteractionRequestIds(assignmentId: string, envelopes: readonly CommitEnvelope<unknown>[]): string[] {
+  const stream = assignmentStream(assignmentId);
+  const ids = new Set<string>();
+  for (const envelope of envelopes) {
+    for (const record of envelope.entries) {
+      if (record.stream !== stream) continue;
+      const body = (record.body as { readonly body?: { readonly t?: unknown; readonly requestId?: unknown } } | null)?.body;
+      if (body?.t === "interaction-requested" && typeof body.requestId === "string") ids.add(body.requestId);
+    }
+  }
+  return [...ids];
+}
+
+/** 镜像链的全局长度：省去的已镜像前缀加内存中的后缀。 */
+function finishedCount(state: LedgerProjection): number {
+  return (state.finishedBase ?? 0) + state.finishedOrder.length;
+}
+
+/** 镜像链全局下标处的项；落在省去的前缀里时为 undefined。 */
+function finishedAt(state: LedgerProjection, index: number): MirrorChainItem | undefined {
+  const local = index - (state.finishedBase ?? 0);
+  return local >= 0 ? state.finishedOrder[local] : undefined;
+}
+
 function emptyProjection(assignmentId: string): LedgerProjection {
   return {
     assignmentId,
@@ -4469,7 +4847,7 @@ function hasPendingInteractionObligations(state: LedgerProjection): boolean {
   // 镜像义务覆盖整条镜像链（含沉淀）；流投影义务只到最后一条交互结果
   return (
     state.pendingRequests.size > 0 ||
-    state.mirroredFinishedCount !== state.finishedOrder.length ||
+    state.mirroredFinishedCount !== finishedCount(state) ||
     (state.received?.body.activation.ref.execution === "job" &&
       state.streamProjectionEnabledAfter !== undefined &&
       state.streamProjectedUpTo < state.validation.lastFinishedInteractionRecordSeq)
@@ -4493,6 +4871,44 @@ function interactionRecordSeqFromSource(sourceId: string): number {
     );
   }
   return recordSeq;
+}
+
+function interactionStreamEventsOf(state: LedgerProjection): DurableInteractionStreamEvent[] {
+  const events: DurableInteractionStreamEvent[] = [];
+  for (const requested of state.requested.values()) {
+    events.push({
+      recordSeq: requested.recordSeq,
+      payload: {
+        kind: "interaction",
+        event: {
+          t: "requested",
+          requestId: requested.body.requestId,
+          toolName: requested.body.toolName,
+          display: snapshot(
+            requested.body.display,
+            "Interaction stream display",
+          ),
+          issuedAt: requested.body.issuedAt,
+          ttlMs: requested.body.ttlMs,
+          expiresAt: requested.body.expiresAt,
+        },
+      },
+    });
+  }
+  for (const finished of state.finished.values()) {
+    events.push({
+      recordSeq: finished.recordSeq,
+      payload: {
+        kind: "interaction",
+        event: {
+          t: "finished",
+          requestId: finished.body.requestId,
+          outcome: streamInteractionOutcome(finished.body.outcome),
+        },
+      },
+    });
+  }
+  return events.sort((left, right) => left.recordSeq - right.recordSeq);
 }
 
 function interactionProjectionSourceIds(
@@ -4949,7 +5365,7 @@ function applyEntry(
         throw corruptLedger("Validated interaction projection lost its pending request");
       }
       state.finished.set(body.requestId, finished);
-      state.finishedIndexBySeq.set(entry.recordSeq, state.finishedOrder.length);
+      state.finishedIndexBySeq.set(entry.recordSeq, finishedCount(state));
       state.finishedOrder.push(finished);
       return;
     case "trust-sediment": {
@@ -4957,7 +5373,7 @@ function applyEntry(
       if (!sedimentCheckpoint) {
         throw corruptLedger("Validated trust sediment lost its mirror checkpoint");
       }
-      state.finishedIndexBySeq.set(entry.recordSeq, state.finishedOrder.length);
+      state.finishedIndexBySeq.set(entry.recordSeq, finishedCount(state));
       state.finishedOrder.push({
         body,
         recordSeq: entry.recordSeq,
@@ -5211,7 +5627,7 @@ function ledgerEvidencePayload(
   assignmentId: string,
   executorId: string,
   entries: readonly AssignmentEntry[],
-  ledgerBySeq: readonly string[],
+  chainDigestAt: (recordSeq: number) => string,
 ) {
   return {
     v: 1 as const,
@@ -5219,7 +5635,7 @@ function ledgerEvidencePayload(
     fromSeq: entries[0]!.recordSeq,
     toSeq: entries.at(-1)!.recordSeq,
     entries: snapshot([...entries], "Ledger evidence entries"),
-    chainDigest: ledgerBySeq[entries.at(-1)!.recordSeq - 1]!,
+    chainDigest: chainDigestAt(entries.at(-1)!.recordSeq),
     executorId,
   };
 }
@@ -5364,11 +5780,11 @@ function selectPendingInteractionMirrors(
   const entries: InteractionMirrorEntry[] = [];
   for (
     let index = state.mirroredFinishedCount;
-    index < state.finishedOrder.length;
+    index < finishedCount(state);
     index += 1
   ) {
     if (entries.length === 256) break;
-    const finished = state.finishedOrder[index]!;
+    const finished = finishedAt(state, index)!;
     const candidate = mirrorEntry(finished);
     const nextEntries = [...entries, candidate];
     const nextBytes = interactionMirrorRecordCapacityBytes({

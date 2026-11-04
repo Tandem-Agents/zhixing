@@ -52,9 +52,15 @@ const summary = (io: FileIoSnapshot) => {
 };
 type Phase = ReturnType<typeof summary>;
 
+const dropCheckpoints = async (log: FileAuthorityCommitLog, prefix: string) => {
+  for (const key of await log.listProjectionCheckpointKeys(prefix)) await log.deleteProjectionCheckpoint(key);
+};
+
 describe("assignment ledger cold reads with fixed current work and growing ended assignments", () => {
+  // A 组：没有可用检查点（旧资料首次启动），不读任何检查点；B 组：目标派发已有严格决定状态，只读它这一份小状态。
+  // 两组用确定的准备状态区分（写完待落盘的决定状态后按需删除），不依赖合并定时器是否恰好已落盘
   it("bounds binding recovery and recovery discovery by index depth at 64 / 256 / 1024 ended assignments while full reads grow", async () => {
-    const rows: { ended: number; binding: Phase; discovery: Phase; streamReplay: Phase; wholeLog: Phase }[] = [];
+    const rows: { ended: number; binding: Phase; discovery: Phase; bindingKept: Phase; discoveryKept: Phase; streamReplay: Phase; wholeLog: Phase }[] = [];
     for (const ended of [64, 256, 1024]) {
       const h = await createFormalReceiptHarness({ startupProofs: true, monotonicClock: () => 0 });
       const logRoot = path.join(h.root, "formal-executor");
@@ -69,6 +75,8 @@ describe("assignment ledger cold reads with fixed current work and growing ended
       }
       // 当前固定：一个已接收、尚未执行的对话派发
       expect(await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"))).toMatchObject({ accepted: true });
+      await h.ledger.flushDecisionStates();
+      await dropCheckpoints(h.log, "executor-assignment-decision");
       await h.log.stopStorageMaintenance();
 
       const io = await captureFileIo(h.root, categorize);
@@ -89,6 +97,8 @@ describe("assignment ledger cold reads with fixed current work and growing ended
       const [bound] = await first.ledger.dataPlaneBindings([{ assignmentId: ASSIGNMENT_ID, use: "observe" }]);
       expect(bound).toMatchObject({ ref: h.activation.ref, executorId: EXECUTOR_ID });
       const binding = summary(io.snapshot());
+      await first.ledger.flushDecisionStates();
+      await dropCheckpoints(first.cold, "executor-assignment-decision");
       await first.cold.stopStorageMaintenance();
 
       const second = coldLedger();
@@ -96,6 +106,9 @@ describe("assignment ledger cold reads with fixed current work and growing ended
       io.reset();
       expect(await second.ledger.recoverableConversationAssignments()).toEqual([h.envelope]);
       const discovery = summary(io.snapshot());
+      // B 组的准备：保留这次完整重放写下的决定状态，删去绑定检查点，让绑定走冷恢复
+      await second.ledger.flushDecisionStates();
+      await dropCheckpoints(second.cold, "executor-data-plane-bindings");
 
       // 对照：按流从起点重放这个派发、整读日志枚举派发（旧做法）
       io.reset();
@@ -104,24 +117,51 @@ describe("assignment ledger cold reads with fixed current work and growing ended
       io.reset();
       expect((await second.cold.readAll()).length).toBeGreaterThan(ended);
       const wholeLog = summary(io.snapshot());
-      rows.push({ ended, binding, discovery, streamReplay, wholeLog });
+      await second.cold.stopStorageMaintenance();
+
+      const third = coldLedger();
+      await third.cold.prepareProjections();
+      io.reset();
+      const [boundKept] = await third.ledger.dataPlaneBindings([{ assignmentId: ASSIGNMENT_ID, use: "observe" }]);
+      expect(boundKept).toEqual(bound);
+      const bindingKept = summary(io.snapshot());
+      await third.cold.stopStorageMaintenance();
+
+      const fourth = coldLedger();
+      await fourth.cold.prepareProjections();
+      io.reset();
+      expect(await fourth.ledger.recoverableConversationAssignments()).toEqual([h.envelope]);
+      const discoveryKept = summary(io.snapshot());
+      rows.push({ ended, binding, discovery, bindingKept, discoveryKept, streamReplay, wholeLog });
     }
     console.log(JSON.stringify(rows));
     for (const row of rows) {
-      for (const phase of [row.binding, row.discovery]) {
-        // 不读检查点、不扫帧索引；日志只读核对头部的固定尾段（冷开后没有新写入，索引之后没有记录）
-        expect(phase.checkpoint).toBe(0);
+      for (const phase of [row.binding, row.discovery, row.bindingKept, row.discoveryKept]) {
+        // 不扫帧索引；日志只读核对头部的固定尾段（冷开后没有新写入，索引之后没有记录）
         expect(phase.frameIndex).toBe(0);
         expect(phase.log).toBeLessThanOrEqual(1_024);
       }
+      // A 组不读检查点；B 组只读目标派发自己的决定状态（小状态，不含其他派发）
+      expect(row.binding.checkpoint).toBe(0);
+      expect(row.discovery.checkpoint).toBe(0);
+      for (const phase of [row.bindingKept, row.discoveryKept]) {
+        expect(phase.checkpoint).toBeGreaterThan(0);
+        expect(phase.checkpoint).toBeLessThanOrEqual(16 * 1024);
+      }
       // 固定上界：段内每次探测连同条目本身一起读（信封行较大），段未填满时增量段多、探测多，所以 256 档可高于 1024 档
       expect(row.binding.readBytes).toBeLessThanOrEqual(64 * 1024);
+      expect(row.bindingKept.readBytes).toBeLessThanOrEqual(64 * 1024);
       expect(row.discovery.readBytes).toBeLessThanOrEqual(128 * 1024);
+      expect(row.discoveryKept.readBytes).toBeLessThanOrEqual(128 * 1024);
     }
     // 只读这个派发的信封与校验状态、候选目录的首页：键数与已结束派发数无关，随历史变化的只有段填满前的
     // 探测次数与基段目录深度（每段二分至多 9 次探测，一次查找至多经过 1 个基段与 4 个增量段）
     const scale = (ended: number) => rows.find(row => row.ended === ended)!;
-    for (const phase of ["binding", "discovery"] as const) {
+    // B 组的决定状态不随已结束派发增长（只差日志位置的位数）
+    for (const phase of ["bindingKept", "discoveryKept"] as const) {
+      expect(scale(1024)[phase].checkpoint).toBeLessThanOrEqual(scale(64)[phase].checkpoint + 64);
+    }
+    for (const phase of ["binding", "discovery", "bindingKept", "discoveryKept"] as const) {
       expect(scale(1024)[phase].log).toBe(scale(64)[phase].log);
       expect(scale(1024)[phase].readBytes).toBeLessThanOrEqual(scale(256)[phase].readBytes * 1.5);
       expect(scale(1024)[phase].reads).toBeLessThanOrEqual(scale(256)[phase].reads * 1.5);
@@ -164,10 +204,13 @@ describe("assignment ledger cold reads with fixed current work and growing ended
         from: number, to: number, visit: (lsn: number, row: Buffer) => boolean | void) {
         return scanRows.call(this, from, to, (lsn, row) => { rows++; return visit(lsn, row); });
       });
+      // 绑定证明能回答时不再取决定状态：只读绑定检查点
+      const loads = vi.spyOn(cold, "loadProjectionCheckpoint");
       try {
         const [bound] = await ledger.dataPlaneBindings([{ assignmentId: ASSIGNMENT_ID, use: "observe" }]);
         expect(bound).toMatchObject({ ref: h.activation.ref, executorId: EXECUTOR_ID });
-      } finally { spy.mockRestore(); }
+        expect(loads.mock.calls.map(([key]) => String(key).split(":")[0])).toEqual(["executor-data-plane-bindings"]);
+      } finally { spy.mockRestore(); loads.mockRestore(); }
       visited.push(rows);
     }
     expect(visited[1], JSON.stringify(visited)).toBe(visited[0]);
