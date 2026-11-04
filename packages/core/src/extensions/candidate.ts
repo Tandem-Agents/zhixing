@@ -84,6 +84,26 @@ export class ExtensionCandidates {
   }
   async read(digest: string): Promise<ExtensionCandidate> {
     if (!/^[a-f0-9]{64}$/.test(digest)) throw new TypeError("Invalid candidate digest");
-    return validateExtensionCandidate(JSON.parse(await readFile(join(this.root, digest, "candidate.json"), "utf8")));
+    const candidate = validateExtensionCandidate(JSON.parse(await readFile(join(this.root, digest, "candidate.json"), "utf8")));
+    // 归档目录即身份：放错目录的另一份合法候选不能冒充所请求的这一份
+    if (candidate.manifest.digest !== digest) throw new TypeError("候选包与所请求的制品摘要不一致");
+    return candidate;
+  }
+
+  /**
+   * 已有归档是否恰好是这份预期候选（例如随包分发种子派生的候选）保存后的字节。只做清单校验与编码比较，
+   * 不解析源码：逐字节相同即说明归档就是 save 完整校验后写下的这份内容。预期本身来自可信的分发材料，
+   * 不依赖归档旁的任何可被一并替换的记录。不同、缺失或预期无效时返回 false，调用方改走完整的 read。
+   */
+  async holdsExactly(expected: ExtensionCandidate): Promise<boolean> {
+    let encoded: string;
+    try {
+      const manifest = validateExtensionManifest(expected.manifest);
+      // 预期本身也要成立：代码必须就是清单摘要所指的那份，否则不能凭字节相同放行
+      if (typeof expected.code !== "string" || createHash("sha256").update(expected.code).digest("hex") !== manifest.digest) return false;
+      encoded = JSON.stringify(structuredClone({ ...expected, manifest }));
+    } catch { return false; }
+    const existing = await readFile(join(this.root, expected.manifest.digest, "candidate.json"), "utf8").catch(() => undefined);
+    return existing === encoded;
   }
 }

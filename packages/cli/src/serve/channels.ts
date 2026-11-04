@@ -20,7 +20,7 @@ import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
 import { channelDeclaration, validateChannelReplacement } from "@zhixing/core/channels/extension";
 import { ChannelVerification } from "../runtime/extensions/channel-verification.js";
 import { EXTENSION_LOG_SOURCE, ManagedExtensions } from "@zhixing/core/extensions/runtime";
-import type { ExtensionBinding, ExtensionInstance, ExtensionOperation } from "@zhixing/core/extensions/contracts";
+import type { ExtensionBinding, ExtensionCandidate, ExtensionInstance, ExtensionManifest, ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import type { ProductApiContribution } from "@zhixing/core/product-api";
 import { packagedExtensions } from "../runtime/extensions/catalog.js";
@@ -102,6 +102,13 @@ export interface CreateInboundChannelRouterOptions {
   readonly sessionBroadcast: SessionBroadcast;
   readonly sessionActivityBroadcast: SessionActivityBroadcast;
   readonly isCurrentOwner: () => boolean;
+}
+
+/** 由随包分发种子派生的候选包：补建归档与核对已有归档用同一份预期内容。 */
+function seedCandidate(manifest: ExtensionManifest, code: string): ExtensionCandidate {
+  return { manifest, code,
+    provenance: { kind: "existing", url: "https://github.com/Tandem-Agents/zhixing", revision: manifest.digest },
+    sources: { [manifest.entry]: code }, build: "发布包固定 Node 24 独立制品；保留的入口也是可修改的完整源码，无外部依赖" };
 }
 
 /** Constructs the complete inbound consumer only after Delivery owns its Outbox. */
@@ -224,12 +231,16 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     for (const instance of (await application.instances())) {
       const seed = seeds.find(item => item.manifest.digest === instance.binding.manifest.digest);
       if (!seed) continue;
+      // 归档恰好是由随包种子派生的这份候选时，它就是 save 完整校验后写下的内容，不必每次激活重新解析整个
+      // 源码包；预期来自分发材料本身。其余情况（缺失、内容不同）走原来的完整读取与补建
+      // 种子入口读不到时不能凭它判断，也不能拿它补建：照原样只做完整读取，已有有效归档时仍然成立
+      const code = await readFile(join(seed.directory, seed.manifest.entry), "utf8").catch(() => undefined);
+      const expected = code === undefined ? undefined : seedCandidate(seed.manifest, code);
+      if (expected && await candidates.holdsExactly(expected)) continue;
       try { await candidates.read(seed.manifest.digest); }
-      catch {
-        const code = await readFile(join(seed.directory, seed.manifest.entry), "utf8");
-        await candidates.save({ manifest: seed.manifest, code,
-          provenance: { kind: "existing", url: "https://github.com/Tandem-Agents/zhixing", revision: seed.manifest.digest },
-          sources: { [seed.manifest.entry]: code }, build: "发布包固定 Node 24 独立制品；保留的入口也是可修改的完整源码，无外部依赖" });
+      catch (error) {
+        if (!expected) throw error;
+        await candidates.save(expected);
       }
     }
     for (const [id, entry] of Object.entries(options.configuration.entries())) {
@@ -242,9 +253,7 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
       try {
         const bytes = await readFile(join(seed.directory, seed.manifest.entry));
         await artifacts.import(seed.manifest, bytes);
-        await candidates.save({ manifest: seed.manifest, code: bytes.toString("utf8"),
-          provenance: { kind: "existing", url: "https://github.com/Tandem-Agents/zhixing", revision: seed.manifest.digest },
-          sources: { [seed.manifest.entry]: bytes.toString("utf8") }, build: "发布包固定 Node 24 独立制品；保留的入口也是可修改的完整源码，无外部依赖" });
+        await candidates.save(seedCandidate(seed.manifest, bytes.toString("utf8")));
         const binding = await options.configuration.prepare(id, seed.manifest);
         const enabled = await options.configuration.requestedEnabled(id, undefined, binding.sourceRevision);
         const adopted = await application.adopt(id, binding, enabled ?? true);
