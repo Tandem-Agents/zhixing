@@ -46,7 +46,7 @@ const codes = new Set([
 ]);
 const actions = new Set([
   'clipboard-read', 'clipboard-write', 'startup', 'exit', 'interrupt', 'display-page', 'display-earlier', 'history-open', 'history-close',
-  'display-retry', 'retry-connection', 'input-window', 'input-history-next', 'configuration-action',
+  'display-retry', 'local-body-retry', 'retry-connection', 'input-window', 'input-history-next', 'configuration-action',
   'configuration-open', 'secret-value', 'selection', 'confirmation', 'submit', 'paste',
   'input-submit', 'input-references', 'skills-open', 'skills-action', 'skills-refresh',
 ]);

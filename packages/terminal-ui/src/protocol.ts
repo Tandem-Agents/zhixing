@@ -93,6 +93,8 @@ export type TerminalAction =
   | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean; readonly generation?: number }
   /** 取显示序号 before 之前紧邻的一页（至多一页传输上限）。N 已存就直接读；不够时单飞读一次源页。不改显示游标、跟随与补丁基准；回复见 TerminalEarlierReply。 */
   | { readonly kind: 'display-earlier'; readonly before: number; readonly generation: number }
+  /** 断线返回页“本机正文恢复失败”的重试：只按本机重读提示所属的会话与阅读代次；重读在途或已换代时不生效，不经在线恢复或重连 */
+  | { readonly kind: 'local-body-retry'; readonly conversationId: string; readonly generation: number }
   | { readonly kind: "configuration-open"; readonly section?: "model" | "mcp" }
   | { readonly kind: "configuration-action"; readonly editId: string; readonly action: string; readonly value?: string | number | boolean }
   | { readonly kind: "secret-value"; readonly editId: string; readonly fieldId: string; readonly value: string }
@@ -210,6 +212,8 @@ export interface TerminalView {
   readonly displayGap?: boolean;
   readonly displayPaused?: boolean;
   readonly bodyRecovery?: 'retrying' | 'blocked';
+  /** 断线返回页按本机只读重建正文失败：阅读行提示并可点击重试（只重读本机，不连接宿主）；重建成功即清除 */
+  readonly localBodyFailed?: boolean;
   readonly requestId?: string;
   readonly editId?: string;
   readonly configurationHome?: boolean;

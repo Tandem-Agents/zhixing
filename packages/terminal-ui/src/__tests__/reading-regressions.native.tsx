@@ -564,6 +564,31 @@ try {
     const frame = h.test.captureCharFrame();
     assert.ok(all <= 2 && frame.includes('STALE-BODY') && !frame.includes('读取未完成'), `the gesture ends quietly with the body kept: ${all}`);
   });
+  await scenario('local-restore-failure-offers-local-retry', async h => {
+    // 断线返回页的本机正文恢复失败：阅读行明确提示并可点击重试；点击只发带阅读身份的本机重读，不发在线恢复或重连
+    const r = { conversationId: 'local', generation: 3 };
+    await h.show({ ...h.view, conversationId: 'local', title: 'LOCAL', connected: false, connectionState: 'unavailable', readyForInput: true,
+      message: '连接已断开，输入与已有内容保留。按 Enter 重试。', reading: r, localBodyFailed: true });
+    const rows = h.test.captureCharFrame().split('\n'), y = rows.findIndex((row: string) => row.includes('本机正文恢复失败'));
+    assert.ok(y >= 0 && rows[y].includes('点击重试'), 'the failure is stated on the reading row');
+    assert.ok(rows.some((row: string) => row.includes('连接已断开')), 'the disconnect notice stays');
+    const mark = h.requests.length, x = rows[y].indexOf('本');
+    // 连点两次：两次都带提示所属的会话与代次（是否重读由 N 按身份与在途状态决定），不出现在线恢复或重连
+    await h.test.mockMouse.click(x + 1, y); await h.flush();
+    assert.ok(h.test.captureCharFrame().includes('本机正文恢复失败'));
+    await h.test.mockMouse.click(x + 1, y); await h.flush();
+    const sent = h.requests.slice(mark);
+    const local = sent.filter((a: TerminalAction) => a.kind === 'local-body-retry');
+    assert.equal(local.length, 2, `two local retries: ${sent.map((a: TerminalAction) => a.kind).join(',')}`);
+    assert.ok(local.every((a: any) => a.conversationId === 'local' && a.generation === 3), 'each retry names the failed reading');
+    assert.ok(!sent.some((a: TerminalAction) => a.kind === 'display-retry' || a.kind === 'retry-connection'), 'no online recovery or reconnect');
+    await h.show({ ...h.view, conversationId: 'local', title: 'LOCAL', connected: false, connectionState: 'unavailable', readyForInput: true,
+      message: '连接已断开，输入与已有内容保留。按 Enter 重试。', reading: r });
+    h.root.receive({ type: 'display-page', page: { first: -1, last: 0, start: -1, follow: true, segments: [segment('l', 'LOCAL-BODY')] }, revision: 7401, reading: r, hasEarlier: false });
+    await h.flush();
+    const frame = h.test.captureCharFrame();
+    assert.ok(frame.includes('LOCAL-BODY') && !frame.includes('本机正文恢复失败') && frame.includes('连接已断开'), 'success shows the body and clears the failure');
+  });
   await scenario('prefetch-budget-stops-without-progress', async h => {
     h.readWith(async (action: TerminalAction) => action.kind === 'display-earlier' ? { accepted: true, hasEarlier: true } : { accepted: true });
     await h.show({ ...h.view, conversationId: 'budget', readyForInput: true, historyHasMore: true });

@@ -242,6 +242,8 @@ class TerminalApplication {
   #displaySent?: BodyPageRevision;
   /** 已发出完整基准的历史范围；换代后的第一条正文发完整页 */
   #displayBase?: TerminalHistoryState;
+  /** 在途的本机正文重试（断线返回页）；在途期间再点不生效 */
+  #localRetry?: Promise<void>;
   #readingGeneration = 0;
   #closing?: Promise<void>;
   #generation = 0;
@@ -623,6 +625,23 @@ class TerminalApplication {
         if (this.#mainView.inputReceiptPending) { this.#receiptRetryRequested = true; this.#receiptRetry?.(); return { accepted: true }; }
         this.#leaveHistoryRead(); this.#background(release => this.#startup(release)); return { accepted: true };
       case 'display-retry': this.#controller?.retryRecovery(); this.#background(() => this.#retryDisplay()); return { accepted: true };
+      case 'local-body-retry': {
+        if (typeof action.conversationId !== 'string' || !Number.isSafeInteger(action.generation)) throw Error('terminal-display-cursor');
+        // 只重读失败提示所属的那一代：提示仍在、动作的会话与代次就是当前只读范围、首页未落定且没有读取在途。
+        // 重复点击（重读已在途或已换代）与过期动作都不生效；不经在线恢复或重连，不改连接与输入状态。失败提示在重读成功时才清除
+        const history = this.#history;
+        if (!this.#localRetry && !this.#historyRead && this.#mainView.localBodyFailed && history?.offline && !history.settled &&
+            history.conversationId === action.conversationId && history.generation === action.generation) {
+          const work = this.#restoreReturnReading().then(() => this.#publish(this.#mainView), async error => {
+            if (this.#abort.signal.aborted) return;
+            recordTerminalFailure(this.#logging.records, error, 'terminal-history-read-failed');
+            this.#mainView = { ...this.#mainView, localBodyFailed: true }; await this.#publish(this.#mainView);
+          }).finally(() => { if (this.#localRetry === work) this.#localRetry = undefined; });
+          this.#localRetry = work;
+          void work.catch(() => this.#close(70, 'terminal-history-read-undelivered'));
+        }
+        return { accepted: true };
+      }
       case 'exit': void this.#close(this.args.length ? 130 : 0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
         if (!this.#editor) throw Error('terminal-editor-not-open');
@@ -1227,7 +1246,8 @@ class TerminalApplication {
     const work = this.#historyPage().catch(async error => {
       if (this.#abort.signal.aborted || this.#history !== history) return;
       recordTerminalFailure(this.#logging.records, error, 'terminal-history-read-failed');
-      if (this.#mainView.kind !== 'history') return;
+      // 返回页（断线会话）的本机正文重建失败：保留它自己的断线提示，阅读行给出“本机正文恢复失败”与重试
+      if (this.#mainView.kind !== 'history') { this.#mainView = { ...this.#mainView, localBodyFailed: true }; await this.#publish(this.#mainView); return; }
       this.#mainView = { ...this.#mainView, busy: false, message: '本机历史暂时无法读取。可返回连接页、重试或选择其他历史。' };
       await this.#publishHistoryView();
     }).finally(() => {
@@ -1353,6 +1373,7 @@ class TerminalApplication {
       // 只读历史页报告读取结果；为返回页重建正文时，返回页自己的提示与状态不变
       if (this.#mainView.kind === 'history') this.#mainView = { ...this.#mainView, busy: false,
         message: this.#display.first === this.#display.last ? '暂无已保存的内容。' : undefined };
+      else if (this.#mainView.localBodyFailed) this.#mainView = { ...this.#mainView, localBodyFailed: undefined };
       await this.#publishHistoryView(); await this.#displayPage();
     }
   }

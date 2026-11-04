@@ -162,7 +162,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const isBody = () => ['conversation', 'history'].includes(view().kind);
   // 阅读导航行只在有阅读信息时占行；“下方还有内容”由正文按不含这一行时的完整高度判定，
   // 所以这一行出现或消失不会反过来改变它自己的条件
-  const navigationShown = () => isBody() && (view().bodyRecovery === 'blocked' || view().bodyRecovery === 'retrying' ||
+  const navigationShown = () => isBody() && (view().bodyRecovery === 'blocked' || view().bodyRecovery === 'retrying' || !!view().localBodyFailed ||
     !!reading().retry || reading().loading || reading().below || reading().above || shellLoading());
   // 后台补邻页只在可输入且空闲时进行：输入框为空、无候选、无待受理的提交、没有运行；发送路径从不等待它
   const prefetchAllowed = () => {
@@ -171,11 +171,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     return current.kind === 'history' ? !current.busy : !!current.readyForInput && current.connected !== false && !current.connectionState && !current.busy;
   };
   // 阅读导航行：左侧是方向与读取状态（故障优先），右侧在实际视口下面还有正文时给“回到最新”
-  const readingLeft = () => view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试'
+  // 断线返回页的本机正文恢复失败排在最前：重试只重读本机，与 Ctrl+R/Enter 的重连分开
+  const readingLeft = () => view().localBodyFailed ? '本机正文恢复失败 · 点击重试' : view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试'
     : reading().retry ? '读取未完成 · 点击或原方向翻页重试'
     : view().bodyRecovery === 'retrying' || reading().loading || shellLoading() ? '正在读取…'
     : reading().above ? '↑ 上方还有内容' : '';
-  const readingRight = () => view().bodyRecovery === 'blocked' || !reading().belowShown ? ''
+  const readingRight = () => view().bodyRecovery === 'blocked' || view().localBodyFailed || !reading().belowShown ? ''
     : process.platform === 'darwin' || size().width < 60 ? '↓ 回到最新' : '↓ 回到最新 Ctrl+End';
   const bodyReady = (value: BodyViewHandle | undefined) => {
     const previous = bodyView; bodyView = value;
@@ -601,8 +602,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         event.preventDefault(); event.stopPropagation();
         void bodyView?.page(direction === 'up' ? -1 : 1, 3).catch(setStatus);
       }}>
-      <text height={1} flexShrink={1} fg={reading().retry || view().bodyRecovery === 'blocked' ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
+      <text height={1} flexShrink={1} fg={reading().retry || view().bodyRecovery === 'blocked' || view().localBodyFailed ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
         onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
+          // 本机正文重试带上提示所属的阅读身份：N 只重读这一代，重复或过期的点击不生效
+          if (view().localBodyFailed) { const reading = view().reading; if (reading) void action({ kind: 'local-body-retry', conversationId: reading.conversationId, generation: reading.generation }); return; }
           if (view().bodyRecovery === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
           const retry = reading().retry;
           if (retry) { void bodyView?.page(retry)?.catch(setStatus); return; }
