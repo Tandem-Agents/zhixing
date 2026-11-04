@@ -88,6 +88,27 @@ try {
   test.renderer.clearSelection(); await flush();
   checks.push('reading text uses the returned column: right edge at column 117 of 120 and selectable there');
 
+  // 中文句末标点恰好放不下：助手正文可用 113 列（120 − 左右各 2 − 标记 3），56 个汉字＋“。”共 114 列。
+  // “。”连同前一个字一起换行，不单独落到行首；复制得到原句、不含软换行；宽两列时整句一行
+  const sentence = '这是一个用于检查中文句末标点折行的句子'.repeat(3).slice(0, 56) + '。';
+  await publish({ ...page, segments: [{ ...page.segments[0]!, text: page.segments[0]!.text + '\n' + sentence }] });
+  await latest();
+  let frame = test.captureCharFrame().split('\n');
+  const first = frame.findIndex(row => row.includes(sentence.slice(0, 10)));
+  assert.ok(first >= 0, 'sentence rendered');
+  assert.equal(frame[first]!.trim(), sentence.slice(0, 55), 'first row keeps 55 characters');
+  assert.equal(frame[first + 1]!.trim(), sentence.slice(55), 'last character and the full stop wrap together');
+  assert.ok(!frame.some(row => row.trim() === '。'), 'full stop never starts a row alone');
+  const startCol = frame[first]!.length - frame[first]!.trimStart().length, secondCol = frame[first + 1]!.length - frame[first + 1]!.trimStart().length;
+  await test.mockMouse.drag(startCol, first, secondCol + 3, first + 1); await flush();
+  assert.equal(test.renderer.getSelection()?.getSelectedText(), sentence, 'copy yields the source sentence without a soft break');
+  test.renderer.clearSelection(); await flush();
+  test.resize(122, 40); await flush(); await latest();
+  frame = test.captureCharFrame().split('\n');
+  assert.ok(frame.some(row => row.trim() === sentence), 'one column pair wider keeps the sentence on one row');
+  test.resize(120, 40); await flush(); await latest();
+  checks.push('chinese full stop at the critical width wraps with the preceding character; copy keeps the source; wider keeps one row');
+
   // 列表页仍保留竖条：拖动单调、缩放后重定位、丢失松手后新按下不被旧捕获拦住。
   // 列表收到视图时会把选中项滚进可见区（root.tsx 选项跟随），没有“拖动中同内容刷新”的场景，不在此断言。
   const listView = { kind: 'configuration' as const, title: '配置', editId: 'cfg-long', choices: Array.from({ length: 80 }, (_, i) => ({ id: `c${i}`, label: `选项 ${i}` })) };

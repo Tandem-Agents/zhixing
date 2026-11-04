@@ -1,6 +1,6 @@
 import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack, type JSX } from 'solid-js';
-import { bodyBlockGeometry } from './body/geometry.js';
+import { bodyBlockGeometry, bodyWrapMode } from './body/geometry.js';
 import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
   TextRenderable, type CliRenderer, type TextChunk,
@@ -186,8 +186,9 @@ export function BodyView(props: BodyViewProps) {
   const measureBlock = (block: BodyRenderBlock, width: number) => {
       let cached = measured.get(block);
       if (!cached || cached.width !== width) {
-        const rows = (text: string, columns: number) => {
-          measure.setText(text); wrapMeasure.setWrapWidth(Math.max(1, columns));
+        // 测量与显示用同一折行模式（见 bodyWrapMode）；表格单元仍逐字断行
+        const rows = (text: string, columns: number, mode: 'word' | 'char' = 'char') => {
+          measure.setText(text); wrapMeasure.setWrapMode(mode); wrapMeasure.setWrapWidth(Math.max(1, columns));
           return Math.max(1, wrapMeasure.getVirtualLineCount());
         };
         let height = 1;
@@ -198,7 +199,7 @@ export function BodyView(props: BodyViewProps) {
             (stacked && !block.node.header ? rows(`${block.node.labels?.[cell] ?? `列 ${cell + 1}`}：`, cellWidth - 1) : 0));
           height = 1 + (stacked ? sizes.reduce((sum, size) => sum + size, 0) : Math.max(1, ...sizes));
         } else if (!['rule', 'space'].includes(block.node.kind)) {
-          height = rows(block.text, layout.textWidth);
+          height = rows(block.text, layout.textWidth, bodyWrapMode(block));
         }
         cached = { width, height }; measured.set(block, cached);
       }
@@ -819,7 +820,7 @@ export function BodyView(props: BodyViewProps) {
       current.content = content();
     });
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
-      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode="char" selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
+      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode={bodyWrapMode(value.block)} selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
   };
   return <scrollbox ref={value => { box = value as TerminalScrollBox; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
