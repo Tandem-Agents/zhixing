@@ -1,4 +1,4 @@
-import type { BodyFragmentMetadata, BodyPagePatch } from './body-model.js';
+import type { BodyFragmentMetadata, BodyPage, BodyPagePatch } from './body-model.js';
 import type { TerminalSkillsAction, TerminalSkillsView } from './skills-model.js';
 import type { TerminalProcessView } from './process-model.js';
 export { validateProcessView } from './process-model.js';
@@ -73,7 +73,8 @@ export type TerminalMessage =
   | { readonly type: 'host-start'; readonly id: string; readonly endpoint?: string; readonly channel?: 'posix'; readonly handoff: string; readonly deadline: number }
   | { readonly type: 'host-release'; readonly id: string }
   | { readonly type: 'host-state'; readonly id: string; readonly state: 'created' | 'failed' | 'exited'; readonly pid?: number; readonly code?: number }
-  | { readonly type: "display-page"; readonly page: TerminalDisplayPage }
+  /** 本代完整基准：U 据此重置阅读窗口与补丁基址；hasEarlier 为本代首页落定时源端是否还有更早历史 */
+  | { readonly type: "display-page"; readonly page: BodyPage; readonly revision: number; readonly reading: TerminalReading; readonly hasEarlier?: boolean }
   | { readonly type: 'display-patch'; readonly patch: BodyPagePatch }
   | { readonly type: 'submission'; readonly inputId: string; readonly version: number; readonly accepted: boolean; readonly message?: string }
   | { readonly type: "ack"; readonly sequence: number };
@@ -89,9 +90,9 @@ export type TerminalAction =
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
   | { readonly kind: 'command-route'; readonly name: string }
   | { readonly kind: 'skills-action'; readonly action: TerminalSkillsAction }
-  | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean }
+  | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean; readonly generation?: number }
   /** 取显示序号 before 之前紧邻的一页（至多一页传输上限）。N 已存就直接读；不够时单飞读一次源页。不改显示游标、跟随与补丁基准；回复见 TerminalEarlierReply。 */
-  | { readonly kind: 'display-earlier'; readonly before: number }
+  | { readonly kind: 'display-earlier'; readonly before: number; readonly generation: number }
   | { readonly kind: "configuration-open"; readonly section?: "model" | "mcp" }
   | { readonly kind: "configuration-action"; readonly editId: string; readonly action: string; readonly value?: string | number | boolean }
   | { readonly kind: "secret-value"; readonly editId: string; readonly fieldId: string; readonly value: string }
@@ -169,7 +170,9 @@ export interface TerminalDisplaySegment {
 /** display-earlier 的回复：page 为 before 之前紧邻的已存片段（可能为空），hasEarlier 为源端是否还有更早历史。 */
 export interface TerminalEarlierReply { readonly accepted: true; readonly hasEarlier: boolean; readonly page?: TerminalDisplayPage;
   /** 这次是否有进展（取到内容、N 已存起点前移、源游标或准备进度推进）；false 表示原地踏步 */
-  readonly progressed?: boolean }
+  readonly progressed?: boolean;
+  /** 请求属于已被替换的阅读代次（换代或取消）：N 没有读源、没有推进任何游标；U 安静结束这次读取，不算原地踏步，也不再补读，等新代基准 */
+  readonly stale?: true }
 export interface TerminalDisplayPage {
   readonly first: number;
   readonly last: number;
@@ -194,8 +197,11 @@ export interface TerminalProcessStatus {
   readonly turnId?: string;
   readonly view: TerminalProcessView;
 }
+/** 一次正文重建的身份：会话与阅读代次。视图声明期望的，基准携带实际的，两者相同才显示正文。 */
+export interface TerminalReading { readonly conversationId: string; readonly generation: number }
 export interface TerminalView {
   readonly historyHasMore?: boolean;
+  readonly reading?: TerminalReading;
   readonly generation: number;
   readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills' | 'recovery';
   readonly title: string;

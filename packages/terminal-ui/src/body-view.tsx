@@ -1,5 +1,5 @@
 import { tone, spacing } from './theme.js';
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack, type JSX } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack, type JSX } from 'solid-js';
 import { bodyBlockGeometry, bodyWrapMode } from './body/geometry.js';
 import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
@@ -73,6 +73,8 @@ export interface BodyReadingState { readonly below: boolean; readonly belowShown
 export interface BodyViewProps {
   readonly header?: JSX.Element;
   readonly page: BodyPage; readonly width: number; readonly height: number;
+  /** 阅读范围的身份（会话与代次，或壳态）；变化时重置阅读状态 */
+  readonly readingKey?: string;
   readonly renderer: CliRenderer;
   readonly anchor?: BodyAnchor;
   readonly hasEarlier?: boolean;
@@ -246,7 +248,8 @@ export function BodyView(props: BodyViewProps) {
   let heldContent: BodyPage | undefined;
   const readQueue = new ReadingQueue(intent => disposed || intent.kind !== 'page' ? Promise.resolve() : props.requestPage(intent.start, intent.follow));
   // 取更早页单飞：后台补读与用户上翻共用；不进翻页队列，源读不阻塞翻页同步
-  let earlierRead: Promise<void> | undefined, earlierScope = 0, earlierProgressed = true;
+  // earlierStale：最近一次回复属于已被替换的阅读代次（N 未读源）；这次读取安静结束，不算原地踏步、不再补读，等新代基准重置
+  let earlierRead: Promise<void> | undefined, earlierScope = 0, earlierProgressed = true, earlierStale = false;
   let fill = { steps: 0, fragments: 0, done: false };
   // 用户正在等更早的内容（上翻到顶）：取到的页超出窗口上限时不保留为已备页，直接交给揭示（窗口从较新的一侧裁剪后移动）
   let intentWaiting = false, overflow: { start: number; segments: readonly BodySegment[] } | undefined;
@@ -263,6 +266,8 @@ export function BodyView(props: BodyViewProps) {
     const work: Promise<void> = props.requestEarlier(before).then(value => {
       if (disposed || scopeAt !== earlierScope) return;
       const reply = value as Partial<TerminalEarlierReply> | undefined;
+      earlierStale = reply?.stale === true;
+      if (earlierStale) return;
       if (reply?.hasEarlier === false) setSourceEnded(true);
       const page = reply?.page as BodyPage | undefined;
       earlierProgressed = !!page?.segments.length || reply?.progressed !== false;
@@ -306,7 +311,7 @@ export function BodyView(props: BodyViewProps) {
     if (!fitsWindow(prepared()?.segments ?? [])) { fill.done = true; return; }
     fill.steps++;
     // 无进展（同一源游标原地踏步）就停，不把步数耗完；失败也停，入口仍在
-    void readEarlier().then(() => { fill.fragments += Math.max(0, (prepared()?.segments.length ?? 0) - count); if (!earlierProgressed) fill.done = true; }, () => { fill.done = true; });
+    void readEarlier().then(() => { fill.fragments += Math.max(0, (prepared()?.segments.length ?? 0) - count); if (earlierStale || !earlierProgressed) fill.done = true; }, () => { fill.done = true; });
   };
   let failedIntent: { start: number | undefined; follow: boolean } | undefined;
   const readingOwner = () => {
@@ -643,13 +648,12 @@ export function BodyView(props: BodyViewProps) {
     },
     resetReading() {
       readingGeneration++; navigationVersion++; paging = false; gestureHold = false; readError = undefined; failedIntent = undefined;
-      // A new conversation starts at latest regardless of whether its view or
-      // body arrives first. The previous page never owns the new scope's intent.
+      // 新的阅读范围（换代或进出壳态）一律从最新处开始，不论视图与正文谁先到；上一范围的意图、选区和位置都不带过来
       setFollowing(true); box?.cancelPointer(); props.renderer.releasePointerCapture?.(); props.renderer.clearSelection();
       selectionClearPending = false; readQueue.reset(); headerTop = undefined; anchorOffset = 0;
       pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined;
       // 新的阅读范围：旧的已备页、在途的取更早页结果与补读预算都作废
-      earlierScope++; earlierRead = undefined; fill = { steps: 0, fragments: 0, done: false };
+      earlierScope++; earlierRead = undefined; earlierStale = false; fill = { steps: 0, fragments: 0, done: false };
       setPrepared(undefined); setReplyFirst(Number.POSITIVE_INFINITY); setSourceEnded(false); setScope(value => value + 1);
       restorePending = true; layoutReady = false; props.onAnchor(undefined); props.renderer.requestRender();
       reportReading();
@@ -702,7 +706,7 @@ export function BodyView(props: BodyViewProps) {
             intentWaiting = true;
             while (current() && !overflow && !prepared()?.segments.length && (earlierRead || storeBefore() || sourceMore())) {
               await readEarlier();
-              if (!current() || overflow || prepared()?.segments.length) break;
+              if (!current() || overflow || prepared()?.segments.length || earlierStale) break;
               if (!earlierProgressed && ++stalls >= 5) throw Error('terminal-history-no-progress');
               if (earlierProgressed) stalls = 0;
               delay = Math.min(400, delay ? delay * 2 : 50);
@@ -794,6 +798,8 @@ export function BodyView(props: BodyViewProps) {
   };
   props.renderer.addPostProcessFn(postFrame);
   props.onReady?.(handle);
+  // 阅读键变化（换代、进出壳态）即新的阅读范围：在新页已就位之后重置，欢迎块起点按新页起算，旧手势、已备页与在途读取作废
+  createEffect(on(() => props.readingKey, () => handle.resetReading(), { defer: true }));
   function release() {
     if (disposed) return;
     disposed = true; readingGeneration++; readQueue.reset(); earlierScope++; clearTimeout(pagingTimer); props.onReady?.(undefined);

@@ -1,7 +1,7 @@
-import { createEffect, createMemo, createSignal, For, Show, ErrorBoundary } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, For, Show, ErrorBoundary, onCleanup } from 'solid-js';
 import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget } from './protocol.js';
+import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalReading, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget } from './protocol.js';
 import { ProcessView } from './process-view.js';
 import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
@@ -12,7 +12,7 @@ import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
 import { BodyView, TerminalScrollBox, type BodyViewHandle, type BodyReadingState } from './body-view.js';
-import { BODY_PAGE_BYTES, bodyWindows, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
+import { BODY_PAGE_BYTES, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
 import { BodyReadingWindow } from './body-window.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
@@ -138,26 +138,42 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const [contextHeight, setContextHeight] = createSignal(0);
   const [readingArea, setReadingArea] = createSignal(0);
   const [bodyAnchor, setBodyAnchor] = createSignal<BodyAnchor>();
-  // Configuration and other overlays may omit the conversation identity. They
-  // do not replace the retained conversation or its reading position.
-  let bodyConversationId: string | undefined;
+  // 已安装正文的身份（来自本代完整基准）与基准给出的“还有更早”。视图只声明期望的身份，不清掉已收到的正文
+  const [bodyReading, setBodyReading] = createSignal<TerminalReading>();
+  const [bodyEarlier, setBodyEarlier] = createSignal<boolean>();
+  const sameReading = (left?: TerminalReading, right?: TerminalReading) => left?.conversationId === right?.conversationId && left?.generation === right?.generation;
+  // 视图声明的会话与代次都与已安装正文相同才显示正文；否则正文区只有目标自己的欢迎区（壳态）
+  const bodyMatches = createMemo(() => sameReading(view().reading, bodyReading()));
+  const shellPage: TerminalDisplayPage = { first: 0, last: 0, start: 0, follow: true, segments: [] };
+  // 阅读键只在换代、进出壳态时变化（字符串比较，页更新不触发）；正文组件据此在新页就位后重置阅读状态，欢迎块起点按新页起算
+  const readingKey = createMemo(() => bodyMatches() ? `reading:${bodyReading()?.conversationId ?? ''}:${bodyReading()?.generation ?? ''}`
+    : `shell:${view().reading?.conversationId ?? ''}:${view().reading?.generation ?? ''}`);
+  const bodyPage = createMemo(() => bodyMatches() ? display() : shellPage);
+  // 已就绪的会话页在壳态停留超过 200 ms（目标首页仍在读取）才提示读取中，不和正常空会话混淆
+  const [shellLoading, setShellLoading] = createSignal(false);
+  createEffect(() => {
+    const current = view();
+    if (bodyMatches() || current.kind !== 'conversation' || !current.readyForInput || current.connected === false || current.connectionState) { setShellLoading(false); return; }
+    const timer = setTimeout(() => setShellLoading(true), 200);
+    onCleanup(() => clearTimeout(timer));
+  });
   const [reading, setReading] = createSignal<BodyReadingState>({ below: false, belowShown: false, above: false, loading: false },
     { equals: (a, b) => a.below === b.below && a.belowShown === b.belowShown && a.above === b.above && a.loading === b.loading && a.retry === b.retry });
   const isBody = () => ['conversation', 'history'].includes(view().kind);
   // 阅读导航行只在有阅读信息时占行；“下方还有内容”由正文按不含这一行时的完整高度判定，
   // 所以这一行出现或消失不会反过来改变它自己的条件
   const navigationShown = () => isBody() && (view().bodyRecovery === 'blocked' || view().bodyRecovery === 'retrying' ||
-    !!reading().retry || reading().loading || reading().below || reading().above);
+    !!reading().retry || reading().loading || reading().below || reading().above || shellLoading());
   // 后台补邻页只在可输入且空闲时进行：输入框为空、无候选、无待受理的提交、没有运行；发送路径从不等待它
   const prefetchAllowed = () => {
     const current = view();
-    if (!isBody() || !editorEmpty() || candidateOpen() || input.pendingSubmissionId) return false;
+    if (!isBody() || !bodyMatches() || !editorEmpty() || candidateOpen() || input.pendingSubmissionId) return false;
     return current.kind === 'history' ? !current.busy : !!current.readyForInput && current.connected !== false && !current.connectionState && !current.busy;
   };
   // 阅读导航行：左侧是方向与读取状态（故障优先），右侧在实际视口下面还有正文时给“回到最新”
   const readingLeft = () => view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试'
     : reading().retry ? '读取未完成 · 点击或原方向翻页重试'
-    : view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…'
+    : view().bodyRecovery === 'retrying' || reading().loading || shellLoading() ? '正在读取…'
     : reading().above ? '↑ 上方还有内容' : '';
   const readingRight = () => view().bodyRecovery === 'blocked' || !reading().belowShown ? ''
     : process.platform === 'darwin' || size().width < 60 ? '↓ 回到最新' : '↓ 回到最新 Ctrl+End';
@@ -550,13 +566,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <Show when={view().kind !== 'configuration' && view().choices?.[selected()]?.detail}><text fg={tone.dim}>{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
       </box></scrollbox>}>
-        <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
+        <BodyView page={bodyPage()} readingKey={readingKey()} renderer={renderer} width={bodySize().width} height={bodySize().height}
           header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} bottomGap={false} />}
-          hasEarlier={view().historyHasMore}
+          hasEarlier={bodyMatches() ? view().historyHasMore ?? bodyEarlier() : undefined}
           fullHeight={readingArea()}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
-          requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
-          requestEarlier={before => options.request({ kind: 'display-earlier', before })}
+          requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow, generation: bodyReading()?.generation })}
+          requestEarlier={before => options.request({ kind: 'display-earlier', before, generation: bodyReading()?.generation ?? 0 })}
           reveal={page => {
             if (disposed) return;
             const protectedRange = bodyView?.selectionRange();
@@ -983,18 +999,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
           const previous = view(), sameInteraction = interactionKey(previous) === interactionKey(message.view);
-          const changedConversation = message.view.conversationId !== undefined && bodyConversationId !== message.view.conversationId;
           const selectedId = previous.choices?.[selected()]?.id;
           const refreshCandidates = view().kind === 'conversation' && message.view.kind === 'conversation';
           if (message.view.recovery?.requestId !== view().recovery?.requestId) releaseRecovery();
           if (message.view.recovery?.input && !recoveryInput) recoveryInput = new RecoveryInputBuffer();
           candidates?.resetDelete(); trustControls.reset();
           preserveDraft(); bodyView?.beforeUpdate();
-          if (changedConversation) {
-            bodyView?.resetReading();
-            bodyConversationId = message.view.conversationId;
-            bodyWindow.reset(); setBodyAnchor(undefined);
-          }
           if (!sameInteraction) {
             activateInformation(message.view); releaseSecret(); setEditorLines(1); setEditorEmpty(!message.view.field?.value);
           }
@@ -1037,11 +1047,19 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           displayReceived = next; setDisplay(bodyWindow.accept(next.page, protectedRange?.from, protectedRange?.to, true));
           if (bodyWindow.notice) setStatus(bodyWindow.notice);
         } else if (message.type === 'display-page') {
-          if (message.page.segments.length > 4 || Buffer.byteLength(JSON.stringify(message.page)) > BODY_PAGE_BYTES) throw Error('terminal-display-wire-size');
-          bodyWindows(message.page); // Validate complete source/metadata/page before installing it.
+          // 本代完整基准：自带修订号、不引用旧页；校验通过后整页安装，同代后续补丁以它为基址
+          const reading = message.reading;
+          if (!reading || typeof reading.conversationId !== 'string' || !Number.isSafeInteger(reading.generation) ||
+              (message.hasEarlier !== undefined && typeof message.hasEarlier !== 'boolean')) throw Error('terminal-display-reading');
+          const base = decodeBodyPage({ ...message.page, revision: message.revision, segments: message.page.segments }, undefined);
           bodyView?.beforeUpdate();
-          displayReceived = undefined;
-          bodyWindow.reset(); setDisplay(bodyWindow.accept(message.page));
+          displayReceived = base;
+          // 换代时一并换身份：页与身份同批生效，正文组件随阅读键重置（旧手势、已备页、在途读取作废，欢迎块按新页起算）
+          batch(() => {
+            bodyWindow.reset(); setDisplay(bodyWindow.accept(base.page));
+            if (!sameReading(bodyReading(), reading)) { setBodyAnchor(undefined); setBodyReading({ conversationId: reading.conversationId, generation: reading.generation }); }
+            setBodyEarlier(message.hasEarlier);
+          });
         } else if (message.type === 'invalidate' && view().requestId === message.requestId) {
           releaseSecret();
           const next: TerminalView = { generation: view().generation, kind: 'conversation', title: '知行', conversationId: view().conversationId, message: '该请求已由其他入口处理或已失效。' };

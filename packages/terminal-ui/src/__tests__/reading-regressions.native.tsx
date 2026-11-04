@@ -6,6 +6,11 @@ import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
 import { encodeBodyPage, type BodyPage, type BodyPageRevision } from '../body-model.js';
 import type { TerminalAction, TerminalView } from '../protocol.js';
+// 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
+const TEST_READING = { conversationId: 'test', generation: 1 };
+let baselineRevision = 0;
+const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, reading });
+
 setRenderLibPath(process.env.ZHIXING_TERMINAL_RENDER_LIB!);
 const frames: Record<string, unknown> = {}, checks: string[] = [];
 const walk = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMap(walk)];
@@ -18,6 +23,7 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
   const requests: TerminalAction[] = [], copies: string[] = [];
   const pasted = new Map<string, string>();
   let readReply: ((action: TerminalAction) => Promise<unknown>) | undefined;
+  let currentReading = TEST_READING;
   const flush = async () => { for (let i = 0; i < 10; i++) await test.renderOnce(); await new Promise<void>(resolve => queueMicrotask(resolve)); };
   const nodes = () => walk(test.renderer.root), box = () => nodes().find(n => n.constructor.name === 'TerminalScrollBox');
   const tick = setInterval(() => void test.renderOnce(), 15);
@@ -28,22 +34,34 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
       if (action.kind === 'input-part') pasted.set(action.inputId, (pasted.get(action.inputId) ?? '') + action.text);
       if (action.kind === 'paste-finish') return { text: pasted.get(action.inputId) ?? '', handles: [], paste: false };
       if (readReply && (action.kind === 'display-page' || action.kind === 'display-earlier')) return readReply(action);
-      if (action.kind === 'display-page') { page = { ...page, follow: !!action.follow }; root!.receive({ type: 'display-page', page }); }
+      if (action.kind === 'display-page') { page = { ...page, follow: !!action.follow }; root!.receive({ type: 'display-page', ...baseline(currentReading), page }); }
       if (action.kind === 'clipboard-write') { copies.push(action.text); return { state: 'copied' }; }
       if (action.kind === 'input-candidates') return { revision: action.revision, start: 0, end: action.text.length, active: action.text.startsWith('/'), items: action.text.startsWith('/') ? [{ id: 'config', label: '/config' }] : [] };
       return { accepted: true };
     } }, async () => test.renderer);
     clearInterval(tick);
-    const show = async (value: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { ...value, generation: ++generation } }); await flush(); };
-    const publish = async (value: BodyPage) => { page = value; root!.receive({ type: 'display-page', page }); await flush(); };
+    const show = async (value: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { reading: currentReading, ...value, generation: ++generation } }); await flush(); };
+    const publish = async (value: BodyPage, reading = currentReading) => { page = value; currentReading = reading; root!.receive({ type: 'display-page', ...baseline(reading), page }); await flush(); };
     const latest = async () => { test.mockInput.pressKey('\x1b[1;5F'); await flush(); };
     await show(view); await publish(page); await latest();
     await run({ test, root, flush, nodes, box, show, publish, latest, view, requests, copies, get page() { return page; },
       readWith: (reply: typeof readReply) => { readReply = reply; },
+      useReading: (reading: typeof TEST_READING) => { currentReading = reading; },
       capture: (label: string) => { frames[name + '-' + label] = test.captureSpans(); } });
     checks.push(name); console.log('PASS ' + name);
   } finally { clearInterval(tick); await root?.dispose(); test.renderer.destroy(); }
 }
+// 宿主替身的正文发送：每个替身是一次新的打开（新的阅读代次），首条发本代完整基准，之后按修订号发补丁（与 N 的发送规则一致）
+const hostBody = (h: any, revision: number) => {
+  const reading = { conversationId: `host-${revision}`, generation: revision };
+  h.useReading(reading);
+  let previous: BodyPageRevision | undefined;
+  return (page: BodyPage) => {
+    if (!previous) { previous = { revision: ++revision, page }; h.root.receive({ type: 'display-page', page, revision, reading }); return; }
+    const patch = encodeBodyPage(page, ++revision, previous); previous = { revision, page };
+    h.root.receive({ type: 'display-patch', patch });
+  };
+};
 try {
   await scenario('notice-between-one-paragraph-keeps-both-parts', async h => {
     // 按实测记录复现：回复写到一半时到点通知落盘，同一段落被通知隔成两段，两段的来源节点起点都是 0
@@ -103,9 +121,11 @@ try {
   for (const bodyFirst of [false, true]) await scenario('conversation-scope-' + bodyFirst, async h => {
     await h.test.mockMouse.scroll(20, 8, 'up'); await h.flush(); assert.equal(h.page.follow, false);
     const next = { ...h.page, follow: true, segments: [{ ...h.page.segments[0], blockId: 'different', text: 'NEW CONVERSATION\n'.repeat(100) }] };
-    if (bodyFirst) await h.publish(next);
-    await h.show({ ...h.view, conversationId: 'different-conversation' });
-    if (!bodyFirst) await h.publish(next);
+    // 换会话即换阅读代次：正文先到时装进同一窗口但不显示，视图声明同一代次后才显示，并从最新处开始
+    const reading = { conversationId: 'different-conversation', generation: 2 };
+    if (bodyFirst) await h.publish(next, reading);
+    await h.show({ ...h.view, conversationId: 'different-conversation', reading });
+    if (!bodyFirst) await h.publish(next, reading);
     assert.equal(h.box().scrollTop + h.box().viewport.height, h.box().scrollHeight);
   });
   await scenario('thinking-source-copy', async h => {
@@ -218,8 +238,9 @@ try {
       await h.flush(); assert.ok(reject, 'real interaction issued the retained request');
       h.readWith(undefined);
       if (successor === 'conversation') {
-        await h.show({ ...h.view, conversationId: 'new-scope', title: 'NEW_READY', message: 'NEW_READY' });
-        await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'new', role: 'assistant', contentOffset: 0, final: true, text: 'NEW_CONVERSATION_BODY' }] });
+        const reading = { conversationId: 'new-scope', generation: 2 };
+        await h.show({ ...h.view, conversationId: 'new-scope', title: 'NEW_READY', message: 'NEW_READY', reading });
+        await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'new', role: 'assistant', contentOffset: 0, final: true, text: 'NEW_CONVERSATION_BODY' }] }, reading);
       } else await h.show({ kind: 'configuration', title: 'NEW_READY', editId: 'new-config', choices: [{ id: 'field', label: 'NEW_FIELD' }] });
       const before = h.test.captureCharFrame();
       reject(Error('OLD_SCOPE_READ_FAILURE')); await h.flush();
@@ -308,11 +329,7 @@ try {
     };
     const trace: unknown[] = [];
     // 与宿主同一条投递路径：按修订号发 display-patch，界面解码后并入阅读窗口（display-page 消息会重置窗口，不是这条路径）
-    let revision = 1000, previous: BodyPageRevision | undefined;
-    const send = (page: BodyPage) => {
-      const patch = encodeBodyPage(page, ++revision, previous); previous = { revision, page };
-      h.root.receive({ type: 'display-patch', patch });
-    };
+    const send = hostBody(h, 1000);
     h.readWith(async (action: TerminalAction) => {
       if (action.kind === 'display-page') { send(pageAt(action.start, !!action.follow)); return { accepted: true }; }
       if (action.kind !== 'display-earlier') return { accepted: true };
@@ -346,12 +363,10 @@ try {
     const store = new Map<number, any>();
     for (let o = -total; o < 0; o++) store.set(o, seg(o + total));
     const state = { first: -4, earlier: 0, sourceReads: 0, gate: undefined as undefined | { resolve: () => void } };
-    let revision = 2000, previous: BodyPageRevision | undefined;
+    const body = hostBody(h, 2000);
     const send = (start: number | undefined, follow: boolean) => {
       const from = Math.max(state.first, Math.min(0, start ?? -4));
-      const page: BodyPage = { first: state.first, last: 0, start: from, follow, segments: Array.from({ length: Math.min(0, from + 4) - from }, (_, i) => store.get(from + i)) };
-      const patch = encodeBodyPage(page, ++revision, previous); previous = { revision, page };
-      h.root.receive({ type: 'display-patch', patch });
+      body({ first: state.first, last: 0, start: from, follow, segments: Array.from({ length: Math.min(0, from + 4) - from }, (_, i) => store.get(from + i)) });
     };
     h.readWith(async (action: TerminalAction) => {
       if (action.kind === 'display-page') { send(action.start, !!action.follow); return { accepted: true }; }
@@ -427,12 +442,127 @@ try {
     fake.send(undefined, true); await h.flush(); await h.flush();
     assert.equal(fake.state.earlier, 1);
     const gate = fake.state.gate!;
-    await h.show({ ...h.view, conversationId: 'switch-b', readyForInput: true, historyHasMore: false });
-    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'b', role: 'assistant', contentOffset: 0, final: true, text: 'SWITCH-B 新对话' }] });
+    const switchB = { conversationId: 'switch-b', generation: 2 };
+    await h.show({ ...h.view, conversationId: 'switch-b', readyForInput: true, historyHasMore: false, reading: switchB });
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'b', role: 'assistant', contentOffset: 0, final: true, text: 'SWITCH-B 新对话' }] }, switchB);
     gate.resolve(); await h.flush(); await h.flush();
     await h.test.mockMouse.scroll(20, 10, 'up'); await h.flush();
     const frame = h.test.captureCharFrame();
     assert.ok(frame.includes('SWITCH-B') && !frame.includes('ANSWER-'), 'a late reply of the previous conversation never reaches the new one');
+  });
+  // 会话切换与正文重建：视图只声明期望的会话与代次，正文按本代完整基准安装；两者相同才显示
+  const segment = (blockId: string, text: string, role = 'assistant') => ({ blockId, role, contentOffset: 0, final: true, text });
+  const welcome = (h: any, title: string) => h.test.captureCharFrame().includes(`当前对话 ${title}`);
+  for (const order of ['view-first', 'body-first'] as const) await scenario(`switch-order-${order}`, async h => {
+    const a = { conversationId: 'order-a', generation: 2 }, b = { conversationId: 'order-b', generation: 3 };
+    await h.show({ ...h.view, conversationId: 'order-a', title: 'TITLE-A', readyForInput: true, reading: a });
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [segment('a', 'BODY-A 旧会话正文')] }, a);
+    assert.ok(h.test.captureCharFrame().includes('BODY-A'));
+    // 目标首页起点为负、旧窗口起点为 0：现行裁剪规则曾把它整页裁掉
+    const target = { first: -4, last: 0, start: -4, follow: true, segments: [-4, -3, -2, -1].map(o => segment(`b${o}`, `BODY-B${o}`, o % 2 ? 'assistant' : 'user')) };
+    if (order === 'body-first') {
+      await h.publish(target, b);
+      const mid = h.test.captureCharFrame();
+      assert.ok(!mid.includes('BODY-B') && !mid.includes('BODY-A'), 'a body ahead of its view is installed but not shown, and the old body is gone');
+      await h.show({ ...h.view, conversationId: 'order-b', title: 'TITLE-B', readyForInput: true, reading: b });
+    } else {
+      await h.show({ ...h.view, conversationId: 'order-b', title: 'TITLE-B', readyForInput: true, reading: b });
+      const mid = h.test.captureCharFrame();
+      assert.ok(!mid.includes('BODY-A') && welcome(h, 'TITLE-B'), 'the target view shows its own welcome, never the previous body');
+      await h.publish(target, b);
+    }
+    const frame = h.test.captureCharFrame();
+    for (const o of [-4, -3, -2, -1]) assert.ok(frame.includes(`BODY-B${o}`), `complete first page of the target in either order: ${o}`);
+    assert.ok(welcome(h, 'TITLE-B') && !frame.includes('BODY-A'), 'welcome belongs to the target');
+  });
+  await scenario('switch-a-b-a-never-shows-the-first-generation', async h => {
+    const a1 = { conversationId: 'aba-a', generation: 2 }, b2 = { conversationId: 'aba-b', generation: 3 }, a3 = { conversationId: 'aba-a', generation: 4 };
+    await h.show({ ...h.view, conversationId: 'aba-a', title: 'ABA-A', reading: a1 });
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [segment('a1', 'GEN-A1 第一代')] }, a1);
+    await h.show({ ...h.view, conversationId: 'aba-b', title: 'ABA-B', reading: b2 });
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [segment('b2', 'GEN-B2 另一个会话')] }, b2);
+    // 回到 A 的视图先到：上一代 A 的正文不能冒充这次打开
+    await h.show({ ...h.view, conversationId: 'aba-a', title: 'ABA-A', reading: a3 });
+    let frame = h.test.captureCharFrame();
+    assert.ok(!frame.includes('GEN-A1') && !frame.includes('GEN-B2') && welcome(h, 'ABA-A'), 'neither the first generation nor the other conversation is shown');
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [segment('a3', 'GEN-A3 这次打开')] }, a3);
+    frame = h.test.captureCharFrame();
+    assert.ok(frame.includes('GEN-A3') && !frame.includes('GEN-A1'), 'the current generation is shown');
+  });
+  await scenario('same-id-rebuild-keeps-welcome-and-new-pages', async h => {
+    // 同一会话原地清空、来源要求重读：会话 ID 不变，正文以新代次重建
+    let revision = 6000, previous: BodyPageRevision | undefined;
+    const base = (page: BodyPage, reading: { conversationId: string; generation: number }) => { previous = { revision: ++revision, page }; h.root.receive({ type: 'display-page', page, revision, reading }); };
+    const patch = (page: BodyPage) => { const value = encodeBodyPage(page, ++revision, previous); previous = { revision, page }; h.root.receive({ type: 'display-patch', patch: value }); };
+    const r1 = { conversationId: 'same', generation: 2 }, r2 = { conversationId: 'same', generation: 3 }, r3 = { conversationId: 'same', generation: 4 };
+    await h.show({ ...h.view, conversationId: 'same', title: 'SAME', readyForInput: true, reading: r1 });
+    base({ first: -4, last: 0, start: -4, follow: true, segments: [-4, -3, -2, -1].map(o => segment(`old${o}`, `SAME-OLD${o}`)) }, r1); await h.flush();
+    assert.ok(h.test.captureCharFrame().includes('SAME-OLD-4') && welcome(h, 'SAME'));
+    await h.show({ ...h.view, conversationId: 'same', title: 'SAME', readyForInput: true, reading: r2 });
+    base({ first: 0, last: 0, start: 0, follow: true, segments: [] }, r2); await h.flush();
+    let frame = h.test.captureCharFrame();
+    assert.ok(!frame.includes('SAME-OLD') && welcome(h, 'SAME'), 'a cleared conversation keeps its welcome');
+    patch({ first: 0, last: 2, start: 0, follow: true, segments: [segment('new0', 'SAME-NEW-0', 'user'), segment('new1', 'SAME-NEW-1')] }); await h.flush();
+    frame = h.test.captureCharFrame();
+    assert.ok(frame.includes('SAME-NEW-0') && frame.includes('SAME-NEW-1') && welcome(h, 'SAME'), 'messages sent after clearing show in the same generation');
+    // 来源要求重读：新一代首页起点为负，整页安装
+    base({ first: -2, last: 0, start: -2, follow: true, segments: [segment('re0', 'SAME-RE-0', 'user'), segment('re1', 'SAME-RE-1')] }, r3); await h.flush();
+    await h.show({ ...h.view, conversationId: 'same', title: 'SAME', readyForInput: true, reading: r3 });
+    frame = h.test.captureCharFrame();
+    assert.ok(frame.includes('SAME-RE-0') && frame.includes('SAME-RE-1') && !frame.includes('SAME-NEW') && welcome(h, 'SAME'), 'a rebuilt generation shows its complete first page');
+  });
+  await scenario('two-fragment-first-page-shows-both-without-upward-entry', async h => {
+    const r = { conversationId: 'two', generation: 2 };
+    await h.show({ ...h.view, conversationId: 'two', title: 'TWO', readyForInput: true, reading: r });
+    h.root.receive({ type: 'display-page', page: { first: -2, last: 0, start: -2, follow: true, segments: [segment('q', 'TWO-ASK', 'user'), segment('a', 'TWO-ANSWER')] }, revision: 7001, reading: r, hasEarlier: false });
+    for (let i = 0; i < 6; i++) await h.flush();
+    const frame = h.test.captureCharFrame();
+    assert.ok(frame.includes('TWO-ASK') && frame.includes('TWO-ANSWER') && !frame.includes('上方还有内容'), 'both messages of a one-page conversation are mounted, no upward entry');
+    assert.ok(!h.requests.some((a: TerminalAction) => a.kind === 'display-earlier'), 'no prefetch for a conversation the source reports complete');
+  });
+  await scenario('first-pageup-after-switch-reads-earlier', async h => {
+    const r = { conversationId: 'earlier', generation: 5 };
+    const earlier: TerminalAction[] = [];
+    h.readWith(async (action: TerminalAction) => {
+      if (action.kind !== 'display-earlier') return { accepted: true };
+      earlier.push(action);
+      if (action.generation !== r.generation) return { accepted: true, hasEarlier: true, progressed: true };
+      return { accepted: true, hasEarlier: false, progressed: true, page: { first: -6, last: 0, start: -6, follow: false, segments: [segment('e0', 'EARLIER-ASK-0', 'user'), segment('e1', 'EARLIER-ANSWER-1')] } };
+    });
+    await h.show({ ...h.view, conversationId: 'earlier', title: 'EARLIER', readyForInput: true, reading: r });
+    h.root.receive({ type: 'display-page', page: { first: -4, last: 0, start: -4, follow: true, segments: [-4, -3, -2, -1].map(o => segment(`p${o}`, `PAGE${o}`)) }, revision: 7101, reading: r, hasEarlier: true });
+    await h.flush();
+    assert.ok(h.test.captureCharFrame().includes('上方还有内容'), 'the upward entry is offered');
+    for (let i = 0; i < 3 && !h.test.captureCharFrame().includes('EARLIER-ASK-0'); i++) { h.test.mockInput.pressKey('\x1b[5~'); await h.flush(); }
+    const frame = h.test.captureCharFrame();
+    assert.ok(frame.includes('EARLIER-ASK-0') && !frame.includes('读取未完成'), 'the first upward reading after a switch reveals earlier content');
+    assert.ok(earlier.length > 0 && earlier.every(action => action.kind === 'display-earlier' && action.generation === r.generation), 'earlier reads are bound to the current generation');
+  });
+  await scenario('shell-shows-reading-state-only-after-a-delay', async h => {
+    const r = { conversationId: 'slow', generation: 2 };
+    await h.show({ ...h.view, conversationId: 'slow', title: 'SLOW', readyForInput: true, reading: r });
+    assert.ok(welcome(h, 'SLOW') && !h.test.captureCharFrame().includes('正在读取'), 'no loading flash for a quick first page');
+    await new Promise(resolve => setTimeout(resolve, 260)); await h.flush();
+    assert.ok(welcome(h, 'SLOW') && h.test.captureCharFrame().includes('正在读取'), 'a slow first page is distinguishable from an empty conversation');
+    h.root.receive({ type: 'display-page', page: { first: 0, last: 0, start: 0, follow: true, segments: [] }, revision: 7201, reading: r, hasEarlier: false });
+    await h.flush();
+    assert.ok(welcome(h, 'SLOW') && !h.test.captureCharFrame().includes('正在读取'), 'a confirmed empty conversation shows only its welcome');
+  });
+  await scenario('stale-earlier-reply-ends-quietly', async h => {
+    // N 回“已作废”（请求属于已被替换的代次，未读源）：不报读取失败，不当原地踏步重试，后台补读停止，等新代基准
+    h.readWith(async (action: TerminalAction) => action.kind === 'display-earlier' ? { accepted: true, hasEarlier: true, stale: true } : { accepted: true });
+    const r = { conversationId: 'stale', generation: 2 };
+    await h.show({ ...h.view, conversationId: 'stale', title: 'STALE', readyForInput: true, reading: r });
+    const mark = h.requests.length;
+    h.root.receive({ type: 'display-page', page: { first: -1, last: 0, start: -1, follow: true, segments: [segment('s', 'STALE-BODY')] }, revision: 7301, reading: r, hasEarlier: true });
+    for (let i = 0; i < 20; i++) await h.flush();
+    const background = h.requests.slice(mark).filter((a: TerminalAction) => a.kind === 'display-earlier').length;
+    assert.equal(background, 1, `one stale reply stops background filling: ${background}`);
+    h.test.mockInput.pressKey('\x1b[5~');
+    for (let i = 0; i < 20; i++) await h.flush();
+    const all = h.requests.slice(mark).filter((a: TerminalAction) => a.kind === 'display-earlier').length;
+    const frame = h.test.captureCharFrame();
+    assert.ok(all <= 2 && frame.includes('STALE-BODY') && !frame.includes('读取未完成'), `the gesture ends quietly with the body kept: ${all}`);
   });
   await scenario('prefetch-budget-stops-without-progress', async h => {
     h.readWith(async (action: TerminalAction) => action.kind === 'display-earlier' ? { accepted: true, hasEarlier: true } : { accepted: true });
@@ -485,10 +615,11 @@ try {
     for (let o = -34; o < 0; o++) store.set(o, { blockId: 'think', role: 'thinking', contentOffset: (o + 34) * length, final: o === -1,
       text: ('x'.repeat(32000) + `
 THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
-    let revision = 3000, previous: BodyPageRevision | undefined, earlier = 0;
+    let earlier = 0;
+    const body = hostBody(h, 3000);
     const page = (from: number, to: number, follow: boolean): BodyPage => ({ first: -34, last: 0, start: from, follow,
       segments: Array.from({ length: to - from }, (_, i) => store.get(from + i)) });
-    const send = (value: BodyPage) => { const patch = encodeBodyPage(value, ++revision, previous); previous = { revision, page: value }; h.root.receive({ type: 'display-patch', patch }); };
+    const send = body;
     h.readWith(async (action: TerminalAction) => {
       if (action.kind === 'display-page') { const from = Math.max(-30, action.start ?? -4); send(page(from, Math.min(0, from + 4), !!action.follow)); return { accepted: true }; }
       if (action.kind !== 'display-earlier') return { accepted: true };
@@ -535,9 +666,10 @@ THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
           anchor: offset === 0, runs: [{ from: offset, to: offset + text.length, text, style: 0 }] }] } } });
       offset += text.length;
     }
-    let first = -2, revision = 4000, previous: BodyPageRevision | undefined;
+    let first = -2;
+    const body = hostBody(h, 4000);
     const page = (from: number, to: number, follow: boolean): BodyPage => ({ first, last: 0, start: from, follow, segments: Array.from({ length: to - from }, (_, i) => store.get(from + i)) });
-    const send = (value: BodyPage) => { const patch = encodeBodyPage(value, ++revision, previous); previous = { revision, page: value }; h.root.receive({ type: 'display-patch', patch }); };
+    const send = body;
     h.readWith(async (action: TerminalAction) => {
       if (action.kind === 'display-page') { const from = Math.max(first, action.start ?? -2); send(page(from, Math.min(0, from + 4), !!action.follow)); return { accepted: true }; }
       if (action.kind !== 'display-earlier') return { accepted: true };

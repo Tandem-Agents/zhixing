@@ -90,6 +90,10 @@ interface TerminalHistoryState {
   /** 历史首页冻结的本地权威边界；控制恢复从这里起步 */
   historyThrough?: import('@zhixing/core/authority').DurableLogCheckpoint;
   conversationId: string;
+  /** 阅读代次：每个新的历史范围（启动、切换、清空、来源要求重读、离线选历史）各一代，U 只显示与视图声明相同代次的正文 */
+  generation: number;
+  /** 本代首页已落定：此前正文通道不发消息、不放行补读；落定后的第一条正文是完整基准 */
+  settled?: boolean;
   buffered?: ConversationBodyPage;
   bodyCursor?: ConversationBodyCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[];
   /** 已读到的运行状态与已标出结果的运行：每个运行的结果行只出一次（逆序读到它的第一个片段时） */
@@ -236,6 +240,9 @@ class TerminalApplication {
   #displayStart?: number;
   #displayRevision = 0;
   #displaySent?: BodyPageRevision;
+  /** 已发出完整基准的历史范围；换代后的第一条正文发完整页 */
+  #displayBase?: TerminalHistoryState;
+  #readingGeneration = 0;
   #closing?: Promise<void>;
   #generation = 0;
   #hello = false;
@@ -644,16 +651,20 @@ class TerminalApplication {
       }
       case 'display-page':
         if (action.start !== undefined && !Number.isSafeInteger(action.start)) throw Error('terminal-display-cursor');
+        // 旧代的翻页请求不改新代的显示游标（它的序号属于上一代）
+        if (action.generation !== this.#history?.generation) return { accepted: true };
         this.#displayStart = action.follow ? undefined : action.start;
         await this.#displayPage(); return { accepted: true };
       case 'display-earlier':
-        if (!Number.isSafeInteger(action.before)) throw Error('terminal-display-cursor');
-        return this.#displayEarlier(action.before);
+        if (!Number.isSafeInteger(action.before) || !Number.isSafeInteger(action.generation)) throw Error('terminal-display-cursor');
+        return this.#displayEarlier(action.before, action.generation);
       case 'history-open': this.#background(() => this.#readOnly()); return { accepted: true };
       case 'history-close':
         this.#leaveHistoryRead();
         if (this.#mainView.kind === 'history' && this.#historyReturn) {
-          this.#mainView = this.#historyReturn; await this.#publish(this.#mainView);
+          this.#mainView = this.#historyReturn;
+          await this.#restoreReturnReading();
+          await this.#publish(this.#mainView);
         }
         return { accepted: true };
       case 'rubric-resume': this.#background(() => this.#resolveRubric()); return { accepted: true };
@@ -992,7 +1003,7 @@ class TerminalApplication {
           this.#history = undefined;
           await this.#display.reset(); this.#displayStart = undefined;
           if (!current()) return;
-          this.#history = { conversationId, hasMore: true, offline: false };
+          this.#openHistory(conversationId, false);
           await this.#historyPage();
         },
         projectOutcome: projectTerminalTurnOutcome,
@@ -1015,7 +1026,7 @@ class TerminalApplication {
       // 首屏正文到达之前先发布带标题与环境的页面（本地描述此时已就绪，不增加读取）：欢迎框先长到最终高度，
       // 正文与页面经不同通道到达时，首个可读正文帧之后欢迎框不再长高、把正在读的文字往下推
       void this.#publish({ ...this.#mainView, busy: true }).catch(() => {});
-      this.#history = { conversationId: initial.active.conversationId, hasMore: true, offline: false };
+      this.#openHistory(initial.active.conversationId, false);
       await observeStartupPhase(this.#logging.records, 'terminal.initial-history', () => this.#historyPage());
       await observeStartupPhase(this.#logging.records, 'terminal.start-observer', () => this.#controller!.start());
       this.#ensureSessionBinding();
@@ -1147,13 +1158,13 @@ class TerminalApplication {
         const continuing = !this.#readOnlyNeedsReset && this.#mainView.kind === 'history' && this.#history?.offline && this.#history.conversationId === selected;
         if (continuing) { await this.#displayPage(); return; }
         this.#nextHistoryRead = false;
-        this.#history = { conversationId: selected, hasMore: true, offline: true };
+        this.#openHistory(selected, true);
         // A committed-empty display may still own an in-flight first append.
         // Replacing history always waits for that write before resetting it.
         await this.#outputProjection.drain();
         await this.#display.reset(); this.#displayStart = undefined;
         this.#readOnlyNeedsReset = false;
-        this.#mainView = { kind: 'history', title: `${entry.name} · 只读`, connected: false, message: this.#display.first === this.#display.last && this.#history?.hasMore ? '正在读取本机历史…' : undefined,
+        this.#mainView = { kind: 'history', title: `${entry.name} · 只读`, conversationId: selected, connected: false, message: this.#display.first === this.#display.last && this.#history?.hasMore ? '正在读取本机历史…' : undefined,
           choices: [{ id: 'retry', label: '重试连接' }, { id: 'history-open', label: '选择其他历史' },
             { id: 'history-close', label: '返回连接页 · Esc' }, { id: 'exit', label: '退出终端' }] };
         if (this.#display.first === this.#display.last) this.#loadOfflineHistory(); else await this.#displayPage(); return;
@@ -1175,14 +1186,38 @@ class TerminalApplication {
     return this.#historySelection || this.#abort.signal.aborted ? Promise.resolve() : this.#publish(this.#mainView);
   }
 
+  /** 新的历史范围即新的阅读代次：本代首页落定前不发正文、不放行补读，视图上的“还有更早”留待本代首页给出。 */
+  #openHistory(conversationId: string, offline: boolean): TerminalHistoryState {
+    this.#mainView = { ...this.#mainView, historyHasMore: undefined };
+    return this.#history = { conversationId, generation: ++this.#readingGeneration, hasMore: true, offline };
+  }
+
   #leaveHistoryRead(): void {
     this.#nextHistoryRead = false;
     if (this.#history?.offline) {
       // Invalidate the consumer immediately. The one physical read still owns
       // its lifetime; a newer navigation never spawns another concurrent read.
-      this.#history = { conversationId: this.#history.conversationId, hasMore: true, offline: true };
+      this.#openHistory(this.#history.conversationId, true);
       this.#readOnlyNeedsReset = true;
     }
+  }
+
+  /**
+   * 从只读历史返回：只读阅读已用同一显示存储读过别的范围。返回页若是一个会话（断线时保留着它的正文），
+   * 按本机只读重建这个会话的首页，成为新的阅读代次；没有会话的连接页按自身状态呈现。返回页的连接与输入状态不变，不取得在线发送许可。
+   */
+  async #restoreReturnReading(): Promise<void> {
+    const target = this.#mainView.kind === 'conversation' ? this.#mainView.conversationId ?? this.#controller?.current.conversationId : undefined;
+    if (!target) return;
+    this.#nextHistoryRead = false;
+    // 绑定这次返回开的范围：等待期间若已被重连、再次打开历史等换掉，就不清新范围的显示存储，也不替它发起读取
+    const history = this.#openHistory(target, true);
+    await this.#outputProjection.drain();
+    if (this.#history !== history || this.#abort.signal.aborted) return;
+    await this.#display.reset(); this.#displayStart = undefined;
+    if (this.#history !== history || this.#abort.signal.aborted) return;
+    this.#readOnlyNeedsReset = false;
+    this.#loadOfflineHistory();
   }
 
   #loadOfflineHistory(): void {
@@ -1192,21 +1227,23 @@ class TerminalApplication {
     const work = this.#historyPage().catch(async error => {
       if (this.#abort.signal.aborted || this.#history !== history) return;
       recordTerminalFailure(this.#logging.records, error, 'terminal-history-read-failed');
+      if (this.#mainView.kind !== 'history') return;
       this.#mainView = { ...this.#mainView, busy: false, message: '本机历史暂时无法读取。可返回连接页、重试或选择其他历史。' };
       await this.#publishHistoryView();
     }).finally(() => {
       if (this.#historyRead === work) this.#historyRead = undefined;
       const next = this.#nextHistoryRead; this.#nextHistoryRead = false;
-      if (next && this.#mainView.kind === 'history') this.#loadOfflineHistory();
+      // 排着的下一次读取属于当前的只读范围（只读历史页，或返回页正在重建的正文）
+      if (next && this.#history?.offline) this.#loadOfflineHistory();
     });
     this.#historyRead = work;
     void work.catch(() => this.#close(70, 'terminal-history-read-undelivered'));
   }
 
   /** 历史读取一律串行：首屏、重置、离线阅读与阅读窗的取更早页共用同一游标，不能并发推进。 */
-  #historyPage(options: { quiet?: boolean } = {}): Promise<void> {
-    // 排入时绑定历史身份：轮到时若已换了对话（或离开离线阅读），这一步不读，不能推进新对话的游标
-    const history = this.#history;
+  #historyPage(options: { quiet?: boolean; history?: TerminalHistoryState } = {}): Promise<void> {
+    // 排入时绑定历史身份（调用方给出的，或此刻的当前范围）：轮到时若已换了对话（或离开离线阅读），这一步不读，不能推进新对话的游标
+    const history = options.history ?? this.#history;
     const run = this.#historyTail.catch(() => {}).then(() => this.#historyPageNow(history, options));
     this.#historyTail = run.catch(() => {});
     return run;
@@ -1223,27 +1260,33 @@ class TerminalApplication {
   /**
    * 阅读窗取更早一页（静默预取与用户上翻共用）：N 已存就直接读 before 之前紧邻的一页；不够时读一步源页再取。
    * 不改显示游标、跟随与补丁基准；源读安静进行（不写进度、不逐片发布），步末只发布一次 hasEarlier。
-   * 可输入之前不发起源读：首屏读取由启动路径负责，这里只回已存部分。
+   * 只服务本代：请求的代次不是当前代、本代首页尚未落定（首屏读取由启动与切换路径负责）或处理中换了代时，不读源、不推进任何游标，
+   * 回“已作废”；U 安静结束这次读取，不当成原地踏步、不报读取失败，等新代基准整体重置。
    */
-  async #displayEarlier(before: number): Promise<TerminalEarlierReply> {
+  async #displayEarlier(before: number, generation: number): Promise<TerminalEarlierReply> {
     const history = this.#history;
+    const stale: TerminalEarlierReply = { accepted: true, hasEarlier: true, stale: true };
+    if (!history?.settled || history.generation !== generation) return stale;
     const stored = async () => before > this.#display.first ? await this.#display.before(before) : undefined;
     let page = await stored();
     // 本次是否有进展：N 已存起点前移、源游标或“还有更早”变化；准备中的页推进了游标也算。没有进展时阅读窗停止自动补读
     const mark = () => JSON.stringify([this.#earlierWork, this.#display.first, history?.hasMore, history?.bodyCursor ?? null, this.#offlineReader?.history === history ? this.#offlineReader?.cursor ?? null : null]);
     const before0 = mark();
-    if (!page?.segments.length && history?.hasMore && (history.offline || this.#mainView.readyForInput)) {
-      // 已有读取在途（如离线阅读的首页）就先等它，读完仍不够再读一步
+    if (!page?.segments.length && history.hasMore) {
+      // 已有读取在途（如离线阅读的读取）就先等它，读完仍不够再读一步；期间换了代就按过期回复
       if (this.#historyRead) await this.#historyRead.catch(() => {});
-      if (this.#history !== history) throw Error('terminal-history-scope-changed');
+      if (this.#history !== history) return stale;
       page = await stored();
+      if (this.#history !== history) return stale;
       if (!page?.segments.length && history.hasMore) {
-        await this.#historyPage({ quiet: true });
-        if (this.#history !== history) throw Error('terminal-history-scope-changed');
+        // 源读取绑定这次请求的历史范围排队：轮到时若已换代就不读，新范围的游标不会被旧请求推进
+        await this.#historyPage({ quiet: true, history });
+        if (this.#history !== history) return stale;
         page = await stored();
       }
     }
-    return { accepted: true, hasEarlier: this.#history === history && !!history?.hasMore, progressed: !!page?.segments.length || mark() !== before0,
+    if (this.#history !== history) return stale;
+    return { accepted: true, hasEarlier: history.hasMore, progressed: !!page?.segments.length || mark() !== before0,
       ...(page?.segments.length ? { page } : {}) };
   }
 
@@ -1306,14 +1349,17 @@ class TerminalApplication {
     }
     if (current() && quiet) { this.#noteHistoryView(); return; }
     if (current()) {
-      this.#mainView = { ...this.#mainView, busy: false,
+      history.settled = true;
+      // 只读历史页报告读取结果；为返回页重建正文时，返回页自己的提示与状态不变
+      if (this.#mainView.kind === 'history') this.#mainView = { ...this.#mainView, busy: false,
         message: this.#display.first === this.#display.last ? '暂无已保存的内容。' : undefined };
       await this.#publishHistoryView(); await this.#displayPage();
     }
   }
 
   async #onlineHistoryPage(owner: TerminalHistoryState, quiet = false): Promise<void> {
-    const stageInitial = !quiet && !this.#mainView.readyForInput && this.#display.first === 0 && this.#display.last === 0;
+    // 本代首页一次性写入并整页发布（启动、切换、清空后重读都一样）：逐片出现会让预取把首页里的较早片段当成更早内容藏到上方
+    const stageInitial = !quiet && !owner.settled && this.#display.first === 0 && this.#display.last === 0;
     if (!stageInitial) { await this.#readOnlineHistoryPage(owner, false, quiet); return; }
     // 首屏批量写入的显示预留与首页 RPC 并发取得；本次读取结束时未被取用的（失败、取消、代际变化、迟到）结算为 0。
     // 结算失败只会让这份占用保守地留到 S 回收本实例，不会少计
@@ -1443,7 +1489,7 @@ class TerminalApplication {
         part.block !== source.block || part.offset < history.bodyCursor!.offset);
       history.buffered = remaining.length ? { ...page, fragments: remaining } : undefined;
       if (!remaining.length && !page.hasMore) history.hasMore = false;
-      if (!quiet && current() && this.#mainView.readyForInput) { await this.#displayPage(); await this.#publishHistoryView(); }
+      if (!quiet && current() && owner.settled) { await this.#displayPage(); await this.#publishHistoryView(); }
       history.recoveryRunIds = [...new Set([...(history.recoveryRunIds ?? []), source.runId])].slice(0, 4);
     }
     if (current()) {
@@ -1457,6 +1503,8 @@ class TerminalApplication {
       }
       if (stageInitial) Object.assign(owner, history);
       if (quiet) { this.#noteHistoryView(); return; }
+      // 本代首页落定：此后正文通道发本代完整基准，补读放行
+      owner.settled = true;
       progress(originalMessage ?? '');
       await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
         // 先发布“还有更早历史”再发布首屏正文：正文到达时上方入口的事实已在，首个可读帧就带着入口
@@ -1465,12 +1513,23 @@ class TerminalApplication {
   }
 
   async #displayPage(): Promise<void> {
+    // 本代首页落定之前不发正文：首页不逐片出现，换代途中的页也落不进新代
+    const history = this.#history;
+    if (!history?.settled) return;
     const revision = ++this.#displayRevision;
     const sourceRevision = this.#outputProjection.revision;
     let page = await this.#display.page(this.#displayStart);
     if (revision === this.#displayRevision && sourceRevision !== this.#outputProjection.revision) return this.#displayPage();
     page = this.#outputProjection.projectPage(page);
-    if (revision === this.#displayRevision && !this.#abort.signal.aborted) {
+    if (revision === this.#displayRevision && history === this.#history && !this.#abort.signal.aborted) {
+      if (this.#displayBase !== history) {
+        // 每一代的第一条正文是完整基准：U 据此重置阅读窗口、欢迎块起点与补丁基址，本代后续补丁都引用它或其后的修订
+        this.#displaySent = { revision, page }; this.#displayBase = history;
+        try { await this.#toUi({ type: 'display-page', page, revision, hasEarlier: history.hasMore,
+          reading: { conversationId: history.conversationId, generation: history.generation } }, 'body'); }
+        catch (error) { this.#displaySent = undefined; this.#displayBase = undefined; throw error; }
+        return;
+      }
       const patch = encodeBodyPage(page, revision, this.#displaySent);
       // Body delivery is FIFO. Publish this base before yielding so concurrent
       // navigation can reference the already enqueued page in the same order.
@@ -2470,7 +2529,9 @@ class TerminalApplication {
     this.#holdNoticeDisplay();
     this.#pendingRubric = undefined; this.#deferredRubric = undefined; this.#pendingRubricNotice = undefined; this.#pendingRubricResolution = undefined;
     this.#stalledOperation = undefined;
-    this.#mainView = { kind: 'conversation', title: controller.current.name, busy: false, connected: true };
+    // 换对话不改变本终端的输入准入：已就绪就保持就绪；启动中、删除或断线时本来就不就绪，也不会因此取得
+    const ready = this.#mainView.kind === 'conversation' && this.#mainView.readyForInput === true;
+    this.#mainView = { kind: 'conversation', title: controller.current.name, busy: false, connected: true, ...(ready ? { readyForInput: true } : {}) };
     this.#taskNotices?.resume();
     await controller.reattachActiveObserver().finally(() => this.#resumeNoticeDisplay());
     await this.#localView.refresh();
@@ -2689,7 +2750,10 @@ class TerminalApplication {
       while (this.#nextView && !this.#abort.signal.aborted) {
         const next = this.#nextView; this.#nextView = undefined;
         if ((next.current && !next.current()) || !this.#ownsPage(next.view)) continue;
-        await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation } });
+        // 视图声明它要显示的正文代次，送达时按当前历史范围取（不进 mainView 与返回快照）：同一会话、同一代次的正文才显示
+        const history = this.#history;
+        const reading = history && history.conversationId === next.view.conversationId ? { conversationId: history.conversationId, generation: history.generation } : undefined;
+        await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation, ...(reading ? { reading } : {}) } });
       }
     })().finally(() => { this.#publishing = undefined; if (view.kind === 'conversation') this.#drainConfirmations(); });
     return this.#publishing;

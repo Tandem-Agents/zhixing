@@ -9,6 +9,11 @@ import type { TerminalAction, TerminalView } from '../protocol.js';
 import { interactionKey } from '../surface-layout.js';
 import type { BodyNode, BodyPage } from '../body-model.js';
 import type { TerminalPasteSink } from '../paste-stream.js';
+// 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
+const TEST_READING = { conversationId: 'test', generation: 1 };
+let baselineRevision = 0;
+const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, reading });
+
 // Exercise the producer/renderer seam, not a hand-authored diff node fixture.
 import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
 import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
@@ -64,7 +69,7 @@ try {
     } }, async options => { externalPaste = (options as { externalPaste?: () => TerminalPasteSink | undefined })?.externalPaste; return test.renderer; });
   clearInterval(tick);
   const flush = async () => { const start = performance.now(); for (let frame = 0; frame < 4; frame++) await test.renderOnce(); await new Promise<void>(resolve => process.nextTick(resolve)); frameTimes.push(performance.now() - start); };
-  const show = async (view: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { ...view, generation: ++generation } }); await flush(); };
+  const show = async (view: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { reading: TEST_READING, ...view, generation: ++generation } }); await flush(); };
   const text = () => test.captureCharFrame();
   const editor = () => {
     const visit = (node: any): TextareaRenderable | undefined => node.constructor.name === 'TerminalTextarea' ? node : node.getChildren?.().map(visit).find(Boolean);
@@ -389,12 +394,12 @@ try {
   const history = { first: 0, start: 0, last: 1, follow: true, segments: [
     { blockId: 'long', contentOffset: 0, role: 'assistant', text: Array.from({ length: 100 }, (_, i) => `history row ${i}`).join('\n'), final: true },
   ] } as const;
-  root.receive({ type: 'display-page', page: history }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: history }); await flush();
   const before = text(); await test.mockMouse.scroll(20, 8, 'up'); await flush();
   assert.notEqual(text(), before); assert.ok(actions.some(action => action.kind === 'display-page' && !action.follow));
   checks.push('wheel moves retained body without changing input');
   const anchorRow = text().match(/history row \d+/)?.[0]; assert.ok(anchorRow);
-  root.receive({ type: 'display-page', page: { ...history, follow: false } }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: { ...history, follow: false } }); await flush();
   test.resize(60, 20); await flush(); assert.ok(text().includes(anchorRow), JSON.stringify({ anchorRow, frame: text() }));
   test.resize(100, 30); await flush(); assert.ok(text().includes(anchorRow), JSON.stringify({ anchorRow, frame: text() }));
   checks.push('paused reading anchor survives page acknowledgement and both resize directions');
@@ -424,10 +429,10 @@ try {
     return { first: 0, last: 1, start: 0, follow, segments: [{ blockId: 'markdown', contentOffset: 0, role: 'assistant', text: source, final: false,
       body: { version: 1, revision: count, kind: 'markdown', end: false, context: { nodes } } }] };
   };
-  root.receive({ type: 'display-page', page: paragraphs(30, true) }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: paragraphs(30, true) }); await flush();
   await test.mockMouse.scroll(20, 8, 'up'); await flush();
   const paragraphAnchor = text().match(/paragraph \d+/)?.[0]; assert.ok(paragraphAnchor);
-  root.receive({ type: 'display-page', page: paragraphs(32, false) }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: paragraphs(32, false) }); await flush();
   test.resize(60, 24); await flush(); assert.ok(text().includes(paragraphAnchor), JSON.stringify({ paragraphAnchor, frame: text() }));
   test.resize(100, 30); await flush(); assert.ok(text().includes(paragraphAnchor), JSON.stringify({ paragraphAnchor, frame: text() }));
   checks.push('streamed Markdown nodes preserve the reader through replacement and reflow');
@@ -439,13 +444,13 @@ try {
       blockId: 'selection', contentOffset: 0, role: 'assistant', final: false,
       text: Array.from({ length: count }, (_, i) => `ROW${i}: ` + (mode === 'ascii' ? 'abcde ' : '中文abc ').repeat(16)).join('\n'),
     }] });
-    root.receive({ type: 'display-page', page: page(40) }); await flush();
+    root.receive({ type: 'display-page', ...baseline(), page: page(40) }); await flush();
     const rows = text().split('\n').map((line, y) => ({ line, y })).filter(row => row.y >= 4 && /ROW\d+:|paragraph \d+/.test(row.line));
     assert.ok(rows.length >= 2, mode + ': selection rows');
     const x = (row: typeof rows[number]) => Math.max(row.line.indexOf('ROW'), row.line.indexOf('paragraph'));
     await test.mockMouse.drag(x(rows[0]!) + 2, rows[0]!.y, x(rows[1]!) + 18, rows[1]!.y); await flush();
     const selected = test.renderer.getSelection()?.getSelectedText(); assert.ok(selected, mode + ': initial selection');
-    root.receive({ type: 'display-page', page: page(42) }); await flush();
+    root.receive({ type: 'display-page', ...baseline(), page: page(42) }); await flush();
     assert.equal(test.renderer.getSelection()?.getSelectedText(), selected, `${mode}: append`);
     test.resize(60, 24); await flush();
     assert.equal(test.renderer.getSelection()?.getSelectedText(), selected, `${mode}: narrow`);
@@ -463,7 +468,7 @@ try {
     const reverseRows = text().split('\n').map((line, y) => ({ line, y })).filter(row => row.y >= 4 && /ROW\d+:|paragraph \d+/.test(row.line));
     await test.mockMouse.drag(x(reverseRows[1]!) + 18, reverseRows[1]!.y, x(reverseRows[0]!) + 2, reverseRows[0]!.y); await flush();
     const reverseText = test.renderer.getSelection()!.getSelectedText(); assert.ok(reverseText);
-    root.receive({ type: 'display-page', page: page(44) }); await flush();
+    root.receive({ type: 'display-page', ...baseline(), page: page(44) }); await flush();
     test.resize(60, 24); await flush(); test.resize(100, 34); await flush();
     assert.equal(test.renderer.getSelection()!.getSelectedText(), reverseText, `${mode}: backward selection reflow and append`);
   }
@@ -474,7 +479,7 @@ try {
   };
   const sx = (column: number) => selectionOrigin().x + column - 5;
   const sy = () => selectionOrigin().y;
-  root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 1, follow: false, segments: [{ blockId: 'single', contentOffset: 0, role: 'assistant', text: 'A 中 B', final: true }] } }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 1, follow: false, segments: [{ blockId: 'single', contentOffset: 0, role: 'assistant', text: 'A 中 B', final: true }] } }); await flush();
   for (const [start, end, behavior, expected] of [[5, 5, 'word', 'A'], [7, 8, 'cell', '中']] as const) {
     await test.mockMouse.drag(sx(5), sy(), sx(9), sy()); await flush();
     const leaf = test.renderer.getSelection()!.selectedRenderables[0]!; assert.ok(leaf);
@@ -487,7 +492,7 @@ try {
   const selectionPage = (text: string): BodyPage => ({ first: 0, start: 0, last: 1, follow: false,
     segments: [{ blockId: 'boundary', contentOffset: 0, role: 'assistant', text, final: false }] });
   test.renderer.clearSelection();
-  root.receive({ type: 'display-page', page: selectionPage('alpha beta gamma delta\nsecond row unchanged') }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: selectionPage('alpha beta gamma delta\nsecond row unchanged') }); await flush();
   await test.mockMouse.drag(sx(5), sy(), sx(10), sy()); await flush();
   test.resize(60, 24); await flush();
   const restoredSelection = test.renderer.getSelection()!;
@@ -510,7 +515,7 @@ try {
   for (const [initial, appended] of [['alpha', 'alphabet'], ['A', 'Abc'], ['中', '中文']] as const) {
     for (const behavior of ['word', 'line'] as const) {
       test.renderer.clearSelection();
-      root.receive({ type: 'display-page', page: selectionPage(initial) }); await flush();
+      root.receive({ type: 'display-page', ...baseline(), page: selectionPage(initial) }); await flush();
       await test.mockMouse.doubleClick(sx(5), sy()); await flush();
       if (behavior === 'line') {
         const leaf = test.renderer.getSelection()!.selectedRenderables[0]!;
@@ -518,10 +523,10 @@ try {
         test.renderer.updateSelection(leaf, sx(5), sy(), { finishDragging: true }); await flush();
       }
       assert.equal(test.renderer.getSelection()!.getSelectedText(), initial);
-      root.receive({ type: 'display-page', page: selectionPage(appended) }); await flush();
+      root.receive({ type: 'display-page', ...baseline(), page: selectionPage(appended) }); await flush();
       assert.equal(test.renderer.getSelection()!.getSelectedText(), initial, `${behavior}: appended text is outside the frozen range`);
       test.resize(60, 24); await flush(); test.resize(100, 34); await flush();
-      root.receive({ type: 'display-page', page: selectionPage(appended + ' more') }); await flush();
+      root.receive({ type: 'display-page', ...baseline(), page: selectionPage(appended + ' more') }); await flush();
       assert.equal(test.renderer.getSelection()!.getSelectedText(), initial, `${behavior}: repeated append and reflow preserve exact range`);
     }
   }
@@ -532,7 +537,7 @@ try {
         const extended: string[] = [];
         for (const reflow of [false, true]) {
           test.renderer.clearSelection(); test.resize(80, 30);
-          root.receive({ type: 'display-page', page: selectionPage(`A ${glyph} B`) }); await flush();
+          root.receive({ type: 'display-page', ...baseline(), page: selectionPage(`A ${glyph} B`) }); await flush();
           await test.mockMouse.drag(sx(reverse ? 8 : 7), sy(), sx(reverse ? 7 : 8), sy()); await flush();
           assert.equal(test.renderer.getSelection()!.getSelectedText(), glyph);
           if (reflow) {
@@ -540,7 +545,7 @@ try {
               test.resize(width, 30); await flush();
               assert.equal(test.renderer.getSelection()!.getSelectedText(), glyph, `single wide ${glyph}, reverse=${reverse}, width=${width}`);
             }
-            root.receive({ type: 'display-page', page: selectionPage(`A ${glyph} B appended`) }); await flush();
+            root.receive({ type: 'display-page', ...baseline(), page: selectionPage(`A ${glyph} B appended`) }); await flush();
             assert.equal(test.renderer.getSelection()!.getSelectedText(), glyph, 'append does not change a single wide selection');
           }
           await test.mockMouse.click(sx(target), sy(), 0, { modifiers: { ctrl: true } }); await flush();
@@ -556,7 +561,7 @@ try {
       const extended: string[] = [];
       for (const reflow of [false, true]) {
         test.renderer.clearSelection(); test.resize(80, 30);
-        root.receive({ type: 'display-page', page: selectionPage(`A ${glyph} B`) }); await flush();
+        root.receive({ type: 'display-page', ...baseline(), page: selectionPage(`A ${glyph} B`) }); await flush();
         await test.mockMouse.drag(sx(anchorX), sy(), sx(focusX), sy()); await flush();
         const original = test.renderer.getSelection()!.getSelectedText();
         if (reflow) { test.resize(60, 24); await flush(); test.resize(80, 30); await flush(); }
@@ -572,7 +577,7 @@ try {
     const extended: string[] = [];
     for (const reflow of [false, true]) {
       test.renderer.clearSelection();
-      root.receive({ type: 'display-page', page: selectionPage('alpha beta gamma') }); await flush();
+      root.receive({ type: 'display-page', ...baseline(), page: selectionPage('alpha beta gamma') }); await flush();
       await test.mockMouse.doubleClick(sx(7), sy()); await flush();
       if (behavior === 'line') {
         const leaf = test.renderer.getSelection()!.selectedRenderables[0]!;
@@ -599,14 +604,16 @@ try {
     }
     throw Error(`${name}: effect absent after eight frames: ${JSON.stringify({ input: editor().plainText, cursor: editor().cursorOffset, frame: text() })}`);
   };
-  for (const workload of ['long-block', 'history-page']) {
+  for (const [index, workload] of ['long-block', 'history-page'].entries()) {
+    // 每个负载是一次新的打开：新的阅读代次，从最新处开始
+    const reading = { conversationId: 'response', generation: 100 + index };
     test.renderer.clearSelection(); test.resize(100, 34);
-    await show({ kind: 'conversation', title: '响应验收', conversationId: 'response' });
+    await show({ kind: 'conversation', title: '响应验收', conversationId: 'response', reading });
     editor().setText(''); await flush();
     const blockText = Array.from({ length: 350 }, (_, i) => `row ${i}: ${'abcdefgh '.repeat(9)}`).join('\n');
     const page: BodyPage = { first: 0, start: 0, last: workload === 'long-block' ? 1 : 4, follow: false,
       segments: Array.from({ length: workload === 'long-block' ? 1 : 4 }, (_, i) => ({ blockId: `response-${i}`, contentOffset: 0, role: 'assistant', text: blockText, final: true })) };
-    root.receive({ type: 'display-page', page }); await flush();
+    root.receive({ type: 'display-page', ...baseline(reading), page }); await flush();
     for (let i = 0; i < 30; i++) {
       const expected = editor().plainText + 'k';
       await observe(`${workload}/input`, () => test.mockInput.pressKey('k'), () => text().includes(expected));
@@ -614,8 +621,8 @@ try {
       // Each new conversation starts at latest; move away from that boundary
       // first so this measures real scrolling rather than a no-op at EOF.
       await observe(`${workload}/scroll`, () => test.mockMouse.scroll(20, 8, i % 2 ? 'down' : 'up'), () => text() !== beforeScroll);
-      await show({ kind: 'configuration', title: '响应设置页', editId: `response-${i}` });
-      await observe(`${workload}/return`, () => root!.receive({ type: 'view', view: { generation: ++generation, kind: 'conversation', title: '响应验收', conversationId: 'response' } }), () => text().includes(expected) && text().includes('row '));
+      await show({ kind: 'configuration', title: '响应设置页', editId: `response-${i}`, reading });
+      await observe(`${workload}/return`, () => root!.receive({ type: 'view', view: { reading, generation: ++generation, kind: 'conversation', title: '响应验收', conversationId: 'response' } }), () => text().includes(expected) && text().includes('row '));
       const width = i % 2 ? 100 : 60, height = i % 2 ? 34 : 24;
       await observe(`${workload}/resize`, () => test.resize(width, height), () => text().split('\n').length >= height && editor().width === width - 8 && text().includes(expected));
       await flush();
@@ -638,10 +645,12 @@ try {
       body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes } } };
   }) };
   const descendants = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMap(descendants)];
+  // 容量保护段是另一次打开：先声明它的阅读身份（默认测试身份），再装入大页
+  await show(active);
   // Follow is now a U reading intent; installing fresh data cannot overwrite
   // the user's prior off-bottom navigation. Explicitly request latest first.
   test.mockInput.pressKey('\x1b[1;5F'); await flush();
-  root.receive({ type: 'display-page', page: many }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: many }); await flush();
   assert.match(text(), /viewport-399/);
   assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);
   const scroll = descendants(test.renderer.root).find(node => node.constructor.name === 'TerminalScrollBox'); assert.ok(scroll);
@@ -652,7 +661,7 @@ try {
   assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);
   checks.push('large semantic page keeps only viewport text leaves live and preserves first/last scroll reachability');
   const keptDraft = editor().plainText;
-  await observe('paused-feedback', () => root!.receive({ type: 'view', view: { ...active, generation: ++generation, displayGap: true, displayPaused: true } }), () => text().includes('正文保留已暂停'));
+  await observe('paused-feedback', () => root!.receive({ type: 'view', view: { reading: TEST_READING, ...active, generation: ++generation, displayGap: true, displayPaused: true } }), () => text().includes('正文保留已暂停'));
   test.mockInput.pressKey('r', { ctrl: true }); await flush();
   assert.ok(actions.some(action => action.kind === 'display-retry'));
   await show({ ...active, displayGap: true, displayPaused: false });
@@ -674,7 +683,7 @@ try {
       segments: [{ blockId: 'latest', contentOffset: 0, role: 'assistant', text: 'LATEST BODY\n' + 'latest line\n'.repeat(10), final: true }] };
     for (const route of ['keyboard', 'wheel', 'bottom', 'click'] as const) {
       await show({ kind: 'conversation', title: '读取恢复', conversationId: `read-${route}`, connected: true });
-      readingReply = undefined; root.receive({ type: 'display-page', page: oldPage }); await flush();
+      readingReply = undefined; root.receive({ type: 'display-page', ...baseline(), page: oldPage }); await flush();
       const pending = pendingRead();
       readingReply = () => pending.promise;
       const start = actions.length;
@@ -687,17 +696,17 @@ try {
       assert.ok(actions.slice(start).some(a => a.kind === 'display-page' || a.kind === 'display-earlier'));
       pending.reject(Error('synthetic read unavailable')); await flush(); await flush();
       assert.match(text(), /读取未完成/); assert.ok(editor());
-      readingReply = async () => { root!.receive({ type: 'display-page', page: latest }); return { accepted: true }; };
+      readingReply = async () => { root!.receive({ type: 'display-page', ...baseline(), page: latest }); return { accepted: true }; };
       test.mockInput.pressKey('\x1b[1;5F'); await flush();
       assert.match(text(), /LATEST BODY|latest line/); assert.doesNotMatch(text(), /读取未完成/);
     }
     for (const failed of [true, false]) {
       readingReply = undefined;
       await show({ kind: 'conversation', title: '乱序读取', conversationId: `late-read-${failed}`, connected: true });
-      root.receive({ type: 'display-page', page: oldPage }); await flush();
+      root.receive({ type: 'display-page', ...baseline(), page: oldPage }); await flush();
       const pending = pendingRead();
       readingReply = async action => {
-        if (action.kind === 'display-page' && action.follow) { root!.receive({ type: 'display-page', page: latest }); return { accepted: true }; }
+        if (action.kind === 'display-page' && action.follow) { root!.receive({ type: 'display-page', ...baseline(), page: latest }); return { accepted: true }; }
         return pending.promise;
       };
       test.mockInput.pressKey('\x1b[5~'); await flush();
@@ -726,7 +735,7 @@ try {
     producer.appendProcessBlock({ blockId: 'native-blank-diff', role: 'tool-diff', text: processArtifactText(artifact), lines: processArtifactLines(artifact), spans: processArtifactSpans(artifact) });
     await producer.drain(); await producer.close();
     const page = { first: 0, last: segments.length, start: 0, follow: false, segments };
-    root.receive({ type: 'display-page', page }); await flush();
+    root.receive({ type: 'display-page', ...baseline(), page }); await flush();
     const rows = text().split('\n'), displayed = rows.map((row, y) => ({ row, y })).filter(({ row }) => /\+ \d+  /u.test(row));
     assert.equal(displayed.length, contents.length, text());
     for (let i = 0; i < contents.length; i++) assert.ok(displayed[i]!.row.includes(`+ ${i + 1}  ${contents[i]!.slice(0, 10)}`), text());
@@ -745,7 +754,7 @@ try {
       };
       await copy('initial');
       test.resize(width === 45 ? 80 : 45, 24); await flush(); await copy('reflow');
-      root.receive({ type: 'display-page', page: JSON.parse(JSON.stringify(page)) }); await flush(); await copy('equivalent page');
+      root.receive({ type: 'display-page', ...baseline(), page: JSON.parse(JSON.stringify(page)) }); await flush(); await copy('equivalent page');
       test.resize(width, 24); await flush(); await copy('reflow back');
     }
   }
@@ -760,7 +769,7 @@ try {
     const code = 'const 中文 = "🙂"; ' + 'long_value '.repeat(7), source = code + '\n\nsecond();';
     const node = (from: number, to: number, decoration: string) => ({ from, to, origin: from, kind: 'paragraph' as const, decoration,
       runs: [{ from, to: to > from && source[to - 1] === '\n' ? to - 1 : to, text: source.slice(from, to).replace(/\n$/u, ''), style: 0, semantic: 'added' as const }] });
-    root.receive({ type: 'display-page', page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'diff-copy', contentOffset: 0,
+    root.receive({ type: 'display-page', ...baseline(), page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'diff-copy', contentOffset: 0,
       role: 'tool-diff', text: source, final: true, body: { version: 1, revision: 0, kind: 'plain', end: true,
         context: { nodes: [node(0, code.length + 1, '+ 12  '), node(code.length + 1, code.length + 2, '+ 13  '), node(code.length + 2, source.length, '+ 14  ')] } } }] } });
     await flush();
@@ -794,7 +803,7 @@ try {
   await test.mockMouse.drag(bodyX, bodyY, bodyX + 5, bodyY); await flush();
   assert.match(text(), /复制选区/);
   await show({ kind: 'conversation', title: '新对话', conversationId: 'copy-new-conversation', connected: true });
-  root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 1, follow: false,
+  root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 1, follow: false,
     segments: [{ blockId: 'fresh-body', contentOffset: 0, role: 'assistant', text: 'New body', final: true }] } }); await flush();
   await noBodyCopy('old conversation selection cannot copy from the new page');
   await show({ kind: 'configuration', title: '字段复制边界', editId: 'copy-field', field: { id: 'copy-field', label: '字段', secret: false } });
@@ -806,7 +815,7 @@ try {
   const mapped: BodyPage['segments'][number][] = [];
   for await (const part of projectBodyHistory('- **🙂甲**\t尾部\n', 'markdown', 'forward', async () => {}))
     mapped.push({ blockId: 'mapped-copy', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
-  root.receive({ type: 'display-page', page: { first: 0, last: mapped.length, start: 0, follow: false, segments: mapped } }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: { first: 0, last: mapped.length, start: 0, follow: false, segments: mapped } }); await flush();
   const mappedRows = text().split('\n'), mappedY = mappedRows.findIndex(row => row.includes('尾部'));
   const tabX = mappedRows[mappedY]!.indexOf('尾部') - 3;
   await test.mockMouse.drag(tabX, mappedY, tabX + 2, mappedY); await flush();
@@ -835,7 +844,7 @@ try {
     for await (const part of projectBodyHistory(source, 'markdown', 'forward', async () => {}))
       segments.push({ blockId: 'table-selection', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
     const page = { first: 0, last: segments.length, start: 0, follow: false, segments };
-    root.receive({ type: 'display-page', page }); await flush();
+    root.receive({ type: 'display-page', ...baseline(), page }); await flush();
     const point = (value: string) => {
       const rows = text().split('\n'), y = rows.findIndex(row => row.includes(value)); assert.ok(y >= 0, text());
       return { x: rows[y]!.indexOf(value), y };
@@ -854,7 +863,7 @@ try {
     await checkCopy(expected);
     for (const width of [45, 80, 45, 80]) {
       test.resize(width, 24); await flush();
-      if (replacePage) { root.receive({ type: 'display-page', page: JSON.parse(JSON.stringify(page)) }); await flush(); }
+      if (replacePage) { root.receive({ type: 'display-page', ...baseline(), page: JSON.parse(JSON.stringify(page)) }); await flush(); }
       await checkCopy(expected);
       if (width === 80 || endCell === 1) {
         const leaves = test.renderer.getSelection()!.selectedRenderables.map(leaf => leaf.getSelectedText());
@@ -924,7 +933,7 @@ try {
       }
     }
     await show({ kind: 'conversation', title: 'Brand fixture', conversationId: 'brand-fixture', connected: true });
-    root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 0, follow: false, segments: [] } }); await flush();
+    root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 0, follow: false, segments: [] } }); await flush();
     assertBold('知行', true); assertBold('当前对话 Brand fixture', false);
   }
   checks.push('configuration/MCP brand columns and native bold/dim attributes survive loading, selection and conversation transitions');
@@ -935,7 +944,7 @@ try {
   const clipSegments: BodyPage['segments'][number][] = [];
   for await (const part of projectBodyHistory('| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | eps | zeta | eta | theta |\n', 'markdown', 'forward', async () => {}))
     clipSegments.push({ blockId: 'clip-table', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
-  root.receive({ type: 'display-page', page: { first: 0, start: 0, last: clipSegments.length, follow: false, segments: clipSegments } }); await flush();
+  root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: clipSegments.length, follow: false, segments: clipSegments } }); await flush();
   const clippedBody = descendants(test.renderer.root).find(node => node.constructor.name === 'TerminalScrollBox'); assert.ok(clippedBody);
   assert.equal(clippedBody.viewport.height, 1, 'fixture exercises a one-row reading viewport');
   for (const top of [2, 3, 2]) {

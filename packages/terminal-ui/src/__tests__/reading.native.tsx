@@ -7,6 +7,11 @@ import { createTerminalRoot } from '../root.js';
 import { scrollGeometry } from '../scroll-box.js';
 import type { BodyPage } from '../body-model.js';
 import type { TerminalView } from '../protocol.js';
+// 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
+const TEST_READING = { conversationId: 'test', generation: 1 };
+let baselineRevision = 0;
+const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, reading });
+
 setRenderLibPath(process.env.ZHIXING_TERMINAL_RENDER_LIB!);
 const test = await createTestRenderer({ width: 120, height: 40, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
 const frames: Record<string, unknown> = {}, checks: string[] = [];
@@ -19,14 +24,14 @@ const walk = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMa
 const find = (name: string) => walk(test.renderer.root).find(node => node.constructor.name === name)!;
 const box = () => find('TerminalScrollBox'), editor = () => find('TerminalTextarea');
 const flush = async () => { for (let i = 0; i < 8; i++) await test.renderOnce(); await new Promise<void>(resolve => queueMicrotask(resolve)); };
-const show = async (value: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { ...value, generation: ++generation } }); await flush(); };
-const publish = async (value = page) => { page = value; root!.receive({ type: 'display-page', page }); await flush(); };
+const show = async (value: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { reading: TEST_READING, ...value, generation: ++generation } }); await flush(); };
+const publish = async (value = page) => { page = value; root!.receive({ type: 'display-page', ...baseline(), page }); await flush(); };
 const latest = async () => { test.mockInput.pressKey('\x1b[1;5F'); await flush(); };
 const capture = (name: string) => { frames[name] = test.captureSpans(); };
 const tick = setInterval(() => void test.renderOnce(), 15);
 try {
   root = await createTerminalRoot({ signal: new AbortController().signal, inputReady() {}, exit: async () => {}, request: async action => {
-    if (action.kind === 'display-page') { page = { ...page, follow: !!action.follow }; root!.receive({ type: 'display-page', page }); }
+    if (action.kind === 'display-page') { page = { ...page, follow: !!action.follow }; root!.receive({ type: 'display-page', ...baseline(), page }); }
     if (action.kind === 'input-candidates') return { revision: action.revision, start: 0, end: action.text.length, active: action.text.startsWith('/'), items: action.text.startsWith('/') ? [{ id: 'config', label: '/config' }] : [] };
     if (action.kind === 'clipboard-write') { copies.push(action.text); return { state: 'copied' }; }
     return { accepted: true };

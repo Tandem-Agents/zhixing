@@ -46,6 +46,34 @@ describe('foreground terminal page ownership', () => {
     target[kind] = undefined; await target.publishHistoryView();
     expect(views.at(-1).kind).toBe('conversation');
   });
+  it('declares the current reading generation when a foreground page that hid the main view closes', async () => {
+    const { target, views } = fixture(); target.controller = { current: { conversationId: 'c' } };
+    target.history = { conversationId: 'c', generation: 1, hasMore: true, offline: false, settled: true };
+    target.presentingConfirmation = true;
+    // 前台确认页期间发生重建：新代次的视图发布被挡住
+    target.history = { conversationId: 'c', generation: 2, hasMore: true, offline: false, settled: true };
+    await target.publishHistoryView(); expect(views).toHaveLength(0);
+    target.presentingConfirmation = undefined;
+    await target.publish(target.mainView);
+    expect(views.at(-1)).toMatchObject({ kind: 'conversation', conversationId: 'c', reading: { conversationId: 'c', generation: 2 } });
+  });
+  it('stamps the reading at delivery, so a restored snapshot view never declares a stale generation', async () => {
+    const { target, views } = fixture(); target.controller = { current: { conversationId: 'c' } };
+    target.history = { conversationId: 'c', generation: 3, hasMore: true, offline: false };
+    await target.publish(target.mainView);
+    const snapshot = target.mainView;
+    expect(views.at(-1).reading).toEqual({ conversationId: 'c', generation: 3 });
+    target.history = { conversationId: 'c', generation: 4, hasMore: true, offline: false };
+    await target.publish(snapshot);
+    expect(views.at(-1).reading).toEqual({ conversationId: 'c', generation: 4 });
+    expect(snapshot).not.toHaveProperty('reading');
+  });
+  it('declares no reading for a view whose conversation is not the one being read', async () => {
+    const { target, views } = fixture(); target.controller = { current: { conversationId: 'next' } };
+    target.history = { conversationId: 'previous', generation: 5, hasMore: true, offline: false, settled: true };
+    await target.publish(target.mainView);
+    expect(views.at(-1).conversationId).toBe('next'); expect(views.at(-1)).not.toHaveProperty('reading');
+  });
   it('keeps every conversation update in the starting projection until startup admits input', async () => {
     const { target, views } = fixture(); target.startupAttempt = {};
     await target.publish({ ...target.mainView, message: '正在准备最近的对话…' });

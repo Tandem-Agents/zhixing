@@ -38,6 +38,16 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     createMemo: (read: () => unknown) => read,
     createSignal: (initial: unknown) => { let value = initial; return [() => value, (update: unknown) => { value = typeof update === 'function' ? update(value) : update; }]; },
     createEffect: (effect: () => void) => { effects.push(effect); }, onCleanup: (cleanup: () => void) => { cleanups.push(cleanup); }, For, Show,
+    // 与 Solid 的 on 同义：defer 时首次不调用，之后只在依赖值变化时调用
+    on: (deps: () => unknown, run: (value: unknown) => void, options?: { defer?: boolean }) => {
+      let started = false, previous: unknown;
+      return () => {
+        const value = deps();
+        if (!started) { started = true; previous = value; if (options?.defer) return; }
+        else if (value === previous) return;
+        previous = value; run(value);
+      };
+    },
   };
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },
     './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2, content: 2, scrollbar: 1, userInner: 2 } },
