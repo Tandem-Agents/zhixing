@@ -35,8 +35,11 @@ try {
   await show(view); await publish();
   const geometry = () => { const s = box(); return { content: s.scrollHeight, viewport: s.viewport.height, scrollTop: s.scrollTop, ...scrollGeometry(s.scrollHeight, s.viewport.height, s.verticalScrollBar.slider.height, s.scrollTop) }; };
   const initial = geometry();
-  assert.equal(box().verticalScrollBar.x, 119);
-  assert.equal(box().verticalScrollBar.slider.getThumbRect().height, initial.height);
+  // 会话正文不画应用竖条：内容溢出时也不出现，原竖条列还给正文
+  assert.ok(initial.content > initial.viewport, 'fixture overflows the reading viewport');
+  assert.equal(box().verticalScrollBar.visible, false);
+  assert.equal(box().viewport.width, 120);
+  assert.ok(!test.captureCharFrame().split('\n').some(row => /[█▐▕┃]$/u.test(row.trimEnd())), 'no scrollbar glyph at the right edge');
   capture('main');
   // Shared geometry covers tiny overflow, no overflow and a one-cell track.
   for (const [content, viewport, track] of [[34, 34, 34], [35, 34, 34], [90, 34, 34], [20, 1, 1]]) {
@@ -66,14 +69,37 @@ try {
   box().scrollTo(3); await flush(); await test.mockMouse.click(18, 8); await flush(); assert.equal(box().scrollTop, 3);
   checks.push('wheel consumes exactly once; ordinary body and partly visible header clicks do not move content');
 
+  // 原竖条所在的最右列现在属于正文：滚轮照常滚动，点击不移动内容、不被竖条拦截，拖选能从这一列开始
+  const beforeEdgeWheel = box().scrollTop;
+  await test.mockMouse.scroll(119, 8, 'up'); await flush(); assert.equal(box().scrollTop, beforeEdgeWheel - 3);
+  const afterEdgeWheel = box().scrollTop;
+  await test.mockMouse.click(119, 8); await flush(); assert.equal(box().scrollTop, afterEdgeWheel);
+  assert.equal((test.renderer as any).capturedRenderable, undefined);
+  checks.push('former scrollbar column belongs to the body: wheel scrolls, click neither moves nor captures');
+
+  // 长行按全宽折行：正文右缘落在第 117 列（左右各留 2 列），这一列的文字可以命中并拖选
+  await publish({ ...page, segments: [{ ...page.segments[0]!, text: page.segments[0]!.text + '\n' + 'W'.repeat(300) }] });
   await latest();
+  const rows = test.captureCharFrame().split('\n'), wide = rows.findIndex(row => row.includes('WWWWWWWWWW'));
+  assert.ok(wide >= 0 && rows[wide + 1]!.includes('WWWWWWWWWW'), 'long line wraps');
+  assert.equal(Math.max(...rows.filter(row => row.includes('WWWWWWWWWW')).map(row => row.lastIndexOf('W'))), 117);
+  await test.mockMouse.drag(117, wide, 110, wide + 1); await flush();
+  assert.match(test.renderer.getSelection()?.getSelectedText() ?? '', /^W{2,}$/u, 'text in the rightmost text column is selectable');
+  test.renderer.clearSelection(); await flush();
+  checks.push('reading text uses the returned column: right edge at column 117 of 120 and selectable there');
+
+  // 列表页仍保留竖条：拖动单调、缩放后重定位、丢失松手后新按下不被旧捕获拦住。
+  // 列表收到视图时会把选中项滚进可见区（root.tsx 选项跟随），没有“拖动中同内容刷新”的场景，不在此断言。
+  const listView = { kind: 'configuration' as const, title: '配置', editId: 'cfg-long', choices: Array.from({ length: 80 }, (_, i) => ({ id: `c${i}`, label: `选项 ${i}` })) };
+  await show(listView);
+  assert.equal(box().verticalScrollBar.visible, true, 'list pages keep their scrollbar');
+  box().scrollTo(box().scrollHeight); await flush();
   const slider = box().verticalScrollBar.slider, thumb = slider.getThumbRect();
   let pointer = thumb.y + Math.min(2, thumb.height - 1);
   await test.mockMouse.pressDown(slider.x, pointer); await flush();
   const positions: number[] = [box().scrollTop];
   for (let i = 0; i < 7; i++) {
     pointer--; await test.mockMouse.emitMouseEvent('drag', slider.x, pointer); await flush(); positions.push(box().scrollTop);
-    await show({ ...view, message: '相同内容刷新' }); assert.equal(box().scrollTop, positions.at(-1));
   }
   assert.ok(positions.every((value, i) => !i || value <= positions[i - 1]!));
   assert.ok(new Set(positions).size >= 5, 'continuous drag has intermediate positions');
@@ -81,15 +107,15 @@ try {
   test.resize(100, 36); await flush(); const resized = box().scrollTop;
   await test.mockMouse.emitMouseEvent('drag', box().verticalScrollBar.x, pointer); await flush(); assert.equal(box().scrollTop, resized, 'resize rebase without pointer movement');
   await test.mockMouse.release(box().verticalScrollBar.x, pointer); await flush();
-  // Lose mouse-up while the native renderer holds the slider; a new press
-  // must reach the editor rather than the stale capture target.
+  // 丢失松手时原生渲染器仍持有滑块；之后在别处的新按下不能被旧捕获拦住（列表页无输入框，取顶行标题处）
   const nextThumb = box().verticalScrollBar.slider.getThumbRect();
   await test.mockMouse.pressDown(box().verticalScrollBar.x, nextThumb.y + 1);
   await test.mockMouse.emitMouseEvent('drag', box().verticalScrollBar.x, nextThumb.y); await flush();
-  await test.mockMouse.pressDown(editor().x, editor().y); await test.mockMouse.release(editor().x, editor().y); await flush();
+  await test.mockMouse.pressDown(2, 0); await test.mockMouse.release(2, 0); await flush();
   assert.ok(!test.renderer.getSelection()?.isDragging);
   assert.equal((test.renderer as any).capturedRenderable, undefined);
-  checks.push('thumb drag is monotone across intermediate positions, same-content refresh and resize rebasing');
+  checks.push('list thumb drag is monotone across intermediate positions and resize rebasing');
+  await show(view);
 
   await latest();
   const currentTop = box().scrollTop;

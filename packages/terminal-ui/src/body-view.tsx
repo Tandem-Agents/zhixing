@@ -107,7 +107,8 @@ function styled(block: BodyRenderBlock): StyledText {
  * only a finite body page, its native measurements and its reading position. */
 export function BodyView(props: BodyViewProps) {
   const [following, setFollowing] = createSignal(props.page.follow);
-  const contentWidth = () => Math.max(1, props.width - spacing.scrollbar - 2 * spacing.content);
+  // 会话正文不画应用竖条，原竖条列还给正文
+  const contentWidth = () => Math.max(1, props.width - 2 * spacing.content);
   const [headerHeight, setHeaderHeight] = createSignal(0);
   // Do not evaluate the JSX-valued header getter from pointer callbacks, or
   // cache native nodes across a Show unmount (destroyed nodes cannot remount).
@@ -757,13 +758,6 @@ export function BodyView(props: BodyViewProps) {
       }
     }
   }
-  const navigateScrollbar = () => {
-    if (!box || disposed) return;
-    navigationVersion++; paging = false; gestureHold = false; setFollowing(false);
-    restorePending = false; saved = capture(); props.onAnchor(saved);
-    if (atBottom() && !handle.hasSelection()) { setFollowing(true); saved = undefined; headerTop = undefined; }
-    commitReadingIntent(following());
-  };
   createEffect(() => {
     prefixHeight();
     const page = contentPage(), width = props.width, height = props.height;
@@ -827,9 +821,9 @@ export function BodyView(props: BodyViewProps) {
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
       width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode="char" selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
   };
-  return <scrollbox ref={value => { box = value as TerminalScrollBox; value.on('reading-pointer', () => handle.inputTakeover()); value.on('reading-navigation', navigateScrollbar); }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
+  return <scrollbox ref={value => { box = value as TerminalScrollBox; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
-    verticalScrollbarOptions={{ width: spacing.scrollbar, showArrows: false }}
+    verticalScrollbarOptions={{ width: spacing.scrollbar, showArrows: false, visible: false }}
     onMouseUp={event => { if (event.button === 0) { const version = navigationVersion; queueMicrotask(() => { if (!disposed && version === navigationVersion) { finishBodySelection(); endGesture(); } }); } }}
     onMouseDown={event => {
       if (event.button !== 0) return;
@@ -841,7 +835,7 @@ export function BodyView(props: BodyViewProps) {
       event.preventDefault(); event.stopPropagation();
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
     }}>
-    <Show when={showHeader()}><box width={Math.max(1, props.width - spacing.scrollbar)} flexShrink={0} flexDirection="column" onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}
+    <Show when={showHeader()}><box width={Math.max(1, props.width)} flexShrink={0} flexDirection="column" onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}
       {/* 欢迎框下原有的间隔行：确证到头时写“对话从这里开始”，行高不变，正文不挪动 */}
       <text height={1} wrapMode="none" selectable={false} fg={tone.dim} content={atStart() ? ' '.repeat(Math.max(0, spacing.content + Math.floor((contentWidth() - 20) / 2))) + '── 对话从这里开始 ──' : ''} />
     </box></Show>

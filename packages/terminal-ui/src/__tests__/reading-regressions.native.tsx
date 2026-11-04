@@ -201,7 +201,7 @@ try {
     await h.show({ kind: 'history', title: '历史', conversationId: h.view.conversationId, connected: false, displayGap: true });
     text = h.test.captureCharFrame(); assert.ok(text.includes('历史展示存在缺口')); h.capture('gap');
   }, 24);
-  for (const route of ['selection', 'clear-body', 'clear-editor', 'scrollbar']) {
+  for (const route of ['selection', 'clear-body', 'clear-editor', 'pageup']) {
     for (const successor of ['conversation', 'configuration']) await scenario(`late-reading-${route}-${successor}`, async h => {
       if (route.startsWith('clear')) { await h.test.mockMouse.drag(6, 4, 18, 5); await h.flush(); }
       let reject!: (error: Error) => void;
@@ -212,8 +212,8 @@ try {
         const editor = h.nodes().find((n: any) => n.constructor.name === 'TerminalTextarea');
         await h.test.mockMouse.click(editor.x, editor.y);
       } else {
-        const bar = h.box().verticalScrollBar;
-        await h.test.mockMouse.click(bar.x, bar.slider.getThumbRect().y - 2);
+        // 会话正文已无竖条：用键盘翻页作为同一类真实阅读操作
+        h.test.mockInput.pressKey('\x1b[5~');
       }
       await h.flush(); assert.ok(reject, 'real interaction issued the retained request');
       h.readWith(undefined);

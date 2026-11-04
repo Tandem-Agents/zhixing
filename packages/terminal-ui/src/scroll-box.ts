@@ -19,6 +19,9 @@ export class TerminalScrollBox extends ScrollBoxRenderable {
     super(ctx, { ...options, verticalScrollbarOptions: { ...options.verticalScrollbarOptions,
       width: spacing.scrollbar, showArrows: false, visible: true,
       trackOptions: { backgroundColor: 'transparent', foregroundColor: tone.border } } });
+    // 调用方明确不要竖条时（会话正文）经 setter 固定隐藏：OpenTUI 默认按溢出自动显隐，
+    // 只有 setter 置否才会一直不显示，也不占列、不接收指针。
+    if (options.verticalScrollbarOptions?.visible === false) this.verticalScrollBar.visible = false;
     const slider = this.verticalScrollBar.slider;
     ctx.on('terminal-pointer-cancel', this.#cancel);
     slider.onMouseDown = event => {
