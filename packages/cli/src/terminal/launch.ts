@@ -5,6 +5,7 @@ import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
 import { runTerminalSupervisor } from './supervisor.js';
 import { TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
+import { clearStartupHint } from './startup-hint.js';
 
 /** 已知关闭原因给用户的说明；未列出的原因仍指向运行日志 */
 const MODE_INCOMPATIBLE = '这个终端窗口的显示模式与知行不兼容（常见于其他程序或上次异常结束留下的状态），知行无法在这里启动；请新开一个终端窗口后再运行 zz。';
@@ -53,6 +54,8 @@ export async function launchTerminal(args: readonly string[], entryTiming?: {
     if (logging) recordRuntimeFailure(logging.records, error, 'terminal-startup-failed');
   }
   // R has restored the original terminal before ordinary command results are written.
+  // 没进入界面就结束（启动失败、取消）时，启动提示仍在原屏：先清掉，再写结果
+  clearStartupHint();
   const notice = terminalExitNotice(result, closeReason);
   if (notice) process.stderr.write(notice);
   for (const item of output) await new Promise<void>((resolve, reject) => process[item.stream].write(item.text, error => error ? reject(error) : resolve()));

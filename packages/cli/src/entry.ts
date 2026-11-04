@@ -74,6 +74,8 @@ if (process.env.ZHIXING_TERMINAL_ROLE === 'application' && process.env.ZHIXING_T
 } else if (process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY && process.env.TERM !== 'dumb') {
   const interactive = args.length === 0 || (await import('./index.js')).usesInteractiveTerminal(args);
   if (interactive) {
+    // 默认交互入口在加载任何重模块之前先给出启动提示；界面接管或启动失败时由 S 清除
+    if (args.length === 0) (await import('./terminal/startup-hint.js')).showStartupHint();
     const prepareAt = performance.now(), prepareCpu = process.cpuUsage();
     // S forwards finite, short-lived display frames. Like N, keep a modest
     // growth margin instead of retaining a server-sized spare heap. This does

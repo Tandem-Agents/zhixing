@@ -21,6 +21,7 @@ import { verifyTerminalAssets } from './verify-assets.js';
 import { readTerminalChunkTables } from './chunk-table.js';
 import { recordTerminalFailure, TERMINAL_ASSET_FAILURE_CODES } from './failure.js';
 import { readDeviceRestriction, retrievingHostAlive } from '../serve/device-restriction.js';
+import { clearStartupHint } from './startup-hint.js';
 
 type Role = 'recovery' | 'application' | 'ui';
 interface OwnedProcess {
@@ -1023,6 +1024,8 @@ class TerminalSupervisor {
       const end = Date.now() + 800;
       await this.#phase('mode-register', () => this.#nativeCommand(`modes-${message.originalMask}-${message.mutableMask}`, event => event.event === 'modes-admitted', Math.max(0, end - Date.now())));
       this.#live();
+      // 恢复进程即将接管屏幕：先清掉入口写在原屏的启动提示，退出界面后原屏不留残余
+      clearStartupHint();
       await this.#phase('mode-activate', () => this.#nativeCommand('activate', event => event.event === 'entered', Math.max(0, end - Date.now())));
       this.#live();
       await this.#phase('mode-permit', () => this.#nativeCommand('permit-modes', event => event.event === 'modes-permitted', Math.max(0, end - Date.now())));
