@@ -68,11 +68,6 @@ export interface BodyViewProps {
   readonly renderer: CliRenderer;
   readonly anchor?: BodyAnchor;
   readonly hasEarlier?: boolean;
-  /**
-   * 对话页：跟随最新且已装入的正文不足一屏时，留白放在横幅与正文之间，让正文末尾贴近输入区。
-   * 只是显示布局——留白不计入正文几何与阅读位置，也不改变任何读取判定。
-   */
-  readonly alignEnd?: boolean;
   readonly requestPage: (start: number | undefined, follow: boolean) => Promise<unknown>;
   readonly requestPrevious: () => Promise<unknown>;
   readonly onAnchor: (anchor: BodyAnchor | undefined) => void;
@@ -172,11 +167,6 @@ export function BodyView(props: BodyViewProps) {
     return new Set(items.filter(item => state.selecting || (item.top + item.height >= top - height && item.top <= top + 2 * height)).map(item => item.key));
   });
   const heights = createMemo(() => new Map(geometry().map(item => [item.key, item.height])));
-  // 留白＝视口高度−自然内容高度。自然高度取正文几何（块高度即按它显式排版，横幅为排版回报），
-  // 不依赖留白自身的排版时序，因而不会自我回路；只在跟随最新、已有正文时存在
-  const geometryNatural = () => { const last = geometry().at(-1); return last ? last.top + last.height : prefixHeight(); };
-  const endSpacer = createMemo(() => props.alignEnd && following() && blocks().length > 0
-    ? Math.max(0, Math.max(1, props.height) - geometryNatural()) : 0);
   let box: TerminalScrollBox | undefined, disposed = false, paging = false;
   let gestureHold = false, gestureIntent = false, gestureHadSelection = false, navigationVersion = 0, heldVersion = 0;
   let selectionClearPending = false;
@@ -706,7 +696,6 @@ export function BodyView(props: BodyViewProps) {
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
     }}>
     <Show when={showHeader()}><box width={Math.max(1, props.width - spacing.scrollbar)} flexShrink={0} onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}</box></Show>
-    <Show when={endSpacer() > 0}><box height={endSpacer()} flexShrink={0} /></Show>
     <For each={blockKeys()}>{key => {
       const block = createMemo(() => blockIndex().get(key)!);
       return <box flexDirection="column" flexShrink={0} marginX={spacing.content} width={contentWidth()} paddingLeft={layout(block()).indent} paddingTop={block().gapBefore ?? 0}

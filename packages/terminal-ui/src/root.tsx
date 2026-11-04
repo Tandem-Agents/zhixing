@@ -528,7 +528,6 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
           header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} />}
           hasEarlier={view().historyHasMore}
-          alignEnd={view().kind === 'conversation'}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
           requestPrevious={() => options.request({ kind: 'history-previous' })}
