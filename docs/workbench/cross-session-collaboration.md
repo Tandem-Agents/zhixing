@@ -424,6 +424,10 @@ collab/
 
 **保留与清理**（自然回合触发，幂等，任何角色可执行；无定时器、无共享账本）：
 
+- **临时通信**沿用现有信箱。需要回复的信在结果交付后结清，无需回复的通知在处理完后确认；未处理事项继续保留。关键结论进入正式产物后，传输副本按信箱原有规则释放。
+- **大件工作资料**遵循[任务临时资源的收尾规则](../engineering/path-and-resource-isolation.md#任务临时资源的收尾)。在开始临时实验时就确定独占根和消费者；换候选、交审或结束时，创建方释放已用完的副本。交付只列仍需保留的例外及释放责任，复审方用完后自行释放或明确交还。线程保留期不延长一次性安装和解包目录的寿命，未复核的唯一材料仍须保留。监理在原有巡查中发现积压、孤儿或测量争用时指出，不另增常驻巡检。
+- 验证工具已有作用域目录时直接使用。手工实验需要自选位置时，重型环境放在 `collab/work/<thread>/<role>/<用途>/`，长期设施放在 `collab/tools/`，交审记录与必要的冻结材料放在线程目录。不为每次重试默认开一份永续目录；换轮先确认上轮是否还有消费者，再复用空闲位置或为确需并存的候选单独开根。
+
 - **永不清理**：`open`/`waiting` 线程、未关闭 blocker、`user-decision-needed`、未 promote 的证据、未释放或未过期的租约。
 - **清扫前核对**：目标线程不被任何角色的 `open_threads` 引用（读 roles 即可）。
 - **线程**：终态 + `terminal_retention_days=30` → 移入 `collab/archive/<YYYYMMDD>-<thread-id>/`（命名即时间戳）；归档 + `archive_retention_days=60` → 删除，并生成 tombstone `collab/archive/tombstones/<YYYYMMDD>-<thread-id>.md`（`deleted_by/at/reason/close_reason/sedimentation`）。
