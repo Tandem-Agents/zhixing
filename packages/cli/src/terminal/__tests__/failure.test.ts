@@ -27,9 +27,9 @@ describe('terminal first-cause logging', () => {
     cause.stack = 'Error: secret provider payload\n    at receive (file:///C:/private-home/packages/cli/dist/application-ABCD.js:18:7)\n    at file:///C:/private-home/custom-secret-path.js:8:1';
     const error = Error('terminal-application-request-capacity', { cause });
     error.stack = 'Error: terminal-application-request-capacity';
-    recordTerminalFailure(records, error, 'terminal-receive-failed', { action: 'history-previous', requestId: 18, pending: 8 });
+    recordTerminalFailure(records, error, 'terminal-receive-failed', { action: 'display-earlier', requestId: 18, pending: 8 });
     expect(record.mock.calls[0]![0]).toMatchObject({ event: 'terminalFailure', data: {
-      action: 'history-previous', requestId: 18, pending: 8,
+      action: 'display-earlier', requestId: 18, pending: 8,
       failure: { code: 'terminal-application-request-capacity' }, sourceFrames: ['cli/application-ABCD.js:18:7'],
     } });
     const serialized = JSON.stringify(record.mock.calls);

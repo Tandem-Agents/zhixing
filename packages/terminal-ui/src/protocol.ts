@@ -83,13 +83,15 @@ export type TerminalAction =
   | { readonly kind: 'recovery-part'; readonly requestId: string; readonly index: number; readonly encoded: string; readonly final: boolean }
   | { readonly kind: 'recovery-page'; readonly requestId: string; readonly page: number }
   | { readonly kind: 'recovery-cancel'; readonly requestId: string }
-  | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "exit" | "status" }
+  | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "rubric-resume" | "confirmation-retry" | "exit" | "status" }
   /** Esc／Ctrl+C 请求停止。stop 是按键时屏上显示的那次运行（意图与身份，不是授权）；缺省表示按键时屏上空闲。 */
   | { readonly kind: "abort" | "interrupt"; readonly stop?: TerminalStopTarget }
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
   | { readonly kind: 'command-route'; readonly name: string }
   | { readonly kind: 'skills-action'; readonly action: TerminalSkillsAction }
   | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean }
+  /** 取显示序号 before 之前紧邻的一页（至多一页传输上限）。N 已存就直接读；不够时单飞读一次源页。不改显示游标、跟随与补丁基准；回复见 TerminalEarlierReply。 */
+  | { readonly kind: 'display-earlier'; readonly before: number }
   | { readonly kind: "configuration-open"; readonly section?: "model" | "mcp" }
   | { readonly kind: "configuration-action"; readonly editId: string; readonly action: string; readonly value?: string | number | boolean }
   | { readonly kind: "secret-value"; readonly editId: string; readonly fieldId: string; readonly value: string }
@@ -164,6 +166,10 @@ export interface TerminalDisplaySegment {
   readonly final: boolean;
   readonly body?: BodyFragmentMetadata;
 }
+/** display-earlier 的回复：page 为 before 之前紧邻的已存片段（可能为空），hasEarlier 为源端是否还有更早历史。 */
+export interface TerminalEarlierReply { readonly accepted: true; readonly hasEarlier: boolean; readonly page?: TerminalDisplayPage;
+  /** 这次是否有进展（取到内容、N 已存起点前移、源游标或准备进度推进）；false 表示原地踏步 */
+  readonly progressed?: boolean }
 export interface TerminalDisplayPage {
   readonly first: number;
   readonly last: number;

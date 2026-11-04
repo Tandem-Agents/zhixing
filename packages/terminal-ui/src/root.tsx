@@ -11,7 +11,7 @@ import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
-import { BodyView, TerminalScrollBox, type BodyViewHandle } from './body-view.js';
+import { BodyView, TerminalScrollBox, type BodyViewHandle, type BodyReadingState } from './body-view.js';
 import { BODY_PAGE_BYTES, bodyWindows, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
 import { BodyReadingWindow } from './body-window.js';
@@ -136,13 +136,31 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const bodyClosures = new Set<Promise<void>>();
   const [bodySize, setBodySize] = createSignal({ width: 78, height: 10 });
   const [contextHeight, setContextHeight] = createSignal(0);
+  const [readingArea, setReadingArea] = createSignal(0);
   const [bodyAnchor, setBodyAnchor] = createSignal<BodyAnchor>();
   // Configuration and other overlays may omit the conversation identity. They
   // do not replace the retained conversation or its reading position.
   let bodyConversationId: string | undefined;
-  const [reading, setReading] = createSignal<{ below: boolean; loading: boolean; retry?: -1 | 1 }>({ below: false, loading: false },
-    { equals: (a, b) => a.below === b.below && a.loading === b.loading && a.retry === b.retry });
+  const [reading, setReading] = createSignal<BodyReadingState>({ below: false, belowShown: false, above: false, loading: false },
+    { equals: (a, b) => a.below === b.below && a.belowShown === b.belowShown && a.above === b.above && a.loading === b.loading && a.retry === b.retry });
   const isBody = () => ['conversation', 'history'].includes(view().kind);
+  // 阅读导航行只在有阅读信息时占行；“下方还有内容”由正文按不含这一行时的完整高度判定，
+  // 所以这一行出现或消失不会反过来改变它自己的条件
+  const navigationShown = () => isBody() && (view().bodyRecovery === 'blocked' || view().bodyRecovery === 'retrying' ||
+    !!reading().retry || reading().loading || reading().below || reading().above);
+  // 后台补邻页只在可输入且空闲时进行：输入框为空、无候选、无待受理的提交、没有运行；发送路径从不等待它
+  const prefetchAllowed = () => {
+    const current = view();
+    if (!isBody() || !editorEmpty() || candidateOpen() || input.pendingSubmissionId) return false;
+    return current.kind === 'history' ? !current.busy : !!current.readyForInput && current.connected !== false && !current.connectionState && !current.busy;
+  };
+  // 阅读导航行：左侧是方向与读取状态（故障优先），右侧在实际视口下面还有正文时给“回到最新”
+  const readingLeft = () => view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试'
+    : reading().retry ? '读取未完成 · 点击或原方向翻页重试'
+    : view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…'
+    : reading().above ? '↑ 上方还有内容' : '';
+  const readingRight = () => view().bodyRecovery === 'blocked' || !reading().belowShown ? ''
+    : process.platform === 'darwin' || size().width < 60 ? '↓ 回到最新' : '↓ 回到最新 Ctrl+End';
   const bodyReady = (value: BodyViewHandle | undefined) => {
     const previous = bodyView; bodyView = value;
     if (!value && previous) {
@@ -373,6 +391,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   // Reserve compact chrome (2), a body row, input borders (2), the footer
   // and the fixed reading-navigation row on body surfaces.
   // Measure only the preceding context, so editor resizing cannot feed itself.
+  // 阅读导航行按需显隐，这里始终按它在场预留：这只是编辑框的高度上限，不随导航行显隐来回变化
   const fieldRows = () => view().field?.secret ? 1 : Math.max(1, Math.min(
     candidateOpen() ? candidateBudget().editor : Infinity,
     inputRows(editorLines(), size().height), size().height - contextHeight() - candidateHeight() - 6 - (isBody() ? 1 : 0),
@@ -519,6 +538,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }
   }}>
     <Show when={!isBody()}><SurfaceChrome view={view()} width={size().width} height={size().height} /></Show>
+    {/* 正文与阅读导航行共处一个区域：区域高度不随导航行显隐变化，正文据此判断下方是否还有内容 */}
+    <box flexDirection="column" flexGrow={1} minHeight={1} onSizeChange={function(this: BoxRenderable) { setReadingArea(this.height); }}>
     <box ref={value => { bodyBox = value; }} marginX={0} flexGrow={1} minHeight={1}
       onSizeChange={function(this: BoxRenderable) {
         bodyView?.beforeUpdate(); setBodySize({ width: this.width, height: this.height });
@@ -530,11 +551,20 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
       </box></scrollbox>}>
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
-          header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} />}
+          header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} bottomGap={false} />}
           hasEarlier={view().historyHasMore}
+          fullHeight={readingArea()}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
-          requestPrevious={() => options.request({ kind: 'history-previous' })}
+          requestEarlier={before => options.request({ kind: 'display-earlier', before })}
+          reveal={page => {
+            if (disposed) return;
+            const protectedRange = bodyView?.selectionRange();
+            const next = bodyWindow.reveal(page, protectedRange?.from, protectedRange?.to);
+            if (next) setDisplay(next);
+            if (bodyWindow.notice) setStatus(bodyWindow.notice);
+          }}
+          prefetch={prefetchAllowed()}
           onReading={setReading}
           onError={error => { if (!disposed) setStatus(error instanceof Error ? error.message : typeof error === 'string' ? error : '正文暂不可用，已保留内容仍可回看。'); }} />
       </Show>}>
@@ -547,15 +577,26 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           onReady={value => { skillsView = value; }} />
       </Show>
     </box>
+    <Show when={navigationShown()}><box height={1} flexShrink={0} flexDirection="row" marginX={spacing.content}
+      onMouseScroll={event => {
+        // 阅读行上的滚轮照常滚正文
+        const direction = event.scroll?.direction;
+        if (direction !== 'up' && direction !== 'down') return;
+        event.preventDefault(); event.stopPropagation();
+        void bodyView?.page(direction === 'up' ? -1 : 1, 3).catch(setStatus);
+      }}>
+      <text height={1} flexShrink={1} fg={reading().retry || view().bodyRecovery === 'blocked' ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
+        onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
+          if (view().bodyRecovery === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
+          const retry = reading().retry;
+          if (retry) { void bodyView?.page(retry)?.catch(setStatus); return; }
+          if (!reading().loading && reading().above) void bodyView?.page(-1)?.catch(setStatus); }}>{readingLeft()}</text>
+      <box flexGrow={1} minWidth={1} />
+      <Show when={readingRight()}><text height={1} flexShrink={0} fg={tone.dim} selectable={false} wrapMode="none"
+        onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); void bodyView?.bottom()?.catch(setStatus); }}>{readingRight()}</text></Show>
+    </box></Show>
+    </box>
     <box flexDirection="column" flexShrink={0}>
-    <Show when={isBody()}><text height={1} marginX={spacing.content} fg={reading().retry ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
-      onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
-        if (view().bodyRecovery === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
-        const retry = reading().retry; if (!retry && (!reading().below || reading().loading)) return;
-        void (retry ? bodyView?.page(retry) : bodyView?.bottom())?.catch(setStatus); }}>
-      {view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试' : reading().retry ? '读取未完成 · 点击或原方向翻页重试' :
-        view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…' : reading().below ? process.platform === 'darwin' ? '↓ 下方还有内容 · 点击回到最新' : '↓ 下方还有内容 · Ctrl+End 回到最新' : ''}
-    </text></Show>
     <box flexDirection="column" flexShrink={0} height={candidateHeight() ? candidateBudget().process : 'auto'} overflow="hidden" justifyContent="flex-end" onSizeChange={function(this: BoxRenderable) { setContextHeight(this.height); }}>
       <Show when={isBody()} fallback={<>
         <Show when={view().kind === 'recovery'}>
@@ -992,7 +1033,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           const next = decodeBodyPage(message.patch, displayReceived);
           if (!sameBodyPageContent(display(), next.page)) bodyView?.beforeUpdate();
           const protectedRange = bodyView?.selectionRange();
-          displayReceived = next; setDisplay(bodyWindow.accept(next.page, protectedRange?.from, protectedRange?.to));
+          // N 的补丁不让挂载窗口向前扩展：更早的内容只由用户动作揭示，静默阅读的画面不被前插挪动
+          displayReceived = next; setDisplay(bodyWindow.accept(next.page, protectedRange?.from, protectedRange?.to, true));
           if (bodyWindow.notice) setStatus(bodyWindow.notice);
         } else if (message.type === 'display-page') {
           if (message.page.segments.length > 4 || Buffer.byteLength(JSON.stringify(message.page)) > BODY_PAGE_BYTES) throw Error('terminal-display-wire-size');

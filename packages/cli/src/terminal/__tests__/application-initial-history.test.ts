@@ -7,7 +7,7 @@ import { runOutcomeSegment, runOutcomeText } from '../display-replay.js';
 // ports are replaced; parsing, page progression and publication order are real.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#onlineHistoryPage', '#readOnlineHistoryPage'].map(name => {
+const methods = ['#onlineHistoryPage', '#readOnlineHistoryPage', '#historyPage', '#historyPageNow', '#displayEarlier', '#noteHistoryView'].map(name => {
   const node = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === name);
   if (!node) throw Error(`Missing production online history method ${name}`);
   return node.getText(source);
@@ -21,7 +21,8 @@ const Fixture = new Function('observeStartupPhase', 'runOutcomeText', 'runOutcom
 class Fixture {
   abort = new AbortController(); mainView = { readyForInput: false }; logging = { records: undefined };
   historyParser = { close() {} }; bodyWork = { run: work => work() };
-  displayed = 0; published = 0;
+  displayed = 0; published = 0; historyTail = Promise.resolve(); historyRead = undefined; earlierWork = 0; earlierPreparing = -1;
+  async offlineHistoryPage() { throw Error('offline path not exercised'); }
   async displayPage() { this.displayed++; }
   async publishHistoryView() { this.published++; }
   ${methods.replace(/#/gu, '')}
@@ -173,5 +174,76 @@ describe('history marks each run with its outcome once', () => {
     await h.target.onlineHistoryPage(h.history);
     expect(h.stored.filter(text => text === runOutcomeText('cancelled'))).toHaveLength(1);
     expect(h.stored).toEqual(['message-0', runOutcomeText('cancelled'), 'message-1', 'message-2', 'message-3']);
+  });
+});
+
+describe('earlier page for the reading window (display-earlier)', () => {
+  // 存储替身：前插让 first 前移；before() 回紧邻 before 的至多 4 段
+  const store = (target: InstanceType<typeof Fixture>, first: number) => {
+    const texts = new Map<number, string>();
+    for (let ordinal = first; ordinal < 0; ordinal++) texts.set(ordinal, `stored-${ordinal}`);
+    target.display = { first, last: 0,
+      append: vi.fn(async (segment: { text: string }, prepend: boolean) => { if (prepend) texts.set(--target.display.first, segment.text); }),
+      before: vi.fn(async (before: number) => {
+        const end = Math.max(target.display.first, before), from = Math.max(target.display.first, end - 4);
+        return { first: target.display.first, last: 0, start: from, follow: false,
+          segments: Array.from({ length: end - from }, (_, index) => ({ blockId: `b${from + index}`, role: 'user', contentOffset: 0, final: true, text: texts.get(from + index) })) };
+      }) };
+  };
+  it('answers from the stored range without a source read or any display publication', async () => {
+    const h = fixture(); store(h.target, -8); h.target.mainView = { readyForInput: true, message: '已恢复最近对话。' };
+    const reply = await h.target.displayEarlier(-4);
+    expect(reply.page.segments.map((segment: { text: string }) => segment.text)).toEqual(['stored--8', 'stored--7', 'stored--6', 'stored--5']);
+    expect(reply.hasEarlier).toBe(true);
+    expect(h.target.conversation.bodyPage).not.toHaveBeenCalled();
+    expect(h.target.displayed).toBe(0); expect(h.target.published).toBe(0);
+  });
+  it('does not start a source read before the conversation accepts input', async () => {
+    const h = fixture(); store(h.target, -4); h.target.mainView = { readyForInput: false };
+    const reply = await h.target.displayEarlier(-4);
+    expect(reply.page).toBeUndefined(); expect(reply.hasEarlier).toBe(true);
+    expect(h.target.conversation.bodyPage).not.toHaveBeenCalled();
+  });
+  it('reads one bounded quiet source step, then answers the page right before the old first', async () => {
+    const h = fixture(); store(h.target, -4); h.target.mainView = { readyForInput: true, message: '已恢复最近对话。' };
+    // 源页只有 2 个片段且源端还有更多：没有“一步一页”的上限时会接着再取下一页
+    h.target.conversation.bodyPage.mockImplementation(async () => ({ fragments: h.fragments.slice(0, 2), hasMore: true }));
+    const reply = await h.target.displayEarlier(-4);
+    expect(h.target.conversation.bodyPage).toHaveBeenCalledTimes(1);
+    expect(reply.page.segments).toHaveLength(2); expect(reply.page.start + reply.page.segments.length).toBe(-4);
+    // 安静：不写进度、不改状态行、不发布显示页，也不发整页 view（界面收到 view 会重置候选里的两步操作）；
+    // “还有更早”只记在 N 的页面投影里，阅读窗从回复里取得
+    expect(h.target.mainView.message).toBe('已恢复最近对话。');
+    expect(h.target.displayed).toBe(0); expect(h.target.published).toBe(0);
+    expect(h.target.mainView.historyHasMore).toBe(true); expect(reply.hasEarlier).toBe(true);
+  });
+  it('binds a queued read to the conversation it was queued for', async () => {
+    const h = fixture(); store(h.target, -4); h.target.mainView = { readyForInput: true };
+    const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+    let calls = 0;
+    h.target.conversation.bodyPage.mockImplementation(async () => { calls++; entered.resolve(); await gate.promise; return { fragments: h.fragments.slice(0, 1), hasMore: true }; });
+    const first = h.target.historyPage({ quiet: true });      // 对话 A 的一步，源读挂起
+    const queued = h.target.historyPage({ quiet: true });     // A 的第二步，排在后面
+    await entered.promise;
+    const other = { conversationId: 'other', hasMore: true, offline: false };
+    h.target.history = other;                                  // 切到对话 B
+    gate.resolve(); await first; await queued;
+    expect(calls).toBe(1);                                     // 排队的 A 步轮到时发现已换对话，不读
+    expect(other).toEqual({ conversationId: 'other', hasMore: true, offline: false });
+  });
+  it('reports no progress when the source stays at the same cursor', async () => {
+    const h = fixture(); store(h.target, -4); h.target.mainView = { readyForInput: true };
+    h.target.conversation.bodyPage.mockImplementation(async () => ({ fragments: [], hasMore: true, cursor: undefined }));
+    h.history.bodyCursor = undefined;
+    const reply = await h.target.displayEarlier(-4);
+    expect(reply.page).toBeUndefined(); expect(reply.progressed).toBe(false);
+  });
+  it('counts a preparing source page as one step without progress text', async () => {
+    const h = fixture(); store(h.target, -4); h.target.mainView = { readyForInput: true, message: '已恢复最近对话。' };
+    h.target.conversation.bodyPage.mockImplementation(async () => ({ fragments: [], hasMore: true, preparing: { bytes: 1024, total: 8192 }, cursor: h.fragments[0]!.cursor }));
+    const reply = await h.target.displayEarlier(-4);
+    expect(h.target.conversation.bodyPage).toHaveBeenCalledTimes(1);
+    expect(reply.page).toBeUndefined(); expect(reply.hasEarlier).toBe(true);
+    expect(h.target.mainView.message).toBe('已恢复最近对话。'); expect(h.target.published).toBe(0);
   });
 });

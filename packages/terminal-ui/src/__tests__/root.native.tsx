@@ -43,7 +43,7 @@ try {
     usableFrame(frameId) { usableFrames.push(frameId); },
     request: async action => {
       actions.push(action);
-      if (readingReply && (action.kind === 'display-page' || action.kind === 'history-previous')) return readingReply(action);
+      if (readingReply && (action.kind === 'display-page' || action.kind === 'display-earlier')) return readingReply(action);
       if (action.kind === 'command-route' && ['help', 'clear'].includes(action.name)) return { route: 'local' };
       if (action.kind === 'input-candidates') {
         if (candidateReply) return candidateReply(action);
@@ -645,6 +645,8 @@ try {
   assert.match(text(), /viewport-399/);
   assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);
   const scroll = descendants(test.renderer.root).find(node => node.constructor.name === 'TerminalScrollBox'); assert.ok(scroll);
+  // 先经真实滚轮离开最新（阅读意图），再直接定位到顶：阅读导航行出现时正文按原意图保持位置，不被跟随拉回底部
+  await test.mockMouse.scroll(20, 5, 'up'); await flush();
   scroll.scrollTo(0); await flush();
   assert.match(text(), /viewport-000/);
   assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);
@@ -679,9 +681,10 @@ try {
       if (route === 'keyboard') test.mockInput.pressKey('\x1b[5~');
       else if (route === 'wheel') await test.mockMouse.scroll(20, 8, 'up');
       else if (route === 'bottom') test.mockInput.pressKey('\x1b[1;5F');
-      else { const row = text().split('\n').findIndex(line => line.includes('下方还有内容')); assert.ok(row >= 0); await test.mockMouse.click(5, row); }
+      // 点阅读行右侧的“回到最新”（45 列下右侧文字占第 33–42 列）
+      else { const row = text().split('\n').findIndex(line => line.includes('回到最新')); assert.ok(row >= 0); await test.mockMouse.click(40, row); }
       await flush();
-      assert.ok(actions.slice(start).some(a => a.kind === 'display-page' || a.kind === 'history-previous'));
+      assert.ok(actions.slice(start).some(a => a.kind === 'display-page' || a.kind === 'display-earlier'));
       pending.reject(Error('synthetic read unavailable')); await flush(); await flush();
       assert.match(text(), /读取未完成/); assert.ok(editor());
       readingReply = async () => { root!.receive({ type: 'display-page', page: latest }); return { accepted: true }; };
@@ -938,7 +941,7 @@ try {
   for (const top of [2, 3, 2]) {
     clippedBody.scrollTo(top); await flush();
     const notice = text().split('\n')[clippedBody.viewport.y + clippedBody.viewport.height]!;
-    assert.equal(notice.trim(), '↓ 下方还有内容 · Ctrl+End 回到最新', `table at ${top} cannot paint into the reading notice`);
+    assert.match(notice.trim(), /^(↑ 上方还有内容\s+)?↓ 回到最新 Ctrl\+End$/u, `table at ${top} cannot paint into the reading notice`);
   }
   candidateReply = undefined;
   checks.push('production table border crossing a one-row viewport never overwrites the adjacent reading notice');

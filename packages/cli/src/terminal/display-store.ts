@@ -449,6 +449,22 @@ export class TerminalDisplayStore {
     return page;
     });
   }
+  /** 只读取 before 之前紧邻的至多一页（预取与上翻揭示用）：不改当前阅读页槽，不影响显示游标所在页的热读。 */
+  async before(before: number): Promise<TerminalDisplayPage> {
+    await this.#tail; this.signal.throwIfAborted();
+    return this.#files.runOperation(async () => {
+      const first = this.#first, last = this.#last;
+      const end = Math.max(first, Math.min(last, before)), from = Math.max(first, end - 4);
+      const segments: TerminalDisplaySegment[] = [];
+      let encodedBytes = 0;
+      for (let ordinal = from; ordinal < end; ordinal++) {
+        const value = await this.#read(ordinal); segments.push(value.segment); encodedBytes += value.encodedBytes;
+      }
+      encodedBytes += Buffer.byteLength(JSON.stringify({ first, last, start: from, follow: false, segments: [] })) + Math.max(0, segments.length - 1);
+      if (encodedBytes > PAGE_BYTES) throw Error('terminal-display-page-size');
+      return { first, last, start: from, follow: false, segments };
+    });
+  }
   async close(): Promise<void> { await this.#tail; this.#hot.clear(); this.#reading.clear(); if (this.#ownsFiles) await this.#files.close(); }
 
   /** Retry admission without removing any retained prefix or old gap. */

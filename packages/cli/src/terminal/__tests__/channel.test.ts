@@ -6,9 +6,9 @@ describe('terminal independent control capacity', () => {
   it('保存接收/发送失败首因和请求身份，不被后续关闭覆盖', async () => {
     const cause = Error('terminal-application-request-capacity'), failure = vi.fn();
     const channel = new TerminalChannel('synthetic', (_packet, done) => done(), () => { throw cause; }, failure);
-    channel.accept({ protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: 1, traffic: 'control', payload: { type: 'request', id: 18, action: { kind: 'history-previous' } } });
+    channel.accept({ protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: 1, traffic: 'control', payload: { type: 'request', id: 18, action: { kind: 'display-earlier', before: -4 } } });
     await expect(channel.closeAfterReceived()).rejects.toThrow();
-    expect(channel.failureContext).toMatchObject({ error: cause, requestId: 18, action: 'history-previous' });
+    expect(channel.failureContext).toMatchObject({ error: cause, requestId: 18, action: 'display-earlier' });
     channel.close('later-shutdown');
     expect(channel.failureContext?.error).toBe(cause);
     const native = Object.assign(Error('private path'), { code: 'EPIPE' });

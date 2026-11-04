@@ -9,9 +9,30 @@ export class BodyReadingWindow {
   #page?: BodyPage;
   notice?: string;
   reset(): void { this.#page = undefined; this.notice = undefined; }
-  accept(next: BodyPage, protectedAnchor?: BodyAnchor, protectedEnd?: BodyAnchor): BodyPage {
+  /** 当前挂载窗口（无窗口时为 undefined）。 */
+  get page(): BodyPage | undefined { return this.#page; }
+  /**
+   * 把紧邻窗口起点之前的已备页并入窗口：只在用户向上阅读时调用。超出窗口上限时从末尾（较新的一侧）裁掉，
+   * 选区所在部分受保护；窗口末尾的实时尾巴与中断尾巴原样保留。
+   */
+  reveal(older: BodyPage, protectedAnchor?: BodyAnchor, protectedEnd?: BodyAnchor): BodyPage | undefined {
+    const current = this.#page;
+    if (!current || !older.segments.length || older.start + older.segments.length !== current.start) return current;
+    return this.accept({ ...current, first: Math.min(current.first, older.first), last: Math.max(current.last, older.last), start: older.start, follow: false,
+      segments: [...older.segments, ...current.segments], interrupted: [...(older.interrupted ?? []), ...(current.interrupted ?? [])] }, protectedAnchor, protectedEnd);
+  }
+  /**
+   * keepStart：N 的补丁不让挂载窗口向前（更早）扩展。跟随页在 N 已存不足一页时会因前插的更早片段而起点前移，
+   * 把它们并进来会挪动正在阅读的正文；更早的内容只经 reveal 由用户动作揭示。
+   */
+  accept(next: BodyPage, protectedAnchor?: BodyAnchor, protectedEnd?: BodyAnchor, keepStart = false): BodyPage {
     this.notice = undefined;
     const old = this.#page;
+    if (keepStart && old && next.start < old.start && next.start + next.segments.length >= old.start) {
+      const drop = old.start - next.start;
+      const interrupted = next.interrupted?.filter(item => item.before >= old.start);
+      next = { ...next, start: old.start, segments: next.segments.slice(drop), interrupted: interrupted?.length ? interrupted : undefined };
+    }
     if (!old || !next.segments.length || next.start > old.start + old.segments.length ||
         next.start + next.segments.length < old.start) { this.#page = next; return next; }
     const start = Math.max(next.first, Math.min(old.start, next.start));

@@ -3,6 +3,7 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import * as model from '../body-model.js';
 import * as layout from './layout.js';
+import * as bodyWindow from '../body-window.js';
 import * as processModel from '../process-model.js';
 import { ReadingQueue } from '../reading-queue.js';
 import type { BodyViewHandle, BodyViewProps } from '../body-view.js';
@@ -42,6 +43,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2, content: 2, scrollbar: 1, userInner: 2 } },
     './scroll-box.js': { TerminalScrollBox: core.ScrollBoxRenderable },
     './reading-queue.js': { ReadingQueue },
+    './body-window.js': bodyWindow,
     './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,
     './body/highlighting.js': { BodyHighlighter: class { setPage() {} get() {} async close() {} } } };
   const geometry = {};
@@ -74,7 +76,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   exports.BodyView!({ page: { first: 0, last: 1, start: 0, follow, segments: [
     { blockId: 'body', contentOffset: 0, role: 'assistant', text: 'first\nsecond\nthird', final: true },
   ] }, width: 20, height: 1, renderer: renderer as unknown as BodyViewProps['renderer'], anchor,
-    requestPage: async () => {}, requestPrevious: async () => {}, onAnchor: value => { reported = value; },
+    requestPage: async () => {}, requestEarlier: async () => ({ accepted: true, hasEarlier: false }), reveal: () => {}, onAnchor: value => { reported = value; },
     onError: error => { throw error; }, onReady: value => { handle = value; } });
   for (const effect of effects) effect();
   return { handle: handle!, scroll, get reported() { return reported; },

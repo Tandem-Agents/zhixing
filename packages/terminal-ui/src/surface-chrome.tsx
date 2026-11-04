@@ -4,7 +4,8 @@ import { tone, spacing, surfaceGeometry } from './theme.js';
 import { cleanProcessText } from './process-model.js';
 
 /** Shared identity, frame and environment geometry. Pages supply only content. */
-export function SurfaceChrome(props: { view: TerminalView; width: number; height: number }) {
+/** bottomGap=false：正文页自己管理欢迎框下的那一行（间隔或“对话从这里开始”），这里不再加下边距。 */
+export function SurfaceChrome(props: { view: TerminalView; width: number; height: number; bottomGap?: boolean }) {
   const main = () => ['conversation', 'history', 'unavailable'].includes(props.view.kind);
   const branded = () => main() || props.view.configurationHome;
   // Page identity and real window size select this variant, never query results.
@@ -14,7 +15,7 @@ export function SurfaceChrome(props: { view: TerminalView; width: number; height
     : props.view.connected === false ? '暂未连接 · 已有内容保留'
     : main() && props.view.title !== '知行' ? `当前对话 ${line(props.view.title)}` : props.view.title === '知行' ? '' : line(props.view.title);
   const geometry = () => surfaceGeometry(props.width);
-  return <box width={geometry().frameWidth} marginLeft={geometry().margin} flexDirection="column" flexShrink={0} marginBottom={1}>
+  return <box width={geometry().frameWidth} marginLeft={geometry().margin} flexDirection="column" flexShrink={0} marginBottom={props.bottomGap === false ? 0 : 1}>
     <Show when={!compact()} fallback={<text height={1} wrapMode="none" truncate fg={tone.brand}>{branded() ? '知行 ' : ''}{status()}</text>}>
       <Show when={branded()} fallback={<box border borderStyle="rounded" borderColor={tone.border} title={` ${line(props.view.title)} `} paddingX={spacing.welcomeInner} paddingY={props.view.chromeDescription ? 1 : 0} height={props.view.chromeDescription ? 'auto' : 2}>
         <Show when={props.view.chromeDescription}><text fg={tone.text}>{props.view.chromeDescription}</text></Show>

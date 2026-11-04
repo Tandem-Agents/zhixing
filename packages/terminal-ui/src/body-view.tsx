@@ -5,7 +5,9 @@ import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
   TextRenderable, type CliRenderer, type TextChunk,
 } from '@opentui/core';
-import { BODY_STYLE, bodyPageSegments, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
+import { BODY_STYLE, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, bodyPageSegments, bodyWindows, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
+import { BODY_WINDOW_BYTES, BODY_WINDOW_FRAGMENTS, BODY_WINDOW_NODES } from './body-window.js';
+import type { TerminalEarlierReply } from './protocol.js';
 import { bodyCell, bodyBlockGaps, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
@@ -62,18 +64,31 @@ export interface BodyViewHandle {
   inputTakeover(): void;
   close(): Promise<void>;
 }
+/**
+ * 阅读导航所需的事实。below 用不含导航行的完整高度判定（决定导航行要不要出现）；belowShown 用实际视口判定
+ * （导航行已出现时，视口下面是否还有正文）；above 为“上方还有可读正文”：视口顶边以上的正文（欢迎框不算）、
+ * 挂载窗口之前的已备页或 N 已存片段、源端还有更早历史，三者任一。
+ */
+export interface BodyReadingState { readonly below: boolean; readonly belowShown: boolean; readonly above: boolean; readonly loading: boolean; readonly retry?: -1 | 1 }
 export interface BodyViewProps {
   readonly header?: JSX.Element;
   readonly page: BodyPage; readonly width: number; readonly height: number;
   readonly renderer: CliRenderer;
   readonly anchor?: BodyAnchor;
   readonly hasEarlier?: boolean;
+  /** 正文与阅读导航行共有的区域高度（不随导航行显隐变化）；判断“下方还有内容”用它，导航行不会因自己的显隐反复出现消失 */
+  readonly fullHeight?: number;
   readonly requestPage: (start: number | undefined, follow: boolean) => Promise<unknown>;
-  readonly requestPrevious: () => Promise<unknown>;
+  /** 取显示序号 before 之前紧邻的一页（回复为 TerminalEarlierReply）；不改 N 的显示游标、跟随与补丁基准 */
+  readonly requestEarlier: (before: number) => Promise<unknown>;
+  /** 把紧邻挂载窗口起点之前的已备页并入挂载窗口：只在用户向上阅读时调用 */
+  readonly reveal: (page: BodyPage) => void;
+  /** 可以在后台补邻页（可输入、空闲、输入框为空、无待受理提交、无候选） */
+  readonly prefetch?: boolean;
   readonly onAnchor: (anchor: BodyAnchor | undefined) => void;
   readonly onError: (error: unknown) => void;
   readonly onReady?: (handle: BodyViewHandle | undefined) => void;
-  readonly onReading?: (state: { below: boolean; loading: boolean; retry?: -1 | 1 }) => void;
+  readonly onReading?: (state: BodyReadingState) => void;
 }
 const teal = tone.brand, gray = tone.dim, codeBackground = tone.history;
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -96,7 +111,25 @@ export function BodyView(props: BodyViewProps) {
   const [headerHeight, setHeaderHeight] = createSignal(0);
   // Do not evaluate the JSX-valued header getter from pointer callbacks, or
   // cache native nodes across a Show unmount (destroyed nodes cannot remount).
-  const showHeader = () => props.page.start === props.page.first;
+  // 欢迎框跟随本阅读范围里最早挂载过的起点：后台预取让 N 的 first 前移时不隐去它（不挪动正在读的画面）；
+  // 只有窗口从前端被裁掉时才隐去
+  const [scope, setScope] = createSignal(0);
+  const earliest = createMemo<{ scope: number; start: number } | undefined>(previous => {
+    const current = scope(), start = props.page.start;
+    return !previous || previous.scope !== current ? { scope: current, start } : { scope: current, start: Math.min(previous.start, start) };
+  });
+  const showHeader = () => props.page.start <= (earliest()?.start ?? props.page.start);
+  // 已备页：紧邻挂载窗口起点之前、已取到但尚未挂载的片段；只在用户向上阅读时并入
+  const [prepared, setPrepared] = createSignal<{ start: number; segments: readonly BodySegment[] }>();
+  const [replyFirst, setReplyFirst] = createSignal(Number.POSITIVE_INFINITY);
+  const [sourceEnded, setSourceEnded] = createSignal(false);
+  const storeFirst = () => Math.min(props.page.first, replyFirst());
+  const preparedStart = () => prepared()?.start ?? props.page.start;
+  const storeBefore = () => preparedStart() > storeFirst();
+  const sourceMore = () => props.hasEarlier === true && !sourceEnded();
+  // 确证到头：窗口已挂到 N 已存的最早处、没有未揭示的已备页、源端已无更早历史，且有消息（空新会话不标）
+  const atStart = () => props.page.segments.length > 0 && props.page.start <= storeFirst() && !prepared()?.segments.length &&
+    (props.hasEarlier === false || sourceEnded());
   const prefixHeight = () => showHeader() ? headerHeight() : 0;
   // Keep live range counters for navigation without reflowing unchanged text.
   const contentPage = createMemo<BodyPage>(previous => {
@@ -120,15 +153,36 @@ export function BodyView(props: BodyViewProps) {
   const [viewport, setViewport] = createSignal<{ page?: BodyPage; width: number; top: number; selecting: boolean }>({ width: 0, top: 0, selecting: false });
   let pendingScroll = 0, readError: -1 | 1 | undefined;
   let readingGeneration = 0;
-  let prefetched: BodyPage | undefined;
-  const reportReading = () => props.onReading?.({ below: !!box && (box.scrollTop + box.viewport.height < box.scrollHeight ||
-    props.page.start + props.page.segments.length < props.page.last), loading: paging, retry: readError });
+  // 内容的自然高度（欢迎框＋各块，不含为填满视口的撑高）与不含导航行的完整视口高度一起判断下方是否还有正文
+  const natural = () => { const last = geometry().at(-1); return last ? last.top + last.height : prefixHeight(); };
+  let pagingSince = 0, pagingTimer: ReturnType<typeof setTimeout> | undefined;
+  // 读取在 200 ms 内完成时不显示“正在读取…”：已备页揭示、翻页同步都很快，避免导航行文字闪动
+  const beginPaging = () => {
+    paging = true; pagingSince = performance.now(); clearTimeout(pagingTimer);
+    pagingTimer = setTimeout(() => { if (paging && !disposed) props.renderer.requestRender(); }, 220);
+  };
+  const reportReading = () => {
+    const later = props.page.start + props.page.segments.length < props.page.last;
+    const loading = paging && performance.now() - pagingSince >= 200;
+    if (!box) return props.onReading?.({ below: later, belowShown: later, above: !!prepared()?.segments.length || storeBefore() || sourceMore(), loading, retry: readError });
+    const content = natural();
+    props.onReading?.({
+      below: box.scrollTop + Math.max(box.viewport.height, props.fullHeight ?? 0) < content || later,
+      belowShown: box.scrollTop + box.viewport.height < content || later,
+      // 跟随最新时，正文（不含欢迎框）高过完整视口，顶边以上就有正文：布局之前即可判定
+      above: box.scrollTop > prefixHeight() || (following() && natural() - prefixHeight() >= Math.max(box.viewport.height, props.fullHeight ?? 0)) ||
+        !!prepared()?.segments.length || storeBefore() || sourceMore(),
+      loading, retry: readError });
+  };
+  // 不依赖滚动位置的阅读事实一变就报告（布局之前）：导航行与正文在同一帧出现，跟随最新时正文不会因它晚一帧出现而上移一行
+  createEffect(() => {
+    natural(); props.fullHeight; prepared(); replyFirst(); sourceEnded(); props.hasEarlier; props.page; following();
+    untrack(reportReading);
+  });
   // Measure the finite page without allocating a native text buffer, selection
   // store and reactive subtree for every offscreen paragraph. Fixed-height
   // placeholders preserve the same scroll geometry and source page.
-  const geometry = createMemo(() => {
-    const width = contentWidth(); let top = prefixHeight();
-    return blocks().map(block => {
+  const measureBlock = (block: BodyRenderBlock, width: number) => {
       let cached = measured.get(block);
       if (!cached || cached.width !== width) {
         const rows = (text: string, columns: number) => {
@@ -147,8 +201,22 @@ export function BodyView(props: BodyViewProps) {
         }
         cached = { width, height }; measured.set(block, cached);
       }
-      const item = { key: block.key, top, height: cached.height + (block.gapBefore ?? 0) }; top += item.height; return item;
+      return cached.height;
+  };
+  const geometry = createMemo(() => {
+    const width = contentWidth(); let top = prefixHeight();
+    return blocks().map(block => {
+      const item = { key: block.key, top, height: measureBlock(block, width) + (block.gapBefore ?? 0) }; top += item.height; return item;
     });
+  });
+  // 已备页按当前宽度的自然行高（含块间距，另加与挂载窗口之间的一行间距）计入补读目标
+  const preparedHeight = createMemo(() => {
+    const p = prepared(), width = contentWidth();
+    if (!p?.segments.length) return 0;
+    const page: BodyPage = { first: p.start, last: p.start + p.segments.length, start: p.start, follow: false, segments: p.segments };
+    const rendered = bodyBlockGaps(bodyRenderBlocks(page).map(block => processBodyBlock(block, bodyBlockGeometry(block, width).textWidth))
+      .filter(block => block.role !== 'thinking' || block.text.length > 0));
+    return rendered.reduce((sum, block) => sum + measureBlock(block, width) + (block.gapBefore ?? 0), 1);
   });
   const visible = createMemo(() => {
     const items = geometry(), state = viewport(), height = Math.max(1, props.height);
@@ -171,10 +239,73 @@ export function BodyView(props: BodyViewProps) {
   let gestureHold = false, gestureIntent = false, gestureHadSelection = false, navigationVersion = 0, heldVersion = 0;
   let selectionClearPending = false;
   // headerTop 只对记录它时横幅下的那一块有效：之后若在它前面载入了更早内容，横幅位置已不是用户在读的地方
-  let anchorOffset = 0, headerTop: number | undefined, headerFirst: string | undefined;
+  // headerStart：记录时的窗口起点。同一条长回复的多个承载片段共用一个块键，只比首块键识别不了“前面又载入了内容”
+  let anchorOffset = 0, headerTop: number | undefined, headerFirst: string | undefined, headerStart: number | undefined;
   let heldContent: BodyPage | undefined;
-  const readQueue = new ReadingQueue(intent => disposed ? Promise.resolve() : intent.kind === 'previous'
-    ? props.requestPrevious() : props.requestPage(intent.start, intent.follow));
+  const readQueue = new ReadingQueue(intent => disposed || intent.kind !== 'page' ? Promise.resolve() : props.requestPage(intent.start, intent.follow));
+  // 取更早页单飞：后台补读与用户上翻共用；不进翻页队列，源读不阻塞翻页同步
+  let earlierRead: Promise<void> | undefined, earlierScope = 0, earlierProgressed = true;
+  let fill = { steps: 0, fragments: 0, done: false };
+  // 用户正在等更早的内容（上翻到顶）：取到的页超出窗口上限时不保留为已备页，直接交给揭示（窗口从较新的一侧裁剪后移动）
+  let intentWaiting = false, overflow: { start: number; segments: readonly BodySegment[] } | undefined;
+  // 挂载窗口与已备页合计须守住阅读窗口上限（字节、节点、片数），保留之前就核算
+  const usage = (segments: readonly BodySegment[]) => segments.reduce((sum, segment) => ({ bytes: sum.bytes + Buffer.byteLength(JSON.stringify(segment)),
+    nodes: sum.nodes + (segment.body?.context.nodes.length ?? 1), count: sum.count + 1 }), { bytes: 0, nodes: 0, count: 0 });
+  const fitsWindow = (extra: readonly BodySegment[]) => {
+    const total = usage([...bodyPageSegments(props.page), ...extra]);
+    return total.count + (props.page.interrupted?.length ?? 0) <= BODY_WINDOW_FRAGMENTS && total.bytes <= BODY_WINDOW_BYTES - 256 && total.nodes <= BODY_WINDOW_NODES;
+  };
+  const readEarlier = (): Promise<void> => {
+    if (earlierRead) return earlierRead;
+    const scopeAt = earlierScope, before = preparedStart();
+    const work: Promise<void> = props.requestEarlier(before).then(value => {
+      if (disposed || scopeAt !== earlierScope) return;
+      const reply = value as Partial<TerminalEarlierReply> | undefined;
+      if (reply?.hasEarlier === false) setSourceEnded(true);
+      const page = reply?.page as BodyPage | undefined;
+      earlierProgressed = !!page?.segments.length || reply?.progressed !== false;
+      if (!page) return;
+      if (!Array.isArray(page.segments) || page.segments.length > BODY_PAGE_FRAGMENTS || Buffer.byteLength(JSON.stringify(page)) > BODY_PAGE_BYTES) throw Error('terminal-display-wire-size');
+      bodyWindows(page);
+      setReplyFirst(first => Math.min(first, page.first));
+      // 只接紧邻当前已备起点的一页；期间窗口已变（揭示、裁剪、换窗）就丢弃，下次按新起点重取
+      if (!page.segments.length || preparedStart() !== before || page.start + page.segments.length !== before) return;
+      const segments = [...page.segments, ...(prepared()?.segments ?? [])];
+      if (fitsWindow(segments)) setPrepared({ start: page.start, segments });
+      else if (intentWaiting) { setPrepared(undefined); overflow = { start: page.start, segments }; }
+      else fill.done = true;
+    }).finally(() => { if (earlierRead === work) earlierRead = undefined; if (!disposed) props.renderer.requestRender(); });
+    earlierRead = work;
+    return work;
+  };
+  const revealPrepared = () => {
+    const p = overflow ?? prepared();
+    overflow = undefined;
+    if (!p?.segments.length) return false;
+    setPrepared(undefined);
+    // 揭示在窗口前面插入了内容：欢迎框位置不再是用户在读的地方，按原文锚点恢复
+    headerTop = undefined; headerFirst = undefined;
+    restorePending = true; layoutReady = false;
+    props.reveal({ first: Math.min(storeFirst(), p.start), last: props.page.last, start: p.start, follow: false, segments: p.segments });
+    props.renderer.requestRender();
+    return true;
+  };
+  // 窗口起点变了（揭示、裁剪、换窗）而已备页不再紧邻，就丢弃已备页
+  createEffect(() => { const start = props.page.start, p = untrack(prepared); if (p && p.start + p.segments.length !== start) setPrepared(undefined); });
+  // 后台补读：可输入且空闲时，按当前宽度的自然行高补到“已挂载＋已备 ≥ 两屏”；每次进入至多 16 步、40 片
+  const fillStep = () => {
+    if (!props.prefetch || fill.done || earlierRead || paging || gestureHold || restorePending || !box || disposed) return;
+    if (props.renderer.getSelection()?.isDragging) return;
+    const rows = Math.max(box.viewport.height, props.fullHeight ?? 0);
+    if (natural() - prefixHeight() + preparedHeight() >= 2 * rows) return;
+    if (!storeBefore() && !sourceMore()) return;
+    const count = prepared()?.segments.length ?? 0;
+    if (fill.steps >= 16 || fill.fragments >= 40 || count + props.page.segments.length >= BODY_WINDOW_FRAGMENTS - BODY_PAGE_FRAGMENTS) { fill.done = true; return; }
+    if (!fitsWindow(prepared()?.segments ?? [])) { fill.done = true; return; }
+    fill.steps++;
+    // 无进展（同一源游标原地踏步）就停，不把步数耗完；失败也停，入口仍在
+    void readEarlier().then(() => { fill.fragments += Math.max(0, (prepared()?.segments.length ?? 0) - count); if (!earlierProgressed) fill.done = true; }, () => { fill.done = true; });
+  };
   let failedIntent: { start: number | undefined; follow: boolean } | undefined;
   const readingOwner = () => {
     // Pointer takeover retires mouse callbacks, not an in-flight reading
@@ -324,7 +455,7 @@ export function BodyView(props: BodyViewProps) {
   };
   const capture = (): BodyAnchor | undefined => {
     if (!box || disposed || restorePending) return saved;
-    headerTop = prefixHeight() > box.scrollTop ? box.scrollTop : undefined;
+    headerTop = prefixHeight() > box.scrollTop ? box.scrollTop : undefined; headerStart = props.page.start;
     headerFirst = headerTop === undefined ? undefined : blocks()[0]?.key;
     const top = box.viewport.y;
     let first: { block: BodyRenderBlock; view: TextRenderable } | undefined;
@@ -369,7 +500,7 @@ export function BodyView(props: BodyViewProps) {
     const scrollTop = box.scrollTop;
     if (align === 'bottom' || (following() && !gestureHold && !saved)) box.scrollTo(box.scrollHeight);
     else if (align === 'top') box.scrollTo(0);
-    else if (headerTop !== undefined && showHeader() && blocks()[0]?.key === headerFirst) box.scrollTo(headerTop);
+    else if (headerTop !== undefined && showHeader() && blocks()[0]?.key === headerFirst && props.page.start === headerStart) box.scrollTo(headerTop);
     else if (saved) {
       // A bounded thinking tail may have evicted the old anchor. Keep its
       // viewport offset at that same block's first retained source position.
@@ -514,7 +645,10 @@ export function BodyView(props: BodyViewProps) {
       // body arrives first. The previous page never owns the new scope's intent.
       setFollowing(true); box?.cancelPointer(); props.renderer.releasePointerCapture?.(); props.renderer.clearSelection();
       selectionClearPending = false; readQueue.reset(); headerTop = undefined; anchorOffset = 0;
-      pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined; prefetched = undefined;
+      pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined;
+      // 新的阅读范围：旧的已备页、在途的取更早页结果与补读预算都作废
+      earlierScope++; earlierRead = undefined; fill = { steps: 0, fragments: 0, done: false };
+      setPrepared(undefined); setReplyFirst(Number.POSITIVE_INFINITY); setSourceEnded(false); setScope(value => value + 1);
       restorePending = true; layoutReady = false; props.onAnchor(undefined); props.renderer.requestRender();
       reportReading();
     },
@@ -530,7 +664,7 @@ export function BodyView(props: BodyViewProps) {
       const current = readingOwner();
       if (pendingScroll && Math.sign(pendingScroll) !== direction) pendingScroll = 0;
       saved = capture(); props.onAnchor(saved);
-      paging = true;
+      beginPaging();
       readError = undefined; reportReading();
       try {
         if (retryIntent) {
@@ -546,17 +680,35 @@ export function BodyView(props: BodyViewProps) {
           box.scrollBy(direction * Math.max(0, rows ?? box.viewport.height - 1));
           saved = capture(); props.onAnchor(saved);
           if (direction > 0 && atBottom() && !handle.hasSelection()) await handle.bottom();
-          else if (direction < 0 && box.scrollTop < box.viewport.height && props.hasEarlier && props.page.start === props.page.first)
-            await readQueue.request({ kind: 'previous' });
-          else await requestPage(props.page.start, false);
+          else {
+            // 接近顶边时先把更早一页取进已备页（不挂载），到顶时即可直接揭示
+            if (direction < 0 && box.scrollTop < box.viewport.height && !prepared()?.segments.length && (storeBefore() || sourceMore()))
+              void readEarlier().catch(() => {});
+            await requestPage(props.page.start, false);
+          }
           return;
         }
         const before = props.page;
         align = undefined;
         pendingScroll = Math.max(-2 * box.viewport.height, Math.min(2 * box.viewport.height,
           pendingScroll + direction * Math.max(0, rows ?? box.viewport.height - 2)));
-        if (direction < 0 && props.page.start === props.page.first) await readQueue.request({ kind: 'previous' });
-        else if (direction < 0) await requestPage(Math.max(props.page.first, props.page.start - 4), false);
+        if (direction < 0) {
+          // 向上到顶：已备页直接揭示；取更早页在途就等它（不吞这次手势）；都没有才读。源端准备中或回空页时保留同一个意图，
+          // 有界退让后继续，直到能显示、到头或明确失败；换向、回到最新、切会话都会让 current() 失效而结束
+          let delay = 0, stalls = 0;
+          try {
+            intentWaiting = true;
+            while (current() && !overflow && !prepared()?.segments.length && (earlierRead || storeBefore() || sourceMore())) {
+              await readEarlier();
+              if (!current() || overflow || prepared()?.segments.length) break;
+              if (!earlierProgressed && ++stalls >= 5) throw Error('terminal-history-no-progress');
+              if (earlierProgressed) stalls = 0;
+              delay = Math.min(400, delay ? delay * 2 : 50);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          } finally { intentWaiting = false; }
+          if (current()) revealPrepared(); else overflow = undefined;
+        }
         else if (props.page.start + props.page.segments.length < props.page.last) await requestPage(props.page.start + props.page.segments.length, false);
         else if (!handle.hasSelection()) await handle.bottom();
         else { pendingScroll = 0; await requestPage(props.page.start, false); }
@@ -572,7 +724,7 @@ export function BodyView(props: BodyViewProps) {
       const current = readingOwner();
       selection = undefined; selectionOwner = undefined; selectionGesture = undefined; props.renderer.clearSelection(); headerTop = undefined;
       saved = undefined; props.onAnchor(undefined); align = 'bottom';
-      paging = true; reportReading();
+      beginPaging(); reportReading();
       restorePending = true; layoutReady = false; props.renderer.requestRender();
       try { await requestPage(undefined, true); }
       catch { if (current()) { setFollowing(false); readError = 1; } }
@@ -642,20 +794,14 @@ export function BodyView(props: BodyViewProps) {
     if (!restorePending && (state.page !== page || state.width !== props.width || state.top !== box.scrollTop || state.selecting !== selecting))
       setViewport({ page, width: props.width, top: box.scrollTop, selecting });
     reportReading();
-    // A transport batch must not leave a short viewport looking like EOF.
-    // Fetch one neighbour at a time; each accepted page is measured again.
-    // （滚动区内容高度至少等于视口；留白只在视口以内补齐，不改变这里的判定）
-    if (!paging && !readError && !selecting && !restorePending && page !== prefetched && box.scrollHeight < box.viewport.height && page.segments.length) {
-      const direction = page.start + page.segments.length < page.last ? 1 : page.start > page.first || props.hasEarlier ? -1 : undefined;
-      prefetched = page;
-      if (direction) void handle.page(direction, 0).catch(props.onError);
-    }
+    // 短视口不能看起来像到头：入口由 above 事实立即给出；内容按自然行高在后台补到已备页，不挂载、不挪动画面
+    if (!readError && !selecting) fillStep();
   };
   props.renderer.addPostProcessFn(postFrame);
   props.onReady?.(handle);
   function release() {
     if (disposed) return;
-    disposed = true; readingGeneration++; readQueue.reset(); props.onReady?.(undefined);
+    disposed = true; readingGeneration++; readQueue.reset(); earlierScope++; clearTimeout(pagingTimer); props.onReady?.(undefined);
     props.renderer.removePostProcessFn(postFrame); mounted.clear(); projected.clear(); wrapMeasure.destroy(); measureView.destroy(); measure.destroy();
   }
   onCleanup(() => {
@@ -695,7 +841,10 @@ export function BodyView(props: BodyViewProps) {
       event.preventDefault(); event.stopPropagation();
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
     }}>
-    <Show when={showHeader()}><box width={Math.max(1, props.width - spacing.scrollbar)} flexShrink={0} onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}</box></Show>
+    <Show when={showHeader()}><box width={Math.max(1, props.width - spacing.scrollbar)} flexShrink={0} flexDirection="column" onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}
+      {/* 欢迎框下原有的间隔行：确证到头时写“对话从这里开始”，行高不变，正文不挪动 */}
+      <text height={1} wrapMode="none" selectable={false} fg={tone.dim} content={atStart() ? ' '.repeat(Math.max(0, spacing.content + Math.floor((contentWidth() - 20) / 2))) + '── 对话从这里开始 ──' : ''} />
+    </box></Show>
     <For each={blockKeys()}>{key => {
       const block = createMemo(() => blockIndex().get(key)!);
       return <box flexDirection="column" flexShrink={0} marginX={spacing.content} width={contentWidth()} paddingLeft={layout(block()).indent} paddingTop={block().gapBefore ?? 0}
