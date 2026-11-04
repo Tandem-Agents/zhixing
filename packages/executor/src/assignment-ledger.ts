@@ -2,9 +2,10 @@ import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/co
 import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime,
   leaseClockProjectionId, readLeaseClockSummary, registerLeaseClockProjection, type LeaseClockSummary } from "./assignment-lease-clock.js";
 import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentChangedAfter, assignmentIdFromStream, hasAssignmentHistoryKeys, readAssignmentEnvelopes, readAssignmentEnvelopesAfter,
-  readAssignmentHistory, readAssignmentPhases, readRecoveryCandidateClasses, type AssignmentHistoryNeeds, type RecoveryCandidateClass,
+  readAssignmentHistory, readAssignmentPhases, readRecoveryCandidateClasses, type AssignmentHistoryNeeds, type AssignmentHistoryRows, type RecoveryCandidateClass,
   registerAssignmentLedgerIndex } from "./assignment-ledger-index.js";
 import { Buffer } from "node:buffer";
+import { createHash, randomUUID } from "node:crypto";
 import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError, currentMaintenanceAbortSignal, currentMaintenanceUrgency,
   isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runDetachedDeviceCapacity, runDetachedMaintenanceContext, runWithMaintenanceUrgency, waitForMaintenanceRetry,
   type StorageMaintenanceUrgency } from "@zhixing/core/resources";
@@ -555,6 +556,12 @@ interface LedgerProjection {
   historyChecked?: Set<string>;
   /** 按键补入的已镜像镜像链项（按记录序号）；不保存 */
   historicMirror?: Map<number, MirrorChainItem>;
+  /** 旧格式分派：序号不超过它的历史事实在旧前缀历史检查点里（领域索引没有这些键） */
+  legacyHistoryUpTo?: number;
+  /** 公布时核对过已落盘的那份旧前缀历史的代次 */
+  legacyHistoryGeneration?: string;
+  /** 旧前缀历史各类别的页数 */
+  legacyHistoryPages?: LegacyHistoryPages;
 }
 
 interface JobRecoveryIndexValue {
@@ -638,7 +645,33 @@ const DECISION_STATE_SAVE_DELAY_MS = 5_000;
  */
 type DecisionState = { readonly coveredLsn: number; readonly state: LedgerProjection };
 
-/** 省略态的状态遇到尚未按键核过的交互请求 ID（他方写入的尾部）：丢弃缓存，经冷恢复路径预取后重做。 */
+/**
+ * 旧格式分派（本格式之前创建、领域索引里没有按键行的前缀）省去的已完成历史：在一次完整严格重放后写成一份检查点，
+ * 覆盖到 upToSeq；之后的记录由领域索引写按键行，所以它不再增长。
+ */
+type LegacyHistory = {
+  /** 这份旧前缀历史的代次：决定状态记下它，读取时核对，旧代或缺失都不当作可用 */
+  readonly generation: string;
+  readonly upToSeq: number;
+  readonly requests: Map<string, { readonly seq: number; readonly body: JsonValue }>;
+  readonly finished: Map<string, JsonValue>;
+  /** 副作用的内存状态不带记录序号：旧前缀里的开始与结束按业务键（effectSeq）记，序号以覆盖边界为界 */
+  readonly effectStarts: Map<number, { readonly body: JsonValue }>;
+  readonly effectEnds: Map<number, { readonly body: JsonValue }>;
+  readonly mirror: Map<number, JsonValue>;
+};
+
+/** 旧前缀历史的分页（类别 → 页数）：每类按业务键哈希分页，单页平均 LEGACY_HISTORY_PAGE_KEYS 个键，读一个键只读它所在的页 */
+type LegacyHistoryPages = { readonly requests: number; readonly effects: number; readonly mirror: number };
+type LegacyHistoryCategory = keyof LegacyHistoryPages;
+/** 旧前缀历史的一页：只含该类别落在本页的事实（其余类别为空）；页存在且代次与页号相符时，本页即这些哈希上的完整集合 */
+type LegacyHistoryPage = LegacyHistory & { readonly category: LegacyHistoryCategory; readonly page: number; readonly pages: number };
+const LEGACY_HISTORY_PAGE_KEYS = 8;
+
+/**
+ * 省略态的状态遇到尚未按键核过的交互请求 ID（他方写入的尾部），或旧前缀历史缺失、与决定状态不符：丢弃缓存
+ * （后者连同决定状态），经冷恢复路径重做。缺键不当作首次使用。
+ */
 class HistoryLookupRequired extends Error {}
 /** 一次绑定查询的分派数上限（票据恢复一次查询全部有效票据）。 */
 export const DATA_PLANE_BINDING_BATCH_LIMIT = 4096;
@@ -705,7 +738,17 @@ export class ConversationAssignmentLedger implements
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
   >();
   /** 待落盘的严格决定状态（分派 → 去掉历史后的状态与它覆盖到的游标）。 */
-  readonly #decisionPending = new Map<string, { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }>();
+  readonly #decisionPending = new Map<string, {
+    readonly state: LedgerProjection;
+    readonly cursor: ProjectionCursor;
+    /** 旧格式分派首次写出的旧前缀历史各页；全部证实写成才保存 state，否则保存 fallback（完整集合） */
+    readonly legacy?: { readonly generation: string; readonly upToSeq: number; readonly pages: LegacyHistoryPages; readonly files: readonly LegacyHistoryPage[] };
+    readonly fallback?: LedgerProjection;
+  }>();
+  /** 已证实写成旧前缀历史的旧格式分派（分派 → 覆盖边界与代次）：之后直接保存按键化的决定状态，不再重写 */
+  readonly #legacyBackfilled = new Map<string, { readonly upToSeq: number; readonly generation: string; readonly pages: LegacyHistoryPages }>();
+  /** 已读取或待写的旧前缀历史页（分派 → 页键 → 页），每进程缓存 */
+  readonly #legacyHistories = new Map<string, Map<string, LegacyHistoryPage>>();
   #decisionSave: NodeJS.Timeout | undefined;
   /** 决定状态的写入串行进行；flushDecisionStates 等它写完 */
   #decisionWrite: Promise<void> = Promise.resolve();
@@ -4017,6 +4060,8 @@ export class ConversationAssignmentLedger implements
         try {
           const cached = this.#takeCachedProjection(assignmentId) ?? await this.#recoverProjection(assignmentId);
           const keyed = history !== undefined && omitsHistory(cached.state);
+          // 旧前缀历史在事务外读好（检查点读取要取日志锁）
+          const legacy = keyed ? await this.#legacyHistory(cached.state, history!(cached.state)) : undefined;
           // 只重放这个分派自己的流；当前租约时钟在同一位置从时钟投影读出，所需的已完成历史也在同一位置按键补入
           const transaction = await this.#log.transactProjection<
             LedgerProjection,
@@ -4026,7 +4071,7 @@ export class ConversationAssignmentLedger implements
             cached.state,
             (state, record, envelope) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, envelope),
             async (state, context) => {
-              if (keyed) await this.#hydrateHistory(state, context.readProjection(ASSIGNMENT_LEDGER_INDEX_ID), history!(state));
+              if (keyed) await this.#hydrateHistory(state, context.readProjection(ASSIGNMENT_LEDGER_INDEX_ID), history!(state), legacy);
               return { kind: "return", value: await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)) };
             },
             {
@@ -4065,6 +4110,7 @@ export class ConversationAssignmentLedger implements
       try {
         return await operation();
       } catch (error) {
+        if (error instanceof HistoryLookupRequired && rounds === 0) continue;
         if (rounds >= 64) throw error;
         if (await awaitAuthorityPreparation(error)) continue;
         const delay = maintenanceRetryDelayMs(error);
@@ -4131,7 +4177,9 @@ export class ConversationAssignmentLedger implements
         try {
           let state = restoreDecisionState(saved.state);
           if (omitsHistory(state)) {
-            await this.#applyHistory(state, tailInteractionRequestIds(assignmentId, recovered.envelopes), [], [], recovered.history);
+            const requests = tailInteractionRequestIds(assignmentId, recovered.envelopes);
+            const legacy = requests.length > 0 ? await this.#legacyHistory(state, { requests }) : undefined;
+            await this.#applyHistory(state, requests, [], [], withLegacyHistory(recovered.history, legacy, { requests }));
           }
           const stream = assignmentStream(assignmentId);
           for (const envelope of recovered.envelopes) {
@@ -4183,7 +4231,10 @@ export class ConversationAssignmentLedger implements
       const item = saved?.state as { coveredLsn?: unknown; state?: LedgerProjection } | undefined;
       if (saved && item && Number.isSafeInteger(item.coveredLsn) && (item.coveredLsn as number) > 0 &&
           (item.coveredLsn as number) <= saved.cursor.lsn && item.state && typeof item.state === "object" &&
-          item.state.assignmentId === assignmentId && Number.isSafeInteger(item.state.lastSeq) && item.state.lastSeq > 0) {
+          item.state.assignmentId === assignmentId && Number.isSafeInteger(item.state.lastSeq) && item.state.lastSeq > 0 &&
+          (item.state.legacyHistoryUpTo === undefined || (Number.isSafeInteger(item.state.legacyHistoryUpTo) &&
+            item.state.legacyHistoryUpTo > 0 && item.state.legacyHistoryUpTo <= item.state.lastSeq &&
+            typeof item.state.legacyHistoryGeneration === "string" && validLegacyPages(item.state.legacyHistoryPages)))) {
         decisions.set(assignmentId, { coveredLsn: item.coveredLsn as number, state: item.state });
       }
     }
@@ -4210,13 +4261,80 @@ export class ConversationAssignmentLedger implements
   /**
    * 在同一锁定前缀按键补入 decide 需要的已完成历史。只在省略态（已完成历史不在内存）时读取，已在内存或已核过的跳过。
    */
-  async #hydrateHistory(state: LedgerProjection, view: DurableProjectionReadContext, needs: AssignmentHistoryNeeds): Promise<void> {
+  async #hydrateHistory(
+    state: LedgerProjection,
+    view: DurableProjectionReadContext,
+    needs: AssignmentHistoryNeeds,
+    legacy: LegacyHistory | undefined,
+  ): Promise<void> {
     const requests = (needs.requests ?? []).filter(id => !state.requested.has(id) && !state.historyChecked?.has(id));
     const effects = (needs.effects ?? []).filter(effectSeq => !state.sideEffects.has(effectSeq));
     const mirrorSeqs = (needs.mirrorSeqs ?? []).filter(seq => !state.finishedIndexBySeq.has(seq) && !state.historicMirror?.has(seq));
     if (requests.length === 0 && effects.length === 0 && mirrorSeqs.length === 0) return;
     const rows = await readAssignmentHistory(view, state.assignmentId, { requests, effects, mirrorSeqs }, state.historyBase!);
-    await this.#applyHistory(state, requests, effects, mirrorSeqs, rows);
+    await this.#applyHistory(state, requests, effects, mirrorSeqs, withLegacyHistory(rows, legacy, { requests, effects, mirrorSeqs }));
+  }
+
+  /**
+   * 旧格式分派的旧前缀历史：在事务外读取（检查点读取要取日志锁，不能在锁内进行），每进程每分派缓存一份。
+   * 缺失或与决定状态不符时丢弃这份决定状态并要求重做（完整重放后重新写出），不把缺键当作首次使用。
+   */
+  async #legacyHistory(state: LedgerProjection, needs: AssignmentHistoryNeeds): Promise<LegacyHistory | undefined> {
+    const upTo = state.legacyHistoryUpTo, generation = state.legacyHistoryGeneration, pages = state.legacyHistoryPages;
+    if (!upTo) return undefined;
+    const merged: LegacyHistory = { generation: generation!, upToSeq: upTo, requests: new Map(), finished: new Map(),
+      effectStarts: new Map(), effectEnds: new Map(), mirror: new Map() };
+    // 只读所需键所在的页：页的读取量随所需键数，而不随旧前缀的历史量
+    const wanted = new Map<string, { category: LegacyHistoryCategory; page: number }>();
+    const want = (category: LegacyHistoryCategory, key: string | number) => {
+      const page = legacyPageOf(category, key, pages![category]);
+      wanted.set(this.#legacyHistoryKey(state.assignmentId, category, page), { category, page });
+    };
+    if (pages) {
+      for (const requestId of needs.requests ?? []) want("requests", requestId);
+      for (const effectSeq of needs.effects ?? []) want("effects", effectSeq);
+      for (const seq of needs.mirrorSeqs ?? []) want("mirror", seq);
+    }
+    const cache = this.#legacyHistories.get(state.assignmentId) ?? new Map<string, LegacyHistoryPage>();
+    this.#legacyHistories.set(state.assignmentId, cache);
+    for (const [key, slot] of wanted) {
+      let page = cache.get(key);
+      if (!page || page.generation !== generation) {
+        page = (await this.#log.loadProjectionCheckpoint?.<LegacyHistoryPage>(key)?.catch(() => undefined))?.state;
+        if (!isLegacyHistoryPage(page, generation!, upTo, slot.category, slot.page, pages![slot.category])) {
+          // 页缺失、属于旧代或与决定状态不符：缺资料，不当作“已覆盖且无此键”
+          this.#decisionPending.delete(state.assignmentId);
+          this.#legacyBackfilled.delete(state.assignmentId);
+          this.#legacyHistories.delete(state.assignmentId);
+          await this.#log.deleteProjectionCheckpoint?.(this.#decisionStateKey(state.assignmentId))?.catch(() => {});
+          throw new HistoryLookupRequired();
+        }
+        cache.set(key, page);
+      }
+      for (const name of ["requests", "finished", "effectStarts", "effectEnds", "mirror"] as const) {
+        for (const [factKey, fact] of page[name] as Map<unknown, never>) (merged[name] as Map<unknown, unknown>).set(factKey, fact);
+      }
+    }
+    if (!pages && wanted.size === 0 && ((needs.requests?.length ?? 0) + (needs.effects?.length ?? 0) + (needs.mirrorSeqs?.length ?? 0)) > 0) {
+      throw new HistoryLookupRequired();
+    }
+    return merged;
+  }
+
+  /** 旧前缀历史页的键；不带类别与页号的是上一格式的单份旧前缀历史，迁移时顺手删除。 */
+  #legacyHistoryKey(assignmentId: string, category?: LegacyHistoryCategory, page?: number): string {
+    const base = `${projectionCheckpointKey("executor-assignment-legacy-history", 1)}:${this.#executorId}:${assignmentId}`;
+    return category === undefined ? base : `${base}:${category}:${page}`;
+  }
+
+  async #deleteLegacyHistory(assignmentId: string, pages: LegacyHistoryPages | undefined): Promise<void> {
+    await this.#log.deleteProjectionCheckpoint?.(this.#legacyHistoryKey(assignmentId))?.catch(() => {});
+    if (!pages) return;
+    for (const category of ["requests", "effects", "mirror"] as const) {
+      for (let page = 0; page < pages[category]; page++) {
+        await this.#log.deleteProjectionCheckpoint?.(this.#legacyHistoryKey(assignmentId, category, page))?.catch(() => {});
+      }
+    }
   }
 
   /**
@@ -4234,19 +4352,35 @@ export class ConversationAssignmentLedger implements
     for (const requestId of requests) {
       checked.add(requestId);
       const found = rows?.requests.get(requestId);
-      if (!found) continue;
+      const finished = rows?.finished.get(requestId) as unknown as FinishedInteraction | undefined;
+      // 开始与结果可能分处旧前缀历史与领域索引：结果须属于同一请求且在其后；有结果无请求按账本损坏拒绝
+      if (!found) {
+        if (finished) throw corruptLedger("Interaction result has no durable request in the keyed history");
+        continue;
+      }
+      if (finished && (finished.body.requestId !== requestId || finished.recordSeq <= found.seq)) {
+        throw corruptLedger("Interaction result does not follow its durable request in the keyed history");
+      }
       const body = found.body as unknown as RequestedInteraction["body"];
       await materializeInteractionDisplay(body.display, this.#artifacts);
       state.requested.set(requestId, { body, recordSeq: found.seq });
       state.validation.requestedInteractions.add(requestId);
-      if (found.finished) state.finished.set(requestId, found.finished as unknown as FinishedInteraction);
+      if (finished) state.finished.set(requestId, finished);
     }
     for (const effectSeq of effects) {
-      const found = rows?.effects.get(effectSeq);
-      if (!found) continue;
+      const started = rows?.effectStarts.get(effectSeq);
+      const completed = rows?.effectEnds.get(effectSeq);
+      if (!started) {
+        if (completed) throw corruptLedger("Side-effect completion has no durable start in the keyed history");
+        continue;
+      }
+      // 两端都来自领域索引时核对先后；旧前缀里的事实以覆盖边界为界，按业务键与记录种类组合
+      if (completed && started.seq !== undefined && completed.seq !== undefined && completed.seq <= started.seq) {
+        throw corruptLedger("Side-effect completion does not follow its durable start in the keyed history");
+      }
       state.sideEffects.set(effectSeq, {
-        started: found.started as unknown as Extract<AssignmentRecord, { t: "side-effect-started" }>,
-        ...(found.completed ? { completed: found.completed as unknown as Extract<AssignmentRecord, { t: "side-effect-completed" }> } : {}),
+        started: started.body as unknown as Extract<AssignmentRecord, { t: "side-effect-started" }>,
+        ...(completed ? { completed: completed.body as unknown as Extract<AssignmentRecord, { t: "side-effect-completed" }> } : {}),
       });
     }
     for (const seq of mirrorSeqs) {
@@ -4261,7 +4395,23 @@ export class ConversationAssignmentLedger implements
    */
   #scheduleDecisionSave(assignmentId: string, state: LedgerProjection, cursor: ProjectionCursor): void {
     if (!this.#log.saveProjectionCheckpoint || state.lastSeq <= 0) return;
-    this.#decisionPending.set(assignmentId, { state: decisionSnapshot(state), cursor });
+    if (state.keyed) {
+      this.#decisionPending.set(assignmentId, { state: decisionSnapshot(state), cursor });
+    } else {
+      const backfilled = this.#legacyBackfilled.get(assignmentId);
+      if (backfilled !== undefined) {
+        // 旧前缀历史已证实写成：其后的记录都有按键行，直接保存按键化的决定状态
+        this.#decisionPending.set(assignmentId, { state: decisionSnapshot({ ...state, keyed: true,
+          legacyHistoryUpTo: backfilled.upToSeq, legacyHistoryGeneration: backfilled.generation, legacyHistoryPages: backfilled.pages }), cursor });
+      } else {
+        // 旧格式分派这次已完整严格重放：从它写出旧前缀历史，证实写成后才保存按键化的决定状态，否则照旧保存完整集合
+        const legacy = pageLegacyHistory(legacyHistoryOf(state));
+        this.#legacyHistories.set(assignmentId, new Map(legacy.files.map(file =>
+          [this.#legacyHistoryKey(assignmentId, file.category, file.page), file] as const)));
+        this.#decisionPending.set(assignmentId, { state: decisionSnapshot({ ...state, keyed: true, legacyHistoryUpTo: legacy.upToSeq,
+          legacyHistoryGeneration: legacy.generation, legacyHistoryPages: legacy.pages }), cursor, legacy, fallback: decisionSnapshot(state) });
+      }
+    }
     if (this.#decisionSave) return;
     this.#decisionSave = setTimeout(() => {
       this.#decisionSave = undefined;
@@ -4274,12 +4424,35 @@ export class ConversationAssignmentLedger implements
     const batch = [...this.#decisionPending];
     this.#decisionPending.clear();
     this.#decisionWrite = this.#decisionWrite.then(async () => {
-      for (const [id, { state: item, cursor: at }] of batch) {
+      for (const [id, { state: item, cursor: at, legacy, fallback }] of batch) {
         if (item.phase === "acked" || item.phase === "dispatch-rejected") {
           await this.#log.deleteProjectionCheckpoint?.(this.#decisionStateKey(id))?.catch(() => {});
-        } else {
-          await this.#log.saveProjectionCheckpoint?.(this.#decisionStateKey(id), at, { coveredLsn: at.lsn, state: item })?.catch(() => {});
+          await this.#deleteLegacyHistory(id, item.legacyHistoryPages ?? this.#legacyBackfilled.get(id)?.pages);
+          this.#legacyBackfilled.delete(id);
+          this.#legacyHistories.delete(id);
+          continue;
         }
+        if (legacy) {
+          // 检查点保存是尽力而为（不可写、过大或出错都可能正常返回而未落盘）：读回一次，同一游标、同一代次、同一覆盖
+          // 边界才算写成，才公布按键化的决定状态；读回到旧代或没有文件都按未写成处理，保存完整回退
+          for (const file of legacy.files) {
+            await this.#log.saveProjectionCheckpoint?.(this.#legacyHistoryKey(id, file.category, file.page), at, file)?.catch(() => {});
+          }
+          let durable = true;
+          for (const file of legacy.files) {
+            const written = await this.#log.loadProjectionCheckpoint?.<LegacyHistoryPage>(this.#legacyHistoryKey(id, file.category, file.page))?.catch(() => undefined);
+            if (!written || written.cursor.lsn !== at.lsn ||
+                !isLegacyHistoryPage(written.state, legacy.generation, legacy.upToSeq, file.category, file.page, file.pages)) { durable = false; break; }
+          }
+          if (!durable) {
+            await this.#log.saveProjectionCheckpoint?.(this.#decisionStateKey(id), at, { coveredLsn: at.lsn, state: fallback })?.catch(() => {});
+            continue;
+          }
+          this.#legacyBackfilled.set(id, { upToSeq: legacy.upToSeq, generation: legacy.generation, pages: legacy.pages });
+          // 上一格式的单份旧前缀历史不再使用
+          await this.#log.deleteProjectionCheckpoint?.(this.#legacyHistoryKey(id))?.catch(() => {});
+        }
+        await this.#log.saveProjectionCheckpoint?.(this.#decisionStateKey(id), at, { coveredLsn: at.lsn, state: item })?.catch(() => {});
       }
     });
     return this.#decisionWrite;
@@ -4317,6 +4490,7 @@ export class ConversationAssignmentLedger implements
           const cached = (receiptRetirement ? undefined : this.#takeCachedProjection(assignmentId)) ??
             await this.#recoverProjection(assignmentId, receiptRetirement);
           const keyed = options.history !== undefined && omitsHistory(cached.state);
+          const legacy = keyed ? await this.#legacyHistory(cached.state, options.history!(cached.state)) : undefined;
           const transact = () => this.#log.transactProjection<
             LedgerProjection,
             unknown,
@@ -4326,7 +4500,7 @@ export class ConversationAssignmentLedger implements
             (state, record, commit) => this.#reduce(state === cached.state ? structuredClone(state) : state, record, commit, receiptRetirement),
             async (state, context) => {
               withLeaseClock(state, await readLeaseClockSummary(context.readProjection(this.#leaseClockProjectionId)));
-              if (keyed) await this.#hydrateHistory(state, context.readProjection(ASSIGNMENT_LEDGER_INDEX_ID), options.history!(state));
+              if (keyed) await this.#hydrateHistory(state, context.readProjection(ASSIGNMENT_LEDGER_INDEX_ID), options.history!(state), legacy);
               const decision = await decide(state, context);
               if (decision.kind !== "append") return decision;
               const resourceRecords = this.#prepareResourceTerminalRecords(
@@ -4780,6 +4954,108 @@ function decisionSnapshot(state: LedgerProjection): LedgerProjection {
 /** 恢复用的决定状态：独立拷贝，之后归约追加的记录从 historyBase 之后接上。 */
 function restoreDecisionState(state: LedgerProjection): LedgerProjection {
   return structuredClone(state);
+}
+
+/**
+ * 旧格式分派完整严格重放后、覆盖边界内的全部历史事实：所有请求开始（含当时未结）与结果、所有副作用开始（含当时
+ * 进行中）与结束、所有镜像链项（含当时未镜像）。之后才结束或才镜像的业务，其结束事实由领域索引按键给出，与这里的
+ * 开始事实按分量组合。
+ */
+function legacyHistoryOf(state: LedgerProjection): LegacyHistory {
+  const requests = new Map<string, { seq: number; body: JsonValue }>();
+  for (const [requestId, item] of state.requested) requests.set(requestId, { seq: item.recordSeq, body: item.body as unknown as JsonValue });
+  const finished = new Map<string, JsonValue>();
+  for (const [requestId, item] of state.finished) finished.set(requestId, item as unknown as JsonValue);
+  const effectStarts = new Map<number, { body: JsonValue }>();
+  const effectEnds = new Map<number, { body: JsonValue }>();
+  for (const [effectSeq, effect] of state.sideEffects) {
+    effectStarts.set(effectSeq, { body: effect.started as unknown as JsonValue });
+    if (effect.completed) effectEnds.set(effectSeq, { body: effect.completed as unknown as JsonValue });
+  }
+  const mirror = new Map<number, JsonValue>();
+  for (const item of state.finishedOrder) mirror.set(item.recordSeq, item as unknown as JsonValue);
+  return structuredClone({ generation: randomUUID(), upToSeq: state.lastSeq, requests, finished, effectStarts, effectEnds, mirror });
+}
+
+/** 业务键所在的页：按类别与键做摘要后取模，页数由写出时的键数决定。 */
+function legacyPageOf(category: LegacyHistoryCategory, key: string | number, pages: number): number {
+  return createHash("sha256").update(`${category}\0${key}`, "utf8").digest().readUInt32BE(0) % pages;
+}
+
+/** 把旧前缀历史分成各类别的页（含空页）：页数 = ⌈该类键数 / LEGACY_HISTORY_PAGE_KEYS⌉，至少 1 页。 */
+function pageLegacyHistory(legacy: LegacyHistory) {
+  // 每类的业务键（请求开始与结果共用请求 ID，副作用开始与结束共用 effectSeq）
+  const requestIds = new Set([...legacy.requests.keys(), ...legacy.finished.keys()]);
+  const effectSeqs = new Set([...legacy.effectStarts.keys(), ...legacy.effectEnds.keys()]);
+  const count = (keys: number) => Math.max(1, Math.ceil(keys / LEGACY_HISTORY_PAGE_KEYS));
+  const pages: LegacyHistoryPages = { requests: count(requestIds.size), effects: count(effectSeqs.size), mirror: count(legacy.mirror.size) };
+  const byCategory: Record<LegacyHistoryCategory, LegacyHistoryPage[]> = { requests: [], effects: [], mirror: [] };
+  for (const category of ["requests", "effects", "mirror"] as const) {
+    for (let page = 0; page < pages[category]; page++) {
+      byCategory[category].push({ generation: legacy.generation, upToSeq: legacy.upToSeq, category, page, pages: pages[category],
+        requests: new Map(), finished: new Map(), effectStarts: new Map(), effectEnds: new Map(), mirror: new Map() });
+    }
+  }
+  // 每个业务键只算一次页号，按下标直接取页：工作量随键数线性
+  const pageOf = (category: LegacyHistoryCategory, key: string | number) => byCategory[category][legacyPageOf(category, key, pages[category])]!;
+  for (const requestId of requestIds) {
+    const file = pageOf("requests", requestId);
+    const requested = legacy.requests.get(requestId), finished = legacy.finished.get(requestId);
+    if (requested) file.requests.set(requestId, requested);
+    if (finished !== undefined) file.finished.set(requestId, finished);
+  }
+  for (const effectSeq of effectSeqs) {
+    const file = pageOf("effects", effectSeq);
+    const started = legacy.effectStarts.get(effectSeq), ended = legacy.effectEnds.get(effectSeq);
+    if (started) file.effectStarts.set(effectSeq, started);
+    if (ended) file.effectEnds.set(effectSeq, ended);
+  }
+  for (const [seq, item] of legacy.mirror) pageOf("mirror", seq).mirror.set(seq, item);
+  return { generation: legacy.generation, upToSeq: legacy.upToSeq, pages,
+    files: [...byCategory.requests, ...byCategory.effects, ...byCategory.mirror] };
+}
+
+function validLegacyPages(pages: unknown): pages is LegacyHistoryPages {
+  const value = pages as LegacyHistoryPages | undefined;
+  return !!value && typeof value === "object" &&
+    (["requests", "effects", "mirror"] as const).every(category => Number.isSafeInteger(value[category]) && value[category] > 0);
+}
+
+/** 一页旧前缀历史是否就是所指的那一页：代次、覆盖边界、类别、页号与页数都相符，且各类事实都是表。 */
+function isLegacyHistoryPage(
+  page: LegacyHistoryPage | undefined,
+  generation: string,
+  upToSeq: number,
+  category: LegacyHistoryCategory,
+  index: number,
+  pages: number,
+): page is LegacyHistoryPage {
+  return !!page && page.generation === generation && page.upToSeq === upToSeq && page.category === category &&
+    page.page === index && page.pages === pages && page.requests instanceof Map && page.finished instanceof Map &&
+    page.effectStarts instanceof Map && page.effectEnds instanceof Map && page.mirror instanceof Map;
+}
+
+/** 领域索引按键行未命中的项，再从旧前缀历史取（只在旧格式分派上有）。 */
+function withLegacyHistory(
+  rows: AssignmentHistoryRows | undefined,
+  legacy: LegacyHistory | undefined,
+  needs: AssignmentHistoryNeeds,
+): AssignmentHistoryRows | undefined {
+  if (!legacy) return rows;
+  // 按分量各自补：同一笔业务的开始可能只在旧前缀历史里，结束只在领域索引里
+  const fill = <Key, Value>(own: ReadonlyMap<Key, Value> | undefined, old: ReadonlyMap<Key, Value>, keys: readonly Key[]) => {
+    const merged = new Map(own);
+    for (const key of keys) if (!merged.has(key) && old.has(key)) merged.set(key, old.get(key)!);
+    return merged;
+  };
+  const requests = needs.requests ?? [], effects = needs.effects ?? [];
+  return {
+    requests: fill(rows?.requests, legacy.requests, requests),
+    finished: fill(rows?.finished, legacy.finished, requests),
+    effectStarts: fill(rows?.effectStarts, legacy.effectStarts, effects),
+    effectEnds: fill(rows?.effectEnds, legacy.effectEnds, effects),
+    mirror: fill(rows?.mirror, legacy.mirror, needs.mirrorSeqs ?? []),
+  };
 }
 
 /** 内存状态省去了已完成历史（从按键化的决定状态恢复）：需要的项按键补入。 */

@@ -253,16 +253,23 @@ export interface AssignmentHistoryNeeds {
   readonly mirrorSeqs?: readonly number[];
 }
 
+/** 按键取到的历史事实。开始与结束分别给出：跨格式边界时同一笔业务的两端可能分处领域索引与旧前缀历史。 */
 export interface AssignmentHistoryRows {
-  /** 请求 ID → 请求记录，及其结果的镜像链项（已有结果时） */
-  readonly requests: ReadonlyMap<string, { readonly seq: number; readonly body: JsonValue; readonly finished?: JsonValue }>;
-  readonly effects: ReadonlyMap<number, { readonly started: JsonValue; readonly completed?: JsonValue }>;
+  /** 请求 ID → 请求记录 */
+  readonly requests: ReadonlyMap<string, { readonly seq: number; readonly body: JsonValue }>;
+  /** 请求 ID → 它的结果（镜像链项） */
+  readonly finished: ReadonlyMap<string, JsonValue>;
+  /** 副作用开始与结束：来自领域索引时带记录序号；来自旧前缀历史时只按业务键记 */
+  readonly effectStarts: ReadonlyMap<number, { readonly seq?: number; readonly body: JsonValue }>;
+  readonly effectEnds: ReadonlyMap<number, { readonly seq?: number; readonly body: JsonValue }>;
+  /** 记录序号 → 镜像链项 */
   readonly mirror: ReadonlyMap<number, JsonValue>;
 }
 
 /**
- * 按键取该分派序号不超过 upToSeq 的已完成历史：每项只读自己的小行，读取量随所需键数而不随历史。
- * 行的形态与键不符按索引损坏拒绝；超过 upToSeq 的行属于更晚的记录，不当作先前已有。
+ * 按键取该分派序号不超过 upToSeq 的历史事实：每项只读自己的小行，读取量随所需键数而不随历史。
+ * 行的形态与键不符按索引损坏拒绝；超过 upToSeq 的行属于更晚的记录，不当作先前已有。开始与结束各自独立取，
+ * 由账本组合并核对。
  */
 export async function readAssignmentHistory(
   view: DurableProjectionReadContext,
@@ -284,38 +291,42 @@ export async function readAssignmentHistory(
     }
     return found?.value as JsonValue | undefined;
   };
-  const requests = new Map<string, { seq: number; body: JsonValue; finished?: JsonValue }>();
+  const requests = new Map<string, { seq: number; body: JsonValue }>();
+  const finished = new Map<string, JsonValue>();
   for (const requestId of needs.requests ?? []) {
     const requested = await row(historyKey(assignmentId, "q", subject(requestId)));
-    if (!requested) continue;
-    const body = requested.value.body as { readonly t?: unknown; readonly requestId?: unknown } | undefined;
-    if (body?.t !== "interaction-requested" || body.requestId !== requestId) throw corruptIndex("Assignment history request row is invalid");
+    if (requested) {
+      const body = requested.value.body as { readonly t?: unknown; readonly requestId?: unknown } | undefined;
+      if (body?.t !== "interaction-requested" || body.requestId !== requestId) throw corruptIndex("Assignment history request row is invalid");
+      requests.set(requestId, { seq: requested.seq, body: body as JsonValue });
+    }
     const finishedAt = await row(historyKey(assignmentId, "f", subject(requestId)));
-    const finished = finishedAt ? await mirrorItem(finishedAt.seq) : undefined;
-    if (finishedAt && (finished as { body?: { requestId?: unknown } } | undefined)?.body?.requestId !== requestId) {
-      throw corruptIndex("Assignment history result row is invalid");
+    if (finishedAt) {
+      const item = await mirrorItem(finishedAt.seq);
+      if ((item as { body?: { t?: unknown; requestId?: unknown } } | undefined)?.body?.t !== "interaction-finished" ||
+          (item as { body: { requestId?: unknown } }).body.requestId !== requestId) {
+        throw corruptIndex("Assignment history result row is invalid");
+      }
+      finished.set(requestId, item!);
     }
-    requests.set(requestId, { seq: requested.seq, body: body as JsonValue, ...(finished ? { finished } : {}) });
   }
-  const effects = new Map<number, { started: JsonValue; completed?: JsonValue }>();
+  const effectStarts = new Map<number, { seq: number; body: JsonValue }>();
+  const effectEnds = new Map<number, { seq: number; body: JsonValue }>();
   for (const effectSeq of needs.effects ?? []) {
-    const started = await row(historyKey(assignmentId, "x", seqPart(effectSeq)));
-    if (!started) continue;
-    const completed = await row(historyKey(assignmentId, "y", seqPart(effectSeq)));
-    const startBody = started.value.body as { readonly t?: unknown; readonly effectSeq?: unknown } | undefined;
-    const endBody = completed?.value.body as { readonly t?: unknown; readonly effectSeq?: unknown } | undefined;
-    if (startBody?.t !== "side-effect-started" || startBody.effectSeq !== effectSeq ||
-        (completed && (endBody?.t !== "side-effect-completed" || endBody.effectSeq !== effectSeq))) {
-      throw corruptIndex("Assignment history side-effect row is invalid");
+    for (const [kind, t, into] of [["x", "side-effect-started", effectStarts], ["y", "side-effect-completed", effectEnds]] as const) {
+      const found = await row(historyKey(assignmentId, kind, seqPart(effectSeq)));
+      if (!found) continue;
+      const body = found.value.body as { readonly t?: unknown; readonly effectSeq?: unknown } | undefined;
+      if (body?.t !== t || body.effectSeq !== effectSeq) throw corruptIndex("Assignment history side-effect row is invalid");
+      into.set(effectSeq, { seq: found.seq, body: body as JsonValue });
     }
-    effects.set(effectSeq, { started: startBody as JsonValue, ...(endBody ? { completed: endBody as JsonValue } : {}) });
   }
   const mirror = new Map<number, JsonValue>();
   for (const seq of needs.mirrorSeqs ?? []) {
     const item = await mirrorItem(seq);
     if (item !== undefined) mirror.set(seq, item);
   }
-  return { requests, effects, mirror };
+  return { requests, finished, effectStarts, effectEnds, mirror };
 }
 
 /**
