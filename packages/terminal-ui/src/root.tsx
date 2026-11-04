@@ -476,9 +476,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const current = view(), shown = shownProcess(), status = processStatus();
     const running = shown?.activity === 'running' || shown?.activity === 'reconciling';
     if (current.kind !== 'conversation' || !current.conversationId || (!running && !current.busy)) return undefined;
-    const inputId = input.pendingSubmissionId;
-    return { conversationId: current.conversationId, ...(running && status?.turnId ? { turnId: status.turnId } : {}),
-      ...(running && status?.runId ? { runId: status.runId } : {}), ...(inputId ? { inputId } : {}) };
+    // 输入身份只在屏上还没有轮次/运行身份时代表“正在提交的这一次”（协议 TerminalStopTarget 与 N 的绑定规则一致）；
+    // 屏上已有运行身份时只按它停，另一份在途提交的身份不随带，免得与所停运行的身份互相否决
+    const turnId = running ? status?.turnId : undefined, runId = running ? status?.runId : undefined;
+    const inputId = turnId || runId ? undefined : input.pendingSubmissionId;
+    return { conversationId: current.conversationId, ...(turnId ? { turnId } : {}), ...(runId ? { runId } : {}), ...(inputId ? { inputId } : {}) };
   };
   const displayRecoveryNotice = () => view().displayPaused || view().bodyRecovery === 'blocked'
     ? view().kind === 'history' ? '历史展示已暂停，存在缺口 · 请释放空间后重新打开历史' : '正文保留已暂停 · Ctrl+R 重试展示'
@@ -490,7 +492,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     taskStatus().noticeGap ?? '',
     taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state === 'error' ? taskStatus().summary!.text : '',
     view().connectionState === 'unavailable' ? displayText(view().message ?? '') : '',
-  ].filter(Boolean), details: !!taskStatus().summary && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state !== 'error'
+  // 任务进度只在“已就绪且有文字”时占行：就绪但为空（无待办或全部完成）是合法的成功结果、读取中不是有效摘要，
+  // 都不占行（否则启动后“正在读取任务列表…”一闪，会把导航行与跟随中的正文顶上一行再落回）；读取失败仍按失败显示
+  ].filter(Boolean), details: !!taskStatus().summary?.text.trim() && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state === 'ready'
     ? [taskStatus().summary!.text] : [], notice: displayText(view().inputReceiptPending || view().connectionState === 'starting' ? view().message || taskStatus().summary?.text || '' : taskStatus().summary?.text || ''),
     operation: operationText(), candidateCompressed: candidateHeight() > 0 });
   const footerProcess = () => view().inputReceiptPending ? { revision: 0, phase: '原输入结果待核对，草稿已保留', activity: 'reconciling' as const, tools: [], children: [], usage: {} } : shownProcess() ?? { revision: 0, phase: view().busy ? view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',

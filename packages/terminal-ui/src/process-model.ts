@@ -121,14 +121,15 @@ export function processViewRows(view: TerminalProcessView, columns: number, heig
   // 没有必须的失败、也不在运行时，当前说明就是状态行；否则它紧挨在状态行之上
   const leads = !!operation && !failures.length && view.activity !== 'running' && view.activity !== 'reconciling';
   const rows: ProcessViewRow[] = failures.slice(1).map(text => ({ text, failed: true }));
-  if (!complete) for (const text of feedback.details ?? []) rows.push({ text });
+  // 只给有文字的条目分配行：就绪但为空的摘要、空的细节都不占行
+  if (!complete) for (const text of feedback.details ?? []) if (text.trim()) rows.push({ text });
   if (view.children.length && (!complete || view.children.some(child => child.status === 'failed' || child.status === 'aborted'))) {
     const count = (status: ProcessChildView['status']) => view.children.filter(c => c.status === status).length;
     const failed = count('failed'), aborted = count('aborted');
     const focus = view.children.find(c => c.status === 'failed') ?? view.children.find(c => c.status === 'running') ?? view.children.at(-1)!;
     rows.push({ text: '子任务 ' + view.children.length + ' · ' + (failed ? failed + '失败 ' : '') + (aborted ? aborted + '中止 ' : '') + count('running') + '运行 ' + count('succeeded') + '完成 · ' + (focus.label || focus.id), failed: !!(failed || aborted) });
   }
-  if (!complete) for (const line of view.tools) rows.push({ text: '  ' + line });
+  if (!complete) for (const line of view.tools) if (line.trim()) rows.push({ text: '  ' + line });
   const usage = view.usage, parts: string[] = [];
   if (usage.inputTokens !== undefined) parts.push('输入 ' + usage.inputTokens);
   if (usage.outputTokens !== undefined) parts.push('输出 ' + usage.outputTokens);
@@ -147,7 +148,8 @@ export function processViewRows(view: TerminalProcessView, columns: number, heig
   for (let pass = 0; pass < 2; pass++) {
     const text = (hidden ? '另' + hidden + '项提示，' + (feedback.candidateCompressed ? 'Esc 收起候选查看' : '放大窗口查看') + ' · ' : '') + (failures[0] ?? (leads ? operation : normal));
     // 当前说明与必须的失败说明都按宽度完整显示（失败说明常带“输入保留、可重试”等下一步）；放不下预算才退回单行
-    status = leads || failures.length ? processWrap(text, columns, '◆ ', '  ', cell) : [text ? '◆ ' + text : ''];
+    // 没有任何状态文字时不占行：空闲且无信息的状态区为零行
+    status = leads || failures.length ? processWrap(text, columns, '◆ ', '  ', cell) : text ? ['◆ ' + text] : [];
     shown = !!operation && status.length + above.length <= budget;
     if (leads && !shown || !leads && status.length > budget) status = ['◆ ' + text];
     // 放不下的当前说明也计入提示数，状态行告诉用户还有说明以及怎样看到（如收起候选）

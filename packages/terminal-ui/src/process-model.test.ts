@@ -45,6 +45,16 @@ describe('pure process presentation', () => {
     expect(processViewRows({ ...view, notice: '本轮已结束；正文存在缺口' }, 80, 6)[0]!.text).toContain('正文存在缺口');
     expect(validateProcessView({ ...view, durationMs: Infinity })).toBe(false);
   });
+  it('只给有文字的条目分配行：空闲无信息为零行，空摘要、空工具行不占行', () => {
+    const idle = { revision: 0, phase: '', activity: 'complete' as const, tools: [], children: [], usage: {} };
+    expect(processViewRows(idle, 80, 6)).toEqual([]);
+    // 就绪但为空的任务摘要与只有空白的细节都不占行
+    expect(processViewRows(idle, 80, 6, { details: ['', '  '] })).toEqual([]);
+    // 恢复回执占状态行时，空摘要不在它上方留空行
+    expect(processViewRows(idle, 80, 6, { details: [''], operation: '已恢复最近对话。' }).map(row => row.text)).toEqual(['◆ 已恢复最近对话。']);
+    const running = processViewRows({ ...idle, phase: '正在处理…', activity: 'running', tools: ['', '读取 a.ts'] }, 80, 6, { details: ['', '整理桌面 (1/3)'] });
+    expect(running.map(row => row.text)).toEqual(['整理桌面 (1/3)', '  读取 a.ts', '◆ 正在处理…']);
+  });
   describe('当前操作的说明完整可见', () => {
     const kept = '本次输入未接纳，已保留在输入框；原推进目标保持不变，确认验收标准前不执行原任务；可以补充说明，也可以说“直接执行”或“取消”。';
     const done = { revision: 1, phase: '本轮已结束', durationMs: 2000, tools: [], children: [], usage: { contextTokens: 162 } };
