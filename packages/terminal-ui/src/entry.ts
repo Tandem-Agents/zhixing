@@ -82,7 +82,8 @@ function receive(message: TerminalMessage): void {
           inputReady: renderer => input.handoff(renderer as unknown as { setupInput(): void }),
           usableFrame: frameId => { void channel.send({ type: 'usable-frame', frameId }).catch(() => { if (!abort.signal.aborted) void close('terminal-ready-observation-undelivered', 71); }); },
           exit: () => close('user-exit', 0),
-          ...(process.env.ZHIXING_TERMINAL_PROMPT_GLYPH === 'ascii' ? { promptGlyph: 'ascii' as const } : {}) });
+          ...(process.env.ZHIXING_TERMINAL_PROMPT_GLYPH === 'ascii' ? { promptGlyph: 'ascii' as const } : {}),
+          ...(process.env.ZHIXING_TERMINAL_TEXTURE_GLYPH === 'ascii' ? { textureGlyph: 'ascii' as const } : {}) });
         if (abort.signal.aborted) { await root.dispose(); return; }
         phase = 'active';
         await channel.send({ type: 'ready', frameId: root.firstFrameId });

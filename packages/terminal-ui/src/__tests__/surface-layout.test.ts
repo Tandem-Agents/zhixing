@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { initialChoiceIndex, nextChoiceIndex, candidateLayout, selectedLabel } from '../surface-layout.js';
+import { initialChoiceIndex, nextChoiceIndex, candidateLayout } from '../surface-layout.js';
 import type { TerminalView } from '../protocol.js';
 
 const view: TerminalView = { generation: 1, kind: 'selection', title: '选择', initialItemId: 'last', choices: [
@@ -13,7 +13,6 @@ it('reserves one physical candidate viewport and leaves the editor/reading budge
     const result = candidateLayout(height);
     if (result.rows) expect(2 + result.process + result.editor + 2 + result.rows).toBeLessThan(height);
   }
-  expect(selectedLabel('a  b', true, false, 7, text => text.length)).toBe('a  b...');
 });
 it('honors initial choice, preserves an enabled selection on refresh, and skips disabled defaults', () => {
   expect(initialChoiceIndex(view)).toBe(3); expect(initialChoiceIndex(view, 'first')).toBe(1);

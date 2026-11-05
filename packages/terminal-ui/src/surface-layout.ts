@@ -1,5 +1,4 @@
 import type { TerminalView } from './protocol.js';
-import { fitInformation } from './information-model.js';
 
 /** Refresh generations are not interaction identities. */
 export function interactionKey(view: TerminalView): string {
@@ -18,14 +17,6 @@ export function candidateLayout(height: number) {
   const process = height >= 24 ? 3 : height >= 20 ? 2 : 1;
   const rows = Math.max(0, Math.min(16, height - 2 - process - (editor + 2) - (height >= 20 ? 4 : 1)));
   return { editor, process, rows: rows >= 5 ? rows : 0 };
-}
-
-/** Texture marks a selected row, never an input, an unselected row or danger. */
-export function selectedLabel(text: string, selected: boolean, danger: boolean, width: number, measure: (text: string) => number): string {
-  const label = fitInformation(text, width, measure);
-  if (!selected || danger) return label;
-  // ASCII 点：控制台西文字体在纯 ASCII 行里也能显示（“░”会渲染成缺字方框）
-  return label + '.'.repeat(Math.max(0, width - measure(label)));
 }
 
 /** Preserve a still-enabled selection, otherwise honor the requested default. */

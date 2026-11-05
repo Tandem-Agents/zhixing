@@ -1,5 +1,5 @@
 import { tone, spacing } from './theme.js';
-import { SELECTED_MARK } from './choice-view.js';
+import { SELECTED_MARK, SelectionBand, SelectionText } from './selection-row.js';
 import { createEffect, createMemo, For, onCleanup, Show } from 'solid-js';
 import {
   skillsActionForKey, skillsDisplayText, skillsPageSize, skillsVisibleItems, validateSkillsView,
@@ -78,10 +78,16 @@ export function SkillsView(props: SkillsViewProps) {
     <Show when={safe()} fallback={<text height={1} wrapMode="none" truncate>{hint('Esc 返回 · 请放大窗口以浏览技能', 'Esc 返回 · 请放大窗口', 'Esc 返回')}</text>}>
       <box flexGrow={1} flexDirection="column" overflow="hidden">
         <Show when={view().total > 0} fallback={<text>{view().state === 'loading' ? '正在读取技能…' : view().state === 'error' ? '技能暂不可用，按 r 重试。' : '还没有技能 —— 让 agent 把某摊事的做法沉淀成一个技能，即可在此管理。'}</text>}>
-          <For each={items()}>{item => <box flexDirection="column" height={2} backgroundColor={item.id === view().selectedId ? tone.selected : undefined}>
-            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? tone.brand : tone.text}>{item.id === view().selectedId ? `${SELECTED_MARK} ` : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
-            <text height={1} wrapMode="none" truncate fg={tone.dim}>  {SKILL_MODE_LABEL[item.mode]} · {SKILL_SOURCE_LABEL[item.source]}{item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · {skillsDisplayText(item.description)}</text>
-          </box>}</For>
+          {/* 选中项与其他选择入口共用 selection-row 的呈现：两行都铺整行纹理，不用底色带 */}
+          <For each={items()}>{item => {
+            const active = () => item.id === view().selectedId;
+            return <SelectionBand active={active()} flexDirection="column" height={2}>
+              <text height={1} wrapMode="none" truncate fg={active() ? tone.brand : tone.text}>
+                <SelectionText active={active()} text={`${active() ? `${SELECTED_MARK} ` : '  '}${item.pinned ? '★' : ' '}${item.disabled ? '⊘' : ' '} ${skillsDisplayText(item.id)}`} /></text>
+              <text height={1} wrapMode="none" truncate fg={tone.dim}>
+                <SelectionText active={active()} text={`  ${SKILL_MODE_LABEL[item.mode]} · ${SKILL_SOURCE_LABEL[item.source]}${item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · ${skillsDisplayText(item.description)}`} /></text>
+            </SelectionBand>;
+          }}</For>
         </Show>
       </box>
       <Show when={view().message}><text height={2} fg={view().state === 'error' ? tone.warn : tone.dim}>{skillsDisplayText(view().message ?? '')}</text></Show>

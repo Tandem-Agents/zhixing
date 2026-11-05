@@ -23,6 +23,7 @@ import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
 import { tone, spacing, surfaceGeometry } from './theme.js';
 import { conversationVisit, historyVisit, operatedVisit, type ReadingVisit } from './reading-visit.js';
+import { configureSelectionTexture } from './selection-model.js';
 
 extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
@@ -36,6 +37,8 @@ export interface TerminalRootOptions {
   readonly exit: () => Promise<void>;
   /** 入口在经典控制台实测当前字体缺 ❯ 字形时改用 ASCII 提示符；其余情况保持 ❯。 */
   readonly promptGlyph?: 'ascii';
+  /** 选中纹理的宿主判定（与提示符分开）：经典控制台或 Windows 上宿主不明时为 ascii，选中纹理改用“:”。 */
+  readonly textureGlyph?: 'ascii';
 }
 
 export async function createTerminalRoot(options: TerminalRootOptions, createRenderer = createCliRenderer) {
@@ -765,6 +768,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     informationBuffer.setText(text);
     return informationView.logicalLineInfo.lineWidthCols[0] ?? 0;
   };
+  // 选中纹理字形：宿主判定之外再用渲染器自己的测宽核对“░”占 1 列，界面挂载前定好
+  configureSelectionTexture(options.textureGlyph === 'ascii', measureInformation);
   // 过程区按渲染器自己的字素宽度折行（歧义宽度字符与渲染截断同一口径）；按字素缓存，条数有界
   const graphemeWidths = new Map<string, number>();
   const graphemeWidth = (grapheme: string) => {

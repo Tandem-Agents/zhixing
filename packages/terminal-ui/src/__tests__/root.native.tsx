@@ -383,7 +383,8 @@ try {
   const local = root.information.source(interactionKey({ kind: 'conversation', title: '知行', conversationId: 'test', generation }));
   local.set('left', 'notice', '主场景公告');
   await show({ kind: 'selection', title: '临时选择', requestId: 'pick', choices: [{ id: 'a', label: '普通  行' }, { id: 'cancel', label: '取消', danger: true }] });
-  assert.ok(!text().includes('主场景公告')); assert.match(text(), /共享公告/); assert.match(text(), /普通  行 \./);
+  // 选中行按迁移前的整行点阵：标签内的连续空白与行尾都铺纹理
+  assert.ok(!text().includes('主场景公告')); assert.match(text(), /共享公告/); assert.match(text(), /» 普通░░行░{2,}/);
   const late = root.information.source(interactionKey({ kind: 'selection', title: '临时选择', requestId: 'pick', generation }));
   await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
   late.set('left', 'notice', '迟到的旧页面'); await flush();
@@ -939,7 +940,7 @@ try {
       assertBold(title, false);
       if (!busy) {
         assertBold('ChoiceOne', true); assertBold('ChoiceTwo', false);
-        const texture = spansFor('...'); assert.ok(texture.length);
+        const texture = spansFor('░░'); assert.ok(texture.length);
         assert.ok(texture.every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)), 'texture is independently dim, never inherited bold');
         test.mockInput.pressArrow('down'); await flush();
         assertBold('ChoiceOne', false); assertBold('ChoiceTwo', true);
@@ -953,7 +954,8 @@ try {
   candidateReply = async action => ({ revision: action.revision, active: true, start: 0, end: action.text.length, items: [{ id: 'clip', label: 'ClipChoice', detail: 'Detail' }] });
   test.resize(100, 16); editor().setText('/clip'); await flush(); await flush();
   assertBold('ClipChoice', true);
-  assert.ok(spansFor('...').every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)));
+  const candidateShade = spansFor('░░');
+  assert.ok(candidateShade.length && candidateShade.every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)));
   const clipSegments: BodyPage['segments'][number][] = [];
   // 4 列：100 列宽下走框线横排，覆盖框线跨过单行视口
   for await (const part of projectBodyHistory('| A | B | C | D |\n| --- | --- | --- | --- |\n| alpha | beta | gamma | delta |\n', 'markdown', 'forward', async () => {}))

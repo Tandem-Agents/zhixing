@@ -16,8 +16,10 @@ const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, re
 setRenderLibPath(process.env.ZHIXING_TERMINAL_RENDER_LIB!);
 const frames: Record<string, unknown> = {}, checks: string[] = [];
 const walk = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMap(walk)];
-async function scenario(name: string, run: (h: any) => Promise<void>, height = 40) {
+async function scenario(name: string, run: (h: any) => Promise<void>, height = 40, extra: { textureGlyph?: 'ascii' } = {}) {
   const test = await createTestRenderer({ width: 120, height, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
+  // 候选面板的条目可由用例替换（默认只有 /config）
+  let candidateItems: readonly { id: string; label: string; detail?: string }[] = [{ id: 'config', label: '/config' }];
   let root: Awaited<ReturnType<typeof createTerminalRoot>> | undefined, generation = 0;
   let page: BodyPage = { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: name, role: 'assistant', contentOffset: 0, final: true,
     text: Array.from({ length: 80 }, (_, i) => `LINE ${i} retained selection text`).join('\n') }] };
@@ -30,7 +32,7 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
   const nodes = () => walk(test.renderer.root), box = () => nodes().find(n => n.constructor.name === 'TerminalScrollBox');
   const tick = setInterval(() => void test.renderOnce(), 15);
   try {
-    root = await createTerminalRoot({ signal: new AbortController().signal, inputReady() {}, exit: async () => {}, request: async action => {
+    root = await createTerminalRoot({ signal: new AbortController().signal, inputReady() {}, exit: async () => {}, ...extra, request: async action => {
       requests.push(action);
       if (action.kind === 'input-begin') pasted.set(action.inputId, '');
       if (action.kind === 'input-part') pasted.set(action.inputId, (pasted.get(action.inputId) ?? '') + action.text);
@@ -38,7 +40,7 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
       if (readReply && (action.kind === 'display-page' || action.kind === 'display-earlier')) return readReply(action);
       if (action.kind === 'display-page') { page = { ...page, follow: !!action.follow }; root!.receive({ type: 'display-page', ...baseline(currentReading), page }); }
       if (action.kind === 'clipboard-write') { copies.push(action.text); return { state: 'copied' }; }
-      if (action.kind === 'input-candidates') return { revision: action.revision, start: 0, end: action.text.length, active: action.text.startsWith('/'), items: action.text.startsWith('/') ? [{ id: 'config', label: '/config' }] : [] };
+      if (action.kind === 'input-candidates') return { revision: action.revision, start: 0, end: action.text.length, active: action.text.startsWith('/'), items: action.text.startsWith('/') ? candidateItems : [] };
       return { accepted: true };
     } }, async () => test.renderer);
     clearInterval(tick);
@@ -48,6 +50,7 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
     await show(view); await publish(page); await latest();
     await run({ test, root, flush, nodes, box, show, publish, latest, view, requests, copies, get page() { return page; },
       readWith: (reply: typeof readReply) => { readReply = reply; },
+      candidatesWith: (items: typeof candidateItems) => { candidateItems = items; },
       useReading: (reading: typeof TEST_READING) => { currentReading = reading; },
       capture: (label: string) => { frames[name + '-' + label] = test.captureSpans(); } });
     checks.push(name); console.log('PASS ' + name);
@@ -1039,6 +1042,104 @@ THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
     assert.ok(item.length && item.every((span: any) => slot(span) === -1), 'list item text keeps the body color');
     h.capture('styles');
   });
+  // 选中当前项的整行点阵：所有选择入口经由同一原语；只铺在选中行盒内，单空格保留，危险项不铺
+  const cols = (text: string) => [...text].reduce((sum, char) => sum + (/[⺀-〿㐀-鿿＀-｠]/u.test(char) ? 2 : 1), 0);
+  const shadeLine = (lines: string[], label: string) => lines.findIndex(line => line.includes(label));
+  await scenario('selection-band-candidates', async h => {
+    h.candidatesWith([{ id: 'a', label: '/advancement', detail: 'task progress details' }, { id: 'b', label: '/clear', detail: '清空对话历史' }, { id: 'c', label: '/exit', detail: 'leave' }]);
+    await h.test.mockInput.typeText('/'); await h.flush(); await h.flush();
+    let lines = frameLines(h);
+    const a = shadeLine(lines, '/advancement'), b = shadeLine(lines, '/clear'), c = shadeLine(lines, '/exit');
+    assert.ok(a >= 0 && b > a && c > b, lines.join('\n'));
+    // 标记后的单空格保留；标签到说明、说明到行尾都铺满；框内 1 列内距、滚动列与左右框都不被覆盖
+    assert.match(lines[a]!, /│» \/advancement░{2,}task progress details░{2,} │/u, lines[a]);
+    assert.ok(!lines[b]!.includes('░') && !lines[c]!.includes('░'), 'unselected rows stay plain');
+    const frameColumn = (line: string) => cols(line.slice(0, line.lastIndexOf('│')));
+    assert.equal(frameColumn(lines[a]!), frameColumn(lines[c]!), 'band stops inside the frame');
+    h.capture('first');
+    h.test.mockInput.pressArrow('down'); await h.flush();
+    lines = frameLines(h);
+    assert.deepEqual([shadeLine(lines, '/advancement'), shadeLine(lines, '/clear')], [a, b], `rows keep their positions\n${lines.join('\n')}`);
+    assert.ok(!lines[a]!.includes('░'), 'the previous selection loses its band');
+    assert.match(lines[b]!, /│» \/clear░{2,}清空对话历史░{2,} │/u, lines[b]);
+    assert.equal(frameColumn(lines[b]!), frameColumn(lines[c]!));
+    h.capture('second');
+  }, 30);
+  await scenario('selection-band-configuration', async h => {
+    const choices = [
+      { id: 'one', label: '主模型（必填 · 主对话）', detail: 'deepseek · deepseek-v4-pro', status: 'ready' as const, section: '对话模型' },
+      { id: 'two', label: '轻量模型', detail: '未启用', status: 'disabled' as const, section: '对话模型' },
+      { id: 'drop', label: '删除配置', danger: true, section: '对话模型' },
+      { id: 'save', label: '完成', detail: '保存并生效', presentation: 'button' as const, primary: true, shortcut: 'Ctrl+S', section: '操作' },
+      { id: 'cancel', label: '取消', detail: '放弃本次修改', presentation: 'button' as const, shortcut: 'Esc', section: '操作' },
+    ];
+    await h.show({ kind: 'configuration', title: 'Provider', editId: 'band-edit', configurationHome: false, choices });
+    let lines = frameLines(h);
+    const shortcutColumn = (line: string) => cols(line.slice(0, line.indexOf('Ctrl+S')));
+    const saveColumn = shortcutColumn(lines[shadeLine(lines, 'Ctrl+S')]!);
+    assert.match(lines[shadeLine(lines, '主模型')]!.trimEnd(), /» 主模型（必填 · 主对话）░{2,}✓ deepseek · deepseek-v4-pro░{2,}$/u, lines.join('\n'));
+    assert.ok(!lines[shadeLine(lines, '轻量模型')]!.includes('░') && !lines[shadeLine(lines, '完成')]!.includes('░'));
+    h.capture('list');
+    h.test.mockInput.pressArrow('down'); await h.flush();
+    lines = frameLines(h);
+    assert.ok(!lines[shadeLine(lines, '主模型')]!.includes('░'));
+    assert.match(lines[shadeLine(lines, '轻量模型')]!.trimEnd(), /» 轻量模型░{2,}· 未启用░{2,}$/u, lines[shadeLine(lines, '轻量模型')]);
+    // 危险项：红底，不铺纹理
+    h.test.mockInput.pressArrow('down'); await h.flush();
+    lines = frameLines(h);
+    assert.ok(lines[shadeLine(lines, '删除配置')]!.includes('»') && !lines[shadeLine(lines, '删除配置')]!.includes('░'), 'danger keeps its own highlight');
+    assert.ok(spansOf(h, '删除配置').every((span: any) => span.bg.intent === 'indexed' && span.bg.slot === 52), 'danger keeps the red background');
+    // 按钮行：标签、说明、快捷键之间与尾部铺纹理，快捷键不挪位
+    h.test.mockInput.pressArrow('down'); await h.flush();
+    lines = frameLines(h);
+    const save = lines[shadeLine(lines, 'Ctrl+S')]!;
+    assert.match(save.trimEnd(), /» 完成░{2,}保存并生效░{2,}Ctrl\+S$/u, save);
+    assert.equal(shortcutColumn(save), saveColumn, 'shortcut stays in its column');
+    h.capture('button');
+    h.test.mockInput.pressArrow('down'); await h.flush();
+    lines = frameLines(h);
+    assert.ok(!lines[shadeLine(lines, 'Ctrl+S')]!.includes('░'));
+    assert.match(lines[shadeLine(lines, '放弃本次修改')]!.trimEnd(), /» 取消░{2,}放弃本次修改░{2,}Esc$/u);
+  });
+  await scenario('selection-band-narrow-wrap', async h => {
+    h.test.resize(40, 30); await h.flush();
+    await h.show({ kind: 'configuration', title: 'Narrow', editId: 'band-narrow', configurationHome: false, choices: [
+      { id: 'long', label: '这是一个非常长的配置项名称需要在窄屏里折行显示', detail: '说明文字', status: 'ready' as const },
+      { id: 'next', label: '下一项' }] });
+    let lines = frameLines(h);
+    const first = shadeLine(lines, '» 这是'), next = shadeLine(lines, '下一项');
+    assert.ok(first >= 0 && next - first >= 3, lines.join('\n'));
+    // 标签折行与说明的每个显示行都铺到行尾；外边距不铺
+    for (const line of lines.slice(first, next)) assert.match(line, /░\s*$/u, `wrapped line keeps the band: ${JSON.stringify(line)}`);
+    assert.ok(lines.slice(first, next).every(line => line.startsWith('  ') && !line.startsWith('░')), 'page margin stays blank');
+    h.capture('wrapped');
+    h.test.mockInput.pressArrow('down'); await h.flush();
+    lines = frameLines(h);
+    assert.equal(shadeLine(lines, '下一项'), next, 'the wrapped item keeps its height');
+    assert.ok(lines.slice(first, next).every(line => !line.includes('░')));
+    h.test.resize(120, 40); await h.flush();
+  }, 30);
+  await scenario('selection-band-skills', async h => {
+    const item = (id: string, pinned: boolean) => ({ id, name: id, description: `${id} 的说明`, pinned, disabled: false, mode: 'main' as const, source: 'own' as const, hitCount: 3 });
+    await h.show({ kind: 'skills', title: '技能', skills: { sessionId: 'band', revision: 1, state: 'ready', busy: false, items: [item('alpha-skill', true), item('beta-skill', false)],
+      total: 2, offset: 0, pageSize: 10, selectedIndex: 0, selectedId: 'alpha-skill' } });
+    const lines = frameLines(h), alpha = shadeLine(lines, 'alpha-skill'), beta = shadeLine(lines, 'beta-skill');
+    assert.ok(alpha >= 0 && beta > alpha, lines.join('\n'));
+    // 双行项两行都成带：“★”后的双空格与行尾铺纹理，第二行行首缩进铺纹理；不再用底色带
+    assert.match(lines[alpha]!.trimEnd(), /» ★░░alpha-skill░{2,}$/u, lines[alpha]);
+    assert.match(lines[alpha + 1]!.trim(), /^░░.*的说明░{2,}$/u, lines[alpha + 1]);
+    assert.ok(!lines[beta]!.includes('░') && !lines[beta + 1]!.includes('░'));
+    const shade = spansOf(h, '░░');
+    assert.ok(shade.length && shade.every((span: any) => !(span.bg.intent === 'indexed' && span.bg.slot === 236)), 'no shaded background band under the texture');
+    h.capture('skills');
+  });
+  await scenario('selection-band-ascii-fallback', async h => {
+    await h.show({ kind: 'configuration', title: 'Fallback', editId: 'band-ascii', configurationHome: false, choices: [
+      { id: 'one', label: 'Main model', detail: 'ready', status: 'ready' as const }, { id: 'two', label: 'Other' }] });
+    const line = frameLines(h)[shadeLine(frameLines(h), 'Main model')]!;
+    assert.match(line.trimEnd(), /» Main model:{2,}✓ ready:{2,}$/u, line);
+    assert.ok(!frameLines(h).some(row => row.includes('░')), 'the shade glyph is never used when the host declares ascii');
+  }, 40, { textureGlyph: 'ascii' });
   console.log(JSON.stringify({ checks }));
 } finally {
   if (process.env.ZHIXING_READING_CAPTURE) {

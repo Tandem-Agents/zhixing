@@ -66,6 +66,17 @@ export interface TerminalSupervisorOptions {
  * S 处理完才回该请求的确认帧，N 对请求结果与确认帧各有 5 秒超时（确认超时会使通道失效），期限须留出往返余量。 */
 const ASSET_OPERATION_DEADLINE_MS = 4_000;
 
+/**
+ * 选中纹理字形的宿主判定：普通终端（Windows Terminal 等，原生侧判为 other，有字体回退）与非 Windows 平台用“░”。
+ * 经典控制台一律用 ASCII 后备：它不做字体回退，界面画在备用屏幕缓冲区上，而该缓冲区的字体可能与启动时
+ * 主缓冲区的当前字体不同（实测：主缓冲区临时改成 Consolas 时，备用缓冲区仍是新宋体，“░”成方框），
+ * 启动前无法确认界面实际用的字体有没有“░”。Windows 上测量本身失败（宿主不明）同样用 ASCII，绝不出缺字方框。
+ */
+export function terminalTextureGlyph(platform: NodeJS.Platform, cells: TerminalConsoleCells | undefined): 'ascii' | undefined {
+  if (platform !== 'win32') return undefined;
+  return cells?.kind === 'other' ? undefined : 'ascii';
+}
+
 /** 设备容量仲裁未授予（结构判断：S 的启动包不引入容量模块）。 */
 function capacityAdmission(error: unknown): { readonly kind: string; readonly blockedBy?: string; readonly retryAfterMs?: number } | undefined {
   if (!(error instanceof Error) || error.name !== 'DeviceCapacityAdmissionError') return undefined;
@@ -1157,6 +1168,7 @@ class TerminalSupervisor {
       if (consoleCells.cellWidths) env.ZHIXING_TERMINAL_CELL_WIDTHS = consoleCells.cellWidths;
       if (consoleCells.promptGlyph === 'missing') env.ZHIXING_TERMINAL_PROMPT_GLYPH = 'ascii';
     }
+    if (terminalTextureGlyph(process.platform, consoleCells) === 'ascii') env.ZHIXING_TERMINAL_TEXTURE_GLYPH = 'ascii';
     return env;
   }
 

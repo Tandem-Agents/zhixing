@@ -4,6 +4,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
+import { terminalTextureGlyph } from '../supervisor.js';
 
 // Execute production admission against deferred storage/native ports so each
 // prerequisite can fail or complete independently of the operating system.
@@ -30,7 +31,7 @@ const emitted = ts.transpileModule(`class Fixture {
 } exports.Fixture = Fixture;`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 interface FixturePort { run(verified: Promise<boolean>): Promise<{instancePath: string; startupDeadline: number}>; cancel(): void }
 const loaded: { Fixture?: new (ports: unknown) => FixturePort } = {};
-new Function('exports', 'process', 'path', 'randomUUID', 'TerminalChannelRetiredError', emitted)(loaded, { platform: 'win32', env: {} }, path, randomUUID, TerminalChannelRetiredError);
+new Function('exports', 'process', 'path', 'randomUUID', 'TerminalChannelRetiredError', 'terminalTextureGlyph', emitted)(loaded, { platform: 'win32', env: {} }, path, randomUUID, TerminalChannelRetiredError, terminalTextureGlyph);
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function fixture(preloaded?: { spawnId: string }) {
   const admission = deferred<string>(), bind = deferred<void>(), verification = deferred<boolean>();
