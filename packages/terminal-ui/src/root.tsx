@@ -7,24 +7,24 @@ import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
 import { TerminalInputSession, type TerminalAtomicRange } from './input-session.js';
 import { setEditorAtomicWrap } from './editor-atomic-wrap.js';
-import { type TerminalPasteSink } from './paste-stream.js';
+import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
-import { BodyView, TerminalScrollBox, type BodyViewHandle, type BodyReadingState, isBodyTextLeaf } from './body-view.js';
+import { BodyView, TerminalScrollBox, isBodyTextLeaf, type BodyViewHandle, type BodyReadingState } from './body-view.js';
+import { copySource, type CopySource, type SelectionLeaf, type SelectionState } from './copy-selection.js';
 import { BODY_PAGE_BYTES, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
 import { BodyReadingWindow } from './body-window.js';
+import { conversationVisit, historyVisit, operatedVisit, type ReadingVisit } from './reading-visit.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
-import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
+import { InformationBoard, informationLayout, splitKeys, type InformationSource } from './information-model.js';
 import { interactionKey, inputRows, candidateLayout, initialChoiceIndex, nextChoiceIndex } from './surface-layout.js';
 import { CandidateView } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
-import { tone, spacing, surfaceGeometry, sectionMarker } from './theme.js';
-import { copySource, type CopySource, type SelectionLeaf, type SelectionState } from './copy-selection.js';
-import { conversationVisit, historyVisit, operatedVisit, type ReadingVisit } from './reading-visit.js';
 import { configureSelectionTexture } from './selection-model.js';
+import { tone, spacing, surfaceGeometry, sectionMarker } from './theme.js';
 import { SummaryView, summaryLeafInfo } from './summary-view.js';
 
 extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
@@ -589,6 +589,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const room = Math.max(0, size().width - 4);
     const need = (text: string, withCopy: boolean) => (feedback ? leftWidth + 2 : 0) + measureInformation(text) + (withCopy && copy ? copyWidth + 2 : 0);
     const hint = (full: string, compact: string) => need(full, true) <= room ? full : compact;
+    // 面板键位按整项排布：信息行放得下的前缀留在这里，其余整项进候选面板底行（CandidateView），不截半、不丢项。
+    // 只有走到这一支（面板此刻的可用操作）时才给底行键位；错误、读取中、删除准备态仍只显示各自原有的键位
+    let panelKeys: readonly string[] = [];
+    const candidateKeys = (items: readonly string[]) => { const split = splitKeys(items, text => need(text, true) <= room); panelKeys = split.rest; return split.info; };
     const keys = current.inputReceiptPending ? hint('Ctrl+R 核对 · Ctrl+C 中止 · 连按退出', 'Ctrl+R 核对 · Ctrl+C 中止')
       : candidateOpen() && candidateError() ? 'Ctrl+R 重试 · Esc 返回'
       : candidateOpen() && candidateLoading() ? '正在读取候选 · Esc 返回'
@@ -596,7 +600,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : candidate?.ghost ? hint(`Tab 补全 ${candidate.ghost.fullValue} · ↑↓ 选择 · Enter 接纳 · Esc 返回`, `Tab 补全 ${candidate.ghost.fullValue} · Esc 返回`)
       // 删除准备态：左侧说明下一步，右侧让出位置
       : candidate?.mode === 'picker' && candidates?.deleteArmed ? 'Esc 返回'
-      : candidate?.hint ? candidate.hint
+      : candidate?.hint?.length ? candidateKeys(candidate.hint)
       : candidate?.items.length || candidate?.mode ? hint('↑↓ 选择 · Tab/Enter 接纳 · Esc 返回', '↑↓ 选择 · Enter 接纳 · Esc 返回')
       : current.kind === 'skills' ? '' // The skill surface owns its two contextual hint rows.
       : current.kind === 'recovery' ? (current.recovery?.input ? 'Enter 回读 · Esc 取消' : 'Esc 返回')
@@ -619,7 +623,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const shownKeys = copyAvailable() ? keys.replace(/Ctrl\+C [^·]*?(?=\s*(·|$))/u, 'Ctrl+C 复制') : keys;
     const shownCopy = copy && (!feedback || need(shownKeys, true) <= room) ? copy : '';
     return { ...informationLayout({ left, right: [...blocks.right, shownKeys] }, size().width - (shownCopy ? copyWidth + 2 : 0), measureInformation, feedback),
-      copy: shownCopy, copyWidth: shownCopy ? copyWidth : 0 };
+      copy: shownCopy, copyWidth: shownCopy ? copyWidth : 0, panelKeys };
   };
   let clipboardPending = false;
   // A paste may arrive after more editing. Page identity alone cannot authorize
@@ -815,7 +819,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     </Show>
     <Show when={candidateHeight() > 0}>
       <CandidateView value={candidateValue()} loading={candidateLoading()} error={candidateError()} selected={candidateSelected()} danger={candidateDanger()}
-        width={size().width} height={candidateHeight()} renderer={renderer} measure={measureInformation} />
+        keys={info().panelKeys} width={size().width} height={candidateHeight()} renderer={renderer} measure={measureInformation} />
     </Show>
     <box height={1} flexShrink={0} flexDirection="row" paddingX={info().inset}>
       <text height={1} wrapMode="none" fg={tone.dim}>{info().left}</text>

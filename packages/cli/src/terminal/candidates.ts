@@ -1,5 +1,5 @@
 import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type InlineActionSupport, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing/core/typeahead';
-import { type TerminalTrustCandidates } from './trust-candidates.js';
+import type { TerminalTrustCandidates } from './trust-candidates.js';
 import { normalizeLeadingSlashAlias, type TerminalCandidates } from '@zhixing/terminal-ui/protocol';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
@@ -101,8 +101,8 @@ export class TerminalCandidatesOwner {
       const listed = query.items.length > 0;
       const pickerHint = ['Esc 返回', ...(listed ? [command === 'work' ? 'Enter 进入' : 'Enter 切换'] : []),
         ...(listed && actions.delete ? [command === 'work' ? 'Ctrl+D 删除' : '两次 Ctrl+D 删除'] : []),
-        ...(listed && actions.rename ? ['Ctrl+R 改名'] : []), ...(actions.create ? ['Ctrl+N 新建'] : [])].join(' · ');
-      return { ...range, ...(query.ghost ? { ghost: { fullValue: query.ghost } } : {}), ...(argumentHint ? { argumentHint } : {}), ...(trust ? { mode: 'management' as const, canDelete: true, hint: 'Esc 返回 · ↑↓ 选择 · 两次 Ctrl+D 撤销 · Ctrl+R 刷新' }
+        ...(listed && actions.rename ? ['Ctrl+R 改名'] : []), ...(actions.create ? ['Ctrl+N 新建'] : [])];
+      return { ...range, ...(query.ghost ? { ghost: { fullValue: query.ghost } } : {}), ...(argumentHint ? { argumentHint } : {}), ...(trust ? { mode: 'management' as const, canDelete: true, hint: ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'] }
         : command ? { mode: 'picker' as const, canDelete: !!actions.delete, canRename: !!actions.rename, canCreate: !!actions.create, hint: pickerHint } : {}),
         items: query.items.map(item => ({ id: item.id, label: item.displayText, detail: item.description })) };
     }

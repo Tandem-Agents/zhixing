@@ -86,6 +86,22 @@ it('rejects late results after leaving the candidate interaction', async () => {
   expect(await f.session.accept()).toBe(false); expect(f.input.draft.text).toBe('/work');
 });
 
+it('notifies the view when a picker deletion is armed and when it is disarmed, so the danger row appears and goes away', async () => {
+  let changes = 0;
+  const input = new TerminalInputSession(async () => ({}), () => {});
+  const calls: { action: TerminalAction; resolve(value: unknown): void }[] = [];
+  const session = new TerminalCandidateSession(input, action => new Promise(resolve => calls.push({ action, resolve })), () => { changes++; });
+  input.edit('/resume ', 8); session.sync();
+  const first = calls[0]!;
+  if (first.action.kind !== 'input-candidates') throw Error('unexpected action');
+  first.resolve({ revision: first.action.revision, active: true, start: 8, end: 8, mode: 'picker', canDelete: true, items: [{ id: 'chat-a', label: '对话甲' }] });
+  await Promise.resolve();
+  let before = changes;
+  expect(session.confirmDelete(1)).toBe(false); expect(session.deleteArmed).toBe(true); expect(changes).toBeGreaterThan(before);
+  before = changes; session.resetDelete(); expect(session.deleteArmed).toBe(false); expect(changes).toBeGreaterThan(before);
+  before = changes; session.resetDelete(); expect(changes).toBe(before);
+});
+
 it('turns an invalid current result into a retryable state instead of an endless spinner', async () => {
   const f = fixture(); f.edit('/'); f.calls[0]!.resolve({ revision: 999, items: [] }); await Promise.resolve();
   expect(f.session.loading).toBe(false); expect(f.session.error).toBeTruthy(); expect(f.session.value).toBeUndefined();

@@ -1,7 +1,6 @@
-import { type BodyFragmentMetadata, type BodyPage, type BodyPagePatch } from './body-model.js';
-import { type TerminalSkillsAction, type TerminalSkillsView } from './skills-model.js';
-import { type TerminalProcessView } from './process-model.js';
-
+import type { BodyFragmentMetadata, BodyPage, BodyPagePatch } from './body-model.js';
+import type { TerminalSkillsAction, TerminalSkillsView } from './skills-model.js';
+import type { TerminalProcessView } from './process-model.js';
 export { validateProcessView } from './process-model.js';
 
 /** Private same-release terminal transport, not a second product API. */
@@ -129,7 +128,8 @@ export interface TerminalCandidates {
   readonly canDelete?: boolean;
   readonly canRename?: boolean;
   readonly canCreate?: boolean;
-  readonly hint?: string;
+  /** 此刻可用的操作键位，按项给出（如“Esc 返回”“Ctrl+N 新建”）；界面按整项排布，放不下的项移到面板底行，不截半、不丢项 */
+  readonly hint?: readonly string[];
   readonly error?: string;
   /** UTF-16 offsets within the bounded query window. */
   readonly start: number;

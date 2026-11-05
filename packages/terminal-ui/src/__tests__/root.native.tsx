@@ -1,12 +1,20 @@
+// Runs with the pinned Bun/native renderer via scripts/test-root.ts.
+// This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { setRenderLibPath, resolveRenderLib, OptimizedBuffer, RGBA, TextAttributes, type TextareaRenderable } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
-import { type TerminalAction, type TerminalView } from '../protocol.js';
+import type { TerminalAction, TerminalView } from '../protocol.js';
 import { interactionKey } from '../surface-layout.js';
-import { type BodyNode, type BodyPage } from '../body-model.js';
-import { type TerminalPasteSink } from '../paste-stream.js';
+import type { BodyNode, BodyPage } from '../body-model.js';
+import type { TerminalPasteSink } from '../paste-stream.js';
+// 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
+const TEST_READING = { conversationId: 'test', generation: 1 };
+let baselineRevision = 0;
+const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, reading });
+
+// Exercise the producer/renderer seam, not a hand-authored diff node fixture.
 import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
 import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
 import { processArtifactLines, processArtifactSpans, processArtifactText } from '../../../cli/src/terminal/process-presentation.js';
@@ -16,32 +24,6 @@ import { informationContextSummary, informationUsageSummary } from '../../../cli
 import { commandHelpSummary } from '../../../cli/src/terminal/command-help.js';
 import { advancementDetailSummary } from '../../../cli/src/advancement-presentation.js';
 import { BUILTIN_COMMANDS } from '../../../cli/src/commands/builtin-definitions.js';
-// Runs with the pinned Bun/native renderer via scripts/test-root.ts.
-// This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
-
-
-
-
-
-
-
-
-
-// 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
-const TEST_READING = { conversationId: 'test', generation: 1 };
-let baselineRevision = 0;
-const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, reading });
-
-// Exercise the producer/renderer seam, not a hand-authored diff node fixture.
-
-
-
-
-
-
-
-
-
 
 process.env.OTUI_ASSET_ROOT = path.resolve(`dist/${process.platform}-${process.arch}/assets`);
 const admittedLibrary = process.env.ZHIXING_TERMINAL_RENDER_LIB;
@@ -1784,6 +1766,79 @@ try {
       test.renderer.clearSelection(); await flush();
       test.resize(100, 32); await show(conversation); await flush();
       checks.push('45-column information row keeps copy success and failure readable, short keys with a selection, navigation keys without');
+    }
+    // 放在复制场景最后：在测试渲染器里用过候选面板之后，页面拖选不再形成选区（与内距无关，真实终端另行核对），
+    // 所以候选用例排在依赖拖选的用例之后
+    // 候选面板：框内 1 列内距；读取中、参数提示、错误等状态文字与条目标签同一列（折行续行也对齐）；错误是警示色位；危险态不叠纹理
+    {
+      const slot = (span: any) => span.fg?.intent === 'indexed' ? span.fg.slot : -1;
+      const slots = (value: string) => [...new Set(test.captureSpans().lines.flatMap(line => line.spans).filter(span => span.text.includes(value)).map(slot))];
+      const labelColumn = (line: string) => line.indexOf('│') + 4;
+      const items = [{ id: 'a', label: '/resume', detail: '切换到另一个对话' }, { id: 'b', label: '/work', detail: '进入工作场景' }];
+      for (const columns of [131, 45]) {
+        test.resize(columns, 32); await show({ ...conversation, conversationId: `candidate-pad-${columns}` }); editor().setText(''); await flush();
+        candidateReply = async action => ({ revision: action.revision, active: true, start: 0, end: action.text.length, items });
+        editor().setText('/candidate-pad'); await flush(); await flush();
+        const selectedRow = rows().find(line => line.includes('/resume'))!;
+        assert.equal(selectedRow.indexOf('»'), selectedRow.indexOf('│') + 2, `${columns}: one column of padding before the selection mark: ${selectedRow}`);
+        assert.equal(selectedRow[selectedRow.indexOf('│') + 1], ' ', `${columns}: the selection band does not touch the border`);
+        assert.equal(selectedRow.indexOf('/resume'), labelColumn(selectedRow), `${columns}: label column`);
+        const other = rows().find(line => line.includes('/work'))!;
+        assert.equal(other.indexOf('/work'), labelColumn(other), `${columns}: unselected label in the same column`);
+        // 读取中
+        const pending = pendingRead(); let latest: Extract<TerminalAction, { kind: 'input-candidates' }> | undefined;
+        candidateReply = action => { latest = action; return pending.promise; };
+        editor().setText('/candidate-pad-loading'); await flush();
+        const loading = rows().find(line => line.includes('正在读取…'))!;
+        assert.equal(loading.indexOf('正在读取…'), labelColumn(loading), `${columns}: loading text aligns with labels`);
+        pending.resolve({ revision: latest!.revision, active: true, start: 0, end: latest!.text.length, items: [], argumentHint: '暂无可切换对话' }); await flush();
+        const hint = rows().find(line => line.includes('暂无可切换对话'))!;
+        assert.equal(hint.indexOf('暂无可切换对话'), labelColumn(hint), `${columns}: hint aligns with labels`);
+        assert.ok(slots('暂无可切换对话').includes(8) && !slots('暂无可切换对话').includes(3), 'a hint is dim, not a warning');
+        // 错误：警示色；窄屏折行时续行也对齐
+        const error = '候选读取失败：fixture 不可用，请按 Ctrl+R 重试或检查本机候选来源是否仍可访问';
+        candidateReply = async action => ({ revision: action.revision, active: true, start: 0, end: action.text.length, items: [], error });
+        editor().setText('/candidate-pad-error'); await flush(); await flush();
+        const errorAt = rows().findIndex(line => line.includes('候选读取失败'));
+        assert.equal(rows()[errorAt]!.indexOf('候选读取失败'), labelColumn(rows()[errorAt]!), `${columns}: error aligns with labels`);
+        assert.ok(slots('候选读取失败').includes(3), `${columns}: the error stays a warning`);
+        if (columns === 45) {
+          const next = rows()[errorAt + 1]!;
+          assert.ok(next.trim() && !next.includes('╰'), `the long error wraps at 45 columns: ${next}`);
+          assert.equal(next.search(/[^\s│]/u), labelColumn(next), `the wrapped line aligns with the first: ${next}`);
+        }
+        test.mockInput.pressEscape(); await flush();
+      }
+      // 面板键位按整项排布：放不下信息行的整项移到面板底行，与“↓ 更多候选”共用；不截半、不丢项，面板高度不变
+      const lastBorder = (lines: string[]) => lines.findLastIndex(line => line.trimStart().startsWith('╰'));
+      const keyCase = async (columns: number, text: string, reply: Record<string, unknown>, expectInfo: string, expectPanel: string) => {
+        test.resize(columns, 32); editor().setText(''); await flush();
+        candidateReply = async action => ({ revision: action.revision, active: true, start: action.text.length, end: action.text.length, ...reply });
+        editor().setText(text); await flush(); await flush();
+        const lines = rows(), info = lines.filter(line => line.trim()).at(-1)!, footer = lines[lastBorder(lines) - 1]!;
+        assert.ok(!info.includes('…') && !footer.includes('…'), `${columns} ${text}: no key is cut: ${info} | ${footer}`);
+        assert.ok(info.includes(expectInfo), `${columns} ${text}: information row ${info}`);
+        assert.equal(footer.replace(/[│█]/gu, '').trim(), expectPanel, `${columns} ${text}: panel bottom row`);
+        for (const key of (reply.hint as string[] | undefined) ?? []) assert.ok(info.includes(key) || footer.includes(key), `${columns} ${text}: ${key} stays visible`);
+        test.mockInput.pressEscape(); await flush(); editor().setText(''); await flush();
+      };
+      const workKeys = ['Esc 返回', 'Enter 进入', 'Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'];
+      const scene = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `s${index}`, label: `场景${index}`, detail: 'D:/work' }));
+      const picker = { mode: 'picker', canDelete: true, canRename: true, canCreate: true, hint: workKeys };
+      await keyCase(131, '/work ', { ...picker, items: scene(2) }, workKeys.join(' · '), '');
+      await keyCase(45, '/work ', { ...picker, items: scene(2) }, 'Esc 返回 · Enter 进入 · Ctrl+D 删除', 'Ctrl+R 改名 · Ctrl+N 新建');
+      await keyCase(45, '/work ', { ...picker, items: scene(30) }, 'Esc 返回 · Enter 进入 · Ctrl+D 删除', '↓ · Ctrl+R 改名 · Ctrl+N 新建');
+      await keyCase(131, '/work ', { ...picker, items: scene(30) }, workKeys.join(' · '), '↓ 更多候选 · PgUp/PgDn 翻阅');
+      const trustKeys = ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'];
+      await keyCase(45, '/trust ', { mode: 'management', canDelete: true, hint: trustKeys, items: [{ id: 'r1', label: 'bash npm test', detail: '当前范围' }] },
+        'Esc 返回 · ↑↓ 选择 · 两次 Ctrl+D 撤销', 'Ctrl+R 刷新');
+      await keyCase(45, '/resume ', { mode: 'picker', canDelete: true, hint: ['Esc 返回', 'Enter 切换', '两次 Ctrl+D 删除'], items: scene(2) },
+        'Esc 返回 · Enter 切换 · 两次 Ctrl+D 删除', '');
+      // 普通斜杠候选沿用原有的长短两版键位，45 列时也不截半
+      await keyCase(45, '/sta', { items: [{ id: 'status:repl', label: '/status', detail: '运行状态' }] }, '↑↓ 选择 · Tab/Enter 接纳 · Esc 返回', '');
+      test.resize(100, 32);
+      candidateReply = undefined; editor().setText(''); await show(conversation); await flush();
+      checks.push('candidate panel: one column of inner padding at 131/45 columns, labels, loading, hints and errors share one column (wrapped error lines too), errors stay warnings; panel keys are laid out by whole items across the information row and the panel bottom row at 131/45 columns for /work, /trust, /resume and slash candidates');
     }
 
   }

@@ -1,5 +1,5 @@
 import { normalizeLeadingSlashAlias, type TerminalAction, type TerminalCandidateAcceptance, type TerminalCandidates } from './protocol.js';
-import { type TerminalInputSession } from './input-session.js';
+import type { TerminalInputSession } from './input-session.js';
 
 /** One outstanding bounded query, one replaceable successor, and one visible
  * result. Async results never edit a different draft or cursor position. */
@@ -12,13 +12,14 @@ export class TerminalCandidateSession {
   error?: string;
   #deleteSignature?: string;
   get deleteArmed(): boolean { return this.#deleteSignature !== undefined; }
-  resetDelete(): void { this.#deleteSignature = undefined; }
+  // 准备删除的状态决定选中项是否显示为危险态：进入与解除都要通知界面重算，否则红底不出现或不消失
+  resetDelete(): void { if (this.#deleteSignature === undefined) return; this.#deleteSignature = undefined; this.changed(); }
   confirmDelete(pageKey: number): boolean {
     const value = this.value, item = value?.items[this.selected], draft = this.input.draft;
     if (!value?.canDelete || value.mode !== 'picker' || !item || this.busy) return false;
     const signature = JSON.stringify([pageKey, value.revision, item.id, draft.version, draft.cursor]);
-    if (this.#deleteSignature === signature) { this.#deleteSignature = undefined; return true; }
-    this.#deleteSignature = signature; return false;
+    if (this.#deleteSignature === signature) { this.#deleteSignature = undefined; this.changed(); return true; }
+    this.#deleteSignature = signature; this.changed(); return false;
   }
   /** 返回删除是否完成（只对删除有意义）；删除结束后按新状态重新取候选。 */
   async manage(action: 'delete' | 'rename' | 'create'): Promise<boolean> {
@@ -76,7 +77,7 @@ export class TerminalCandidateSession {
     const atStart = offset === 0 && this.input.windowStart === 0;
     this.#pending = { version: draft.version, cursor: draft.cursor, text, offset, revision, atStart };
     if (/^\/trust\s/u.test(atStart ? normalizeLeadingSlashAlias(text) : text)) {
-      this.value = { revision, start: text.length, end: text.length, mode: 'management', items: [], hint: 'Esc 返回 · 正在读取信任规则' };
+      this.value = { revision, start: text.length, end: text.length, mode: 'management', items: [], hint: ['Esc 返回', '正在读取信任规则'] };
       this.#snapshot = this.#pending; this.changed();
     }
     void this.#drain();
@@ -159,7 +160,7 @@ export class TerminalCandidateSession {
         // Preserve management ownership while loading, including an empty list.
         if (/^\/trust\s/u.test(query.atStart ? normalizeLeadingSlashAlias(query.text) : query.text)) {
           this.value = { revision: query.revision, start: query.text.length, end: query.text.length,
-            mode: 'management', items: [], hint: '正在读取信任规则 · Esc 返回' };
+            mode: 'management', items: [], hint: ['正在读取信任规则', 'Esc 返回'] };
           this.#snapshot = query; this.changed();
         }
         try {
@@ -168,7 +169,8 @@ export class TerminalCandidateSession {
           if (result.revision !== query.revision || !Array.isArray(result.items) || result.items.length > 100 ||
             !Number.isSafeInteger(result.start) || !Number.isSafeInteger(result.end) || result.start < 0 || result.end < result.start || result.end > query.text.length || ((query.offset > 0 || this.input.windowStart > 0) && result.start === 0)) throw Error('terminal-candidate-result');
           if ((result.ghost !== undefined && (typeof result.ghost?.fullValue !== 'string' || !result.ghost.fullValue || Buffer.byteLength(result.ghost.fullValue) > 4096)) ||
-              (result.argumentHint !== undefined && (typeof result.argumentHint !== 'string' || Buffer.byteLength(result.argumentHint) > 4096))) throw Error('terminal-candidate-result');
+              (result.argumentHint !== undefined && (typeof result.argumentHint !== 'string' || Buffer.byteLength(result.argumentHint) > 4096)) ||
+              (result.hint !== undefined && (!Array.isArray(result.hint) || result.hint.length > 8 || !result.hint.every(item => typeof item === 'string' && item.length > 0 && Buffer.byteLength(item) <= 256)))) throw Error('terminal-candidate-result');
           this.value = result; this.#snapshot = query;
           const restore = this.#restore; this.#restore = undefined;
           if (restore?.version === query.version && result.items.length) {

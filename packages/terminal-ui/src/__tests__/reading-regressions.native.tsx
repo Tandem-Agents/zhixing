@@ -4,10 +4,9 @@ import path from 'node:path';
 import { setRenderLibPath, TextAttributes } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
-import { encodeBodyPage, type BodyPage, type BodyPageRevision, sliceBodyNodes, type BodyNode } from '../body-model.js';
-import { type TerminalAction, type TerminalView } from '../protocol.js';
+import { encodeBodyPage, sliceBodyNodes, type BodyNode, type BodyPage, type BodyPageRevision } from '../body-model.js';
 import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
-
+import type { TerminalAction, TerminalView } from '../protocol.js';
 // 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
 const TEST_READING = { conversationId: 'test', generation: 1 };
 let baselineRevision = 0;
@@ -1052,7 +1051,7 @@ THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
     const a = shadeLine(lines, '/advancement'), b = shadeLine(lines, '/clear'), c = shadeLine(lines, '/exit');
     assert.ok(a >= 0 && b > a && c > b, lines.join('\n'));
     // 标记后的单空格保留；标签到说明、说明到行尾都铺满；框内 1 列内距、滚动列与左右框都不被覆盖
-    assert.match(lines[a]!, /│» \/advancement░{2,}task progress details░{2,} │/u, lines[a]);
+    assert.match(lines[a]!, /│ » \/advancement░{2,}task progress details░{2,}  │/u, lines[a]);
     assert.ok(!lines[b]!.includes('░') && !lines[c]!.includes('░'), 'unselected rows stay plain');
     const frameColumn = (line: string) => cols(line.slice(0, line.lastIndexOf('│')));
     assert.equal(frameColumn(lines[a]!), frameColumn(lines[c]!), 'band stops inside the frame');
@@ -1061,7 +1060,7 @@ THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
     lines = frameLines(h);
     assert.deepEqual([shadeLine(lines, '/advancement'), shadeLine(lines, '/clear')], [a, b], `rows keep their positions\n${lines.join('\n')}`);
     assert.ok(!lines[a]!.includes('░'), 'the previous selection loses its band');
-    assert.match(lines[b]!, /│» \/clear░{2,}清空对话历史░{2,} │/u, lines[b]);
+    assert.match(lines[b]!, /│ » \/clear░{2,}清空对话历史░{2,}  │/u, lines[b]);
     assert.equal(frameColumn(lines[b]!), frameColumn(lines[c]!));
     h.capture('second');
   }, 30);

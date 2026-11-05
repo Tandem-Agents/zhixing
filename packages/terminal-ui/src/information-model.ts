@@ -75,3 +75,33 @@ export function informationLayout(content: InformationContent, width: number, me
   const left = fitInformation(leftText, Math.max(0, available - rightWidth - (right ? 2 : 0)), measure);
   return { inset, left, right, rightWidth, gap: Math.max(0, available - measure(left) - rightWidth) };
 }
+
+/** 键位项之间的分隔 */
+export const KEY_SEPARATOR = ' · ';
+
+/** 键位按整项排布：信息行放得下的最长前缀留在信息行（至少留第一项），其余整项交给候选面板底行；不截半、不丢项 */
+export function splitKeys(items: readonly string[], fits: (text: string) => boolean): { info: string; rest: readonly string[] } {
+  let count = items.length;
+  while (count > 1 && !fits(items.slice(0, count).join(KEY_SEPARATOR))) count--;
+  return { info: items.slice(0, count).join(KEY_SEPARATOR), rest: items.slice(count) };
+}
+
+/**
+ * 候选面板底行：“↓ 更多候选”与放不下信息行的键位共用这一行（面板高度不变）。
+ * 放不下时先省“PgUp/PgDn 翻阅”，再把“↓ 更多候选”缩成“↓”；仍放不下（窄于面板管理可用的宽度）时按整项截取，
+ * 末尾以“…”表示还有未列出的键位，不把键名截半。
+ */
+export function candidateFooter(more: boolean, keys: readonly string[], width: number, measure: (text: string) => number): string {
+  if (!more && !keys.length) return '';
+  const variants = more ? [['↓ 更多候选', 'PgUp/PgDn 翻阅', ...keys], ['↓ 更多候选', ...keys], ['↓', ...keys]] : [[...keys]];
+  for (const items of variants) {
+    const text = items.join(KEY_SEPARATOR);
+    if (measure(text) <= width) return text;
+  }
+  const items = variants.at(-1)!;
+  for (let count = items.length - 1; count >= 1; count--) {
+    const text = [...items.slice(0, count), '…'].join(KEY_SEPARATOR);
+    if (measure(text) <= width) return text;
+  }
+  return fitInformation(items[0]!, width, measure);
+}

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { type ActiveConversation, type ConversationController, type TurnOutcome } from '../../runtime/conversation-controller.js';
-import { type RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
+import type { ActiveConversation, ConversationController, TurnOutcome } from '../../runtime/conversation-controller.js';
+import type { RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
 import { TerminalSessionCommands, projectCommittedTerminalOutcome, projectTerminalTurnOutcome, type TerminalTurnOutcome } from '../session-commands.js';
 import { ADVANCEMENT_PROPOSED_NOTICE } from '@zhixing/core/advancement/proposal-messages';
-import { type TerminalSelectionPort } from '../selection.js';
+import type { TerminalSelectionPort } from '../selection.js';
 import { TerminalCandidatesOwner } from '../candidates.js';
 
 function fixture() {
@@ -49,13 +49,13 @@ describe('terminal session navigation', () => {
     const source = new TerminalCandidatesOwner(() => ({ cwd: process.cwd(), target: 'cli', features: { chrome: true }, now: 0, workspaceId: null, sessionBusy: false }));
     source.bindCommands(f.owner.commands);
     expect(await source.query(1, '/work ', 6)).toMatchObject({ canDelete: true, canRename: true, canCreate: true,
-      hint: 'Esc 返回 · Enter 进入 · Ctrl+D 删除 · Ctrl+R 改名 · Ctrl+N 新建', items: [{ label: '场景' }, { label: '另一场景' }] });
+      hint: ['Esc 返回', 'Enter 进入', 'Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], items: [{ label: '场景' }, { label: '另一场景' }] });
     // 空列表只列此刻可用的操作，空提示在列表里
     f.workscene.list.mockResolvedValueOnce([]);
-    expect(await source.query(2, '/work ', 6)).toMatchObject({ items: [], argumentHint: '暂无工作场景，Ctrl+N 新建', hint: 'Esc 返回 · Ctrl+N 新建' });
+    expect(await source.query(2, '/work ', 6)).toMatchObject({ items: [], argumentHint: '暂无工作场景，Ctrl+N 新建', hint: ['Esc 返回', 'Ctrl+N 新建'] });
     await f.owner.run('work', 'scene-1');
     const inScene = await source.query(3, '/work ', 6);
-    expect(inScene).toMatchObject({ items: [], argumentHint: '已在工作场景中，请先 /exit 返回主对话。', canDelete: false, canRename: false, canCreate: false, hint: 'Esc 返回' });
+    expect(inScene).toMatchObject({ items: [], argumentHint: '已在工作场景中，请先 /exit 返回主对话。', canDelete: false, canRename: false, canCreate: false, hint: ['Esc 返回'] });
     expect(() => source.manage(3, 'create')).toThrow('不支持');
   });
   it('renames the selected scene in place, naming that scene rather than the visible conversation', async () => {
