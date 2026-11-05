@@ -306,4 +306,44 @@ describe('terminal source body projection', () => {
     projection.dispose();
     expect(projection.retainedBytes).toBe(0);
   });
+  // 阅读质感：表格的对齐与可见表头、回复起点标记、列表记号都由投影声明，界面只按声明绘制
+  it('declares column alignment and visible header labels on every table row', () => {
+    const source = '| **名称** | `值` | 数 |\n| :--- | :---: | ---: |\n| a | b | 1 |\n| c | d | 2 |\n\n后文\n';
+    const nodes = live(source).flatMap(item => item.body.context.nodes);
+    const rows = nodes.filter(node => node.kind === 'table');
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.labels).toEqual(['名称', '值', '数']);
+      expect(row.align).toEqual(['left', 'center', 'right']);
+      // 界面据行末换行确认行尾：换行算在行内，或紧跟在行后（表格后接空行时）
+      expect(source[row.to - 1] === '\n' || source[row.to] === '\n').toBe(true);
+    }
+    const plain = live('| 名称 | 值 |\n| --- | :-- |\n| a | b |\n').flatMap(item => item.body.context.nodes).filter(node => node.kind === 'table');
+    expect(plain.every(node => node.align === undefined)).toBe(true);
+  });
+  it.each([
+    ['table', '| 名称 | 值 |\n| --- | --- |\n| a | b |\n'],
+    ['heading', '## 标题\n\n正文\n'],
+    ['list', '- 一项\n- 二项\n'],
+    ['code', '```ts\nconst x = 1;\n```\n'],
+    ['paragraph', '---\n\n正文\n'],
+  ])('anchors the reply on its first non-empty %s block', (kind, source) => {
+    for (const chunk of [3, 8192]) {
+      const nodes = live(source, chunk).flatMap(item => item.body.context.nodes);
+      const anchored = nodes.filter(node => node.anchor);
+      expect(anchored.length).toBeGreaterThan(0);
+      expect(new Set(anchored.map(node => node.from)).size).toBe(1);
+      expect(anchored[0]!.kind).toBe(kind);
+      const first = nodes.find(node => node.kind !== 'space' && node.kind !== 'rule')!;
+      expect(first.origin ?? first.from).toBe(anchored[0]!.origin ?? anchored[0]!.from);
+    }
+  });
+  it('marks list item markers as presentation style while keeping them as source text', () => {
+    const items = live('- **一项**\n\n1. 二项\n');
+    const lists = items.flatMap(item => item.body.context.nodes).filter(node => node.kind === 'list');
+    expect(lists.map(node => node.runs[0]!.text)).toEqual(['- ', '1. ']);
+    expect(lists.every(node => node.runs[0]!.style === BODY_STYLE.marker)).toBe(true);
+    expect(lists.every(node => node.runs.slice(1).every(run => !(run.style & BODY_STYLE.marker)))).toBe(true);
+    expect(visible(items)).toBe('- 一项1. 二项');
+  });
 });

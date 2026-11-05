@@ -848,8 +848,9 @@ try {
     assert.equal((copies.at(-1) as { text: string }).text, selectedSpaces);
   }
   checks.push('partial expanded Markdown tab keeps exact highlight and copied text through reflow');
+  // 8 列表：120 列时每列分到的宽度可读，走框线横排；45 列走带列名的纵排
   for (const reverse of [false, true]) for (const replacePage of [false, true]) for (const endCell of [1, 2, 7]) {
-    test.renderer.clearSelection(); test.resize(80, 24);
+    test.renderer.clearSelection(); test.resize(120, 24);
     await show({ kind: 'conversation', title: '表格选区', conversationId: `table-selection-${reverse}-${replacePage}-${endCell}`, connected: true });
     const segments: BodyPage['segments'][number][] = [];
     const source = '| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | eps | zeta | eta | theta |\n';
@@ -873,11 +874,11 @@ try {
       assert.equal((copies.at(-1) as { text: string }).text, expected, `table reverse=${reverse} replace=${replacePage} end=${endCell}`);
     };
     await checkCopy(expected);
-    for (const width of [45, 80, 45, 80]) {
+    for (const width of [45, 120, 45, 120]) {
       test.resize(width, 24); await flush();
       if (replacePage) { root.receive({ type: 'display-page', ...baseline(), page: JSON.parse(JSON.stringify(page)) }); await flush(); }
       await checkCopy(expected);
-      if (width === 80 || endCell === 1) {
+      if (width === 120 || endCell === 1) {
         const leaves = test.renderer.getSelection()!.selectedRenderables.map(leaf => leaf.getSelectedText());
         assert.deepEqual(leaves, chosen, 'all source cells retain their highlight when visible again');
       }
@@ -954,7 +955,8 @@ try {
   assertBold('ClipChoice', true);
   assert.ok(spansFor('...').every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)));
   const clipSegments: BodyPage['segments'][number][] = [];
-  for await (const part of projectBodyHistory('| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | eps | zeta | eta | theta |\n', 'markdown', 'forward', async () => {}))
+  // 4 列：100 列宽下走框线横排，覆盖框线跨过单行视口
+  for await (const part of projectBodyHistory('| A | B | C | D |\n| --- | --- | --- | --- |\n| alpha | beta | gamma | delta |\n', 'markdown', 'forward', async () => {}))
     clipSegments.push({ blockId: 'clip-table', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
   root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: clipSegments.length, follow: false, segments: clipSegments } }); await flush();
   const clippedBody = descendants(test.renderer.root).find(node => node.constructor.name === 'TerminalScrollBox'); assert.ok(clippedBody);

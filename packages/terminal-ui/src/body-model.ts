@@ -10,7 +10,8 @@ export const BODY_PARSE_NODES = 4096;
 /** Reservation covers marked tokens/maps, one amend carrier and old/new
  * projections. Cold reverse checkpoints share this same working reservation. */
 export const BODY_PROJECTION_WORK_BYTES = 16 * 1024 * 1024;
-export const BODY_STYLE = { bold: 1, italic: 2, strike: 4, code: 8, link: 16, dim: 32 } as const;
+/** marker：列表项记号（如 “-”“1.”），只改显示颜色，仍是可复制的源文字 */
+export const BODY_STYLE = { bold: 1, italic: 2, strike: 4, code: 8, link: 16, dim: 32, marker: 64 } as const;
 export type BodyKind = 'markdown' | 'plain';
 export type BodyNodeKind = 'paragraph' | 'heading' | 'quote' | 'list' | 'code' | 'table' | 'rule' | 'space';
 export interface BodyRun {
@@ -19,6 +20,7 @@ export interface BodyRun {
   readonly text: string; readonly style: number; readonly cell?: number; readonly href?: string;
   readonly semantic?: 'added' | 'removed' | 'meta';
 }
+export type BodyCellAlign = 'left' | 'center' | 'right';
 export interface BodyNode {
   readonly from: number; readonly to: number; readonly kind: BodyNodeKind;
   readonly origin?: number;
@@ -26,6 +28,8 @@ export interface BodyNode {
   readonly depth?: number; readonly language?: string;
   readonly table?: number; readonly columns?: number; readonly header?: boolean;
   readonly labels?: readonly string[];
+  /** 表格各列的对齐（来自分隔行）；缺省为左对齐 */
+  readonly align?: readonly BodyCellAlign[];
   /** Nonselectable decoration, not source. */
   readonly anchor?: boolean;
   readonly decoration?: string;
@@ -117,7 +121,7 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
       !keys(value.context, ['nodes']) || !Array.isArray(value.context.nodes) || value.context.nodes.length > BODY_PARSE_NODES) return false;
   let count = 0, previous = contentOffset;
   for (const node of value.context.nodes) {
-    if (++count > BODY_PARSE_NODES || !record(node) || !keys(node, ['from', 'to', 'kind', 'origin', 'runs', 'depth', 'language', 'table', 'columns', 'header', 'labels', 'anchor', 'decoration']) ||
+    if (++count > BODY_PARSE_NODES || !record(node) || !keys(node, ['from', 'to', 'kind', 'origin', 'runs', 'depth', 'language', 'table', 'columns', 'header', 'labels', 'align', 'anchor', 'decoration']) ||
         !integer(node.from) || !integer(node.to) || node.from < contentOffset || node.to < node.from ||
         node.to > contentOffset + sourceLength || node.from < previous || typeof node.kind !== 'string' || !kinds.includes(node.kind) || !Array.isArray(node.runs)) return false;
     previous = node.to;
@@ -127,13 +131,14 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
         (node.table !== undefined && !integer(node.table)) ||
         (node.columns !== undefined && (!integer(node.columns) || node.columns < 1 || node.columns > 128)) ||
         (node.labels !== undefined && (!Array.isArray(node.labels) || node.labels.length !== node.columns || node.labels.some(label => typeof label !== 'string' || label.length > 512))) ||
+        (node.align !== undefined && (!Array.isArray(node.align) || node.align.length !== node.columns || node.align.some(value => typeof value !== 'string' || !['left', 'center', 'right'].includes(value)))) ||
         (node.header !== undefined && typeof node.header !== 'boolean') || (node.anchor !== undefined && typeof node.anchor !== 'boolean') ||
         (node.decoration !== undefined && (typeof node.decoration !== 'string' || !/^[ +\-\d]{1,24}$/u.test(node.decoration)))) return false;
     let runEnd = node.from;
     for (const run of node.runs) {
       if (++count > BODY_PARSE_NODES || !record(run) || !keys(run, ['from', 'to', 'text', 'style', 'cell', 'href', 'semantic']) ||
           !integer(run.from) || !integer(run.to) || run.from < runEnd || run.to < run.from || run.to > node.to ||
-          typeof run.text !== 'string' || !integer(run.style) || run.style > 63 ||
+          typeof run.text !== 'string' || !integer(run.style) || run.style > 127 ||
           (run.semantic !== undefined && !['added', 'removed', 'meta'].includes(String(run.semantic))) ||
           (run.href !== undefined && (typeof run.href !== 'string' || /[\u0000-\u001f\u007f-\u009f]/u.test(run.href))) ||
           (run.cell !== undefined && (!integer(run.cell) || typeof node.columns !== 'number' || run.cell >= node.columns))) return false;

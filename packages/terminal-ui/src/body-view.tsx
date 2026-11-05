@@ -1,6 +1,6 @@
 import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack, type JSX } from 'solid-js';
-import { bodyBlockGeometry, bodyWrapMode } from './body/geometry.js';
+import { bodyBlockGeometry, bodyWrapMode, bodyTableGeometry, bodyTableRule } from './body/geometry.js';
 import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, TextRenderable, type CliRenderer, type TextChunk } from '@opentui/core';
 import { BODY_STYLE, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, bodyPageSegments, bodyWindows, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
@@ -96,14 +96,32 @@ export interface BodyViewProps {
 }
 const teal = tone.brand, gray = tone.dim, codeBackground = tone.history;
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+/**
+ * 正文阅读层级：标题按级别、表头、强调各有语义色（颜色是主通道，终端里中文粗体几乎不改变字重）。
+ * 优先级：语义色 > 过程类角色 > 链接 > 深灰底上的文字（行内代码、用户消息） > 思考 > 列表记号 > 标题与表头 > 强调 > 正文。
+ */
+function readingColor(block: BodyRenderBlock, style: number) {
+  if (style & BODY_STYLE.marker) return tone.listMarker;
+  // 一、二级标题取品牌色；三级及以下用正文前景色（随宿主明暗，浅色背景下也可读），靠加粗区分
+  if (block.node.kind === 'heading') return (block.node.depth ?? 1) <= 2 ? tone.heading : tone.text;
+  if (block.node.kind === 'table' && block.node.header) return tone.tableHeader;
+  return style & BODY_STYLE.bold ? tone.strong : tone.text;
+}
+/** 片段可能从表格行中间开始：只有含该行源头（from 等于 origin）的表头块才画上边线 */
+function tableTop(block: BodyRenderBlock) {
+  return !!block.node.header && block.node.from === (block.node.origin ?? block.node.from);
+}
 function styled(block: BodyRenderBlock): StyledText {
+  const h1 = block.node.kind === 'heading' && (block.node.depth ?? 1) === 1;
   return new StyledText(block.runs.map(run => ({ __isChunk: true, text: run.text,
     link: run.href ? { url: run.href } : undefined,
     fg: run.semantic ? tone[run.semantic === 'added' ? 'success' : run.semantic === 'removed' ? 'error' : 'brand'] :
-      processBodyColor(block.role, '') ? tone[processBodyColor(block.role, '')!] : (run.style & BODY_STYLE.link) ? teal : block.role === 'thinking' ? gray : tone.text,
+      processBodyColor(block.role, '') ? tone[processBodyColor(block.role, '')!] : (run.style & BODY_STYLE.link) ? teal :
+      // 行内代码与用户消息压在固定深灰底上：前景也取固定浅灰，明暗宿主下都可读
+      (run.style & BODY_STYLE.code) || block.role === 'user' ? tone.shadeText : block.role === 'thinking' ? gray : readingColor(block, run.style),
     bg: (run.style & BODY_STYLE.code) ? codeBackground : undefined,
     attributes: createTextAttributes({ bold: !!(run.style & BODY_STYLE.bold), italic: !!(run.style & BODY_STYLE.italic),
-      strikethrough: !!(run.style & BODY_STYLE.strike), underline: !!(run.style & BODY_STYLE.link), dim: !!(run.style & BODY_STYLE.dim) }),
+      strikethrough: !!(run.style & BODY_STYLE.strike), underline: !!(run.style & BODY_STYLE.link) || (h1 && !(run.style & BODY_STYLE.code)), dim: !!(run.style & BODY_STYLE.dim) }),
   } satisfies TextChunk)));
 }
 
@@ -155,6 +173,31 @@ export function BodyView(props: BodyViewProps) {
   const wrapMeasure = TextBufferView.create(measure);
   wrapMeasure.setWrapMode('char');
   const measured = new WeakMap<BodyRenderBlock, { width: number; height: number }>();
+  // 表格分栏只由可见表头与宽度决定（见 bodyTableGeometry）：标签显示宽度用正文原生测量，同一组标签与宽度只算一次
+  const labelWidth = (text: string) => { measure.setText(text); return Math.max(0, ...measureView.logicalLineInfo.lineWidthCols); };
+  const tableGeometries = new Map<string, ReturnType<typeof bodyTableGeometry>>();
+  const tableGeometry = (block: BodyRenderBlock, bodyWidth: number) => {
+    const columns = block.node.columns ?? 1, key = `${bodyWidth}\u0000${columns}\u0000${(block.node.labels ?? []).join('\u0001')}`;
+    let value = tableGeometries.get(key);
+    if (!value) {
+      if (tableGeometries.size >= 256) tableGeometries.clear();
+      value = bodyTableGeometry(block.node.labels ?? [], columns, bodyWidth, labelWidth); tableGeometries.set(key, value);
+    }
+    return value;
+  };
+  // 表格收边只看同一来源块的确定后继：下一个同源块不是本表的行，或本行是来源真实结尾（终态片段的最后节点）。
+  // 窗口或挂载边缘、插入的其他消息都不算证据，未定时按“未完”画行分隔
+  const tableEnds = createMemo(() => {
+    const ends = new Set<string>(), open = new Map<string, BodyRenderBlock>();
+    for (const block of blocks()) {
+      const pending = open.get(block.blockId);
+      if (pending && !(block.node.kind === 'table' && block.node.table === pending.node.table)) { ends.add(pending.key); open.delete(block.blockId); }
+      if (block.node.kind !== 'table') continue;
+      open.delete(block.blockId);
+      if (block.sourceEnd) ends.add(block.key); else open.set(block.blockId, block);
+    }
+    return ends;
+  });
   const [viewport, setViewport] = createSignal<{ page?: BodyPage; width: number; top: number; selecting: boolean }>({ width: 0, top: 0, selecting: false });
   let pendingScroll = 0, readError: -1 | 1 | undefined;
   let readingGeneration = 0;
@@ -198,10 +241,17 @@ export function BodyView(props: BodyViewProps) {
         let height = 1;
         const layout = bodyBlockGeometry(block, width);
         if (block.node.kind === 'table') {
-          const columns = block.node.columns ?? 1, { stacked, cellWidth } = layout;
-          const sizes = Array.from({ length: columns }, (_, cell) => rows(bodyCell(block, cell).text, cellWidth - 1) +
-            (stacked && !block.node.header ? rows(`${block.node.labels?.[cell] ?? `列 ${cell + 1}`}：`, cellWidth - 1) : 0));
-          height = 1 + (stacked ? sizes.reduce((sum, size) => sum + size, 0) : Math.max(1, ...sizes));
+          // 分栏：真实表头起点另占一条上边线，内容取各列最高者，真实行尾再占一条下边线（行分隔、表头分隔或收边）；
+          // 窄布局：各列依次带列名排开，真实行尾一条分隔线
+          const columns = block.node.columns ?? 1, table = tableGeometry(block, layout.bodyWidth), below = block.rowEnd ? 1 : 0;
+          if (table.stacked) {
+            const sizes = Array.from({ length: columns }, (_, cell) => rows(bodyCell(block, cell).text, layout.bodyWidth - 1) +
+              (!block.node.header ? rows(`${block.node.labels?.[cell] ?? `列 ${cell + 1}`}：`, layout.bodyWidth - 1) : 0));
+            height = below + sizes.reduce((sum, size) => sum + size, 0);
+          } else {
+            const sizes = table.widths.map((width, cell) => rows(bodyCell(block, cell).text, width));
+            height = (tableTop(block) ? 1 : 0) + Math.max(1, ...sizes) + below;
+          }
         } else if (!['rule', 'space'].includes(block.node.kind)) {
           height = rows(block.text, layout.textWidth, bodyWrapMode(block));
         }
@@ -349,11 +399,17 @@ export function BodyView(props: BodyViewProps) {
   // Native lineStartCols are absolute buffer columns, not columns relative to
   // each logical line. Subtract that line's first wrapped-row origin.
   const lineBase = (info: TextRenderable['lineInfo'], logical: number) => info.lineStartCols[info.lineSources.indexOf(logical)] ?? 0;
+  // 居中、居右的文本（表格单元格）每个显示行按自身行宽对齐，行首不在叶子左边：屏幕列与行内列互换时扣除这段偏移
+  const alignShift = (view: TextRenderable, row: number) => {
+    const free = Math.max(0, view.width - (view.lineInfo.lineWidthCols[row] ?? 0));
+    return view.textAlign === 'right' ? free : view.textAlign === 'center' ? Math.floor(free / 2) : 0;
+  };
   const position = (entry: { block: BodyRenderBlock; view: TextRenderable }, row: number, x = 0): BodyAnchor => {
     const info = entry.view.lineInfo, logical = info.lineSources[row] ?? 0;
     const lines = sourceLineStarts(entry.block.text), start = lines[logical] ?? 0;
     const end = lines[logical + 1] ?? entry.block.text.length;
-    const text = entry.block.text.slice(start, end), column = Math.max(0, (info.lineStartCols[row] ?? 0) - lineBase(info, logical) + x);
+    const text = entry.block.text.slice(start, end);
+    const column = Math.max(0, (info.lineStartCols[row] ?? 0) - lineBase(info, logical) + x - alignShift(entry.view, row));
     measure.setText(text);
     const lib = resolveRenderLib();
     const bytes = lib.textBufferGetTextRangeByCoords(measure.ptr, 0, 0, 0, column, Buffer.byteLength(text));
@@ -443,7 +499,7 @@ export function BodyView(props: BodyViewProps) {
       let row = 0;
       const base = lineBase(info, logical);
       for (let i = 0; i < info.lineSources.length; i++) if (info.lineSources[i] === logical && info.lineStartCols[i]! - base <= column) row = i;
-      return { view: entry.view, x: entry.view.x + column - ((info.lineStartCols[row] ?? 0) - base), y: entry.view.y + row };
+      return { view: entry.view, x: entry.view.x + alignShift(entry.view, row) + column - ((info.lineStartCols[row] ?? 0) - base), y: entry.view.y + row };
     }
     return undefined;
   };
@@ -819,9 +875,19 @@ export function BodyView(props: BodyViewProps) {
     void highlighter.close().catch(() => {}); // close() exposes the same promise to the root lifecycle owner.
   });
   const layout = (block: BodyRenderBlock) => bodyBlockGeometry(block, contentWidth());
-  const stacked = (block: BodyRenderBlock) => layout(block).stacked;
-  const cellWidth = (block: BodyRenderBlock) => layout(block).cellWidth;
-  const Text = (value: { block: BodyRenderBlock; width?: number }) => {
+  const table = (block: BodyRenderBlock) => tableGeometry(block, layout(block).bodyWidth);
+  // 表格一行的内容高度与测量同源（结果已缓存）：去掉真实表头起点的上边线与真实行尾的下边线
+  const tableRows = (block: BodyRenderBlock) => Math.max(1, measureBlock(block, contentWidth()) - (tableTop(block) ? 1 : 0) - (block.rowEnd ? 1 : 0));
+  const tableBars = (block: BodyRenderBlock) => Array.from({ length: tableRows(block) }, () => '│').join('\n');
+  // 下边线（只在真实行尾画）：确定是表尾才收边；表头之下用双线与数据区分开；其余为行分隔
+  const tableBottom = (block: BodyRenderBlock) => {
+    const widths = table(block).widths;
+    return tableEnds().has(block.key) ? bodyTableRule(widths, '└', '┴', '┘', '─') :
+      block.node.header ? bodyTableRule(widths, '╞', '╪', '╡', '═') : bodyTableRule(widths, '├', '┼', '┤', '─');
+  };
+  const cellAlign = (block: BodyRenderBlock, cell: number) => block.node.align?.[cell] ?? 'left';
+  const anchorTone = (block: BodyRenderBlock) => tone[processBodyColor(block.role, block.text) ?? 'brand'];
+  const Text = (value: { block: BodyRenderBlock; width?: number; align?: 'left' | 'center' | 'right' }) => {
     let current: BodyTextRenderable | undefined;
     const key = value.block.key;
     onCleanup(() => { if (mounted.get(key)?.view === current) mounted.delete(key); });
@@ -835,7 +901,8 @@ export function BodyView(props: BodyViewProps) {
       current.content = content();
     });
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
-      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode={bodyWrapMode(value.block)} selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
+      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode={bodyWrapMode(value.block)} textAlign={value.align ?? 'left'}
+      selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
   };
   return <scrollbox ref={value => { box = value as TerminalScrollBox; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
@@ -861,23 +928,47 @@ export function BodyView(props: BodyViewProps) {
       return <box flexDirection="column" flexShrink={0} marginX={spacing.content} width={contentWidth()} paddingLeft={layout(block()).indent} paddingTop={block().gapBefore ?? 0}
       height={heights().get(key)}>
       <Show when={visible().has(key)}>
-      <Show when={block().node.kind === 'rule'}><text marginLeft={layout(block()).leading} content={'─'.repeat(layout(block()).bodyWidth)} fg={tone.dim} selectable={false} /></Show>
+      {/* 分隔线用虚线，与表格框线区分 */}
+      <Show when={block().node.kind === 'rule'}><text marginLeft={layout(block()).leading} content={'┄'.repeat(layout(block()).bodyWidth)} fg={tone.rule} selectable={false} /></Show>
       <Show when={!['rule', 'space'].includes(block().node.kind)}>
       <Show when={block().node.kind === 'table'} fallback={<box flexDirection="row" flexShrink={0} paddingRight={layout(block()).trailing} backgroundColor={block().role === 'user' ? tone.history : undefined}>
-        <text width={layout(block()).leading} content={block().role === 'user' ? '' : block().node.anchor ? ' ◆ ' : block().node.kind === 'quote' ? ' │ ' : block().node.kind === 'heading' ? '# ' : ''}
-          fg={block().node.anchor ? tone[processBodyColor(block().role, block().text) ?? 'brand'] : tone.dim} selectable={false} />
+        <text width={layout(block()).leading} content={block().role === 'user' ? '' : block().node.anchor ? ' ◆ ' : block().node.kind === 'quote' ? ' │ ' : ''}
+          fg={block().node.anchor ? anchorTone(block()) : tone.dim} selectable={false} />
         <Show when={block().node.decoration}><text width={block().node.decoration?.length ?? 0}
           content={block().node.from === block().node.origin ? block().node.decoration : ''} fg={tone.dim} selectable={false} /></Show>
         <Text block={block()} width={layout(block()).textWidth} />
       </box>}>
-        <box marginLeft={layout(block()).leading} width={layout(block()).bodyWidth} flexDirection={stacked(block()) ? 'column' : 'row'} flexShrink={0} border={['bottom']} borderColor={tone.border}>
-          <For each={Array.from({ length: block().node.columns ?? 1 }, (_, i) => i)}>{cell =>
-            <box width={cellWidth(block())} paddingRight={1} flexShrink={0} flexDirection="column">
-              <Show when={stacked(block()) && !block().node.header}><text selectable={false} fg={tone.dim} wrapMode="char"
-                width={Math.max(1, cellWidth(block()) - 1)}>{`${block().node.labels?.[cell] ?? `列 ${cell + 1}`}：`}</text></Show>
-              <Text block={bodyCell(block(), cell)} width={Math.max(1, cellWidth(block()) - 1)} />
-            </box>}
-          </For>
+        <box flexDirection="row" flexShrink={0}>
+          <text width={layout(block()).leading} content={block().role !== 'user' && block().node.anchor ? ' ◆ ' : ''} fg={anchorTone(block())} selectable={false} />
+          <Show when={!table(block()).stacked} fallback={
+            <box width={layout(block()).bodyWidth} flexDirection="column" flexShrink={0} border={block().rowEnd ? ['bottom'] : false} borderColor={tone.tableFrame}>
+              <For each={Array.from({ length: block().node.columns ?? 1 }, (_, i) => i)}>{cell =>
+                <box width={layout(block()).bodyWidth} paddingRight={1} flexShrink={0} flexDirection="column">
+                  <Show when={!block().node.header}><text selectable={false} fg={tone.dim} wrapMode="char"
+                    width={Math.max(1, layout(block()).bodyWidth - 1)}>{`${block().node.labels?.[cell] ?? `列 ${cell + 1}`}：`}</text></Show>
+                  <Text block={bodyCell(block(), cell)} width={Math.max(1, layout(block()).bodyWidth - 1)} />
+                </box>}
+              </For>
+            </box>}>
+            {/* 整表框线：真实表头起点上方画上边，真实行尾之下画行分隔／表头双线／收边；行的残段不伪造；框线不可选、不进复制 */}
+            <box width={table(block()).width} flexDirection="column" flexShrink={0}>
+              <Show when={tableTop(block())}><text height={1} wrapMode="none" selectable={false} fg={tone.tableFrame}
+                content={bodyTableRule(table(block()).widths, '┌', '┬', '┐', '─')} /></Show>
+              <box flexDirection="row" flexShrink={0} height={tableRows(block())}>
+                <text width={1} height={tableRows(block())} wrapMode="none" selectable={false} fg={tone.tableFrame} content={tableBars(block())} />
+                <For each={table(block()).widths.map((_, i) => i)}>{cell =>
+                  <box flexDirection="row" flexShrink={0}>
+                    {/* 对齐按显示行由原生完成（textAlign）：多行单元格的每一行都居中或居右，不往源文字补空格 */}
+                    <box width={(table(block()).widths[cell] ?? 1) + 2} paddingLeft={1} paddingRight={1} flexShrink={0} flexDirection="column">
+                      <Text block={bodyCell(block(), cell)} width={table(block()).widths[cell] ?? 1} align={cellAlign(block(), cell)} />
+                    </box>
+                    <text width={1} height={tableRows(block())} wrapMode="none" selectable={false} fg={tone.tableFrame} content={tableBars(block())} />
+                  </box>}
+                </For>
+              </box>
+              <Show when={block().rowEnd}><text height={1} wrapMode="none" selectable={false} fg={tone.tableFrame} content={tableBottom(block())} /></Show>
+            </box>
+          </Show>
         </box>
       </Show>
       </Show>

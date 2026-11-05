@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { setRenderLibPath } from '@opentui/core';
+import { setRenderLibPath, TextAttributes } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
-import { encodeBodyPage, type BodyPage, type BodyPageRevision } from '../body-model.js';
+import { encodeBodyPage, type BodyPage, type BodyPageRevision, sliceBodyNodes, type BodyNode } from '../body-model.js';
 import { type TerminalAction, type TerminalView } from '../protocol.js';
+import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
 
 // 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
 const TEST_READING = { conversationId: 'test', generation: 1 };
@@ -851,6 +852,193 @@ THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
       h.capture(`${width}-${section ?? 'subpage'}`);
     }
   }, 24);
+  // 阅读质感：用真实投影（N）产出的节点驱动界面，核对整表框线、分栏、对齐、复制、收边证据与层级样式
+  const projectNodes = async (source: string) => {
+    const nodes: BodyNode[] = [];
+    for await (const part of projectBodyHistory(source, 'markdown', 'forward', async () => {})) nodes.push(...part.body.context.nodes);
+    return nodes;
+  };
+  const sourcePart = (blockId: string, source: string, nodes: readonly BodyNode[], from: number, to: number, end: boolean) => ({ blockId, role: 'assistant',
+    contentOffset: from, final: end, text: source.slice(from, to),
+    body: { version: 1 as const, revision: 1, kind: 'markdown' as const, end, context: { nodes: sliceBodyNodes(nodes, from, to) } } });
+  const frameLines = (h: any) => (h.test.captureCharFrame() as string).split('\n');
+  const rowsWith = (lines: string[], glyph: string) => lines.map((line, index) => line.includes(glyph) ? index : -1).filter(index => index >= 0);
+  const junctions = (line: string) => [...line].map((char, index) => '┌┬┐╞╪╡├┼┤└┴┘│'.includes(char) ? index : -1).filter(index => index >= 0);
+  const spansOf = (h: any, value: string) => (h.test.captureSpans().lines as any[]).flatMap(line => line.spans).filter((span: any) => span.text.includes(value));
+  const slot = (span: any) => span.fg.intent === 'indexed' ? span.fg.slot : -1;
+  await scenario('reading-texture-table-frame', async h => {
+    const source = '| 名称 | 说明 | 数 |\n| :-- | :-: | --: |\n| a | 很长的说明文字很长的说明文字 | 1 |\n| b | x | 22 |\n\n结尾段落\n';
+    const nodes = await projectNodes(source);
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [sourcePart('texture-table', source, nodes, 0, source.length, true)] });
+    await h.latest();
+    const lines = frameLines(h), at = (value: string) => lines.findIndex(line => line.includes(value));
+    const top = rowsWith(lines, '┌'), head = rowsWith(lines, '╞'), separator = rowsWith(lines, '├'), bottom = rowsWith(lines, '└');
+    assert.deepEqual([top.length, head.length, separator.length, bottom.length], [1, 1, 1, 1], lines.join('\n'));
+    assert.ok(lines[top[0]!]!.includes('◆'), 'a reply that opens with a table still carries the reply anchor');
+    const rowB = lines.findIndex(line => /│ b +│/u.test(line));
+    assert.ok(top[0]! < at('名称') && at('名称') < head[0]! && head[0]! < at('很长的说明') && at('很长的说明') < separator[0]! &&
+      separator[0]! < rowB && rowB < bottom[0]! && bottom[0]! < at('结尾段落'), lines.join('\n'));
+    // 各条框线与纯 ASCII 内容行的交点同列；列宽只来自表头与可用宽度：长内容不撑宽本列，余量平均分
+    const columns = junctions(lines[head[0]!]!);
+    for (const index of [separator[0]!, bottom[0]!, rowB]) assert.deepEqual(junctions(lines[index]!), columns, `frame row ${index} lines up`);
+    const widths = columns.slice(1).map((value, index) => value - columns[index]! - 3);
+    const extra = widths.map((value, index) => value - [4, 4, 3][index]!);
+    assert.ok(Math.max(...extra) - Math.min(...extra) <= 1, `equal split beyond header minima: ${widths}`);
+    // 对齐：左、居中、居右
+    const cells = columns.slice(1).map((value, index) => lines[rowB]!.slice(columns[index]! + 1, value));
+    assert.match(cells[0]!, /^ b +$/u);
+    const left = cells[1]!.indexOf('x'), right = cells[1]!.length - left - 1;
+    assert.ok(Math.abs(left - right) <= 1, `centered cell: ${JSON.stringify(cells[1])}`);
+    assert.match(cells[2]!, /^ +22 $/u);
+    // 框线不可选：跨整行拖选只复制单元格源文字
+    const y = rowB, x0 = lines[rowB]!.indexOf(' b ') + 1, x1 = lines[rowB]!.indexOf('22') + 2;
+    await h.test.mockMouse.drag(x0, y, x1, y); await h.flush();
+    h.test.mockInput.pressKey('c', { ctrl: true }); await h.flush();
+    assert.equal(h.copies.at(-1), 'b\tx\t22', 'copy carries only cell source text');
+    h.test.renderer.clearSelection(); await h.flush();
+    // 颜色：表头取标题语义色，框线取弱化色
+    assert.ok(spansOf(h, '名称').every((span: any) => slot(span) === 6), 'header uses the heading tone');
+    assert.ok(spansOf(h, '┌').length && spansOf(h, '┌').every((span: any) => slot(span) === 8), 'frame uses the frame tone');
+    h.capture('wide');
+    // 窄宽度：平均每列不足 6 格时改为带列名的窄布局，不画框线
+    h.test.resize(32, 40); await h.flush(); await h.latest();
+    const narrow = frameLines(h);
+    assert.ok(rowsWith(narrow, '┌').length === 0 && narrow.some(line => line.includes('名称：')), narrow.join('\n'));
+    h.capture('narrow');
+    h.test.resize(120, 40); await h.flush();
+  });
+  await scenario('reading-texture-table-end-evidence', async h => {
+    const source = '| 列一 | 列二 |\n| --- | --- |\n| r1 | v1 |\n| r2 | v2 |\n| r3 | v3 |\n| r4 | v4 |\n';
+    const nodes = await projectNodes(source), rows = nodes.filter(node => node.kind === 'table');
+    const cut = rows[2]!.to, notice = { blockId: 'notice:texture', role: 'notice', contentOffset: 0, final: true, text: '定时任务 · 插入的通知' };
+    const between = (lines: string[], a: string, b: string) => lines.slice(lines.findIndex(line => line.includes(a)), lines.findIndex(line => line.includes(b)));
+    // 同一张表被其他消息隔开：前一段不收边（其他消息不是证据），后一段不另起上边，真实结尾才收边
+    await h.publish({ first: 0, last: 3, start: 0, follow: true, segments: [sourcePart('texture-split', source, nodes, 0, cut, false), notice,
+      sourcePart('texture-split', source, nodes, cut, source.length, true)] });
+    await h.latest();
+    let lines = frameLines(h);
+    assert.equal(rowsWith(lines, '┌').length, 1, lines.join('\n'));
+    assert.equal(rowsWith(lines, '└').length, 1, lines.join('\n'));
+    assert.ok(rowsWith(lines, '└')[0]! > lines.findIndex(line => line.includes('r4')), 'the only closing edge follows the real last row');
+    assert.ok(between(lines, 'r2', '插入的通知').some(line => line.includes('├')), 'the part before the notice stays open');
+    h.capture('split');
+    // 挂载窗口从表中间开始、来源未结束：没有上边、没有收边；来源真实结束后才收边
+    await h.publish({ first: 0, last: 2, start: 1, follow: true, segments: [sourcePart('texture-window', source, nodes, cut, source.length, false)] });
+    await h.latest();
+    lines = frameLines(h);
+    assert.deepEqual([rowsWith(lines, '┌').length, rowsWith(lines, '└').length], [0, 0], lines.join('\n'));
+    assert.ok(rowsWith(lines, '├').length >= 2, 'undetermined rows end with a row separator');
+    await h.publish({ first: 0, last: 2, start: 1, follow: true, segments: [sourcePart('texture-window', source, nodes, cut, source.length, true)] });
+    await h.latest();
+    lines = frameLines(h);
+    assert.deepEqual([rowsWith(lines, '┌').length, rowsWith(lines, '└').length], [0, 1], lines.join('\n'));
+    h.capture('window-end');
+  });
+  await scenario('reading-texture-table-row-pieces', async h => {
+    // 窗口从表头行中间开始：残段不是表的起点，不画顶沿；表头行尾在本段，照常画表头双线
+    const head = '| FIRST-HEAD | SECOND-HEAD |\n|---|---|\n| a | b |\n\ntext\n';
+    const headNodes = await projectNodes(head), cutHead = head.indexOf('SECOND-HEAD') + 3;
+    await h.publish({ first: 0, last: 2, start: 1, follow: true, segments: [sourcePart('piece-head', head, headNodes, cutHead, head.length, true)] });
+    await h.latest();
+    let lines = frameLines(h);
+    assert.ok(lines.some(line => line.includes('OND-HEAD')), lines.join('\n'));
+    assert.deepEqual([rowsWith(lines, '┌').length, rowsWith(lines, '╞').length, rowsWith(lines, '└').length], [0, 1, 1], lines.join('\n'));
+    // 一行被通知从中间隔开：前段没有行尾，不画行下的线；后段不是行的起点，不画顶沿；行尾在后段
+    const source = '| 列一 | 列二 |\n| --- | --- |\n| r1 | v1 |\n| r2 | v2-tail |\n| r3 | v3 |\n';
+    const nodes = await projectNodes(source), cut = source.indexOf('v2-tail') + 2;
+    const notice = { blockId: 'notice:piece', role: 'notice', contentOffset: 0, final: true, text: '定时任务 · 插入的通知' };
+    await h.publish({ first: 0, last: 3, start: 0, follow: true, segments: [sourcePart('piece-row', source, nodes, 0, cut, false), notice,
+      sourcePart('piece-row', source, nodes, cut, source.length, true)] });
+    await h.latest();
+    lines = frameLines(h);
+    const at = (value: string) => lines.findIndex(line => line.includes(value));
+    assert.ok(lines.slice(at('r2'), at('插入的通知')).every(line => !/[├╞└┌]/u.test(line)), `row piece before the notice has no line below\n${lines.join('\n')}`);
+    assert.ok(lines.slice(at('插入的通知'), at('-tail')).every(line => !/[┌├╞└]/u.test(line)), 'continued piece has no top edge');
+    assert.ok(/├/u.test(lines[at('-tail') + 1] ?? ''), 'the row ends in the continued piece');
+    assert.deepEqual([rowsWith(lines, '┌').length, rowsWith(lines, '└').length], [1, 1], lines.join('\n'));
+    h.capture('split-row');
+    // 两段紧邻时并回一行，画面与整段相同；跨两段的行仍按源复制
+    await h.publish({ first: 0, last: 2, start: 0, follow: true, segments: [sourcePart('piece-row', source, nodes, 0, cut, false),
+      sourcePart('piece-row', source, nodes, cut, source.length, true)] });
+    await h.latest();
+    const joined = h.test.captureCharFrame();
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [sourcePart('piece-row', source, nodes, 0, source.length, true)] });
+    await h.latest();
+    assert.equal(h.test.captureCharFrame(), joined, 'adjacent pieces render exactly like the whole row');
+    lines = frameLines(h);
+    const y = at('r2'), x0 = lines[y]!.indexOf('r2'), x1 = lines[y]!.indexOf('v2-tail') + 'v2-tail'.length;
+    await h.test.mockMouse.drag(x0, y, x1, y); await h.flush();
+    h.test.mockInput.pressKey('c', { ctrl: true }); await h.flush();
+    assert.equal(h.copies.at(-1), 'r2\tv2-tail');
+    h.test.renderer.clearSelection(); await h.flush();
+  });
+  await scenario('reading-texture-cell-alignment', async h => {
+    // 多行单元格按显示行对齐：居右的每一行贴右，居中的每一行两侧留白相差不超过一格；拖选与复制取源文字，换宽后选区仍在
+    h.test.resize(58, 32); await h.flush();
+    const source = '| L | R | C |\n|---|---:|:---:|\n| x | ' + '1'.repeat(30) + 'XYZ | ' + '2'.repeat(30) + 'ABCD |\n';
+    const nodes = await projectNodes(source);
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [sourcePart('align', source, nodes, 0, source.length, true)] });
+    await h.latest();
+    const lines = frameLines(h), head = rowsWith(lines, '╞')[0]!, bottom = rowsWith(lines, '└')[0]!;
+    const columns = junctions(lines[head]!);
+    const cells = (index: number) => lines.slice(head + 1, bottom).map(line => line.slice(columns[index]! + 1, columns[index + 1]!));
+    const right = cells(1), center = cells(2);
+    assert.ok(right.length >= 3, lines.join('\n'));
+    for (const cell of right.filter(cell => cell.trim())) assert.match(cell, /\S $/u, `right aligned line ${JSON.stringify(cell)}`);
+    for (const cell of center.filter(cell => cell.trim())) {
+      const inner = cell.slice(1, -1), left = inner.length - inner.trimStart().length, rest = inner.length - inner.trimEnd().length;
+      assert.ok(Math.abs(left - rest) <= 1, `centered line ${JSON.stringify(cell)}`);
+    }
+    assert.ok(right.some(cell => /^ {3,}\S/u.test(cell) && cell.includes('XYZ')), `last right line is pushed right: ${JSON.stringify(right)}`);
+    h.capture('wrapped');
+    const copyOf = async (value: string) => {
+      const rows = frameLines(h), y = rows.findIndex(line => line.includes(value)), x = rows[y]!.indexOf(value);
+      await h.test.mockMouse.drag(x, y, x + value.length, y); await h.flush();
+      h.test.mockInput.pressKey('c', { ctrl: true }); await h.flush();
+      return h.copies.at(-1);
+    };
+    assert.equal(await copyOf('XYZ'), 'XYZ', 'native hit testing follows right alignment');
+    h.test.resize(64, 32); await h.flush(); await h.flush();
+    assert.equal(h.test.renderer.getSelection()?.getSelectedText(), 'XYZ', 'selection survives reflow of an aligned cell');
+    h.test.mockInput.pressKey('c', { ctrl: true }); await h.flush();
+    assert.equal(h.copies.at(-1), 'XYZ');
+    h.test.renderer.clearSelection(); await h.flush();
+    assert.equal(await copyOf('ABCD'), 'ABCD', 'native hit testing follows center alignment');
+    h.test.renderer.clearSelection(); await h.flush();
+    h.test.resize(120, 40); await h.flush();
+  }, 32);
+  await scenario('reading-texture-shade-text', async h => {
+    // 固定深灰底上的文字（用户消息、行内代码）取固定浅灰前景，不随宿主明暗
+    const source = '正文里有 `inline code` 片段。\n';
+    const nodes = await projectNodes(source);
+    await h.publish({ first: 0, last: 2, start: 0, follow: true, segments: [
+      { blockId: 'user-shade', role: 'user', contentOffset: 0, final: true, text: '用户消息文字' },
+      { ...sourcePart('shade', source, nodes, 0, source.length, true), groupId: 'shade-reply' }] });
+    await h.latest();
+    const user = spansOf(h, '用户消息文字'), code = spansOf(h, 'inline code');
+    const bg = (span: any) => span.bg.intent === 'indexed' ? span.bg.slot : -1;
+    assert.ok(user.length && user.every((span: any) => slot(span) === 252 && bg(span) === 236), 'user message: fixed light text on the fixed shade');
+    assert.ok(code.length && code.every((span: any) => slot(span) === 252 && bg(span) === 236), 'inline code: fixed light text on the fixed shade');
+    assert.ok(spansOf(h, '正文里有').every((span: any) => slot(span) === -1), 'ordinary body text keeps the host foreground');
+  });
+  await scenario('reading-texture-heading-strong-list', async h => {
+    const source = '# 一级标题\n\n### 三级标题\n\n正文**强调词**结束\n\n---\n\n- 列表项\n';
+    const nodes = await projectNodes(source);
+    await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [sourcePart('texture-heading', source, nodes, 0, source.length, true)] });
+    await h.latest();
+    const lines = frameLines(h), line = (value: string) => lines.find(row => row.includes(value)) ?? '';
+    assert.ok(!line('一级标题').includes('#') && !line('三级标题').includes('#'), 'headings carry no hash gutter');
+    assert.ok(line('一级标题').includes('◆'), 'reply anchor on a heading that opens the reply');
+    assert.ok(lines.some(row => row.includes('┄┄┄')), 'thematic break uses its own dashed line');
+    const h1 = spansOf(h, '一级标题'), h3 = spansOf(h, '三级标题'), strong = spansOf(h, '强调词'), marker = spansOf(h, '- '), item = spansOf(h, '列表项');
+    assert.ok(h1.length && h1.every((span: any) => slot(span) === 6 && (span.attributes & TextAttributes.UNDERLINE) && (span.attributes & TextAttributes.BOLD)), 'H1: brand, bold, underline');
+    // 三级标题用宿主正文前景色（固定的亮白在浅色背景上看不见），靠加粗区分
+    assert.ok(h3.length && h3.every((span: any) => slot(span) === -1 && (span.attributes & TextAttributes.BOLD) && !(span.attributes & TextAttributes.UNDERLINE)), 'H3: body color, bold, no underline');
+    assert.ok(strong.length && strong.every((span: any) => slot(span) === 3 && (span.attributes & TextAttributes.BOLD)), 'strong: warm and bold');
+    assert.ok(marker.some((span: any) => slot(span) === 6), 'list marker is colored');
+    assert.ok(item.length && item.every((span: any) => slot(span) === -1), 'list item text keeps the body color');
+    h.capture('styles');
+  });
   console.log(JSON.stringify({ checks }));
 } finally {
   if (process.env.ZHIXING_READING_CAPTURE) {

@@ -297,7 +297,7 @@ function blocks(tokens: readonly Token[], input: MappedText, depth = 0, quote = 
         if (nested.length) {
           const first = nested[0]!;
           nested[0] = { ...first, kind: 'list', from: found.value.at(0), depth,
-            runs: [...(marker.text ? [run(marker, marker.text.trimStart(), 0)] : []), ...first.runs] };
+            runs: [...(marker.text ? [run(marker, marker.text.trimStart(), BODY_STYLE.marker)] : []), ...first.runs] };
         }
         result.push(...nested);
       }
@@ -316,6 +316,10 @@ function blocks(tokens: readonly Token[], input: MappedText, depth = 0, quote = 
       if (table.header.length > 128) throw new BodyProjectionCapacityError();
       const rows = [table.header, ...table.rows];
       const lines = source.text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+      // 对齐来自分隔行；全部左对齐时省略字段（读侧缺省即左对齐）
+      const align = table.align.some(value => value === 'center' || value === 'right') ? table.align.map(value => value ?? 'left') : undefined;
+      // 表头标签用可见文字（去掉 Markdown 记号），供分栏几何与窄屏列名共用
+      let labels: string[] = table.header.map(cell => cell.text.slice(0, 512));
       let lineOffset = 0;
       for (let row = 0; row < rows.length; row++) {
         if (row === 1) lineOffset += lines[1]?.length ?? 0;
@@ -328,9 +332,9 @@ function blocks(tokens: readonly Token[], input: MappedText, depth = 0, quote = 
           const match = mappedChild(mapped, value.text, cellCursor); cellCursor = match.cursor;
           runs.push(...inlines(value.tokens, match.value, row === 0 ? BODY_STYLE.bold : 0).map(part => ({ ...part, cell })));
         }
+        if (row === 0) labels = table.header.map((_, cell) => runs.filter(run => run.cell === cell).map(run => run.text).join('').slice(0, 512));
         result.push({ from: mapped.at(0), to: mapped.at(mapped.text.length), kind: 'table', table: from,
-          columns: table.header.length, header: row === 0,
-          labels: table.header.map(cell => cell.text.slice(0, 512)), runs });
+          columns: table.header.length, header: row === 0, labels, ...(align ? { align } : {}), runs });
         lineOffset += line.length;
       }
     } else if (token.type === 'paragraph' || token.type === 'text' || token.type === 'heading') {
@@ -463,7 +467,8 @@ export class TerminalBodyProjection {
     const parsed = this.#fence ? this.#parseFence(end) : this.#table ? this.#parseTable(end) : this.#parseNormal(this.#source, this.#start, end);
     if (parsed.nodes.length + parsed.nodes.reduce((sum, node) => sum + node.runs.length, 0) > BODY_PARSE_NODES) throw new BodyProjectionCapacityError();
     if (!this.#anchor) {
-      const paragraph = parsed.nodes.findIndex(node => node.kind === 'paragraph' && node.runs.some(run => run.text.trim()));
+      // 起点标记放在回复的第一个非空块上，不限类型（标题、列表、表格、代码开头的回复同样有起点）
+      const paragraph = parsed.nodes.findIndex(node => node.kind !== 'space' && node.kind !== 'rule' && node.runs.some(run => run.text.trim()));
       if (paragraph >= 0) parsed.nodes[paragraph] = { ...parsed.nodes[paragraph]!, anchor: true };
     }
     return parsed;

@@ -5,6 +5,10 @@ export interface BodyRenderBlock {
   readonly groupId?: string;
   readonly gapBefore?: number;
   readonly node: BodyNode; readonly text: string; readonly runs: readonly BodyRun[];
+  /** 该来源块已投影到真实结尾（终态片段），且这是它的最后一个节点：表格据此确定收边 */
+  readonly sourceEnd?: boolean;
+  /** 表格行：本块含该行的真实结尾（片段源文字在行末是换行，或来源真实结束）。片段在行中间结束的残段没有 */
+  readonly rowEnd?: boolean;
 }
 /** A wire page replaces its objects, not every native leaf. Reuse only exact
  * current-page projections; the cache cannot retain discarded history. */
@@ -13,7 +17,8 @@ export function retainBodyBlocks(next: readonly BodyRenderBlock[], previous: rea
   const result = next.map(block => {
     const prior = old.get(block.key);
     if (prior === block) return block;
-    if (!prior || prior.role !== block.role || prior.text !== block.text || prior.groupId !== block.groupId || prior.gapBefore !== block.gapBefore) return block;
+    if (!prior || prior.role !== block.role || prior.text !== block.text || prior.groupId !== block.groupId || prior.gapBefore !== block.gapBefore ||
+      prior.sourceEnd !== block.sourceEnd || prior.rowEnd !== block.rowEnd) return block;
     const { runs: _a, ...a } = block.node, { runs: _b, ...b } = prior.node;
     if (JSON.stringify(a) !== JSON.stringify(b) || JSON.stringify(block.runs) !== JSON.stringify(prior.runs)) return block;
     return prior;
@@ -35,10 +40,16 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
     const window = windows[index]!, segment = segments[index]!;
     let projected = cache?.get(segment);
     if (!projected) {
-      projected = window.context.nodes.map(node => {
+      const last = window.context.nodes.length - 1;
+      projected = window.context.nodes.map((node, nodeIndex) => {
         const runs = node.runs.map(run => ({ ...run, text: visibleBodyText(run.text) }));
+        const sourceEnd = window.end && nodeIndex === last;
+        // 表格行在源文字里以换行收尾（换行可能算在行内，也可能紧跟在行后，如表格后接空行）；片段若切在行中间，本段就看不到
+        const at = node.to - segment.contentOffset, after = segment.text.charCodeAt(at);
+        const rowEnd = node.kind === 'table' && (sourceEnd || segment.text.charCodeAt(at - 1) === 10 || after === 10 || after === 13);
         return { key: `${window.blockId}:${node.origin ?? node.from}:${node.kind}`, blockId: window.blockId, role: window.role,
-          groupId: segment.groupId ?? segment.blockId, node, runs, text: runs.map(run => run.text).join('') };
+          groupId: segment.groupId ?? segment.blockId, node, runs, text: runs.map(run => run.text).join(''),
+          ...(sourceEnd ? { sourceEnd: true } : {}), ...(rowEnd ? { rowEnd: true } : {}) };
       });
       cache?.set(segment, projected);
     }
@@ -47,8 +58,10 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
     const previous = result.at(-1);
     if (previous && previousSource === key && previous.node.to === node.from) {
       const joined = [...previous.runs, ...runs];
-      result[result.length - 1] = { ...previous, node: { ...previous.node, to: node.to, runs: joined }, runs: joined,
-        text: joined.map(run => run.text).join('') };
+      // 续段带来结尾事实：是否到达来源结尾、表格行尾都以后一段为准
+      const { sourceEnd: _ended, rowEnd: _rowEnded, ...merged } = previous;
+      result[result.length - 1] = { ...merged, node: { ...previous.node, to: node.to, runs: joined }, runs: joined,
+        text: joined.map(run => run.text).join(''), ...(block.sourceEnd ? { sourceEnd: true } : {}), ...(block.rowEnd ? { rowEnd: true } : {}) };
     } else {
       let unique = key;
       if (used.has(unique)) unique = `${key}@${node.from}`;
@@ -57,6 +70,16 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
     }
     previousSource = key;
     }
+  }
+  // 行尾也可由后继证明：同一来源块在本页里后面还有别的节点（不是本行的续段），说明这一行已经写完。
+  // 同一来源的片段在页内按源顺序连续，其他来源的块不算证据
+  const origin = (block: BodyRenderBlock) => block.node.origin ?? block.node.from;
+  const later = new Map<string, BodyRenderBlock>();
+  for (let index = result.length - 1; index >= 0; index--) {
+    const block = result[index]!, next = later.get(block.blockId);
+    if (block.node.kind === 'table' && !block.rowEnd && next && !(next.node.kind === 'table' && origin(next) === origin(block)))
+      result[index] = { ...block, rowEnd: true };
+    later.set(block.blockId, block);
   }
   return bodyBlockGaps(result);
 }
