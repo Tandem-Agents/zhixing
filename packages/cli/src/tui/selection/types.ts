@@ -1,3 +1,5 @@
+import type { TerminalSummary } from "@zhixing/terminal-ui/protocol";
+
 export const MAX_SELECTION_OPTIONS = 5;
 
 export type SelectionCancelCause = "escape" | "ctrl-c" | "ctrl-d" | "aborted";
@@ -8,6 +10,8 @@ export interface SelectionRequest<TValue extends string = string> {
   readonly id?: string;
   readonly title: string;
   readonly body?: readonly string[];
+  /** 结构化信息内容（信息页），一页或多页（多页时以上一页/下一页翻看），与 body 二选一 */
+  readonly summary?: TerminalSummary | readonly TerminalSummary[];
   readonly details?: SelectionDetailsSpec;
   readonly options: readonly SelectionOption<TValue>[];
   readonly initialValue?: TValue;

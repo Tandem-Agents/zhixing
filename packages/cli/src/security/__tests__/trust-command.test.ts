@@ -73,13 +73,15 @@ describe("handleSecurityCommand", () => {
     const text = writer.text();
     expect(text).toContain("安全状态");
     expect(text).toContain("主模式");
-    expect(text).toMatch(/内置: 3 条（2 条禁区，每次确认 · 1 条需确认）/u);
+    // 按与信任规则的关系分档：block 直接拦截，不可覆盖的确认每次确认，其余可被放行；不把拦截说成确认
+    expect(text).toContain("内置规则 3 条：直接拦截 1 · 每次确认 1 · 需要确认 1");
+    expect(text).not.toMatch(/禁区/u);
     // 概览面向用户：不出现内部标识
     expect(text).not.toMatch(/contextId|bypassImmune/u);
-    expect(text).toContain("会话: 0 · 上下文: 1 · 全局: 0");
-    expect(text).toContain("bash");
-    expect(text).toContain("rm");
-    expect(text).toContain("对话默认概览");
+    expect(text).toContain("本对话 0 · 当前范围 1 · 所有范围 0");
+    expect(text).toContain("bash · rm  已允许 1 次 · 最高风险 极高");
+    expect(text).toContain("bash  2 / 10");
+    expect(text).toContain("主模式 · 本对话的默认范围");
   });
 
   it("有正在执行的运行时标出该运行的实际范围与冻结规则数", async () => {
@@ -102,9 +104,10 @@ describe("handleSecurityCommand", () => {
       writer,
     });
     const text = writer.text();
-    expect(text).toContain("本次运行:");
-    expect(text).toContain("冻结规则 1 条");
-    expect(text).not.toContain("对话默认概览");
+    expect(text).toContain("本次运行：工作区（标识 hash-a） · 使用开始时锁定的 1 条信任规则");
+    expect(text).toContain("本对话的默认范围：主模式");
+    // 下面的信任规则统计属于对话默认范围，不能读成运行正在用的那份
+    expect(text).toContain("对话默认范围的信任规则 · 共 0 条");
   });
 
   it("rules：列出宿主返回的内置策略规则", async () => {
@@ -121,8 +124,11 @@ describe("handleSecurityCommand", () => {
       writer,
     });
 
-    expect(writer.text()).toContain("策略规则 (1 条)");
-    expect(writer.text()).toContain("safe-confirm");
+    // 规则说明保留原列表的全部信息（名称、档位、风险、标识、不可覆盖）并附说明
+    expect(writer.text()).toContain("规则说明");
+    expect(writer.text()).toContain("内置规则 1 条：需要确认 1");
+    expect(writer.text()).toMatch(/Policy safe-confirm {2}风险 \S+ · safe-confirm/u);
+    expect(writer.text()).toContain("    policy");
   });
 
   it("宿主快照失败：可观测呈现而非抛出", async () => {

@@ -10,6 +10,7 @@ import { type TerminalPasteSink } from '../paste-stream.js';
 import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
 import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
 import { processArtifactLines, processArtifactSpans, processArtifactText } from '../../../cli/src/terminal/process-presentation.js';
+import { securityOverview, securityRulesDetail } from '../../../cli/src/security/security-summary.js';
 // Runs with the pinned Bun/native renderer via scripts/test-root.ts.
 // This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 
@@ -1597,6 +1598,78 @@ try {
       await show(conversation); await flush();
     }
     checks.push('first drag while the entry hint is shown keeps the text under the pointer (also after a missed release), returns the row on release and copies the pressed text; a first click returns the row in the first frame after release');
+
+    // 信息页（/security）：N 的真实投影经结构化 summary 进页面，由 U 的公共分节组件呈现。宽屏侧注右对齐、窄屏换到标题下一行；
+    // 章节标记不进复制；默认选中“返回输入”；规则说明页带每条规则的描述
+    {
+      const rule = (id: string, name: string, description: string, action: 'block' | 'confirm', bypassImmune: boolean, severity: 'high' | 'critical') =>
+        ({ id, name, description, enabled: true, match: { type: 'command', pattern: id }, action, bypassImmune, severity, category: 'destructive_operation' });
+      const snapshot = { contextId: { kind: 'main' }, workspacePath: null, permissionRules: [],
+        builtinRules: [rule('bi-git', 'Git 内部文件写保护', '防止直接修改 .git/ 目录内部文件', 'block', true, 'critical'),
+          rule('cf-rm', '破坏性命令', '检测可能导致不可逆数据删除的命令', 'confirm', false, 'high')],
+        rateLimits: [{ key: 'bash', used: 86, limit: 100 }], confirmations: [{ key: 'bash::npm test *', count: 2, highestRisk: 'medium' }] } as never;
+      const page = { kind: 'selection' as const, title: '安全状态', requestId: 'security-page', summary: securityOverview(snapshot), initialItemId: 'option:done',
+        choices: [{ id: 'option:done', label: '返回输入' }, { id: 'option:rules', label: '查看规则说明' }] };
+      test.resize(100, 40); await show(page); await flush();
+      const header = rows().find(line => line.includes('直接拦截 · 1 项'))!;
+      assert.ok(header?.includes('▎ 直接拦截 · 1 项') && header.trimEnd().endsWith('信任规则不能放行'), `wide aside aligned right: ${header}`);
+      for (const expected of ['主模式 · 本对话的默认范围', '内置规则 2 条：直接拦截 1 · 需要确认 1', '86 / 100 · 接近上限', '浏览与撤销：在输入框输入 /trust 后加空格', '已允许 2 次 · 最高风险 中'])
+        assert.ok(rows().some(line => line.includes(expected)), `security page shows: ${expected}`);
+      // 从页首陈述开始拖，跨过整条标题行（含行首的章节标记）到下一行：标记不可选，复制结果里没有它
+      const headerRow = rows().indexOf(header), titleColumn = header.indexOf('直接拦截');
+      const leadRow = rows().findIndex(line => line.includes('内置规则 2 条')), leadColumn = rows()[leadRow]!.indexOf('内置规则');
+      assert.ok(leadRow >= 0 && leadRow < headerRow, 'the lead sits above the first section');
+      await test.mockMouse.drag(leadColumn, leadRow, titleColumn + 30, headerRow + 1); await flush();
+      before = writes().length; await ctrlC();
+      const copied = writes().at(-1)!.text;
+      assert.equal(writes().length, before + 1);
+      assert.ok(copied.includes('内置规则') && copied.includes('直接拦截') && copied.includes('\n') && !copied.includes('▎'),
+        `copy keeps lines and excludes the section marker: ${JSON.stringify(copied)}`);
+      test.renderer.clearSelection(); await flush();
+      test.mockInput.pressEnter(); await flush();
+      assert.equal((actions.findLast(action => action.kind === 'selection') as { itemId?: string } | undefined)?.itemId, 'option:done', 'Enter takes the default return action');
+      // 45 列时内容宽 40 列，标题加侧注 35 列仍在同一行；36 列（内容宽 31 列）放不下，侧注换到标题下一行
+      await show({ ...page, requestId: 'security-page-2' }); test.resize(45, 40); await flush();
+      assert.ok(rows().find(line => line.includes('直接拦截 · 1 项'))?.trimEnd().endsWith('信任规则不能放行'), 'aside still fits at 45 columns');
+      test.resize(36, 40); await flush();
+      const narrow = rows(), at = narrow.findIndex(line => line.includes('直接拦截 · 1 项'));
+      assert.ok(at >= 0 && !narrow[at]!.includes('信任规则不能放行') && narrow[at + 1]!.includes('信任规则不能放行'), 'narrow aside moves below the title');
+      test.resize(100, 32);
+      await show({ kind: 'selection', title: '规则说明', requestId: 'security-rules', summary: securityRulesDetail(snapshot)[0]!, initialItemId: 'option:back',
+        choices: [{ id: 'option:back', label: '返回安全状态' }] }); await flush();
+      assert.ok(rows().some(line => line.includes('检测可能导致不可逆数据删除的命令')), 'the explanation page shows rule descriptions');
+      assert.ok(rows().some(line => line.includes('风险 极高 · bi-git · 不可覆盖')), 'the explanation page keeps severity, id and the override mark');
+      // 复制只取源文：同一段含中文、英文单词、双空格、长路径的文字，在不同宽度下拖选整段后复制，与源文逐字一致（软折行与缩进不进复制、空格不丢）；
+      // 标签与值之间是制表符
+      const source = '开头 START alpha  beta gamma delta epsilon zeta eta theta iota kappa lambda mu 中文句子，标点。D:\\very\\long\\path\\segment\\to\\file.txt END';
+      const names = ['Git 内部文件写保护', 'SSH 密钥保护', '环境变量注入防护', '知行秘密存储隔离', '系统凭据库隔离', '宿主秘密路径隔离'];
+      const copyPage = { kind: 'selection' as const, title: '复制', initialItemId: 'option:done', choices: [{ id: 'option:done', label: '返回输入' }],
+        summary: { lead: [[{ text: source }]], sections: [{ title: '允许累计', rows: [{ label: 'bash · npm test *', value: '已允许 2 次 · 最高风险 中' }] },
+          { title: '直接拦截 · 6 项', items: names }] } };
+      for (const columns of [45, 60, 100]) {
+        test.resize(columns, 32); await show({ ...copyPage, requestId: `copy-summary-${columns}` }); await flush();
+        const lines = rows(), first = lines.findIndex(line => line.includes('开头')), last = lines.findIndex(line => line.includes('END'));
+        assert.ok(columns === 100 || last > first, `${columns}: the paragraph wraps on screen`);
+        await test.mockMouse.drag(lines[first]!.indexOf('开头'), first, lines[last]!.indexOf('END') + 2, last); await flush();
+        before = writes().length; await ctrlC();
+        assert.equal(writes().length, before + 1); assert.equal(writes().at(-1)!.text, source, `${columns}: copy equals the source text exactly`);
+        test.renderer.clearSelection(); await flush();
+        const labelRow = rows().findIndex(line => line.includes('bash · npm test')), valueRow = rows().findIndex(line => line.includes('已允许 2 次'));
+        await test.mockMouse.drag(rows()[labelRow]!.indexOf('bash'), labelRow, columns - 3, valueRow); await flush();
+        before = writes().length; await ctrlC();
+        assert.equal(writes().at(-1)!.text, 'bash · npm test *\t已允许 2 次 · 最高风险 中', `${columns}: label and value copy with a tab, no padding`);
+        test.renderer.clearSelection(); await flush();
+        // 并列条目按项换行：每个名称完整出现在某一行里；整串复制得到“甲 · 乙 · …”，不含换行
+        for (const name of names) assert.ok(rows().some(line => line.includes(name)), `${columns}: ${name} is never split across lines`);
+        const itemsFirst = rows().findIndex(line => line.includes(names[0]!)), itemsLast = rows().findIndex(line => line.includes(names.at(-1)!));
+        await test.mockMouse.drag(rows()[itemsFirst]!.indexOf('Git'), itemsFirst, columns - 3, itemsLast); await flush();
+        before = writes().length; await ctrlC();
+        assert.equal(writes().at(-1)!.text, names.join(' · '), `${columns}: items copy as one list`);
+        test.renderer.clearSelection(); await flush();
+      }
+      test.resize(100, 32); await show(conversation); await flush();
+      checks.push('information page: real security projection, right-aligned asides wide, wrapped asides narrow, copy without the section marker, default return action, rule explanations, source-exact copy at 45/60/100 columns');
+    }
 
     // 45 列信息行：有选区时键位改用短版、复制按钮仍在；复制成功与失败的说明都完整可读；没有选区时导航键位照常
     {

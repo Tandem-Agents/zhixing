@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from 'node:util';
 import type { Readable } from 'node:stream';
 import type { AgentYield } from '@zhixing/core/loop';
 import type { TerminalSelectionPort } from './terminal/selection.js';
+import { summaryLines } from './summary-projection.js';
 
 export interface TextSink { write(text: string): unknown }
 
@@ -115,6 +116,8 @@ export function createTextSelection(output: TextSessionOutput, options: { readon
   return async page => {
     output.line(page.title);
     if (page.message) output.line(page.message);
+    // 分节信息页（安全状态、用量、上下文、任务推进）按同一份投影的文字出口逐行输出
+    else if (page.summary) for (const line of summaryLines(page.summary)) output.line(line);
     for (const choice of page.choices ?? []) {
       if (['previous', 'next', 'return'].includes(choice.id)) continue;
       output.line(`- ${choice.label}${choice.detail ? `：${choice.detail}` : ''}`);

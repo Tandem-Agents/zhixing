@@ -59,17 +59,35 @@ describe('terminal decision commands', () => {
     expect(f.management.trustRevoke).toHaveBeenCalledWith('rule-1', 'conv-1'); expect(f.text()).not.toContain('已撤销');
     await f.owner.run('trust', 'revoke'); expect(f.text()).toContain('用法');
   });
-  it('preserves security overview/rules/help and explicit lookup failures', async () => {
+  it('shows the security overview and rules explanation as structured pages, keeps help and explicit lookup failures', async () => {
     const f = fixture();
-    await f.owner.run('security', ''); await f.owner.run('security', 'rules'); await f.owner.run('security', 'help');
-    expect(f.management.securityStatus).toHaveBeenCalledTimes(2);
-    expect(f.choose.mock.calls[0]![0].title).toBe('安全状态');
-    expect(f.text()).not.toContain('╭─ 安全状态');
-    expect(f.text()).toContain('策略规则'); expect(f.text()).toContain('/security rules');
-    f.management.securityStatus.mockRejectedValueOnce(Error('offline'));
+    // 概览：结构化信息、默认选中“返回输入”、可进入规则说明；说明页返回回到概览，同一份快照不重复查询
+    f.choose.mockResolvedValueOnce({ itemId: 'option:rules' }).mockResolvedValueOnce({ itemId: 'option:back' }).mockResolvedValueOnce({ itemId: 'option:done' });
     await f.owner.run('security', '');
-    expect(f.text()).toContain('安全状态不可用'); expect(f.text()).toContain('offline');
-    expect(f.publish).toHaveBeenLastCalledWith(expect.objectContaining({ error: true }));
+    const pages = f.choose.mock.calls.map(([page]) => page);
+    expect(pages.map(page => page.title)).toEqual(['安全状态', '规则说明', '安全状态']);
+    expect(pages[0]!.message).toBeUndefined();
+    expect(pages[0]!.summary?.sections.map(section => section.title)).toEqual(['信任规则 · 共 0 条', '允许累计', '调用频率（当前窗口）']);
+    expect(pages[0]!.initialItemId).toBe('option:done');
+    expect(pages[0]!.choices?.map(choice => choice.label)).toEqual(['返回输入', '查看规则说明']);
+    expect(pages[1]!.choices?.map(choice => choice.label)).toEqual(['返回安全状态']);
+    expect(f.management.securityStatus).toHaveBeenCalledTimes(1);
+    // 说明页按 Esc 回到概览；/security rules 直接打开说明页，返回即结束
+    f.choose.mockClear();
+    f.choose.mockResolvedValueOnce({ itemId: 'option:rules' }).mockResolvedValueOnce({ itemId: 'return', cancelCause: 'escape' });
+    await f.owner.run('security', '');
+    expect(f.choose.mock.calls.map(([page]) => page.title)).toEqual(['安全状态', '规则说明', '安全状态']);
+    f.choose.mockClear();
+    await f.owner.run('security', 'rules');
+    expect(f.choose.mock.calls.map(([page]) => [page.title, page.choices?.map(choice => choice.label)])).toEqual([['规则说明', ['返回输入']]]);
+    await f.owner.run('security', 'help');
+    expect(f.text()).toContain('/security rules');
+    // 读取失败如实显示失败，不变成零记录的页面
+    f.management.securityStatus.mockRejectedValueOnce(Error('offline'));
+    const shown = f.choose.mock.calls.length;
+    await f.owner.run('security', '');
+    expect(f.choose.mock.calls.length).toBe(shown);
+    expect(f.publish).toHaveBeenLastCalledWith(expect.objectContaining({ title: '安全状态', error: true, message: expect.stringContaining('安全状态不可用：offline') }));
   });
   it('carries trust lookup and revoke failures as typed failures instead of success-shaped text', async () => {
     const f = fixture(); f.management.trustList.mockRejectedValueOnce(Error('offline'));

@@ -7,14 +7,16 @@
  */
 
 import chalk from "chalk";
-import type { PermissionContextId } from "@zhixing/core/security";
 import type {
   TrustAdministrationRule,
   TrustAdministrationScopeGroup,
 } from "@zhixing/core/trust-administration";
 import type { SessionSecurityResult } from "@zhixing/rpc";
+import type { TerminalSummary } from "@zhixing/terminal-ui/protocol";
 import type { CliWriter } from "../screen/index.js";
 import { formatGroupedRuleDescription, formatRuleDescription } from "./trust-rule-format.js";
+import { securityOverview, securityRulesDetail } from "./security-summary.js";
+import { summaryLines } from "../summary-projection.js";
 
 // ─── /security ───
 
@@ -41,11 +43,11 @@ export async function handleSecurityCommand(
 
 function printSecurityHelp(writer: CliWriter): void {
   writer.line("");
-  writer.line(chalk.bold("  /security — 安全系统状态"));
+  writer.line(chalk.bold("  /security — 安全状态"));
   writer.line("");
-  writer.line("  /security             状态概览（默认）");
-  writer.line("  /security rules       列出当前生效的策略规则");
-  writer.line("  /trust                权限规则管理");
+  writer.line("  /security             概览：范围、内置规则分档、信任规则、允许累计、调用频率（默认）");
+  writer.line("  /security rules       规则说明：每条内置规则的档位、风险与说明");
+  writer.line("  /trust                信任规则；输入 /trust 后加空格可浏览与撤销");
   writer.line("");
 }
 
@@ -65,115 +67,30 @@ async function loadSecuritySnapshot(
 }
 
 async function showSecurityOverview(opts: SecurityOptions): Promise<boolean> {
-  const { writer } = opts;
-  const edge = opts.framed === false ? "" : chalk.bold("│");
   const snapshot = await loadSecuritySnapshot(opts);
   if (!snapshot) return false;
-
-  const rules = snapshot.permissionRules;
-  const sessionCount = rules.filter((r) => r.scope === "session").length;
-  const ctxCount = rules.filter((r) => r.scope === "context").length;
-  const globalCount = rules.filter((r) => r.scope === "global").length;
-  const denyCount = rules.filter((r) => r.decision === "deny").length;
-
-  const bypassCount = snapshot.builtinRules.filter((r) => r.bypassImmune).length;
-  // 两类互斥：不可覆盖的规则里也有"确认"动作的，按是否可被用户批准划分，两项之和等于总数
-  const confirmCount = snapshot.builtinRules.filter(
-    (r) => !r.bypassImmune && r.action === "confirm",
-  ).length;
-
-  const ctxLabel = formatContextKindLabel(snapshot.contextId);
-
-  if (opts.framed !== false) {
-    writer.line("");
-    writer.line(chalk.bold("╭─ 安全状态 ─────────────────────────────"));
-  }
-  writer.line(edge);
-  writer.line(
-    `${edge} ${chalk.dim("上下文:")}    ${chalk.cyan(ctxLabel)}` +
-      (snapshot.workspacePath ? `  ${chalk.dim(snapshot.workspacePath)}` : ""),
-  );
-  const scope = snapshot.scope;
-  if (scope?.kind === "run") {
-    // 正在执行的运行：按它的已验签清单推导的实际范围与冻结快照
-    writer.line(
-      `${edge} ${chalk.dim("本次运行:")}  ${chalk.cyan(formatContextKindLabel(scope.contextId))}  ` +
-        chalk.dim(`冻结规则 ${scope.permissionRules.length} 条`),
-    );
-  } else {
-    writer.line(`${edge} ${chalk.dim("以上为对话默认概览；显式选择工作区的运行按该工作区范围生效")}`);
-  }
-  writer.line(edge);
-  writer.line(`${edge} ${chalk.bold("── 策略规则 ──")}`);
-  writer.line(
-    `${edge} 内置: ${snapshot.builtinRules.length} 条（${chalk.red(`${bypassCount} 条禁区，每次确认`)} · ${chalk.yellow(`${confirmCount} 条需确认`)}）`,
-  );
-  writer.line(edge);
-  writer.line(`${edge} ${chalk.bold("── 权限规则 ──")}`);
-  writer.line(
-    `${edge} 会话: ${sessionCount} · 上下文: ${ctxCount} · 全局: ${globalCount}` +
-      (denyCount > 0 ? chalk.red(`（含 ${denyCount} 条拒绝规则）`) : ""),
-  );
-  if (rules.length > 0) {
-    writer.line(chalk.dim(`${edge} Tip: /trust 查看详情`));
-  }
-  writer.line(edge);
-  writer.line(`${edge} ${chalk.bold("── 频率限制（最近窗口）──")}`);
-  if (snapshot.rateLimits.length === 0) {
-    writer.line(`${edge} ${chalk.dim("(无活动)")}`);
-  } else {
-    for (const entry of snapshot.rateLimits.slice(0, 8)) {
-      const pct = entry.used / entry.limit;
-      const bar =
-        pct > 0.8 ? chalk.red : pct > 0.5 ? chalk.yellow : chalk.green;
-      writer.line(
-        `${edge}   ${chalk.cyan(entry.key.padEnd(10))} ${bar(`${entry.used}/${entry.limit}`)}`,
-      );
-    }
-  }
-  writer.line(edge);
-  writer.line(`${edge} ${chalk.bold("── 确认追踪 ──")}`);
-  if (snapshot.confirmations.length === 0) {
-    writer.line(`${edge} ${chalk.dim("(无累计)")}`);
-  } else {
-    for (const entry of snapshot.confirmations.slice(0, 8)) {
-      const keyShort = entry.key.replace(/^bash::/, "").slice(0, 30);
-      writer.line(
-        `${edge}   ${chalk.cyan(keyShort.padEnd(30))} ${entry.count} 次 ${chalk.dim(`(${entry.highestRisk})`)}`,
-      );
-    }
-  }
-  if (opts.framed !== false) {
-    writer.line(chalk.bold("╰────────────────────────────────────────"));
-    writer.line("");
-  }
+  writeSummary(opts, "安全状态", securityOverview(snapshot));
   return true;
 }
 
 async function showPolicyRules(opts: SecurityOptions): Promise<boolean> {
   const snapshot = await loadSecuritySnapshot(opts);
   if (!snapshot) return false;
-  const rules = snapshot.builtinRules;
-  opts.writer.line("");
-  opts.writer.line(chalk.bold(`  策略规则 (${rules.length} 条)`));
-  opts.writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
-  for (const rule of rules) {
-    const action =
-      rule.action === "block"
-        ? chalk.red("block  ")
-        : rule.action === "confirm"
-          ? chalk.yellow("confirm")
-          : chalk.green("audit  ");
-    const immune = rule.bypassImmune ? chalk.red("[!]") : "   ";
-    const sev = rule.severity.padEnd(8);
-    opts.writer.line(
-      `  ${immune} ${action} ${chalk.dim(sev)} ${chalk.cyan(rule.id.padEnd(28))} ${chalk.dim(rule.name)}`,
-    );
-  }
-  opts.writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
-  opts.writer.line(chalk.dim("  [!] = bypassImmune（任何配置都无法覆盖）"));
-  opts.writer.line("");
+  writeSummary(opts, "规则说明", securityRulesDetail(snapshot));
   return true;
+}
+
+/** 与终端信息页同一份投影逐行输出（多页依次输出）；全屏页面已有自己的页头时不再写标题 */
+function writeSummary(opts: SecurityOptions, title: string, summary: TerminalSummary | readonly TerminalSummary[]): void {
+  if (opts.framed !== false) {
+    opts.writer.line("");
+    opts.writer.line(chalk.bold(`  ${title}`));
+  }
+  const pages = Array.isArray(summary) ? summary : [summary as TerminalSummary];
+  for (const page of pages) {
+    for (const line of summaryLines(page)) opts.writer.line(opts.framed === false ? line : `  ${line}`);
+  }
+  if (opts.framed !== false) opts.writer.line("");
 }
 // ─── /trust ───
 
@@ -333,28 +250,7 @@ function printTrustHelp(writer: CliWriter): void {
   writer.line("  /trust others [游标]  列出其他范围（显式工作区、已失效工作区等）");
   writer.line("");
   writer.line(
-    chalk.dim("  typeahead 模式下可在 /trust 面板浏览并 Ctrl+D 双击撤销"),
+    chalk.dim("  在终端里输入 /trust 后加空格可浏览规则，两次 Ctrl+D 撤销"),
   );
   writer.line("");
 }
-
-// ─── 内部 helpers（/security 概览用） ───
-
-/**
- * PermissionContextId.kind → 中文标签。
- * workspace / scene 统一显示「当前工作场景」，对用户呈现统一术语；底层 kind 由
- * type system 严守隔离。
- */
-function formatContextKindLabel(
-  contextId: PermissionContextId | undefined,
-): string {
-  if (!contextId) return "(unknown context)";
-  switch (contextId.kind) {
-    case "main":
-      return "主模式";
-    case "workspace":
-    case "scene":
-      return "当前工作场景";
-  }
-}
-

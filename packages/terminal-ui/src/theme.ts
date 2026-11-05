@@ -30,6 +30,9 @@ export const tone = {
   rule: RGBA.fromIndex(8),
 } as const;
 
+/** 章节标记：选项列表的分节与信息分节共用同一个字形与品牌色 */
+export const sectionMarker = '▎ ';
+
 export const spacing = { content: 2, marker: 3, userInner: 2, scrollbar: 1, nested: 2, frame: 1, frameInner: 1, welcomeInner: 3 } as const;
 
 /** All frames are measured against the same addressable terminal grid. */

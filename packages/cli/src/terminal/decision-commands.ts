@@ -6,6 +6,8 @@ import { renderAdvancementDetailLines } from '../advancement-presentation.js';
 import { stripAnsi } from '../tui/ansi.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';
+import { type SessionSecurityResult } from '@zhixing/rpc';
+import { securityOverview, securityRulesDetail } from '../security/security-summary.js';
 
 export type TerminalDecisionController = Pick<ConversationController<string>, 'advancementDetail' | 'uncertainRuns' | 'resolveUncertain'> & {
   readonly current: { readonly conversationId: string; readonly name?: string };
@@ -67,6 +69,11 @@ export class TerminalDecisionCommands {
       scope.assertCurrent(); return response;
     };
     try {
+      // 安全状态的概览与规则说明是结构化信息页（语义投影见 security-summary.ts）；help 仍是文字页
+      if (name === 'security' && argument.trim().split(/\s+/)[0]?.toLowerCase() !== 'help') {
+        await securityPages(this.options, argument, scope, choose);
+        return;
+      }
       if (name === 'security' || name === 'trust') {
         const collected = collectText(scope);
         const succeeded = name === 'security' ? await handleSecurityCommand(argument, {
@@ -168,6 +175,35 @@ export class TerminalDecisionCommands {
     } finally {
       abort.abort(); if (this.#abort === abort) this.#abort = undefined; this.#running = false;
     }
+  }
+}
+
+/** /security 概览与规则说明。读取失败如实显示失败，不当作零记录；页面或对话变化照常作废。
+ *  概览默认选中“返回输入”；说明页返回（或 Esc）回到概览，/security rules 直接打开说明页、返回即结束 */
+async function securityPages(options: TerminalDecisionOptions, argument: string, scope: TerminalDecisionScope, choose: TerminalSelectionPort): Promise<void> {
+  let snapshot: SessionSecurityResult;
+  try {
+    scope.assertCurrent();
+    const result = await options.management.securityStatus(scope.conversationId);
+    scope.assertCurrent(); snapshot = boundedControlProjection(result, 1024 * 1024);
+  } catch (error) {
+    if (error instanceof ExpiredDecision) throw error;
+    await options.publish({ title: '安全状态', message: `安全状态不可用：${plainText(error instanceof Error ? error.message : String(error))}`, error: true });
+    return;
+  }
+  const overview = securityOverview(snapshot), rules = securityRulesDetail(snapshot);
+  const direct = argument.trim().split(/\s+/)[0]?.toLowerCase() === 'rules';
+  for (let page: 'overview' | 'rules' = direct ? 'rules' : 'overview'; ;) {
+    if (page === 'rules') {
+      const result = await chooseTerminalSelection({ title: '规则说明', summary: rules,
+        options: [{ value: 'back', label: direct ? '返回输入' : '返回安全状态' }] }, choose);
+      if (direct || !result || (result.kind === 'cancelled' && result.cause !== 'escape')) return;
+      page = 'overview'; continue;
+    }
+    const result = await chooseTerminalSelection({ title: '安全状态', summary: overview, initialValue: 'done',
+      options: [{ value: 'done', label: '返回输入' }, { value: 'rules', label: '查看规则说明' }] }, choose);
+    if (result?.kind !== 'selected' || result.value !== 'rules') return;
+    page = 'rules';
   }
 }
 

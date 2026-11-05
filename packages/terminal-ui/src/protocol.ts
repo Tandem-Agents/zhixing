@@ -161,6 +161,43 @@ export interface TerminalChoice {
   readonly status?: 'ready' | 'pending' | 'disabled';
 }
 
+/**
+ * 信息页的结构化内容：页面只给语义（文字与语气），章节标记、颜色、对齐与宽窄适配由 U 的公共分节组件决定。
+ * 与 message 二选一；N 在 terminalSelectionActions 按下面的上界校验形状。
+ */
+export interface TerminalSummary {
+  /** 页首陈述，每行由若干片段组成 */
+  readonly lead: readonly (readonly TerminalSummaryText[])[];
+  readonly sections: readonly TerminalSummarySection[];
+}
+/** accent：本页的关键值；dim：次要说明；warn：需要留意的事实（必须同时有文字说明，不只靠颜色） */
+export type TerminalSummaryTone = 'normal' | 'accent' | 'dim' | 'warn';
+export interface TerminalSummaryText { readonly text: string; readonly tone?: TerminalSummaryTone }
+export interface TerminalSummarySection {
+  readonly title: string;
+  /** 标题右侧的弱化侧注；同一行放不下时换到标题下一行 */
+  readonly aside?: string;
+  /** 并列的短条目，以“ · ”连接，按条目折行 */
+  readonly items?: readonly string[];
+  /** 标签与值成对的行 */
+  readonly rows?: readonly TerminalSummaryRow[];
+  /** 没有条目与行时的空态 */
+  readonly empty?: string;
+  /** 区块末尾的弱化说明 */
+  readonly notes?: readonly string[];
+}
+export interface TerminalSummaryRow {
+  readonly label: string;
+  readonly value: string;
+  readonly tone?: 'normal' | 'warn';
+  /** 行下的弱化说明，例如规则描述 */
+  readonly note?: string;
+}
+/** bytes 是一页信息内容的预算：比通道帧上限少 32 KiB，留给视图的其余字段与信封；完整帧另由发页前核算兜底 */
+export const TERMINAL_SUMMARY_LIMITS = { lead: 6, parts: 8, sections: 16, items: 256, rows: 512, notes: 8, text: 2048, bytes: TERMINAL_LIMITS.frameBytes - 32 * 1024 } as const;
+/** 视图之外的信封与序号等字段的预留：发页前按“视图字节 + 预留 ≤ 帧上限”核算 */
+export const TERMINAL_VIEW_ENVELOPE_BYTES = 4 * 1024;
+
 export interface TerminalDisplaySegment {
   readonly blockId: string;
   readonly groupId?: string;
@@ -210,6 +247,8 @@ export interface TerminalView {
   readonly title: string;
   readonly conversationId?: string;
   readonly message?: string;
+  /** 结构化信息内容（信息页），与 message 二选一 */
+  readonly summary?: TerminalSummary;
   readonly displayGap?: boolean;
   readonly displayPaused?: boolean;
   readonly bodyRecovery?: 'retrying' | 'blocked';

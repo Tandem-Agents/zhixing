@@ -49,19 +49,42 @@ export function joinSelectedLeaves(leaves: readonly SelectionLeaf[]): string {
     .map(([, line]) => line.sort((a, b) => a.x - b.x).map(segment => segment.text).join('')).join('\n');
 }
 
+/** 语义文字节点：每个节点是一段完整的语义文字（原生折行，选中文字即源文）；after 指向它所跟随的节点，joiner 是两者之间的连接（缺省为制表符） */
+export interface SemanticLeafInfo { readonly key: object; readonly after?: object; readonly joiner?: string }
+
+/**
+ * 语义文字节点的拼接：节点按阅读顺序排列，各取自己选中的源文（跨软折行不含换行与缩进）；
+ * 跟随关系（标签后的值、标题后的侧注之间是制表符，同一串并列条目之间是空格）按各自的连接符，其余段落之间换行。
+ */
+export function joinSemanticLeaves(leaves: readonly SelectionLeaf[], info: (leaf: SelectionLeaf) => SemanticLeafInfo): string {
+  let text = '', previous: SemanticLeafInfo | undefined;
+  for (const leaf of [...leaves].sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const part = leaf.getSelectedText();
+    if (!part) continue;
+    const current = info(leaf);
+    text += previous ? (current.after && current.after === previous.key ? current.joiner ?? '\t' : '\n') + part : part;
+    previous = current;
+  }
+  return text;
+}
+
 export function copySource(selection: SelectionState | null | undefined, options: {
   readonly root: SelectionLeaf;
   readonly isBodyLeaf: (leaf: SelectionLeaf) => boolean;
   /** 正文自己是否认定有选区：它的源文映射认可纯换行的选区，这时渲染器里一个选中的字符叶节点也没有 */
   readonly bodySelected: boolean;
   readonly editor?: SelectionLeaf;
+  /** 语义文字节点（如信息分节）的关系；全部选中节点都有关系时按语义拼接 */
+  readonly semanticLeaf?: (leaf: SelectionLeaf) => SemanticLeafInfo | undefined;
 }): CopySource | undefined {
   if (!selection) return undefined;
   if (selection.isDragging) return { kind: 'dragging' };
   const leaves = selection.selectedRenderables.filter(leaf => onScreen(leaf, options.root));
   // 选中叶节点全在正文里（含一个也没有的纯换行选区）：以正文的判断为准；混入正文以外的叶节点才整段读取
   if (leaves.every(options.isBodyLeaf)) return options.bodySelected ? { kind: 'body' } : undefined;
+  const semantic = options.semanticLeaf;
   const text = options.editor && leaves.length === 1 && leaves[0] === options.editor ? options.editor.getSelectedText()
+    : semantic && leaves.every(leaf => semantic(leaf)) ? joinSemanticLeaves(leaves, leaf => semantic(leaf)!)
     : joinSelectedLeaves(leaves);
   return text.length ? { kind: 'text', text } : undefined;
 }

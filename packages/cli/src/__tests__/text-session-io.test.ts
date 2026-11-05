@@ -5,6 +5,8 @@ import { TextLineInput, TextSessionOutput, createTextSelection, attachTextInterr
 import { resolveTerminalConfirmation, projectTerminalConfirmation } from '../terminal/confirmation.js';
 import type { ConfirmationRequest } from '@zhixing/core/confirmation';
 import { chooseTerminalSelection } from '../terminal/selection.js';
+import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import { summaryLines } from '../summary-projection.js';
 
 function output() {
   let value = '';
@@ -95,6 +97,15 @@ describe('non-TTY output and decisions', () => {
     expect(view.text()).toContain('撤销：/trust revoke ID'); expect(view.text()).not.toContain('还有更多内容');
     for (const selectionLayer of ['input', 'confirm'] as const) expect(await display({ kind: 'selection', selectionLayer,
       title: '不能自动选择', choices: [{ id: 'next', label: '继续' }] })).toBeUndefined();
+  });
+  it('writes a sectioned information page through the same text exit, every page of it', async () => {
+    const view = output(), display = createTextSelection(view.writer, { readOnly: true });
+    const page = (title: string): TerminalSummary => ({ lead: [[{ text: `${title}页首` }]], sections: [{ title, rows: [{ label: '标签', value: `${title}的值`, note: '说明' }], notes: ['区块说明'] }] });
+    const result = await chooseTerminalSelection({ title: '安全状态', summary: [page('第一'), page('第二')],
+      options: [{ value: 'done', label: '返回输入' }] }, display);
+    expect(result).toBeUndefined();
+    for (const summary of [page('第一'), page('第二')]) for (const line of summaryLines(summary)) expect(view.text()).toContain(line);
+    expect(view.text()).not.toContain('还有更多内容');
   });
 });
 

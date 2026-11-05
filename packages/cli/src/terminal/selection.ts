@@ -1,5 +1,5 @@
-import { type TerminalView, type TerminalSelectionCancelCause } from '@zhixing/terminal-ui/protocol';
-import { type SelectionRequest, type SelectionResult } from '../tui/selection/types.js';
+import { TERMINAL_LIMITS, TERMINAL_SUMMARY_LIMITS, TERMINAL_VIEW_ENVELOPE_BYTES, type TerminalView, type TerminalSelectionCancelCause, type TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import type { SelectionRequest, SelectionResult } from '../tui/selection/types.js';
 
 export interface TerminalSelectionResponse { readonly itemId: string; readonly input?: string; readonly cancelCause?: TerminalSelectionCancelCause }
 export type TerminalSelectionPage = Omit<TerminalView, 'generation' | 'requestId'>;
@@ -30,6 +30,8 @@ export function terminalSelectionActions(page: TerminalSelectionPage): ReadonlyS
     if (enabled) allowed.add(id);
   }
   if (page.initialItemId !== undefined && (!validId(page.initialItemId) || !choices.some(choice => choice.id === page.initialItemId && !choice.disabled))) throw Error('terminal-selection-initial');
+  // 信息页：结构化内容与 message 二选一，形状与上界在这里核对，U 只按语义呈现
+  if (page.summary !== undefined && (page.message || !validSummary(page.summary))) throw Error('terminal-selection-summary');
   // 单字段页：提交动作由字段声明，不与动作列表混用（混用会让 Enter 的去向取决于看不见的选中项）
   if (page.fieldSubmit !== undefined) {
     const submit = page.fieldSubmit;
@@ -38,6 +40,23 @@ export function terminalSelectionActions(page: TerminalSelectionPage): ReadonlyS
     allowed.add(submit.id);
   }
   return allowed;
+}
+
+function validSummary(value: TerminalSummary): boolean {
+  const limits = TERMINAL_SUMMARY_LIMITS;
+  const text = (item: unknown): item is string => typeof item === 'string' && item.length <= limits.text && !/[\u0000-\u001f\u007f]/u.test(item);
+  const optional = (item: unknown) => item === undefined || text(item);
+  // 形状来自跨进程数据，逐项按未知值核对
+  const list = (items: unknown, max: number, each: (item: any) => boolean) => items === undefined || (Array.isArray(items) && items.length <= max && items.every(each));
+  if (!value || !Array.isArray(value.lead) || !Array.isArray(value.sections) || value.lead.length > limits.lead || value.sections.length > limits.sections) return false;
+  const lead = value.lead.every(line => Array.isArray(line) && list(line, limits.parts, (part: { text: unknown; tone?: unknown }) =>
+    !!part && text(part.text) && (part.tone === undefined || ['normal', 'accent', 'dim', 'warn'].includes(part.tone as string))));
+  const sections = value.sections.every(section => !!section && text(section.title) && section.title.length > 0 &&
+    optional(section.aside) && optional(section.empty) && list(section.items, limits.items, text) &&
+    list(section.notes, limits.notes, text) &&
+    list(section.rows, limits.rows, (row: { label: unknown; value: unknown; note?: unknown; tone?: unknown }) =>
+      !!row && text(row.label) && text(row.value) && optional(row.note) && (row.tone === undefined || row.tone === 'normal' || row.tone === 'warn')));
+  return lead && sections && Buffer.byteLength(JSON.stringify(value)) <= limits.bytes;
 }
 
 function cancellation(response: TerminalSelectionResponse | undefined): Extract<SelectionResult, { kind: 'cancelled' }> | undefined {
@@ -50,7 +69,11 @@ function cancellation(response: TerminalSelectionResponse | undefined): Extract<
 export async function chooseTerminalSelection<T extends string>(request: SelectionRequest<T>, choose: TerminalSelectionPort): Promise<SelectionResult<T> | undefined> {
   const allText = [request.title, ...(request.body ?? []), ...(request.details?.body ?? []), ...request.options.flatMap(option =>
     [option.label, option.description ?? '', ...(option.details?.body ?? []), ...(option.confirm?.body ?? [])])];
-  if (allText.reduce((bytes, text) => bytes + Buffer.byteLength(text) + 64, 0) > 2 * 1024 * 1024 || request.options.length > 32) {
+  // 信息内容可以是一页或多页；正文文字与它二选一
+  const summaries: readonly TerminalSummary[] = request.summary === undefined ? [] : Array.isArray(request.summary) ? request.summary : [request.summary as TerminalSummary];
+  if (summaries.length && request.body?.length) throw Error('terminal-selection-summary');
+  const summaryBytes = summaries.reduce((bytes, summary) => bytes + Buffer.byteLength(JSON.stringify(summary)), 0);
+  if (allText.reduce((bytes, text) => bytes + Buffer.byteLength(text) + 64, summaryBytes) > 2 * 1024 * 1024 || request.options.length > 32) {
     await choose({ kind: 'selection', title: '无法完整展示此请求', message: '内容超过当前安全展示容量，确认已禁用。可返回并保留待处理请求。', choices: [{ id: 'return', label: '返回' }] });
     return;
   }
@@ -59,19 +82,25 @@ export async function chooseTerminalSelection<T extends string>(request: Selecti
   let page = 0;
   let active = request.options.find(option => option.value === request.initialValue && !option.disabled) ?? request.options.find(option => !option.disabled);
   for (;;) {
-    const pages = pageCount(body);
-    const view: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'select', title: request.title,
+    const pages = summaries.length || pageCount(body);
+    const view: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'select', title: summaries.length > 1 ? `${request.title}（${page + 1}/${pages}）` : request.title,
       ...(active ? { initialItemId: `option:${active.value}` } : {}),
       ...(request.details ? { detailsActionId: 'request-details' } : {}),
-      message: pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}）` : ''),
+      // 信息页按页给出结构化内容，与正文文字二选一
+      ...(summaries.length ? { summary: summaries[page] } : { message: pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}）` : '') }),
       choices: [
         ...request.options.map(option => ({ id: `option:${option.value}`, label: option.label, detail: option.description, disabled: option.disabled, danger: option.tone === 'danger', hotkey: option.hotkey,
           ...(option.details || request.details ? { detailsActionId: `details:${option.value}` } : {}) })),
-        ...(page ? [{ id: 'previous', label: '上一页正文' }] : []),
-        ...(page + 1 < pages ? [{ id: 'next', label: '下一页正文' }] : []),
+        ...(page ? [{ id: 'previous', label: summaries.length ? '上一页' : '上一页正文' }] : []),
+        ...(page + 1 < pages ? [{ id: 'next', label: summaries.length ? '下一页' : '下一页正文' }] : []),
         ...(request.details ? [{ id: 'details', label: request.details.title ?? '查看详情' }] : []),
       ] };
     terminalSelectionActions(view);
+    // 整帧核算：视图连同信封不超过通道帧上限；超出时说明无法完整展示，不让超大帧把控制通道关掉
+    if (Buffer.byteLength(JSON.stringify(view)) + TERMINAL_VIEW_ENVELOPE_BYTES > TERMINAL_LIMITS.frameBytes) {
+      await choose({ kind: 'selection', title: '无法完整展示此请求', message: '内容超过当前安全展示容量，确认已禁用。可返回并保留待处理请求。', choices: [{ id: 'return', label: '返回' }] });
+      return;
+    }
     const response = await choose(view);
     if (!response) return;
     const cancelled = cancellation(response); if (cancelled) return cancelled;

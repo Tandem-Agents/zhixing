@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { chooseTerminalSelection, terminalSelectionActions, type TerminalSelectionPage, type TerminalSelectionResponse } from '../selection.js';
-import { type SelectionRequest } from '../../tui/selection/types.js';
+import type { SelectionRequest } from '../../tui/selection/types.js';
 
 const cancelled = (cancelCause: 'escape' | 'ctrl-c' | 'ctrl-d' | 'aborted'): TerminalSelectionResponse => ({ itemId: 'cancelled', cancelCause });
 const request: SelectionRequest = { title: '选择', initialValue: 'other', details: { body: ['总览'] }, options: [

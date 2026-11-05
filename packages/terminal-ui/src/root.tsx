@@ -21,10 +21,11 @@ import { interactionKey, inputRows, candidateLayout, initialChoiceIndex, nextCho
 import { CandidateView } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
-import { tone, spacing, surfaceGeometry } from './theme.js';
+import { tone, spacing, surfaceGeometry, sectionMarker } from './theme.js';
 import { copySource, type CopySource, type SelectionLeaf, type SelectionState } from './copy-selection.js';
 import { conversationVisit, historyVisit, operatedVisit, type ReadingVisit } from './reading-visit.js';
 import { configureSelectionTexture } from './selection-model.js';
+import { SummaryView, summaryLeafInfo } from './summary-view.js';
 
 extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
@@ -496,7 +497,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const currentCopy = (): CopySource | undefined => {
     const target = editor && !editor.isDestroyed && !view().field?.secret ? editor as unknown as SelectionLeaf : undefined;
     return copySource(renderer.getSelection() as unknown as SelectionState | null, { root: renderer.root as unknown as SelectionLeaf, isBodyLeaf: isBodyTextLeaf,
-      bodySelected: isBody() && !!bodyView?.hasSelection(), editor: target, });
+      bodySelected: isBody() && !!bodyView?.hasSelection(), editor: target, semanticLeaf: summaryLeafInfo });
   };
   const refreshCopy = () => {
     if (disposed) return;
@@ -705,7 +706,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       return <box id={`choice-${index() + choiceStart()}`} flexDirection="column" flexShrink={0}
         paddingTop={view().kind === 'configuration' && choice.presentation === 'button' && index() > 0 && choices()[index() - 1]?.presentation !== 'button' && !startsSection() ? 1 : 0}>
       <Show when={startsSection()}>
-        <text marginTop={index() ? 1 : 0} marginBottom={1} fg={tone.brand}>{`▎ ${displayText(choice.section ?? '')}`}</text>
+        <text marginTop={index() ? 1 : 0} marginBottom={1} fg={tone.brand}>{`${sectionMarker}${displayText(choice.section ?? '')}`}</text>
         <Show when={choice.sectionDescription}><text marginLeft={2} marginBottom={1} fg={tone.dim}>{displayText(choice.sectionDescription ?? '')}</text></Show>
       </Show>
       <ChoiceView choice={choice} selected={selected() === index() + choiceStart()} width={Math.max(1, bodySize().width - 1 - spacing.content * 2)} configuration={view().kind === 'configuration'} measure={measureInformation} />
@@ -726,6 +727,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       }}>
       <Show when={view().kind === 'skills' && view().skills} fallback={<Show when={isBody()} fallback={<scrollbox ref={value => { historyBox = value; }} flexGrow={1}><box marginX={spacing.content} flexDirection="column">
         <Show when={view().message}><text selectable>{displayText(view().message ?? '')}</text></Show>
+        {/* 信息页的结构化内容：宽度按窗口同帧推导（左右留白与滚动条列），不等布局后回报 */}
+        <Show when={view().summary}><SummaryView summary={view().summary!} width={Math.max(1, size().width - spacing.content * 2 - spacing.scrollbar)}
+          graphemeWidth={graphemeWidth} display={displayText} /></Show>
         <Show when={view().kind === 'recovery'}><text selectable fg="#111111" bg="#ffffff">{displayText(recoveryPage().text)}</text></Show>
         <Show when={view().kind !== 'configuration' && view().choices?.[selected()]?.detail}><text fg={tone.dim}>{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
