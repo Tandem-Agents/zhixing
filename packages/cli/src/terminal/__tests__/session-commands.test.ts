@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ActiveConversation, ConversationController, TurnOutcome } from '../../runtime/conversation-controller.js';
-import type { RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
+import { type ActiveConversation, type ConversationController, type TurnOutcome } from '../../runtime/conversation-controller.js';
+import { type RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
 import { TerminalSessionCommands, projectCommittedTerminalOutcome, projectTerminalTurnOutcome, type TerminalTurnOutcome } from '../session-commands.js';
 import { ADVANCEMENT_PROPOSED_NOTICE } from '@zhixing/core/advancement/proposal-messages';
-import type { TerminalSelectionPort } from '../selection.js';
+import { type TerminalSelectionPort } from '../selection.js';
 import { TerminalCandidatesOwner } from '../candidates.js';
 
 function fixture() {
@@ -19,12 +19,12 @@ function fixture() {
     exitScene: vi.fn(async (target: ActiveConversation) => ({ kind: 'returned' as const, active: active = target })),
   };
   const workscene = { list: vi.fn(async () => [{ sceneId: 'scene-1', name: '场景' }]), rename: vi.fn(async () => ({})), delete: vi.fn(async () => {}) };
-  const changed = vi.fn(async () => {}), publish = vi.fn(async () => {}), choose = vi.fn<TerminalSelectionPort>(async () => undefined);
+  const changed = vi.fn(async () => {}), publish = vi.fn(async () => {}), choose = vi.fn<TerminalSelectionPort>(async () => undefined), result = vi.fn(async () => {});
   const deletedCurrent = vi.fn(), settleDelete = vi.fn(), deleting = vi.fn(() => settleDelete), createScene = vi.fn(async (): Promise<string | undefined> => undefined);
   const owner = new TerminalSessionCommands({ controller: () => controller as unknown as ConversationController<TerminalTurnOutcome>,
-    workscene: workscene as unknown as RpcWorksceneFacade, changed, publish, choose, deletedCurrent, deleting, createScene,
+    workscene: workscene as unknown as RpcWorksceneFacade, changed, publish, result, choose, deletedCurrent, deleting, createScene,
     activeTurn: () => null, signal: new AbortController().signal });
-  return { owner, controller, workscene, changed, publish, choose, deletedCurrent, deleting, settleDelete, createScene };
+  return { owner, controller, workscene, changed, publish, result, choose, deletedCurrent, deleting, settleDelete, createScene };
 }
 
 describe('terminal session navigation', () => {
@@ -40,7 +40,7 @@ describe('terminal session navigation', () => {
     const f = fixture();
     await f.owner.run('work', 'scene-1');
     await expect(f.owner.run('work', 'scene-2')).resolves.toBeUndefined();
-    expect(f.publish).toHaveBeenLastCalledWith('已在工作场景中，请先 /exit 返回主对话。');
+    expect(f.result).toHaveBeenLastCalledWith('已在工作场景中，请先 /exit 返回主对话。'); expect(f.publish).not.toHaveBeenCalled();
     expect(f.controller.enterScene).toHaveBeenCalledTimes(1);
   });
   it('lists and manages scenes only from the main conversation; inside a scene /work shows the guidance', async () => {
@@ -58,17 +58,79 @@ describe('terminal session navigation', () => {
     expect(inScene).toMatchObject({ items: [], argumentHint: '已在工作场景中，请先 /exit 返回主对话。', canDelete: false, canRename: false, canCreate: false, hint: 'Esc 返回' });
     expect(() => source.manage(3, 'create')).toThrow('不支持');
   });
-  it('prefills a scene rename with its current name and confirms the save', async () => {
+  it('renames the selected scene in place, naming that scene rather than the visible conversation', async () => {
     const f = fixture(); f.choose.mockResolvedValueOnce({ itemId: 'save', input: '新名' } as never);
     await f.owner.manage('work', 'rename', 'scene-1', '场景');
-    expect(f.choose.mock.calls[0]![0]).toMatchObject({ title: '工作场景改名', message: '当前名称：场景', field: { value: '场景' } });
-    expect(f.workscene.rename).toHaveBeenCalledWith('scene-1', '新名'); expect(f.publish).toHaveBeenLastCalledWith('名称已保存。');
+    const page = f.choose.mock.calls[0]![0];
+    expect(page).toMatchObject({ inline: true, title: '重命名工作场景「场景」', field: { value: '场景', label: '新的场景名称' }, fieldSubmit: { id: 'save', label: '保存' }, cancelLabel: '取消' });
+    expect(page).not.toHaveProperty('choices');
+    expect(f.workscene.rename).toHaveBeenCalledWith('scene-1', '新名'); expect(f.result).toHaveBeenLastCalledWith('工作场景已改名为「新名」。');
+  });
+  it('renames the conversation in place: a single field with save and cancel, no action list', async () => {
+    const f = fixture(); f.choose.mockResolvedValueOnce({ itemId: 'save', input: '  新名称  ' } as never);
+    await f.owner.run('name', '');
+    const page = f.choose.mock.calls[0]![0];
+    expect(page).toMatchObject({ kind: 'selection', inline: true, title: '重命名对话', field: { id: 'name', value: '主对话' }, fieldSubmit: { id: 'save', label: '保存' }, cancelLabel: '取消' });
+    expect(page).not.toHaveProperty('choices');
+    expect(f.controller.rename).toHaveBeenCalledWith('新名称'); expect(f.changed).toHaveBeenCalled();
+    expect(f.result).toHaveBeenLastCalledWith('已改名为「新名称」。');
+  });
+  it('keeps an empty or failed save in the field with the submitted value and the reason, and never retries by itself', async () => {
+    const f = fixture();
+    f.choose.mockResolvedValueOnce({ itemId: 'save', input: '   ' } as never)
+      .mockResolvedValueOnce({ itemId: 'save', input: '坏名' } as never)
+      .mockResolvedValueOnce({ itemId: 'save', input: '好名' } as never);
+    f.controller.rename.mockRejectedValueOnce(Error('名称含不支持的字符。'));
+    await f.owner.run('name', '');
+    const pages = f.choose.mock.calls.map(([page]) => page);
+    expect(pages).toHaveLength(3);
+    expect(pages[1]).toMatchObject({ field: { value: '', error: '名称不能为空。' } });
+    expect(pages[2]).toMatchObject({ field: { value: '坏名', error: '保存失败：名称含不支持的字符。可修改后再按 Enter 保存，或按 Esc 取消。' } });
+    expect(f.controller.rename.mock.calls.map(([name]) => name)).toEqual(['坏名', '好名']);
+    expect(f.result).toHaveBeenLastCalledWith('已改名为「好名」。');
+  });
+  it('opens the field with the submitted value when a direct /name argument fails', async () => {
+    const f = fixture(); f.controller.rename.mockRejectedValueOnce(Error('暂不可用'));
+    await f.owner.run('name', '想要的名字');
+    expect(f.choose.mock.calls[0]![0]).toMatchObject({ field: { value: '想要的名字', error: '保存失败：暂不可用。可修改后再按 Enter 保存，或按 Esc 取消。' } });
+    expect(f.publish).not.toHaveBeenCalled(); expect(f.result).not.toHaveBeenCalled();
+  });
+  it('says nothing changed for the same name, and a cancel leaves no result of its own', async () => {
+    const f = fixture();
+    await f.owner.run('name', '改过');
+    expect(f.result).toHaveBeenLastCalledWith('已改名为「改过」。');
+    f.choose.mockResolvedValueOnce({ itemId: 'save', input: '改过' } as never);
+    await f.owner.run('name', '');
+    expect(f.result).toHaveBeenLastCalledWith('名称未改变。'); expect(f.controller.rename).toHaveBeenCalledTimes(1);
+    // 上一条结果由应用在本次命令受理时撤回（见 application-operation-result.test.ts）；取消本身不发布任何说明
+    f.result.mockClear();
+    f.choose.mockResolvedValueOnce({ itemId: 'cancelled', cancelCause: 'escape' } as never);
+    await f.owner.run('name', '');
+    expect(f.result).not.toHaveBeenCalled(); expect(f.publish).not.toHaveBeenCalled();
+  });
+  it('ends the rename when the conversation changes while saving, without reopening the old field', async () => {
+    const f = fixture();
+    f.choose.mockResolvedValueOnce({ itemId: 'save', input: '新名' } as never);
+    f.controller.rename.mockImplementationOnce(async () => { await f.controller.newConversation(); throw Error('对话已切换'); });
+    await expect(f.owner.run('name', '')).rejects.toThrow('对话已变化');
+    expect(f.choose).toHaveBeenCalledTimes(1); expect(f.publish).not.toHaveBeenCalled(); expect(f.result).not.toHaveBeenCalled();
+  });
+  it('keeps an empty new-scene description on its page instead of treating it as a cancel', async () => {
+    const f = fixture();
+    f.choose.mockResolvedValueOnce({ itemId: 'save', input: '' } as never).mockResolvedValueOnce({ itemId: 'save', input: '论文场景' } as never);
+    f.createScene.mockResolvedValueOnce('论文');
+    await f.owner.manage('work', 'create');
+    const pages = f.choose.mock.calls.map(([page]) => page);
+    expect(pages[0]).toMatchObject({ title: '新建工作场景', fieldSubmit: { id: 'save', label: '继续创建' }, cancelLabel: '取消' });
+    expect(pages[0]).not.toHaveProperty('inline'); expect(pages[0]).not.toHaveProperty('choices');
+    expect(pages[1]).toMatchObject({ field: { error: '请描述用途和工作目录，或输入名称。' } });
+    expect(f.createScene).toHaveBeenCalledWith('论文场景', expect.any(Function));
   });
   it('reports a created scene by name and stays quiet when nothing was created', async () => {
     const f = fixture(); f.choose.mockResolvedValue({ itemId: 'save', input: '用途说明' } as never);
     f.createScene.mockResolvedValueOnce('页面场景');
-    await f.owner.manage('work', 'create'); expect(f.publish).toHaveBeenLastCalledWith('已创建工作场景「页面场景」。');
-    f.publish.mockClear(); await f.owner.manage('work', 'create'); expect(f.publish).not.toHaveBeenCalled();
+    await f.owner.manage('work', 'create'); expect(f.result).toHaveBeenLastCalledWith('已创建工作场景「页面场景」。');
+    f.result.mockClear(); await f.owner.manage('work', 'create'); expect(f.result).not.toHaveBeenCalled(); expect(f.publish).not.toHaveBeenCalled();
   });
   it('keeps a local delete echo owned until a replacement conversation is installed', async () => {
     const f = fixture();

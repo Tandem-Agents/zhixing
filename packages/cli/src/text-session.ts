@@ -201,7 +201,7 @@ export async function startTextSession(home: string, configPath: string, options
         await confirmations!.refresh().catch(fail);
       };
       session = new TerminalSessionCommands({ controller: current, workscene, signal: lifetime.signal, choose,
-        publish: async message => output.line(message), changed, activeTurn: () => activeTurn,
+        publish: async message => output.line(message), result: async message => output.line(message), changed, activeTurn: () => activeTurn,
         createScene: async () => { output.line('新建工作场景需要交互确认，请在交互终端继续。'); return undefined; },
         deleting: () => () => {}, deletedCurrent: requestExit });
       information = new TerminalInformationCommands({ controller: current, signal: lifetime.signal, choose: display,

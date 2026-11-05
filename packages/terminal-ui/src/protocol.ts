@@ -224,7 +224,15 @@ export interface TerminalView {
   readonly selectionLayer?: 'select' | 'input' | 'confirm' | 'details';
   readonly initialItemId?: string;
   readonly detailsActionId?: string;
-  readonly field?: { readonly id: string; readonly label: string; readonly secret: boolean; readonly value?: string; readonly configured?: boolean };
+  /** error：上一次提交未被接受的原因（空值、保存失败）；字段按提交时的值重开，说明写在信息行 */
+  readonly field?: { readonly id: string; readonly label: string; readonly secret: boolean; readonly value?: string; readonly configured?: boolean; readonly error?: string };
+  /** 单字段页的提交动作：Enter 以它的 id 连同输入应答，不再画动作列表（与 choices 互斥） */
+  readonly fieldSubmit?: { readonly id: string; readonly label: string };
+  /** 单字段页 Esc 的说法（取消、返回）；Esc 照常走选择取消 */
+  readonly cancelLabel?: string;
+  /** 就地字段：底层会话的显示（正文、欢迎、阅读、过程、导航）保留，只把输入区换成这个字段；
+   *  U 没有同一会话的会话视图可依托时按整页显示 */
+  readonly inline?: boolean;
   readonly connected?: boolean;
   readonly connectionState?: 'starting' | 'unavailable';
   /** N completed initial history/observer admission; U acknowledges its frame. */

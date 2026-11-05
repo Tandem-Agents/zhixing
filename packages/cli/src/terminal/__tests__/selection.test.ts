@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { chooseTerminalSelection, terminalSelectionActions, type TerminalSelectionPage, type TerminalSelectionResponse } from '../selection.js';
-import type { SelectionRequest } from '../../tui/selection/types.js';
+import { type SelectionRequest } from '../../tui/selection/types.js';
 
 const cancelled = (cancelCause: 'escape' | 'ctrl-c' | 'ctrl-d' | 'aborted'): TerminalSelectionResponse => ({ itemId: 'cancelled', cancelCause });
 const request: SelectionRequest = { title: '选择', initialValue: 'other', details: { body: ['总览'] }, options: [
@@ -60,6 +60,24 @@ describe('terminal selection contract', () => {
     const allowed = terminalSelectionActions(page);
     expect(allowed.has('option:disabled')).toBe(false); expect(allowed.has('details:disabled')).toBe(false);
     expect(allowed.has('details:other')).toBe(true);
+  });
+  it('authorizes a declared field submit and rejects it without a field or mixed with an action list', () => {
+    const field = { id: 'name', label: '名称', secret: false };
+    expect(terminalSelectionActions({ kind: 'selection', title: '', field, fieldSubmit: { id: 'save', label: '保存' }, cancelLabel: '取消' }).has('save')).toBe(true);
+    expect(() => terminalSelectionActions({ kind: 'selection', title: '', fieldSubmit: { id: 'save', label: '保存' } })).toThrow('field-submit');
+    expect(() => terminalSelectionActions({ kind: 'selection', title: '', field, fieldSubmit: { id: 'save', label: '保存' }, choices: [{ id: 'cancel', label: '取消' }] })).toThrow('field-submit');
+  });
+  it('turns the input layer into a single field: Enter submits, Escape returns, and a required empty input stays with its reason', async () => {
+    const pages: TerminalSelectionPage[] = [];
+    const answers: TerminalSelectionResponse[] = [{ itemId: 'option:edit' }, { itemId: 'submit', input: '  ' }, { itemId: 'submit', input: '理由' }];
+    const result = await chooseTerminalSelection(request, async page => { pages.push(page); return answers.shift(); });
+    expect(result).toEqual({ kind: 'selected', value: 'edit', input: '理由' });
+    expect(pages[1]).toMatchObject({ selectionLayer: 'input', fieldSubmit: { id: 'submit', label: '提交说明' }, cancelLabel: '返回' });
+    expect(pages[1]).not.toHaveProperty('choices'); expect(pages[1]).not.toHaveProperty('initialItemId');
+    expect(pages[2]).toMatchObject({ selectionLayer: 'input', field: { value: '  ', error: '请填写说明后再提交。' } });
+    const optional: SelectionRequest = { title: '选择', options: [{ value: 'note', label: '备注', input: { placeholder: '可留空', allowEmpty: true } }] };
+    const empty = [{ itemId: 'option:note' }, { itemId: 'submit', input: '' }];
+    expect(await chooseTerminalSelection(optional, async () => empty.shift())).toEqual({ kind: 'selected', value: 'note', input: '' });
   });
   it('rejects nonexistent/disabled initial values, duplicate shortcuts and detail/action collisions', async () => {
     await expect(chooseTerminalSelection({ ...request, initialValue: 'disabled' }, async () => undefined)).rejects.toThrow('initial');

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { AsyncLocalStorage } from 'node:async_hooks';
 
 // 从只读历史（F2）返回：运行生产的 #action（history-close、display-retry）、#readOnly、#restoreReturnReading、#leaveHistoryRead、
 // #openHistory、#loadOfflineHistory、#historyPage、#historyPageNow、#offlineHistoryPage、#displayPage 与 #publish。
@@ -9,7 +9,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
 const methods = ['#action', '#readOnly', '#restoreReturnReading', '#leaveHistoryRead', '#openHistory', '#loadOfflineHistory', '#historyPage', '#historyPageNow',
-  '#offlineHistoryPage', '#publish', '#dropHandoff', '#ownsPage', '#publishHistoryView', '#noteHistoryView', '#displayPage'].map(name => {
+  '#offlineHistoryPage', '#publish', '#dropHandoff', '#ownsPage', '#publishHistoryView', '#noteHistoryView', '#displayPage', '#retractResult'].map(name => {
   const node = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === name);
   if (!node) throw Error(`Missing production method ${name}`);
   return node.getText(source).replace(/#/gu, '');

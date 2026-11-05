@@ -1255,5 +1255,119 @@ try {
     checks.push('subpage header frames only a description; a title-only page draws an unframed title rule');
     entryReply = undefined; candidateReply = undefined;
   }
+  // 就地字段（改名）：底层会话的正文、欢迎区、阅读位置不动，只把输入区换成字段；Enter 以字段声明的提交动作应答，
+  // 提交后锁住直到下一视图；N 带原因重开时按提交时的值继续编辑；Esc 取消；返回后主草稿原样
+  {
+    const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const conversation = { kind: 'conversation' as const, title: '就地改名', conversationId: 'inline-name', connected: true, readyForInput: true };
+    const rename = (requestId: string, value: string, extra: Partial<TerminalView> = {}) => ({ kind: 'selection' as const, inline: true, title: '重命名对话',
+      requestId, conversationId: 'inline-name', field: { id: 'name', label: '新名称', value, secret: false }, fieldSubmit: { id: 'save', label: '保存' }, cancelLabel: '取消', ...extra });
+    const receiveOnly = async (view: Omit<TerminalView, 'generation'>) => {
+      root!.receive({ type: 'view', view: { reading: TEST_READING, ...view, generation: ++generation } });
+      for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+      await test.renderOnce();
+    };
+    // 输入框之上的全部行（正文、导航、过程区）：进入与返回时应逐行不变
+    const above = (frame: string) => { const rows = frame.split('\n'); const top = rows.findLastIndex(line => line.trimStart().startsWith('╭')); return rows.slice(0, top).join('\n'); };
+    const lastSelection = () => actions.findLast(action => action.kind === 'selection') as Extract<TerminalAction, { kind: 'selection' }> | undefined;
+    test.resize(100, 32); await show(conversation);
+    test.mockInput.pressKey('\x1b[1;5F'); await flush();
+    let source = ''; const nodes: BodyNode[] = [];
+    for (let row = 0; row < 80; row++) {
+      const line = `inline-body-${String(row).padStart(2, '0')}\n`, from = source.length; source += line;
+      nodes.push({ from, to: source.length, kind: 'paragraph', runs: [{ from, to: source.length, text: line, style: 0 }] });
+    }
+    root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: 'inline-body', contentOffset: 0,
+      text: source, role: 'assistant', final: true, body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes } } }] } }); await flush();
+    // 三行草稿：会话输入框占三行，就地字段沿用这个高度，正文区才不动
+    editor().setText('draft-keep\nsecond line\nthird line'); await flush(); await pause(25); await flush();
+    assert.match(text(), /inline-body-79/); assert.match(text(), /third line/);
+
+    // 跟随底部时进入：首帧起输入框之上的行不变，标题在输入框边框上，没有动作列表
+    const before = text();
+    await receiveOnly(rename('rename-1', '旧名称'));
+    assert.equal(above(text()), above(before), 'entering the inline field keeps the body, navigation and process rows on the first frame');
+    await flush();
+    assert.equal(above(text()), above(before), 'and on the settled frame');
+    assert.match(text(), /╭─ 重命名对话 ─/); assert.equal(editor().plainText, '旧名称');
+    assert.ok(!/保存名称|» 保存|› 取消/.test(text()), 'no duplicated action list'); assert.match(text(), /Enter 保存 · Esc 取消/);
+    // ↑ 归输入框，不改变 Enter 的去向
+    const start = actions.length;
+    await test.mockInput.typeText('X'); await flush(); test.mockInput.pressArrow('up'); await flush();
+    // （字段粘贴在途时 Enter 本就不提交，所以锁住之前不会有未返回的读取；锁判定仍在读取返回处兜底）
+    const reads = () => actions.filter(action => action.kind === 'clipboard-read').length;
+    test.mockInput.pressEnter(); await flush();
+    assert.deepEqual(lastSelection(), { kind: 'selection', requestId: 'rename-1', itemId: 'save', input: '旧名称X' });
+    // 提交后锁住：右键不发起剪贴板读取、不写入；打字、Enter、Esc、Ctrl+D 都不生效，不发第二次应答，不发取消
+    const readsBefore = reads();
+    await test.mockMouse.click(20, 30, 2); await flush(); await pause(25); await flush();
+    assert.equal(reads(), readsBefore, 'no clipboard read while the field is locked'); assert.equal(editor().plainText, '旧名称X');
+    const sink = externalPaste?.(); sink?.write(new TextEncoder().encode('外部粘贴')); sink?.end(); await flush(); await pause(25); await flush();
+    assert.equal(editor().plainText, '旧名称X', 'an external paste never writes into the locked field');
+    assert.match(text(), /正在提交…/); assert.match(text(), /Ctrl\+C 中止\/退出/); assert.ok(!/Enter 保存|Esc 取消/.test(text()), 'the hint shows only what works now');
+    await test.mockInput.typeText('Y'); test.mockInput.pressEnter(); test.mockInput.pressEscape(); test.mockInput.pressKey('\x04'); await pause(25); await flush();
+    assert.equal(editor().plainText, '旧名称X'); assert.equal(actions.slice(start).filter(action => action.kind === 'selection').length, 1);
+    // Ctrl+C 走会话的中止/退出：交 N 一次 interrupt，不向已应答的请求发取消
+    await pause(800); const exitsBefore = exits, interrupts = actions.filter(action => action.kind === 'interrupt').length;
+    test.mockInput.pressKey('\x03'); await flush();
+    assert.equal(actions.filter(action => action.kind === 'interrupt').length, interrupts + 1);
+    assert.equal(actions.slice(start).filter(action => action.kind === 'selection').length, 1); assert.equal(exits, exitsBefore);
+    await pause(800);
+    // N 带原因重开：按提交时的值继续编辑，说明在信息行
+    await show(rename('rename-2', '旧名称X', { field: { id: 'name', label: '新名称', value: '旧名称X', secret: false, error: '保存失败：暂不可用。可修改后再按 Enter 保存，或按 Esc 取消。' } }));
+    assert.match(text(), /保存失败：暂不可用/); assert.equal(editor().plainText, '旧名称X');
+    await test.mockInput.typeText('Z'); await flush(); assert.equal(editor().plainText, '旧名称XZ');
+    // 字段期间正文照常阅读与追加：PgUp 上翻、Ctrl+End 回到底部、新内容跟随显示
+    const followed = above(text());
+    test.mockInput.pressKey('\x1b[5~'); await flush(); await pause(25); await flush();
+    assert.notEqual(above(text()), followed, 'PgUp reads the conversation body while the field is open');
+    test.mockInput.pressKey('\x1b[1;5F'); await flush(); await pause(25); await flush();
+    const appended = source + 'inline-body-80\n';
+    const appendedNodes: BodyNode[] = [...nodes, { from: source.length, to: appended.length, kind: 'paragraph', runs: [{ from: source.length, to: appended.length, text: 'inline-body-80\n', style: 0 }] }];
+    root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: 'inline-body', contentOffset: 0,
+      text: appended, role: 'assistant', final: true, body: { version: 1, revision: 1, kind: 'markdown', end: true, context: { nodes: appendedNodes } } }] } }); await flush();
+    assert.match(text(), /inline-body-80/); assert.equal(editor().plainText, '旧名称XZ');
+    // Esc 取消：选择取消应答
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.deepEqual(lastSelection(), { kind: 'selection', requestId: 'rename-2', cancelled: true, cancelCause: 'escape' });
+    // 返回：首帧输入框之上不变，主草稿原样
+    const beforeReturn = text();
+    await receiveOnly(conversation);
+    assert.equal(above(text()), above(beforeReturn), 'returning keeps the body on the first frame');
+    await flush(); assert.equal(editor().plainText, 'draft-keep\nsecond line\nthird line');
+    checks.push('inline rename keeps the conversation body, reading and process rows; one field with Enter/Esc, locked while saving, reopened with its value and reason');
+
+    // 向上阅读时进入与返回：阅读位置不动
+    for (let wheel = 0; wheel < 12; wheel++) { await test.mockMouse.scroll(20, 3, 'up'); await flush(); }
+    await pause(25); await flush();
+    const reading = text(); assert.ok(!reading.includes('inline-body-80'), 'reading above the bottom');
+    await receiveOnly(rename('rename-3', '旧名称'));
+    assert.equal(above(text()), above(reading), 'entering while reading keeps the reading position on the first frame');
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    const readingField = text();
+    await receiveOnly(conversation);
+    assert.equal(above(text()), above(readingField), 'returning while reading keeps the reading position');
+    test.mockInput.pressKey('\x1b[1;5F'); await flush();
+    checks.push('inline field enters and returns without moving a followed or a read-up body');
+
+    // 窄窗口与长名称：输入框服从可用高度上限，长名称在框内可编辑，信息行仍在
+    for (const [width, height] of [[40, 16], [100, 32]] as const) {
+      test.resize(width, height); await flush();
+      await show(rename(`rename-${width}`, '很长的名称'.repeat(12)));
+      assert.ok(editor().y + editor().height < height - 1, `field fits at ${width}x${height}`); assert.match(text(), /Esc 取消|Esc/);
+      test.mockInput.pressEscape(); await pause(25); await flush(); await show(conversation);
+    }
+    // 没有同一会话可依托时按整页显示；整页单字段页同样没有动作列表，键位写各自的动词
+    await show({ ...rename('rename-page', '旧名称'), conversationId: 'another' });
+    assert.match(text(), /重命名对话 ─{8,}/); assert.ok(!text().includes('inline-body'), 'falls back to a page without another conversation behind it');
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    await show({ kind: 'selection', title: '新建工作场景', requestId: 'scene-new', field: { id: 'scene', label: '描述用途和工作目录，或输入名称', value: '', secret: false },
+      fieldSubmit: { id: 'save', label: '继续创建' }, cancelLabel: '取消' });
+    assert.match(text(), /Enter 继续创建 · Esc 取消/); assert.ok(!text().includes('› 取消'));
+    await test.mockInput.typeText('论文'); test.mockInput.pressEnter(); await flush();
+    assert.deepEqual(lastSelection(), { kind: 'selection', requestId: 'scene-new', itemId: 'save', input: '论文' });
+    await show(conversation); editor().setText(''); await flush();
+    checks.push('inline field obeys the available height and falls back to a page; page fields show their own verbs without an action list');
+  }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

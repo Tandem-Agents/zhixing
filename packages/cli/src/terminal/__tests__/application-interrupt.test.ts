@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 // 能否停以处理时的权威状态为准；停不到时不退出终端，也不停后来的运行。
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#interrupt', '#stopShown'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source)).join('\n');
+const methods = ['#interrupt', '#stopShown', '#showResult'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source)).join('\n');
 const Fixture = new Function(ts.transpile(
   'class Fixture { mainView = {}; args = []; ' + methods.replace(/#/gu, '') + ' } return Fixture;',
   { target: ts.ScriptTarget.ES2022 },

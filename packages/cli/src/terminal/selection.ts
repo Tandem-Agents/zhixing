@@ -1,5 +1,5 @@
-import type { TerminalView, TerminalSelectionCancelCause } from '@zhixing/terminal-ui/protocol';
-import type { SelectionRequest, SelectionResult } from '../tui/selection/types.js';
+import { type TerminalView, type TerminalSelectionCancelCause } from '@zhixing/terminal-ui/protocol';
+import { type SelectionRequest, type SelectionResult } from '../tui/selection/types.js';
 
 export interface TerminalSelectionResponse { readonly itemId: string; readonly input?: string; readonly cancelCause?: TerminalSelectionCancelCause }
 export type TerminalSelectionPage = Omit<TerminalView, 'generation' | 'requestId'>;
@@ -30,6 +30,13 @@ export function terminalSelectionActions(page: TerminalSelectionPage): ReadonlyS
     if (enabled) allowed.add(id);
   }
   if (page.initialItemId !== undefined && (!validId(page.initialItemId) || !choices.some(choice => choice.id === page.initialItemId && !choice.disabled))) throw Error('terminal-selection-initial');
+  // 单字段页：提交动作由字段声明，不与动作列表混用（混用会让 Enter 的去向取决于看不见的选中项）
+  if (page.fieldSubmit !== undefined) {
+    const submit = page.fieldSubmit;
+    if (!page.field || choices.length || !validId(submit.id) || typeof submit.label !== 'string' || !submit.label || submit.label.length > 32 ||
+        (page.cancelLabel !== undefined && (typeof page.cancelLabel !== 'string' || page.cancelLabel.length > 32))) throw Error('terminal-selection-field-submit');
+    allowed.add(submit.id);
+  }
   return allowed;
 }
 
@@ -91,13 +98,19 @@ export async function chooseTerminalSelection<T extends string>(request: Selecti
       if (cancelled || confirmed.itemId !== 'confirm') continue;
     }
     if (option.input) {
-      const entered = await choose({ kind: 'selection', selectionLayer: 'input', initialItemId: 'submit', title: option.label, message: option.description,
-        field: { id: 'selection-input', label: option.input.placeholder, value: '', secret: false },
-        choices: [{ id: 'submit', label: request.submitLabel ?? '提交说明' }, { id: 'back', label: '返回' }] });
+      // 单字段页：Enter 提交、Esc 返回选项列表。不允许空值时，空提交留在输入层说明原因，不悄悄退回列表
+      let value = '', error: string | undefined, entered: TerminalSelectionResponse | undefined;
+      for (;;) {
+        entered = await choose({ kind: 'selection', selectionLayer: 'input', title: option.label, message: option.description,
+          field: { id: 'selection-input', label: option.input.placeholder, value, secret: false, ...(error ? { error } : {}) },
+          fieldSubmit: { id: 'submit', label: request.submitLabel ?? '提交说明' }, cancelLabel: '返回' });
+        if (!entered || cancellation(entered) || entered.itemId !== 'submit') break;
+        if (!option.input.allowEmpty && !entered.input?.trim()) { value = entered.input ?? ''; error = '请填写说明后再提交。'; continue; }
+        return { kind: 'selected', value: option.value, input: entered.input ?? '' };
+      }
       const cancelled = cancellation(entered); if (cancelled && cancelled.cause !== 'escape') return cancelled;
       if (!entered) return;
-      if (cancelled || entered.itemId !== 'submit' || (!option.input.allowEmpty && !entered.input?.trim())) continue;
-      return { kind: 'selected', value: option.value, input: entered.input ?? '' };
+      continue;
     }
     return { kind: 'selected', value: option.value };
   }

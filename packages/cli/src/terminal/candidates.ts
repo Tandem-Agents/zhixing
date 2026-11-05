@@ -1,5 +1,5 @@
 import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type InlineActionSupport, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing/core/typeahead';
-import type { TerminalTrustCandidates } from './trust-candidates.js';
+import { type TerminalTrustCandidates } from './trust-candidates.js';
 import { normalizeLeadingSlashAlias, type TerminalCandidates } from '@zhixing/terminal-ui/protocol';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
@@ -8,6 +8,15 @@ import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
  * the same catalog, without exposing an inoperative candidate. */
 const available = new Set(['help', 'status', 'stop', 'config', 'mcp', 'skills', 'exit', 'trust', 'security', 'advancement', 'resolve', 'tasklist', 'task', 'tasks', 'model', 'usage', 'context', 'compact']);
 interface CandidateQuery { revision: number; abort: AbortController; items: readonly SuggestionItem[]; ghost?: string; command?: 'resume' | 'work'; actions?: InlineActionSupport }
+/** /trust 的管理面板与 /resume、/work 的选择面板：query 判定模式与面板打开判定共用这两条规则 */
+const TRUST_PANEL = /^\/trust\s/u, PICKER_PANEL = /^\/(resume|work)\s/u;
+
+/** 这次查询是否打开管理或选择面板（不执行命令的有效操作） */
+export function opensManagedCandidates(text: unknown, atStart: unknown): boolean {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > 32 * 1024) return false;
+  const semantic = atStart === false ? text : normalizeLeadingSlashAlias(text);
+  return TRUST_PANEL.test(semantic) || PICKER_PANEL.test(semantic);
+}
 
 export class TerminalCandidatesOwner {
   readonly registry = new DefaultCommandRegistry();
@@ -52,8 +61,8 @@ export class TerminalCandidatesOwner {
     for (const provider of this.#providers) {
       const match = provider.matchTrigger(context);
       if (!match) continue;
-      const trust = provider.id === 'argument' && /^\/trust\s/u.test(semanticText);
-      const command = provider.id === 'argument' ? /^\/(resume|work)\s/u.exec(semanticText)?.[1] as 'resume' | 'work' | undefined : undefined;
+      const trust = provider.id === 'argument' && TRUST_PANEL.test(semanticText);
+      const command = provider.id === 'argument' ? PICKER_PANEL.exec(semanticText)?.[1] as 'resume' | 'work' | undefined : undefined;
       const chars = Array.from(text);
       const range = { revision, active: true, start: chars.slice(0, match.tokenStart).join('').length, end: chars.slice(0, match.tokenEnd).join('').length };
       let items: readonly SuggestionItem[];

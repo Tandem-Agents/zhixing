@@ -58,7 +58,10 @@ export interface TerminalSessionOptions {
   readonly workscene: RpcWorksceneFacade;
   readonly signal: AbortSignal;
   readonly choose: TerminalSelectionPort;
+  /** 仍需用户留意的说明（失败、待核对、警告）：保持到被别的说明取代 */
   readonly publish: (message: string) => Promise<void>;
+  /** 已结束、没有后续动作的结果：由应用持有凭据，下一次有效操作时撤回 */
+  readonly result: (message: string) => Promise<void>;
   readonly changed: (advancement?: SessionAdvancementStateSnapshot) => Promise<void>;
   readonly activeTurn: () => Promise<unknown> | null;
   /** 返回实际创建的场景名；取消或未创建时为空。 */
@@ -105,6 +108,38 @@ export class TerminalSessionCommands {
           (!switched && controller.current.conversationId !== conversationId)) throw Error('对话已变化，请重新打开后操作。');
     } };
   }
+  /**
+   * 改名：就地字段，Enter 保存、Esc 取消，名称预填。initial 是带参数直接改名的值（不经字段先保存一次）。
+   * 空值与保存失败都留在字段里：按提交时的值重开并写明原因，由用户修改或再次提交，不自动重试。
+   * 未改变如实说明；取消不留结果（上一条结果已在本次操作受理时撤回）。每次等待后由 current() 核对上下文：
+   * 换会话、断线、失效时流程随之结束，不重开旧字段、不改旧目标。
+   */
+  async #rename(page: { readonly title: string; readonly label: string; readonly original: string },
+    initial: string | undefined, save: (value: string) => Promise<unknown>, current: () => void, saved: (value: string) => Promise<string>): Promise<void> {
+    let value = initial, error: string | undefined;
+    for (;;) {
+      if (value === undefined || error !== undefined) {
+        const response = await this.options.choose({ kind: 'selection', inline: true, title: page.title,
+          field: { id: 'name', label: page.label, value: value ?? page.original, secret: false, ...(error !== undefined ? { error } : {}) },
+          fieldSubmit: { id: 'save', label: '保存' }, cancelLabel: '取消' });
+        current();
+        if (response?.itemId !== 'save') return;
+        value = response.input?.trim() ?? ''; error = undefined;
+      }
+      if (!value) { error = '名称不能为空。'; continue; }
+      if (value === page.original) { await this.options.result('名称未改变。'); return; }
+      try { await save(value); }
+      catch (failure) {
+        current();
+        const reason = (failure instanceof Error ? failure.message : String(failure)).replace(/[。.\s]+$/u, '').slice(0, 200);
+        error = `保存失败：${reason}。可修改后再按 Enter 保存，或按 Esc 取消。`;
+        continue;
+      }
+      current();
+      await this.options.result(await saved(value));
+      return;
+    }
+  }
   async #entries(command: 'resume' | 'work', query?: string) {
     const entries = command === 'resume'
       ? (await this.options.controller()!.listConversationPage({ limit: 100, query })).conversations.map(item => ({ id: item.conversationId, name: item.name,
@@ -121,26 +156,21 @@ export class TerminalSessionCommands {
     scope.current();
     if (name === 'new') {
       const created = await scope.controller.newConversation(); scope.current(true);
-      this.#mainReturn = created; await this.options.changed(); await this.options.publish(`已创建新对话 ${created.name}`); return;
+      this.#mainReturn = created; await this.options.changed(); await this.options.result(`已创建新对话 ${created.name}`); return;
     }
     if (name === 'name') {
-      let value = argument.trim();
-      if (!value) {
-        const response = await this.options.choose({ kind: 'selection', title: '对话名称', field: { id: 'name', label: '输入新名称', value: scope.controller.current.name, secret: false },
-          choices: [{ id: 'save', label: '保存名称' }, { id: 'cancel', label: '取消' }] }); scope.current();
-        if (response?.itemId !== 'save') return;
-        value = response.input?.trim() ?? '';
-      }
-      if (!value) return;
-      await scope.controller.rename(value); scope.current(); await this.options.changed(); await this.options.publish('名称已保存。'); return;
+      await this.#rename({ title: '重命名对话', label: '新名称', original: scope.controller.current.name }, argument.trim() || undefined,
+        value => scope.controller.rename(value), scope.current,
+        async value => { await this.options.changed(); return `已改名为「${value}」。`; });
+      return;
     }
     if (name === 'clear') {
-      await scope.controller.clear(); scope.current(); await this.options.changed(); await this.options.publish('对话历史已清空。'); return;
+      await scope.controller.clear(); scope.current(); await this.options.changed(); await this.options.result('对话历史已清空。'); return;
     }
     if (name === 'exit') { await this.navigate({ kind: 'exit' }); return; }
     if (name !== 'resume' && name !== 'work') throw Error('未知会话命令。');
     // 场景内不直接跨场景切换：这是规则引导不是故障，与进入路径同一说明
-    if (name === 'work' && scope.controller.current.mode.kind !== 'main') { await this.options.publish(SCENE_SWITCH_GUIDANCE); return; }
+    if (name === 'work' && scope.controller.current.mode.kind !== 'main') { await this.options.result(SCENE_SWITCH_GUIDANCE); return; }
     if (name === 'resume') { await this.#resume(argument, scope); return; }
     const entries = await this.#entries(name); scope.current();
     const query = argument.trim().toLocaleLowerCase();
@@ -185,22 +215,22 @@ export class TerminalSessionCommands {
       const resumed = await scope.controller.resume(target.conversationId); scope.current(true);
       if (resumed.active.mode.kind === 'main') this.#mainReturn = resumed.active;
       await this.options.changed(resumed.advancement);
-      await this.options.publish(resumed.adoptionReview?.message ?? `已切换到 ${resumed.active.name}`); return;
+      await (resumed.adoptionReview ? this.options.publish(resumed.adoptionReview.message) : this.options.result(`已切换到 ${resumed.active.name}`)); return;
     }
   }
 
   async navigate(intent: Navigation): Promise<void> {
     const scope = this.#scope(), controller = scope.controller;
     if (intent.kind === 'enter') {
-      if (controller.current.mode.kind !== 'main') { await this.options.publish(SCENE_SWITCH_GUIDANCE); return; }
+      if (controller.current.mode.kind !== 'main') { await this.options.result(SCENE_SWITCH_GUIDANCE); return; }
       this.#mainReturn = { ...controller.current };
       const entered = await controller.enterScene(intent.sceneId); scope.current(true);
-      await this.options.changed(entered.advancement); await this.options.publish(`已进入工作场景 ${entered.active.name}`); return;
+      await this.options.changed(entered.advancement); await this.options.result(`已进入工作场景 ${entered.active.name}`); return;
     }
     if (intent.kind === 'set_workdir') {
       const changed = await controller.setCurrentSceneWorkdirAndReenter(intent.sceneId, intent.workspace); scope.current(true);
       if (changed.kind === 'reentered') {
-        await this.options.changed(changed.advancement); await this.options.publish(changed.scene.workspaceWarning ?? '工作场景配置已更新。'); return;
+        await this.options.changed(changed.advancement); await (changed.scene.workspaceWarning ? this.options.publish(changed.scene.workspaceWarning) : this.options.result('工作场景配置已更新。')); return;
       }
       if (changed.kind === 'set-failed' || changed.kind === 'scene-mismatch') {
         await this.options.publish(changed.kind === 'set-failed' ? '工作区更改失败，仍在原场景。' : '场景请求已过期，请重新核对。'); return;
@@ -212,7 +242,7 @@ export class TerminalSessionCommands {
     const exited = await controller.exitScene(target); scope.current(true);
     this.#mainReturn = exited.active;
     await this.options.changed(exited.kind === 'not-in-workscene' ? undefined : exited.advancement);
-    await this.options.publish(exited.kind === 'fallback-new' ? '原主对话已不存在，已创建新主对话。'
+    await this.options.result(exited.kind === 'fallback-new' ? '原主对话已不存在，已创建新主对话。'
       : exited.kind === 'fallback-latest' ? '原主对话已不存在，已回到最近主对话。' : '已退出工作场景，返回主对话。');
   }
   /** label 是候选上显示的当前名称：改名时预填并点明改的是哪个场景。 */
@@ -220,21 +250,28 @@ export class TerminalSessionCommands {
     const scope = this.#scope();
     if (action === 'create' || action === 'rename') {
       if (command !== 'work') throw Error('当前候选不支持此操作。');
-      const current = action === 'rename' ? label?.trim() : undefined;
-      const response = await this.options.choose({ kind: 'selection', title: action === 'create' ? '新建工作场景' : '工作场景改名',
-        ...(current ? { message: `当前名称：${current}` } : {}),
-        field: { id: 'scene', secret: false, label: action === 'create' ? '描述用途和工作目录，或输入名称' : '输入新名称', ...(current ? { value: current } : {}) },
-        choices: [{ id: 'save', label: action === 'create' ? '继续创建' : '保存名称' }, { id: 'cancel', label: '取消' }] });
-      scope.current();
-      if (response?.itemId !== 'save' || !response.input?.trim()) return;
-      if (action === 'create') {
-        const created = await this.options.createScene(response.input.trim(), () => scope.current());
-        if (created) await this.options.publish(`已创建工作场景「${created}」。`);
+      if (action === 'rename') {
+        // 改的是候选里选中的场景，不一定是屏上这个对话：标题写明对象
+        if (!id) throw Error('候选已失效。');
+        const current = label?.trim() ?? '';
+        await this.#rename({ title: current ? `重命名工作场景「${current}」` : '重命名工作场景', label: '新的场景名称', original: current }, undefined,
+          value => this.options.workscene.rename(id, value), scope.current, async value => `工作场景已改名为「${value}」。`);
         return;
       }
-      if (!id) throw Error('候选已失效。');
-      await this.options.workscene.rename(id, response.input.trim()); scope.current();
-      await this.options.publish('名称已保存。');
+      // 新建：整页保留说明；空提交留在页面说明，不当作取消
+      let value = '', error: string | undefined;
+      for (;;) {
+        const response = await this.options.choose({ kind: 'selection', title: '新建工作场景',
+          field: { id: 'scene', secret: false, label: '描述用途和工作目录，或输入名称', value, ...(error ? { error } : {}) },
+          fieldSubmit: { id: 'save', label: '继续创建' }, cancelLabel: '取消' });
+        scope.current();
+        if (response?.itemId !== 'save') return;
+        value = response.input?.trim() ?? '';
+        if (value) break;
+        error = '请描述用途和工作目录，或输入名称。';
+      }
+      const created = await this.options.createScene(value, () => scope.current());
+      if (created) await this.options.result(`已创建工作场景「${created}」。`);
       return;
     }
     if (!id) throw Error('候选已失效。');

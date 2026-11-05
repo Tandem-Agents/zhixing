@@ -75,7 +75,7 @@ import { normalizeCliArgs } from '../logging/entry-mode.js';
 import { terminalEnvironment } from './environment-presentation.js';
 import { RpcConfirmationBroker } from '../runtime/rpc-confirmation-broker.js';
 import { projectTerminalConfirmation, resolveTerminalConfirmation } from './confirmation.js';
-import { TerminalCandidatesOwner } from './candidates.js';
+import { TerminalCandidatesOwner, opensManagedCandidates } from './candidates.js';
 import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtime/stop-selection.js';
 import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
@@ -318,7 +318,19 @@ class TerminalApplication {
   #readOnlyNeedsReset = false;
   #historySelection = false;
   #lastRequest = 0;
-  #mainView: View = { kind: 'conversation', title: '知行', message: '', connected: false };
+  #view: View = { kind: 'conversation', title: '知行', message: '', connected: false };
+  /**
+   * 当前显示的操作结果（已结束、没有后续动作的说明，例如“已取消本次配置编辑。”）的凭据。
+   * 只由 #showResult 写入；普通写入一旦改变说明，凭据即失效，之后的撤回不再触碰那句普通说明。
+   * 下一次有效操作（命令受理、管理面板打开、提交、打开本机历史、候选管理操作）时撤回。
+   */
+  #result?: object;
+  #writingResult = false;
+  get #mainView(): View { return this.#view; }
+  set #mainView(view: View) {
+    if (this.#result && !this.#writingResult && view.message !== this.#view.message) this.#result = undefined;
+    this.#view = view;
+  }
   #historyReturn?: View;
   #publishing?: Promise<void>;
   #nextView?: { readonly view: View; readonly current?: () => boolean };
@@ -376,7 +388,7 @@ class TerminalApplication {
         this.#processSession.reset();
         this.#invalidateAuxiliary(); this.#taskNotices?.resume();
         void this.#tasks?.refresh();
-        this.#mainView = { ...this.#mainView, message: '对话内容已清空。' };
+        this.#showResult({ ...this.#mainView, message: '对话内容已清空。' });
       }
       if (reaction.kind === 'deleted') {
         if (this.#localDeletions.has(payload.conversationId)) return;
@@ -384,7 +396,7 @@ class TerminalApplication {
       }
       void (async () => {
         if (reaction.kind === 'deleted') {
-          try { await this.#controller?.newConversation(); await this.#conversationChanged(); this.#mainView = { ...this.#mainView, message: '当前对话已删除，已创建新对话。' }; }
+          try { await this.#controller?.newConversation(); await this.#conversationChanged(); this.#showResult({ ...this.#mainView, message: '当前对话已删除，已创建新对话。' }); }
           catch { this.#deletedCurrent(); }
         }
         await this.#publish(this.#mainView);
@@ -718,6 +730,9 @@ class TerminalApplication {
         this.#confirmationBlocked = false; await this.#confirmations.refresh(); this.#drainConfirmations(); return { accepted: true };
       case 'input-candidates':
         await this.#ensureDecisionBinding();
+        // 打开 /resume、/work、/trust 面板也是一次有效操作（未必执行命令）：先送达撤回帧再查询，
+        // 界面此时仍在读取候选，收到会话帧后的重新查询不会让面板开合
+        if (this.#result && opensManagedCandidates(action.text, action.atStart)) await this.#retractResultFrame();
         return this.#candidates.query(action.revision, action.text, action.cursor, action.atStart);
       case 'candidate-ghost': return this.#candidates.acceptGhost(action.revision);
       case 'candidate-accept': return this.#acceptCandidate(action.revision, action.id);
@@ -726,6 +741,9 @@ class TerminalApplication {
         if (this.#operation || this.#presentingConfirmation || this.#abort.signal.aborted) throw Error('另一个操作正在进行，请稍后重试。');
         if (!['delete', 'rename', 'create'].includes(action.action)) throw Error('候选操作无效。');
         const target = this.#candidates.manage(action.revision, action.action, action.id);
+        // 面板里的管理操作是新的操作：上一条结果只在内存里撤回，不另发帧（发帧会让面板重新读取）；
+        // 操作结束时的主视图发布不再带它
+        this.#retractResult();
         // 删除（两次 Ctrl+D 即确认）不弹页面：等它结束再回复，候选面板据此刷新并说明结果；
         // 失败的说明仍由后台流程统一给出
         let settled!: (deleted: boolean) => void;
@@ -864,7 +882,7 @@ class TerminalApplication {
       const runId = stop.runId ?? (sameLocal ? local?.runId : undefined);
       if (runId && !sameSubmission && await controller.abortRunIfActive(runId)) return requested();
     }
-    this.#mainView = { ...this.#mainView, message: '这次运行已经结束，无需再停止。' }; await this.#publish(this.#mainView);
+    this.#showResult({ ...this.#mainView, message: '这次运行已经结束，无需再停止。' }); await this.#publish(this.#mainView);
     return false;
   }
 
@@ -1071,7 +1089,7 @@ class TerminalApplication {
         },
       }, initial.active);
       await observeStartupPhase(this.#logging.records, 'terminal.local-description', () => this.#localView.refresh());
-      this.#mainView = { kind: 'conversation', title: initial.active.name, message: initial.resumedConversationName ? '已恢复最近对话。' : '准备就绪，开始你的第一条消息。', connected: true };
+      this.#showResult({ kind: 'conversation', title: initial.active.name, message: initial.resumedConversationName ? '已恢复最近对话。' : '准备就绪，开始你的第一条消息。', connected: true });
       // 首屏正文到达之前先发布带标题与环境的页面（本地描述此时已就绪，不增加读取）：欢迎框先长到最终高度，
       // 正文与页面经不同通道到达时，首个可读正文帧之后欢迎框不再长高、把正在读的文字往下推
       void this.#publish({ ...this.#mainView, busy: true }).catch(() => {});
@@ -1185,6 +1203,8 @@ class TerminalApplication {
   async #readOnly(): Promise<void> {
     this.#historySelection = true;
     try {
+      // 打开本机历史前撤下上一条结果，再记返回快照：退出历史时不会把它带回来
+      this.#retractResult();
       if (this.#mainView.kind !== 'history') this.#historyReturn = this.#mainView;
       const storage = await this.#readOnlyStorage();
       await this.#publish({ ...this.#mainView, message: '正在准备本机对话目录…' });
@@ -1830,6 +1850,7 @@ class TerminalApplication {
 
   async #beginPrepared(inputId: string, submission: ReturnType<typeof createUserSubmission>): Promise<BeginReferencedUserTurnResult<TerminalTurnOutcome> | undefined> {
     await this.#sendPhase('send-admit', () => this.#display.admit());
+    // 输入被接纳：“正在提交”这句普通说明取代上一条操作结果（结果凭据随之失效），随即发布，不为此多等一帧
     this.#mainView = { ...this.#mainView, busy: true, message: '正在提交…' };
     // “正在提交”画面与随后的发送准备并行：发布按最新视图合流、按序送达（#publish），迟到的这一帧不会盖过之后的状态；
     // 送达失败按视图送不达处理，不改变这次输入的提交结果（草稿已保留，不重发）
@@ -2281,8 +2302,13 @@ class TerminalApplication {
     const reconnected = this.#connection.getStatus().kind === 'connected';
     this.#resolvedLocalView = undefined;
     if (reconnected) await this.#localView.refresh();
-    this.#mainView = { ...this.#mainView, message, connected: reconnected, busy: false,
+    // 已结束、没有后续动作的结果（取消、已应用、已生效）持有凭据；未完成、待重试、连接不可用的说明照常保留
+    const settled = reconnected && (result.kind === 'cancelled' || result.kind === 'local-applied'
+      || (result.kind === 'mcp' && result.result.status === 'active')
+      || (result.kind === 'reloaded' && result.effects.reload.status !== 'failed' && result.effects.reconcile.status !== 'failed' && !result.pendingChannels));
+    const view: View = { ...this.#mainView, message, connected: reconnected, busy: false,
       connectionState: reconnected ? undefined : 'unavailable', choices: undefined };
+    if (settled) this.#showResult(view); else this.#mainView = view;
     void this.#tasks?.refresh();
     await this.#publish(this.#mainView);
   }
@@ -2467,7 +2493,9 @@ class TerminalApplication {
           const current = () => this.#controller === controller && controller?.current.conversationId === id &&
             this.#mainView.connected === true && this.#conversationEpoch === epoch && !this.#abort.signal.aborted;
           if (!current()) return;
-          this.#mainView = { ...this.#mainView, message: result.message };
+          // 成功的任务操作是已结束的结果；失败与“暂未确认”照常保留
+          const view = { ...this.#mainView, message: result.message };
+          if (result.error) this.#mainView = view; else this.#showResult(view);
           await this.#publish(this.#mainView, current);
         },
         changed: summary => { this.#taskStatus = { ...this.#taskStatus, summary }; this.#sendTaskStatus(); },
@@ -2509,8 +2537,9 @@ class TerminalApplication {
         choose: view => this.#choosePage(view),
         publish: async (result, scope) => {
           scope.assertCurrent();
-          this.#mainView = { ...this.#mainView, message: result.message,
-            ...(result.busy === undefined ? {} : { busy: result.busy }) };
+          const view = { ...this.#mainView, message: result.message, ...(result.busy === undefined ? {} : { busy: result.busy }) };
+          // 已完成的结果（压缩完成等）持有凭据；进行中与失败照常保留
+          if (result.error || result.busy) this.#mainView = view; else this.#showResult(view);
           await this.#publish(this.#mainView, scope.isCurrent);
         },
       });
@@ -2542,7 +2571,9 @@ class TerminalApplication {
       this.#decisionCommands = new TerminalDecisionCommands({ controller, management: this.#management, signal: this.#abort.signal,
         choose: view => this.#choosePage(view),
         publish: async result => {
-          this.#mainView = { ...this.#mainView, message: result.message };
+          // 已结束的处理结果持有凭据；读取或操作失败照常保留
+          const view = { ...this.#mainView, message: result.message };
+          if (result.error) this.#mainView = view; else this.#showResult(view);
           await this.#publish(this.#mainView);
         },
         resumeRubric: async scope => { scope.assertCurrent(); await this.#resolveRubric(scope.assertCurrent); scope.assertCurrent(); },
@@ -2610,6 +2641,8 @@ class TerminalApplication {
         activeTurn: () => this.#state.activeTurnPromise,
         changed: advancement => this.#conversationChanged(advancement),
         publish: async message => { this.#mainView = { ...this.#mainView, title: this.#controller?.current.name ?? this.#mainView.title, message }; await this.#publish(this.#mainView); },
+        // 已结束的会话操作结果：持有凭据，下一次有效操作时撤回
+        result: async message => { this.#showResult({ ...this.#mainView, title: this.#controller?.current.name ?? this.#mainView.title, message }); await this.#publish(this.#mainView); },
         createScene: (input, current) => this.#createScene(input, current),
         deleting: id => { this.#localDeletions.add(id); return () => this.#localDeletions.delete(id); },
         deletedCurrent: () => this.#deletedCurrent(),
@@ -2636,13 +2669,20 @@ class TerminalApplication {
     const { runWorksceneCreateAssist, createWorksceneCreateSelectionRequest } = await import('../runtime/workscene-create-assist.js');
     current();
     const ask = async (title: string, prefill = '', label = '输入说明') => {
-      current();
-      const response = await this.#choosePage({ kind: 'selection', title: '创建工作场景', message: title, field: { id: 'scene-input', secret: false, label, value: prefill },
-        choices: [{ id: 'submit', label: '继续' }, { id: 'cancel', label: '取消' }] });
+      // 单字段页：Enter 继续、Esc 取消；空的“继续”没有意义，留在页面说明（Esc 仍是取消）
+      let value = prefill, error: string | undefined;
+      for (;;) {
         current();
-        const value = response?.itemId === 'submit' ? response.input?.trim() || null : null;
-        if (value) await this.#publish({ kind: 'selection', title: '创建工作场景', requestId: 'workscene-preparing', busy: true, message: '正在准备工作场景；Ctrl+C 可取消。' });
-        return value;
+        const response = await this.#choosePage({ kind: 'selection', title: '创建工作场景', message: title,
+          field: { id: 'scene-input', secret: false, label, value, ...(error ? { error } : {}) }, fieldSubmit: { id: 'submit', label: '继续' }, cancelLabel: '取消' });
+        current();
+        if (response?.itemId !== 'submit') return null;
+        value = response.input?.trim() ?? '';
+        if (value) break;
+        error = '请填写后再继续。';
+      }
+      await this.#publish({ kind: 'selection', title: '创建工作场景', requestId: 'workscene-preparing', busy: true, message: '正在准备工作场景；Ctrl+C 可取消。' });
+      return value;
     };
     const result = await runWorksceneCreateAssist(input, {
       listScenes: () => { current(); return this.#workscene.list(); },
@@ -2696,6 +2736,8 @@ class TerminalApplication {
   /** 受理后在后台执行的命令，请求等到它的交接帧真正送达（或判定失效、操作无可见结果而结束）才返回：
    *  界面以此结束“保持来源页”。不受理、立即关闭等不进后台的路径照旧立即返回。 */
   async #command(name: string, argument: string): Promise<unknown> {
+    // 新命令受理即撤下上一条操作结果：撤回帧在交接作用域之外先送达，就地字段与页面随后才到
+    if (this.#result && typeof name === 'string' && this.#candidates.registry.findByName(name)) await this.#retractResultFrame();
     const handoff = new CommandHandoff(name);
     const outcome = await this.#commandScope.run(handoff, () => this.#dispatchCommand(name, argument)) as { accepted?: boolean } | undefined;
     if (outcome?.accepted && handoff.started && !handoff.settled) {
@@ -2815,6 +2857,26 @@ class TerminalApplication {
       this.#confirmation = undefined; this.#presentingConfirmation = false;
       if (!this.#abort.signal.aborted) void this.#publish(this.#mainView).catch(() => this.#close(70, 'terminal-confirmation-undelivered'));
     });
+  }
+
+  /** 写入一条操作结果并持有它的凭据（写入点声明它已结束、没有后续动作） */
+  #showResult(view: View): void {
+    this.#writingResult = true;
+    try { this.#mainView = view; } finally { this.#writingResult = false; }
+    this.#result = view.message ? {} : undefined;
+  }
+
+  /** 撤回仍在显示的操作结果；返回是否撤回了。凭据已因普通写入失效时什么都不做 */
+  #retractResult(): boolean {
+    if (!this.#result) return false;
+    this.#result = undefined;
+    this.#mainView = { ...this.#mainView, message: undefined };
+    return true;
+  }
+
+  /** 撤回并把撤回后的主视图作为普通帧送达（在命令交接作用域之外），之后的页面或候选结果才到 */
+  async #retractResultFrame(): Promise<void> {
+    if (this.#retractResult()) await this.#commandScope.exit(() => this.#publish(this.#mainView)).catch(() => {});
   }
 
   #publish(view: View, current?: () => boolean): Promise<void> {

@@ -45,6 +45,19 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   let usableReported = false, usableScheduled = false;
   options.signal.throwIfAborted();
   const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
+  // 显示上下文与交互目标分开：view() 是当前交互（输入框、信息行、键位、提交）；surface() 是屏上的显示上下文
+  // （正文、欢迎区、阅读身份与位置、过程区、阅读导航、翻页）。就地字段（如就地改名）期间 surface 仍是底层会话的
+  // 最近一次会话视图快照，只有输入区换成字段；没有同一会话的会话视图可依托时，字段按整页显示
+  const [baseView, setBaseView] = createSignal<TerminalView>();
+  const inlineField = () => { const current = view(), base = baseView();
+    return current.inline && current.field && current.kind === 'selection' && base && base.conversationId === current.conversationId ? current : undefined; };
+  const surface = () => inlineField() ? baseView()! : view();
+  // 就地字段进入时会话输入框的行数：字段输入框不小于它，进入与返回时正文区不动
+  const [inlineEntryRows, setInlineEntryRows] = createSignal(1);
+  // 已提交、下一视图还没到的单字段请求：期间字段不可编辑、不可再提交，Esc 不宣称撤销；N 重开或结束时清除
+  const [fieldSaving, setFieldSaving] = createSignal<string>();
+  // 字段是否处在提交锁里：所有写入入口（按键、粘贴事件、右键剪贴板、外部粘贴、在途读取的返回）都按它拒绝写入
+  const fieldLocked = () => !!view().requestId && fieldSaving() === view().requestId;
   const [informationRevision, setInformationRevision] = createSignal(0);
   const information = new InformationBoard(() => setInformationRevision(value => value + 1));
   let statusSource = information.source(interactionKey(view()));
@@ -147,28 +160,28 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const [bodyEarlier, setBodyEarlier] = createSignal<boolean>();
   const sameReading = (left?: TerminalReading, right?: TerminalReading) => left?.conversationId === right?.conversationId && left?.generation === right?.generation;
   // 视图声明的会话与代次都与已安装正文相同才显示正文；否则正文区只有目标自己的欢迎区（壳态）
-  const bodyMatches = createMemo(() => sameReading(view().reading, bodyReading()));
+  const bodyMatches = createMemo(() => sameReading(surface().reading, bodyReading()));
   const shellPage: TerminalDisplayPage = { first: 0, last: 0, start: 0, follow: true, segments: [] };
   // 阅读键只在换代、进出壳态时变化（字符串比较，页更新不触发）；正文组件据此在新页就位后重置阅读状态，欢迎块起点按新页起算
   const readingKey = createMemo(() => bodyMatches() ? `reading:${bodyReading()?.conversationId ?? ''}:${bodyReading()?.generation ?? ''}`
-    : `shell:${view().reading?.conversationId ?? ''}:${view().reading?.generation ?? ''}`);
+    : `shell:${surface().reading?.conversationId ?? ''}:${surface().reading?.generation ?? ''}`);
   const bodyPage = createMemo(() => bodyMatches() ? display() : shellPage);
   // 已就绪的会话页在壳态停留超过 200 ms（目标首页仍在读取）才提示读取中，不和正常空会话混淆
   const [shellLoading, setShellLoading] = createSignal(false);
   createEffect(() => {
-    const current = view();
+    const current = surface();
     if (bodyMatches() || current.kind !== 'conversation' || !current.readyForInput || current.connected === false || current.connectionState) { setShellLoading(false); return; }
     const timer = setTimeout(() => setShellLoading(true), 200);
     onCleanup(() => clearTimeout(timer));
   });
   const [reading, setReading] = createSignal<BodyReadingState>({ below: false, belowShown: false, above: false, loading: false, holding: false },
     { equals: (a, b) => a.below === b.below && a.belowShown === b.belowShown && a.above === b.above && a.loading === b.loading && a.retry === b.retry && a.holding === b.holding });
-  const isBody = () => ['conversation', 'history'].includes(view().kind);
+  const isBody = () => ['conversation', 'history'].includes(surface().kind);
   // 进入提醒按访问计：会话页与 F2 只读历史各一次（边界见 reading-visit.ts）。本次访问里用户发起过输入，
   // 「↑ 更早的消息」就不再出现；“上方还有正文”这个阅读事实本身不变，上翻、补页照常
   const [pageVisit, setPageVisit] = createSignal<ReadingVisit>({ operated: false });
   const [readOnlyVisit, setReadOnlyVisit] = createSignal<ReadingVisit>({ operated: false });
-  const visitOperated = () => (view().kind === 'history' ? readOnlyVisit() : pageVisit()).operated;
+  const visitOperated = () => (surface().kind === 'history' ? readOnlyVisit() : pageVisit()).operated;
   // 是否真正离开过只读历史：选择页、确认页是历史页上的临时层（如“选择其他历史”后取消或原地选回），
   // 不算离开；回到会话页、连接页等才算离开，之后再打开历史是新访问
   let leftHistory = true;
@@ -199,32 +212,32 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   // 阅读导航行只在有阅读信息时占行；“下方还有内容”由正文按不含这一行时的完整高度判定，
   // 所以这一行出现或消失不会反过来改变它自己的条件
-  const navigationShown = () => isBody() && (view().bodyRecovery === 'blocked' || view().bodyRecovery === 'retrying' || !!view().localBodyFailed ||
+  const navigationShown = () => isBody() && (surface().bodyRecovery === 'blocked' || surface().bodyRecovery === 'retrying' || !!surface().localBodyFailed ||
     !!reading().retry || reading().loading || reading().below || hintRow() || shellLoading());
   // 后台补邻页只在可输入且空闲时进行：输入框为空、无候选、无待受理的提交、没有运行；发送路径从不等待它
   const prefetchAllowed = () => {
-    const current = view();
+    const current = surface();
     if (!isBody() || !bodyMatches() || !editorEmpty() || candidateOpen() || input.pendingSubmissionId) return false;
     return current.kind === 'history' ? !current.busy : !!current.readyForInput && current.connected !== false && !current.connectionState && !current.busy;
   };
   // 阅读导航行：左侧是方向与读取状态（故障优先），右侧在实际视口下面还有正文时给“回到底部”（落点是对话末尾并恢复跟随）
   // 断线返回页的本机正文恢复失败排在最前：重试只重读本机，与 Ctrl+R/Enter 的重连分开
   // 左侧按语义种类分派，点击按事件发生时显示的那一项执行；文案只由种类映射，换文案不影响点击
-  const readingLeftKind = (): 'local-failed' | 'blocked' | 'retry' | 'loading' | 'above' | undefined => view().localBodyFailed ? 'local-failed'
-    : view().bodyRecovery === 'blocked' ? 'blocked' : reading().retry ? 'retry'
-    : view().bodyRecovery === 'retrying' || reading().loading || shellLoading() ? 'loading'
+  const readingLeftKind = (): 'local-failed' | 'blocked' | 'retry' | 'loading' | 'above' | undefined => surface().localBodyFailed ? 'local-failed'
+    : surface().bodyRecovery === 'blocked' ? 'blocked' : reading().retry ? 'retry'
+    : surface().bodyRecovery === 'retrying' || reading().loading || shellLoading() ? 'loading'
     : reading().above && !visitOperated() ? 'above' : undefined;
   const readingLeft = () => {
     switch (readingLeftKind()) {
       case 'local-failed': return '本机正文恢复失败 · 点击重试';
-      case 'blocked': return view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试';
+      case 'blocked': return surface().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试';
       case 'retry': return '读取未完成 · 点击或原方向翻页重试';
       case 'loading': return '正在读取…';
       case 'above': return '↑ 更早的消息';
       default: return '';
     }
   };
-  const readingRight = () => view().bodyRecovery === 'blocked' || view().localBodyFailed || !reading().belowShown ? ''
+  const readingRight = () => surface().bodyRecovery === 'blocked' || surface().localBodyFailed || !reading().belowShown ? ''
     : process.platform === 'darwin' || size().width < 60 ? '↓ 回到底部' : '↓ 回到底部 Ctrl+End';
   const bodyReady = (value: BodyViewHandle | undefined) => {
     const previous = bodyView; bodyView = value;
@@ -384,6 +397,14 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (!safeAction()) { setStatus('请放大窗口后提交；仍可按 Esc 取消。'); return; }
       const value = editorValue();
       if (Buffer.byteLength(value) > 8192) { setStatus('说明过长，请缩短后再提交。'); return; }
+      // 单字段页：Enter 以字段声明的提交动作应答；提交后锁住字段，直到 N 给出下一视图（重开、结束或下一步）
+      if (current.fieldSubmit && current.kind === 'selection') {
+        if (fieldSaving() === current.requestId) return;
+        setFieldSaving(current.requestId);
+        const accepted = await action({ kind: 'selection', requestId: current.requestId, itemId: current.fieldSubmit.id, input: value });
+        if (!accepted && fieldSaving() === current.requestId) setFieldSaving(undefined);
+        return;
+      }
       const choice = current.choices?.[selected()];
       if (!choice || choice.disabled) return;
       const itemId = choice.id;
@@ -459,7 +480,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }).catch(reportStatus()).finally(() => endEntry(id));
   };
   const cancelPage = async (cause: TerminalSelectionCancelCause = 'escape') => {
-    const current = view(); releaseSecret();
+    const current = view();
+    // 已提交的单字段请求已经应答：Esc 不再发取消，也不宣称撤销（信息行正写着“正在提交…”）
+    if (fieldLocked()) return;
+    releaseSecret();
     if (current.requestId === 'workscene-preparing' && current.busy) { await action({ kind: 'abort' }); return; }
     if (current.kind === 'history') await action({ kind: 'history-close' });
     else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: 'back' });
@@ -505,9 +529,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   // and the fixed reading-navigation row on body surfaces.
   // Measure only the preceding context, so editor resizing cannot feed itself.
   // 阅读导航行按需显隐，这里始终按它在场预留：这只是编辑框的高度上限，不随导航行显隐来回变化
+  // 就地字段的输入框不小于进入时会话输入框的高度：进入与返回时正文区不变；仍服从可用高度上限，长名称在框内滚动阅读
   const fieldRows = () => view().field?.secret ? 1 : Math.max(1, Math.min(
     candidateOpen() ? candidateBudget().editor : Infinity,
-    inputRows(editorLines(), size().height), size().height - contextHeight() - candidateHeight() - 6 - (isBody() ? 1 : 0),
+    inlineField() ? Math.max(inlineEntryRows(), inputRows(editorLines(), size().height)) : inputRows(editorLines(), size().height),
+    size().height - contextHeight() - candidateHeight() - 6 - (isBody() ? 1 : 0),
   ));
   const computeInfo = () => {
     informationRevision();
@@ -528,7 +554,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (candidate?.error) left.push(candidate.error);
     // 列表为空时提示已显示在列表里，底部不再重复
     else if (candidate?.argumentHint && !(candidateOpen() && !candidate.items.length)) left.push(candidate.argumentHint);
-    else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
+    // 单字段页：提交后到下一视图前写“正在提交…”；上一次提交未被接受时写明原因，代替字段标签
+    else if (current.field) left.push(fieldLocked() ? '正在提交…'
+      : current.field.error ?? current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
     else if (current.kind === 'conversation' && editorEmpty() && !left.length) left.push('输入消息或 / 查看命令');
     const hint = (full: string, compact: string) => measureInformation(full) <= size().width - 4 ? full : compact;
     const keys = current.inputReceiptPending ? hint('Ctrl+R 核对 · Ctrl+C 中止 · 连按退出', 'Ctrl+R 核对 · Ctrl+C 中止')
@@ -543,7 +571,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : current.kind === 'skills' ? '' // The skill surface owns its two contextual hint rows.
       : current.kind === 'recovery' ? (current.recovery?.input ? 'Enter 回读 · Esc 取消' : 'Esc 返回')
       : current.selectionLayer === 'details' ? hint('↑↓ 阅读 · ←/Enter/Esc 返回 · PgUp/PgDn 翻阅', '↑↓ 阅读 · Esc 返回')
-      : current.field ? 'Enter 确认 · Esc 返回'
+      // 提交锁里只写真实可用的操作：阅读与 Ctrl+C 的中止/退出（Enter、Esc 此时不生效）
+      : current.field && fieldLocked() ? hint('PgUp/PgDn 阅读 · Ctrl+C 中止/退出', 'Ctrl+C 中止/退出')
+      : current.field ? current.fieldSubmit ? `Enter ${current.fieldSubmit.label} · Esc ${current.cancelLabel ?? '返回'}` : 'Enter 确认 · Esc 返回'
       : current.kind === 'configuration' ? hint('↑↓ 选择 · Enter 确认 · Ctrl+S 完成 · Esc 返回', '↑↓ 选择 · Enter 确认 · Esc 返回')
       : current.connectionState === 'starting' ? '可先输入 · Ctrl+C 退出'
       : current.connectionState === 'unavailable' ? hint('Enter 重试 · F2 历史 · F3 配置 · Ctrl+C 退出', 'Enter 重试 · F2 历史 · F3 配置')
@@ -567,7 +597,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const target = view().field?.secret || editor?.isDestroyed ? undefined : editor;
     const cursor = target?.cursorOffset, selected = target?.getSelection();
     return () => {
-      if (disposed || scope !== statusSource || version !== fieldEditVersion) return false;
+      if (disposed || scope !== statusSource || version !== fieldEditVersion || fieldLocked()) return false;
       if (view().field?.secret) return true;
       if (!editor || editor.isDestroyed || editor !== target) return false;
       const selection = editor.getSelection();
@@ -576,7 +606,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const pasteClipboard = async () => {
     const current = view(), scope = statusSource;
-    if (clipboardPending || current.kind !== 'conversation' && !current.field) return;
+    // 提交锁里的字段不发起剪贴板读取；锁之前已发出的读取，返回时由下面的判定拒绝写入
+    if (clipboardPending || current.kind !== 'conversation' && !current.field || current.field && fieldLocked()) return;
     clipboardPending = true;
     const report = reportStatus();
     const finish = current.field ? beginFieldPaste(scope) : undefined;
@@ -592,7 +623,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         if (typeof value?.text !== 'string' || Buffer.byteLength(value.text) > 8192) throw Error('字段粘贴未完成，请检查内容。');
         if (!value.text) return;
         if (!applicable()) {
-          report('字段已继续编辑，本次粘贴未应用。'); return;
+          report(fieldLocked() ? '正在提交，本次粘贴未应用。' : '字段已继续编辑，本次粘贴未应用。'); return;
         }
         if (current.field?.secret) {
           if (Buffer.byteLength(secret) + Buffer.byteLength(value.text) > 8192) throw Error('字段输入过长，请检查内容。');
@@ -605,7 +636,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     } catch { report('剪贴板粘贴未完成，原输入保留；可使用终端的粘贴快捷键。'); }
     finally { finish?.(); clipboardPending = false; }
   };
-  const shownProcess = () => view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId ? processStatus()?.view : undefined;
+  const shownProcess = () => surface().kind === 'conversation' && processStatus()?.conversationId === surface().conversationId ? processStatus()?.view : undefined;
   // 按键时屏上显示的运行：停止请求带上它所在的对话与过程状态里的身份，由 N 按权威状态决定能否停；屏上空闲时不带
   const stopTarget = (): TerminalStopTarget | undefined => {
     const current = view(), shown = shownProcess(), status = processStatus();
@@ -617,23 +648,23 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const inputId = turnId || runId ? undefined : input.pendingSubmissionId;
     return { conversationId: current.conversationId, ...(turnId ? { turnId } : {}), ...(runId ? { runId } : {}), ...(inputId ? { inputId } : {}) };
   };
-  const displayRecoveryNotice = () => view().displayPaused || view().bodyRecovery === 'blocked'
-    ? view().kind === 'history' ? '历史展示已暂停，存在缺口 · 请释放空间后重新打开历史' : '正文保留已暂停 · Ctrl+R 重试展示'
-    : view().displayGap ? view().kind === 'history' ? '历史展示存在缺口 · 请重新打开历史核对' : '展示已恢复；原缺口保留，可查看历史与用量' : '';
+  const displayRecoveryNotice = () => surface().displayPaused || surface().bodyRecovery === 'blocked'
+    ? surface().kind === 'history' ? '历史展示已暂停，存在缺口 · 请释放空间后重新打开历史' : '正文保留已暂停 · Ctrl+R 重试展示'
+    : surface().displayGap ? surface().kind === 'history' ? '历史展示存在缺口 · 请重新打开历史核对' : '展示已恢复；原缺口保留，可查看历史与用量' : '';
   // 当前操作的说明（结果、未接纳原因、输入是否保留、下一步）按宽度完整显示；待核对与启动中各有自己的位置
-  const operationText = () => view().inputReceiptPending || view().connectionState === 'starting' ? '' : displayText(view().message ?? '');
-  const footerFeedback = () => view().kind === 'history' ? { failures: [displayRecoveryNotice()].filter(Boolean), operation: operationText() } : ({ failures: [
+  const operationText = () => surface().inputReceiptPending || surface().connectionState === 'starting' ? '' : displayText(surface().message ?? '');
+  const footerFeedback = () => surface().kind === 'history' ? { failures: [displayRecoveryNotice()].filter(Boolean), operation: operationText() } : ({ failures: [
     displayRecoveryNotice(),
     taskStatus().noticeGap ?? '',
-    taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state === 'error' ? taskStatus().summary!.text : '',
-    view().connectionState === 'unavailable' ? displayText(view().message ?? '') : '',
+    taskStatus().summary?.conversationId === surface().conversationId && taskStatus().summary?.state === 'error' ? taskStatus().summary!.text : '',
+    surface().connectionState === 'unavailable' ? displayText(surface().message ?? '') : '',
   // 任务进度只在“已就绪且有文字”时占行：就绪但为空（无待办或全部完成）是合法的成功结果、读取中不是有效摘要，
   // 都不占行（否则启动后“正在读取任务列表…”一闪，会把导航行与跟随中的正文顶上一行再落回）；读取失败仍按失败显示
-  ].filter(Boolean), details: !!taskStatus().summary?.text.trim() && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state === 'ready'
-    ? [taskStatus().summary!.text] : [], notice: displayText(view().inputReceiptPending || view().connectionState === 'starting' ? view().message || taskStatus().summary?.text || '' : taskStatus().summary?.text || ''),
+  ].filter(Boolean), details: !!taskStatus().summary?.text.trim() && taskStatus().summary?.conversationId === surface().conversationId && taskStatus().summary?.state === 'ready'
+    ? [taskStatus().summary!.text] : [], notice: displayText(surface().inputReceiptPending || surface().connectionState === 'starting' ? surface().message || taskStatus().summary?.text || '' : taskStatus().summary?.text || ''),
     operation: operationText(), candidateCompressed: candidateHeight() > 0 });
-  const footerProcess = () => view().inputReceiptPending ? { revision: 0, phase: '原输入结果待核对，草稿已保留', activity: 'reconciling' as const, tools: [], children: [], usage: {} } : shownProcess() ?? { revision: 0, phase: view().busy ? view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',
-    activity: view().busy ? 'running' as const : 'complete' as const, tools: [], children: [], usage: {} };
+  const footerProcess = () => surface().inputReceiptPending ? { revision: 0, phase: '原输入结果待核对，草稿已保留', activity: 'reconciling' as const, tools: [], children: [], usage: {} } : shownProcess() ?? { revision: 0, phase: surface().busy ? surface().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',
+    activity: surface().busy ? 'running' as const : 'complete' as const, tools: [], children: [], usage: {} };
   const processHeight = () => candidateHeight() ? candidateBudget().process : Math.max(1, Math.min(6, size().height - 6));
   /** 过程区正在显示，且整段当前说明都在其中（此时输入框下不再重复） */
   const operationShown = () => isBody() && processRows().some(row => row.operation);
@@ -669,8 +700,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
       </box></scrollbox>}>
         <BodyView page={bodyPage()} readingKey={readingKey()} renderer={renderer} width={bodySize().width} height={bodySize().height}
-          header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} bottomGap={false} />}
-          hasEarlier={bodyMatches() ? view().historyHasMore ?? bodyEarlier() : undefined}
+          header={<SurfaceChrome view={surface()} width={bodySize().width} height={size().height} bottomGap={false} />}
+          hasEarlier={bodyMatches() ? surface().historyHasMore ?? bodyEarlier() : undefined}
           fullHeight={readingArea()} extent={size().height}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow, generation: bodyReading()?.generation })}
@@ -711,7 +742,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           const shown = readingLeftKind();
           recordOperation();
           // 本机正文重试带上提示所属的阅读身份：N 只重读这一代，重复或过期的点击不生效
-          if (shown === 'local-failed') { const reading = view().reading; if (reading) void action({ kind: 'local-body-retry', conversationId: reading.conversationId, generation: reading.generation }); return; }
+          if (shown === 'local-failed') { const reading = surface().reading; if (reading) void action({ kind: 'local-body-retry', conversationId: reading.conversationId, generation: reading.generation }); return; }
           if (shown === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
           const retry = reading().retry;
           if (shown === 'retry' && retry) { void bodyView?.page(retry)?.catch(setStatus); return; }
@@ -736,7 +767,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       <Show when={!safeAction()}><text fg={tone.warn}>{view().choices?.length ? '窗口较小：可取消；放大后继续确认。' : '窗口较小：放大后可完整显示与操作。'}</text></Show>
     </box>
     <Show when={view().kind === 'conversation' || view().field}>
-      <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={surfaceGeometry(size().width).margin} paddingX={spacing.frameInner} flexDirection="row">
+      {/* 就地字段的标题写在输入框边框上（如“重命名对话”），不加行：进入与返回时正文区不动 */}
+      <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={surfaceGeometry(size().width).margin} paddingX={spacing.frameInner} flexDirection="row"
+        title={inlineField() ? ` ${displayText(view().title)} ` : undefined}>
         <text width={2} selectable={false} fg={teal}>{options.promptGlyph === 'ascii' ? '> ' : '❯ '}</text>
         <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), surfaceGeometry(size().width).editorWidth))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
@@ -798,7 +831,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         try {
           if (used && !failed && !disposed && statusSource === scope) {
             if (applicable()) renderer.keyInput.processPaste(buffer.subarray(0, used));
-            else report('字段已继续编辑，本次粘贴未应用。');
+            else report(fieldLocked() ? '正在提交，本次粘贴未应用。' : '字段已继续编辑，本次粘贴未应用。');
           }
         }
         finally { abort(); }
@@ -896,8 +929,20 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (event.ctrl && event.name === 'r') { consume(); void action({ kind: 'retry-connection' }); return; }
     }
     if (event.ctrl && event.name === 'c' && isBody() && (event.shift || bodyView?.hasSelection())) { consume(); void copyBody(); return; }
-    if ((view().displayPaused || view().bodyRecovery === 'blocked') && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
-      consume(); if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return;
+    // 已提交的单字段请求等 N 给出下一视图：保留阅读（翻页、回到底部、上面的复制选区）与 Ctrl+C 的中止/退出；
+    // 编辑、再提交、Esc、Ctrl+D 都不生效——这次请求已经应答，不再发取消，也不宣称撤销已受理的写入
+    if (fieldLocked() && !['pageup', 'pagedown'].includes(event.name) && !(event.ctrl && event.name === 'end')) {
+      consume();
+      if (event.ctrl && event.name === 'c') {
+        // 沿用会话的中止/退出：连按退出；单按交 N，有可停的就停，没有就按原约定退出终端
+        const now = performance.now();
+        if (ctrlC > 0 && now - ctrlC < 750) { void options.exit(); return; }
+        ctrlC = now; void action({ kind: 'interrupt' });
+      }
+      return;
+    }
+    if ((surface().displayPaused || surface().bodyRecovery === 'blocked') && isBody() && event.ctrl && event.name === 'r') {
+      consume(); if (surface().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return;
     }
     if (event.ctrl && event.name === 'c') {
       consume();
@@ -1024,11 +1069,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         }
         return;
       }
-      if (['conversation', 'history'].includes(view().kind)) void pageHistory(direction);
+      if (isBody()) void pageHistory(direction);
       else if (historyBox) historyBox.scrollBy(direction * Math.max(1, historyBox.viewport.height - 2));
       return;
     }
-    if (['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'end') {
+    if (isBody() && event.ctrl && event.name === 'end') {
       consume(); void bodyView?.bottom(); return;
     }
     const selectionView = view();
@@ -1083,6 +1128,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     recordOperation();
     pointerTakeover();
     if (view().kind === 'recovery') { event.preventDefault(); event.stopPropagation(); appendRecovery(event.bytes); return; }
+    if (fieldLocked()) { event.preventDefault(); event.stopPropagation(); return; }
     if (!view().field?.secret && view().kind !== 'conversation') return;
     event.preventDefault(); event.stopPropagation();
     if (view().kind === 'conversation') {
@@ -1094,7 +1140,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   let animationTimer: ReturnType<typeof setInterval> | undefined;
   const syncAnimation = () => {
-    if (!(shownProcess() ? shownProcess()!.activity === 'running' : view().busy)) { clearInterval(animationTimer); animationTimer = undefined; }
+    if (!(shownProcess() ? shownProcess()!.activity === 'running' : surface().busy)) { clearInterval(animationTimer); animationTimer = undefined; }
     else if (!animationTimer) {
       const tick = () => setAnimation(frames[Math.floor(performance.now() / 300) % frames.length]!);
       tick(); animationTimer = setInterval(tick, 300);
@@ -1132,6 +1178,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           if (message.view.recovery?.input && !recoveryInput) recoveryInput = new RecoveryInputBuffer();
           candidates?.resetDelete(); trustControls.reset();
           preserveDraft(); bodyView?.beforeUpdate();
+          // 显示上下文：会话视图是就地字段的底；从会话进入就地字段时，在下面按交互重置之前记下会话输入框的实际行数。
+          // 下一视图到达（N 重开、结束或下一步）即解除提交锁
+          if (message.view.kind === 'conversation') setBaseView(message.view);
+          else if (message.view.inline && message.view.field && previous.kind === 'conversation') setInlineEntryRows(untrack(fieldRows));
+          if (fieldSaving() !== undefined && message.view.requestId !== fieldSaving()) setFieldSaving(undefined);
           if (!sameInteraction) {
             activateInformation(message.view); releaseSecret(); setEditorLines(1); setEditorEmpty(!message.view.field?.value);
           }
