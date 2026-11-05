@@ -5,7 +5,8 @@ import { setRenderLibPath } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
 import { encodeBodyPage, type BodyPage, type BodyPageRevision } from '../body-model.js';
-import type { TerminalAction, TerminalView } from '../protocol.js';
+import { type TerminalAction, type TerminalView } from '../protocol.js';
+
 // 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
 const TEST_READING = { conversationId: 'test', generation: 1 };
 let baselineRevision = 0;
@@ -381,7 +382,7 @@ try {
     return { state, send };
   };
   const bodyRows = (h: any) => {
-    const rows = h.test.captureCharFrame().split('\n'), end = rows.findIndex((row: string) => row.includes('上方还有内容'));
+    const rows = h.test.captureCharFrame().split('\n'), end = rows.findIndex((row: string) => row.includes('更早的消息'));
     assert.ok(end >= 0, 'the reading row offers the upward entry');
     return rows.slice(0, end);
   };
@@ -517,8 +518,129 @@ try {
     h.root.receive({ type: 'display-page', page: { first: -2, last: 0, start: -2, follow: true, segments: [segment('q', 'TWO-ASK', 'user'), segment('a', 'TWO-ANSWER')] }, revision: 7001, reading: r, hasEarlier: false });
     for (let i = 0; i < 6; i++) await h.flush();
     const frame = h.test.captureCharFrame();
-    assert.ok(frame.includes('TWO-ASK') && frame.includes('TWO-ANSWER') && !frame.includes('上方还有内容'), 'both messages of a one-page conversation are mounted, no upward entry');
+    assert.ok(frame.includes('TWO-ASK') && frame.includes('TWO-ANSWER') && !frame.includes('更早的消息'), 'both messages of a one-page conversation are mounted, no upward entry');
     assert.ok(!h.requests.some((a: TerminalAction) => a.kind === 'display-earlier'), 'no prefetch for a conversation the source reports complete');
+  });
+  // 进入提醒：一次访问里用户第一次发起输入即收起，本次访问不再亮回；换会话是新访问
+  const hinted = (h: any) => h.test.captureCharFrame().includes('更早的消息');
+  const enterVisit = async (h: any, id: string, generation: number) => {
+    const reading = { conversationId: id, generation };
+    h.useReading(reading);
+    await h.show({ ...h.view, conversationId: id, title: id, readyForInput: true, reading });
+    h.root.receive({ type: 'display-page', page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: `${id}-${generation}`, role: 'assistant', contentOffset: 0, final: true,
+      text: Array.from({ length: 80 }, (_, i) => `VISIT ${id} ${i}`).join('\n') }] }, revision: generation, reading, hasEarlier: false });
+    for (let i = 0; i < 3; i++) await h.flush();
+  };
+  const lastRowOf = (h: any, id: string) => h.test.captureCharFrame().split('\n').findIndex((row: string) => row.includes(`VISIT ${id} 79`));
+  await scenario('entry-hint-first-input-hides-it-for-the-visit', async h => {
+    await enterVisit(h, 'visit-a', 8101);
+    assert.ok(hinted(h), 'entering a long conversation offers the upward hint');
+    const before = lastRowOf(h, 'visit-a');
+    await h.test.mockInput.typeText('x'); await h.flush();
+    assert.ok(!hinted(h), 'the first typed key hides the hint');
+    const after = lastRowOf(h, 'visit-a');
+    assert.equal(after, before + 1, `the freed reading row is given back once: ${before} -> ${after}`);
+    for (let i = 0; i < 4; i++) { await h.flush(); assert.equal(lastRowOf(h, 'visit-a'), after, 'no further movement after the row is given back'); }
+    // 同一访问内：上翻、回底、同会话换代重建、模态与 F2 往返都不亮回
+    h.test.mockInput.pressKey('\x1b[5~'); await h.flush(); await h.latest();
+    assert.ok(!hinted(h), 'back at the bottom the hint stays hidden');
+    await enterVisit(h, 'visit-a', 8102);
+    assert.ok(!hinted(h), 'a technical rebuild of the same conversation is the same visit');
+    await h.show({ kind: 'selection', title: '选择', requestId: 'visit-modal', selectionLayer: 'select', choices: [{ id: 'back', label: '返回' }] });
+    await h.show({ ...h.view, conversationId: 'visit-a', title: 'visit-a', readyForInput: true, reading: { conversationId: 'visit-a', generation: 8102 } });
+    for (let i = 0; i < 3; i++) await h.flush();
+    assert.ok(!hinted(h), 'returning from a modal page is the same visit');
+    await enterVisit(h, 'visit-b', 8103);
+    assert.ok(hinted(h), 'another conversation is a new visit');
+    await h.test.mockMouse.scroll(20, 8, 'up'); await h.flush();
+    assert.ok(!hinted(h), 'the first wheel hides the hint of the new visit');
+    await enterVisit(h, 'visit-a', 8104);
+    assert.ok(hinted(h), 'A→B→A: coming back to A is a new visit');
+    await h.show({ kind: 'history', title: 'H · 只读', conversationId: 'visit-h', connected: false, reading: { conversationId: 'visit-h', generation: 8105 } });
+    h.useReading({ conversationId: 'visit-h', generation: 8105 });
+    h.root.receive({ type: 'display-page', page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'visit-h', role: 'assistant', contentOffset: 0, final: true,
+      text: Array.from({ length: 80 }, (_, i) => `VISIT visit-h ${i}`).join('\n') }] }, revision: 8105, reading: { conversationId: 'visit-h', generation: 8105 }, hasEarlier: false });
+    for (let i = 0; i < 3; i++) await h.flush();
+    assert.ok(hinted(h), 'the F2 read-only history page is its own visit');
+    h.test.mockInput.pressKey('\x1b[5~'); await h.flush();
+    assert.ok(!hinted(h), 'the first key on the history page hides its hint');
+  });
+  await scenario('entry-hint-history-temporary-selection-keeps-the-visit', async h => {
+    const openHistory = async (id: string, generation: number) => {
+      const reading = { conversationId: id, generation };
+      h.useReading(reading);
+      await h.show({ kind: 'history', title: `${id} · 只读`, conversationId: id, connected: false, reading });
+      h.root.receive({ type: 'display-page', page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: `${id}-${generation}`, role: 'assistant', contentOffset: 0, final: true,
+        text: Array.from({ length: 80 }, (_, i) => `VISIT ${id} ${i}`).join('\n') }] }, revision: generation, reading, hasEarlier: false });
+      for (let i = 0; i < 3; i++) await h.flush();
+    };
+    const pick = async () => h.show({ kind: 'selection', title: '本机历史 · 只读', requestId: `history-pick-${Math.random()}`, selectionLayer: 'select', choices: [{ id: 'cancel', label: '返回' }] });
+    await openHistory('hist-a', 8501);
+    assert.ok(hinted(h), 'opening the read-only history offers the hint');
+    h.test.mockInput.pressKey('\x1b[5~'); await h.flush(); await h.latest();
+    assert.ok(!hinted(h), 'the first key consumes the history hint');
+    // “选择其他历史”后取消：N 重发同一历史页、同一阅读代次，不是新访问
+    await pick();
+    await h.show({ kind: 'history', title: 'hist-a · 只读', conversationId: 'hist-a', connected: false, reading: { conversationId: 'hist-a', generation: 8501 } });
+    for (let i = 0; i < 3; i++) await h.flush();
+    assert.ok(!hinted(h), 'cancelling the temporary history picker keeps the visit');
+    // 原地选回同一历史：同上
+    await pick(); await openHistory('hist-a', 8501);
+    assert.ok(!hinted(h), 're-picking the same history in place keeps the visit');
+    // 换选另一个历史：新访问
+    await pick(); await openHistory('hist-b', 8502);
+    assert.ok(hinted(h), 'another history is a new visit');
+    h.test.mockInput.pressKey('\x1b[5~'); await h.flush();
+    // 真正离开历史回到会话页，再打开同一历史：新访问；会话页的访问不受历史页影响
+    await h.show({ ...h.view, conversationId: h.view.conversationId, readyForInput: true, connected: false });
+    await pick(); await openHistory('hist-b', 8503);
+    assert.ok(hinted(h), 'leaving the history and opening it again is a new visit');
+  });
+  await scenario('entry-hint-first-scroll-keeps-the-reading-row-every-frame', async h => {
+    // 真实的 N 经进程间通道异步应答翻页请求：滚动后的阅读报告要到帧后才到，替身不能在请求里同步回发正文
+    for (const [id, generation, first] of [['wheel', 8201, 'wheel'], ['pageup', 8202, 'pageup']] as const) {
+      h.readWith(undefined);
+      await enterVisit(h, id, generation);
+      assert.ok(hinted(h), `${id}: the hint is offered`);
+      h.readWith(async () => { await new Promise(resolve => setTimeout(resolve, 40)); return { accepted: true }; });
+      const viewport = h.box().viewport.height;
+      // 键盘路径的记录在按键处理开头、翻页之前；翻页会在滚动前同步报告一次阅读事实，那次报告不能看到“已操作”
+      if (first === 'wheel') await h.test.mockMouse.scroll(20, 8, 'up'); else h.test.mockInput.pressKey('\x1b[5~');
+      for (let i = 0; i < 12; i++) {
+        await h.test.renderOnce();
+        assert.equal(h.box().viewport.height, viewport, `${id} frame ${i}: the reading row is handed over, the body neither grows nor shrinks`);
+      }
+      await h.flush();
+      const frame = h.test.captureCharFrame();
+      assert.ok(!frame.includes('更早的消息') && frame.includes('回到底部'), `${id}: the hint is gone and the downward entry holds the row`);
+    }
+    h.readWith(undefined);
+  });
+  await scenario('entry-hint-click-pages-up-exactly-once', async h => {
+    await enterVisit(h, 'click', 8301);
+    const rows = h.test.captureCharFrame().split('\n');
+    const y = rows.findIndex((row: string) => row.includes('更早的消息')), x = rows[y].indexOf('更早');
+    assert.ok(y >= 0 && x >= 0, 'the hint is on screen');
+    const top = h.box().scrollTop;
+    await h.test.mockMouse.click(x, y); await h.flush();
+    const paged = h.box().scrollTop;
+    assert.ok(paged < top, `the click pages up: ${top} -> ${paged}`);
+    assert.ok(!hinted(h), 'the click consumes the hint');
+    await h.test.mockMouse.click(x, y); await h.flush();
+    assert.equal(h.box().scrollTop, paged, 'the empty left part is not an upward hot spot');
+  });
+  await scenario('entry-hint-survives-passive-updates', async h => {
+    await enterVisit(h, 'passive', 8401);
+    const reading = { conversationId: 'passive', generation: 8401 };
+    for (let i = 0; i < 3; i++) {
+      h.root.receive({ type: 'display-page', page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'passive-8401', role: 'assistant', contentOffset: 0, final: i === 2,
+        text: Array.from({ length: 80 + i }, (_, j) => `VISIT passive ${j}`).join('\n') }] }, revision: 8402 + i, reading, hasEarlier: false });
+      await h.flush();
+    }
+    h.test.resize(110, 40); await h.flush(); h.test.resize(120, 40); await h.flush();
+    await h.show({ ...h.view, conversationId: 'passive', title: 'passive', readyForInput: true, reading, message: '状态更新' });
+    for (let i = 0; i < 10; i++) await h.flush();
+    assert.ok(hinted(h), 'streaming, resize and view republishes are not user operations');
   });
   await scenario('first-pageup-after-switch-reads-earlier', async h => {
     const r = { conversationId: 'earlier', generation: 5 };
@@ -532,7 +654,7 @@ try {
     await h.show({ ...h.view, conversationId: 'earlier', title: 'EARLIER', readyForInput: true, reading: r });
     h.root.receive({ type: 'display-page', page: { first: -4, last: 0, start: -4, follow: true, segments: [-4, -3, -2, -1].map(o => segment(`p${o}`, `PAGE${o}`)) }, revision: 7101, reading: r, hasEarlier: true });
     await h.flush();
-    assert.ok(h.test.captureCharFrame().includes('上方还有内容'), 'the upward entry is offered');
+    assert.ok(h.test.captureCharFrame().includes('更早的消息'), 'the upward entry is offered');
     for (let i = 0; i < 3 && !h.test.captureCharFrame().includes('EARLIER-ASK-0'); i++) { h.test.mockInput.pressKey('\x1b[5~'); await h.flush(); }
     const frame = h.test.captureCharFrame();
     assert.ok(frame.includes('EARLIER-ASK-0') && !frame.includes('读取未完成'), 'the first upward reading after a switch reveals earlier content');
@@ -597,7 +719,7 @@ try {
     for (let i = 0; i < 40; i++) await h.flush();
     const count = h.requests.slice(mark).filter((a: TerminalAction) => a.kind === 'display-earlier').length;
     assert.ok(count > 0 && count <= 16, `background steps are bounded: ${count}`);
-    assert.ok(h.test.captureCharFrame().includes('上方还有内容'), 'the entry stays available after the budget stops');
+    assert.ok(h.test.captureCharFrame().includes('更早的消息'), 'the entry stays available after the budget stops');
   });
   await scenario('first-gesture-survives-preparing-step', async h => {
     // 实际协议顺序：第一步源端还在准备（有进展、没有正文），第二步才有正文；一次上翻要等到正文出现再结清

@@ -2,18 +2,16 @@ import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack, type JSX } from 'solid-js';
 import { bodyBlockGeometry, bodyWrapMode } from './body/geometry.js';
 import { extend } from '@opentui/solid';
-import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
-  TextRenderable, type CliRenderer, type TextChunk,
-} from '@opentui/core';
+import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, TextRenderable, type CliRenderer, type TextChunk } from '@opentui/core';
 import { BODY_STYLE, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, bodyPageSegments, bodyWindows, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
 import { BODY_WINDOW_BYTES, BODY_WINDOW_FRAGMENTS, BODY_WINDOW_NODES } from './body-window.js';
-import type { TerminalEarlierReply } from './protocol.js';
+import { type TerminalEarlierReply } from './protocol.js';
 import { bodyCell, bodyBlockGaps, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
-
 import { TerminalScrollBox } from './scroll-box.js';
 import { ReadingQueue } from './reading-queue.js';
+
 export { TerminalScrollBox } from './scroll-box.js';
 
 type NativeSelection = NonNullable<ReturnType<CliRenderer['getSelection']>>;
@@ -61,15 +59,17 @@ export interface BodyViewHandle {
   /** Root calls this immediately before replacing page/size signals. */
   beforeUpdate(): void;
   resetReading(): void;
-  inputTakeover(): void;
+  /** 输入接管：结束当前手势。press 为一次新的按下（新手势随后在同一次事件处理里开始），这期间的阅读报告仍算按住 */
+  inputTakeover(press?: boolean): void;
   close(): Promise<void>;
 }
 /**
  * 阅读导航所需的事实。below 用不含导航行的完整高度判定（决定导航行要不要出现）；belowShown 用实际视口判定
  * （导航行已出现时，视口下面是否还有正文）；above 为“上方还有可读正文”：视口顶边以上的正文（欢迎框不算）、
- * 挂载窗口之前的已备页或 N 已存片段、源端还有更早历史，三者任一。
+ * 挂载窗口之前的已备页或 N 已存片段、源端还有更早历史，三者任一。holding 为正文里按下的指针手势（拖选、点按）尚未结束，
+ * 或一次新的按下正在开始：这期间正文外的布局不应改变正文视口，否则指针下的文字会在手势中途移动。
  */
-export interface BodyReadingState { readonly below: boolean; readonly belowShown: boolean; readonly above: boolean; readonly loading: boolean; readonly retry?: -1 | 1 }
+export interface BodyReadingState { readonly below: boolean; readonly belowShown: boolean; readonly above: boolean; readonly loading: boolean; readonly retry?: -1 | 1; readonly holding: boolean }
 export interface BodyViewProps {
   readonly header?: JSX.Element;
   readonly page: BodyPage; readonly width: number; readonly height: number;
@@ -91,6 +91,8 @@ export interface BodyViewProps {
   readonly onError: (error: unknown) => void;
   readonly onReady?: (handle: BodyViewHandle | undefined) => void;
   readonly onReading?: (state: BodyReadingState) => void;
+  /** 正文上的鼠标按下与滚轮是用户操作；这两处阻止冒泡，由此告知外层（外层据此收起进入提醒） */
+  readonly onOperation?: () => void;
 }
 const teal = tone.brand, gray = tone.dim, codeBackground = tone.history;
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -167,7 +169,7 @@ export function BodyView(props: BodyViewProps) {
   const reportReading = () => {
     const later = props.page.start + props.page.segments.length < props.page.last;
     const loading = paging && performance.now() - pagingSince >= 200;
-    if (!box) return props.onReading?.({ below: later, belowShown: later, above: !!prepared()?.segments.length || storeBefore() || sourceMore(), loading, retry: readError });
+    if (!box) return props.onReading?.({ below: later, belowShown: later, above: !!prepared()?.segments.length || storeBefore() || sourceMore(), loading, retry: readError, holding: gestureHold || pressing });
     const content = natural();
     props.onReading?.({
       below: box.scrollTop + Math.max(box.viewport.height, props.fullHeight ?? 0) < content || later,
@@ -175,7 +177,7 @@ export function BodyView(props: BodyViewProps) {
       // 跟随最新时，正文（不含欢迎框）高过完整视口，顶边以上就有正文：布局之前即可判定
       above: box.scrollTop > prefixHeight() || (following() && natural() - prefixHeight() >= Math.max(box.viewport.height, props.fullHeight ?? 0)) ||
         !!prepared()?.segments.length || storeBefore() || sourceMore(),
-      loading, retry: readError });
+      loading, retry: readError, holding: gestureHold || pressing });
   };
   // 不依赖滚动位置的阅读事实一变就报告（布局之前）：导航行与正文在同一帧出现，跟随最新时正文不会因它晚一帧出现而上移一行
   createEffect(() => {
@@ -240,7 +242,7 @@ export function BodyView(props: BodyViewProps) {
   });
   const heights = createMemo(() => new Map(geometry().map(item => [item.key, item.height])));
   let box: TerminalScrollBox | undefined, disposed = false, paging = false;
-  let gestureHold = false, gestureIntent = false, gestureHadSelection = false, navigationVersion = 0, heldVersion = 0;
+  let gestureHold = false, gestureIntent = false, gestureHadSelection = false, navigationVersion = 0, heldVersion = 0, pressing = false;
   let selectionClearPending = false;
   // headerTop 只对记录它时横幅下的那一块有效：之后若在它前面载入了更早内容，横幅位置已不是用户在读的地方
   // headerStart：记录时的窗口起点。同一条长回复的多个承载片段共用一个块键，只比首块键识别不了“前面又载入了内容”
@@ -572,9 +574,12 @@ export function BodyView(props: BodyViewProps) {
     }
   };
   const handle: BodyViewHandle = {
-    inputTakeover() {
+    inputTakeover(press = false) {
       // Retire queued mouse callbacks and finish the held gesture. Plain
       // editing must preserve a current reading request and its loading state.
+      // 新的按下（包括上一次松开没有送达）：旧手势在这里结束，按在正文上的新手势在同一次事件处理里开始；
+      // 两者之间的报告仍算按住，按住期间保留的布局不先归还。按下落在正文之外时，下一次报告即归还
+      if (press) { pressing = true; queueMicrotask(() => { pressing = false; }); }
       const ownsGesture = heldVersion === navigationVersion;
       navigationVersion++;
       if (ownsGesture) heldVersion = navigationVersion;
@@ -700,7 +705,7 @@ export function BodyView(props: BodyViewProps) {
           pendingScroll + direction * Math.max(0, rows ?? box.viewport.height - 2)));
         if (direction < 0) {
           // 向上到顶：已备页直接揭示；取更早页在途就等它（不吞这次手势）；都没有才读。源端准备中或回空页时保留同一个意图，
-          // 有界退让后继续，直到能显示、到头或明确失败；换向、回到最新、切会话都会让 current() 失效而结束
+          // 有界退让后继续，直到能显示、到头或明确失败；换向、回到底部、切会话都会让 current() 失效而结束
           let delay = 0, stalls = 0;
           try {
             intentWaiting = true;
@@ -750,6 +755,10 @@ export function BodyView(props: BodyViewProps) {
   function endGesture() {
     if (!gestureHold || disposed) return;
     gestureHold = false;
+    // 手势结束当即报告：按住期间保留的布局（如进入提示的导航行）据此归还，不等下一帧
+    try { settleGesture(); } finally { reportReading(); }
+  }
+  function settleGesture() {
     if (heldVersion !== navigationVersion) return;
     if (handle.hasSelection()) {
       setFollowing(false); commitReadingIntent(false);
@@ -834,13 +843,14 @@ export function BodyView(props: BodyViewProps) {
     onMouseUp={event => { if (event.button === 0) { const version = navigationVersion; queueMicrotask(() => { if (!disposed && version === navigationVersion) { finishBodySelection(); endGesture(); } }); } }}
     onMouseDown={event => {
       if (event.button !== 0) return;
-      event.stopPropagation(); beginGesture();
+      event.stopPropagation(); beginGesture(); props.onOperation?.();
     }}
     onMouseScroll={event => {
       const direction = event.scroll?.direction;
       if (direction !== 'up' && direction !== 'down') return;
       event.preventDefault(); event.stopPropagation();
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
+      props.onOperation?.();
     }}>
     <Show when={showHeader()}><box width={Math.max(1, props.width)} flexShrink={0} flexDirection="column" onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}
       {/* 欢迎框下原有的间隔行：确证到头时写“对话从这里开始”，行高不变，正文不挪动 */}

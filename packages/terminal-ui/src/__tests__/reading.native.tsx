@@ -53,6 +53,9 @@ try {
     else { assert.equal(g.top + g.height, track); if (track! > 1) assert.ok(g.height < track!); }
   }
   await test.mockInput.typeText('/config'); await flush(); editor().setText(''); await flush();
+  // 输入是本次访问的第一个操作：进入提醒收起、它占的导航行归还给正文；配置往返要保持的是此刻的几何
+  const beforeConfiguration = geometry();
+  assert.equal(beforeConfiguration.viewport, initial.viewport + 1, 'the first input gives the entry hint row back');
   await show({ kind: 'configuration', title: '配置', configurationHome: true, editId: 'cfg', chromeDetails: ['工作目录    D:/example'], choices: [
     { id: 'save', label: '完成', detail: '保存并启动', shortcut: 'Ctrl+S', primary: true, presentation: 'button', section: '操作' },
     { id: 'cancel', label: '取消', detail: '返回', shortcut: 'Esc', presentation: 'button' },
@@ -61,7 +64,7 @@ try {
   const configLines = test.captureCharFrame().split('\n');
   assert.equal(configLines.findIndex(row => row.includes('取消')), configLines.findIndex(row => row.includes('完成')) + 1);
   await show({ ...view, message: '已取消本次配置编辑。' });
-  assert.deepEqual(geometry(), initial, 'same content and viewport after configuration');
+  assert.deepEqual(geometry(), beforeConfiguration, 'same content and viewport after configuration');
   assert.equal(test.captureCharFrame().split('\n').findIndex(row => row.includes('已取消本次配置')), editor().parent.y - 1);
   capture('configuration-return'); checks.push('fixed candidate budget releases to auto; configuration round trip preserves all geometry and adjacent status');
 

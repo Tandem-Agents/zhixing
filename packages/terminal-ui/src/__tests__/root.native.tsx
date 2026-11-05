@@ -1,23 +1,35 @@
-// Runs with the pinned Bun/native renderer via scripts/test-root.ts.
-// This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { setRenderLibPath, resolveRenderLib, OptimizedBuffer, RGBA, TextAttributes, type TextareaRenderable } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
-import type { TerminalAction, TerminalView } from '../protocol.js';
+import { type TerminalAction, type TerminalView } from '../protocol.js';
 import { interactionKey } from '../surface-layout.js';
-import type { BodyNode, BodyPage } from '../body-model.js';
-import type { TerminalPasteSink } from '../paste-stream.js';
+import { type BodyNode, type BodyPage } from '../body-model.js';
+import { type TerminalPasteSink } from '../paste-stream.js';
+import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
+import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
+import { processArtifactLines, processArtifactSpans, processArtifactText } from '../../../cli/src/terminal/process-presentation.js';
+// Runs with the pinned Bun/native renderer via scripts/test-root.ts.
+// This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
+
+
+
+
+
+
+
+
+
 // 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
 const TEST_READING = { conversationId: 'test', generation: 1 };
 let baselineRevision = 0;
 const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, reading });
 
 // Exercise the producer/renderer seam, not a hand-authored diff node fixture.
-import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
-import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
-import { processArtifactLines, processArtifactSpans, processArtifactText } from '../../../cli/src/terminal/process-presentation.js';
+
+
+
 
 process.env.OTUI_ASSET_ROOT = path.resolve(`dist/${process.platform}-${process.arch}/assets`);
 const admittedLibrary = process.env.ZHIXING_TERMINAL_RENDER_LIB;
@@ -690,8 +702,8 @@ try {
       if (route === 'keyboard') test.mockInput.pressKey('\x1b[5~');
       else if (route === 'wheel') await test.mockMouse.scroll(20, 8, 'up');
       else if (route === 'bottom') test.mockInput.pressKey('\x1b[1;5F');
-      // 点阅读行右侧的“回到最新”（45 列下右侧文字占第 33–42 列）
-      else { const row = text().split('\n').findIndex(line => line.includes('回到最新')); assert.ok(row >= 0); await test.mockMouse.click(40, row); }
+      // 点阅读行右侧的“回到底部”（45 列下右侧文字占第 33–42 列）
+      else { const row = text().split('\n').findIndex(line => line.includes('回到底部')); assert.ok(row >= 0); await test.mockMouse.click(40, row); }
       await flush();
       assert.ok(actions.slice(start).some(a => a.kind === 'display-page' || a.kind === 'display-earlier'));
       pending.reject(Error('synthetic read unavailable')); await flush(); await flush();
@@ -950,7 +962,7 @@ try {
   for (const top of [2, 3, 2]) {
     clippedBody.scrollTo(top); await flush();
     const notice = text().split('\n')[clippedBody.viewport.y + clippedBody.viewport.height]!;
-    assert.match(notice.trim(), /^(↑ 上方还有内容\s+)?↓ 回到最新 Ctrl\+End$/u, `table at ${top} cannot paint into the reading notice`);
+    assert.match(notice.trim(), /^(↑ 更早的消息\s+)?↓ 回到底部 Ctrl\+End$/u, `table at ${top} cannot paint into the reading notice`);
   }
   candidateReply = undefined;
   checks.push('production table border crossing a one-row viewport never overwrites the adjacent reading notice');

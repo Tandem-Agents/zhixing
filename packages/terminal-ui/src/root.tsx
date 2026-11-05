@@ -1,4 +1,4 @@
-import { batch, createEffect, createMemo, createSignal, For, Show, ErrorBoundary, onCleanup } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, For, Show, ErrorBoundary, onCleanup, untrack } from 'solid-js';
 import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
 import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalReading, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget } from './protocol.js';
@@ -7,7 +7,7 @@ import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
 import { TerminalInputSession, type TerminalAtomicRange } from './input-session.js';
 import { setEditorAtomicWrap } from './editor-atomic-wrap.js';
-import type { TerminalPasteSink } from './paste-stream.js';
+import { type TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
@@ -22,6 +22,7 @@ import { CandidateView } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
 import { tone, spacing, surfaceGeometry } from './theme.js';
+import { conversationVisit, historyVisit, operatedVisit, type ReadingVisit } from './reading-visit.js';
 
 extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
@@ -157,27 +158,71 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const timer = setTimeout(() => setShellLoading(true), 200);
     onCleanup(() => clearTimeout(timer));
   });
-  const [reading, setReading] = createSignal<BodyReadingState>({ below: false, belowShown: false, above: false, loading: false },
-    { equals: (a, b) => a.below === b.below && a.belowShown === b.belowShown && a.above === b.above && a.loading === b.loading && a.retry === b.retry });
+  const [reading, setReading] = createSignal<BodyReadingState>({ below: false, belowShown: false, above: false, loading: false, holding: false },
+    { equals: (a, b) => a.below === b.below && a.belowShown === b.belowShown && a.above === b.above && a.loading === b.loading && a.retry === b.retry && a.holding === b.holding });
   const isBody = () => ['conversation', 'history'].includes(view().kind);
+  // 进入提醒按访问计：会话页与 F2 只读历史各一次（边界见 reading-visit.ts）。本次访问里用户发起过输入，
+  // 「↑ 更早的消息」就不再出现；“上方还有正文”这个阅读事实本身不变，上翻、补页照常
+  const [pageVisit, setPageVisit] = createSignal<ReadingVisit>({ operated: false });
+  const [readOnlyVisit, setReadOnlyVisit] = createSignal<ReadingVisit>({ operated: false });
+  const visitOperated = () => (view().kind === 'history' ? readOnlyVisit() : pageVisit()).operated;
+  // 是否真正离开过只读历史：选择页、确认页是历史页上的临时层（如“选择其他历史”后取消或原地选回），
+  // 不算离开；回到会话页、连接页等才算离开，之后再打开历史是新访问
+  let leftHistory = true;
+  createEffect(() => {
+    const kind = view().kind, id = view().conversationId;
+    untrack(() => {
+      if (kind === 'conversation') setPageVisit(visit => conversationVisit(visit, id));
+      if (kind === 'history') { setReadOnlyVisit(visit => historyVisit(visit, id, leftHistory)); leftHistory = false; }
+      else if (kind !== 'selection' && kind !== 'confirmation') leftHistory = true;
+    });
+  });
+  // 用户发起的输入（按键、粘贴、鼠标按下、滚轮）在当前同步处理结束后记为本次访问的操作：翻页在处理器里
+  // 先按旧位置同步报告一次阅读事实，那次报告不能看到“已操作”，否则导航行会先收起、滚动后的报告里再撑开。
+  // 只记录，不消费事件，原来的翻页、选择、编辑照常完成
+  const recordOperation = () => {
+    const history = view().kind === 'history', origin = history ? readOnlyVisit() : pageVisit();
+    if (origin.operated) return;
+    queueMicrotask(() => (history ? setReadOnlyVisit : setPageVisit)(current => operatedVisit(current, origin)));
+  };
+  // 提示占行的事实只随阅读报告更新，与“下方还有正文”在同一次报告里交接：第一次上翻时导航行由右侧接替，
+  // 不先收起再撑开；纯输入后在下一次报告里归还这一行。第一次操作是在正文里按下鼠标时，提示文字照常收起，
+  // 已占的这一行留作占位直到这次手势结束：正文视口不变，指针下的文字不移动，拖选落在用户按下的那段文字上；
+  // 松开后归还这一行，正文按源文锚点与选区恢复。占位只保留已有的行，按住期间不会新出现
+  const [hintRow, setHintRow] = createSignal(false);
+  const readingReported = (state: BodyReadingState) => {
+    setReading(state);
+    setHintRow(shown => state.above && (!untrack(visitOperated) || shown && state.holding));
+  };
   // 阅读导航行只在有阅读信息时占行；“下方还有内容”由正文按不含这一行时的完整高度判定，
   // 所以这一行出现或消失不会反过来改变它自己的条件
   const navigationShown = () => isBody() && (view().bodyRecovery === 'blocked' || view().bodyRecovery === 'retrying' || !!view().localBodyFailed ||
-    !!reading().retry || reading().loading || reading().below || reading().above || shellLoading());
+    !!reading().retry || reading().loading || reading().below || hintRow() || shellLoading());
   // 后台补邻页只在可输入且空闲时进行：输入框为空、无候选、无待受理的提交、没有运行；发送路径从不等待它
   const prefetchAllowed = () => {
     const current = view();
     if (!isBody() || !bodyMatches() || !editorEmpty() || candidateOpen() || input.pendingSubmissionId) return false;
     return current.kind === 'history' ? !current.busy : !!current.readyForInput && current.connected !== false && !current.connectionState && !current.busy;
   };
-  // 阅读导航行：左侧是方向与读取状态（故障优先），右侧在实际视口下面还有正文时给“回到最新”
+  // 阅读导航行：左侧是方向与读取状态（故障优先），右侧在实际视口下面还有正文时给“回到底部”（落点是对话末尾并恢复跟随）
   // 断线返回页的本机正文恢复失败排在最前：重试只重读本机，与 Ctrl+R/Enter 的重连分开
-  const readingLeft = () => view().localBodyFailed ? '本机正文恢复失败 · 点击重试' : view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试'
-    : reading().retry ? '读取未完成 · 点击或原方向翻页重试'
-    : view().bodyRecovery === 'retrying' || reading().loading || shellLoading() ? '正在读取…'
-    : reading().above ? '↑ 上方还有内容' : '';
+  // 左侧按语义种类分派，点击按事件发生时显示的那一项执行；文案只由种类映射，换文案不影响点击
+  const readingLeftKind = (): 'local-failed' | 'blocked' | 'retry' | 'loading' | 'above' | undefined => view().localBodyFailed ? 'local-failed'
+    : view().bodyRecovery === 'blocked' ? 'blocked' : reading().retry ? 'retry'
+    : view().bodyRecovery === 'retrying' || reading().loading || shellLoading() ? 'loading'
+    : reading().above && !visitOperated() ? 'above' : undefined;
+  const readingLeft = () => {
+    switch (readingLeftKind()) {
+      case 'local-failed': return '本机正文恢复失败 · 点击重试';
+      case 'blocked': return view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试';
+      case 'retry': return '读取未完成 · 点击或原方向翻页重试';
+      case 'loading': return '正在读取…';
+      case 'above': return '↑ 更早的消息';
+      default: return '';
+    }
+  };
   const readingRight = () => view().bodyRecovery === 'blocked' || view().localBodyFailed || !reading().belowShown ? ''
-    : process.platform === 'darwin' || size().width < 60 ? '↓ 回到最新' : '↓ 回到最新 Ctrl+End';
+    : process.platform === 'darwin' || size().width < 60 ? '↓ 回到底部' : '↓ 回到底部 Ctrl+End';
   const bodyReady = (value: BodyViewHandle | undefined) => {
     const previous = bodyView; bodyView = value;
     if (!value && previous) {
@@ -552,6 +597,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }}</For>
   </box>;
   const App = () => <box width="100%" height="100%" flexDirection="column" onMouseDown={event => {
+    // 冒泡到这里的按下（输入框内点按与选字、右键粘贴等）都是用户操作；自行阻止冒泡的入口各自记录
+    recordOperation();
     if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }
   }}>
     <Show when={!isBody()}><SurfaceChrome view={view()} width={size().width} height={size().height} /></Show>
@@ -582,7 +629,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
             if (bodyWindow.notice) setStatus(bodyWindow.notice);
           }}
           prefetch={prefetchAllowed()}
-          onReading={setReading}
+          onReading={readingReported}
+          onOperation={recordOperation}
           onError={error => { if (!disposed) setStatus(error instanceof Error ? error.message : typeof error === 'string' ? error : '正文暂不可用，已保留内容仍可回看。'); }} />
       </Show>}>
         <SkillsView view={view().skills!} width={bodySize().width} height={bodySize().height}
@@ -601,18 +649,22 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         if (direction !== 'up' && direction !== 'down') return;
         event.preventDefault(); event.stopPropagation();
         void bodyView?.page(direction === 'up' ? -1 : 1, 3).catch(setStatus);
+        recordOperation();
       }}>
       <text height={1} flexShrink={1} fg={reading().retry || view().bodyRecovery === 'blocked' || view().localBodyFailed ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
         onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
+          // 按点击时显示的那一项执行一次，再记为操作；没有显示内容的留白不是上翻热区
+          const shown = readingLeftKind();
+          recordOperation();
           // 本机正文重试带上提示所属的阅读身份：N 只重读这一代，重复或过期的点击不生效
-          if (view().localBodyFailed) { const reading = view().reading; if (reading) void action({ kind: 'local-body-retry', conversationId: reading.conversationId, generation: reading.generation }); return; }
-          if (view().bodyRecovery === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
+          if (shown === 'local-failed') { const reading = view().reading; if (reading) void action({ kind: 'local-body-retry', conversationId: reading.conversationId, generation: reading.generation }); return; }
+          if (shown === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
           const retry = reading().retry;
-          if (retry) { void bodyView?.page(retry)?.catch(setStatus); return; }
-          if (!reading().loading && reading().above) void bodyView?.page(-1)?.catch(setStatus); }}>{readingLeft()}</text>
+          if (shown === 'retry' && retry) { void bodyView?.page(retry)?.catch(setStatus); return; }
+          if (shown === 'above') void bodyView?.page(-1)?.catch(setStatus); }}>{readingLeft()}</text>
       <box flexGrow={1} minWidth={1} />
       <Show when={readingRight()}><text height={1} flexShrink={0} fg={tone.dim} selectable={false} wrapMode="none"
-        onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); void bodyView?.bottom()?.catch(setStatus); }}>{readingRight()}</text></Show>
+        onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); void bodyView?.bottom()?.catch(setStatus); recordOperation(); }}>{readingRight()}</text></Show>
     </box></Show>
     </box>
     <box flexDirection="column" flexShrink={0}>
@@ -730,7 +782,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     candidates?.sync(false);
     renderer.off('resize', resize);
     renderer.off('frame', refreshCopy);
-    renderer.off('pointer-takeover', pointerTakeover); renderer.off('blur', pointerTakeover);
+    renderer.off('pointer-takeover', pressTakeover); renderer.off('blur', pointerTakeover);
     renderer.keyInput.off('keypress', keypress); renderer.keyInput.off('paste', paste);
     disposing = (async () => {
       try { await bodyView?.close(); await Promise.all(bodyClosures); }
@@ -739,7 +791,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     return disposing;
   };
   const resize = () => { bodyView?.beforeUpdate(); setSize({ width: renderer.terminalWidth, height: renderer.terminalHeight }); };
-  const pointerTakeover = () => { renderer.releasePointerCapture?.(); renderer.emit('terminal-pointer-cancel'); bodyView?.inputTakeover(); };
+  const takeover = (press: boolean) => { renderer.releasePointerCapture?.(); renderer.emit('terminal-pointer-cancel'); bodyView?.inputTakeover(press); };
+  const pointerTakeover = () => takeover(false);
+  // 每次按下先于原生选区路由到达：上一次手势（含松开未送达的）在这里结束，同一次处理里随即开始新手势
+  const pressTakeover = () => takeover(true);
   let followedSize = size();
   createEffect(() => {
     const index = selected(), current = view(), dimensions = size();
@@ -759,6 +814,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (resized) followFrames(3); else queueMicrotask(follow);
   });
   const keypress = (event: KeyEvent) => {
+    recordOperation();
     pointerTakeover();
     const consume = () => { event.preventDefault(); event.stopPropagation(); };
     if (view().kind === 'recovery' && view().recovery) {
@@ -957,6 +1013,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const paste = (event: PasteEvent) => {
     if (!event.bytes.byteLength) { event.preventDefault(); event.stopPropagation(); return; }
+    recordOperation();
     pointerTakeover();
     if (view().kind === 'recovery') { event.preventDefault(); event.stopPropagation(); appendRecovery(event.bytes); return; }
     if (!view().field?.secret && view().kind !== 'conversation') return;
@@ -985,7 +1042,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (renderFailure) throw renderFailure;
     resize(); renderer.on('resize', resize);
     renderer.on('frame', refreshCopy);
-    renderer.on('pointer-takeover', pointerTakeover); renderer.on('blur', pointerTakeover);
+    renderer.on('pointer-takeover', pressTakeover); renderer.on('blur', pointerTakeover);
     renderer.keyInput.on('keypress', keypress); renderer.keyInput.on('paste', paste);
     options.inputReady(renderer);
     const firstFrameId = await new Promise<number>((resolve, reject) => {
