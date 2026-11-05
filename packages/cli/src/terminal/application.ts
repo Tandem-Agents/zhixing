@@ -195,7 +195,8 @@ class CommandHandoff {
   onSettle?: () => void;
   readonly done: Promise<void>;
   #resolve!: () => void;
-  constructor(name: string) { this.name = name; this.done = new Promise(resolve => { this.#resolve = resolve; }); }
+  /** 界面给这次提交的令牌：只在通过准入（started）后的交接帧上回显，界面据此在首个结果帧上收尾 */
+  constructor(name: string, readonly token?: string) { this.name = name; this.done = new Promise(resolve => { this.#resolve = resolve; }); }
   settle(): void { if (!this.settled) { this.settled = true; this.#resolve(); this.onSettle?.(); } }
 }
 
@@ -815,7 +816,7 @@ class TerminalApplication {
       case 'status': this.#background(() => this.#status()); return { accepted: true };
       case 'command-route': return this.#commandRoute(action.name);
       case 'skills-action': return { handled: await this.#skills?.act(action.action) ?? false };
-      case 'command': return this.#command(action.name, action.argument);
+      case 'command': return this.#command(action.name, action.argument, action.handoff);
       default: throw Error('terminal-action-unavailable');
     }
   }
@@ -2739,10 +2740,12 @@ class TerminalApplication {
 
   /** 受理后在后台执行的命令，请求等到它的交接帧真正送达（或判定失效、操作无可见结果而结束）才返回：
    *  界面以此结束“保持来源页”。不受理、立即关闭等不进后台的路径照旧立即返回。 */
-  async #command(name: string, argument: string): Promise<unknown> {
+  async #command(name: string, argument: string, token?: unknown): Promise<unknown> {
+    // 令牌只用来在本实例内把交接帧对回这次提交：有限的十进制序号，不赋予任何权限
+    if (token !== undefined && (typeof token !== 'string' || !/^[1-9][0-9]{0,15}$/u.test(token))) throw Error('terminal-command-handoff');
     // 新命令受理即撤下上一条操作结果：撤回帧在交接作用域之外先送达，就地字段与页面随后才到
     if (this.#result && typeof name === 'string' && this.#candidates.registry.findByName(name)) await this.#retractResultFrame();
-    const handoff = new CommandHandoff(name);
+    const handoff = new CommandHandoff(name, token);
     const outcome = await this.#commandScope.run(handoff, () => this.#dispatchCommand(name, argument)) as { accepted?: boolean } | undefined;
     if (outcome?.accepted && handoff.started && !handoff.settled) {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2911,8 +2914,11 @@ class TerminalApplication {
         // 仍在打开的命令：它自己的首帧就是结果，这一帧及之后不再带“正在打开”；其余会话视图如实带上
         if (frame && this.#pendingCommand === frame.scope) this.#pendingCommand = undefined;
         const pending = next.view.kind === 'conversation' && this.#pendingCommand ? { commandPending: this.#pendingCommand.name } : {};
+        // 已通过准入的命令，它的交接帧回显提交令牌：界面在这一帧上完成那次提交的收尾。
+        // 被拒绝、未知命令（未进后台）与作用域外的视图都不带；只加在这次写出的消息上，不进 mainView，后续刷新不带
+        const handoff = frame?.scope.started && frame.scope.token ? { handoff: frame.scope.token } : {};
         // 交接帧写出（或写出失败）即结算：失败时它已离开保留槽，不能指望收尾再结算
-        try { await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation, ...(reading ? { reading } : {}), ...pending } }); }
+        try { await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation, ...(reading ? { reading } : {}), ...pending, ...handoff } }); }
         finally { frame?.scope.settle(); }
       }
     })().finally(() => {

@@ -87,7 +87,8 @@ export type TerminalAction =
   | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "rubric-resume" | "confirmation-retry" | "exit" | "status" }
   /** Esc／Ctrl+C 请求停止。stop 是按键时屏上显示的那次运行（意图与身份，不是授权）；缺省表示按键时屏上空闲。 */
   | { readonly kind: "abort" | "interrupt"; readonly stop?: TerminalStopTarget }
-  | { readonly kind: "command"; readonly name: string; readonly argument: string }
+  /** handoff：界面为这次提交生成的令牌（十进制序号）。N 只在这条命令通过准入后的交接帧上原样回显，界面据此在首个结果帧上收尾。 */
+  | { readonly kind: "command"; readonly name: string; readonly argument: string; readonly handoff?: string }
   | { readonly kind: 'command-route'; readonly name: string }
   | { readonly kind: 'skills-action'; readonly action: TerminalSkillsAction }
   | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean; readonly generation?: number }
@@ -281,6 +282,8 @@ export interface TerminalView {
   readonly inputReceiptPending?: boolean;
   /** 已受理、结果还没送到界面的命令名（N 等首帧到上限后如实保留，首帧写出或结算时撤下）；会话页信息行据此显示“正在打开” */
   readonly commandPending?: string;
+  /** 只出现在已准入命令的交接帧上：回显那次 command 动作的 handoff 令牌，表示这一帧就是它的结果。不进主视图，后续刷新不带 */
+  readonly handoff?: string;
   readonly skills?: TerminalSkillsView;
   readonly recovery?: { readonly requestId: string; readonly input: boolean; readonly pages: number; readonly settled?: boolean };
 }

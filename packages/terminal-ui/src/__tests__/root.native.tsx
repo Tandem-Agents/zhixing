@@ -1244,6 +1244,95 @@ try {
     editor().setText(''); await flush();
     checks.push('preemption voids the late reply; in-place results, failures and refusals release the hold once the command returns');
 
+    // 已发出的命令把前台换成另一个会话（/resume、/new、/work、场景退出）：N 先写出带这次提交令牌的结果帧再回复，
+    // 这一帧画出来时就已收起面板、清空命令；消费权只属于当前提交的原草稿，各种到达顺序结束状态一致
+    {
+      const commandToken = () => {
+        const sent = actions.findLast(action => action.kind === 'command') as Extract<TerminalAction, { kind: 'command' }> | undefined;
+        assert.ok(sent?.handoff, 'the command carries a submission token'); return sent.handoff;
+      };
+      const send = async () => {
+        await open('/res');
+        test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/resume chat-b', execute: true }); await flush(); await pause(25); await flush();
+        reply('command-route', { route: 'local' }); await flush();
+        return commandToken();
+      };
+      const settle = async () => { await flush(); await pause(25); await flush(); };
+      const clean = (label: string) => {
+        assert.equal(editor().plainText, '', `${label}: the command draft is consumed`);
+        assert.ok(!/候选说明|正在打开/.test(text()), `${label}: no candidate panel or opening notice\n${text()}`);
+      };
+      const reset = async () => { editor().setText(''); await flush(); await show(conversation); };
+      const other = { ...conversation, conversationId: 'entry-switched', title: '切换后的对话' };
+      // 带令牌的切换帧先到：收到后画出的第一帧就已收尾；迟到的受理回复不再改动
+      let token = await send();
+      root.receive({ type: 'view', view: { reading: TEST_READING, ...other, handoff: token, generation: ++generation } });
+      await test.renderOnce();
+      clean('handoff frame first');
+      reply('command', { accepted: true }); await settle(); clean('late reply after the handoff frame');
+      await show(conversation);
+      // 受理先到（等待到上限），带令牌的帧随后才到：回复时收尾，迟到的帧幂等
+      token = await send();
+      reply('command', { accepted: true, pending: true }); await settle(); clean('pending reply first');
+      await show({ ...other, handoff: token }); clean('late handoff frame after the reply');
+      await show(conversation);
+      // 同一会话的结果帧带令牌：同样在这一帧收尾
+      token = await send();
+      await show({ ...conversation, message: '就地结果', handoff: token }); clean('same-conversation handoff frame');
+      reply('command', { accepted: true }); await settle(); clean('reply after the same-conversation frame');
+      // 不带令牌的换会话（如运行结束后的场景切换）不冒认结果：只解除保持；不受理时草稿保留，受理时回复收尾
+      for (const accepted of [false, true]) {
+        token = await send();
+        await show(other);
+        assert.equal(editor().plainText, '/resume chat-b', 'an untagged switch does not consume the command');
+        reply('command', { accepted }); await settle();
+        if (accepted) clean('untagged switch then accepted reply');
+        else assert.equal(editor().plainText, '/resume chat-b', 'a refused command keeps its draft');
+        await reset();
+      }
+      // 未知令牌的帧不冒认
+      token = await send();
+      await show({ ...other, handoff: `${Number(token) + 100}` });
+      assert.equal(editor().plainText, '/resume chat-b', 'an unknown token does not consume');
+      reply('command', { accepted: false }); await settle(); await reset();
+      // 同一草稿版本重复提交：t1 发出后 Esc 收起、草稿不变再按 Enter 发出 t2；t1 的帧与回复都不能消费 t2 仍在用的输入
+      const first = await send();
+      test.mockInput.pressEscape(); await settle();
+      assert.equal(editor().plainText, '/resume chat-b');
+      test.mockInput.pressEnter(); await flush(); reply('command-route', { route: 'local' }); await flush();
+      const second = commandToken(); assert.notEqual(second, first, 'the resubmission has its own token');
+      await show({ ...other, handoff: first });
+      assert.equal(editor().plainText, '/resume chat-b', 'the superseded submission does not consume the newer one');
+      take('command').resolve({ accepted: true }); await settle();
+      assert.equal(editor().plainText, '/resume chat-b', 'nor does its late reply');
+      reply('command', { accepted: false }); await settle();
+      assert.equal(editor().plainText, '/resume chat-b', 'the refused newer submission keeps the draft');
+      await reset();
+      // 发出后编辑出的新草稿保留
+      token = await send();
+      await test.mockInput.typeText('_after'); await flush();
+      await show({ ...other, handoff: token });
+      assert.equal(editor().plainText, '/resume chat-b_after', 'a draft edited after sending is kept');
+      reply('command', { accepted: true }); await settle();
+      assert.equal(editor().plainText, '/resume chat-b_after');
+      await reset();
+      // 断线后迟到的受理回复不能消费
+      token = await send();
+      await show({ ...conversation, connected: false });
+      reply('command', { accepted: true }); await settle();
+      assert.equal(editor().plainText, '/resume chat-b', 'a reply after the connection dropped cannot consume');
+      await reset();
+      // 断线后操作失败的错误视图同样带这次的令牌（生产形状见 application-command-handoff 的断线例）：断线判定先于消费，
+      // 这一帧与随后的受理回复都不清草稿
+      token = await send();
+      await show({ ...conversation, connected: false, connectionState: 'unavailable', message: '操作未完成：connection closed before navigation', handoff: token });
+      assert.equal(editor().plainText, '/resume chat-b', 'a disconnected handoff frame does not consume');
+      reply('command', { accepted: true }); await settle();
+      assert.equal(editor().plainText, '/resume chat-b', 'nor does the accepted reply after it');
+      await reset();
+    }
+    checks.push('a command that switches the conversation is finished on its tagged first frame; only the current submission consumes its own draft');
+
     // 页头：有说明画框装说明，没有说明的子页用无框层级标题
     await show({ kind: 'selection', title: '命令帮助', requestId: 'entry-help', choices: [{ id: 'return', label: '返回输入' }] });
     assert.match(text(), /命令帮助 ─{8,}/); assert.ok(!text().includes('╭─ 命令帮助'), 'no empty framed header');

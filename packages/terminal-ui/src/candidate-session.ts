@@ -145,8 +145,9 @@ export class TerminalCandidateSession {
       // 已作废的接纳不碰锁与查询：此时可能已有更新的接纳或查询在进行
       if (token === this.#acceptToken) {
         this.#accepting = false;
-        // A file/directory completion may open its successor. A command will be
-        // submitted by the caller before this microtask reaches the next query.
+        // 补全文件或目录后可能接着打开下一级候选，所以按新草稿重新查询。执行类命令的提交要等路由与命令，
+        // 这次查询会先发出：面板此时被进入冻结住，命令有结果（交接帧或受理回复）时由提交的收尾收起；
+        // 未受理、作为输入发送等分支，草稿保留，面板按这次查询照常显示
         this.#signature = ''; queueMicrotask(() => this.sync(this.#active));
       }
     }

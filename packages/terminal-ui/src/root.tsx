@@ -274,8 +274,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   // 直到命令返回——N 在本命令首帧真正写出后才回复，或等待到上限后如实回复“仍在打开”。
   // 阶段 pending：command 尚未发出（等候选应答、等路由），用户的意图还没被受理。此时编辑或移动光标、Esc、
   // 页面接管、换会话、断线、销毁都当场作废这次进入：解除冻结，在途的候选接纳随之作废，迟到的补全、路由不再生效。
-  // 阶段 sent：command 已发出，按原有归属处理；Esc 只收起冻结的面板，“正在打开”保留到命令返回。
-  type Entry = { readonly id: number; readonly stage: 'pending' | 'sent'; readonly frozen: boolean; readonly conversationId?: string;
+  // 阶段 sent：command 已发出，按原有归属处理；Esc 只收起冻结的面板，“正在打开”保留到命令返回，
+  // 或保留到它的交接帧（带这次提交令牌的视图）先送达——那一帧就是结果，进入随之结束。
+  // token：命令发出后记下的提交令牌，它的交接帧到达即这次进入的结果已经呈现
+  type Entry = { readonly id: number; readonly stage: 'pending' | 'sent'; readonly frozen: boolean; readonly conversationId?: string; readonly token?: string;
     readonly source: InformationSource; readonly snapshot: { readonly value?: TerminalCandidates; readonly selected: number; readonly error?: string } };
   const [entry, setEntry] = createSignal<Entry | undefined>();
   let entrySequence = 0;
@@ -286,7 +288,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     return id;
   };
   const entryLive = (id: number) => entry()?.id === id;
-  const updateEntry = (id: number, patch: Partial<Pick<Entry, 'stage' | 'frozen'>>) => setEntry(current => current?.id === id ? { ...current, ...patch } : current);
+  const updateEntry = (id: number, patch: Partial<Pick<Entry, 'stage' | 'frozen' | 'token'>>) => setEntry(current => current?.id === id ? { ...current, ...patch } : current);
   const endEntry = (id?: number) => {
     const current = entry();
     if (!current || (id !== undefined && current.id !== id)) return;
@@ -379,6 +381,19 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       syncEditor();
     } });
   };
+  // 命令对输入的消费权：只属于最近一次发出的命令（新提交取代旧提交），消费的是它发出时的原草稿版本。
+  // 与进入的视觉保持无关：换会话结束保持，不剥夺消费；旧令牌、未知令牌、断线与销毁都不能消费
+  let commandSequence = 0;
+  let commandOwner: { readonly token: string; readonly version: number } | undefined;  /** 令牌 token 的命令已有结果（交接帧送达或回复受理）或已结束（不受理、失败）：仍是当前提交才处理，重复到达幂等 */
+  const completeCommand = (token: string, accepted: boolean) => {
+    const owner = commandOwner;
+    if (owner?.token !== token) return;
+    commandOwner = undefined;
+    if (!accepted || draft.version !== owner.version) return;
+    input.clear(owner.version);
+    if (view().kind === 'conversation') { changingDraft = true; try { editor?.setText(''); } finally { changingDraft = false; } syncEditor(); }
+    candidates?.dismiss();
+  };
   // entryId：由一次进入发起的提交；每次等待之后核对这次进入仍有效，作废了就不再发后续请求、不清草稿
   const submit = async (entryId?: number) => {
     let current = view();
@@ -454,14 +469,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
             catch (error) { if (!disposed) report(error); }
             return;
           }
-          if (entryId !== undefined) updateEntry(entryId, { stage: 'sent' });
+          // 从这里起这条命令拥有原草稿的消费权：它的交接帧先到（N 写出首帧才回复）就在那一帧收尾，否则在回复时收尾
+          const token = String(++commandSequence); commandOwner = { token, version };
+          if (entryId !== undefined) updateEntry(entryId, { stage: 'sent', token });
           // pending：命令已受理、结果还没到界面（N 等待到上限）。照常结束这次进入；“正在打开”由视图的 commandPending 继续显示
-          const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '' }) as { accepted?: boolean; pending?: boolean } | undefined;
-          if (result?.accepted && draft.version === version && (entryId === undefined || entryLive(entryId))) {
-            input.clear(version);
-            if (view().kind === 'conversation') { changingDraft = true; try { editor?.setText(''); } finally { changingDraft = false; } syncEditor(); }
-            candidates?.dismiss();
-          }
+          const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '', handoff: token }) as { accepted?: boolean; pending?: boolean } | undefined;
+          completeCommand(token, !!result?.accepted);
         }
       } else {
         try { setStatus('正在保存并提交输入…'); await input.submit(); }
@@ -905,7 +918,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   let disposing: Promise<void> | undefined;
   const dispose = (): Promise<void> => {
     if (disposing) return disposing;
-    disposed = true; endEntry(); input.activate(false); releaseSecret(); releaseRecovery(); clearInterval(animationTimer);
+    disposed = true; endEntry(); commandOwner = undefined; input.activate(false); releaseSecret(); releaseRecovery(); clearInterval(animationTimer);
     information.dispose();
     candidates?.sync(false);
     renderer.off('resize', resize);
@@ -1233,7 +1246,19 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           }
           setSelected(initialChoiceIndex(message.view, sameInteraction ? selectedId : undefined));
           setView(message.view);
-          // 进入的作废：页面接管时作废尚未发出的进入；换会话、断线时不论阶段都结束，旧进入不再操作新的前台
+          // 断线先于任何消费：已发出的命令不再能证明自己完成，这一帧（即使带着它的令牌——断线后操作失败的错误视图
+          // 照样是它的交接帧）与之后迟到的令牌、受理回复都不得消费草稿
+          if (message.view.kind === 'conversation' && (message.view.connected === false || !!message.view.connectionState)) commandOwner = undefined;
+          // 已受理命令的交接帧（N 只给通过准入的命令回显它的提交令牌）：这一帧就是它的结果，在这一帧上收起保持、
+          // 消费原草稿并收起面板，不让命令与面板残留到下一帧；回复随后到达时幂等
+          const handoff = message.view.handoff;
+          if (handoff !== undefined) {
+            const owned = entry();
+            if (owned?.token === handoff) endEntry(owned.id);
+            completeCommand(handoff, true);
+          }
+          // 进入的作废：页面接管时作废尚未发出的进入；换会话、断线时不论阶段都结束视觉保持，旧进入不再操作新的前台。
+          // 已发出命令对原草稿的消费不随之取消，由提交令牌决定
           const current = entry(), next = message.view;
           if (current && (next.kind === 'conversation'
             ? next.conversationId !== current.conversationId || next.connected === false || !!next.connectionState

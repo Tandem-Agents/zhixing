@@ -49,10 +49,10 @@ function fixture(Class = Fixture) {
   // 挡住接下来的发送，直到调用返回的放行函数
   const block = () => { const held = deferred(); gate = held.promise; return () => { gate = undefined; held.resolve(); }; };
   // 运行一条命令：operation 是命令受理后在后台执行的操作；记录 command 返回时界面已收到的消息
-  const run = (operation?: () => Promise<void>, outcome: unknown = { accepted: true }) => {
+  const run = (operation?: () => Promise<void>, outcome: unknown = { accepted: true }, token?: string) => {
     target.dispatchCommand = async () => { if (operation) target.background(operation); return outcome; };
     const state: { returned: boolean; deliveredAtReturn?: string[]; result?: unknown } = { returned: false };
-    const done = target.command('resolve', '').then((result: unknown) => {
+    const done = target.command('resolve', '', token).then((result: unknown) => {
       state.returned = true; state.deliveredAtReturn = sent.map(view => view.message); state.result = result;
     });
     return { state, done };
@@ -166,5 +166,52 @@ describe('command handoff settles on the delivered first frame', () => {
     const { run } = fixture();
     const { state, done } = run(undefined, { accepted: false });
     await done; expect(state.result).toEqual({ accepted: false });
+  });
+
+  // 提交令牌：界面靠它把首个结果帧对回自己的那次提交（/resume 等换会话命令的结果帧先于回复到达）
+  it('echoes the submission token only on the handoff frame of an admitted command', async () => {
+    // 通过准入：交接帧（这里是换到另一个会话的视图）带令牌；作用域外的刷新、之后的刷新与主视图都不带
+    const admitted = fixture();
+    const work = deferred();
+    const first = admitted.run(async () => { await work.promise; await admitted.target.publish({ ...admitted.target.mainView, conversationId: 'target', message: '已切换' }); }, { accepted: true }, '7');
+    await turns();
+    await admitted.target.publish({ ...admitted.target.mainView, message: '作用域外' });
+    work.resolve(); await first.done;
+    await admitted.target.publish(admitted.target.mainView);
+    expect(admitted.sent.map(view => [view.message, view.handoff])).toEqual([['作用域外', undefined], ['已切换', '7'], [undefined, undefined]]);
+    expect(first.state.deliveredAtReturn).toContain('已切换');
+    expect(admitted.target.mainView).not.toHaveProperty('handoff');
+    // 未知命令：没有进后台（未通过准入），在作用域内发布的说明帧不带令牌
+    const unknown = fixture();
+    unknown.target.dispatchCommand = async () => { void unknown.target.publish({ ...unknown.target.mainView, message: '未知命令' }); return { accepted: false }; };
+    expect(await unknown.target.command('missing', '', '8')).toEqual({ accepted: false });
+    await turns();
+    expect(unknown.sent.map(view => [view.message, view.handoff])).toEqual([['未知命令', undefined]]);
+    // 准入被拒（另一个操作还占着）：命令报错，同时到达的其他视图不带令牌
+    const refused = fixture();
+    refused.target.operation = Promise.resolve();
+    const second = refused.run(async () => {}, { accepted: true }, '9');
+    await expect(second.done).rejects.toThrow('terminal-operation-in-progress');
+    await refused.target.publish({ ...refused.target.mainView, conversationId: 'other', message: '运行结束后的场景切换' });
+    expect(refused.sent.map(view => view.handoff)).toEqual([undefined]);
+    // 不带令牌保持原行为；令牌不是有限十进制序号时拒绝，不发任何帧
+    const plain = fixture();
+    await plain.run(async () => { await plain.target.publish({ ...plain.target.mainView, message: '无令牌' }); }).done;
+    expect(plain.sent.at(-1)).not.toHaveProperty('handoff');
+    // 断线后操作失败：生产断线回调把主视图置为不可用，#background 的 catch 释放操作后发布错误视图。它仍是这次已准入命令的
+    // 交接帧，照样带令牌，命令也照样回复受理——令牌只说明“这是它的结果”，不说明连接可用；界面须先按断线判定、不消费草稿
+    const dropped = fixture();
+    const closing = deferred();
+    const third = dropped.run(async () => { await closing.promise; throw Error('connection closed before navigation'); }, { accepted: true }, '10');
+    await turns(); dropped.target.disconnect(); closing.resolve(); await third.done; await turns();
+    expect(dropped.sent).toHaveLength(1);
+    expect(dropped.sent[0]).toMatchObject({ connected: false, connectionState: 'unavailable', handoff: '10' });
+    expect(dropped.sent[0].message).toMatch(/操作未完成：connection closed before navigation/);
+    expect(third.state.result).toEqual({ accepted: true });
+    for (const token of ['', '0', '01', 'x7', '1'.repeat(17), 7]) {
+      const invalid = fixture();
+      await expect(invalid.target.command('resolve', '', token)).rejects.toThrow('terminal-command-handoff');
+      expect(invalid.sent).toHaveLength(0);
+    }
   });
 });
