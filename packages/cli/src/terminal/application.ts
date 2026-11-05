@@ -1,19 +1,18 @@
-import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias, TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing/terminal-ui/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRpcClient } from '@zhixing/server/client';
 import { createPlatformSecretStore } from '@zhixing/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
-import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing/core/contracts';
-import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
+import { type ConversationBodyCursor, type ConversationBodyPage, type TranscriptToolFacts } from '@zhixing/core/contracts';
+import { type TranscriptByteReader, type TranscriptBodyCursor } from '@zhixing/core/transcript';
 import { isAbsolute, join as joinPath } from 'node:path';
 import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
-import type { TerminalPreloadRelease } from './application-preload.js';
+import { type TerminalPreloadRelease } from './application-preload.js';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
-import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing/terminal-ui/protocol';
-import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
+import { type SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
@@ -24,34 +23,34 @@ import { createLogWriterProbe } from '../logging/writers.js';
 import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
 import { terminalCloseDeadline, terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
 import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError, type CoreHostLifecycleNotice } from '../runtime/core-host-connection.js';
-import type { DeviceRestriction } from '../serve/device-restriction.js';
+import { type DeviceRestriction } from '../serve/device-restriction.js';
 import { connectReplHost } from '../runtime/repl-host-startup.js';
-import type { HostReloadOptions } from '../runtime/configuration-application.js';
-import type { NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
-import type { ConfigEditorRuntime, SectionId } from '../config-editor/types.js';
-import type { TerminalConfigurationEditor } from './configuration-editor.js';
-import type { TerminalSkillsOwner } from './skills.js';
-import type { TerminalSkillCommands } from './skill-commands.js';
-import type { TerminalDecisionCommands } from './decision-commands.js';
-import type { TerminalTrustCandidates } from './trust-candidates.js';
-import type { TerminalTasks } from './tasks.js';
-import type { TerminalTaskNotices } from './task-notices.js';
-import type { TerminalSchedulerNotices } from './scheduler-notices.js';
-import type { TerminalInformationCommands } from './information-commands.js';
+import { type HostReloadOptions } from '../runtime/configuration-application.js';
+import { type NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
+import { type ConfigEditorRuntime, type SectionId } from '../config-editor/types.js';
+import { type TerminalConfigurationEditor } from './configuration-editor.js';
+import { type TerminalSkillsOwner } from './skills.js';
+import { type TerminalSkillCommands } from './skill-commands.js';
+import { type TerminalDecisionCommands } from './decision-commands.js';
+import { type TerminalTrustCandidates } from './trust-candidates.js';
+import { type TerminalTasks } from './tasks.js';
+import { type TerminalTaskNotices } from './task-notices.js';
+import { type TerminalSchedulerNotices } from './scheduler-notices.js';
+import { type TerminalInformationCommands } from './information-commands.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
 import { formatRelativeTimeText } from '../commands/format.js';
 import { advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
-import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
+import { type SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import { parseConversationId } from '@zhixing/core/conversation';
-import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
+import { type SkillCatalogClient } from '@zhixing/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AdvancementOperationTarget, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
-import { PendingInputReceiptError, RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
+import { PendingInputReceiptError, RpcConversationFacade, type SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
 import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
-import type { AgentYield } from '@zhixing/core/loop';
-import type { ConversationOutputSource } from '../runtime/conversation-output.js';
+import { type AgentYield } from '@zhixing/core/loop';
+import { type ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
 import { TerminalDisplayReplay, runOutcomeSegment, runOutcomeText, toolCardSegment, type DisplayReplaySource, type RunOutcomeState, type ToolReplaySource } from './display-replay.js';
@@ -64,7 +63,6 @@ import { TerminalManagedFiles } from './managed-files.js';
 import { TerminalInputHistoryReader } from './input-history.js';
 import { TerminalPendingSendStore } from './pending-send-store.js';
 import { prepareSessionSendSnapshot } from './prepare-session-send.js';
-import type { SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-facade.js';
 import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-material-registry.js';
 import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
 import { createUserSubmission } from '../runtime/user-submission.js';
@@ -82,6 +80,7 @@ import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtim
 import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { recordTerminalFailure, terminalStorageFullMessage } from './failure.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
@@ -175,6 +174,27 @@ function stalledProposal(conversationId: string, snapshot: SessionAdvancementSta
   if (!snapshot || (snapshot.status !== 'draft-failed' && snapshot.status !== 'draft-uncertain') || !snapshot.originalTurnId || snapshot.draftGeneration === undefined) return undefined;
   return { conversationId, turnId: snapshot.originalTurnId, advancementSessionId: snapshot.advancementSessionId,
     draftGeneration: snapshot.draftGeneration, outcome: snapshot.status === 'draft-failed' ? 'failed' : 'uncertain' };
+}
+
+/**
+ * 一次命令的进页交接。命令作用域内的第一次发布是“交接帧”（目标页、就地结果或失败说明），
+ * 由发送器单独保留，真正写入界面，或被判定不再有效时结算；命令没有任何可见结果时，随操作结束结算。
+ * command 请求以结算为返回时刻，界面据此结束“保持来源页”。作用域外的后台刷新、通知不会结算它。
+ * 等待有上限且远低于界面动作请求的期限：首帧迟迟不来（例如宿主很慢）时如实回复“已受理、仍在打开”，
+ * 会话视图带上 commandPending 直到交接结算（首帧写出时撤下；无结果结算时补发去掉它的主视图）；
+ * 不会因为等首帧让请求超时成“结果未确认”，界面也不会回到看似什么都没发生的样子。
+ */
+const COMMAND_HANDOFF_WAIT_MS = 10_000;
+class CommandHandoff {
+  framed = false; started = false; settled = false;
+  /** 规范命令名（分派时按命令表改写），用于“正在打开”的说明 */
+  name: string;
+  /** 结算时回调一次（等待到上限之后才挂上，用来撤下 commandPending） */
+  onSettle?: () => void;
+  readonly done: Promise<void>;
+  #resolve!: () => void;
+  constructor(name: string) { this.name = name; this.done = new Promise(resolve => { this.#resolve = resolve; }); }
+  settle(): void { if (!this.settled) { this.settled = true; this.#resolve(); this.onSettle?.(); } }
 }
 
 class TerminalApplication {
@@ -302,6 +322,11 @@ class TerminalApplication {
   #historyReturn?: View;
   #publishing?: Promise<void>;
   #nextView?: { readonly view: View; readonly current?: () => boolean };
+  readonly #commandScope = new AsyncLocalStorage<CommandHandoff>();
+  /** 交接帧不参与 #nextView 的合并：保留到真正写出或判定失效为止 */
+  #handoffFrame?: { readonly scope: CommandHandoff; readonly view: View; readonly current?: () => boolean };
+  /** 等待到上限仍未出帧的命令：发送会话视图时带上 commandPending，直到它的交接结算 */
+  #pendingCommand?: CommandHandoff;
 
   #closeDeadline = 0;
   constructor(readonly instance: string, readonly home: string, directory: string, readonly transport: TerminalParentTransport, directoryIdentity: string, readonly args: readonly string[] = []) {
@@ -441,6 +466,8 @@ class TerminalApplication {
     this.#connection.onDisconnect(() => {
       this.#processSession.reset();
       ++this.#conversationEpoch;
+      // 断线也是换代：未写出的交接帧作废，不在断线画面之前补发过期页面
+      this.#dropHandoff();
       this.#invalidateAuxiliary();
       this.#sceneCreateAbort?.abort();
       this.#sessionCommands?.invalidate();
@@ -776,6 +803,9 @@ class TerminalApplication {
     // 操作的独占部分可以提前结束：交还之后到达的提交与操作按常规准入，收尾工作不再占着准入门
     let work: Promise<void> | undefined, released = false;
     const release = () => { released = true; if (work && this.#operation === work) this.#operation = undefined; };
+    // 命令发起的操作：标记已开始；操作结束时若始终没有可见结果，交接随之结算
+    const handoff = this.#commandScope.getStore();
+    if (handoff) handoff.started = true;
     work = operation(release).catch(async error => {
       if (this.#abort.signal.aborted) return;
       recordTerminalFailure(this.#logging.records, error, 'terminal-operation-failed');
@@ -788,7 +818,7 @@ class TerminalApplication {
       // 操作已结束：先交还准入门，再发布结果视图
       release();
       if (!this.#editor) await this.#publish(this.#mainView);
-    }).finally(release);
+    }).finally(() => { release(); if (handoff && !handoff.framed) handoff.settle(); });
     if (!released) this.#operation = work;
     void work.catch(() => this.#close(70, 'application-operation-undelivered'));
   }
@@ -2531,6 +2561,8 @@ class TerminalApplication {
   #invalidateConversation(): void {
     this.#processSession.reset();
     ++this.#conversationEpoch;
+    // 换代：旧会话里尚未发出的交接帧作废，不补发
+    this.#dropHandoff();
     this.#invalidateAuxiliary();
     this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#sessionCommands?.invalidate(); this.#candidates.close();
     const selection = this.#selection; this.#selection = undefined;
@@ -2661,7 +2693,32 @@ class TerminalApplication {
     });
   }
 
+  /** 受理后在后台执行的命令，请求等到它的交接帧真正送达（或判定失效、操作无可见结果而结束）才返回：
+   *  界面以此结束“保持来源页”。不受理、立即关闭等不进后台的路径照旧立即返回。 */
   async #command(name: string, argument: string): Promise<unknown> {
+    const handoff = new CommandHandoff(name);
+    const outcome = await this.#commandScope.run(handoff, () => this.#dispatchCommand(name, argument)) as { accepted?: boolean } | undefined;
+    if (outcome?.accepted && handoff.started && !handoff.settled) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([handoff.done, new Promise<void>(resolve => { timer = setTimeout(resolve, COMMAND_HANDOFF_WAIT_MS); timer.unref?.(); })]);
+      clearTimeout(timer);
+      if (!handoff.settled && !this.#abort.signal.aborted) {
+        // 已受理、结果还没到界面：会话视图如实带上“仍在打开”，先送到界面再回复；结算时撤下。
+        // 首帧写出时在发送循环里撤下（那一帧及之后都不带）；无结果结算（作废、无可见结果）时补发主视图去掉它
+        this.#pendingCommand = handoff;
+        handoff.onSettle = () => {
+          if (this.#pendingCommand !== handoff) return;
+          this.#pendingCommand = undefined;
+          if (!this.#abort.signal.aborted) void this.#publish(this.#mainView).catch(() => {});
+        };
+        await this.#publish(this.#mainView).catch(() => {});
+        return { ...outcome, pending: true };
+      }
+    }
+    return outcome;
+  }
+
+  async #dispatchCommand(name: string, argument: string): Promise<unknown> {
     if (typeof name !== 'string' || typeof argument !== 'string' || name.length > 128 || argument.length > 8192) throw Error('terminal-command-size');
     const definition = this.#candidates.registry.findByName(name);
     if (!definition) {
@@ -2671,6 +2728,7 @@ class TerminalApplication {
       return { accepted: false };
     }
     name = definition.name;
+    const handoff = this.#commandScope.getStore(); if (handoff) handoff.name = name;
     if (name === 'exit') {
       if (this.#controller?.current.mode.kind === 'workscene') this.#background(() => this.#sessionCommand(name, argument));
       else void this.#close(0, 'user-exit');
@@ -2761,23 +2819,46 @@ class TerminalApplication {
 
   #publish(view: View, current?: () => boolean): Promise<void> {
     if (this.#abort.signal.aborted) return Promise.reject(Error('terminal-application-closed'));
-    if (current && !current()) return Promise.resolve();
-    if (!this.#ownsPage(view)) return Promise.resolve();
+    // 命令作用域内尚未出帧的第一次发布即交接帧；它若当场无效（过期或不属于当前前台），交接随即结算，不补发
+    const scope = this.#commandScope.getStore();
+    const handoff = scope && !scope.framed && !scope.settled ? scope : undefined;
+    if (current && !current()) { handoff?.settle(); return Promise.resolve(); }
+    if (!this.#ownsPage(view)) { handoff?.settle(); return Promise.resolve(); }
     // 启动未结束时，选会话/首屏历史/恢复进度等任何会话页更新都保持启动态；已声明的连接态（如不可用）照原样
     const starting = this.#startupAttempt !== undefined && view.kind === 'conversation' && !view.connectionState;
-    this.#nextView = { view: { ...view, ...(starting ? { connectionState: 'starting' as const } : {}), conversationId: view.conversationId ?? this.#controller?.current.conversationId,
+    const entry = { view: { ...view, ...(starting ? { connectionState: 'starting' as const } : {}), conversationId: view.conversationId ?? this.#controller?.current.conversationId,
       environment: view.kind === 'conversation' && this.#resolvedLocalView ? terminalEnvironment(this.#resolvedLocalView) : undefined }, current };
+    if (handoff) {
+      // 交接帧单独保留到真正写出：比它早排队、尚未发出的帧已被它取代；比它晚的照常进 #nextView 合并、排在它之后
+      handoff.framed = true; this.#dropHandoff(); this.#handoffFrame = { scope: handoff, ...entry }; this.#nextView = undefined;
+    } else this.#nextView = entry;
     if (!this.#publishing) this.#publishing = (async () => {
-      while (this.#nextView && !this.#abort.signal.aborted) {
-        const next = this.#nextView; this.#nextView = undefined;
-        if ((next.current && !next.current()) || !this.#ownsPage(next.view)) continue;
+      while ((this.#handoffFrame || this.#nextView) && !this.#abort.signal.aborted) {
+        const frame = this.#handoffFrame; this.#handoffFrame = undefined;
+        const next = frame ?? this.#nextView!; if (!frame) this.#nextView = undefined;
+        if ((next.current && !next.current()) || !this.#ownsPage(next.view)) { frame?.scope.settle(); continue; }
         // 视图声明它要显示的正文代次，送达时按当前历史范围取（不进 mainView 与返回快照）：同一会话、同一代次的正文才显示
         const history = this.#history;
         const reading = history && history.conversationId === next.view.conversationId ? { conversationId: history.conversationId, generation: history.generation } : undefined;
-        await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation, ...(reading ? { reading } : {}) } });
+        // 仍在打开的命令：它自己的首帧就是结果，这一帧及之后不再带“正在打开”；其余会话视图如实带上
+        if (frame && this.#pendingCommand === frame.scope) this.#pendingCommand = undefined;
+        const pending = next.view.kind === 'conversation' && this.#pendingCommand ? { commandPending: this.#pendingCommand.name } : {};
+        // 交接帧写出（或写出失败）即结算：失败时它已离开保留槽，不能指望收尾再结算
+        try { await this.#toUi({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation, ...(reading ? { reading } : {}), ...pending } }); }
+        finally { frame?.scope.settle(); }
       }
-    })().finally(() => { this.#publishing = undefined; if (view.kind === 'conversation') this.#drainConfirmations(); });
+    })().finally(() => {
+      this.#publishing = undefined;
+      // 关闭中止了发送：未发出的交接帧作废并结算，界面随之结束保持
+      this.#dropHandoff();
+      if (view.kind === 'conversation') this.#drainConfirmations();
+    });
     return this.#publishing;
+  }
+
+  /** 作废尚未发出的交接帧（换代、关闭）：不补发过期画面，交接结算 */
+  #dropHandoff(): void {
+    const frame = this.#handoffFrame; this.#handoffFrame = undefined; frame?.scope.settle();
   }
 
   #ownsPage(view: View): boolean {

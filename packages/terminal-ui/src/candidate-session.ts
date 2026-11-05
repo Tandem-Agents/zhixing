@@ -1,5 +1,5 @@
 import { normalizeLeadingSlashAlias, type TerminalAction, type TerminalCandidateAcceptance, type TerminalCandidates } from './protocol.js';
-import type { TerminalInputSession } from './input-session.js';
+import { type TerminalInputSession } from './input-session.js';
 
 /** One outstanding bounded query, one replaceable successor, and one visible
  * result. Async results never edit a different draft or cursor position. */
@@ -42,9 +42,20 @@ export class TerminalCandidateSession {
   #snapshot?: { version: number; cursor: number; offset: number };
   #running = false;
   #accepting = false;
+  /** 每次接纳一个令牌；作废时递增，在途接纳据此判定自己已经作废 */
+  #acceptToken = 0;
   #active = true;
   constructor(readonly input: TerminalInputSession, readonly request: (action: TerminalAction) => Promise<unknown>, readonly changed: () => void) {}
+  /**
+   * 作废在途的接纳：迟到的应答不改草稿、不执行、不报错；接纳锁立即解除，下一次同步照常查询，
+   * 用户不必等旧应答回来就能继续操作。离开主输入（sync(false)）时同样作废。
+   */
+  cancelAccept(): void {
+    if (!this.#accepting) return;
+    this.#acceptToken++; this.#accepting = false; this.#signature = '';
+  }
   sync(active = true): void {
+    if (!active) this.cancelAccept();
     this.#active = active;
     const draft = this.input.draft, signature = `${draft.version}:${draft.cursor}:${active}`;
     if (signature === this.#signature) return;
@@ -71,6 +82,8 @@ export class TerminalCandidateSession {
     void this.#drain();
   }
   dismiss(): void {
+    // 收起即认定当前草稿已处理：草稿不变就不因后续同步重新打开（作废接纳会清空签名，这里补回）
+    const draft = this.input.draft; this.#signature = `${draft.version}:${draft.cursor}:${this.#active}`;
     this.resetDelete(); this.#restore = undefined;
     this.open = false; this.loading = false; this.error = undefined;
     ++this.#revision; this.#pending = undefined; this.value = undefined; this.#snapshot = undefined; this.changed();
@@ -115,18 +128,26 @@ export class TerminalCandidateSession {
   async accept(ghost = false): Promise<boolean> {
     const value = this.value, snapshot = this.#snapshot, item = value?.items[this.selected];
     if (!value || !snapshot || (ghost ? !value.ghost : !item) || value.mode === 'management' || this.#accepting) return false;
+    const token = ++this.#acceptToken;
     this.#accepting = true; this.dismiss();
     try {
       const result = await this.request(ghost ? { kind: 'candidate-ghost', revision: value.revision } : { kind: 'candidate-accept', revision: value.revision, id: item!.id }) as TerminalCandidateAcceptance;
       if (typeof result?.text !== 'string' || result.text.length > 32 * 1024) throw Error('补全结果不可用，草稿保留。');
-      const current = this.#active && this.input.draft.version === snapshot.version && this.input.draft.cursor === snapshot.cursor;
+      // 已作废的接纳只登记应答带来的引用，不改草稿、不执行
+      const current = token === this.#acceptToken && this.#active && this.input.draft.version === snapshot.version && this.input.draft.cursor === snapshot.cursor;
       this.input.candidate(result, current ? { start: value.start + snapshot.offset, end: value.end + snapshot.offset } : undefined);
       return !ghost && current && result.execute;
+    } catch (error) {
+      if (token !== this.#acceptToken) return false;
+      throw error;
     } finally {
-      this.#accepting = false;
-      // A file/directory completion may open its successor. A command will be
-      // submitted by the caller before this microtask reaches the next query.
-      this.#signature = ''; queueMicrotask(() => this.sync(this.#active));
+      // 已作废的接纳不碰锁与查询：此时可能已有更新的接纳或查询在进行
+      if (token === this.#acceptToken) {
+        this.#accepting = false;
+        // A file/directory completion may open its successor. A command will be
+        // submitted by the caller before this microtask reaches the next query.
+        this.#signature = ''; queueMicrotask(() => this.sync(this.#active));
+      }
     }
   }
   async #drain(): Promise<void> {

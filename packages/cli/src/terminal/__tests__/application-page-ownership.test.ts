@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { terminalSelectionActions } from '../selection.js';
@@ -8,17 +9,17 @@ import { terminalSelectionActions } from '../selection.js';
 // In-flight history and IPC delivery are independently controlled at real awaits.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#publish', '#toUi', '#ownsPage', '#choosePage', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
+const methods = ['#publish', '#dropHandoff', '#toUi', '#ownsPage', '#choosePage', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
   const method = owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name);
   if (!method) throw Error(`Missing production method ${name}`);
   return method.getText(source).replace(/#/gu, '');
 }).join('\n');
-const Fixture = new Function('randomUUID', 'terminalSelectionActions', 'terminalEnvironment', ts.transpile(`class Fixture {
+const Fixture = new Function('randomUUID', 'terminalSelectionActions', 'terminalEnvironment', 'AsyncLocalStorage', ts.transpile(`class Fixture {
   abort = new AbortController(); generation = 0; mainView = {kind:'conversation',title:'chat'};
-  uiOpen = true; uiReady = Promise.resolve();
+  uiOpen = true; uiReady = Promise.resolve(); commandScope = new AsyncLocalStorage();
   drainConfirmations() {};
   ${methods}
-} return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(randomUUID, terminalSelectionActions, () => undefined);
+} return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(randomUUID, terminalSelectionActions, () => undefined, AsyncLocalStorage);
 function fixture() {
   const target = new Fixture(), views: any[] = [];
   target.channel = { send: async (message: any) => { views.push(message.view); } };

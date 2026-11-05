@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 // 从只读历史（F2）返回：运行生产的 #action（history-close、display-retry）、#readOnly、#restoreReturnReading、#leaveHistoryRead、
 // #openHistory、#loadOfflineHistory、#historyPage、#historyPageNow、#offlineHistoryPage、#displayPage 与 #publish。
@@ -8,14 +9,15 @@ import { describe, expect, it } from 'vitest';
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
 const methods = ['#action', '#readOnly', '#restoreReturnReading', '#leaveHistoryRead', '#openHistory', '#loadOfflineHistory', '#historyPage', '#historyPageNow',
-  '#offlineHistoryPage', '#publish', '#ownsPage', '#publishHistoryView', '#noteHistoryView', '#displayPage'].map(name => {
+  '#offlineHistoryPage', '#publish', '#dropHandoff', '#ownsPage', '#publishHistoryView', '#noteHistoryView', '#displayPage'].map(name => {
   const node = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === name);
   if (!node) throw Error(`Missing production method ${name}`);
   return node.getText(source).replace(/#/gu, '');
 }).join('\n');
 const failures: unknown[] = [];
-const Harness = new Function('formatRelativeTimeText', 'terminalEnvironment', 'recordTerminalFailure', ts.transpile(`class Harness {\n${methods}\n} return Harness;`, { target: ts.ScriptTarget.ES2022 }))(
-  () => '', () => undefined, (_records: unknown, error: unknown) => { failures.push(error); });
+const Harness = new Function('formatRelativeTimeText', 'terminalEnvironment', 'recordTerminalFailure', 'AsyncLocalStorage',
+  ts.transpile(`class Harness {\ncommandScope = new AsyncLocalStorage();\n${methods}\n} return Harness;`, { target: ts.ScriptTarget.ES2022 }))(
+  () => '', () => undefined, (_records: unknown, error: unknown) => { failures.push(error); }, AsyncLocalStorage);
 
 const disconnected = { kind: 'conversation', title: 'A', connected: false, connectionState: 'unavailable', readyForInput: true, message: '连接已断开，输入与已有内容保留。按 Enter 重试。' };
 function fixture(options: { controller?: boolean; opened?: string } = {}) {

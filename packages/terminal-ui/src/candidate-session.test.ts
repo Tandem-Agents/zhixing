@@ -38,3 +38,47 @@ describe('TerminalCandidateSession escape', () => {
     expect(candidates.open).toBe(false);
   });
 });
+
+describe('TerminalCandidateSession accept cancellation', () => {
+  // 候选查询立即应答；接纳的应答由用例逐个放行
+  function pendingAccepts(text: string) {
+    const session = input(text), replies: ((value: unknown) => void)[] = [], failures: ((error: unknown) => void)[] = [];
+    const request = vi.fn(async (action: { kind: string; revision?: number }) => action.kind === 'input-candidates'
+      ? { revision: action.revision, start: 1, end: text.length, items: [{ id: 'quit', label: '/quit' }] }
+      : new Promise((resolve, reject) => { replies.push(resolve); failures.push(reject); }));
+    const candidates = new TerminalCandidateSession(session, request as never, () => {});
+    const query = async () => { candidates.sync(true); await vi.waitFor(() => expect(candidates.value?.items.length).toBe(1)); };
+    return { session, candidates, replies, failures, query };
+  }
+
+  it('a cancelled accept leaves the draft alone and never executes, and a new accept can start at once', async () => {
+    const f = pendingAccepts('/qu'); await f.query();
+    const first = f.candidates.accept();
+    f.candidates.cancelAccept();
+    await f.query();
+    const second = f.candidates.accept();
+    expect(f.replies).toHaveLength(2);
+    f.replies[0]!({ text: 'quit', execute: true });
+    expect(await first).toBe(false);
+    expect(f.session.candidate).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'quit' }), undefined);
+    f.replies[1]!({ text: 'quit', execute: true });
+    expect(await second).toBe(true);
+  });
+
+  it('leaving the main input cancels an in-flight accept, even after coming back to the same draft', async () => {
+    const f = pendingAccepts('/qu'); await f.query();
+    const accept = f.candidates.accept();
+    f.candidates.sync(false); f.candidates.sync(true);
+    f.replies[0]!({ text: 'quit', execute: true });
+    expect(await accept).toBe(false);
+    expect(f.session.candidate).toHaveBeenLastCalledWith(expect.objectContaining({ text: 'quit' }), undefined);
+  });
+
+  it('a cancelled accept that fails reports nothing', async () => {
+    const f = pendingAccepts('/qu'); await f.query();
+    const accept = f.candidates.accept();
+    f.candidates.cancelAccept();
+    f.failures[0]!(Error('late failure'));
+    await expect(accept).resolves.toBe(false);
+  });
+});

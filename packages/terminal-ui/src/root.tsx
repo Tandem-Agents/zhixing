@@ -1,7 +1,7 @@
 import { batch, createEffect, createMemo, createSignal, For, Show, ErrorBoundary, onCleanup, untrack } from 'solid-js';
 import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalReading, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget } from './protocol.js';
+import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalReading, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalCandidates } from './protocol.js';
 import { ProcessView } from './process-view.js';
 import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
@@ -255,13 +255,38 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   });
   const draft = input.draft;
   candidates = new TerminalCandidateSession(input, options.request, () => setCandidateRevision(value => value + 1));
-  const candidateItems = () => { candidateRevision(); return candidates?.value?.items ?? []; };
-  const candidateOpen = () => { candidateRevision(); return view().kind === 'conversation' && !!candidates?.open; };
-  const candidateLoading = () => { candidateRevision(); return !!candidates?.loading; };
-  const candidateSelected = () => { candidateRevision(); return candidates?.selected ?? 0; };
-  const candidateError = () => { candidateRevision(); return candidates?.error; };
-  const candidateDanger = () => { candidateRevision(); return !!candidates?.deleteArmed; };
-  const candidateValue = () => { candidateRevision(); return candidates?.value; };
+  // 进入：在候选面板上按 Enter 发起的一次命令进入。面板按按键时的最后一帧冻结（占位不变、正文不重排），
+  // 直到命令返回——N 在本命令首帧真正写出后才回复，或等待到上限后如实回复“仍在打开”。
+  // 阶段 pending：command 尚未发出（等候选应答、等路由），用户的意图还没被受理。此时编辑或移动光标、Esc、
+  // 页面接管、换会话、断线、销毁都当场作废这次进入：解除冻结，在途的候选接纳随之作废，迟到的补全、路由不再生效。
+  // 阶段 sent：command 已发出，按原有归属处理；Esc 只收起冻结的面板，“正在打开”保留到命令返回。
+  type Entry = { readonly id: number; readonly stage: 'pending' | 'sent'; readonly frozen: boolean; readonly conversationId?: string;
+    readonly source: InformationSource; readonly snapshot: { readonly value?: TerminalCandidates; readonly selected: number; readonly error?: string } };
+  const [entry, setEntry] = createSignal<Entry | undefined>();
+  let entrySequence = 0;
+  const beginEntry = () => {
+    const id = ++entrySequence;
+    setEntry({ id, stage: 'pending', frozen: true, conversationId: view().conversationId, source: statusSource,
+      snapshot: { value: candidates?.value, selected: candidates?.selected ?? 0, error: candidates?.error } });
+    return id;
+  };
+  const entryLive = (id: number) => entry()?.id === id;
+  const updateEntry = (id: number, patch: Partial<Pick<Entry, 'stage' | 'frozen'>>) => setEntry(current => current?.id === id ? { ...current, ...patch } : current);
+  const endEntry = (id?: number) => {
+    const current = entry();
+    if (!current || (id !== undefined && current.id !== id)) return;
+    setEntry(undefined); current.source.set('left', 'entry', null);
+    if (current.stage === 'pending') candidates?.cancelAccept();
+  };
+  const voidPendingEntry = () => { const current = entry(); if (current?.stage === 'pending') endEntry(current.id); };
+  const held = () => entry()?.frozen ? entry()!.snapshot : undefined;
+  const candidateItems = () => { candidateRevision(); return (held() ? held()!.value : candidates?.value)?.items ?? []; };
+  const candidateOpen = () => { candidateRevision(); return view().kind === 'conversation' && (!!held() || !!candidates?.open); };
+  const candidateLoading = () => { candidateRevision(); return !held() && !!candidates?.loading; };
+  const candidateSelected = () => { candidateRevision(); return held() ? held()!.selected : candidates?.selected ?? 0; };
+  const candidateError = () => { candidateRevision(); return held() ? held()!.error : candidates?.error; };
+  const candidateDanger = () => { candidateRevision(); return !held() && !!candidates?.deleteArmed; };
+  const candidateValue = () => { candidateRevision(); return held() ? held()!.value : candidates?.value; };
   const trustSnapshot = () => ({ mode: candidateValue()?.mode, revision: candidateValue()?.revision ?? 0,
     items: candidateItems(), selected: candidates?.selected ?? 0, draftVersion: draft.version, cursor: draft.cursor,
     pageKey: view().generation, canDelete: candidateValue()?.canDelete === true, busy: candidates?.busy,
@@ -271,6 +296,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const preserveDraft = () => {
     if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
       const text = editor.plainText, cursor = editorUtf16Cursor(editor);
+      // 用户改了草稿或光标：尚未发出的进入随之作废（解除冻结，下面的同步按新草稿查询候选）
+      if (text !== draft.text || cursor !== draft.cursor) voidPendingEntry();
       try {
         if (text !== draft.text) {
           setStatus('');
@@ -296,7 +323,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     candidates?.sync(view().kind === 'conversation');
   };
   const preserveCursor = () => {
-    if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) input.edit(draft.text, editorUtf16Cursor(editor));
+    if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
+      const cursor = editorUtf16Cursor(editor);
+      if (cursor !== draft.cursor) voidPendingEntry();
+      input.edit(draft.text, cursor);
+    }
     candidates?.sync(view().kind === 'conversation');
   };
   const releaseSecret = () => { secret = ''; setSecretLength(0); };
@@ -333,7 +364,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       syncEditor();
     } });
   };
-  const submit = async () => {
+  // entryId：由一次进入发起的提交；每次等待之后核对这次进入仍有效，作废了就不再发后续请求、不清草稿
+  const submit = async (entryId?: number) => {
     let current = view();
     if (current.kind === 'conversation' && input.pasting) {
       preserveDraft();
@@ -392,13 +424,17 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         if (match) {
           const route = await action({ kind: 'command-route', name: match[1]! }) as { route?: 'input' | 'local' } | undefined;
           if (!route || disposed || draft.version !== version || view().kind !== 'conversation') return;
+          if (entryId !== undefined && !entryLive(entryId)) return;
           if (route?.route === 'input') {
-            try { setStatus('正在保存并提交输入…'); await input.submit(); }
+            // 作为输入发送的命令不是打开页面：“正在打开”让位给发送提示
+            try { statusSource.set('left', 'entry', null); setStatus('正在保存并提交输入…'); await input.submit(); }
             catch (error) { if (!disposed) report(error); }
             return;
           }
-          const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '' }) as { accepted?: boolean } | undefined;
-          if (result?.accepted && draft.version === version) {
+          if (entryId !== undefined) updateEntry(entryId, { stage: 'sent' });
+          // pending：命令已受理、结果还没到界面（N 等待到上限）。照常结束这次进入；“正在打开”由视图的 commandPending 继续显示
+          const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '' }) as { accepted?: boolean; pending?: boolean } | undefined;
+          if (result?.accepted && draft.version === version && (entryId === undefined || entryLive(entryId))) {
             input.clear(version);
             if (view().kind === 'conversation') { changingDraft = true; try { editor?.setText(''); } finally { changingDraft = false; } syncEditor(); }
             candidates?.dismiss();
@@ -409,6 +445,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         catch (error) { if (!disposed) report(error); }
       }
     }
+  };
+  // 在候选面板上按 Enter：先保持来源页等候选应答；确定执行命令后在信息行写“正在打开”并提交，
+  // 提交结束（命令结果已送达或不受理、失败）才解除保持。只补全不执行的应答直接解除，不出现提示
+  const enterCandidate = () => {
+    const id = beginEntry();
+    void candidates?.accept().then(async execute => {
+      const current = entry();
+      if (!execute || disposed || current?.id !== id) return;
+      const name = /^\/(\S+)/u.exec(normalizeLeadingSlashAlias(draft.text.trim()))?.[1];
+      if (name) { current.source.set('left', 'status', null); current.source.set('left', 'entry', `正在打开 /${Array.from(name).slice(0, 48).join('')}…`); }
+      await submit(id);
+    }).catch(reportStatus()).finally(() => endEntry(id));
   };
   const cancelPage = async (cause: TerminalSelectionCancelCause = 'escape') => {
     const current = view(); releaseSecret();
@@ -474,6 +522,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const operationNotice = isBody() && current.message && current.connectionState !== 'starting' && current.connectionState !== 'unavailable' && !current.inputReceiptPending && !operationShown()
       ? displayText(current.message) : '';
     if (operationNotice && !left.length) left.push(operationNotice);
+    // 已受理、结果未到的命令：照常可以输入与取消，信息行如实说明它仍在打开，避免重复触发
+    const opening = current.kind === 'conversation' && current.commandPending ? `正在打开 /${Array.from(displayText(current.commandPending)).slice(0, 48).join('')}…` : '';
+    if (opening && !left.includes(opening)) left.unshift(opening);
     if (candidate?.error) left.push(candidate.error);
     // 列表为空时提示已显示在列表里，底部不再重复
     else if (candidate?.argumentHint && !(candidateOpen() && !candidate.items.length)) left.push(candidate.argumentHint);
@@ -620,7 +671,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <BodyView page={bodyPage()} readingKey={readingKey()} renderer={renderer} width={bodySize().width} height={bodySize().height}
           header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} bottomGap={false} />}
           hasEarlier={bodyMatches() ? view().historyHasMore ?? bodyEarlier() : undefined}
-          fullHeight={readingArea()}
+          fullHeight={readingArea()} extent={size().height}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow, generation: bodyReading()?.generation })}
           requestEarlier={before => options.request({ kind: 'display-earlier', before, generation: bodyReading()?.generation ?? 0 })}
@@ -782,7 +833,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   let disposing: Promise<void> | undefined;
   const dispose = (): Promise<void> => {
     if (disposing) return disposing;
-    disposed = true; input.activate(false); releaseSecret(); releaseRecovery(); clearInterval(animationTimer);
+    disposed = true; endEntry(); input.activate(false); releaseSecret(); releaseRecovery(); clearInterval(animationTimer);
     information.dispose();
     candidates?.sync(false);
     renderer.off('resize', resize);
@@ -864,6 +915,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       void action({ kind: 'interrupt', ...(stop ? { stop } : {}) }); return;
     }
     if (event.ctrl && event.name === 'd' && (view().kind === 'selection' || view().kind === 'confirmation')) { consume(); void cancelPage('ctrl-d'); return; }
+    // 面板冻结期间显示的是按键时的最后一帧：激活与选择键不再生效（不会二次提交，也不移动看不见的选中项）；
+    // 文字、粘贴照常进入来源草稿（命令尚未发出时这会作废这次进入并立即解除冻结）；Esc 见下方
+    if (view().kind === 'conversation' && entry()?.frozen && (['return', 'tab', 'up', 'down', 'pageup', 'pagedown'].includes(event.name) ||
+        (event.ctrl && ['d', 'r', 'n'].includes(event.name)))) { consume(); return; }
     if (view().kind === 'conversation') {
       if (!(event.ctrl && event.name === 'd')) { if (candidates?.deleteArmed) setStatus(''); candidates?.resetDelete(); }
       const value = candidateValue();
@@ -908,6 +963,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     if (event.name === 'escape') {
       consume();
+      // 面板冻结期间 Esc 与平时一样：收起候选、保留草稿。命令尚未发出时这次进入随之作废，迟到的应答不再生效；
+      // 已发出时只收起面板，命令按原有归属继续，“正在打开”留到它返回
+      const current = entry();
+      if (view().kind === 'conversation' && current?.frozen) {
+        if (current.stage === 'pending') endEntry(current.id); else updateEntry(current.id, { frozen: false });
+        candidates?.escape(); return;
+      }
       if (candidateOpen()) { candidates?.escape(); return; }
       // 发送尚未交出时 Esc 取消这次发送而不是清空草稿
       if (view().kind === 'conversation' && input.cancelPreparedSubmit()) return;
@@ -926,10 +988,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         // 没有匹配项时 Enter 照常提交：未知命令由宿主说明"命令不可用"，草稿保留供修改。
         // 管理面板里 Enter 仍不提交（面板靠两次 Ctrl+D 与 Esc 操作）
         if (event.name === 'return' && !candidateLoading() && !candidateItems().length && candidateValue()?.mode !== 'management') {
-          consume(); candidates?.dismiss(); void submit().catch(reportStatus()); return;
+          consume(); const id = beginEntry(); candidates?.dismiss(); void submit(id).catch(reportStatus()).finally(() => endEntry(id)); return;
         }
         if (candidateLoading() || !candidateItems().length) { consume(); return; }
-        consume(); void candidates?.accept().then(execute => { if (execute) return submit(); }).catch(reportStatus()); return;
+        consume(); enterCandidate(); return;
       }
     }
     if (view().kind === 'conversation' && !event.ctrl && !event.shift && !event.meta && !editor?.hasSelection()) {
@@ -1075,6 +1137,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           }
           setSelected(initialChoiceIndex(message.view, sameInteraction ? selectedId : undefined));
           setView(message.view);
+          // 进入的作废：页面接管时作废尚未发出的进入；换会话、断线时不论阶段都结束，旧进入不再操作新的前台
+          const current = entry(), next = message.view;
+          if (current && (next.kind === 'conversation'
+            ? next.conversationId !== current.conversationId || next.connected === false || !!next.connectionState
+            : current.stage === 'pending')) endEntry(current.id);
           if (!usableReported && !usableScheduled && message.view.kind === 'conversation' && message.view.readyForInput && message.view.connected && !message.view.busy && !message.view.connectionState) {
             usableScheduled = true;
             renderer.once('frame', (frame: { frameId: number }) => {

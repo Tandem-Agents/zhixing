@@ -113,6 +113,22 @@ describe('single-root Node configuration transaction', () => {
     h.editor.cancel(); await h.result;
   });
 
+  it('puts the stable guide of an input page in its header and keeps errors in the body', async () => {
+    const h = setup();
+    await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型'); await h.choose('添加自定义模型');
+    expect(h.current()).toMatchObject({ title: '添加自定义模型', chromeDescription: '为 DeepSeek 官方 添加 · 输入服务商提供的完整 model id。' });
+    expect(h.current().message ?? '').toBe('');
+    h.editor.cancel(); await h.result;
+    const m = setup({ mcpResolve: async () => ({ ok: false, error: '无法识别这个来源' }) });
+    await m.choose('其他');
+    const guide = '输入预设名、包名、网址、启动命令或描述。';
+    expect(m.current()).toMatchObject({ title: '接入 MCP', chromeDescription: guide }); expect(m.current().message ?? '').toBe('');
+    await m.editor.act({ kind: 'configuration-action', editId: m.editor.editId, action: 'field', value: 'synthetic' });
+    await vi.waitFor(() => expect(m.current().message).toContain('无法识别这个来源'));
+    expect(m.current().chromeDescription).toBe(guide);
+    m.editor.cancel(); await m.result;
+  });
+
   it('preserves the selected thinking option when completing the provider page', async () => {
     const h = setup();
     await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型');

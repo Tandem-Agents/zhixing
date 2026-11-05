@@ -31,6 +31,12 @@ const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, re
 
 
 
+
+
+
+
+
+
 process.env.OTUI_ASSET_ROOT = path.resolve(`dist/${process.platform}-${process.arch}/assets`);
 const admittedLibrary = process.env.ZHIXING_TERMINAL_RENDER_LIB;
 assert.ok(admittedLibrary, 'test runner supplies the rebuilt admitted native library');
@@ -47,6 +53,8 @@ let pasteReply: (() => unknown) | undefined;
 let externalPaste: (() => TerminalPasteSink | undefined) | undefined;
 let readingReply: ((action: TerminalAction) => Promise<unknown>) | undefined;
 let candidateReply: ((action: Extract<TerminalAction, { kind: 'input-candidates' }>) => Promise<unknown>) | undefined;
+// 进页保持场景：按需延后候选应答、命令路由与命令本身
+let entryReply: ((action: TerminalAction) => Promise<unknown> | undefined) | undefined;
 const usableFrames: number[] = [];
 const pendingRead = () => {
   let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void;
@@ -61,6 +69,7 @@ try {
     request: async action => {
       actions.push(action);
       if (readingReply && (action.kind === 'display-page' || action.kind === 'display-earlier')) return readingReply(action);
+      const entry = entryReply?.(action); if (entry) return entry;
       if (action.kind === 'command-route' && ['help', 'clear'].includes(action.name)) return { route: 'local' };
       if (action.kind === 'input-candidates') {
         if (candidateReply) return candidateReply(action);
@@ -998,6 +1007,253 @@ try {
     assert.equal(exits, exitsBefore, 'a page Ctrl+C is not the first press of a double press');
     assert.equal(lastStop()?.kind, 'interrupt');
     checks.push('stop requests carry the shown run identity; idle carries none; a page Ctrl+C never arms the double-press exit');
+  }
+  // 进页保持：候选面板上按 Enter 后，来源页（面板与正文）冻结到命令结果送达再一次切换；
+  // 编辑、Esc、切页让迟到的应答作废；重复 Enter 不二次提交；只补全不显示“正在打开”；无操作、失败均退出保持
+  {
+    const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    // 同一种请求可能同时挂着新旧两个（作废的进入与新的进入），按发出顺序排队、先到先答
+    const waits = new Map<string, ReturnType<typeof pendingRead>[]>();
+    entryReply = action => {
+      if (action.kind !== 'candidate-accept' && action.kind !== 'command-route' && action.kind !== 'command') return undefined;
+      const wait = pendingRead(); waits.set(action.kind, [...waits.get(action.kind) ?? [], wait]); return wait.promise;
+    };
+    const take = (kind: string) => { const wait = waits.get(kind)?.shift(); assert.ok(wait, `${kind} is pending`); return wait; };
+    const reply = (kind: string, value: unknown) => take(kind).resolve(value);
+    candidateReply = async action => action.text.startsWith('/adv') || action.text.startsWith('/res')
+      ? { revision: action.revision, active: true, start: 0, end: action.text.length,
+        items: [{ id: action.text.startsWith('/adv') ? 'advancement' : 'resume', label: action.text.startsWith('/adv') ? '/advancement' : '/resume', detail: '候选说明' }] }
+      : { revision: action.revision, active: true, start: 0, end: action.text.length, items: [] };
+    const count = (since: number, kind: TerminalAction['kind']) => actions.slice(since).filter(action => action.kind === kind).length;
+    const conversation = { kind: 'conversation' as const, title: '进页保持', conversationId: 'entry-hold', connected: true };
+    const open = async (draft: string) => {
+      editor().setText(''); await flush(); await test.mockInput.typeText(draft); await flush(); await flush();
+      assert.match(text(), /候选说明/, `${draft} opens candidates`);
+    };
+    // 冻结比较：除输入框文字行与信息行外逐行不变（输入框里补全成整条命令、信息行写“正在打开”属于预期变化）
+    const frozen = (before: string, after: string, label: string) => {
+      const info = after.split('\n').findIndex(line => line.includes('正在打开'));
+      const rows = (frame: string) => frame.split('\n').map((line, index) => index === info || (index >= editor().y && index < editor().y + editor().height) ? '' : line);
+      assert.deepEqual(rows(after), rows(before), label);
+    };
+    test.resize(100, 32); await show(conversation);
+
+    // 主路径：四处依次延后，期间连按 Enter
+    let start = actions.length;
+    await open('/adv'); const before = text(), editorY = editor().y;
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(text(), before, 'waiting for the candidate reply changes nothing on screen');
+    test.mockInput.pressEnter(); await flush(); test.mockInput.pressArrow('down'); await flush();
+    reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    assert.match(text(), /正在打开 \/advancement…/); frozen(before, text(), 'accepted: panel and body stay');
+    assert.equal(editor().y, editorY);
+    test.mockInput.pressEnter(); await flush();
+    reply('command-route', { route: 'local' }); await flush();
+    frozen(before, text(), 'routed: panel and body stay while the command runs');
+    test.mockInput.pressEnter(); await flush();
+    await show({ kind: 'selection', title: '任务推进', chromeDescription: '对话：示例', requestId: 'entry-advancement', choices: [{ id: 'done', label: '返回输入' }] });
+    assert.match(text(), /╭─ 任务推进 ─/); assert.match(text(), /对话：示例/);
+    reply('command', { accepted: true }); await flush();
+    assert.deepEqual([count(start, 'candidate-accept'), count(start, 'command-route'), count(start, 'command')], [1, 1, 1], 'repeated Enter never submits twice');
+    await show(conversation); await pause(25); await flush();
+    assert.equal(editor().plainText, ''); assert.ok(!/候选说明|正在打开/.test(text()), 'returning shows no stale panel or opening notice');
+    checks.push('candidate Enter freezes panel and body until the command result is delivered; repeated Enter submits once');
+
+    // 等候选应答时改草稿：进入当场作废、立即解除冻结，不必等旧应答；新草稿上马上能再进入；旧应答迟到不改草稿、不执行
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); await test.mockInput.typeText('_new'); await flush(); await flush();
+    assert.equal(editor().plainText, '/adv_new');
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(count(start, 'candidate-accept'), 2, 'a new entry starts at once on the edited draft');
+    reply('candidate-accept', { text: '/advancement', execute: true }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command-route'), 0); assert.equal(editor().plainText, '/adv_new', 'the late reply of the voided entry changes nothing');
+    reply('candidate-accept', { text: '/advancement', execute: false }); await flush(); await pause(25); await flush();
+    editor().setText(''); await flush();
+    // 光标停在中间时按 Delete：草稿变了、光标没动，同样作废这次进入，立即能再进入
+    start = actions.length; await open('/advx');
+    test.mockInput.pressArrow('left'); await flush(); await flush();
+    assert.match(text(), /候选说明/);
+    test.mockInput.pressEnter(); await flush(); test.mockInput.pressKey('\x1b[3~'); await flush(); await flush();
+    assert.equal(editor().plainText, '/adv');
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(count(start, 'candidate-accept'), 2, 'a forward delete voids the entry at once');
+    reply('candidate-accept', { text: '/advancement', execute: true }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command-route'), 0); assert.equal(editor().plainText, '/adv');
+    reply('candidate-accept', { text: '/advancement', execute: false }); await flush(); await pause(25); await flush();
+    editor().setText(''); await flush();
+    // 等候选应答时 Esc：与平时一样收起候选、保留草稿，这次进入作废；迟到的应答不执行
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.equal(editor().plainText, '/adv'); assert.ok(!text().includes('候选说明'), 'Esc collapses the candidates at once');
+    reply('candidate-accept', { text: '/advancement', execute: true }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command-route'), 0); assert.equal(editor().plainText, '/adv');
+    editor().setText(''); await flush();
+    // 路由途中编辑：进入当场作废（“正在打开”撤下），迟到的路由不发命令，草稿保留且不清空
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    await test.mockInput.typeText('y'); await flush();
+    assert.ok(!text().includes('正在打开'), 'editing voids the entry before the route replies');
+    reply('command-route', { route: 'local' }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command'), 0); assert.equal(editor().plainText, '/advancementy');
+    editor().setText(''); await flush();
+    // 路由途中 Esc（草稿未变）：进入作废，迟到的路由不发命令，草稿保留
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.ok(!/候选说明|正在打开/.test(text()));
+    reply('command-route', { route: 'local' }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command'), 0); assert.equal(editor().plainText, '/advancement');
+    editor().setText(''); await flush();
+    // 只补全：不显示“正在打开”、不路由
+    start = actions.length; await open('/res');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/resume ', execute: false }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command-route'), 0); assert.equal(editor().plainText, '/resume '); assert.ok(!text().includes('正在打开'));
+    editor().setText(''); await flush();
+    // 路由为“作为输入发送”：不是打开页面，“正在打开”让位，不发 command
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    reply('command-route', { route: 'input' }); await flush(); await pause(25); await flush();
+    assert.ok(!text().includes('正在打开')); assert.equal(count(start, 'command'), 0);
+    // 走的是输入发送分支（本文件前面场景留有未完成的提交，夹具里这次发送报“仍在处理”，同样证明分支）
+    assert.match(text(), /正在保存并提交输入|输入仍在处理/, 'took the send-as-input branch');
+    editor().setText(''); await flush(); await show(conversation);
+    checks.push('typing, Esc or editing during the hold voids the late reply and keeps the draft; completion-only shows no opening notice');
+
+    // 被确认页抢占后再回到原会话，旧应答才返回：不路由、不改草稿、不出现“正在打开”；回来后马上能再进入
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush();
+    await show({ kind: 'confirmation', title: '确认', requestId: 'entry-preempt', choices: [{ id: 'allow', label: '允许' }] });
+    await show(conversation); await pause(25); await flush();
+    reply('candidate-accept', { text: '/advancement', execute: true }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command-route'), 0); assert.equal(editor().plainText, '/adv'); assert.ok(!text().includes('正在打开'));
+    assert.match(text(), /候选说明/, 'candidates are live again after returning');
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(count(start, 'candidate-accept'), 2, 'not frozen after the round trip');
+    reply('candidate-accept', { text: '/advancement', execute: false }); await flush(); await pause(25); await flush();
+    editor().setText(''); await flush();
+    // 换会话：尚未发出的进入作废，迟到的应答不在新会话里执行
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush();
+    await show({ ...conversation, conversationId: 'entry-other' });
+    reply('candidate-accept', { text: '/advancement', execute: true }); await flush(); await pause(25); await flush();
+    assert.equal(count(start, 'command-route'), 0); assert.ok(!text().includes('正在打开'));
+    editor().setText(''); await flush(); await show(conversation);
+    // 命令已发出后：打字保留在来源草稿，命令返回不清掉新草稿；Esc 只收起面板，“正在打开”留到命令返回
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    reply('command-route', { route: 'local' }); await flush();
+    await test.mockInput.typeText('_after'); await flush();
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.ok(!text().includes('候选说明'), 'Esc collapses the frozen panel'); assert.match(text(), /正在打开 \/advancement…/);
+    assert.equal(editor().plainText, '/advancement_after');
+    reply('command', { accepted: true }); await flush(); await pause(25); await flush();
+    assert.equal(editor().plainText, '/advancement_after', 'the command reply never clears a newer draft'); assert.ok(!text().includes('正在打开'));
+    editor().setText(''); await flush();
+    // 等待到上限：命令已受理、结果还没到。冻结解除、草稿清空，信息行按视图如实显示“正在打开”，页面迟到后回会话不再显示
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    reply('command-route', { route: 'local' }); await flush();
+    await show({ ...conversation, commandPending: 'advancement' });
+    reply('command', { accepted: true, pending: true }); await flush(); await pause(25); await flush();
+    assert.equal(editor().plainText, ''); assert.ok(!text().includes('候选说明'));
+    assert.match(text(), /正在打开 \/advancement…/, 'still opening is shown after the bounded wait');
+    await show({ kind: 'selection', title: '任务推进', requestId: 'entry-late', choices: [{ id: 'done', label: '返回输入' }] });
+    await show(conversation); await pause(25); await flush();
+    assert.ok(!text().includes('正在打开'), 'no stale opening notice after the late page');
+    // 就地结果：结果在保持中到达，命令返回后面板收起、草稿清空
+    start = actions.length; await open('/adv');
+    test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+    reply('command-route', { route: 'local' }); await flush();
+    await show({ ...conversation, message: '当前对话没有结果待确认的运行。' });
+    assert.match(text(), /候选说明/, 'the panel stays until the command returns');
+    reply('command', { accepted: true }); await flush(); await pause(25); await flush();
+    assert.match(text(), /当前对话没有结果待确认的运行/); assert.ok(!/候选说明|正在打开/.test(text())); assert.equal(editor().plainText, '');
+    await show(conversation);
+    // 就地结果收尾、正文贴底：面板收起、正文视口变高后的第一帧里，正文末行已在稳定后的位置（不先留空再贴底）
+    {
+      test.mockInput.pressKey('\x1b[1;5F'); await flush();
+      // 多块正文（与实机一样逐块挂载）：视口一下子变高时，新露出的块不能晚一帧才就位
+      let source = ''; const nodes: BodyNode[] = [];
+      for (let row = 0; row < 80; row++) {
+        const line = `entry-body-${String(row).padStart(2, '0')}\n`, from = source.length; source += line;
+        nodes.push({ from, to: source.length, kind: 'paragraph', runs: [{ from, to: source.length, text: line, style: 0 }] });
+      }
+      root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: 'entry-body', contentOffset: 0,
+        text: source, role: 'assistant', final: true, body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes } } }] } }); await flush();
+      assert.match(text(), /entry-body-79/);
+      start = actions.length; await open('/adv');
+      test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+      reply('command-route', { route: 'local' }); await flush();
+      await show({ ...conversation, message: '当前对话没有结果待确认的运行。' });
+      reply('command', { accepted: true });
+      for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+      await test.renderOnce();
+      const lastRow = () => text().split('\n').findIndex(line => line.includes('entry-body-79'));
+      const first = lastRow(), firstFrame = text();
+      await flush(); await pause(25); await flush();
+      assert.ok(!text().includes('候选说明'), 'panel collapsed');
+      assert.equal(first, lastRow(), `the first frame after the panel collapses already shows the body at its settled place\n${firstFrame}`);
+      // 首帧整个正文区与稳定后一致：新露出的块已在原位（不先错位一帧）
+      const bodyRows = (frame: string) => frame.split('\n').slice(0, frame.split('\n').findIndex(line => line.includes('◆'))).join('\n');
+      assert.equal(bodyRows(firstFrame), bodyRows(text()), 'the whole body region of the first frame equals the settled one');
+      await show(conversation);
+      // 向上阅读（不贴底、下方仍有足够内容）时视口同样变高：首帧起阅读位置不动，只在下方多显示内容
+      const topRow = () => text().split('\n').find(line => /entry-body-\d+/u.test(line))?.trim();
+      start = actions.length; await open('/adv');
+      for (let wheel = 0; wheel < 16; wheel++) { await test.mockMouse.scroll(20, 3, 'up'); await flush(); }
+      await pause(25); await flush();
+      const reading = topRow(); assert.ok(reading && reading < 'entry-body-60', `reading well above the bottom: ${reading}`);
+      test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+      reply('command-route', { route: 'local' }); await flush();
+      reply('command', { accepted: true });
+      for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+      await test.renderOnce();
+      assert.equal(topRow(), reading, 'the first frame keeps the reading position');
+      await flush(); await pause(25); await flush();
+      assert.equal(topRow(), reading, 'the settled frame keeps the reading position');
+      test.mockInput.pressKey('\x1b[1;5F'); await flush(); await show(conversation);
+    }
+    checks.push('in-place result: the first frame after the panel collapses keeps the followed body at its settled place');
+    // 失败与不受理：退出保持，草稿保留
+    for (const outcome of ['reject', 'refused'] as const) {
+      start = actions.length; await open('/adv');
+      test.mockInput.pressEnter(); await flush(); reply('candidate-accept', { text: '/advancement', execute: true }); await flush();
+      reply('command-route', { route: 'local' }); await flush();
+      const wait = take('command');
+      if (outcome === 'reject') wait.reject(Error('命令暂不可用')); else wait.resolve({ accepted: false });
+      await flush(); await pause(25); await flush();
+      assert.ok(!text().includes('正在打开'), `${outcome}: opening notice cleared`); assert.equal(editor().plainText, '/advancement');
+      if (outcome === 'reject') assert.match(text(), /命令暂不可用/);
+      // 解除后 Enter 能再次发起（面板按真实状态重新出现时走候选接纳，否则直接路由）
+      const attempts = () => count(start, 'candidate-accept') + count(start, 'command-route');
+      const before = attempts(); test.mockInput.pressEnter(); await flush();
+      assert.equal(attempts(), before + 1, `${outcome}: hold released, Enter starts again`);
+      if (waits.get('candidate-accept')?.length) reply('candidate-accept', { text: '/advancement', execute: false }); else reply('command-route', undefined);
+      await flush(); await pause(25); editor().setText(''); await flush(); await show(conversation);
+    }
+    // 无匹配项的 Enter：同样保持到命令返回，期间重复 Enter 不二次提交
+    start = actions.length; editor().setText('/zzz'); await flush(); await flush();
+    test.mockInput.pressEnter(); await flush(); test.mockInput.pressEnter(); await flush();
+    reply('command-route', { route: 'local' }); await flush(); test.mockInput.pressEnter(); await flush();
+    reply('command', { accepted: false }); await flush(); await pause(25); await flush();
+    assert.deepEqual([count(start, 'command-route'), count(start, 'command')], [1, 1]);
+    editor().setText(''); await flush();
+    checks.push('preemption voids the late reply; in-place results, failures and refusals release the hold once the command returns');
+
+    // 页头：有说明画框装说明，没有说明的子页用无框层级标题
+    await show({ kind: 'selection', title: '命令帮助', requestId: 'entry-help', choices: [{ id: 'return', label: '返回输入' }] });
+    assert.match(text(), /命令帮助 ─{8,}/); assert.ok(!text().includes('╭─ 命令帮助'), 'no empty framed header');
+    // 横线补满到右侧，不靠截断收尾（截断会在横线中间放省略号）；窄窗口同样成立
+    for (const width of [100, 40]) {
+      test.resize(width, 32); await flush();
+      const row = text().split('\n').find(line => line.includes('命令帮助'))!;
+      assert.ok(!/[.…]/u.test(row), `title rule has no ellipsis at ${width}: ${row}`);
+      assert.match(row.trimEnd(), /─$/u, `title rule reaches the right side at ${width}`);
+    }
+    test.resize(100, 32); await flush();
+    await show(conversation);
+    checks.push('subpage header frames only a description; a title-only page draws an unframed title rule');
+    entryReply = undefined; candidateReply = undefined;
   }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

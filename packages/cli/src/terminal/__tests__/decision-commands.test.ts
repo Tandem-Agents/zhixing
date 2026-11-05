@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionAdvancementDetailResult } from '@zhixing/rpc';
-import type { TrustAdministrationRule } from '@zhixing/core/trust-administration';
+import { type SessionAdvancementDetailResult } from '@zhixing/rpc';
+import { type TrustAdministrationRule } from '@zhixing/core/trust-administration';
 import { TerminalDecisionCommands, type TerminalDecisionController, type TerminalDecisionOptions, type TerminalDecisionScope } from '../decision-commands.js';
-import type { TerminalSelectionPort } from '../selection.js';
+import { type TerminalSelectionPort } from '../selection.js';
 
 const rule = (id: string): TrustAdministrationRule => ({ id, pattern: { tool: 'bash', argument: 'ls *' }, decision: 'allow',
   scope: 'context', contextId: { kind: 'main' }, createdAt: 0, lastMatchedAt: 0, matchCount: 0 });
@@ -108,6 +108,11 @@ describe('terminal decision commands', () => {
   it('shows absent and pending advancement, handing resume to the one existing rubric owner', async () => {
     const f = fixture();
     await f.owner.run('advancement'); expect(f.text()).toContain('没有推进任务');
+    // 页头说明是哪个对话的推进；没有名字时不造空说明
+    expect(f.choose.mock.calls.at(-1)![0]).not.toHaveProperty('chromeDescription');
+    f.controller.current = { conversationId: 'conv-1', name: '整理周报' } as typeof f.controller.current;
+    await f.owner.run('advancement');
+    expect(f.choose.mock.calls.at(-1)![0]).toMatchObject({ title: '任务推进', chromeDescription: '对话：整理周报' });
     f.controller.advancementDetail.mockResolvedValueOnce(pendingDetail());
     f.choose.mockResolvedValueOnce({ itemId: 'option:resume' });
     await f.owner.run('advancement');

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
@@ -15,15 +16,15 @@ const method = (name: string) => {
   if (!node) throw Error(`Missing production method ${name}`);
   return node.getText(source);
 };
-const methods = ['#receive', '#reply', '#action', '#background', '#beginEarlyStartup', '#toUi', '#publish', '#ownsPage'].map(method).join('\n').replace(/#/gu, '');
+const methods = ['#receive', '#reply', '#action', '#background', '#beginEarlyStartup', '#toUi', '#publish', '#dropHandoff', '#ownsPage'].map(method).join('\n').replace(/#/gu, '');
 const startup = method('#startup');
 const headStart = startup.indexOf('const attempt = {};'), headEnd = startup.indexOf('\n', startup.indexOf('else void starting.catch'));
 if (headStart < 0 || headEnd < 0) throw Error('Startup head not found');
 const head = startup.slice(headStart, headEnd).replace(/#/gu, '');
 const failures: { error: unknown; code: string }[] = [];
 const Fixture = new Function('TERMINAL_LIMITS', 'terminalCloseDeadline', 'TerminalChannelRetiredError', 'recordTerminalFailure', 'ConfigurationEditPendingError',
-  'terminalStorageFullMessage', 'terminalEnvironment', ts.transpile(`class Fixture {
-  args = []; abort = new AbortController(); generation = 0; logging = { records: undefined };
+  'terminalStorageFullMessage', 'terminalEnvironment', 'AsyncLocalStorage', ts.transpile(`class Fixture {
+  args = []; abort = new AbortController(); generation = 0; logging = { records: undefined }; commandScope = new AsyncLocalStorage();
   mainView = { kind: 'conversation', title: '知行', message: '', connected: false };
   requests = new Set(); lastRequest = 0; hello = false; started = false; closeDeadline = 0;
   earlyStartup = false; startupReceipt = false;
@@ -43,7 +44,7 @@ const Fixture = new Function('TERMINAL_LIMITS', 'terminalCloseDeadline', 'Termin
   }
   ${methods}
 } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(TERMINAL_LIMITS, terminalCloseDeadline, TerminalChannelRetiredError,
-  (_records: unknown, error: unknown, code: string) => { failures.push({ error, code }); }, class extends Error {}, terminalStorageFullMessage, () => undefined);
+  (_records: unknown, error: unknown, code: string) => { failures.push({ error, code }); }, class extends Error {}, terminalStorageFullMessage, () => undefined, AsyncLocalStorage);
 
 const INSTANCE = '00000000-0000-4000-8000-000000000071';
 const turns = async (count = 20) => { for (let i = 0; i < count; i++) await new Promise<void>(resolve => setImmediate(resolve)); };

@@ -3,6 +3,7 @@ import { getEventListeners } from 'node:events';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { terminalStorageFullMessage } from '../failure.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 // 生产的提交入口、后台操作、视图发布与启动末段（启动尝试开头 + await displayPrepared 之后到方法结束）原样运行，
 // 只替换传输、验收方式处理与确认核对的异步闸门：可发送帧与实际准入门必须一致。
@@ -13,7 +14,7 @@ const method = (name: string) => {
   if (!node) throw Error(`Missing production method ${name}`);
   return node.getText(source);
 };
-const methods = ['#action', '#background', '#publish', '#toUi', '#ownsPage', '#unavailable', '#confirmationRefreshFailed'].map(method).join('\n').replace(/#/gu, '');
+const methods = ['#action', '#background', '#publish', '#dropHandoff', '#toUi', '#ownsPage', '#unavailable', '#confirmationRefreshFailed'].map(method).join('\n').replace(/#/gu, '');
 const startup = method('#startup');
 const prologueStart = startup.indexOf('const attempt = {};'), finishLine = startup.indexOf('const finish =');
 const tailStart = startup.indexOf('await displayPrepared;');
@@ -21,9 +22,9 @@ if (prologueStart < 0 || finishLine < 0 || tailStart < 0) throw Error('Startup c
 const prologue = startup.slice(prologueStart, startup.indexOf('\n', finishLine)).replace(/#/gu, '');
 const tail = startup.slice(tailStart, startup.lastIndexOf('}')).replace(/#/gu, '');
 const failures: { error: unknown; code: string }[] = [];
-const Fixture = new Function('terminalEnvironment', 'recordTerminalFailure', 'ConfigurationEditPendingError', 'terminalStorageFullMessage', ts.transpile(`class Fixture {
+const Fixture = new Function('terminalEnvironment', 'recordTerminalFailure', 'ConfigurationEditPendingError', 'terminalStorageFullMessage', 'AsyncLocalStorage', ts.transpile(`class Fixture {
   args = []; abort = new AbortController(); generation = 0; logging = { records: undefined };
-  uiOpen = true; uiReady = Promise.resolve();
+  uiOpen = true; uiReady = Promise.resolve(); commandScope = new AsyncLocalStorage();
   mainView = { kind: 'conversation', title: 'chat', message: '已恢复最近对话。', connected: true };
   connection = { getStatus: () => ({ kind: 'connected' }) };
   submitted = [];
@@ -43,7 +44,7 @@ const Fixture = new Function('terminalEnvironment', 'recordTerminalFailure', 'Co
   }
   ${methods}
 } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(() => undefined,
-  (_records: unknown, error: unknown, code: string) => { failures.push({ error, code }); }, class extends Error {}, terminalStorageFullMessage);
+  (_records: unknown, error: unknown, code: string) => { failures.push({ error, code }); }, class extends Error {}, terminalStorageFullMessage, AsyncLocalStorage);
 
 function fixture(options: { controller?: boolean } = {}) {
   const target = new Fixture(), views: any[] = [], submissions: any[] = [];

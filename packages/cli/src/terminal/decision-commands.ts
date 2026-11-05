@@ -1,6 +1,6 @@
-import type { ConversationController } from '../runtime/conversation-controller.js';
-import type { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
-import type { CliWriter } from '../screen/cli-writer.js';
+import { type ConversationController } from '../runtime/conversation-controller.js';
+import { type RpcManagementFacade } from '../runtime/rpc-management-facade.js';
+import { type CliWriter } from '../screen/cli-writer.js';
 import { handleSecurityCommand, handleTrustCommand } from '../security/commands.js';
 import { renderAdvancementDetailLines } from '../advancement-presentation.js';
 import { stripAnsi } from '../tui/ansi.js';
@@ -8,7 +8,7 @@ import { boundedControlProjection } from '../runtime/control-projection.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';
 
 export type TerminalDecisionController = Pick<ConversationController<string>, 'advancementDetail' | 'uncertainRuns' | 'resolveUncertain'> & {
-  readonly current: { readonly conversationId: string };
+  readonly current: { readonly conversationId: string; readonly name?: string };
 };
 export interface TerminalDecisionScope {
   readonly controller: TerminalDecisionController;
@@ -122,11 +122,13 @@ export class TerminalDecisionCommands {
         const lines = renderAdvancementDetailLines(detail, RESULT_BYTES).map(plainText);
         boundedControlProjection(lines, RESULT_BYTES);
         const pending = detail.detail?.status === 'awaiting-rubric-confirmation';
+        // 页头注明是哪个对话的推进：标题不含对象，空态与结果只说“有没有、是什么”
+        const conversation = controller.current.name ? `对话：${controller.current.name}` : undefined;
         const selected = await chooseTerminalSelection({
           title: '任务推进', body: lines,
           options: [...(pending ? [{ value: 'resume', label: '继续确认任务', description: '查看、修改、确认、直接执行或取消原任务' }] : []),
             { value: 'done', label: '返回输入' }],
-        }, choose);
+        }, page => choose(conversation ? { ...page, chromeDescription: conversation } : page));
         if (selected?.kind === 'selected' && selected.value === 'resume') {
           scope.assertCurrent(); await this.options.resumeRubric(scope); scope.assertCurrent();
         }

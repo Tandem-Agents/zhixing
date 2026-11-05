@@ -80,6 +80,9 @@ export interface BodyViewProps {
   readonly hasEarlier?: boolean;
   /** 正文与阅读导航行共有的区域高度（不随导航行显隐变化）；判断“下方还有内容”用它，导航行不会因自己的显隐反复出现消失 */
   readonly fullHeight?: number;
+  /** 视口可能长到的上限（终端行数）。挂载窗口按它预留：视口一下子变高（如候选面板收起）时要露出的块已经挂好、
+   *  在上一帧完成布局，首帧即在原位；否则它们在本帧布局之后才挂上，第一帧会错位 */
+  readonly extent?: number;
   readonly requestPage: (start: number | undefined, follow: boolean) => Promise<unknown>;
   /** 取显示序号 before 之前紧邻的一页（回复为 TerminalEarlierReply）；不改 N 的显示游标、跟随与补丁基准 */
   readonly requestEarlier: (before: number) => Promise<unknown>;
@@ -288,7 +291,8 @@ export function BodyView(props: BodyViewProps) {
       }
     }
     // Keep the native selection owner intact throughout a gesture/reflow.
-    return new Set(items.filter(item => state.selecting || (item.top + item.height >= top - height && item.top <= top + 2 * height)).map(item => item.key));
+    const reach = Math.max(height, props.extent ?? 0);
+    return new Set(items.filter(item => state.selecting || (item.top + item.height >= top - reach && item.top <= top + height + reach)).map(item => item.key));
   });
   const heights = createMemo(() => new Map(geometry().map(item => [item.key, item.height])));
   let box: TerminalScrollBox | undefined, disposed = false, paging = false;
@@ -904,7 +908,10 @@ export function BodyView(props: BodyViewProps) {
       width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode={bodyWrapMode(value.block)} textAlign={value.align ?? 'left'}
       selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
   };
-  return <scrollbox ref={value => { box = value as TerminalScrollBox; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
+  // 高度跟随外层区域的同一次布局（填满父框），不用量出来的 props.height：后者在布局之后才更新，
+  // 视口变化（如候选面板收起）时会让滚动框晚一帧变高，先画出一帧正文停在旧位置、下方留空。
+  // 同一次布局里视口变高时，滚动条按新视口收紧滚动位置，贴底的正文首帧即在稳定位置；宽度仍走量出的值与绘制后的恢复
+  return <scrollbox ref={value => { box = value as TerminalScrollBox; }} width={Math.max(1, props.width)} height="100%" minHeight={1}
     scrollY scrollX={false} stickyScroll={false}
     verticalScrollbarOptions={{ width: spacing.scrollbar, showArrows: false, visible: false }}
     onMouseUp={event => { if (event.button === 0) { const version = navigationVersion; queueMicrotask(() => { if (!disposed && version === navigationVersion) { finishBodySelection(); endGesture(); } }); } }}

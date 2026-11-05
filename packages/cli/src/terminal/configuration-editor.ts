@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { SUPPORTED_PROVIDERS } from '../registries/index.js';
 import type { TerminalAction, TerminalChoice, TerminalView } from '@zhixing/terminal-ui/protocol';
 import type { ConfigurationEditResult, NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
 import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, SectionId, WorkingState } from '../config-editor/types.js';
@@ -272,12 +273,13 @@ export class TerminalConfigurationEditor {
           ...(!meta.sensitive ? { value: this.#state.inputBuffer || meta.currentValue(this.#state) || '' } : {}) };
         break;
       }
+      // 页头说明只放进入时就需要、页面别处看不到的信息（对象与稳定引导）；校验错误留在正文，不会顶掉引导
       case 'add-model':
-        title = '添加自定义模型'; message = '输入服务商提供的完整 model id。';
+        title = '添加自定义模型'; chromeDescription = `为 ${SUPPORTED_PROVIDERS.find(provider => provider.id === panel.providerId)?.label ?? panel.providerId} 添加 · 输入服务商提供的完整 model id。`;
         field = { id: 'model', label: 'Model ID', secret: false, value: this.#state.inputBuffer }; break;
       case 'thinking-budget': {
         const range = resolveBudgetRange(panel.providerId, panel.model);
-        title = '思考预算'; message = range ? `官方建议区间：${range[0]}–${range[1]} token` : '输入思考 token 预算（整数）。';
+        title = '思考预算'; chromeDescription = `${panel.model} · ${range ? `官方建议区间：${range[0]}–${range[1]} token` : '输入思考 token 预算（整数）。'}`;
         field = { id: 'budget', label: 'Token 预算', secret: false, value: this.#state.inputBuffer }; break;
       }
       case 'mcp-server': {
@@ -288,10 +290,10 @@ export class TerminalConfigurationEditor {
         add(isMcpServerEnabled(this.#state, panel.serverId) ? '停用' : '启用'); add('删除', '完成保存后删除此连接及凭据', true); break;
       }
       case 'mcp-add-input':
-        title = '接入 MCP'; message = panel.error ?? '输入预设名、包名、网址、启动命令或描述。';
+        title = '接入 MCP'; chromeDescription = '输入预设名、包名、网址、启动命令或描述。'; message = panel.error ?? '';
         field = { id: 'mcp-source', label: '来源', secret: false, value: this.#state.inputBuffer }; break;
       case 'mcp-choices':
-        title = '选择 MCP 候选'; message = panel.error ?? '仅从选中的确切来源提取接入信息。';
+        title = '选择 MCP 候选'; chromeDescription = '仅从选中的确切来源提取接入信息。'; message = panel.error ?? '';
         for (const choice of panel.choices) add(choice.name, `${choice.summary}\n${choice.reason}`); break;
       case 'mcp-add': {
         title = `接入 · ${panel.label ?? panel.candidate.serverId}`;

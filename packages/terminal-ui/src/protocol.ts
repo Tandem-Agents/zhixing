@@ -1,6 +1,7 @@
-import type { BodyFragmentMetadata, BodyPage, BodyPagePatch } from './body-model.js';
-import type { TerminalSkillsAction, TerminalSkillsView } from './skills-model.js';
-import type { TerminalProcessView } from './process-model.js';
+import { type BodyFragmentMetadata, type BodyPage, type BodyPagePatch } from './body-model.js';
+import { type TerminalSkillsAction, type TerminalSkillsView } from './skills-model.js';
+import { type TerminalProcessView } from './process-model.js';
+
 export { validateProcessView } from './process-model.js';
 
 /** Private same-release terminal transport, not a second product API. */
@@ -231,6 +232,8 @@ export interface TerminalView {
   readonly environment?: { readonly provider: string; readonly model: string; readonly workspace: string | null };
   readonly busy?: boolean;
   readonly inputReceiptPending?: boolean;
+  /** 已受理、结果还没送到界面的命令名（N 等首帧到上限后如实保留，首帧写出或结算时撤下）；会话页信息行据此显示“正在打开” */
+  readonly commandPending?: string;
   readonly skills?: TerminalSkillsView;
   readonly recovery?: { readonly requestId: string; readonly input: boolean; readonly pages: number; readonly settled?: boolean };
 }
