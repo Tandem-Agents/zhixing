@@ -1,13 +1,13 @@
-import { type ConversationController } from '../runtime/conversation-controller.js';
-import { type RpcManagementFacade } from '../runtime/rpc-management-facade.js';
-import { type CliWriter } from '../screen/cli-writer.js';
+import type { ConversationController } from '../runtime/conversation-controller.js';
+import type { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
+import type { CliWriter } from '../screen/cli-writer.js';
+import type { SessionSecurityResult } from '@zhixing/rpc';
 import { handleSecurityCommand, handleTrustCommand } from '../security/commands.js';
-import { renderAdvancementDetailLines } from '../advancement-presentation.js';
+import { securityOverview, securityRulesDetail } from '../security/security-summary.js';
+import { advancementDetailSummary, renderAdvancementEmptyLine } from '../advancement-presentation.js';
 import { stripAnsi } from '../tui/ansi.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';
-import { type SessionSecurityResult } from '@zhixing/rpc';
-import { securityOverview, securityRulesDetail } from '../security/security-summary.js';
 
 export type TerminalDecisionController = Pick<ConversationController<string>, 'advancementDetail' | 'uncertainRuns' | 'resolveUncertain'> & {
   readonly current: { readonly conversationId: string; readonly name?: string };
@@ -126,13 +126,13 @@ export class TerminalDecisionCommands {
         const detail = await controller.advancementDetail();
         scope.assertCurrent(); boundedControlProjection(detail, RESULT_BYTES);
         if (detail.conversationId !== conversationId) throw Error('推进详情的对话身份不一致，请重新读取。');
-        const lines = renderAdvancementDetailLines(detail, RESULT_BYTES).map(plainText);
-        boundedControlProjection(lines, RESULT_BYTES);
+        // 有记录时是分节信息页（按页拆分，整体容量由分页上界守住）；没有记录时沿用原来的一句话页面
+        const summary = advancementDetailSummary(detail);
         const pending = detail.detail?.status === 'awaiting-rubric-confirmation';
         // 页头注明是哪个对话的推进：标题不含对象，空态与结果只说“有没有、是什么”
         const conversation = controller.current.name ? `对话：${controller.current.name}` : undefined;
         const selected = await chooseTerminalSelection({
-          title: '任务推进', body: lines,
+          title: '任务推进', ...(summary ? { summary } : { body: [plainText(renderAdvancementEmptyLine(RESULT_BYTES))] }),
           options: [...(pending ? [{ value: 'resume', label: '继续确认任务', description: '查看、修改、确认、直接执行或取消原任务' }] : []),
             { value: 'done', label: '返回输入' }],
         }, page => choose(conversation ? { ...page, chromeDescription: conversation } : page));

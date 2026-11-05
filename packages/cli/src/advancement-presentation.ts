@@ -14,7 +14,9 @@
  */
 
 import chalk from "chalk";
-import { describeClosureVerdict, renderClosureReport, type AdvancementExit, type AdvancementRunReview, type ReviewEvidence } from "@zhixing/core/advancement";
+import { closureHeading, describeClosureVerdict, type AdvancementExit, type AdvancementRunReview, type ReviewEvidence } from "@zhixing/core/advancement";
+import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from "@zhixing/terminal-ui/protocol";
+import { paginateSummary, summaryText } from "./summary-projection.js";
 import { advancementProposalStalledMessage, describeAdvancementProposalStage } from "@zhixing/core/advancement/proposal-messages";
 import type { SessionAdvancementDetailResult } from "@zhixing/rpc";
 import { clampLine } from "./tui/line-width.js";
@@ -188,87 +190,68 @@ export function renderAdvancementControlEventLines(
 }
 
 /**
- * /advancement 详情呈现——「判断详情默认折叠、可展开」的展开面。
- * open 会话给标准矩阵逐条归因（判定人话 + 理由 + 证据摘录）、采信证据、
- * 已试策略与消耗；终态会话直出收场报告（离线错过收场事件后的回看）。
- * 素材全部来自宿主已持久化事实，呈现层不引入新真相源。
+ * /advancement 详情的语义投影——「判断详情默认折叠、可展开」的展开面。
+ * 进行中与待确认：页首写标题与状态，区块给验收标准逐条判定（判定人话 + 理由 + 证据摘录）、
+ * 最近一轮采信证据与已尝试策略，末尾写消耗；终态回看（离线错过收场事件后）读同一份 facts，
+ * 标题与收场报告共用；提议阶段只说明所处阶段与可继续的操作。
+ * 没有推进记录时返回 undefined，由调用方沿用原有的一句话页面。
+ * 素材全部来自宿主已持久化事实，判定文字用 core 的同一份人话，呈现层不引入新真相源。
  */
-export function renderAdvancementDetailLines(
-  result: SessionAdvancementDetailResult,
-  width: number,
-): string[] {
+/** 没有推进记录时的一句话页面（原样保留，不改成分节） */
+export function renderAdvancementEmptyLine(width: number): string {
+  return systemLine("当前对话没有推进任务记录。", width);
+}
+
+export function advancementDetailSummary(result: SessionAdvancementDetailResult): TerminalSummary[] | undefined {
   const detail = result.detail;
-  if (!detail) {
-    return [systemLine("当前对话没有推进任务记录。", width)];
-  }
+  if (!detail) return undefined;
   const { facts } = detail;
+  const finish = (lead: TerminalSummaryText[][], sections: TerminalSummarySection[], usage: string): TerminalSummary[] => {
+    const last = sections.at(-1);
+    if (last) sections[sections.length - 1] = { ...last, notes: [...(last.notes ?? []), usage] };
+    else lead.push([{ text: usage, tone: "dim" }]);
+    // 标准、证据与策略随推进增长：按页拆分，整体容量内全部可达；用量写在最后一个区块的末尾
+    return paginateSummary(lead, sections);
+  };
 
   // 提议阶段（草案尚未待确认）不是终态：说明所处阶段，起草失败或结果不明时给出可继续的操作
   if (detail.status === "proposed" || detail.status === "drafting" || detail.status === "draft-failed" || detail.status === "draft-uncertain") {
-    return [
-      systemLine(`任务推进：${describeAdvancementProposalStage(detail.status)}`, width),
-      ...(detail.status === "draft-failed" || detail.status === "draft-uncertain"
-        ? [dimLine("回复补充说明可重新起草，也可以说“直接执行”或“取消”。", width)]
-        : [dimLine("验收标准就绪后会请你确认；确认前不执行原任务。", width)]),
-    ];
+    return [{ lead: [
+      [{ text: `任务推进：${describeAdvancementProposalStage(detail.status)}`, tone: "accent" }],
+      [{ text: detail.status === "draft-failed" || detail.status === "draft-uncertain"
+        ? "回复补充说明可重新起草，也可以说“直接执行”或“取消”。"
+        : "验收标准就绪后会请你确认；确认前不执行原任务。", tone: "dim" }],
+    ], sections: [] }];
   }
+
+  const criteria = (title: string): TerminalSummarySection[] => facts.criteria.length ? [{ title, rows: facts.criteria.map((row, index) => ({
+    label: summaryText(`${index + 1}. ${row.text}`),
+    value: describeClosureVerdict(row.verdict),
+    ...(row.verdict === "unmet" ? { tone: "warn" as const } : {}),
+    ...(row.reason || row.evidenceExcerpt ? { note: summaryText([row.reason, row.evidenceExcerpt ? `证据：${row.evidenceExcerpt}` : ""].filter(Boolean).join("  ")) } : {}),
+  })) }] : [];
+  const evidence = (title: string, items: readonly ReviewEvidence[]): TerminalSummarySection[] => items.length
+    ? [{ title, rows: items.map((item) => ({ label: describeEvidenceSource(item), value: summaryText(item.summary) })) }] : [];
+  const strategies: TerminalSummarySection[] = facts.attemptedStrategies.length ? [{ title: "已尝试策略", rows: facts.attemptedStrategies.map((strategy) => ({
+    label: summaryText(strategy.scenario ?? strategy.failureHandlingId), value: `${strategy.attempts} 次` })) }] : [];
 
   if (detail.status !== "active" && detail.status !== "awaiting-rubric-confirmation") {
-    // 终态回看：收场报告随查随算直出（unknown 人话已在 core 渲染层翻译）
-    const header =
-      detail.status === "cancelled" ? "推进任务已取消" : undefined;
-    return [
-      ...(header ? [systemLine(header, width)] : []),
-      ...renderClosureReport(facts)
-        .split("\n")
-        .map((row) => line(chalk.dim(`${layout.contentPrefix}${row}`), width)),
-    ];
+    // 终态回看：与收场报告同一份 facts、同一句标题，按区块呈现
+    const cancelled = detail.status === "cancelled";
+    return finish([
+      ...(cancelled ? [[{ text: "推进任务已取消", tone: "accent" as const }]] : []),
+      [{ text: summaryText(closureHeading(facts)), tone: cancelled ? "normal" : "accent" }],
+      [{ text: `共验收 ${facts.reviewedRunCount} 轮。` }],
+      ...(facts.exit && facts.status !== "completed" ? [[{ text: summaryText(`退出原因：${facts.exit.message}`) }]] : []),
+    ], [...criteria("验收标准"), ...strategies, ...(facts.status === "completed" ? evidence("验收证据", facts.lastEvidence) : [])],
+    `本次推进共消耗约 ${facts.usage.totalTokens} tokens。`);
   }
 
-  const lines: string[] = [];
-  const title = detail.rubricTitle ? `：${detail.rubricTitle}` : "";
-  const state =
-    detail.status === "active"
-      ? `进行中 · 已验收 ${facts.reviewedRunCount} 轮`
-      : "等待确认验收标准";
-  lines.push(systemLine(`任务推进${title}（${state}）`, width));
-
-  if (facts.criteria.length > 0) {
-    lines.push(dimLine("【标准矩阵 · 最近判定】", width));
-    facts.criteria.forEach((row, index) => {
-      const parts = [`${index + 1}. ${row.text}：${describeClosureVerdict(row.verdict)}`];
-      if (row.reason) parts.push(row.reason);
-      lines.push(dimLine(`  ${parts.join("。")}`, width));
-      if (row.evidenceExcerpt) {
-        lines.push(dimLine(`     证据：${row.evidenceExcerpt}`, width));
-      }
-    });
-  }
-
-  const evidence = detail.lastReview?.evidence ?? [];
-  if (evidence.length > 0) {
-    lines.push(dimLine("【最近一轮采信证据】", width));
-    for (const item of evidence) {
-      lines.push(
-        dimLine(`  - ${item.summary}（${describeEvidenceSource(item)}）`, width),
-      );
-    }
-  }
-
-  if (facts.attemptedStrategies.length > 0) {
-    lines.push(dimLine("【已尝试策略】", width));
-    for (const strategy of facts.attemptedStrategies) {
-      lines.push(
-        dimLine(
-          `  - ${strategy.scenario ?? strategy.failureHandlingId}（${strategy.attempts} 次）`,
-          width,
-        ),
-      );
-    }
-  }
-
-  lines.push(dimLine(`本次推进已消耗约 ${facts.usage.totalTokens} tokens。`, width));
-  return lines;
+  return finish([
+    [{ text: summaryText(`任务推进${detail.rubricTitle ? `：${detail.rubricTitle}` : ""}`), tone: "accent" }],
+    [{ text: detail.status === "active" ? `进行中 · 已验收 ${facts.reviewedRunCount} 轮` : "等待确认验收标准" }],
+  ], [...criteria("验收标准 · 最近判定"), ...evidence("最近一轮采信证据", detail.lastReview?.evidence ?? []), ...strategies],
+  `本次推进已消耗约 ${facts.usage.totalTokens} tokens。`);
 }
 
 function describeEvidenceSource(evidence: ReviewEvidence): string {
@@ -280,10 +263,6 @@ function describeEvidenceSource(evidence: ReviewEvidence): string {
     default:
       return "执行侧报告";
   }
-}
-
-function dimLine(text: string, width: number): string {
-  return line(chalk.dim(`${layout.contentPrefix}${text}`), width);
 }
 
 /**

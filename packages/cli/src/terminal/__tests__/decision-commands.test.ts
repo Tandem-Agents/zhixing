@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { type SessionAdvancementDetailResult } from '@zhixing/rpc';
-import { type TrustAdministrationRule } from '@zhixing/core/trust-administration';
+import type { SessionAdvancementDetailResult } from '@zhixing/rpc';
+import type { TrustAdministrationRule } from '@zhixing/core/trust-administration';
 import { TerminalDecisionCommands, type TerminalDecisionController, type TerminalDecisionOptions, type TerminalDecisionScope } from '../decision-commands.js';
-import { type TerminalSelectionPort } from '../selection.js';
+import type { TerminalSelectionPort } from '../selection.js';
 
 const rule = (id: string): TrustAdministrationRule => ({ id, pattern: { tool: 'bash', argument: 'ls *' }, decision: 'allow',
   scope: 'context', contextId: { kind: 'main' }, createdAt: 0, lastMatchedAt: 0, matchCount: 0 });

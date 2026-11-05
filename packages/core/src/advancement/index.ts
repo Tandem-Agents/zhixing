@@ -23,6 +23,7 @@ export {
 export {
   buildClosureFacts,
   buildClosureSynthesisPrompt,
+  closureHeading,
   describeClosureVerdict,
   renderClosureReport,
   sumAdvancementUsage,

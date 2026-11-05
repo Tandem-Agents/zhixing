@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { AdvancementRunReview } from "@zhixing/core/advancement";
+import { renderClosureReport, type AdvancementRunReview } from "@zhixing/core/advancement";
+import type { TerminalSummary } from "@zhixing/terminal-ui/protocol";
 import {
   ADVANCEMENT_TURN_LABEL,
   describeAdvancementExitReason,
+  advancementDetailSummary,
   renderAdvancementControlEventLines,
-  renderAdvancementDetailLines,
+  renderAdvancementEmptyLine,
   renderResumedAdvancementNotice,
   summarizeReview,
 } from "../advancement-presentation.js";
@@ -235,7 +237,7 @@ describe("renderAdvancementControlEventLines", () => {
   });
 });
 
-describe("renderAdvancementDetailLines", () => {
+describe("advancementDetailSummary", () => {
   const facts = {
     sessionId: "adv-1",
     conversationId: "conv-1",
@@ -256,77 +258,106 @@ describe("renderAdvancementDetailLines", () => {
         verdict: "unknown" as const,
         reason: "无独立证据。",
       },
+      { criterionId: "pc-3", text: "文档已更新", verdict: "unreviewed" as const },
+      { criterionId: "pc-4", text: "无回归", verdict: "met" as const },
     ],
     attemptedStrategies: [
       { failureHandlingId: "fix-tests", attempts: 2, scenario: "测试失败" },
+      { failureHandlingId: "retry-build", attempts: 1 },
     ],
-    lastEvidence: [],
+    lastEvidence: [{ id: "ci", kind: "command-output" as const, summary: "CI 全绿", source: "user" as const }],
     usage: {
       judge: { inputTokens: 0, outputTokens: 0 },
       run: { inputTokens: 0, outputTokens: 0 },
       totalTokens: 12345,
     },
   };
+  const section = (summary: TerminalSummary, title: string) => summary.sections.find((item) => item.title === title);
+  const one = (pages: TerminalSummary[] | undefined) => { expect(pages).toHaveLength(1); return pages![0]!; };
 
-  it("active 会话展开逐条归因：判定人话、理由、证据摘录、采信证据与策略", () => {
-    const lines = plain(
-      renderAdvancementDetailLines(
-        {
-          conversationId: "conv-1",
-          detail: {
-            advancementSessionId: "adv-1",
-            status: "active",
-            rubricTitle: "代码任务验收",
-            facts,
-            lastReview: {
-              ...review(),
-              evidence: [
-                {
-                  id: "git",
-                  kind: "file-diff",
-                  summary: "git status: 2 changed",
-                  source: "independent",
-                },
-              ],
-            },
-          },
+  it("active：页首写标题与 reviewedRunCount，逐条判定用 core 人话，未满足警示、未验收另行表述，理由与证据在行下", () => {
+    const summary = one(advancementDetailSummary({
+      conversationId: "conv-1",
+      detail: {
+        advancementSessionId: "adv-1",
+        status: "active",
+        rubricTitle: "代码任务验收",
+        facts,
+        lastReview: {
+          ...review({ runIndex: 7 }),
+          evidence: [{ id: "git", kind: "file-diff", summary: "git status: 2 changed", source: "independent" }],
         },
-        WIDTH,
-      ),
-    );
-    const text = lines.join("\n");
-    expect(text).toContain("任务推进：代码任务验收（进行中 · 已验收 2 轮）");
-    expect(text).toContain("1. 测试通过：未满足。测试仍未全绿。");
-    expect(text).toContain("证据：vitest: 1 failed");
-    expect(text).toContain("无法独立核验，已按执行侧报告采信");
-    expect(text).not.toContain("unknown");
-    expect(text).toContain("git status: 2 changed（独立核验）");
-    expect(text).toContain("测试失败（2 次）");
-    expect(text).toContain("12345 tokens");
+      },
+    }));
+    expect(summary.lead).toEqual([
+      [{ text: "任务推进：代码任务验收", tone: "accent" }],
+      [{ text: "进行中 · 已验收 2 轮" }],
+    ]);
+    expect(section(summary, "验收标准 · 最近判定")!.rows).toEqual([
+      { label: "1. 测试通过", value: "未满足", tone: "warn", note: "测试仍未全绿。  证据：vitest: 1 failed" },
+      { label: "2. 实现满足需求", value: "无法独立核验，已按执行侧报告采信", note: "无独立证据。" },
+      { label: "3. 文档已更新", value: "未验收" },
+      { label: "4. 无回归", value: "已满足" },
+    ]);
+    expect(section(summary, "最近一轮采信证据")!.rows).toEqual([{ label: "独立核验", value: "git status: 2 changed" }]);
+    expect(section(summary, "已尝试策略")!.rows).toEqual([{ label: "测试失败", value: "2 次" }, { label: "retry-build", value: "1 次" }]);
+    expect(summary.sections.at(-1)!.notes).toEqual(["本次推进已消耗约 12345 tokens。"]);
+    const all = JSON.stringify(summary);
+    expect(all).not.toContain("unknown"); expect(all).not.toContain("已验收 7 轮");
   });
 
-  it("终态会话直出收场报告（离线回看）", () => {
-    const lines = plain(
-      renderAdvancementDetailLines(
-        {
-          conversationId: "conv-1",
-          detail: {
-            advancementSessionId: "adv-1",
-            status: "exited",
-            facts: { ...facts, status: "exited" as const },
-          },
-        },
-        WIDTH,
-      ),
-    );
-    expect(lines.join("\n")).toContain("任务推进已退出");
+  it("待确认：状态写“等待确认验收标准”，没有证据与策略时只列已有区块，用量仍在", () => {
+    const summary = one(advancementDetailSummary({
+      conversationId: "conv-1",
+      detail: { advancementSessionId: "adv-1", status: "awaiting-rubric-confirmation", facts: { ...facts, criteria: [], attemptedStrategies: [] } },
+    }));
+    expect(summary.lead).toEqual([[{ text: "任务推进", tone: "accent" }], [{ text: "等待确认验收标准" }],
+      [{ text: "本次推进已消耗约 12345 tokens。", tone: "dim" }]]);
+    expect(summary.sections).toEqual([]);
+  });
+
+  it("终态回看与收场报告同一份 facts：标题、轮次、退出原因、标准、策略、总消耗；cancelled 先写已取消", () => {
+    const exited = one(advancementDetailSummary({
+      conversationId: "conv-1",
+      detail: { advancementSessionId: "adv-1", status: "exited",
+        facts: { ...facts, status: "exited" as const, exit: { reason: "dead-end", message: "继续推进没有新进展" } } },
+    }));
+    expect(exited.lead).toEqual([
+      [{ text: "任务推进已退出：代码任务验收", tone: "accent" }],
+      [{ text: "共验收 2 轮。" }],
+      [{ text: "退出原因：继续推进没有新进展" }],
+    ]);
+    expect(section(exited, "验收标准")!.rows!.map((row) => row.value)).toEqual(["未满足", "无法独立核验，已按执行侧报告采信", "未验收", "已满足"]);
+    expect(section(exited, "已尝试策略")).toBeDefined();
+    expect(section(exited, "验收证据")).toBeUndefined();
+    expect(exited.sections.at(-1)!.notes).toEqual(["本次推进共消耗约 12345 tokens。"]);
+
+    const completed = one(advancementDetailSummary({
+      conversationId: "conv-1",
+      detail: { advancementSessionId: "adv-1", status: "completed", facts: { ...facts, status: "completed" as const } },
+    }));
+    expect(completed.lead[0]).toEqual([{ text: "任务推进已验收通过：代码任务验收", tone: "accent" }]);
+    expect(section(completed, "验收证据")!.rows).toEqual([{ label: "用户提供", value: "CI 全绿" }]);
+
+    const cancelled = one(advancementDetailSummary({
+      conversationId: "conv-1",
+      detail: { advancementSessionId: "adv-1", status: "cancelled", facts: { ...facts, status: "cancelled" as const, criteria: [], attemptedStrategies: [] } },
+    }));
+    expect(cancelled.lead.slice(0, 2)).toEqual([[{ text: "推进任务已取消", tone: "accent" }], [{ text: "任务推进已退出：代码任务验收", tone: "normal" }]]);
+    expect(cancelled.lead.at(-1)).toEqual([{ text: "本次推进共消耗约 12345 tokens。", tone: "dim" }]);
+  });
+
+  it("终态标题与 core 收场报告首行一致", () => {
+    for (const status of ["completed", "exited"] as const) {
+      const summary = one(advancementDetailSummary({ conversationId: "conv-1", detail: { advancementSessionId: "adv-1", status, facts: { ...facts, status } } }));
+      expect(summary.lead[0]![0]!.text).toBe(renderClosureReport({ ...facts, status }).split("\n")[0]);
+    }
   });
 
   it("提议阶段不是终态：说明所处阶段与可继续的操作，不显示“已退出”", () => {
-    const render = (status: "drafting" | "draft-failed" | "draft-uncertain") => plain(renderAdvancementDetailLines(
+    const render = (status: "drafting" | "draft-failed" | "draft-uncertain") => JSON.stringify(advancementDetailSummary(
       { conversationId: "conv-1", detail: { advancementSessionId: "adv-1", status, facts: { ...facts, status } } },
-      WIDTH,
-    )).join("\n");
+    ));
     expect(render("drafting")).toContain("已提出推进，正在起草验收标准");
     const failed = render("draft-failed");
     expect(failed).toContain("起草失败，原任务保留");
@@ -335,14 +366,21 @@ describe("renderAdvancementDetailLines", () => {
     expect(render("draft-uncertain")).toContain("起草结果不明");
   });
 
-  it("无推进记录时明确说明", () => {
-    const lines = plain(
-      renderAdvancementDetailLines(
-        { conversationId: "conv-1", detail: null },
-        WIDTH,
-      ),
-    );
-    expect(lines[0]).toContain("没有推进任务记录");
+  it("标准、证据与策略很多时按页拆分，末项可达，用量写在最后一个区块的末尾", () => {
+    const criteria = Array.from({ length: 600 }, (_, index) => ({ criterionId: `c-${index}`, text: `标准 ${index + 1}`, verdict: "met" as const, reason: "已核对。" }));
+    const pages = advancementDetailSummary({ conversationId: "conv-1", detail: { advancementSessionId: "adv-1", status: "active", rubricTitle: "长清单",
+      facts: { ...facts, criteria, attemptedStrategies: [] } } })!;
+    expect(pages.length).toBeGreaterThan(1);
+    const rows = pages.flatMap((page) => page.sections).filter((item) => item.title.startsWith("验收标准")).flatMap((item) => item.rows ?? []);
+    expect(rows).toHaveLength(600); expect(rows.at(-1)!.label).toBe("600. 标准 600");
+    expect(pages[0]!.sections[0]!.notes).toBeUndefined();
+    expect(pages.at(-1)!.sections.at(-1)!.notes).toEqual(["本次推进已消耗约 12345 tokens。"]);
+    expect(JSON.stringify(pages)).not.toContain("未能显示");
+  });
+
+  it("无推进记录时不给分节，沿用原来的一句话页面", () => {
+    expect(advancementDetailSummary({ conversationId: "conv-1", detail: null })).toBeUndefined();
+    expect(stripAnsi(renderAdvancementEmptyLine(WIDTH))).toContain("◆ 当前对话没有推进任务记录。");
   });
 });
 

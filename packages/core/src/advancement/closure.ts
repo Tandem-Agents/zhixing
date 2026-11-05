@@ -162,17 +162,22 @@ export function describeClosureVerdict(
   return VERDICT_LABELS[verdict];
 }
 
+/** 收场标题——收场报告与接入面的终态回看共用同一句。 */
+export function closureHeading(
+  facts: Pick<AdvancementClosureFacts, "status" | "rubricTitle">,
+): string {
+  const heading =
+    facts.status === "completed" ? "任务推进已验收通过" : "任务推进已退出";
+  return facts.rubricTitle ? `${heading}：${facts.rubricTitle}` : heading;
+}
+
 /**
  * 收场报告降级直出——确定性纯文本渲染，不依赖 LLM。
  * LLM 合成失败时它保证退出 / 完成不被阻塞、信息不缺席。
  */
 export function renderClosureReport(facts: AdvancementClosureFacts): string {
   const lines: string[] = [];
-  const heading =
-    facts.status === "completed" ? "任务推进已验收通过" : "任务推进已退出";
-  lines.push(
-    facts.rubricTitle ? `${heading}：${facts.rubricTitle}` : heading,
-  );
+  lines.push(closureHeading(facts));
   lines.push(`共验收 ${facts.reviewedRunCount} 轮。`);
   if (facts.exit && facts.status !== "completed") {
     lines.push(`退出原因：${facts.exit.message}`);

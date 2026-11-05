@@ -14,6 +14,7 @@ import { securityOverview, securityRulesDetail } from '../../../cli/src/security
 import { serverStatusSummary } from '../../../cli/src/runtime/server-status-presentation.js';
 import { informationContextSummary, informationUsageSummary } from '../../../cli/src/terminal/information-presentation.js';
 import { commandHelpSummary } from '../../../cli/src/terminal/command-help.js';
+import { advancementDetailSummary } from '../../../cli/src/advancement-presentation.js';
 import { BUILTIN_COMMANDS } from '../../../cli/src/commands/builtin-definitions.js';
 // Runs with the pinned Bun/native renderer via scripts/test-root.ts.
 // This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
@@ -1742,6 +1743,16 @@ try {
       const helpAt = (name: string) => { const line = rows().find(value => value.includes(`${name} `) && !value.includes('▎'))!; return line.slice(line.indexOf(name) + name.length).search(/\S/u) + line.indexOf(name) + name.length; };
       assert.equal(helpAt('/new'), helpAt('/advancement'), 'descriptions line up across long and short command names');
 
+      const facts = { sessionId: 'adv', conversationId: 'c', status: 'active' as const, rubricTitle: '代码任务验收', reviewedRunCount: 2,
+        criteria: [{ criterionId: 'a', text: '测试通过', verdict: 'unmet' as const, reason: '测试仍未全绿。', evidenceExcerpt: 'vitest: 1 failed' },
+          { criterionId: 'b', text: '文档已更新', verdict: 'unreviewed' as const }],
+        attemptedStrategies: [{ failureHandlingId: 'fix', attempts: 2, scenario: '测试失败' }], lastEvidence: [],
+        usage: { judge: { inputTokens: 0, outputTokens: 0 }, run: { inputTokens: 0, outputTokens: 0 }, totalTokens: 12345 } };
+      const advancement = only(advancementDetailSummary({ conversationId: 'c', detail: { advancementSessionId: 'adv', status: 'active', rubricTitle: '代码任务验收', facts } } as never)!);
+      test.resize(100, 32); await show(page('任务推进', advancement)); await flush();
+      for (const expected of ['任务推进：代码任务验收', '进行中 · 已验收 2 轮', '▎ 验收标准 · 最近判定', '1. 测试通过', '证据：vitest: 1 failed', '未验收', '▎ 已尝试策略', '本次推进已消耗约 12345 tokens。'])
+        assert.ok(shown(expected), `advancement shows ${expected}`);
+      assert.ok(slots('未满足').includes(3) && !slots('未验收').includes(3), 'unmet is a warning, unreviewed is not');
       test.resize(100, 32); await show(conversation); await flush();
       checks.push('stage-2 information pages from real projections: status sections with warnings, local facts when the host is unavailable, aligned values, a wrapped path copied exactly at 45 columns; usage subtasks, context tiers by host status, help by category with aligned descriptions, advancement verdicts');
     }
