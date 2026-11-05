@@ -1742,6 +1742,8 @@ export class ConversationManager implements ConversationCommitProjection {
     if (!accepted.appended) return;
     const session = this.sessions.get(conversationId);
     if (!session) return;
+    // 两套编号：窗口与快照锚点跟随 transcript 物理位置（存储返回值）；owner 事件与 owner-log 引用
+    // 用协议编号（封存记录的 runIndex）。没有旧前缀的会话两者相同
     const outcome = session.window.acceptRun({
       runMessages: input.runRecord.messages,
       runIndex: accepted.runIndex,
@@ -1752,8 +1754,8 @@ export class ConversationManager implements ConversationCommitProjection {
     await this.maybeWriteSnapshot(conversationId, session, input.windowCompact, outcome);
     this.notifyTurnCommitted(session, input.runRecord, {
       turnId: input.runRecord.runId,
-      runIndex: accepted.runIndex,
-      runRecordRef: { shardId: 'owner-log', runIndex: accepted.runIndex },
+      runIndex: input.runRecord.runIndex,
+      runRecordRef: { shardId: 'owner-log', runIndex: input.runRecord.runIndex },
     });
   }
 

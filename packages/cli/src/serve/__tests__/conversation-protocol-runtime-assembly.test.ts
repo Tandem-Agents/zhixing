@@ -4,7 +4,7 @@ import { userMessageFromTurnInput, type Message } from "@zhixing/core";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
 import { type PermissionRule } from "@zhixing/core/security";
 import { createSignedTrustRuleSnapshot, protocolDigest } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { ConversationManager, type TurnCommittedInfo } from "@zhixing/owner-kernel/conversation-manager";
 import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
 import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
 import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
@@ -135,6 +135,58 @@ describe("ConversationProtocolRuntime", () => {
       "Conversation executor topology directory is required",
     );
   });
+
+  it("旧前缀会话：投影返回物理位置时，owner 事件与 owner-log 引用仍用协议编号", async () => {
+    const home = await createTempDir("conversation-protocol-legacy-prefix");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    await authority.installPermissionSnapshot(
+      createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer),
+    );
+    const conversationId = localConversationId(authority.deviceId, "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-legacy-prefix",
+      async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+        return {
+          agentResult: { reason: "completed", message: assistant, usage: { inputTokens: 1, outputTokens: 1 } },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage: { inputTokens: 1, outputTokens: 1 }, source: "interactive" },
+          newMessages: [assistant],
+          durationMs: 1,
+        };
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    const factory: RuntimeFactory = { create: vi.fn(async () => runtime) };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      owner: fixtureLocalOwnerRuntime(authority),
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: factory },
+    });
+    const committedTurns: TurnCommittedInfo[] = [];
+    // transcript 有两条 owner 之前的旧前缀：存储把协议 0 放在物理 2
+    const legacyPrefix = 2;
+    manager = new ConversationManager(factory, undefined, {
+      ensureConversation: (id) => protocol.ensureSession(id),
+      initTranscript: (id) => protocol.ensureSession(id),
+      appendRun: async () => { throw new Error("local owner must not use legacy transcript persistence"); },
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex + legacyPrefix, shardId: "000001", appended: true }),
+      durableTurnExecutor: protocol,
+      onTurnCommitted: (info) => { committedTurns.push(info); },
+    });
+    await protocol.ensureSession(conversationId);
+    const managed = await manager.getOrCreate(conversationId);
+    expectSettled(await projectSessionTurn({
+      manager, managed, text: "first after legacy", turnId: "local:turn:legacy:1",
+      runOptions: { source: "interactive", turnContext: { turnId: "local:turn:legacy:1" } }, notify: () => {},
+    }));
+    expect(committedTurns).toHaveLength(1);
+    expect(committedTurns[0]).toMatchObject({ runIndex: 0, runRecordRef: { shardId: "owner-log", runIndex: 0 } });
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("runs and recovers a device-local conversation entirely on the executor authority domain", async () => {
     const home = await createTempDir("conversation-protocol-local-owner");

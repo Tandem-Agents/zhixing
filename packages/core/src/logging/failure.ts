@@ -5,6 +5,8 @@ const SYSTEM_CODES = new Set(["EACCES", "EPERM", "ENOSPC", "EDQUOT", "EIO", "ENO
 const RPC_FAILURES = new Set(['RPC_CONNECTION_CLOSED', 'RPC_DEADLINE_EXCEEDED', 'RPC_CALLER_CANCELLED']);
 const STEP_DIMENSIONS = new Set(["memoryReservationBytes", "temporaryBytes", "slots", "readBytes", "writeBytes", "ioOperations"]);
 const CLASSES = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "AggregateError"]);
+/** 投影冲突诊断的受控格式（见 transcript/shard/store.ts runConflictDiagnostic）：只有摘要前缀、序号、字段名与来源比较 */
+const RUN_CONFLICT_DIAGNOSTIC = /^conv [0-9a-f]{8} run \d{1,15} fields (?:none|(?:[A-Za-z0-9_]{1,24}|\?)(?:\+(?:[A-Za-z0-9_]{1,24}|\?)){0,15}) source (?:equal|differs|not-compared) stored (?:owner|local|legacy)$/u;
 const PROJECTION_FAILURES: Readonly<Record<string, string>> = {
   "Committed transcript run conflicts with an existing projection": "transcript-run-conflict",
   "Committed transcript run is not contiguous with the current projection": "transcript-run-gap",
@@ -66,7 +68,12 @@ export function logFailureEvidence(error: unknown): LogFailureEvidence {
         if (cause.message === "Device capacity step is no longer usable") return { category: "resource-step", code: "step-inactive" };
         if (cause.message === "Device capacity permit cannot cover the next atomic step") return { category: "resource-step", code: "step-unavailable" };
       }
-      if (Object.hasOwn(PROJECTION_FAILURES, cause.message)) return { category: "projection", code: PROJECTION_FAILURES[cause.message]! };
+      if (Object.hasOwn(PROJECTION_FAILURES, cause.message)) {
+        // 投影冲突附带的脱敏诊断（会话摘要前缀、runIndex、不一致字段名、来源比较）随失败证据记录，不含正文
+        const detail = (cause as Error & { projectionConflict?: unknown }).projectionConflict, code = PROJECTION_FAILURES[cause.message]!;
+        return { category: "projection", code,
+          ...(code === "transcript-run-conflict" && typeof detail === "string" && RUN_CONFLICT_DIAGNOSTIC.test(detail) ? { operation: detail } : {}) };
+      }
       const native = /\b(?:NTSTATUS 0x[0-9a-f]{1,8}|Win32 \d{1,10}|POSIX errno \d{1,10}|checkpoint-child-missing)\b/iu.exec(cause.message)?.[0];
       if (native) return { category: "platform", code: native };
       if (Object.hasOwn(PLATFORM_GUARDS, cause.message)) return { category: "platform-guard", code: PLATFORM_GUARDS[cause.message]! };

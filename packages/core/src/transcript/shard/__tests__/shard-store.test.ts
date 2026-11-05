@@ -14,7 +14,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import type { Message } from "../../../types/messages.js";
 import { ShardedTranscriptStore } from "../store.js";
 import { countRuns, readRunsReverse } from "../reader.js";
-import { decodePositionEntry, encodePositionEntry, POSITION_RECORD_BYTES } from "../position-file.js";
+import { decodePositionEntry, encodePositionEntry, entryOffset, POSITION_RECORD_BYTES } from "../position-file.js";
 import { sha256, ZERO_SHA256 } from "../directory-root.js";
 import {
   TranscriptDirectoryDamagedError,
@@ -164,6 +164,20 @@ describe("写入与 runIndex", () => {
     await expect(store.appendCommittedRunRecord("p", { ...first, messages: [] }, source(0))).rejects.toThrow("conflicts");
     await expect(store.appendCommittedRunRecord("p", first, { ...source(0), commitRevision: 99 })).rejects.toThrow("conflicts");
     expect(await countRuns(store, "p")).toBe(1);
+  });
+
+  it("冲突附带脱敏诊断：会话摘要前缀、runIndex、不一致字段名与来源比较，不含正文", async () => {
+    const first = committed(0);
+    await store.appendCommittedRunRecord("diag", first, source(0));
+    const payload = await store.appendCommittedRunRecord("diag", { ...first, messages: [] }, source(0)).catch((error: Error & { projectionConflict?: string }) => error.projectionConflict);
+    expect(payload).toMatch(/^conv [0-9a-f]{8} run 0 fields messages source equal stored owner$/u);
+    const revision = await store.appendCommittedRunRecord("diag", first, { ...source(0), commitRevision: 99 }).catch((error: Error & { projectionConflict?: string }) => error.projectionConflict);
+    expect(revision).toMatch(/^conv [0-9a-f]{8} run 0 fields none source differs stored owner$/u);
+    // 旧本地前缀两条、只收到协议 1：不接手（不凑成连续），与本地 1 号冲突
+    await store.appendRunRecord("legacy-diag", runInput("旧问题一"));
+    await store.appendRunRecord("legacy-diag", runInput("旧问题二"));
+    const legacy = await store.appendCommittedRunRecord("legacy-diag", committed(1), source(1)).catch((error: Error & { projectionConflict?: string }) => error.projectionConflict);
+    expect(legacy).toMatch(/^conv [0-9a-f]{8} run 1 fields messages\+runId\+timestamp(?:\+\w+)* source not-compared stored local$/u);
   });
 
   it("committed 序号跨 clear、换片与重开保持单调", async () => {
@@ -767,6 +781,94 @@ describe("公共原语反例：短写、待确认发布、旧游标、已发布�
   });
 });
 
+// ─── 旧前缀会话的 owner 接手（协议编号与物理位置） ───
+
+describe("旧前缀会话的首个 owner 接手", () => {
+  async function localPrefix(id: string, count: number, writer = store) {
+    for (let i = 0; i < count; i++) await writer.appendRunRecord(id, runInput(`旧-${i}`));
+  }
+
+  it("协议 0 接在旧前缀之后；重驱幂等；后续协议编号按偏移接续；旧前缀原样保留", async () => {
+    await localPrefix("lp", 2);
+    await expect(store.appendCommittedRunRecord("lp", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2, appended: true });
+    await expect(store.appendCommittedRunRecord("lp", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2, appended: false });
+    await expect(store.appendCommittedRunRecord("lp", committed(1), source(1))).resolves.toMatchObject({ runIndex: 3, appended: true });
+    const reopened = new ShardedTranscriptStore(convDir);
+    await expect(reopened.appendCommittedRunRecord("lp", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2, appended: false });
+    await expect(reopened.appendCommittedRunRecord("lp", committed(1), source(1))).resolves.toMatchObject({ runIndex: 3, appended: false });
+    expect((await collect(reopened, "lp")).map((r) => r.runIndex)).toEqual([3, 2, 1, 0]);
+    const texts: string[] = [];
+    for await (const { record } of readRunsReverse(reopened, "lp")) texts.push(JSON.stringify(record.messages));
+    expect(texts.join()).toContain("旧-0");
+    expect(texts.join()).toContain("旧-1");
+    expect(texts.join()).toContain("run-0");
+  });
+
+  it("接手后同位置的 owner 记录不等仍报冲突；协议编号跳号不凑成连续", async () => {
+    await localPrefix("lc", 2);
+    await store.appendCommittedRunRecord("lc", committed(0), source(0));
+    await expect(store.appendCommittedRunRecord("lc", { ...committed(0), messages: [] }, source(0))).rejects.toThrow("conflicts");
+    await expect(store.appendCommittedRunRecord("lc", committed(0), { ...source(0), digest: "sha256:other" })).rejects.toThrow("conflicts");
+    await expect(store.appendCommittedRunRecord("lc", committed(2), source(2))).rejects.toThrow("not contiguous");
+    await localPrefix("lj", 2);
+    await expect(store.appendCommittedRunRecord("lj", committed(1), source(1))).rejects.toThrow("conflicts");
+    await expect(store.appendCommittedRunRecord("lj", committed(0))).rejects.toThrow("conflicts");
+    expect(await countRuns(store, "lj")).toBe(2);
+  });
+
+  it("首次接手时位置与正文已写、根未发布（崩溃）：重开后重驱只落一条，不重复", async () => {
+    await localPrefix("lr", 2);
+    await withRootRolledBack("lr", () => store.appendCommittedRunRecord("lr", committed(0), source(0)));
+    const reopened = new ShardedTranscriptStore(convDir);
+    await expect(reopened.appendCommittedRunRecord("lr", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2 });
+    await expect(reopened.appendCommittedRunRecord("lr", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2, appended: false });
+    expect((await collect(reopened, "lr")).map((r) => r.runIndex)).toEqual([2, 1, 0]);
+  });
+
+  it("有退役前缀时不接手（无法证明此前没有 owner）：维持退役语义，不追加", async () => {
+    let now = Date.UTC(2026, 0, 1);
+    const writer = new ShardedTranscriptStore(convDir, { maxShardBytes: 1, now: () => now });
+    for (let i = 0; i < 3; i++) { now += 86_400_000; await writer.appendRunRecord("lt", runInput(`旧-${i}`)); }
+    now += 86_400_000;
+    await writer.retainShards("lt", new Date(Date.UTC(2026, 0, 3) + 1).toISOString());
+    expect((await writer.readView("lt"))!.fromSeq).toBeGreaterThan(1);
+    await expect(writer.appendCommittedRunRecord("lt", committed(0), source(0))).resolves.toMatchObject({ appended: false, evidence: "retired" });
+    expect((await writer.readView("lt"))!.nextRunIndex).toBe(3);
+  });
+
+  it("反例：已投影的 owner 0 退役后又写了本地运行，重驱不重新物化", async () => {
+    let now = Date.UTC(2026, 0, 1);
+    const writer = new ShardedTranscriptStore(convDir, { maxShardBytes: 1, now: () => now });
+    await writer.appendCommittedRunRecord("ro", committed(0), source(0));
+    for (let i = 0; i < 3; i++) { now += 86_400_000; await writer.appendRunRecord("ro", runInput(`后写-${i}`)); }
+    now += 86_400_000;
+    await writer.retainShards("ro", new Date(Date.UTC(2026, 0, 4) + 1).toISOString());
+    const visible = (await writer.readView("ro"))!;
+    expect(visible.nextRunIndex).toBe(4);
+    await expect(writer.appendCommittedRunRecord("ro", committed(0), source(0))).resolves.toMatchObject({ appended: false, evidence: "retired" });
+    expect((await writer.readView("ro"))!.nextRunIndex).toBe(4);
+  });
+
+  it("反例：位置项有洞时不当作“没有 owner”，拒绝接手而不追加", async () => {
+    await localPrefix("lh2", 3);
+    const pos = path.join(dirOf("lh2"), "000001.pos");
+    const handle = await fs.open(pos, "r+");
+    try { await handle.write(Buffer.alloc(POSITION_RECORD_BYTES), 0, POSITION_RECORD_BYTES, entryOffset(1)); } finally { await handle.close(); }
+    const reopened = new ShardedTranscriptStore(convDir);
+    await expect(reopened.appendCommittedRunRecord("lh2", committed(0), source(0))).rejects.toThrow("conflicts");
+    expect((await reopened.readView("lh2"))!.nextRunIndex).toBe(3);
+  });
+
+  it("反例：owner 0 接手后又写入本地运行，重驱仍命中已确定的位置", async () => {
+    await localPrefix("lm", 1);
+    await expect(store.appendCommittedRunRecord("lm", committed(0), source(0))).resolves.toMatchObject({ runIndex: 1, appended: true });
+    await store.appendRunRecord("lm", runInput("之后的本地"));
+    const reopened = new ShardedTranscriptStore(convDir);
+    await expect(reopened.appendCommittedRunRecord("lm", committed(0), source(0))).resolves.toMatchObject({ runIndex: 1, appended: false });
+    expect((await reopened.readView("lm"))!.nextRunIndex).toBe(3);
+  });
+});
+
 // ─── 旧测试格式一次性转换 ───
 
 describe("旧测试格式（v1 index.json）一次性转换", () => {
@@ -797,8 +899,18 @@ describe("旧测试格式（v1 index.json）一次性转换", () => {
     expect(await countRuns(store, "lg")).toBe(1);
     const legacy = legacyRun(1, "r-1") as unknown as TranscriptRunRecord;
     await expect(store.appendCommittedRunRecord("lg", legacy, source(1))).resolves.toMatchObject({ runIndex: 1, appended: false });
+    // 带 runId 的既有记录重驱协议 0：原位精确命中，不当作旧前缀接手
+    await expect(store.appendCommittedRunRecord("lg", legacyRun(0, "r-0") as unknown as TranscriptRunRecord, source(0))).resolves.toMatchObject({ runIndex: 0, appended: false });
     await expect(store.appendCommittedRunRecord("lg", committed(3), source(3))).resolves.toMatchObject({ runIndex: 3, appended: true });
     expect(await fs.readFile(fileOf("lg", "index.json"), "utf-8")).toContain('"version":1');
+  });
+
+  it("转换来的旧前缀（legacy、不带 runId）：首个 owner 运行接在其后，旧记录原样保留", async () => {
+    await writeLegacy("lgp", [{ seq: 1, lines: [header(1), legacyRun(0), legacyRun(1)] }]);
+    await expect(store.appendCommittedRunRecord("lgp", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2, appended: true });
+    await expect(store.appendCommittedRunRecord("lgp", committed(0), source(0))).resolves.toMatchObject({ runIndex: 2, appended: false });
+    await expect(store.appendCommittedRunRecord("lgp", committed(1), source(1))).resolves.toMatchObject({ runIndex: 3, appended: true });
+    expect((await collect(store, "lgp")).map((r) => r.runIndex)).toEqual([3, 2, 1, 0]);
   });
 
   it("活跃片尾部有撕裂行：转换后换到新片继续追加，原片保持原样", async () => {

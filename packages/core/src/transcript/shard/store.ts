@@ -264,6 +264,11 @@ export class ShardedTranscriptStore {
    * 将已提交的 run 幂等物化为 transcript 投影（owner 入口）。新提交（runIndex 等于已发布水位）
    * 不读任何历史；重驱只读定位元数据与该 run 自己的字节，核对记录与来源摘要。证据所在分片
    * 已撤可见时返回已投影（evidence: "retired"）；应在可见分片中却找不到时报定位缺失。
+   *
+   * 两套编号：入参 runIndex 是 owner 协议编号（账本修订序号，接手时从 0 起），返回值与 transcript
+   * 行内、位置索引用的是物理位置。没有旧前缀的会话两者相同；有 owner 之前留下的旧前缀（legacy、
+   * local）时，首个 owner 运行接在旧前缀之后，此后物理位置 = 偏移 + 协议编号，偏移由已发布根里
+   * 最后一个 owner 运行推导（见 ownerOffset），不另存状态。
    */
   async appendCommittedRunRecord(
     conversationId: string,
@@ -279,11 +284,19 @@ export class ShardedTranscriptStore {
       throw new TypeError("Committed transcript run identity is invalid");
     }
     // 比较的是持久化后的 JSON 合同（含省略的可选字段）
-    const record: TranscriptRunRecord = JSON.parse(JSON.stringify(input));
-    const digest = ownerSourceDigest(record.runId, source);
+    const committed: TranscriptRunRecord = JSON.parse(JSON.stringify(input));
+    const digest = ownerSourceDigest(committed.runId, source);
     return await this.withLock(conversationId, async () => {
       const state = (await this.openInLock(conversationId, true))!;
       const next = state.root.tail.nextRunIndex;
+      const mapping = await this.ownerMappingInLock(conversationId, state);
+      // 旧前缀会话的首个 owner 接手：只有整段历史可见、位置项全部有效且证明没有 owner 时才接在旧前缀之后
+      if (mapping.offset === undefined && mapping.provenNoOwner && await this.ownerTakeoverInLock(conversationId, state, committed, source)) {
+        const seq = await this.appendInLock(conversationId, state, { kind: "run", record: { ...committed, runIndex: next }, source: digest });
+        return { runIndex: next, shardId: seqId(seq), appended: true };
+      }
+      const offset = mapping.offset ?? 0;
+      const record: TranscriptRunRecord = offset ? { ...committed, runIndex: offset + committed.runIndex } : committed;
       if (record.runIndex < next) {
         const located = await this.locateInLock(conversationId, state, record.runIndex);
         if (located.kind === "retired") {
@@ -296,7 +309,10 @@ export class ShardedTranscriptStore {
         // 来源摘要只在双方都带来源绑定时比较（旧测试格式转换来的位置没有来源）
         const storedHasSource = located.source.kind === "owner" && !located.source.assignmentSha256.equals(ZERO_SHA256);
         if (!isDeepStrictEqual(located.record, record) || (source && storedHasSource && !sourceDigestEquals(located.source, digest))) {
-          throw new Error("Committed transcript run conflicts with an existing projection");
+          throw Object.assign(new Error("Committed transcript run conflicts with an existing projection"), {
+            projectionConflict: runConflictDiagnostic(conversationId, record.runIndex, located.record, record,
+              !source || !storedHasSource ? "not-compared" : sourceDigestEquals(located.source, digest) ? "equal" : "differs", located.source.kind),
+          });
         }
         await this.confirmInLock(conversationId, state);
         return { runIndex: record.runIndex, shardId: seqId(located.seq), appended: false };
@@ -774,6 +790,44 @@ export class ShardedTranscriptStore {
     return { kind: "located", record, seq: position.seq, source: position.source };
   }
 
+  /**
+   * 旧前缀会话的首个 owner 接手判定（调用方已证明整段历史里没有 owner）：协议 0 且来源 commitRevision
+   * 为 1；物理 0 可定位，是另一条非 owner 运行（同 runId 的是既有记录的精确重驱，不算接手）。
+   * 物理 0 已退役或无法定位时不接手，回到原有语义。
+   */
+  private async ownerTakeoverInLock(conversationId: string, state: OpenState, committed: TranscriptRunRecord,
+    source: CommittedRunSource | undefined): Promise<boolean> {
+    if (committed.runIndex !== 0 || source?.commitRevision !== 1 || state.root.tail.nextRunIndex === 0) return false;
+    const first = await this.locateInLock(conversationId, state, 0);
+    return first.kind === "located" && first.source.kind !== "owner" &&
+      (first.record as Partial<TranscriptRunRecord>).runId !== committed.runId;
+  }
+
+  /**
+   * 协议编号到物理位置的映射证据：根里最后一个是 owner 运行时直接推导偏移；否则只读位置项扫描可见历史，
+   * 第一个带修订号的 owner 位置给出已确定的偏移（之后又写入的本地运行不改变它）。provenNoOwner 只在
+   * 整段历史可见（没有退役前缀）、每个位置项都有效且都不是 owner 时为真；未知不等于没有。
+   */
+  private async ownerMappingInLock(conversationId: string, state: OpenState): Promise<{ readonly offset?: number; readonly provenNoOwner: boolean }> {
+    const root = state.root;
+    const fromLast = ownerOffset(root);
+    if (fromLast !== undefined || root.last?.source.kind === "owner") return { ...(fromLast !== undefined ? { offset: fromLast } : {}), provenNoOwner: false };
+    let complete = root.visible.fromRunIndex === 0;
+    for (let seq = root.visible.fromSeq; seq <= root.active.seq; seq++) {
+      const first = await this.shardFirstRunIndex(conversationId, state, seq);
+      const end = seq === root.active.seq ? root.tail.nextRunIndex : await this.shardFirstRunIndex(conversationId, state, seq + 1);
+      for (let runIndex = Math.max(first, root.visible.fromRunIndex); runIndex < end; runIndex++) {
+        const entry = await this.readEntry(conversationId, seq, runIndex - first, root);
+        if (!isPublishedEntry(entry, root, runIndex)) { complete = false; continue; }
+        if (entry.source.kind === "owner") {
+          const offset = entry.source.commitRevision >= 1 ? runIndex - (entry.source.commitRevision - 1) : -1;
+          return { ...(offset >= 0 ? { offset } : {}), provenNoOwner: false };
+        }
+      }
+    }
+    return { provenNoOwner: complete };
+  }
+
   private async shardFirstRunIndex(conversationId: string, state: OpenState, seq: number): Promise<number> {
     if (seq === state.root.active.seq) return state.root.active.firstRunIndex;
     const header = await this.readPositionHeader(conversationId, seq, state.root);
@@ -953,6 +1007,29 @@ function headerLine(conversationId: string, seq: number, createdAtMs: number, fi
     firstRunIndex,
   };
   return Buffer.from(`${JSON.stringify(header)}\n`, "utf-8");
+}
+
+/**
+ * 投影冲突的脱敏诊断：只含会话 ID 摘要前缀、runIndex、不一致的顶层字段名与来源比较结果，不含正文。
+ * 启动失败日志据此定位冲突落在哪个会话、哪次运行，以便在隔离条件下复现与恢复。
+ */
+export function runConflictDiagnostic(conversationId: string, runIndex: number, stored: object, committed: object,
+  source: "equal" | "differs" | "not-compared", storedKind: RunSourceDigest["kind"]): string {
+  const a = stored as Record<string, unknown>, b = committed as Record<string, unknown>;
+  const fields = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(key => !isDeepStrictEqual(a[key], b[key])).sort();
+  const names = fields.map(key => /^[A-Za-z0-9_]{1,24}$/u.test(key) ? key : "?").join("+") || "none";
+  return `conv ${sha256(conversationId).toString("hex").slice(0, 8)} run ${runIndex} fields ${names} source ${source} stored ${storedKind}`.slice(0, 140);
+}
+
+/**
+ * 协议编号到物理位置的偏移，由已发布根里最后一个 owner 运行推导：owner 提交的协议编号 p 恒为
+ * commitRevision − 1，物理位置 − p 即偏移。根未记录 owner 尾巴（或来源不带修订号）时为 undefined。
+ */
+function ownerOffset(root: DirectoryRoot): number | undefined {
+  const last = root.last;
+  if (!last || last.source.kind !== "owner" || last.source.commitRevision < 1) return undefined;
+  const offset = last.runIndex - (last.source.commitRevision - 1);
+  return offset >= 0 ? offset : undefined;
 }
 
 function ownerSourceDigest(runId: string, source: CommittedRunSource | undefined): RunSourceDigest {
