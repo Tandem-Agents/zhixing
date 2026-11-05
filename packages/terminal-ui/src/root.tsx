@@ -11,7 +11,7 @@ import { type TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
-import { BodyView, TerminalScrollBox, type BodyViewHandle, type BodyReadingState } from './body-view.js';
+import { BodyView, TerminalScrollBox, type BodyViewHandle, type BodyReadingState, isBodyTextLeaf } from './body-view.js';
 import { BODY_PAGE_BYTES, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
 import { BodyReadingWindow } from './body-window.js';
@@ -22,6 +22,7 @@ import { CandidateView } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
 import { tone, spacing, surfaceGeometry } from './theme.js';
+import { copySource, type CopySource, type SelectionLeaf, type SelectionState } from './copy-selection.js';
 import { conversationVisit, historyVisit, operatedVisit, type ReadingVisit } from './reading-visit.js';
 import { configureSelectionTexture } from './selection-model.js';
 
@@ -490,22 +491,33 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'cancelled', cancelCause: cause });
     else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true, cancelCause: cause });
   };
+  // 复制意图的判定：屏上当前选区按选中叶节点的归属取文字（规则见 copy-selection.ts）。正文仍走源文映射，
+  // 编辑器只在选区只落在它身上时用它自己的读取；保密字段没有可选文字。按钮、键位文案与 Ctrl+C 共用这一个判定
+  const currentCopy = (): CopySource | undefined => {
+    const target = editor && !editor.isDestroyed && !view().field?.secret ? editor as unknown as SelectionLeaf : undefined;
+    return copySource(renderer.getSelection() as unknown as SelectionState | null, { root: renderer.root as unknown as SelectionLeaf, isBodyLeaf: isBodyTextLeaf,
+      bodySelected: isBody() && !!bodyView?.hasSelection(), editor: target, });
+  };
   const refreshCopy = () => {
     if (disposed) return;
     syncEditor();
-    setCopyAvailable(isBody() && !!bodyView?.hasSelection());
+    const source = currentCopy();
+    setCopyAvailable(!!source && source.kind !== 'dragging');
   };
   let bodyCopyPending = false;
-  const copyBody = async () => {
-    if (disposed || !isBody()) return;
-    if (!bodyView?.hasSelection()) { setStatus('请重新选择要复制的正文。'); return; }
+  const copyCurrent = (source: Exclude<CopySource, { kind: 'dragging' }>) => {
+    if (source.kind === 'text') return copyText(source.text);
     const text = bodyView?.selectedText() ?? '';
-    if (!text) return;
-    if (bodyCopyPending) return;
+    if (!text) { setStatus('请重新选择要复制的文字。'); return; }
+    return copyText(text);
+  };
+  // 复制通道：交 N 写入系统剪贴板，N 写不了时退到终端 OSC52；按实际结果说明，不一律说已复制
+  const copyText = async (text: string) => {
+    if (disposed || !text || bodyCopyPending) return;
     const request = { kind: 'clipboard-write' as const, text };
     if (Buffer.byteLength(JSON.stringify(request)) > BODY_PAGE_BYTES) { setStatus('选区过大，请分段复制。'); return; }
     const report = reportStatus();
-    bodyCopyPending = true; ctrlC = 0;
+    bodyCopyPending = true;
     try {
       const result = await options.request(request) as { state?: string };
       if (result.state === 'copied') report('已复制。');
@@ -515,13 +527,22 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     } catch { report('复制请求未完成，选区已保留。'); }
     finally { bodyCopyPending = false; }
   };
-  const copyRecovery = () => {
+  // 恢复页的保密内容只走终端 OSC52，不经 N
+  const copyRecovery = (text = bodySelection(renderer, bodyBox)?.getSelectedText()) => {
     if (disposed || view().kind !== 'recovery') return;
-    const text = bodySelection(renderer, bodyBox)?.getSelectedText();
     if (!text) { setStatus('请选择本页要复制的保密内容。'); return; }
     if (Buffer.byteLength(text) > 32 * 1024) { setStatus('请分段复制。'); return; }
     try { setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求。'); }
     catch { setStatus('复制请求未完成。'); }
+  };
+  // 复制意图的唯一入口：Ctrl+C（含 Ctrl+Shift+C）与“复制选区”按钮共用。连按退出的计数一律清零；
+  // 通道按当前页归属选择：恢复页的保密内容只走它自己的 OSC52，其余交 N 写入。拖动未完成或没有可复制选区时只说明
+  const requestCopy = (source = currentCopy()) => {
+    ctrlC = 0;
+    if (source?.kind === 'dragging') { setStatus('选择尚未完成，松开鼠标后再按 Ctrl+C 复制。'); return; }
+    if (view().kind === 'recovery') { copyRecovery(source?.kind === 'text' ? source.text : undefined); return; }
+    if (!source) { setStatus('请先选择要复制的文字。'); return; }
+    void copyCurrent(source);
   };
   const candidateBudget = () => candidateLayout(size().height);
   const candidateHeight = () => candidateOpen() ? candidateBudget().rows : 0;
@@ -558,7 +579,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     else if (current.field) left.push(fieldLocked() ? '正在提交…'
       : current.field.error ?? current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
     else if (current.kind === 'conversation' && editorEmpty() && !left.length) left.push('输入消息或 / 查看命令');
-    const hint = (full: string, compact: string) => measureInformation(full) <= size().width - 4 ? full : compact;
+    // 按实际可用宽度组织右侧：左侧是当前操作的结果或失败说明时，先保证它完整可读；
+    // 键位提示放不下长版就用短版，还放不下再让出“复制选区”按钮（Ctrl+C 照样复制），最后才截短键位
+    const leftText = left.filter(Boolean).join('  '), leftWidth = leftText ? measureInformation(leftText) : 0;
+    const feedback = leftWidth > 0 && (blocks.left.length > 0 || !!operationNotice || !!opening || !!candidate?.error || !!current.field?.error || !!current.inputReceiptPending);
+    const copy = copyAvailable() && size().width >= 12 ? '复制选区' : '';
+    const copyWidth = copy ? measureInformation(copy) : 0;
+    const room = Math.max(0, size().width - 4);
+    const need = (text: string, withCopy: boolean) => (feedback ? leftWidth + 2 : 0) + measureInformation(text) + (withCopy && copy ? copyWidth + 2 : 0);
+    const hint = (full: string, compact: string) => need(full, true) <= room ? full : compact;
     const keys = current.inputReceiptPending ? hint('Ctrl+R 核对 · Ctrl+C 中止 · 连按退出', 'Ctrl+R 核对 · Ctrl+C 中止')
       : candidateOpen() && candidateError() ? 'Ctrl+R 重试 · Esc 返回'
       : candidateOpen() && candidateLoading() ? '正在读取候选 · Esc 返回'
@@ -585,9 +614,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           : hint('Enter 确认 · Esc 拒绝 · PgUp/PgDn 阅读', 'Enter 确认 · Esc 拒绝')
       : (current.detailsActionId || current.choices?.some(choice => choice.detailsActionId)) ? hint('Enter 确认 · → 详情 · Esc 返回 · PgUp/PgDn 阅读', 'Enter 确认 · → 详情 · Esc 返回')
       : hint('Enter 确认 · Esc 返回 · PgUp/PgDn 阅读', 'Enter 确认 · Esc 返回');
-    const copy = copyAvailable() && size().width >= 12 ? '复制选区' : '';
-    const copyWidth = copy ? measureInformation(copy) : 0;
-    return { ...informationLayout({ left, right: [...blocks.right, keys] }, size().width - (copy ? copyWidth + 2 : 0), measureInformation), copy, copyWidth };
+    // 有可复制的选区时 Ctrl+C 就是复制：键位里关于 Ctrl+C 的说法随之改写，与实际按键结果一致
+    const shownKeys = copyAvailable() ? keys.replace(/Ctrl\+C [^·]*?(?=\s*(·|$))/u, 'Ctrl+C 复制') : keys;
+    const shownCopy = copy && (!feedback || need(shownKeys, true) <= room) ? copy : '';
+    return { ...informationLayout({ left, right: [...blocks.right, shownKeys] }, size().width - (shownCopy ? copyWidth + 2 : 0), measureInformation, feedback),
+      copy: shownCopy, copyWidth: shownCopy ? copyWidth : 0 };
   };
   let clipboardPending = false;
   // A paste may arrive after more editing. Page identity alone cannot authorize
@@ -771,7 +802,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={surfaceGeometry(size().width).margin} paddingX={spacing.frameInner} flexDirection="row"
         title={inlineField() ? ` ${displayText(view().title)} ` : undefined}>
         <text width={2} selectable={false} fg={teal}>{options.promptGlyph === 'ascii' ? '> ' : '❯ '}</text>
-        <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), surfaceGeometry(size().width).editorWidth))}</text>}>
+        <Show when={!view().field?.secret} fallback={<text height={1} selectable={false}>{'•'.repeat(Math.min(secretLength(), surfaceGeometry(size().width).editorWidth))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
             {(owner: string) => <textarea selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={surfaceGeometry(size().width).editorWidth} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
           </Show>
@@ -787,7 +818,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       <box width={info().gap} />
       <text height={1} wrapMode="none" fg={tone.dim}>{info().right}</text>
       <Show when={info().copy}><box width={2} /><text height={1} width={info().copyWidth} selectable={false} fg={teal} bg={tone.selected}
-        onMouseDown={event => { if (event.button === 0) { event.preventDefault(); event.stopPropagation(); copyBody(); } }}>{info().copy}</text></Show>
+        onMouseDown={event => { if (event.button === 0) { event.preventDefault(); event.stopPropagation(); recordOperation(); requestCopy(); } }}>{info().copy}</text></Show>
     </box>
     </box>
   </box>;
@@ -903,12 +934,19 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (resized) followFrames(3); else queueMicrotask(follow);
   });
   const keypress = (event: KeyEvent) => {
+    const consume = () => { event.preventDefault(); event.stopPropagation(); };
+    // 复制意图先于一切：在通用的鼠标收尾（会结束拖动手势、改写选区）、页面键位、提交锁与中止/退出之前判定。
+    // 有当前选区就只做复制：结果按实际写入情况说明，这次按键已被消费，不中止、不退出、不取消，也不累计连按退出；
+    // 没有选区时照旧；Ctrl+Shift+C 始终是复制意图，没有选区只说明，不落到别的含义
+    if (event.ctrl && !event.meta && event.name === 'c') {
+      const source = currentCopy();
+      if (source || event.shift) { consume(); recordOperation(); requestCopy(source); return; }
+    }
     recordOperation();
     pointerTakeover();
-    const consume = () => { event.preventDefault(); event.stopPropagation(); };
     if (view().kind === 'recovery' && view().recovery) {
       const current = view().recovery!;
-      if (event.ctrl && event.shift && event.name === 'c') { consume(); copyRecovery(); return; }
+      if (event.ctrl && event.shift && event.name === 'c') { consume(); requestCopy(); return; }
       consume();
       if (event.name === 'escape' || event.ctrl && event.name === 'c') { releaseRecovery(); void action({ kind: 'recovery-cancel', requestId: current.requestId }); if (!current.input && !current.settled) void options.exit(); return; }
       if (event.name === 'pageup' || event.name === 'pagedown') {
@@ -928,7 +966,6 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (event.name === 'f3') { consume(); void action({ kind: 'configuration-open' }); return; }
       if (event.ctrl && event.name === 'r') { consume(); void action({ kind: 'retry-connection' }); return; }
     }
-    if (event.ctrl && event.name === 'c' && isBody() && (event.shift || bodyView?.hasSelection())) { consume(); void copyBody(); return; }
     // 已提交的单字段请求等 N 给出下一视图：保留阅读（翻页、回到底部、上面的复制选区）与 Ctrl+C 的中止/退出；
     // 编辑、再提交、Esc、Ctrl+D 都不生效——这次请求已经应答，不再发取消，也不宣称撤销已受理的写入
     if (fieldLocked() && !['pageup', 'pagedown'].includes(event.name) && !(event.ctrl && event.name === 'end')) {

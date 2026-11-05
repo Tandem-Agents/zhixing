@@ -26,6 +26,17 @@ describe('common information row', () => {
       if (row.left && row.right) expect(row.gap).toBeGreaterThanOrEqual(2);
     }
     expect(informationLayout({ left: [], right: [] }, 80, width)).toEqual({ inset: 2, left: '', right: '', rightWidth: 0, gap: 76 });
+    // 左侧是操作结果或失败说明时先保证它完整，键位用剩下的宽度（窄到放不下时截短）；其余宽度、对齐与总宽合计不变
+    for (let columns = 0; columns <= 100; columns++) {
+      const row = informationLayout({ left: ['复制请求未完成，选区已保留。'], right: ['Enter 确认 · Esc 返回'] }, columns, width, true);
+      expect(row.inset * 2 + width(row.left) + row.gap + width(row.right)).toBe(columns);
+      if (columns >= 34) expect(row.left).toBe('复制请求未完成，选区已保留。');
+      if (row.left && row.right) expect(row.gap).toBeGreaterThanOrEqual(2);
+    }
+    const tight = informationLayout({ left: ['复制请求未完成，选区已保留。'], right: ['Enter 确认 · Esc 返回'] }, 41, width, true);
+    expect(tight.left).toBe('复制请求未完成，选区已保留。'); expect(tight.right.endsWith('…')).toBe(true);
+    // 不是反馈时仍是键位优先：同样的宽度下左侧让位
+    expect(informationLayout({ left: ['复制请求未完成，选区已保留。'], right: ['Enter 确认 · Esc 返回'] }, 41, width).right).toBe('Enter 确认 · Esc 返回');
     expect(fitInformation('a👨‍👩‍👧‍👦b', 4, width)).toBe('a👨‍👩‍👧‍👦b');
     expect(fitInformation('a👨‍👩‍👧‍👦bc', 4, width)).toBe('a👨‍👩‍👧‍👦…');
     expect(fitInformation('long', 1, text => width(text) + (text.includes('…') ? 1 : 0))).toBe('');

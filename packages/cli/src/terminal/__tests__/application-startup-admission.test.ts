@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { getEventListeners } from 'node:events';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { terminalStorageFullMessage } from '../failure.js';
-import { AsyncLocalStorage } from 'node:async_hooks';
 
 // 生产的提交入口、后台操作、视图发布与启动末段（启动尝试开头 + await displayPrepared 之后到方法结束）原样运行，
 // 只替换传输、验收方式处理与确认核对的异步闸门：可发送帧与实际准入门必须一致。
@@ -272,6 +272,20 @@ describe('background reconnection restores the unavailable view', () => {
     arrange(target);
     target.reconnectedInBackground(notice);
     expect(target.startups).toBe(0);
+  });
+});
+
+describe('clipboard writes from any copyable selection', () => {
+  // 生产的 #action 原样运行：字段、页面、配置页上的选区都经同一通道写系统剪贴板；只有恢复页的保密内容不经 N
+  it('writes while a page, field or editor is open, and refuses only during the recovery display', async () => {
+    const { target } = fixture(), written: string[] = [];
+    target.clipboard = { write: async (text: string) => { written.push(text); return { state: 'copied' }; } };
+    target.recovery = { active: false };
+    target.selection = { id: 'rename', allowed: new Set(['save']) }; target.editor = {};
+    await expect(target.action({ kind: 'clipboard-write', text: '字段里的文字' })).resolves.toEqual({ state: 'copied' });
+    target.recovery = { active: true };
+    await expect(target.action({ kind: 'clipboard-write', text: '保密内容' })).rejects.toThrow('terminal-clipboard-context');
+    expect(written).toEqual(['字段里的文字']);
   });
 });
 

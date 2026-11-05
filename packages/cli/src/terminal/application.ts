@@ -777,7 +777,9 @@ class TerminalApplication {
       case 'input-history-end': await this.#inputHistoryReader.close(action.ticket); return { accepted: true };
       case 'paste-finish': return this.#finishPaste(action.inputId, action.draft);
       case 'clipboard-write': {
-        if (!['conversation', 'history'].includes(this.#mainView.kind) || this.#editor || this.#selection || this.#recovery.active) throw Error('terminal-clipboard-context');
+        // 屏上任何可复制的选区（正文、输入框、字段、页面文字）都经这里写系统剪贴板；唯一的例外是恢复页的保密内容，
+        // 它只走终端 OSC52，不经 N。保密字段显示为掩码、不可选，到不了这里
+        if (this.#recovery.active) throw Error('terminal-clipboard-context');
         return await this.#clipboard.write(action.text);
       }
       case 'clipboard-read': {

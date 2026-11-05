@@ -1,17 +1,19 @@
 import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack, type JSX } from 'solid-js';
-import { bodyBlockGeometry, bodyWrapMode, bodyTableGeometry, bodyTableRule } from './body/geometry.js';
+import { bodyBlockGeometry, bodyTableGeometry, bodyTableRule, bodyWrapMode } from './body/geometry.js';
 import { extend } from '@opentui/solid';
-import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, TextRenderable, type CliRenderer, type TextChunk } from '@opentui/core';
+import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
+  TextRenderable, type CliRenderer, type TextChunk,
+} from '@opentui/core';
 import { BODY_STYLE, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, bodyPageSegments, bodyWindows, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
 import { BODY_WINDOW_BYTES, BODY_WINDOW_FRAGMENTS, BODY_WINDOW_NODES } from './body-window.js';
-import { type TerminalEarlierReply } from './protocol.js';
+import type { TerminalEarlierReply } from './protocol.js';
 import { bodyCell, bodyBlockGaps, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
+
 import { TerminalScrollBox } from './scroll-box.js';
 import { ReadingQueue } from './reading-queue.js';
-
 export { TerminalScrollBox } from './scroll-box.js';
 
 type NativeSelection = NonNullable<ReturnType<CliRenderer['getSelection']>>;
@@ -46,6 +48,8 @@ class BodyTextRenderable extends TextRenderable {
     return super.onSelectionChanged(selection);
   }
 }
+/** 选中的叶节点是不是正文文字：复制时正文按源文映射取，装饰与正文外的文字不走这条路 */
+export const isBodyTextLeaf = (node: unknown): boolean => node instanceof BodyTextRenderable;
 declare module '@opentui/solid' { interface OpenTUIComponents { body_text: typeof BodyTextRenderable } }
 extend({ body_text: BodyTextRenderable });
 

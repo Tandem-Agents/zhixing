@@ -59,12 +59,19 @@ export function fitInformation(text: string, width: number, measure: (text: stri
 }
 
 /** Full terminal width in, one bounded row out. Right actions have priority. */
-export function informationLayout(content: InformationContent, width: number, measure: (text: string) => number) {
+/** leftFirst：左侧是当前操作的结果或失败说明时先保证它完整，键位提示用剩下的宽度；否则键位优先，左侧占位说明用剩下的 */
+export function informationLayout(content: InformationContent, width: number, measure: (text: string) => number, leftFirst = false) {
   width = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
   const inset = Math.min(2, Math.max(0, Math.floor((width - 1) / 2)));
   const available = width - 2 * inset;
-  const right = fitInformation(content.right.filter(Boolean).join('  '), available, measure);
+  const leftText = content.left.filter(Boolean).join('  '), rightText = content.right.filter(Boolean).join('  ');
+  if (leftFirst && leftText) {
+    const left = fitInformation(leftText, available, measure), leftWidth = measure(left);
+    const right = fitInformation(rightText, Math.max(0, available - leftWidth - 2), measure), rightWidth = measure(right);
+    return { inset, left, right, rightWidth, gap: Math.max(0, available - leftWidth - rightWidth) };
+  }
+  const right = fitInformation(rightText, available, measure);
   const rightWidth = measure(right);
-  const left = fitInformation(content.left.filter(Boolean).join('  '), Math.max(0, available - rightWidth - (right ? 2 : 0)), measure);
+  const left = fitInformation(leftText, Math.max(0, available - rightWidth - (right ? 2 : 0)), measure);
   return { inset, left, right, rightWidth, gap: Math.max(0, available - measure(left) - rightWidth) };
 }

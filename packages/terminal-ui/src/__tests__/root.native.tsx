@@ -55,6 +55,8 @@ let readingReply: ((action: TerminalAction) => Promise<unknown>) | undefined;
 let candidateReply: ((action: Extract<TerminalAction, { kind: 'input-candidates' }>) => Promise<unknown>) | undefined;
 // 进页保持场景：按需延后候选应答、命令路由与命令本身
 let entryReply: ((action: TerminalAction) => Promise<unknown> | undefined) | undefined;
+// 复制场景：按需改写剪贴板写入的结果（失败、未确认）
+let clipboardWriteReply: (() => Promise<unknown>) | undefined;
 const usableFrames: number[] = [];
 const pendingRead = () => {
   let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void;
@@ -84,7 +86,7 @@ try {
       }
       if (action.kind === 'input-history') return { end: true };
       if (action.kind === 'clipboard-read') return clipboardReply ? clipboardReply() : { text: '字段粘贴' };
-      if (action.kind === 'clipboard-write') return { state: 'copied' };
+      if (action.kind === 'clipboard-write') return clipboardWriteReply ? clipboardWriteReply() : { state: 'copied' };
       if (action.kind === 'paste-finish') return pasteReply ? pasteReply() : { text: '右键中文🙂', handles: [], replacePastes: true };
       return { accepted: true };
     } }, async options => { externalPaste = (options as { externalPaste?: () => TerminalPasteSink | undefined })?.externalPaste; return test.renderer; });
@@ -818,7 +820,14 @@ try {
   await test.mockMouse.drag(gutterX, gutterRow, gutterX + 3, gutterRow); await flush();
   await noBodyCopy('decoration alone is not source selection');
   test.renderer.clearSelection(); editor().setText('draft only'); editor().selectAll(); await flush();
-  await noBodyCopy('editor selection is not body selection');
+  // 输入框的选区按输入框自己的文字复制，不当作正文源文：按钮出现，复制的正是输入框里选中的文字
+  {
+    const count = actions.filter(action => action.kind === 'clipboard-write').length;
+    assert.match(text(), /复制选区/, 'editor selection is copyable');
+    test.mockInput.pressKey('c', { ctrl: true, shift: true }); await flush();
+    const copies = actions.filter(action => action.kind === 'clipboard-write') as Extract<TerminalAction, { kind: 'clipboard-write' }>[];
+    assert.equal(copies.length, count + 1); assert.equal(copies.at(-1)!.text, 'draft only', 'editor selection copies the editor text, not body source');
+  }
   editor().editorView.resetSelection();
   const bodyRows = text().split('\n'), bodyY = bodyRows.findIndex(row => row.includes('const 中文'));
   const bodyX = bodyRows[bodyY]!.indexOf('const');
@@ -830,8 +839,15 @@ try {
   await noBodyCopy('old conversation selection cannot copy from the new page');
   await show({ kind: 'configuration', title: '字段复制边界', editId: 'copy-field', field: { id: 'copy-field', label: '字段', secret: false } });
   editor().setText('field only'); editor().selectAll(); await flush();
-  await noBodyCopy('field selection never enters body copy');
-  checks.push('source selection ownership excludes decoration-only, draft, field and previous conversation');
+  // 字段的选区按字段自己的文字复制，不进正文源文映射
+  {
+    const count = actions.filter(action => action.kind === 'clipboard-write').length;
+    assert.match(text(), /复制选区/, 'field selection is copyable');
+    test.mockInput.pressKey('c', { ctrl: true, shift: true }); await flush();
+    const copies = actions.filter(action => action.kind === 'clipboard-write') as Extract<TerminalAction, { kind: 'clipboard-write' }>[];
+    assert.equal(copies.length, count + 1); assert.equal(copies.at(-1)!.text, 'field only', 'field selection copies the field text, not body source');
+  }
+  checks.push('body source copy excludes decoration-only and previous-conversation selections; draft and field selections copy their own text');
   test.renderer.clearSelection(); test.resize(80, 24);
   await show({ kind: 'conversation', title: 'Markdown 复制', conversationId: 'mapped-copy', connected: true });
   const mapped: BodyPage['segments'][number][] = [];
@@ -1368,6 +1384,249 @@ try {
     assert.deepEqual(lastSelection(), { kind: 'selection', requestId: 'scene-new', itemId: 'save', input: '论文' });
     await show(conversation); editor().setText(''); await flush();
     checks.push('inline field obeys the available height and falls back to a page; page fields show their own verbs without an action list');
+  }
+  // 复制意图（问题 6）：有当前选区时 Ctrl+C 只做复制——正文、输入框、字段、页面文字都一样；结果按实际写入说明，
+  // 不中止、不退出、不取消，也不累计连按退出；没有选区时现有语义不变
+  {
+    const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const writes = () => actions.filter(action => action.kind === 'clipboard-write') as Extract<TerminalAction, { kind: 'clipboard-write' }>[];
+    const count = (kind: TerminalAction['kind']) => actions.filter(action => action.kind === kind).length;
+    const rows = () => text().split('\n');
+    const ctrlC = async () => { test.mockInput.pressKey('\x03'); await flush(); await pause(25); await flush(); };
+    const conversation = { kind: 'conversation' as const, title: '复制', conversationId: 'copy-conv', connected: true, readyForInput: true };
+    test.resize(100, 32); await show(conversation); test.mockInput.pressKey('\x1b[1;5F'); await flush();
+    let source = ''; const nodes: BodyNode[] = [];
+    for (let row = 0; row < 40; row++) {
+      const line = `copy-body-${String(row).padStart(2, '0')}\n`, from = source.length; source += line;
+      nodes.push({ from, to: source.length, kind: 'paragraph', runs: [{ from, to: source.length, text: line, style: 0 }] });
+    }
+    root.receive({ type: 'display-page', ...baseline(), page: { first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: 'copy-body', contentOffset: 0,
+      text: source, role: 'assistant', final: true, body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes } } }] } }); await flush();
+    editor().setText('draft-copy-test'); await flush(); await pause(25); await flush();
+
+    // 会话输入框的鼠标选区：复制选中的那段，不发 interrupt、不退出，草稿与选区都在；提示与按钮随之出现
+    const ex = editor().x, ey = editor().y;
+    await test.mockMouse.drag(ex, ey, ex + 5, ey); await flush();
+    const selectedDraft = editor().getSelectedText(); assert.ok(selectedDraft.length > 0 && 'draft-copy-test'.startsWith(selectedDraft), `editor selection: ${selectedDraft}`);
+    assert.match(text(), /复制选区/); assert.match(text(), /Ctrl\+C 复制/);
+    let before = writes().length, interrupts = count('interrupt'), exitsBefore = exits;
+    await ctrlC();
+    assert.equal(writes().length, before + 1); assert.equal(writes().at(-1)!.text, selectedDraft);
+    assert.equal(count('interrupt'), interrupts); assert.equal(exits, exitsBefore); assert.match(text(), /已复制。/);
+    assert.equal(editor().plainText, 'draft-copy-test'); assert.ok(editor().hasSelection(), 'selection kept after copying');
+    // 复制后马上再按 Ctrl+C（已无选区）：不凑成连按退出，只是一次普通 Ctrl+C
+    test.renderer.clearSelection(); await flush();
+    await ctrlC();
+    assert.equal(exits, exitsBefore); assert.equal(count('interrupt'), interrupts + 1);
+    await pause(800);
+    checks.push('a selection in the input copies on Ctrl+C without interrupting or exiting, keeps draft and selection, and does not arm a double-press exit');
+
+    // 正文选区走源文映射；随后在输入框里用键盘扩选，当前选区换成输入框的
+    const bodyRow = rows().findIndex(line => line.includes('copy-body-30'));
+    const bodyCol = rows()[bodyRow]!.indexOf('copy-body-30');
+    await test.mockMouse.drag(bodyCol, bodyRow, bodyCol + 12, bodyRow); await flush();
+    before = writes().length; await ctrlC();
+    assert.equal(writes().length, before + 1); assert.match(writes().at(-1)!.text, /copy-body-30/);
+    test.mockInput.pressArrow('right', { shift: true }); await flush();
+    const keyboardSelected = editor().getSelectedText();
+    assert.ok(keyboardSelected.length > 0 && 'draft-copy-test'.includes(keyboardSelected), `keyboard selection replaced the body selection: ${keyboardSelected}`);
+    before = writes().length; await ctrlC();
+    assert.equal(writes().at(-1)!.text, keyboardSelected, 'the current selection is the input one, not the earlier body one');
+    test.renderer.clearSelection(); await flush();
+    // 同一显示行上的多个文字叶节点：按横向顺序直接拼接，不多出换行
+    // 信息行：左侧状态与右侧键位是同一显示行上的两个文字叶节点（从左侧文字起点按下，内边距处不能开始选区）
+    const last = rows().findIndex(line => line.includes('已复制')), lastStart = rows()[last]!.indexOf('已复制');
+    await test.mockMouse.drag(lastStart, last, 99, last); await flush();
+    before = writes().length; await ctrlC();
+    const sameLine = writes().at(-1)!.text;
+    assert.equal(writes().length, before + 1); assert.ok(!sameLine.includes('\n'), `one display line stays one line: ${JSON.stringify(sameLine)}`);
+    assert.ok(/已复制/.test(sameLine) && /Enter 发送/.test(sameLine), `both leaves on the line are copied: ${JSON.stringify(sameLine)}`);
+    test.renderer.clearSelection(); await flush();
+    // 跨区域：正文是独立的选区容器，从正文开始的选区出不了正文；根级的选区可以从信息行连进输入框。
+    // 这时输入框虽然也有选区，复制的仍是整段（输入框那部分加信息行那部分），不只复制输入框
+    const infoRow = rows().findIndex(line => line.includes('已复制')), infoStart = rows()[infoRow]!.indexOf('已复制');
+    await test.mockMouse.drag(infoStart + 2, infoRow, editor().x + 4, editor().y); await flush();
+    assert.ok(editor().hasSelection(), 'the input takes part in the cross-region selection');
+    before = writes().length; await ctrlC();
+    const cross = writes().at(-1)!.text;
+    assert.equal(writes().length, before + 1);
+    assert.ok(cross.includes('copy-test') && cross.includes('已复'), `cross-region copy keeps both parts: ${JSON.stringify(cross)}`);
+    test.renderer.clearSelection(); await flush();
+    checks.push('body copies by source; keyboard selection takes over; one display line joins without newline; a cross-region selection copies all of it');
+
+    // 拖动中：只说明，不复制、不中止
+    await test.mockMouse.pressDown(bodyCol, bodyRow); await test.mockMouse.moveTo(bodyCol + 6, bodyRow); await flush();
+    before = writes().length; interrupts = count('interrupt'); await ctrlC();
+    assert.equal(writes().length, before); assert.equal(count('interrupt'), interrupts); assert.match(text(), /选择尚未完成/);
+    await test.mockMouse.release(bodyCol + 6, bodyRow); await flush(); test.renderer.clearSelection(); await flush();
+    // 写入失败与终端未确认：照实说明，仍不中止、不退出
+    for (const [reply, expected] of [[async () => { throw Error('写入失败'); }, /复制请求未完成，选区已保留/], [async () => ({ state: 'other' }), /未能确认复制结果，选区已保留/]] as const) {
+      clipboardWriteReply = reply;
+      await test.mockMouse.drag(ex, ey, ex + 5, ey); await flush();
+      interrupts = count('interrupt'); await ctrlC();
+      assert.match(text(), expected); assert.equal(count('interrupt'), interrupts); assert.equal(exits, exitsBefore);
+      test.renderer.clearSelection(); await flush();
+    }
+    clipboardWriteReply = undefined;
+    // 纯空白也算可复制
+    editor().setText('   tail'); await flush();
+    await test.mockMouse.drag(ex, ey, ex + 2, ey); await flush();
+    before = writes().length; await ctrlC();
+    assert.equal(writes().at(-1)!.text, editor().getSelectedText());
+    assert.ok(/^ +$/.test(writes().at(-1)!.text), `whitespace-only selection copies: ${JSON.stringify(writes().at(-1)!.text)}`);
+    test.renderer.clearSelection(); editor().setText(''); await flush();
+    // Ctrl+Shift+C 没有选区：只说明，不落到别的含义
+    interrupts = count('interrupt'); test.mockInput.pressKey('c', { ctrl: true, shift: true }); await flush();
+    assert.match(text(), /请先选择要复制的文字/); assert.equal(count('interrupt'), interrupts);
+    checks.push('dragging, write failures, unconfirmed writes and empty Ctrl+Shift+C never interrupt or exit; whitespace-only selections copy');
+
+    // 页面文字与字段：复制，不取消页面；换页后旧页面的文字不再算数
+    const cancels = () => actions.filter(action => action.kind === 'selection' && (action as { cancelled?: boolean }).cancelled).length;
+    await show({ kind: 'selection', title: '复制页', requestId: 'copy-page', message: 'page-copy-text', choices: [{ id: 'ok', label: '确定' }] });
+    const pageRow = rows().findIndex(line => line.includes('page-copy-text')), pageCol = rows()[pageRow]!.indexOf('page-copy-text');
+    await test.mockMouse.drag(pageCol, pageRow, pageCol + 14, pageRow); await flush();
+    before = writes().length; let cancelled = cancels(); await ctrlC();
+    assert.match(writes().at(-1)!.text, /page-copy-text/); assert.equal(cancels(), cancelled, 'copying does not cancel the page');
+    await show({ kind: 'selection', title: '另一页', requestId: 'copy-page-2', choices: [{ id: 'ok', label: '确定' }] });
+    before = writes().length; await ctrlC();
+    assert.equal(writes().length, before, 'leaves of the previous page are not copied'); assert.equal(cancels(), cancelled + 1, 'without a selection Ctrl+C cancels the page as before');
+    await show(conversation);
+    await show({ kind: 'selection', inline: true, title: '重命名对话', requestId: 'copy-rename', conversationId: 'copy-conv',
+      field: { id: 'name', label: '新名称', value: 'rename-copy', secret: false }, fieldSubmit: { id: 'save', label: '保存' }, cancelLabel: '取消' });
+    await test.mockMouse.drag(editor().x, editor().y, editor().x + 6, editor().y); await flush();
+    before = writes().length; cancelled = cancels(); await ctrlC();
+    assert.equal(writes().at(-1)!.text, editor().getSelectedText()); assert.equal(cancels(), cancelled, 'copying in a field does not cancel the rename');
+    test.renderer.clearSelection(); test.mockInput.pressEscape(); await pause(25); await show(conversation);
+    // 保密掩码选不中：Ctrl+C 仍是取消配置编辑
+    await show({ kind: 'configuration', title: '密钥', editId: 'copy-secret', field: { id: 'key', label: '密钥', secret: true } });
+    await test.mockInput.typeText('s3cret'); await flush();
+    const maskRow = rows().findIndex(line => line.includes('••••')), maskCol = rows()[maskRow]!.indexOf('••••');
+    await test.mockMouse.drag(maskCol, maskRow, maskCol + 5, maskRow); await flush();
+    before = writes().length; await ctrlC();
+    assert.equal(writes().length, before, 'the secret mask is not selectable');
+    assert.ok(actions.some(action => action.kind === 'configuration-action' && action.editId === 'copy-secret' && action.action === 'cancel'));
+    // 恢复页：选区经它自己的终端通道复制，不经 N，也不取消
+    // 快捷键与“复制选区”按钮是同一个复制入口：都只经它自己的终端通道（OSC52），不经 N，也不取消
+    const terminalCopies: string[] = [], terminalCopy = test.renderer.copyToClipboardOSC52.bind(test.renderer);
+    test.renderer.copyToClipboardOSC52 = (...args: Parameters<typeof terminalCopy>) => { terminalCopies.push(args[0]); return terminalCopy(...args); };
+    try {
+      await show({ kind: 'recovery', title: '保密显示', requestId: 'copy-recovery', recovery: { requestId: 'copy-recovery', pages: 1, input: false } });
+      root.receive({ type: 'recovery-page', requestId: 'copy-recovery', page: 0, text: 'recovery-copy-text' }); await flush();
+      const recoveryRow = rows().findIndex(line => line.includes('recovery-copy-text')), recoveryCol = rows()[recoveryRow]!.indexOf('recovery-copy-text');
+      const selectRecovery = async () => { await test.mockMouse.drag(recoveryCol, recoveryRow, recoveryCol + 18, recoveryRow); await flush(); };
+      const recoveryCancels = count('recovery-cancel');
+      for (const route of ['shortcut', 'shift-shortcut', 'button'] as const) {
+        await selectRecovery();
+        before = writes().length; const terminalBefore = terminalCopies.length;
+        if (route === 'shortcut') await ctrlC();
+        else if (route === 'shift-shortcut') { test.mockInput.pressKey('c', { ctrl: true, shift: true }); await flush(); }
+        else {
+          // 按钮在信息行里；行内全角字符占两列，按显示宽度换算点击列
+          const buttonRow = rows().findIndex(line => line.includes('复制选区')), buttonAt = rows()[buttonRow]!.indexOf('复制选区');
+          assert.ok(buttonRow >= 0, 'recovery selection shows the copy button');
+          const wide = rows()[buttonRow]!.slice(0, buttonAt).match(/[\p{Script=Han}　-〿＀-￯]/gu)?.length ?? 0;
+          await test.mockMouse.click(buttonAt + wide + 1, buttonRow); await flush();
+        }
+        assert.equal(writes().length, before, `${route}: recovery content never goes through N`);
+        assert.equal(terminalCopies.length, terminalBefore + 1, `${route}: recovery copies through its own terminal channel`);
+        assert.match(terminalCopies.at(-1)!, /^recovery-copy/, `${route}: the selected recovery text is copied`);
+        assert.equal(count('recovery-cancel'), recoveryCancels, `${route}: copying does not cancel the recovery page`);
+        assert.match(text(), /已发送复制请求|当前终端无法执行复制请求/);
+        test.renderer.clearSelection(); await flush();
+      }
+    } finally { test.renderer.copyToClipboardOSC52 = terminalCopy; }
+    test.renderer.clearSelection(); await show(conversation); editor().setText(''); await flush();
+    checks.push('page text and fields copy without cancelling; old page leaves expire; the secret mask is not selectable; recovery copies through its own channel from the shortcut and the button alike');
+
+    // 新访问、进入提示仍在时第一次在正文上拖选：按下即是第一次操作，提示文字收起，但这一行留作占位直到松开，
+    // 指针下的文字不移动，选中的就是按下的那段；松开后归还这一行（不留常驻空行），正文与选区随源文恢复，Ctrl+C 复制而不中止。
+    // 上一次松开没有送达（如在窗口外松开）时再次按下，接续的新手势同样保留这一行
+    for (const repress of [false, true]) {
+      // 每次都是新的会话与阅读范围：正文从最新处开始，与真实的冷访问一致
+      const firstReading = { conversationId: `copy-first-drag-${repress}`, generation: 1 };
+      await show({ kind: 'conversation', title: '首次拖选', conversationId: firstReading.conversationId, reading: firstReading, connected: true, readyForInput: true });
+      let firstSource = ''; const firstNodes: BodyNode[] = [];
+      for (let row = 0; row < 55; row++) {
+        const line = `first-body-${String(row).padStart(2, '0')} target text\n`, from = firstSource.length; firstSource += line;
+        firstNodes.push({ from, to: firstSource.length, kind: 'paragraph', runs: [{ from, to: firstSource.length, text: line, style: 0 }] });
+      }
+      root.receive({ type: 'display-page', ...baseline(firstReading), page: { first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: 'first-drag', contentOffset: 0,
+        text: firstSource, role: 'assistant', final: true, body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes: firstNodes } } }] } });
+      await flush(); await flush();
+      const rowOf = (needle: string) => rows().findIndex(line => line.includes(needle));
+      assert.ok(rowOf('更早的消息') >= 0, `${repress}: a new visit shows the entry hint`);
+      const y = rowOf('first-body-50'), x = rows()[y]!.indexOf('first-body-50'), lastRow = rowOf('first-body-54');
+      assert.ok(y >= 0 && lastRow > y && !text().includes('回到底部'), `${repress}: the new visit starts at the latest content`);
+      before = writes().length; interrupts = count('interrupt');
+      await test.mockMouse.pressDown(x, y); await flush(); await flush();
+      assert.ok(rowOf('更早的消息') < 0, `${repress}: the first press dismisses the hint text`);
+      assert.equal(rowOf('first-body-50'), y, `${repress}: the text under the pointer stays in place while the button is held`);
+      if (repress) { await test.mockMouse.pressDown(x, y); await flush(); await flush();
+        assert.equal(rowOf('first-body-50'), y, 'a new press after a missed release keeps the held row'); }
+      await test.mockMouse.moveTo(x + 12, y); await flush();
+      assert.equal(rowOf('first-body-50'), y, `${repress}: the text stays in place throughout the drag`);
+      await test.mockMouse.release(x + 12, y); await flush(); await flush(); await pause(25); await flush();
+      assert.equal(rowOf('first-body-54'), lastRow + 1, `${repress}: after release the placeholder row is returned to the body`);
+      const highlighted = test.renderer.getSelection()?.getSelectedText() ?? '';
+      assert.ok(/^first-body-5/.test(highlighted) && 'first-body-50 target text'.startsWith(highlighted), `${repress}: the restored selection is the pressed text: ${JSON.stringify(highlighted)}`);
+      await ctrlC();
+      assert.equal(count('interrupt'), interrupts, `${repress}: Ctrl+C after the first drag copies instead of interrupting`);
+      assert.equal(writes().length, before + 1); assert.equal(writes().at(-1)!.text, highlighted, `${repress}: the copied text is the selected text`);
+      test.renderer.clearSelection(); await show(conversation); editor().setText(''); await flush();
+    }
+    // 在段落间的空白处单击（不产生选区）：松开即归还占位行，松开后的第一帧就不再留空行，不等别的输入或下一次刷新
+    {
+      const clickReading = { conversationId: 'copy-first-click', generation: 1 };
+      await show({ kind: 'conversation', title: '首次单击', conversationId: clickReading.conversationId, reading: clickReading, connected: true, readyForInput: true });
+      let clickSource = ''; const clickNodes: BodyNode[] = [];
+      for (let row = 0; row < 55; row++) {
+        const line = `click-body-${String(row).padStart(2, '0')}\n`, from = clickSource.length; clickSource += line;
+        clickNodes.push({ from, to: clickSource.length, kind: 'paragraph', runs: [{ from, to: clickSource.length, text: line, style: 0 }] });
+      }
+      root.receive({ type: 'display-page', ...baseline(clickReading), page: { first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: 'first-click', contentOffset: 0,
+        text: clickSource, role: 'assistant', final: true, body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes: clickNodes } } }] } });
+      await flush(); await flush();
+      const rowOf = (needle: string) => rows().findIndex(line => line.includes(needle));
+      const gap = rowOf('click-body-50') - 1, lastRow = rowOf('click-body-54');
+      assert.ok(rowOf('更早的消息') >= 0 && gap > 0 && !rows()[gap]!.trim(), 'a new visit shows the hint above a blank gap row');
+      await test.mockMouse.pressDown(20, gap); await flush(); await flush();
+      assert.equal(rowOf('click-body-54'), lastRow, 'the row is held while the button is down');
+      await test.mockMouse.release(20, gap); await test.renderOnce();
+      assert.equal(rowOf('click-body-54'), lastRow + 1, 'the first frame after release no longer holds the row');
+      assert.equal(test.renderer.getSelection()?.getSelectedText() ?? '', '', 'a click on a gap selects nothing');
+      await show(conversation); await flush();
+    }
+    checks.push('first drag while the entry hint is shown keeps the text under the pointer (also after a missed release), returns the row on release and copies the pressed text; a first click returns the row in the first frame after release');
+
+    // 45 列信息行：有选区时键位改用短版、复制按钮仍在；复制成功与失败的说明都完整可读；没有选区时导航键位照常
+    {
+      const narrowPage = { kind: 'selection' as const, title: '窄屏反馈', requestId: 'narrow-feedback', message: 'narrow-copy-text 用于窄屏复制反馈', choices: [{ id: 'ok', label: '确定' }] };
+      test.resize(45, 24); await show(narrowPage); await flush();
+      const bottom = () => rows().filter(line => line.trim()).at(-1)!;
+      assert.ok(bottom().includes('Esc 返回') && !bottom().includes('复制选区'), `navigation keys without a selection: ${bottom()}`);
+      const textRow = rows().findIndex(line => line.includes('narrow-copy-text')), textColumn = rows()[textRow]!.indexOf('narrow-copy-text');
+      await test.mockMouse.drag(textColumn, textRow, textColumn + 15, textRow); await flush();
+      // 键位按扣掉按钮后的实际宽度选短版，不出现被截断的“PgUp/P…”
+      assert.ok(bottom().includes('复制选区') && bottom().includes('Enter 确认') && !bottom().includes('…'), `a selection shows the short keys and the copy button: ${bottom()}`);
+      await ctrlC();
+      assert.ok(bottom().includes('已复制。'), `success is readable at 45 columns: ${bottom()}`);
+      clipboardWriteReply = async () => { throw Error('写入失败'); };
+      await ctrlC();
+      assert.ok(bottom().includes('复制请求未完成，选区已保留。'), `failure is fully readable at 45 columns: ${bottom()}`);
+      // 更长的说明（38 列）：键位用短版仍放不下，让出“复制选区”按钮（Ctrl+C 照样复制），说明完整可读
+      const terminalCopy = test.renderer.copyToClipboardOSC52.bind(test.renderer);
+      test.renderer.copyToClipboardOSC52 = () => false;
+      clipboardWriteReply = async () => ({ state: 'unavailable' });
+      try {
+        await ctrlC();
+        assert.ok(bottom().includes('当前终端无法执行复制请求，选区已保留。') && !bottom().includes('复制选区'), `a long failure takes the copy button's room: ${bottom()}`);
+      } finally { test.renderer.copyToClipboardOSC52 = terminalCopy; }
+      clipboardWriteReply = undefined;
+      test.renderer.clearSelection(); await flush();
+      test.resize(100, 32); await show(conversation); await flush();
+      checks.push('45-column information row keeps copy success and failure readable, short keys with a selection, navigation keys without');
+    }
+
   }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }
