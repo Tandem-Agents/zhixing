@@ -6,6 +6,7 @@ import { RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js'
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
 import { TerminalInformationCommands, type TerminalInformationController, type TerminalInformationOptions } from '../information-commands.js';
 import type { TerminalSelectionPort } from '../selection.js';
+import { summaryLines } from '../../summary-projection.js';
 
 const budget = { currentTokens: 40_000, effectiveWindow: 80_000, contextWindow: 100_000, usageRatio: 0.5, status: 'normal' } as const;
 const usage = (): SessionUsageResult => ({ budget, turnCount: 2, calibrationFactor: 1, subUsages: [] });
@@ -32,7 +33,7 @@ function fixture() {
   const abort = new AbortController();
   const owner = new TerminalInformationCommands({ controller: () => current, getPrimaryModel, logs, choose, publish, signal: abort.signal });
   return { owner, controller, getPrimaryModel, logs, choose, publish, abort,
-    text: () => choose.mock.calls.map(([page]) => page.message ?? '').join('\n'),
+    text: () => choose.mock.calls.map(([page]) => page.message ?? (page.summary ? summaryLines(page.summary).join('\n') : '')).join('\n'),
     messages: () => publish.mock.calls.map(([result]) => result.message).join('\n'),
     replace(value: TerminalInformationController | undefined) { current = value; } };
 }
@@ -59,14 +60,29 @@ describe('terminal information commands', () => {
     expect(f.text()).toContain('model-a'); expect(f.text()).toContain('model-b'); expect(f.text()).toContain('provider-b');
     expect(f.getPrimaryModel).toHaveBeenCalledTimes(2); expect(f.controller.compact).not.toHaveBeenCalled(); expect(f.logs.applyPolicy).not.toHaveBeenCalled();
   });
-  it('paginates long structured child usage through the shared selection and keeps returning side-effect free', async () => {
+  it('shows long structured child usage as one sectioned page with every row, and keeps returning side-effect free', async () => {
     const f = fixture(); f.controller.usage.mockResolvedValueOnce({ ...usage(), subUsages: Array.from({ length: 180 }, (_, index) => ({
       index: index + 1, description: `子任务 ${index + 1} 👩‍💻`, status: 'succeeded', tokens: index, toolUses: 0, durationMs: 0,
     })) });
     f.choose.mockImplementation(async page => page.choices?.some(choice => choice.id === 'next') ? { itemId: 'next' } : { itemId: 'return' });
     await f.owner.run('usage');
-    expect(f.choose.mock.calls.length).toBeGreaterThan(1); expect(f.text()).toContain('#180 ✓ 成功'); expect(f.text()).toContain('子任务总计');
-    expect(f.choose.mock.calls.every(([page]) => (page.message?.length ?? 0) < 4200)).toBe(true);
+    expect(f.choose).toHaveBeenCalledOnce();
+    const page = f.choose.mock.calls[0]![0];
+    expect(page.message).toBeUndefined();
+    expect(page.summary?.sections.find(section => section.title === '子任务（180 个）')?.rows).toHaveLength(180);
+    expect(f.text()).toContain('#180  ✓ 成功'); expect(f.text()).toContain('子任务总计');
+    expect(f.controller.usage).toHaveBeenCalledOnce(); expect(f.controller.compact).not.toHaveBeenCalled();
+  });
+  it('pages 700 short subtasks through the shared selection so every row, including the last, is reachable', async () => {
+    const f = fixture(); f.controller.usage.mockResolvedValueOnce({ ...usage(), subUsages: Array.from({ length: 700 }, (_, index) => ({
+      index: index + 1, description: 'case', status: 'succeeded', tokens: 1, toolUses: 1, durationMs: 1, subId: `sub-${index}`,
+    })) });
+    f.choose.mockImplementation(async page => page.choices?.some(choice => choice.id === 'next') ? { itemId: 'next' } : { itemId: 'return' });
+    await f.owner.run('usage');
+    expect(f.choose.mock.calls.length).toBeGreaterThan(1);
+    const rows = f.choose.mock.calls.flatMap(([page]) => page.summary?.sections ?? []).filter(item => item.title.startsWith('子任务（')).flatMap(item => item.rows ?? []);
+    expect(rows).toHaveLength(700); expect(rows.at(-1)).toMatchObject({ label: '#700', note: 'case · sub sub-699' });
+    expect(f.text()).not.toContain('未能显示'); expect(f.text()).toContain('子任务总计');
     expect(f.controller.usage).toHaveBeenCalledOnce(); expect(f.controller.compact).not.toHaveBeenCalled();
   });
   it.each(['usage', 'context'] as const)('reports %s lookup errors without a fake empty or zero result and can retry explicitly', async name => {

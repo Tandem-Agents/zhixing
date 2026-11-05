@@ -4,8 +4,9 @@ import type { RuntimePrimaryModelDisplayProjection } from '../runtime/runtime-co
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { configureLogs } from '../logging/configuration.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';
+import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
 import { INFORMATION_TEXT_BYTES, informationText, informationLines, informationModelLines,
-  informationUsageLines, informationContextLines, informationCompactLines } from './information-presentation.js';
+  informationUsageSummary, informationContextSummary, informationCompactLines } from './information-presentation.js';
 
 export type TerminalInformationController = Pick<ConversationController<string>, 'usage' | 'contextBudget' | 'compact'> & {
   readonly current: { readonly conversationId: string };
@@ -72,13 +73,13 @@ export class TerminalInformationCommands {
     const title = name === 'model' ? '当前模型' : name === 'usage' ? 'Token 用量' : name === 'context' ? '上下文窗口' : name === 'compact' ? '压缩上下文' : '日志策略';
     let mutationReceipt = false;
     try {
-      let lines: readonly string[];
+      let lines: readonly string[] = [], summary: TerminalSummary | readonly TerminalSummary[] | undefined;
       scope.assertCurrent();
       if (name === 'model') lines = informationModelLines(this.options.getPrimaryModel());
       else if (name === 'usage') {
-        const view = await controller.usage(); scope.assertCurrent(); lines = informationUsageLines(view);
+        const view = await controller.usage(); scope.assertCurrent(); summary = informationUsageSummary(view);
       } else if (name === 'context') {
-        const view = await controller.contextBudget(); scope.assertCurrent(); lines = informationContextLines(view.budget);
+        const view = await controller.contextBudget(); scope.assertCurrent(); summary = informationContextSummary(view.budget);
       } else if (name === 'compact') {
         await publish({ title, message: '正在压缩上下文…', busy: true });
         // Publishing the progress view can yield: never start a mutation in a successor context.
@@ -105,7 +106,7 @@ export class TerminalInformationCommands {
         scope.assertCurrent(); lines = informationLines(collected);
       }
       scope.assertCurrent();
-      await chooseTerminalSelection({ title, body: lines, options: [{ value: 'done', label: '返回输入' }] }, choose);
+      await chooseTerminalSelection({ title, ...(summary ? { summary } : { body: lines }), options: [{ value: 'done', label: '返回输入' }] }, choose);
     } catch (error) {
       if (!scope.isCurrent()) return;
       const prefix = mutationReceipt ? '操作已有回执，但结果显示未完成' : name === 'usage' ? '用量信息不可用' : name === 'context' ? '上下文信息不可用'

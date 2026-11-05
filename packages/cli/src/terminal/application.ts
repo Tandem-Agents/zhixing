@@ -1,18 +1,20 @@
-import { normalizeLeadingSlashAlias, TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createRpcClient } from '@zhixing/server/client';
 import { createPlatformSecretStore } from '@zhixing/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
-import { type ConversationBodyCursor, type ConversationBodyPage, type TranscriptToolFacts } from '@zhixing/core/contracts';
-import { type TranscriptByteReader, type TranscriptBodyCursor } from '@zhixing/core/transcript';
+import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing/core/contracts';
+import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
 import { isAbsolute, join as joinPath } from 'node:path';
 import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
-import { type TerminalPreloadRelease } from './application-preload.js';
+import type { TerminalPreloadRelease } from './application-preload.js';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
-import { type SessionEventEnvelope } from '@zhixing/rpc/session-events';
+import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing/terminal-ui/protocol';
+import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
@@ -23,34 +25,34 @@ import { createLogWriterProbe } from '../logging/writers.js';
 import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
 import { terminalCloseDeadline, terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
 import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError, type CoreHostLifecycleNotice } from '../runtime/core-host-connection.js';
-import { type DeviceRestriction } from '../serve/device-restriction.js';
+import type { DeviceRestriction } from '../serve/device-restriction.js';
 import { connectReplHost } from '../runtime/repl-host-startup.js';
-import { type HostReloadOptions } from '../runtime/configuration-application.js';
-import { type NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
-import { type ConfigEditorRuntime, type SectionId } from '../config-editor/types.js';
-import { type TerminalConfigurationEditor } from './configuration-editor.js';
-import { type TerminalSkillsOwner } from './skills.js';
-import { type TerminalSkillCommands } from './skill-commands.js';
-import { type TerminalDecisionCommands } from './decision-commands.js';
-import { type TerminalTrustCandidates } from './trust-candidates.js';
-import { type TerminalTasks } from './tasks.js';
-import { type TerminalTaskNotices } from './task-notices.js';
-import { type TerminalSchedulerNotices } from './scheduler-notices.js';
-import { type TerminalInformationCommands } from './information-commands.js';
+import type { HostReloadOptions } from '../runtime/configuration-application.js';
+import type { NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
+import type { ConfigEditorRuntime, SectionId } from '../config-editor/types.js';
+import type { TerminalConfigurationEditor } from './configuration-editor.js';
+import type { TerminalSkillsOwner } from './skills.js';
+import type { TerminalSkillCommands } from './skill-commands.js';
+import type { TerminalDecisionCommands } from './decision-commands.js';
+import type { TerminalTrustCandidates } from './trust-candidates.js';
+import type { TerminalTasks } from './tasks.js';
+import type { TerminalTaskNotices } from './task-notices.js';
+import type { TerminalSchedulerNotices } from './scheduler-notices.js';
+import type { TerminalInformationCommands } from './information-commands.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
 import { formatRelativeTimeText } from '../commands/format.js';
 import { advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
-import { type SessionAdvancementStateSnapshot } from '@zhixing/rpc';
+import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import { parseConversationId } from '@zhixing/core/conversation';
-import { type SkillCatalogClient } from '@zhixing/core/skills/catalog';
+import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AdvancementOperationTarget, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
-import { PendingInputReceiptError, RpcConversationFacade, type SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-facade.js';
+import { PendingInputReceiptError, RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
 import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
-import { type AgentYield } from '@zhixing/core/loop';
-import { type ConversationOutputSource } from '../runtime/conversation-output.js';
+import type { AgentYield } from '@zhixing/core/loop';
+import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
 import { TerminalDisplayReplay, runOutcomeSegment, runOutcomeText, toolCardSegment, type DisplayReplaySource, type RunOutcomeState, type ToolReplaySource } from './display-replay.js';
@@ -63,6 +65,7 @@ import { TerminalManagedFiles } from './managed-files.js';
 import { TerminalInputHistoryReader } from './input-history.js';
 import { TerminalPendingSendStore } from './pending-send-store.js';
 import { prepareSessionSendSnapshot } from './prepare-session-send.js';
+import type { SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-facade.js';
 import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-material-registry.js';
 import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
 import { createUserSubmission } from '../runtime/user-submission.js';
@@ -80,7 +83,6 @@ import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtim
 import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { recordTerminalFailure, terminalStorageFullMessage } from './failure.js';
-import { AsyncLocalStorage } from 'node:async_hooks';
 
 type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
@@ -2791,8 +2793,10 @@ class TerminalApplication {
     if (name === 'help') {
       this.#background(() => this.#selectionFlow(async () => {
         try {
+          const { commandHelpSummary } = await import('./command-help.js');
+          this.#abort.signal.throwIfAborted();
           await chooseTerminalSelection({ title: '命令帮助',
-            body: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`),
+            summary: commandHelpSummary(this.#candidates.registry.list(this.#candidates.runtime())),
             options: [{ value: 'return', label: '返回输入' }],
           }, view => this.#choosePage(view));
         } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
@@ -2815,7 +2819,7 @@ class TerminalApplication {
     const controller = this.#controller, epoch = this.#conversationEpoch;
     const status = await this.#management.serverInfoIfConnected();
     if (this.#abort.signal.aborted || this.#controller !== controller || this.#conversationEpoch !== epoch) return;
-    const { serverStatusLines } = await import('../runtime/server-status-presentation.js');
+    const { serverStatusSummary } = await import('../runtime/server-status-presentation.js');
     await this.#localView.refresh();
     if (this.#abort.signal.aborted || this.#controller !== controller || this.#conversationEpoch !== epoch) return;
     const current = controller?.current;
@@ -2823,7 +2827,7 @@ class TerminalApplication {
     await this.#selectionFlow(async () => {
       try {
         await chooseTerminalSelection({ id: 'server-status', title: '运行状态',
-          body: serverStatusLines(name, this.#localView.primaryModel, this.#localView.networkProxy, status),
+          summary: serverStatusSummary(name, this.#localView.primaryModel, this.#localView.networkProxy, status),
           options: [{ value: 'return', label: '返回输入' }],
         }, view => this.#choosePage(view));
       } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }

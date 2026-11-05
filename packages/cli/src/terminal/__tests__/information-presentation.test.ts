@@ -1,50 +1,84 @@
 import { describe, expect, it } from 'vitest';
-import { informationCompactLines, informationContextLines, informationLines, informationModelLines,
-  informationText, informationUsageLines, type TerminalUsageProjection } from '../information-presentation.js';
+import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import { informationCompactLines, informationContextSummary, informationLines, informationModelLines,
+  informationText, informationUsageSummary, type TerminalUsageProjection } from '../information-presentation.js';
+import { summaryLines } from '../../summary-projection.js';
 
 const budget = { currentTokens: 40_000, effectiveWindow: 80_000, contextWindow: 100_000, usageRatio: 0.5, status: 'normal' } as const;
 const usage = (change: Partial<TerminalUsageProjection> = {}): TerminalUsageProjection => ({ budget, turnCount: 4, calibrationFactor: 1, subUsages: [], ...change });
 const text = (lines: readonly string[]) => lines.join('\n');
+const section = (summary: TerminalSummary, title: string) => {
+  const found = summary.sections.find(item => item.title === title);
+  if (!found) throw Error(`missing section ${title}: ${summary.sections.map(item => item.title).join('、')}`);
+  return found;
+};
+const usageOne = (view: TerminalUsageProjection) => { const pages = informationUsageSummary(view); expect(pages).toHaveLength(1); return pages[0]!; };
+const values = (summary: TerminalSummary, title: string) => Object.fromEntries((section(summary, title).rows ?? []).map(row => [row.label, row.value]));
 
 describe('terminal information presentation', () => {
   it('displays only the supplied current model projection, including unconfigured state', () => {
     expect(informationModelLines({ model: 'model-a', providerId: 'provider-a' })).toEqual(['模型：model-a', '服务商：provider-a']);
     expect(informationModelLines({ model: '', providerId: '' })).toEqual(['模型：(未配置)', '服务商：(未配置)']);
   });
-  it('distinguishes request capacity, effective window, nominal window and optional calibration', () => {
-    const rendered = text(informationUsageLines(usage()));
-    expect(rendered).toContain('50% (40.0k / 80.0k)'); expect(rendered).toContain('标称上下文窗口：100.0k');
-    expect(rendered).toContain('会话轮次：4'); expect(rendered).toContain('1.000（未校准）');
-    expect(rendered).toContain('不是累计消耗或费用'); expect(rendered).not.toContain('子任务总计');
-    expect(text(informationUsageLines(usage({ calibrationFactor: 1.125 })))).toContain('1.125（已校准）');
-    expect(text(informationUsageLines(usage({ calibrationFactor: undefined })))).not.toContain('估算校准');
+  it('distinguishes request capacity, effective window, nominal window and optional calibration, keeping the scope sentence', () => {
+    const summary = usageOne(usage());
+    expect(summary.lead).toEqual([[{ text: '主对话 · 上下文容量估算', tone: 'accent' }]]);
+    expect(values(summary, '容量')).toEqual({ 容量占比: '50% (40.0k / 80.0k)', 有效容量: '80.0k tokens', 标称上下文窗口: '100.0k tokens',
+      会话轮次: '4 轮', 估算校准: '1.000（未校准）' });
+    expect(section(summary, '容量').notes).toEqual(['以上是请求容量估算，不是累计消耗或费用。']);
+    expect(summary.sections.map(item => item.title)).toEqual(['容量']);
+    expect(values(usageOne(usage({ calibrationFactor: 1.125 })), '容量').估算校准).toBe('1.125（已校准）');
+    expect(values(usageOne(usage({ calibrationFactor: undefined })), '容量')).not.toHaveProperty('估算校准');
   });
-  it('keeps successful, failed and aborted subtask costs separate from the main estimate', () => {
-    const rendered = text(informationUsageLines(usage({ subUsages: [
+  it('keeps successful, failed and aborted subtask costs separate from the main estimate, one row each', () => {
+    const summary = usageOne(usage({ subUsages: [
       { index: 1, description: '搜集资料', status: 'succeeded', tokens: 1200, toolUses: 2, durationMs: 800, subId: 'first' },
       { index: 2, description: '读取失败', status: 'failed', tokens: 2300, toolUses: 3, durationMs: 1500 },
       { index: 3, description: '用户中止', status: 'aborted', tokens: 0, toolUses: 0, durationMs: 60_000 },
-    ] })));
-    for (const expected of ['#1 ✓ 成功', '#2 ⚠ 失败', '#3 ⏵ 中止', 'sub first', '子任务总计：3.5k tokens', '工具调用合计：5 次', '耗时合计：1m 2s', '不是全会话总成本']) expect(rendered).toContain(expected);
-    expect(rendered).toContain('50% (40.0k / 80.0k)');
+    ] }));
+    expect(section(summary, '子任务（3 个）').rows).toEqual([
+      { label: '#1', value: '✓ 成功 · 1.2k tokens · 工具调用 2 次 · 耗时 800ms', note: '搜集资料 · sub first' },
+      { label: '#2', value: '⚠ 失败 · 2.3k tokens · 工具调用 3 次 · 耗时 1.5s', note: '读取失败', tone: 'warn' },
+      { label: '#3', value: '⏵ 中止 · 0 tokens · 工具调用 0 次 · 耗时 1m 0s', note: '用户中止' },
+    ]);
+    expect(values(summary, '子任务合计')).toEqual({ 子任务总计: '3.5k tokens', 工具调用合计: '5 次', 耗时合计: '1m 2s' });
+    expect(section(summary, '子任务合计').notes).toEqual(['子任务合计仅覆盖这些任务，不是全会话总成本。']);
+    expect(values(summary, '容量').容量占比).toBe('50% (40.0k / 80.0k)');
   });
   it('never treats missing or invalid statistics as zero, including aggregate duration', () => {
-    const rendered = text(informationUsageLines(usage({ budget: {}, turnCount: undefined, calibrationFactor: undefined, subUsages: [
+    const summary = usageOne(usage({ budget: {}, turnCount: undefined, calibrationFactor: undefined, subUsages: [
       { index: 1, description: '缺统计', status: 'succeeded' },
       { index: 2, tokens: 0, toolUses: 0, durationMs: 0 },
-    ] })));
-    for (const expected of ['容量占比：未知', '有效容量：未知', '会话轮次：未知', '子任务总计：未知', '工具调用合计：未知', '耗时合计：未知', '0 tokens', '耗时：0ms']) expect(rendered).toContain(expected);
-    const malformed = text(informationUsageLines(usage({ budget: { ...budget, currentTokens: NaN, usageRatio: -1 }, subUsages: [{ tokens: Infinity, toolUses: -1, durationMs: NaN }] })));
+    ] }));
+    expect(values(summary, '容量')).toEqual({ 容量占比: '未知 (未知 / 未知)', 有效容量: '未知 tokens', 标称上下文窗口: '未知 tokens', 会话轮次: '未知 轮' });
+    expect(values(summary, '子任务合计')).toEqual({ 子任务总计: '未知 tokens', 工具调用合计: '未知 次', 耗时合计: '未知' });
+    expect(section(summary, '子任务（2 个）').rows).toEqual([
+      { label: '#1', value: '✓ 成功 · 未知 tokens · 工具调用 未知 次 · 耗时 未知', note: '缺统计' },
+      { label: '#2', value: '状态未知 · 0 tokens · 工具调用 0 次 · 耗时 0ms', note: '未命名' },
+    ]);
+    const malformed = JSON.stringify(usageOne(usage({ budget: { ...budget, currentTokens: NaN, usageRatio: -1 }, subUsages: [{ tokens: Infinity, toolUses: -1, durationMs: NaN }] })));
     expect(malformed).not.toMatch(/NaN|Infinity|-1%/u); expect(malformed).toContain('未知');
   });
-  it('preserves the context ruler and limits the visible bar without changing an over-capacity percentage', () => {
-    const normal = text(informationContextLines(budget));
-    expect(normal).toContain('██████████░░░░░░░░░░'); expect(normal).toContain('50%'); expect(normal).not.toContain('/compact');
-    for (const [threshold, count] of [['75%', '60.0k'], ['85%', '68.0k'], ['95%', '76.0k']]) expect(normal).toContain(`(${threshold})：${count}`);
-    const overloaded = text(informationContextLines({ ...budget, usageRatio: 1.25, status: 'critical' }));
-    expect(overloaded).toContain(`[${'█'.repeat(20)}] 125%`); expect(overloaded).toContain('/compact');
-    expect(text(informationContextLines({}))).toContain('容量占比：未知');
-    expect(text(informationContextLines({ ...budget, usageRatio: 0 }))).toContain(`[${'░'.repeat(20)}] 0%`);
+  it('takes the threshold ratios from the host constants and marks reached tiers only by the host status', () => {
+    const normal = informationContextSummary(budget);
+    expect(normal.lead).toEqual([[{ text: '50%', tone: 'accent' }, { text: ' · 40.0k / 80.0k tokens' }]]);
+    expect(values(normal, '容量')).toEqual({ 有效上下文容量: '80.0k tokens', 当前估算: '40.0k tokens', 容量占比: '[██████████░░░░░░░░░░] 50%' });
+    expect(section(normal, '阈值').rows).toEqual([
+      { label: '预警 (75%)', value: '60.0k tokens' }, { label: '压缩 (85%)', value: '68.0k tokens' }, { label: '上限 (95%)', value: '76.0k tokens' }]);
+    expect(section(normal, '阈值').notes).toBeUndefined();
+    // 占比已超过预警线，但宿主给的状态仍是 normal：不在呈现层重新判断
+    expect(section(informationContextSummary({ ...budget, usageRatio: 0.8 }), '阈值').rows!.every(row => row.tone === undefined)).toBe(true);
+    const compact = section(informationContextSummary({ ...budget, usageRatio: 0.5, status: 'compact' }), '阈值');
+    expect(compact.rows!.map(row => [row.value, row.tone])).toEqual([['60.0k tokens · 已达到', 'warn'], ['68.0k tokens · 已达到', 'warn'], ['76.0k tokens', undefined]]);
+    expect(compact.notes).toEqual(['提示：使用 /compact 手动触发压缩。']);
+    expect(section(informationContextSummary({ ...budget, status: 'warning' }), '阈值').rows!.filter(row => row.tone === 'warn')).toHaveLength(1);
+    const overloaded = informationContextSummary({ ...budget, usageRatio: 1.25, status: 'critical' });
+    expect(values(overloaded, '容量').容量占比).toBe(`[${'█'.repeat(20)}] 125%`);
+    expect(section(overloaded, '阈值').rows!.filter(row => row.tone === 'warn')).toHaveLength(3);
+    const unknown = informationContextSummary({});
+    expect(unknown.lead).toEqual([[{ text: '容量占比：未知' }]]);
+    expect(values(unknown, '容量').容量占比).toBe('未知');
+    expect(values(informationContextSummary({ ...budget, usageRatio: 0 }), '容量').容量占比).toBe(`[${'░'.repeat(20)}] 0%`);
   });
   it('renders each compression result and puts mechanical truncation cost before success', () => {
     expect(informationCompactLines({ modified: false })).toEqual(['已无可压缩内容。']);
@@ -57,13 +91,22 @@ describe('terminal information presentation', () => {
     expect(emergency[1]).toContain('完整原文仍在对话历史中'); expect(emergency[2]).toContain('20.0k → 0 tokens');
   });
   it('removes terminal and directional controls while retaining Chinese, emoji and line structure', () => {
-    const rendered = informationText('\x1b[31m中文👩‍💻\x1b[0m\r\n下一行\x1b]0;title\x07\u202e\x00');
-    expect(rendered).toContain('中文👩‍💻\n下一行'); expect(rendered).not.toMatch(/[\x1b\x00\u202e]/u); expect(rendered).not.toContain('title');
-    expect(text(informationUsageLines(usage({ subUsages: [{ description: 'A\nB\x1b[2J', tokens: 0 }] })))).toContain('A B');
+    const rendered = informationText('\x1b[31m中文👩‍💻\x1b[0m\r\n下一行\x1b]0;title\x07‮\x00');
+    expect(rendered).toContain('中文👩‍💻\n下一行'); expect(rendered).not.toMatch(/[\x1b\x00‮]/u); expect(rendered).not.toContain('title');
+    const note = section(usageOne(usage({ subUsages: [{ description: 'A\nB\x1b[2J', tokens: 0 }] })), '子任务（1 个）').rows![0]!.note;
+    expect(note).toBe('A B'); expect(text(summaryLines(usageOne(usage())))).not.toMatch(/[\x00-\x08\x1b]/u);
   });
-  it('bounds both raw projections and the final retained text, never silently dropping whole rows', () => {
+  it('bounds raw projections, and pages long subtask lists so every row stays reachable within the overall capacity', () => {
     expect(() => informationModelLines({ model: 'm'.repeat(2 * 1024 * 1024), providerId: 'p' })).toThrow('容量');
     expect(() => informationLines(['x'.repeat(256 * 1024)])).toThrow('容量');
-    expect(() => informationUsageLines(usage({ subUsages: Array.from({ length: 2500 }, (_, index) => ({ index, description: '子任务'.repeat(30), tokens: 1, toolUses: 0, status: 'succeeded' })) }))).toThrow('容量');
+    const subUsages = (length: number) => Array.from({ length }, (_, index) => ({ index: index + 1, description: '子任务'.repeat(30), tokens: 1, toolUses: 0, status: 'succeeded' as const }));
+    const rowsOf = (pages: ReturnType<typeof informationUsageSummary>) => pages.flatMap(page => page.sections).filter(item => item.title.startsWith('子任务（')).flatMap(item => item.rows ?? []);
+    const many = informationUsageSummary(usage({ subUsages: subUsages(2500) }));
+    expect(many.length).toBeGreaterThan(1);
+    expect(rowsOf(many)).toHaveLength(2500); expect(rowsOf(many).at(-1)!.label).toBe('#2500');
+    expect(JSON.stringify(many)).not.toContain('未能显示');
+    expect(many.at(-1)!.sections.at(-1)).toMatchObject({ title: '子任务合计', notes: ['子任务合计仅覆盖这些任务，不是全会话总成本。'] });
+    // 原有的整体边界照旧：用量投影本身超过 1 MiB 时明确失败，不静默裁掉
+    expect(() => informationUsageSummary(usage({ subUsages: subUsages(6000) }))).toThrow('容量');
   });
 });

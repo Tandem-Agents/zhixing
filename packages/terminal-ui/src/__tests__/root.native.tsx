@@ -11,6 +11,10 @@ import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
 import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
 import { processArtifactLines, processArtifactSpans, processArtifactText } from '../../../cli/src/terminal/process-presentation.js';
 import { securityOverview, securityRulesDetail } from '../../../cli/src/security/security-summary.js';
+import { serverStatusSummary } from '../../../cli/src/runtime/server-status-presentation.js';
+import { informationContextSummary, informationUsageSummary } from '../../../cli/src/terminal/information-presentation.js';
+import { commandHelpSummary } from '../../../cli/src/terminal/command-help.js';
+import { BUILTIN_COMMANDS } from '../../../cli/src/commands/builtin-definitions.js';
 // Runs with the pinned Bun/native renderer via scripts/test-root.ts.
 // This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 
@@ -1669,6 +1673,77 @@ try {
       }
       test.resize(100, 32); await show(conversation); await flush();
       checks.push('information page: real security projection, right-aligned asides wide, wrapped asides narrow, copy without the section marker, default return action, rule explanations, source-exact copy at 45/60/100 columns');
+    }
+
+    // 第二段信息页：运行状态、用量、上下文、命令帮助、任务推进都用 N 的真实投影进同一个分节组件。
+    // 宽屏标签列对齐；窄屏长路径完整折行、复制取源文（标签与值之间是制表符）；需要留意的事实是警示色位并有文字
+    {
+      const slot = (span: any) => span.fg?.intent === 'indexed' ? span.fg.slot : -1;
+      const slots = (value: string) => [...new Set(test.captureSpans().lines.flatMap(line => line.spans).filter(span => span.text.includes(value)).map(slot))];
+      const shown = (expected: string) => rows().map(line => line.replace(/[│▎]/gu, '')).join('').replace(/\s/gu, '').includes(expected.replace(/[\s│▎]/gu, ''));
+      const logPath = 'C:\\Users\\example\\.zhixing\\logs\\host-2026-11-05-very-long-segment\\terminal-host.log';
+      const info = { version: '1', protocol: 1, pid: 4242, startedAt: '', uptimeSec: 5, host: '127.0.0.1', port: 47800, activeConversations: 1, busyConversations: 0,
+        connectionCount: 1, memoryRssBytes: 1, channels: [{ channelId: 'feishu', state: 'error', error: 'token 已过期' }, { channelId: 'slack', state: 'connected' }],
+        deferredWork: [{ id: 'delivery', kind: 'delivery', label: '离线消息', count: 4 }], keepAliveWork: [{ id: 'schedule', kind: 'schedule', label: '定时任务', count: 2 }],
+        recoveryBackup: { state: 'pending-verification', fullBackupReady: false, nextAction: 'run-backup-verify' }, logPath } as never;
+      const proxy = { mode: 'auto' as const, hasResolvedProxy: true, display: 'http://127.0.0.1:7890（来自环境变量）' };
+      const page = (title: string, summary: unknown) => ({ kind: 'selection' as const, title, requestId: `s2-${title}-${generation}`, summary: summary as never,
+        initialItemId: 'option:done', choices: [{ id: 'option:done', label: '返回输入' }] });
+      const only = <T,>(pages: readonly T[]) => { assert.equal(pages.length, 1, 'the fixture fits one page'); return pages[0]!; };
+      const status = only(serverStatusSummary('06 表格与列表｜C 盘清理总结', { providerId: 'anthropic', model: 'claude-opus' }, proxy, info));
+      for (const columns of [131, 45]) {
+        test.resize(columns, 48); await show(page('运行状态', status)); await flush();
+        for (const header of ['▎ 模型与网络', '▎ 服务与接入', '▎ 待处理', '▎ 运维']) assert.ok(rows().some(line => line.includes(header)), `${columns}: ${header}`);
+        // 窄屏时长值按词折行：按整页文字核对每个字段都在
+        const flat = rows().map(line => line.replace(/[│▎]/gu, '')).join('').replace(/\s/gu, '');
+        for (const expected of ['claude-opus', 'anthropic', 'http://127.0.0.1:7890（来自环境变量）', 'pid 4242 · 127.0.0.1:47800', '通道 feishu', 'token 已过期', '4 条待重试', '2 个已启用', '需要停止知行请输入 /stop。'])
+          assert.ok(flat.includes(expected.replace(/\s/gu, '')), `${columns}: status shows ${expected}`);
+        assert.ok(rows().join('').replace(/\s/gu, '').includes(logPath), `${columns}: the long log path is shown in full`);
+        assert.deepEqual(slots('4 条待重试'), [3], `${columns}: pending delivery is a warning`);
+        assert.ok(!slots('已连接').includes(3) && slots('异常').includes(3), `${columns}: only the failing channel is a warning`);
+        if (columns === 131) {
+          // 按显示列比较：中文标签占两列
+          const wide = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿가-힣豈-﫿︰-﹏＀-｠￠-￦]/u;
+          const at = (value: string) => { const line = rows().find(item => item.includes(value))!; return [...line.slice(0, line.indexOf(value))].reduce((sum, ch) => sum + (wide.test(ch) ? 2 : 1), 0); };
+          assert.equal(at('claude-opus'), at('anthropic'), 'values line up in one column'); assert.equal(at('anthropic'), at('http://127.0.0.1:7890'));
+        } else {
+          // 45 列：拖选“日志”这一行到路径末尾，复制得到“日志<Tab>完整路径”，折行不进复制
+          const labelRow = rows().findIndex(line => /日志/u.test(line) && !line.includes('▎')), lastRow = rows().findIndex(line => line.includes('terminal-host.log'));
+          assert.ok(labelRow >= 0 && lastRow > labelRow, `the path wraps at 45 columns: ${rows().slice(labelRow, lastRow + 1).join(' | ')}`);
+          await test.mockMouse.drag(rows()[labelRow]!.indexOf('日志'), labelRow, rows()[lastRow]!.indexOf('terminal-host.log') + 'terminal-host.log'.length + 1, lastRow); await flush();
+          before = writes().length; await ctrlC();
+          assert.equal(writes().length, before + 1); assert.equal(writes().at(-1)!.text, `日志\t${logPath}`, '45: label and a wrapped path copy exactly');
+          test.renderer.clearSelection(); await flush();
+        }
+      }
+      const unavailable = only(serverStatusSummary('A', { providerId: 'anthropic', model: 'claude-opus' }, proxy, null));
+      test.resize(100, 32); await show(page('运行状态', unavailable)); await flush();
+      assert.ok(rows().some(line => line.includes('宿主状态暂不可用。')) && slots('宿主状态暂不可用。').includes(3), 'host unavailable is a warning in the lead');
+      assert.ok(rows().some(line => line.includes('（来自环境变量）')) && !rows().some(line => line.includes('▎ 待处理')), 'local facts stay, host sections are omitted');
+
+      const usage = only(informationUsageSummary({ budget: { currentTokens: 40_000, effectiveWindow: 80_000, contextWindow: 100_000, usageRatio: 0.5, status: 'normal' },
+        turnCount: 4, calibrationFactor: 1, subUsages: [
+          { index: 1, description: '搜集资料并整理成表格', status: 'succeeded', tokens: 1200, toolUses: 2, durationMs: 800, subId: 'sub-first' },
+          { index: 2, description: '读取失败的子任务', status: 'failed', tokens: 2300, toolUses: 3, durationMs: 1500 }] }));
+      test.resize(45, 40); await show(page('Token 用量', usage)); await flush();
+      for (const expected of ['▎ 容量', '50% (40.0k / 80.0k)', '不是累计消耗或费用', '▎ 子任务（2 个）', '⚠ 失败 · 2.3k tokens', '搜集资料并整理成表格', '▎ 子任务合计', '不是全会话总成本'])
+        assert.ok(shown(expected), `usage at 45 shows ${expected}`);
+      assert.ok(slots('⚠ 失败').includes(3) && !slots('✓ 成功').includes(3), 'only the failed subtask is a warning');
+
+      const context = informationContextSummary({ currentTokens: 70_000, effectiveWindow: 80_000, contextWindow: 100_000, usageRatio: 0.875, status: 'compact' });
+      test.resize(100, 32); await show(page('上下文窗口', context)); await flush();
+      assert.ok(rows().some(line => line.includes('预警 (75%)')) && rows().some(line => line.includes('提示：使用 /compact 手动触发压缩。')), 'context ruler and hint');
+      assert.equal(rows().filter(line => line.includes('· 已达到')).length, 2, 'warning and compact tiers are reached, the limit is not');
+      assert.ok(slots('68.0k tokens · 已达到').includes(3) && !slots('76.0k tokens').includes(3), 'reached tiers are warnings');
+
+      const help = only(commandHelpSummary(Object.values(BUILTIN_COMMANDS)));
+      test.resize(131, 48); await show(page('命令帮助', help)); await flush();
+      for (const header of ['▎ 对话', '▎ 配置与安全', '▎ 状态与信息', '▎ 工具与任务']) assert.ok(rows().some(line => line.includes(header)), `help shows ${header}`);
+      const helpAt = (name: string) => { const line = rows().find(value => value.includes(`${name} `) && !value.includes('▎'))!; return line.slice(line.indexOf(name) + name.length).search(/\S/u) + line.indexOf(name) + name.length; };
+      assert.equal(helpAt('/new'), helpAt('/advancement'), 'descriptions line up across long and short command names');
+
+      test.resize(100, 32); await show(conversation); await flush();
+      checks.push('stage-2 information pages from real projections: status sections with warnings, local facts when the host is unavailable, aligned values, a wrapped path copied exactly at 45 columns; usage subtasks, context tiers by host status, help by category with aligned descriptions, advancement verdicts');
     }
 
     // 45 列信息行：有选区时键位改用短版、复制按钮仍在；复制成功与失败的说明都完整可读；没有选区时导航键位照常

@@ -2,6 +2,9 @@ import { stripVTControlCharacters } from 'node:util';
 import type { SessionCompactResult, SessionUsageResult } from '@zhixing/rpc/session-wire';
 import type { RuntimePrimaryModelDisplayProjection } from '../runtime/runtime-configuration-provider.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
+import { DEFAULT_THRESHOLDS } from '@zhixing/core/context';
+import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from '@zhixing/terminal-ui/protocol';
+import { fitSummary, paginateSummary, summaryText } from '../summary-projection.js';
 
 type Budget = Readonly<Partial<SessionUsageResult['budget']>>;
 type SubUsage = Readonly<Partial<SessionUsageResult['subUsages'][number]>>;
@@ -26,43 +29,61 @@ export function informationModelLines(model: RuntimePrimaryModelDisplayProjectio
   return finish([`模型：${model.model || '(未配置)'}`, `服务商：${model.providerId || '(未配置)'}`]);
 }
 
-export function informationUsageLines(view: TerminalUsageProjection): readonly string[] {
+/** 用量页：容量估算与子任务拆分分区；口径句紧跟数值，原文保留；未知值仍写“未知” */
+export function informationUsageSummary(view: TerminalUsageProjection): TerminalSummary[] {
   boundedControlProjection(view, PROJECTION_BYTES);
   const budget = view.budget;
-  const lines = ['主对话 · 上下文容量估算',
-    `容量占比：${percent(budget.usageRatio)} (${tokens(budget.currentTokens)} / ${tokens(budget.effectiveWindow)})`,
-    `有效容量：${tokens(budget.effectiveWindow)} tokens`,
-    `标称上下文窗口：${tokens(budget.contextWindow)} tokens`,
-    `会话轮次：${number(view.turnCount)} 轮`];
-  if (known(view.calibrationFactor)) lines.push(`估算校准：${view.calibrationFactor.toFixed(3)}（${view.calibrationFactor === 1 ? '未校准' : '已校准'}）`);
-  lines.push('以上是请求容量估算，不是累计消耗或费用。');
+  const sections: TerminalSummarySection[] = [{ title: '容量', rows: [
+    { label: '容量占比', value: `${percent(budget.usageRatio)} (${tokens(budget.currentTokens)} / ${tokens(budget.effectiveWindow)})` },
+    { label: '有效容量', value: `${tokens(budget.effectiveWindow)} tokens` },
+    { label: '标称上下文窗口', value: `${tokens(budget.contextWindow)} tokens` },
+    { label: '会话轮次', value: `${number(view.turnCount)} 轮` },
+    ...(known(view.calibrationFactor) ? [{ label: '估算校准', value: `${view.calibrationFactor.toFixed(3)}（${view.calibrationFactor === 1 ? '未校准' : '已校准'}）` }] : []),
+  ], notes: ['以上是请求容量估算，不是累计消耗或费用。'] }];
   if (view.subUsages?.length) {
-    lines.push('', `子任务拆分（${view.subUsages.length} 个）`);
-    for (const entry of view.subUsages) {
+    sections.push({ title: `子任务（${view.subUsages.length} 个）`, rows: view.subUsages.map(entry => {
       const status = entry.status === 'succeeded' ? '✓ 成功' : entry.status === 'failed' ? '⚠ 失败' : entry.status === 'aborted' ? '⏵ 中止' : '状态未知';
-      lines.push(`#${number(entry.index)} ${status} · ${tokens(entry.tokens)} tokens`,
-        `  ${label(entry.description ?? '', 100) || '未命名'}`,
-        `  工具调用：${number(entry.toolUses)} 次 · 耗时：${duration(entry.durationMs)}`);
-      if (entry.subId) lines.push(`  sub ${label(entry.subId, 64)}`);
-    }
-    lines.push('', `子任务总计：${tokens(total(view.subUsages, entry => entry.tokens))} tokens`,
-      `工具调用合计：${number(total(view.subUsages, entry => entry.toolUses))} 次`,
-      `耗时合计：${duration(total(view.subUsages, entry => entry.durationMs))}`,
-      '子任务合计仅覆盖这些任务，不是全会话总成本。');
+      const description = label(entry.description ?? '', 100) || '未命名';
+      // 警示色作用在值上：状态写在值的开头，失败时文字与颜色一起出现
+      return { label: `#${number(entry.index)}`,
+        value: `${status} · ${tokens(entry.tokens)} tokens · 工具调用 ${number(entry.toolUses)} 次 · 耗时 ${duration(entry.durationMs)}`,
+        note: summaryText(entry.subId ? `${description} · sub ${label(entry.subId, 64)}` : description),
+        ...(entry.status === 'failed' ? { tone: 'warn' as const } : {}) };
+    }) }, { title: '子任务合计', rows: [
+      { label: '子任务总计', value: `${tokens(total(view.subUsages, entry => entry.tokens))} tokens` },
+      { label: '工具调用合计', value: `${number(total(view.subUsages, entry => entry.toolUses))} 次` },
+      { label: '耗时合计', value: duration(total(view.subUsages, entry => entry.durationMs)) },
+    ], notes: ['子任务合计仅覆盖这些任务，不是全会话总成本。'] });
   }
-  return finish(lines);
+  // 子任务明细随会话增长：按页拆分，整体容量内全部可达，真实超出时写明未能显示的条数
+  return paginateSummary([[{ text: '主对话 · 上下文容量估算', tone: 'accent' }]], sections);
 }
 
-export function informationContextLines(budget: Budget): readonly string[] {
+const BUDGET_LEVEL = { normal: 0, warning: 1, compact: 2, critical: 3 } as const;
+
+/** 上下文页：当前值、比例与阈值分区。阈值比例是宿主计算预算状态所用的同一组常量；
+ *  哪一档已达到只看宿主给出的 budget.status，不在这里拿占比重新比较 */
+export function informationContextSummary(budget: Budget): TerminalSummary {
   boundedControlProjection(budget, PROJECTION_BYTES);
   const ratio = budget.usageRatio;
-  const bar = known(ratio) ? `[${'█'.repeat(Math.min(20, Math.round(ratio * 20)))}${'░'.repeat(20 - Math.min(20, Math.round(ratio * 20)))}] ${percent(ratio)}` : '容量占比：未知';
-  const lines = [`有效上下文容量：${tokens(budget.effectiveWindow)} tokens`,
-    `当前估算：${tokens(budget.currentTokens)} tokens`, bar, '', '阈值标尺：',
-    ...([['预警', 0.75], ['压缩', 0.85], ['上限', 0.95]] as const).map(([name, threshold]) =>
-      `${name} (${threshold * 100}%)：${tokens(known(budget.effectiveWindow) ? Math.round(budget.effectiveWindow * threshold) : undefined)} tokens`)];
-  if (budget.status === 'warning' || budget.status === 'compact' || budget.status === 'critical') lines.push('', '提示：使用 /compact 手动触发压缩。');
-  return finish(lines);
+  const bar = known(ratio) ? `[${'█'.repeat(Math.min(20, Math.round(ratio * 20)))}${'░'.repeat(20 - Math.min(20, Math.round(ratio * 20)))}] ${percent(ratio)}` : '未知';
+  const level = budget.status !== undefined && Object.hasOwn(BUDGET_LEVEL, budget.status) ? BUDGET_LEVEL[budget.status as keyof typeof BUDGET_LEVEL] : 0;
+  const tiers = [['预警', DEFAULT_THRESHOLDS.warning, 1], ['压缩', DEFAULT_THRESHOLDS.compact, 2], ['上限', DEFAULT_THRESHOLDS.critical, 3]] as const;
+  const lead: TerminalSummaryText[] = known(ratio)
+    ? [{ text: percent(ratio), tone: 'accent' }, { text: ` · ${tokens(budget.currentTokens)} / ${tokens(budget.effectiveWindow)} tokens` }]
+    : [{ text: '容量占比：未知' }];
+  return fitSummary({ lead: [lead], sections: [
+    { title: '容量', rows: [
+      { label: '有效上下文容量', value: `${tokens(budget.effectiveWindow)} tokens` },
+      { label: '当前估算', value: `${tokens(budget.currentTokens)} tokens` },
+      { label: '容量占比', value: bar },
+    ] },
+    { title: '阈值', rows: tiers.map(([name, threshold, rank]) => ({
+      label: `${name} (${Math.round(threshold * 100)}%)`,
+      value: `${tokens(known(budget.effectiveWindow) ? Math.round(budget.effectiveWindow * threshold) : undefined)} tokens${level >= rank ? ' · 已达到' : ''}`,
+      ...(level >= rank ? { tone: 'warn' as const } : {}),
+    })), ...(level >= 1 ? { notes: ['提示：使用 /compact 手动触发压缩。'] } : {}) },
+  ] }, '信息超过当前展示容量，请缩小请求后重试。');
 }
 
 export function informationCompactLines(result: SessionCompactResult): readonly string[] {
