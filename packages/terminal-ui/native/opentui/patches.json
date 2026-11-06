@@ -418,7 +418,7 @@
     {
       "file": "src/lib.zig",
       "baseSha256": "1e09f19493d43d9ee841e616afbf82f21607505cfee18eb4bd292efd5d382491",
-      "outputSha256": "5360124f3f31d3a81a572c660b5f82f3c826c504e5f6ded25220a9dba3be7d40",
+      "outputSha256": "b4a8be426eded0016ba0f0b45e396a84717dca0ead5374985f03c930fda2cf58",
       "edits": [
         {
           "at": 3002,
@@ -429,7 +429,7 @@
             "    if (count > text_buffer_view.max_no_break_ranges) return false;",
             "    const input: []const text_buffer_view.NoBreakRange = if (count == 0) &.{} else (ranges orelse return false)[0..count];",
             "    if (!object_ptr.getTextBufferView().setNoBreakRanges(input)) return false;",
-            "    object_ptr.makeCursorVisible();",
+            "    object_ptr.updateBeforeRender();",
             "    return true;",
             "}",
             ""

@@ -602,6 +602,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const room = Math.max(0, size().width - 4);
     const need = (text: string, withCopy: boolean) => (feedback ? leftWidth + 2 : 0) + measureInformation(text) + (withCopy && copy ? copyWidth + 2 : 0);
     const hint = (full: string, compact: string) => need(full, true) <= room ? full : compact;
+    // 主对话三档：先让出 Esc 清空，再让出 Ctrl+J 换行。宽度够时连同左侧说明完整放下；都放不下时回到键位优先
+    const conversationTiers = ['Enter 发送 · Ctrl+J 换行 · Esc 清空 · Ctrl+C 中止/退出', 'Enter 发送 · Ctrl+J 换行 · Ctrl+C 退出', 'Enter 发送 · Ctrl+C 退出'];
+    const conversationKeys = () => conversationTiers.find(text => need(text, true) + (!feedback && leftWidth ? leftWidth + 2 : 0) <= room)
+      ?? conversationTiers.find(text => need(text, true) <= room) ?? conversationTiers.at(-1)!;
     // 面板键位按整项排布：信息行放得下的前缀留在这里，其余整项进候选面板底行（CandidateView），不截半、不丢项。
     // 只有走到这一支（面板此刻的可用操作）时才给底行键位；错误、读取中、删除准备态仍只显示各自原有的键位
     let panelKeys: readonly string[] = [];
@@ -624,7 +628,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : current.kind === 'configuration' ? hint('↑↓ 选择 · Enter 确认 · Ctrl+S 完成 · Esc 返回', '↑↓ 选择 · Enter 确认 · Esc 返回')
       : current.connectionState === 'starting' ? '可先输入 · Ctrl+C 退出'
       : current.connectionState === 'unavailable' ? hint('Enter 重试 · F2 历史 · F3 配置 · Ctrl+C 退出', 'Enter 重试 · F2 历史 · F3 配置')
-      : current.kind === 'conversation' ? hint('Enter 发送 · Esc 清空 · Ctrl+C 中止/退出', 'Enter 发送 · Ctrl+C 退出')
+      : current.kind === 'conversation' ? conversationKeys()
       // 权限确认外层：Esc 即拒绝本次授权，不是一般面板的返回；内层（二次确认、理由、详情）仍先返回选择
       : current.kind === 'confirmation' && (current.selectionLayer ?? 'select') === 'select'
         ? (current.detailsActionId || current.choices?.some(choice => choice.detailsActionId))

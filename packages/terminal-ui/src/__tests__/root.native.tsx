@@ -9,6 +9,7 @@ import type { TerminalAction, TerminalView } from '../protocol.js';
 import { interactionKey } from '../surface-layout.js';
 import type { BodyNode, BodyPage } from '../body-model.js';
 import type { TerminalPasteSink } from '../paste-stream.js';
+import { setEditorAtomicWrap } from '../editor-atomic-wrap.js';
 // 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
 const TEST_READING = { conversationId: 'test', generation: 1 };
 let baselineRevision = 0;
@@ -277,6 +278,72 @@ try {
   editor().cursorOffset = 13; test.mockInput.pressArrow('right'); await flush(); assert.equal(editor().cursorOffset, 18, 'same cached ranges drive atomic Right');
   checks.push('admitted multi-token paste, same native FFI, atomic wrap, narrow/wide resize, raw/copy preservation, undo/redo and atomic Right');
   pasteReply = undefined; editor().setText(''); test.resize(80, 24); await flush();
+  // 硬换行之后继续编辑：每次内容变化都会经产品包装发布原子区间（实际导出 editorViewSetNoBreakRanges），它只能影响折行与视口，
+  // 不得移动编辑光标。真实宿主的 Ctrl+J / Ctrl+Enter 到达应用是原始 0x0a，这里照原样送入；编辑框随行数增高，24 行高时上限 8 行
+  const linefeed = async () => { test.renderer.stdin.emit('data', Buffer.from('\n')); await flush(); };
+  const typeEach = async (value: string) => { for (const ch of value) { test.renderer.stdin.emit('data', Buffer.from(ch)); await flush(); } };
+  const cursorAt = () => [editor().logicalCursor.row, editor().logicalCursor.col];
+  editor().setText(''); await flush();
+  await typeEach('abc'); await linefeed(); await typeEach('xyz');
+  assert.equal(editor().plainText, 'abc\nxyz', 'typing after a hard newline keeps the typed order');
+  assert.deepEqual(cursorAt(), [1, 3], 'the cursor stays where the text was typed');
+  editor().setText(''); await flush();
+  await typeEach('中文'); await linefeed(); await typeEach('字符串');
+  assert.equal(editor().plainText, '中文\n字符串', 'wide characters after a hard newline keep their order');
+  // 草稿超过可见高度：视口 offsetY 不为 0 时继续键入，再上移两行插入；视口始终跟随光标
+  editor().setText(''); await flush();
+  for (const ch of 'abcdefghi') { await typeEach(ch); await linefeed(); }
+  await typeEach('j');
+  assert.equal(editor().plainText, 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj');
+  assert.ok(editor().editorView.getViewport().offsetY > 0, 'the draft is taller than the editor');
+  test.mockInput.pressArrow('up'); await flush(); test.mockInput.pressArrow('up'); await flush();
+  await typeEach('Q');
+  assert.equal(editor().plainText, 'a\nb\nc\nd\ne\nf\ng\nhQ\ni\nj', 'insertion lands at the moved cursor while scrolled');
+  const visual = editor().editorView.getVisualCursor();
+  assert.ok(visual.visualRow >= 0 && visual.visualRow < editor().height, `the viewport follows the cursor: row ${visual.visualRow}`);
+  // 有选区时发布原子区间：选区与光标都不变（经产品包装直接调用实际导出）
+  editor().setText('abc\nxyz'); editor().cursorOffset = 7; await flush();
+  editor().editorView.setSelection(4, 7); await flush();
+  const selectedCursor = editor().cursorOffset;
+  setEditorAtomicWrap(editor(), editor().plainText, [], test.renderer.widthMethod); await flush();
+  assert.equal(editor().getSelectedText(), 'xyz', 'publishing ranges keeps the selection');
+  assert.equal(editor().cursorOffset, selectedCursor, 'publishing ranges never moves the cursor under a selection');
+  editor().editorView.resetSelection(); editor().setText(''); await flush();
+  // 经受支持的粘贴路径带入两行，再续写
+  pasteReply = () => ({ text: 'abc\ndef', paste: true, handles: [] });
+  const twoLines = externalPaste?.(); assert.ok(twoLines);
+  twoLines.write(Buffer.from('payload')); twoLines.end(); await flush(); await flush();
+  await typeEach('xyz');
+  assert.equal(editor().plainText, 'abc\ndefxyz', 'typing after a pasted hard newline keeps the order');
+  // 原子 token 之后硬换行再续写：文本保真，token 仍整块跳过
+  editor().setText(''); await flush();
+  pasteReply = () => ({ text: '12[A B]z', paste: true, handles: [{ token: '[A B]', id: '33333333-3333-3333-3333-333333333333' }] });
+  const tokenPaste = externalPaste?.(); assert.ok(tokenPaste);
+  tokenPaste.write(Buffer.from('payload')); tokenPaste.end(); await flush(); await flush();
+  await linefeed(); await typeEach('qr');
+  assert.equal(editor().plainText, '12[A B]z\nqr', 'a token line followed by a hard newline keeps the typed order');
+  editor().cursorOffset = 2; test.mockInput.pressArrow('right'); await flush();
+  assert.equal(editor().cursorOffset, 7, 'the token is still crossed as one unit');
+  pasteReply = undefined; editor().setText(''); await flush();
+  // 字段（改名）共用同一编辑器
+  await show({ kind: 'selection', title: '对话名称', requestId: 'multiline-field', field: { id: 'name', label: '输入新名称', secret: false, value: '' }, choices: [{ id: 'save', label: '保存' }] });
+  await typeEach('ab'); await linefeed(); await typeEach('cd');
+  assert.equal(editor().plainText, 'ab\ncd', 'a field keeps the typed order after a hard newline');
+  await show({ kind: 'conversation', title: '知行 · 交互验证', conversationId: 'test' });
+  editor().setText(''); await flush();
+  checks.push('hard newline editing: typed order and cursor kept (ASCII, wide, scrolled draft, selection, paste, token, field)');
+  // 主对话键位提示：先让出 Esc 清空，再让出 Ctrl+J 换行；宽度够时左侧说明也完整，不够时键位优先
+  const footer = async (width: number) => { test.resize(width, 24); await flush(); return text().split('\n').filter(line => line.trim()).at(-1) ?? ''; };
+  let row = await footer(131);
+  assert.ok(row.includes('Enter 发送 · Ctrl+J 换行 · Esc 清空 · Ctrl+C 中止/退出') && row.includes('输入消息或 / 查看命令'), row);
+  row = await footer(70);
+  assert.ok(row.includes('Enter 发送 · Ctrl+J 换行 · Ctrl+C 退出') && !row.includes('Esc 清空') && row.includes('输入消息或 / 查看命令'), row);
+  row = await footer(45);
+  assert.ok(row.includes('Enter 发送 · Ctrl+J 换行 · Ctrl+C 退出'), row);
+  row = await footer(40);
+  assert.ok(row.includes('Enter 发送 · Ctrl+C 退出') && !row.includes('Ctrl+J'), row);
+  test.resize(80, 24); await flush();
+  checks.push('conversation key hints: three tiers by width, placeholder kept whole when it fits');
   await show({ kind: 'conversation', title: '知行', conversationId: 'test', busy: true });
   root.receive({ type: 'process-status', status: { conversationId: 'test', view: { revision: 1, phase: '正在回复', tools: [], children: [], usage: {} } } });
   await flush(); assert.match(text(), /正在回复/); assert.ok(!text().includes('正在处理'));
