@@ -691,9 +691,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const shownProcess = () => surface().kind === 'conversation' && processStatus()?.conversationId === surface().conversationId ? processStatus()?.view : undefined;
   // 按键时屏上显示的运行：停止请求带上它所在的对话与过程状态里的身份，由 N 按权威状态决定能否停；屏上空闲时不带
+  const waitingSubject = () => shownProcess()?.activity === 'waiting' && !!(processStatus()?.turnId || processStatus()?.runId);
   const stopTarget = (): TerminalStopTarget | undefined => {
     const current = view(), shown = shownProcess(), status = processStatus();
-    const running = shown?.activity === 'running' || shown?.activity === 'reconciling';
+    // 等待中的输入同样是屏上显示的对象：带它的身份，由 N 按权威状态决定能否停；只有待确认义务（不带身份）时不是可停止的对象
+    const running = shown?.activity === 'running' || shown?.activity === 'reconciling' || waitingSubject();
     if (current.kind !== 'conversation' || !current.conversationId || (!running && !current.busy)) return undefined;
     // 输入身份只在屏上还没有轮次/运行身份时代表“正在提交的这一次”（协议 TerminalStopTarget 与 N 的绑定规则一致）；
     // 屏上已有运行身份时只按它停，另一份在途提交的身份不随带，免得与所停运行的身份互相否决
@@ -1081,7 +1083,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       // 发送尚未交出时 Esc 取消这次发送而不是清空草稿
       if (view().kind === 'conversation' && input.cancelPreparedSubmit()) return;
       if (view().kind === 'conversation' && draft.text) { input.clear(draft.version); return; }
-      if (view().kind === 'conversation' && view().busy) { const stop = stopTarget(); void action({ kind: 'abort', ...(stop ? { stop } : {}) }); } else void cancelPage(); return;
+      if (view().kind === 'conversation' && (view().busy || waitingSubject())) { const stop = stopTarget(); void action({ kind: 'abort', ...(stop ? { stop } : {}) }); } else void cancelPage(); return;
     }
     if (view().kind === 'conversation' && candidateValue()?.ghost && event.name === 'tab' && !event.ctrl && !event.shift && !event.meta) {
       consume(); void candidates?.accept(true).catch(reportStatus()); return;

@@ -13,7 +13,7 @@ const Fixture = new Function(ts.transpile(
 ))();
 
 const ENDED = '这次运行已经结束，无需再停止。', REQUESTED = '已请求停止当前工作；已发生的动作不会回滚。';
-function fixture(state: { local?: { conversationId: string; turnId: string; runId?: string; inputId?: string }; submitting?: boolean; submittingInputId?: string; active?: string[]; task?: boolean; conversationId?: string } = {}) {
+function fixture(state: { local?: { conversationId: string; turnId: string; runId?: string; inputId?: string }; submitting?: boolean; submittingInputId?: string; active?: string[]; task?: boolean; conversationId?: string; followed?: string[] } = {}) {
   const target = new Fixture();
   target.activeTurn = state.local;
   target.submittingInput = state.submitting ?? false;
@@ -23,6 +23,8 @@ function fixture(state: { local?: { conversationId: string; turnId: string; runI
     current: { conversationId: state.conversationId ?? 'conv-1' },
     abortRunIfActive: vi.fn(async (runId: string) => (state.active ?? []).includes(runId)),
     abortWorksceneTask: vi.fn(async () => state.task ?? false),
+    runLifecycles: vi.fn(() => [] as { runId: string; state: string; local?: boolean }[]),
+    followsRun: vi.fn((runId: string) => (state.followed ?? []).includes(runId)),
   };
   target.publish = vi.fn(async () => {});
   target.close = vi.fn(async () => {});
@@ -61,6 +63,45 @@ describe('Ctrl+C carries the run shown at the key press', () => {
     expect(target.requestRunStop).not.toHaveBeenCalled();
     expect(target.controller.abortRunIfActive).not.toHaveBeenCalled();
     expect(target.mainView.message).toBe(ENDED);
+    expect(target.close).not.toHaveBeenCalled();
+  });
+
+  it('stops a queued own input shown as waiting by its run identity, not the newer local turn', async () => {
+    // 等待说明的主体是较早排队的输入：按它的运行身份停，不把较新的本地轮次当成它
+    const target = fixture({ local: { conversationId: 'conv-1', turnId: 'turn-new', runId: 'run-new' }, active: ['run-queued'] });
+    await target.interrupt({ conversationId: 'conv-1', turnId: 'turn-queued', runId: 'run-queued' });
+    expect(target.requestRunStop).not.toHaveBeenCalled();
+    expect(target.controller.abortRunIfActive).toHaveBeenCalledWith('run-queued');
+    expect(target.mainView.message).toBe(REQUESTED);
+    expect(target.close).not.toHaveBeenCalled();
+  });
+
+  it('keeps the actual result when the stopped run ended before the stop request returned', async () => {
+    // 排队中的输入被即时取消：终态先于请求回复到达，运行跟随已写出实际结果，不能再被“已请求”覆盖。
+    // 跟随记录在终态到达时即释放，所以“有本地跟随”要在等待停止请求之前取
+    const followed = ['run-queued'];
+    const target = fixture({ active: ['run-queued'], followed });
+    target.controller.abortRunIfActive = vi.fn(async () => {
+      followed.length = 0;
+      target.mainView = { ...target.mainView, message: '本次运行已中止。' };
+      target.controller.runLifecycles = vi.fn(() => [{ runId: 'run-queued', state: 'terminal', local: true }]);
+      return true;
+    });
+    expect(await target.stopShown({ conversationId: 'conv-1', turnId: 'turn-queued', runId: 'run-queued' }, 'Esc')).toBe(true);
+    expect(target.mainView.message).toBe('本次运行已中止。');
+    expect(target.close).not.toHaveBeenCalled();
+  });
+
+  it('states that the run has ended when nothing local will report the result', async () => {
+    // 没有本地跟随：终端重开后的排队输入、其他接入面的运行，或本地运行以待确认结束后经 /resolve 重新执行（local 仍为真，跟随已结清）。
+    // 请求返回时已是终态，只知道已结束，不说成已取消
+    const target = fixture({ active: ['run-retried'] });
+    target.controller.abortRunIfActive = vi.fn(async () => {
+      target.controller.runLifecycles = vi.fn(() => [{ runId: 'run-retried', state: 'terminal', local: true }]);
+      return true;
+    });
+    expect(await target.stopShown({ conversationId: 'conv-1', turnId: 'turn-old', runId: 'run-retried' }, 'Esc')).toBe(true);
+    expect(target.mainView.message).toBe('这次运行已结束；已发生的动作不会回滚。');
     expect(target.close).not.toHaveBeenCalled();
   });
 

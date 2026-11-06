@@ -73,6 +73,7 @@ import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } fro
 import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
 import { TerminalProcessSession } from './process-session.js';
+import { presentRunActivity } from './run-activity.js';
 import { TerminalRecovery } from './recovery.js';
 import { normalizeCliArgs } from '../logging/entry-mode.js';
 import { terminalEnvironment } from './environment-presentation.js';
@@ -221,6 +222,8 @@ class TerminalApplication {
   readonly #processSession: TerminalProcessSession;
   readonly #recovery: TerminalRecovery;
   #processStatus?: TerminalProcessStatus;
+  /** 合成状态行视图的修订号 */
+  #activityRevision = 0;
   #processStatusDirty = false;
   #processStatusSending?: Promise<void>;
   readonly #bodyWork: TerminalBodyWork;
@@ -885,7 +888,15 @@ class TerminalApplication {
       const otherSubmission = this.#submittingInput && this.#submittingInputId !== local?.inputId;
       if ((sameSubmission || (sameLocal && !otherSubmission)) && await this.#requestRunStop(key)) return true;
       const runId = stop.runId ?? (sameLocal ? local?.runId : undefined);
-      if (runId && !sameSubmission && await controller.abortRunIfActive(runId)) return requested();
+      // 本地跟随记录在终态到达时即释放，所以在等待停止请求之前取
+      const followed = !!runId && controller.followsRun(runId);
+      if (runId && !sameSubmission && await controller.abortRunIfActive(runId)) {
+        // 请求返回前终态已经到达（例如排队中的输入被即时取消）：有本地跟随时实际结果由它写出，不再用“已请求”覆盖；
+        // 没有本地跟随时只知道已结束（跟踪器不区分结束方式），如实说已结束，不说成已取消
+        if (!controller.runLifecycles().some(entry => entry.runId === runId && entry.state === 'terminal')) return requested();
+        if (followed) return true;
+        this.#mainView = { ...this.#mainView, message: '这次运行已结束；已发生的动作不会回滚。' }; await this.#publish(this.#mainView); return true;
+      }
     }
     this.#showResult({ ...this.#mainView, message: '这次运行已经结束，无需再停止。' }); await this.#publish(this.#mainView);
     return false;
@@ -1087,11 +1098,10 @@ class TerminalApplication {
         },
         onObservedTurnComplete: source => this.#outputProjection.end(source.conversationId, source.turnId, source.runId),
         onNotice: () => { /* Durable/current-owner state is refreshed at the next page boundary. */ },
-        // 结果待确认的运行（宿主中途失联、重启后等）：按权威状态在状态行指向 /resolve，不改写历史正文
-        onUncertainRun: message => {
-          this.#mainView = { ...this.#mainView, message };
-          if (!this.#editor && !this.#selection && this.#mainView.readyForInput) void this.#publish(this.#mainView).catch(() => {});
-        },
+        // 运行的权威生命周期有变化（含结果待确认）：状态行按生命周期与待确认义务重新合成，不写进会被覆盖的一次性说明
+        onRunLifecycle: () => this.#sendProcessStatus(),
+        // 新的执行尝试已确证：旧尝试的过程展示作废，新尝试的帧重新开始
+        onProcessAttempt: source => this.#processSession.restart(source.conversationId, source.runId, source.turnId),
       }, initial.active);
       await observeStartupPhase(this.#logging.records, 'terminal.local-description', () => this.#localView.refresh());
       this.#showResult({ kind: 'conversation', title: initial.active.name, message: initial.resumedConversationName ? '已恢复最近对话。' : '准备就绪，开始你的第一条消息。', connected: true });
@@ -1713,7 +1723,10 @@ class TerminalApplication {
     this.#processStatusSending = (async () => {
       while (this.#processStatusDirty && !this.#abort.signal.aborted) {
         this.#processStatusDirty = false;
-        await this.#toUi({ type: 'process-status', status: this.#processStatus });
+        // 状态行只有一处说明：按权威生命周期合成等待、取消与待确认说明，过程展示只在当前尝试已确证时出现
+        const status = presentRunActivity({ conversationId: this.#controller?.current.conversationId,
+          lifecycles: this.#controller?.runLifecycles() ?? [], process: this.#processStatus, revision: ++this.#activityRevision });
+        await this.#toUi({ type: 'process-status', status });
       }
     })().catch(() => this.#close(70, 'terminal-process-status-undelivered'))
       .finally(() => { this.#processStatusSending = undefined; if (this.#processStatusDirty && !this.#abort.signal.aborted) this.#sendProcessStatus(); });
@@ -2214,7 +2227,8 @@ class TerminalApplication {
       // its duplicate observer notice. Keep the authoritative error visible,
       // bounded independently of the control frame and detached from its RPC.
       if (this.#controller?.current.conversationId !== conversationId) return;
-      this.#mainView = { ...this.#mainView, busy: false, message: outcome.reason === 'completed' ? undefined : outcome.message };
+      // 结果待确认由状态行的持续义务说明承载（直到 /resolve 关闭），这里不再写一次性说明
+      this.#mainView = { ...this.#mainView, busy: false, message: outcome.reason === 'completed' || outcome.uncertain ? undefined : outcome.message };
       // 提议运行结束不是任务完成：显示“已提出推进”，草案就绪后由草案事件拉起确认面；起草结果先到时显示该结果
       if (outcome.control?.advancementProposal) {
         const stage = this.#proposalStage;
@@ -2228,7 +2242,7 @@ class TerminalApplication {
           message: `运行已结束；场景切换未完成：${error instanceof Error ? error.message.slice(0, 1024) : '请重新核对当前对话。'}` }; }
         if (outcome.control.conflict) this.#mainView = { ...this.#mainView, message: `本轮包含多个场景请求，已按最后一次确认处理。${this.#mainView.message ?? ''}` };
       }
-      if (outcome.reason !== 'completed' && this.#mainView.message !== outcome.message) {
+      if (outcome.reason !== 'completed' && !outcome.uncertain && this.#mainView.message !== outcome.message) {
         this.#mainView = { ...this.#mainView, message: `${outcome.message}\n${this.#mainView.message ?? ''}` };
       }
       if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);

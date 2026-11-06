@@ -157,6 +157,12 @@ describe('terminal session navigation', () => {
     const f = fixture(); await f.owner.manage('work', 'create');
     expect(f.createScene).not.toHaveBeenCalled();
   });
+  it('marks an uncertain ending so the status line obligation carries it instead of a one-off message', () => {
+    const uncertain = { reason: 'error', error: { name: 'RunUncertain', message: '本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。' } } as unknown as TurnOutcome['result'];
+    expect(projectTerminalTurnOutcome({ result: uncertain })).toMatchObject({ reason: 'error', uncertain: true });
+    const failed = { reason: 'error', error: { name: 'ModelError', message: '模型不可用' } } as unknown as TurnOutcome['result'];
+    expect(projectTerminalTurnOutcome({ result: failed })).not.toHaveProperty('uncertain');
+  });
   it('retains only bounded navigation and the handoff fact from a completed turn', () => {
     const result = { reason: 'completed' } as unknown as TurnOutcome['result'];
     expect(projectTerminalTurnOutcome({ result, postTurnControl: { intent: { kind: 'enter', sceneId: 'scene-1' } } }).control?.navigation)

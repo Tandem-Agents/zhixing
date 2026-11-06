@@ -12,10 +12,10 @@ it('rebuilds a run outcome line from its locator and states each outcome in user
   expect(segment).toMatchObject({ blockId: 'owner-log:r:outcome', role: 'notice', text });
   expect(runOutcomeText('failed', 'Connection error.')).toBe('⚠ 这次运行未完成：无法连接模型服务：请检查网络、代理或服务地址后重试。');
   expect(runOutcomeText('cancelled')).toBe('这次运行已停止。');
-  expect(runOutcomeText('uncertain')).toContain('/resolve');
-  expect(runOutcomeText('running')).toContain('仍在进行');
   expect(runOutcomeText('missing')).toContain('找不到这次运行的记录');
   for (const quiet of ['committed', 'unknown'] as const) expect(runOutcomeText(quiet)).toBeUndefined();
+  // 还会变化的生命周期状态不固化成历史正文：由状态行的活动投影承载，读取之后不会过时
+  for (const live of ['queued', 'dispatched', 'running', 'cancel-requested', 'uncertain'] as const) expect(runOutcomeText(live)).toBeUndefined();
   replay.close();
 });
 

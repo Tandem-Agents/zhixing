@@ -17,6 +17,8 @@ type Navigation = Extract<PostTurnControlOutcome['intent'], { kind: 'enter' | 'e
 export interface TerminalTurnOutcome {
   readonly reason: TurnOutcome['result']['reason'];
   readonly message: string;
+  /** 这一轮以“结果待确认”结束：由状态行的持续义务说明承载，不再写进一次性说明，免得同一信息占两行 */
+  readonly uncertain?: true;
   readonly bodyPending?: true;
   readonly control?: { readonly navigation?: Navigation; readonly handedOff: boolean; readonly conflict: boolean; readonly advancementProposal?: true };
 }
@@ -42,6 +44,7 @@ export function projectTerminalTurnOutcome(outcome: TurnOutcome): TerminalTurnOu
     default: { const unhandled: never = result; throw Error(`terminal-turn-result:${unhandled}`); }
   }
   const control = outcome.postTurnControl, intent = control?.intent;
+  if (result.reason === 'error' && result.error.name === 'RunUncertain') return { reason, message, uncertain: true };
   if (!control || !intent) return { reason, message };
   if (intent.kind === 'propose_advancement' && reason === 'completed') {
     return { reason, message: ADVANCEMENT_PROPOSED_NOTICE, control: { handedOff: false, conflict: !!control.conflict, advancementProposal: true } };

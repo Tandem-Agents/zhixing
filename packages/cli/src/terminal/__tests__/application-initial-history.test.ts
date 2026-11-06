@@ -133,21 +133,22 @@ describe('initial history cursor follows confirmed display', () => {
 describe('history marks each run with its outcome once', () => {
   // 逆序读：一个运行的第一个片段即它在正文里的末尾，结果行前插后落在它之后
   const items = (h: ReturnType<typeof fixture>) => h.target.display.appendInitialHistory.mock.calls.flatMap((call: unknown[]) => call[0] as { segment: { text: string }; replay: { kind: string } }[]);
-  it('adds one line per run that failed, stopped, is still running, awaits /resolve or has no record; none for completed or unknown', async () => {
+  it('adds one line only for a determined outcome; none for runs still running, awaiting /resolve, completed or unknown', async () => {
     const h = fixture(), release = h.release; release.resolve();
-    const states: Record<string, { state: string; reason?: string }> = { 'run-0': { state: 'failed', reason: 'Connection error.' }, 'run-1': { state: 'committed' },
-      'run-2': { state: 'uncertain' }, 'run-3': { state: 'unknown' } };
-    h.target.conversation.runOutcomes.mockImplementation(async (_id: string, runIds: string[]) => ({ entries: runIds.map(runId => ({ runId, ...states[runId] })) }));
+    // run-3 没有记录可读（按无法判断处理）
+    const states: Record<string, { state: string; reason?: string }> = { 'run-0': { state: 'failed', reason: 'Connection error.' }, 'run-1': { state: 'running' },
+      'run-2': { state: 'uncertain' } };
+    h.target.conversation.runOutcomes.mockImplementation(async (_id: string, runIds: string[]) => ({ entries: runIds.filter(runId => states[runId]).map(runId => ({ runId, ...states[runId] })) }));
     await h.target.onlineHistoryPage(h.history);
     expect(h.target.conversation.runOutcomes).toHaveBeenCalledOnce();
     expect(h.target.conversation.runOutcomes).toHaveBeenCalledWith('current', ['run-0', 'run-1', 'run-2', 'run-3']);
-    // 每批至多 4 项：失败行、run-0、run-1、待确认行
-    expect(h.stored).toEqual([runOutcomeText('failed', 'Connection error.'), 'message-0', 'message-1', runOutcomeText('uncertain')]);
-    expect(items(h).map(item => item.replay.kind)).toEqual(['outcome', 'owner', 'owner', 'outcome']);
+    // 每批至多 4 项：失败行、run-0、run-1、run-2。执行中与待确认还会变化，由状态行承载，不固化成历史正文
+    expect(h.stored).toEqual([runOutcomeText('failed', 'Connection error.'), 'message-0', 'message-1', 'message-2']);
+    expect(items(h).map(item => item.replay.kind)).toEqual(['outcome', 'owner', 'owner', 'owner']);
     expect(h.stored[0]).toMatch(/^⚠ 这次运行未完成：/u);
     await h.target.onlineHistoryPage(h.history);
-    // 接着读：run-2 的片段不再重复结果行；run-3 无法判断不出行；不再为已读过的运行查询状态
-    expect(h.stored.slice(4)).toEqual(['message-2', 'message-3']);
+    // 接着读：run-3 无法判断不出行；不再为已读过的运行查询状态
+    expect(h.stored.slice(4)).toEqual(['message-3']);
     expect(h.target.conversation.runOutcomes).toHaveBeenCalledOnce();
   });
   it('keeps the history readable when the outcome read fails, and fills the line in on the next reload', async () => {

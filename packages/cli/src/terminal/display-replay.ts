@@ -23,7 +23,11 @@ export type RunOutcomeState = ConversationRunOutcomesPage['entries'][number]['st
 // 存储维护未放行写入：运行记录里是内部原文，给用户说清是本机存储繁忙
 const STORAGE_NOT_ADMITTED = /^Storage maintenance was not admitted\b/u;
 
-/** 历史里一次运行末尾的结果行；已完成与无法判断不出行。仍在进行、结果待确认如实说明，不笼统建议重发。 */
+/**
+ * 历史里一次运行末尾的结果行，只写已确定的结束结果（失败、过期、停止、找不到记录），用来解释为什么没有回答。
+ * 已完成与无法判断不出行。排队、派发、执行、停止中、结果待确认都还会变化：它们由状态行的活动投影按权威生命周期承载，
+ * 不固化成历史正文，否则读取之后就会与实际状态矛盾。
+ */
 export function runOutcomeText(state: RunOutcomeState, reason?: string): string | undefined {
   switch (state) {
     case 'failed': {
@@ -32,9 +36,6 @@ export function runOutcomeText(state: RunOutcomeState, reason?: string): string 
     }
     case 'expired': return '⚠ 这次运行等待过久已失效，没有执行完成。';
     case 'cancelled': return '这次运行已停止。';
-    case 'cancel-requested': return '这次运行正在停止。';
-    case 'uncertain': return '⚠ 这次运行的结果尚待确认：可用 /resolve 查看并处理。';
-    case 'queued': case 'dispatched': case 'running': return '这次运行仍在进行，结果会接在后面。';
     case 'missing': return '⚠ 找不到这次运行的记录。';
     default: return undefined;
   }

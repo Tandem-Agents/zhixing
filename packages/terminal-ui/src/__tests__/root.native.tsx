@@ -350,6 +350,36 @@ try {
   root.receive({ type: 'process-status', status: undefined });
   await show({ kind: 'conversation', title: '知行 · 交互验证', conversationId: 'test' });
   checks.push('active process uses the shared M1 indicator without another busy row');
+  // 被挡住的输入：等待活动用静态标记如实说明，Esc 携带它的身份请求停止；只有待确认义务时不带身份、不算在停止范围内
+  await show({ kind: 'conversation', title: '知行', conversationId: 'test', busy: true });
+  root.receive({ type: 'process-status', status: { conversationId: 'test', turnId: 'turn-wait', runId: 'run-wait',
+    view: { revision: 2, phase: '消息已排队，需先处理上次运行结果 · /resolve', activity: 'waiting', tools: [], children: [], usage: {} } } });
+  await flush();
+  assert.match(text(), /◆ 消息已排队，需先处理上次运行结果 · \/resolve/); assert.ok(!text().includes('正在处理'));
+  const beforeWaitingEsc = actions.length;
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  assert.deepEqual(actions.slice(beforeWaitingEsc).filter(action => action.kind === 'abort'),
+    [{ kind: 'abort', stop: { conversationId: 'test', turnId: 'turn-wait', runId: 'run-wait' } }]);
+  // 一次性说明（如被取消的那一轮的结果）写在等待说明上方，状态行仍是等待说明
+  await show({ kind: 'conversation', title: '知行', conversationId: 'test', message: '本次运行已中止。' });
+  root.receive({ type: 'process-status', status: { conversationId: 'test', turnId: 'turn-wait', runId: 'run-wait',
+    view: { revision: 3, phase: '消息已排队，需先处理上次运行结果 · /resolve', activity: 'waiting', tools: [], children: [], usage: {} } } });
+  await flush();
+  assert.match(text(), /本次运行已中止。[\s\S]*◆ 消息已排队，需先处理上次运行结果 · \/resolve/);
+  await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
+  root.receive({ type: 'process-status', status: { conversationId: 'test',
+    view: { revision: 4, phase: '上次运行结果待确认 · /resolve 处理', activity: 'waiting', tools: [], children: [], usage: {} } } });
+  await flush();
+  assert.match(text(), /◆ 上次运行结果待确认 · \/resolve 处理/);
+  const beforeObligationKey = actions.length;
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  assert.equal(actions.slice(beforeObligationKey).filter(action => action.kind === 'abort').length, 0, 'an obligation alone is not a stop target');
+  test.mockInput.pressKey('c', { ctrl: true }); await flush();
+  assert.deepEqual(actions.slice(beforeObligationKey).filter(action => action.kind === 'interrupt'), [{ kind: 'interrupt' }]);
+  await new Promise(resolve => setTimeout(resolve, 800));
+  root.receive({ type: 'process-status', status: undefined });
+  await show({ kind: 'conversation', title: '知行 · 交互验证', conversationId: 'test' });
+  checks.push('waiting input: static indicator, truthful text, Esc carries its identity; an obligation alone carries none');
   // The upstream mock typeText iterates UTF-16 units. Real stdin carries UTF-8.
   for (const point of '中文 mixed 👨‍👩‍👧‍👦') test.mockInput.pressKey(point);
   await flush();

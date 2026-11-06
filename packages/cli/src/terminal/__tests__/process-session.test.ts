@@ -30,6 +30,29 @@ describe('terminal process session ownership', () => {
     }
     await output.close();
   });
+  it('drops an old attempt display on restart so the confirmed new attempt shows again', () => {
+    const f = fixture();
+    f.emit('retry', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'old attempt' } });
+    f.emit('retry', 1, { kind: 'gap', reason: '过程来源已换代，请刷新正文。' });
+    f.changed.mockClear();
+    // 关闭后的旧展示仍会挡住同一运行的帧
+    f.emit('retry', 2, { kind: 'yield', delta: { type: 'text_delta', text: 'blocked' } });
+    expect(f.changed).not.toHaveBeenCalled();
+    f.session.restart('conversation', 'retry');
+    expect(f.changed).toHaveBeenLastCalledWith(undefined);
+    f.emit('retry', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'new attempt' } });
+    expect(f.changed.mock.calls.at(-1)![0]).toMatchObject({ runId: 'retry', view: { activity: 'running' } });
+  });
+  it('lets a confirmed new attempt run after the old uncertain waiter ended the display', () => {
+    const f = fixture();
+    f.session.followLocal('conversation', 'turn-retry', 'retry');
+    f.emit('retry', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'old attempt' } });
+    // 待确认结清本地等待时会调用 end：这只是旧尝试的展示结束，不是运行的业务终态
+    f.session.end('conversation', 'turn-retry', 'retry');
+    f.session.restart('conversation', 'retry', 'turn-retry');
+    f.emit('retry', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'new attempt' } });
+    expect(f.changed.mock.calls.at(-1)![0]).toMatchObject({ runId: 'retry', view: { activity: 'running' } });
+  });
   it('remembers completion before the first process frame and does not steal a newer activity', () => {
     const f = fixture(); f.session.end('conversation', undefined, 'early');
     f.emit('early', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'late body' } });

@@ -64,6 +64,7 @@ import type { RpcConversationFacade, ConversationStatusCursor } from "./rpc-conv
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 import type { ConversationOutputIdentity, ConversationOutputSource } from "./conversation-output.js";
 import { ObservedTextPrefix } from "./observed-text-prefix.js";
+import { RunLifecycleTracker, type RunLifecycle } from "./run-lifecycle.js";
 
 /** 当前对话指针 + 模式视图(由全域键派生,场景显示名取自 enter 响应) */
 export interface ActiveConversation {
@@ -224,8 +225,10 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
   onActivity?: (activity: SessionActivityPayload) => void;
   onNotice?: (message: string) => void;
-  /** 当前对话出现结果待确认的运行（按权威状态）：接入面据此提示用户经 /resolve 处理 */
-  onUncertainRun?: (message: string) => void;
+  /** 当前对话里运行的权威生命周期有变化：接入面经 runLifecycles() 读取快照，投影状态说明与停止主体 */
+  onRunLifecycle?: () => void;
+  /** 权威状态确证了运行的新执行尝试，旧尝试的过程展示作废：接入面丢弃该运行的旧过程，新尝试的帧重新开始 */
+  onProcessAttempt?: (source: { readonly conversationId: string; readonly runId: string; readonly turnId?: string }) => void;
   /** Consume the complete result synchronously, including when completion
    * precedes the send receipt. Only this surface's projection remains in its
    * waiter promise; legacy consumers retain the original outcome by default. */
@@ -266,6 +269,8 @@ export interface ObservedTurnNotification extends ConversationOutputIdentity {}
 interface DurableRunWatch {
   readonly conversationId: string;
   readonly turnId: string;
+  /** 本接入面的接纳先后：生命周期按它恢复本地输入的归属与顺序 */
+  readonly order: number;
   statusRevision: number;
   finalRequested?: boolean;
 }
@@ -375,6 +380,9 @@ export class ConversationController<Outcome = TurnOutcome> {
   private readonly localOutput = new Map<string, { conversationId: string; text: ObservedTextPrefix; recovering: boolean; pendingReceipt: boolean }>();
   private readonly processRuns = new Map<string, { source: SessionProcessSource; text: ObservedTextPrefix; lastSeq: number; closed: boolean; historyRendered: boolean }>();
   private readonly processHistory = new Map<string, true>();
+  /** 当前对话里运行的权威生命周期与当前执行尝试身份（有界） */
+  private readonly lifecycles = new RunLifecycleTracker();
+  private acceptOrder = 0;
   private wakeReceipt?: () => void;
   private readonly durableRuns = new Map<string, DurableRunWatch>();
   private readonly durableRunByTurn = new Map<string, string>();
@@ -520,6 +528,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       opts.conversation.onStatus((notice) => {
         if (this.opts.pagedRecovery) {
           if (notice.ref.conversationId === this.active.conversationId) {
+            // 实时状态是权威事实：直接进入生命周期（按修订去重），不必等有序正文恢复
+            this.applyLifecycleStatus(notice);
             if (notice.state === 'uncertain-closed' && notice.resultingState === 'committed') this.requestCompletion(notice.ref);
             const result = terminalResultForStatus(notice), watch = this.durableRuns.get(notice.ref.runId);
             if (result && watch && notice.statusRevision > watch.statusRevision) {
@@ -573,11 +583,65 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   /** 切当前对话指针(纯 UI 态变更,无宿主副作用)。 */
+  /** 当前对话里运行的权威生命周期快照（有界）：接入面据此投影状态说明与停止主体 */
+  runLifecycles(): readonly RunLifecycle[] {
+    return this.lifecycles.snapshot(this.active.conversationId);
+  }
+
+  /** 该运行在本接入面还有未结清的本地等待：它的终态会由本地跟随写出实际结果。终态到达时随即释放，须在等待别的回复之前取 */
+  followsRun(runId: string): boolean {
+    return this.durableRuns.has(runId);
+  }
+
+  /**
+   * 权威状态事实进入生命周期（实时通知、控制扫描与恢复页共用，按修订去重）。本地跟随的运行补上本接入面的归属；
+   * 确证到新的执行尝试时，作废属于旧尝试的过程条目，并让接入面清掉旧尝试的展示（含它留下的已结束标记）。
+   */
+  private applyLifecycleStatus(notice: ConversationStatusNotice): void {
+    const { conversationId, runId } = notice.ref;
+    if (conversationId !== this.active.conversationId) return;
+    const { changed, attemptChanged, newAttempt } = this.lifecycles.status(notice);
+    const watch = this.durableRuns.get(runId);
+    const owned = !!watch && watch.conversationId === conversationId &&
+      this.lifecycles.receipt(conversationId, runId, watch.turnId, watch.order);
+    if (!changed && !owned) return;
+    if (attemptChanged || newAttempt) {
+      const attempt = this.lifecycles.get(runId)?.assignmentId, process = this.processRuns.get(runId);
+      const stale = !!attempt && !!process && process.source.assignmentId !== attempt;
+      if (stale) this.processRuns.delete(runId);
+      if (stale || newAttempt) {
+        const turnId = this.lifecycles.get(runId)?.turnId ?? process?.source.turnId;
+        this.opts.onProcessAttempt?.({ conversationId, runId, ...(turnId ? { turnId } : {}) });
+      }
+    }
+    this.opts.onRunLifecycle?.();
+  }
+
+  /** 已查证的提交终态（不是未查证的 final 通知） */
+  private applyLifecycleFinal(conversationId: string, runId: string): void {
+    if (conversationId === this.active.conversationId && this.lifecycles.final(conversationId, runId)) this.opts.onRunLifecycle?.();
+  }
+
+  /** 按本地跟随记录恢复当前对话里本接入面输入的归属与接纳顺序（切换回来时） */
+  private seedLocalLifecycles(conversationId: string): void {
+    for (const [runId, watch] of this.durableRuns) {
+      if (watch.conversationId === conversationId) this.lifecycles.receipt(conversationId, runId, watch.turnId, watch.order);
+    }
+  }
+
+  private resetLifecycles(): void {
+    this.lifecycles.clear();
+    this.opts.onRunLifecycle?.();
+  }
+
   setActive(next: ActiveConversation): void {
     if (next.conversationId !== this.active.conversationId) this.presentationRevision++;
-    if (next.conversationId !== this.active.conversationId) { this.processRuns.clear(); this.processHistory.clear(); }
+    if (next.conversationId !== this.active.conversationId) { this.processRuns.clear(); this.processHistory.clear(); this.lifecycles.clear(); }
     if (next.conversationId !== this.active.conversationId) { this.recoveryVersion++; this.recoveryDeleted = false; this.recoveryResetRequested = this.opts.pagedRecovery === true; }
+    const switched = next.conversationId !== this.active.conversationId;
     this.active = next;
+    // 换到别的对话：旧对话的生命周期已清空；本接入面在这个对话里仍在跟随的输入按原有归属与顺序恢复，其余由恢复事实重建
+    if (switched) { this.seedLocalLifecycles(next.conversationId); this.opts.onRunLifecycle?.(); }
     this.wakeReceipt?.();
   }
 
@@ -1120,12 +1184,16 @@ export class ConversationController<Outcome = TurnOutcome> {
       rememberBounded(this.observedContinuations, runId, { ...observed, localTurnId: turnId });
       return;
     }
+    const order = ++this.acceptOrder;
     this.durableRuns.set(runId, {
       conversationId,
       turnId,
+      order,
       statusRevision: 0,
     });
     this.durableRunByTurn.set(turnId, runId);
+    // 本接入面的接纳回执：生命周期在没有状态事实之前是“未知”
+    if (conversationId === this.active.conversationId && this.lifecycles.receipt(conversationId, runId, turnId, order)) this.opts.onRunLifecycle?.();
     const process = this.processRuns.get(runId);
     if (output && process) output.text = process.text;
     const status = this.pendingStatuses.get(runId);
@@ -1178,6 +1246,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   private consumeStatus(notice: ConversationStatusNotice): void {
+    this.applyLifecycleStatus(notice);
     const runId = notice.ref.runId;
     const watch = this.durableRuns.get(runId);
     if (!watch) {
@@ -1185,10 +1254,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       const prior = this.pendingStatuses.get(runId);
       if (prior && prior.statusRevision > notice.statusRevision) return;
       rememberBounded(this.pendingStatuses, runId, notice);
-      if (notice.state === "uncertain" && prior?.statusRevision !== notice.statusRevision) {
-        this.opts.onNotice?.(UNCERTAIN_RUN_NOTICE);
-        if (notice.ref.conversationId === this.active.conversationId) this.opts.onUncertainRun?.(UNCERTAIN_RUN_NOTICE);
-      }
+      if (notice.state === "uncertain" && prior?.statusRevision !== notice.statusRevision) this.opts.onNotice?.(UNCERTAIN_RUN_NOTICE);
       const observed = this.observedContinuations.get(runId);
       const result = terminalResultForStatus(notice);
       if (result && notice.ref.conversationId === this.active.conversationId) {
@@ -1282,8 +1348,8 @@ export class ConversationController<Outcome = TurnOutcome> {
     observed.settled = true;
     const identity = { conversationId: observed.conversationId, runId: notice.ref.runId };
     this.opts.onObservedTurnDelta?.(identity);
-    const label = observed.communication ? "来信处理" : "任务续接";
-    this.opts.onYield({ type: "text_delta", text: result.reason === "error" ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: "status", notice });
+    const text = observedTerminalText(observed.communication ? "来信处理" : "任务续接", result);
+    if (text) this.opts.onYield({ type: "text_delta", text }, { ...identity, kind: "status", notice });
     this.opts.onObservedTurnComplete?.(identity);
   }
 
@@ -1456,6 +1522,8 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (!current()) return;
           if (fact.kind === 'final') await this.confirmCommittedRun(fact.frame, current);
           else if (fact.kind === 'status') {
+            // 控制扫描读到的状态事实同样进入生命周期：正文被阻塞时活动主体也不停在旧状态
+            this.applyLifecycleStatus(fact.notice);
             const notice = fact.notice, watch = this.durableRuns.get(notice.ref.runId), result = terminalResultForStatus(notice);
             if (result) this.opts.onRunTerminal?.({ conversationId, runId: notice.ref.runId, turnId: watch?.turnId });
             if (watch && result && notice.statusRevision > watch.statusRevision) this.finishTurn(watch.conversationId, watch.turnId, result);
@@ -1525,12 +1593,13 @@ export class ConversationController<Outcome = TurnOutcome> {
       return;
     }
     const notice = fact.notice, runId = notice.ref.runId;
+    if (current()) this.applyLifecycleStatus(notice);
     const result = terminalResultForStatus(notice), watch = this.durableRuns.get(runId);
     if (watch && notice.statusRevision > watch.statusRevision) {
       watch.statusRevision = notice.statusRevision;
       if (result) { progress.localSettled = true; this.finishTurn(watch.conversationId, watch.turnId, result); }
     }
-    if (notice.state === 'uncertain') { this.opts.onNotice?.(UNCERTAIN_RUN_NOTICE); this.opts.onUncertainRun?.(UNCERTAIN_RUN_NOTICE); }
+    if (notice.state === 'uncertain') this.opts.onNotice?.(UNCERTAIN_RUN_NOTICE);
     if (!result) return;
     if (!current()) return;
     let observed = this.observedContinuations.get(runId);
@@ -1549,8 +1618,8 @@ export class ConversationController<Outcome = TurnOutcome> {
     observed.communication ||= fact.communication;
     if (!observed.settled && !local) {
       const identity = { conversationId, runId };
-      const label = observed.communication ? '来信处理' : fact.continuation ? '任务续接' : '运行';
-      await this.emitRecoveredYield({ type: 'text_delta', text: result.reason === 'error' ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: 'status', notice });
+      const text = observedTerminalText(observed.communication ? '来信处理' : fact.continuation ? '任务续接' : '运行', result);
+      if (text) await this.emitRecoveredYield({ type: 'text_delta', text }, { ...identity, kind: 'status', notice });
       await this.opts.onRecoveryDrain?.(identity);
       if (!current()) return;
       observed.settled = true;
@@ -1608,6 +1677,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       Object.assign(observed, { completion: completion.summary });
       if (watch) observed.localTurnId = watch.turnId;
       rememberBounded(this.observedContinuations, frame.runId, observed);
+      // 提交已经查证：该运行进入终态
+      this.applyLifecycleFinal(frame.conversationId, frame.runId);
       this.opts.onRunTerminal?.({ conversationId: frame.conversationId, runId: frame.runId, turnId: watch?.turnId });
       if (watch) {
         const waiter = this.waiters.get(watch.turnId);
@@ -1842,6 +1913,14 @@ export class ConversationController<Outcome = TurnOutcome> {
     catch { this.opts.onNotice?.('过程展示不可读取，请刷新正文。'); return; }
     const { source, payload } = value, runId = source.runId;
     if (!runId) return;
+    // 当前执行尝试由权威状态确证：别的尝试的帧不进入展示；新尝试的帧遇到旧尝试的条目时，旧条目作废后重新开始
+    const admission = this.lifecycles.admitProcess(runId, source.assignmentId, this.processRuns.get(runId)?.source.assignmentId);
+    if (admission === 'drop') return;
+    if (admission === 'restart') {
+      const turnId = this.lifecycles.get(runId)?.turnId ?? this.processRuns.get(runId)?.source.turnId ?? source.turnId;
+      this.processRuns.delete(runId);
+      this.opts.onProcessAttempt?.({ conversationId: source.conversationId, runId, ...(turnId ? { turnId } : {}) });
+    }
     let process = this.processRuns.get(runId);
     if (!process) {
       if (this.processRuns.size >= 64) {
@@ -2045,6 +2124,8 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (match.record.postTurnControl) {
             this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
           }
+          // 已提交的记录出现在历史里：提交已经查证，该运行进入终态
+          this.applyLifecycleFinal(watch.conversationId, runId);
           this.finishTurn(watch.conversationId, watch.turnId, {
             reason: "completed",
             message: finalAssistantMessageOf(match.record.messages),
@@ -2479,9 +2560,12 @@ export class ConversationController<Outcome = TurnOutcome> {
     }
     if (payload.change === "cleared") {
       this.processRuns.clear();
+      // 清空后旧运行不再属于可见对话：生命周期按恢复事实重建
+      this.resetLifecycles();
       this.recoveryVersion++; this.recoveryResetRequested = true; this.wakeReceipt?.(); this.wakeRecovery();
       return { kind: "cleared" };
     }
+    this.resetLifecycles();
     this.recoveryVersion++; this.recoveryDeleted = true; this.wakeReceipt?.();
     const turnId = this.localTurnsByConversation.get(payload.conversationId);
     if (turnId) this.finishTurn(payload.conversationId, turnId, { reason: 'error', error: { name: 'ConversationDeleted', message: '当前对话已删除。' }, usage: { inputTokens: 0, outputTokens: 0 } });
@@ -2495,6 +2579,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   dispose(): void {
     this.processRuns.clear();
     this.processHistory.clear();
+    this.lifecycles.clear();
     this.disposed = true;
     this.localOutput.clear(); this.wakeReceipt?.();
     clearImmediate(this.lookupScheduled); this.lookupScheduled = undefined;
@@ -2524,6 +2609,12 @@ export class ConversationController<Outcome = TurnOutcome> {
 }
 
 const UNCERTAIN_RUN_NOTICE = "本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。";
+
+/** 旁观运行终态写进正文的一句。结果待确认不写：它由状态行的持续义务说明承载，直到 /resolve 关闭，写进正文会在关闭后仍让人去处理 */
+function observedTerminalText(label: string, result: WireAgentResult): string | undefined {
+  if (result.reason === "error" && result.error.name === "RunUncertain") return undefined;
+  return result.reason === "error" ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n`;
+}
 
 function terminalResultForStatus(
   notice: ConversationStatusNotice,

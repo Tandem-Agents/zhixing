@@ -23,6 +23,7 @@ import { RpcConversationFacade, PendingInputReceiptError } from "../rpc-conversa
 import type { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 import { TerminalOutputProjection } from '../../terminal/output.js';
+import { presentRunActivity } from '../../terminal/run-activity.js';
 import { createUserSubmission } from "../user-submission.js";
 import { projectProcessYield } from '@zhixing/rpc/session-wire';
 import { advancementExecutionTurnId } from "@zhixing/core/advancement/proposal-identity";
@@ -741,6 +742,58 @@ describe('assignment display completion is independent from business completion'
       f.emit.process(projection(accepted.runId!, 2, { kind: 'closed' }));
       f.emit.process(projection(accepted.runId!, 3, { kind: 'yield', delta: { type: 'text_delta', text: 'stale' } }));
       expect(onProcess).toHaveBeenCalledTimes(3);
+    } finally { controller.dispose(); }
+  });
+  const runStatus = (runId: string, state: string, statusRevision: number, extra: Record<string, unknown> = {}) => ({ v: 1,
+    ref: { execution: 'conversation', conversationId: 'conv-1', ownerEpoch: 1, runId }, state, statusRevision, actions: [], at: '2026-11-06T00:00:00.000Z', ...extra });
+  const attemptFrame = (runId: string, assignmentId: string, seq: number, text: string) => ({ version: 1,
+    source: { conversationId: 'conv-1', runId, assignmentId, streamEpoch: 1, sourceSeq: seq }, payload: { kind: 'yield', delta: { type: 'text_delta', text } } });
+  it('drops a stale attempt tail and shows the confirmed new attempt after a retry', () => {
+    const f = makeFakes(), onProcess = vi.fn(), onProcessAttempt = vi.fn();
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: vi.fn(), onProcess, onProcessAttempt } as never, initial);
+    const digest = `sha256:${'1'.repeat(64)}`;
+    try {
+      f.emit.status(runStatus('retry-run', 'dispatched', 2, { assignmentId: 'assignment-A' }));
+      f.emit.process(attemptFrame('retry-run', 'assignment-A', 1, 'a1'));
+      f.emit.status(runStatus('retry-run', 'uncertain', 3, { actions: ['verify-side-effects', 'abandon', 'retry-risk-ack'], openFactDigest: digest }));
+      f.emit.status(runStatus('retry-run', 'uncertain-closed', 4, { openFactDigest: digest, closedBy: 'user-retry-acknowledged', resultingState: 'queued' }));
+      // 重新排队期间旧尝试的尾帧：生命周期不变，也不能被认作当前尝试
+      f.emit.process(attemptFrame('retry-run', 'assignment-A', 2, 'a2'));
+      f.emit.status(runStatus('retry-run', 'dispatched', 5, { assignmentId: 'assignment-B' }));
+      // 新尝试已派发、首帧未到时，旧尝试的尾帧先到
+      f.emit.process(attemptFrame('retry-run', 'assignment-A', 3, 'a3'));
+      f.emit.process(attemptFrame('retry-run', 'assignment-B', 1, 'b1'));
+      f.emit.process(attemptFrame('retry-run', 'assignment-B', 2, 'b2'));
+      const shown = onProcess.mock.calls.map(([value]) => `${value.source.assignmentId}:${value.payload.kind === 'yield' ? value.payload.delta.text : value.payload.kind}`);
+      expect(shown.filter(item => item.startsWith('assignment-B'))).toEqual(['assignment-B:b1', 'assignment-B:b2']);
+      expect(shown).not.toContain('assignment-A:a3');
+      expect(onProcessAttempt).toHaveBeenCalledWith({ conversationId: 'conv-1', runId: 'retry-run' });
+      expect((controller as unknown as { runLifecycles(): Array<{ runId: string; state: string; assignmentId?: string }> }).runLifecycles())
+        .toContainEqual(expect.objectContaining({ runId: 'retry-run', state: 'dispatched', assignmentId: 'assignment-B' }));
+    } finally { controller.dispose(); }
+  });
+  it('keeps status revisions and commit revisions in separate counting domains', async () => {
+    const f = makeFakes(), onRunLifecycle = vi.fn();
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: vi.fn(), onRunLifecycle } as never, initial);
+    const lifecycles = () => (controller as unknown as { runLifecycles(): Array<{ runId: string; state: string; local: boolean }> }).runLifecycles();
+    try {
+      const accepted = await controller.beginTurn('waiting request');
+      // 回执只证明接纳：还没有状态事实时是“未知”
+      expect(lifecycles()).toContainEqual(expect.objectContaining({ runId: accepted.runId, state: 'unknown', local: true }));
+      f.emit.status(runStatus(accepted.runId!, 'queued', 1));
+      expect(lifecycles()).toContainEqual(expect.objectContaining({ runId: accepted.runId, state: 'queued', local: true }));
+      f.emit.status(runStatus('peer-run', 'running', 5, { assignmentId: 'assignment-peer' }));
+      // 未查证的 final 通知不直接判终态（终态只记在查证过的提交处）
+      f.emit.final({ v: 1, conversationId: 'conv-1', runId: 'peer-run', commitRevision: 1, digest: `sha256:${'0'.repeat(64)}` });
+      expect(lifecycles()).toContainEqual(expect.objectContaining({ runId: 'peer-run', state: 'running' }));
+      f.emit.status(runStatus('peer-run', 'cancelled', 6));
+      expect(lifecycles()).toContainEqual(expect.objectContaining({ runId: 'peer-run', state: 'terminal' }));
+      // 已确认的终态不被更晚的状态事实复活
+      f.emit.status(runStatus('peer-run', 'running', 7, { assignmentId: 'assignment-peer' }));
+      expect(lifecycles()).toContainEqual(expect.objectContaining({ runId: 'peer-run', state: 'terminal' }));
+      expect(onRunLifecycle).toHaveBeenCalled();
     } finally { controller.dispose(); }
   });
   it('rejects old conversation display after the pointer changes', () => {
@@ -2744,4 +2797,89 @@ it("reconciles a lost revision receipt after the page has loaded the new draft",
     expect(facade.hasPendingAdvancement("conv-1")).toBe(false); expect(mutations).toBe(1);
     expect((controller as unknown as { turnOutcomes: Map<string, unknown> }).turnOutcomes.size).toBe(0);
   } finally { controller.dispose(); }
+});
+
+describe('run lifecycle projection under paged recovery', () => {
+  const NOW_AT = '2026-11-06T00:00:00.000Z';
+  const point = (lsn: number) => ({ logId: 'lifecycle', lsn, frameEndOffset: lsn, prefixDigest: 'synthetic' });
+  const statusFact = (runId: string, state: string, statusRevision: number, extra: Record<string, unknown> = {}) => ({ kind: 'status' as const,
+    notice: { v: 1, ref: { execution: 'conversation', conversationId: 'conv-1', runId, ownerEpoch: 1 }, state, statusRevision, actions: [], at: NOW_AT, ...extra },
+    communication: false });
+  const page = (conversationId: string, facts: unknown[]) => ({ facts, cursor: { conversationId, ownerEpoch: 1, clearedThroughLsn: 0, baseItem: 0, upper: point(1), after: point(1), item: 0 }, hasMore: false, reset: false });
+  const pause = () => new Promise(resolve => setTimeout(resolve, 60));
+  const subject = (controller: ConversationController) =>
+    presentRunActivity({ conversationId: controller.current.conversationId, lifecycles: controller.runLifecycles(), process: undefined, revision: 1 });
+
+  it('keeps the local queued input and its identity after switching away and back', async () => {
+    const f = makeFakes();
+    const facts = new Map<string, unknown[]>();
+    (f.conversation as unknown as Record<string, unknown>).controlPage = async (id: string) => page(id, facts.get(id) ?? []);
+    (f.conversation as unknown as Record<string, unknown>).completion = async () => ({});
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: vi.fn() }, initial);
+    try {
+      await controller.start();
+      const turn = await controller.beginTurn('queued behind an uncertain run');
+      facts.set('conv-1', [statusFact('old', 'uncertain', 3, { actions: ['verify-side-effects', 'abandon', 'retry-risk-ack'], openFactDigest: `sha256:${'1'.repeat(64)}` }),
+        statusFact(turn.runId!, 'queued', 1)]);
+      controller.retryRecovery(); await pause();
+      expect(subject(controller)).toMatchObject({ runId: turn.runId, turnId: turn.turnId, view: { activity: 'waiting' } });
+      await controller.resume('conv-2'); await pause();
+      await controller.resume('conv-1'); await pause();
+      // 切回后仍是本终端的排队输入：主体与可停止身份都不丢
+      expect(subject(controller)).toMatchObject({ runId: turn.runId, turnId: turn.turnId, view: { phase: '消息已排队，需先处理上次运行结果 · /resolve', activity: 'waiting' } });
+      expect(controller.runLifecycles()).toContainEqual(expect.objectContaining({ runId: 'old', state: 'uncertain', local: false }));
+      // 切回后取消 A：本地等待按实际结果结清，旧义务不受影响
+      let settled: unknown;
+      void turn.outcome.then(value => { settled = value; });
+      facts.set('conv-1', [...facts.get('conv-1')!, statusFact(turn.runId!, 'cancelled', 2)]);
+      f.emit.status(statusFact(turn.runId!, 'cancelled', 2).notice); await pause();
+      expect(settled).toMatchObject({ result: { reason: 'aborted' } });
+      expect(subject(controller)).toMatchObject({ view: { phase: '上次运行结果待确认 · /resolve 处理' } });
+    } finally { controller.dispose(); }
+  });
+
+  it('states a recovered uncertain run only through the lifecycle, not as body text', async () => {
+    // 待确认义务由状态行持续说明，直到 /resolve 关闭；恢复路径不再把它写进正文，以免关闭后正文仍让人去处理
+    const f = makeFakes();
+    const onYield = vi.fn();
+    (f.conversation as unknown as Record<string, unknown>).controlPage = async (id: string) => page(id, id === 'conv-1'
+      ? [statusFact('old', 'uncertain', 3, { actions: ['verify-side-effects', 'abandon', 'retry-risk-ack'], openFactDigest: `sha256:${'1'.repeat(64)}` })] : []);
+    (f.conversation as unknown as Record<string, unknown>).completion = async () => ({});
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield }, initial);
+    try {
+      await controller.start();
+      controller.retryRecovery(); await pause();
+      expect(subject(controller)).toMatchObject({ view: { phase: '上次运行结果待确认 · /resolve 处理' } });
+      expect(JSON.stringify(onYield.mock.calls)).not.toContain('结果待确认');
+    } finally { controller.dispose(); }
+  });
+
+  it('applies live and scanned control facts even while the ordered body read is blocked', async () => {
+    const f = makeFakes();
+    let facts: unknown[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    (f.conversation as unknown as Record<string, unknown>).controlPage = async (id: string) => page(id, facts);
+    (f.conversation as unknown as Record<string, unknown>).consumeInputPage = async () => { await blocked; throw Error('body unavailable'); };
+    (f.conversation as unknown as Record<string, unknown>).completion = async () => ({});
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: vi.fn(), projectCommittedOutcome: summary => summary as never }, initial);
+    try {
+      await controller.start();
+      const a = await controller.beginTurn('run A');
+      facts = [statusFact(a.runId!, 'running', 2, { assignmentId: 'assignment-A' })];
+      controller.retryRecovery(); await pause();
+      // 正文页被阻塞：控制事实里 A 已取消，实时状态也到了
+      facts = [{ kind: 'input', cursor: { conversationId: 'conv-1', runId: 'older-input', ownerEpoch: 1, clearedThroughLsn: 0, upper: point(1), position: 1, part: 0, offset: 0, contentOffset: 0 } },
+        statusFact(a.runId!, 'cancelled', 3)];
+      controller.retryRecovery(); await pause();
+      f.emit.status(statusFact(a.runId!, 'cancelled', 3).notice); await pause();
+      const b = await controller.beginTurn('run B');
+      f.emit.status(statusFact(b.runId!, 'queued', 1).notice); await pause();
+      expect(controller.runLifecycles()).toContainEqual(expect.objectContaining({ runId: a.runId, state: 'terminal' }));
+      expect(subject(controller)).toMatchObject({ runId: b.runId, view: { phase: '消息已排队，等待执行', activity: 'waiting' } });
+    } finally { controller.dispose(); release(); }
+  });
 });

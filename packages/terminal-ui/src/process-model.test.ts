@@ -54,6 +54,9 @@ describe('pure process presentation', () => {
     expect(processViewRows(idle, 80, 6, { details: [''], operation: '已恢复最近对话。' }).map(row => row.text)).toEqual(['◆ 已恢复最近对话。']);
     const running = processViewRows({ ...idle, phase: '正在处理…', activity: 'running', tools: ['', '读取 a.ts'] }, 80, 6, { details: ['', '整理桌面 (1/3)'] });
     expect(running.map(row => row.text)).toEqual(['整理桌面 (1/3)', '  读取 a.ts', '◆ 正在处理…']);
+    // 等待中的持续说明不让位：一次性说明写在它上方，状态行仍是等待说明
+    const waiting = processViewRows({ ...idle, phase: '消息已排队，需先处理上次运行结果 · /resolve', activity: 'waiting' }, 80, 6, { operation: '本次运行已中止。' });
+    expect(waiting.map(row => row.text)).toEqual(['  本次运行已中止。', '◆ 消息已排队，需先处理上次运行结果 · /resolve']);
   });
   describe('当前操作的说明完整可见', () => {
     const kept = '本次输入未接纳，已保留在输入框；原推进目标保持不变，确认验收标准前不执行原任务；可以补充说明，也可以说“直接执行”或“取消”。';

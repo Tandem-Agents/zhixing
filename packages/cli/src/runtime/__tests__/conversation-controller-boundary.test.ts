@@ -153,7 +153,7 @@ function harness(mode: Mode, gates: { controlPageGate?: () => Promise<void>; inp
     onRecoveryYield: async (event, source) => { visible.push(`yield:${source.runId}:${source.kind}:${'text' in event ? event.text : event.type}`); },
     onObservedInputFragment: async input => { await gates.inputGate?.(input.runId); visible.push(`input:${input.runId}:${input.text}`); },
     onNotice: message => { visible.push('notice:' + message); },
-    onUncertainRun: message => { uncertain.push(message); },
+    onRunLifecycle: () => { uncertain.push('lifecycle-changed'); },
     onObservedTurnComplete: turn => { effects.push('observed-complete:' + turn.runId); },
     onRecoveryDrain: async turn => { effects.push('drain:' + turn.runId); },
     onRunTerminal: turn => { effects.push('terminal:' + turn.runId); },
@@ -182,7 +182,7 @@ async function compare(script: (h: Harness) => Promise<unknown[]>) {
     const h = harness(mode);
     try {
       const outcomes = await script(h);
-      results.push({ mode, visible: h.visible, effects: h.effects, outcomes, runFactCalls: h.runFactCalls });
+      results.push({ mode, visible: h.visible, effects: h.effects, outcomes, runFactCalls: h.runFactCalls, lifecycles: h.controller.runLifecycles() });
     } finally { h.controller.dispose(); }
   }
   const [old, next] = results as [typeof results[0], typeof results[0]];
@@ -214,7 +214,9 @@ describe('control recovery from the history boundary keeps client-visible behavi
       return [];
     });
     expect(old.visible.some(line => line.includes('来信处理已停止') && line.includes('mail-new'))).toBe(true);
-    expect(old.visible.some(line => line.includes('unsure'))).toBe(true);
+    // 边界之前的待确认运行由生命周期交给接入面（状态行持续说明到 /resolve 关闭），不写进正文
+    for (const result of [old, next]) expect(result.lifecycles).toContainEqual(expect.objectContaining({ runId: 'unsure', state: 'uncertain' }));
+    expect(old.visible.some(line => line.startsWith('yield:unsure'))).toBe(false);
     expect(old.effects.filter(effect => effect.startsWith('terminal:')).length).toBeGreaterThan(next.effects.filter(effect => effect.startsWith('terminal:')).length);
     expect(next.runFactCalls).toEqual([]);
   }, 30_000);
@@ -226,7 +228,9 @@ describe('control recovery from the history boundary keeps client-visible behavi
       h.owner.admit('unsure'); h.owner.state('unsure', 'running'); h.owner.state('unsure', 'uncertain');
       h.owner.freezeHistory();
       await h.controller.start(); await h.settle();
-      expect(h.uncertain).toEqual(['本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。']);
+      // 接入面经生命周期快照得知待确认的运行（不再是一句会被覆盖的说明）
+      expect(h.uncertain.length).toBeGreaterThan(0);
+      expect(h.controller.runLifecycles()).toContainEqual(expect.objectContaining({ runId: 'unsure', state: 'uncertain' }));
     } finally { h.controller.dispose(); }
   }, 30_000);
 

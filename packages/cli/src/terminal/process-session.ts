@@ -111,6 +111,21 @@ export class TerminalProcessSession {
           (runId && entry.scope.runId === runId || turnId && entry.scope.turnId === turnId)) entry.projection.markLocal();
     }
   }
+  /**
+   * 权威状态确证了运行的新执行尝试：丢弃旧尝试的过程展示，让新尝试的帧重新开始，不被旧的已关闭展示挡住。
+   * 旧尝试留下的“已结束”标记（例如结果待确认时本地等待的结清）只属于旧尝试的展示，一并清掉；
+   * 真正的业务终态不会再确证新尝试，所以不会因此复活。
+   */
+  restart(conversationId: string, runId: string, turnId?: string): void {
+    const key = JSON.stringify([conversationId, 'assignment', runId]);
+    this.#retired.delete(key);
+    this.#completed.delete(JSON.stringify([conversationId, 'run', runId]));
+    if (turnId) this.#completed.delete(JSON.stringify([conversationId, 'turn', turnId]));
+    const entry = this.#scopes.get(key);
+    if (!entry) return;
+    entry.projection.dispose(); this.#scopes.delete(key);
+    if (this.#active === key) { this.#active = undefined; this.ports.changed(undefined); }
+  }
   pause(reason: string): void {
     this.#paused = true;
     for (const entry of this.#scopes.values()) if (!entry.projection.closed) entry.projection.pause(reason);

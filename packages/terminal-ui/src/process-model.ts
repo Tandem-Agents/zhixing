@@ -10,7 +10,8 @@ export interface ProcessChildView {
 export interface TerminalProcessView {
   readonly revision: number;
   readonly phase: string;
-  readonly activity?: 'running' | 'reconciling' | 'complete';
+  /** waiting：等待中的持续说明（本终端已接纳、尚未开始的输入，或待确认义务），不显示动画；带身份时才是可停止的对象 */
+  readonly activity?: 'running' | 'reconciling' | 'complete' | 'waiting';
   readonly durationMs?: number;
   readonly thinking?: { readonly text: string; readonly active: boolean };
   readonly tools: readonly string[];
@@ -90,7 +91,7 @@ export function validateProcessView(value: unknown): value is TerminalProcessVie
   const v = value as Partial<TerminalProcessView>;
   const short = (s: unknown, max: number) => typeof s === 'string' && s.length <= max;
   return Number.isSafeInteger(v.revision) && v.revision! >= 0 && short(v.phase, 256) &&
-    (v.activity === undefined || ['running', 'reconciling', 'complete'].includes(v.activity)) &&
+    (v.activity === undefined || ['running', 'reconciling', 'complete', 'waiting'].includes(v.activity)) &&
     (v.durationMs === undefined || Number.isFinite(v.durationMs) && v.durationMs >= 0) &&
     (!v.thinking || short(v.thinking.text, 8192) && typeof v.thinking.active === 'boolean') &&
     Array.isArray(v.tools) && v.tools.length <= 3 && v.tools.every(s => short(s, 1024)) &&
@@ -119,7 +120,8 @@ export function processViewRows(view: TerminalProcessView, columns: number, heig
   const normal = complete ? '用时 ' + Math.max(1, Math.round(view.durationMs! / 1000)) + 's' + context : view.phase || feedback.notice || '';
   const operation = feedback.operation && !failures.includes(feedback.operation) ? feedback.operation : '';
   // 没有必须的失败、也不在运行时，当前说明就是状态行；否则它紧挨在状态行之上
-  const leads = !!operation && !failures.length && view.activity !== 'running' && view.activity !== 'reconciling';
+  // 等待中的说明（排队、待确认）是持续状态：一次性说明写在它上方，不占它的状态行
+  const leads = !!operation && !failures.length && view.activity !== 'running' && view.activity !== 'reconciling' && view.activity !== 'waiting';
   const rows: ProcessViewRow[] = failures.slice(1).map(text => ({ text, failed: true }));
   // 只给有文字的条目分配行：就绪但为空的摘要、空的细节都不占行
   if (!complete) for (const text of feedback.details ?? []) if (text.trim()) rows.push({ text });
