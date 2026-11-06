@@ -555,11 +555,17 @@ export async function createHarness(
   return { ...harness, dispatch };
 }
 
-export async function createFormalReceiptHarness(options: { clock?: () => string; monotonicClock?: () => number; shortPermission?: boolean; startupProofs?: boolean } = {}) {
+export async function createFormalReceiptHarness(options: {
+  clock?: () => string; monotonicClock?: () => number; shortPermission?: boolean; startupProofs?: boolean;
+  /** 宿主模式：治理开启执行作用域与丢失执行的退休。 */
+  lostExecutionRetirement?: boolean;
+  /** 执行端资源租约的到期时间（缺省与其他租约同为 EXPIRY）。 */
+  resourceExpiry?: string;
+} = {}) {
   const h = await createHarness(options);
   const clock = options.clock ?? (() => NOW);
   const { digest: _digest, signature: _signature, ...root } = h.unsigned.resourceLease;
-  const payload = { ...root, reservationId: `reservation:${ASSIGNMENT_ID}`,
+  const payload = { ...root, ...(options.resourceExpiry ? { expiry: options.resourceExpiry } : {}), reservationId: `reservation:${ASSIGNMENT_ID}`,
     domain: { kind: "anchor" as const, anchorEpoch: 3 },
     delegation: { executorId: EXECUTOR_ID, maxDepth: 1, maxBudget: root.budget } };
   const digested = { ...payload, digest: protocolDigest("ResourceLease", 1, payload) };
@@ -573,9 +579,10 @@ export async function createFormalReceiptHarness(options: { clock?: () => string
   const log = new FileAuthorityCommitLog(path.join(h.root, "formal-executor"), h.artifacts, { clock,
     ...(options.startupProofs === true ? { integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 5)) } : {}) });
   onTestFinished(() => log.stopStorageMaintenance());
-  const reopen = () => {
+  const reopen = (overrides: { lostExecutionRetirement?: boolean } = {}) => {
     const governor = new ExecutorResourceGovernor({ log, signer: h.identity, verifier: h.identity, guard: { assert() {} },
-      executorId: EXECUTOR_ID, localDomainId: "local:device-1", localGovernorEpoch: 1, maxActiveRoots: 1, clock, monotonicClock: options.monotonicClock });
+      executorId: EXECUTOR_ID, localDomainId: "local:device-1", localGovernorEpoch: 1, maxActiveRoots: 1, clock, monotonicClock: options.monotonicClock,
+      lostExecutionRetirement: overrides.lostExecutionRetirement ?? options.lostExecutionRetirement ?? false });
     const ledger = new ConversationAssignmentLedger({ log, artifacts: h.artifacts, executorId: EXECUTOR_ID,
       signer: h.identity, verifier: h.identity, ownerControl, snapshotFor: matchingSnapshotFor,
       permissionSnapshotFor: digest => matchingPermissionSnapshotFor(h.identity, digest), resources: governor, clock, monotonicClock: options.monotonicClock });

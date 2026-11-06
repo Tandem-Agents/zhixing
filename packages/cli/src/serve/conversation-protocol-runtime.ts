@@ -1605,6 +1605,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     let executorPlan: Awaited<
       ReturnType<ConversationExecutorDispatchApplication["plan"]>
     > | undefined;
+    // 本地执行帧的执行作用域：开始执行前打开，帧的最终出口关闭；关闭之后执行端恢复才可能退休它的资源
+    let executionScope: { close(): void } | undefined;
     let runFailed = false;
     let runError: unknown;
     try {
@@ -1850,6 +1852,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         effect: ConversationExecutorExecutionEffect,
       ): AsyncGenerator<AgentYield, RunResult> {
       const executionRuntime = effect.runtime;
+      executionScope ??= effect.openExecutionScope();
       await this.#phase("start-and-report", () => effect.startAndReport(submissionContext));
 
       const stream = await this.#phase("create-stream", () => effect.createStream({ assignmentId, ref: streamRef }));
@@ -2244,6 +2247,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       attemptForeground.close();
       this.#clearRunClaims(runId);
       this.#activeAssignmentClaims.delete(assignmentId);
+      executionScope?.close();
       try {
         await this.#retireSettledAssignments(input.conversationId, journal);
       } catch (cleanupError) {

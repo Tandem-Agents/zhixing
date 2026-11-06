@@ -141,6 +141,8 @@ type PreparedAssignment = Awaited<
 export interface ConversationExecutorExecutionEffect {
   readonly runtime: SessionRuntime;
   runKernel: SessionRuntime["run"];
+  /** 本执行帧对该分配的执行作用域：startAndReport 之前打开，帧的最终出口关闭。 */
+  openExecutionScope(): { close(): void };
   startAndReport(context: AuthorityCallContext): Promise<void>;
   createStream(input: {
     readonly assignmentId: string;
@@ -965,6 +967,7 @@ function createLocalConversationExecutorMechanism(
             return {
               runtime: runtime!,
               runKernel: (...args) => execution.run(...args),
+              openExecutionScope: () => ledger.openExecutionScope(input.assignmentId),
               startAndReport: async (context) => {
                 await submission.startAndReport(input.assignmentId, context);
               },

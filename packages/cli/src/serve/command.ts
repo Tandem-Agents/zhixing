@@ -765,6 +765,7 @@ async function runServerProcess(
   const authorityRuntime = await observeLogPhase(startupRecords, "prepare-authority", () => setupAuthorityRuntime({
     records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     phaseRecords: startupRecords,
+    lostExecutionRetirement: true,
     extensionReadiness: createChannelExtensionReadiness(
       new ChannelConfiguration(getGlobalConfigPath({}, zhixingHome), bootstrap.secretStore),
       path.join(zhixingHome, "extensions", "artifacts"),

@@ -353,6 +353,7 @@ async function runExecutorProcess(
     });
     authority = await setupAuthorityRuntime({
       records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
+      lostExecutionRetirement: true,
       zhixingHome,
       secretStore: bootstrap.secretStore,
       deviceKey: bootstrap.mesh.deviceKey,

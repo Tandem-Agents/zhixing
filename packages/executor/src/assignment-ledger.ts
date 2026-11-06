@@ -159,7 +159,7 @@ import {
   type StreamDataFramePayload,
   type StreamVerifierCheckpoint,
 } from "@zhixing/core/protocol";
-import type { ExecutorAssignmentResourceCoordinator, ExecutorCoordinationOptions } from "./resource-governor.js";
+import type { ExecutorAssignmentResourceCoordinator, ExecutorCoordinationOptions, ExecutorExecutionScope } from "./resource-governor.js";
 import type { DataPlaneAssignmentBinding, DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 
@@ -682,7 +682,11 @@ const BINDING_RECOVERY_CHUNK = 64;
 interface StoredDataPlaneBinding {
   readonly observe?: DataPlaneAssignmentBinding;
   readonly active?: DataPlaneAssignmentBinding;
+  /** 受执行端资源治理的分配：根预留编号。宿主模式下 active 用途还须根仍为 active。 */
+  readonly resourceReservationId?: string;
 }
+
+const NO_EXECUTION_SCOPE: ExecutorExecutionScope = Object.freeze({ close() {} });
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 const RECEIPT_URGENCY_RANK: Record<StorageMaintenanceUrgency, number> = { background: 0, recovery: 1, foreground: 2 };
 
@@ -1471,7 +1475,21 @@ export class ConversationAssignmentLedger implements
     );
   }
 
+  /** 本进程执行帧对该分配的执行作用域：开始执行前打开，帧的最终出口关闭。没有资源治理时为空操作。 */
+  openExecutionScope(assignmentId: string): ExecutorExecutionScope {
+    assertIdentifier(assignmentId, "Execution scope assignment id");
+    return this.#resources?.openExecutionScope(assignmentId) ?? NO_EXECUTION_SCOPE;
+  }
+
+  /** 该分配的执行端资源是否已因租约终止被回收；取消续接据此停止重试并交所属方对账。 */
+  async executionResourceRetired(assignmentId: string): Promise<boolean> {
+    const lease = await this.#select(assignmentId, (state) => state.received?.resourceLease);
+    if (!lease || !requiresExecutorResourceReceipt(lease) || !this.#resources) return false;
+    return (await this.#resources.reservationStates([lease.reservationId])).get(lease.reservationId) === "reclaimed";
+  }
+
   async start(assignmentId: string): Promise<{ readonly started: boolean }> {
+    this.#resources?.assertExecutionScope(assignmentId);
     const current = await this.#prepareExecutionAuthority(assignmentId, true);
     const transaction = await this.#transact<{ started: boolean }>(
       assignmentId,
@@ -1958,7 +1976,12 @@ export class ConversationAssignmentLedger implements
 
   async dataPlaneBinding(assignmentId: string, use?: DataPlaneTicketUse) {
     assertIdentifier(assignmentId, "Data-plane assignment id");
-    return this.#select(assignmentId, state => this.#dataPlaneBinding(state, use));
+    const { binding, lease } = await this.#select(assignmentId, state => ({
+      binding: this.#dataPlaneBinding(state, use),
+      lease: state.received?.resourceLease,
+    }));
+    if (use === "observe" || !binding || !lease || !requiresExecutorResourceReceipt(lease)) return binding;
+    return (await this.#inactiveResourceReservations([lease.reservationId])).size > 0 ? undefined : binding;
   }
 
   /**
@@ -1974,7 +1997,7 @@ export class ConversationAssignmentLedger implements
     }
     for (const request of requests) assertIdentifier(request.assignmentId, "Data-plane assignment id");
     if (requests.length === 0) return [];
-    return this.#repeatPrepared(() => this.#operations.run(async () => {
+    const resolved = await this.#repeatPrepared(() => this.#operations.run(async () => {
       const wanted = [...new Set(requests.map(request => request.assignmentId))];
       const key = this.#bindingCheckpointKey();
       const saved = await this.#log.loadProjectionCheckpoint?.<ReadonlyMap<string, StoredDataPlaneBinding>>(key);
@@ -2000,21 +2023,37 @@ export class ConversationAssignmentLedger implements
         const recovered = await this.#recoverProjections(fresh.slice(offset, offset + BINDING_RECOVERY_CHUNK));
         cursor ??= recovered.cursor;
         for (const [id, state] of recovered.states) {
-          bindings.set(id, { observe: this.#dataPlaneBinding(state, "observe"), active: this.#dataPlaneBinding(state) });
+          const lease = state.received?.resourceLease;
+          bindings.set(id, {
+            observe: this.#dataPlaneBinding(state, "observe"),
+            active: this.#dataPlaneBinding(state),
+            ...(lease && requiresExecutorResourceReceipt(lease) ? { resourceReservationId: lease.reservationId } : {}),
+          });
         }
       }
       // 以最早的那个游标保存：沿用的绑定截至该游标成立，之后恢复的绑定此后若再有记录，下次即被识别并重算。
       if (cursor) await this.#log.saveProjectionCheckpoint?.(key, cursor, bindings);
-      return requests.map(request => {
-        const binding = bindings.get(request.assignmentId)!;
-        return request.use === "observe" ? binding.observe : binding.active;
-      });
+      return requests.map(request => bindings.get(request.assignmentId)!);
     }));
+    // 绑定检查点只依赖分配流；宿主模式下 active 用途另按治理的当前根状态核对（在账本串行区外读取）
+    const inactive = await this.#inactiveResourceReservations(resolved.flatMap((binding, index) =>
+      requests[index]!.use !== "observe" && binding.active && binding.resourceReservationId
+        ? [binding.resourceReservationId] : []));
+    return resolved.map((binding, index) => requests[index]!.use === "observe"
+      ? binding.observe
+      : binding.resourceReservationId && inactive.has(binding.resourceReservationId) ? undefined : binding.active);
+  }
+
+  /** 宿主模式下，给出这些根预留中当前不是 active 的那些；非宿主模式不读取治理状态。 */
+  async #inactiveResourceReservations(reservationIds: readonly string[]): Promise<ReadonlySet<string>> {
+    if (!this.#resources?.lostExecutionRetirement || reservationIds.length === 0) return new Set();
+    const states = await this.#resources.reservationStates([...new Set(reservationIds)]);
+    return new Set([...states].flatMap(([id, state]) => state === "active" ? [] : [id]));
   }
 
   /** 绑定检查点的键带归约与绑定规则的指纹：规则改变后旧绑定不再被沿用。 */
   #bindingCheckpointKey(): string {
-    return `${projectionCheckpointKey("executor-data-plane-bindings", 1, this.#reduce, this.#dataPlaneBinding)}:${this.#executorId}`;
+    return `${projectionCheckpointKey("executor-data-plane-bindings", 2, this.#reduce, this.#dataPlaneBinding)}:${this.#executorId}`;
   }
 
   #dataPlaneBinding(state: LedgerProjection, use?: DataPlaneTicketUse) {
@@ -2905,9 +2944,47 @@ export class ConversationAssignmentLedger implements
       }, [], true);
       released += result.value;
     }
-    // 只有本轮从头到尾没有释放（日志头未因本轮前进）才记下起点：其后任何提交都会让下次核对不相等
-    if (released === 0) this.#receiptsSettledAt = head;
+    const retirement = await this.#retireLostExecutions(
+      candidates.filter((lease) => phases.get(lease.activation.assignmentId)?.started !== false),
+    );
+    released += retirement.retired;
+    // 只有本轮从头到尾没有释放（日志头未因本轮前进）、也没有暂缓的退休候选时才记下起点：
+    // 其后任何提交都会让下次核对不相等；租约到期与作用域关闭不写日志，暂缓时每轮都要重新判断
+    if (released === 0 && !retirement.deferred) this.#receiptsSettledAt = head;
     return released;
+  }
+
+  /**
+   * 丢失执行的资源退休：已开始、没有终局、本进程没有执行作用域、执行端租约已明确到期的分配根，
+   * 在一笔协调事务里保守计入、终结子树并回收根；不写任何分配记录，业务结论留给所属方。
+   * 先在治理的内存状态里预检，只有到期的项才重放账本复核，作用域打开中的执行不触发重放。
+   */
+  async #retireLostExecutions(
+    candidates: readonly AssignmentResourceLease[],
+  ): Promise<{ readonly retired: number; readonly deferred: boolean }> {
+    if (!this.#resources?.lostExecutionRetirement || candidates.length === 0) {
+      return { retired: 0, deferred: false };
+    }
+    const preflight = await this.#resources.lostExecutionRetirementDue(candidates);
+    let deferred = preflight.deferred;
+    let retired = 0;
+    for (const lease of preflight.due) {
+      // 预检之后作用域可能重新打开：以事务内的真实判定决定是否已完成，暂缓的必须让下一轮重新判断
+      const result = await this.#transact<"retired" | "deferred" | "skip">(lease.activation.assignmentId, (state) => {
+        if (state.phase !== "started" || !state.started || state.halted || !state.received ||
+          canonicalize(state.received.resourceLease) !== canonicalize(lease)) {
+          return { kind: "return", value: "skip" };
+        }
+        const prepared = this.#resources!.prepareLostExecutionRetirement(lease);
+        if (prepared.records.length > 0) {
+          return { kind: "append", entries: prepared.records, value: "retired" };
+        }
+        return { kind: "return", value: prepared.deferred ? "deferred" : "skip" };
+      }, [], true);
+      if (result.value === "retired") retired += 1;
+      else if (result.value === "deferred") deferred = true;
+    }
+    return { retired, deferred };
   }
 
   async recoverableConversationAssignments(): Promise<
@@ -3580,17 +3657,27 @@ export class ConversationAssignmentLedger implements
         if (authorized.controlLease.renewalSeq < current.lease.renewalSeq) {
           throw new TypeError("Owner control lease renewal sequence regressed");
         }
-        if (authorized.controlLease.renewalSeq === current.lease.renewalSeq) {
-          if (
-            controlLeaseIdentityDigest(authorized.controlLease) !==
+        if (
+          authorized.controlLease.renewalSeq === current.lease.renewalSeq &&
+          controlLeaseIdentityDigest(authorized.controlLease) !==
             controlLeaseIdentityDigest(current.lease)
-          ) {
-            throw new TypeError("Owner control lease sequence was reused");
-          }
+        ) {
+          throw new TypeError("Owner control lease sequence was reused");
+        }
+        // 执行资源已因租约终止回收：执行控制租约随之终止，不再续期。历史读取照常（所属方的恢复与
+        // 裁决依赖它），其余主动控制在续期时拒绝
+        const resourceReclaimed = this.#executionResourceReclaimed(state);
+        if (resourceReclaimed && request.method === "executor.queryLedger") {
+          return { kind: "return", value: true };
+        }
+        if (authorized.controlLease.renewalSeq === current.lease.renewalSeq) {
           if (!this.#ownerControlLeaseIsActive(state)) {
             return this.#expiredLeaseDecision(state, leaseTime(current.acceptedAt) + current.validForMs, false);
           }
           return { kind: "return", value: true };
+        }
+        if (resourceReclaimed) {
+          throw new TypeError("Owner control lease cannot be renewed after the execution resource was reclaimed");
         }
       }
       const effectiveAcceptedAt = new Date(this.#effectiveLeaseNow(state)).toISOString();
@@ -3615,6 +3702,13 @@ export class ConversationAssignmentLedger implements
 
   #effectiveLeaseNow(state: LedgerProjection): number {
     return this.#leaseTime.now(Math.max(state.leaseTimeFrontier, state.leaseAcceptanceFloor));
+  }
+
+  /** 协调内：该分配受治理的执行端根与接收的 lease 全等，且已因租约终止回收。 */
+  #executionResourceReclaimed(state: LedgerProjection): boolean {
+    const lease = state.received?.resourceLease;
+    return lease !== undefined && requiresExecutorResourceReceipt(lease) &&
+      this.#resources?.assignmentRootState(lease) === "reclaimed";
   }
 
   #ownerControlLeaseIsActive(state: LedgerProjection): boolean {
@@ -3809,6 +3903,8 @@ export class ConversationAssignmentLedger implements
       const lease = state.received?.resourceLease;
       return lease !== undefined && requiresFormalResourceCoordination(lease);
     });
+    // 资源已因租约终止回收：停止无从证明，与“仍有未完成副作用”同样返回空，不再取最终用量
+    if (governed && await this.executionResourceRetired(assignmentId)) return undefined;
     const finalUsage = snapshot(
       governed
         ? await this.#usageFinal(assignmentId)
@@ -3828,6 +3924,11 @@ export class ConversationAssignmentLedger implements
           state.phase === "dispatch-rejected" ||
           state.supersedeFence
         ) {
+          return { kind: "return", value: undefined };
+        }
+        const lease = state.received?.resourceLease;
+        if (lease && requiresExecutorResourceReceipt(lease) &&
+          this.#resources?.assignmentRootState(lease) === "reclaimed") {
           return { kind: "return", value: undefined };
         }
         const authority = assertAbortAuthority(state, cause);
@@ -4005,6 +4106,13 @@ export class ConversationAssignmentLedger implements
       if (!control || !permission || control.lease.controlLeaseId !== validatedLease.controlLeaseId ||
           permission.controlLeaseId !== validatedLease.controlLeaseId) {
         throw new TypeError("Permission snapshot lease is inactive, expired, or misbound");
+      }
+      // 宿主模式：执行端资源根不再 active（如因租约终止已回收）时，执行权随之封闭
+      const resourceLease = state.received?.resourceLease;
+      if (this.#resources?.lostExecutionRetirement && resourceLease &&
+        requiresExecutorResourceReceipt(resourceLease) &&
+        this.#resources.assignmentRootState(resourceLease) !== "active") {
+        throw new TypeError("Permission snapshot lease is inactive because its execution resource is no longer active");
       }
       const expiry = Math.min(leaseTime(control.acceptedAt) + control.validForMs,
         leaseTime(permission.acceptedAt) + permission.validForMs);
@@ -4575,6 +4683,10 @@ export class ConversationAssignmentLedger implements
     if (!requiresExecutorResourceReceipt(lease)) return [];
     if (!this.#resources) {
       throw corruptLedger("Governed assignment has no executor resource coordinator");
+    }
+    // 资源已因租约终止回收：不给这次执行写任何终局（不写不带资源陪伴的终局，重放合同不变）
+    if (this.#resources.assignmentRootState(lease) === "reclaimed") {
+      throw new AssignmentExecutionResourceRetiredError(state.assignmentId);
     }
     const mode = terminal.body.t === "supersede-fenced" ||
       (terminal.body.t === "halted" && terminal.body.proof.decision === "not-started")
@@ -5715,6 +5827,17 @@ function applyEntry(
       return;
     default:
       throw corruptLedger("Unsupported assignment record in this protocol stage");
+  }
+}
+
+/**
+ * 执行端资源已因租约终止被回收（lease 全等且根为 reclaimed）：这次执行不能再写任何执行端终局。
+ * 属于明确的本地拒绝（TypeError），持久义务的重试据此停止，业务结论留给所属方对账。
+ */
+export class AssignmentExecutionResourceRetiredError extends TypeError {
+  constructor(readonly assignmentId: string) {
+    super("Assignment execution resource was reclaimed after its lease ended; no executor terminal can be written");
+    this.name = "AssignmentExecutionResourceRetiredError";
   }
 }
 

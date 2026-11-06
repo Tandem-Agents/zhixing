@@ -109,9 +109,12 @@ export class ConversationAssignmentWorker {
     if (this.#running.has(envelope.assignmentId)) return;
     const executionAbort = new AbortController();
     this.#executionAborts.set(envelope.assignmentId, executionAbort);
+    // 执行帧的执行作用域：开始执行前打开，帧的最终出口（含失败、待确认与封包收尾之后）关闭
+    const executionScope = this.options.ledger.openExecutionScope(envelope.assignmentId);
     const task = this.#execute(envelope, executionAbort.signal)
       .catch((error) => this.options.onError?.(envelope.assignmentId, asError(error)))
       .finally(() => {
+        executionScope.close();
         this.#running.delete(envelope.assignmentId);
         this.#kernels.delete(envelope.assignmentId);
         if (this.#executionAborts.get(envelope.assignmentId) === executionAbort) {
@@ -606,6 +609,16 @@ export class ConversationAssignmentWorker {
             ) {
               throw new IncompleteCancellationProofError(
                 "Ticket cancellation retains an open side effect for owner reconciliation",
+              );
+            }
+            // 执行资源已因租约终止回收：停止无从证明，与保留未完成副作用同样交所属方对账，不再重试
+            if (
+              await this.options.ledger.executionResourceRetired(
+                envelope.assignmentId,
+              )
+            ) {
+              throw new IncompleteCancellationProofError(
+                "Ticket cancellation cannot be proven after the execution resource was reclaimed; left for owner reconciliation",
               );
             }
             throw new Error("Ticket cancellation proof is not yet available");

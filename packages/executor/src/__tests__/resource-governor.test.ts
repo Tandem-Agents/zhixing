@@ -579,6 +579,54 @@ describe("ExecutorResourceGovernor", {
     });
   });
 
+  it("丢失执行退休：同帧保守计入未收束用量、由深到浅回收后代再回收根；作用域打开或未到期时暂缓", async () => {
+    let now = NOW;
+    let monotonicNow = 0;
+    const fixture = await createHarness(4, () => now, 1_000, () => monotonicNow, undefined, true);
+    const root = assignmentLease("assignment-lost", "run-lost", 2, {
+      issuedAt: NOW,
+      expiry: "2026-07-20T00:00:01.000Z",
+    });
+    const capability = assignmentCapability("assignment-lost", "cap-lost");
+    await accept(fixture, root, [capability.capId]);
+    const child = await fixture.governor.acquireChild(
+      root,
+      { kind: "evidence", id: "evidence-lost", attempt: 1 },
+      { maxCalls: 1 },
+      { ...assignmentCallContext(capability), deadlineAt: root.expiry },
+    );
+    await fixture.governor.reserveUsage(
+      child,
+      { usageId: "usage-lost", calls: 1 },
+      { ...assignmentCallContext(capability), deadlineAt: "2026-07-20T00:00:00.500Z" },
+    );
+    expect(await fixture.governor.lostExecutionRetirementDue([root])).toEqual({ due: [], deferred: true });
+    const scope = fixture.governor.openExecutionScope("assignment-lost");
+    now = "2026-07-20T00:00:02.000Z";
+    monotonicNow = 2_000;
+    expect(await fixture.governor.lostExecutionRetirementDue([root])).toEqual({ due: [], deferred: true });
+    scope.close();
+    expect(await fixture.governor.lostExecutionRetirementDue([root])).toEqual({ due: [root], deferred: false });
+    await fixture.governor.coordinate(async () => {
+      const { records, deferred } = fixture.governor.prepareLostExecutionRetirement(root);
+      expect(deferred).toBe(false);
+      expect(records.map((record) => record.body)).toEqual([
+        expect.objectContaining({ t: "consume", usageId: "usage-lost", calls: 1 }),
+        { t: "reclaim", reservationId: child.reservationId },
+        { t: "reclaim", reservationId: root.reservationId },
+      ]);
+      await fixture.log.append(records);
+    });
+    const projection = await fixture.governor.snapshot();
+    expect(projection.reservations.get(root.reservationId)?.state).toBe("reclaimed");
+    expect(projection.reservations.get(child.reservationId)?.state).toBe("reclaimed");
+    expect(projection.usageReservations.get("usage-lost")?.state).toBe("consumed");
+    expect(await fixture.governor.lostExecutionRetirementDue([root])).toEqual({ due: [], deferred: false });
+    await fixture.governor.coordinate(async () => {
+      expect(fixture.governor.prepareLostExecutionRetirement(root)).toEqual({ records: [], deferred: false });
+    });
+  });
+
   it("keeps expired assignment trees for business recovery and reclaims control roots", async () => {
     let now = NOW;
     let monotonicNow = 0;
@@ -1079,6 +1127,7 @@ async function createHarness(
   leaseTtlMs = 60_000,
   monotonicClock: () => number = () => performance.now(),
   existingRoot?: string,
+  lostExecutionRetirement = false,
 ) {
   const root = existingRoot ?? await createTempDir("executor-resource-governor");
   let log: FileAuthorityCommitLog | undefined;
@@ -1109,6 +1158,7 @@ async function createHarness(
       leaseTtlMs,
       clock,
       monotonicClock,
+      lostExecutionRetirement,
     });
   }
 }

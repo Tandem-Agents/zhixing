@@ -106,6 +106,29 @@ export interface ExecutorResourceGovernorOptions {
   readonly monotonicClock?: () => number;
   /** 阶段事件的记录端口（与启动阶段同一端口，日志库接收阶段事件）：候选等待与协调各记一个日志阶段，其间的授权工作汇总据此按来源分开（只观测）。 */
   readonly records?: LogRecordPort;
+  /**
+   * 宿主进程在构造时开启：本进程的执行帧须先打开执行作用域才能开始分配；已开始、没有终局、
+   * 本进程没有作用域、执行端租约已明确到期的分配根，由业务恢复所有者在一笔事务里退休。
+   * 独立命令等非宿主进程不开启。
+   */
+  readonly lostExecutionRetirement?: boolean;
+}
+
+/** 本进程一个执行帧对一个分配的执行作用域：帧开始执行前打开，帧的最终出口关闭；关闭可重复调用。 */
+export interface ExecutorExecutionScope {
+  close(): void;
+}
+
+/** 退休预检的结论：due 为此刻可退休的根；deferred 表示还有作用域打开中或租约未明确到期的候选，下一轮须重新判断。 */
+export interface LostExecutionRetirementDue {
+  readonly due: readonly AssignmentResourceLease[];
+  readonly deferred: boolean;
+}
+
+/** 事务内的退休准备：records 非空即同帧退休；为空时 deferred 区分“仍须暂缓”与“不再是候选”。 */
+export interface LostExecutionRetirementPreparation {
+  readonly records: readonly LogicalRecord<GovernorRecord>[];
+  readonly deferred: boolean;
 }
 
 type LocalRootResourceCandidate = AssignmentResourceLease | ImmediateRootResourceLease;
@@ -164,6 +187,29 @@ export interface ExecutorAssignmentResourceCoordinator {
     readonly reportDigest: string;
     readonly upToUsageSeq: number;
   };
+  /** 宿主进程是否开启了执行作用域与丢失执行的退休。 */
+  readonly lostExecutionRetirement: boolean;
+  openExecutionScope(assignmentId: string): ExecutorExecutionScope;
+  /** 开启时，分配开始执行前本进程必须已为它打开执行作用域。 */
+  assertExecutionScope(assignmentId: string): void;
+  lostExecutionRetirementDue(
+    leases: readonly AssignmentResourceLease[],
+  ): Promise<LostExecutionRetirementDue>;
+  /**
+   * 在 coordinate 内、账本证明该分配已开始且没有终局之后调用：可退休时给出同帧记录；否则记录为空，
+   * deferred 表示此刻仍须暂缓（作用域打开中或租约未明确到期），调用方据此决定下一轮是否必须重新判断。
+   */
+  prepareLostExecutionRetirement(
+    lease: AssignmentResourceLease,
+  ): LostExecutionRetirementPreparation;
+  /** 在 coordinate 内读取：根的当前状态；lease 与持久激活不全等或根不存在时为 undefined。 */
+  assignmentRootState(
+    lease: AssignmentResourceLease,
+  ): ResourceReservationProjection["state"] | undefined;
+  /** 协调外读取：按预留编号给出当前状态，不存在时为 undefined。 */
+  reservationStates(
+    reservationIds: readonly string[],
+  ): Promise<ReadonlyMap<string, ResourceReservationProjection["state"] | undefined>>;
 }
 
 /** Durable device-side governor for hard capacity, delegated children and usage watermarks. */
@@ -182,6 +228,9 @@ export class ExecutorResourceGovernor
   readonly #clock: () => string;
   readonly #monotonicClock: () => number;
   readonly #records: LogRecordPort | undefined;
+  readonly #lostExecutionRetirement: boolean;
+  /** 本进程打开中的执行作用域：分配编号 → 打开中的帧数。 */
+  readonly #executionScopes = new Map<string, number>();
   readonly #stream: string;
   readonly #operations = new SerialTaskQueue();
   readonly #candidates = new Map<AdmissionClass, LocalCandidateOccupancy>();
@@ -231,6 +280,7 @@ export class ExecutorResourceGovernor
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
     this.#records = options.records;
+    this.#lostExecutionRetirement = options.lostExecutionRetirement === true;
     this.#stream = "governor";
     this.#store = new ResourceGovernorIndexStore(options.log, options.verifier, MAX_LEASE_TTL_MS, this.#clock);
     this.#activations = registerResourceCapabilityActivations(options.log);
@@ -292,6 +342,130 @@ export class ExecutorResourceGovernor
       throw new TypeError("Superseded receipt does not match its durable lease");
     if (current.state !== "active") return [];
     return this.prepareTerminal({ lease: validated, mode: "release" });
+  }
+
+  get lostExecutionRetirement(): boolean {
+    return this.#lostExecutionRetirement;
+  }
+
+  openExecutionScope(assignmentId: string): ExecutorExecutionScope {
+    requireIdentifier(assignmentId, "Execution scope assignment id");
+    this.#executionScopes.set(assignmentId, (this.#executionScopes.get(assignmentId) ?? 0) + 1);
+    let open = true;
+    return Object.freeze({
+      close: () => {
+        if (!open) return;
+        open = false;
+        const remaining = (this.#executionScopes.get(assignmentId) ?? 1) - 1;
+        if (remaining > 0) this.#executionScopes.set(assignmentId, remaining);
+        else this.#executionScopes.delete(assignmentId);
+      },
+    });
+  }
+
+  assertExecutionScope(assignmentId: string): void {
+    if (!this.#lostExecutionRetirement || this.#executionScopes.has(assignmentId)) return;
+    throw new TypeError("Executor assignment start requires an open execution scope in this process");
+  }
+
+  /** 一次协调里判断哪些候选此刻可退休；作用域打开中、租约未明确到期的计为暂缓，根已不 active 或 lease 不符的不再计入。 */
+  async lostExecutionRetirementDue(
+    leases: readonly AssignmentResourceLease[],
+  ): Promise<LostExecutionRetirementDue> {
+    if (!this.#lostExecutionRetirement || leases.length === 0) return { due: [], deferred: false };
+    return this.coordinate(async () => {
+      const due: AssignmentResourceLease[] = [];
+      let deferred = false;
+      for (const lease of leases) {
+        const verdict = this.#lostExecutionVerdict(lease);
+        if (verdict === "due") due.push(lease);
+        else if (verdict === "deferred") deferred = true;
+      }
+      return { due, deferred };
+    }, { caller: "executor-governor.lost-execution-due" });
+  }
+
+  prepareLostExecutionRetirement(
+    lease: AssignmentResourceLease,
+  ): LostExecutionRetirementPreparation {
+    const verdict = this.#lostExecutionVerdict(lease);
+    if (verdict !== "due") return { records: [], deferred: verdict === "deferred" };
+    const state = this.#currentState();
+    const rootId = lease.reservationId;
+    const subtree = liveGovernorReservations(state)
+      .filter((reservation) =>
+        reservation.rootReservationId === rootId &&
+        reservation.depth > 0 &&
+        (reservation.state === "active" || reservation.state === "settled"))
+      .sort((left, right) => right.depth - left.depth);
+    // 没有可核验水位：未收束预占按上限保守计入，后代由深到浅回收（已结算的只释放），最后回收根
+    const entries = conservativeUsageConsumptionRecords(state, { rootReservationIds: new Set([rootId]) })
+      .map((record) => this.#record(record));
+    for (const reservation of subtree) {
+      entries.push(this.#record({
+        t: reservation.state === "settled" ? "release" : "reclaim",
+        reservationId: reservation.lease.reservationId,
+      }));
+    }
+    entries.push(this.#record({ t: "reclaim", reservationId: rootId }));
+    this.#preflight(entries, state);
+    return { records: entries, deferred: false };
+  }
+
+  /** 调用方给出的是账本已校验的接收 lease：只与耐久激活做规范全等比较，不重新验签（它在每次控制调用上都会读取）。 */
+  assignmentRootState(
+    lease: AssignmentResourceLease,
+  ): ResourceReservationProjection["state"] | undefined {
+    const current = this.#currentState().reservations.get(lease.reservationId);
+    if (!current || current.depth !== 0 || canonicalize(current.lease) !== canonicalize(lease)) return undefined;
+    return current.state;
+  }
+
+  async reservationStates(
+    reservationIds: readonly string[],
+  ): Promise<ReadonlyMap<string, ResourceReservationProjection["state"] | undefined>> {
+    if (reservationIds.length === 0) return new Map();
+    return this.coordinate(async () => {
+      const state = this.#currentState();
+      return new Map(reservationIds.map((id) => [id, state.reservations.get(id)?.state] as const));
+    }, { caller: "executor-governor.reservation-states" });
+  }
+
+  /**
+   * 协调内：可退休（due）、下一轮再判（deferred）或不再是候选（skip）。缺键照常抛出待装入，由协调重做。
+   * 只与本治理已接受的耐久租约做规范全等比较，不重新验签：每轮恢复都会判断，验签失败不能中断整轮恢复。
+   */
+  #lostExecutionVerdict(lease: AssignmentResourceLease): "due" | "deferred" | "skip" {
+    if (!this.#lostExecutionRetirement || lease.activation?.kind !== "assignment" || lease.parentId !== undefined) return "skip";
+    const state = this.#currentState();
+    const current = state.reservations.get(lease.reservationId);
+    if (!current || current.state !== "active" || current.depth !== 0 ||
+      canonicalize(current.lease) !== canonicalize(lease)) {
+      return "skip";
+    }
+    if (this.#executionScopes.has(lease.activation.assignmentId)) return "deferred";
+    return this.#leaseDefinitelyExpired(state, current.lease) ? "due" : "deferred";
+  }
+
+  /**
+   * 与截止检查同一份接受事实与换算：首次按本机时钟对耐久接受时间折算并记下单调截止，之后按单调时钟。
+   * 只认明确到期：本机时钟早于接受时间、缺少接受事实或时间无法解析都不算到期。
+   */
+  #leaseDefinitelyExpired(state: GovernorProjection, lease: ResourceLease): boolean {
+    const remembered = this.#leaseDeadlines.get(lease.reservationId);
+    if (remembered?.digest === lease.digest) return this.#monotonicClock() >= remembered.deadline;
+    const acceptance = state.leaseAcceptances.get(lease.reservationId);
+    if (!acceptance || acceptance.leaseDigest !== lease.digest) return false;
+    const now = Date.parse(this.#clock());
+    const acceptedAt = Date.parse(acceptance.acceptedAt);
+    if (!Number.isFinite(now) || !Number.isFinite(acceptedAt) || now < acceptedAt) return false;
+    const remaining = acceptance.validForMs - (now - acceptedAt);
+    if (remaining <= 0) return true;
+    this.#leaseDeadlines.set(lease.reservationId, {
+      digest: lease.digest,
+      deadline: this.#monotonicClock() + remaining,
+    });
+    return false;
   }
 
   async enqueueRoot(

@@ -84,6 +84,7 @@ describe("job assignment audit-only recovery", () => {
       interactionStreamEvents: vi.fn(async () => []),
       markInteractionStreamProjected: vi.fn(async () => undefined),
       markInteractionSettlementOwnerAccepted: markAccepted,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const completeInteractionSettlement = vi.fn(async () => undefined);
     const owner = {
@@ -177,6 +178,7 @@ describe("job assignment audit-only recovery", () => {
       interactionStreamProjectedUpTo: vi.fn(async () => 0),
       interactionStreamEvents: vi.fn(async () => []),
       markInteractionStreamProjected: vi.fn(async () => undefined),
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const worker = new JobAssignmentWorker({
       ledger,
@@ -233,12 +235,18 @@ describe("job assignment audit-only recovery", () => {
     });
     let runtimeSignal: AbortSignal | undefined;
     let issuedCapabilities: unknown;
-    const sealJobBundle = vi.fn(async () => ({
-      assignmentId,
-    }));
+    // 执行帧的作用域：开始前打开，封包等收尾之后在帧出口关闭恰好一次
+    const frameOrder: string[] = [];
+    const sealJobBundle = vi.fn(async () => {
+      frameOrder.push("seal");
+      return { assignmentId };
+    });
     const ledger = {
       recoverableJobObligations: vi.fn(async () => ({ entries: [] })),
-      start: vi.fn(async () => ({ started: true })),
+      start: vi.fn(async () => {
+        frameOrder.push("start");
+        return { started: true };
+      }),
       recoverInteractions: vi.fn(async () => ({ pending: [] })),
       interactionStreamProjectedUpTo: vi.fn(async () => 0),
       interactionStreamEvents: vi.fn(async () => []),
@@ -247,6 +255,10 @@ describe("job assignment audit-only recovery", () => {
       hasPendingTicketCancellation: vi.fn(async () => false),
       closePendingInteractionsForRunEnd: vi.fn(async () => undefined),
       sealJobBundle,
+      openExecutionScope: () => {
+        frameOrder.push("open");
+        return { close: () => { frameOrder.push("close"); } };
+      },
     } as unknown as ConversationAssignmentLedger;
     class Submission {
       async flushInteractionMirrors() {}
@@ -318,6 +330,7 @@ describe("job assignment audit-only recovery", () => {
     expect(sealJobBundle).toHaveBeenCalledTimes(1);
     expect(reserveUsage).toHaveBeenCalledTimes(1);
     expect(consume).toHaveBeenCalledTimes(1);
+    expect(frameOrder).toEqual(["open", "start", "seal", "close"]);
     await expect(worker.close()).resolves.toBeUndefined();
   });
 
@@ -327,6 +340,7 @@ describe("job assignment audit-only recovery", () => {
     const ledger = {
       recoverableJobObligations: vi.fn(async () => ({ entries: [] })),
       start: vi.fn(async () => ({ started: true })),
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const worker = new JobAssignmentWorker({
       ledger,

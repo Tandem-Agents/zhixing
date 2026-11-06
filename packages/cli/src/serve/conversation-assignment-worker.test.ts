@@ -24,12 +24,15 @@ import { worksceneTaskContext } from "@zhixing/core/workscene/application";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 
 it("instantiates the exact signed profile when new tools appear before execution", async () => {
-  const failExecution = vi.fn(async () => {});
+  // 执行帧的作用域：开始前打开，失败收尾之后在帧出口关闭恰好一次
+  const frameOrder: string[] = [];
+  const failExecution = vi.fn(async () => { frameOrder.push("failExecution"); });
   const create = vi.fn(async (_id: string, environment: Parameters<RuntimeFactory["create"]>[1]) => ({ executionProfile: () => environment?.executionProfile ?? { tools: ["mcp_discover", "mcp__new__tool"], mcpServers: ["new"], providerIds: [] }, run: () => { throw new Error("RUN_REACHED"); }, dispose: vi.fn(async () => {}) }));
   const errors: string[] = [];
   const worker = new ConversationAssignmentWorker({
     InProcessAssignmentSubmission,
-    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, hasPendingOwnerCancellation: async () => false, failExecution },
+    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => { frameOrder.push("start"); return { started: true }; }, closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, hasPendingOwnerCancellation: async () => false, failExecution,
+      openExecutionScope: () => { frameOrder.push("open"); return { close: () => { frameOrder.push("close"); } }; } },
     runtimeFactory: { create }, artifacts: {},
     submissionFor: () => ({ reportStarted: async () => {}, mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof: vi.fn() }),
     finalizeUsage: async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 }),
@@ -42,6 +45,10 @@ it("instantiates the exact signed profile when new tools appear before execution
   await worker.drain();
   expect(create.mock.calls[0]?.[1]).toEqual({ workspaceRoot: "D:\\fixture", executionProfile: { tools: ["mcp_discover"], mcpServers: [], providerIds: [] }, workspaceBinding: null });
   expect(errors).toEqual(["RUN_REACHED"]);
+  expect(frameOrder[0]).toBe("open");
+  expect(frameOrder.indexOf("start")).toBeGreaterThan(0);
+  expect(frameOrder.at(-1)).toBe("close");
+  expect(frameOrder.filter((step) => step === "close")).toHaveLength(1);
 });
 
 // 远端执行体：推进执行运行的原任务与契约来自指派材料，身份取耐久 ingress；材料不可用时运行体不启动
@@ -57,7 +64,7 @@ it.each(["ready", "unavailable", "missing"] as const)("hands the adjudicated adv
   const errors: string[] = [];
   const worker = new ConversationAssignmentWorker({
     InProcessAssignmentSubmission,
-    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, hasPendingOwnerCancellation: async () => false, failExecution: vi.fn(async () => {}) },
+    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, hasPendingOwnerCancellation: async () => false, failExecution: vi.fn(async () => {}), openExecutionScope: () => ({ close() {} }) },
     runtimeFactory: { create }, artifacts: {},
     submissionFor: () => ({ reportStarted: async () => {}, mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof: vi.fn() }),
     finalizeUsage: async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 }),
@@ -131,6 +138,7 @@ describe("ConversationAssignmentWorker", () => {
           kind: "not-sealed" as const,
         })),
         start: vi.fn(async () => ({ started: true })),
+        openExecutionScope: () => ({ close() {} }),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
       artifacts: {} as ArtifactStore,
@@ -184,6 +192,7 @@ describe("ConversationAssignmentWorker", () => {
           kind: "not-sealed" as const,
         })),
         start,
+        openExecutionScope: () => ({ close() {} }),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
       artifacts: {} as ArtifactStore,
@@ -249,6 +258,7 @@ describe("ConversationAssignmentWorker", () => {
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
       hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
       failExecution,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const runtimeFailure = new Error("runtime factory unavailable");
     const onError = vi.fn();
@@ -345,6 +355,7 @@ describe("ConversationAssignmentWorker", () => {
         pendingInteractionMirrorBatch: vi.fn(async () => undefined),
         hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
         failExecution,
+        openExecutionScope: () => ({ close() {} }),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
       artifacts: {} as ArtifactStore,
@@ -391,6 +402,7 @@ describe("ConversationAssignmentWorker", () => {
       start: vi.fn(async () => ({ started: false })),
       sealedBundleForRecovery: vi.fn(async () => ({ kind: "sealed", bundle })),
       acknowledge,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const submitBundle = vi.fn(async () => ({
       committed: true as const,
@@ -449,6 +461,7 @@ describe("ConversationAssignmentWorker", () => {
       start: vi.fn(async () => ({ started: false })),
       sealedBundleForRecovery: vi.fn(async () => ({ kind: "sealed", bundle })),
       acknowledge,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const submitBundle = vi.fn()
       .mockImplementationOnce(async () => {
@@ -501,6 +514,7 @@ describe("ConversationAssignmentWorker", () => {
           bundle: { assignmentId } as SealedBundle,
         })),
         acknowledge: vi.fn(),
+        openExecutionScope: () => ({ close() {} }),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory: {} as RuntimeFactory,
       artifacts: {} as ArtifactStore,
@@ -564,6 +578,7 @@ describe("ConversationAssignmentWorker", () => {
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
       hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => ownerCancelled),
       failExecution,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     let observedSignal: AbortSignal | undefined;
     const run = vi.fn(async function* (
@@ -649,6 +664,7 @@ describe("ConversationAssignmentWorker", () => {
       continueTicketCancellation,
       hasOpenSideEffects: vi.fn(async () => false),
       markTicketCancellationProofOwnerAccepted,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
@@ -705,6 +721,7 @@ describe("ConversationAssignmentWorker", () => {
       continueTicketCancellation: vi.fn(async () => ({ assignmentId, cause: "abort-ticket" }) as never),
       hasOpenSideEffects: vi.fn(async () => false),
       markTicketCancellationProofOwnerAccepted,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
@@ -741,6 +758,7 @@ describe("ConversationAssignmentWorker", () => {
       continueTicketCancellation: vi.fn(async () => ({ assignmentId, cause: "abort-ticket" }) as never),
       hasOpenSideEffects: vi.fn(async () => false),
       markTicketCancellationProofOwnerAccepted,
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
@@ -763,6 +781,49 @@ describe("ConversationAssignmentWorker", () => {
 
     expect(onError).toHaveBeenCalledWith(assignmentId, expect.objectContaining({ message: "Cancel proof names a different assignment" }));
     expect(markTicketCancellationProofOwnerAccepted).not.toHaveBeenCalled();
+  });
+
+  it("stops ticket cancellation without retrying once the execution resource was retired", async () => {
+    const assignmentId = "asg-worker-ticket-cancel-retired";
+    const envelope = {
+      execution: "conversation",
+      assignmentId,
+      capabilities: [{ expiry: new Date(Date.now() + 60_000).toISOString() }],
+    } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
+    const onError = vi.fn();
+    const submitCancelProof = vi.fn(async () => undefined);
+    // 退休之后：执行干净，但停止已无从证明；续接不能变成无限重试，也不能提交或伪造证明
+    const continueTicketCancellation = vi.fn(async () => undefined);
+    const ledger = {
+      abortWithTicket: vi.fn(async () => ({ kind: "accepted" as const })),
+      conversationAssignmentForRecovery: vi.fn(async () => envelope),
+      pendingInteractionMirrorBatch: vi.fn(async () => undefined),
+      continueTicketCancellation,
+      hasOpenSideEffects: vi.fn(async () => false),
+      executionResourceRetired: vi.fn(async () => true),
+      markTicketCancellationProofOwnerAccepted: vi.fn(async () => true),
+      openExecutionScope: () => ({ close() {} }),
+    } as unknown as ConversationAssignmentLedger;
+    const worker = new ConversationAssignmentWorker({
+      InProcessAssignmentSubmission,
+      ledger,
+      runtimeFactory: {} as RuntimeFactory,
+      artifacts: {} as ArtifactStore,
+      submissionFor: () => ({ reportStarted: vi.fn(), mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof }),
+      finalizeUsage: vi.fn(),
+      interactions: interactionObserver(),
+      onError,
+    });
+
+    await worker.abortWithTicket({ assignmentId, reason: "owner unavailable" } as unknown as ExecutionAbortRequest);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(
+      assignmentId,
+      expect.objectContaining({ name: "IncompleteCancellationProofError" }),
+    ), { timeout: 2_000 });
+    await worker.drain();
+
+    expect(continueTicketCancellation).toHaveBeenCalledTimes(1);
+    expect(submitCancelProof).not.toHaveBeenCalled();
   });
 
   it("routes an authorized surface answer through the active runtime broker", async () => {
@@ -808,6 +869,7 @@ describe("ConversationAssignmentWorker", () => {
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
       hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
       failExecution: vi.fn(async () => undefined),
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const confirmationBroker = {} as never;
     let observedSignal: AbortSignal | undefined;
@@ -885,6 +947,7 @@ describe("ConversationAssignmentWorker", () => {
       ledger: {
         abortWithTicket: vi.fn(async () => ({ kind: "terminal" as const })),
         conversationAssignmentForRecovery,
+        openExecutionScope: () => ({ close() {} }),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory: {} as RuntimeFactory,
       artifacts: {} as ArtifactStore,
@@ -915,6 +978,7 @@ describe("ConversationAssignmentWorker", () => {
         .mockRejectedValueOnce(new Error("temporary read failure"))
         .mockResolvedValueOnce({ kind: "sealed", bundle }),
       acknowledge: vi.fn(async () => undefined),
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const submitBundle = vi.fn(async () => ({ committed: true as const, commitRevision: 9 }));
     const transientWorker = new ConversationAssignmentWorker({
@@ -948,6 +1012,7 @@ describe("ConversationAssignmentWorker", () => {
         recoverableConversationCancellations: vi.fn(async () => []),
         start: vi.fn(async () => ({ started: false })),
         sealedBundleForRecovery: vi.fn(async () => { throw corruption; }),
+        openExecutionScope: () => ({ close() {} }),
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory: {} as RuntimeFactory,
       artifacts: {} as ArtifactStore,
@@ -971,7 +1036,7 @@ describe("ConversationAssignmentWorker", () => {
     const onError = vi.fn();
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,
-      ledger: { start } as unknown as ConversationAssignmentLedger,
+      ledger: { start, openExecutionScope: () => ({ close() {} }) } as unknown as ConversationAssignmentLedger,
       runtimeFactory: {} as RuntimeFactory,
       artifacts: {} as ArtifactStore,
       submissionFor: () => ({
@@ -1077,6 +1142,7 @@ describe("ConversationAssignmentWorker", () => {
       sealConversationBundle,
       failExecution,
       acknowledge: vi.fn(async () => undefined),
+      openExecutionScope: () => ({ close() {} }),
     } as unknown as ConversationAssignmentLedger;
     const worker = new ConversationAssignmentWorker({
       InProcessAssignmentSubmission,

@@ -206,6 +206,8 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     const executionAbort = new AbortController();
     this.#executionAborts.set(envelope.assignmentId, executionAbort);
     this.#executionStages.set(envelope.assignmentId, "waiting-owner");
+    // 执行帧的执行作用域：开始执行前打开，帧的最终出口关闭
+    const executionScope = this.options.ledger.openExecutionScope(envelope.assignmentId);
     // Accepted jobs have an independent durable owner. A manual schedule tool
     // must not lend its live permit, lock marker or cancellation to the job.
     const task = runDetachedDeviceCapacity(() => runDetachedMaintenanceContext("background",
@@ -216,6 +218,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         }
       })
       .finally(() => {
+        executionScope.close();
         this.#running.delete(envelope.assignmentId);
         if (this.#executionAborts.get(envelope.assignmentId) === executionAbort) {
           this.#executionAborts.delete(envelope.assignmentId);

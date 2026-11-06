@@ -538,6 +538,11 @@ export interface SetupAuthorityRuntimeOptions {
   }) => RuntimeExecutionProfile;
   readonly enableAnchor?: boolean;
   readonly enableLocalExecutor?: boolean;
+  /**
+   * 只由宿主进程开启（serve 宿主与执行端专用宿主，均在取得 home 端口单例之后调用）：执行帧须先打开
+   * 执行作用域才能开始分配，已离开执行帧且执行端租约明确到期的分配根由业务恢复退休。独立命令不开启。
+   */
+  readonly lostExecutionRetirement?: boolean;
   readonly resourceCandidateTtlMs?: number;
   readonly clock?: () => string;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
@@ -851,6 +856,7 @@ export async function setupAuthorityRuntime(
           ...(options.resourceCandidateTtlMs === undefined
             ? {}
             : { candidateTtlMs: options.resourceCandidateTtlMs }),
+          lostExecutionRetirement: options.lostExecutionRetirement === true,
           clock,
         })
       : undefined;
