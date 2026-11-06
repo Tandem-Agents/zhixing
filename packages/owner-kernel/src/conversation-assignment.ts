@@ -2656,8 +2656,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         } });
       } else if (record.stream === runStream(this.#conversationId) && 't' in body && body.t === 'state') {
         const status = controls.get(body.runId)!;
+        // 只有记录就是运行当前最新的状态时才发出事实，记录里的派发即这条状态的执行尝试
         const fact = status.entry?.statusRevision === body.statusRevision ? this.#statusFact(body.runId, status,
-          cursor.historyThroughInputLsn !== undefined && (imported || upper.lsn <= cursor.historyThroughInputLsn)) : undefined;
+          cursor.historyThroughInputLsn !== undefined && (imported || upper.lsn <= cursor.historyThroughInputLsn), body.assignmentId) : undefined;
         if (fact) facts.push(fact);
       } else if (record.stream === 'final-outbox' && 't' in body && body.t === 'final' && body.conversationId === this.#conversationId && body.state === 'pending') {
         const commit = controls.get(body.runId)?.commit;
@@ -2747,8 +2748,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   /** 一个运行当前状态的控制事实（扫描、当前集合补发与精确端口共用） */
-  #statusFact(runId: string, status: ControlRead, historyCovered: boolean): Extract<ConversationControlFact, { kind: 'status' }> | undefined {
-    const notice = conversationStatusNotice(this.#conversationId, this.#ownerEpoch, runId, status.entry!);
+  #statusFact(runId: string, status: ControlRead, historyCovered: boolean, assignmentId?: string): Extract<ConversationControlFact, { kind: 'status' }> | undefined {
+    const notice = conversationStatusNotice(this.#conversationId, this.#ownerEpoch, runId, status.entry!, assignmentId);
     if (!notice) return;
     return { kind: 'status', ...(historyCovered ? { historyCovered: true } : {}), notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice,
       communication: status.communication, continuation: status.continuation, ...(status.commit ? { commitRevision: status.commit.commitRevision } : {}) };
@@ -6009,6 +6010,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       requests.map(async ({ runId, afterStatusRevision }) => {
         const page = await this.#readIndex.statusHistory(this.#conversationId, runId, afterStatusRevision);
         const selected = page.slice(0, 64);
+        // 每条读目录条目自带它那条状态记录的派发身份
         const notices = selected
           .map((record) =>
             conversationStatusNotice(
@@ -8718,6 +8720,7 @@ function conversationStatusNoticesForCommit(
       ownerEpoch,
       body.runId,
       entry,
+      body.assignmentId,
     );
     if (notice) notices.push(notice);
   }

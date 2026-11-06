@@ -189,6 +189,13 @@ describe("ConversationProtocolRuntime", () => {
       ?.assignmentId;
     const bundleRef = records.find((record) => record.t === "committed")?.bundle?.ref;
     if (!assignmentId || !bundleRef) throw new Error("committed bundle identity is missing");
+    // 实时状态通知：派发与执行中的状态带上该次派发（当前执行尝试）的身份，其他状态不带
+    const live = statuses as Array<{ state: string; assignmentId?: string }>;
+    expect(live.filter((notice) => notice.state === "dispatched" || notice.state === "running").length).toBeGreaterThan(0);
+    for (const notice of live) {
+      if (notice.state === "dispatched" || notice.state === "running") expect(notice.assignmentId).toBe(assignmentId);
+      else expect(notice).not.toHaveProperty("assignmentId");
+    }
     const bundle = JSON.parse(
       Buffer.from(await authority.artifacts.get(bundleRef)).toString("utf8"),
     ) as {
@@ -573,6 +580,23 @@ describe("ConversationProtocolRuntime", () => {
       await started.promise;
       const runId = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
         .map(entry => entry.body as { t?: string; runId?: string }).find(body => body.t === "admitted")!.runId!;
+      // 恢复路径（状态历史分页，经读目录）：派发、执行与取消中的每条状态带上它那条状态记录的派发，其他状态不带
+      const attemptStates = new Set(["dispatched", "running", "cancel-requested"]);
+      const expectAttempts = async () => {
+        const records = new Map((await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+          .map(entry => entry.body as { t?: string; runId?: string; state?: string; statusRevision?: number; assignmentId?: string })
+          .filter(body => body.t === "state" && body.runId === runId).map(body => [body.statusRevision!, body] as const));
+        const history = (await protocol.statusHistory([{ conversationId: "local-stop", runId, afterStatusRevision: 0 }])).notices as Array<{ state: string; statusRevision: number; assignmentId?: string }>;
+        expect(history.length).toBeGreaterThan(0);
+        for (const notice of history) {
+          const record = records.get(notice.statusRevision)!;
+          if (attemptStates.has(notice.state)) expect(notice.assignmentId).toBe(record.assignmentId);
+          else expect(notice).not.toHaveProperty("assignmentId");
+        }
+        return history;
+      };
+      const runningHistory = await expectAttempts();
+      expect(runningHistory.at(-1)).toMatchObject({ state: expect.stringMatching(/^(dispatched|running)$/u), assignmentId: expect.any(String) });
       const cancelling = protocol.cancel({ conversationId: "local-stop", runId, requestId: "cancel:local-stop",
         principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "test" } });
       const stoppedBeforeExecutorCancellation = await Promise.race([
@@ -587,6 +611,9 @@ describe("ConversationProtocolRuntime", () => {
       const status = () => protocol.statusHistory([{ conversationId: "local-stop", runId, afterStatusRevision: 0 }]);
       await vi.waitFor(async () => expect((await status()).notices.at(-1)?.state).toBe("cancelled"), { timeout: 10_000 });
       expect((await status()).notices.some(notice => notice.state === "uncertain")).toBe(false);
+      // 运行已结束：终态不带执行尝试身份，较早的派发与执行状态仍带各自记录的派发
+      const ended = await expectAttempts();
+      expect(ended.at(-1)).not.toHaveProperty("assignmentId");
     } finally {
       gate.resolve();
       begin.mockRestore();

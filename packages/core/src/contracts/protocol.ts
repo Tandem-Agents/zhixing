@@ -458,11 +458,14 @@ export type ConversationStatusNotice =
     > & { openFactDigest: Digest })
   | (StatusNoticeBase<ExecutionRefFor<"conversation">, "uncertain-closed", []> &
       { openFactDigest: Digest } & ConversationUncertainClosure)
-  | StatusNoticeBase<
+  | (StatusNoticeBase<
       ExecutionRefFor<"conversation">,
       Exclude<ConversationRunState, "committed" | "uncertain">,
       []
-    >;
+    > & {
+      /** dispatched、running、cancel-requested：这条状态所属的派发，即当前执行尝试的身份；其他状态不带 */
+      assignmentId?: string;
+    });
 
 export type JobStatusNotice =
   | (StatusNoticeBase<ExecutionRefFor<"job">, "uncertain", ResolutionActionSet> & {

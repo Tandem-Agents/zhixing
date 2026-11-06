@@ -6,6 +6,8 @@ export type StatusHistoryEntry = {
   readonly statusRevision: number;
   readonly at: IsoTime;
   readonly reason?: string;
+  /** 读目录保存的这条状态所属派发（执行尝试）；只在派发、执行与取消中且状态记录带来时存在 */
+  readonly assignmentId?: string;
 } & (
   | { readonly uncertainTransition?: undefined }
   | { readonly uncertainTransition: "opened"; readonly openFactDigest: string }
@@ -21,11 +23,21 @@ export function projectStatusEntry(body: { state: ConversationRunState; statusRe
     ...(transition.kind === 'opened' ? { uncertainTransition: 'opened' as const, openFactDigest: transition.openFactDigest } : transition.kind === 'closed' ? { uncertainTransition: 'closed' as const, openFactDigest: transition.openFactDigest, ...conversationUncertainClosure(transition.resolutionKind as Exclude<typeof transition.resolutionKind, 'proven-not-started-cancelled'>) } : {}) };
 }
 
+/** 带执行尝试身份的状态：派发、执行与取消中都属于某一次派发 */
+export function conversationAttemptState(state: ConversationRunState): boolean {
+  return state === "dispatched" || state === "running" || state === "cancel-requested";
+}
+
+/**
+ * assignmentId 是这条状态所属的派发（执行尝试），只对 dispatched、running、cancel-requested 生效。
+ * 实时路径直接传入状态记录里的值；恢复路径取读目录条目自带的值（由同一条状态记录派生）。
+ */
 export function conversationStatusNotice(
   conversationId: string,
   ownerEpoch: number,
   runId: string,
   entry: StatusHistoryEntry,
+  assignmentId?: string,
 ): ConversationStatusNotice | undefined {
   const ref = {
     execution: "conversation" as const,
@@ -75,6 +87,9 @@ export function conversationStatusNotice(
     actions: [],
     at: entry.at,
     ...(entry.reason ? { reason: entry.reason } : {}),
+    ...((assignmentId ?? entry.assignmentId) && conversationAttemptState(entry.state)
+      ? { assignmentId: assignmentId ?? entry.assignmentId }
+      : {}),
   };
 }
 

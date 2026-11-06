@@ -2,7 +2,7 @@ import { artifactJsonIndex, createDurableProjectionOverlay, assertArtifactRef, t
 import type { ProtocolSignatureVerifier } from '@zhixing/core/protocol';
 import { validateConversationRunRecord, validateFinalOutboxRecord } from './conversation-run-contracts.js';
 import type { JsonValue, SessionMeta, ArtifactRef, ConversationCommitSummary } from '@zhixing/core/contracts';
-import { projectStatusEntry, type StatusHistoryEntry } from './conversation-status-projection.js';
+import { conversationAttemptState, projectStatusEntry, type StatusHistoryEntry } from './conversation-status-projection.js';
 import { validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord, canonicalize } from '@zhixing/core/protocol';
 import type { DurableLogCheckpoint, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing/core/authority';
 import { parseConversationId } from '@zhixing/core/conversation';
@@ -922,7 +922,9 @@ export class ConversationDirectoryReducer {
         // Imported execution prefixes are verified by the transfer owner. An
         // atomic closure identifies that prior uncertain state without loading it.
         const previousState = previous?.state ?? (resolutions.some(fact => fact.resolution) ? 'uncertain' : undefined);
-        const status = projectStatusEntry(body, at, previousState, resolutions);
+        // 读目录同时保存这条状态所属的派发：恢复路径据此给出当前执行尝试的身份，不必去读运行决策状态
+        const status: StatusHistoryEntry = { ...projectStatusEntry(body, at, previousState, resolutions),
+          ...(conversationAttemptState(body.state) && body.assignmentId ? { assignmentId: body.assignmentId } : {}) };
         put(statusKey, status);
         put(p + 'status-history:' + JSON.stringify(body.runId) + ':' + ordinal(body.statusRevision), status);
         const position = local ? item : baseStart + item;
@@ -1085,7 +1087,7 @@ export function registerConversationReadProjection(log: AuthorityCommitLog, arti
   registerConversationBaseContext(log, artifacts, verifier);
   const reducer = new ConversationDirectoryReducer(artifacts, verifier);
   const index = log.durableProjection<ConversationRunJournalRecord>({
-    projectionId: 'conversation-read-directory', reducerVersion: 18,
+    projectionId: 'conversation-read-directory', reducerVersion: 19,
     inputs: { families: ['run:', 'transfer:'], streams: ['final-outbox', 'control'] },
     reduce: async (envelope, current, position) => {
       const seeds = new Map<string, JsonValue | undefined>();
