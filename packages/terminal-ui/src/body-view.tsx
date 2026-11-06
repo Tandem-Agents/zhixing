@@ -404,6 +404,11 @@ export function BodyView(props: BodyViewProps) {
   let selection: { from: BodyAnchor; to: BodyAnchor; anchor: SourcePoint; focus: SourcePoint; behavior: NativeSelection['behavior'];
     parts: { key: string; from: BodyAnchor; to: BodyAnchor; fromBias: number; toBias: number }[] } | undefined;
   let selectionOwner: NativeSelection | undefined, selectionGesture: string | undefined;
+  // 拖选中重排的冻结快照（见 freezeDrag / finishReflow）：旧布局下的视口锚点与源选区、手势代际，以及判断排版是否未变的身份
+  // ended：冻结期间原手势已收束（松手或普通键接管），重排完成后按快照保留其选区；
+  // superseded：被新的按下取代，快照作废，重排完成后只按冻结锚点定位视口，不投影旧选区
+  let reflow: { anchor?: BodyAnchor; selection?: NonNullable<typeof selection>; version: number; proven: boolean; width: number; page: BodyPage;
+    prefix: number; viewportY: number; scrollTop: number; pointer?: number; ended?: boolean; superseded?: boolean } | undefined;
   // Native lineStartCols are absolute buffer columns, not columns relative to
   // each logical line. Subtract that line's first wrapped-row origin.
   const lineBase = (info: TextRenderable['lineInfo'], logical: number) => info.lineStartCols[info.lineSources.indexOf(logical)] ?? 0;
@@ -442,11 +447,12 @@ export function BodyView(props: BodyViewProps) {
     const range = entry.view.getSelection();
     return range && range.start !== range.end;
   }).sort((a, b) => a.view.y - b.view.y || a.view.x - b.view.x);
-  const captureSelection = (current: NonNullable<ReturnType<CliRenderer['getSelection']>>) => {
+  // 读源快照：拖动中与已完成的原生选区共用；只有已完成的选区才能用于复制（captureSelection）
+  const readSelection = (current: NativeSelection) => {
     const owned = new Set([...mounted.values()].filter(entry => !entry.view.isDestroyed).map(entry => entry.view));
     // Empty source lines have touched leaves but no selected characters. Still
     // reject fields, stale leaves and mixed selections before claiming Ctrl+C.
-    if (current.isDragging || current.selectedRenderables.some(leaf => !owned.has(leaf as BodyTextRenderable)) ||
+    if (current.selectedRenderables.some(leaf => !owned.has(leaf as BodyTextRenderable)) ||
         !current.touchedRenderables.some(leaf => owned.has(leaf as BodyTextRenderable))) return undefined;
     // Read native selected ranges, including word/line expansion and wide
     // graphemes. Pointer endpoints alone do not describe the selected text.
@@ -468,6 +474,7 @@ export function BodyView(props: BodyViewProps) {
     if (!anchor || !focus) return undefined;
     return { from: parts[0]!.from, to: parts.at(-1)!.to, anchor, focus, behavior: current.behavior, parts };
   };
+  const captureSelection = (current: NativeSelection) => current.isDragging ? undefined : readSelection(current);
   // Native anchor is derived from its leaf's CURRENT geometry; it moves even
   // without input. Focus changes only via updateSelection (user gesture or our
   // own restore, which explicitly rebinds the snapshot below). A new native
@@ -526,8 +533,11 @@ export function BodyView(props: BodyViewProps) {
     const origin = sourcePoint(source, entry.block.key);
     return origin ? { source, key: entry.block.key, cellOffset: point.x - origin.x, rowOffset: point.y - origin.y } : undefined;
   };
-  const capture = (): BodyAnchor | undefined => {
-    if (!box || disposed || restorePending) return saved;
+  // 待恢复期间返回冻结的锚点（布局可能只更新了一半）；其余时候直接读当前布局
+  const capture = (): BodyAnchor | undefined => !box || disposed || restorePending ? saved : readAnchor();
+  // 直接读当前已完成布局的视口首个可见源位置，不走冻结分支：拖选结束、重排冻结时用
+  const readAnchor = (): BodyAnchor | undefined => {
+    if (!box || disposed) return saved;
     headerTop = prefixHeight() > box.scrollTop ? box.scrollTop : undefined; headerStart = props.page.start;
     headerFirst = headerTop === undefined ? undefined : blocks()[0]?.key;
     const top = box.viewport.y;
@@ -548,6 +558,14 @@ export function BodyView(props: BodyViewProps) {
   const finishBodySelection = () => {
     const current = props.renderer.getSelection();
     if (disposed || !current || current.isDragging || ![...mounted.values()].some(entry => current.touchedRenderables.includes(entry.view))) return;
+    // 重排冻结期间结束（松手或接管）：半更新的布局不可读，按冻结的源快照收束，投影留给重排完成时；
+    // 被新按下取代的快照已作废，不再作为选区
+    if (reflow) {
+      reflow.ended = true;
+      if (reflow.superseded) { selection = undefined; selectionOwner = undefined; selectionGesture = undefined; }
+      else { selection = reflow.selection; selectionOwner = current; selectionGesture = gesture(current); }
+      return;
+    }
     const focus = pointerSource(current.focus), target = focus && mounted.get(focus.key)?.view;
     if (!target) return;
     // OpenTUI widens a selection container by one ancestor per movement.
@@ -564,12 +582,81 @@ export function BodyView(props: BodyViewProps) {
     // renderer has no selected character leaf for it.
     selection = captureSelection(current); selectionOwner = current; selectionGesture = gesture(current);
   };
+  // 本正文的原生拖选正在进行：此时视口归原生手势（含边缘自动滚动），旧阅读锚点不得拉回
+  const activeDrag = () => {
+    const current = props.renderer.getSelection();
+    return !!box && !disposed && gestureHold && heldVersion === navigationVersion && !!current?.isDragging &&
+      [...mounted.values()].some(entry => current.touchedRenderables.includes(entry.view));
+  };
+  // 拖选中的实际几何变化：在旧布局仍可读时冻结视口锚点、源选区与判断“排版是否未变”所需的身份，暂停边缘推进。
+  // proven=false：变化不经 beforeUpdate 到达（如欢迎区高度），无法证明对应不变，重排后只等真实指针
+  const freezeDrag = (proven: boolean) => {
+    if (reflow) return true;
+    if (!box || !untrack(activeDrag)) return false;
+    const current = props.renderer.getSelection()!;
+    reflow = { anchor: readAnchor(), selection: readSelection(current), version: navigationVersion, proven, width: props.width,
+      page: untrack(contentPage), prefix: untrack(prefixHeight), viewportY: box.viewport.y, scrollTop: box.scrollTop, pointer: box.realPointer?.seq };
+    box.holdAutoScroll();
+    saved = reflow.anchor; props.onAnchor(saved);
+    return true;
+  };
+  // 按源快照重建原生选区；active 时保持拖动中（不带 finishDragging），之后真实的 drag 与 up 照常由渲染器路由
+  const projectSelection = (snapshot: NonNullable<typeof selection>, active: boolean) => {
+    const first = snapshot.parts[0]!, last = snapshot.parts.at(-1)!;
+    const from = sourcePoint(snapshot.from, first.key, first.fromBias), to = sourcePoint(snapshot.to, last.key, last.toBias);
+    const anchor = sourcePoint(snapshot.anchor.source, snapshot.anchor.key), focus = sourcePoint(snapshot.focus.source, snapshot.focus.key);
+    if (!from || !to || !anchor || !focus) return false;
+    for (const entry of mounted.values()) entry.view.restoringSelection = { from, to };
+    try {
+      props.renderer.startSelection(anchor.view, anchor.x + snapshot.anchor.cellOffset, anchor.y + snapshot.anchor.rowOffset, snapshot.behavior);
+      // A restored range jumps straight to its endpoint. Native mouse drags
+      // normally widen the selection container one ancestor per move.
+      let container = props.renderer.getSelectionContainer();
+      while (true) {
+        props.renderer.updateSelection(focus.view, focus.x + snapshot.focus.cellOffset, focus.y + snapshot.focus.rowOffset, active ? undefined : { finishDragging: true });
+        const next = props.renderer.getSelectionContainer();
+        if (!next || next === container) break;
+        container = next;
+      }
+    } finally {
+      for (const entry of mounted.values()) entry.view.restoringSelection = undefined;
+    }
+    return true;
+  };
+  // 新布局已就绪、视口已按冻结锚点定位：把冻结的源选区投影回去。手势仍有效就保持活动，并决定边缘推进何时继续
+  const finishReflow = () => {
+    const frozen = reflow!; reflow = undefined;
+    const current = props.renderer.getSelection();
+    const live = !frozen.ended && frozen.version === navigationVersion && gestureHold && !!current?.isDragging;
+    if (live) {
+      if (frozen.selection) projectSelection(frozen.selection, true);
+      const pointer = box!.realPointer, viewport = box!.viewport;
+      if (pointer && pointer.seq !== frozen.pointer) {
+        // 冻结后收到过真实指针：按新布局交给原生，并照真实输入继续推进
+        props.renderer.requestSelectionUpdate(); box!.resumeAutoScroll();
+      } else if (frozen.proven && props.width === frozen.width && contentPage() === frozen.page && prefixHeight() === frozen.prefix &&
+          viewport.y === frozen.viewportY && box!.scrollTop === frozen.scrollTop && pointer && pointer.y >= viewport.y && pointer.y < viewport.y + viewport.height) {
+        // 同宽、同内容、同起点且未夹紧：排版结果相同，各行与指针落点的源对应都未变，只是视口底部变高或变矮
+        box!.resumeAutoScroll();
+      } else box!.awaitPointer();
+      return;
+    }
+    // 被新按下取代：旧快照作废，保留新手势或当前可判定的选区，不复活旧选区
+    if (frozen.superseded) return;
+    // 冻结期间原手势已收束（松手或普通键接管）：按冻结的源快照以完成态投影
+    if (frozen.selection && projectSelection(frozen.selection, false)) {
+      const restored = props.renderer.getSelection();
+      selection = frozen.selection; selectionOwner = restored ?? undefined; selectionGesture = restored ? gesture(restored) : undefined;
+    }
+  };
   const restore = () => {
     if (!box || disposed || !restorePending) return;
     // A parent size callback updates the child's explicit width after native
     // layout. Give that width one complete layout before reading its line map.
     // Otherwise a narrow/wide transition restores with the previous wrapping.
     if (!layoutReady) { layoutReady = true; props.renderer.requestRender(); return; }
+    // 原生拖选进行中且没有待交接的重排：视口归原生手势，等手势结束再按结束时的锚点恢复，不与自动滚动争 scrollTop
+    if (!reflow && activeDrag()) return;
     const scrollTop = box.scrollTop;
     if (align === 'bottom' || (following() && !gestureHold && !saved)) box.scrollTo(box.scrollHeight);
     else if (align === 'top') box.scrollTo(0);
@@ -609,26 +696,9 @@ export function BodyView(props: BodyViewProps) {
     if (box.scrollTop !== scrollTop) { props.renderer.requestRender(); return; }
     if (pendingScroll) { box.scrollBy(pendingScroll); pendingScroll = 0; props.renderer.requestRender(); }
     restorePending = false;
+    if (reflow) { finishReflow(); return; }
     if (selection) {
-      const first = selection.parts[0]!, last = selection.parts.at(-1)!;
-      const from = sourcePoint(selection.from, first.key, first.fromBias), to = sourcePoint(selection.to, last.key, last.toBias);
-      const anchor = sourcePoint(selection.anchor.source, selection.anchor.key), focus = sourcePoint(selection.focus.source, selection.focus.key);
-      if (from && to && anchor && focus) {
-        for (const entry of mounted.values()) entry.view.restoringSelection = { from, to };
-        try {
-          props.renderer.startSelection(anchor.view, anchor.x + selection.anchor.cellOffset, anchor.y + selection.anchor.rowOffset, selection.behavior);
-          // A restored range jumps straight to its endpoint. Native mouse drags
-          // normally widen the selection container one ancestor per move.
-          let container = props.renderer.getSelectionContainer();
-          while (true) {
-            props.renderer.updateSelection(focus.view, focus.x + selection.focus.cellOffset, focus.y + selection.focus.rowOffset, { finishDragging: true });
-            const next = props.renderer.getSelectionContainer();
-            if (!next || next === container) break;
-            container = next;
-          }
-        } finally {
-          for (const entry of mounted.values()) entry.view.restoringSelection = undefined;
-        }
+      if (projectSelection(selection, false)) {
         const restored = props.renderer.getSelection();
         selectionOwner = restored ?? undefined; selectionGesture = restored ? gesture(restored) : undefined;
       } else {
@@ -644,6 +714,8 @@ export function BodyView(props: BodyViewProps) {
       // 新的按下（包括上一次松开没有送达）：旧手势在这里结束，按在正文上的新手势在同一次事件处理里开始；
       // 两者之间的报告仍算按住，按住期间保留的布局不先归还。按下落在正文之外时，下一次报告即归还
       if (press) { pressing = true; queueMicrotask(() => { pressing = false; }); }
+      // 新的按下取代旧手势：旧手势尚未交接的重排快照随之作废
+      if (press && reflow) reflow.superseded = true;
       const ownsGesture = heldVersion === navigationVersion;
       navigationVersion++;
       if (ownsGesture) heldVersion = navigationVersion;
@@ -700,6 +772,8 @@ export function BodyView(props: BodyViewProps) {
     anchor: capture,
     beforeUpdate() {
       if (disposed) return;
+      // 拖选进行中：冻结旧布局下的视口锚点与源选区，重排完成后投影回去并保持手势活动（见 finishReflow）
+      if (freezeDrag(true)) { restorePending = true; layoutReady = false; props.renderer.requestRender(); return; }
       if (!following() || gestureHold) { saved = capture(); props.onAnchor(saved); }
       if (!restorePending) {
         selection = currentSelection();
@@ -720,7 +794,7 @@ export function BodyView(props: BodyViewProps) {
       // 新的阅读范围（换代或进出壳态）一律从最新处开始，不论视图与正文谁先到；上一范围的意图、选区和位置都不带过来
       setFollowing(true); box?.cancelPointer(); props.renderer.releasePointerCapture?.(); props.renderer.clearSelection();
       selectionClearPending = false; readQueue.reset(); headerTop = undefined; anchorOffset = 0;
-      pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined;
+      pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined; reflow = undefined;
       // 新的阅读范围：旧的已备页、在途的取更早页结果与补读预算都作废
       earlierScope++; earlierRead = undefined; earlierStale = false; fill = { steps: 0, fragments: 0, done: false };
       setPrepared(undefined); setReplyFirst(Number.POSITIVE_INFINITY); setSourceEnded(false); setScope(value => value + 1);
@@ -734,7 +808,8 @@ export function BodyView(props: BodyViewProps) {
       navigationVersion++; gestureHold = false; setFollowing(false);
       // Changing follow intent is not a layout operation. Native scrollTo
       // already updates child coordinates; keep this navigation's new anchor.
-      restorePending = false;
+      // 新的阅读导航取代拖选中尚未交接的重排冻结
+      restorePending = false; reflow = undefined;
       readingGeneration++;
       const current = readingOwner();
       if (pendingScroll && Math.sign(pendingScroll) !== direction) pendingScroll = 0;
@@ -794,7 +869,7 @@ export function BodyView(props: BodyViewProps) {
     async bottom() {
       if (disposed) return;
       readingGeneration++;
-      readError = undefined; failedIntent = undefined; pendingScroll = 0;
+      readError = undefined; failedIntent = undefined; pendingScroll = 0; reflow = undefined;
       navigationVersion++; gestureHold = false; setFollowing(true); box?.cancelPointer();
       const current = readingOwner();
       selection = undefined; selectionOwner = undefined; selectionGesture = undefined; props.renderer.clearSelection(); headerTop = undefined;
@@ -825,6 +900,9 @@ export function BodyView(props: BodyViewProps) {
   function settleGesture() {
     if (heldVersion !== navigationVersion) return;
     if (handle.hasSelection()) {
+      // 手势结束时的视口就是用户最后看到的位置（含边缘自动滚动扫到处）：先于切换跟随与提交阅读意图记为阅读锚点。
+      // 直接读当前布局，不用按下时的锚点，也不走待恢复期间的冻结分支；重排冻结中则用冻结锚点（半更新的布局不可读）
+      saved = reflow ? reflow.anchor : readAnchor(); props.onAnchor(saved);
       setFollowing(false); commitReadingIntent(false);
     } else if (gestureIntent || gestureHadSelection && atBottom()) {
       const changed = !following();
@@ -836,10 +914,15 @@ export function BodyView(props: BodyViewProps) {
       }
     }
   }
+  let lastPrefix = 0;
   createEffect(() => {
-    prefixHeight();
+    const prefix = prefixHeight();
     const page = contentPage(), width = props.width, height = props.height;
     if (disposed) return;
+    // 拖选中未经 beforeUpdate 到达的几何变化（如欢迎区高度）同样冻结；经 beforeUpdate 的已在那里冻结。
+    // 这里无法证明对应不变（proven=false），重排后只等真实指针
+    if (lastPage && (prefix !== lastPrefix || page !== lastPage || width !== lastWidth || height !== lastHeight)) untrack(() => freezeDrag(false));
+    lastPrefix = prefix;
     if (lastPage && (page !== lastPage || width !== lastWidth || height !== lastHeight)) {
       if (!page.follow && !align && !saved) saved = untrack(() => props.anchor ?? capture());
       else if (page.follow && !gestureHold) { saved = undefined; headerTop = undefined; }

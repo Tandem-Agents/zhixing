@@ -15,8 +15,11 @@ const baseline = (reading = TEST_READING) => ({ revision: ++baselineRevision, re
 setRenderLibPath(process.env.ZHIXING_TERMINAL_RENDER_LIB!);
 const frames: Record<string, unknown> = {}, checks: string[] = [];
 const walk = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMap(walk)];
-async function scenario(name: string, run: (h: any) => Promise<void>, height = 40, extra: { textureGlyph?: 'ascii' } = {}) {
-  const test = await createTestRenderer({ width: 120, height, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
+// cold：不做开场的 Ctrl+End，保留冷访问的进入提示；ZHIXING_NATIVE_ONLY：只跑名字以它开头的场景（定向迭代用）
+async function scenario(name: string, run: (h: any) => Promise<void>, height = 40, options: { textureGlyph?: 'ascii'; cold?: boolean; width?: number } = {}) {
+  if (process.env.ZHIXING_NATIVE_ONLY && !name.startsWith(process.env.ZHIXING_NATIVE_ONLY)) return;
+  const { cold, width = 120, ...extra } = options;
+  const test = await createTestRenderer({ width, height, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
   // 候选面板的条目可由用例替换（默认只有 /config）
   let candidateItems: readonly { id: string; label: string; detail?: string }[] = [{ id: 'config', label: '/config' }];
   let root: Awaited<ReturnType<typeof createTerminalRoot>> | undefined, generation = 0;
@@ -46,7 +49,7 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
     const show = async (value: Omit<TerminalView, 'generation'>) => { root!.receive({ type: 'view', view: { reading: currentReading, ...value, generation: ++generation } }); await flush(); };
     const publish = async (value: BodyPage, reading = currentReading) => { page = value; currentReading = reading; root!.receive({ type: 'display-page', ...baseline(reading), page }); await flush(); };
     const latest = async () => { test.mockInput.pressKey('\x1b[1;5F'); await flush(); };
-    await show(view); await publish(page); await latest();
+    await show(view); await publish(page); if (!cold) await latest();
     await run({ test, root, flush, nodes, box, show, publish, latest, view, requests, copies, get page() { return page; },
       readWith: (reply: typeof readReply) => { readReply = reply; },
       candidatesWith: (items: typeof candidateItems) => { candidateItems = items; },
@@ -66,6 +69,48 @@ const hostBody = (h: any, revision: number) => {
     h.root.receive({ type: 'display-patch', patch });
   };
 };
+// 边缘拖选：900 行单条长回复按行切成不超过 30 KB 的连续承载片段（与真实长回复跨多个传输片段一致）
+const EDGE_LINE = /长回答第\s+(\d+)\s+行/u;
+const edgeAnswer = (): BodyPage => {
+  const text = Array.from({ length: 900 }, (_, i) => `长回答第 ${String(i).padStart(3, '0')} 行：这一行用来构成跨越多个传输页的单条长回复，内容稳定便于核对。`).join('\n');
+  const chunks: string[] = []; let current = '';
+  for (const line of text.split(/(?<=\n)/u)) { if (Buffer.byteLength(current + line) > 30 * 1024) { chunks.push(current); current = ''; } current += line; }
+  chunks.push(current);
+  let offset = 0;
+  const segments = chunks.map((chunk, i) => { const segment = { blockId: 'edge-long', role: 'assistant' as const, contentOffset: offset, final: i === chunks.length - 1, text: chunk }; offset += chunk.length; return segment; });
+  return { first: 0, last: segments.length, start: 0, follow: true, segments };
+};
+// 字符帧里宽字符只占一个字符位：屏幕列按显示宽度换算（夹具只含中日韩字符、全角标点与 ASCII）
+const cells = (text: string) => [...text].reduce((sum, ch) => sum + (ch.codePointAt(0)! > 0x2e80 ? 2 : 1), 0);
+const edgeRows = (h: any) => (h.test.captureCharFrame().split('\n') as string[]).flatMap((row, y) => {
+  const m = EDGE_LINE.exec(row);
+  return m ? [{ y, line: Number(m[1]), x: cells(row.slice(0, m.index + m[0].indexOf(m[1]!))), digits: m[1]!, row }] : [];
+});
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+// 按真实节奏按住拖动：场景的自动渲染已停，这里自己每 15 ms 推进一帧并记录 scrollTop；during 在按住之后、松手之前执行
+async function heldDrag(h: any, points: { x: number; y: number }[], options: { stepMs?: number; holdMs?: number; during?: () => Promise<void>; release?: boolean } = {}) {
+  const samples: number[] = [];
+  const tick = setInterval(() => { void h.test.renderOnce(); samples.push(h.box().scrollTop); }, 15);
+  let marks: number[] = [];
+  try {
+    await h.test.mockMouse.pressDown(points[0]!.x, points[0]!.y);
+    for (const point of points.slice(1)) { await pause(options.stepMs ?? 40); await h.test.mockMouse.moveTo(point.x, point.y); }
+    await pause(options.holdMs ?? 150);
+    marks.push(samples.length);
+    await options.during?.();
+    marks.push(samples.length);
+    // atRelease：紧接松手之前同步读取（帧采样是异步渲染之后记的，会晚一帧）；松手同步处理，此后边缘推进即停
+    const atRelease = h.box().scrollTop as number;
+    if (options.release !== false) await h.test.mockMouse.release(points.at(-1)!.x, points.at(-1)!.y);
+    marks.push(samples.length);
+    await pause(300);
+    return { held: samples.slice(0, marks[0]), during: samples.slice(marks[0], marks[1]), after: samples.slice(marks[2]), samples, atRelease };
+  } finally { clearInterval(tick); await h.flush(); }
+}
+const nonIncreasing = (values: number[]) => values.every((value, i) => i === 0 || value <= values[i - 1]!);
+const nonDecreasing = (values: number[]) => values.every((value, i) => i === 0 || value >= values[i - 1]!);
+const copyNow = async (h: any) => { h.test.mockInput.pressKey('c', { ctrl: true }); await h.flush(); return h.copies.at(-1) as string | undefined; };
+const copiedLines = (text: string | undefined) => [...(text ?? '').matchAll(/长回答第\s+(\d+)\s+行/gu)].map(m => Number(m[1]));
 try {
   await scenario('notice-between-one-paragraph-keeps-both-parts', async h => {
     // 按实测记录复现：回复写到一半时到点通知落盘，同一段落被通知隔成两段，两段的来源节点起点都是 0
@@ -1139,6 +1184,130 @@ THINK${String(o).padStart(4, ' ')}`).slice(0, length) });
     assert.match(line.trimEnd(), /» Main model:{2,}✓ ready:{2,}$/u, line);
     assert.ok(!frameLines(h).some(row => row.includes('░')), 'the shade glyph is never used when the host declares ascii');
   }, 40, { textureGlyph: 'ascii' });
+  // 边缘拖选：行内选字不触发自动滚动；跨屏拖选按住期间单调推进、松手不回拉；拖选中重排按源保真并保持手势活动
+  await scenario('edge-drag-top-row-inline-does-not-scroll', async h => {
+    await h.publish(edgeAnswer());
+    const top = edgeRows(h)[0]!;
+    assert.equal(top.y, 0, 'the long answer fills the screen from the top row');
+    assert.ok(h.test.captureCharFrame().includes('更早的消息'), 'a cold visit shows the entry hint');
+    const start = h.box().scrollTop;
+    const run = await heldDrag(h, Array.from({ length: 21 }, (_, i) => ({ x: top.x + Math.round(i * top.digits.length / 20), y: 0 })));
+    assert.ok(run.held.every(value => value === start), `holding a drag along the top line never scrolls: ${run.held.join(',')}`);
+    // 松手后交还进入提示占的那一行属于既有设计：视口在末尾时整体下移至多一行
+    assert.ok(run.after.every(value => value === start || value === start - 1), `release does not jump: ${run.after.join(',')}`);
+    assert.equal(await copyNow(h), `${top.digits} `, 'copy is exactly the dragged cells, the end cell inclusive');
+  }, 38, { cold: true, width: 131 });
+  const fromRow = (h: any, y: number) => edgeRows(h).find(row => row.y === y)!;
+  const upToTop = (from: { x: number }, y: number) => [{ x: from.x, y }, ...Array.from({ length: y }, (_, i) => ({ x: from.x, y: y - 1 - i }))];
+  await scenario('edge-drag-cross-screen-keeps-reading', async h => {
+    await h.publish(edgeAnswer());
+    assert.ok(!h.test.captureCharFrame().includes('回到底部'), 'starts at the latest position without the navigation row');
+    const from = fromRow(h, 15), start = h.box().scrollTop;
+    // 到边缘先走慢档、停留约半秒后升档：按住 1.2 s 足以推进十几行
+    const run = await heldDrag(h, upToTop(from, 15), { holdMs: 1200 });
+    assert.ok(nonIncreasing(run.held) && run.held.at(-1)! < start - 10, `the held drag advances upward without pulling back: ${run.held.join(',')}`);
+    assert.ok(h.test.captureCharFrame().includes('回到底部'), 'the navigation row appeared during the drag');
+    assert.ok(run.after.every(value => value === run.atRelease), `release keeps the reached position: ${run.atRelease} / ${run.after.join(',')}`);
+    const visible = edgeRows(h), copied = await copyNow(h), lines = copiedLines(copied);
+    assert.ok(copied?.endsWith(`长回答第 ${from.digits[0]}`), 'the selection still ends in the pressed cell');
+    assert.ok(Math.abs(lines[0]! - visible[0]!.line) <= 1, `the copied text starts where the screen shows it: ${lines[0]} vs ${visible[0]!.line}`);
+  }, 38, { width: 131 });
+  await scenario('edge-drag-bottom-edge-keeps-reading', async h => {
+    await h.publish(edgeAnswer());
+    for (let i = 0; i < 3; i++) { h.test.mockInput.pressKey('\x1b[5~'); await h.flush(); }
+    const box = h.box(), bottom = box.viewport.y + box.viewport.height - 1, from = fromRow(h, 10), start = box.scrollTop;
+    const run = await heldDrag(h, [{ x: from.x, y: 10 }, ...Array.from({ length: bottom - 10 }, (_, i) => ({ x: from.x, y: 11 + i }))], { holdMs: 1200 });
+    assert.ok(nonDecreasing(run.held) && run.held.at(-1)! > start + 10, `the held drag advances downward without pulling back: ${run.held.join(',')}`);
+    assert.ok(run.after.every(value => value === run.atRelease), `release keeps the reached position: ${run.atRelease} / ${run.after.join(',')}`);
+    const lines = copiedLines(await copyNow(h));
+    assert.equal(lines[0], from.line + 1, 'the selection starts in the pressed line');
+    assert.ok(lines.at(-1)! >= edgeRows(h).at(-1)!.line - 2, 'the selection ends where the screen shows it');
+  }, 38, { width: 131 });
+  // 宽度重排使后续显示行的源对应改变，即使首个可见行不变，也不得在无指针输入时继续推进
+  await scenario('edge-drag-resize-keeps-source-and-activity', async h => {
+    await h.publish(edgeAnswer());
+    const from = fromRow(h, 15);
+    let frozen = '', topBefore = 0, topAfter = 0, still: number[] = [], resumed = 0, dragging = false, projected = '';
+    await heldDrag(h, upToTop(from, 15), { holdMs: 300, during: async () => {
+      frozen = h.test.renderer.getSelection()?.getSelectedText() ?? '';
+      topBefore = edgeRows(h)[0]!.line;
+      // 真实宿主改窗口往往连发几次尺寸变化（还原、移动、再定尺寸）
+      h.test.resize(60, 38); await pause(20); h.test.resize(70, 38);
+      await pause(90); still.push(h.box().scrollTop);
+      await pause(300); still.push(h.box().scrollTop);
+      topAfter = edgeRows(h)[0]!.line;
+      dragging = !!h.test.renderer.getSelection()?.isDragging;
+      projected = h.test.renderer.getSelection()?.getSelectedText() ?? '';
+      await h.test.mockMouse.moveTo(from.x, 1); await pause(40); await h.test.mockMouse.moveTo(from.x, 0); await pause(600);
+      resumed = h.box().scrollTop;
+    } });
+    assert.ok(frozen.length > 0, 'the drag had selected text before the resize');
+    assert.equal(topAfter, topBefore, 'the first visible source line is unchanged by the resize');
+    assert.equal(still[0], still[1], `without pointer input the resize does not advance the selection: ${still.join(',')}`);
+    assert.ok(dragging, 'the gesture stays active through the resize');
+    assert.equal(projected, frozen, 'the selection keeps its source range through the resize');
+    assert.ok(resumed < still[1]!, `a real pointer move continues the edge drag: ${still[1]} -> ${resumed}`);
+    const copied = await copyNow(h);
+    assert.ok(copied?.endsWith(frozen.slice(-120)), 'the final copy still ends with the frozen range');
+  }, 38, { width: 131 });
+  // 重排冻结窗口内按普通键接管（Ctrl+C 在拖动未完成时按既有合同只提示、不接管）：按冻结的源快照收束
+  await scenario('edge-drag-resize-then-key-keeps-frozen-selection', async h => {
+    await h.publish(edgeAnswer());
+    const from = fromRow(h, 15);
+    let frozen = '', settle: number[] = [];
+    await heldDrag(h, upToTop(from, 15), { holdMs: 300, release: false, during: async () => {
+      frozen = h.test.renderer.getSelection()?.getSelectedText() ?? '';
+      h.test.resize(60, 38);
+      h.test.mockInput.pressKey('x');
+      await pause(90); settle.push(h.box().scrollTop); await pause(300); settle.push(h.box().scrollTop);
+    } });
+    assert.ok(frozen.length > 0);
+    assert.equal(settle[0], settle[1], 'reading does not move after the takeover');
+    assert.equal(await copyNow(h), frozen, 'a key that takes over during the reflow keeps the frozen source selection');
+  }, 38, { width: 131 });
+  await scenario('edge-drag-resize-then-release-keeps-frozen-selection', async h => {
+    await h.publish(edgeAnswer());
+    const from = fromRow(h, 15);
+    let frozen = '';
+    await heldDrag(h, upToTop(from, 15), { holdMs: 300, release: false, during: async () => {
+      frozen = h.test.renderer.getSelection()?.getSelectedText() ?? '';
+      h.test.resize(60, 38);
+      await h.test.mockMouse.release(from.x, 0);
+    } });
+    assert.ok(frozen.length > 0);
+    assert.equal(await copyNow(h), frozen, 'releasing during the reflow keeps the frozen source selection');
+  }, 38, { width: 131 });
+  // 重排冻结窗口内的新按下取代旧手势（也覆盖旧松手未送达）：旧快照作废，重排完成后不得复活旧选区
+  await scenario('edge-drag-resize-then-new-press-drops-frozen-selection', async h => {
+    await h.publish(edgeAnswer());
+    const from = fromRow(h, 15);
+    let frozen = '', after = '', afterDragging: boolean | undefined;
+    await heldDrag(h, upToTop(from, 15), { holdMs: 300, release: false, during: async () => {
+      frozen = h.test.renderer.getSelection()?.getSelectedText() ?? '';
+      h.test.resize(80, 38);
+      await h.test.mockMouse.pressDown(from.x, 20);
+      await pause(300);
+      const selection = h.test.renderer.getSelection();
+      after = selection?.getSelectedText() ?? ''; afterDragging = selection?.isDragging;
+      await h.test.mockMouse.release(from.x, 20);
+    } });
+    assert.ok(frozen.length > 40);
+    assert.ok(!after.includes(frozen.slice(0, 40)), `the superseded gesture's frozen selection does not come back: ${JSON.stringify(after.slice(0, 60))} dragging=${afterDragging}`);
+  }, 38, { width: 131 });
+  // 冷访问：进入提示占着导航行，按住期间没有高度变化，旧实现在这里能滚动出一段，接管后的拉回才看得出来
+  await scenario('edge-drag-key-takeover-keeps-reading', async h => {
+    await h.publish(edgeAnswer());
+    const from = fromRow(h, 15), start = h.box().scrollTop;
+    let reached = 0;
+    const run = await heldDrag(h, upToTop(from, 15), { holdMs: 1200, release: false, during: async () => {
+      reached = h.box().scrollTop; h.test.mockInput.pressKey('x'); await pause(30);
+    } });
+    assert.ok(reached < start - 10, `the drag scrolled before the takeover: ${start} -> ${reached}`);
+    // 接管后交还进入提示占的那一行：视口在末尾以外，阅读位置不变
+    assert.ok(run.after.every(value => Math.abs(value - reached) <= 1), `a key takeover keeps the reading position: ${reached} / ${run.after.join(',')}`);
+    const visible = edgeRows(h), lines = copiedLines(await copyNow(h));
+    assert.ok(lines.length > 5 && Math.abs(lines[0]! - visible[0]!.line) <= 2, `the selection is kept at its last observable endpoint: ${lines[0]} vs ${visible[0]!.line}`);
+  }, 38, { cold: true, width: 131 });
   console.log(JSON.stringify({ checks }));
 } finally {
   if (process.env.ZHIXING_READING_CAPTURE) {
