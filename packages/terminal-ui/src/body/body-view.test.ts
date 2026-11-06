@@ -52,6 +52,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },
     './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2, content: 2, scrollbar: 1, userInner: 2 } },
     './scroll-box.js': { TerminalScrollBox: core.ScrollBoxRenderable },
+    './terminal-text.js': { TerminalText: core.TextRenderable },
     './reading-queue.js': { ReadingQueue },
     './body-window.js': bodyWindow,
     './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,

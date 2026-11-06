@@ -5,6 +5,7 @@ import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
   TextRenderable, type CliRenderer, type TextChunk,
 } from '@opentui/core';
+import { TerminalText } from './terminal-text.js';
 import { BODY_STYLE, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, bodyPageSegments, bodyWindows, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
 import { BODY_WINDOW_BYTES, BODY_WINDOW_FRAGMENTS, BODY_WINDOW_NODES } from './body-window.js';
 import type { TerminalEarlierReply } from './protocol.js';
@@ -22,7 +23,8 @@ type SourcePoint = { source: BodyAnchor; key: string; cellOffset: number; rowOff
 /** A reflow restores the exact highlight separately from the original mouse
  * endpoints. The renderer keeps the real gesture for subsequent Ctrl extension;
  * the leaf projects its frozen range without replaying word/line expansion. */
-class BodyTextRenderable extends TextRenderable {
+// 正文文字继承应用文字基类：缺省前景是宿主默认前景（各样式块仍显式给出自己的前景）
+class BodyTextRenderable extends TerminalText {
   restoringSelection?: ScreenRange;
   #restored: NativeSelection | null = null;
   #range?: ScreenRange;

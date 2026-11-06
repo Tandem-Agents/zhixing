@@ -11,6 +11,7 @@ import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
+import { TerminalText } from './terminal-text.js';
 import { BodyView, TerminalScrollBox, isBodyTextLeaf, type BodyViewHandle, type BodyReadingState } from './body-view.js';
 import { copySource, type CopySource, type SelectionLeaf, type SelectionState } from './copy-selection.js';
 import { BODY_PAGE_BYTES, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
@@ -27,7 +28,8 @@ import { configureSelectionTexture } from './selection-model.js';
 import { tone, spacing, surfaceGeometry, sectionMarker } from './theme.js';
 import { SummaryView, summaryLeafInfo } from './summary-view.js';
 
-extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
+// 普通文字与输入框接入应用的缺省前景（宿主默认前景），不落到 OpenTUI 的固定纯白
+extend({ text: TerminalText, textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
 const teal = tone.brand;
 const frames = ['◇', '□', '◈', '▤', '◆', '▦', '◈', '▨', '◇', '▩'];

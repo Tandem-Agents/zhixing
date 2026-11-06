@@ -10,6 +10,9 @@ import { interactionKey } from '../surface-layout.js';
 import type { BodyNode, BodyPage } from '../body-model.js';
 import type { TerminalPasteSink } from '../paste-stream.js';
 import { setEditorAtomicWrap } from '../editor-atomic-wrap.js';
+import { TerminalText } from '../terminal-text.js';
+import { TerminalTextarea } from '../editor-coordinates.js';
+import { tone } from '../theme.js';
 // 测试默认的阅读身份：视图声明与整页基准携带同一个，正文按匹配显示；切换会话类用例自行换代
 const TEST_READING = { conversationId: 'test', generation: 1 };
 let baselineRevision = 0;
@@ -2027,6 +2030,66 @@ try {
       checks.push('candidate panel: one column of inner padding at 131/45 columns, labels, loading, hints and errors share one column (wrapped error lines too), errors stay warnings; panel keys are laid out by whole items across the information row and the panel bottom row at 131/45 columns for /work, /trust, /resume and slash candidates');
     }
 
+  }
+  // 浅色可读：省略前景的文字与输入缺省交给宿主默认前景，不是 OpenTUI 的固定纯白；显式语义色与固定配对照旧。
+  // 这里只证明“默认委托给宿主、显式配对有效”，可读性以深浅两种真实画面为准
+  {
+    const spansFor = (value: string) => test.captureSpans().lines.flatMap(line => line.spans).filter(span => span.text.includes(value));
+    const intents = (value: string) => {
+      const spans = spansFor(value); assert.ok(spans.length, `visible ${value}`);
+      return [...new Set(spans.map(span => (span.fg as RGBA | undefined)?.intent))];
+    };
+    const hostDefault = (value: string) => assert.deepEqual(intents(value), ['default'], `${value} uses the host default foreground`);
+    const slots = (value: string) => [...new Set(spansFor(value).map(span => (span.fg as RGBA | undefined)?.intent === 'indexed' ? (span.fg as RGBA).slot : -1))];
+    // 通用 message 出口：正文取宿主前景；标题仍是品牌色、选中项说明仍是弱化色
+    await show({ kind: 'selection', title: 'MessageTitle', requestId: `light-message-${generation}`, message: 'MESSAGEFG 有 1 个已启用定时任务',
+      choices: [{ id: 'back', label: 'BACKCHOICE', detail: 'DETAILFG' }] });
+    hostDefault('MESSAGEFG');
+    assert.deepEqual(slots('MessageTitle'), [6], 'explicit brand title is kept');
+    assert.deepEqual(slots('DETAILFG'), [8], 'explicit dim detail is kept');
+    // 技能页空态
+    await show({ kind: 'skills', title: '技能管理', skills: { sessionId: 'light-skills', revision: 1, state: 'ready', busy: false, items: [], total: 0, offset: 0, pageSize: 10, selectedIndex: -1 } });
+    hostDefault('还没有技能');
+    assert.deepEqual(slots('共 0 个技能'), [6], 'explicit brand count is kept');
+    // 对话输入（聚焦）与就地字段的预填值
+    await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
+    editor().setText('INPUTFG浅色输入'); await flush();
+    hostDefault('INPUTFG');
+    editor().setText(''); await flush();
+    await show({ kind: 'selection', title: '对话名称', requestId: `light-field-${generation}`, field: { id: 'name', label: '输入新名称', secret: false, value: 'FIELDFG旧名' }, choices: [{ id: 'save', label: '保存' }] });
+    hostDefault('FIELDFG');
+    // 密文字段圆点
+    await show({ kind: 'configuration', title: '保密字段', editId: `light-secret-${generation}`, field: { id: 'secret', label: '凭据', secret: true } });
+    await test.mockInput.pasteBracketedText('XY'); await flush();
+    hostDefault('••');
+    // 恢复页固定黑白配对：底色为固定纯白的文字，前景仍是显式的固定色
+    const recoveryId = `light-recovery-${generation}`;
+    await show({ kind: 'recovery', title: '保密显示', requestId: recoveryId, recovery: { requestId: recoveryId, pages: 1, input: false } });
+    root.receive({ type: 'recovery-page', requestId: recoveryId, page: 0, text: 'RECOVERYFG 恢复码页面' }); await flush();
+    assert.ok(text().includes('RECOVERYFG'), 'recovery page text is shown');
+    const paired = test.captureSpans().lines.flatMap(line => line.spans).filter(span => span.text.trim() && (span.bg as RGBA | undefined)?.intent === 'rgb'
+      && (span.bg as RGBA).toInts().slice(0, 3).join(',') === '255,255,255');
+    assert.ok(paired.length, 'recovery text keeps its fixed white background');
+    assert.ok(paired.every(span => (span.fg as RGBA | undefined)?.intent === 'rgb' && (span.fg as RGBA).toInts().slice(0, 3).join(',') === '17,17,17'), 'recovery text keeps its fixed #111111 foreground');
+    await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
+    // 动态：Solid 先只用 id 构造、再逐项写属性；显式颜色改为空值时也经过 setter，必须回到宿主前景而不是纯白。getter 照常读出当前值
+    const probeText = new TerminalText(test.renderer, { id: 'light-probe-text' });
+    try {
+      assert.equal(probeText.fg.intent, 'default');
+      probeText.fg = tone.warn; assert.equal(probeText.fg.intent, 'indexed'); assert.equal(probeText.fg.slot, 3);
+      probeText.fg = undefined; assert.equal(probeText.fg.intent, 'default');
+      probeText.fg = '#111111'; assert.equal(probeText.fg.intent, 'rgb');
+    } finally { probeText.destroy(); }
+    const probeArea = new TerminalTextarea(test.renderer, { id: 'light-probe-area' });
+    try {
+      const focusedFg = () => (probeArea as unknown as { _focusedTextColor: RGBA })._focusedTextColor;
+      assert.equal(probeArea.textColor.intent, 'default'); assert.equal(focusedFg().intent, 'default');
+      probeArea.textColor = tone.warn; assert.equal(probeArea.textColor.intent, 'indexed');
+      probeArea.textColor = undefined; assert.equal(probeArea.textColor.intent, 'default');
+      probeArea.focusedTextColor = tone.warn; assert.equal(focusedFg().intent, 'indexed');
+      probeArea.focusedTextColor = undefined as never; assert.equal(focusedFg().intent, 'default');
+    } finally { probeArea.destroy(); }
+    checks.push('host default foreground: message pages, skills empty state, focused conversation input, prefilled inline field and secret mask take the host default foreground; explicit brand/dim and the fixed recovery pair are kept; explicit colours cleared to undefined return to the host default (text, textarea and its focused colour) and getters keep reading the current colour');
   }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }
