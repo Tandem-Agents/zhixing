@@ -23,6 +23,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [首次公开发布当前工作安排](./tasks/first-public-release-execution.md)
 - [终端迁移收尾方案与执行计划](./tasks/terminal-migration-delivery-plan.md)
 - [终端启动性能收敛](./tasks/terminal-startup-performance.md)
+- [问题处理工作台](./workbench/issue-workbench.md)
 - [验证手册](../research/design/workbench/verification-runbook.md)
 - [路径解析与资源隔离](engineering/path-and-resource-isolation.md)
 - [仓库组织与包边界](engineering/repository-structure.md)
