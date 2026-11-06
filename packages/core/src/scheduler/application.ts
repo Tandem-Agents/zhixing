@@ -6,6 +6,7 @@ import {
   defineProductApiQuery,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
+import { canonicalize } from "../protocol/canonical.js";
 import { validateTaskDefinition } from "../protocol/job.js";
 import type { TaskPatch, TaskSpec, TaskView } from "./facade.js";
 import { computeStatusSummary, isInternal } from "./status-summary.js";
@@ -778,10 +779,29 @@ function normalizeSpec(draft: ScheduleTaskDraft | TaskSpec): TaskSpec {
       definition: { kind: "user", spec },
       state: spec.enabled ? "enabled" : "disabled",
     });
+    // 校验通过后，嵌套对象只含已声明成员，必填成员都有合法值；仍为 undefined 的只能是已声明的可选成员
+    // （schedule.tz、action.model、action.tools、delivery.threadId），按缺省处理，与省略、与经 JSON 传输的输入一致
+    const normalized: TaskSpec = {
+      ...spec,
+      schedule: withoutUndefinedMembers(spec.schedule),
+      action: withoutUndefinedMembers(spec.action),
+      ...(spec.delivery !== undefined ? { delivery: withoutUndefinedMembers(spec.delivery) } : {}),
+    };
+    // 交给仓储的必须是规范协议数据：校验未覆盖的不规范值在本层按无效命令拒绝，不留到暂存或摘要处才失败
+    canonicalize(normalized);
+    return normalized;
   } catch (error) {
     throw invalid(error instanceof Error ? error.message : String(error));
   }
-  return spec;
+}
+
+/** 已校验对象的浅拷贝，去掉值为 undefined 的自有属性；不进入数组或更深层，也不转换其他值。 */
+function withoutUndefinedMembers<T extends object>(value: T): T {
+  const copy = { ...value } as Record<string, unknown>;
+  for (const key of Object.keys(copy)) {
+    if (copy[key] === undefined) delete copy[key];
+  }
+  return copy as T;
 }
 
 function mergeSpec(task: TaskView, patch: TaskPatch): ScheduleTaskDraft {

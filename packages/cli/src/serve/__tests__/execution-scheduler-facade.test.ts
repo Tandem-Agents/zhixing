@@ -1,5 +1,7 @@
 import { createEventBus } from "@zhixing/core";
 import type { AssignmentMutationPort } from "@zhixing/core/contracts";
+import { canonicalize } from "@zhixing/core/protocol";
+import { createScheduleTool } from "@zhixing/tools-builtin";
 import { type SchedulerFacade, type SchedulerEventMap, type TaskSpec, type TaskView } from "@zhixing/core/scheduler";
 import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel/scheduler-authority";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
@@ -194,5 +196,56 @@ describe("ExecutionSchedulerFacade", () => {
 
     expect(stageMutation).not.toHaveBeenCalled();
     expect(base.create).not.toHaveBeenCalled();
+  });
+
+  it("stages the schedule tool's minimal cron create and cron update without a timezone", async () => {
+    // 账本替身与 assignment-ledger.ts 的 stageMutation 相同：暂存输入先做规范化快照，不规范即拒绝
+    const staged: Array<{ requestId: string; mutation: { spec?: TaskSpec } }> = [];
+    const ledger = {
+      stageMutation: vi.fn(async (_assignmentId: string, input: { requestId: string; mutation: { spec?: TaskSpec } }) => {
+        JSON.parse(canonicalize(input));
+        staged.push(input);
+        return {
+          kind: "assignment-mutation-staged" as const,
+          requestId: input.requestId,
+          recordSeq: staged.length,
+          mutationDigest: "a".repeat(64),
+        };
+      }),
+      readStagedMutationOverlay: async () => [],
+    } as unknown as ConversationAssignmentLedger;
+    const assignmentMutations = createAssignmentMutationPort({
+      ledger,
+      assignmentId: "assignment-tool",
+      execution: "conversation",
+      anchorEpoch: 1,
+    });
+    const base = baseFacade();
+    const facade = new ExecutionSchedulerFacade(base);
+    const tool = createScheduleTool(() => facade);
+    const bus = createEventBus<SchedulerEventMap>();
+
+    const results = await runContextStorage.run(
+      { bus, lineage: "main", assignmentMutations },
+      async () => [
+        // 工具声明里只有 name、prompt、schedule_kind 与对应的 schedule_cron 是 cron 创建的必填项
+        await tool.call({ action: "create", name: "提醒", prompt: "向用户发送提醒", schedule_kind: "cron", schedule_cron: "0 3 29 2 *" }, { toolCallId: "call-create" } as never),
+        await tool.call({ action: "update", id: "task-existing", task_revision: 3, schedule_kind: "cron", schedule_cron: "0 4 29 2 *" }, { toolCallId: "call-update" } as never),
+        await tool.call({ action: "create", name: "带时区", prompt: "向用户发送提醒", schedule_kind: "cron", schedule_cron: "0 3 29 2 *", schedule_tz: "Asia/Shanghai" }, { toolCallId: "call-create-tz" } as never),
+      ],
+    );
+
+    expect(results.map((result) => [result.isError ?? false, String(result.content).split("\n")[0]])).toEqual([
+      [false, "Task created successfully"],
+      [false, "Task updated successfully"],
+      [false, "Task created successfully"],
+    ]);
+    expect(staged.map((input) => input.mutation.spec?.schedule)).toEqual([
+      { kind: "cron", expr: "0 3 29 2 *" },
+      { kind: "cron", expr: "0 4 29 2 *" },
+      { kind: "cron", expr: "0 3 29 2 *", tz: "Asia/Shanghai" },
+    ]);
+    expect(base.create).not.toHaveBeenCalled();
+    expect(base.update).not.toHaveBeenCalled();
   });
 });

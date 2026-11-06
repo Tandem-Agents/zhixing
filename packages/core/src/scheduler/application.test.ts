@@ -28,6 +28,7 @@ import {
 import { ProductApiDispatcher } from "../product-api/catalog.js";
 import type { JobOccurrence, TaskDefinition } from "../contracts/state.js";
 import type { TaskSpec, TaskView } from "./facade.js";
+import { canonicalize } from "../protocol/canonical.js";
 
 const NOW = "2026-08-30T00:00:00.000Z";
 
@@ -719,5 +720,130 @@ describe("Schedule runtime application boundaries", () => {
     expect(() => lifecycle.release(mechanism)).toThrow(
       "Cannot release a foreign Schedule lifecycle mechanism",
     );
+  });
+});
+
+describe("ScheduleManagementApplicationService optional nested members", () => {
+  // 已声明的嵌套可选成员：省略与“自有属性值为 undefined”是同一个意思，提交给仓储的必须是同一份规范数据
+  const members = [
+    {
+      member: "schedule.tz",
+      omitted: { schedule: { kind: "cron" as const, expr: "0 3 29 2 *" } },
+      undefinedValue: { schedule: { kind: "cron" as const, expr: "0 3 29 2 *", tz: undefined } },
+      explicit: { schedule: { kind: "cron" as const, expr: "0 3 29 2 *", tz: "Asia/Shanghai" } },
+      owner: (spec: TaskSpec) => spec.schedule as object,
+      key: "tz",
+    },
+    {
+      member: "action.model",
+      omitted: { action: { kind: "agent-turn" as const, prompt: "work" } },
+      undefinedValue: { action: { kind: "agent-turn" as const, prompt: "work", model: undefined } },
+      explicit: { action: { kind: "agent-turn" as const, prompt: "work", model: "model-1" } },
+      owner: (spec: TaskSpec) => spec.action as object,
+      key: "model",
+    },
+    {
+      member: "action.tools",
+      omitted: { action: { kind: "agent-turn" as const, prompt: "work" } },
+      undefinedValue: { action: { kind: "agent-turn" as const, prompt: "work", tools: undefined } },
+      explicit: { action: { kind: "agent-turn" as const, prompt: "work", tools: ["read"] } },
+      owner: (spec: TaskSpec) => spec.action as object,
+      key: "tools",
+    },
+    {
+      member: "delivery.threadId",
+      omitted: { delivery: { kind: "channel" as const, channel: "feishu", to: "user-1" } },
+      undefinedValue: { delivery: { kind: "channel" as const, channel: "feishu", to: "user-1", threadId: undefined } },
+      explicit: { delivery: { kind: "channel" as const, channel: "feishu", to: "user-1", threadId: "thread-1" } },
+      owner: (spec: TaskSpec) => spec.delivery as object,
+      key: "threadId",
+    },
+  ];
+  const base = {
+    name: "optional",
+    schedule: { kind: "interval" as const, everyMs: 60_000 },
+    action: { kind: "agent-turn" as const, prompt: "work" },
+  };
+
+  async function committedCreate(draft: Record<string, unknown>) {
+    const repo = repository();
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
+    await application.execute({
+      kind: "create",
+      draft: { ...base, ...draft } as never,
+      operation: { operationId: "create-optional" },
+    });
+    return (repo.commits[0] as { spec: TaskSpec }).spec;
+  }
+
+  async function committedUpdate(patch: Record<string, unknown>) {
+    const repo = repository([view("user", 3)]);
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
+    await application.execute({
+      kind: "update",
+      taskId: "user",
+      patch: patch as never,
+      operation: { operationId: "update-optional", expectedRevision: 3 },
+    });
+    return (repo.commits[0] as { spec: TaskSpec }).spec;
+  }
+
+  for (const { member, omitted, undefinedValue, explicit, owner, key } of members) {
+    it(`commits the same canonical spec when ${member} is omitted or undefined`, async () => {
+      for (const commit of [committedCreate, committedUpdate]) {
+        const left = await commit(omitted);
+        const right = await commit(undefinedValue);
+        expect(Object.hasOwn(owner(right), key)).toBe(false);
+        expect(right).toEqual(left);
+        expect(canonicalize(right)).toBe(canonicalize(left));
+        const kept = await commit(explicit);
+        expect(owner(kept)).toEqual(Object.values(explicit)[0]);
+        expect(kept).toMatchObject({ enabled: true, priority: "normal" });
+      }
+    });
+  }
+
+  it("replays an omitted member and an undefined member as the same operation", async () => {
+    const repo = repository();
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
+    const command = (schedule: Record<string, unknown>) => ({
+      kind: "create" as const,
+      draft: { ...base, schedule } as never,
+      operation: { operationId: "create-replay" },
+    });
+    const first = await application.execute(command({ kind: "cron", expr: "0 3 29 2 *" }));
+    const replay = await application.execute(command({ kind: "cron", expr: "0 3 29 2 *", tz: undefined }));
+    expect(replay).toEqual(first);
+  });
+
+  it("still rejects unknown members, null and invalid values before the repository", async () => {
+    const invalidDrafts: Array<[string, Record<string, unknown>]> = [
+      ["unknown cron member valued undefined", { schedule: { kind: "cron", expr: "0 3 29 2 *", unknown: undefined } }],
+      ["extra once member valued undefined", { schedule: { kind: "once", at: "2026-12-01T00:00:00.000Z", extra: undefined } }],
+      ["null timezone", { schedule: { kind: "cron", expr: "0 3 29 2 *", tz: null } }],
+      ["undefined tool entry", { action: { kind: "agent-turn", prompt: "work", tools: [undefined] } }],
+      ["unknown delivery member valued undefined", { delivery: { kind: "channel", channel: "feishu", to: "user-1", unknown: undefined } }],
+    ];
+    for (const [label, draft] of invalidDrafts) {
+      const repo = repository();
+      const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
+      await expect(application.execute({
+        kind: "create",
+        draft: { ...base, ...draft } as never,
+        operation: { operationId: `invalid-${label}` },
+      }), label).rejects.toMatchObject({ code: "invalid-command" });
+      expect(repo.commits, label).toEqual([]);
+    }
+  });
+
+  it("rejects a spec that is not canonical protocol data before the repository", async () => {
+    const repo = repository();
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
+    await expect(application.execute({
+      kind: "create",
+      draft: { ...base, name: "bad\uD800" },
+      operation: { operationId: "invalid-unicode" },
+    })).rejects.toMatchObject({ code: "invalid-command" });
+    expect(repo.commits).toEqual([]);
   });
 });
