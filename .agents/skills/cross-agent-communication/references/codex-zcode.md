@@ -5,9 +5,11 @@
 | 实际方向 | 本实例通道 | 接收身份 | 成功含义 |
 | --- | --- | --- | --- |
 | Codex → ZCode | 本机文件信箱 + `collab/bridge/zcode-ui-send.ps1` 写入 ZCode 当前输入框并 Enter；正文先落盘 | ZCode 会话 `sess_...`，登记在本地 `collab/bridge/config.json` 的 `zcode.session` | 输入框已清空，消息被接受/排队；不代表任务完成，也不代表正文已处理 |
-| ZCode → Codex | 既有 `codex queue --thread <UUID> --message <短通知>`（经 `collab/bridge/bridge.mjs`） | Codex thread UUID（`config.controller.thread`） | 排队成功，不代表已处理 |
+| ZCode → Codex | 既有桥调用共用Codex投递脚本：忙时steer，宿主明确空闲时queue | Codex thread UUID（`config.controller.thread`） | 接受投递，不代表已处理 |
 
 ## 使用现有实例
+
+Codex接收端的入口与验证边界见[Codex侧投递](codex-claude.md#codex侧投递)；不因接收端更新而启动旧会话或重新执行历史任务。
 
 实例位于 `collab/bridge/`；首次选择、登记变化或排障时读 `README.md` 并运行 `node collab/bridge/bridge.mjs status --explain`。已知正常且身份未变时，不为每条消息重做发现与连通性测试。
 
