@@ -9,13 +9,15 @@ import { CONFIGURATION_LOG_SOURCE, ConfigurationEditPendingError } from '@zhixin
 import { recordingFixture } from '../../../../core/src/logging/__tests__/recording.js';
 import { RUNTIME_LOG_SOURCE } from '../../logging/runtime.js';
 import type { McpSetupCandidate } from '@zhixing/core/mcp-management';
+import type { ZhixingConfig, ZhixingCredentials } from '@zhixing/providers';
 
-function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456', purpose: 'setup' | 'edit' = 'edit') {
+function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456', purpose: 'setup' | 'edit' = 'edit',
+  session?: { config: ZhixingConfig; credentials: ZhixingCredentials }) {
   const views: Omit<TerminalView, 'generation'>[] = [];
   const save = vi.fn(async (_edit: Extract<ConfigurationEditResult, { kind: 'completed' }>) => {});
   const editor = new TerminalConfigurationEditor({
-    session: { initialConfig: { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
-      initialCredentials: { providers: { deepseek: { apiKey } } }, writers: { save } },
+    session: { initialConfig: session?.config ?? { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
+      initialCredentials: session?.credentials ?? { providers: { deepseek: { apiKey } } }, writers: { save } },
     title: '合成配置', sections: runtime ? ['mcp'] : ['model'], purpose, runtime,
     headerDetails: ['工作目录    fixture-workspace', '配置        fixture.json', '秘密存储    本机安全存储'],
     publish: async view => { views.push(view); },
@@ -107,10 +109,93 @@ describe('single-root Node configuration transaction', () => {
     expect(h.current().initialItemId).toBe(modelRow);
     while (!h.current().configurationHome) await h.action('back');
     expect(h.current().choices!.find(item => item.id === h.current().initialItemId)?.label).toContain('主模型');
-    // 恢复只作用于返回后的那一次发布，之后的页面不带旧行
+    // 恢复只作用于返回后的那一次发布：再次进入服务商页时定位当前服务商，不带旧行（旧行是第一项）
     await h.choose('主模型');
-    expect(h.current().initialItemId).toBeUndefined();
+    expect(h.current().choices!.find(item => item.id === h.current().initialItemId)?.label).toBe('● DeepSeek 官方');
     h.editor.cancel(); await h.result;
+  });
+
+  describe('selection pages start on the current value', () => {
+    const credentials = { providers: { deepseek: { apiKey: 'synthetic-key-123456' } } } as ZhixingCredentials;
+    const configured = { llm: {
+      main: { provider: 'deepseek', model: 'deepseek-v4-pro', thinking: { mode: 'effort', effort: 'max' } },
+      light: { provider: 'deepseek', model: 'deepseek-v4-flash' },
+    } } as ZhixingConfig;
+    const focused = (h: ReturnType<typeof setup>) => h.current().choices!.find(item => item.id === h.current().initialItemId)?.label;
+    const home = async (h: ReturnType<typeof setup>) => { while (!h.current().configurationHome) await h.action('back'); };
+
+    it('marks and focuses the configured provider, model and thinking option; an unconfigured role has none', async () => {
+      const h = setup(undefined, undefined, 'edit', { config: configured, credentials });
+      await h.choose('主模型');
+      expect(focused(h)).toBe('● DeepSeek 官方');
+      expect(h.current().chromeDescription).toContain('带 ● 的是当前已选');
+      await h.action(h.current().initialItemId!); await h.choose('使用模型');
+      expect(focused(h)).toBe('● deepseek-v4-pro');
+      await h.action(h.current().initialItemId!);
+      expect(h.current().title).toBe('deepseek-v4-pro · 思考控制');
+      expect(focused(h)).toBe('● 强度 max');
+      await home(h);
+      await h.choose('轻量模型');
+      expect(focused(h)).toBe('● DeepSeek 官方');
+      await h.action(h.current().initialItemId!); await h.choose('使用模型');
+      // 当前项排第二，光标跟随当前项而不是第一项
+      expect(focused(h)).toBe('● deepseek-v4-flash');
+      await home(h);
+      await h.choose('强力模型');
+      expect(h.current().initialItemId).toBeUndefined();
+      expect(h.current().choices!.some(item => item.label.startsWith('● '))).toBe(false);
+      h.editor.cancel(); await h.result;
+    });
+
+    it('keeps the thinking setting when the user only browses the current model and saves', async () => {
+      const h = setup(undefined, undefined, 'edit', { config: configured, credentials });
+      await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型'); await h.choose('deepseek-v4-pro');
+      expect(h.current().title).toBe('deepseek-v4-pro · 思考控制');
+      await home(h); await h.action('complete');
+      expect((await h.result).kind).toBe('completed');
+      expect(h.save.mock.calls[0]![0].config.llm?.main).toEqual(configured.llm!.main);
+    });
+
+    it('returns to the row the user entered from rather than the current value', async () => {
+      const h = setup(undefined, undefined, 'edit', { config: configured, credentials });
+      await h.choose('主模型'); await h.choose('硅基流动'); await h.action('back');
+      expect(focused(h)).toBe('硅基流动');
+      h.editor.cancel(); await h.result;
+    });
+
+    it('opens the page holding a current value past the first page without pinning later paging', async () => {
+      const models = Array.from({ length: 30 }, (_, index) => `custom-${String(index + 1).padStart(2, '0')}`);
+      const h = setup(undefined, undefined, 'edit', {
+        config: { llm: { main: { provider: 'deepseek', model: 'custom-28' } } } as ZhixingConfig,
+        credentials: { providers: { deepseek: { apiKey: 'synthetic-key-123456', models } } } as ZhixingCredentials,
+      });
+      await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型');
+      expect(focused(h)).toBe('● custom-28');
+      expect(h.current().choices![0]!.id).toBe('previous');
+      await h.action('previous');
+      expect(h.current().initialItemId).toBeUndefined();
+      expect(h.current().choices!.some(item => item.label === 'deepseek-v4-pro')).toBe(true);
+      await h.action('next');
+      expect(h.current().initialItemId).toBeUndefined();
+      expect(h.current().choices!.some(item => item.label === '● custom-28')).toBe(true);
+      // 从子页返回回到进入行（优先于当前项），再次进入列表重新定位当前项
+      await h.choose('添加自定义模型'); await h.action('back');
+      expect(focused(h)).toBe('+ 添加自定义模型');
+      await h.action('back'); await h.choose('使用模型');
+      expect(focused(h)).toBe('● custom-28');
+      h.editor.cancel(); await h.result;
+    });
+
+    it('shows a hand-configured model outside the catalog as current only under its own provider', async () => {
+      const h = setup(undefined, undefined, 'edit', {
+        config: { llm: { main: { provider: 'deepseek', model: 'manual-config-model' } } } as ZhixingConfig, credentials,
+      });
+      await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型');
+      expect(focused(h)).toBe('● manual-config-model');
+      await h.action('back'); await h.action('back'); await h.choose('硅基流动'); await h.choose('使用模型');
+      expect(h.current().choices!.some(item => item.label.includes('manual-config-model'))).toBe(false);
+      h.editor.cancel(); await h.result;
+    });
   });
 
   it('puts the stable guide of an input page in its header and keeps errors in the body', async () => {

@@ -122,3 +122,24 @@ describe("optional role revert", () => {
     expect(buildProviderListMeta(state, { kind: "provider-list", role: "power" }).items.some(item => item.label === "沿用主模型")).toBe(false);
   });
 });
+
+describe("服务商列表的当前项", () => {
+  const state = createInitialState({
+    llm: { main: { provider: "siliconflow", model: "m-main" }, light: { provider: "deepseek", model: "m-light" } },
+  } as unknown as ZhixingConfig, {} as ZhixingCredentials);
+  const current = (role: "main" | "light" | "power") =>
+    buildProviderListMeta(state, { kind: "provider-list", role }).items.filter(item => item.current).map(item => item.label);
+
+  it("标出角色显式配置的服务商，页头说明带标记含义", () => {
+    expect(current("main")).toEqual(["硅基流动"]);
+    expect(current("light")).toEqual(["DeepSeek 官方"]);
+    expect(buildProviderListMeta(state, { kind: "provider-list", role: "light" }).description).toBe("选择 API 服务商作为轻量模型来源；带 ● 的是当前已选");
+  });
+
+  it("未配置的角色没有当前项，“沿用主模型”也不当作当前项，页头不提标记", () => {
+    expect(current("power")).toEqual([]);
+    expect(buildProviderListMeta(state, { kind: "provider-list", role: "power" }).description).toBe("选择 API 服务商作为强力模型来源");
+    const light = buildProviderListMeta(state, { kind: "provider-list", role: "light" });
+    expect(light.items.find(item => item.label === "沿用主模型")?.current).toBeFalsy();
+  });
+});

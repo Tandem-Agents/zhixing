@@ -141,11 +141,8 @@ export function buildProviderConfigMeta(
           currentRole?.provider === descriptor.providerId
             ? currentRole?.model
             : recommendedModel;
-        // Completing this page confirms the model already selected below it;
-        // selecting the same model again would discard its thinking settings.
-        const next = currentRole?.provider === descriptor.providerId && currentRole.model === model
-          ? s
-          : writeModelRole(s, descriptor.role, descriptor.providerId, model ?? "");
+        // 确认的是下方已选的模型时，writeModelRole 保留其思考控制
+        const next = writeModelRole(s, descriptor.role, descriptor.providerId, model ?? "");
         const issues = checkModel(next.config, { providers: next.credentials.providers }).filter(
           (i) => i.role === descriptor.role,
         );

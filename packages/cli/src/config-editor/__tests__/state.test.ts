@@ -284,6 +284,30 @@ describe("readModelThinking / writeModelThinking", () => {
     expect(readModelThinking(state, "main")).toBeUndefined();
   });
 
+  it("重新写入同一 provider+model 不是换模型 → 保留思考控制，仍返回新 state", () => {
+    let state = createInitialState({}, {});
+    state = writeModelRole(state, "main", "deepseek", "deepseek-v4-pro");
+    state = writeModelThinking(state, "main", { mode: "effort", effort: "max" });
+    const again = writeModelRole(state, "main", "deepseek", "deepseek-v4-pro");
+
+    expect(again.config.llm?.main).toEqual({
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      thinking: { mode: "effort", effort: "max" },
+    });
+    expect(again).not.toBe(state);
+    expect(again.config).not.toBe(state.config);
+  });
+
+  it("model 同名但换了 provider 是换模型 → 丢弃旧思考控制", () => {
+    let state = createInitialState({}, {});
+    state = writeModelRole(state, "main", "deepseek", "shared-model");
+    state = writeModelThinking(state, "main", { mode: "on" });
+    state = writeModelRole(state, "main", "siliconflow", "shared-model");
+
+    expect(state.config.llm?.main).toEqual({ provider: "siliconflow", model: "shared-model" });
+  });
+
   it("未配该角色时 readModelThinking 返回 undefined", () => {
     const state = createInitialState({}, {});
     expect(readModelThinking(state, "light")).toBeUndefined();

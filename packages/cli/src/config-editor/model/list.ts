@@ -49,13 +49,17 @@ export function buildProviderListMeta(
     description: `不再单独配置${roleLabel}，改用主模型`,
     onEnter: (s) => ({ type: "pop", state: clearModelRole(s, descriptor.role) }),
   }] : [];
+  // 只有显式配置了的服务商才是当前项；未配置的角色没有当前项，不把继承当作选中
+  const currentProvider = readModelRole(state, descriptor.role)?.provider;
+  const hasCurrent = SUPPORTED_PROVIDERS.some((p) => p.id === currentProvider);
   return {
     title: `${roleLabel} · 选择服务商`,
-    description: `选择 API 服务商作为${roleLabel}来源`,
-    hasCurrentConcept: false,
+    description: `选择 API 服务商作为${roleLabel}来源${hasCurrent ? "；带 ● 的是当前已选" : ""}`,
+    hasCurrentConcept: true,
     items: [...revert, ...SUPPORTED_PROVIDERS.map((p): ListItem => ({
       label: p.label,
       description: p.description,
+      current: p.id === currentProvider,
       onEnter: (s) => ({
         type: "navigate",
         state: s,
@@ -104,6 +108,12 @@ export function buildModelListMeta(
     currentRole?.provider === descriptor.providerId
       ? currentRole?.model
       : undefined;
+  // 手填进配置、目录里没有的当前模型也是合法配置：并入列表以便标出与定位。
+  // 只投影本服务商的当前值，不写入目录，不带入别的服务商的模型。
+  if (userSelectedModel && !seen.has(userSelectedModel)) {
+    allModels.push(userSelectedModel);
+    seen.add(userSelectedModel);
+  }
   const items: ListItem[] = allModels.map((modelId) => {
     const description =
       modelId === recommendedModel ? `${descriptor.role} 推荐` : undefined;

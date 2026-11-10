@@ -9,9 +9,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createInitialState, writeModelRole } from "../state.js";
-import { handleListPanelKey } from "../model/list.js";
-import { handleThinkingBudgetPanelKey } from "../model/input.js";
+import { createInitialState, setInputBuffer, writeModelRole } from "../state.js";
+import { buildModelListMeta, buildThinkingConfigMeta, handleListPanelKey } from "../model/list.js";
+import { handleAddModelPanelKey, handleThinkingBudgetPanelKey } from "../model/input.js";
 import { handleEntityPanelKey } from "../model/entity.js";
 import type { PanelDescriptor, WorkingState } from "../types.js";
 
@@ -203,5 +203,54 @@ describe("服务商页完成后的模型设置", () => {
     if (completed.action.type !== "stay") throw Error("missing credential must keep the panel open");
     expect(completed.errorMessage).toContain("API Key");
     expect(completed.action.state.config.llm?.main?.thinking).toEqual({ mode: "off" });
+  });
+});
+
+describe("重新确认当前模型", () => {
+  const configured = () => createInitialState(
+    { llm: { main: { provider: "deepseek", model: "deepseek-v4-pro", thinking: { mode: "effort", effort: "max" } } } },
+    { providers: { deepseek: { apiKey: "synthetic-key" } } },
+  );
+  const thinkingDesc = { kind: "thinking-config", role: "main", providerId: "deepseek", model: "deepseek-v4-pro" } as const;
+
+  it("在当前模型上回车：思考页标出已配档位，Esc 返回、服务商页完成都保留它", () => {
+    const selected = enterAt(configured(), modelListDesc, 0).action;
+    expect(selected.type).toBe("navigate");
+    if (selected.type !== "navigate") throw Error("model selection did not open thinking");
+    const marked = buildThinkingConfigMeta(selected.state, thinkingDesc).items.filter((item) => item.current).map((item) => item.label);
+    expect(marked).toEqual(["强度 max"]);
+    const back = handleListPanelKey(selected.state, thinkingDesc, { index: 0 }, { type: "escape" }).action;
+    expect(back.type).toBe("pop");
+    if (back.type !== "pop") throw Error("escape did not return");
+    expect(back.state.config.llm?.main?.thinking).toEqual({ mode: "effort", effort: "max" });
+    const provider = { kind: "provider-config", role: "main", providerId: "deepseek" } as const;
+    const completed = handleEntityPanelKey(back.state, provider, { index: 2 }, { type: "enter" }).action;
+    expect(completed.type).toBe("pop");
+    if (completed.type !== "pop") throw Error("provider did not complete");
+    expect(completed.state.config.llm?.main?.thinking).toEqual({ mode: "effort", effort: "max" });
+  });
+
+  it("添加与当前模型同名的自定义模型：保留思考档", () => {
+    const state = setInputBuffer(configured(), "deepseek-v4-pro");
+    const action = handleAddModelPanelKey(state, { kind: "add-model", role: "main", providerId: "deepseek" }, { type: "enter" });
+    expect(action.type).toBe("pop");
+    if (action.type !== "pop") throw Error("add-model did not return");
+    expect(action.state.config.llm?.main?.thinking).toEqual({ mode: "effort", effort: "max" });
+  });
+
+  it("手填、目录里没有的当前模型：只在本服务商列表中并入并标为当前，不写入目录", () => {
+    const state = createInitialState(
+      { llm: { main: { provider: "deepseek", model: "manual-config-model" } } },
+      { providers: { deepseek: { apiKey: "synthetic-key" } } },
+    );
+    const items = buildModelListMeta(state, modelListDesc).items;
+    expect(items.filter((item) => item.current).map((item) => item.label)).toEqual(["manual-config-model"]);
+    expect(state.credentials.providers?.deepseek?.models).toBeUndefined();
+    const other = buildModelListMeta(state, { kind: "model-list", role: "main", providerId: "siliconflow" });
+    expect(other.items.some((item) => item.label === "manual-config-model")).toBe(false);
+    // 在它上面回车：没有思考形态，直接返回且角色值不变
+    const action = enterAt(state, modelListDesc, items.findIndex((item) => item.current)).action;
+    expect(action.type).toBe("pop");
+    if (action.type === "pop") expect(action.state.config.llm?.main).toEqual({ provider: "deepseek", model: "manual-config-model" });
   });
 });

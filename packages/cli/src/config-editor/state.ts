@@ -49,13 +49,6 @@ export function readModelRole(
   return state.config.llm?.[role];
 }
 
-/**
- * 设置 llm 角色 provider + model。
- *
- * 角色无关写入：main 是 schema 必填键，写非 main 角色而 llm 尚不存在时，
- * 先放一个占位空 main 保持 schema 合法（写 main 时该占位被同次写入覆盖）。
- * 不再有 `role === "main" ? … : secondary` 的逐角色分支——新增角色零改动。
- */
 /** 撤回可选角色（轻量 / 强力）的单独配置，回到沿用主模型；主模型是必填键，不能撤回 */
 export function clearModelRole(state: WorkingState, role: ModelRole): WorkingState {
   if (role === "main" || !state.config.llm?.[role]) return state;
@@ -66,6 +59,16 @@ export function clearModelRole(state: WorkingState, role: ModelRole): WorkingSta
   return { ...state, config };
 }
 
+/**
+ * 设置 llm 角色 provider + model。
+ *
+ * 重新选定角色已在用的同一 provider 与 model 不是换模型：保留整个角色值（含思考控制）。
+ * provider 或 model 任一变化才是换模型：替换角色值并丢弃旧思考控制（形态随模型变）。
+ * 所有选模型入口（模型列表、服务商页完成、添加自定义模型）都经这里，规则只在这一处。
+ *
+ * 角色无关写入：main 是 schema 必填键，写非 main 角色而 llm 尚不存在时，
+ * 先放一个占位空 main 保持 schema 合法（写 main 时该占位被同次写入覆盖）。
+ */
 export function writeModelRole(
   state: WorkingState,
   role: ModelRole,
@@ -75,7 +78,8 @@ export function writeModelRole(
   const config = structuredClone(state.config);
   const llm = config.llm ?? { main: { provider: "", model: "" } };
   config.llm = { ...llm };
-  config.llm[role] = { provider, model };
+  const existing = config.llm[role];
+  config.llm[role] = existing?.provider === provider && existing.model === model ? existing : { provider, model };
   return { ...state, config };
 }
 
