@@ -147,6 +147,9 @@ export type {
   TrustSedimentSubmission,
   TrustSedimentSubmissionPort,
   TrustSedimentSubmissionResult,
+  TrustRuleHitRecordResult,
+  TrustRuleHitSubmission,
+  TrustRuleHitSubmissionPort,
 } from "./execution.js";
 
 export type TrustAdministrationApplicationErrorCode =

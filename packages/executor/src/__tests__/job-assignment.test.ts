@@ -60,6 +60,7 @@ import {
   signCancelProof,
   signJobActivation,
   StreamFrameVerifier,
+  interactionMirrorBatchDigest,
   systemJobParamsDigest,
   validateJobMutationBatch,
   validateJobStagedMutationRecord,
@@ -90,6 +91,7 @@ import {
   type SystemJobResourceCoordinator,
   type JobTrustSedimentPort,
 } from "@zhixing/owner-kernel/job-assignment";
+import type { TrustRuleHitBatchInput, TrustRuleHitPort } from "@zhixing/owner-kernel/conversation-assignment";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { expectJobStateParity } from "./job-state-parity.js";
@@ -474,6 +476,7 @@ async function createUserHarness(
       artifacts: FileArtifactStore,
     ) => NonNullable<ConstructorParameters<typeof JobJournal>[0]["commitParticipant"]>;
     trustSediments?: JobTrustSedimentPort;
+    trustRuleHits?: TrustRuleHitPort;
   } = {},
 ) {
   const trackLog = trackTestAuthorityLogs();
@@ -527,6 +530,7 @@ async function createUserHarness(
     schedulerNotices,
     commitParticipant: options.commitParticipant?.(log, artifacts),
     trustSediments: options.trustSediments,
+    trustRuleHits: options.trustRuleHits,
   });
   const executorLog = options.governed ? trackLog(new FileAuthorityCommitLog(path.join(root,"executor-authority"), artifacts,{clock,lockWaitMs:2000})) : log;
   const executorResources = options.governed ? new ExecutorResourceGovernor({log:executorLog, signer:executorIdentity, verifier:identity,
@@ -8191,6 +8195,55 @@ describe("job trust sediments through the abort-ticket settlement", {
     });
     await expect(harness.journal.trustSedimentMirrored(ASSIGNMENT_ID, "trust-sediment:1")).resolves.toBe(true);
     await expectSettledOnBothSides(harness);
+  });
+
+  it("carries rule hits through the real JobJournal: prepared before commit, counted after, replay and late batches safe", async () => {
+    const counted = new Map<string, TrustRuleHitBatchInput>();
+    const pending = new Map<string, string>();
+    const calls: string[] = [];
+    const key = (input: TrustRuleHitBatchInput, requestId: string) => `${input.assignmentId}/${requestId}`;
+    const port: TrustRuleHitPort = {
+      async prepare(input) {
+        calls.push(`prepare:${input.entries.map((entry) => entry.requestId).join(",")}`);
+        expect(input).toMatchObject({ origin: { taskId: TASK_ID }, assignmentId: ASSIGNMENT_ID });
+        for (const entry of input.entries) pending.set(key(input, entry.requestId), input.batchDigest);
+      },
+      async accept(input) {
+        calls.push(`accept:${input.entries.map((entry) => entry.requestId).join(",")}`);
+        // 只认领本批准备的记录，计入后删除（与宿主语义一致）
+        for (const entry of input.entries) {
+          const id = key(input, entry.requestId);
+          if (pending.get(id) !== input.batchDigest) continue;
+          pending.delete(id);
+          counted.set(id, input);
+        }
+      },
+      async discard(input) {
+        calls.push(`discard:${input.entries.map((entry) => entry.requestId).join(",")}`);
+      },
+    };
+    const harness = await createUserHarness({ trustRuleHits: port });
+    await start(harness);
+    await expect(harness.ledger.recordTrustRuleHit(ASSIGNMENT_ID, { ruleId: "rule-job" }))
+      .resolves.toMatchObject({ requestId: "trust-rule-hit:1" });
+    await harness.ledger.recordTrustRuleHit(ASSIGNMENT_ID, { ruleId: "rule-job" });
+    const batch = (await harness.ledger.pendingInteractionMirrorBatch(ASSIGNMENT_ID))!;
+    expect(batch.entries.map((entry) => [entry.kind, entry.requestId])).toEqual([
+      ["trust-rule-hit", "trust-rule-hit:1"],
+      ["trust-rule-hit", "trust-rule-hit:2"],
+    ]);
+    const context = submissionContext(harness.unsigned);
+    await harness.journal.mirrorInteractions(ASSIGNMENT_ID, batch, context);
+    expect(calls).toEqual(["prepare:trust-rule-hit:1,trust-rule-hit:2", "accept:trust-rule-hit:1,trust-rule-hit:2"]);
+    expect([...counted.keys()]).toEqual([`${ASSIGNMENT_ID}/trust-rule-hit:1`, `${ASSIGNMENT_ID}/trust-rule-hit:2`]);
+    await expect(harness.journal.trustRuleHitBatchState(ASSIGNMENT_ID, interactionMirrorBatchDigest(batch)))
+      .resolves.toBe("committed");
+    // 回执丢失后的同批重放：不重新准备，只再接纳（已无记录可计）
+    await harness.journal.mirrorInteractions(ASSIGNMENT_ID, batch, context);
+    expect(calls.slice(2)).toEqual(["accept:trust-rule-hit:1,trust-rule-hit:2"]);
+    expect(counted.size).toBe(2);
+    // 未提交的摘要：开放中的指派为 unknown
+    await expect(harness.journal.trustRuleHitBatchState(ASSIGNMENT_ID, "sha256:not-a-batch")).resolves.toBe("unknown");
   });
 
   it("targets the interaction itself when the sediment precedes it", async () => {

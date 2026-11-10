@@ -308,7 +308,11 @@ export class SecurityPipeline {
       state: {},
     };
 
-    return this.runPipeline(ctx, 0);
+    const result = await this.runPipeline(ctx, 0);
+    // 匹配之后的中间件（如执行守卫限流）可能短路返回、不带已选出的规则：规则已经匹配过，
+    // 结果如实带上它（只用于审计与匹配统计），不改变任何结论
+    const matched = ctx.state.matchedPermissionRule;
+    return matched && !result.matchedPermissionRule ? { ...result, matchedPermissionRule: matched } : result;
   }
 
   /** 获取策略引擎实例（用于加载额外规则） */

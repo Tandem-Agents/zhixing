@@ -1036,3 +1036,104 @@ describe("createSecureExecuteTool", () => {
     });
   });
 });
+
+describe("规则匹配计数的唯一生产入口", () => {
+  function withHits(options: { failHit?: boolean } = {}) {
+    const { pipeline, store, trustAdministration } = makePipeline();
+    const hits: { ruleId: string; scope: string }[] = [];
+    const port = Object.freeze({
+      contextId: Object.freeze(toPermissionContext(trustAdministration.context)),
+      recordApproval: (approval: Parameters<typeof trustAdministration.recordApproval>[0]) =>
+        trustAdministration.recordApproval(approval),
+      recordRuleHit: async (hit: { ruleId: string; scope: "context" | "global" }) => {
+        if (options.failHit) throw new Error("hit lane unavailable");
+        hits.push({ ...hit });
+      },
+    });
+    return { pipeline, store, hits, port };
+  }
+
+  it("冻结的 allow 规则放行：记一次；副作用前的租约复核不重复计", async () => {
+    const { pipeline, hits, port } = withHits();
+    const exec = mockExecute();
+    const allow = PermissionStore.createRule({ pattern: { tool: "bash", argument: "curl *" }, decision: "allow", scope: "global" });
+    const authorize = vi.fn(() => [allow]);
+    const wrapped = createProductionSecureExecuteTool({
+      pipeline, originalExecute: exec.fn, broker: new ConfirmationBroker(), authorizeToolExecution: authorize, securityApproval: port,
+    });
+    await wrapped(makeTool("bash"), { command: "curl https://example.com" }, makeContext());
+    expect(exec.callCount()).toBe(1);
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(hits).toEqual([{ ruleId: allow.id, scope: "global" }]);
+  });
+
+  it("deny 规则拒绝也记一次，结论不变", async () => {
+    const { pipeline, hits, port } = withHits();
+    const exec = mockExecute();
+    const deny = PermissionStore.createRule({ pattern: { tool: "bash", argument: "curl *" }, decision: "deny", scope: "context" });
+    const wrapped = createProductionSecureExecuteTool({
+      pipeline, originalExecute: exec.fn, broker: new ConfirmationBroker(), authorizeToolExecution: () => [deny], securityApproval: port,
+    });
+    await expect(wrapped(makeTool("bash"), { command: "curl https://example.com" }, makeContext())).rejects.toThrow();
+    expect(exec.callCount()).toBe(0);
+    expect(hits).toEqual([{ ruleId: deny.id, scope: "context" }]);
+  });
+
+  it("bypassImmune 仍需确认时，已经发生的匹配照样计入", async () => {
+    const { pipeline, hits, port } = withHits();
+    const broker = new ConfirmationBroker();
+    autoResolveBroker(broker, { kind: "allow-once" });
+    const exec = mockExecute();
+    const allowWrite = PermissionStore.createRule({ pattern: { tool: "write", argument: "*" }, decision: "allow", scope: "global" });
+    const wrapped = createProductionSecureExecuteTool({
+      pipeline, originalExecute: exec.fn, broker, authorizeToolExecution: () => [allowWrite], securityApproval: port,
+    });
+    await wrapped(makeTool("write"), { path: ".zhixing/config.json" }, makeContext());
+    expect(exec.callCount()).toBe(1);
+    expect(hits).toEqual([{ ruleId: allowWrite.id, scope: "global" }]);
+  });
+
+  it("匹配之后被执行守卫限流拒绝：两次匹配都记，限流结论不变、第二次不执行", async () => {
+    const store = new PermissionStore({ rootDir: null });
+    const pipeline = new SecurityPipeline({
+      trustContext: { kind: "workspace", dir: "/tmp/ws" },
+      permissionRuleSource: bindPermissionRuleExecutionSource(store, { kind: "workspace", hash: "binding-ws", revision: 1 }),
+      executionGuard: { rateMaxCalls: 1, rateWindowMs: 60_000 },
+    });
+    const hits: { ruleId: string; scope: string }[] = [];
+    const allow = PermissionStore.createRule({ pattern: { tool: "bash", argument: "curl *" }, decision: "allow", scope: "global" });
+    const exec = mockExecute();
+    const wrapped = createProductionSecureExecuteTool({
+      pipeline, originalExecute: exec.fn, broker: new ConfirmationBroker(), authorizeToolExecution: () => [allow],
+      securityApproval: Object.freeze({
+        contextId: Object.freeze({ kind: "workspace" as const, hash: "binding-ws", revision: 1 }),
+        recordApproval: async () => ({ kind: "recorded" as const }),
+        recordRuleHit: async (hit: { ruleId: string; scope: "context" | "global" }) => { hits.push({ ...hit }); },
+      }),
+    });
+    await wrapped(makeTool("bash"), { command: "curl https://example.com/a" }, makeContext());
+    await expect(wrapped(makeTool("bash"), { command: "curl https://example.com/b" }, makeContext())).rejects.toThrow(/频率限制/);
+    expect(exec.callCount()).toBe(1);
+    expect(hits).toEqual([{ ruleId: allow.id, scope: "global" }, { ruleId: allow.id, scope: "global" }]);
+  });
+
+  it("session 规则不计；记录失败不阻断工具", async () => {
+    const sessionCase = withHits();
+    const session = PermissionStore.createRule({ pattern: { tool: "bash", argument: "curl *" }, decision: "allow", scope: "session" });
+    const exec = mockExecute();
+    await createProductionSecureExecuteTool({
+      pipeline: sessionCase.pipeline, originalExecute: exec.fn, broker: new ConfirmationBroker(),
+      authorizeToolExecution: () => [session], securityApproval: sessionCase.port,
+    })(makeTool("bash"), { command: "curl https://example.com" }, makeContext());
+    expect(sessionCase.hits).toEqual([]);
+
+    const failing = withHits({ failHit: true });
+    const allow = PermissionStore.createRule({ pattern: { tool: "bash", argument: "curl *" }, decision: "allow", scope: "global" });
+    const failingExec = mockExecute();
+    await expect(createProductionSecureExecuteTool({
+      pipeline: failing.pipeline, originalExecute: failingExec.fn, broker: new ConfirmationBroker(),
+      authorizeToolExecution: () => [allow], securityApproval: failing.port,
+    })(makeTool("bash"), { command: "curl https://example.com" }, makeContext())).resolves.toMatchObject({ content: "executed" });
+    expect(failingExec.callCount()).toBe(1);
+  });
+});

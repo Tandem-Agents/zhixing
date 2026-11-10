@@ -26,6 +26,8 @@ import type {
   InteractionSettlementStreamProof,
   TrustSedimentFact,
   TrustSedimentMirrorEntry,
+  TrustRuleHitFact,
+  TrustRuleHitMirrorEntry,
   IngressContext,
   LedgerEvidencePage,
   LedgerSnapshot,
@@ -154,7 +156,8 @@ export type ConversationInteractionOutcome =
 
 export type ConversationInteractionMirrorEntry =
   | (Omit<InteractionAnswerMirrorEntry, "outcome"> & { readonly outcome: ConversationInteractionOutcome })
-  | TrustSedimentMirrorEntry;
+  | TrustSedimentMirrorEntry
+  | TrustRuleHitMirrorEntry;
 
 export type ConversationInteractionMirrorBatch = Omit<
   InteractionMirrorBatch,
@@ -165,6 +168,9 @@ export type AssignmentInteractionOutcome = InteractionAnswerMirrorEntry["outcome
 
 /** 沉淀条目在一个指派内的身份前缀；与交互请求 id 不冲突。 */
 export const TRUST_SEDIMENT_REQUEST_PREFIX = "trust-sediment:";
+
+/** 规则命中条目在一个指派内的身份前缀；与交互请求、沉淀 id 不冲突。 */
+export const TRUST_RULE_HIT_REQUEST_PREFIX = "trust-rule-hit:";
 
 export function confirmationDecisionDigest(
   requestId: string,
@@ -234,6 +240,7 @@ export interface AssignmentLedgerValidationState {
   >;
   stagedMutationCount: number;
   trustSedimentCount: number;
+  trustRuleHitCount: number;
   readonly mutationRequestIds: Set<string>;
   sideEffectCount: number;
   readonly openSideEffects: Set<number>;
@@ -276,6 +283,7 @@ export function createAssignmentLedgerValidationState(
     cancelProofOwnerAccepted: false,
     stagedMutationCount: 0,
     trustSedimentCount: 0,
+    trustRuleHitCount: 0,
     mutationRequestIds: new Set(),
     sideEffectCount: 0,
     openSideEffects: new Set(),
@@ -781,6 +789,11 @@ export function advanceAssignmentInteractionMirrorDigest(
     validateTrustSedimentFact(entry.sediment);
     if (!entry.requestId.startsWith(TRUST_SEDIMENT_REQUEST_PREFIX)) {
       throw new TypeError("Trust sediment mirror identity is invalid");
+    }
+  } else if (entry.kind === "trust-rule-hit") {
+    validateTrustRuleHitFact(entry.hit);
+    if (!entry.requestId.startsWith(TRUST_RULE_HIT_REQUEST_PREFIX)) {
+      throw new TypeError("Trust rule hit mirror identity is invalid");
     }
   } else if (entry.kind !== "allow-once") {
     throw new TypeError("Interaction mirror entry kind is invalid");
@@ -1410,6 +1423,32 @@ export function applyValidatedAssignmentEntry(
           requestId: body.requestId,
           kind: "trust-sediment",
           sediment: body.sediment,
+        },
+      );
+      state.unmirroredFinished.set(entry.recordSeq, {
+        ordinal: state.finishedInteractionCount,
+        mirrorDigest: state.interactionMirrorDigest,
+      });
+      break;
+    case "trust-rule-hit":
+      // 规则命中与沉淀同样搭交互镜像链回到 owner，不是交互：不进待决交互集合、不推进最后
+      // 交互序号、不产生流投影义务。
+      if (state.phase !== "started" || state.aborts.size > 0) {
+        throw new TypeError("trust rule hit is outside a started assignment");
+      }
+      if (body.requestId !== `${TRUST_RULE_HIT_REQUEST_PREFIX}${state.trustRuleHitCount + 1}`) {
+        throw new TypeError("trust rule hit identity is not the next in sequence");
+      }
+      state.trustRuleHitCount += 1;
+      state.finishedInteractionCount += 1;
+      state.interactionMirrorDigest = advanceAssignmentInteractionMirrorDigest(
+        state.interactionMirrorDigest,
+        {
+          ordinal: state.finishedInteractionCount,
+          seq: entry.recordSeq,
+          requestId: body.requestId,
+          kind: "trust-rule-hit",
+          hit: body.hit,
         },
       );
       state.unmirroredFinished.set(entry.recordSeq, {
@@ -2261,6 +2300,34 @@ function validateTrustSedimentMirrorEntry(
   return entry as unknown as TrustSedimentMirrorEntry;
 }
 
+/** 规则命中事实的结构校验；规则是否在指派已认证范围内由规则权威核对。 */
+export function validateTrustRuleHitFact(input: unknown): TrustRuleHitFact {
+  assertObject(input, "Trust rule hit");
+  assertExactKeys(input, ["ruleId"], "Trust rule hit");
+  assertIdentifier(input.ruleId, "Trust rule hit rule id");
+  return input as unknown as TrustRuleHitFact;
+}
+
+function validateTrustRuleHitMirrorEntry(
+  entry: Record<string, unknown>,
+  label: string,
+): TrustRuleHitMirrorEntry {
+  assertExactKeys(entry, ["at", "hit", "kind", "ordinal", "requestId", "seq"], label);
+  if (!Number.isSafeInteger(entry.ordinal) || (entry.ordinal as number) <= 0) {
+    throw new TypeError("Interaction mirror ordinal must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(entry.seq) || (entry.seq as number) <= 0) {
+    throw new TypeError("Interaction mirror sequence must be a positive safe integer");
+  }
+  assertIdentifier(entry.requestId, "Trust rule hit identity");
+  if (!entry.requestId.startsWith(TRUST_RULE_HIT_REQUEST_PREFIX)) {
+    throw new TypeError("Trust rule hit mirror identity is invalid");
+  }
+  validateTrustRuleHitFact(entry.hit);
+  assertCanonicalTime(entry.at, "Interaction mirror time");
+  return entry as unknown as TrustRuleHitMirrorEntry;
+}
+
 export function validateConversationInteractionMirrorEntry(
   input: unknown,
 ): ConversationInteractionMirrorEntry {
@@ -2271,6 +2338,9 @@ export function validateConversationInteractionMirrorEntry(
   assertObject(entry, "Conversation interaction mirror entry");
   if (entry.kind === "trust-sediment") {
     return validateTrustSedimentMirrorEntry(entry, "Conversation interaction mirror entry");
+  }
+  if (entry.kind === "trust-rule-hit") {
+    return validateTrustRuleHitMirrorEntry(entry, "Conversation interaction mirror entry");
   }
   assertExactKeys(
     entry,
@@ -2303,6 +2373,9 @@ export function validateAssignmentInteractionMirrorEntry(
   assertObject(entry, "Assignment interaction mirror entry");
   if (entry.kind === "trust-sediment") {
     return validateTrustSedimentMirrorEntry(entry, "Assignment interaction mirror entry");
+  }
+  if (entry.kind === "trust-rule-hit") {
+    return validateTrustRuleHitMirrorEntry(entry, "Assignment interaction mirror entry");
   }
   assertExactKeys(
     entry,
@@ -2525,6 +2598,14 @@ function assertAssignmentRecord(
         throw new TypeError("Trust sediment record identity is invalid");
       }
       validateTrustSedimentFact(value.sediment);
+      return;
+    case "trust-rule-hit":
+      assertExactKeys(value, ["hit", "requestId", "t", "v"], "trust-rule-hit record");
+      assertIdentifier(value.requestId, "trust rule hit identity");
+      if (!value.requestId.startsWith(TRUST_RULE_HIT_REQUEST_PREFIX)) {
+        throw new TypeError("Trust rule hit record identity is invalid");
+      }
+      validateTrustRuleHitFact(value.hit);
       return;
     case "staged-mutation":
       assertExactKeys(

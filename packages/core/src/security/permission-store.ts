@@ -13,7 +13,8 @@
  *
  * 落盘策略：
  *   - 只在 create / revoke / reset 时落盘
- *   - match 是热路径，只更新内存中的 matchCount / lastMatchedAt
+ *   - match 是热路径：session / builtin 规则只更新内存中的 matchCount / lastMatchedAt；
+ *     持久规则的计数由规则权威按命中记录累计（见 DurablePermissionRuleStore），这里不改
  *   - 使用 tmp 文件 + rename 做原子写，避免损坏
  */
 
@@ -21,7 +22,7 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 
 import { getZhixingHome } from "../paths.js";
-import { DurablePermissionRuleStore } from "./durable-permission-rules.js";
+import { DurablePermissionRuleStore, GLOBAL_PERMISSION_BUCKET } from "./durable-permission-rules.js";
 import type {
   IPermissionStore,
   PermissionContextId,
@@ -307,8 +308,12 @@ export class PermissionStore implements IPermissionStore {
 
     if (userCandidates.length > 0) {
       const chosen = this.resolveConflict(userCandidates);
-      chosen.matchCount += 1;
-      chosen.lastMatchedAt = this.now();
+      // 持久规则（context/global）的计数只由规则权威按命中记录累计（运行结束经耐久回程，
+      // 或无回程时直接记账）；这里再改共享内存会与之双计。session 规则只在内存，照旧计数。
+      if (chosen.scope === "session") {
+        chosen.matchCount += 1;
+        chosen.lastMatchedAt = this.now();
+      }
       return chosen;
     }
 
@@ -378,6 +383,18 @@ export class PermissionStore implements IPermissionStore {
         );
       }
     }
+  }
+
+  async recordRuleHits(
+    contextId: PermissionContextId,
+    hits: readonly { readonly ruleId: string; readonly scope: "context" | "global"; readonly at: number }[],
+  ): Promise<number> {
+    const global = hits.filter((hit) => hit.scope === "global");
+    const context = hits.filter((hit) => hit.scope === "context");
+    let counted = 0;
+    if (global.length > 0) counted += await this.durable.recordHits(GLOBAL_PERMISSION_BUCKET, global);
+    if (context.length > 0) counted += await this.durable.recordHits(toStorageKey(contextId), context);
+    return counted;
   }
 
   list(contextId: PermissionContextId): PermissionRule[] {

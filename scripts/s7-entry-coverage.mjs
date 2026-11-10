@@ -14422,6 +14422,8 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "evidence",
     "closeDrainBudgetMs",
     "currentAnchorDeviceId",
+    // 本地对话 owner 把镜像里的规则命中交规则权威累计（规则权威宿主装配，否则为空）
+    "trustRuleHits",
   ]);
   for (const record of records.filter(({ relative }) => productionRoots.has(relative))) {
     const source = sourceFile(record.relative, record.text);

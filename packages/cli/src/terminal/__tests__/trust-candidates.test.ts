@@ -32,7 +32,7 @@ describe('terminal trust candidates', () => {
     const items = await f.query();
     expect(f.provider.computePanelMode(f.match())).toBe('management');
     expect(f.provider.computeInlineActions(f.match())).toEqual({ delete: true });
-    expect(items.map(item => item.description)).toEqual(['主模式 · [—] · 未匹配', '全局 · [你] · 未匹配', '当前工作场景 · [—] · 未匹配']);
+    expect(items.map(item => item.description)).toEqual(['主模式 · [—] · 暂无匹配记录', '全局 · [你] · 暂无匹配记录', '当前工作场景 · [—] · 暂无匹配记录']);
     expect(f.management.trustList).toHaveBeenCalledWith('conv-1');
     f.binding.retain(4, items);
     await expect(f.binding.revoke(4, items[2]!.id)).resolves.toEqual({ revoked: true, message: '已撤销信任规则。' });
@@ -44,7 +44,7 @@ describe('terminal trust candidates', () => {
     Object.assign(f.management, { trustOtherScopes: vi.fn(async () => ({ groups: [{ context: stale, label: '工作区「B」',
       effective: false, rules: [{ ...rule('stale'), contextId: { kind: 'workspace', hash: 'hash-b', revision: 1 } }] }] })) });
     const items = await f.query();
-    expect(items.map(item => item.description)).toEqual(['主模式 · [—] · 未匹配', expect.stringMatching(/^工作区「B」 · 不再生效 · /u)]);
+    expect(items.map(item => item.description)).toEqual(['主模式 · [—] · 暂无匹配记录', expect.stringMatching(/^工作区「B」 · 不再生效 · /u)]);
     f.binding.retain(5, items);
     await f.binding.revoke(5, items[1]!.id);
     expect(f.management.trustRevoke).toHaveBeenCalledWith('stale', 'conv-1', stale);

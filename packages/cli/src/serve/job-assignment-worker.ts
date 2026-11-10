@@ -259,6 +259,13 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     return this.#interactions.recordTrustSediment(sediment);
   }
 
+  /** 当前 job 运行内的规则命中记入台账；不在 job 运行内返回 undefined。 */
+  recordTrustRuleHit(
+    hit: Parameters<DurableJobInteractionCoordinator["recordTrustRuleHit"]>[0],
+  ): ReturnType<DurableJobInteractionCoordinator["recordTrustRuleHit"]> {
+    return this.#interactions.recordTrustRuleHit(hit);
+  }
+
   async resolveNoInteractiveSurface(input: {
     readonly assignmentId: string;
     readonly requestId: string;

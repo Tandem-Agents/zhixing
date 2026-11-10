@@ -518,6 +518,7 @@ export interface CreateConversationServicesInput {
   readonly durableInteractions: DurableConversationInteractionObserver;
   /** 本宿主是规则权威时的沉淀接纳端口，构造协议运行时即交入。 */
   readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly conversationRuntimeStorage: ConversationRuntimeStoragePort;
   readonly confirmationHub: ConfirmationHub;
@@ -709,6 +710,7 @@ export async function createConversationServices(
       : {}),
     interactions: input.durableInteractions,
     ...(input.trustSediments ? { trustSediments: input.trustSediments } : {}),
+    ...(input.trustRuleHits ? { trustRuleHits: input.trustRuleHits } : {}),
     executeRecoveredPerspective: async (input) => {
       const execution = await conversationPerspectives.executePerspectiveWork({
         runtime: projectConversationPerspectivesRuntime(
@@ -1051,6 +1053,7 @@ export interface CreateLocalConversationOwnerInput {
   readonly durableInteractions: DurableConversationInteractionObserver;
   /** 本宿主是规则权威时的沉淀接纳端口（本地对话同样由它接纳）。 */
   readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;
   readonly providerCredentials?: ProviderCredentialProjection;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
@@ -1144,6 +1147,7 @@ export async function createLocalConversationOwner(
     runtimeFactory: input.assignmentRuntimeFactory,
     interactions: input.durableInteractions,
     ...(input.trustSediments ? { trustSediments: input.trustSediments } : {}),
+    trustRuleHits: input.trustRuleHits,
     advancementModelProvider: createHostAdvancementModelProviderFactory({
       configuration: input.advancementConfiguration,
       credentials: input.providerCredentials ?? {},

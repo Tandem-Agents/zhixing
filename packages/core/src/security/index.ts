@@ -89,7 +89,9 @@ export type {
   DurablePermissionRuleStoreOptions,
   PendingApprovalAcceptance,
   PendingPermissionApproval,
+  PendingRuleHit,
   PermissionRulePublication,
+  RuleHitClaim,
 } from "./durable-permission-rules.js";
 export {
   createPermissionStoreTrustAdministrationRepository,

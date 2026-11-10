@@ -76,6 +76,23 @@ export interface TrustSedimentSubmissionPort {
   submit(sediment: TrustSedimentSubmission): Promise<TrustSedimentSubmissionResult>;
 }
 
+/** 安全评价选出的一条持久用户规则：只交规则权威累计匹配次数，不改变授权结论。 */
+export interface TrustRuleHitSubmission {
+  readonly ruleId: string;
+  readonly scope: "context" | "global";
+}
+
+/**
+ * 规则命中回程。`recorded`：已记入本运行的耐久回程，随既有镜像义务交规则权威；
+ * `unavailable`：本运行没有耐久回程。
+ */
+export interface TrustRuleHitSubmissionPort {
+  submit(hit: TrustRuleHitSubmission): Promise<"recorded" | "unavailable">;
+}
+
+/** recorded 走回程；direct 已由规则权威宿主直接记账；dropped 无回程且本宿主不是规则权威。 */
+export type TrustRuleHitRecordResult = "recorded" | "direct" | "dropped";
+
 export type TrustAdministrationApprovalResult =
   | { readonly kind: "recorded" }
   | {
@@ -104,6 +121,14 @@ export interface TrustAdministrationExecutionRepository {
     context: TrustAdministrationContext,
     rule: TrustAdministrationRepositoryRule,
   ): Promise<void>;
+  /**
+   * 规则权威宿主上没有耐久回程的运行直接累计规则命中；返回计入的条数。未提供时这类运行
+   * 的命中不计。
+   */
+  recordExecutionRuleHits?(
+    context: TrustAdministrationContext,
+    hits: readonly (TrustRuleHitSubmission & { readonly at: number })[],
+  ): Promise<number>;
 }
 
 export interface TrustAdministrationExecutionApplication {
@@ -114,6 +139,8 @@ export interface TrustAdministrationExecutionApplication {
   recordApproval(
     approval: TrustAdministrationApproval,
   ): Promise<TrustAdministrationApprovalResult>;
+  /** 记一次持久用户规则的匹配；不改变授权结论。 */
+  recordRuleHit(hit: TrustRuleHitSubmission): Promise<TrustRuleHitRecordResult>;
   securitySnapshot(): TrustAdministrationExecutionSnapshot;
   executionRules(): readonly TrustAdministrationRepositoryRule[];
 }
@@ -132,6 +159,11 @@ export interface TrustAdministrationExecutionApplicationOptions {
    */
   readonly sediments?: TrustSedimentSubmissionPort;
   readonly directSediments?: boolean;
+  /**
+   * 规则命中回程。返回 unavailable 时与沉淀同一判断：directSediments 为 true（规则权威所在
+   * 宿主）直接记账，否则不计。
+   */
+  readonly ruleHits?: TrustRuleHitSubmissionPort;
 }
 
 const SUGGESTION_THRESHOLDS: Readonly<
@@ -183,6 +215,7 @@ export class TrustAdministrationExecutionApplicationService
   readonly #observations = new Map<string, ObservationEntry>();
   readonly #sediments: TrustSedimentSubmissionPort | undefined;
   readonly #directSediments: boolean;
+  readonly #ruleHits: TrustRuleHitSubmissionPort | undefined;
 
   constructor(options: TrustAdministrationExecutionApplicationOptions) {
     this.#repository = options.repository;
@@ -191,7 +224,19 @@ export class TrustAdministrationExecutionApplicationService
     this.#createRuleId = options.createRuleId ?? randomUUID;
     this.#sediments = options.sediments;
     this.#directSediments = options.sediments ? options.directSediments === true : true;
+    this.#ruleHits = options.ruleHits;
     this.context = freezeContext(options.context);
+  }
+
+  async recordRuleHit(hit: TrustRuleHitSubmission): Promise<TrustRuleHitRecordResult> {
+    if (hit.scope !== "context" && hit.scope !== "global") return "dropped";
+    if (typeof hit.ruleId !== "string" || hit.ruleId.length === 0) return "dropped";
+    const submission = Object.freeze({ ruleId: hit.ruleId, scope: hit.scope });
+    if (this.#ruleHits && await this.#ruleHits.submit(submission) === "recorded") return "recorded";
+    // 没有耐久回程：与沉淀同一判断，只有规则权威所在宿主直接记账，执行端不自作权威
+    if (!this.#directSediments || !this.#repository.recordExecutionRuleHits) return "dropped";
+    await this.#repository.recordExecutionRuleHits(this.context, [{ ...submission, at: this.#now() }]);
+    return "direct";
   }
 
   suggest(

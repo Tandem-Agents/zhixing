@@ -69,6 +69,7 @@ import type {
   InteractionMirrorEntry,
   InteractionSettlementStreamProof,
   TrustSedimentFact,
+  TrustRuleHitFact,
   ChannelInteractionGrant,
   RunDispatchArguments,
   RunExecutorPort,
@@ -129,6 +130,8 @@ import {
   validateAssignmentInteractionOutcome,
   validateTrustSedimentFact,
   TRUST_SEDIMENT_REQUEST_PREFIX,
+  validateTrustRuleHitFact,
+  TRUST_RULE_HIT_REQUEST_PREFIX,
   interactionSettlementNeedsStreamProof,
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionOutcome,
@@ -460,7 +463,16 @@ interface RecordedTrustSediment {
   readonly mirrorDigest: string;
 }
 
-type MirrorChainItem = FinishedInteraction | RecordedTrustSediment;
+/** 规则命中事实：同样搭交互镜像链回到 owner，不是交互。 */
+interface RecordedTrustRuleHit {
+  readonly body: Extract<AssignmentRecord, { t: "trust-rule-hit" }>;
+  readonly recordSeq: number;
+  readonly at: string;
+  readonly ordinal: number;
+  readonly mirrorDigest: string;
+}
+
+type MirrorChainItem = FinishedInteraction | RecordedTrustSediment | RecordedTrustRuleHit;
 
 interface RequestedInteraction {
   readonly body: Extract<AssignmentRecord, { t: "interaction-requested" }>;
@@ -1771,6 +1783,37 @@ export class ConversationAssignmentLedger implements
         const body = snapshot(
           { v: 1 as const, t: "trust-sediment" as const, requestId, sediment: validated },
           "Trust sediment record",
+        );
+        const entry = nextEntry(state, body);
+        return {
+          kind: "append",
+          entries: [assignmentRecord(assignmentId, entry)],
+          value: { requestId, recordSeq: entry.recordSeq },
+        };
+      },
+    );
+    return transaction.value;
+  }
+
+  /**
+   * 记一条规则命中事实（对话或 job 指派运行中）：进入同一条镜像链，随既有镜像冲刷义务
+   * （运行结束、取消、下一次交互、job 收束）回到 owner，不在这里单独冲刷。返回其身份。
+   */
+  async recordTrustRuleHit(
+    assignmentId: string,
+    hit: TrustRuleHitFact,
+  ): Promise<{ readonly requestId: string; readonly recordSeq: number }> {
+    const validated = validateTrustRuleHitFact(snapshot(hit, "Trust rule hit"));
+    const transaction = await this.#transact<{ readonly requestId: string; readonly recordSeq: number }>(
+      assignmentId,
+      (state) => {
+        if (state.phase !== "started" || state.aborts.length > 0) {
+          throw new Error("Trust rule hits can only be recorded by a started assignment");
+        }
+        const requestId = `${TRUST_RULE_HIT_REQUEST_PREFIX}${state.validation.trustRuleHitCount + 1}`;
+        const body = snapshot(
+          { v: 1 as const, t: "trust-rule-hit" as const, requestId, hit: validated },
+          "Trust rule hit record",
         );
         const entry = nextEntry(state, body);
         return {
@@ -5457,7 +5500,8 @@ async function reduceJobRecoveryIndex(
         };
         break;
       case "trust-sediment":
-        // 待镜像义务与交互结果相同：镜像水位追上之前不算结清；沉淀不进流投影
+      case "trust-rule-hit":
+        // 待镜像义务与交互结果相同：镜像水位追上之前不算结清；沉淀与规则命中不进流投影
         next = {
           ...next,
           hasInteractionFacts: true,
@@ -5756,10 +5800,11 @@ function applyEntry(
       state.finishedIndexBySeq.set(entry.recordSeq, finishedCount(state));
       state.finishedOrder.push(finished);
       return;
-    case "trust-sediment": {
+    case "trust-sediment":
+    case "trust-rule-hit": {
       const sedimentCheckpoint = state.validation.unmirroredFinished.get(entry.recordSeq);
       if (!sedimentCheckpoint) {
-        throw corruptLedger("Validated trust sediment lost its mirror checkpoint");
+        throw corruptLedger(`Validated ${body.t} lost its mirror checkpoint`);
       }
       state.finishedIndexBySeq.set(entry.recordSeq, finishedCount(state));
       state.finishedOrder.push({
@@ -5768,7 +5813,7 @@ function applyEntry(
         at,
         ordinal: sedimentCheckpoint.ordinal,
         mirrorDigest: sedimentCheckpoint.mirrorDigest,
-      });
+      } as RecordedTrustSediment | RecordedTrustRuleHit);
       return;
     }
     case "staged-mutation":
@@ -6124,6 +6169,16 @@ function mirrorEntry(finished: MirrorChainItem): InteractionMirrorEntry {
       requestId: finished.body.requestId,
       kind: "trust-sediment",
       sediment: snapshot(finished.body.sediment, "Trust sediment"),
+      at: finished.at,
+    };
+  }
+  if (finished.body.t === "trust-rule-hit") {
+    return {
+      ordinal: finished.ordinal,
+      seq: finished.recordSeq,
+      requestId: finished.body.requestId,
+      kind: "trust-rule-hit",
+      hit: snapshot(finished.body.hit, "Trust rule hit"),
       at: finished.at,
     };
   }

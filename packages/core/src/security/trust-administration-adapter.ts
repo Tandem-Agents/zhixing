@@ -61,6 +61,13 @@ export function createPermissionStoreTrustAdministrationRepository(
         toPermissionRule(rule),
       );
     },
+    async recordExecutionRuleHits(
+      context: TrustAdministrationContext,
+      hits: readonly { readonly ruleId: string; readonly scope: "context" | "global"; readonly at: number }[],
+    ): Promise<number> {
+      const store = storeProvider();
+      return store.recordRuleHits ? store.recordRuleHits(toPermissionContext(context), hits) : 0;
+    },
   });
 }
 

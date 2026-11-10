@@ -163,7 +163,8 @@ function historyRows(
     case "interaction-requested":
       return [{ kind: "put", key: historyKey(assignmentId, "q", subject(body.requestId!)), value: { seq, body } }];
     case "interaction-finished":
-    case "trust-sediment": {
+    case "trust-sediment":
+    case "trust-rule-hit": {
       const checkpoint = state.unmirroredFinished.get(seq);
       if (!checkpoint) return [];
       const item = { body, recordSeq: seq, at, ordinal: checkpoint.ordinal, mirrorDigest: checkpoint.mirrorDigest };
@@ -286,7 +287,8 @@ export async function readAssignmentHistory(
   };
   const mirrorItem = async (seq: number) => {
     const found = await row(historyKey(assignmentId, "o", seqPart(seq)));
-    if (found && (found.seq !== seq || (found.value.body?.t !== "interaction-finished" && found.value.body?.t !== "trust-sediment"))) {
+    if (found && (found.seq !== seq || (found.value.body?.t !== "interaction-finished" &&
+      found.value.body?.t !== "trust-sediment" && found.value.body?.t !== "trust-rule-hit"))) {
       throw corruptIndex("Assignment history mirror row is invalid");
     }
     return found?.value as JsonValue | undefined;

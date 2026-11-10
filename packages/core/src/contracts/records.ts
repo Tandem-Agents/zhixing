@@ -259,7 +259,28 @@ export interface TrustSedimentMirrorEntry {
   at: IsoTime;
 }
 
-export type InteractionMirrorEntry = InteractionAnswerMirrorEntry | TrustSedimentMirrorEntry;
+/**
+ * 执行端安全评价选出的一条持久用户规则（context/global）的命中事实：只说明哪条规则被匹配，
+ * 不改变授权结论。随交互镜像回到 owner，由规则权威按指派已认证范围核对后累计。
+ */
+export interface TrustRuleHitFact {
+  ruleId: string;
+}
+
+export interface TrustRuleHitMirrorEntry {
+  ordinal: number;
+  seq: number;
+  /** 命中在本指派内的身份（`trust-rule-hit:<序号>`），与交互请求、沉淀 id 不冲突。 */
+  requestId: string;
+  kind: "trust-rule-hit";
+  hit: TrustRuleHitFact;
+  at: IsoTime;
+}
+
+export type InteractionMirrorEntry =
+  | InteractionAnswerMirrorEntry
+  | TrustSedimentMirrorEntry
+  | TrustRuleHitMirrorEntry;
 
 export interface InteractionMirrorBatchPayload
   extends WireSchemaV1<"InteractionMirrorBatch"> {
@@ -346,6 +367,11 @@ type AssignmentRecordV1Body =
         t: "trust-sediment";
         requestId: string;
         sediment: TrustSedimentFact;
+      }
+    | {
+        t: "trust-rule-hit";
+        requestId: string;
+        hit: TrustRuleHitFact;
       }
     | {
         t: "staged-mutation";

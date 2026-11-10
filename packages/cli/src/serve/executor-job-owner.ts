@@ -130,6 +130,13 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     return this.#worker.recordTrustSediment(sediment);
   }
 
+  /** 运行中的规则命中只在活动的 job 绑定里记录，与就绪状态无关。 */
+  recordTrustRuleHit(
+    hit: Parameters<JobAssignmentWorker["recordTrustRuleHit"]>[0],
+  ): ReturnType<JobAssignmentWorker["recordTrustRuleHit"]> {
+    return this.#worker.recordTrustRuleHit(hit);
+  }
+
   stopAccepting(): void {
     if (this.#state === "closed") return;
     this.#state = "closed";

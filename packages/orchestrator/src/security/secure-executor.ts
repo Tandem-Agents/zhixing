@@ -239,6 +239,17 @@ export function createSecureExecuteTool(
       });
     }
 
+    // 本次评价选出的持久用户规则记一次匹配（含随后被阻止或仍需确认的情形）。统计不改变
+    // 授权结论；记录失败只留诊断，不阻断本次工具，也不当作统计完整
+    const matchedRule = result.matchedPermissionRule;
+    if (matchedRule && (matchedRule.scope === "context" || matchedRule.scope === "global") &&
+      securityApproval.recordRuleHit) {
+      await securityApproval.recordRuleHit({ ruleId: matchedRule.id, scope: matchedRule.scope }).catch((error: unknown) => {
+        records?.record(() => ({ event: "permission", result: "failure", data: { tool: tool.name, phase: "rule-hit-not-recorded",
+          error: error instanceof Error ? error.message : "规则匹配未记录" } }));
+      });
+    }
+
     // 1. block → 通知 UI 并抛错
     if (!result.allowed) {
       onBlocked?.(tool.name, input, result);

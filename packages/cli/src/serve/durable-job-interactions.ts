@@ -12,6 +12,7 @@ import type {
   AuthorityCallContext,
   ChannelInteractionGrant,
   IngressContext,
+  TrustRuleHitFact,
   TrustSedimentFact,
 } from "@zhixing/core/contracts";
 import {
@@ -375,6 +376,19 @@ export class DurableJobInteractionCoordinator
     const recorded = await active.ledger.recordTrustSediment(active.assignmentId, sediment);
     this.wakeConvergence(active.assignmentId, active);
     return { assignmentId: active.assignmentId, requestId: recorded.requestId, mirrored: false };
+  }
+
+  /**
+   * 在当前耐久 job 指派内记一条规则命中，随同一条镜像链回到 owner：只写台账，由收束循环的
+   * 既有镜像义务带回，不为每次命中唤醒。不在 job 指派内返回 undefined。
+   */
+  async recordTrustRuleHit(hit: TrustRuleHitFact): Promise<
+    { readonly assignmentId: string; readonly requestId: string } | undefined
+  > {
+    const active = this.#bindings.getStore();
+    if (!active) return undefined;
+    const recorded = await active.ledger.recordTrustRuleHit(active.assignmentId, hit);
+    return { assignmentId: active.assignmentId, requestId: recorded.requestId };
   }
 
   async drainAssignment(binding: DurableJobInteractionBinding): Promise<void> {

@@ -270,6 +270,8 @@ export {
   validateAssignmentInteractionOutcome,
   validateTrustSedimentFact,
   TRUST_SEDIMENT_REQUEST_PREFIX,
+  validateTrustRuleHitFact,
+  TRUST_RULE_HIT_REQUEST_PREFIX,
   interactionSettlementNeedsStreamProof,
   validateInteractionSettlementStreamProof,
   validateDispatchConflictProof,

@@ -128,6 +128,7 @@ export interface AnchorSchedulerRuntimeOptions {
   readonly onError?: (error: Error) => void;
   /** job 镜像里的信任沉淀交规则权威接纳；只在规则权威所在的锚点宿主装配。 */
   readonly trustSediments?: JobTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
   /** job 派发冻结快照的规则：范围按 jobRunTrustScopeInput 推导，内置规则随签发的工具集合。 */
   readonly jobPermissionRules?: (input: {
     readonly scope: ExecutionTrustScopeInput;
@@ -1186,6 +1187,15 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     return this.#journal(taskId).trustSedimentMirrored(assignmentId, requestId);
   }
 
+  /** 某批 job 规则命中在该任务日志里的结论（重开核对待计数命中用）。 */
+  trustRuleHitBatchState(
+    taskId: string,
+    assignmentId: string,
+    batchDigest: string,
+  ): Promise<import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitBatchState> {
+    return this.#journal(taskId).trustRuleHitBatchState(assignmentId, batchDigest);
+  }
+
   #journal(taskId: string): JobJournal {
     let journal = this.#journals.get(taskId);
     if (journal) return journal;
@@ -1213,6 +1223,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       localExecutorId: this.#options.authority.executorId,
       clock: this.#clock,
       ...(this.#options.trustSediments ? { trustSediments: this.#options.trustSediments } : {}),
+      ...(this.#options.trustRuleHits ? { trustRuleHits: this.#options.trustRuleHits } : {}),
     });
     this.#journals.set(taskId, journal);
     this.#journalLifecycleDisposers.set(

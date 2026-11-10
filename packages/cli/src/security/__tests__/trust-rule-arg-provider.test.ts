@@ -123,7 +123,7 @@ describe("trustRuleArgProvider", () => {
       if (typeof choice !== "object") throw new Error("expected object choice");
       expect(choice.description).toContain("主模式");
       expect(choice.description).toContain("[你 你 助理]");
-      expect(choice.description).toContain("3 次");
+      expect(choice.description).toContain("已记录 3 次");
     });
 
     it("label = tool + argument", async () => {
@@ -135,13 +135,14 @@ describe("trustRuleArgProvider", () => {
       expect(choice.label).toBe("bash npm install *");
     });
 
-    it("未匹配规则显示「未匹配」而非 0 次", async () => {
+    it("没有记录到匹配时显示「暂无匹配记录」，不断言从未匹配", async () => {
       const rule = makeRule({ matchCount: 0 });
       const listRules = listRulesOf([rule]);
       const provider = createTrustRuleArgProvider(listRules);
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object choice");
-      expect(choice.description).toContain("未匹配");
+      expect(choice.description).toContain("暂无匹配记录");
+      expect(choice.description).not.toContain("未匹配");
     });
 
     it("contributors 为空时显示 [—]", async () => {

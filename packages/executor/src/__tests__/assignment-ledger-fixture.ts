@@ -6,7 +6,7 @@ import { AuthorityCacheIntegrity, AuthorityStorageError, FileArtifactStore, File
 import { DeliveryAuthority } from "@zhixing/core/delivery";
 import type { AuthorityCallContext, AuthorityCapability, DispatchEnvelope, IngressContext, PermissionSnapshotLease, Signature, StreamFrame, TrustRuleSnapshot } from "@zhixing/core/contracts";
 import { buildConversationActivationPayload, canonicalize, confirmationDecisionDigest, createSignedConversationEnvelope, createSignedTrustRuleSnapshot, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolBytes, protocolDigest, createConversationSealedBundle, createSignedConversationInteractionMirrorBatch, interactionMirrorSeed, ownerControlRequestDigest, permissionSnapshotLeaseDigest, sealedBundleArtifact, signConversationActivation, type ProtocolSignatureVerifier, type ProtocolSigner, type ConversationInteractionMirrorBatch, type ConversationInteractionMirrorEntry, type ExecutorCapabilitySnapshot, type UnsignedConversationEnvelope } from "@zhixing/core/protocol";
-import { CONVERSATION_RUN_INTERNAL_RECORD_TYPES, ConversationRunJournal, InProcessConversationDispatcher, type ConversationTrustSedimentPort, type AssignmentSubmissionAuthorizer, type ConversationCommitAuthority, type ConversationCommitProjection, type ConversationCommitProjectionInput, type ConversationMutationPublisher, type ConversationRunRecordType } from "@zhixing/owner-kernel/conversation-assignment";
+import { CONVERSATION_RUN_INTERNAL_RECORD_TYPES, ConversationRunJournal, InProcessConversationDispatcher, type ConversationTrustSedimentPort, type TrustRuleHitPort, type AssignmentSubmissionAuthorizer, type ConversationCommitAuthority, type ConversationCommitProjection, type ConversationCommitProjectionInput, type ConversationMutationPublisher, type ConversationRunRecordType } from "@zhixing/owner-kernel/conversation-assignment";
 import { ControlAdmissionJournal, channelSurfacePrincipal, createConversationControlEnvelope, createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
 import { createOwnerDeliveryParticipant, type OwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
 import { createTempDir } from "@zhixing/test-utils";
@@ -401,6 +401,7 @@ export async function createUnassignedHarness(
     assignmentRecordV2Writes?: boolean;
     integrity?: AuthorityCacheIntegrity;
     trustSediments?: ConversationTrustSedimentPort;
+    trustRuleHits?: TrustRuleHitPort;
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
@@ -462,6 +463,7 @@ export async function createUnassignedHarness(
     projection,
     publisher: options.publisher,
     ...(options.trustSediments ? { trustSediments: options.trustSediments } : {}),
+    ...(options.trustRuleHits ? { trustRuleHits: options.trustRuleHits } : {}),
     legacyAbortTickets: {
       authorize(input) {
         if (
@@ -547,6 +549,7 @@ export async function createHarness(
     assignmentRecordV2Writes?: boolean;
     integrity?: AuthorityCacheIntegrity;
     trustSediments?: ConversationTrustSedimentPort;
+    trustRuleHits?: TrustRuleHitPort;
   } = {},
 ) {
   const harness = await createUnassignedHarness(options);

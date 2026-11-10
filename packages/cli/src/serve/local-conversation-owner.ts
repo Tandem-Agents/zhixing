@@ -228,6 +228,7 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly interactions: DurableConversationInteractionObserver;
   /** 本宿主是规则权威时，本地对话镜像里的沉淀由它接纳；非权威宿主不给（无效果）。 */
   readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly advancementModelProvider: AdvancementModelProviderFactory;
   readonly evidence: EvidenceHandlerPort;
   readonly currentAnchorDeviceId: () => string | undefined;
@@ -848,6 +849,7 @@ export class LocalConversationOwnerAssembly {
       }),
       interactions: options.interactions,
       ...(options.trustSediments ? { trustSediments: options.trustSediments } : {}),
+      ...(options.trustRuleHits ? { trustRuleHits: options.trustRuleHits } : {}),
       executorDispatch: options.executorDispatch,
       assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: options.assignmentStaging,

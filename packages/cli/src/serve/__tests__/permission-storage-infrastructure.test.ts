@@ -457,3 +457,119 @@ describe("Host permission storage infrastructure", () => {
     expect(verified).toEqual(["request-reload"]);
   });
 });
+
+describe("规则命中在规则权威侧累计", () => {
+  async function homeWithGlobalRule(prefix: string): Promise<string> {
+    const home = await createTempDir(prefix);
+    cleanup.push(home);
+    await fs.mkdir(path.join(home, "permissions"), { recursive: true });
+    await fs.writeFile(path.join(home, "permissions", "global.json"), JSON.stringify({
+      version: 1, scope: "global", rules: [rule("rule-global", "global", "curl *")],
+    }));
+    return home;
+  }
+  const matchCount = async (infrastructure: ReturnType<typeof createPermissionStorageInfrastructure>) =>
+    (await infrastructure.management.list({ kind: "main" })).find((entry) => entry.id === "rule-global")?.matchCount;
+  const entry = (n: number) => ({
+    ordinal: n, seq: n, requestId: `trust-rule-hit:${n}`, kind: "trust-rule-hit" as const,
+    hit: { ruleId: "rule-global" }, at: "2026-11-10T00:00:00.000Z",
+  });
+  const batch = (n: number, batchDigest: string) => ({
+    origin: { conversationId: "conversation-1" }, assignmentId: "assignment-1", environment: {}, batchDigest, entries: [entry(n)],
+  });
+
+  it("运行的命中经回程交 owner 累计；无回程时只有规则权威直接记账；执行端宿主不记", async () => {
+    const home = await homeWithGlobalRule("rule-hit-runtime");
+    const anchor = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+    let durableRun = true;
+    let n = 0;
+    anchor.addTrustRuleHitRecorder(async () => undefined);
+    anchor.addTrustRuleHitRecorder(async () => {
+      if (!durableRun) return undefined;
+      // 本机执行端：owner 日志在同一进程里准备并接纳
+      n += 1;
+      await anchor.trustRuleHits!.prepare(batch(n, `sha256:batch-${n}`));
+      await anchor.trustRuleHits!.accept(batch(n, `sha256:batch-${n}`));
+      return { assignmentId: "assignment-1", requestId: `trust-rule-hit:${n}` };
+    });
+    const conversation = anchor.runtime.bind(Object.freeze({})).create(runtimeRequest());
+    expect(await matchCount(anchor)).toBe(0);
+    await conversation.recordRuleHit!({ ruleId: "rule-global", scope: "global" });
+    expect(await matchCount(anchor)).toBe(1);
+
+    durableRun = false;
+    const scheduled = anchor.runtime.bind(Object.freeze({}), { persistentApprovals: false }).create(runtimeRequest());
+    await scheduled.recordRuleHit!({ ruleId: "rule-global", scope: "global" });
+    expect(await matchCount(anchor)).toBe(2);
+
+    const executorHome = await homeWithGlobalRule("rule-hit-remote");
+    const executorOnly = createPermissionStorageInfrastructure({ zhixingHome: executorHome });
+    const remote = executorOnly.runtime.bind(Object.freeze({})).create(runtimeRequest());
+    await remote.recordRuleHit!({ ruleId: "rule-global", scope: "global" });
+    expect(await matchCount(executorOnly)).toBe(0);
+  });
+
+  it("不在指派范围内的规则命中不计；同批重放只计一次", async () => {
+    const home = await homeWithGlobalRule("rule-hit-scope");
+    const anchor = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+    const stranger = { ...batch(1, "sha256:b"), entries: [{ ...entry(1), hit: { ruleId: "rule-elsewhere" } }] };
+    await anchor.trustRuleHits!.prepare(stranger);
+    await anchor.trustRuleHits!.accept(stranger);
+    await anchor.trustRuleHits!.prepare(batch(2, "sha256:c"));
+    await anchor.trustRuleHits!.accept(batch(2, "sha256:c"));
+    await anchor.trustRuleHits!.accept(batch(2, "sha256:c"));
+    expect(await matchCount(anchor)).toBe(1);
+  });
+
+  it("重开核对首次查询暂时失败：管理读取、重新绑定或 owner 接纳时再核对，不必再重开", async () => {
+    const home = await homeWithGlobalRule("rule-hit-retry");
+    const before = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+    await before.management.list({ kind: "main" });
+    await before.trustRuleHits!.prepare(batch(1, "sha256:committed"));
+    const reopened = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+    let available = false;
+    let calls = 0;
+    const verify = async () => {
+      calls += 1;
+      if (!available) throw new Error("temporary owner query unavailable");
+      return "committed" as const;
+    };
+    reopened.bindTrustRuleHitVerifier(verify);
+    await reopened.management.list({ kind: "main" });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    expect(await matchCount(reopened)).toBe(0);
+    // 故障解除后的下一次管理读取触发再核对，随后的读取看到计入
+    available = true;
+    await reopened.management.list({ kind: "main" });
+    await vi.waitFor(async () => expect(await matchCount(reopened)).toBe(1));
+    expect(calls).toBe(2);
+    // 已解决后不再重复查询
+    await reopened.management.list({ kind: "main" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(2);
+  });
+
+  it("重开核对：已提交的计入，确定不会提交的清理，未知的保留待核", async () => {
+    const home = await homeWithGlobalRule("rule-hit-reload");
+    const before = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+    await before.management.list({ kind: "main" });
+    for (const [n, digest] of [[1, "sha256:committed"], [2, "sha256:rejected"], [3, "sha256:unknown"]] as const) {
+      await before.trustRuleHits!.prepare(batch(n, digest));
+    }
+    // 进程在提交后、接纳前退出
+    const after = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
+    const verified: string[] = [];
+    after.bindTrustRuleHitVerifier(async (hit) => {
+      verified.push(hit.batchDigest!);
+      return hit.batchDigest === "sha256:committed" ? "committed" : hit.batchDigest === "sha256:rejected" ? "rejected" : "unknown";
+    });
+    await after.management.list({ kind: "main" });
+    await vi.waitFor(async () => expect(await matchCount(after)).toBe(1));
+    await vi.waitFor(async () => {
+      const file = JSON.parse(await fs.readFile(path.join(home, "permissions", "global.json"), "utf8"));
+      expect(file.hits.map((hit: { batchDigest: string }) => hit.batchDigest)).toEqual(["sha256:unknown"]);
+    });
+    // 未知的那条在之后的管理读取里会再核对，所以按去重后的集合比较
+    expect([...new Set(verified)].sort()).toEqual(["sha256:committed", "sha256:rejected", "sha256:unknown"]);
+  });
+});

@@ -50,6 +50,11 @@ export interface KernelSecurityApprovalPort {
   readonly persistentApprovals: boolean;
   /** 落盘规则在耐久写完成后才算记录成功；写失败时拒绝。 */
   recordApproval(approval: KernelSecurityApproval): Promise<KernelSecurityApprovalResult>;
+  /**
+   * 安全评价选出一条持久用户规则（context/global）时记一次匹配，交规则权威累计；不改变
+   * 授权结论。规则命中计数的唯一生产入口；未装配时不计。
+   */
+  recordRuleHit?(hit: { readonly ruleId: string; readonly scope: "context" | "global" }): Promise<void>;
 }
 
 export interface KernelSecurityUserSnapshot {
@@ -129,6 +134,7 @@ export function assembleKernelSecurityExecution(
     typeof execution.permissionRuleSource.match !== "function" ||
     typeof execution.permissionRuleSource.matchFrozen !== "function" ||
     typeof execution.recordApproval !== "function" ||
+    (execution.recordRuleHit !== undefined && typeof execution.recordRuleHit !== "function") ||
     typeof execution.persistentApprovals !== "boolean" ||
     typeof execution.securitySnapshot !== "function" ||
     typeof execution.executionPermissionRules !== "function"

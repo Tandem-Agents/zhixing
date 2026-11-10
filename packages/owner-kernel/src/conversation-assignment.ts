@@ -127,9 +127,23 @@ import type {
   TranscriptPage,
   TranscriptRunRecord,
   TrustSedimentMirrorEntry,
+  TrustRuleHitMirrorEntry,
   UserTurnInput,
   UncertainResolutionFact,
 } from "@zhixing/core/contracts";
+import {
+  AssignmentSerialQueue,
+  type TrustRuleHitBatchInput,
+  type TrustRuleHitBatchState,
+  type TrustRuleHitPort,
+} from "./trust-rule-hits.js";
+
+export type {
+  TrustRuleHitBatchInput,
+  TrustRuleHitBatchState,
+  TrustRuleHitOrigin,
+  TrustRuleHitPort,
+} from "./trust-rule-hits.js";
 import {
   applyValidatedAssignmentEntry,
   assertDataPlaneTicketTtlMs,
@@ -449,6 +463,8 @@ export interface ConversationRunJournalOptions {
   };
   /** 镜像批次里的信任沉淀交给规则权威接纳；不装配时沉淀条目只进日志、无效果。 */
   readonly trustSediments?: ConversationTrustSedimentPort;
+  /** 镜像批次里的规则命中交给规则权威累计；不装配时命中条目只进日志、无效果。 */
+  readonly trustRuleHits?: TrustRuleHitPort;
 }
 
 /**
@@ -1116,6 +1132,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly executorId?: string;
   } | undefined;
   readonly #trustSediments: ConversationTrustSedimentPort | undefined;
+  readonly #trustRuleHits: TrustRuleHitPort | undefined;
+  readonly #mirrorQueue = new AssignmentSerialQueue();
   readonly #operations = new SerialTaskQueue();
   #readBaseGeneration = 0;
   readonly #statusListeners = new Set<
@@ -1156,6 +1174,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       { delivery: options.delivery, currentAuthority: options.currentAuthority, resources: options.resources });
     this.#currentAuthority = options.currentAuthority;
     this.#trustSediments = options.trustSediments;
+    this.#trustRuleHits = options.trustRuleHits;
     registerConversationIdentityProjection(options.log, options.artifacts);
     registerControlAdmissionProjection(options.log, options.artifacts);
     if (options.currentAuthority) {
@@ -4636,10 +4655,34 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       throw new TypeError("Interaction mirror batch names a different assignment");
     }
     const batchDigest = interactionMirrorBatchDigest(batch);
+    // 同一指派的镜像处理串行：检查是否已提交、准备、提交、接纳或清理依次进行。否则两次并发
+    // 投递都读到“未提交”，命中会在先到者接纳并删除记录后被重新准备，再经重放接纳一次
+    return this.#mirrorQueue.run(assignmentId, () =>
+      this.#commitInteractionMirror(assignmentId, rawBatch, batch, batchDigest, ctx));
+  }
+
+  async #commitInteractionMirror(
+    assignmentId: string,
+    rawBatch: ConversationInteractionMirrorBatch,
+    batch: ConversationInteractionMirrorBatch,
+    batchDigest: string,
+    ctx: AuthorityCallContext,
+  ): Promise<{
+    readonly mirroredUpTo: number;
+    readonly ordinal: number;
+    readonly mirrorDigest: string;
+  }> {
     const sediments = this.#trustSediments
       ? batch.entries.filter((entry): entry is TrustSedimentMirrorEntry => entry.kind === "trust-sediment")
       : [];
+    const hits = this.#trustRuleHits
+      ? batch.entries.filter((entry): entry is TrustRuleHitMirrorEntry => entry.kind === "trust-rule-hit")
+      : [];
     if (sediments.length > 0) await this.#prepareTrustSediments(assignmentId, batch, batchDigest, sediments);
+    const hitPrepared = hits.length > 0
+      ? await this.#prepareTrustRuleHits(assignmentId, batch, batchDigest, hits)
+      : undefined;
+    const hitTarget = hitPrepared?.target;
     const transaction = await this.#transact<{
       mirroredUpTo: number;
       ordinal: number;
@@ -4739,13 +4782,101 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           mirrorDigest: batch.mirrorDigest,
         },
       };
-    }, [], [], conversationDecisionScope({ assignmentId, rawBatch, ctx }));
+    }, [], [], conversationDecisionScope({ assignmentId, rawBatch, ctx })).catch(async (error: unknown) => {
+      // 本批没有提交：只处理本次确实准备过的命中（按耐久状态补接纳或清理），再把原错误交回
+      if (hitPrepared?.prepared) await this.#settleUncommittedTrustRuleHits(assignmentId, batchDigest, hitPrepared.target);
+      throw error;
+    });
     // 日志已接纳（含同批重放）：沉淀生效并物化；失败由规则权威下次写入或重开核对补做
     for (const entry of sediments) {
       await this.#trustSediments!.accept({ conversationId: this.#conversationId, assignmentId, entry })
         .catch(() => undefined);
     }
+    // 命中计入：重放时同样调用，已折叠的命中没有记录可再计；失败由下次写入或重开核对补做
+    if (hitTarget) await this.#trustRuleHits!.accept(hitTarget).catch(() => undefined);
     return transaction.value;
+  }
+
+  /**
+   * 镜像批次提交前：只有本批满足提交事务的全部前提（指派与执行端绑定、未关闭、运行可接纳
+   * 镜像、前缀与序号连续、请求身份未出现过）时，才请规则权威为本批命中写待计数记录；否则
+   * 不准备（事务随后照原合同裁决），以免错误的新批改绑另一批次的恢复记录。重放（批次已
+   * 提交）同样不准备。返回接纳所需的输入与本次是否准备过；指派不存在时返回 undefined。
+   */
+  async #prepareTrustRuleHits(
+    assignmentId: string,
+    batch: ConversationInteractionMirrorBatch,
+    batchDigest: string,
+    hits: readonly TrustRuleHitMirrorEntry[],
+  ): Promise<{ readonly target: TrustRuleHitBatchInput; readonly prepared: boolean } | undefined> {
+    const checked = await this.#select((state) => {
+      const current = state.assignedById.get(assignmentId);
+      if (!current?.envelope) return undefined;
+      const mirrorState = state.mirrorStateByAssignment.get(assignmentId);
+      const first = batch.entries[0];
+      const runState = state.stateByRun.get(current.record.runId)?.state;
+      const requestIds = new Set<string>();
+      const freshIdentities = batch.entries.every((entry) => {
+        if (requestIds.has(entry.requestId) || mirrorState?.requestIds.has(entry.requestId)) return false;
+        requestIds.add(entry.requestId);
+        return true;
+      });
+      const prepare = !state.mirrorBatches.has(batchDigest) &&
+        !state.closedAssignments.has(assignmentId) &&
+        state.assignmentByRun.get(current.record.runId) === assignmentId &&
+        (runState === "dispatched" || runState === "running" ||
+          ((runState === "cancel-requested" || runState === "uncertain") && state.cancelFences.has(assignmentId))) &&
+        current.record.executorId === batch.executorId &&
+        mirrorState !== undefined && first !== undefined &&
+        batch.previousDigest === mirrorState.mirrorDigest &&
+        first.ordinal === mirrorState.ordinal + 1 &&
+        first.seq > mirrorState.mirroredUpTo &&
+        freshIdentities;
+      return { prepare, environment: structuredClone(current.envelope.manifest.environment) };
+    }, conversationDecisionScope({ assignmentId, batch }));
+    if (!checked) return undefined;
+    const target: TrustRuleHitBatchInput = {
+      origin: { conversationId: this.#conversationId },
+      assignmentId,
+      environment: checked.environment,
+      batchDigest,
+      entries: hits,
+    };
+    if (checked.prepare) await this.#trustRuleHits!.prepare(target);
+    return { target, prepared: checked.prepare };
+  }
+
+  /**
+   * 事务没有成功：读耐久状态判断本批是否其实已提交。已提交就计入；确定没有提交就清理本批的
+   * 待计数记录（执行端重发时会重新准备）；状态读不到就保留，交重开核对。
+   */
+  async #settleUncommittedTrustRuleHits(
+    assignmentId: string,
+    batchDigest: string,
+    target: TrustRuleHitBatchInput,
+  ): Promise<void> {
+    const committed = await this.#select(
+      (state) => state.mirrorBatches.has(batchDigest),
+      conversationDecisionScope({ assignmentId }, { mirrorDigests: [batchDigest] }),
+    ).catch(() => undefined);
+    if (committed === true) await this.#trustRuleHits!.accept(target).catch(() => undefined);
+    else if (committed === false) await this.#trustRuleHits!.discard(target).catch(() => undefined);
+  }
+
+  /**
+   * 某批命中在本日志里的结论（重开核对待计数记录用）：批次已提交为 committed；指派已关闭
+   * 或不存在而批次未提交为 rejected（之后不会再提交）；否则 unknown（执行端仍会重发）。
+   */
+  async trustRuleHitBatchState(assignmentId: string, batchDigest: string): Promise<TrustRuleHitBatchState> {
+    assertIdentifier(assignmentId, "Assignment id");
+    if (typeof batchDigest !== "string" || batchDigest.length === 0 || batchDigest.length > 256) {
+      throw new TypeError("Interaction mirror batch digest is invalid");
+    }
+    return this.#select((state): TrustRuleHitBatchState => {
+      if (state.mirrorBatches.has(batchDigest)) return "committed";
+      if (!state.assignedById.has(assignmentId) || state.closedAssignments.has(assignmentId)) return "rejected";
+      return "unknown";
+    }, conversationDecisionScope({ assignmentId }, { mirrorDigests: [batchDigest] }));
   }
 
   /** 镜像批次提交前：把其中的信任沉淀交规则权威写待生效（重放的批次已写过，跳过）。 */

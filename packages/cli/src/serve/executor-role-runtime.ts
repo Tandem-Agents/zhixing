@@ -323,6 +323,8 @@ async function runExecutorProcess(
     const interactions = new DurableConversationInteractionObserver();
     // 本宿主不是规则权威：沉淀记入指派台账、随镜像回到 owner 接纳
     permissionStorage.addTrustSedimentRecorder((sediment) => interactions.recordTrustSediment(sediment));
+    // 规则命中同样记入指派台账，随镜像回到 owner 由规则权威累计
+    permissionStorage.addTrustRuleHitRecorder((hit) => interactions.recordTrustRuleHit(hit));
     let authority: AuthorityRuntimeStack | undefined;
     const communicationHandle = createConversationCommunicationAssemblyHandle();
     const extensionHandle = createExtensionManagementHandle();
@@ -575,6 +577,7 @@ async function runExecutorProcess(
         writer.notify(`[job-worker] ${error.message}`),
     });
     permissionStorage.addTrustSedimentRecorder((sediment) => jobOwnerAssembly.owner.recordTrustSediment(sediment));
+    permissionStorage.addTrustRuleHitRecorder((hit) => jobOwnerAssembly.owner.recordTrustRuleHit(hit));
     const coordinateRuntimeTrustTransition = async () => {
       const result = await coordinateManagedHostTrustTransition({
         processMode,

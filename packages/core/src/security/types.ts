@@ -365,6 +365,15 @@ export interface IPermissionStore {
   /** 撤销某条规则。返回是否找到并撤销；落盘规则在耐久写完成后才从读取中消失。 */
   revoke(ruleId: string): Promise<boolean>;
 
+  /**
+   * 规则权威宿主上没有耐久回程的运行直接累计持久规则（context/global）的匹配；返回计入的
+   * 条数。只由持有持久规则所有者的实现提供。
+   */
+  recordRuleHits?(
+    contextId: PermissionContextId,
+    hits: readonly { readonly ruleId: string; readonly scope: "context" | "global"; readonly at: number }[],
+  ): Promise<number>;
+
   /** 清除当前上下文的规则（session + context 作用域，不影响 global） */
   reset(contextId: PermissionContextId): Promise<void>;
 

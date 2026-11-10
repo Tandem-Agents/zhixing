@@ -275,3 +275,62 @@ describe("TrustAdministrationExecutionApplicationService", () => {
     expect(snapshot.userRules[0]).not.toBe(repository.rules[0]);
   });
 });
+
+describe("TrustAdministrationExecutionApplicationService.recordRuleHit", () => {
+  function withHitRepository() {
+    const repository = createRepository();
+    const direct: unknown[] = [];
+    repository.recordExecutionRuleHits = async (_context, hits) => {
+      direct.push(...hits);
+      return hits.length;
+    };
+    return { repository, direct };
+  }
+
+  it("有耐久回程时交回程，不在本机记账", async () => {
+    const { repository, direct } = withHitRepository();
+    const submitted: unknown[] = [];
+    const application = new TrustAdministrationExecutionApplicationService({
+      repository,
+      context: MAIN,
+      sediments: { submit: async () => ({ kind: "unavailable" as const }) },
+      directSediments: true,
+      ruleHits: { submit: async (hit) => { submitted.push(hit); return "recorded"; } },
+    });
+    await expect(application.recordRuleHit({ ruleId: "rule-1", scope: "global" })).resolves.toBe("recorded");
+    expect(submitted).toEqual([{ ruleId: "rule-1", scope: "global" }]);
+    expect(direct).toEqual([]);
+  });
+
+  it("无回程时只有规则权威宿主直接记账，其余丢弃", async () => {
+    const authority = withHitRepository();
+    const onAuthority = new TrustAdministrationExecutionApplicationService({
+      repository: authority.repository,
+      context: MAIN,
+      now: () => 42,
+      sediments: { submit: async () => ({ kind: "unavailable" as const }) },
+      directSediments: true,
+      ruleHits: { submit: async () => "unavailable" },
+    });
+    await expect(onAuthority.recordRuleHit({ ruleId: "rule-1", scope: "context" })).resolves.toBe("direct");
+    expect(authority.direct).toEqual([{ ruleId: "rule-1", scope: "context", at: 42 }]);
+
+    const executorHost = withHitRepository();
+    const remote = new TrustAdministrationExecutionApplicationService({
+      repository: executorHost.repository,
+      context: MAIN,
+      sediments: { submit: async () => ({ kind: "unavailable" as const }) },
+      directSediments: false,
+      ruleHits: { submit: async () => "unavailable" },
+    });
+    await expect(remote.recordRuleHit({ ruleId: "rule-1", scope: "global" })).resolves.toBe("dropped");
+    expect(executorHost.direct).toEqual([]);
+  });
+
+  it("session/builtin 等非持久规则不计", async () => {
+    const { repository, direct } = withHitRepository();
+    const application = new TrustAdministrationExecutionApplicationService({ repository, context: MAIN });
+    await expect(application.recordRuleHit({ ruleId: "rule-1", scope: "session" as never })).resolves.toBe("dropped");
+    expect(direct).toEqual([]);
+  });
+});

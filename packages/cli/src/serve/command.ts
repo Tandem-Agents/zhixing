@@ -852,6 +852,7 @@ async function runServerProcess(
     ...(permissionStorage.explicitApprovals ? { explicitApprovals: permissionStorage.explicitApprovals } : {}),
   });
   permissionStorage.addTrustSedimentRecorder((sediment) => durableInteractions.recordTrustSediment(sediment));
+  permissionStorage.addTrustRuleHitRecorder((hit) => durableInteractions.recordTrustRuleHit(hit));
   const advancementEvidenceRuntime = new AdvancementEvidenceHostBinding();
   const advancementConversationComposition: AdvancementConversationComposition =
     Object.freeze({
@@ -1022,6 +1023,7 @@ async function runServerProcess(
     durableInteractions,
     // 镜像里的信任沉淀由本宿主规则所有者接纳：构造协议运行时即交入，不留后绑定窗口
     ...(permissionStorage.trustSediments ? { trustSediments: permissionStorage.trustSediments } : {}),
+    ...(permissionStorage.trustRuleHits ? { trustRuleHits: permissionStorage.trustRuleHits } : {}),
     runtimeFactory,
     conversationRuntimeStorage: conversationStorage.runtime,
     confirmationHub,
@@ -1142,6 +1144,7 @@ async function runServerProcess(
       assignmentRuntimeFactory,
       durableInteractions,
       ...(permissionStorage.trustSediments ? { trustSediments: permissionStorage.trustSediments } : {}),
+      ...(permissionStorage.trustRuleHits ? { trustRuleHits: permissionStorage.trustRuleHits } : {}),
       advancementConfiguration,
       providerCredentials,
       lifecycleContributions,
@@ -1160,6 +1163,7 @@ async function runServerProcess(
       records: startupRecords,
     });
     permissionStorage.addTrustSedimentRecorder((sediment) => jobs.owner.recordTrustSediment(sediment));
+    permissionStorage.addTrustRuleHitRecorder((hit) => jobs.owner.recordTrustRuleHit(hit));
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
   }) : undefined;
   await observeLogPhase(startupRecords, "start-asset-maintenance", () => startAssetMaintenance({
@@ -1301,6 +1305,21 @@ async function runServerProcess(
   let settleSchedulerSedimentLookup!: (runtime: AnchorSchedulerRuntime | undefined) => void;
   const schedulerSedimentLookup = new Promise<AnchorSchedulerRuntime | undefined>((resolve) => {
     settleSchedulerSedimentLookup = resolve;
+  });
+  // 待计数的规则命中重开后按 owner 日志核对它所在的镜像批次：已提交的计入，指派已关闭而
+  // 未提交的清理，查不到或未知的保留待核（执行端会按既有镜像义务重发）
+  permissionStorage.bindTrustRuleHitVerifier(async (hit) => {
+    if (!hit.batchDigest) return "unknown";
+    if (hit.taskId) {
+      const scheduler = await schedulerSedimentLookup;
+      return scheduler
+        ? await scheduler.trustRuleHitBatchState(hit.taskId, hit.assignmentId, hit.batchDigest).catch(() => "unknown" as const)
+        : "unknown";
+    }
+    if (!hit.conversationId || !boundConversationProtocol) return "unknown";
+    return await boundConversationProtocol
+      .trustRuleHitBatchState(hit.conversationId, hit.assignmentId, hit.batchDigest)
+      .catch(() => "unknown" as const);
   });
   // 显式持久批准的待生效记录重开后按耐久决定核对：先查执行端台账（接纳边界），
   // 台账已不保留该指派时查 owner 侧的耐久交互结果；都查不到的保留不生效
@@ -1611,6 +1630,7 @@ async function runServerProcess(
       onError: (error) =>
         console.error(chalk.red(`[scheduler] ${error.message}`)),
       ...(permissionStorage.jobTrustSediments ? { trustSediments: permissionStorage.jobTrustSediments } : {}),
+      ...(permissionStorage.trustRuleHits ? { trustRuleHits: permissionStorage.trustRuleHits } : {}),
       jobPermissionRules: ({ scope, tools }) =>
         permissionStorage.executionRulesFor(scope, hostToolPermissionRuleSets(tools)),
     });

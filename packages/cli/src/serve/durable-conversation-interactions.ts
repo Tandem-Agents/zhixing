@@ -12,6 +12,7 @@ import type { ExplicitApprovalEffects } from "@zhixing/core/security";
 import type {
   AuthorityCallContext,
   IngressContext,
+  TrustRuleHitFact,
   TrustSedimentFact,
 } from "@zhixing/core/contracts";
 import {
@@ -234,6 +235,19 @@ export class DurableConversationInteractionObserver
       .flushInteractionMirrors(active.assignmentId, active.context)
       .then(() => true, () => false);
     return { assignmentId: active.assignmentId, requestId: recorded.requestId, mirrored };
+  }
+
+  /**
+   * 在当前耐久对话指派内记一条规则命中，随同一条镜像链回到 owner。只写台账、不单独冲刷：
+   * 由运行结束、取消与下次交互的既有镜像义务带回。不在耐久对话指派内返回 undefined。
+   */
+  async recordTrustRuleHit(hit: TrustRuleHitFact): Promise<
+    { readonly assignmentId: string; readonly requestId: string } | undefined
+  > {
+    const active = this.#bindings.getStore();
+    if (!active) return undefined;
+    const recorded = await active.ledger.recordTrustRuleHit(active.assignmentId, hit);
+    return { assignmentId: active.assignmentId, requestId: recorded.requestId };
   }
 
   async resolveWithSurfaceTicket(

@@ -160,6 +160,7 @@ export interface ConversationProtocolRuntimeOptions {
    * 不存在后绑定窗口）。不给的宿主（非规则权威）沉淀条目只进日志、无效果。
    */
   readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
   /** 运行准备各步记为日志阶段的端口（只观测）。 */
   readonly phaseRecords?: LogRecordPort;
@@ -398,6 +399,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #onFirstPartyFrame: ConversationProtocolRuntimeOptions['onFirstPartyFrame'];
   readonly #onFirstPartyAssignment: ConversationProtocolRuntimeOptions['onFirstPartyAssignment'];
   readonly #trustSediments: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort | undefined;
+  readonly #trustRuleHits: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort | undefined;
   #createFirstPartyFinality:
     | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
     | undefined;
@@ -522,6 +524,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     this.#interactions = options.interactions;
     this.#trustSediments = options.trustSediments;
+    this.#trustRuleHits = options.trustRuleHits;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
     this.#onFailure = options.onFailure;
     this.#onStatus = options.onStatus;
@@ -1124,6 +1127,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async trustSedimentMirrored(conversationId: string, assignmentId: string, requestId: string): Promise<boolean> {
     await this.#adopt(conversationId);
     return this.#journal(conversationId).trustSedimentMirrored(assignmentId, requestId);
+  }
+
+  /** 某批规则命中在该对话日志里的结论（规则权威重开核对待计数命中用）。 */
+  async trustRuleHitBatchState(
+    conversationId: string,
+    assignmentId: string,
+    batchDigest: string,
+  ): Promise<import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitBatchState> {
+    await this.#adopt(conversationId);
+    return this.#journal(conversationId).trustRuleHitBatchState(assignmentId, batchDigest);
   }
 
   async touchWorksceneSession(input: {
@@ -3312,6 +3325,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         executorId: this.#authority.executorId,
       },
       ...(this.#trustSediments ? { trustSediments: this.#trustSediments } : {}),
+      ...(this.#trustRuleHits ? { trustRuleHits: this.#trustRuleHits } : {}),
     });
     journal.onStatus(async (notice) => {
       this.#markRecovery(conversationId, this.#routineStatusRun(notice));

@@ -16,6 +16,12 @@
  * 里删掉待生效记录；物化失败时已接纳项照常生效，由该文件的下一次写入补做。重开时
  * 待生效记录先不生效，交给宿主按耐久决定核对后再接纳。
  *
+ * 规则命中的累计：执行端的命中经耐久回程到达 owner，owner 提交镜像前在规则所在范围文件
+ * 写待计数记录（不计入），提交后接纳——计数折叠进规则并在同一次原子写里删除该记录，所以
+ * 记录本身就是去重依据：已折叠的命中没有记录可再接纳。接纳写失败时已接纳项照常计入，由该
+ * 文件的下一次写入补做；重开时未接纳的记录交宿主按 owner 已提交的命中核对。命中从不创建
+ * 规则，撤销后的命中只丢记录。
+ *
  * 写入顺序：先耐久落盘（临时文件 sync → 原子替换 → 目录同步），成功后才发布新的
  * 内存状态；写失败时内存不变并把错误交给调用方。Windows 上目录元数据由 NTFS 日志
  * 保证，`syncDirectory` 不做单独的目录同步。
@@ -53,6 +59,26 @@ export interface PendingPermissionApproval {
   readonly rule: PermissionRule;
 }
 
+/**
+ * 规则命中的待计数记录：owner 提交镜像前写入（不计入），接纳后折叠进规则计数。
+ * id 是命中在其指派内的身份（`<assignmentId>/<镜像条目 requestId>`），digest 是命中内容
+ * 摘要，重开核对时与 owner 已提交的命中比对。
+ */
+export interface PendingRuleHit {
+  readonly id: string;
+  readonly ruleId: string;
+  readonly at: number;
+  readonly digest: string;
+  readonly assignmentId: string;
+  readonly conversationId?: string;
+  readonly taskId?: string;
+  /**
+   * 最近一次准备它的镜像批次摘要。批次摘要覆盖批内全部条目的内容，重开时确认 owner 提交了
+   * 这一批，就确认了命中内容；同一命中随新批次重发时更新为最新一批。
+   */
+  readonly batchDigest?: string;
+}
+
 export type PermissionRulePublication = "published" | "exists" | "revoked";
 
 export type PendingApprovalAcceptance =
@@ -85,6 +111,7 @@ interface StorageFile {
   contextPath?: string;
   rules: PermissionRule[];
   pending?: PendingPermissionApproval[];
+  hits?: PendingRuleHit[];
 }
 
 interface RevokedFile {
@@ -97,9 +124,11 @@ interface Bucket {
   readonly rules: readonly PermissionRule[];
   /** 范围文件里的待生效记录（含内存里已接纳、尚未物化的）。 */
   readonly pending: readonly PendingPermissionApproval[];
-  /** 已按耐久决定接纳的请求 id（只在内存；重开后由宿主重新核对）。 */
+  /** 范围文件里的待计数命中（含内存里已接纳、尚未物化的）。 */
+  readonly hits: readonly PendingRuleHit[];
+  /** 已按耐久决定接纳的请求 id 与命中 id（只在内存；重开后由宿主重新核对）。 */
   readonly accepted: ReadonlySet<string>;
-  /** 生效视图：已物化 ∪ 已接纳 − 已撤销。 */
+  /** 生效视图：已物化 ∪ 已接纳 − 已撤销；计数含已接纳未物化的命中。 */
   readonly effective: readonly PermissionRule[];
 }
 
@@ -226,7 +255,7 @@ export class DurablePermissionRuleStore {
         return "revoked";
       }
       const accepted = new Set(current.accepted).add(requestId);
-      this.#buckets.set(bucket, this.#bucketView(current.rules, current.pending, accepted));
+      this.#buckets.set(bucket, this.#bucketView(current.rules, current.pending, accepted, current.hits));
       try {
         await this.#write(bucket, this.#buckets.get(bucket)!);
         return "materialized";
@@ -246,6 +275,107 @@ export class DurablePermissionRuleStore {
         ...current,
         pending: current.pending.filter((item) => item.requestId !== requestId),
       });
+    });
+  }
+
+  /** 某桶里尚未接纳的待计数命中（宿主核对用）。 */
+  unacceptedHits(bucket: string): readonly PendingRuleHit[] {
+    const current = this.#bucket(bucket);
+    return current.hits.filter((entry) => !current.accepted.has(entry.id));
+  }
+
+  /**
+   * 写待计数命中（不计入）。同 id 同内容复用；同 id 不同内容拒绝；规则不在本桶或已撤销
+   * 的命中不写（命中不创建规则，也不让撤销的规则复活）。写失败上抛。
+   */
+  prepareHits(bucket: string, hits: readonly PendingRuleHit[]): Promise<void> {
+    return this.#serialize(async () => {
+      const current = this.#bucket(bucket);
+      const revoked = this.#revokedSet();
+      const added: PendingRuleHit[] = [];
+      const rebatched = new Map<string, PendingRuleHit>();
+      for (const entry of hits) {
+        const existing = current.hits.find((item) => item.id === entry.id) ??
+          added.find((item) => item.id === entry.id);
+        if (existing) {
+          if (!sameHitContent(existing, entry)) {
+            throw new Error(`Permission rule hit ${entry.id} already exists with different content`);
+          }
+          // 同一命中随新批次重发：记下最新一批，重开核对按它确认（已接纳的不再改）
+          if (entry.batchDigest !== undefined && existing.batchDigest !== entry.batchDigest &&
+            !current.accepted.has(entry.id)) rebatched.set(entry.id, entry);
+          continue;
+        }
+        if (revoked.has(entry.ruleId) || !current.effective.some((rule) => rule.id === entry.ruleId)) continue;
+        added.push(entry);
+      }
+      if (added.length === 0 && rebatched.size === 0) return;
+      await this.#write(bucket, {
+        ...current,
+        hits: [...current.hits.map((item) => rebatched.get(item.id) ?? item), ...added],
+      });
+    });
+  }
+
+  /**
+   * 接纳待计数命中：计入并在同一次原子写里折叠进规则、删除记录；返回本次新接纳的条数。
+   * 只认领 id、内容摘要与（给出时）批次摘要都相同的记录：另一批次准备的记录不归本批。
+   * 已不存在（已折叠或从未准备）的不计。写失败不上抛（接纳已由 owner 提交固定）：
+   * 已接纳项照常计入，由该文件的下一次写入补做。
+   */
+  acceptHits(bucket: string, claims: readonly RuleHitClaim[]): Promise<number> {
+    return this.#serialize(async () => {
+      const current = this.#bucket(bucket);
+      const fresh = current.hits.filter((entry) => !current.accepted.has(entry.id) && claimsHit(claims, entry));
+      if (fresh.length === 0) return 0;
+      const accepted = new Set(current.accepted);
+      for (const entry of fresh) accepted.add(entry.id);
+      const view = this.#bucketView(current.rules, current.pending, accepted, current.hits);
+      this.#buckets.set(bucket, view);
+      await this.#write(bucket, view).catch(() => undefined);
+      const revoked = this.#revokedSet();
+      return fresh.filter((entry) => !revoked.has(entry.ruleId) &&
+        current.effective.some((rule) => rule.id === entry.ruleId)).length;
+    });
+  }
+
+  /**
+   * 删掉确定不会接纳的待计数命中（本批被明确拒绝、指派已关闭）。与接纳同样只认领 id、内容与
+   * 批次都相同的记录：被拒绝的新批次不能删掉另一批次（例如已提交批次）的恢复记录；已接纳的不动。
+   */
+  discardHits(bucket: string, claims: readonly RuleHitClaim[]): Promise<void> {
+    return this.#serialize(async () => {
+      const current = this.#bucket(bucket);
+      const dropped = current.hits.filter((entry) => !current.accepted.has(entry.id) && claimsHit(claims, entry));
+      if (dropped.length === 0) return;
+      await this.#write(bucket, { ...current, hits: current.hits.filter((entry) => !dropped.includes(entry)) });
+    });
+  }
+
+  /**
+   * 没有耐久回程的运行在规则权威宿主上直接记账：计入本桶存在且未撤销的规则，一次写入
+   * 折叠；返回计入的条数。这里没有已耐久的待计数记录可供恢复，所以写盘成功才计入，写
+   * 失败时内存不变并上抛，由调用方留诊断（不能报已更新）。
+   */
+  recordHits(bucket: string, hits: readonly { readonly ruleId: string; readonly at: number }[]): Promise<number> {
+    return this.#serialize(async () => {
+      const current = this.#bucket(bucket);
+      const revoked = this.#revokedSet();
+      const counted = hits
+        .filter((entry) => !revoked.has(entry.ruleId) && current.effective.some((rule) => rule.id === entry.ruleId))
+        .map((entry): PendingRuleHit => ({
+          id: `direct/${randomUUID()}`,
+          ruleId: entry.ruleId,
+          at: entry.at,
+          digest: "direct",
+          assignmentId: "direct",
+        }));
+      if (counted.length === 0) return 0;
+      const accepted = new Set(current.accepted);
+      for (const entry of counted) accepted.add(entry.id);
+      // #write 成功后才发布新状态；失败时内存保持写前，错误交给调用方
+      await this.#write(bucket, { ...current, accepted, hits: [...current.hits, ...counted] });
+      return counted.length;
     });
   }
 
@@ -271,7 +401,7 @@ export class DurablePermissionRuleStore {
       await this.#writeRevoked(revoked);
       this.#revoked = revoked;
       for (const [key, bucket] of this.#buckets) {
-        this.#buckets.set(key, this.#bucketView(bucket.rules, bucket.pending, bucket.accepted));
+        this.#buckets.set(key, this.#bucketView(bucket.rules, bucket.pending, bucket.accepted, bucket.hits));
       }
       await this.#write(owner, this.#buckets.get(owner)!).catch(() => undefined);
       return true;
@@ -280,7 +410,7 @@ export class DurablePermissionRuleStore {
 
   resetContext(storageKey: string): Promise<void> {
     return this.#serialize(async () => {
-      await this.#write(storageKey, this.#bucketView([], [], new Set()));
+      await this.#write(storageKey, this.#bucketView([], [], new Set(), []));
     });
   }
 
@@ -297,7 +427,7 @@ export class DurablePermissionRuleStore {
         await syncDirectory(this.rootDir);
       }
       this.#buckets.clear();
-      this.#buckets.set(GLOBAL_PERMISSION_BUCKET, this.#bucketView([], [], new Set()));
+      this.#buckets.set(GLOBAL_PERMISSION_BUCKET, this.#bucketView([], [], new Set(), []));
     });
   }
 
@@ -314,9 +444,10 @@ export class DurablePermissionRuleStore {
       const scope: PermissionScope = key === GLOBAL_PERMISSION_BUCKET ? "global" : "context";
       const rules = data ? sanitizeStoredRules(data.rules ?? [], scope) : [];
       const pending = data ? sanitizePendingApprovals(data.pending, scope) : [];
-      bucket = this.#bucketView(rules, pending, new Set());
+      const hits = data ? sanitizePendingHits(data.hits) : [];
+      bucket = this.#bucketView(rules, pending, new Set(), hits);
       this.#buckets.set(key, bucket);
-      if (pending.length > 0) this.#onPendingLoaded?.(key, pending);
+      if (pending.length > 0 || hits.length > 0) this.#onPendingLoaded?.(key, pending);
     }
     return bucket;
   }
@@ -325,17 +456,18 @@ export class DurablePermissionRuleStore {
     rules: readonly PermissionRule[],
     pending: readonly PendingPermissionApproval[],
     accepted: ReadonlySet<string>,
+    hits: readonly PendingRuleHit[],
   ): Bucket {
     // 空桶不需要撤销集合：没有授权规则的目录在首次派发时不多读一次文件
-    if (rules.length === 0 && pending.length === 0) return { rules, pending, accepted, effective: [] };
+    if (rules.length === 0 && pending.length === 0) return { rules, pending, hits, accepted, effective: [] };
     const revoked = this.#revokedSet();
-    const effective = [
+    const effective = foldHits([
       ...rules.filter((rule) => !revoked.has(rule.id)),
       ...pending
         .filter((entry) => accepted.has(entry.requestId) && !revoked.has(entry.rule.id))
         .map((entry) => entry.rule),
-    ];
-    return { rules, pending, accepted, effective };
+    ], hits.filter((entry) => accepted.has(entry.id)));
+    return { rules, pending, hits, accepted, effective };
   }
 
   #revokedSet(): ReadonlySet<string> {
@@ -357,15 +489,19 @@ export class DurablePermissionRuleStore {
    * 写一个桶并发布：已接纳的待生效记录在这次写里一并物化，已撤销的规则与待生效记录
    * 一并清掉。写失败时内存保持写前状态。
    */
-  async #write(key: string, next: Pick<Bucket, "rules" | "pending" | "accepted">): Promise<void> {
+  async #write(key: string, next: Pick<Bucket, "rules" | "pending" | "accepted" | "hits">): Promise<void> {
     const revoked = this.#revokedSet();
     const materialized = next.pending.filter((entry) => next.accepted.has(entry.requestId));
-    const rules = [
+    // 已接纳的命中在同一次写里折叠进规则计数并删除记录；撤销规则的命中只删记录
+    const rules = foldHits([
       ...next.rules,
       ...materialized.map((entry) => entry.rule).filter((rule) => !next.rules.some((existing) => existing.id === rule.id)),
-    ].filter((rule) => !revoked.has(rule.id));
+    ].filter((rule) => !revoked.has(rule.id)), next.hits.filter((entry) => next.accepted.has(entry.id)));
     const pending = next.pending.filter(
       (entry) => !next.accepted.has(entry.requestId) && !revoked.has(entry.rule.id),
+    );
+    const hits = next.hits.filter(
+      (entry) => !next.accepted.has(entry.id) && !revoked.has(entry.ruleId) && rules.some((rule) => rule.id === entry.ruleId),
     );
     if (this.rootDir) {
       const file = path.join(this.rootDir, bucketFile(key));
@@ -375,6 +511,7 @@ export class DurablePermissionRuleStore {
           scope: "global",
           rules: [...rules],
           ...(pending.length > 0 ? { pending: [...pending] } : {}),
+          ...(hits.length > 0 ? { hits: [...hits] } : {}),
         });
       } else {
         // contextPath 与范围描述取首条带有该字段的规则（同一范围内一致）
@@ -387,10 +524,11 @@ export class DurablePermissionRuleStore {
           contextPath: described.find((rule) => rule.contextPath)?.contextPath,
           rules: [...rules],
           ...(pending.length > 0 ? { pending: [...pending] } : {}),
+          ...(hits.length > 0 ? { hits: [...hits] } : {}),
         });
       }
     }
-    this.#buckets.set(key, this.#bucketView(rules, pending, new Set()));
+    this.#buckets.set(key, this.#bucketView(rules, pending, new Set(), hits));
   }
 
   async #writeRevoked(revoked: ReadonlySet<string>): Promise<void> {
@@ -411,6 +549,65 @@ function sameRuleContent(left: PermissionRule, right: PermissionRule): boolean {
     left.scope === right.scope &&
     left.pattern.tool === right.pattern.tool &&
     left.pattern.argument === right.pattern.argument;
+}
+
+/** 对某条待计数记录的认领：id 与内容摘要必须相同；给出批次摘要时还须是该批准备的记录。 */
+export interface RuleHitClaim {
+  readonly id: string;
+  readonly digest: string;
+  readonly batchDigest?: string;
+}
+
+function claimsHit(claims: readonly RuleHitClaim[], entry: PendingRuleHit): boolean {
+  return claims.some((claim) => claim.id === entry.id && claim.digest === entry.digest &&
+    (claim.batchDigest === undefined || claim.batchDigest === entry.batchDigest));
+}
+
+function sameHitContent(left: PendingRuleHit, right: PendingRuleHit): boolean {
+  return left.ruleId === right.ruleId && left.digest === right.digest && left.at === right.at &&
+    left.assignmentId === right.assignmentId;
+}
+
+/** 已接纳命中折叠进规则：每条加一次计数，最近匹配时间取最大；不在列表里的规则不受影响。 */
+function foldHits(
+  rules: readonly PermissionRule[],
+  hits: readonly { readonly ruleId: string; readonly at: number }[],
+): PermissionRule[] {
+  if (hits.length === 0) return [...rules];
+  return rules.map((rule) => {
+    const own = hits.filter((entry) => entry.ruleId === rule.id);
+    if (own.length === 0) return rule;
+    return {
+      ...rule,
+      matchCount: rule.matchCount + own.length,
+      lastMatchedAt: Math.max(rule.lastMatchedAt, ...own.map((entry) => entry.at)),
+    };
+  });
+}
+
+function sanitizePendingHits(raw: unknown): PendingRuleHit[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PendingRuleHit[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Partial<PendingRuleHit>;
+    if (typeof entry.id !== "string" || !entry.id) continue;
+    if (typeof entry.ruleId !== "string" || !entry.ruleId) continue;
+    if (typeof entry.digest !== "string" || !entry.digest) continue;
+    if (typeof entry.assignmentId !== "string" || !entry.assignmentId) continue;
+    if (typeof entry.at !== "number" || !Number.isFinite(entry.at)) continue;
+    out.push({
+      id: entry.id,
+      ruleId: entry.ruleId,
+      at: entry.at,
+      digest: entry.digest,
+      assignmentId: entry.assignmentId,
+      ...(typeof entry.conversationId === "string" && entry.conversationId ? { conversationId: entry.conversationId } : {}),
+      ...(typeof entry.taskId === "string" && entry.taskId ? { taskId: entry.taskId } : {}),
+      ...(typeof entry.batchDigest === "string" && entry.batchDigest ? { batchDigest: entry.batchDigest } : {}),
+    });
+  }
+  return out;
 }
 
 function sanitizePendingApprovals(raw: unknown, scope: PermissionScope): PendingPermissionApproval[] {

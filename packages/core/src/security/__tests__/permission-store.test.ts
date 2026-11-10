@@ -485,6 +485,22 @@ describe("PermissionStore (disk persistence)", () => {
     rootDir = await createTempDir("perm");
   });
 
+  it("非冻结 match 不改持久规则的计数：统计只由命中记录计入，避免与直接记账双计", async () => {
+    const durable = new DurablePermissionRuleStore(rootDir);
+    const store = new PermissionStore({ durable });
+    const context = ws("ws-hits");
+    await store.create(context, makeRule({ id: "ctx", pattern: { tool: "bash", argument: "*" }, scope: "context", contextId: context }));
+    await store.create(context, makeRule({ id: "glob", pattern: { tool: "web_fetch", argument: "*" }, scope: "global" }));
+
+    expect(store.match(context, makeRequest("bash", { command: "ls" }))?.id).toBe("ctx");
+    expect(store.match(context, makeRequest("web_fetch", { url: "https://example.com" }))?.id).toBe("glob");
+    // 同一个 durable 的管理读取看到的仍是未计数的值；按规则权威的直接记账只计一次
+    const management = new PermissionStore({ durable });
+    expect(management.list(context).map((rule) => [rule.id, rule.matchCount])).toEqual([["ctx", 0], ["glob", 0]]);
+    expect(await durable.recordHits("\u0000global", [{ ruleId: "glob", at: 5 }])).toBe(1);
+    expect(management.list(context).find((rule) => rule.id === "glob")?.matchCount).toBe(1);
+  });
+
   it("创建 workspace 规则 → 文件被创建 → 新实例可加载", async () => {
     const wsId = ws("ws-abc123");
     const storeA = new PermissionStore({ rootDir });
