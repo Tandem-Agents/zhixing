@@ -122,6 +122,33 @@ describe("SkillCommandSource", () => {
     }).list();
     expect(commands.map((command) => command.id)).toEqual(["skill:deploy"]);
   });
+
+  it("禁用技能投影为 hidden：不进发现入口，名称与别名照常注册", async () => {
+    const commands = await sourceWith([
+      { ...rec("deploy-service", "部署服务"), disabled: true },
+      rec("review", "review"),
+    ]).list();
+    expect(commands).toEqual([
+      expect.objectContaining({
+        id: "skill:deploy-service",
+        name: "deploy-service",
+        aliases: ["部署服务"],
+        execution: "agent",
+        hidden: true,
+      }),
+      expect.objectContaining({ id: "skill:review", name: "review" }),
+    ]);
+    // 启用的技能不带 hidden，照常出现在补全与帮助
+    expect(commands[1]).not.toHaveProperty("hidden");
+  });
+
+  it("禁用技能撞非技能命令时同样跳过，不以 hidden 遮蔽核心命令", async () => {
+    const commands = await sourceWith(
+      [{ ...rec("help", "help"), disabled: true }],
+      { help: builtinCmd("help") },
+    ).list();
+    expect(commands).toEqual([]);
+  });
 });
 
 describe("SkillCommandSource · Authority Catalog 集成", () => {
@@ -134,7 +161,14 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
     now: 0,
   };
 
-  it("正式应用查询注册动态命令并保持 builtin-first dispatch", async () => {
+  /** 真实 Authority 日志 + Correctness 端口 + 管理应用，注册表接本源；用例结束删除临时根。 */
+  async function withAuthorityCatalog(
+    skills: readonly { name: string; description: string; body: string }[],
+    body: (input: {
+      application: SkillCatalogApplicationService;
+      registry: DefaultCommandRegistry;
+    }) => Promise<void>,
+  ): Promise<void> {
     const root = await createTempDir("skill-command-authority");
     try {
       const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -146,10 +180,7 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
         anchorEpoch: 1,
         clock: () => NOW,
       });
-      for (const skill of [
-        { name: "Deploy Service", description: "部署到生产", body: "# 步骤" },
-        { name: "help", description: "撞内置命令", body: "x" },
-      ]) {
+      for (const skill of skills) {
         const content = await artifacts.put(Buffer.from(
           `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n${skill.body}`,
         ));
@@ -171,11 +202,11 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
           },
         );
       }
+      // 不固定 requestId：管理提交按请求身份幂等，禁用与启用必须是两次不同的请求
       const application = new SkillCatalogApplicationService(
         createAnchorSkillCatalogManagementCorrectnessPort({
           globalState: state,
           anchorEpoch: 1,
-          requestId: () => "list",
           now: () => new Date(NOW),
         }),
       );
@@ -199,7 +230,17 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
         findExisting: (name) => registry.findByName(name),
       }));
       await registry.refresh();
+      await body({ application, registry });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
 
+  it("正式应用查询注册动态命令并保持 builtin-first dispatch", async () => {
+    await withAuthorityCatalog([
+      { name: "Deploy Service", description: "部署到生产", body: "# 步骤" },
+      { name: "help", description: "撞内置命令", body: "x" },
+    ], async ({ registry }) => {
       expect(registry.findByName("deploy-service")).toMatchObject({
         id: "skill:deploy-service",
         execution: "agent",
@@ -211,8 +252,46 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
         kind: "agent-message",
         text: "/deploy-service",
       });
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
+    });
+  });
+
+  it("管理提交禁用后补全与帮助不列出，按名与别名仍可调用；启用后恢复", async () => {
+    await withAuthorityCatalog([
+      { name: "Deploy Service", description: "部署到生产", body: "# 步骤" },
+    ], async ({ application, registry }) => {
+      const listed = () => registry.list(runtime).map((command) => command.name);
+      expect(listed()).toContain("deploy-service");
+
+      await application.execute({
+        kind: "set-state",
+        skillId: "deploy-service",
+        patch: { disabled: true },
+      });
+      await registry.refresh();
+      // 管理投影仍含禁用项（/skills 要浏览），命令源把它投影为 hidden
+      expect((await application.query({ kind: "list" })).entries[0]).toMatchObject({
+        id: "deploy-service",
+        disabled: true,
+      });
+      expect(listed()).not.toContain("deploy-service");
+      expect(registry.findByName("deploy-service")).toMatchObject({
+        id: "skill:deploy-service",
+        hidden: true,
+        execution: "agent",
+      });
+      expect(registry.findByName("Deploy Service")?.id).toBe("skill:deploy-service");
+      await expect(
+        new CommandDispatcher({ registry }).dispatch("/deploy-service", runtime),
+      ).resolves.toEqual({ kind: "agent-message", text: "/deploy-service" });
+
+      await application.execute({
+        kind: "set-state",
+        skillId: "deploy-service",
+        patch: { disabled: false },
+      });
+      await registry.refresh();
+      expect(listed()).toContain("deploy-service");
+      expect(registry.findByName("deploy-service")).not.toHaveProperty("hidden");
+    });
   });
 });

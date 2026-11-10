@@ -60,4 +60,16 @@ describe('terminal dynamic Skill commands', () => {
     expect(terminalSkillCommandRoute(f.registry, 'unknown')).toBeUndefined(); expect(f.command).not.toHaveBeenCalled();
     f.binding.dispose(); expect(terminalSkillCommandRoute(f.registry, 'manual-skill')).toBeUndefined();
   });
+  it('drops a skill from candidates and help when a fact reports it disabled, keeps name routing, and restores it on enable', async () => {
+    const runtime = { sessionBusy: false, workspaceId: null, cwd: '.', target: 'cli' as const, features: {}, now: 0 };
+    const listed = (f: ReturnType<typeof fixture>) => f.registry.list(runtime).map(command => command.name);
+    const f = fixture([entry('manual-skill', '唤醒技能')]); await f.binding.refresh();
+    expect(listed(f)).toContain('manual-skill');
+    f.set([{ ...entry('manual-skill', '唤醒技能'), disabled: true }]); f.emit(); await f.binding.refresh();
+    expect(listed(f)).not.toContain('manual-skill');
+    expect(terminalSkillCommandRoute(f.registry, 'manual-skill')).toEqual({ route: 'input' });
+    expect(terminalSkillCommandRoute(f.registry, '唤醒技能')).toEqual({ route: 'input' });
+    f.set([entry('manual-skill', '唤醒技能')]); f.emit(); await f.binding.refresh();
+    expect(listed(f)).toContain('manual-skill'); f.binding.dispose();
+  });
 });

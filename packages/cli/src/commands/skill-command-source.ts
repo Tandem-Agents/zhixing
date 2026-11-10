@@ -11,6 +11,10 @@
  * `CommandDef.id` 命名空间化为 `skill:<id>`,与 builtin 的 `<name>:builtin` 不撞
  * registry id;`aliases` 保留原始 name 供补全显示与按人读名匹配。
  *
+ * 禁用:管理投影含禁用项(/skills 要浏览、可再启用),本源把禁用技能投影为 `hidden` 命令 ——
+ * 补全、ghost 提示与帮助都读 `registry.list`,不再列出;精确名与别名经 `findByName` 仍可
+ * 唤醒(禁用只影响自动索引与发现入口,不禁止指名加载)。启用后下一次刷新恢复列出。
+ *
  * 撞名:技能 id 与某个非技能命令(builtin / task 等)同名时**不注册为 slash 命令**
  * —— 核心命令优先、不被用户技能遮蔽(该技能仍可被 agent `load_skill`、经管理面板
  * 唤醒)。探测经 findExisting:命中命令的 id 不以 `skill:` 开头即判为外部撞名而跳过;
@@ -67,6 +71,7 @@ export class SkillCommandSource implements DynamicCommandSource {
         category: "plugin",
         tag: "plugin",
         execution: SKILL_COMMAND_SOURCE_DESCRIPTOR.execution,
+        ...(s.disabled ? { hidden: true } : {}),
       });
     }
     return commands;
