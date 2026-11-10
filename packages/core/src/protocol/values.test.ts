@@ -13,6 +13,18 @@ describe("消息来源协议", () => {
     }
   });
 
+  it("窗口首部标记只接受两种类别，且不与输入身份并存", () => {
+    for (const windowHead of ["context", "note"]) {
+      for (const role of ["user", "assistant"]) {
+        const marked = { ...message, role, windowHead };
+        expect(validateMessage(JSON.parse(JSON.stringify(marked)))).toEqual(marked);
+      }
+    }
+    expect(() => validateMessage({ ...message, windowHead: "summary" })).toThrow("window head");
+    expect(() => validateMessage({ ...message, windowHead: true })).toThrow("window head");
+    expect(() => validateMessage({ ...message, windowHead: "context", inputIdentity: identity })).toThrow("window head");
+  });
+
   it("不允许将 assistant 或工具结果伪装为用户输入", () => {
     expect(() => validateMessage({ ...message, role: "assistant", inputIdentity: identity })).toThrow();
     expect(() => validateMessage({ ...message, content: [{ type: "tool_result", toolUseId: "tool-1", content: "ok" }], inputIdentity: identity })).toThrow();

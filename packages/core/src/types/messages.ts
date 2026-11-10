@@ -123,7 +123,19 @@ export interface Message {
   content: ContentBlock[];
   /** 应用层的输入身份；不作为提示正文发送给模型。 */
   inputIdentity?: MessageInputIdentity;
+  /**
+   * 注意力窗口首部条目（启动装填、摘要或截断说明）的结构标记；不作为提示正文发送给模型。
+   * 只由窗口为运行输入读取时写入，普通配对一律不带；运行体只在输入起始两条读取它，
+   * 用来区分首部与已接受的配对，正文写什么都不影响判定。
+   */
+  windowHead?: WindowHeadKind;
 }
+
+/**
+ * 首部承载的内容类别：context = 启动装填或真实摘要（移除即丢失更早的上下文内容）；
+ * note = 截断说明（只说明此前已省略，本身不承载对话内容）。
+ */
+export type WindowHeadKind = "context" | "note";
 
 export interface MessageInputIdentity {
   readonly id: string;

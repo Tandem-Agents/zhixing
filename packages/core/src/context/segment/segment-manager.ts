@@ -18,9 +18,10 @@
  *      e. emit summarize_complete
  *      f. afterSummarize hooks（失败 → 降级 warning + 继续：压缩成本不浪费）
  *      g. beforeNewSegmentStart hooks（失败 → 降级 warning + 继续：压缩成本不浪费）
- *      h. splitMessagesPairAware → toSummarize / toPreserve
- *      i. composeNewSegmentMessages → 新段首条 user message
- *      j. 构造窗口重构指令（含 segmentId + structuredSummary + 平文本 summary 副本）
+ *      h. 覆盖规划（coverage.ts）→ 移除的首部 / 配对 / 步骤与保留的消息（切分在 transition_start 前完成）
+ *      i. 新段 = 摘要对（与 owner 折叠同一构造）+ 原生保留消息
+ *      j. 构造窗口重构指令（含 segmentId + structuredSummary + 平文本 summary 副本；
+ *         pairsCompacted 为本 run 累计移除的已接受配对数）
  *      k. persistence.appendSegment（segmentMetadata 累积；失败 emit warning 但仍成功）
  *      l. emit new_started 携带 marker → 返回 modified=true
  *   8. trigger 关键失败（压缩失败 / 解析空 / beforeSummarize hook 失败）按终态分流，
@@ -51,13 +52,16 @@ import type { AgentEventMap } from "../../types/agent-events.js";
 import type { Message } from "../../types/messages.js";
 import type { ToolSpec } from "../../types/tools.js";
 import type { WindowCompact } from "../window/types.js";
-import {
-  calculateMessageTurns,
-  splitMessagesPairAware,
-} from "../message-turns.js";
 import type { ITokenEstimator } from "../types.js";
-import { buildDroppedTurnsMessage } from "../system-meta.js";
-import { composeNewSegmentMessages } from "./compose.js";
+import { buildCompactSummaryPair } from "../system-meta.js";
+import {
+  advanceSegmentLedger,
+  describeEmergencyFloor,
+  emergencyFloorFacts,
+  planSegmentCoverage,
+  type SegmentCoverage,
+  type SegmentLedger,
+} from "./coverage.js";
 import { decideSegmentAction } from "./decision.js";
 import { parseSummary } from "./parser.js";
 import { SEGMENT_SUMMARIZE_INSTRUCTION } from "./prompts.js";
@@ -76,6 +80,17 @@ import type {
 } from "./types.js";
 
 // ─── 默认配置 ───
+
+/**
+ * 模型返回了内容、但解析不出摘要三段时的失败原因（诊断原文）。界面据此识别并换成
+ * 用户语言的说明，不靠匹配任意英文。
+ */
+export const SUMMARY_UNUSABLE_ERROR = "summary parser returned empty triplet";
+
+/** 摘要失败原因是否为“模型返回的摘要不可用” */
+export function isUnusableSummaryError(message: string): boolean {
+  return message === SUMMARY_UNUSABLE_ERROR;
+}
 
 const DEFAULT_BUFFER_TURNS = 2;
 const DEFAULT_RETRIES = 3;
@@ -178,7 +193,7 @@ export class SegmentManager {
     });
 
     if (decision.kind !== "trigger") {
-      return { decision, modified: false };
+      return { decision, modified: false, ledger: input.ledger };
     }
 
     return await this.performTransition(input, decision, currentTokens);
@@ -194,22 +209,30 @@ export class SegmentManager {
     const conversationId = input.conversationId;
     const segmentId = this.cfg.generateSegmentId();
     const startedAt = this.cfg.clock();
-    // 切分提前到 ctx 构造（纯函数，与摘要 LLM 调用无序依赖）——被摘段原文
+    const ledger = input.ledger;
+    // 覆盖规划提前到 ctx 构造（纯函数，与摘要 LLM 调用无序依赖）——被移除的原文
     // 作为通用 hook 输入随 ctx 交付
-    const { toSummarize, toPreserve } = splitMessagesPairAware(
-      input.messages,
-      this.cfg.bufferTurns,
-    );
-    // 无可摘内容（全部消息都在保留 buffer 内）→ 切段无意义，静默不切。
-    // 强制触发（阈值置零的手动压缩）在小窗口上会落到这里。
-    if (toSummarize.length === 0) {
-      return { decision, modified: false };
+    const plan = planSegmentCoverage(input.messages, ledger, this.cfg.bufferTurns);
+    // 无可移除内容（全部单元都在保留缓冲内、首部不可单独替换）→ 切段无意义，静默不切。
+    // 手动压缩在短对话上会落到这里。
+    if (plan.kind === "nothing") {
+      return { decision, modified: false, ledger };
     }
+    // 结构与预期不符（不应出现在正常路径）：不猜删除边界，本次不切并报告
+    if (plan.kind === "invalid") {
+      await this.cfg.eventBus?.emit("segment:transition_failed", {
+        segmentId,
+        error: plan.reason,
+        retriesExhausted: false,
+      });
+      return { decision, modified: false, ledger };
+    }
+    const coverage = plan.coverage;
     const ctx: SegmentTransitionContext = {
       conversationId,
       segmentId,
       tokensBefore,
-      messages: toSummarize,
+      messages: coverage.covered,
       abortSignal: input.abortSignal,
     };
 
@@ -236,7 +259,7 @@ export class SegmentManager {
         error: `beforeSummarize hook aborted: ${errorMessage(beforeHookErr)}`,
         retriesExhausted: false,
       });
-      return { decision, modified: false };
+      return { decision, modified: false, ledger };
     }
 
     // ── 压缩 LLM call ──
@@ -250,7 +273,7 @@ export class SegmentManager {
       );
       summary = parseSummary(summaryText);
       if (isEmptySummary(summary)) {
-        throw new Error("summary parser returned empty triplet");
+        throw new Error(SUMMARY_UNUSABLE_ERROR);
       }
     } catch (e) {
       // 应急地板：风险阈值已破（再不切就逼近物理窗口）而摘要 LLM 不可用 →
@@ -268,8 +291,8 @@ export class SegmentManager {
           segmentId,
           tokensBefore,
           this.estimateFixedTokens(input),
-          toSummarize,
-          toPreserve,
+          ledger,
+          coverage,
           errorMessage(e),
         );
       }
@@ -278,7 +301,7 @@ export class SegmentManager {
         error: errorMessage(e),
         retriesExhausted: true,
       });
-      return { decision, modified: false };
+      return { decision, modified: false, ledger };
     }
 
     const summarizeEndAt = this.cfg.clock();
@@ -319,19 +342,22 @@ export class SegmentManager {
     }
 
     // ── 拼新段 ──
-    const newSegmentMessages = composeNewSegmentMessages({
-      summary,
-      recentTurns: toPreserve,
-    });
+    // 摘要对与 owner 折叠后的窗口首部同一构造、同一文本；保留的配对、本次输入与
+    // 步骤保持原生消息，工具调用与结果不被文本化
+    const summaryText = flattenSummary(summary);
+    const newSegmentMessages = [
+      ...buildCompactSummaryPair(summaryText),
+      ...coverage.kept,
+    ];
     // 与 tokensBefore 同口径（系统提示＋工具＋消息），压缩前后才可比
     const tokensAfter = this.estimateFixedTokens(input) + this.cfg.estimator.estimateMessages(newSegmentMessages);
-    const turnsCompacted = computeTurnsCompacted(toSummarize);
+    const nextLedger = advanceSegmentLedger(ledger, coverage, "context");
 
     const windowCompact: WindowCompact = {
-      summary: flattenSummary(summary),
+      summary: summaryText,
       structuredSummary: summary,
       segmentId,
-      pairsCompacted: turnsCompacted,
+      pairsCompacted: nextLedger.coveredPairs,
       tokensBefore,
       tokensAfter,
     };
@@ -376,6 +402,7 @@ export class SegmentManager {
       modified: true,
       newSegmentMessages,
       windowCompact,
+      ledger: nextLedger,
     };
   }
 
@@ -436,32 +463,36 @@ export class SegmentManager {
   }
 
   /**
-   * 应急地板 —— 注意力层自己的最后兜底：被摘段整体替换为机械占位
-   * （dropped-turns 标注），保留最近 buffer 原文。有损降级换可用性：
-   * 细节仍完整躺在持久化原文上，窗口折叠指令不携结构化摘要（不产快照）。
+   * 应急地板 —— 注意力层自己的最后兜底：按同一覆盖规划移除较早内容，新首部是
+   * 截断说明对（与 owner 折叠同一构造、同一文本），其后是原生保留消息。有损降级换
+   * 可用性：细节仍完整躺在持久化原文上，窗口折叠指令不携结构化摘要（不产快照，
+   * 窗口据此把首部标为截断说明）。
    *
-   * summarizeError 是走到地板的根因（摘要 LLM 为何不可用），随
-   * emergency_floor 事件带给诊断与 UI 消费方。
+   * 截断说明与 emergency_floor 事件出自同一组事实（移除的配对、运行步骤与首部处置），
+   * 替换旧截断说明不算新的内容损失。summarizeError 是走到地板的根因（摘要 LLM 为何
+   * 不可用），随事件带给诊断与 UI 消费方。
    */
   private async applyEmergencyFloor(
     decision: SegmentDecision & { kind: "trigger" },
     segmentId: string,
     tokensBefore: number,
     fixedTokens: number,
-    toSummarize: readonly Message[],
-    toPreserve: readonly Message[],
+    ledger: SegmentLedger,
+    coverage: SegmentCoverage,
     summarizeError: string,
   ): Promise<SegmentManagerOutput> {
-    const droppedTurns = computeTurnsCompacted(toSummarize);
+    const facts = emergencyFloorFacts(ledger, coverage);
+    const note = describeEmergencyFloor(facts);
     const newSegmentMessages = [
-      buildDroppedTurnsMessage(droppedTurns),
-      ...toPreserve,
+      ...buildCompactSummaryPair(note),
+      ...coverage.kept,
     ];
     const tokensAfter = fixedTokens + this.cfg.estimator.estimateMessages(newSegmentMessages);
+    const nextLedger = advanceSegmentLedger(ledger, coverage, "note");
 
     const windowCompact: WindowCompact = {
-      summary: `因上下文超限且摘要生成失败，前 ${droppedTurns} 轮对话已被机械截断，完整原文保存在对话历史中`,
-      pairsCompacted: droppedTurns,
+      summary: note,
+      pairsCompacted: nextLedger.coveredPairs,
       tokensBefore,
       tokensAfter,
     };
@@ -469,7 +500,9 @@ export class SegmentManager {
     await this.cfg.eventBus?.emit("segment:emergency_floor", {
       segmentId,
       error: summarizeError,
-      droppedTurns,
+      droppedTurns: facts.droppedTurns,
+      droppedRunSteps: facts.droppedRunSteps,
+      priorContext: facts.priorContext,
       tokensBefore,
       tokensAfter,
     });
@@ -485,7 +518,13 @@ export class SegmentManager {
       windowCompact,
     });
 
-    return { decision, modified: true, newSegmentMessages, windowCompact };
+    return {
+      decision,
+      modified: true,
+      newSegmentMessages,
+      windowCompact,
+      ledger: nextLedger,
+    };
   }
 
   /**
@@ -529,12 +568,6 @@ function flattenSummary(summary: ParsedSummary): string {
   return [summary.facts, summary.state, summary.active]
     .filter((part) => part !== "")
     .join("\n\n");
-}
-
-function computeTurnsCompacted(toSummarize: readonly Message[]): number {
-  if (toSummarize.length === 0) return 0;
-  const turns = calculateMessageTurns(toSummarize);
-  return turns[turns.length - 1] ?? 0;
 }
 
 function errorMessage(e: unknown): string {

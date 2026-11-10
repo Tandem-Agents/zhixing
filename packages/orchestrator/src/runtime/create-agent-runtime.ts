@@ -35,6 +35,8 @@ import {
   type WindowCompact,
   type ContextBudget,
   type TurnContextProvider,
+  type EmergencyFloorPriorContext,
+  createSegmentLedger,
   createSegmentManager,
   createSegmentSummarizeFn,
   createTokenEstimator,
@@ -444,7 +446,16 @@ export interface ForceCompactResult {
    * 调用方据此向用户呈现降级方式与代价（先方式与代价、后结果），不让
    * 有损截断伪装成正常摘要。
    */
-  emergencyFloor?: { droppedTurns: number; error: string };
+  emergencyFloor?: {
+    droppedTurns: number;
+    priorContext: EmergencyFloorPriorContext;
+    error: string;
+  };
+  /**
+   * 摘要失败且未达风险线：切段没有发生、窗口不折叠，只带回失败原因（与“无可压缩内容”
+   * 区分开）。来自本地 bus 的 segment:transition_failed。
+   */
+  failure?: { error: string };
 }
 
 /**
@@ -1216,19 +1227,23 @@ export async function createAgentRuntime(
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
-      // 手动压缩 = 强制段切换：阈值置零 → 任何规模都走 risk-exceeded 强制
-      // trigger，天然绕过 in-progress defer（用户明确要求压缩，不该被推迟）。
+      // 手动压缩 = 强制段切换：optimal 置零 → 任何规模都触发；任务清单恒否 →
+      // 绕过 in-progress defer（用户明确要求压缩，不该被推迟）。风险线保持主模型
+      // 的真实值：摘要失败时只有真正达到风险线才走应急地板，未达风险线则不改
+      // 窗口、带回失败原因（与自动路径同一判据，不另设 risk 规则）。
       // 摘要调用复用实例权威 prompt + 冻结 tools——与主对话请求同形，prompt
-      // cache 前缀命中；摘要失败由段管理器的应急地板机械兜底。产物与自动
-      // 切段同构（windowCompact + 可选快照锚），owner 经窗口 applyCompact
-      // 应用——本方法只产指令、不触窗口、不落盘。
+      // cache 前缀命中。产物与自动切段同构（windowCompact + 可选快照锚），owner
+      // 经窗口 applyCompact 应用——本方法只产指令、不触窗口、不落盘。
       //
       // 本地 bus：段事件与 REPL 主事件流隔离（/compact 的用户反馈由调用方
       // 按 ForceCompactResult 渲染）。手动与自动切段共用同一摘要装配。
       const localBus = createEventBus<AgentEventMap>({ lineage: "main" });
       const segmentManager = createSegmentManager({
         estimator,
-        capability: { optimalMaxTokens: 0, riskMaxTokens: 0 },
+        capability: {
+          optimalMaxTokens: 0,
+          riskMaxTokens: primaryModelCapability.riskMaxTokens,
+        },
         callLLM: createSegmentSummarizeFn(
           makeSegmentStreamFactory(localBus, DEFAULT_WATCHDOG_POLICY),
           roles.light.model,
@@ -1243,11 +1258,20 @@ export async function createAgentRuntime(
         hooks: [],
       });
 
-      // localBus 与 UI 隔离，降级信息经返回值显式交付——在 evaluate 期间
-      // 收集 emergency_floor（emit 同步 await，evaluate 返回前必已触发）。
+      // localBus 与 UI 隔离，降级与失败信息经返回值显式交付——在 evaluate 期间
+      // 收集 emergency_floor / transition_failed（emit 同步 await，evaluate 返回
+      // 前必已触发；同一次评估两者互斥）。
       let emergencyFloor: ForceCompactResult["emergencyFloor"];
+      let failure: ForceCompactResult["failure"];
       localBus.on("segment:emergency_floor", (info) => {
-        emergencyFloor = { droppedTurns: info.droppedTurns, error: info.error };
+        emergencyFloor = {
+          droppedTurns: info.droppedTurns,
+          priorContext: info.priorContext,
+          error: info.error,
+        };
+      });
+      localBus.on("segment:transition_failed", (info) => {
+        failure = { error: info.error };
       });
 
       const compactView = buildCommittedRequestView(messages);
@@ -1258,6 +1282,8 @@ export async function createAgentRuntime(
         tools: compactView.tools,
         turnCount,
         conversationId: undefined,
+        // 手动压缩只有已提交窗口、没有运行部分：运行起点 = 条数
+        ledger: createSegmentLedger(messages, messages.length),
       });
 
       const finalMessages =
@@ -1267,6 +1293,7 @@ export async function createAgentRuntime(
         messages: finalMessages,
         windowCompact: out.windowCompact,
         emergencyFloor,
+        ...(!out.modified && failure ? { failure } : {}),
       };
     },
 

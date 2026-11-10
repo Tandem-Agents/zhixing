@@ -191,7 +191,7 @@ describe('text session application binding', () => {
         event('retry:attempt', { errorType: 'network', attempt: 1, maxRetries: 3, delayMs: 100, willRetry: true }),
         event('retry:success', { errorType: 'network', attemptsTaken: 1, totalDelayMs: 100 }),
         event('retry:exhausted', { errorType: 'network', totalAttempts: 3, lastError: 'retry-end-test' }),
-        event('segment:emergency_floor', { segmentId: 'segment-test', tokensBefore: 1000, tokensAfter: 100, droppedTurns: 7, error: 'floor-test' }),
+        event('segment:emergency_floor', { segmentId: 'segment-test', tokensBefore: 1000, tokensAfter: 100, droppedTurns: 7, droppedRunSteps: 0, priorContext: 'none', error: 'floor-test' }),
         event('lifecycle:hook_failed', { hookId: 'hook-test', phase: 'onBeforeRun', error: 'hook-failure-test' }),
         event('lifecycle:warning', { runtimeId: 'runtime-test', hookId: 'hook-test', phase: 'onBeforeRun', windowIndex: 0, message: 'warning-test' }),
         event('lifecycle:prompt_rebuilt', { reason: 'compact' }),
@@ -209,7 +209,7 @@ describe('text session application binding', () => {
       return { kind: 'accepted', turn: { outcome: Promise.resolve({ message: 'done' }) } };
     });
     const run = t.run(); t.input.end('one\n'); expect(await run).toBe(0);
-    for (const marker of ['第 1/3 次重试', '重试成功', '重试耗尽', '较早的 7 轮已截断', 'hook-failure-test', 'warning-test', '系统提示词已随注意力窗口重建', 'will auto-cancel', '[interrupted]', 'single-body-test']) {
+    for (const marker of ['第 1/3 次重试', '重试成功', '重试耗尽', '较早的 7 轮对话已移出模型上下文', 'hook-failure-test', 'warning-test', '系统提示词已随注意力窗口重建', 'will auto-cancel', '[interrupted]', 'single-body-test']) {
       expect(t.output().split(marker).length - 1, marker).toBe(1);
     }
     expect(t.handlerCount('session.event')).toBe(0);

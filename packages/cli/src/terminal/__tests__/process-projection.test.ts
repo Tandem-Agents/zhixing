@@ -16,6 +16,36 @@ function setup(source: 'legacy' | 'assignment' = 'legacy') {
 const child = { parentToolCallId: 'task', childLineage: 'main/sub-child', childAgentId: 'child' };
 const request = (inputTokens: number, extra = {}) => ({ event: 'llm:request_end' as const,
   payload: { model: 'model', duration: 1, usage: { inputTokens, outputTokens: 2, ...extra }, stopReason: 'end_turn' as const } });
+describe('terminal process fold · 上下文整理提示', () => {
+  it('应急截断先说代价再说原因，内部英文原因换成用户语言；替换旧截断说明不报内容损失', () => {
+    const s = setup();
+    s.event({ event: 'segment:emergency_floor', payload: { segmentId: 'seg', error: 'summary parser returned empty triplet',
+      droppedTurns: 2, droppedRunSteps: 1, priorContext: 'removed', tokensBefore: 9_000, tokensAfter: 4_000 } });
+    expect(s.p.snapshot().notice).toBe('上下文已紧急截断：较早的 2 轮对话、此前的摘要或恢复内容、本次请求中较早的 1 个执行步骤已移出模型上下文；'
+      + '完整原文仍在对话历史中。未能生成摘要的原因：模型没有按要求返回摘要。');
+    s.event({ event: 'segment:emergency_floor', payload: { segmentId: 'seg-2', error: 'fetch failed',
+      droppedTurns: 0, droppedRunSteps: 1, priorContext: 'already-truncated', tokensBefore: 9_000, tokensAfter: 8_000 } });
+    expect(s.p.snapshot().notice).toContain('更早的对话此前已截断');
+    expect(s.p.snapshot().notice).not.toContain('摘要或恢复内容');
+    expect(s.p.snapshot().notice).toContain('无法连接模型服务');
+  });
+  it('同段的“已整理”不覆盖应急截断的代价说明；之后另一段正常整理照常提示', () => {
+    const s = setup();
+    s.event({ event: 'segment:emergency_floor', payload: { segmentId: 'seg-floor', error: 'summary parser returned empty triplet',
+      droppedTurns: 1, droppedRunSteps: 0, priorContext: 'none', tokensBefore: 9_000, tokensAfter: 8_000 } });
+    s.event({ event: 'segment:new_started', payload: { segmentId: 'seg-floor', bufferTurns: 2, tokensBefore: 9_000, tokensAfter: 8_000 } });
+    expect(s.p.snapshot().notice).toContain('上下文已紧急截断：较早的 1 轮对话已移出模型上下文');
+    s.event({ event: 'segment:new_started', payload: { segmentId: 'seg-next', bufferTurns: 2, tokensBefore: 9_000, tokensAfter: 5_000 } });
+    expect(s.p.snapshot().notice).toBe('上下文已整理');
+  });
+  it('整理未完成同样按现行规则说明原因：已知类映射、未知类保留原文', () => {
+    const s = setup();
+    s.event({ event: 'segment:transition_failed', payload: { segmentId: 'seg', error: 'summary parser returned empty triplet', retriesExhausted: true } });
+    expect(s.p.snapshot().notice).toBe('上下文整理未完成：模型没有按要求返回摘要。');
+    s.event({ event: 'segment:transition_failed', payload: { segmentId: 'seg-2', error: 'odd upstream state', retriesExhausted: true } });
+    expect(s.p.snapshot().notice).toBe('上下文整理未完成：odd upstream state。');
+  });
+});
 describe('terminal process fold', () => {
   it('deduplicates display sequence across epochs and accepts closure on a newer epoch', () => {
     const s = setup('assignment');

@@ -10,7 +10,11 @@
 import type { AbortReason } from "@zhixing/core/interrupt";
 import type { AgentEventMap, EventBus, Message, TextCallLLMResult, TurnContext } from "@zhixing/core";
 import type { AgentYield, RunResult } from "@zhixing/core/loop";
-import type { ContextBudget, WindowCompact } from "@zhixing/core/context";
+import type {
+  ContextBudget,
+  EmergencyFloorPriorContext,
+  WindowCompact,
+} from "@zhixing/core/context";
 import type { DurableToolExecutionAuthorizer, PermissionContextId, PermissionRule, RiskLevel, SecurityRule } from "@zhixing/core/security";
 import type { IConfirmationBroker } from "@zhixing/core/confirmation";
 import type { OrchestrationContextSnapshotV1, OrchestrationExecutableV1, OrchestrationRunResultV1 } from "@zhixing/core/orchestration";
@@ -272,8 +276,14 @@ export interface RuntimeSubAgentUsageEntry {
 export interface RuntimeCompactOutcome {
   modified: boolean;
   windowCompact?: WindowCompact;
-  /** 应急地板降级信息——摘要 LLM 失败、以机械保尾截断完成时携带 */
-  emergencyFloor?: { droppedTurns: number; error: string };
+  /** 应急地板降级信息——摘要 LLM 失败、达到风险线、以机械截断完成时携带 */
+  emergencyFloor?: {
+    droppedTurns: number;
+    priorContext: EmergencyFloorPriorContext;
+    error: string;
+  };
+  /** 摘要失败且未达风险线：窗口不折叠，只带回失败原因 */
+  failure?: { error: string };
 }
 
 /**

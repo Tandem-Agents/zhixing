@@ -357,7 +357,15 @@ export type AgentEventMap = {
     segmentId: string;
     /** 摘要 LLM 失败的根因 —— 为什么走到机械截断 */
     error: string;
+    /** 本次移除的已接受配对数（一问一答为一轮） */
     droppedTurns: number;
+    /** 本次移除的运行步骤数（assistant 连同其工具结果；运行中的输入不会被移除） */
+    droppedRunSteps: number;
+    /**
+     * 首部的处置：removed = 移除了承载内容的首部（启动装填或摘要）；
+     * already-truncated = 替换的是先前的截断说明（不是新的内容损失）；none = 没有首部
+     */
+    priorContext: "none" | "removed" | "already-truncated";
     tokensBefore: number;
     tokensAfter: number;
   };

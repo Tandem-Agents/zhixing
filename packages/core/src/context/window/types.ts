@@ -96,6 +96,13 @@ export interface AttentionWindowState {
   getMessages(): readonly Message[];
 
   /**
+   * 运行输入用的窗口事实：内容同 getMessages，另给首部条目（启动装填、摘要、截断说明）
+   * 的两条消息写上 windowHead 结构标记，配对消息剔除同名字段。运行体据此区分首部与
+   * 已接受配对、计算压缩覆盖；历史查询、快照与预算估算继续用 getMessages。
+   */
+  getRunInputMessages(): readonly Message[];
+
+  /**
    * 接受一个 run：先应用 windowCompact（若有），再追加本 run 的蒸馏对。
    *
    * 接受时机归 owner：先持久化成功、后调本方法——持久化失败则窗口不前进，

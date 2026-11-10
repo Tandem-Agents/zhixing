@@ -955,8 +955,10 @@ function validateProjectedPassthroughPayload(
       assertExactKeys(
         payload,
         [
+          "droppedRunSteps",
           "droppedTurns",
           "error",
+          "priorContext",
           "segmentId",
           "tokensAfter",
           "tokensBefore",
@@ -966,6 +968,12 @@ function validateProjectedPassthroughPayload(
       assertProtocolIdentifier(payload.segmentId, "Segment id");
       assertString(payload.error, "Segment error");
       assertNonNegativeInteger(payload.droppedTurns, "Dropped turns");
+      assertNonNegativeInteger(payload.droppedRunSteps, "Dropped run steps");
+      assertOneOf(
+        payload.priorContext,
+        ["none", "removed", "already-truncated"],
+        "Prior context disposition",
+      );
       assertNonNegativeInteger(payload.tokensBefore, "Tokens before");
       assertNonNegativeInteger(payload.tokensAfter, "Tokens after");
       return;

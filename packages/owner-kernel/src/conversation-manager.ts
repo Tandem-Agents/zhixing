@@ -2010,7 +2010,7 @@ export class ConversationManager implements ConversationCommitProjection {
     try {
       if (!acquired.runtime.forceCompact) return { status: "unsupported" };
       const outcome = await acquired.runtime.forceCompact(
-        [...acquired.window.getMessages()],
+        [...acquired.window.getRunInputMessages()],
         acquired.turnCount,
       );
       if (outcome.windowCompact) {

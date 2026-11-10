@@ -17,7 +17,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../events/event-bus.js";
 import type { AgentEventMap } from "../../types/agent-events.js";
-import { userMessage } from "../../types/messages.js";
+import { assistantMessage, userMessage } from "../../types/messages.js";
+import { assertToolPairingIntact } from "../../context/message-turns.js";
 import type { Message } from "../../types/messages.js";
 import type { ToolDefinition } from "../../types/tools.js";
 import {
@@ -69,6 +70,17 @@ function fakeReader(hasInProgress = false): TaskListReader {
 }
 
 const SUMMARY_OK = `<facts>F</facts><state>S</state><active>A</active>`;
+
+/**
+ * 运行输入 = 一个已接受配对 + 本次输入：起始上下文里有可移除的配对，runTurnBegin
+ * 才有东西可压缩（只有本次输入时它钉住保留，没有可移除单元）。
+ */
+const WITH_WINDOW_PAIR: Message[] = [
+  userMessage("earlier"),
+  assistantMessage("earlier reply"),
+  userMessage("hi"),
+];
+const SUMMARY_HEAD = '<system-meta kind="compact-summary">F';
 
 /**
  * 模拟一次 "tool-use 然后 pure text" 的 LLM 交互：
@@ -138,6 +150,7 @@ describe("agent-loop × SegmentManager 集成", () => {
       baseParams(provider, {
         segmentManager,
         conversationId: "conv-1",
+        messages: WITH_WINDOW_PAIR,
       }),
     );
 
@@ -176,7 +189,11 @@ describe("agent-loop × SegmentManager 集成", () => {
 
     const provider = makeToolThenTextProvider("t");
     await drainAgentLoop(
-      baseParams(provider, { segmentManager, conversationId: "conv-1" }),
+      baseParams(provider, {
+        segmentManager,
+        conversationId: "conv-1",
+        messages: WITH_WINDOW_PAIR,
+      }),
     );
 
     // 首个 LLM 请求（turn 1）已是 runTurnBegin 压缩后的新段 messages
@@ -184,8 +201,10 @@ describe("agent-loop × SegmentManager 集成", () => {
     const turn1FirstText = (
       provider.calls[0]!.messages[0]!.content[0] as { type: string; text: string }
     ).text;
-    expect(turn1FirstText).toContain("<previous-segment-summary>");
-    expect(turn1FirstText).toContain("<facts>F</facts>");
+    expect(turn1FirstText).toContain(SUMMARY_HEAD);
+    // 新段 = 摘要对 + 钉住的本次输入（原生消息）
+    expect(provider.calls[0]!.messages[1]!.role).toBe("assistant");
+    expect(provider.calls[0]!.messages[2]).toEqual(userMessage("hi"));
   });
 
   it("runTurnBegin：未超阈 → no-op，首个 LLM 调用用原始 messages、不调压缩 LLM", async () => {
@@ -240,6 +259,7 @@ describe("agent-loop × SegmentManager 集成", () => {
       baseParams(provider, {
         segmentManager,
         conversationId: "conv-1",
+        messages: WITH_WINDOW_PAIR,
       }),
     );
 
@@ -248,11 +268,10 @@ describe("agent-loop × SegmentManager 集成", () => {
     expect(provider.calls.length).toBeGreaterThanOrEqual(2);
     const turn2Msgs = provider.calls[1]!.messages;
 
-    // 新段 messages 起始于 compose 输出 + 用户新输入；compose 输出含
-    // <previous-segment-summary> XML 标签
+    // 新段 messages 起始于摘要对，其后是钉住的本次输入；工具步骤已被移除
     const turn2FirstText = (turn2Msgs[0]!.content[0] as { type: string; text: string }).text;
-    expect(turn2FirstText).toContain("<previous-segment-summary>");
-    expect(turn2FirstText).toContain("<facts>F</facts>");
+    expect(turn2FirstText).toContain(SUMMARY_HEAD);
+    expect(turn2Msgs[2]).toEqual(userMessage("hi"));
   });
 
   it("pass 决策 → state.messages 不被替换，turn 2 用原始 messages", async () => {
@@ -459,6 +478,7 @@ describe("agent-loop × SegmentManager 集成", () => {
         segmentManager,
         conversationId: "conv-1",
         windowLifecycle: { onChange },
+        messages: WITH_WINDOW_PAIR,
       }),
     );
 
@@ -526,5 +546,75 @@ describe("agent-loop × SegmentManager 集成", () => {
     );
 
     expect(provider.calls[0]!.systemPrompt).toBe("STATIC-SYS");
+  });
+});
+
+describe("agent-loop × 运行中追加输入 × 多次切段（真实 loop 接口）", () => {
+  it("纯文本后追加 → 工具结果后追加 → 压缩 → 再追加 → 再地板：输入全保留、工具成对、累计不重复", async () => {
+    // 摘要调用依次：成功、失败（地板）、成功、失败（地板）
+    const summaries = [SUMMARY_OK, "不合格", SUMMARY_OK, "不合格"];
+    const callLLM = vi.fn<(req: SegmentSummarizeRequest) => Promise<string>>(async () => summaries.shift()!);
+    const events: { name: string; payload: unknown }[] = [];
+    const bus = new EventBus<AgentEventMap>();
+    bus.onAny((name, payload) => { if (name.startsWith("segment:")) events.push({ name, payload }); });
+    const segmentManager = createSegmentManager({
+      estimator: fakeEstimator(20),
+      // 阈值置零：每次评估都触发；摘要失败即走应急地板
+      capability: { optimalMaxTokens: 0, riskMaxTokens: 0 },
+      callLLM,
+      persistence: fakePersistence(),
+      taskListReader: fakeReader(),
+      eventBus: bus,
+      retries: 0,
+      retryBaseMs: 0,
+    });
+    const appended: Record<number, Message[]> = {
+      1: [userMessage("纯文本后追加")],
+      2: [userMessage("工具结果后追加")],
+      3: [userMessage("再追加")],
+    };
+    const provider = new MockLLMProvider([
+      { text: "回复一" },
+      { toolCalls: [{ id: "t1", name: "t", input: {} }] },
+      { text: "回复三" },
+      { text: "回复四" },
+    ]);
+    const { result } = await drainAgentLoop(baseParams(provider, {
+      segmentManager,
+      conversationId: "conv-1",
+      eventBus: bus,
+      messages: [
+        userMessage("第一问"), assistantMessage("第一答"),
+        userMessage("第二问"), assistantMessage("第二答"),
+        userMessage("本次请求"),
+      ],
+      inputPort: {
+        receive: async ({ boundary }) => appended[boundary] ?? [],
+        close: async () => {},
+      },
+    }));
+
+    expect(result.reason).toBe("completed");
+    expect(callLLM).toHaveBeenCalledTimes(4);
+    const texts = (messages: readonly Message[]) => messages.map((m) => m.content.map((b) => b.type === "text" ? b.text : b.type).join(""));
+    for (const call of provider.calls) assertToolPairingIntact(call.messages);
+    // 每次请求里本次请求与此前追加的输入都在（输入钉住，不随步骤移除）
+    expect(texts(provider.calls[1]!.messages)).toEqual(expect.arrayContaining(["本次请求", "纯文本后追加"]));
+    expect(texts(provider.calls[2]!.messages)).toEqual(expect.arrayContaining(["本次请求", "纯文本后追加", "工具结果后追加"]));
+    expect(texts(provider.calls[3]!.messages)).toEqual(expect.arrayContaining(["本次请求", "纯文本后追加", "工具结果后追加", "再追加"]));
+    // 工具结果后紧跟追加输入（连续 user）原样保留
+    const third = provider.calls[2]!.messages;
+    const toolResultIndex = third.findIndex((m) => m.content.some((b) => b.type === "tool_result"));
+    expect(third[toolResultIndex + 1]).toEqual(userMessage("工具结果后追加"));
+
+    const floors = events.filter((e) => e.name === "segment:emergency_floor").map((e) => e.payload);
+    expect(floors).toEqual([
+      expect.objectContaining({ droppedTurns: 1, droppedRunSteps: 0, priorContext: "removed" }),
+      expect.objectContaining({ droppedTurns: 0, droppedRunSteps: 1, priorContext: "removed" }),
+    ]);
+    // 窗口折叠只数实际移除的已接受配对：两次切段各移除一对，累计 2，运行步骤不计入
+    const compacts = events.filter((e) => e.name === "segment:new_started")
+      .map((e) => (e.payload as AgentEventMap["segment:new_started"]).windowCompact.pairsCompacted);
+    expect(compacts).toEqual([1, 2, 2, 2]);
   });
 });

@@ -39,17 +39,11 @@ export {
   resolveModelInfo,
 } from "./model-info-resolver.js";
 
-export type { SplitResult } from "./message-turns.js";
-export {
-  assertToolPairingIntact,
-  calculateMessageTurns,
-  splitMessagesPairAware,
-} from "./message-turns.js";
+export { assertToolPairingIntact } from "./message-turns.js";
 
 export type { SystemMetaKind } from "./system-meta.js";
 export {
   buildCompactSummaryPair,
-  buildDroppedTurnsMessage,
   buildGuidanceMessagePair,
   buildStartupBootstrapPair,
   buildWorksceneDigestMessage,

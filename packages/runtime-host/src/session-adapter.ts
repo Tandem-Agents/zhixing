@@ -390,6 +390,8 @@ export function createOwnerRuntimeAdapter(
         modified: result.modified,
         windowCompact: result.windowCompact,
         emergencyFloor: result.emergencyFloor,
+        // 摘要失败且未达风险线：窗口不折叠，失败原因须带到接入面（与“无可压缩内容”区分）
+        ...(result.failure ? { failure: result.failure } : {}),
       };
     },
 

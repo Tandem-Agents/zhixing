@@ -58,6 +58,7 @@ import {
   type TokenAnchor,
 } from "../context/token-accounting.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
+import type { SegmentLedger } from "../context/segment/coverage.js";
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import type { TokenUsage } from "../types/llm.js";
@@ -84,6 +85,8 @@ export type TurnEndOutcome =
       readonly kind: "ok";
       readonly messages: Message[];
       readonly anchorInvalidated: boolean;
+      /** 与 messages 对应的压缩台账（切段后为新台账） */
+      readonly segmentLedger: SegmentLedger | undefined;
     }
   | { readonly kind: "terminal"; readonly result: AgentResult };
 
@@ -109,6 +112,11 @@ export interface TurnEndParams {
   readonly prepareSendView: PrepareSendView;
   /** 段切换 ephemeral 路径判定（缺省 → SegmentManager 内部静默 pass） */
   readonly conversationId?: string;
+  /**
+   * 本 run 的压缩台账 —— 与 messages 对应；装配了 segmentManager 时必须提供
+   * （由 agent-loop 在运行开始时建立并逐 turn 传递）。
+   */
+  readonly segmentLedger: SegmentLedger | undefined;
 
   /**
    * Token 估算器 —— ③ tokens 快照 emit 的依赖。
@@ -165,6 +173,8 @@ export interface SegmentSwitchParams {
   readonly abortSignal: AbortSignal;
   /** 注意力窗口换代回调 —— 段切换后内部触发(同 runTurnEnd)。缺省 → no-op。 */
   readonly windowLifecycle?: WindowLifecycle;
+  /** 本 run 的压缩台账（装配了 segmentManager 时必须提供，见 TurnEndParams） */
+  readonly segmentLedger: SegmentLedger | undefined;
 }
 
 /**
@@ -194,9 +204,17 @@ export interface SegmentSwitchParams {
  */
 export async function runTurnBegin(
   params: SegmentSwitchParams,
-): Promise<{ messages: Message[]; anchorInvalidated: boolean }> {
+): Promise<{
+  messages: Message[];
+  anchorInvalidated: boolean;
+  segmentLedger: SegmentLedger | undefined;
+}> {
   if (!params.segmentManager) {
-    return { messages: [...params.messages], anchorInvalidated: false };
+    return {
+      messages: [...params.messages],
+      anchorInvalidated: false,
+      segmentLedger: params.segmentLedger,
+    };
   }
   const sendView = params.prepareSendView(params.messages);
   const seg = await params.segmentManager.evaluate({
@@ -207,12 +225,27 @@ export async function runTurnBegin(
     turnCount: params.turnCount,
     conversationId: params.conversationId,
     abortSignal: params.abortSignal,
+    ledger: requireSegmentLedger(params.segmentLedger),
   });
   if (seg.modified && seg.newSegmentMessages) {
     await params.windowLifecycle?.onChange("segment-transition");
-    return { messages: seg.newSegmentMessages, anchorInvalidated: true };
+    return {
+      messages: seg.newSegmentMessages,
+      anchorInvalidated: true,
+      segmentLedger: seg.ledger,
+    };
   }
-  return { messages: [...params.messages], anchorInvalidated: false };
+  return {
+    messages: [...params.messages],
+    anchorInvalidated: false,
+    segmentLedger: seg.ledger,
+  };
+}
+
+/** 装配了段切换却缺台账是装配错误：不猜运行起点，直接失败 */
+function requireSegmentLedger(ledger: SegmentLedger | undefined): SegmentLedger {
+  if (!ledger) throw new Error("段切换缺少本 run 的压缩台账");
+  return ledger;
 }
 
 // ─── 钩子 ───
@@ -234,6 +267,7 @@ export async function runTurnEnd(
   let messages = params.messages;
   let windowChange: WindowChangeReason | undefined;
   let anchorInvalidated = false;
+  let segmentLedger = params.segmentLedger;
 
   // attention-driven 段切换（唯一压缩机制）
   //
@@ -250,7 +284,9 @@ export async function runTurnEnd(
       turnCount: params.turnCount,
       conversationId: params.conversationId,
       abortSignal: params.abortSignal,
+      ledger: requireSegmentLedger(segmentLedger),
     });
+    segmentLedger = seg.ledger;
     if (seg.modified && seg.newSegmentMessages) {
       messages = seg.newSegmentMessages;
       windowChange = "segment-transition";
@@ -302,5 +338,5 @@ export async function runTurnEnd(
   //    - 失败语义按"是否致命"决定：致命返 terminal 短路；非致命降级继续
   //    - 不感知 caller 路径，纯粹按"turn 结束做什么"思考
 
-  return { kind: "ok", messages, anchorInvalidated };
+  return { kind: "ok", messages, anchorInvalidated, segmentLedger };
 }

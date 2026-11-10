@@ -251,6 +251,26 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 describe("createOwnerRuntimeAdapter", () => {
+  it("手动压缩回执原样转交三种终态：失败原因、应急地板代价、正常折叠", async () => {
+    const outcomes = [
+      { modified: false, messages: [], failure: { error: "summary parser returned empty triplet" } },
+      { modified: true, messages: [], windowCompact: { summary: "说明", pairsCompacted: 2, tokensBefore: 9, tokensAfter: 4 },
+        emergencyFloor: { droppedTurns: 2, priorContext: "removed" as const, error: "fetch failed" } },
+      { modified: true, messages: [], windowCompact: { summary: "摘要", structuredSummary: { facts: "f", state: "s", active: "a" }, pairsCompacted: 1, tokensBefore: 9, tokensAfter: 5 } },
+    ];
+    const agentRuntime = Object.assign(createMockAgentRuntime(), {
+      forceCompact: vi.fn(async () => outcomes.shift()!),
+    }) as AgentRuntime;
+    const runtime = createOwnerRuntimeAdapter("compact", agentRuntime);
+    expect(await runtime.forceCompact!([um("a")], 1)).toEqual({ modified: false, windowCompact: undefined, emergencyFloor: undefined,
+      failure: { error: "summary parser returned empty triplet" } });
+    expect(await runtime.forceCompact!([um("a")], 1)).toMatchObject({ modified: true,
+      emergencyFloor: { droppedTurns: 2, priorContext: "removed", error: "fetch failed" } });
+    const normal = await runtime.forceCompact!([um("a")], 1);
+    expect(normal.failure).toBeUndefined();
+    expect(normal.windowCompact?.structuredSummary).toEqual({ facts: "f", state: "s", active: "a" });
+  });
+
   it("passes the owner input port unchanged into the Kernel correctness boundary", async () => {
     const inputPort = { receive: async () => [], close: async () => {} };
     let captured: KernelRunEnvelope | undefined;

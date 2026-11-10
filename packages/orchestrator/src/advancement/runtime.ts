@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
   buildCompactSummaryPair,
+  createSegmentLedger,
   createSegmentManager,
   createSegmentSummarizeFn,
   createTokenEstimator,
+  stripWindowHead,
   type SegmentDecision,
   type SegmentSummarizeLLMFn,
   type WindowCompact,
@@ -471,6 +473,8 @@ async function buildContextWindow(input: {
     turnCount: priorReviews.length,
     conversationId: undefined,
     abortSignal: input.abortSignal,
+    // 推进窗口只有已提交条目、没有运行部分：运行起点 = 条数；首部来自摘要条目
+    ledger: createSegmentLedger(beforeMessages, beforeMessages.length),
   });
 
   const afterEntries = out.windowCompact
@@ -523,10 +527,21 @@ function restoreWindowEntries(
   ];
 }
 
+/**
+ * 展平推进窗口：首部标记只按条目种类写出——摘要条目带上它的类别（旧数据缺省按承载
+ * 内容处理），评审条目一律剔除同名字段，不让外来元数据升级成首部身份。
+ */
 function flattenWindowEntries(
   entries: readonly AdvancementWindowEntry[],
 ): readonly Message[] {
-  return entries.flatMap((entry) => entry.messages);
+  return entries.flatMap((entry) =>
+    entry.kind === "summary"
+      ? entry.messages.map((message) => ({
+          ...stripWindowHead(message),
+          windowHead: entry.messages[0]?.windowHead === "note" ? "note" as const : "context" as const,
+        }))
+      : entry.messages.map(stripWindowHead),
+  );
 }
 
 function applyWindowCompact(
@@ -541,9 +556,17 @@ function applyWindowCompact(
     Math.max(0, compact.pairsCompacted),
     reviewEntries.length,
   );
+  // 摘要条目记下首部类别：真实摘要带结构化摘要；应急地板只带截断说明
+  const head = compact.structuredSummary === undefined ? "note" : "context";
   const [summary, ack] = buildCompactSummaryPair(compact.summary);
   return [
-    { kind: "summary", messages: [summary, ack] },
+    {
+      kind: "summary",
+      messages: [
+        { ...summary, windowHead: head },
+        { ...ack, windowHead: head },
+      ],
+    },
     ...reviewEntries.slice(foldedCount),
   ];
 }

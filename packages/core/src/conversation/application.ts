@@ -22,6 +22,7 @@ import type { AbortReason } from "../interrupt/types.js";
 import type { TurnOrigin } from "../types/tools.js";
 import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
 import type { ContextBudget } from "../context/types.js";
+import type { EmergencyFloorPriorContext } from "../context/segment/coverage.js";
 import type { ConversationRevealIntent, TaskItem, TaskListState } from "./types.js";
 import { parseConversationId } from "./scope-id.js";
 export {
@@ -585,8 +586,11 @@ export interface ConversationCompactMechanismOutcome {
   readonly tokensAfter?: number;
   readonly emergencyFloor?: Readonly<{
     droppedTurns: number;
+    priorContext: EmergencyFloorPriorContext;
     error: string;
   }>;
+  /** 摘要失败且未达风险线：窗口未改动，只带回失败原因 */
+  readonly failure?: Readonly<{ error: string }>;
 }
 
 /** Owner/runtime mechanisms consumed by the Conversation compact use case. */
@@ -1114,8 +1118,11 @@ export interface ConversationCompactResult {
   readonly tokensAfter?: number;
   readonly emergencyFloor?: Readonly<{
     droppedTurns: number;
+    priorContext: EmergencyFloorPriorContext;
     error: string;
   }>;
+  /** 摘要失败且未达风险线：窗口未改动，只带回失败原因 */
+  readonly failure?: Readonly<{ error: string }>;
 }
 
 export interface ConversationContextBudgetResult {
@@ -2023,9 +2030,13 @@ export class ConversationDirectoryApplicationService
             ? {
                 emergencyFloor: Object.freeze({
                   droppedTurns: outcome.emergencyFloor.droppedTurns,
+                  priorContext: outcome.emergencyFloor.priorContext,
                   error: outcome.emergencyFloor.error,
                 }),
               }
+            : {}),
+          ...(outcome.failure
+            ? { failure: Object.freeze({ error: outcome.failure.error }) }
             : {}),
         });
       }

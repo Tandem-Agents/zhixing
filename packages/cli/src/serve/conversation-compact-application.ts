@@ -29,9 +29,13 @@ export function createAnchorConversationCompactPort(input: Readonly<{
             ? {
                 emergencyFloor: Object.freeze({
                   droppedTurns: result.outcome.emergencyFloor.droppedTurns,
+                  priorContext: result.outcome.emergencyFloor.priorContext,
                   error: result.outcome.emergencyFloor.error,
                 }),
               }
+            : {}),
+          ...(result.outcome.failure
+            ? { failure: Object.freeze({ error: result.outcome.failure.error }) }
             : {}),
         }),
       });

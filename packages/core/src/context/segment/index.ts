@@ -5,7 +5,20 @@
  * 后续 step 加入后会从本 barrel 一并导出。
  */
 
-export { composeNewSegmentMessages, type ComposeInput } from "./compose.js";
+export {
+  advanceSegmentLedger,
+  createSegmentLedger,
+  describeEmergencyFloor,
+  emergencyFloorFacts,
+  planSegmentCoverage,
+  SEGMENT_STRUCTURE_INVALID,
+  stripWindowHead,
+  type EmergencyFloorFacts,
+  type EmergencyFloorPriorContext,
+  type SegmentCoverage,
+  type SegmentCoveragePlan,
+  type SegmentLedger,
+} from "./coverage.js";
 export { decideSegmentAction, type DecideInput } from "./decision.js";
 export { parseSummary } from "./parser.js";
 export {
@@ -24,7 +37,9 @@ export {
 } from "./calibration.js";
 export {
   createSegmentManager,
+  isUnusableSummaryError,
   SegmentManager,
+  SUMMARY_UNUSABLE_ERROR,
   type SegmentManagerConfig,
 } from "./segment-manager.js";
 export type {

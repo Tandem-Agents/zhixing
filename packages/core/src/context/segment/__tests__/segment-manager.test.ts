@@ -31,6 +31,7 @@ import {
   type SegmentManagerConfig,
 } from "../segment-manager.js";
 import { SEGMENT_SUMMARIZE_INSTRUCTION } from "../prompts.js";
+import { createSegmentLedger } from "../coverage.js";
 import type {
   ParsedSummary,
   SegmentManagerInput,
@@ -142,16 +143,22 @@ function makeConfig(overrides?: Partial<SegmentManagerConfig>): SegmentManagerCo
   };
 }
 
+/**
+ * 默认台账：输入按“已提交窗口配对 + 末尾一条本次输入”理解——偶数条全是已接受配对，
+ * 奇数条时最后一条用户消息是运行部分（与 agent-loop 的运行输入同形）。
+ */
 function makeInput(
   messages: Message[],
   overrides?: Partial<SegmentManagerInput>,
 ): SegmentManagerInput {
+  const runStart = messages.length % 2 === 0 ? messages.length : messages.length - 1;
   return {
     messages,
     systemPrompt: "sys",
     tools: TOOLS,
     turnCount: messages.length,
     conversationId: "conv-1",
+    ledger: createSegmentLedger(messages, runStart),
     ...overrides,
   };
 }
@@ -170,7 +177,7 @@ describe("evaluate — ephemeral 路径（窗口保护对一切运行体生效�
     );
 
     const result = await sm.evaluate(
-      makeInput([userMsg("hi"), assistantMsg("yo")], { conversationId: undefined }),
+      makeInput([userMsg("q1"), assistantMsg("a1"), userMsg("q2"), assistantMsg("a2"), userMsg("q3"), assistantMsg("a3")], { conversationId: undefined }),
     );
 
     expect(result.decision.kind).toBe("trigger");
@@ -195,7 +202,7 @@ describe("evaluate — ephemeral 路径（窗口保护对一切运行体生效�
     );
 
     const result = await sm.evaluate(
-      makeInput([userMsg("hi"), assistantMsg("yo")], { conversationId: undefined }),
+      makeInput([userMsg("q1"), assistantMsg("a1"), userMsg("q2"), assistantMsg("a2"), userMsg("q3"), assistantMsg("a3")], { conversationId: undefined }),
     );
 
     expect(result.modified).toBe(true); // 切段照常发生（LLM 已调用）
@@ -465,8 +472,15 @@ describe("evaluate — trigger 成功完整契约", () => {
 
     expect(result.modified).toBe(true);
     expect(result.newSegmentMessages).toBeDefined();
-    expect(result.newSegmentMessages).toHaveLength(1);
-    expect(result.newSegmentMessages![0]!.role).toBe("user");
+    // 新段 = 摘要对（与 owner 折叠同一构造）+ 原生保留：最近 2 对 + 本次输入
+    const out = result.newSegmentMessages!;
+    expect(out).toHaveLength(2 + 4 + 1);
+    expect(out[0]!.role).toBe("user");
+    expect(out[0]!.content[0]).toMatchObject({ type: "text", text: expect.stringContaining('kind="compact-summary"') });
+    expect(out[1]!.role).toBe("assistant");
+    expect(out.slice(2)).toEqual(makeBigMessages().slice(20));
+    // 12 个已接受配对保留 2 个 → 移除 10 个；本次输入不计
+    expect(result.windowCompact?.pairsCompacted).toBe(10);
     expect(result.windowCompact?.segmentId).toBe("seg-X");
   });
 
@@ -800,18 +814,19 @@ describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", 
 
     expect(result.decision.kind).toBe("trigger");
     expect(result.modified).toBe(true);
-    // 新段 = 机械占位（dropped-turns 标注）+ 最近 buffer 原文
-    const first = result.newSegmentMessages![0]!;
-    const firstBlock = first.content[0]!;
-    expect(firstBlock.type === "text" ? firstBlock.text : "").toContain(
-      "dropped-turns",
-    );
-    expect(result.newSegmentMessages!.length).toBeLessThan(input.messages.length);
-    // 折叠指令：无结构化摘要（不产快照）、机械文本说明
+    // 新段 = 截断说明对（与 owner 折叠同一构造、同一文本）+ 原生保留：最近 2 对 + 本次输入
+    const out = result.newSegmentMessages!;
+    const firstBlock = out[0]!.content[0]!;
+    const noteText = firstBlock.type === "text" ? firstBlock.text : "";
+    expect(noteText).toContain('kind="compact-summary"');
+    expect(noteText).toContain("较早的 10 轮对话已从上下文移除");
+    expect(out[1]!.role).toBe("assistant");
+    expect(out.slice(2)).toEqual(input.messages.slice(20));
+    // 折叠指令：无结构化摘要（不产快照）、文本与运行体新首部同一段说明
     expect(result.windowCompact).toBeDefined();
     expect(result.windowCompact!.structuredSummary).toBeUndefined();
-    expect(result.windowCompact!.summary).toContain("机械截断");
-    expect(result.windowCompact!.pairsCompacted).toBeGreaterThan(0);
+    expect(noteText).toContain(result.windowCompact!.summary);
+    expect(result.windowCompact!.pairsCompacted).toBe(10);
     // 事件即终态：地板兜底成功 = 段切换以降级方式完成，不发 transition_failed
     //（终态事件互斥，消费方无需跨事件对账）；摘要失败根因随 emergency_floor 携带
     expect(events.map((e) => e.event)).not.toContain("segment:transition_failed");
@@ -819,7 +834,7 @@ describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", 
     const floor = events.find((e) => e.event === "segment:emergency_floor")!;
     const floorPayload = floor.payload as AgentEventMap["segment:emergency_floor"];
     expect(floorPayload.error).toContain("provider down");
-    expect(floorPayload.droppedTurns).toBeGreaterThan(0);
+    expect(floorPayload).toMatchObject({ droppedTurns: 10, droppedRunSteps: 0, priorContext: "none" });
     // 折叠指令与成功切段共用同一出口：new_started 携机械折叠指令流向
     // orchestrator accumulator → RunResult → 会话层窗口同步折叠（不发则
     // run 内已截而跨 run 窗口持续增长，地板在自动路径失效）

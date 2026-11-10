@@ -11,6 +11,7 @@ export type {
   ToolResultBlock,
   ToolResultDisposition,
   ToolUseBlock,
+  WindowHeadKind,
 } from "./messages.js";
 export {
   assistantMessage,

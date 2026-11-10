@@ -432,12 +432,22 @@ export interface SessionUsageResult extends SessionContextBudgetResult {
 export type SessionSecurityResult = ConversationSecurityResult;
 
 export interface SessionCompactResult {
-  /** 是否真的发生了折叠(false = 无可压缩内容 / 未达执行条件) */
+  /** 是否真的发生了折叠(false = 无可压缩内容 / 摘要失败未达风险线 / 未达执行条件) */
   modified: boolean;
   tokensBefore?: number;
   tokensAfter?: number;
-  /** 摘要降级信息——以机械保尾截断完成时携带,接入面须如实呈现降级方式 */
-  emergencyFloor?: { droppedTurns: number; error: string };
+  /**
+   * 摘要降级信息——达到风险线、以机械截断完成时携带,接入面须如实呈现降级方式与代价:
+   * droppedTurns = 移出的已接受配对数;priorContext = 首部处置(removed = 移出了摘要或
+   * 恢复内容;already-truncated = 替换的是先前的截断说明;none = 没有首部)
+   */
+  emergencyFloor?: {
+    droppedTurns: number;
+    priorContext: "none" | "removed" | "already-truncated";
+    error: string;
+  };
+  /** 摘要失败且未达风险线:窗口未改动,只带回失败原因(与无可压缩内容区分) */
+  failure?: { error: string };
 }
 
 // ─── workscene 方法结果 ───

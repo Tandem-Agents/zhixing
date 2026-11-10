@@ -86,9 +86,27 @@ describe('terminal information presentation', () => {
     // 与 /usage 同一格式：剩余几百 token 时如实显示，不取整成 0k
     expect(text(informationCompactLines({ modified: true, tokensBefore: 10_300, tokensAfter: 240 }))).toContain('10.3k → 240 tokens');
     expect(text(informationCompactLines({ modified: true, tokensAfter: 0 }))).toContain('窗口已折叠');
-    const emergency = informationCompactLines({ modified: true, tokensBefore: 20_000, tokensAfter: 0, emergencyFloor: { droppedTurns: 7, error: 'summary unavailable' } });
-    expect(emergency[0]).toContain('摘要服务不可用'); expect(emergency[1]).toContain('7 轮已截断');
-    expect(emergency[1]).toContain('完整原文仍在对话历史中'); expect(emergency[2]).toContain('20.0k → 0 tokens');
+    const emergency = informationCompactLines({ modified: true, tokensBefore: 20_000, tokensAfter: 0,
+      emergencyFloor: { droppedTurns: 7, priorContext: 'removed', error: 'summary parser returned empty triplet' } });
+    // 先原因、再代价，结果只报容量变化，不接“压缩完成”；内部英文原因换成用户语言
+    expect(emergency[0]).toBe('⚠ 未能生成摘要：模型没有按要求返回摘要。');
+    expect(emergency[1]).toBe('已改为机械截断：较早的 7 轮对话、此前的摘要或恢复内容已移出模型上下文；完整原文仍在对话历史中。');
+    expect(emergency[2]).toBe('上下文 20.0k → 0 tokens。');
+    expect(text(emergency)).not.toContain('压缩完成'); expect(text(emergency)).not.toContain('summary parser');
+    // 替换的只是先前的截断说明：不报新的内容损失
+    const again = informationCompactLines({ modified: true, tokensBefore: 9_000, tokensAfter: 8_000,
+      emergencyFloor: { droppedTurns: 0, priorContext: 'already-truncated', error: 'summary parser returned empty triplet' } });
+    expect(again[1]).toBe('已改为机械截断：更早的对话此前已截断；完整原文仍在对话历史中。');
+    expect(text(again)).not.toContain('摘要或恢复内容');
+  });
+  it('separates an unfinished compression from nothing to compress and maps known model failures', () => {
+    expect(informationCompactLines({ modified: false, failure: { error: 'summary parser returned empty triplet' } }))
+      .toEqual(['⚠ 压缩未完成：模型没有按要求返回摘要。', '当前上下文已保留，可稍后重试。']);
+    expect(text(informationCompactLines({ modified: false, failure: { error: 'fetch failed' } })))
+      .toContain('无法连接模型服务：请检查网络、代理或服务地址后重试。');
+    // 未知原因按现行规则保留原文
+    expect(text(informationCompactLines({ modified: false, failure: { error: 'odd upstream state' } }))).toContain('odd upstream state');
+    expect(text(informationCompactLines({ modified: false, failure: { error: 'fetch failed' } }))).not.toContain('已无可压缩内容');
   });
   it('removes terminal and directional controls while retaining Chinese, emoji and line structure', () => {
     const rendered = informationText('\x1b[31m中文👩‍💻\x1b[0m\r\n下一行\x1b]0;title\x07‮\x00');

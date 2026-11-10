@@ -6,6 +6,7 @@ import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import type { TerminalProcessView, ProcessChildView } from '@zhixing/terminal-ui/process-model';
 import { cleanProcessText } from '@zhixing/terminal-ui/process-model';
 import { modelFailureText } from './model-failure.js';
+import { emergencyFloorCostText, summaryFailureText } from './compact-outcome-text.js';
 import { getToolRenderStrategy, processArtifactText, processArtifactSpans, processArtifactLines, processBatch, processToolInput, processToolSnapshot, processToolSummary, type ProcessBlock, type ProcessToolSnapshot } from './process-presentation.js';
 
 export interface ProcessScope {
@@ -27,6 +28,8 @@ interface Tool { readonly name: string; readonly input: Record<string, unknown>;
 export class TerminalProcessProjection {
   #scope?: ProcessScope; #closed = false; #confirmed = false; #paused = false; #revision = 0; #block = 0;
   #phase = ''; #notice?: string; #activityNotice?: string; #thinking = ''; #thinkingActive = false; #thinkingSealed = true;
+  /** 本次运行最近一次应急截断的段：随后同段的“已整理”不覆盖截断的代价说明 */
+  #floorSegment?: string;
   #thinkingId?: string; #thinkingOffset = 0;
   readonly #seq = new Map<string, number>();
   #assignmentSource?: { assignmentId: string; epoch: number };
@@ -50,6 +53,7 @@ export class TerminalProcessProjection {
     this.#startedAt = performance.now(); this.#durationMs = undefined; this.#local = false;
     this.#scope = { ...scope }; this.#closed = false; this.#confirmed = confirmed; this.#paused = false; this.#block = 0;
     this.#phase = '正在准备'; this.#notice = undefined; this.#activityNotice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
+    this.#floorSegment = undefined;
     this.#assignmentSource = undefined;
     this.#seq.clear(); this.#tools.clear(); this.#children.clear(); this.#endedParents.clear(); this.#sealedChildren.clear(); this.#summarizedChildren.clear(); this.#batch = []; this.#usage = {}; this.#publish();
   }
@@ -262,9 +266,13 @@ export class TerminalProcessProjection {
       case 'retry:success': if (main) this.#activityNotice = undefined; break;
       case 'retry:exhausted': if (main) this.#notice = `重试未成功：${modelFailureText(processText(event.payload.lastError, 768))}`; break;
       case 'segment:transition_start': if (main) this.#phase = '正在整理上下文'; break;
-      case 'segment:new_started': if (main) this.#notice = '上下文已整理'; break;
-      case 'segment:transition_failed': if (main) this.#notice = `上下文整理未完成：${processText(event.payload.error, 768)}`; break;
-      case 'segment:emergency_floor': if (main) this.#notice = `上下文已紧急截断 ${event.payload.droppedTurns} 轮：${processText(event.payload.error, 512)}`; break;
+      // 应急地板先发 emergency_floor、再发同段 new_started：结果只是降级完成，不能用“已整理”盖掉截断的代价说明
+      case 'segment:new_started': if (main && event.payload.segmentId !== this.#floorSegment) this.#notice = '上下文已整理'; break;
+      case 'segment:transition_failed': if (main) this.#notice = `上下文整理未完成：${summaryFailureText(processText(event.payload.error, 768))}`; break;
+      case 'segment:emergency_floor': if (main) {
+        this.#floorSegment = event.payload.segmentId;
+        this.#notice = `上下文已紧急截断：${emergencyFloorCostText(event.payload)}未能生成摘要的原因：${summaryFailureText(processText(event.payload.error, 512))}`;
+      } break;
       case 'interrupt:warn': if (main) {
         const remaining = Math.max(0, Math.ceil((event.payload.timeoutMs - event.payload.elapsedMs) / 1000));
         this.#activityNotice = `模型流暂未响应；若仍无响应，约 ${remaining} 秒后自动取消`;

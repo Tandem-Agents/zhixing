@@ -37,8 +37,6 @@ export type SystemMetaKind = "compact-summary" | "ack" | "dropped-turns";
 
 const ACK_TEXT = "已阅读摘要";
 const GUIDANCE_ACK_TEXT = "已阅读约定";
-const DROPPED_TURNS_TEXT_PREFIX = "前 ";
-const DROPPED_TURNS_TEXT_SUFFIX = " 轮对话已省略";
 
 /**
  * 识别正则：从 text block 开头严格匹配 `<system-meta kind="...">` 标签。
@@ -80,24 +78,6 @@ export function buildCompactSummaryPair(
     ],
   };
   return [summaryMsg, ackMsg] as const;
-}
-
-/**
- * 构造 dropped-turns 占位消息（应急地板机械截断时使用）。
- *
- * 角色设定为 user —— LLM 视角下，省略的历史对话"补丁"以用户发言承载
- * 是自然的（Anthropic API 允许连续 user 消息，LLM 理解为"系统层补充"）。
- */
-export function buildDroppedTurnsMessage(count: number): Message {
-  return {
-    role: "user",
-    content: [
-      {
-        type: "text",
-        text: `<system-meta kind="dropped-turns" count="${count}">${DROPPED_TURNS_TEXT_PREFIX}${count}${DROPPED_TURNS_TEXT_SUFFIX}</system-meta>`,
-      },
-    ],
-  };
 }
 
 /**

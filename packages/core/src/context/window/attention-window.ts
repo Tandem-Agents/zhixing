@@ -31,6 +31,7 @@ import {
   emptyAssistantMessage,
   findLastAssistantMessage,
 } from "../../types/messages.js";
+import { stripWindowHead } from "../segment/coverage.js";
 import { buildCompactSummaryPair } from "../system-meta.js";
 import type {
   AcceptRunInput,
@@ -45,7 +46,12 @@ import type {
 
 type WindowEntry =
   | { readonly kind: "bootstrap"; readonly messages: readonly [Message, Message] }
-  | { readonly kind: "summary"; readonly messages: readonly [Message, Message] }
+  | {
+      readonly kind: "summary";
+      readonly messages: readonly [Message, Message];
+      /** 截断说明（应急地板的折叠，不携结构化摘要）而非真实摘要 */
+      readonly truncation: boolean;
+    }
   | {
       readonly kind: "pair";
       readonly messages: readonly [Message, Message];
@@ -73,6 +79,16 @@ class AttentionWindow implements AttentionWindowState {
 
   getMessages(): readonly Message[] {
     return this.entries.flatMap((entry) => entry.messages);
+  }
+
+  getRunInputMessages(): readonly Message[] {
+    // 首部标记只由窗口按条目种类写出；配对消息即使带了同名字段也一律剔除，
+    // 不让历史或外来消息携带的元数据升级成首部身份
+    return this.entries.flatMap((entry) => {
+      if (entry.kind === "pair") return entry.messages.map(stripWindowHead);
+      const head = entry.kind === "summary" && entry.truncation ? "note" : "context";
+      return entry.messages.map((message) => ({ ...stripWindowHead(message), windowHead: head }));
+    });
   }
 
   acceptRun(input: AcceptRunInput): WindowFoldOutcome {
@@ -130,8 +146,13 @@ class AttentionWindow implements AttentionWindowState {
     const retained = pairs.slice(foldedCount);
 
     const [summaryMsg, ackMsg] = buildCompactSummaryPair(windowCompact.summary);
+    // 结构化摘要只随真实摘要产出；应急地板的折叠只带截断说明（与派生快照的判据一致）
     this.entries = [
-      { kind: "summary", messages: [summaryMsg, ackMsg] },
+      {
+        kind: "summary",
+        messages: [summaryMsg, ackMsg],
+        truncation: windowCompact.structuredSummary === undefined,
+      },
       ...retained,
     ];
 

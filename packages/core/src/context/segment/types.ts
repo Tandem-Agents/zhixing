@@ -18,6 +18,7 @@ import type { SegmentMeta } from "../../conversation/types.js";
 import type { WindowCompact } from "../window/types.js";
 import type { Message } from "../../types/messages.js";
 import type { ToolSpec } from "../../types/tools.js";
+import type { SegmentLedger } from "./coverage.js";
 
 // ─── 决策 ───
 
@@ -221,6 +222,11 @@ export interface SegmentManagerInput {
   readonly turnCount: number;
   readonly conversationId: string | undefined;
   readonly abortSignal?: AbortSignal;
+  /**
+   * 本 run 的压缩台账：首部类别、运行起点与累计移除的已接受配对数。运行中由 loop 在
+   * 运行开始时建立、每次切段后更新；手动压缩与推进窗口每次评估新建（运行起点 = 消息条数）。
+   */
+  readonly ledger: SegmentLedger;
 }
 
 /**
@@ -235,4 +241,6 @@ export interface SegmentManagerOutput {
   readonly newSegmentMessages?: Message[];
   /** 窗口重构指令 —— 经事件流向累积器、随 RunResult 带出，由会话层折叠窗口 */
   readonly windowCompact?: WindowCompact;
+  /** 评估后的台账：切段时为新台账（对应 newSegmentMessages），否则原样返回 */
+  readonly ledger: SegmentLedger;
 }

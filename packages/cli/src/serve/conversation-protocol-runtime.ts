@@ -3671,7 +3671,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         input: pending.input,
         attachments: pending.attachments,
         messages: [
-          ...managed.window.getMessages(),
+          ...managed.window.getRunInputMessages(),
           userMessageFromTurnInput(pending.input),
         ],
         baseRevision: managed.turnCount,

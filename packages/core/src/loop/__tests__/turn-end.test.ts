@@ -28,6 +28,7 @@ import type {
 import { createEventBus } from "../../events/event-bus.js";
 import type { AgentEventMap } from "../../types/agent-events.js";
 import { runTurnEnd } from "../turn-end.js";
+import { createSegmentLedger } from "../../context/segment/coverage.js";
 import type { PreparedSendView } from "../types.js";
 
 // ─── Fixtures ───
@@ -75,6 +76,7 @@ function baseParams(overrides?: Partial<Parameters<typeof runTurnEnd>[0]>) {
     usage: baseUsage,
     abortSignal: new AbortController().signal,
     prepareSendView: prepareView(),
+    segmentLedger: createSegmentLedger([], 0),
     ...overrides,
   };
 }

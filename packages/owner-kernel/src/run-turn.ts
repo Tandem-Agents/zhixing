@@ -293,7 +293,7 @@ export async function* runTurnWithCommit(
   }
 
   const messages = [
-    ...session.window.getMessages(),
+    ...session.window.getRunInputMessages(),
     userMessageFromTurnInput(input),
   ];
   const durable = manager.durableTurnExecutor();

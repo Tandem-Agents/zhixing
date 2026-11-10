@@ -162,13 +162,17 @@ function createTestModelProvider(primaryRole: "main" | "power") {
     primary: {
       budget: { contextWindow: 128_000, maxOutputTokens: 8192 },
       inputCapabilities: { images: primaryImages.current },
-      attention: { optimalMaxTokens: 64_000, riskMaxTokens: 96_000 },
+      attention: primaryAttention.current,
     },
   });
 }
 
 /** 主模型是否声明支持图片；默认不支持，个别用例打开。 */
 const primaryImages = { current: false };
+
+/** 主模型注意力阈值；个别用例临时调小风险线以覆盖“达到风险线”的路径。 */
+const DEFAULT_ATTENTION = { optimalMaxTokens: 64_000, riskMaxTokens: 96_000 };
+const primaryAttention = { current: DEFAULT_ATTENTION };
 
 function createTestRuntimeEnvironment(
   workspace?: string | null,
@@ -866,8 +870,8 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     expect(providerRef.current!.calls.length).toBe(1);
   });
 
-  it("摘要 LLM 失败 → 应急地板机械兜底：emergencyFloor 携根因随返回值交付（降级知情）", async () => {
-    // 不可重试错误（auth 不在 retryableTypes）：段管理器 4 次尝试各自快速失败 → 进地板
+  it("摘要 LLM 失败且未达风险线 → 不截断、不改窗口，带回失败原因（与无可压缩内容区分）", async () => {
+    // 不可重试错误（auth 不在 retryableTypes）：段管理器 4 次尝试各自快速失败
     const authError = new AgentError("summarize auth fail", "auth");
     providerRef.current = new MockLLMProvider([
       { error: authError },
@@ -879,16 +883,41 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     const runtime = await createAgentRuntime({});
     const result = await runtime.forceCompact(sixMessages(), 10);
 
-    expect(result.modified).toBe(true);
-    // 地板产物：机械折叠指令，无结构化摘要（不产快照）
-    expect(result.windowCompact).toBeDefined();
-    expect(result.windowCompact!.structuredSummary).toBeUndefined();
-    // 降级知情：localBus 与 UI 隔离，emergencyFloor 是手动路径唯一的降级交付通道
-    expect(result.emergencyFloor).toBeDefined();
-    expect(result.emergencyFloor!.droppedTurns).toBeGreaterThan(0);
-    // 根因是真实错误链文本（首次 auth 失败 / 连续失败后熔断开），
-    // 不再是"摘要解析失败"的间接症状
-    expect(result.emergencyFloor!.error).toMatch(/auth fail|Circuit breaker/);
+    // 风险线是主模型真实值（96k），10 轮短对话远未达到：原工作消息保持不变
+    expect(result.modified).toBe(false);
+    expect(result.windowCompact).toBeUndefined();
+    expect(result.emergencyFloor).toBeUndefined();
+    expect(result.messages).toEqual(sixMessages());
+    // 根因是真实错误链文本（首次 auth 失败 / 连续失败后熔断开）
+    expect(result.failure?.error).toMatch(/auth fail|Circuit breaker/);
+  });
+
+  it("摘要 LLM 失败且达到风险线 → 应急地板：emergencyFloor 携根因与代价随返回值交付（降级知情）", async () => {
+    const authError = new AgentError("summarize auth fail", "auth");
+    providerRef.current = new MockLLMProvider([
+      { error: authError },
+      { error: authError },
+      { error: authError },
+      { error: authError },
+    ]);
+    primaryAttention.current = { optimalMaxTokens: 1, riskMaxTokens: 2 };
+    try {
+      const runtime = await createAgentRuntime({});
+      const result = await runtime.forceCompact(sixMessages(), 10);
+
+      expect(result.modified).toBe(true);
+      // 地板产物：机械折叠指令，无结构化摘要（不产快照）；10 个已接受配对保留最近 2 个
+      expect(result.windowCompact).toBeDefined();
+      expect(result.windowCompact!.structuredSummary).toBeUndefined();
+      expect(result.windowCompact!.pairsCompacted).toBe(8);
+      expect(result.messages.slice(2)).toEqual(sixMessages().slice(16));
+      // 降级知情：localBus 与 UI 隔离，emergencyFloor 是手动路径唯一的降级交付通道
+      expect(result.emergencyFloor).toMatchObject({ droppedTurns: 8, priorContext: "none" });
+      expect(result.emergencyFloor!.error).toMatch(/auth fail|Circuit breaker/);
+      expect(result.failure).toBeUndefined();
+    } finally {
+      primaryAttention.current = DEFAULT_ATTENTION;
+    }
   });
 
   it("小窗口（全部消息都在保留 buffer 内）→ 静默不切，零 LLM 调用", async () => {
@@ -2356,6 +2385,8 @@ describe("createAgentRuntime · 生命周期钩子", () => {
         { role: "assistant", content: [{ type: "text", text: "small-a1" }] },
         userMessage("small-2"),
         { role: "assistant", content: [{ type: "text", text: "small-a2" }] },
+        // 运行输入以本次用户消息结尾（与生产入口一致）
+        userMessage("now"),
         ],
       },
       identity: {
@@ -2420,6 +2451,8 @@ describe("createAgentRuntime · 生命周期钩子", () => {
         { role: "assistant", content: [{ type: "text", text: "small-a1" }] },
         userMessage("small-2"),
         { role: "assistant", content: [{ type: "text", text: "small-a2" }] },
+        // 运行输入以本次用户消息结尾（与生产入口一致）
+        userMessage("now"),
         ],
       },
       identity: {

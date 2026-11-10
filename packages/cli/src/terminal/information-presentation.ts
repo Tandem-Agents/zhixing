@@ -5,6 +5,7 @@ import { boundedControlProjection } from '../runtime/control-projection.js';
 import { DEFAULT_THRESHOLDS } from '@zhixing/core/context';
 import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from '@zhixing/terminal-ui/protocol';
 import { fitSummary, paginateSummary, summaryText } from '../summary-projection.js';
+import { emergencyFloorCostText, summaryFailureText } from './compact-outcome-text.js';
 
 type Budget = Readonly<Partial<SessionUsageResult['budget']>>;
 type SubUsage = Readonly<Partial<SessionUsageResult['subUsages'][number]>>;
@@ -89,15 +90,22 @@ export function informationContextSummary(budget: Budget): TerminalSummary {
 export function informationCompactLines(result: SessionCompactResult): readonly string[] {
   boundedControlProjection(result, PROJECTION_BYTES);
   if (typeof result.modified !== 'boolean') throw Error('压缩回执格式不可用。');
+  // 摘要失败且未达风险线：窗口没动，与“无可压缩内容”分开说
+  if (!result.modified && result.failure) return finish([
+    `⚠ 压缩未完成：${label(summaryFailureText(result.failure.error), 512)}`,
+    '当前上下文已保留，可稍后重试。']);
   if (!result.modified) return ['已无可压缩内容。'];
-  const lines: string[] = [];
-  if (result.emergencyFloor) lines.push(
-    `⚠ 摘要服务不可用（${label(result.emergencyFloor.error, 512)}）。`,
-    `已应急保留最近对话，较早的 ${number(result.emergencyFloor.droppedTurns)} 轮已截断；完整原文仍在对话历史中。`);
   const detail = known(result.tokensBefore) && known(result.tokensAfter)
-    ? `${tokens(result.tokensBefore)} → ${tokens(result.tokensAfter)} tokens` : '窗口已折叠';
-  lines.push(`✓ 压缩完成，${detail}。`);
-  return finish(lines);
+    ? `${tokens(result.tokensBefore)} → ${tokens(result.tokensAfter)} tokens` : undefined;
+  // 应急地板：先说原因与代价，结果只报容量变化，不接“压缩完成”
+  if (result.emergencyFloor) return finish([
+    `⚠ 未能生成摘要：${label(summaryFailureText(result.emergencyFloor.error), 512)}`,
+    `已改为机械截断：${emergencyFloorCostText({
+      droppedTurns: known(result.emergencyFloor.droppedTurns) ? result.emergencyFloor.droppedTurns : 0,
+      priorContext: result.emergencyFloor.priorContext,
+    })}`,
+    ...(detail ? [`上下文 ${detail}。`] : [])]);
+  return finish([`✓ 压缩完成，${detail ?? '窗口已折叠'}。`]);
 }
 
 /** A bounded writer target for the existing configureLogs handler. */

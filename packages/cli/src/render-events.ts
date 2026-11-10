@@ -4,6 +4,7 @@ import type { AgentEventMap, IEventBus } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from "@zhixing/core/conversation/application";
 import type { CliWriter } from "./screen/index.js";
+import { emergencyFloorCostText, summaryFailureText } from "./terminal/compact-outcome-text.js";
 import { ANCHOR_SUB_AGENT } from "./output/speaker-state.js";
 import { renderAuditEvent } from "./security/audit-event-renderer.js";
 import { createLifecycleWarningDeduper, renderLifecycleWarningLine, type LifecycleWarningDeduper } from "./lifecycle-diagnostics-presentation.js";
@@ -158,19 +159,24 @@ export function renderSegmentFailed(
   writer: CliWriter,
 ): void {
   writer.line(
-    `  ${chalk.yellow("⚠")} ${chalk.dim(`上下文整理失败（不影响对话）: ${info.error}`)}`,
+    `  ${chalk.yellow("⚠")} ${chalk.dim(`上下文整理未完成（不影响对话）：${summaryFailureText(info.error)}`)}`,
   );
 }
 
-/** 渲染应急地板降级警示 —— 摘要服务不可用、已机械保留最近对话。
- *  紧随其后的 new_started 渲染"已整理"结果行：先方式与代价、后结果，
- *  对用户诚实呈现这次整理是有损截断而非正常摘要。 */
+/** 渲染应急地板降级警示 —— 未能生成摘要、已机械截断较早内容。
+ *  紧随其后的 new_started 渲染"已整理"结果行：先原因与代价、后结果，
+ *  对用户诚实呈现这次整理是有损截断而非正常摘要；替换旧截断说明不算新的内容损失。 */
 export function renderEmergencyFloor(
-  info: { droppedTurns: number; error: string },
+  info: {
+    droppedTurns: number;
+    droppedRunSteps: number;
+    priorContext: "none" | "removed" | "already-truncated";
+    error: string;
+  },
   writer: CliWriter,
 ): void {
   writer.line(
-    `  ${chalk.yellow("⚠")} ${chalk.dim(`摘要服务不可用（${info.error}），已应急保留最近对话，较早的 ${info.droppedTurns} 轮已截断（完整原文在对话历史中）`)}`,
+    `  ${chalk.yellow("⚠")} ${chalk.dim(`未能生成摘要：${summaryFailureText(info.error)}已改为机械截断：${emergencyFloorCostText(info)}`)}`,
   );
 }
 

@@ -94,11 +94,15 @@ describe('terminal information commands', () => {
   });
   it('preserves compression progress, emergency disclosure, no-op, missing counts and failure', async () => {
     const f = fixture(); f.controller.compact.mockResolvedValueOnce({ modified: true, tokensBefore: 40_000, tokensAfter: 0,
-      emergencyFloor: { droppedTurns: 3, error: 'summary failed' } });
+      emergencyFloor: { droppedTurns: 3, priorContext: 'none', error: 'summary failed' } });
     await f.owner.run('compact');
     expect(f.publish.mock.calls[0]?.[0]).toMatchObject({ busy: true, message: '正在压缩上下文…' });
-    expect(f.messages()).toContain('摘要服务不可用'); expect(f.messages()).toContain('3 轮已截断');
+    expect(f.messages()).toContain('未能生成摘要'); expect(f.messages()).toContain('较早的 3 轮对话已移出模型上下文');
     expect(f.messages()).toContain('完整原文仍在对话历史中'); expect(f.text()).toContain('40.0k → 0 tokens');
+    expect(f.messages()).not.toContain('压缩完成');
+    f.controller.compact.mockResolvedValueOnce({ modified: false, failure: { error: 'summary parser returned empty triplet' } });
+    await f.owner.run('compact'); expect(f.text()).toContain('压缩未完成：模型没有按要求返回摘要');
+    expect(f.text()).toContain('当前上下文已保留');
     f.controller.compact.mockResolvedValueOnce({ modified: false }); await f.owner.run('compact'); expect(f.text()).toContain('已无可压缩内容');
     f.controller.compact.mockResolvedValueOnce({ modified: true }); await f.owner.run('compact'); expect(f.text()).toContain('窗口已折叠');
     f.publish.mockClear(); f.choose.mockClear(); f.controller.compact.mockRejectedValueOnce(Error('no summarizer'));

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "../../types/messages.js";
 import {
   buildCompactSummaryPair,
-  buildDroppedTurnsMessage,
   buildGuidanceMessagePair,
   buildStartupBootstrapPair,
   buildWorksceneDigestMessage,
@@ -119,23 +118,6 @@ describe("buildStartupBootstrapPair", () => {
   });
 });
 
-// ─── buildDroppedTurnsMessage ───
-
-describe("buildDroppedTurnsMessage", () => {
-  it("构造 dropped-turns user 消息并携带 count 属性", () => {
-    const msg = buildDroppedTurnsMessage(42);
-    expect(msg.role).toBe("user");
-    expect(detectSystemMetaKind(msg)).toBe("dropped-turns");
-    const text = (msg.content[0] as { text: string }).text;
-    expect(text).toContain('count="42"');
-  });
-
-  it("count=0 合法构造（极端场景）", () => {
-    const msg = buildDroppedTurnsMessage(0);
-    expect(detectSystemMetaKind(msg)).toBe("dropped-turns");
-  });
-});
-
 // ─── detectSystemMetaKind ───
 
 describe("detectSystemMetaKind", () => {
@@ -231,7 +213,11 @@ describe("stripSummaryPlaceholderPair", () => {
   });
 
   it("dropped-turns 不被剥离（语义不同）", () => {
-    const dropped = buildDroppedTurnsMessage(5);
+    // 旧数据里可能残留的 dropped-turns 标注（构造器已随应急地板改为截断说明对而删除）
+    const dropped: Message = {
+      role: "user",
+      content: [{ type: "text", text: '<system-meta kind="dropped-turns" count="5">前 5 轮对话已省略</system-meta>' }],
+    };
     const ack: Message = {
       role: "assistant",
       content: [{ type: "text", text: '<system-meta kind="ack">已阅读摘要</system-meta>' }],

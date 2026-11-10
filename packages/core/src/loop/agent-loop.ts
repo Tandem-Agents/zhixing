@@ -57,6 +57,7 @@ import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
 import { runTurnBegin, runTurnEnd } from "./turn-end.js";
+import { createSegmentLedger } from "../context/segment/coverage.js";
 import type {
   AgentLoopDeps,
   AgentLoopParams,
@@ -160,6 +161,16 @@ export async function* runAgentLoop(
     messages: [...params.messages],
     turnCount: 0,
     totalUsage: emptyUsage(),
+    // 运行输入 = 窗口事实 + 本次用户消息（最后一条），运行部分从最后一条开始；
+    // 首部身份只取窗口写在起始两条上的结构标记
+    ...(params.segmentManager
+      ? {
+          segmentLedger: createSegmentLedger(
+            params.messages,
+            Math.max(0, params.messages.length - 1),
+          ),
+        }
+      : {}),
   };
   // 排他初始控制工具的批次门：本运行启用的控制名，以及本运行是否已进入过任何工具实现
   const exclusiveControls = params.enabledExclusiveControls ?? new Set<string>();
@@ -286,11 +297,13 @@ export async function* runAgentLoop(
       // 段切换→新窗的换代由 runTurnBegin 内部触发(收敛,见 turn-end.ts ④);
       // 重建后下个 getSystemPrompt() 现取新的本 run 局部 prompt。
       windowLifecycle,
+      segmentLedger: state.segmentLedger,
     });
     state = {
       ...state,
       messages: begin.messages,
       anchor: begin.anchorInvalidated ? undefined : state.anchor,
+      segmentLedger: begin.segmentLedger,
     };
 
     while (true) {
@@ -480,6 +493,7 @@ export async function* runAgentLoop(
           // 纯文本末轮的段切换 / 压缩也是注意力窗口换代 —— runTurnEnd 内部触发
           // 换代回调更新实例权威 prompt(给下个 run),与工具路径同走一条出口、不漏。
           windowLifecycle,
+          segmentLedger: state.segmentLedger,
         });
         if (turnEnd.kind === "terminal") {
           return await finalizeRun(turnEnd.result);
@@ -489,12 +503,14 @@ export async function* runAgentLoop(
           ? await params.inputPort?.receive({ boundary: state.turnCount + 1, closing: true }) ?? []
           : [];
         if (incoming.length > 0) {
+          // 追加输入接在运行部分末尾：台账的运行起点不变，覆盖规划把它们当作钉住的输入
           state = {
             messages: [...turnEnd.messages, ...incoming],
             turnCount: state.turnCount + 1,
             totalUsage: usage,
             transition: { reason: "input" },
             anchor: turnEnd.anchorInvalidated ? undefined : state.anchor,
+            segmentLedger: turnEnd.segmentLedger,
           };
           continue;
         }
@@ -604,6 +620,7 @@ export async function* runAgentLoop(
         // 段切换 / 压缩→新窗的换代由 runTurnEnd 内部触发(收敛,见 turn-end.ts ④);
         // 重建后下个 getSystemPrompt() 现取新的本 run 局部 prompt。
         windowLifecycle,
+        segmentLedger: state.segmentLedger,
       });
       if (turnEnd.kind === "terminal") {
         return await finalizeRun(turnEnd.result);
@@ -636,6 +653,7 @@ export async function* runAgentLoop(
         totalUsage: usage,
         transition: { reason: "tool_use" },
         anchor: turnEnd.anchorInvalidated ? undefined : state.anchor,
+        segmentLedger: turnEnd.segmentLedger,
       };
     }
   } catch (e) {

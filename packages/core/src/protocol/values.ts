@@ -79,7 +79,15 @@ export function validateMessages(value: unknown, label = "Messages"): Message[] 
 /** Validates one exact closed Message value. */
 export function validateMessage(value: unknown, label = "Message"): Message {
   assertPlainRecord(value, label);
-  assertAllowedKeys(value, ["content", "role", "inputIdentity"], label);
+  assertAllowedKeys(value, ["content", "role", "inputIdentity", "windowHead"], label);
+  if (value.windowHead !== undefined) {
+    if (value.windowHead !== "context" && value.windowHead !== "note") {
+      throw new TypeError(`${label} window head is invalid`);
+    }
+    if (value.inputIdentity !== undefined) {
+      throw new TypeError(`${label} window head cannot carry an input identity`);
+    }
+  }
   if (value.role !== "user" && value.role !== "assistant") {
     throw new TypeError(`${label} role is invalid`);
   }

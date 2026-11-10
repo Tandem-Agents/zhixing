@@ -30,6 +30,7 @@ import type { ToolDefinition, ToolExecutionContext, ToolResult, ToolSpec } from 
 import type { ITokenEstimator } from "../context/types.js";
 import type { TokenAnchor as ContextTokenAnchor } from "../context/token-accounting.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
+import type { SegmentLedger } from "../context/segment/coverage.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
 import type { RunRecordInput } from "../transcript/shard/types.js";
 import type { WindowCompact } from "../context/window/types.js";
@@ -251,6 +252,11 @@ export interface LoopState {
    * 刷新（仅 abort / error / 全量输入为 0 的路径跳过，因为这些样本不可靠）。
    */
   readonly anchor?: ContextTokenAnchor;
+  /**
+   * 本 run 的压缩台账（首部类别、运行起点、累计移除的已接受配对）—— 装配了段切换时
+   * 在运行开始由输入建立，每次切段后随新消息更新；未装配段切换时为 undefined。
+   */
+  readonly segmentLedger?: SegmentLedger;
 }
 
 // ─── 终止结果（判别联合） ───
