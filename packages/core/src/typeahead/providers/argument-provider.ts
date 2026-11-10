@@ -18,6 +18,7 @@ import { parseCommandDraft } from "../parse-command-draft.js";
 import { renderFullHintLine } from "../progressive-hint.js";
 import type {
   ArgChoice,
+  ArgChoiceSnapshot,
   ArgSchema,
   ArgumentHint,
   CommandDef,
@@ -54,6 +55,8 @@ export class ArgumentProvider implements SuggestionProvider {
   readonly supportsChaining = false;
 
   private readonly registry: ICommandRegistry;
+  /** 异步枚举本次查询的空态说明，只绑定在这次查询的 match 上；中止的查询不记录。 */
+  private readonly emptyHints = new WeakMap<TriggerMatch, string | undefined>();
 
   constructor(options: ArgumentProviderOptions) {
     this.registry = options.registry;
@@ -145,9 +148,11 @@ export class ArgumentProvider implements SuggestionProvider {
       renderedHint: renderFullHintLine(data.allSchemas, data.argIndex),
       currentArg: data.currentSchema,
       emptyHint:
-        data.currentSchema.kind === "async-enum"
-          ? data.currentSchema.provider.emptyHint
-          : undefined,
+        data.currentSchema.kind !== "async-enum"
+          ? undefined
+          : this.emptyHints.has(match)
+            ? this.emptyHints.get(match)
+            : data.currentSchema.provider.emptyHint,
     };
   }
 
@@ -230,7 +235,7 @@ export class ArgumentProvider implements SuggestionProvider {
     const schema = data.currentSchema;
     if (schema.kind !== "async-enum") return [];
 
-    const choices = await schema.provider.list(
+    const result = await schema.provider.list(
       {
         query: match.query,
         command: data.command,
@@ -241,6 +246,14 @@ export class ArgumentProvider implements SuggestionProvider {
     );
 
     if (signal.aborted) return [];
+    // 只查询一次：旧数组沿用静态说明；快照的说明属于本次结果（包括 undefined），绑定到本次 match
+    const snapshot = Array.isArray(result) ? undefined : (result as ArgChoiceSnapshot | null);
+    if (!Array.isArray(result) && (typeof snapshot !== "object" || snapshot === null || !Array.isArray(snapshot.choices) ||
+        (snapshot.emptyHint !== undefined && (typeof snapshot.emptyHint !== "string" || snapshot.emptyHint.length > 1024)))) {
+      throw new Error("候选结果格式无效");
+    }
+    const choices: readonly ArgChoice[] = snapshot ? snapshot.choices : (result as readonly ArgChoice[]);
+    this.emptyHints.set(match, snapshot ? snapshot.emptyHint : schema.provider.emptyHint);
 
     const items: SuggestionItem[] = [];
     const isLastArg = data.argIndex >= data.allSchemas.length - 1;

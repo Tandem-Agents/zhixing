@@ -21,6 +21,9 @@ import { ArgumentProvider } from "../providers/argument-provider.js";
 import { CommandProvider } from "../providers/command-provider.js";
 import { DefaultCommandRegistry } from "../registry.js";
 import type {
+  ArgChoice,
+  ArgChoiceProvider,
+  ArgChoiceSnapshot,
   ArgSchema,
   CommandDef,
   RuntimeContext,
@@ -457,5 +460,64 @@ describe("Broker + ArgumentProvider 集成", () => {
     expect(result).not.toBeNull();
     expect(result!.newDraft).toBe("/elevated on");
     expect(result!.execute).toBe(true);
+  });
+});
+
+// ─── async-enum 空态随本次结果返回 ───
+
+describe("async-enum 空态随本次查询结果返回", () => {
+  const pickCommand = (provider: ArgChoiceProvider): CommandDef => ({
+    id: "pick:test", name: "pick", description: "选择条目", category: "config", execution: "hybrid", tag: "builtin",
+    args: [{ kind: "async-enum", name: "item", description: "要选择的条目", required: true, provider }],
+  });
+  const setup = (list: ArgChoiceProvider["list"], emptyHint?: string) => {
+    const registry = new DefaultCommandRegistry();
+    registry.register(pickCommand({ mode: "picker", list, ...(emptyHint === undefined ? {} : { emptyHint }) }));
+    return new ArgumentProvider({ registry });
+  };
+  const hintOf = async (provider: ArgumentProvider, draft: string, signal = new AbortController().signal) => {
+    const match = provider.matchTrigger(makeCtx(draft))!;
+    await provider.query(match, signal);
+    return provider.computeArgumentHint(match)?.emptyHint;
+  };
+
+  it("旧数组结果沿用静态默认提示", async () => {
+    expect(await hintOf(setup(async () => [], "暂无条目"), "/pick ")).toBe("暂无条目");
+  });
+
+  it("快照提示优先于静态默认，提示为 undefined 时也不退回静态文案", async () => {
+    const snapshot = (emptyHint?: string): ArgChoiceSnapshot => ({ choices: [], ...(emptyHint === undefined ? {} : { emptyHint }) });
+    expect(await hintOf(setup(async () => snapshot("没有匹配项"), "暂无条目"), "/pick zz")).toBe("没有匹配项");
+    expect(await hintOf(setup(async () => snapshot(), "暂无条目"), "/pick zz")).toBeUndefined();
+  });
+
+  it("每次查询只调用一次 list，候选照常解包", async () => {
+    let calls = 0;
+    const provider = setup(async () => { calls++; return { choices: [{ value: "a", label: "甲" }] as ArgChoice[], emptyHint: "没有匹配项" }; });
+    const match = provider.matchTrigger(makeCtx("/pick "))!;
+    const items = await provider.query(match, new AbortController().signal);
+    expect(calls).toBe(1);
+    expect(items.map(item => item.displayText)).toEqual(["甲"]);
+  });
+
+  it("中止的查询不记录提示，交错的查询各自读到本次的提示", async () => {
+    const hints = ["第一次", "第二次"];
+    let index = 0;
+    const provider = setup(async () => ({ choices: [], emptyHint: hints[index++] }), "静态");
+    const aborted = new AbortController(); aborted.abort();
+    const first = provider.matchTrigger(makeCtx("/pick a"))!, second = provider.matchTrigger(makeCtx("/pick b"))!;
+    await provider.query(first, aborted.signal);
+    await provider.query(second, new AbortController().signal);
+    expect(provider.computeArgumentHint(first)?.emptyHint).toBe("静态");
+    expect(provider.computeArgumentHint(second)?.emptyHint).toBe("第二次");
+  });
+
+  it("快照形态无效时报错，不当成空结果", async () => {
+    const invalid = setup(async () => ({ choices: "x" } as unknown as ArgChoiceSnapshot));
+    const match = invalid.matchTrigger(makeCtx("/pick "))!;
+    await expect(invalid.query(match, new AbortController().signal)).rejects.toThrow("候选结果格式无效");
+    const long = setup(async () => ({ choices: [], emptyHint: "长".repeat(1025) }));
+    const longMatch = long.matchTrigger(makeCtx("/pick "))!;
+    await expect(long.query(longMatch, new AbortController().signal)).rejects.toThrow("候选结果格式无效");
   });
 });

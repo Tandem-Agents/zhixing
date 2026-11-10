@@ -47,7 +47,7 @@ export function createTrustRuleArgProvider(
       return choices;
     },
     inlineActions: { delete: true },
-    emptyHint:
-      "暂无信任规则：出现操作确认时选“始终允许”（[a] 当前范围、[g] 全局）即可建立；同类操作确认多次后也会自动建立",
+    // 空态只说使用者此刻能做的建立动作；范围键位与沉淀条件由确认界面和 trust.md 说明
+    emptyHint: "暂无信任规则，可在操作确认时选择“始终允许”建立。",
   };
 }

@@ -184,10 +184,11 @@ describe("trustRuleArgProvider", () => {
       expect(provider.inlineActions).toEqual({ delete: true });
     });
 
-    it("emptyHint 包含创建规则引导文案", () => {
+    it("emptyHint 给出当前的建立动作", () => {
       const listRules = listRulesOf([]);
       const provider = createTrustRuleArgProvider(listRules);
-      expect(provider.emptyHint).toContain("[a]/[g]");
+      // 空态只说使用者此刻能做的建立动作；沉淀阈值与范围键位由确认界面和文档说明
+      expect(provider.emptyHint).toBe("暂无信任规则，可在操作确认时选择“始终允许”建立。");
     });
   });
 });

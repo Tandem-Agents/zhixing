@@ -1,9 +1,11 @@
 // Typeahead 输入补全 — 公开 API
 
 // ── Step 2 类型（命令 + 参数 + registry + usage） ──
+export { NO_MATCH_HINT } from "./types.js";
 export type {
   ArgChoice,
   ArgChoiceProvider,
+  ArgChoiceSnapshot,
   ArgQueryContext,
   ArgSchema,
   AsyncEnumArg,

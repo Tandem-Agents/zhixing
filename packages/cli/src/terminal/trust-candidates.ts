@@ -1,4 +1,4 @@
-import type { ArgChoice, ArgChoiceProvider, ArgQueryContext, CommandDef, SuggestionItem } from '@zhixing/core/typeahead';
+import { NO_MATCH_HINT, type ArgChoice, type ArgChoiceProvider, type ArgChoiceSnapshot, type ArgQueryContext, type CommandDef, type SuggestionItem } from '@zhixing/core/typeahead';
 import type { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { createTrustRuleArgProvider } from '../security/trust-rule-arg-provider.js';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
@@ -82,24 +82,26 @@ export class TerminalTrustCandidates {
     } finally { this.#writing = false; }
   }
 
-  async #list(context: ArgQueryContext, signal: AbortSignal): Promise<readonly ArgChoice[]> {
+  async #list(context: ArgQueryContext, signal: AbortSignal): Promise<ArgChoiceSnapshot> {
     const query = ++this.#query; this.#listed = undefined; this.#retained = undefined;
     if (this.#writing) throw Error('正在撤销规则，请稍后刷新。');
     const controller = this.options.controller();
     if (!controller || signal.aborted || this.options.signal.aborted) throw Error('连接不可用，信任规则尚未读取。');
     const scope: Context = { controller, conversationId: controller.current.conversationId, generation: this.#generation };
-    let failed = false, failure: unknown;
+    let failed = false, failure: unknown, currentTotal = 0;
     const original = createTrustRuleArgProvider(async () => {
       try {
         this.#assertCurrent(scope);
         const rules = await this.options.management.trustList(scope.conversationId);
         this.#assertCurrent(scope); boundedControlProjection(rules, 1024 * 1024);
+        currentTotal = rules.length;
         return rules;
       } catch (error) { failed = true; failure = error; throw error; }
     });
     // The legacy provider converts failure to []; preserve that failure at this
     // edge so the new root renders an error management panel, never an empty success.
-    const current = await original.list(context, signal);
+    const listed = await original.list(context, signal);
+    const current = Array.isArray(listed) ? listed : (listed as ArgChoiceSnapshot).choices;
     this.#assertCurrent(scope);
     if (signal.aborted || query !== this.#query) throw Error('信任候选已失效，请刷新。');
     if (failed) throw failure;
@@ -133,7 +135,12 @@ export class TerminalTrustCandidates {
     }
     if (choices.length > 0 && retained.length === 0) throw Error('信任规则描述超过当前展示容量，请使用 /trust 查看。');
     this.#listed = { ...scope, signal, ids, scopes };
-    return retained;
+    // 空态说明只用这一次已经读到的数据：当前范围的全部规则，以及其他范围（读不到时记为未知，不说“全部没有”）
+    const otherTotal = others ? others.groups.reduce((sum, group) => sum + group.rules.length, 0) : undefined;
+    const emptyHint = currentTotal > 0 || (otherTotal ?? 0) > 0
+      ? otherTotal === undefined ? '当前范围没有匹配项；其他范围暂时读不到，可按 Ctrl+R 刷新。' : NO_MATCH_HINT
+      : otherTotal === undefined ? '当前范围暂无信任规则；其他范围暂时读不到，可按 Ctrl+R 刷新。' : original.emptyHint;
+    return { choices: retained, emptyHint };
   }
 
   #assertCurrent(context: Context): void {

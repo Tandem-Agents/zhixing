@@ -1,4 +1,4 @@
-import type { CommandDef, ArgChoiceProvider } from '@zhixing/core/typeahead';
+import { NO_MATCH_HINT, type CommandDef, type ArgChoiceProvider } from '@zhixing/core/typeahead';
 import type { PostTurnControlOutcome } from '@zhixing/core/types';
 import { ADVANCEMENT_PROPOSED_NOTICE, describeAdvancementProposalStage } from '@zhixing/core/advancement/proposal-messages';
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
@@ -12,6 +12,11 @@ import type { TerminalSelectionPort } from './selection.js';
 
 /** 场景内选 /work 的引导：进入路径、命令路径与候选空提示同一说明。 */
 const SCENE_SWITCH_GUIDANCE = '已在工作场景中，请先 /exit 返回主对话。';
+// “没有数据”的说明各按所在表面确实可用的动作写：候选面板有 Ctrl+N，选择页有“新建工作场景”选项
+const NO_SCENES_PANEL = '暂无工作场景，Ctrl+N 新建';
+const NO_SCENES_PAGE = '暂无工作场景，可选择“新建工作场景”。';
+const NO_CONVERSATIONS = '暂无可切换对话';
+const NO_MATCH_PAGE = '没有匹配项，可返回修改名称。';
 
 type Navigation = Extract<PostTurnControlOutcome['intent'], { kind: 'enter' | 'exit' | 'set_workdir' }>;
 export interface TerminalTurnOutcome {
@@ -86,15 +91,18 @@ export class TerminalSessionCommands {
     const provider = (command: 'resume' | 'work'): ArgChoiceProvider => ({
       mode: 'picker',
       get inlineActions() { return command !== 'work' ? { delete: true } : inScene() ? {} : { delete: true, rename: true, create: true }; },
-      get emptyHint() { return command !== 'work' ? '暂无可切换对话' : inScene() ? SCENE_SWITCH_GUIDANCE : '暂无工作场景，Ctrl+N 新建'; },
+      // 空态说明随本次结果返回，按这次读到的数据判断“没有数据”还是“过滤后没有匹配”
       list: async (context, abort) => {
-        if (command === 'work' && inScene()) return [];
+        if (command === 'work' && inScene()) return { choices: [], emptyHint: SCENE_SWITCH_GUIDANCE };
         const scope = this.#scope();
         const entries = await this.#entries(command, context.query); scope.current();
         if (abort.aborted) return [];
         const query = context.query.toLocaleLowerCase();
-        return entries.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(query)).slice(0, 100)
+        const choices = entries.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(query)).slice(0, 100)
           .map(item => ({ value: item.id, label: item.name, description: item.description }));
+        // /work 读到的是完整场景列表；/resume 由服务端按查询词过滤，不为计数另查
+        const emptyHint = command === 'work' ? (entries.length ? NO_MATCH_HINT : NO_SCENES_PANEL) : query ? NO_MATCH_HINT : NO_CONVERSATIONS;
+        return { choices, emptyHint };
       },
     });
     this.commands = ['new', 'name', 'clear', 'resume', 'work'].map(name => ({ ...BUILTIN_COMMANDS[`${name}:repl` as keyof typeof BUILTIN_COMMANDS],
@@ -184,7 +192,8 @@ export class TerminalSessionCommands {
       let page = 0;
       for (;;) {
         const response = await this.options.choose({ kind: 'selection', title: name === 'work' ? '工作场景' : '切换对话',
-          message: !matches.length ? '没有匹配项，可返回修改名称。' : `第 ${page + 1} 页`,
+          // 手里是完整场景列表：一个都没有时说暂无并指向新建，有场景而匹配为空才说没有匹配
+          message: !matches.length ? (entries.length ? NO_MATCH_PAGE : NO_SCENES_PAGE) : `第 ${page + 1} 页`,
           choices: [...matches.slice(page * 20, page * 20 + 20).map(item => ({ id: item.id, label: item.name, detail: item.description })),
             ...(page ? [{ id: 'previous', label: '上一页' }] : []), ...(matches.length > (page + 1) * 20 ? [{ id: 'next', label: '下一页' }] : []),
             ...(name === 'work' ? [{ id: 'create', label: '新建工作场景' }] : []), { id: 'cancel', label: '返回' }] });
@@ -205,7 +214,9 @@ export class TerminalSessionCommands {
       const exact = argument.trim() && page.conversations.find(item => item.conversationId === argument.trim());
       let target = exact || (argument.trim() && page.conversations.length === 1 && !page.next ? page.conversations[0] : undefined);
       if (!target) {
-        const response = await this.options.choose({ kind: 'selection', title: '切换对话', message: page.conversations.length ? `第 ${pages.length} 页` : '没有匹配项，可返回修改名称。',
+        // 服务端按查询词过滤：带查询词而为空是没有匹配，不带查询词而为空才是暂无
+        const response = await this.options.choose({ kind: 'selection', title: '切换对话',
+          message: page.conversations.length ? `第 ${pages.length} 页` : argument.trim() ? NO_MATCH_PAGE : `${NO_CONVERSATIONS}。`,
           choices: [...page.conversations.map(item => ({ id: item.conversationId, label: item.name, detail: item.lastActiveAt })),
             ...(pages.length > 1 ? [{ id: 'previous', label: '上一页' }] : []), ...(page.next ? [{ id: 'next', label: '下一页' }] : []), { id: 'cancel', label: '返回' }] });
         scope.current();

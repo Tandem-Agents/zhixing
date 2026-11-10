@@ -43,6 +43,41 @@ describe('terminal session navigation', () => {
     expect(f.result).toHaveBeenLastCalledWith('已在工作场景中，请先 /exit 返回主对话。'); expect(f.publish).not.toHaveBeenCalled();
     expect(f.controller.enterScene).toHaveBeenCalledTimes(1);
   });
+  it('tells “no data” from “no match” using the list this query already read', async () => {
+    const f = fixture();
+    const source = new TerminalCandidatesOwner(() => ({ cwd: process.cwd(), target: 'cli', features: { chrome: true }, now: 0, workspaceId: null, sessionBusy: false }));
+    source.bindCommands(f.owner.commands);
+    // /work：有场景而过滤为空 → 没有匹配项；没有场景时带不带过滤词都说暂无，并保留新建入口
+    expect(await source.query(1, '/work zzq', 9)).toMatchObject({ items: [], argumentHint: '没有匹配项' });
+    f.workscene.list.mockResolvedValueOnce([]);
+    expect(await source.query(2, '/work zzq', 9)).toMatchObject({ items: [], argumentHint: '暂无工作场景，Ctrl+N 新建', hint: ['Esc 返回', 'Ctrl+N 新建'] });
+    expect(f.workscene.list).toHaveBeenCalledTimes(2);
+    // /resume：服务端按查询过滤；带过滤词而为空 → 没有匹配项，不带而为空 → 暂无
+    f.controller.listConversationPage.mockResolvedValueOnce({ conversations: [] });
+    expect(await source.query(3, '/resume zzq', 11)).toMatchObject({ items: [], argumentHint: '没有匹配项' });
+    f.controller.listConversationPage.mockResolvedValueOnce({ conversations: [] });
+    expect(await source.query(4, '/resume ', 8)).toMatchObject({ items: [], argumentHint: '暂无可切换对话' });
+    // 场景内：任何过滤词都给限制说明，不提供管理
+    await f.owner.run('work', 'scene-1');
+    expect(await source.query(5, '/work zzq', 9)).toMatchObject({ items: [], argumentHint: '已在工作场景中，请先 /exit 返回主对话。', canCreate: false });
+  });
+
+  it('says on the selection page whether there is no data or only no match', async () => {
+    const f = fixture();
+    await f.owner.run('work', 'zzq');
+    expect(f.choose).toHaveBeenLastCalledWith(expect.objectContaining({ title: '工作场景', message: '没有匹配项，可返回修改名称。' }));
+    f.workscene.list.mockResolvedValueOnce([]);
+    await f.owner.run('work', 'zzq');
+    expect(f.choose).toHaveBeenLastCalledWith(expect.objectContaining({ title: '工作场景', message: '暂无工作场景，可选择“新建工作场景”。',
+      choices: expect.arrayContaining([expect.objectContaining({ id: 'create' })]) }));
+    f.controller.listConversationPage.mockResolvedValueOnce({ conversations: [] });
+    await f.owner.run('resume', 'zzq');
+    expect(f.choose).toHaveBeenLastCalledWith(expect.objectContaining({ title: '切换对话', message: '没有匹配项，可返回修改名称。' }));
+    f.controller.listConversationPage.mockResolvedValueOnce({ conversations: [] });
+    await f.owner.run('resume', '');
+    expect(f.choose).toHaveBeenLastCalledWith(expect.objectContaining({ title: '切换对话', message: '暂无可切换对话。' }));
+  });
+
   it('lists and manages scenes only from the main conversation; inside a scene /work shows the guidance', async () => {
     const f = fixture();
     f.workscene.list.mockResolvedValue([{ sceneId: 'scene-1', name: '场景' }, { sceneId: 'scene-2', name: '另一场景' }]);

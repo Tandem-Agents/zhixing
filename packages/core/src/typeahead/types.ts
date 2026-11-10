@@ -192,11 +192,25 @@ export interface InlineActionSupport {
 export type PanelMode = "picker" | "management";
 
 /**
+ * 一次 list 的结果快照：候选，以及本次结果为空时显示的说明。
+ * 说明由来源按本次已经取得的数据判断（没有任何数据 / 过滤后没有匹配 / 只能确认部分范围），
+ * 不另查一次，也不沿用上一次查询的结论。emptyHint 为 undefined 表示本次不给说明。
+ */
+export interface ArgChoiceSnapshot {
+  readonly choices: readonly ArgChoice[];
+  readonly emptyHint?: string;
+}
+
+/** 有数据但过滤后为空时的通用说明。 */
+export const NO_MATCH_HINT = "没有匹配项";
+
+/**
  * 异步参数候选提供者。
  * 实现者返回一个 Promise，**必须**在 signal abort 时尽快 reject 或返回部分结果。
+ * 返回旧形态的候选数组时，候选为空就显示静态 emptyHint；需要区分空态的来源返回快照。
  */
 export interface ArgChoiceProvider {
-  list(ctx: ArgQueryContext, signal: AbortSignal): Promise<readonly ArgChoice[]>;
+  list(ctx: ArgQueryContext, signal: AbortSignal): Promise<readonly ArgChoice[] | ArgChoiceSnapshot>;
   /**
    * **必填**：面板语义模式（picker / management）。决定 Enter / footer / 按键
    * dispatch 行为。type system 强制 caller 显式表态，杜绝"所有候选列表都是
@@ -210,8 +224,8 @@ export interface ArgChoiceProvider {
    */
   readonly inlineActions?: InlineActionSupport;
   /**
-   * 可选:候选为空时面板显示的引导文案,替代技术占位（"未找到匹配项" / 参数
-   * hint）。如 workscene 的"暂无工作场景，Ctrl+N 新建一个"。
+   * 可选：list 返回旧形态数组时的兼容默认空态说明，应是“没有任何数据”时的引导。
+   * 返回快照时一律以快照里的说明为准（包括 undefined），不再退回这里。
    */
   readonly emptyHint?: string;
 }

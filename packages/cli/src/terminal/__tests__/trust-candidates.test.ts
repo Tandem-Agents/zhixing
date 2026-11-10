@@ -135,4 +135,45 @@ describe('terminal trust candidates', () => {
     await expect(f.binding.revoke(2, items[0]!.id)).rejects.toThrow('receipt missing');
     await expect(f.binding.revoke(2, items[0]!.id)).rejects.toThrow('变化'); expect(f.management.trustRevoke).toHaveBeenCalledTimes(2);
   });
+
+  describe('empty state judged from this read', () => {
+    const NONE = '暂无信任规则，可在操作确认时选择“始终允许”建立。';
+    const others = (groups: unknown[] | Error) => vi.fn(async () => { if (groups instanceof Error) throw groups; return { groups }; });
+    const otherGroup = { context: { kind: 'workspace', hash: 'hash-b' }, label: '工作区「B」', effective: true,
+      rules: [{ ...rule('other-1'), contextId: { kind: 'workspace', hash: 'hash-b', revision: 1 } }] };
+    const hint = async (f: ReturnType<typeof fixture>, text: string) => {
+      const match = f.match(text); await f.provider.query(match, new AbortController().signal);
+      return f.provider.computeArgumentHint(match)?.emptyHint;
+    };
+
+    it('says no match when rules exist but the filter matches none, reading each scope once', async () => {
+      const f = fixture(); Object.assign(f.management, { trustOtherScopes: others([]) });
+      expect(await hint(f, 'zzq')).toBe('没有匹配项');
+      expect(f.management.trustList).toHaveBeenCalledTimes(1);
+      expect((f.management as unknown as { trustOtherScopes: ReturnType<typeof vi.fn> }).trustOtherScopes).toHaveBeenCalledTimes(1);
+    });
+
+    it('counts rules that only exist in other scopes as data', async () => {
+      const f = fixture([]); Object.assign(f.management, { trustOtherScopes: others([otherGroup]) });
+      expect(await hint(f, 'zzq')).toBe('没有匹配项');
+    });
+
+    it('gives the creation guidance only when every scope is confirmed empty', async () => {
+      const f = fixture([]); Object.assign(f.management, { trustOtherScopes: others([]) });
+      expect(await hint(f, '')).toBe(NONE);
+      expect(await hint(f, 'zzq')).toBe(NONE);
+    });
+
+    it('limits the statement to the current scope when other scopes cannot be read', async () => {
+      const empty = fixture([]); Object.assign(empty.management, { trustOtherScopes: others(Error('other scopes unavailable')) });
+      expect(await hint(empty, 'zzq')).toBe('当前范围暂无信任规则；其他范围暂时读不到，可按 Ctrl+R 刷新。');
+      const filled = fixture(); Object.assign(filled.management, { trustOtherScopes: others(Error('other scopes unavailable')) });
+      expect(await hint(filled, 'zzq')).toBe('当前范围没有匹配项；其他范围暂时读不到，可按 Ctrl+R 刷新。');
+    });
+
+    it('still reports a current-scope read failure as an error, never as an empty state', async () => {
+      const f = fixture(); f.management.trustList.mockRejectedValueOnce(Error('authority unavailable'));
+      await expect(f.query('zzq')).rejects.toThrow('authority unavailable');
+    });
+  });
 });
