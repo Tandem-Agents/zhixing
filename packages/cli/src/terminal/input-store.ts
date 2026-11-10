@@ -9,7 +9,8 @@ import { randomUUID } from 'node:crypto';
 interface InputBlob {
   readonly id: string; readonly purpose: 'draft' | 'paste';
   bytes: number; index: number; complete: boolean;
-  newlines: number; trailingNewlines: number; hasNonNewline: boolean;
+  // 逻辑行统计：CR、LF、CRLF 各算一个换行；afterCR 记上一字符是否为 CR，使跨片的 CRLF 只算一次
+  newlines: number; trailingNewlines: number; hasNonNewline: boolean; afterCR: boolean;
   failed: boolean; pasteId?: number; token?: string;
   readonly expectedBytes?: number;
   identity?: string;
@@ -55,7 +56,7 @@ export class TerminalInputStore {
     if (!UUID.test(id) || !['draft', 'paste'].includes(purpose) || this.#blobs.has(id)) throw Error('terminal-input-identity');
     if (expectedBytes !== undefined && (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0)) throw Error('terminal-input-size');
     if (this.#blobs.size >= 4096 || [...this.#blobs.values()].filter(blob => !blob.complete).length >= 4) throw Error('terminal-input-slot-capacity');
-    this.#blobs.set(id, { id, purpose, expectedBytes, bytes: 0, index: 0, complete: false, newlines: 0, trailingNewlines: 0, hasNonNewline: false, failed: false });
+    this.#blobs.set(id, { id, purpose, expectedBytes, bytes: 0, index: 0, complete: false, newlines: 0, trailingNewlines: 0, hasNonNewline: false, afterCR: false, failed: false });
     this.#unclaimed.add(id);
   }
 
@@ -83,9 +84,11 @@ export class TerminalInputStore {
         });
         blob.bytes += bytes.length; blob.index++; blob.complete = final;
         if (final) await this.#settle(blob);
+        // 只统计，不改写：存下的仍是收到的原字节
         for (const char of text) {
-          if (char === '\n') { blob.newlines++; blob.trailingNewlines++; }
-          else if (char !== '\r') { blob.hasNonNewline = true; blob.trailingNewlines = 0; }
+          if (char === '\r' || (char === '\n' && !blob.afterCR)) { blob.newlines++; blob.trailingNewlines++; }
+          else if (char !== '\n') { blob.hasNonNewline = true; blob.trailingNewlines = 0; }
+          blob.afterCR = char === '\r';
         }
       } catch (error) { blob.failed = true; throw error; }
     })).finally(() => { this.#pending--; });
@@ -278,6 +281,9 @@ export class TerminalInputStore {
       if (first < from && last > from) from = first;
       if (first < to && last > to) to = last;
     }
+    // 一个 CRLF 是一个逻辑换行：窗口边界不落在 CR 与 LF 之间，免得编辑区把它当成两个可编辑位置
+    if (from > 0 && text[from - 1] === '\r' && text[from] === '\n') from--;
+    if (to > 0 && to < text.length && text[to - 1] === '\r' && text[to] === '\n') to++;
     const value = text.slice(from, to);
     start += Buffer.byteLength(text.slice(0, from));
     const handles = new Map<string, { token: string; id: string; paste: boolean }>();

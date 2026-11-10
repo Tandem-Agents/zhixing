@@ -11,6 +11,7 @@ import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
+import { DraftDisplayAdapter, displayText as draftDisplay, displayToRaw, rawToDisplay } from './draft-projection.js';
 import { TerminalText } from './terminal-text.js';
 import { BodyView, TerminalScrollBox, isBodyTextLeaf, type BodyViewHandle, type BodyReadingState } from './body-view.js';
 import { copySource, type CopySource, type SelectionLeaf, type SelectionState } from './copy-selection.js';
@@ -135,11 +136,23 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   let atomicLayoutEditor: TextareaRenderable | undefined;
   let atomicLayoutRanges: readonly TerminalAtomicRange[] | undefined;
   const noAtomicRanges: readonly TerminalAtomicRange[] = [];
+  // 原子区间按原文偏移给出；原文含 CR 时换成编辑器显示偏移，同一份原文与区间只换算一次
+  let displayRanges: { source: readonly TerminalAtomicRange[]; raw: string; ranges: readonly TerminalAtomicRange[] } | undefined;
+  const editorRanges = (text: string): readonly TerminalAtomicRange[] | undefined => {
+    const source = view().kind === 'conversation' ? input.atomicRanges() : noAtomicRanges;
+    if (!source.length || !draft.text.includes('\r')) return source;
+    if (draftDisplay(draft.text) !== text) return undefined;
+    if (displayRanges?.source !== source || displayRanges.raw !== draft.text) {
+      displayRanges = { source, raw: draft.text, ranges: source.map(range => ({ ...range, start: rawToDisplay(draft.text, range.start), end: rawToDisplay(draft.text, range.end) })) };
+    }
+    return displayRanges.ranges;
+  };
   const syncEditor = () => {
     if (!editor || editor.isDestroyed || changingDraft) return;
     const text = editor.plainText;
-    const ranges = view().kind === 'conversation' ? input.atomicRanges() : noAtomicRanges;
-    if (atomicLayoutDirty || atomicLayoutEditor !== editor || atomicLayoutRanges !== ranges) {
+    // 编辑器与原文暂未同步（同一批操作的内容事件还没到）时不发布区间，留待同步后的这一步
+    const ranges = editorRanges(text);
+    if (ranges && (atomicLayoutDirty || atomicLayoutEditor !== editor || atomicLayoutRanges !== ranges)) {
       try {
         setEditorAtomicWrap(editor, text, ranges, renderer.widthMethod);
         atomicLayoutDirty = false; atomicLayoutEditor = editor; atomicLayoutRanges = ranges;
@@ -255,6 +268,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   let operationCount = 0;
   let changingDraft = false;
   let editorHistoryBytes = 0, editorHistoryEntries = 0;
+  // 编辑器只显示原文的 LF 投影；原文与原生历史对应的原文日志由它保存（见 draft-projection.ts）
+  const draftAdapter = new DraftDisplayAdapter();
   const [candidateRevision, setCandidateRevision] = createSignal(0);
   const trustControls = new TerminalTrustCandidateControls();
   let candidates: TerminalCandidateSession | undefined;
@@ -262,8 +277,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (view().kind === 'conversation' && editor && !editor.isDestroyed) {
       changingDraft = true;
       try {
-        if (editor.plainText !== draft.text) { editor.setText(draft.text); editorHistoryBytes = 0; editorHistoryEntries = 0; }
-        setEditorUtf16Cursor(editor, draft.text, draft.cursor, renderer.widthMethod);
+        // 输入会话换了草稿（再次粘贴、恢复历史、原子编辑、换窗口）：重显投影并同时清空原生历史与原文日志
+        const shown = draftDisplay(draft.text);
+        if (editor.plainText !== shown || draftAdapter.raw !== draft.text) {
+          editor.setText(shown); draftAdapter.reset(draft.text); editorHistoryBytes = 0; editorHistoryEntries = 0;
+        }
+        setEditorUtf16Cursor(editor, shown, rawToDisplay(draft.text, draft.cursor), renderer.widthMethod);
       } finally { changingDraft = false; }
       syncEditor();
     }
@@ -312,9 +331,26 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     error: candidateValue()?.error, safe: view().connected !== false && size().height >= 18 && size().width >= 40 });
   createEffect(() => { if (trustControls.sync(trustSnapshot())) setStatus(''); });
   const editorValue = () => editor && !editor.isDestroyed ? editor.plainText : '';
+  // 把编辑器重显为某份原文的投影；setText 同时清空原生历史，原文日志随之清空
+  const showDraft = (raw: string, cursor: number) => {
+    changingDraft = true;
+    try { const shown = draftDisplay(raw); editor!.setText(shown); setEditorUtf16Cursor(editor!, shown, rawToDisplay(raw, cursor), renderer.widthMethod); }
+    finally { changingDraft = false; }
+    draftAdapter.reset(raw); editorHistoryBytes = 0; editorHistoryEntries = 0;
+  };
   const preserveDraft = () => {
     if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
-      const text = editor.plainText, cursor = editorUtf16Cursor(editor);
+      const shown = editor.plainText;
+      draftAdapter.follow(shown);
+      if (draftAdapter.mismatch || draftDisplay(draftAdapter.raw) !== shown) {
+        // 编辑对不上原文：不发布猜测的正文，保留最后确认的原文，恢复显示并说明未应用
+        const raw = draftAdapter.raw, cursor = displayToRaw(raw, Math.min(editorUtf16Cursor(editor), draftDisplay(raw).length));
+        showDraft(raw, cursor);
+        try { input.edit(raw, cursor); } catch { /* 原文仍在会话里，下面的状态说明已足够 */ }
+        setStatus('这次编辑没能对应到原文，未应用；已保留原文。');
+        syncEditor(); candidates?.sync(view().kind === 'conversation'); return;
+      }
+      const text = draftAdapter.raw, cursor = displayToRaw(text, editorUtf16Cursor(editor));
       // 用户改了草稿或光标：尚未发出的进入随之作废（解除冻结，下面的同步按新草稿查询候选）
       if (text !== draft.text || cursor !== draft.cursor) voidPendingEntry();
       try {
@@ -325,16 +361,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           editorHistoryBytes += Buffer.byteLength(text) + Buffer.byteLength(draft.text); editorHistoryEntries++;
         }
         input.edit(text, cursor);
-        if (editorHistoryBytes >= 1024 * 1024 || editorHistoryEntries >= 1024) {
-          changingDraft = true;
-          try { editor.setText(text); setEditorUtf16Cursor(editor, text, cursor, renderer.widthMethod); editorHistoryBytes = 0; editorHistoryEntries = 0; }
-          finally { changingDraft = false; }
-        }
+        // 原文日志与原生历史同属一份撤销历史，共用这一组上限，到边界时一起释放
+        if (editorHistoryBytes + draftAdapter.historyBytes >= 1024 * 1024 || editorHistoryEntries >= 1024) showDraft(text, cursor);
         void input.compact().catch(reportStatus());
       } catch (error) {
-        changingDraft = true;
-        try { editor.setText(draft.text); setEditorUtf16Cursor(editor, draft.text, draft.cursor, renderer.widthMethod); editorHistoryBytes = 0; editorHistoryEntries = 0; }
-        finally { changingDraft = false; }
+        showDraft(draft.text, draft.cursor);
         setStatus(error instanceof Error ? error.message : '输入暂不可用，草稿保留。');
       }
     }
@@ -343,9 +374,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const preserveCursor = () => {
     if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
-      const cursor = editorUtf16Cursor(editor);
-      if (cursor !== draft.cursor) voidPendingEntry();
-      input.edit(draft.text, cursor);
+      // 光标事件先于同一次编辑的内容事件到达：原文还没跟上编辑器时只等内容同步，不把新光标套到旧原文上
+      draftAdapter.follow(editor.plainText);
+      if (!draftAdapter.mismatch && draftAdapter.raw === draft.text && draftDisplay(draft.text) === editor.plainText) {
+        const cursor = displayToRaw(draft.text, editorUtf16Cursor(editor));
+        if (cursor !== draft.cursor) voidPendingEntry();
+        input.edit(draft.text, cursor);
+      }
     }
     candidates?.sync(view().kind === 'conversation');
   };
@@ -371,9 +406,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const attach = (value: TextareaRenderable) => {
     editor = value; atomicLayoutDirty = true;
+    // 原文日志只属于当前编辑器与当前草稿：新编辑器的原生历史为空，日志从当前原文重新开始
+    draftAdapter.reset(draft.text);
+    if (value instanceof TerminalTextarea) value.editSteps = {
+      wanted: () => editor === value && view().kind === 'conversation' && !changingDraft && draftAdapter.tracking,
+      step: step => draftAdapter.step(step),
+    };
     queueMicrotask(() => { if (!value.isDestroyed) {
       if (view().kind === 'conversation') {
-        changingDraft = true; try { setEditorUtf16Cursor(value, draft.text, draft.cursor, renderer.widthMethod); } finally { changingDraft = false; }
+        changingDraft = true; try { setEditorUtf16Cursor(value, draftDisplay(draft.text), rawToDisplay(draft.text, draft.cursor), renderer.widthMethod); } finally { changingDraft = false; }
       } else if (view().field && !view().field!.secret) {
         // 预填的字段（改名、模型 id 等）光标放在末尾：退格直接修改原值，输入接在原值后面
         const initial = view().field!.value ?? '';

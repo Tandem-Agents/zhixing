@@ -328,6 +328,105 @@ try {
   editor().cursorOffset = 2; test.mockInput.pressArrow('right'); await flush();
   assert.equal(editor().cursorOffset, 7, 'the token is still crossed as one unit');
   pasteReply = undefined; editor().setText(''); await flush();
+  // 原文含 CR、CRLF 的草稿：编辑器只显示 LF 投影。不编辑不写回；局部编辑、在原换行前后插入换行、同一帧内删除与撤销/重做
+  // 都只改动对应的原文片段；对不上原文时不发布猜测的正文。提交时界面上传给 N 的草稿即原文（逐字节比对）。
+  {
+    const crlfDraft = async (raw: string) => {
+      pasteReply = () => ({ text: raw, paste: true, handles: [] });
+      const sink = externalPaste?.(); assert.ok(sink);
+      sink.write(Buffer.from('payload')); sink.end(); await flush(); await flush();
+      pasteReply = undefined;
+    };
+    const uploaded = async () => {
+      await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+      // 提交时上传给 N 的草稿正文。替身照 N 的合同回应拼接（短草稿的已保存窗口覆盖全文，结果字节数即本次上传的字节数），
+      // 提交完整发出后回“未接纳”，草稿保留在编辑器里
+      entryReply = action => action.kind !== 'input-splice' ? undefined : Promise.resolve((() => {
+        const upload = actions.findLast(item => item.kind === 'input-begin' && item.inputId === action.replacementId) as Extract<TerminalAction, { kind: 'input-begin' }> | undefined;
+        return { inputId: crypto.randomUUID(), bytes: upload?.bytes ?? 0, start: action.start, end: action.start + (upload?.bytes ?? 0) };
+      })());
+      const start = actions.length; test.mockInput.pressEnter(); await flush(); await flush();
+      for (let wait = 0; wait < 40 && !actions.slice(start).some(action => action.kind === 'input-submit'); wait++) { await new Promise(resolve => setTimeout(resolve, 10)); await flush(); }
+      entryReply = undefined;
+      const begin = actions.slice(start).findLast(action => action.kind === 'input-begin' && action.purpose === 'draft') as Extract<TerminalAction, { kind: 'input-begin' }> | undefined;
+      const submitted = actions.slice(start).findLast(action => action.kind === 'input-submit') as Extract<TerminalAction, { kind: 'input-submit' }> | undefined;
+      assert.ok(begin && submitted, `submit uploads the draft and reaches N: ${JSON.stringify(actions.slice(start).map(action => action.kind))} status=${text().split('\n').filter(line => line.trim()).slice(-1).join('')}`);
+      root!.receive({ type: 'submission', inputId: submitted.inputId, version: submitted.version, accepted: false }); await flush();
+      return actions.slice(start).filter(action => action.kind === 'input-part' && action.inputId === begin.inputId)
+        .map(action => (action as Extract<TerminalAction, { kind: 'input-part' }>).text).join('');
+    };
+    const clearDraft = async () => { test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush(); assert.equal(editor().plainText, ''); };
+    const at = async (display: number) => { editor().cursorOffset = display; await flush(); };
+    // 前面的用例有提交没给回执：先逐个结清（未接纳），再清空草稿，从干净的输入开始
+    for (const action of actions) if (action.kind === 'input-submit') root!.receive({ type: 'submission', inputId: action.inputId, version: action.version, accepted: false });
+    await flush(); if (editor().plainText) await clearDraft();
+
+    await crlfDraft('A\r\nB\rC');
+    assert.equal(editor().plainText, 'A\nB\nC', 'the native editor shows the LF projection');
+    test.mockInput.pressArrow('left'); test.mockInput.pressArrow('right'); await flush();
+    assert.equal(await uploaded(), 'A\r\nB\rC', 'moving the cursor never writes the projection back');
+    await clearDraft();
+
+    await crlfDraft('A\r\nB'); await at(1); await linefeed();
+    assert.equal(await uploaded(), 'A\n\r\nB', 'a line break typed before an original CRLF goes before it');
+    await clearDraft();
+    await crlfDraft('A\r\nB'); await at(2); await linefeed();
+    assert.equal(await uploaded(), 'A\r\n\nB', 'a line break typed after an original CRLF goes after it');
+    await clearDraft();
+
+    await crlfDraft('x\r\ny\rz'); await at(3); test.mockInput.pressKey('Q'); await flush();
+    assert.equal(await uploaded(), 'x\r\nyQ\rz', 'a local edit keeps every untouched CR and CRLF');
+    await clearDraft();
+
+    // Ctrl+V 交付的单独 CR：LF 紧接其后时两个逻辑换行都保留（改动区补一个编码 LF），撤销回到收到的原字节
+    await crlfDraft('a\rb'); await at(2); await linefeed();
+    assert.equal(editor().plainText, 'a\n\nb');
+    assert.equal(await uploaded(), 'a\r\n\nb', 'a line break typed right after a lone CR keeps both logical breaks');
+    test.mockInput.pressKey('-', { ctrl: true }); await flush();
+    assert.equal(await uploaded(), 'a\rb', 'undo returns to the received bytes');
+    await clearDraft();
+    await crlfDraft('a\rX\nb'); await at(3); test.mockInput.pressBackspace(); await flush();
+    assert.equal(editor().plainText, 'a\n\nb');
+    assert.equal(await uploaded(), 'a\r\n\nb', 'deleting between a lone CR and an LF keeps both logical breaks');
+    test.mockInput.pressKey('-', { ctrl: true }); await flush();
+    assert.equal(await uploaded(), 'a\rX\nb', 'undo restores the deleted character and the original bytes');
+    await clearDraft();
+
+    // 同一帧内：Backspace 删掉 CRLF，再 Ctrl+-、Ctrl+.、Ctrl+-（OpenTUI 的撤销/重做键位），中间不刷新
+    await crlfDraft('A\r\nB'); await at(2);
+    test.mockInput.pressBackspace(); test.mockInput.pressKey('-', { ctrl: true }); test.mockInput.pressKey('.', { ctrl: true }); test.mockInput.pressKey('-', { ctrl: true });
+    await flush();
+    assert.equal(editor().plainText, 'A\nB');
+    assert.equal(await uploaded(), 'A\r\nB', 'native undo after deleting a CRLF restores the original CRLF');
+    test.mockInput.pressKey('.', { ctrl: true }); await flush();
+    assert.equal(await uploaded(), 'AB', 'native redo removes the original CRLF again');
+    await clearDraft();
+    // 删除与撤销分在两帧：撤销读回的只有 LF，原文日志把 CRLF 还原
+    await crlfDraft('A\r\nB'); await at(2);
+    test.mockInput.pressBackspace(); await flush(); test.mockInput.pressKey('-', { ctrl: true }); await flush();
+    assert.equal(await uploaded(), 'A\r\nB', 'an undo in a later frame restores the original CRLF');
+    await clearDraft();
+
+    // 未经修改入口的文本变化：保留最后确认的原文，恢复显示并说明未应用
+    await crlfDraft('A\r\nB');
+    resolveRenderLib().editBufferInsertText(editor().editBuffer.ptr, 'Z'); await flush();
+    assert.equal(editor().plainText, 'A\nB', 'an unmatched change is not applied');
+    assert.ok(text().includes('这次编辑没能对应到原文'), 'the refusal is stated');
+    assert.equal(await uploaded(), 'A\r\nB', 'the last confirmed original is kept');
+    await clearDraft();
+
+    // 原子 token 前有 CRLF：区间按显示偏移发布，右移仍整块跨过
+    pasteReply = () => ({ text: 'x\r\ny[A B]z', paste: true, handles: [{ token: '[A B]', id: '44444444-4444-4444-4444-444444444444' }] });
+    const tokenSink = externalPaste?.(); assert.ok(tokenSink);
+    tokenSink.write(Buffer.from('payload')); tokenSink.end(); await flush(); await flush(); pasteReply = undefined;
+    await at(3); test.mockInput.pressArrow('right'); await flush();
+    assert.equal(editor().cursorOffset, 8, 'the token after a CRLF is crossed as one unit');
+    assert.equal(await uploaded(), 'x\r\ny[A B]z');
+    await clearDraft();
+    // 最后一次“未接纳”的说明随下一次真实编辑清除，后面的用例从默认提示开始
+    await typeEach('x'); await clearDraft();
+    checks.push('CR/CRLF drafts: LF projection, no write-back, cursor-anchored inserts, local edits, same-frame delete/undo/redo, refusal of unmatched edits, token ranges');
+  }
   // 字段（改名）共用同一编辑器
   await show({ kind: 'selection', title: '对话名称', requestId: 'multiline-field', field: { id: 'name', label: '输入新名称', secret: false, value: '' }, choices: [{ id: 'save', label: '保存' }] });
   await typeEach('ab'); await linefeed(); await typeEach('cd');

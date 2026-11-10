@@ -399,6 +399,39 @@ describe('terminal cold original references', () => {
     expect(h.store.completePaste(id).fold).toBe(fold);
   });
 
+  // Windows Terminal 的 Ctrl+V 把换行送成单独 CR；CR、LF、CRLF 都是逻辑换行，原字节照收到的保存
+  it.each([
+    ['a\rb\rc', 3, false], ['a\rb\rc\rd', 4, true], ['a\rb\rc\rd\r\r', 4, true], ['a\r\nb\nc\rd', 4, true], ['\r\n\r\n', 0, false],
+  ] as const)('counts CR, LF and CRLF as logical lines and keeps the received bytes (%j)', async (text, lines, fold) => {
+    const h = await setup(), id = randomUUID(); h.store.begin(id, 'paste'); await h.store.part(id, 0, text, true);
+    const paste = h.store.completePaste(id);
+    expect(paste.fold).toBe(fold);
+    expect(paste.token).toContain(`+${lines} lines · ${Buffer.byteLength(text)}B`);
+    expect(await h.store.text(id, 2 * 1024 * 1024)).toBe(text);
+  });
+
+  it('counts a CRLF split across two parts as one line break', async () => {
+    const h = await setup(), id = randomUUID(); h.store.begin(id, 'paste');
+    await h.store.part(id, 0, 'one\r', false); await h.store.part(id, 1, '\ntwo\r', false);
+    await h.store.part(id, 2, '\nthree\r', false); await h.store.part(id, 3, '\nfour', true);
+    expect(h.store.completePaste(id)).toMatchObject({ fold: true, bytes: 21 });
+    expect(h.store.completePaste(id).token).toContain('+4 lines');
+    expect(await h.store.text(id, 2 * 1024 * 1024)).toBe('one\r\ntwo\r\nthree\r\nfour');
+  });
+
+  it('never splits a CRLF at either edge of an edit window', async () => {
+    const h = await setup(), chars = Array.from('a'.repeat(100_000));
+    // window(…, 50000)：可见区起点 37712、终点 62288（ASCII 时字节与字符一致）
+    chars[37_711] = '\r'; chars[37_712] = '\n'; chars[62_287] = '\r'; chars[62_288] = '\n';
+    const original = chars.join(''), id = randomUUID(); h.store.begin(id, 'draft');
+    for (let at = 0, index = 0; at < original.length; at += 8192) await h.store.part(id, index++, original.slice(at, at + 8192), false);
+    await h.store.part(id, Math.ceil(original.length / 8192), '', true);
+    const page = await h.store.window(id, 50_000);
+    expect([page.start, page.end]).toEqual([37_711, 62_289]);
+    expect(page.text.startsWith('\r\n')).toBe(true); expect(page.text.endsWith('\r\n')).toBe(true);
+    expect(page.text).toBe(original.slice(page.start, page.end));
+  });
+
   it('folds the first long paste inside surrounding text and settles its token extent before the suffix copy', async () => {
     const h = await setup(), incoming = randomUUID(); h.store.begin(incoming, 'paste'); await h.store.part(incoming, 0, '中'.repeat(80), true);
     const paste = h.store.completePaste(incoming), source = await draft(h.store, 'beforeMARKafter');
