@@ -1,0 +1,32 @@
+name: Quality gate
+
+# 防复发：develop/main 的每次推送与 PR 都跑完整 `pnpm lint`
+# （安全三项、S7 结构闸与自测、注册表金样、S7 行为承接用例、Biome）。
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.0.0'
+      - name: Enable the pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # S7 结构闸经包导出读取 core、mesh、orchestrator、owner-kernel、rpc、runtime-host、tools-builtin 的 dist：
+      # 只按拓扑顺序对它们及依赖跑 tsup，不编译原生终端与 mesh 原生桥（lint 不加载它们）。
+      - name: Build TypeScript packages the gate imports
+        run: pnpm lint:prepare
+      - name: Lint
+        run: pnpm lint
