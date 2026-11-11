@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { connect } from 'node:net';
@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createPlatformSecretStore } from '@zhixing/secrets';
+import { createTempDir } from '@zhixing/test-utils';
 
 describe.skipIf(process.platform !== 'win32')('terminal native log declaration', () => {
   it('matches existing lock births and round-trips current-user DPAPI without shell-owned secrets', async () => {
@@ -28,7 +29,7 @@ describe.skipIf(process.platform !== 'win32')('terminal native log declaration',
     expect(() => native.protectKey('protect', Buffer.alloc(33))).toThrow('terminal-credential-input-invalid');
     expect(() => native.protectKey('protect\0extra', Buffer.alloc(32))).toThrow('terminal-credential-input-invalid');
     original.fill(0); unprotected.fill(0);
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'terminal-native-vault-'));
+    const directory = await createTempDir('terminal-native-vault');
     try {
       const options = { homeDir: directory, processIdentityResolver: { read: async () => actual as { kind: 'present'; birth: string } } };
       const nativeOptions = { ...options, windowsProtection: (mode: 'protect' | 'unprotect', input: Uint8Array) => native.protectKey(mode, Buffer.from(input)) };
@@ -44,7 +45,7 @@ describe.skipIf(process.platform !== 'win32')('terminal native log declaration',
     } finally { await rm(directory, { recursive: true, force: true }); }
   }, 15000);
   it('proves the current OS peer during a blocked JS loop and releases/reopens its endpoint', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'terminal-log-proof-'));
+    const home = await createTempDir('terminal-log-proof');
     const artifact = fileURLToPath(new URL('../../../../terminal-ui/dist/win32-x64/foreground.node', import.meta.url));
     const create = terminalWriterDeclarationFactory(artifact)!;
     const files = new LogFilesProcess(home);

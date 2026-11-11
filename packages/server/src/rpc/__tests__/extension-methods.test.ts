@@ -1,19 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionRefresh, extensionSetEnabled } from "@zhixing/core/extensions/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { buildExtensionMethods } from "../methods/extensions.js";
+import { createTempDir } from "@zhixing/test-utils";
 
 vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
 
-const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 async function fixture(loopback = true, onlyOperation?: typeof extensionRefresh | typeof extensionSetEnabled) {
-  const root = await mkdtemp(join(tmpdir(), "zhixing-extension-rpc-")); roots.push(root);
+  const root = await createTempDir("extension-rpc");
   const log = new FileAuthorityCommitLog(root, new FileArtifactStore(join(root, "artifacts")));
   const application = new ExtensionApplication({ log: () => log, assertOwner() {} });
   const effects = {

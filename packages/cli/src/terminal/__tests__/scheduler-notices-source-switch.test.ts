@@ -1,5 +1,3 @@
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { FileArtifactStore, FileAuthorityCommitLog, type ProjectionTransactionContext } from '@zhixing/core/authority';
@@ -8,6 +6,7 @@ import { createOwnerDeliveryParticipant } from '@zhixing/owner-kernel/delivery';
 import { SchedulerUserNoticeJournal } from '@zhixing/owner-kernel/scheduler-user-notices';
 import type { SchedulerNoticePage } from '../../runtime/rpc-scheduler-facade.js';
 import { schedulerNoticeProgressFile, TerminalSchedulerNotices } from '../scheduler-notices.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 // 源端与终端联动：真实通知日志（两代各一份权威日志）、真实终端消费者与真实进度文件
 const NOW = '2026-11-03T00:00:00.000Z';
@@ -51,7 +50,7 @@ async function settle(notices: TerminalSchedulerNotices) {
 
 describe('scheduler notice cursor across a source switch', () => {
   it('resumes a stale partial cursor on a shorter new source from its start and shows the new summary once', { timeout: 60_000 }, async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'zx-notice-switch-'));
+    const root = await createTempDir('notice-switch');
     const file = path.join(root, 'home', 'runtime', 'terminal-scheduler-notices.json');
     const a = await source(path.join(root, 'a'));
     const b = await source(path.join(root, 'b'));

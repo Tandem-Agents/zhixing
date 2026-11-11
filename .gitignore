@@ -5,6 +5,8 @@ node_modules/
 # Build output
 dist/
 build/
+# cli 的源码目录恰好叫 build（启动图打包检查及其测试），不是构建产物
+!packages/cli/src/build/
 out/
 *.tsbuildinfo
 

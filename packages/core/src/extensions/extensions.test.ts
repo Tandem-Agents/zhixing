@@ -1,8 +1,7 @@
 import { recordingFixture } from "../logging/__tests__/recording.js";
 import { EXTENSION_LOG_SOURCE } from "./logging.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { FileAuthorityCommitLog } from "../authority/commit-log.js";
@@ -12,19 +11,17 @@ import { ExtensionArtifacts } from "./artifacts.js";
 import { ManagedExtensions } from "./runtime.js";
 import { validateExtensionManifest, type ExtensionBinding } from "./contracts.js";
 import { ExtensionPeer } from "./protocol.js";
-
-const roots: string[] = [];
+import { createTempDir } from "@zhixing/test-utils";
 const runtimes: ManagedExtensions[] = [];
 const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
   await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance()));
   vi.restoreAllMocks();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function fixture(mode = "normal", projection = async () => ({ mode }), recordsFor?: ConstructorParameters<typeof ManagedExtensions>[0]["recordsFor"]) {
-  const root = await mkdtemp(join(tmpdir(), "zhixing-extensions-")); roots.push(root);
+  const root = await createTempDir("extensions");
   const log = new FileAuthorityCommitLog(root, new FileArtifactStore(join(root, "authority-artifacts")));
   logs.push(log);
   const application = new ExtensionApplication({ log: () => log, assertOwner() {} });

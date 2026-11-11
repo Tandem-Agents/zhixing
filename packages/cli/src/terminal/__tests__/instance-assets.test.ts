@@ -1,22 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
 import { TerminalInstanceAssets, type TerminalIdentityResolver } from '../instance-assets.js';
+import { createTempDir } from '@zhixing/test-utils';
 
-const roots: string[] = [];
 const owners: TerminalInstanceAssets[] = [];
 afterEach(async () => {
   for (const owner of owners.splice(0)) await owner.close();
-  for (const root of roots.splice(0)) {
-    const resolved = path.resolve(root), temporary = path.resolve(os.tmpdir()) + path.sep;
-    if (!resolved.startsWith(temporary) || !path.basename(resolved).startsWith('zhixing-terminal-assets-')) throw Error('Unexpected cleanup boundary');
-    await rm(resolved, { recursive: true, force: true });
-  }
 });
 
 function capacity() {
@@ -44,7 +39,7 @@ function capacity() {
 }
 
 async function setup() {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+  const home = await createTempDir('terminal-assets');
   const resources = capacity();
   const identity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
   const assets = new TerminalInstanceAssets(home, resources.owner, identity);
@@ -126,7 +121,7 @@ describe('terminal instance root admission', () => {
 
   it('queries the filesystem writer only after the first locked file operation has brought its helper up', async () => {
     // 生产里写者辅助进程由第一次文件操作拉起，之前查询身份即失败；准入不得在那之前发起该查询
-    const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+    const home = await createTempDir('terminal-assets');
     const identity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
     const lock = path.join(home, 'temporary', 'terminal', 'owner.lock');
     const writer = { pid: 123458, birth: 'synthetic-file-worker', spawnId: randomUUID() };
@@ -143,7 +138,7 @@ describe('terminal instance root admission', () => {
   });
 
   it('removes its own unpublished instance directory when admission fails after creating it, so the next admission succeeds', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+    const home = await createTempDir('terminal-assets');
     const identity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
     const recovery = () => ({ pid: process.pid, birth: 'synthetic-self-birth', spawnId: randomUUID() });
     const failing = new TerminalInstanceAssets(home, capacity().owner, identity, undefined, async () => { throw Error('terminal-assets-worker-unregistered'); });
@@ -160,7 +155,7 @@ describe('terminal instance root admission', () => {
     const selfIdentity: TerminalIdentityResolver = { async read(pid) { return pid === process.pid ? { kind: 'present', birth: 'synthetic-self-birth' } : { kind: 'absent' }; } };
     const recovery = () => ({ pid: process.pid, birth: 'synthetic-self-birth', spawnId: randomUUID() });
     async function homeWith(build: (instance: string) => Promise<void>) {
-      const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+      const home = await createTempDir('terminal-assets');
       const root = path.join(home, 'temporary', 'terminal');
       // 先由一次正常准入与释放建好受管根，再放入残留
       const first = new TerminalInstanceAssets(home, capacity().owner, selfIdentity); owners.push(first);
@@ -192,7 +187,7 @@ describe('terminal instance root admission', () => {
       ['an extra entry', async (instance: string) => { await mkdir(path.join(instance, 'display')); await mkdir(path.join(instance, 'cache')); }],
       ['a file in place of a child directory', async (instance: string) => { await writeFile(path.join(instance, 'runtime'), ''); }],
       ['a junction in place of a child directory', async (instance: string) => {
-        const target = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(target);
+        const target = await createTempDir('terminal-assets');
         await symlink(target, path.join(instance, 'input'), 'junction');
       }],
     ])('keeps residue with %s and refuses admission as before', async (_name, build) => {
@@ -202,7 +197,7 @@ describe('terminal instance root admission', () => {
     });
 
     it('cannot reclaim a creator\'s directory while that creator still holds the root lock', async () => {
-      const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); roots.push(home);
+      const home = await createTempDir('terminal-assets');
       const gate = Promise.withResolvers<void>(), waiting = Promise.withResolvers<void>();
       const holder = new TerminalInstanceAssets(home, capacity().owner, selfIdentity, undefined, async () => {
         waiting.resolve(); await gate.promise; return { pid: 123459, birth: 'synthetic-file-worker', spawnId: randomUUID() };

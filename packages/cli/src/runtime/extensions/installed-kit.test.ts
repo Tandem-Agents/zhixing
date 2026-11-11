@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -13,17 +12,15 @@ import { ManagedExtensions } from "@zhixing/core/extensions/runtime";
 import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing/core/authority";
 import { extensionKitDirectory } from "./catalog.js";
 import type { ExtensionCandidate } from "@zhixing/core/extensions/contracts";
-
-const roots: string[] = [];
+import { createTempDir } from "@zhixing/test-utils";
 const runtimes: ManagedExtensions[] = [];
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map(runtime => runtime.close()));
-  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
 describe("official installed extension authoring kit", { timeout: 20_000 }, () => {
   it("can author, validate, archive and run an adapter outside the repository without importing product source", async () => {
-    const root = await mkdtemp(join(tmpdir(), "zhixing-installed-kit-")); roots.push(root);
+    const root = await createTempDir("installed-kit");
     const kit = join(root, "kit"); await cp(extensionKitDirectory(), kit, { recursive: true });
     expect(await readFile(join(kit, "authoring.md"), "utf8")).toContain("管理协议 1");
     expect(JSON.parse(await readFile(join(kit, "manifest.schema.json"), "utf8")).properties.protocol.const).toBe(1);

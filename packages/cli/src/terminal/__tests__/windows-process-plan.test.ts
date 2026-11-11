@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { windowsProcessPlan } from '../windows-process-plan.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 describe.runIf(process.platform === 'win32')('Windows owned process plans', () => {
   it('按子环境查找裸命令，准确传递脚本参数且不解释元字符', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'zhixing-process-plan-'));
+    const directory = await createTempDir('process-plan');
     try {
       const bin = path.join(directory, 'space bin'); await mkdir(bin);
       const echo = path.join(directory, 'echo.mjs');

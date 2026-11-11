@@ -1,15 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FileArtifactStore } from '../authority/artifact-store.js';
 import { projectSessionEvent, type SessionEventProjection } from '../types/agent-events.js';
 import { prepareStreamDataPayload, readStreamDisplayPayload, validateSessionEventProjection } from './stream.js';
 import { stripPresentationFromAgentYield } from '../loop/presentation.js';
 import { errorCauseSummary } from '../resilience/classify.js';
-const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function store() { const root = await mkdtemp(join(tmpdir(), 'zhixing-process-')); roots.push(root); return new FileArtifactStore(root); }
+import { createTempDir } from '@zhixing/test-utils';
+async function store() { const root = await createTempDir('process'); return new FileArtifactStore(root); }
 describe('finite process events and canonical display read', () => {
   it('keeps the default result closed instead of exposing display extensions through alternate keys', () => {
     const input = { type: 'tool_end' as const, id: 't', name: 'edit', duration: 1,

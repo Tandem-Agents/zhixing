@@ -2,19 +2,16 @@
  * 段文件身份核对按源操作只做一次：同一操作内反复点查只在首次复用缓存前核对每个段；换一个操作必重核；
  * 非协作写者在两次操作之间替换段文件，下一次操作即发现并拒绝沿用缓存。
  */
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileDurableProjectionIndex } from "../index.js";
-
-const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+import { createTempDir } from "@zhixing/test-utils";
 const checkpoint = (lsn: number) => ({ logId: "segment-operation", lsn, frameEndOffset: 64 + lsn, prefixDigest: `sha256:${String(lsn).padStart(64, "0")}` });
 
 async function fixture() {
-  const root = await mkdtemp(path.join(os.tmpdir(), "segment-operation-"));
-  roots.push(root);
+  const root = await createTempDir("segment-operation");
   const opens: string[] = [];
   let operation: object | undefined;
   const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: "segment-operation", reducerVersion: 1,

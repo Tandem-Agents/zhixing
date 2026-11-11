@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { SchedulerNoticePage, SchedulerNoticeView } from '../../runtime/rpc-scheduler-facade.js';
+import { createTempDir } from '@zhixing/test-utils';
 import {
   schedulerNoticeProgressFile, TerminalSchedulerNotices,
   type SchedulerNoticeProgress, type SchedulerNoticeProgressStore,
@@ -218,7 +218,7 @@ describe('first-party scheduler notices in the terminal', () => {
 });
 
 describe('scheduler notice progress file under concurrent terminals', () => {
-  const fileIn = async () => join(await mkdtemp(join(tmpdir(), 'zx-notice-race-')), 'runtime', 'terminal-scheduler-notices.json');
+  const fileIn = async () => join(await createTempDir('notice-race'), 'runtime', 'terminal-scheduler-notices.json');
 
   it('serializes read-merge-write so a stale writer cannot lower the position', async () => {
     const file = await fileIn();
@@ -263,7 +263,7 @@ describe('scheduler notice progress file under concurrent terminals', () => {
 
 describe('scheduler notice progress file', () => {
   it('persists across processes, merges by composite position and treats damage as fresh progress', async () => {
-    const file = join(await mkdtemp(join(tmpdir(), 'zx-notice-progress-')), 'runtime', 'terminal-scheduler-notices.json');
+    const file = join(await createTempDir('notice-progress'), 'runtime', 'terminal-scheduler-notices.json');
     const a = schedulerNoticeProgressFile(file), b = schedulerNoticeProgressFile(file);
     expect(await a.load()).toBeUndefined();
     await a.save({ source: 's', watermark: 4, skip: 2 });

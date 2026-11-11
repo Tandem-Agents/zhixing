@@ -1,22 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { DeviceCapacityStepPermit } from '@zhixing/core/resources';
 import { TerminalManagedFiles } from '../managed-files.js';
 import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
+import { createTempDir } from '@zhixing/test-utils';
 
 const fixtures: { root: string; files: TerminalManagedFiles }[] = [];
 const step: DeviceCapacityStepPermit = { claim() {}, complete() {} };
 afterEach(async () => {
-  for (const { root, files } of fixtures.splice(0)) {
-    await files.close();
-    if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) || !path.basename(root).startsWith('zhixing-terminal-file-race-')) throw Error('Invalid fixture cleanup');
-    await rm(root, { recursive: true, force: true });
-  }
+  // 目录由 createTempDir 在 afterEach 之后清理，这里只先关闭句柄
+  for (const { files } of fixtures.splice(0)) await files.close();
 });
 async function setup() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-file-race-'));
+  const root = await createTempDir('terminal-file-race');
   await mkdir(path.join(root, 'input')); await mkdir(path.join(root, 'outside'));
   const files = new TerminalManagedFiles(root); fixtures.push({ root, files });
   return { root, files };

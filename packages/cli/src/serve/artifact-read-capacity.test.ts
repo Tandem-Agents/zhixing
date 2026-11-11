@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,9 +19,9 @@ import {
 } from "@zhixing/core/resources";
 import { artifactReadCapacity, projectionReadCapacity } from "./artifact-read-capacity.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
+import { createTempDir } from '@zhixing/test-utils';
 
 const MIB = 1024 * 1024;
-const roots: string[] = [];
 const abort = new AbortController().signal;
 const workload: DeviceCapacityBudget = {
   occupancy: { memoryReservationBytes: MIB, temporaryBytes: 0, slots: 1 },
@@ -29,8 +29,7 @@ const workload: DeviceCapacityBudget = {
 };
 
 async function fixture() {
-  const root = await mkdtemp(path.join(os.tmpdir(), "artifact-read-capacity-"));
-  roots.push(root);
+  const root = await createTempDir('artifact-read-capacity');
   const defaults = createDefaultDeviceCapacityPolicy();
   const arbiter = new DefaultDeviceCapacityArbiter({
     policy: {
@@ -54,12 +53,11 @@ async function fixture() {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
 describe("artifact read capacity", () => {
   it('子任务流发布及重启核验共享Host读取准入，不消耗零I/O的外层预算', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'artifact-read-capacity-')); roots.push(home);
+    const home = await createTempDir('artifact-read-capacity');
     const runtime = createDeviceCapacityRuntime(home, { activityDriven: true });
     const arbiter = runtime.arbiter;
     const store = new FileArtifactStore(path.join(home, 'artifacts'), { runReadStep: artifactReadCapacity(arbiter) });
@@ -97,7 +95,7 @@ describe("artifact read capacity", () => {
   });
 
   it("reads through the real Host arbiter and permit wrappers", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "artifact-read-capacity-")); roots.push(root);
+    const root = await createTempDir('artifact-read-capacity');
     const runtime = createDeviceCapacityRuntime(root, { activityDriven: true });
     try {
       const store = new FileArtifactStore(path.join(root, "artifacts"), { runReadStep: artifactReadCapacity(runtime.arbiter) });

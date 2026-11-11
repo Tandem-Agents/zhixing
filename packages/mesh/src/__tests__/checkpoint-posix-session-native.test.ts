@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { access, link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { closeSync, constants, openSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { CheckpointDirectoryHandle } from '../checkpoint-child-bridge.js';
 import { checkpointBridgeTarget, verifyCheckpointBridgeArtifact } from '../checkpoint-bridge-artifact.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 const posix = process.platform === 'linux' || process.platform === 'darwin';
 
@@ -71,7 +71,7 @@ finally:
 
 describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   it('rejects different-case names of one inode before copying on a case-insensitive volume', async context => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-case-alias-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-case-alias'));
     const native = nativeFixture(), raw = native.openPath(root, false);
     const session = CheckpointDirectoryHandle.createPosixSession();
     try {
@@ -103,7 +103,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   });
 
   it('rejects invalid creation and unsafe replacement before changing names', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-admission-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-admission'));
     const native = nativeFixture(), raw = native.openPath(root, false);
     const session = CheckpointDirectoryHandle.createPosixSession();
     try {
@@ -137,7 +137,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   });
 
   it('excludes all namespace mutation entries across sessions and the direct bridge', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-exclusion-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-exclusion'));
     const first = CheckpointDirectoryHandle.createPosixSession(), second = CheckpointDirectoryHandle.createPosixSession();
     const native = nativeFixture(), raw = native.openPath(root, false);
     let unlock: (() => Promise<void>) | undefined;
@@ -178,7 +178,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   }, 15_000);
 
   it('releases partial rename locks on busy and deduplicates aliases of one parent', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-two-parents-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-two-parents'));
     const native = nativeFixture(), rootFd = native.openPath(root, false);
     const left = native.openDirectory(rootFd, 'left', true), right = native.openDirectory(rootFd, 'right', true);
     const parents = [{ fd: left, name: 'left' }, { fd: right, name: 'right' }].sort((a, b) => {
@@ -204,7 +204,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   }, 10_000);
 
   it('checks kind, links and identity through both public transports under namespace exclusion', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-checked-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-checked'));
     const native = nativeFixture(), raw = native.openPath(root, false);
     const session = CheckpointDirectoryHandle.createPosixSession();
     const direct = await CheckpointDirectoryHandle.openPath(root, false);
@@ -239,7 +239,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   });
 
   it.each(['write', 'lock-retry'])('does not dispatch %s against a directory fd reused after close', async kind => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-reuse-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-reuse'));
     const replacement = path.join(root, 'replacement');
     await mkdir(replacement);
     const directory = await CheckpointDirectoryHandle.openPath(root, false);
@@ -269,7 +269,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   });
 
   it('supports editable writes, bounded append copies, physical inventory and atomic replacement', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-native-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-native'));
     const session = CheckpointDirectoryHandle.createPosixSession();
     try {
       const directory = await session.openPath(root, false);
@@ -296,7 +296,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   });
 
   it('pins directory handles across rename and rejects links and read-only writes', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-boundary-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-boundary'));
     const session = CheckpointDirectoryHandle.createPosixSession();
     try {
       const directory = await session.openPath(root, false);
@@ -320,7 +320,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
   });
 
   it('pages without retaining a whole inventory and releases locks on close', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-page-')));
+    const root = await realpath(await createTempDir('checkpoint-posix-page'));
     const first = CheckpointDirectoryHandle.createPosixSession();
     const second = CheckpointDirectoryHandle.createPosixSession();
     try {

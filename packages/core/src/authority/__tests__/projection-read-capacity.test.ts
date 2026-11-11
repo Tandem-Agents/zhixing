@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -16,10 +16,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex, bindDurableProjectionMutations, durableProjectionDirectoryName, durableProjectionReadBudget } from "../index.js";
 import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, runWithDeviceCapacity, withDeviceCapacityStep, currentDeviceCapacityStep, StorageMaintenanceAdmissionError } from "../../resources/index.js";
 import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
+import { createTempDir } from "@zhixing/test-utils";
 
 describe("authority projection physical reads", () => {
   it("does not reserve maintenance capacity while waiting for the source owner", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-lock-order-"));
+    const root = await createTempDir("projection-lock-order");
     const defaults = createDefaultDeviceCapacityPolicy();
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
       probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
@@ -44,12 +45,10 @@ describe("authority projection physical reads", () => {
       expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
     } finally {
       requested.resolve(); await owner; await index.stopStorageMaintenance();
-      if (path.dirname(path.resolve(root)).toLowerCase() !== path.resolve(os.tmpdir()).toLowerCase()) throw Error("Unexpected test directory");
-      await rm(root, { recursive: true, force: true });
     }
   });
   it("closes a scan cursor when its first entry is refused and preserves the failure", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-read-cleanup-"));
+    const root = await createTempDir("projection-read-cleanup");
     const checkpoint = { logId: "cleanup", lsn: 0, frameEndOffset: 64, prefixDigest: "sha256:" + "0".repeat(64) };
     const refused = new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "slots", retryAfterMs: 1 });
     let rejectEntry = false;
@@ -72,7 +71,7 @@ describe("authority projection physical reads", () => {
   });
 
   it("reads a persisted projection inside an occupancy-only workload on a single-slot device", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-read-capacity-"));
+    const root = await createTempDir("projection-read-capacity");
     const defaults = createDefaultDeviceCapacityPolicy();
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
       probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
@@ -117,7 +116,7 @@ describe("authority projection physical reads", () => {
   it("synchronizes registered projections before the caller's physical step on a single-slot device", async () => {
     // 打开投影、采纳其他实例的发布是日志自身的工作，成本随登记的投影数增长；调用方按业务估算的
     // 物理计划只承担自己的读写。每次操作都是新锁会话，投影都须重新采纳发布。
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-presync-"));
+    const root = await createTempDir("projection-presync");
     const arbiter = singleSlotArbiter();
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
       storageMaintenance: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
@@ -140,7 +139,7 @@ describe("authority projection physical reads", () => {
     // 会话到持有上限即在操作边界关闭：下一操作开新会话，按合同重新采纳其他实例的发布
     { name: "re-adopts published manifests in the new session after the hold bound closes the old one", maxHold: 0, readsManifests: true },
   ])("$name", async ({ maxHold, readsManifests }) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-session-refresh-"));
+    const root = await createTempDir("projection-session-refresh");
     const arbiter = singleSlotArbiter();
     const steps: string[] = [];
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
@@ -162,7 +161,7 @@ describe("authority projection physical reads", () => {
   it("reads every re-adopted manifest in a new lock session in bounded concurrent batches with unchanged reads and results", async () => {
     // 每次操作都开新会话：每个待重新采纳的投影照旧各读一次当前清单，只是这些读取在同一会话内有界并发；
     // 读完按原顺序采纳，结果与串行相同（单槽下被拒的退回串行，见上一例）
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-readoption-prefetch-"));
+    const root = await createTempDir("projection-readoption-prefetch");
     const defaults = createDefaultDeviceCapacityPolicy();
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 8, memoryReservationBytes: 1024 ** 3 } },
       probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
@@ -194,7 +193,7 @@ describe("authority projection physical reads", () => {
   it("keeps at most one group of unconsumed re-adoption prefetches and clears the group when adoption fails midway", async () => {
     // 预读按组：一组读完、按原顺序采纳、这一组清理之后才读下一组；未消费的预读不随候选总数累积。
     // 某个采纳中途暂时失败时，本组已开始的读取已收束、预读被清掉，锁外重试照原路径完成
-    const root = await mkdtemp(path.join(os.tmpdir(), "projection-readoption-groups-"));
+    const root = await createTempDir("projection-readoption-groups");
     const ids = Array.from({ length: 12 }, (_, index) => `group-${String(index).padStart(2, "0")}`);
     const outstanding = new Set<FileDurableProjectionIndex>();
     let peak = 0, failOnce = true;

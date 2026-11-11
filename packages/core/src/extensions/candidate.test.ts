@@ -1,21 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import * as acorn from "acorn";
 import { ExtensionCandidates } from "./candidate.js";
 import type { ExtensionCandidate } from "./contracts.js";
+import { createTempDir } from "@zhixing/test-utils";
 
 vi.mock("acorn", async (original) => {
   const actual = await original<typeof import("acorn")>();
   return { ...actual, parse: vi.fn(actual.parse) };
 });
-
-const roots: string[] = [];
 afterEach(async () => {
   vi.mocked(acorn.parse).mockClear();
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
 function candidateFor(code: string, build = "Node 24; no dependencies"): ExtensionCandidate {
@@ -25,7 +22,7 @@ function candidateFor(code: string, build = "Node 24; no dependencies"): Extensi
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "extension-candidate-")); roots.push(root);
+  const root = await createTempDir("extension-candidate");
   const expected = candidateFor("export const fixture = true;");
   const store = new ExtensionCandidates(join(root, "candidates"));
   const archive = join(root, "candidates", expected.manifest.digest, "candidate.json");

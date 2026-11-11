@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import ts from 'typescript';
@@ -13,6 +13,7 @@ import { TERMINAL_LIMITS } from '../../../../terminal-ui/src/protocol.js';
 import { TerminalChannel } from '../../../../terminal-ui/src/channel.js';
 import { recordTerminalFailure, TERMINAL_ASSET_FAILURE_CODES } from '../failure.js';
 import { TerminalAssetClient } from '../asset-client.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 // 执行生产的 S 资产请求处理：存储账户换成可控替身，期限常量由用例注入（生产值另行核对）
 const source = ts.createSourceFile('supervisor.ts', readFileSync(new URL('../supervisor.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
@@ -162,19 +163,13 @@ describe('S 的实例存储账户请求：可重试的背压期限内接续，�
 });
 
 describe('真实容量仲裁与实例根上的接续', () => {
-  const homes: string[] = [];
   const owners: TerminalInstanceAssets[] = [];
   afterEach(async () => {
     for (const owner of owners.splice(0)) await owner.close();
-    for (const home of homes.splice(0)) {
-      const resolved = path.resolve(home), temporary = path.resolve(os.tmpdir()) + path.sep;
-      if (!resolved.startsWith(temporary) || !path.basename(resolved).startsWith('zhixing-terminal-assets-')) throw Error('Unexpected cleanup boundary');
-      await rm(resolved, { recursive: true, force: true });
-    }
   });
 
   it('临时空间样本缺失 1.2 秒：直接预留在 1 秒许可等待后被背压拒绝，S 的请求经接续完成', async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-assets-')); homes.push(home);
+    const home = await createTempDir('terminal-assets');
     // 生产仲裁器与策略；只有压力探针可控：样本缺失期间不给临时空间余量（与磁盘样本过期时一致）
     let missingUntil = 0;
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: createDefaultDeviceCapacityPolicy(), probe: () => ({

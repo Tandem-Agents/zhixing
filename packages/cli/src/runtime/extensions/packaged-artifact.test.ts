@@ -1,23 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { fork, type ForkOptions } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { packagedExtensions } from "./catalog.js";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
 import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
 import { ExtensionPeer } from "@zhixing/core/extensions/protocol";
 import { channelDeclaration } from "@zhixing/core/channels/extension";
-
-const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+import { createTempDir } from "@zhixing/test-utils";
 
 describe("packaged migration artifact", () => {
   it("runs from a standalone copied file without platform packages or repository sources", async () => {
     const seed = packagedExtensions().find(({ manifest }) => manifest.id === "feishu");
     expect(seed).toBeDefined();
     expect(channelDeclaration(seed!.manifest).identityFields).toEqual(["appId"]);
-    const root = await mkdtemp(join(tmpdir(), "zhixing-packaged-extension-")); roots.push(root);
+    const root = await createTempDir("packaged-extension");
     const bytes = await readFile(join(seed!.directory, seed!.manifest.entry));
     const code = bytes.toString("utf8");
     const candidates = new ExtensionCandidates(join(root, "candidates"));

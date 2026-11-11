@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile, rm } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
 import { InputMaterialRegistry } from '../../input-material-registry.js';
 import { prepareUserTurnInput } from '../../user-turn-input.js';
@@ -8,18 +7,11 @@ import { prepareSessionSendEngage } from '../../session-engage.js';
 import { prepareSessionSendSnapshot } from '../prepare-session-send.js';
 import { jsonStringBytes, SessionSendJsonWriter, SESSION_SEND_WIRE_BYTES } from '../session-send-encoding.js';
 import { readBoundedInputFile } from '../bounded-input-file.js';
-
-const directories: string[] = [];
-afterEach(async () => {
-  for (const directory of directories.splice(0)) {
-    if (!resolve(directory).startsWith(resolve(tmpdir()) + sep) || !basename(directory).startsWith('zhixing-send-source-')) throw Error('Invalid fixture cleanup boundary');
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+import { createTempDir } from '@zhixing/test-utils';
 const identity = { turnId: 'test-turn', conversationId: 'test-conversation', surfaceCapabilities: { postTurnControl: true as const }, acceptLimitedCapabilities: true as const };
 
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), 'zhixing-send-source-')); directories.push(directory);
+  const directory = await createTempDir('send-source');
   const registry = new InputMaterialRegistry();
   const file = join(directory, 'note.txt'), image = join(directory, 'picture.png');
   await writeFile(file, 'material first\n内容');

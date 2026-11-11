@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { rm, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing/core/authority";
 import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing/core/extensions/application";
@@ -11,6 +10,7 @@ import { createExtensionContinuation } from "../extension-continuation.js";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import type { ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import { buildExtensionMethods } from "../../../../server/src/rpc/methods/extensions.js";
+import { createTempDir } from "@zhixing/test-utils";
 
 describe("extension product bindings", { timeout: 20_000 }, () => {
   it("keeps local configuration results pending until a real conversation can receive them", async () => {
@@ -28,7 +28,7 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
     expect((admit.mock.calls[0] as unknown[])[0]).not.toHaveProperty("source");
   });
   it("writes archived source to a new workspace file, without overwriting or exposing credentials", async () => {
-    const root = await mkdtemp(join(tmpdir(), "extension-source-"));
+    const root = await createTempDir("extension-source");
     const code = "export const version = 1;";
     const candidate = { manifest: { id: "fixture", version: "1.0.0", digest: createHash("sha256").update(code).digest("hex"),
       type: "channel", contract: 1, protocol: 1 as const, runtime: "node24" as const, entry: "adapter.mjs", declaration: {} }, code,
@@ -80,7 +80,7 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
     expect(admitted[0]!.options.turnContext).not.toHaveProperty("emissionTarget");
   });
   it("admits the tool-generated operation identity through the real Authority application", async () => {
-    const root = await mkdtemp(join(tmpdir(), "extension-tool-"));
+    const root = await createTempDir("extension-tool");
     try {
       const application = new ExtensionApplication({ log: () => new FileAuthorityCommitLog(join(root, "authority"), new FileArtifactStore(join(root, "facts"))), assertOwner() {} });
       await application.prepare("other", "other-app", { conversationId: "other-scene", request: "other-private-request" });

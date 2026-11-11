@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, stat, readFile } from 'node:fs/promises';
+import { mkdir, rm, stat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
@@ -12,19 +12,14 @@ import { TerminalDisplayReplay, toolCardSegment, type DisplayReplayRecord, type 
 import { TOOL_HISTORY_CARD_FORMAT } from '../../tool-card-format.js';
 import { TerminalOutputProjection } from '../output.js';
 import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
-
-const roots: string[] = [];
+import { createTempDir } from '@zhixing/test-utils';
 const stores: TerminalDisplayStore[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const store of stores.splice(0)) await store.close();
-  for (const root of roots.splice(0)) {
-    if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) || !path.basename(root).startsWith('zhixing-terminal-display-')) throw Error('Invalid cleanup boundary');
-    await rm(root, { recursive: true, force: true });
-  }
 });
 async function setup(replay?: (record: DisplayReplayRecord) => Promise<import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment>) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-display-')); roots.push(root);
+  const root = await createTempDir('terminal-display');
   await mkdir(path.join(root, 'display'));
   let active = 0, outstanding = 0, stored = 0;
   const capacity: DeviceCapacityArbiterPort = { async acquire(request) {

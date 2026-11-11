@@ -1,8 +1,7 @@
 import { recordingFixture } from "../../../../core/src/logging/__tests__/recording.js";
 import type { BindLogSource } from "@zhixing/core/logging";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
@@ -23,6 +22,7 @@ import { createChannelExtensionReadiness } from "../../runtime/extensions/channe
 import { messagingSection } from "../../config-editor/sections/messaging.js";
 import { disableMessaging, enableMessaging } from "../../config-editor/state.js";
 import { editRuntimeConfiguration, type ConfigurationApplicationDeps } from "../../runtime/configuration-application.js";
+import { createTempDir } from "@zhixing/test-utils";
 async function applyConfigurationEdit(deps: ConfigurationApplicationDeps): Promise<void> {
   await editRuntimeConfiguration(deps, {
     kind: "config",
@@ -38,7 +38,6 @@ const catalog = vi.hoisted(() => ({ seeds: [] as unknown[] }));
 const editor = vi.hoisted(() => ({ run: vi.fn(), store: undefined as unknown }));
 vi.mock("../../runtime/extensions/catalog.js", () => ({ packagedExtensions: () => catalog.seeds }));
 vi.mock("@zhixing/secrets", async (original) => ({ ...await original<typeof import("@zhixing/secrets")>(), createPlatformSecretStore: () => editor.store }));
-const roots: string[] = [];
 const systems: SetupChannelsResult[] = [];
 const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const outbound: ConfiguredChannelConsumers = { inbound: { kind: "absent", reason: "outbound-only" }, onChallengeAction: async () => {} };
@@ -54,13 +53,12 @@ beforeAll(async () => {
 });
 afterEach(async () => {
   await Promise.all(systems.splice(0).map((system) => system.dispose()));
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   catalog.seeds = [];
   editor.run.mockReset(); editor.store = undefined;
 });
 
 async function fixture(ids = ["one"], options: Record<string, unknown> = {}, bindLogs?: BindLogSource) {
-  const root = await mkdtemp(join(tmpdir(), "zhixing-channel-extension-")); roots.push(root);
+  const root = await createTempDir("channel-extension");
   const configPath = join(root, "config.jsonc");
   const manifest = validateExtensionManifest({ id: "fixture", version: "1.0.0",
     digest: createHash("sha256").update(bytes).digest("hex"), runtime: "node24", entry: "extension.mjs",

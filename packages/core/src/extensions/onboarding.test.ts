@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { FileAuthorityCommitLog } from "../authority/commit-log.js";
@@ -11,17 +10,15 @@ import { ExtensionArtifacts } from "./artifacts.js";
 import { ExtensionCandidates, validateExtensionCandidate } from "./candidate.js";
 import { ExtensionOnboarding } from "./onboarding.js";
 import type { ExtensionBinding, ExtensionCandidate, ExtensionOperation } from "./contracts.js";
-
-const roots: string[] = [];
+import { createTempDir } from "@zhixing/test-utils";
 const owners: FileAuthorityCommitLog[] = [];
 const managers: ExtensionOnboarding[] = [];
 afterEach(async () => {
   for (const manager of managers.splice(0)) await manager.stop();
   for (const owner of owners.splice(0)) await owner.stopStorageMaintenance();
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "extension-onboarding-")); roots.push(root);
+  const root = await createTempDir("extension-onboarding");
   const owner = new FileAuthorityCommitLog(join(root, "authority"), new FileArtifactStore(join(root, "facts"))); owners.push(owner);
   const log = () => owner;
   const application = new ExtensionApplication({ log, assertOwner() {} });

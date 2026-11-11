@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { checkpointFilesystemCompletion, ownedPosixFilesystem, POSIX_FILESYSTEM_LIMITS } from '../checkpoint-posix-session.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 function fixture(autoExit = true) {
   const sent: { id: number; op: string }[] = [];
@@ -205,7 +205,7 @@ describe('owned POSIX filesystem transport (host-independent)', () => {
   });
 
   it('runs blocking primitive work outside the parent loop and kills its real helper', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-transport-'));
+    const directory = await createTempDir('checkpoint-posix-transport');
     const addon = path.join(directory, 'fixture.cjs');
     // This is a transport fixture, not native/POSIX filesystem validation.
     await writeFile(addon, `module.exports = {
@@ -225,7 +225,7 @@ describe('owned POSIX filesystem transport (host-independent)', () => {
   }, 10_000);
 
   it('rejects exhausted handle admission before native namespace side effects', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-capacity-'));
+    const directory = await createTempDir('checkpoint-posix-capacity');
     const addon = path.join(directory, 'fixture.cjs'), marker = path.join(directory, 'side-effect');
     await writeFile(addon, `const fs = require('node:fs'); let fd = 0n;
       const create = () => { fs.writeFileSync(${JSON.stringify(marker)}, 'created'); return ++fd; };

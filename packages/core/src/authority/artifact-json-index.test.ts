@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ArtifactJsonIndex } from './artifact-json-index.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -62,7 +62,7 @@ describe('artifact JSON byte index', () => {
     expect(f.stats().largestRead).toBeLessThanOrEqual(64 * 1024);
   });
   it('uses persistent indexes on a second reader without rescanning the body', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'zx-json-index-')); cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const directory = await createTempDir('json-index'); cleanups.push(() => rm(directory, { recursive: true, force: true }));
     const f = fixture({ body: 'x'.repeat(200000), usage: { outputTokens: 12 } }, directory);
     await ready(f); await f.index.close();
     const next = new ArtifactJsonIndex(f.store, directory); cleanups.push(() => next.close());
@@ -81,14 +81,14 @@ describe('artifact JSON byte index', () => {
     await expect(f.index.prepare({ ...f.ref, digest: `sha256:${'0'.repeat(64)}` })).rejects.toThrow('invalid');
   });
   it('rebuilds a corrupt derived database without modifying source artifacts', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'zx-json-index-corrupt-'));
+    const directory = await createTempDir('json-index-corrupt');
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     await writeFile(path.join(directory, 'positions-v2.sqlite'), 'not a sqlite database');
     const f = fixture({ text: 'original 中文' }, directory); await ready(f);
     expect(await f.index.value(f.ref, ['text'])).toBe('original 中文');
   });
   it('keeps the disposable index in its own WAL-mode file and retires the previous format', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'zx-json-index-format-'));
+    const directory = await createTempDir('json-index-format');
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     await writeFile(path.join(directory, 'positions-v1.sqlite'), 'previous format');
     await writeFile(path.join(directory, 'positions-v1.sqlite-journal'), 'previous journal');

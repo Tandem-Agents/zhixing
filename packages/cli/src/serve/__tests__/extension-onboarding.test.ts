@@ -1,6 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
@@ -23,9 +22,9 @@ import { checkMessaging } from "../../config-editor/checks/messaging.js";
 import { extensionContinuationText } from "../extension-continuation.js";
 import { resolveInputField } from "../../config-editor/model/input.js";
 import { resolveEntityMeta } from "../../config-editor/model/entity.js";
+import { createTempDir } from "@zhixing/test-utils";
 
 vi.mock("../../runtime/extensions/catalog.js", () => ({ packagedExtensions: () => [] }));
-const roots: string[] = [];
 const systems: SetupChannelsResult[] = [];
 let code: string;
 beforeAll(async () => {
@@ -37,10 +36,9 @@ beforeAll(async () => {
 });
 afterEach(async () => {
   await Promise.all(systems.splice(0).map(system => system.dispose()));
-  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 async function fixture(kind: "existing" | "authored" = "authored") {
-  const root = await mkdtemp(join(tmpdir(), "zhixing-onboard-")); roots.push(root);
+  const root = await createTempDir("onboard");
   const configPath = join(root, "config.jsonc");
   const artifactDirectory = join(root, "extensions", "artifacts");
   const key = randomBytes(32);

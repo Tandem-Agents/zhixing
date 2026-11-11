@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { TerminalAction, TerminalCandidates } from '../../../../terminal-ui/src/protocol.js';
 import { TerminalCandidatesOwner } from '../candidates.js';
@@ -9,6 +8,7 @@ import { TerminalCandidateSession } from '../../../../terminal-ui/src/candidate-
 import { chooseTerminalSelection } from '../selection.js';
 import { createStopSelectionRequest } from '../../runtime/stop-selection.js';
 import type { ServerInfoResult } from '../../runtime/rpc-management-facade.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 function owner(root = process.cwd()) {
   return new TerminalCandidatesOwner(() => ({ cwd: root, target: 'cli', features: { chrome: true }, now: 0, workspaceId: null, sessionBusy: false }));
@@ -51,19 +51,14 @@ describe('terminal candidates and control commands', () => {
     expect(() => source.accept(2, 'config:repl')).toThrow('expired');
   });
   it('converts code point provider offsets to UTF-16 and enumerates only the fixture directory', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'zhixing-candidates-'));
-    try {
-      await mkdir(path.join(root, 'folder')); await writeFile(path.join(root, 'note.txt'), 'synthetic');
-      const source = owner(root), text = '🦞中文 @file:';
-      const candidates = await source.query(1, text, text.length);
-      expect(candidates.start).toBe(text.indexOf('@')); expect(candidates.end).toBe(text.length);
-      expect(candidates.items.map(item => item.label)).toEqual(['folder/', 'note.txt']);
-      const selected = source.accept(1, 'file:note.txt');
-      expect(selected.acceptPayload.metadata?.resolvedPath).toBe(path.join(root, 'note.txt').replaceAll('\\', '/'));
-    } finally {
-      if (path.dirname(root) !== path.resolve(tmpdir()) || !path.basename(root).startsWith('zhixing-candidates-')) throw Error('fixture cleanup boundary');
-      await rm(root, { recursive: true, force: true });
-    }
+    const root = await createTempDir('candidates');
+    await mkdir(path.join(root, 'folder')); await writeFile(path.join(root, 'note.txt'), 'synthetic');
+    const source = owner(root), text = '🦞中文 @file:';
+    const candidates = await source.query(1, text, text.length);
+    expect(candidates.start).toBe(text.indexOf('@')); expect(candidates.end).toBe(text.length);
+    expect(candidates.items.map(item => item.label)).toEqual(['folder/', 'note.txt']);
+    const selected = source.accept(1, 'file:note.txt');
+    expect(selected.acceptPayload.metadata?.resolvedPath).toBe(path.join(root, 'note.txt').replaceAll('\\', '/'));
   });
   it('coalesces queries and ignores a late result after cursor movement or dismissal', async () => {
     const pending: ((value: unknown) => void)[] = [], actions: TerminalAction[] = [];

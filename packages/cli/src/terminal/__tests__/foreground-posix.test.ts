@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { TerminalForegroundProcesses } from '../foreground-process.js';
 import { randomUUID } from 'node:crypto';
 import type { Socket } from 'node:net';
+import { createTempDir } from '@zhixing/test-utils';
 
 async function bounded<T>(work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -15,7 +16,7 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
 
 describe.skipIf(process.platform !== 'linux' && process.platform !== 'darwin')('terminal POSIX execution gate', () => {
   it('holds admission, preserves arguments, drains a probe group, and reaps a sealed late creation', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'zhixing-gate-fixture-'));
+    const directory = await createTempDir('gate-fixture');
     const artifact = fileURLToPath(new URL(`../../../../terminal-ui/dist/${process.platform}-${process.arch}/foreground.node`, import.meta.url));
     const owner = new TerminalForegroundProcesses(artifact);
     const exits: Promise<void>[] = [];

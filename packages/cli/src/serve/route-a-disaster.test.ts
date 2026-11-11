@@ -92,7 +92,6 @@ import {
   restrictTrustBySupersededFacts,
   registerSupersededTrustReportService,
   SupersededTrustGovernance,
-  readPendingSupersededReports,
   reportSupersededTrust,
 } from "./superseded-trust-report.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";

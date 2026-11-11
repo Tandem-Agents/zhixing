@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FileArtifactStore } from '@zhixing/core/authority';
 import { prepareStreamDataPayload, validateStreamFrame } from '@zhixing/core/protocol';
@@ -8,10 +7,10 @@ import type { StreamFrame } from '@zhixing/core/contracts';
 import { createSessionBroadcastTransport } from '@zhixing/rpc/session-broadcast';
 import { SessionProcessProjector, SessionProcessProjectionOwner, PROCESS_COMPLETION_GRACE_MS } from '../session-process-projection.js';
 import { AssignmentStreamPathManager } from '../assignment-stream-path-manager.js';
-const roots: string[] = [];
-afterEach(async () => { vi.useRealTimers(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+import { createTempDir } from '@zhixing/test-utils';
+afterEach(() => { vi.useRealTimers(); });
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'zhixing-j3-')); roots.push(root);
+  const root = await createTempDir('j3');
   const artifacts = new FileArtifactStore(root), publish = vi.fn();
   return { artifacts, publish, p: new SessionProcessProjector({ artifacts, publish }) };
 }

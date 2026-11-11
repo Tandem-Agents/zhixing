@@ -1,6 +1,6 @@
 import { expect, vi } from 'vitest';
 import { createServer, type Socket } from 'node:net';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import os from 'node:os';
 import { TerminalPrivateEndpoint } from '../../../../terminal-ui/src/parent-transport.js';
 import { TerminalForegroundProcesses, type TerminalForegroundChild } from '../foreground-process.js';
 import { TerminalWindowsWriterAdmission, createTerminalOwnedProcessFactory } from '../host-launch.js';
+import { createTempDir } from '@zhixing/test-utils';
 
 // 超时报出卡在哪一步，偶发失败自带定位信息
 async function bounded<T>(work: Promise<T>, step: string): Promise<T> {
@@ -26,7 +27,7 @@ function windowsSystemRoot(): string {
 
 export async function verifyWindowsWriterGate(artifact: string, modes: readonly string[], beforeResumed = false) {
     const processes = new TerminalForegroundProcesses(artifact);
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'zhixing-writer-gate-'));
+    const directory = await createTempDir('writer-gate');
     const children: Promise<void>[] = [], systemRoot = windowsSystemRoot();
     try {
       for (const mode of modes) {
@@ -156,9 +157,7 @@ export async function verifyWindowsWriterGate(artifact: string, modes: readonly 
         }
       }
     } finally {
+      // 目录由 createTempDir 在所在测试结束时清理
       processes.terminateExecution(); await bounded(Promise.all(children), 'final gates closed'); processes.finish();
-      const root = path.resolve(os.tmpdir()) + path.sep;
-      if (!path.resolve(directory).startsWith(root)) throw Error('writer fixture cleanup outside temp root');
-      await rm(directory, { recursive: true, force: true });
     }
 }
