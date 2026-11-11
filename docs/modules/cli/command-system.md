@@ -34,6 +34,12 @@ CommandDef 的 local/agent/hybrid 描述通用分派语义，不是业务部署�
 
 删除、改名、新建等候选动作由[输入补全](input-completion.md)触发既有业务适配；通用候选状态不执行物理删除。删除当前对话后的新建和指针衔接仍属于会话责任。
 
+## 外部 `zz` 命令面
+
+外部 `zz` 命令是接入面，不是系统功能的默认承载层：能放进交互模式的用户功能，原则上不新增外部命令；外部命令只保留必要、基础、离开交互模式后仍必须可用的控制入口；历史或隐藏的兼容入口只作为系统事实记录，不自动成为用户标准；smoke 清单区分“当前实现存在”和“产品必须保留”。
+
+公开顶层命令以 Commander 中未隐藏的注册为准，CLI 使用指南中 `public-top-level-commands` 标记内的清单由测试与注册比对。`zz serve`、`zz serve logs` 和全局 `--log` 诊断入口属于隐藏或过渡入口，默认帮助不展示，也不纳入用户 smoke 清单。`zz serve status`、`zz serve stop` 以及 `--port`、`--host` 参数已从外部命令面移除，运行控制只保留 `zz status` 与 `zz stop`；不提供 `zz config`、`zz mcp`、`zz task` 等顶层命令。
+
 ## 取舍与验证
 
 core/typeahead 保留 UI 无关的类型、Providers、注册表和通用 dispatcher；应用不必为了调用这些机制而依赖终端渲染。新交互应用没有装配旧 registrar 和 legacy 输入分叉；文本表面仍可使用通用 dispatcher，这两者不能在文档中混为同一实现。

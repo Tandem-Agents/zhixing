@@ -186,7 +186,7 @@ function parseRevision(value: string): number {
 
 program
   .name("zhixing")
-  .description("知行 — 智能体引擎")
+  .description("知行 — 运行在自己设备上的个人智能体")
   .helpOption("-h, --help", "显示帮助")
   .helpCommand(false)
   .version(ZHIXING_CLI_VERSION, "-V, --version", "显示版本")

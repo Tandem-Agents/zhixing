@@ -1,23 +1,216 @@
 # zhixing
 
-> 知行命令行入口 —— 交互对话、运行控制、诊断入口
+> 知行（Zhixing）的安装包：运行在你自己设备上的通用个人智能体，服务生活与工作。
 
-这是知行面向普通用户的安装包；其余 `@zhixing-ai/*` 包是由 CLI 组合使用的内部实现与协议组件，不代表独立 SDK 稳定性承诺。项目总览与英文入口见[知行主文档](https://github.com/Tandem-Agents/zhixing#readme)。
+`zhixing` 是知行面向用户的 npm 包，安装后提供 `zz` 和 `zhixing` 两个等价命令。其余 `@zhixing-ai/*` 包是它使用的内部组件，不承诺作为独立 SDK 保持稳定。产品介绍见[知行主页](https://github.com/Tandem-Agents/zhixing#readme)（[English](https://github.com/Tandem-Agents/zhixing/blob/main/README.en.md)）。界面与命令帮助目前只有中文。
 
-## 概览
+## 安装
 
-`zz` 和 `zhixing` 指向同一 CLI 入口；下文用 `zz` 表示当前构建产物的真实命令面。交互终端默认使用新屏幕：长对话可滚动回看，窗口缩放会重新排版，输入和提示区保持固定。无需设置开发开关或另装 UI 运行时。
+准备：
 
-重定向输入时使用基础文本对话；按行接收，读完已有输入后退出。需要首次配置或交互确认时会明确提示，不把后续管道行当作授权。关闭前台回到 shell，后台任务和其他接入面按各自生命周期继续。
+- Node.js `>=24.0.0` 与 npm。
+- 一个模型服务的 API Key。首次配置目前可以选择[硅基流动](https://cloud.siliconflow.cn/account/ak)或 [DeepSeek 官方](https://platform.deepseek.com/api_keys)。调用费用由服务商收取，你的请求和相关内容会发送给所选服务商。
+- 支持的操作系统见[版本说明](https://github.com/Tandem-Agents/zhixing/blob/main/docs/delivery/releases/0.1.0.md)。
 
-外部 `zz` 命令是接入面，不是系统功能的默认承载层：
+```text
+npm install -g zhixing
+zz
+```
 
-- 能放进交互模式的用户功能，原则上不新增外部 `zz <command>`。
-- 外部命令只保留必要、基础、离开交互模式后仍必须可用的控制入口。
-- 历史或隐藏兼容入口只能作为系统事实记录，不能自动上升为用户标准。
-- smoke 清单必须区分“当前实现存在”和“产品必须保留”；不能因为历史入口存在，就把它固化为长期用户承诺。
+npm 安装这一步不会下载额外程序、注册服务或写入数据目录，也不修改 Node、npm、PATH 或系统权限。第一次运行 `zz` 时，知行才在交互与权限边界内创建配置、设备身份和托管服务。
 
-**当前用户可见的外部 `zz` 命令**：
+全局目录不可写时只使用 Node 官方的用户级安装或修复方式；不要使用 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置。知行不会后台替换程序，也不会修改用户 Node、npm 或 PATH。
+
+## 首次配置
+
+第一次在交互终端运行 `zz` 时，会打开配置界面，用 ↑↓ 选择、Enter 确认、Esc 返回：
+
+- **对话模型（必填）**：选择服务商，添加模型 ID，填写 API Key。可用的模型 ID 见服务商的模型列表页，配置界面里有链接。轻量模型和强力模型可以不配。
+- **消息通道（可选）**：如飞书，见下文“在消息通道中使用”。
+- **MCP 服务（可选）**：接入外部工具，也可以以后用 `/mcp` 管理。
+
+以后用 `/config` 检查和修改这些配置。非交互场景（管道、CI）如果还没完成首次配置，会以退出码 2 退出，需要先在交互终端完成一次配置。
+
+配置分两处保存：
+
+- 功能配置写在 `<ZHIXING_HOME>/config.jsonc`，默认是 `~/.zhixing/config.jsonc`，也可以用 `ZHIXING_CONFIG_PATH` 指定完整路径。文件支持 JSONC 注释。知行可以读取功能配置，修改需要你确认。
+- API Key 等凭据只保存在本机的 SecretStore：桌面系统用系统凭据保护，无头设备用与机器绑定的加密保险库。`config.jsonc` 不接受任何凭据字段。凭据不会交给模型，也不会进入设备间同步、备份或迁移。
+
+知行不读取启动目录下的项目级配置。
+
+## 第一个任务
+
+配置完成后进入对话。先直接提一个请求，例如“我下周要做一次季度汇报，帮我列出准备步骤，并按先后排好”。
+
+要处理某个目录中的文件，先建立并授权工作场景：
+
+1. 输入 `/work`，按 Ctrl+N 新建工作场景。
+2. 描述用途和目录的完整路径，例如“整理 D:\Notes 里的读书笔记”。
+3. 核对它给出的场景名称和目录。确认后，它会创建场景并授权这个目录。
+4. 再次输入 `/work`，选中这个场景，按 Enter 进入。
+5. 先让它只读查看，例如“列出这个目录顶层的文件和文件夹，先不要修改任何内容”。
+
+在工作场景里，知行以授权目录为工作范围读写文件、搜索内容、执行命令；有实际影响的操作按信任与确认设置执行，这些设置不是操作系统级的沙箱。`/exit` 回到主对话。
+
+## 交互命令
+
+交互终端使用全屏界面：长对话可以滚动回看，窗口缩放后会重新排版，输入和提示区保持固定，不需要另装 UI 运行时。启动时会自动回到最近的对话。输入 `/` 可以看到候选命令，`/help` 列出全部命令。
+
+通过管道重定向输入时，知行按行接收，使用基础文本对话，读完已有输入后退出。需要首次配置或交互确认时会明确提示，不会把后续管道内容当作授权。
+
+| 分类 | 命令 | 作用 |
+|---|---|---|
+| 对话 | `/new` | 创建新对话 |
+| | `/resume` | 切换到其他对话 |
+| | `/name` | 为当前对话命名 |
+| | `/clear` | 清空对话历史 |
+| | `/compact` | 手动压缩上下文 |
+| | `/context` · `/usage` · `/model` | 查看上下文容量、token 用量和当前模型 |
+| 工作 | `/work` | 进入、新建（Ctrl+N）或改名（Ctrl+R）工作场景 |
+| | `/exit` | 在工作场景中回到主对话；在主对话中关闭界面，后台继续运行 |
+| | `/tasklist` · `/task` | 查看当前对话的任务列表；`/task new <内容>`、`/task done <序号或 id>` 管理任务 |
+| | `/tasks` | 查看定时任务 |
+| | `/advancement` | 查看当前对话的任务推进详情 |
+| | `/resolve` | 处理结果待确认的运行 |
+| 配置与扩展 | `/config` | 修改模型、消息通道、MCP 等基础配置；`/config logs` 查看或调整日志容量与保留期限 |
+| | `/mcp` | 管理 MCP 服务 |
+| | `/skills` | 管理技能：浏览、置顶、禁用、改适用模式、归档 |
+| | `/trust` · `/security` | 管理权限规则；查看安全状态概览 |
+| 运行 | `/status` · `/stop` | 查看运行状态；停止知行 |
+| | `/help` | 显示帮助 |
+
+在消息里输入 `@` 可以发起多视角评议（目前只支持文本内容）。
+
+## 在消息通道中使用
+
+消息通道按需接入。安装包已带飞书适配，接入的是飞书企业自建应用的机器人：
+
+1. **在飞书开放平台准备应用**：创建企业自建应用并开启机器人能力；在事件订阅中选择[用长连接接收事件](https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-)，添加接收消息事件（`im.message.receive_v1`），开通所需的收发消息权限，完成应用发布与可用范围设置。用于群聊时，还需把机器人加入目标群。
+2. **在知行中填写凭据**：运行 `/config`，在“消息通道”中添加飞书，填写应用的 App ID 和 App Secret。
+3. **完成本人验证**：保存后，按配置面板显示的验证指令（形如“连接 <验证码>”），在飞书里把它发给机器人，再在同一会话中按收到的回复确认。验证通过后，即可在飞书里与知行对话。
+
+普通消息通过长连接收发，不需要公网地址。上面的“连接／确认”用于验证账号与收发，不代表后续任务已获得执行授权。
+
+如果要在飞书中处理任务执行时的权限确认，当前适配器通过卡片按钮接收你的决定，并使用 HTTP 回调接收按钮动作，需要同时满足两个条件：
+
+- 在“消息通道”中成对填写飞书应用的 Verification Token 和 Encrypt Key。只填其中一项会被视为配置错误。
+- 有受控且飞书可达的 HTTPS 回调入口，将请求转发到知行的 `/channels/<通道实例 ID>/challenge`，并在飞书应用中登记这个入口。默认飞书实例的 ID 是 `feishu`。知行本机服务默认监听本机地址（127.0.0.1），这个地址不能直接作为飞书的公网回调地址；接入方式见[飞书回调接收说明](https://open.feishu.cn/document/event-subscription-guide/callback-subscription/receive-and-handle-callbacks)中的开发者服务器方式。
+
+未配置卡片按钮时，飞书内处理执行确认的方式尚未经过验证；不要假设回复“允许”或“yes”就会批准操作。
+
+需要其他平台时，在对话中说明想连接哪个应用。知行负责查证接入方式、获取或准备连接；需要本人处理的账号授权和凭据录入会交给你，凭据仍通过 `/config` 的“消息通道”安全填写。完成本人和双向收发验证后才启用；平台没有开放接口、账号权限不足或无法可靠接入时，会说明限制与下一步。
+
+飞书通道的能力边界见[飞书通道架构](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/feishu/architecture.md)。
+
+## 运行控制与诊断
+
+- `zz status`：查看本机知行的运行状态。
+- `zz stop`：请求安全停止，并等待同一进程退出。停止被拒绝、超时或无法安全受理时，它不会强制结束进程；按提示处理阻塞项后，可以重试同一命令。准备维护（如升级）前使用 `zz stop --maintenance`。
+- `zz doctor`：只读检查本机配置、秘密存储、托管服务、备份配置和已建立连接的状态，每次只给一个安全的下一步行动。它不联网、不写状态，也不输出秘密。
+
+## 本机运行日志
+
+`zz logs` 显示本机运行日志的占用、生效策略与待回收状态；`zz logs location` 显示日志目录和格式说明。查询不依赖常驻服务，也不创建或修复日志文件：
+
+```text
+zz logs --offline search --source runtime
+zz logs read "zxlog://<storeId>/operation/operation/<id>" --view timeline
+zz logs policy
+```
+
+查询结果包含记录、缺口、覆盖范围和续页 `cursor`，把它传给同一查询的 `--cursor` 即可继续读取；`--view detail` 读取仍保留的脱敏详情。修改策略使用 `zz logs policy --revision <当前版本> --set '<JSON 对象>'`；降低额度时先回收空间，受阻时保留期望值并说明原因。
+
+在对话中，可以用 `/config logs` 查看生效策略，再用 `/config logs <容量MiB> <关键记录天数> <当前版本>` 修改，例如 `/config logs 128 14 1` 把容量设为 128 MiB、关键记录保留 14 天；版本冲突时重新查看即可。修改不需要重启。也可以直接让知行查阅日志，它读取的是同一份记录。
+
+日志不记录凭据、模型请求正文和逐 token 文本；工具调用成功只留安全摘要与长度，失败内容经限长脱敏保存，可能包含与错误相关的输入输出片段。存储结构、访问接口与权限边界见[运行日志与问题追溯](https://github.com/Tandem-Agents/zhixing/blob/main/docs/tasks/runtime-logging-and-diagnostics.md)。
+
+## 多设备、恢复备份与本地工作区
+
+这些命令承接必须在交互对话之外仍可完成的设备级旅程；具体参数以对应的 `--help` 为准：
+
+| 旅程 | 入口 | 作用 |
+|---|---|---|
+| 第二台设备 | `zz pair [invitation]` | 一台设备显示二维码和同内容文本，另一台扫描或粘贴后继续恢复码回读、完成配置、确认可用并选择值班设备。正常流程不要求地址、端口、中继或内部角色知识。 |
+| 永久设备移除 | `zz device list/remove/continue/status` | 查看候选，永久移除设备，并在中断后继续或查看同一操作。应用停用另用 `zz app remove`，两者不会混淆。 |
+| 值班迁移 | `zz duty targets/migrate/continue/cancel` | 选择长期在线的接班设备，准备、继续或在切换前取消值班迁移。 |
+| 恢复备份 | `zz backup setup/verify/status` | 建立恢复备份、从实际目标回读验证并查看唯一下一步行动。 |
+| 灾难恢复 | `zz backup recover/recover-finish` | 值班设备永久丢失后，从完整备份接管，并在旧设备已隔离后完成恢复。 |
+| 恢复码 | `zz backup root rotate/invalidate/approve-reset/reset` | 轮换、紧急停用或在另一台已加入设备协助下重置恢复码。 |
+| 本地工作区 | `zz workspace status/list/create/create-scene/rename/repath/remove/reset` | 只在当前设备授权和维护本地目录；远端不接收原始路径。 |
+
+## 升级与卸载
+
+以下每一步都要等上一步成功后再执行。某一步失败或被拒绝时，先按提示处理，不要继续执行后面的命令。不要把多条命令一次性粘贴运行。
+
+**同版修复**（按当前版本重新安装）：
+
+1. 记下当前版本：
+
+   ```text
+   zz --version
+   ```
+
+2. 安全停止，准备维护：
+
+   ```text
+   zz stop --maintenance
+   ```
+
+3. 停止成功后，按第 1 步看到的版本重新安装（把 `<版本号>` 换成实际版本）：
+
+   ```text
+   npm install -g zhixing@<版本号>
+   ```
+
+4. 安装成功后启动：
+
+   ```text
+   zz
+   ```
+
+**升级到新版本**：步骤相同，第 3 步改为安装选定的新版本 `npm install -g zhixing@<新版本号>`；要安装最新版本，可以用 `zhixing@latest`。不支持在已运行新版本后降级。
+
+**卸载但保留数据**（数据保留在 `ZHIXING_HOME`，默认是 `~/.zhixing`）：
+
+1. 停用应用：
+
+   ```text
+   zz app remove
+   ```
+
+2. 看到停用成功后，再卸载：
+
+   ```text
+   npm uninstall -g zhixing
+   ```
+
+如果还有工作没有安全结束，`zz app remove` 会拒绝停用。这时按提示处理后重试，不要直接卸载。
+
+## 故障排查
+
+遇到问题，先运行 `zz doctor`，按它给出的下一步处理。
+
+### 提示“本机服务端口 N 已被其他程序占用”
+
+知行的本机服务端口由数据目录（`ZHIXING_HOME`）决定。本机服务启动失败时，如果这个端口正被其他程序使用，就会出现这个提示：关闭占用该端口的程序后重试。其他原因导致的启动失败，会提示用 `zz logs` 查看原因。
+
+### 提示“[配置错误]”或“Provider … 缺少 API Key”
+
+`config.jsonc` 含有旧版凭证字段（如 `providers.<id>.apiKey: "env:VAR"`）或通道秘密字段（如 `channels.<id>.credentials.appSecret`）时，启动检查会逐项列出违规字段、原因和修复方法。处理方式：
+
+- 按提示在实际的 `config.jsonc` 中删除这些字段；
+- 在交互终端运行 `zz`，在配置界面重新填写 API Key 或通道凭据，它们会写入本机 SecretStore；
+- 无交互的宿主需要先在目标设备上完成 SecretStore 解锁和凭据配置，不接受明文文件或环境变量注入。
+
+### 提示“缺少必要配置，且当前环境非交互终端”
+
+通过管道或 CI 运行时，如果首次配置还没完成，知行会列出缺失项，并以退出码 2 退出。先在交互终端运行 `zz`，在配置界面补全“对话模型”，再回到原来的方式运行。
+
+功能配置可以随时用 `/config` 检查和修改；凭据只能通过配置界面查看状态或更新，不提供明文读取入口。
+
+仍未解决时，请到 [GitHub Issues](https://github.com/Tandem-Agents/zhixing/issues) 反馈，附上 `zz --version` 的输出和脱敏后的现象，不要附凭据或未经检查的完整日志。疑似安全漏洞请按[安全说明](https://github.com/Tandem-Agents/zhixing/blob/main/SECURITY.md)私下报告。
+
+## 外部命令一览
 
 <!-- public-top-level-commands:start -->
 - `zz`：进入交互 REPL。
@@ -34,287 +227,24 @@
 - `zz workspace`：管理当前设备已授权的本地工作区。
 <!-- public-top-level-commands:end -->
 
-**当前真实存在但隐藏 / 过渡中的入口**：
+全局选项：`zz --help`（`-h`）显示帮助，`zz --version`（`-V`）显示版本。
 
-- `zz serve`：内部宿主启动路径；默认 help 不展示，不纳入 0.1 用户 smoke 清单。
-- `zz serve logs`：当前仍可调用的后台宿主日志查看入口；默认顶层 help 不展示。
+## 从源码运行
 
-**当前真实存在的 `zz --...` / option 形态**：
-
-- 全局：`zz --help` / `zz -h`。
-- 全局：`zz --version` / `zz -V`。
-- 全局隐藏诊断入口：`zz --log`。
-- `zz status --help` / `zz status -h`。
-- `zz stop --help` / `zz stop -h`。
-- 隐藏 / 过渡入口：`zz serve --help` / `zz serve -h`。
-- 隐藏 / 过渡入口：`zz serve logs --help` / `zz serve logs -h`。
-- 隐藏 / 过渡入口：`zz serve logs --tail`。
-- 隐藏 / 过渡入口：`zz serve logs --lines <n>`，`n` 必须是 1 到 5000 的整数。
-
-**边界说明**：
-
-- `zz`、`zz serve`、`zz serve logs --tail` 是长运行语义，smoke 不能按“必须立即退出”的基础命令处理。
-- `zz serve status` / `zz serve stop` 已从外部命令面清理；运行控制只保留 `zz status` / `zz stop`。
-- `zz serve --port` / `zz serve --host` 已从外部命令面清理；端口和监听地址不作为用户 CLI 参数承诺。
-- 未实现外部 `zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
-- REPL 内部 `/help`、`/new` 等斜杠命令属于交互接入面内部命令，不纳入外部 `zz` 命令清单。
-
----
-
-## 本机运行日志
-
-`zz logs` 显示新日志存储的占用、生效策略与待回收状态；`zz logs location` 显示目录和格式。查询不依赖常驻服务，也不创建或修复日志文件：
-
-```text
-zz logs --offline search --source runtime
-zz logs read "zxlog://<storeId>/operation/operation/<id>" --view timeline
-zz logs policy
-```
-
-查询结果含记录、缺口、覆盖范围和续页 `cursor`；将其传给同一查询的 `--cursor` 继续读取。单条地址为 `zxlog://<storeId>/record/<id>`，`--view detail` 可读取仍保留的脱敏详情。修改策略使用 `zz logs policy --revision <当前版本> --set '<JSON 对象>'`；降额先回收，受阻时保留期望值并显示原因。
-
-对话中可用 `/config logs` 查看生效策略，再用 `/config logs <容量MiB> <关键记录天数> <当前版本>` 修改。例如 `/config logs 128 14 1` 将容量设为 128 MiB、关键记录保留 14 天；版本冲突时重新查看。修改走同一策略应用，不重启宿主，也不在 `config.jsonc` 另存一份策略。
-
-模型使用 `log_search` 和 `log_read` 查阅同一份证据。普通运行沿用本机所有者权限；`Task({description, prompt, logOnly: true})` 可委派只查当前会话日志的子任务，范围由真实会话身份派生，仅获得两个日志工具。它不能直接读文件、运行代码、调用 MCP 或再委派。所有者直接读文件时请按 `zz logs location` 的结构说明查阅；原始存储需要整库授权。
-
-RPC 提供 `logs.search`（`filter?、cursor?`）、`logs.read`（`address、view?、cursor?`）、`logs.status` 和 `logs.apply-policy`（`patch、expectedVersion`）。身份来自当前设备的连接认证，参数不能声明权限；远程认证接入可以读取，策略修改须由本机接入。游标绑定原查询与身份，续页重验权限；交给另一获准主体时传稳定地址。每次查询只覆盖该地址所属设备的本地保留证据，远端不可用、证据已淘汰或不足均明确返回缺口。
-
-文件位于 `<ZHIXING_HOME>/logs/runtime/`。`segment-*.jsonl` 每行一条观察记录；最高 `published-*.head` 指向已耐久的同代 `state-*.json`，登记保留段与耐久水位；`detail-*.json` 随所属段治理，`index-*.json` 可重建。文件管理权限允许直接用文本工具查阅；未发布或已登记淘汰的文件不能视为保留证据。默认采集入口／宿主、产品调用与耐久提交、Kernel／模型尝试／工具与 MCP、渠道与扩展进程、设备交接及配置生效。记录使用请求、会话、Run、任务、工具调用、投递尝试和代际等真实身份关联；错误与未知结果保留，晚到回执追加记录。模型请求正文、凭据和逐 token 文本不转录；工具成功结果只留安全摘要与长度，失败内容经限长脱敏保存，可能包含错误相关的输入输出片段。后台未分类 stdout/stderr 只记录流名及大小。
-
-`zz serve logs` 转接同一日志应用；`--tail` 按存储顺序跟随，输出受页数和字节限制。旧日志不转写为新事件：`zz logs read zxlog-local:legacy/catalog` 可查本机遗留目录，登记后使用返回的 `zxlog://<storeId>/legacy/<id>` 稳定地址。旧正文仅向整库管理者提供有界脱敏读取；未采集、已淘汰和证据不足会明确标记。
-
-`zz logs` 的迁移状态同时核对存活写者和实际遗留占用。旧写者仍在运行、进程归属无法确认或空间未释放时，不宣称设备整体预算已生效；按正常停止／升级流程处理后自动续接。预算只接管已知历史日志，不清理业务权威、恢复材料或其他用户文件。
-
-## 安装与配置
-
-安装使用 Node `>=24.0.0` 与 npm；各平台目标及验收状态见[运行时边界](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/node-runtime-boundaries.md)。版本发布后使用：
-
-```text
-npm install -g zhixing
-zz
-```
-
-同版修复时先取得当前明确版本，再按该版本重装：
-
-```powershell
-$ZhixingVersion = zz --version
-zz stop --maintenance
-npm install -g "zhixing@$ZhixingVersion"
-zz
-```
-
-主动前向升级时，安全停止后安装已经选定的明确新版；安装最新版本可使用：
-
-```powershell
-zz stop --maintenance
-npm install -g zhixing@latest
-zz
-```
-
-不支持已运行新版本后的降级。卸载应用但保留 `ZHIXING_HOME`：
-
-```text
-zz app remove
-npm uninstall -g zhixing
-```
-
-全局目录不可写时只使用 Node 官方的用户级安装或修复方式；不要使用 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置。知行不会后台替换程序，也不会修改用户 Node、npm 或 PATH。
-
-仓库开发使用以下脚本；这些不是用户安装入口：
-
-```bash
-pnpm install                   # 安装依赖
-pnpm build                     # 构建所有包
-pnpm cli                       # 启动 REPL（dev 模式，跑 src/）
-pnpm serve                     # 启动常驻服务
-pnpm test                      # 运行测试
-```
-
-构建后直接运行：
-
-```bash
-node packages/cli/dist/index.js [...]
-```
-
-首次运行检测必要字段缺失时，在交互终端启动**基础配置编辑器**（↑↓ Enter Esc Ctrl+C 导航），与主页面共用同一终端界面，完成后写入功能配置与设备本地 SecretStore。
-
-### 配置文件
-
-知行用户级配置按“功能配置 vs 本地秘密”分层：
-
-| 文件 | 内容 | 性质 |
-|---|---|---|
-| `$ZHIXING_CONFIG_PATH` 指定的文件；未设置时为 `<ZHIXING_HOME>/config.jsonc`，默认 `~/.zhixing/config.jsonc` | 决策层：`llm.main`（必填）/ `llm.light` / `llm.power` 角色选择、`messaging` 启用列表、`workspace`、`agent` / `intent` / `network` 等使用偏好。**支持 JSONC 注释**——VSCode 等编辑器原生识别 | AI 可读；写需用户确认 |
-| 设备本地 SecretStore | provider、channel、MCP 的秘密 binding；桌面使用系统凭据保护，无头设备使用机器绑定加密 vault | 不进入 AI、网格、备份或迁移流 |
-
-### 字段对称性
-
-```
-config.llm.main.provider="siliconflow"  ─refs─>  SecretStore provider binding
-config.messaging.feishu={...options}    ─refs─>  SecretStore channel binding
-```
-
-config 是“启用什么 / 用哪个”的引用；SecretStore 是目标设备的本地秘密来源。
-
-### apiKey 来源（凭证唯一入口）
-
-1. **设备本地 SecretStore**：配置编辑器通过专用流程写入 `provider/<id>` binding
-2. 缺失 → 启动期触发配置编辑器（TTY）或 fail-fast（非 TTY）
-
-`config.jsonc` **不接受**任何形态的凭证字段——启动期 schema 校验会拒绝 `providers` 字段、`channels` 旧名字段、`messaging.<id>.credentials` 嵌入凭证，三段式（违反字段 / 原因 / 修复步骤）引导用户手工修复。
-
-旧版 `~/.zhixing/credentials.json` 只作为一次性迁移源：逐 binding 写入并回读验证，激活前失败回滚且保留源文件；激活后清退异常则失败关闭并在下次读取继续收敛，不反向覆盖已提交凭据。
-
-配置是用户级单一来源：知行读取 `ZHIXING_CONFIG_PATH` 指定的完整文件路径；未设置时读取当前 `ZHIXING_HOME` 下的 `config.jsonc`（默认 `~/.zhixing/config.jsonc`）。知行不读取启动目录下的项目级配置；秘密只从当前设备 SecretStore 解锁，避免随项目或设备迁移泄漏。
-
----
-
-## REPL（交互对话）
-
-```bash
-zz
-```
-
-完成主模型配置后进入交互式多轮对话。当前工具集包括 read/write/edit/glob/grep/bash/schedule；实际执行仍受信任、权限和确认策略约束。
-
-**斜杠命令**：
-
-| 命令 | 作用 |
-|------|------|
-| `/help` | 显示所有命令（按分类输出） |
-| `/new` | 创建新对话 |
-| `/resume` | 列出对话 + 切换到已有对话（候选选择 / 名称匹配 / id 精确匹配） |
-| `/clear` | 清空当前对话历史 |
-| `/name` | 为当前对话命名 |
-| `/enter` | 进入工作场景 |
-| `/exit` | 退出工作场景 / 退出知行 |
-| `/status` | 显示当前会话状态 |
-| `/model` | 显示当前模型信息 |
-| `/usage` | Token 用量详情 |
-| `/context` | 上下文容量可视化 |
-| `/skills` | 查看技能库 |
-| `/work` | 工作场景管理（增删改查/归档） |
-| `/compact` | 手动触发上下文压缩 |
-| `/tasks` | 查看定时任务 |
-| `/config` | 修改基础配置（服务商 / 模型 / API Key / 消息通道等） |
-| `/mcp` | 管理 MCP 服务（接入外部工具 / 启停 / 查看连接） |
-| `/trust` | 权限规则管理 |
-| `/security` | 安全状态概览 |
-
-**对话恢复**：REPL 启动时默认自动恢复用户域最近一个对话，无需手动指定。进入 REPL 后用 `/new` 创建新对话、`/resume` 列出并切换到其它对话。
-
----
-
-## 外部运行控制
-
-```bash
-zz status
-zz stop
-```
-
-`zz status` 用于查看本机知行运行状态；`zz stop` 读取本机发现记录和持久认证 token，请求耐久安全停机并等待同一进程退出。停机被拒绝、超时或无法安全受理时不会强制杀进程；处理提示的阻塞项后可重试同一命令。托管维护前使用 `zz stop --maintenance`。
-
----
-
-## 多设备、恢复备份与本地工作区
-
-这些命令承接必须在交互对话之外仍可完成的设备级旅程；具体参数以对应的 `--help` 为准：
-
-| 旅程 | 入口 | 作用 |
-|---|---|---|
-| 第二台设备 | `zz pair [invitation]` | 一台设备显示二维码和同内容文本，另一台扫描或粘贴后继续恢复码回读、完成配置、确认可用并选择值班设备。正常流程不要求地址、端口、中继或内部角色知识。 |
-| 永久设备移除 | `zz device list/remove/continue/status` | 查看候选，永久移除设备，并在中断后继续或查看同一操作。应用停用另用 `zz app remove`，两者不会混淆。 |
-| 值班迁移 | `zz duty targets/migrate/continue/cancel` | 选择长期在线的接班设备，准备、继续或在切换前取消值班迁移。 |
-| 恢复备份 | `zz backup setup/verify/status` | 建立恢复备份、从实际目标回读验证并查看唯一下一步行动。 |
-| 灾难恢复 | `zz backup recover/recover-finish` | 值班设备永久丢失后，从完整备份接管，并在旧设备已隔离后完成恢复。 |
-| 恢复码 | `zz backup root rotate/invalidate/approve-reset/reset` | 轮换、紧急停用或在另一台已加入设备协助下重置恢复码。 |
-| 本地工作区 | `zz workspace status/list/create/create-scene/rename/repath/remove/reset` | 只在当前设备授权和维护本地目录；远端不接收原始路径。 |
-
----
-
-## 隐藏 / 过渡入口：`zz serve`
-
-`zz serve` 是内部宿主启动路径，默认帮助不展示，不纳入 0.1 用户 smoke 清单。它启动本地 HTTP + WebSocket 宿主，供正式接入面和内部协议客户端连接。
-
-```bash
-zz serve
-```
-
-**启动后会创建**：
-
-```
-<ZHIXING_HOME>/server.pid    # PID + port + 启动时间（JSON）
-<ZHIXING_HOME>/server.port   # 端口号（明文，shell 友好）
-<ZHIXING_HOME>/server.token  # 持久本机认证 token（首次启动生成，宿主重启复用）
-```
-
-端口由当前 `ZHIXING_HOME` 派生（受控内部入口可显式覆盖），并在监听成功后写入 `server.pid` / `server.port` 供正式客户端发现；`18900` 不是固定端口合同。按发现记录访问时，端点形态为：
-
-```
-HTTP REST:    http://127.0.0.1:<实际端口>/api/health
-              http://127.0.0.1:<实际端口>/api/status
-WebSocket:    ws://127.0.0.1:<实际端口>/ws  ← JSON-RPC 2.0
-```
-
-**安全停机**：
-
-- 后台宿主使用 `zz stop`；它先完成耐久停止准备，再关闭真实 Server，且没有强制结束兜底。
-- 前台宿主收到第一次 `Ctrl+C` / `SIGINT` 或 `SIGTERM` 时走同一安全准备与清理链。停机期间应等待其完成，不重复发送中断。
-- 非 Windows 平台的 `SIGUSR1` 也只触发同一安全停机；知行本身不承诺 supervisor 自动重启。
-
-**进程锁**：端口监听是**唯一**单例锁——同 `ZHIXING_HOME` 派生同端口，重复启动被 OS 以 `EADDRINUSE` 原子拒绝。PID / port 文件仅是发现辅助（供客户端找到 owner 的端口 / pid），**不是第二把锁**：宿主 listen 成功即 owner，覆盖任何崩溃残留的 PID 文件、不自杀。
-
-## 故障排查
-
-### 查看后台宿主日志
-
-`zz serve logs` 是统一运行日志的兼容查看入口，前后台共用同一存储和保留策略。
-
-```bash
-zz serve logs
-zz serve logs --tail
-zz serve logs --lines 100
-```
-
-### `EADDRINUSE` 启动失败
-
-端口被占用。优先停掉占用同一 `ZHIXING_HOME` 的旧进程：
-
-```bash
-zz stop
-```
-
-### `config.jsonc 含 N 处废弃字段` / `Provider 缺少 API Key`
-
-`config.jsonc` 含旧版凭证字段（如 `providers.<id>.apiKey: "env:VAR"`）或 channel 密字段（如 `channels.<id>.credentials.appSecret`），启动期 schema 校验会逐项打印违反字段、原因与精确修复步骤。
-
-修复路径：
-
-- 按错误消息提示，在配置编辑器显示的实际 `config.jsonc` 路径中删除违反字段
-- 在交互终端跑 `zz`，由向导写入设备本地 SecretStore
-- channel 接入字段（appId / appSecret 等）通过配置编辑器写入 SecretStore；config.jsonc 只保留启用项与功能选项
-- 非交互宿主须先在目标设备完成 SecretStore 解锁与凭据配置，不接受明文文件或 env 注入语法
-
-### REPL 启动时报 `首次配置未完成`
-
-启动期 wizard 检测到必要字段缺失：
-- 在交互终端（cmd / PowerShell / bash）直接跑 `zz` —— 向导逐字段询问后自动写盘
-- 非交互场景（CI / pipe）会 fail-fast 退出码 2，必须先在 TTY 终端完成首次配置
-
-现有功能配置可通过交互 REPL 的 `/config` 检查和修改；秘密只能通过 `zz` / `/config` 的专用流程查看或更新，不提供明文读取入口。
-
----
+从源码构建与运行面向贡献者，前提与步骤见[开发与贡献指南](https://github.com/Tandem-Agents/zhixing/blob/main/CONTRIBUTING.md)；源码检出不是受支持的用户安装方式。
 
 ## 相关文档
 
-- [项目与用户指南](https://github.com/Tandem-Agents/zhixing#readme)
-- [安装、维护与发布（当前指南）](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/release-and-maintenance-guide.md)
+- [项目主页与快速开始](https://github.com/Tandem-Agents/zhixing#readme)
+- [安装、维护与发布指南](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/release-and-maintenance-guide.md)
+- [版本说明](https://github.com/Tandem-Agents/zhixing/blob/main/docs/delivery/releases/0.1.0.md)
+- [安全说明](https://github.com/Tandem-Agents/zhixing/blob/main/SECURITY.md)
+- [运行时与平台边界](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/node-runtime-boundaries.md)
+- [运行日志与问题追溯](https://github.com/Tandem-Agents/zhixing/blob/main/docs/tasks/runtime-logging-and-diagnostics.md)
+- [公开配置架构](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/configuration/architecture.md)
+- [秘密存储架构](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/secrets/architecture.md)
+- [命令系统](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/cli/command-system.md)
 - [架构总览](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/architecture/overview.md)
-- [常驻服务设计（历史材料，不作为当前实现合同）](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/persistent-service.md)
-- [Server Gateway 协议](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/server-gateway.md)
-- [安全系统](../../docs/modules/security/architecture.md)
-- [输入补全](../../docs/modules/cli/input-completion.md)
-- [命令系统](../../docs/modules/cli/command-system.md)
 - [问题反馈](https://github.com/Tandem-Agents/zhixing/issues)
 
 ## 许可

@@ -6,12 +6,11 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 ## 使用者 / Users
 
-- [中文快速开始](../README.md)
-- [English quick start](../README.en.md)
-- [CLI 命令与 REPL 使用说明](../packages/cli/README.md)
+- [中文入门](../README.md) · [English](../README.en.md)：知行是什么、安装、首次配置与第一个任务 / What Zhixing is, installation, initial setup, and a first task
+- [使用指南](../packages/cli/README.md)：交互命令、工作场景、飞书、多设备与备份、升级卸载、故障排查（中文）
 - [安装、维护与发布指南](../research/design/modules/distributed-runtime/release-and-maintenance-guide.md)
-- [架构概览](../research/design/architecture/overview.md)
-- [0.1.0 发布说明 / Release notes](./delivery/releases/0.1.0.md)
+- [0.1.0 版本说明 / Release notes](./delivery/releases/0.1.0.md)
+- [安全说明 / Security policy](../SECURITY.md)
 
 ## 贡献者 / Contributors
 
@@ -19,16 +18,20 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [行为准则 / Code of Conduct](../CODE_OF_CONDUCT.md)
 - [安全政策 / Security policy](../SECURITY.md)
 - [缺陷与需求反馈 / Bug and feature requests](https://github.com/Tandem-Agents/zhixing/issues)
+- [验证手册](../research/design/workbench/verification-runbook.md)
+- [路径解析与资源隔离](engineering/path-and-resource-isolation.md)
+- [仓库组织与包边界](engineering/repository-structure.md)
+- [状态、重放与合同一致性的工程经验](engineering/state-replay-contract-lessons.md)
+- [架构概览 / Architecture overview](../research/design/architecture/overview.md)
+- [架构演进记录索引](../research/design/architecture/evolutions/README.md)
+
+项目进度与工作记录 / Project progress and work records:
+
 - [首个公开版本交付计划](./delivery/first-public-release.md)
 - [首次公开发布当前工作安排](./tasks/first-public-release-execution.md)
 - [终端迁移收尾方案与执行计划](./tasks/terminal-migration-delivery-plan.md)
 - [终端启动性能收敛](./tasks/terminal-startup-performance.md)
 - [问题处理工作台](./workbench/issue-workbench.md)
-- [验证手册](../research/design/workbench/verification-runbook.md)
-- [路径解析与资源隔离](engineering/path-and-resource-isolation.md)
-- [仓库组织与包边界](engineering/repository-structure.md)
-- [状态、重放与合同一致性的工程经验](engineering/state-replay-contract-lessons.md)
-- [架构演进记录索引](../research/design/architecture/evolutions/README.md)
 
 疑似漏洞的当前支持与私密报告状态只以[安全政策 / Security policy](../SECURITY.md)为准；不要在公开渠道披露漏洞细节或敏感数据。
 

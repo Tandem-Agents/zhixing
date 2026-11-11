@@ -98,6 +98,8 @@ LogApplication 提供查找、读取及策略/存储状态查询：按时间、�
 
 缺口使用统一的机器可读分类：`expired`（已淘汰）、`not-collected`（未采集）、`unavailable`（暂不可达）、`insufficient`（证据不足）；另行标注内容截断、脱敏及查询覆盖范围。查找未命中本身不产生 error 记录，也不证明已淘汰或未采集；无法确认原因时返回 `insufficient`，不无限保存每条已删除记录的墓碑。权限检查先于缺口解释，无权访问时不返回可推断记录存在的分类。
 
+接口名称：RPC 提供 `logs.search`（`filter?`、`cursor?`）、`logs.read`（`address`、`view?`、`cursor?`）、`logs.status` 与 `logs.apply-policy`（`patch`、`expectedVersion`）。身份来自当前设备的连接认证，参数不能声明权限；远程认证接入可以读取，策略修改须由本机接入。模型使用 `log_search` 与 `log_read`；`Task({description, prompt, logOnly: true})` 委派的子任务只获得这两个日志工具，范围由真实会话身份派生。`zz serve logs` 转接同一日志应用，`--tail` 按存储顺序跟随。旧日志不转写为新事件：`zz logs read zxlog-local:legacy/catalog` 列出本机遗留目录，登记后使用返回的 `zxlog://<storeId>/legacy/<id>` 稳定地址。`zz logs` 的迁移状态同时核对存活写者和实际遗留占用；旧写者仍在运行、进程归属无法确认或空间未释放时，不宣称设备整体预算已生效。
+
 ### 3.6 写入前守住总预算，淘汰后保持可解释
 
 LogPolicy 定义总字节和文件数上限、保留期限与最长分段时窗、单条与附件上限、队列和查询预算，以及治理状态预留量。Configuration 提供配置，LogApplication 的配置应用动作携带预期版本，由 Store 串行校验并确认本机生效版本；普通写者只读生效策略，不能用启动快照覆盖它。减小上限时先回收至新预算，再确认生效；配置期望与生效状态分别可见，无法完成则报告受阻。

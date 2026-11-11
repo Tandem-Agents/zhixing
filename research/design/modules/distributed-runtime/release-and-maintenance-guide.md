@@ -13,24 +13,22 @@ zz
 
 ## 同版修复与前向升级
 
-```text
-zz stop --maintenance
-npm install -g zhixing@<当前明确版本>
-zz
-```
+每一步都要等上一步成功后再执行；某一步失败或被拒绝时，按提示处理，不继续后面的命令：
 
-安装最新版本时把第二行改为 `npm install -g zhixing@latest`。maintenance 只关闭本次 exact 托管定义的未来启动并安全停止；失败会补偿本操作造成的状态变化。成功后保持停用，运行新 `zz` 才更新定义并恢复托管。知行不后台检查、下载、替换或回滚程序；已经运行新版本后不提供降级行动。
+1. `zz stop --maintenance`：安全停止，准备维护。
+2. 停止成功后，安装选定的明确版本：`npm install -g zhixing@<版本号>`。同版修复时填当前版本，可先用 `zz --version` 查看；安装最新版本时用 `zhixing@latest`。
+3. 安装成功后运行 `zz`。
+
+maintenance 只关闭本次 exact 托管定义的未来启动并安全停止；失败会补偿本操作造成的状态变化。成功后保持停用，运行新 `zz` 才更新定义并恢复托管。知行不后台检查、下载、替换或回滚程序；已经运行新版本后不提供降级行动。
 
 ## 诊断与停用
 
 `zz doctor` 只读检查本机配置、秘密存储、托管服务、备份配置和已建立连接的兼容状态，每次只给一个安全行动，不联网、不写状态、不输出秘密或内部路径。
 
-卸载应用而保留全部用户数据：
+卸载应用而保留全部用户数据，按顺序执行；只有 `zz app remove` 报告成功后，才运行 `npm uninstall -g zhixing`：
 
-```text
-zz app remove
-npm uninstall -g zhixing
-```
+1. `zz app remove`：安全停止并注销未来托管启动。仍有工作没有安全结束时，它会拒绝停用；按提示处理后重试，不要直接卸载。
+2. `npm uninstall -g zhixing`：移除程序。
 
 第一步只安全停止并注销未来托管启动；成功固定表示“程序尚未卸载”。`ZHIXING_HOME`、设备身份、信任、配置、对话和工作均保留。永久移除设备及本机数据只能通过独立的 `zz device remove --permanent` 强确认流程。
 

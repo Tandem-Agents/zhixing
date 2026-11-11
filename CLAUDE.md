@@ -26,18 +26,24 @@
 
 代码包(`packages/*`):
 
-- `@zhixing/core` — 核心引擎:Agent Loop、事件系统、工具管线
-- `@zhixing/owner-kernel` — 对话 owner 内核:会话权威、运行提交、确认聚合
-- `@zhixing/rpc` — RPC 投影层:会话流、事件组播、确认桥接
-- `@zhixing/orchestrator` — 编排器:Runtime 装配、子 Agent 生命周期、Task 工具
-- `@zhixing/providers` — LLM Provider 层:协议适配、预设注册、配置解析
-- `@zhixing/tools-builtin` — 内置工具:Read / Write / Edit / Glob / Grep / Bash
-- `@zhixing/mcp` — MCP host:接入外部 MCP server 工具
-- `@zhixing/network` — 网络出口原语:SSRF 安全 fetch、URL/IP 防护
-- `@zhixing/server` — 常驻服务网关:HTTP + WebSocket + JSON-RPC 2.0
-- `@zhixing/cli` — 命令行入口
-- `@zhixing/channel-feishu` — 飞书通道(`packages/channels/`):长连接 + 卡片消息
-- `@zhixing/test-utils` — 内部测试基础设施
+- `@zhixing-ai/core` — 共享运行原语、领域合同与耐久、安全、资源机制
+- `@zhixing-ai/orchestrator` — 智能执行内核、模型与工具循环、子 Agent 编排
+- `@zhixing-ai/runtime-host` — 通用运行时装配、运行投影与对话适配
+- `@zhixing-ai/owner-kernel` — 对话 owner、运行提交及耐久调度与投递机制
+- `@zhixing-ai/owner-services` — 任务推进、审查调度与恢复服务
+- `@zhixing-ai/rpc` — Product API 与会话的 RPC 投影、事件流及确认桥
+- `@zhixing-ai/server` — HTTP、WebSocket 与 JSON-RPC 网关
+- `zhixing` — 命令行及终端入口、ApplicationHost 组合根（packages/cli）
+- `@zhixing-ai/executor` — 执行角色、远端任务账本与数据通路
+- `@zhixing-ai/mesh` — 设备配对、安全连接、传输与检查点恢复
+- `@zhixing-ai/providers` — 模型协议适配、预设与配置解析
+- `@zhixing-ai/tools-builtin` — 内置文件、命令、网页与任务工具
+- `@zhixing-ai/mcp` — 外部 MCP server 连接与工具接入
+- `@zhixing-ai/network` — SSRF 安全 fetch、URL/IP 防护与网络出口
+- `@zhixing-ai/secrets` — 设备本地密钥保护与加密 SecretStore
+- `@zhixing-ai/channel-feishu` — 独立受管飞书通道制品（packages/channels/feishu）
+- `@zhixing-ai/terminal-ui` — 独立终端界面与平台原生资源（私有包）
+- `@zhixing-ai/test-utils` — 跨包测试基础设施（私有包）
 
 研究与设计在 `research/`(`insights/`、`source-analysis/`、`landscape/`、`design/`)。其中:
 

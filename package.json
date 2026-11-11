@@ -2,7 +2,7 @@
   "name": "zhixing-workspace",
   "version": "0.1.0",
   "private": true,
-  "description": "知行 — 智能体引擎",
+  "description": "知行（Zhixing）：运行在你自己设备上的通用个人智能体",
   "type": "module",
   "engines": {
     "node": ">=24.0.0"

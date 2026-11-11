@@ -1,7 +1,15 @@
 {
   "name": "zhixing",
   "version": "0.1.0",
-  "description": "知行 CLI — 智能体命令行入口",
+  "description": "Zhixing（知行）: a general-purpose personal agent that runs on your own devices. 运行在你自己设备上的通用个人智能体。",
+  "keywords": [
+    "zhixing",
+    "personal-agent",
+    "ai-agent",
+    "ai-assistant",
+    "cli",
+    "mcp"
+  ],
   "type": "module",
   "bin": {
     "zhixing": "./dist/index.js",
