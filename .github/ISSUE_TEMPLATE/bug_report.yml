@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for reporting a problem. Do not include credentials, tokens, SecretStore data, private file contents, personal information, or unreviewed full logs.
 
-        If this may be a security vulnerability, do not disclose exploit details here. Read the repository's [security policy](https://github.com/Tandem-Agents/zhixing/blob/main/SECURITY.md) for the current reporting status.
+        If this may be a security vulnerability, do not disclose exploit details here. Use [private vulnerability reporting](https://github.com/Tandem-Agents/zhixing/security/advisories/new) and follow the repository's [security policy](https://github.com/Tandem-Agents/zhixing/blob/main/SECURITY.md).
   - type: textarea
     id: summary
     attributes:

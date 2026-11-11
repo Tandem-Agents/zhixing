@@ -390,7 +390,8 @@ describe("home discovery client reads of its own chain", () => {
     expect(reads[0]!.projectionAt).toBe(1);
     expect(Number(reads[1]!.eventAt) - Number(reads[0]!.eventAt)).toBeLessThanOrEqual(2);
     expect(Number(reads[1]!.eventAt)).toBeLessThanOrEqual(64);
-  });
+    // 预算包含历史准备：夹具要签名并重放约 800 条链事件，耗时随机器负载变化；本例的合同是读取点数，不是耗时
+  }, 30_000);
 
   it("reads only the superseded local segment when it detects a fork", async () => {
     const home = await createHome();

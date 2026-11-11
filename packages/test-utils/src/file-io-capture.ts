@@ -2,10 +2,13 @@
  * 测试用的真实文件读写计量：拦截 FileHandle 的读写方法与 fs/promises 的整文件读写，
  * 按相对 root 的路径归类累计字节与次数。用于规模用例比较不同历史规模下的完整读量与保存量；
  * 嵌套调用（例如 FileHandle.writeFile 内部的 write）只计一次。测试结束时自动还原。
+ * 只计 root 内路径的读写；捕获开始前已打开的句柄无从得知路径，其读写照常计量并归到 "<unmapped>"，
+ * 不按根排除，需要完整归属时应在这些句柄打开前开始捕获。
  */
 import fs, { open } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { onTestFinished, vi } from "vitest";
 
 export interface FileIoTotals {
@@ -43,8 +46,14 @@ export async function captureFileIo(
   const probe = await open(path.join(root, "file-io-probe"), "w");
   const prototype = Object.getPrototypeOf(probe) as Record<string, (...args: unknown[]) => Promise<unknown>>;
   await probe.close();
-  const relative = (file: unknown) => path.relative(root, String(file instanceof URL ? file.pathname : file)).replaceAll("\\", "/");
+  // 只计本次根目录内的读写：同进程里其他夹具（其他根、`../` 兄弟目录）的后台读写不得混入计量
+  const relative = (file: unknown): string | undefined => {
+    const result = path.relative(root, path.resolve(file instanceof URL ? fileURLToPath(file) : String(file)));
+    if (result === ".." || result.startsWith(`..${path.sep}`) || path.isAbsolute(result)) return undefined;
+    return result.replaceAll("\\", "/");
+  };
   const paths = new WeakMap<object, string>();
+  const outside = new WeakSet<object>();
   let totals = empty();
 
   const account = (file: string, kind: "read" | "write", bytes: number) => {
@@ -62,23 +71,28 @@ export async function captureFileIo(
   const openFile = fs.open;
   const opened = vi.spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
     const handle = await openFile(...args);
-    paths.set(handle, relative(args[0]));
+    const mapped = relative(args[0]);
+    if (mapped === undefined) outside.add(handle);
+    else paths.set(handle, mapped);
     return handle;
   });
   const readFile = fs.readFile, writeFile = fs.writeFile, appendFile = fs.appendFile;
   const wholeReads = vi.spyOn(fs, "readFile").mockImplementation((async (file: Parameters<typeof fs.readFile>[0], ...rest: unknown[]) => {
     const result = await (readFile as (...args: unknown[]) => Promise<string | Buffer>)(file, ...rest);
-    if (typeof file === "string" || file instanceof URL) account(relative(file), "read", typeof result === "string" ? Buffer.byteLength(result) : result.length);
+    const mapped = typeof file === "string" || file instanceof URL ? relative(file) : undefined;
+    if (mapped !== undefined) account(mapped, "read", typeof result === "string" ? Buffer.byteLength(result) : result.length);
     return result;
   }) as typeof fs.readFile);
   const wholeWrites = [
     vi.spyOn(fs, "writeFile").mockImplementation((async (file: Parameters<typeof fs.writeFile>[0], data: unknown, ...rest: unknown[]) => {
       await (writeFile as (...args: unknown[]) => Promise<void>)(file, data, ...rest);
-      if (typeof file === "string" || file instanceof URL) account(relative(file), "write", byteLength(data));
+      const mapped = typeof file === "string" || file instanceof URL ? relative(file) : undefined;
+      if (mapped !== undefined) account(mapped, "write", byteLength(data));
     }) as typeof fs.writeFile),
     vi.spyOn(fs, "appendFile").mockImplementation((async (file: Parameters<typeof fs.appendFile>[0], data: unknown, ...rest: unknown[]) => {
       await (appendFile as (...args: unknown[]) => Promise<void>)(file, data, ...rest);
-      if (typeof file === "string" || file instanceof URL) account(relative(file), "write", byteLength(data));
+      const mapped = typeof file === "string" || file instanceof URL ? relative(file) : undefined;
+      if (mapped !== undefined) account(mapped, "write", byteLength(data));
     }) as typeof fs.appendFile),
   ];
   syncBuiltinESMExports();
@@ -92,7 +106,7 @@ export async function captureFileIo(
       depth.set(this, nested + 1);
       try {
         const result = await original.apply(this, args) as { bytesRead?: number; bytesWritten?: number } | string | Buffer | undefined;
-        if (!nested) {
+        if (!nested && !outside.has(this)) {
           const file = paths.get(this) ?? "<unmapped>";
           if (method.startsWith("read")) account(file, "read", typeof result === "object" && result !== null && "bytesRead" in result ? result.bytesRead ?? 0 : byteLength(result));
           else account(file, "write", typeof result === "object" && result !== null && "bytesWritten" in result ? result.bytesWritten ?? 0 : byteLength(args[0]));

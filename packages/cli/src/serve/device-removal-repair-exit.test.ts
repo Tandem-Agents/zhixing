@@ -13,6 +13,9 @@ import { CurrentIssuerDeviceRemovalAuthority, ExecutorRemovalTarget, settleExecu
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadExistingDeviceKey, replacedDeviceOf } from "./mesh-device-key.js";
 import { createPairingTrustEvent, runPairCommand } from "./mesh-pair-command.js";
+import { join } from "node:path";
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 
 class MemorySecretStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -32,16 +35,44 @@ class MemorySecretStore implements SecretStorePort {
       return { kind: entry.slice(0, separator) as SecretRef["kind"], bindingId: entry.slice(separator + 1) };
     });
   }
-  async unlockState(): Promise<"unlocked"> { return "unlocked"; }
+  locked = false;
+  async unlockState(): Promise<"unlocked" | "locked"> { return this.locked ? "locked" : "unlocked"; }
 }
 
-/** 真实配对入口：值班设备发起，加入方完成加入。 */
-async function pair(anchor: { home: string; secrets: MemorySecretStore }, joiner: { home: string; secrets: MemorySecretStore }): Promise<void> {
+/**
+ * 一台模拟设备。生产里一个进程对同一 home 只有一个容量仲裁器，这里同进程模拟两台设备，
+ * 每台设备的全部 store 与配对入口共用自己的容量运行时，用例结束时关闭。
+ */
+interface SimulatedDevice {
+  readonly home: string;
+  readonly secrets: MemorySecretStore;
+  readonly capacity: ReturnType<typeof createDeviceCapacityRuntime>;
+}
+
+async function simulatedDevice(name: string): Promise<SimulatedDevice> {
+  const home = await createTempDir(name);
+  return { home, secrets: new MemorySecretStore(), capacity: createDeviceCapacityRuntime(join(home, "distributed-runtime", "capacity")) };
+}
+
+function openStore(device: SimulatedDevice, key: Parameters<typeof FileMeshBootstrapStore.open>[1]): Promise<FileMeshBootstrapStore> {
+  return FileMeshBootstrapStore.open(device.home, key, {
+    secretStore: device.secrets, deviceCapacity: device.capacity.arbiter, storageMaintenance: device.capacity.storage,
+  });
+}
+
+function deviceLogging(device: SimulatedDevice) {
+  return { bind: recordingFixture().bind, capacity: device.capacity };
+}
+
+/** 真实配对入口：值班设备发起，加入方完成加入。任一侧失败都立即暴露真实错误，并收尾另一侧。 */
+async function pair(anchor: SimulatedDevice, joiner: SimulatedDevice): Promise<void> {
   let resolveInvitation!: (value: string) => void;
   const invitation = new Promise<string>((resolve) => { resolveInvitation = resolve; });
+  const issuerAbort = new AbortController();
   host.name = "duty-device";
   const issuer = runPairCommand({
     zhixingHome: anchor.home, secretStore: anchor.secrets, composition: "production",
+    logging: deviceLogging(anchor), signal: issuerAbort.signal,
     confirmRecoveryPackage: async (encoded) => encoded,
     showPairingInvitation: async (display) => { resolveInvitation(display.invitation); },
     reconcileManagedService: async () => undefined,
@@ -50,30 +81,52 @@ async function pair(anchor: { home: string; secrets: MemorySecretStore }, joiner
     migrateDutyTo: async () => undefined,
     writeLine: () => undefined,
   });
-  const encoded = await invitation;
+  // 发起方在给出邀请前结束（多为启动被拒）时，直接以它的结果结束，不让加入方等到用例超时
+  const endedWithoutInvitation = issuer.then(() => { throw new Error("pairing issuer ended without an invitation"); });
+  endedWithoutInvitation.catch(() => undefined);
+  const encoded = await Promise.race([invitation, endedWithoutInvitation]);
   host.name = "removed-device";
-  await runPairCommand({
-    zhixingHome: joiner.home, secretStore: joiner.secrets, composition: "production",
-    promptExecutorAutoStart: async () => false,
-    invitation: encoded,
-    completeDeviceConfiguration: async () => "ready",
-    reconcileManagedService: async () => undefined,
-    writeLine: () => undefined,
-  });
+  try {
+    await runPairCommand({
+      zhixingHome: joiner.home, secretStore: joiner.secrets, composition: "production",
+      logging: deviceLogging(joiner),
+      promptExecutorAutoStart: async () => false,
+      invitation: encoded,
+      completeDeviceConfiguration: async () => "ready",
+      reconcileManagedService: async () => undefined,
+      writeLine: () => undefined,
+    });
+  } catch (error) {
+    issuerAbort.abort(error);
+    await issuer.catch(() => undefined);
+    throw error;
+  }
   await issuer;
 }
+
+// 夹具自身：发起方在给出邀请前被拒时立即以真实原因失败，不让加入方等到用例超时
+describe("pairing fixture", () => {
+  it("surfaces an issuer rejection before any invitation instead of waiting for the joiner", async () => {
+    const anchor = await simulatedDevice("issuer-rejected-anchor");
+    const device = await simulatedDevice("issuer-rejected-device");
+    anchor.secrets.locked = true;
+    const started = Date.now();
+    await expect(pair(anchor, device)).rejects.toThrow("Device SecretStore must be unlocked before pairing");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 30_000);
+});
 
 // 值班链上待重新配对的设备（撤销阶段、没有撤销凭据的旧移除）经显式重新配对以原身份接回：
 // 旧移除被取代后冷重开正常装配；值班设备随后用这次移除的旧 ready 回执撤销时，在撤销提交点被取代守卫挡下
 describe("explicit re-pairing as the exit of a suspended removal target", () => {
   it("re-enrolls the same identity, supersedes the old removal and refuses the late old revocation", async () => {
-    const anchor = { home: await createTempDir("resume-anchor"), secrets: new MemorySecretStore() };
-    const device = { home: await createTempDir("resume-device"), secrets: new MemorySecretStore() };
+    const anchor = await simulatedDevice("resume-anchor");
+    const device = await simulatedDevice("resume-device");
     await pair(anchor, device);
     const anchorKey = (await loadExistingDeviceKey(anchor.secrets))!;
     const deviceKey = (await loadExistingDeviceKey(device.secrets))!;
-    const anchorStore = await FileMeshBootstrapStore.open(anchor.home, anchorKey, { secretStore: anchor.secrets });
-    const deviceStore = await FileMeshBootstrapStore.open(device.home, deviceKey, { secretStore: device.secrets });
+    const anchorStore = await openStore(anchor, anchorKey);
+    const deviceStore = await openStore(device, deviceKey);
     const anchorVerifier = anchorStore.authoritySources()!.verifier;
     const deviceVerifier = deviceStore.authoritySources()!.verifier;
     const trust = (await anchorStore.loadTrustRecord())!;
@@ -129,7 +182,7 @@ describe("explicit re-pairing as the exit of a suspended removal target", () => 
     await authority().resumeActive();
     expect(guards.size).toBe(0);
     // 这台设备：加入完成时旧移除已在本机终结，冷开结算直接正常装配
-    const reopened = await FileMeshBootstrapStore.open(device.home, deviceKey, { secretStore: device.secrets });
+    const reopened = await openStore(device, deviceKey);
     try {
       const verifier = reopened.authoritySources()!.verifier;
       expect((await new DeviceLifecycleJournal(reopened.authorityLog(), verifier).state(operationId))?.terminalOutcome).toBe("superseded");
@@ -150,12 +203,12 @@ describe("explicit re-pairing as the exit of a suspended removal target", () => 
   }, 180_000);
 
   it("converges the issuer guard by the same fact when the pairing was committed but its termination was interrupted", async () => {
-    const anchor = { home: await createTempDir("resume-anchor-cut"), secrets: new MemorySecretStore() };
-    const device = { home: await createTempDir("resume-device-cut"), secrets: new MemorySecretStore() };
+    const anchor = await simulatedDevice("resume-anchor-cut");
+    const device = await simulatedDevice("resume-device-cut");
     await pair(anchor, device);
     const anchorKey = (await loadExistingDeviceKey(anchor.secrets))!;
     const deviceKey = (await loadExistingDeviceKey(device.secrets))!;
-    const anchorStore = await FileMeshBootstrapStore.open(anchor.home, anchorKey, { secretStore: anchor.secrets });
+    const anchorStore = await openStore(anchor, anchorKey);
     const anchorVerifier = anchorStore.authoritySources()!.verifier;
     const trust = (await anchorStore.loadTrustRecord())!;
     const targetName = trust.members.find((member) => member.device.deviceId === deviceKey.deviceId)!.device.displayName;
@@ -210,14 +263,14 @@ describe("explicit re-pairing as the exit of a suspended removal target", () => 
 // 旧移除被取代后冷重开正常装配，不删资料、不重开旧成员权限，旧钥隔离保留
 describe("explicit re-pairing as the exit of a lost removal", () => {
   it("joins with a new identity, supersedes the old removal and starts normally after a cold reopen", async () => {
-    const anchor = { home: await createTempDir("repair-anchor"), secrets: new MemorySecretStore() };
-    const device = { home: await createTempDir("repair-device"), secrets: new MemorySecretStore() };
+    const anchor = await simulatedDevice("repair-anchor");
+    const device = await simulatedDevice("repair-device");
     await pair(anchor, device);
 
     const anchorKey = (await loadExistingDeviceKey(anchor.secrets))!;
     const oldKey = (await loadExistingDeviceKey(device.secrets))!;
-    const anchorStore = await FileMeshBootstrapStore.open(anchor.home, anchorKey, { secretStore: anchor.secrets });
-    const deviceStore = await FileMeshBootstrapStore.open(device.home, oldKey, { secretStore: device.secrets });
+    const anchorStore = await openStore(anchor, anchorKey);
+    const deviceStore = await openStore(device, oldKey);
     const anchorVerifier = anchorStore.authoritySources()!.verifier;
     const deviceVerifier = deviceStore.authoritySources()!.verifier;
     const trust = (await anchorStore.loadTrustRecord())!;
@@ -258,7 +311,7 @@ describe("explicit re-pairing as the exit of a lost removal", () => {
     expect(device.secrets.values.has(`device-key/retired/v1/${oldKey.deviceId}`)).toBe(true);
 
     // 冷重开：旧移除在加入完成时已按 superseded 终结（绑定本次配对），启动结算直接正常装配，不读信任链
-    const reopened = await FileMeshBootstrapStore.open(device.home, newKey, { secretStore: device.secrets });
+    const reopened = await openStore(device, newKey);
     try {
       const verifier = reopened.authoritySources()!.verifier;
       expect(await settleExecutorRemovalBeforeBootstrap({ log: reopened.authorityLog(), verifier, secretStore: device.secrets }))
@@ -274,7 +327,7 @@ describe("explicit re-pairing as the exit of a lost removal", () => {
       expect((await reopened.loadTrustRecord())!.members.find((member) => member.device.deviceId === oldKey.deviceId)?.state).not.toBe("active");
 
       // 新配对之后对新身份发起的新移除照常可用：撤销提交点的取代判断只看那次移除自己的接受点
-      const anchorAgain = await FileMeshBootstrapStore.open(anchor.home, anchorKey, { secretStore: anchor.secrets });
+      const anchorAgain = await openStore(anchor, anchorKey);
       try {
         const authorityAgain = new CurrentIssuerDeviceRemovalAuthority({
           store: anchorAgain, issuerKey: anchorKey, secretStore: anchor.secrets, verifier: anchorAgain.authoritySources()!.verifier, isReachable: () => false,

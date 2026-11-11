@@ -15,6 +15,7 @@ export * from "./ports.js";
 export * from "./setup.js";
 export * from "./discovery.js";
 export * from "./presets.js";
+export * from "./naming.js";
 
 export type McpConnectionResult =
   | { readonly status: "active"; readonly serverId: string }

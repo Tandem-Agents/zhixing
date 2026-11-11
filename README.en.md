@@ -26,7 +26,7 @@ See the [release notes](docs/delivery/releases/0.1.0.md) for current capabilitie
 
 Conversations and runtime state live on your devices; configured model providers and external services may still receive task data and incur charges. Zhixing can change files and run commands; permission controls are not an OS-level sandbox. See the [security policy](SECURITY.md).
 
-A private vulnerability reporting channel has yet to be established. Do not disclose vulnerability details or sensitive information in public issues.
+Report security vulnerabilities [privately to the maintainers](https://github.com/Tandem-Agents/zhixing/security/advisories/new). Do not disclose vulnerability details or sensitive information in public issues.
 
 ## Feedback and contributions
 

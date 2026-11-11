@@ -17,7 +17,7 @@
 
 import type { ToolResult } from "@zhixing-ai/core";
 import type { TranscriptToolFacts } from "@zhixing-ai/core/contracts";
-import { parseToolName } from "@zhixing-ai/mcp/naming";
+import { parseMcpToolName } from "@zhixing-ai/core/mcp-management";
 import { builtinToolDisplayName } from "@zhixing-ai/core/tool-display-names";
 import { conversationStateLabel } from "./conversation-state-label.js";
 
@@ -32,7 +32,7 @@ const BATCH_DETAIL_TARGET_TRUNCATE = 40;
  * `snake_case → PascalCase` 兜底，大小写转换套在 MCP 名上会把服务名揉坏。
  */
 export function displayToolName(name: string): string {
-  const mcp = parseToolName(name);
+  const mcp = parseMcpToolName(name);
   if (mcp) return `${mcp.tool}（${mcp.serverId}）`;
   return builtinToolDisplayName(name) ?? snakeToPascal(name);
 }

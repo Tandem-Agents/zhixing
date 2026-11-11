@@ -23,6 +23,7 @@ const SRC_DIR = path.resolve(
 const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string }> = [
   { file: "command-entry.ts", reason: "plain entry load failure before any surface is attached" },
   { file: "terminal/launch.ts", reason: "supervisor admission failure before UI, or after it has exited" },
+  { file: "terminal/startup-hint.ts", reason: "默认交互入口的启动提示：界面接管前 S 是唯一写者，只写一行；接管前、启动失败与进程退出时清除" },
   { file: "index.ts", reason: "bin 入口 startup-check 失败路径——chrome 未建立" },
   { file: "screen/cli-writer.ts", reason: "CliWriter 实现本身——StdoutWriter 直写 stdout 是合法语义" },
   { file: "serve/command.ts", reason: "serve daemon——后台进程无 chrome；setup chrome 之前的 logger" },

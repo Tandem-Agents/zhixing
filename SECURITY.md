@@ -10,9 +10,9 @@ Platform targets and pending acceptance are listed in the [release notes](./docs
 
 Do not disclose suspected vulnerability details in a public issue, discussion, pull request, log, or other public channel. Never include API keys, tokens, SecretStore data, private file contents, personal information, or unreviewed full logs.
 
-Private vulnerability reporting is not currently enabled, and the project does not currently publish a private security email address or another private intake channel. This policy will name a verified private channel only after one is actually available. Until then, there is no project-authorized destination for vulnerability details, and the first public release must not be declared ready on the strength of this file alone.
+Report suspected vulnerabilities through [GitHub private vulnerability reporting](https://github.com/Tandem-Agents/zhixing/security/advisories/new). Reports are shared privately with the repository's maintainers.
 
-When a private channel is enabled, a useful report should contain only sanitized information needed to reproduce and assess the issue:
+Include only sanitized information needed to reproduce and assess the issue:
 
 - the affected Zhixing version and supported environment;
 - the security impact and affected boundary;
