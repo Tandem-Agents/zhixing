@@ -1,5 +1,5 @@
-import type { AdvancementEvidenceOutcome, AdvancementSession, ConfirmedRubricSnapshot } from "@zhixing/core/advancement";
-import type { RunRecordInput } from "@zhixing/core/transcript";
+import type { AdvancementEvidenceOutcome, AdvancementSession, ConfirmedRubricSnapshot } from "@zhixing-ai/core/advancement";
+import type { RunRecordInput } from "@zhixing-ai/core/transcript";
 import type {
   CapabilityDescriptor,
   EvidenceExecutionResult,
@@ -8,7 +8,7 @@ import type {
   ResourceLease,
   ResourceReservationPort,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedCapabilityDescriptor,
   createSignedEvidenceBundle,
@@ -18,7 +18,7 @@ import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import type { AdvancementSessionStore } from "./session-store.js";
 import { createAdvancementReviewExternalMechanism } from "./review-external-mechanism.js";

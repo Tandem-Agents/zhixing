@@ -12,7 +12,7 @@ import {
   userMessage,
   type AgentEventMap,
   type Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   RubricContractBuilder,
   advancementExecutionTurnId,
@@ -24,37 +24,37 @@ import {
   type AdvancementRunReview,
   type ConfirmedRubricSnapshot,
   type RubricContractDraftSnapshot,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import {
   RubricStore,
-} from "@zhixing/core/rubrics";
+} from "@zhixing-ai/core/rubrics";
 import type {
   AgentResult,
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import type {
   ContextBudget,
-} from "@zhixing/core/context";
+} from "@zhixing-ai/core/context";
 import type {
   OrchestrationRunResultV1,
-} from "@zhixing/core/orchestration";
+} from "@zhixing-ai/core/orchestration";
 import type {
   TaskListState,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 import { AdvancementStore } from "../../../core/src/advancement/store.js";
 
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import {
   DurableConversationAdmissionRejectedError,
   type DurableConversationTurnExecutor,
-} from "@zhixing/owner-kernel/run-turn";
+} from "@zhixing-ai/owner-kernel/run-turn";
 import {
   createConversationAgentTurnAdmissionPort,
-} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
-import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+} from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
+import { parseConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import type {
   ConversationBootstrap,
   RunTurnOptions,
@@ -62,7 +62,7 @@ import type {
   RuntimeSecuritySnapshot,
   SessionRuntime,
   RuntimeFactory,
-} from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/types";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   encodeRequest,
@@ -76,18 +76,18 @@ import {
   AdvancementController as OwnerAdvancementController,
   createAdvancementRecoveryMaintenance,
   type AdvancementControllerOptions,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewAttemptApplication } from "@zhixing-ai/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
 import {
   createAdvancementProxyTurnPort,
 } from "../advancement/adapters.js";
-import { createTempDir } from "@zhixing/test-utils";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import {
   AdvancementReviewResultProjectionApplicationService,
   type AdvancementReviewAttemptApplication,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationApplicationError,
@@ -110,18 +110,18 @@ import {
   type ConversationPerspectivesApplication,
   type ConversationPerspectivesCorrectnessPort,
   type ConversationPerspectivesRuntimePort,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   AdvancementApplicationService,
   AdvancementConversationLifecycleApplicationService,
   AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   defineProductApiExactSet,
   ProductApiDispatcher,
-} from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/product-api";
 import { bindTestConversationManager } from "./server-conversation-binding-fixture.js";
 
 const TEST_VERSION = "0.1.0-test";

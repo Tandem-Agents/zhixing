@@ -5,8 +5,8 @@ import type {
   ExecutionRef,
   InteractionDisplay,
   StreamFrame,
-} from "@zhixing/core/contracts";
-import type { ConfirmationDecision } from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/contracts";
+import type { ConfirmationDecision } from "@zhixing-ai/core/confirmation";
 import {
   assertDataPlaneTicketActiveAt,
   assertDataPlaneTicketBinding,
@@ -16,10 +16,10 @@ import {
   type ProtocolSignatureVerifier,
   type InlineInteractionDisplay,
   type StreamVerifierCheckpoint,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   ConversationChannelFrameAdoption,
-} from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   AssignmentStreamPathManager,
   type AssignmentStreamPathConnector,

@@ -16,7 +16,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex, bindDurableProjectionMutations, durableProjectionDirectoryName, durableProjectionReadBudget } from "../index.js";
 import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, runWithDeviceCapacity, withDeviceCapacityStep, currentDeviceCapacityStep, StorageMaintenanceAdmissionError } from "../../resources/index.js";
 import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 
 describe("authority projection physical reads", () => {
   it("does not reserve maintenance capacity while waiting for the source owner", async () => {

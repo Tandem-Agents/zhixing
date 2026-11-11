@@ -1,13 +1,13 @@
-import type { ArtifactStore } from "@zhixing/core/authority";
-import type { SkillMode } from "@zhixing/core/skills/catalog";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
+import type { SkillMode } from "@zhixing-ai/core/skills/catalog";
 import type {
   KernelToolImplementationPort,
   KernelToolPermissionRuleSet,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import {
   BUILTIN_TOOL_FACTORIES,
   WEB_FETCH_DEFAULT_RULES,
-} from "@zhixing/tools-builtin";
+} from "@zhixing-ai/tools-builtin";
 import {
   createAssignmentSkillPorts,
   createBuiltinOnlyAssignmentSkillPorts,

@@ -1,11 +1,11 @@
-import type { DurableProjectionReadContext } from "@zhixing/core/authority";
+import type { DurableProjectionReadContext } from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AuthorityError,
   GlobalStagedMutation,
   LogicalRecord,
   WorksceneAppliedResult,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 export type GlobalMutationPublishOutcome =
   | {

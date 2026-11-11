@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
-import { createMcpManagementProductApiContribution, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET } from "@zhixing/core/mcp-management";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
+import { createMcpManagementProductApiContribution, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET } from "@zhixing-ai/core/mcp-management";
 import { buildMcpPendingMethod } from "../methods/mcp.js";
 
 describe("MCP pending secure UI projection", () => {

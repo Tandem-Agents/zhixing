@@ -1,4 +1,4 @@
-import type { LogRecordPort, LogSource } from "@zhixing/core/logging";
+import type { LogRecordPort, LogSource } from "@zhixing-ai/core/logging";
 
 export const INPUT_LOG_SOURCE: LogSource = {
   id: "terminal-input", version: 1,

@@ -1,11 +1,11 @@
 /** Node 首配检查、owner 保存及重读；终端只提供编辑回调。 */
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { getZhixingHome } from "@zhixing/core/paths";
-import type { SecretStorePort } from "@zhixing/core/contracts";
-import { FileLockBusyError } from "@zhixing/core/persistence";
-import { maintenanceRetryDelayMs, StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
+import { FileLockBusyError } from "@zhixing-ai/core/persistence";
+import { maintenanceRetryDelayMs, StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
+import { validateMeshRoleBootConfig } from "@zhixing-ai/mesh/bootstrap";
 import {
   ConfigSchemaError,
   CredentialsSchemaError,
@@ -17,8 +17,8 @@ import {
   type ConfigSemanticIssue,
   type ZhixingConfig,
   type ZhixingCredentials,
-} from "@zhixing/providers/configuration";
-import { createPlatformSecretStore } from "@zhixing/secrets";
+} from "@zhixing-ai/providers/configuration";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import type { LocalConfigurationPort } from "../serve/local-configuration-application.js";
 import {
   projectRuntimeSecrets,
@@ -65,8 +65,8 @@ export type StartupCheckResult =
 export interface StartupApplicationOptions {
   /** Trusted local Configuration application; available without a Host. */
   configuration?: LocalConfigurationPort;
-  processIdentityResolver?: import('@zhixing/core/persistence').FileLockOptions['processIdentityResolver'];
-  records?: import("@zhixing/core/logging").LogRecordPort;
+  processIdentityResolver?: import('@zhixing-ai/core/persistence').FileLockOptions['processIdentityResolver'];
+  records?: import("@zhixing-ai/core/logging").LogRecordPort;
   /** 入口固定的数据根；配置文件可单独指定。 */
   homeDir?: string;
   configPath?: string;

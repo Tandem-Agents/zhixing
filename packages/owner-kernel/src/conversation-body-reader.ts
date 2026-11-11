@@ -1,6 +1,6 @@
-import { artifactJsonIndex, assertArtifactRef, type ArtifactStore } from '@zhixing/core/authority';
-import { readTranscriptToolFacts } from '@zhixing/core/transcript';
-import type { ArtifactRef, ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, ConversationCommitSummary } from '@zhixing/core/contracts';
+import { artifactJsonIndex, assertArtifactRef, type ArtifactStore } from '@zhixing-ai/core/authority';
+import { readTranscriptToolFacts } from '@zhixing-ai/core/transcript';
+import type { ArtifactRef, ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, ConversationCommitSummary } from '@zhixing-ai/core/contracts';
 import { ConversationReadIndex, type CommitPointer, type ReadMeta } from './conversation-read-index.js';
 import { assertConversationCommitSummary } from './conversation-run-contracts.js';
 
@@ -55,7 +55,7 @@ export class ConversationBodyReader {
   /** Same recent-context product budget as the owner bootstrap (100 messages,
    * 200 characters per message, 1200 total), without materializing every run.
    * Only text is projected, so an incomplete tool pair cannot enter the model. */
-  async context(): Promise<import('@zhixing/core/contracts').ConversationContextPage> {
+  async context(): Promise<import('@zhixing-ai/core/contracts').ConversationContextPage> {
     const state = await this.directory.state(this.conversationId), lines: string[] = [];
     let commit = await this.directory.latest(this.conversationId), count = 0, total = 0;
     while (commit && count < 100 && total < 1200) {

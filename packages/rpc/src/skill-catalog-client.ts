@@ -6,7 +6,7 @@ import type {
   SkillCatalogQuery,
   SkillCatalogStatePatch,
   SkillCatalogView,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 

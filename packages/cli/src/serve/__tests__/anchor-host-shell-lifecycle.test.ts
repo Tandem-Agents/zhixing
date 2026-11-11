@@ -13,8 +13,8 @@ import {
   type PidFileContents,
   type ServerStateFile as ServerStateFileType,
   type ZhixingServerInstance,
-} from "@zhixing/server";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/server";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";

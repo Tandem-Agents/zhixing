@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Message } from '@zhixing/core/types';
+import type { Message } from '@zhixing-ai/core/types';
 import { ObservedTextPrefix } from '../observed-text-prefix.js';
 
 const message = (...texts: string[]): Message => ({ role: 'assistant', content: texts.map(text => ({ type: 'text', text })) });

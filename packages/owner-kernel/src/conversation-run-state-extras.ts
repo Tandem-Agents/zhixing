@@ -1,9 +1,9 @@
 import { corruptRunJournal } from './conversation-run-contracts.js';
 import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts, type ConversationBaseLocation } from './conversation-base-source.js';
-import type { ArtifactStore, DurableLogCheckpoint, DurableProjectionReadContext } from '@zhixing/core/authority';
-import type { CommitEnvelope, LogicalRecord, ArtifactRef, ConversationRunState, SegmentRecord } from '@zhixing/core/contracts';
+import type { ArtifactStore, DurableLogCheckpoint, DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import type { CommitEnvelope, LogicalRecord, ArtifactRef, ConversationRunState, SegmentRecord } from '@zhixing-ai/core/contracts';
 import { canonicalize, protocolDigest, interactionMirrorSeed, interactionMirrorBatchDigest, validateConversationInteractionMirrorEntry, validateNonEmptyUserTurnInput,
-  type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+  type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { dispatchConflictKey, rejectedNotStartedKey, loadCommittedBundleBinding, emptyConversationRunProjection, reduceConversationContainment,
   type RunProjection, type SubmissionGuardProjection, type ConversationFactGroup, type ConversationSubmissionGuardContext } from './conversation-assignment.js';
 import { assignmentTerminationProofKind, assertHistoricalBundleFence, type ConversationRunJournalRecord, type ConversationRunInternalRecord, type Stored } from './conversation-run-contracts.js';

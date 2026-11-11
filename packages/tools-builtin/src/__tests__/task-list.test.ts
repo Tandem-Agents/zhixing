@@ -1,4 +1,4 @@
-import type { ConversationTaskListToolApplication } from "@zhixing/core/conversation/application";
+import type { ConversationTaskListToolApplication } from "@zhixing-ai/core/conversation/application";
 import { describe, expect, it } from "vitest";
 import { createTaskListTool } from "../task-list.js";
 

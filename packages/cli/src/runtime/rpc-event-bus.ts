@@ -29,10 +29,10 @@ import type {
   TurnContext,
   Unsubscribe,
   WildcardListener,
-} from "@zhixing/core";
-import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
-import { SESSION_NOTIFICATIONS, validateSessionProcessProjection, type SessionProcessProjection } from "@zhixing/rpc/session-wire";
-import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
+} from "@zhixing-ai/core";
+import type { DecorateRunBusFn } from "@zhixing-ai/orchestrator/runtime";
+import { SESSION_NOTIFICATIONS, validateSessionProcessProjection, type SessionProcessProjection } from "@zhixing-ai/rpc/session-wire";
+import type { SessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";
 
 const AGENT_RUN_END_EVENT = "agent:run_end";

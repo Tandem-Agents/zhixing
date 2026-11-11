@@ -4,7 +4,7 @@
  * 同名根换代后旧用量不会复活。
  */
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import type { GovernorRecord, ReservableResourceLease, ResourceLease, Signature } from "../../contracts/index.js";
 import { canonicalize, protocolDigest } from "../../protocol/canonical.js";

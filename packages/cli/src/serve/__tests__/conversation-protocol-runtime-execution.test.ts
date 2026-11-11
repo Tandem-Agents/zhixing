@@ -1,17 +1,17 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：execution。
-import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, isHoldingMaintenanceExclusion } from "@zhixing/core/resources";
-import { FileArtifactStore } from "@zhixing/core/authority";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { type Message } from "@zhixing/core";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { StreamDigestChain } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { ConversationRunJournal, ConversationPendingCancellationError } from "@zhixing/owner-kernel/conversation-assignment";
-import { createInitialControlEnvelope, createConversationControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { ConversationAssignmentLedger, AssignmentStreamSpool, AssignmentStreamWriter } from "@zhixing/executor";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, isHoldingMaintenanceExclusion } from "@zhixing-ai/core/resources";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { type Message } from "@zhixing-ai/core";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { StreamDigestChain } from "@zhixing-ai/core/protocol";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { ConversationRunJournal, ConversationPendingCancellationError } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { createInitialControlEnvelope, createConversationControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { ConversationAssignmentLedger, AssignmentStreamSpool, AssignmentStreamWriter } from "@zhixing-ai/executor";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { resolve } from "node:path";
 import { describe, expect, it, vi, onTestFinished } from "vitest";
 import { ConversationProtocolRuntime, DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
@@ -857,7 +857,7 @@ describe("ConversationProtocolRuntime", () => {
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("re-derives an expired resource candidate before execution without preparing a second runtime", async () => {
-    const { AnchorResourceGovernor, ResourceCandidateStaleError } = await import("@zhixing/owner-kernel/resource-governor");
+    const { AnchorResourceGovernor, ResourceCandidateStaleError } = await import("@zhixing-ai/owner-kernel/resource-governor");
     const activate = AnchorResourceGovernor.prototype.prepareActivation;
     let rejected = false;
     const spy = vi.spyOn(AnchorResourceGovernor.prototype, "prepareActivation").mockImplementation(function (lease) {

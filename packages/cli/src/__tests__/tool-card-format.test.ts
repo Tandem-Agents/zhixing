@@ -9,7 +9,7 @@ import {
   formatToolResult,
   formatHistoryToolCard,
 } from "../tool-card-format.js";
-import type { ToolResult } from "@zhixing/core";
+import type { ToolResult } from "@zhixing-ai/core";
 
 describe("formatHistoryToolCard（恢复历史的工具卡片）", () => {
   const call = { name: "read", input: { path: "src/a.ts" }, message: 1, block: 0 };

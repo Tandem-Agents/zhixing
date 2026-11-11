@@ -1,24 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSessionBroadcastTransport } from '@zhixing/rpc/session-broadcast';
-import { projectProcessYield, validateSessionProcessProjection } from '@zhixing/rpc/session-wire';
+import { createSessionBroadcastTransport } from '@zhixing-ai/rpc/session-broadcast';
+import { projectProcessYield, validateSessionProcessProjection } from '@zhixing-ai/rpc/session-wire';
 import type { RpcConnection } from '../../../../server/src/rpc/connection.js';
 import { startServer, type ZhixingServerInstance } from '../../../../server/src/server.js';
 import { createServerContext } from '../../../../server/src/context.js';
 import { DEFAULT_SERVER_CONFIG } from '../../../../server/src/types.js';
 import { buildSessionSubscribeMethod, buildSessionUnsubscribeMethod } from '../../../../server/src/rpc/methods/session.js';
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   MeshProtocolError,
   type MeshDeviceIdentity,
   type MeshFrameTransport,
   type MeshServiceClient,
-} from "@zhixing/mesh";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   captureCurrentAnchorRelayMethods,
   DEVICE_LOCAL_RPC_METHODS,
   RPC_ERROR_CODES,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import {
   CURRENT_ANCHOR_RELAY_METHODS,
   FIRST_PARTY_CONVERSATION_MESH_SERVICE,

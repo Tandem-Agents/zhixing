@@ -4,7 +4,7 @@ import type {
   ConversationTransferCommit,
   ConversationTransferResult,
   TransferRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedConversationTransferCommand,
@@ -13,15 +13,15 @@ import {
   validateConversationTransferResult,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   ConversationTransferSource,
   ConversationTransferTarget,
   type ConversationTransferReadPort,
   type FrozenConversationTransfer,
-} from "@zhixing/owner-kernel/conversation-transfer";
+} from "@zhixing-ai/owner-kernel/conversation-transfer";
 
 export const CONVERSATION_TRANSFER_MESH_SERVICE = "conversation.transfer";
 

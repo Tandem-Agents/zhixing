@@ -1,7 +1,7 @@
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { expect, it } from "vitest";
-import { acquireFileLock, withFileLockProcessIdentity, type ProcessIdentityResolver } from "@zhixing/core/persistence";
+import { acquireFileLock, withFileLockProcessIdentity, type ProcessIdentityResolver } from "@zhixing-ai/core/persistence";
 import { acquireLocalWorkspaceOwner, callLocalWorkspaceHost, LocalWorkspaceTransportServer } from "./local-workspace-owner.js";
 
 // 宿主组合根把平台身份端口装在自己的作用域里；本机工作区请求经 socket 读事件到达，

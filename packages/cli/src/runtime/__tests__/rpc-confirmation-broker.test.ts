@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { ConfirmationRequest } from "@zhixing/core/confirmation";
-import { RpcClientClosedError } from "@zhixing/server";
+import type { ConfirmationRequest } from "@zhixing-ai/core/confirmation";
+import { RpcClientClosedError } from "@zhixing-ai/server";
 import { RpcConfirmationBroker } from "../rpc-confirmation-broker.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 

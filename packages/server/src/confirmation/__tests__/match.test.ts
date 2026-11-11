@@ -15,7 +15,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   MAX_REASON_LENGTH,
   formatResolutionReceipt,

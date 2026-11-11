@@ -1,11 +1,11 @@
 import { resolvePlatformProcessStartTime } from '../platform/secret-platform.js';
 import { createWorksceneRunToolApplication } from "./workscene-application-adapter.js";
 
-import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
-import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
+import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal, type ArtifactStore } from "@zhixing-ai/core/authority";
+import { MeshConnectionRegistry } from "@zhixing-ai/mesh/bootstrap";
 import path from "node:path";
 import { handoffLogging } from "../logging/handoff.js";
-import { beginLogPhase } from "@zhixing/core/logging";
+import { beginLogPhase } from "@zhixing-ai/core/logging";
 import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
 import {
   createAgentRuntime,
@@ -14,7 +14,7 @@ import {
   type AgentRuntimeCapacityBinding,
   type KernelModelProviderFactory,
   type KernelRuntimeEnvironmentFactory,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import type { RuntimeSecurityExecutionInfrastructure } from "./permission-storage-infrastructure.js";
 import { zhixingProfile } from "./zhixing-agent-profile.js";
 import { powerProfile } from "./workscene-agent-guidance.js";
@@ -23,11 +23,11 @@ import { readGuidanceFile } from "./read-guidance-file.js";
 import { createAnchorWorksceneAssignmentToolApplication } from "./workscene-application-adapter.js";
 import { createWorkmodeEnterTool, createWorkmodeExitTool, createWorksceneListTool, createWorksceneTaskTools, WORKSCENE_PRODUCT_TOOL_IDS } from "./workmode-tools.js";
 import { createAdvancementProposalTool } from "./advancement-proposal-tool.js";
-import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing/core/advancement/proposal-identity";
-import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
-import { jobRunTrustScopeInput } from "@zhixing/core/trust-administration";
-import type { ProviderCredentialProjection } from "@zhixing/providers";
-import { mcpConfigurationRevision } from "@zhixing/providers";
+import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing-ai/core/advancement/proposal-identity";
+import { isLocalConversationId, parseConversationId } from "@zhixing-ai/core/conversation";
+import { jobRunTrustScopeInput } from "@zhixing-ai/core/trust-administration";
+import type { ProviderCredentialProjection } from "@zhixing-ai/providers";
+import { mcpConfigurationRevision } from "@zhixing-ai/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
 import { MCP_LOG_SOURCE } from "../runtime/mcp-runtime-adapter.js";
@@ -39,7 +39,7 @@ import { createLogAccess, createLocalLogProductApi } from "../logging/access.js"
 import { createRuntimeLogTools } from "../logging/tools.js";
 import { createExtensionStatusObserver } from "./extension-continuation.js";
 import { createLocalConversationCommunicationBinding } from "./conversation-communication-binding.js";
-import { McpManagementApplication } from "@zhixing/core/mcp-management";
+import { McpManagementApplication } from "@zhixing-ai/core/mcp-management";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
 import { createSkillCatalogWindowPromptProjection } from "../runtime/skill-catalog-window-projection.js";
@@ -92,7 +92,7 @@ import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-boo
 import {
   EvidenceJournal,
   ExecutorEvidenceHandler,
-} from "@zhixing/orchestrator/advancement";
+} from "@zhixing-ai/orchestrator/advancement";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import {
@@ -114,12 +114,12 @@ import {
   resolveProcessStartTime,
   runServer,
   ServerStateFile,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import { loadOrCreateToken } from "./token.js";
 import { homeToPort } from "./host-port.js";
 import { isDaemonChild, resolveHostProcessMode } from "./self-exec.js";
-import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { deleteDeviceKeyExact } from "@zhixing-ai/mesh/device-key-store";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { defineDeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import { EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE } from "./planned-duty-migration-lifecycle-contribution.js";
@@ -142,7 +142,7 @@ import {
   type HostStopAcceptedWorkOwner,
   type HostStopAcceptedWorkPorts,
 } from "./host-stop-lifecycle.js";
-import type { StopHostGeneration } from "@zhixing/core/protocol";
+import type { StopHostGeneration } from "@zhixing-ai/core/protocol";
 import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { provePriorHostExited, reclaimRetiredContentCopies } from "./retired-projection-copies.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
@@ -1130,10 +1130,10 @@ export class ExecutorRuntimeSubstrate {
   readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
 
   constructor(private readonly options: {
-    readonly createLogRecords?: import("@zhixing/orchestrator/runtime").KernelLogFactory;
-    readonly communicationTools?: readonly import("@zhixing/core").ToolDefinition[];
-    readonly extensionTools?: readonly import("@zhixing/core").ToolDefinition[];
-    readonly logTools?: readonly import("@zhixing/core").ToolDefinition[];
+    readonly createLogRecords?: import("@zhixing-ai/orchestrator/runtime").KernelLogFactory;
+    readonly communicationTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
+    readonly extensionTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
+    readonly logTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
     readonly zhixingHome: string;
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
@@ -1141,7 +1141,7 @@ export class ExecutorRuntimeSubstrate {
     readonly createToolImplementation: HostKernelToolImplementationFactory;
     readonly permissionStorage: RuntimeSecurityExecutionInfrastructure;
     readonly mcpTools: McpRuntimeToolProjectionPort;
-    readonly mcpProductTools?: readonly import("@zhixing/core").ToolDefinition[];
+    readonly mcpProductTools?: readonly import("@zhixing-ai/core").ToolDefinition[];
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
     readonly artifactStore: () => ArtifactStore;
@@ -1164,8 +1164,8 @@ export class ExecutorRuntimeSubstrate {
   createConversationRuntime(
     workspaceRoot?: string | null,
     sessionId?: string,
-    executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile,
-    workspaceBinding: import("@zhixing/core/contracts").EnvironmentRequirement["workspace"] | null = null,
+    executionProfile?: import("@zhixing-ai/core/types").RuntimeExecutionProfile,
+    workspaceBinding: import("@zhixing-ai/core/contracts").EnvironmentRequirement["workspace"] | null = null,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
@@ -1238,10 +1238,10 @@ export class ExecutorRuntimeSubstrate {
   }
 
   createJobRuntime(
-    instruction: import("@zhixing/core/contracts").JobExecutionInstruction,
-    confirmationBroker: import("@zhixing/core/confirmation").IConfirmationBroker,
+    instruction: import("@zhixing-ai/core/contracts").JobExecutionInstruction,
+    confirmationBroker: import("@zhixing-ai/core/confirmation").IConfirmationBroker,
     capabilities: JobRuntimeCapabilities,
-    workspaceBinding: import("@zhixing/core/contracts").EnvironmentRequirement["workspace"] | null = null,
+    workspaceBinding: import("@zhixing-ai/core/contracts").EnvironmentRequirement["workspace"] | null = null,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const runtimeEnvironment = this.#runtimeEnvironment.create({});

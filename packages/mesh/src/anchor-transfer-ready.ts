@@ -2,11 +2,11 @@ import type {
   DeviceRole,
   ReadyProof,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedReadyProof,
   validateReadyProof,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { canonicalize } from "./canonical.js";
 import {
   DeviceKey,

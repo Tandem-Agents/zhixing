@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -25,7 +26,8 @@ const terminalInputs = JSON.parse(terminalInputBytes);
 const terminalInputHash = createHash("sha256").update(JSON.stringify(terminalInputs)).digest("hex");
 const hostTarget = checkpointBridgeTarget();
 const command = process.platform === "win32" ? (name) => `${name}.cmd` : (name) => name;
-const temporary = await mkdtemp(path.join(root, ".zhixing-package-check-"));
+// 安装验收在仓库之外进行：Node 沿父目录查找 node_modules，仓库依赖不得替补安装包未声明的依赖。
+const temporary = await mkdtemp(path.join(tmpdir(), "zhixing-package-check-"));
 const npmEnv = { ...process.env };
 for (const key of Object.keys(npmEnv)) {
   if (["npm_config_cache", "npm_config_userconfig", "npm_config_verify_deps_before_run"].includes(key.toLowerCase())) {
@@ -36,6 +38,10 @@ npmEnv.npm_config_cache = path.join(temporary, "npm-cache");
 npmEnv.npm_config_userconfig = path.join(temporary, "empty-npmrc");
 
 try {
+  for (let parent = path.dirname(temporary); ; parent = path.dirname(parent)) {
+    assert(!(await exists(path.join(parent, "node_modules"))), `安装验收工作根的上级目录存在 node_modules，无法证明干净安装闭包：${parent}`);
+    if (path.dirname(parent) === parent) break;
+  }
   assertCheckpointBridgeHost(hostTarget, currentGlibcVersion());
   await writeFile(npmEnv.npm_config_userconfig, "", "utf8");
   await run(process.execPath, ["--test", "scripts/npm-delivery-structure.test.mjs"], root);
@@ -84,10 +90,10 @@ try {
     await verifyPublicEntrypoints(installRoot, packages);
     await verifyInstalledBraceExpansionBoundary(installRoot);
     await verifyCli(installRoot, home, rootManifest.version);
-    await verifyTerminalClosure(path.join(installRoot, "node_modules/@zhixing/cli"), rootManifest.version);
+    await verifyTerminalClosure(path.join(installRoot, "node_modules/zhixing"), rootManifest.version);
     await verifyInstalledTerminalNative(installRoot, home);
     await verifyPlatformHelper(installRoot, home);
-    await run(command("npm"), ["uninstall", "--ignore-scripts", "--no-audit", "--no-fund", "@zhixing/cli"], installRoot, npmEnv);
+    await run(command("npm"), ["uninstall", "--ignore-scripts", "--no-audit", "--no-fund", "zhixing"], installRoot, npmEnv);
     assert(await exists(path.join(home, "sentinel.txt")), "npm 卸载影响了 ZHIXING_HOME");
     console.log(
       `package:check 通过：${packages.length} 个公开包，${hostTarget.id} 本地安装闭包可消费；tarball sha256 ${tarballFingerprint}`,
@@ -133,7 +139,7 @@ async function inspectTarball(item, tarball, version) {
   const files = await relativeFiles(packageRoot);
   for (const file of files) {
     const allowed = file === "package.json" || /^(?:README|LICENSE)(?:\.|$)/iu.test(file) || file.startsWith("dist/") ||
-      (item.name === "@zhixing/mesh" && CHECKPOINT_BRIDGE_TARGETS.some((target) =>
+      (item.name === "@zhixing-ai/mesh" && CHECKPOINT_BRIDGE_TARGETS.some((target) =>
         file === `build/prebuilt/${target.id}/${target.file}` || file === `build/prebuilt/${target.id}/descriptor.json`));
     assert(allowed, `${item.name} tarball 含未声明资产：${file}`);
   }
@@ -146,13 +152,13 @@ async function inspectTarball(item, tarball, version) {
   ]);
   assertPackageReadme(readme, item.name);
   assert(packedLicense === rootLicense, `${item.name} tarball LICENSE 与仓库根许可不一致`);
-  if (item.name === "@zhixing/mesh") {
+  if (item.name === "@zhixing-ai/mesh") {
     for (const target of CHECKPOINT_BRIDGE_TARGETS) {
       const included = files.some((file) => file.startsWith(`build/prebuilt/${target.id}/`));
       if (allTargets || included || target.id === hostTarget.id) verifyCheckpointBridgeArtifact(packageRoot, target);
     }
   }
-  if (item.name === "@zhixing/cli") await verifyTerminalClosure(packageRoot, version);
+  if (item.name === "zhixing") await verifyTerminalClosure(packageRoot, version);
 }
 
 function directoryOption(name) {
@@ -225,7 +231,7 @@ function assertTerminalBinary(bytes, id, name) {
 
 async function verifyInstalledTerminalNative(installRoot, home) {
   const target = terminalInputs.targets[hostTarget.id];
-  const directory = path.join(installRoot, "node_modules/@zhixing/cli/dist/terminal", hostTarget.id);
+  const directory = path.join(installRoot, "node_modules/zhixing/dist/terminal", hostTarget.id);
   const smoke = [
     'const native = require(process.argv[1]);',
     'for (const name of [process.platform === "win32" ? "create" : "createPosix", "observe", "seal", "executionState", "terminateExecution"]) if (typeof native[name] !== "function") throw Error(`Missing native operation: ${name}`);',
@@ -249,8 +255,9 @@ async function verifyInstalledClosure(installRoot, packages, version) {
   const expectedAudit = await json(path.join(root, "scripts", "npm-production-install-script-audit.json"));
   const actual = [];
   const productionNames = await productionDependencyNames(installRoot, packages.map(({ name }) => name));
+  const ownPackages = new Set(packages.map(({ name }) => name));
   for (const name of productionNames) {
-    if (name.startsWith("@zhixing/")) continue;
+    if (ownPackages.has(name)) continue;
     const manifest = await json(path.join(installRoot, "node_modules", ...name.split("/"), "package.json"));
     const scripts = ["preinstall", "install", "postinstall"].filter((key) => typeof manifest.scripts?.[key] === "string");
     if (await exists(path.join(installRoot, "node_modules", ...name.split("/"), "binding.gyp")) &&
@@ -308,7 +315,7 @@ async function verifyPublicEntrypoints(installRoot, packages) {
 }
 
 async function verifyCli(installRoot, home, version) {
-  const entry = path.join(installRoot, "node_modules", "@zhixing", "cli", "dist", "index.js");
+  const entry = path.join(installRoot, "node_modules", "zhixing", "dist", "index.js");
   const env = { ...process.env, ZHIXING_HOME: home, NO_COLOR: "1" };
   // First-run checks may create configuration. Each independent scenario must
   // own its initial state; shared installation does not mean shared user state.
@@ -316,7 +323,7 @@ async function verifyCli(installRoot, home, version) {
   const metadata = await import(pathToFileURL(path.join(path.dirname(entry), "metadata.js")).href);
   const versionResult = await run(process.execPath, [entry, "--version"], installRoot, env, true);
   assert(versionResult.stdout.includes(version), "CLI --version 输出不正确");
-  const cliManifest = await json(path.join(installRoot, "node_modules/@zhixing/cli/package.json"));
+  const cliManifest = await json(path.join(installRoot, "node_modules/zhixing/package.json"));
   const binDirectory = path.join(installRoot, "node_modules/.bin");
   for (const name of ["zz", "zhixing"]) {
     assert(["dist/index.js", "./dist/index.js"].includes(cliManifest.bin?.[name]), `${name} 未指向正式 CLI 入口`);
@@ -337,19 +344,21 @@ async function verifyCli(installRoot, home, version) {
   for (const command of hiddenTopLevel) {
     assert(!new RegExp(`^  ${command}(?: |$)`, "mu").test(canonicalHelp), `隐藏命令 ${command} 泄漏到 tarball 默认帮助`);
   }
-  const doctor = await run(process.execPath, [entry, "doctor"], installRoot, scenarioEnv("doctor-empty"), true);
+  // doctor 只有健康才返回 0；空 home 属于“需处理”，按合同以退出码 1 给出唯一设置行动。
+  const doctor = await runOutcome(process.execPath, [entry, "doctor"], installRoot, scenarioEnv("doctor-empty"), true);
+  assert(doctor.code === 1 && doctor.signal === null, `空 home 的 doctor 应以退出码 1 报告需设置，实际 ${doctor.signal ?? doctor.code}`);
   assert(doctor.stdout.includes("知行尚未完成首次设置") && doctor.stdout.includes("运行 zz 完成设置"), "空 home 的 doctor 未给出唯一设置行动");
   const maintenance = await run(process.execPath, [entry, "stop", "--maintenance"], installRoot, scenarioEnv("maintenance-empty"), true);
-  assert(maintenance.stdout.includes("npm install -g @zhixing/cli@latest"), "maintenance stop 未给出显式 npm 行动");
+  assert(maintenance.stdout.includes("npm install -g zhixing@latest"), "maintenance stop 未给出显式 npm 行动");
   const removal = await run(process.execPath, [entry, "app", "remove"], installRoot, scenarioEnv("remove-empty"), true);
-  assert(removal.stdout.includes("程序尚未卸载") && removal.stdout.includes("npm uninstall -g @zhixing/cli"), "应用停用未交接给 npm 卸载");
+  assert(removal.stdout.includes("程序尚未卸载") && removal.stdout.includes("npm uninstall -g zhixing"), "应用停用未交接给 npm 卸载");
   const firstRun = await runOutcome(process.execPath, [entry], installRoot, scenarioEnv("first-run-empty"), true);
   assert(firstRun.code === 2 && firstRun.signal === null, "非交互首次运行未安全进入配置边界");
   assert(`${firstRun.stdout}\n${firstRun.stderr}`.includes("请在 TTY 终端中运行 `zhixing` 完成配置"), "首次运行未给出唯一交互配置行动");
 }
 
 async function verifyPlatformHelper(installRoot, home) {
-  const packageRoot = path.join(installRoot, "node_modules", "@zhixing", "mesh");
+  const packageRoot = path.join(installRoot, "node_modules", "@zhixing-ai", "mesh");
   verifyCheckpointBridgeArtifact(packageRoot, hostTarget);
   const modulePath = path.join(packageRoot, "dist", "checkpoint-target.js");
   const targetRoot = path.join(home, "helper-smoke");
@@ -378,7 +387,7 @@ async function verifyInstalledBraceExpansionBoundary(installRoot) {
   const toolsEntry = path.join(
     installRoot,
     "node_modules",
-    "@zhixing",
+    "@zhixing-ai",
     "tools-builtin",
     "dist",
     "index.js",
@@ -388,7 +397,7 @@ async function verifyInstalledBraceExpansionBoundary(installRoot) {
   assert(!/from\s+["']glob["']/u.test(toolsSource), "安装后的 tools-builtin 仍使用内嵌旧 brace 的 glob 默认入口");
 
   const smoke = [
-    'const { createGlobTool, createGrepTool } = await import("@zhixing/tools-builtin");',
+    'const { createGlobTool, createGrepTool } = await import("@zhixing-ai/tools-builtin");',
     "const part = \"{\" + \"0\".repeat(50) + \"1..100000}\";",
     "const bracePattern = \"{\" + Array(400).fill(part).join(\",\") + \"}\";",
     "const context = { workingDirectory: process.cwd() };",
@@ -424,7 +433,7 @@ function assertPublicPackageMetadata(manifest, directory) {
 
 function assertPackageReadme(readme, packageName) {
   assert(readme.trim().length > 0, `${packageName} README 内容为空`);
-  assert(readme.includes("@zhixing/cli"), `${packageName} README 缺少用户安装入口`);
+  assert(readme.includes("zhixing"), `${packageName} README 缺少用户安装入口`);
   assert(readme.includes(canonicalHomepage), `${packageName} README 缺少规范文档入口`);
   assert(readme.includes("MIT"), `${packageName} README 缺少许可说明`);
 }

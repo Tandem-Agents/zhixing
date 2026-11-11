@@ -15,7 +15,7 @@ import {
   extractFirstText,
   findLastUserIndex,
   replaceFirstText,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type { UserContextContribution } from "./lifecycle.js";
 
 const CONTEXT_TAG = "<context>";

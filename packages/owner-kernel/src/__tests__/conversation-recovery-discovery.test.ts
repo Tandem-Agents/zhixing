@@ -1,13 +1,13 @@
 import path from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import { canonicalize, createMutationBatch } from '@zhixing/core/protocol';
-import type { ArtifactRef } from '@zhixing/core/contracts';
-import { createTempDir } from '@zhixing/test-utils';
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import { canonicalize, createMutationBatch } from '@zhixing-ai/core/protocol';
+import type { ArtifactRef } from '@zhixing-ai/core/contracts';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { expect, it, vi } from 'vitest';
 import { registerConversationRecoveryProjection, conversationRecoveryPage } from '../conversation-recovery-index.js';
-import type { AuthorityCommitLog, DurableProjectionDefinition } from '@zhixing/core/authority';
-import type { JsonValue } from '@zhixing/core/contracts';
+import type { AuthorityCommitLog, DurableProjectionDefinition } from '@zhixing-ai/core/authority';
+import type { JsonValue } from '@zhixing-ai/core/contracts';
 import { discoverConversationRecoveryCandidates, discoverConversationRecoveryCandidatesFromLog } from '../conversation-assignment.js';
 
 async function fixture(domain: 'session' | 'global') {

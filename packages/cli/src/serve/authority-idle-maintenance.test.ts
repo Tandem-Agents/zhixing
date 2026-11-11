@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { currentMaintenanceUrgency } from "@zhixing/core/resources";
+import { currentMaintenanceUrgency } from "@zhixing-ai/core/resources";
 import { AuthorityIdleMaintenance, type AuthorityIdleMaintenanceLog } from "./authority-idle-maintenance.js";
 
 afterEach(() => { vi.useRealTimers(); });

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 

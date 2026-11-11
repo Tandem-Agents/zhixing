@@ -1,27 +1,27 @@
 import path from "node:path";
 import { artifactReadCapacity, projectionReadCapacity } from './artifact-read-capacity.js';
-import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
-import type { PhysicalStorageStepRunner } from "@zhixing/core/authority";
-import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError, StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import type { DeviceCapacityArbiterPort } from '@zhixing-ai/core/resources';
+import type { PhysicalStorageStepRunner } from "@zhixing-ai/core/authority";
+import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError, StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import type {
   DataPlaneTicket,
   ExecutionRef,
   StreamConsumerAuth,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   DataPlaneTicketUse,
   ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
   DataPlaneAssignmentBinding,
   DataPlaneAssignmentBindingResolver,
   DataPlaneTicketRegistry,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
-import type { SecureMeshConnection } from "@zhixing/mesh";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
 import {
   createAssignmentStreamServiceHandler,
   createDataPlaneAssignmentStreamAuthorizer,
@@ -227,7 +227,7 @@ export class ExecutorDataPlaneRuntime {
   async #authorizeOwnerRelayConsumer(input: {
     readonly assignmentId: string;
     readonly consumer: Extract<
-      import("@zhixing/core/contracts").StreamConsumerAuth,
+      import("@zhixing-ai/core/contracts").StreamConsumerAuth,
       { readonly kind: "owner-relay" }
     >;
     readonly ownerDeviceId: string;

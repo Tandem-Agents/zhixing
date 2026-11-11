@@ -1,5 +1,5 @@
 import { constants, createHash, randomBytes, X509Certificate } from "node:crypto";
-import type { DeviceIdentity } from "@zhixing/core/contracts";
+import type { DeviceIdentity } from "@zhixing-ai/core/contracts";
 import {
   connect as connectTls,
   createSecureContext,

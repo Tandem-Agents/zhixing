@@ -3,7 +3,7 @@ import { createLoadSkillTool, createSaveSkillTool } from "../skill.js";
 import type {
   SkillCatalogLoadApplication,
   SkillCatalogSaveApplication,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 
 const CTX = { workingDirectory: "." };
 

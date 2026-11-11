@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from "vitest";
 import path from "node:path";
-import { captureFileIo, createTempDir } from "@zhixing/test-utils";
-import type { CheckpointStreamRecord, RecoveryCheckpointGeneration } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import { captureFileIo, createTempDir } from "@zhixing-ai/test-utils";
+import type { CheckpointStreamRecord, RecoveryCheckpointGeneration } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import { FileAuthorityCommitLog } from "../../../core/src/authority/commit-log.js";
 import { FileArtifactStore } from "../../../core/src/authority/artifact-store.js";
 import { AuthorityCacheIntegrity } from "../../../core/src/authority/startup-proofs.js";

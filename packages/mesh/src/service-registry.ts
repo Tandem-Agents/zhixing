@@ -1,4 +1,4 @@
-import { runWithLogAttribution } from "@zhixing/core/logging";
+import { runWithLogAttribution } from "@zhixing-ai/core/logging";
 import { MeshProtocolError } from "./errors.js";
 import {
   assertSecureMeshConnection,

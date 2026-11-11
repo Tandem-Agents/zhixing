@@ -1,5 +1,5 @@
 import { LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT } from "../../runtime/local-workspace-operation-outbox.js";
-import { defineS7DurableScenarios, type S7ExecutableScenarioObservation } from "@zhixing/core/test-support/s7-durable-harness";
+import { defineS7DurableScenarios, type S7ExecutableScenarioObservation } from "@zhixing-ai/core/test-support/s7-durable-harness";
 import {
   executeLocalWorkspaceOutboxCase,
 } from "./s7-durable-cli-scenarios.js";

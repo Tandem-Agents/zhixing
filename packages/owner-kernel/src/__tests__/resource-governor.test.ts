@@ -3,15 +3,15 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   ResourceGovernorIndexStore,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AssignmentResourceLease,
   AuthorityCapability,
   AuthorityCallContext,
   Signature,
   UsageReport,
-} from "@zhixing/core/contracts";
-import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing-ai/core/contracts";
 import {
   createSignedConversationEnvelope,
   dispatchEnvelopeArtifact,
@@ -21,8 +21,8 @@ import {
   ResourceAdmissionDeferredError,
   validateSystemJobResourceLease,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorResourceGovernor,

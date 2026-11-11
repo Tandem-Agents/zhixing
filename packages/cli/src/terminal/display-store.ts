@@ -1,6 +1,6 @@
-import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing/core/resources';
-import { TERMINAL_LIMITS, type TerminalDisplayPage, type TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
-import { BODY_FRAGMENT_ENCODED_BYTES, BODY_PARSE_BYTES, sliceBodyNodes, validateBodyMetadata } from '@zhixing/terminal-ui/body-model';
+import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing-ai/core/resources';
+import { TERMINAL_LIMITS, type TerminalDisplayPage, type TerminalDisplaySegment } from '@zhixing-ai/terminal-ui/protocol';
+import { BODY_FRAGMENT_ENCODED_BYTES, BODY_PARSE_BYTES, sliceBodyNodes, validateBodyMetadata } from '@zhixing-ai/terminal-ui/body-model';
 import { mergeBodyAppends, type BodyAmend } from './body-projection.js';
 import type { TerminalAssetAccount } from './asset-client.js';
 import { TerminalManagedFiles } from './managed-files.js';

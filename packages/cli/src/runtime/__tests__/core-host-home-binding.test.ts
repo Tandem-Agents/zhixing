@@ -8,8 +8,8 @@ const calls = vi.hoisted(() => ({
   surface: vi.fn(),
   reconcile: vi.fn(async () => ({ plan: { mode: "on-demand" } })),
 }));
-vi.mock("@zhixing/server/client", async (original) => ({
-  ...await original<typeof import("@zhixing/server/client")>(),
+vi.mock("@zhixing-ai/server/client", async (original) => ({
+  ...await original<typeof import("@zhixing-ai/server/client")>(),
   discoverServer: calls.discover,
 }));
 vi.mock("../../serve/daemon.js", () => ({ spawnDaemon: calls.spawn }));

@@ -1,5 +1,5 @@
 import { expect, it, vi, onTestFinished } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import path from "node:path";
 import { readFile, writeFile, rename, utimes, stat, appendFile, unlink, mkdir } from "node:fs/promises";
 import { acquireFileLock, withFileLockProcessIdentity } from "../../persistence/file-lock.js";

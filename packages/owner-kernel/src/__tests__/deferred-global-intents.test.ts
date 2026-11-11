@@ -3,20 +3,20 @@ import { Buffer } from "node:buffer";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/authority";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   DEFERRED_INTENT_PROJECTION_ID,

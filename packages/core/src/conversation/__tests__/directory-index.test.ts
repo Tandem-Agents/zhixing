@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { ConversationRepository } from '../repository.js';
 import { ConversationDirectoryIndex } from '../directory-index.js';
 import type { Conversation } from '../types.js';

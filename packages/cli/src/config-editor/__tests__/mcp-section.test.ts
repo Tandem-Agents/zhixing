@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   McpManagementProbePort,
   McpManagementServerStatus,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 import { createInitialState, setInputBuffer } from "../state.js";
 import { mcpSection } from "../sections/mcp.js";
 import {
@@ -21,7 +21,7 @@ import {
   handleMcpChoicesPanelKey,
   handleMcpServerPanelKey,
 } from "../model/mcp.js";
-import { presetToCandidate, type McpSetupCandidate } from "@zhixing/core/mcp-management";
+import { presetToCandidate, type McpSetupCandidate } from "@zhixing-ai/core/mcp-management";
 import { findMcpPreset } from "../../registries/index.js";
 import type {
   ConfigModelContext,

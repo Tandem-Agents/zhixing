@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
-import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import type { CheckpointFilesystemSession } from '@zhixing-ai/mesh/filesystem';
+import type { DeviceCapacityArbiterPort } from '@zhixing-ai/core/resources';
 import { TerminalInstanceAssets, type TerminalProcessIdentity } from '../instance-assets.js';
 
 type Node = { kind: 'file' | 'directory'; identity: string; data?: Buffer; children: Map<string, Node> };

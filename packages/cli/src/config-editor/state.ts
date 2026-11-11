@@ -12,8 +12,8 @@ import type {
   ProviderCredentialEntry,
   ZhixingConfig,
   ZhixingCredentials,
-} from "@zhixing/providers";
-import type { ThinkingConfig } from "@zhixing/core";
+} from "@zhixing-ai/providers";
+import type { ThinkingConfig } from "@zhixing-ai/core";
 import type { ModelRole, WorkingState } from "./types.js";
 
 // ─── 初始化 ───

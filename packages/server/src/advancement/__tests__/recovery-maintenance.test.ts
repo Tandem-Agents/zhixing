@@ -8,36 +8,36 @@ import {
   type AdvancementRunReview,
   type ConfirmedRubricSnapshot,
   type RubricContractDraftSnapshot,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import type {
   Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   RunRecord,
-} from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/transcript";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   AdvancementController as OwnerAdvancementController,
   createAdvancementRecoveryMaintenance as createOwnerAdvancementRecoveryMaintenance,
   type AdvancementControllerOptions,
   type AdvancementConversationDirectory,
   type AdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
-import type { SessionBroadcast } from "@zhixing/rpc";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewAttemptApplication } from "@zhixing-ai/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
+import type { SessionBroadcast } from "@zhixing-ai/rpc";
 import type {
   AdvancementReviewerPort,
   ImmediateRootResourceLease,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import {
   type AdvancementReviewAttemptApplication,
   AdvancementReviewResultProjectionApplicationService,
   buildAdvancementProxyMessage,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 
 function fakeResources(): ResourceReservationPort {
   const leaseFor = (

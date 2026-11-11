@@ -7,12 +7,12 @@ import {
   GovernorStateRequired,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type ArtifactStore,
-} from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
-import { countScheduleConsecutiveFailures } from "@zhixing/core/scheduler/application";
-import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
-import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
-import { SchedulerJobCommitParticipant } from "@zhixing/owner-kernel/scheduler-job-commit";
+} from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import { countScheduleConsecutiveFailures } from "@zhixing-ai/core/scheduler/application";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing-ai/core/skills/global-state";
+import { GlobalMutationCommitCoordinator } from "@zhixing-ai/owner-kernel/global-mutation-commit-coordinator";
+import { SchedulerJobCommitParticipant } from "@zhixing-ai/owner-kernel/scheduler-job-commit";
 import type {
   AssignmentEntry,
   AuthorityCallContext,
@@ -28,7 +28,7 @@ import type {
   TaskDefinition,
   TrustRuleSnapshot,
   TrustSedimentFact,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   advanceAssignmentLedger,
   assignmentLedgerSeed,
@@ -69,17 +69,17 @@ import {
   type ProtocolSigner,
   type ExecutorCapabilitySnapshot,
   type UnsignedJobEnvelope,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   ControlAdmissionJournal,
   createJobControlEnvelope,
-} from "@zhixing/owner-kernel/control-admission";
-import { AnchorResourceGovernor } from "@zhixing/owner-kernel/resource-governor";
-import { SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
+} from "@zhixing-ai/owner-kernel/control-admission";
+import { AnchorResourceGovernor } from "@zhixing-ai/owner-kernel/resource-governor";
+import { SchedulerUserNoticeJournal } from "@zhixing-ai/owner-kernel/scheduler-user-notices";
 import {
   createOwnerDeliveryParticipant,
   OwnerDeliveryParticipant,
-} from "@zhixing/owner-kernel/delivery";
+} from "@zhixing-ai/owner-kernel/delivery";
 import {
   InProcessJobDispatcher,
   JOB_JOURNAL_RECORD_SHAPES,
@@ -90,12 +90,12 @@ import {
   type SystemJobHandler,
   type SystemJobResourceCoordinator,
   type JobTrustSedimentPort,
-} from "@zhixing/owner-kernel/job-assignment";
-import type { TrustRuleHitBatchInput, TrustRuleHitPort } from "@zhixing/owner-kernel/conversation-assignment";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/owner-kernel/job-assignment";
+import type { TrustRuleHitBatchInput, TrustRuleHitPort } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { expectJobStateParity } from "./job-state-parity.js";
-import { jobRunStateIndex } from "@zhixing/owner-kernel/job-run-state-index";
+import { jobRunStateIndex } from "@zhixing-ai/owner-kernel/job-run-state-index";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,

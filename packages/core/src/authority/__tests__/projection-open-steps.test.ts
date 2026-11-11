@@ -7,7 +7,7 @@
 import { open, readFile, truncate, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { AuthorityCacheIntegrity, durableProjectionReadBudget, FileDurableProjectionIndex } from "../index.js";
 import {
   createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, runHoldingMaintenanceExclusion,

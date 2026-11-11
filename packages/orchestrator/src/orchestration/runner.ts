@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { createEventBus, type EventBus } from "@zhixing/core/events";
-import { emptyUsage, mergeUsage, type AgentEventMap, type TokenUsage } from "@zhixing/core/types";
+import { createEventBus, type EventBus } from "@zhixing-ai/core/events";
+import { emptyUsage, mergeUsage, type AgentEventMap, type TokenUsage } from "@zhixing-ai/core/types";
 import {
   type NormalizedOrchestrationNodeV1,
   type OrchestrationContextSnapshotV1,
@@ -10,7 +10,7 @@ import {
   type OrchestrationNodeRunResultV1,
   type OrchestrationRunResultV1,
   type OrchestrationValidationIssueV1,
-} from "@zhixing/core/orchestration";
+} from "@zhixing-ai/core/orchestration";
 import {
   validateNodeOutputV1,
   validateRunInputV1,

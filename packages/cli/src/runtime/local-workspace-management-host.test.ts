@@ -1,22 +1,22 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { ExecutorResourceBackpressureError } from "@zhixing/executor";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { ExecutorResourceBackpressureError } from "@zhixing-ai/executor";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import {
   WorkspaceBindingCancelledError,
   WorkspaceBindingCatalogConflictError,
   WorkspaceBindingCatalogDegradedError,
   WorkspaceBindingCatalogIntegrityError,
-} from "@zhixing/core/environment";
+} from "@zhixing-ai/core/environment";
 import {
   RecoveredWorkspaceAdministrationOperationsError,
   WorkspaceAdministrationBusinessError,
   WorkspaceAdministrationDurableLifecycleApplicationService,
   type WorkspaceAdministrationConsumptionCredential,
   type WorkspaceAdministrationApplication,
-} from "@zhixing/core/environment/workspace-administration";
+} from "@zhixing-ai/core/environment/workspace-administration";
 import {
   LocalWorkspaceHostNotWritableError,
   LocalWorkspaceManagementHost,

@@ -1,16 +1,16 @@
 import path from "node:path";
-import type { DeviceIdentity, SecretRef, SecretStorePort, Signature } from "@zhixing/core/contracts";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
-import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
-import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
-import { DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, type DeviceCapacityPolicy } from "@zhixing/core/resources";
-import { captureFileIo, createTempDir } from "@zhixing/test-utils";
+import type { DeviceIdentity, SecretRef, SecretStorePort, Signature } from "@zhixing-ai/core/contracts";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
+import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing-ai/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing-ai/mesh/device-key-store";
+import { createSignedTrustEvent } from "@zhixing-ai/mesh/trust-chain";
+import { DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, type DeviceCapacityPolicy } from "@zhixing-ai/core/resources";
+import { captureFileIo, createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   PlannedAnchorTransferJournal,

@@ -1,15 +1,15 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceLifecycleJournal, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { createMeshEndpointDescriptor } from "@zhixing/mesh/bootstrap";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing-ai/core/authority";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { createMeshEndpointDescriptor } from "@zhixing-ai/mesh/bootstrap";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import {
   MeshServiceRegistry,
   type MeshServiceDefinition,
-} from "@zhixing/mesh/service-registry";
-import { createSignedTrustEvent, replayTrustChain } from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/service-registry";
+import { createSignedTrustEvent, replayTrustChain } from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {

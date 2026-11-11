@@ -12,8 +12,8 @@ const doubles = vi.hoisted(() => ({
   createAdvancementRuntime: vi.fn(),
 }));
 
-vi.mock("@zhixing/providers", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@zhixing/providers")>()),
+vi.mock("@zhixing-ai/providers", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@zhixing-ai/providers")>()),
   createProviderRoles: doubles.createProviderRoles,
   resolveWorkspace: doubles.resolveWorkspace,
   resolveWorkspaceSessionType: doubles.resolveWorkspaceSessionType,
@@ -25,17 +25,17 @@ vi.mock("@zhixing/providers", async (importOriginal) => ({
   },
 }));
 
-vi.mock("@zhixing/orchestrator/runtime", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@zhixing/orchestrator/runtime")>()),
+vi.mock("@zhixing-ai/orchestrator/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@zhixing-ai/orchestrator/runtime")>()),
   createControlCompletionPort: doubles.createControlCompletionPort,
 }));
 
-vi.mock("@zhixing/orchestrator/advancement", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@zhixing/orchestrator/advancement")>()),
+vi.mock("@zhixing-ai/orchestrator/advancement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@zhixing-ai/orchestrator/advancement")>()),
   createAdvancementRuntime: doubles.createAdvancementRuntime,
 }));
 
-import type { ZhixingConfig } from "@zhixing/providers";
+import type { ZhixingConfig } from "@zhixing-ai/providers";
 import { createHostAdvancementModelProviderFactory } from "../advancement-model-provider.js";
 import { projectRuntimeConfiguration } from "../runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../runtime-configuration-snapshot.js";

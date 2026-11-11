@@ -9,8 +9,8 @@ import {
   TRUST_ADMINISTRATION_LIST_QUERY,
   TRUST_ADMINISTRATION_REVOKE_COMMAND,
   TrustAdministrationApplicationError,
-} from "@zhixing/core/trust-administration";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/trust-administration";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";

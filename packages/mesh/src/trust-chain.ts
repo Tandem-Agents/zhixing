@@ -7,7 +7,7 @@ import type {
   HomeTrustRecord,
   RecoveryActivationPlan,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import { deviceIdFromPublicKey, verifyDeviceSignature } from "./device-identity.js";
 import {

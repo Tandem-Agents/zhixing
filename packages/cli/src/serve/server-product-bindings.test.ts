@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
 import {
   createServerConfirmationBinding,
   createServerConversationBinding,
 } from "./server-product-bindings.js";
 
-vi.mock("@zhixing/rpc/session-turn-stream", () => ({
+vi.mock("@zhixing-ai/rpc/session-turn-stream", () => ({
   projectSessionTurn: vi.fn(async () => undefined),
 }));
 

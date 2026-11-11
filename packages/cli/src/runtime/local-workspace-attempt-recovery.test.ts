@@ -7,10 +7,10 @@ import type {
   SecretRef,
   SecretStorePort,
   WorkspaceBindingAdminPort,
-} from "@zhixing/core/contracts";
-import { localEnvironmentControlSubject } from "@zhixing/core/environment";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/contracts";
+import { localEnvironmentControlSubject } from "@zhixing-ai/core/environment";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
 import {

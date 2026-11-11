@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { LLMRole, StreamEvent } from "@zhixing/core/types";
+import type { LLMRole, StreamEvent } from "@zhixing-ai/core/types";
 import { AISecuritySteward, type StewardInput } from "../ai-steward.js";
 
 const INPUT: StewardInput = {

@@ -1,12 +1,12 @@
 import path from 'node:path';
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import type { ArtifactRef, SessionControlMutation } from '@zhixing/core/contracts';
-import { type ProtocolSigner, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import type { ArtifactRef, SessionControlMutation } from '@zhixing-ai/core/contracts';
+import { type ProtocolSigner, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from '../../../mesh/src/device-identity.js';
 import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent, createTrustGenesisEvent, initializeTrustChain } from '../../../mesh/src/trust-chain.js';
 import { bindConversationAnchorTenure } from '../../../cli/src/serve/conversation-anchor-tenure.js';
-import { localConversationId } from '@zhixing/core/conversation';
-import { createTempDir } from '@zhixing/test-utils';
+import { localConversationId } from '@zhixing-ai/core/conversation';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { onTestFinished } from 'vitest';
 import { ConversationRunJournal } from '../conversation-assignment.js';
 import { ControlAdmissionJournal, createConversationControlEnvelope } from '../control-admission.js';
@@ -143,7 +143,7 @@ export async function createConversationBaseHarness(options: { root?: string } =
   };
   /** Cold storage reopen over the same root; the caller may install the
    * existing Authority work observation before any read happens. */
-  const reopen = (name: 'source' | 'target', records?: import('@zhixing/core/authority').LogRecordPort) => {
+  const reopen = (name: 'source' | 'target', records?: import('@zhixing-ai/core/authority').LogRecordPort) => {
     const artifacts = new FileArtifactStore(path.join(root, name, 'artifacts'));
     const log = new FileAuthorityCommitLog(path.join(root, name, 'authority'), artifacts,
       { clock: () => BASE_NOW, integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, name === 'source' ? 41 : 42)), ...(records ? { records } : {}) });

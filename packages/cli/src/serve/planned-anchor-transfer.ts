@@ -1,4 +1,4 @@
-import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import type {
   AnchorTransferAbort,
   AnchorTransferCommand,
@@ -16,7 +16,7 @@ import type {
   ReadyProof,
   SecretStorePort,
   TransferRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ArtifactReceiveProgress,
   ArtifactStore,
@@ -36,14 +36,14 @@ import type {
   ProjectionTransactionOptions,
   ProjectionTransactionReducer,
   ProjectionTransactionResult,
-} from "@zhixing/core/authority";
-import { collectArtifactRefs, DurableProjectionRecordBindingError } from "@zhixing/core/authority";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import { collectArtifactRefs, DurableProjectionRecordBindingError } from "@zhixing-ai/core/authority";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import {
   createSignedAnchorTransferCommand,
   createSignedAnchorTransferAbort,
@@ -61,26 +61,26 @@ import {
   type PlannedAnchorTransferState,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   createAnchorTransferReadyProof,
   validateAnchorTransferReadyProof,
   type AnchorTransferReadySnapshot,
-} from "@zhixing/mesh/anchor-transfer-ready";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/anchor-transfer-ready";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import {
   activateAnchorIssuerKey,
   deleteAnchorIssuerKey,
   loadActiveAnchorIssuerKey,
   loadAnchorIssuerKey,
-} from "@zhixing/mesh/device-key-store";
+} from "@zhixing-ai/mesh/device-key-store";
 import {
   applyTrustEvent,
   buildHomeTrustRecord,
   createSignedTrustEvent,
   verifyHomeTrustRecord,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   installHomeRouteMaterial,
@@ -436,8 +436,8 @@ export interface PlannedAnchorJournalStorage {
     options?: ProjectionTransactionOptions,
   ): Promise<ProjectionTransactionResult<State, Body, Value>>;
   // 迁居与候选的按键投影（未完目录与按 transferId 精确读）
-  durableProjection: import("@zhixing/core/authority").AuthorityCommitLog["durableProjection"];
-  transactDurableProjection: import("@zhixing/core/authority").AuthorityCommitLog["transactDurableProjection"];
+  durableProjection: import("@zhixing-ai/core/authority").AuthorityCommitLog["durableProjection"];
+  transactDurableProjection: import("@zhixing-ai/core/authority").AuthorityCommitLog["transactDurableProjection"];
   stopStorageMaintenance(): Promise<void>;
 }
 
@@ -1076,7 +1076,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     transferId: string,
     decide: (
       projection: PlannedAnchorCandidateProjection,
-    ) => import("@zhixing/core/authority").ProjectionTransactionDecision<unknown, Value>,
+    ) => import("@zhixing-ai/core/authority").ProjectionTransactionDecision<unknown, Value>,
   ) {
     return this.log.transactDurableProjection<unknown, Value>(this.#projectionId, async (view) =>
       decide(await readPlannedJournalProjection(view, [transferId], {
@@ -1090,7 +1090,7 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
     transferId: string,
     decide: (
       projection: PlannedAnchorCandidateProjection,
-    ) => import("@zhixing/core/authority").ProjectionTransactionDecision<unknown, Value>,
+    ) => import("@zhixing-ai/core/authority").ProjectionTransactionDecision<unknown, Value>,
     candidateReferences?: readonly ArtifactRef[],
   ) {
     return this.log.transactDurableProjection<unknown, Value>(this.#projectionId, async (view) =>
@@ -3757,7 +3757,7 @@ function buildAuthorityCatalog(input: {
 function assertExportBinding(
   catalog: AuthorityCatalog,
   exported: PlannedAuthorityExport,
-  proof: import("@zhixing/core/contracts").SourceFreezeProof,
+  proof: import("@zhixing-ai/core/contracts").SourceFreezeProof,
   state: PlannedAnchorTransferState,
 ): void {
   if (

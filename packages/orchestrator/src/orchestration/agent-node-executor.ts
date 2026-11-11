@@ -1,17 +1,17 @@
-import type { IConfirmationBroker } from "@zhixing/core/confirmation";
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import type {
   LLMProvider,
   LLMRoles,
   ResolvedRoleThinking,
   ThinkingConfig,
   ToolDefinition,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   NormalizedOrchestrationNodeV1,
   OrchestrationNodeOutputV1,
   OrchestrationNodeRunResultV1,
-} from "@zhixing/core/orchestration";
-import type { SecurityPipeline } from "@zhixing/core/security";
+} from "@zhixing-ai/core/orchestration";
+import type { SecurityPipeline } from "@zhixing-ai/core/security";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import {
   runChildAgent,
@@ -37,7 +37,7 @@ export interface AgentNodeExecutorOptionsV1 {
   readonly llmRoles: LLMRoles;
   readonly securityPipeline: SecurityPipeline;
   readonly securityApproval: KernelSecurityApprovalPort;
-  readonly agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  readonly agentIdentity?: import("@zhixing-ai/core/identity").AgentIdentity;
   readonly delegationInstructions?: string;
   readonly workspace: string | null;
   readonly workspaceSource?: string;

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAdvancementModelProviderBinding } from "@zhixing/orchestrator/advancement";
-import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalId, advancementProposalSessionId } from "@zhixing/core/advancement";
-import { AdvancementAcceptedTurnApplicationService } from "@zhixing/core/advancement/application";
+import { createAdvancementModelProviderBinding } from "@zhixing-ai/orchestrator/advancement";
+import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalId, advancementProposalSessionId } from "@zhixing-ai/core/advancement";
+import { AdvancementAcceptedTurnApplicationService } from "@zhixing-ai/core/advancement/application";
 import { createServeAdvancementApplications } from "../advancement-controller.js";
 import { advancementProposalEvent } from "../advancement-proposal-events.js";
 import {

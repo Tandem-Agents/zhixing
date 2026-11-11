@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { RpcSchedulerFacade } from "../rpc-scheduler-facade.js";
-import type { SchedulerFacadeEvent } from "@zhixing/core/scheduler";
+import type { SchedulerFacadeEvent } from "@zhixing-ai/core/scheduler";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcSchedulerFacade", () => {

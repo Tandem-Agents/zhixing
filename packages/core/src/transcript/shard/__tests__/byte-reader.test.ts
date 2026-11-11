@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import type { Message } from '../../../types/messages.js';
 import { createFileLockAcquirer, withFileLockProcessIdentity } from '../../../persistence/file-lock.js';
 import { TranscriptByteReader, type TranscriptBodyCursor } from '../byte-reader.js';

@@ -1,10 +1,10 @@
 import type {
   McpConnectionPort,
   McpSetupCandidate,
-} from "@zhixing/core/mcp-management";
-import { McpConnectionApplication } from "@zhixing/core/mcp-management";
-import type { SecretStorePort } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/mcp-management";
+import { McpConnectionApplication } from "@zhixing-ai/core/mcp-management";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   loadConfig,
   inspectMcpCredentialBinding,
@@ -13,7 +13,7 @@ import {
   type CredentialStoreCoordinator,
   type McpCredentialProjection,
   type McpServerConfigEntry,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import type { HostMcpRuntimePorts } from "./mcp-runtime-ports.js";
 
 /** Configuration/Secret and MCP infrastructure; only finite, non-secret outcomes leave this edge. */

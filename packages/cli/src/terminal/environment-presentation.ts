@@ -1,4 +1,4 @@
-import type { TerminalView } from '@zhixing/terminal-ui/protocol';
+import type { TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 import type { ReplLocalViewSnapshot } from '../runtime/repl-local-view.js';
 
 /** Only the existing public configuration/Host projection crosses into U.

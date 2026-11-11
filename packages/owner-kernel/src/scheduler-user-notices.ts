@@ -2,7 +2,7 @@ import type {
   CommitEnvelope,
   LogicalRecord,
   SchedulerUserNotice,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { createHash } from "node:crypto";
 import {
   readDurableProjectionKeys,
@@ -10,10 +10,10 @@ import {
   type DurableProjectionMutation,
   type ProjectionTransactionContext,
   type RebuildableDurableProjectionIndex,
-} from "@zhixing/core/authority";
-import { DELIVERY_AUTHORITY_PROJECTION_ID, registerDeliveryAuthorityProjection, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { decideScheduleMissedSummary, type SchedulerNoticeDraft, type MissedSummaryGroup } from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/authority";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, registerDeliveryAuthorityProjection, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing-ai/core/delivery";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { decideScheduleMissedSummary, type SchedulerNoticeDraft, type MissedSummaryGroup } from "@zhixing-ai/core/scheduler/application";
 import type {
   JobDeliveryParticipant,
   SchedulerNoticeDeliveryInput,

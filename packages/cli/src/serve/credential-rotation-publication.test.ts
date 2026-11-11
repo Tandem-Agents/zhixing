@@ -1,10 +1,10 @@
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
-import type { CredentialExposureRecord, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
-import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
-import type { ZhixingConfig } from "@zhixing/providers";
+import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing-ai/core/authority";
+import type { CredentialExposureRecord, SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
+import type { ZhixingConfig } from "@zhixing-ai/providers";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
 import { projectRuntimeConfiguration } from "../runtime/runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";

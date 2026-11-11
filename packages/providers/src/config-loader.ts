@@ -17,8 +17,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { acquireFileLock, ensureDurableDirectory } from "@zhixing/core/persistence";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol/canonical";
+import { acquireFileLock, ensureDurableDirectory } from "@zhixing-ai/core/persistence";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol/canonical";
 import {
   parse as parseJsonc,
   printParseErrorCode,
@@ -36,7 +36,7 @@ import {
   type RoleRecommendation,
 } from "./role-recommendations.js";
 import type { ZhixingConfig } from "./types.js";
-import { isValidMcpServerId } from "@zhixing/core/mcp-management";
+import { isValidMcpServerId } from "@zhixing-ai/core/mcp-management";
 
 export {
   getGlobalConfigDir,

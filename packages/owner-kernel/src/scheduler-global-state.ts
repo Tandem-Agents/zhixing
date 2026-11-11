@@ -12,21 +12,21 @@ import type {
   GlobalStatePort,
   ScheduleTaskSpecDto,
   ScheduleWriteMutation,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ScheduleRuntimeProjectionPort,
   ScheduleRuntimeSignal,
   ScheduleManualExecutionPort,
   ScheduleManagementOperation,
   ScheduleManagementRepository,
-} from "@zhixing/core/scheduler/application";
-import type { IEventBus } from "@zhixing/core";
-import type { SchedulerEventMap, SchedulerControlSource, TaskSpec, TaskView } from "@zhixing/core/scheduler";
+} from "@zhixing-ai/core/scheduler/application";
+import type { IEventBus } from "@zhixing-ai/core";
+import type { SchedulerEventMap, SchedulerControlSource, TaskSpec, TaskView } from "@zhixing-ai/core/scheduler";
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,
   protocolDigest,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   type AnchorScheduler,
   scheduleTaskIdForRequest,

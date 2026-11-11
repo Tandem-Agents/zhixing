@@ -1,19 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
-import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
-import { CommandDispatcher, DefaultCommandRegistry, type CommandDef, type RuntimeContext } from "@zhixing/core/typeahead";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing-ai/core/skills/global-state";
+import { CommandDispatcher, DefaultCommandRegistry, type CommandDef, type RuntimeContext } from "@zhixing-ai/core/typeahead";
 import {
   SkillCatalogApplicationService,
   type SkillCatalogClient,
   type SkillCatalogEntry,
-} from "@zhixing/core/skills/catalog";
-import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing/core/skills/catalog-correctness";
+} from "@zhixing-ai/core/skills/catalog";
+import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing-ai/core/skills/catalog-correctness";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   SkillCommandSource,
 } from "../skill-command-source.js";

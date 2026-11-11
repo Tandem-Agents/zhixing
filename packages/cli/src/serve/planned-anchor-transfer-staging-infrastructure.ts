@@ -1,4 +1,4 @@
-import { withLogRefs, type LogRecordPort } from "@zhixing/core/logging";
+import { withLogRefs, type LogRecordPort } from "@zhixing-ai/core/logging";
 import type { Dirent } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
@@ -8,9 +8,9 @@ import {
   FileResumableArtifactReceiver,
   type ArtifactStore,
   type AuthorityCacheIntegrity,
-} from "@zhixing/core/authority";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/authority";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
 import {
   PlannedAnchorCandidateJournal,
   PlannedAnchorTransferJournal,

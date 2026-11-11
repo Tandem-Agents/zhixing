@@ -18,7 +18,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { expandUserHome } from "@zhixing/core/paths";
+import { expandUserHome } from "@zhixing-ai/core/paths";
 
 // ─── @file:path 匹配正则 ───
 

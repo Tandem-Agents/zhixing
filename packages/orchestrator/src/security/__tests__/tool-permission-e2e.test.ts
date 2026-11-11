@@ -11,20 +11,20 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
-import { type ConfirmationRequest } from "@zhixing/core/confirmation";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { PermissionStore, SecurityPipeline } from "@zhixing-ai/core/security";
+import { type ConfirmationRequest } from "@zhixing-ai/core/confirmation";
 import {
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,
   toPermissionContext,
-} from "@zhixing/core/security";
-import { TrustAdministrationExecutionApplicationService } from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/security";
+import { TrustAdministrationExecutionApplicationService } from "@zhixing-ai/core/trust-administration";
 import { createSecureExecuteTool } from "../secure-executor.js";
 
 // ─── 测试辅助 ───

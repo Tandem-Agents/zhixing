@@ -24,7 +24,7 @@
 | `packages/runtime-host`、`executor`、`mesh` | 运行装配、执行角色与设备网格 |
 | `packages/orchestrator` | 编排与子 Agent 相关能力 |
 | `packages/server`、`rpc`、`cli` | 宿主服务、RPC 投影及命令行入口；完整产品不依赖一个 `apps/agent` 目录 |
-| `packages/channels/feishu` | 飞书接入，包名为 `@zhixing/channel-feishu`，不放在旧 extensions 蓝图中 |
+| `packages/channels/feishu` | 飞书接入，包名为 `@zhixing-ai/channel-feishu`，不放在旧 extensions 蓝图中 |
 | `packages/test-utils` | 内部测试基础设施，标记为 private，不作为公开产品包发布 |
 
 根 package 为 private 的工作区协调入口。源码包的发布属性与公开入口由各自 `package.json` 决定，不以“位于 packages”推断全部公开。文档目录由[目录维护技能](../../.agents/skills/maintain-project-docs/SKILL.md)管理，不再用旧 ADR 将研究材料永久固定在 research。

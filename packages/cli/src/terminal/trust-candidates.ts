@@ -1,11 +1,11 @@
-import { NO_MATCH_HINT, type ArgChoice, type ArgChoiceProvider, type ArgChoiceSnapshot, type ArgQueryContext, type CommandDef, type SuggestionItem } from '@zhixing/core/typeahead';
+import { NO_MATCH_HINT, type ArgChoice, type ArgChoiceProvider, type ArgChoiceSnapshot, type ArgQueryContext, type CommandDef, type SuggestionItem } from '@zhixing-ai/core/typeahead';
 import type { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { createTrustRuleArgProvider } from '../security/trust-rule-arg-provider.js';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { stripAnsi } from '../tui/ansi.js';
 import { formatGroupedRuleDescription } from '../security/trust-rule-format.js';
-import type { TrustAdministrationScopeGroup } from '@zhixing/core/trust-administration';
+import type { TrustAdministrationScopeGroup } from '@zhixing-ai/core/trust-administration';
 
 export interface TerminalTrustController { readonly current: { readonly conversationId: string } }
 export interface TerminalTrustCandidateOptions {

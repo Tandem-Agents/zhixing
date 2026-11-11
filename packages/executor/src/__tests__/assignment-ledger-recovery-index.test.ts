@@ -1,6 +1,6 @@
 // 派发账本领域索引的对话恢复候选目录：与三个恢复查询同一口径，结束的派发离开目录，损坏的派发留在目录里照旧报错。
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { createSignedConversationEnvelope } from "@zhixing/core/protocol";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { createSignedConversationEnvelope } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import { ASSIGNMENT_LEDGER_INDEX_ID, readRecoveryCandidates } from "../assignment-ledger-index.js";

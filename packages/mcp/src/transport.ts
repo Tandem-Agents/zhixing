@@ -12,7 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { createSafeFetch, type NetworkPolicy } from "@zhixing/network";
+import { createSafeFetch, type NetworkPolicy } from "@zhixing-ai/network";
 import { filterDangerousEnv } from "./env-security.js";
 import type { McpServerSpec } from "./types.js";
 import { OwnedMcpStdioTransport, type McpStdioProcessFactory } from './owned-stdio.js';
@@ -64,7 +64,7 @@ export function createTransport(
   if (!spec.url) {
     throw new Error(`MCP server "${spec.serverId}" 声明为 http 但未提供 url`);
   }
-  // 出站经 @zhixing/network 的 SSRF-safe fetch（继承 network.proxy + SSRF egress
+  // 出站经 @zhixing-ai/network 的 SSRF-safe fetch（继承 network.proxy + SSRF egress
   // 防护），不走 SDK 默认的全局 fetch。fetch 持有连接池，断开时经 dispose 释放。
   const fetch = createSafeFetch({ proxy: options.proxy });
   const transport = new StreamableHTTPClientTransport(new URL(spec.url), {

@@ -4,7 +4,7 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   GovernorStateRequired,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AssignmentResourceLease,
@@ -13,15 +13,15 @@ import type {
   ResourceUsageIntake,
   Signature,
   UsageReport,
-} from "@zhixing/core/contracts";
-import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   protocolDigest,
   ResourceAdmissionDeferredError,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import {
   ExecutorResourceBackpressureError,

@@ -1,4 +1,4 @@
-import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import {
   createDurableProjectionOverlay,
   readDurableProjectionKeys,
@@ -8,7 +8,7 @@ import {
   type PhysicalStorageStepRunner,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   CommitEnvelope,
   DataPlaneTicket,
@@ -16,7 +16,7 @@ import type {
   JsonValue,
   LogicalRecord,
   StreamConsumerAuth,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   MAX_DATA_PLANE_TICKET_TTL_MS,
   MAX_CLOCK_SKEW_MS,
@@ -31,8 +31,8 @@ import {
   type DataPlaneTicketBinding,
   type DataPlaneTicketUse,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/protocol";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import type { AssignmentStreamSpool } from "./assignment-stream-spool.js";
 
 const MAINTENANCE_REVOCATION_BATCH = 8;

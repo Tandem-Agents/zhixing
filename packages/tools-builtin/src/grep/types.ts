@@ -1,7 +1,7 @@
 import type {
   GrepResultsDiagnostics,
   GrepResultsLineText,
-} from "@zhixing/core";
+} from "@zhixing-ai/core";
 
 export type GrepOutputMode = "content" | "files" | "count";
 export type GrepRegexDialect = "line-regexp";

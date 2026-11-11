@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SkillCatalogClient, SkillCatalogEntry, SkillCatalogChangedFact, SkillCatalogCommand } from '@zhixing/core/skills/catalog';
+import type { SkillCatalogClient, SkillCatalogEntry, SkillCatalogChangedFact, SkillCatalogCommand } from '@zhixing-ai/core/skills/catalog';
 import { validateSkillsView, type TerminalSkillsAction, type TerminalSkillsView } from '../../../../terminal-ui/src/skills-model.js';
 import { TerminalSkillsOwner } from '../skills.js';
 

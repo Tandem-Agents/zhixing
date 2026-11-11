@@ -5,8 +5,8 @@ import {
   protocolDigest,
   type ExecutorCapabilitySnapshot,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { AssignmentResourceLease, Signature } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/protocol";
+import type { AssignmentResourceLease, Signature } from "@zhixing-ai/core/contracts";
 import {
   ManifestSelectionError,
   ConversationAssignmentAuthority,

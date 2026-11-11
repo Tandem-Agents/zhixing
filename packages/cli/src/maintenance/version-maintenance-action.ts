@@ -6,7 +6,7 @@ export type VersionMaintenanceActionTarget =
     };
 
 const MAINTENANCE_STEPS =
-  "先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作";
+  "先运行 zz stop --maintenance；成功后运行 npm install -g zhixing@latest；再运行 zz，然后重试原操作";
 
 export function formatVersionMaintenanceAction(
   target: VersionMaintenanceActionTarget,

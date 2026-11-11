@@ -1,5 +1,5 @@
 /**
- * @zhixing/orchestrator/subagent — 子 agent 公共 API barrel
+ * @zhixing-ai/orchestrator/subagent — 子 agent 公共 API barrel
  *
  * 仅导出真正面向消费者的契约,避免 internal helper 泄漏到公共表面。
  *

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ConversationCancellationResponseEffect } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { ConversationCancellationResponseEffect } from "@zhixing-ai/core/conversation/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import {
   createConversationResolutionFence,
-} from "@zhixing/owner-kernel/conversation-control";
-import type { ConversationResolutionFence } from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/owner-kernel/conversation-control";
+import type { ConversationResolutionFence } from "@zhixing-ai/core/conversation/application";
 import {
   createAnchorConversationRunControlPort,
   createChannelCancellationResponseEffect,

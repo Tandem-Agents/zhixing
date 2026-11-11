@@ -6,7 +6,7 @@
  */
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { NetworkPolicy } from "@zhixing/network";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 import type {
   CreatedTransport,
   CreateTransportOptions,

@@ -9,7 +9,7 @@ import {
   type SegmentDecision,
   type SegmentSummarizeLLMFn,
   type WindowCompact,
-} from "@zhixing/core/context";
+} from "@zhixing-ai/core/context";
 import {
   createAdvancementWindowReviewEntry,
   detectStagnation,
@@ -19,8 +19,8 @@ import {
   type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
   type ReviewEvidence,
-} from "@zhixing/core/advancement";
-import { drainAgentLoop } from "@zhixing/core/loop";
+} from "@zhixing-ai/core/advancement";
+import { drainAgentLoop } from "@zhixing-ai/core/loop";
 import {
   extractText,
   extractUserTurnInputText,
@@ -28,14 +28,14 @@ import {
   type LLMProvider,
   type Message,
   userMessage,
-} from "@zhixing/core/types";
-import type { AgentResult } from "@zhixing/core/loop";
-import type { TokenUsage } from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
+import type { AgentResult } from "@zhixing-ai/core/loop";
+import type { TokenUsage } from "@zhixing-ai/core/types";
 import type {
   AuthorityCallContext,
   ResourceLease,
-} from "@zhixing/core/contracts";
-import type { EvidenceCapabilitySet } from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/contracts";
+import type { EvidenceCapabilitySet } from "@zhixing-ai/core/advancement";
 import { meteredProviderCall } from "../runtime/create-agent-runtime.js";
 import {
   completeMissingRequiredEvidence,

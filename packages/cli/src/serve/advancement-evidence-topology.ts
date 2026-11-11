@@ -1,9 +1,9 @@
-import type { EvidenceClientPort } from "@zhixing/core/contracts";
+import type { EvidenceClientPort } from "@zhixing-ai/core/contracts";
 import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { AdvancementEvidenceTarget } from "@zhixing/owner-services/advancement";
+} from "@zhixing-ai/core/protocol";
+import type { AdvancementEvidenceTarget } from "@zhixing-ai/owner-services/advancement";
 
 /** Demand-owned evidence mechanism directory consumed by Advancement. */
 export interface AdvancementEvidenceTargetDirectory {

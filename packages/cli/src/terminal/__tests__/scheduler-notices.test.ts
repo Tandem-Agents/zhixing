@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { SchedulerNoticePage, SchedulerNoticeView } from '../../runtime/rpc-scheduler-facade.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import {
   schedulerNoticeProgressFile, TerminalSchedulerNotices,
   type SchedulerNoticeProgress, type SchedulerNoticeProgressStore,

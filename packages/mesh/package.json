@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/mesh",
+  "name": "@zhixing-ai/mesh",
   "version": "0.1.0",
   "description": "知行设备网格 — 双向认证、安全会话、出站隧道与盲中继基座",
   "type": "module",
@@ -143,14 +143,14 @@
   "dependencies": {
     "@peculiar/webcrypto": "1.7.1",
     "@peculiar/x509": "2.0.0",
-    "@zhixing/core": "workspace:*",
+    "@zhixing-ai/core": "workspace:*",
     "reflect-metadata": "0.2.2"
   },
   "devDependencies": {
     "node-gyp": "11.5.0",
     "@cipherman/pake-js": "0.1.1",
     "@types/node": "^24.0.0",
-    "@zhixing/test-utils": "workspace:*",
+    "@zhixing-ai/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

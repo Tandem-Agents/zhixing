@@ -1,4 +1,4 @@
-import type { ToolExecutionContext } from "@zhixing/core";
+import type { ToolExecutionContext } from "@zhixing-ai/core";
 import { describe, expect, it } from "vitest";
 import { mapServerTools } from "../mapping.js";
 import type { McpCallFn, McpServerContext, McpToolDescriptor } from "../types.js";

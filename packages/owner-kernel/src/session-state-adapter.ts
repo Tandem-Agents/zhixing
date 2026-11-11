@@ -9,12 +9,12 @@ import type {
   TaskListState,
   TranscriptCursor,
   TranscriptPage,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertPrincipalAllowsAuthorityMethod,
   assertProtocolIdentifier,
-} from "@zhixing/core/protocol";
-import { advancementSubmissionRequestId } from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/protocol";
+import { advancementSubmissionRequestId } from "@zhixing-ai/core/advancement";
 import type { ConversationRunJournal } from "./conversation-assignment.js";
 
 export interface ConversationSessionStateAdapterOptions {

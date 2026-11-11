@@ -1,7 +1,7 @@
 import type {
   ToolDefinition,
   ToolResult,
-} from "@zhixing/core";
+} from "@zhixing-ai/core";
 import {
   executeGrepSearch,
   formatGrepSearchError,

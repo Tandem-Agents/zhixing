@@ -1,11 +1,11 @@
-import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
+import type { DeviceRole, SecretStorePort } from "@zhixing-ai/core/contracts";
 import type {
   ChannelCredentialProjection,
   CredentialStoreCoordinator,
   McpCredentialProjection,
   ProviderCredentialProjection,
-} from "@zhixing/providers";
-import type { CleanupRegistrationOwner } from "@zhixing/server";
+} from "@zhixing-ai/providers";
+import type { CleanupRegistrationOwner } from "@zhixing-ai/server";
 import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
@@ -34,7 +34,7 @@ import type {
   createExecutorRole,
   createInProcessAssignmentRuntimeFactory,
   createInProcessRuntimeFactory,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 
 const VALID_DEVICE_ROLES: ReadonlySet<string> = new Set([
   "anchor",
@@ -73,7 +73,7 @@ export interface ExecutorRoleModule {
 }
 
 export interface ServeBootstrapContext {
-  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
+  readonly bindLogs?: import("@zhixing-ai/core/logging").BindLogSource;
   readonly zhixingHome: string;
   readonly mesh: MeshRuntimeBootstrap;
   readonly deviceCapacity: DeviceCapacityRuntime;

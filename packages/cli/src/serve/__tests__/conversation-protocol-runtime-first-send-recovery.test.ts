@@ -1,13 +1,13 @@
 // 首发窗口内的定时补漏：本次接纳为立即可调度 → run 接管 → 首次进入 provider 之间，定时恢复轮把只带这次接纳登记的会话
 // 错开一轮（登记与代际保留，下一轮照常）；新登记、其他会话、显式请求与全局步不受影响。
 // 真实协议运行时、权威日志、日志 journal 与执行端边界；模型是可控替身，在进入 provider 之前可以卡住。
-import { ForegroundActivity } from "@zhixing/core/resources";
-import { type Message } from "@zhixing/core";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
-import { type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import { ForegroundActivity } from "@zhixing-ai/core/resources";
+import { type Message } from "@zhixing-ai/core";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 import { TEST_DURABLE_IO_TIMEOUT_MS, TEST_LOCAL_EXECUTOR, TEST_RUNTIME_AUTHORITY_FACTS, setupAuthorityRuntime, createProtocol, getOrCreateActiveConversation, expectSettled, MemorySecretStore } from "./conversation-protocol-runtime-fixture.js";

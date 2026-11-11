@@ -11,7 +11,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
-import { acquireFileLock, withFileLockProcessIdentity } from "@zhixing/core/persistence";
+import { acquireFileLock, withFileLockProcessIdentity } from "@zhixing-ai/core/persistence";
 import {
   DEVICE_CAPACITY_CLASSES,
   DefaultDeviceCapacityArbiter,
@@ -20,8 +20,8 @@ import {
   runHoldingMaintenanceExclusion,
   runWithDeviceCapacity,
   type DeviceCapacityPolicy,
-} from "@zhixing/core/resources";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/resources";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
 import { startServer, type ZhixingServerInstance } from "../server.js";

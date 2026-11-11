@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
-import { TERMINAL_LIMITS, TERMINAL_PROTOCOL } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, TERMINAL_PROTOCOL } from '@zhixing-ai/terminal-ui/protocol';
 
 describe('terminal independent control capacity', () => {
   it('保存接收/发送失败首因和请求身份，不被后续关闭覆盖', async () => {

@@ -1,12 +1,12 @@
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import type {
   WorkspaceProbeRequest,
   WorkspaceProbeResult,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { createLiveTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import { EnvironmentProbeMeshClient } from "./environment-probe-mesh.js";
 import type { WorksceneRemoteWorkspaceProbePort } from "./workscene-directory.js";
-import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
+import type { MeshConnectionRegistry } from "@zhixing-ai/mesh/bootstrap";
 
 type LiveMeshTopologyTrust = {
   current(): CurrentTrustProjection;

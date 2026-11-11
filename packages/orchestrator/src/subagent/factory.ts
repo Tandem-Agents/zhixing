@@ -20,8 +20,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { createEventBus, type EventBus } from "@zhixing/core/events";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { createEventBus, type EventBus } from "@zhixing-ai/core/events";
 import {
   emptyUsage,
   toToolSpec,
@@ -34,15 +34,15 @@ import {
   type ThinkingConfig,
   type TokenUsage,
   type ToolDefinition,
-} from "@zhixing/core/types";
-import { TokenEstimator } from "@zhixing/core/context";
-import { type AbortReason } from "@zhixing/core/interrupt";
-import { type IConfirmationBroker } from "@zhixing/core/confirmation";
-import { type SecurityPipeline } from "@zhixing/core/security";
+} from "@zhixing-ai/core/types";
+import { TokenEstimator } from "@zhixing-ai/core/context";
+import { type AbortReason } from "@zhixing-ai/core/interrupt";
+import { type IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { type SecurityPipeline } from "@zhixing-ai/core/security";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { failureSourceFrames, logFailureEvidence } from "@zhixing/core/logging";
-import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing/core/contracts";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { failureSourceFrames, logFailureEvidence } from "@zhixing-ai/core/logging";
+import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing-ai/core/contracts";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
 import {
   runContextStorage,
@@ -118,7 +118,7 @@ export interface RunChildAgentOptions {
   /** 共享父 SecurityPipeline 实例 —— 权限规则 / boundary registry 跨 agent 共用 */
   securityPipeline: SecurityPipeline;
   /** 共享父级有限安全批准端口，子执行不取得产品领域应用。 */
-  agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  agentIdentity?: import("@zhixing-ai/core/identity").AgentIdentity;
   /** 由产品显式投影的共同指令，不接收父 profile 或全部个人约定。 */
   delegationInstructions?: string;
   securityApproval: KernelSecurityApprovalPort;

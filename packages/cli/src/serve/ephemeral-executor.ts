@@ -10,16 +10,16 @@
  *
  * 规格引用：persistent-service.md §4.2 TaskAction（sessionId 未提供时的 ephemeral 模式）
  */
-import { userMessage, type Message, type TurnContext } from "@zhixing/core";
-import { type AgentYield } from "@zhixing/core/loop";
-import type { AgentTurnResult } from "@zhixing/core/scheduler";
+import { userMessage, type Message, type TurnContext } from "@zhixing-ai/core";
+import { type AgentYield } from "@zhixing-ai/core/loop";
+import type { AgentTurnResult } from "@zhixing-ai/core/scheduler";
 import {
   assertKernelRunEvent,
   assertKernelTerminal,
   type AgentRuntime,
   type KernelRunEvent,
   type KernelTerminal,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import { serializeAbortReason } from "./abort-serializer.js";
 
 export interface EphemeralTurnOptions {

@@ -1,16 +1,16 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { FileLockBusyError } from "@zhixing/core/persistence";
-import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import { writeCredentials } from "@zhixing/providers";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { FileLockBusyError } from "@zhixing-ai/core/persistence";
+import { StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
+import { writeCredentials } from "@zhixing-ai/providers";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { runStartupCheck } from "../startup.js";
 import { checkStartupConfiguration } from "../runtime/startup-application.js";
 import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { persistDeviceKey } from "@zhixing-ai/mesh/device-key-store";
 import { createLocalConfigurationApplication } from "../serve/local-configuration-application.js";
 import { CredentialExposureAuthority } from "../serve/credential-exposure-authority.js";
 

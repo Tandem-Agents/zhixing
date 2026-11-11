@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
-import type { EvidenceRequirementSpec, RunRecordInput } from "@zhixing/core/advancement";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import type { EvidenceRequirementSpec, RunRecordInput } from "@zhixing-ai/core/advancement";
 import {
   createFirstPartyEvidenceProvider,
   detectEvidenceCapabilities,

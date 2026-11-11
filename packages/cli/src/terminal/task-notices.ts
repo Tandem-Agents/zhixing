@@ -1,5 +1,5 @@
-import { isProtocolIdentifier } from '@zhixing/core/protocol';
-import type { SchedulerFacadeEvent } from '@zhixing/core/scheduler';
+import { isProtocolIdentifier } from '@zhixing-ai/core/protocol';
+import type { SchedulerFacadeEvent } from '@zhixing-ai/core/scheduler';
 import type { CoreHostNotificationLink } from '../runtime/core-host-connection.js';
 import type { RpcSchedulerFacade } from '../runtime/rpc-scheduler-facade.js';
 import { PublishResultPresenter } from '../runtime/publish-result-presenter.js';

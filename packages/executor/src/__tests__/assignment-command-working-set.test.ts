@@ -1,10 +1,10 @@
 // test-source: isolate
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { AuthorityCacheIntegrity, FileAuthorityCommitLog, type AuthorityCommitLog } from '@zhixing/core/authority';
-import { canonicalize, protocolDigest } from '@zhixing/core/protocol';
-import { ConversationRunJournal, ConversationAssignmentCancelledError } from '@zhixing/owner-kernel/conversation-assignment';
-import { channelSurfacePrincipal } from '@zhixing/owner-kernel/control-admission';
-import { captureFileIo } from '@zhixing/test-utils';
+import { AuthorityCacheIntegrity, FileAuthorityCommitLog, type AuthorityCommitLog } from '@zhixing-ai/core/authority';
+import { canonicalize, protocolDigest } from '@zhixing-ai/core/protocol';
+import { ConversationRunJournal, ConversationAssignmentCancelledError } from '@zhixing-ai/owner-kernel/conversation-assignment';
+import { channelSurfacePrincipal } from '@zhixing-ai/owner-kernel/control-admission';
+import { captureFileIo } from '@zhixing-ai/test-utils';
 import { observeProjectionQueryWork } from '../../../core/src/test-support/projection-query-work.js';
 import { InProcessAssignmentSubmission } from '../assignment-ledger.js';
 import { createHarness, createUnsignedEnvelope, sealDefaultBundle, submissionContext, ownerContext,

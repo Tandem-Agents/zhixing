@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ChatRequest, StreamEvent } from "@zhixing/core/types";
-import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
-import { markRequestUndelivered } from "@zhixing/core/resilience";
+import type { ChatRequest, StreamEvent } from "@zhixing-ai/core/types";
+import type { ModelCallResourceMeter } from "@zhixing-ai/core/contracts";
+import { markRequestUndelivered } from "@zhixing-ai/core/resilience";
 import { meteredProviderCall } from "../create-agent-runtime.js";
 
 const REQUEST: ChatRequest = { model: "test-model", messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] };

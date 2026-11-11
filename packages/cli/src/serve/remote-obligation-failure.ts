@@ -1,4 +1,4 @@
-import { MeshProtocolError } from "@zhixing/mesh/errors";
+import { MeshProtocolError } from "@zhixing-ai/mesh/errors";
 
 const RETRYABLE_MESH_FAILURES = new Set([
   "connection-closed",

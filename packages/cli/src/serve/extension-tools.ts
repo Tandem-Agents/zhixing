@@ -1,10 +1,10 @@
 import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
-import type { ToolDefinition } from "@zhixing/core";
-import { protocolDigest } from "@zhixing/core/protocol";
-import type { ExtensionManagementRequest, ExtensionPublicSnapshot } from "@zhixing/core/extensions/contracts";
-import { validateExtensionCandidate } from "@zhixing/core/extensions/candidate";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import type { ToolDefinition } from "@zhixing-ai/core";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import type { ExtensionManagementRequest, ExtensionPublicSnapshot } from "@zhixing-ai/core/extensions/contracts";
+import { validateExtensionCandidate } from "@zhixing-ai/core/extensions/candidate";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import { extensionKitDirectory } from "../runtime/extensions/catalog.js";
 
 export interface ExtensionManagementTransport {

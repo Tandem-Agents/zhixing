@@ -1,11 +1,11 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：activation。
 import path from "node:path";
-import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import { AuthorityCacheIntegrity, FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "@zhixing/core/authority";
-import type { AssignmentActivationPayload, AssignmentActivationProof, AssignmentEntry, LedgerEvidencePage, IngressContext } from "@zhixing/core/contracts";
-import { assignmentActivationDigest, canonicalize, dataPlaneTicketDigest, dispatchEnvelopeArtifact } from "@zhixing/core/protocol";
-import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing/owner-kernel/conversation-assignment";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
+import { StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
+import { AuthorityCacheIntegrity, FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "@zhixing-ai/core/authority";
+import type { AssignmentActivationPayload, AssignmentActivationProof, AssignmentEntry, LedgerEvidencePage, IngressContext } from "@zhixing-ai/core/contracts";
+import { assignmentActivationDigest, canonicalize, dataPlaneTicketDigest, dispatchEnvelopeArtifact } from "@zhixing-ai/core/protocol";
+import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { channelSurfacePrincipal } from "@zhixing-ai/owner-kernel/control-admission";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import { AssignmentStreamSpool } from "../assignment-stream-spool.js";

@@ -1,14 +1,14 @@
 // Source schema is projected at the same infrastructure edge as the MCP runtime.
-export { MCP_LOG_SOURCE } from "@zhixing/mcp";
+export { MCP_LOG_SOURCE } from "@zhixing-ai/mcp";
 import {
   createMcpHub,
   mapServerTools,
   type McpHub,
   type McpHubOptions,
   type McpServerSpec,
-} from "@zhixing/mcp";
-import { canonicalize } from "@zhixing/core/protocol";
-import type { McpManagementServerDraft } from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/mcp";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import type { McpManagementServerDraft } from "@zhixing-ai/core/mcp-management";
 import { toServerSpec } from "./mcp-config.js";
 import type {
   HostMcpRuntimePorts,

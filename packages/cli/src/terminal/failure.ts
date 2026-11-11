@@ -1,4 +1,4 @@
-import { logFailureEvidence, type LogRecordPort } from '@zhixing/core/logging';
+import { logFailureEvidence, type LogRecordPort } from '@zhixing-ai/core/logging';
 import { failureSourceFrames } from '../logging/failure-location.js';
 
 /** 终端实例存储账户的确定错误码：S 记录、回给 N，N 以它拒绝并据此呈现。 */

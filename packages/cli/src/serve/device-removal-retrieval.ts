@@ -1,24 +1,24 @@
-import type { HomeTrustEvent, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceLifecycleJournal } from "@zhixing/core/authority";
-import { protocolDigest, type ExecutorRemovalSuccessor, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import type { HomeTrustEvent, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
+import { protocolDigest, type ExecutorRemovalSuccessor, type ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   currentAndPreviousDiscoveryRendezvousKeys,
   currentAndPreviousTerminalRendezvousKeys,
-} from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/bootstrap";
 import {
   HomeDiscoveryRefusedError,
   openHomeDiscovery,
   type HomeDiscoveryClientSession,
   type HomeDiscoveryLocalChain,
   type HomeDiscoveryResumePoint,
-} from "@zhixing/mesh/home-discovery";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
-import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
-import { connectAuthenticatedMesh } from "@zhixing/mesh/handshake";
-import { MeshRequestChannel } from "@zhixing/mesh/request-channel";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { SecureMeshConnection } from "@zhixing/mesh/transport";
+} from "@zhixing-ai/mesh/home-discovery";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { deleteDeviceKeyExact } from "@zhixing-ai/mesh/device-key-store";
+import { connectAuthenticatedMesh } from "@zhixing-ai/mesh/handshake";
+import { MeshRequestChannel } from "@zhixing-ai/mesh/request-channel";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh/transport";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import {
   readDiscoveryProgress,

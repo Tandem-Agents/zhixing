@@ -1,23 +1,23 @@
 /** Node 配置保存/应用编排，复用 Configuration、Secret、Channel 与 MCP owners。 */
-import type { ChannelStatus } from "@zhixing/core/channels";
-import { loadConfig } from "@zhixing/providers/configuration";
+import type { ChannelStatus } from "@zhixing-ai/core/channels";
+import { loadConfig } from "@zhixing-ai/providers/configuration";
 import { createLocalConfigurationApplication } from "../serve/local-configuration-application.js";
-import { createPlatformSecretStore } from "@zhixing/secrets";
-import { canonicalize } from "@zhixing/core/protocol";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import { ChannelConfiguration } from "./extensions/channel-configuration.js";
 import { listSupportedChannels } from "../registries/channels.js";
 import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
-import { McpManagementApplication, type McpManagementEditorPort } from "@zhixing/core/mcp-management";
+import { McpManagementApplication, type McpManagementEditorPort } from "@zhixing-ai/core/mcp-management";
 import type { NodeConfigurationEditor } from "./configuration-edit.js";
 import type { CreateMcpManagementAdapterOptions } from "./mcp-management-adapter.js";
 
 export interface ConfigurationApplicationDeps {
-  readonly processIdentityResolver?: import('@zhixing/core/persistence').FileLockOptions['processIdentityResolver'];
+  readonly processIdentityResolver?: import('@zhixing-ai/core/persistence').FileLockOptions['processIdentityResolver'];
   readonly secretStore?: ReturnType<typeof createPlatformSecretStore>;
-  readonly configurationRecords?: import("@zhixing/core/logging").LogRecordPort;
-  readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot>;
+  readonly configurationRecords?: import("@zhixing-ai/core/logging").LogRecordPort;
+  readonly readExtensions?: () => Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionPublicSnapshot>;
   readonly readExtensionLocalSetup?: () => Promise<Readonly<Record<string, string>>>;
-  readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot>;
+  readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionPublicSnapshot>;
   readonly zhixingHome: string;
   readonly configPath: string;
   readonly state: { activeTurnPromise: Promise<unknown> | null };
@@ -236,7 +236,7 @@ export interface McpConfigurationDeps {
   readonly configPath: string;
     /** MCP 连接状态 wire（宿主快照——具体结构由 infrastructure adapter 严格解码）。 */
     readMcpStatusWire: () => Promise<unknown>;
-    readMcpPending?: () => Promise<readonly import("@zhixing/core/mcp-management").McpPendingConnection[]>;
+    readMcpPending?: () => Promise<readonly import("@zhixing-ai/core/mcp-management").McpPendingConnection[]>;
     /** 宿主轻推理通道(llm.complete)——接入向导的源解析 / 提取 */
     llmComplete: (
       prompt: string,
@@ -246,8 +246,8 @@ export interface McpConfigurationDeps {
     llmConsume?: <T>(prompt: string, consume: (text: string) => T, role?: 'main' | 'light', signal?: AbortSignal) => Promise<T>;
     createStdioProcess?: CreateMcpManagementAdapterOptions['createStdioProcess'];
     /** 一次性探测的替换实现（终端：在受管辅助进程里执行，不在本进程加载 SDK）；缺省在本进程探测。 */
-    createProbe?: (proxy: import('@zhixing/network').NetworkPolicy['proxy'] | undefined) =>
-      import('@zhixing/core/mcp-management').McpManagementInfrastructurePort['probe'];
+    createProbe?: (proxy: import('@zhixing-ai/network').NetworkPolicy['proxy'] | undefined) =>
+      import('@zhixing-ai/core/mcp-management').McpManagementInfrastructurePort['probe'];
 }
 
 export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {

@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentEventMap } from "@zhixing/core";
-import type { OrchestrationDefinitionV1, OrchestrationSystemCapsV1 } from "@zhixing/core/orchestration";
-import { createEventBus, emptyUsage } from "@zhixing/core";
-import { loadOrchestrationDefinitionV1 } from "@zhixing/core/orchestration";
+import type { AgentEventMap } from "@zhixing-ai/core";
+import type { OrchestrationDefinitionV1, OrchestrationSystemCapsV1 } from "@zhixing-ai/core/orchestration";
+import { createEventBus, emptyUsage } from "@zhixing-ai/core";
+import { loadOrchestrationDefinitionV1 } from "@zhixing-ai/core/orchestration";
 import {
   OrchestrationRunnerV1,
   type AgentNodeExecutorV1,
-} from "@zhixing/orchestrator/orchestration";
+} from "@zhixing-ai/orchestrator/orchestration";
 import { createRunEventSubscribers, setupInterruptRendering } from "../render-events.js";
 import {
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type { CliWriter } from "../screen/index.js";
 
 // ─── CliWriter 测试桩——按段累积 line / notify 调用 ───

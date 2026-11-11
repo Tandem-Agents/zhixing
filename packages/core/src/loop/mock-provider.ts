@@ -5,7 +5,7 @@
  * 支持文本回复、工具调用、thinking、错误等所有场景。
  *
  * 这不是测试专用的内部工具 —— 它是公开 API 的一部分。
- * 消费者可以用它来测试自己基于 @zhixing/core 构建的应用。
+ * 消费者可以用它来测试自己基于 @zhixing-ai/core 构建的应用。
  */
 
 import type { ChatRequest, LLMProvider, ModelInfo, StreamEvent, TokenUsage } from "../types/llm.js";

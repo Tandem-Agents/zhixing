@@ -2,15 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { rm, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing/core/authority";
-import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing/core/extensions/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing-ai/core/authority";
+import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing-ai/core/extensions/application";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import { createExtensionTools } from "../extension-tools.js";
 import { createExtensionContinuation } from "../extension-continuation.js";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import type { ExtensionOperation } from "@zhixing/core/extensions/contracts";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
+import type { ExtensionOperation } from "@zhixing-ai/core/extensions/contracts";
 import { buildExtensionMethods } from "../../../../server/src/rpc/methods/extensions.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 
 describe("extension product bindings", { timeout: 20_000 }, () => {
   it("keeps local configuration results pending until a real conversation can receive them", async () => {

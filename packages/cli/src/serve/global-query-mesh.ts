@@ -4,7 +4,7 @@ import type {
   GlobalQuery,
   GlobalReadResult,
   GlobalStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   protocolDigest,
@@ -12,9 +12,9 @@ import {
   validateGlobalQuery,
   validateGlobalQueryResult,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 
 const GLOBAL_QUERY_SERVICE = "authority.global.read";
 

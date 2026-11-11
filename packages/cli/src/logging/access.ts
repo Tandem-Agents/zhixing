@@ -1,16 +1,16 @@
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import {
   LogApplication,
   createLogProductApiContribution,
   LOG_PRODUCT_API_EXACT_SET,
   LogRequestError,
   type LogApplicationHost,
-} from "@zhixing/core/logging/application";
-import type { LogReadContext } from "@zhixing/core/logging";
+} from "@zhixing-ai/core/logging/application";
+import type { LogReadContext } from "@zhixing-ai/core/logging";
 import {
   LocalLogStore,
-} from "@zhixing/core/logging/storage";
-import type { DeviceCapacityArbiterPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/logging/storage";
+import type { DeviceCapacityArbiterPort } from "@zhixing-ai/core/resources";
 import { LogFilesProcess } from "./files-process.js";
 import { createLogWriterProbe } from "./writers.js";
 

@@ -11,16 +11,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createEventBus,
-} from "@zhixing/core/events";
+} from "@zhixing-ai/core/events";
 import type {
   AgentEventMap,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   createRunEventForwarder,
   createActivityBroadcast,
   createObserverBroadcast,
   type SessionEventEnvelope,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import type { RpcConnection } from "../connection.js";
 
 function makeBus() {

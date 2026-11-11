@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
-import { MeshServiceRegistry } from "@zhixing/mesh";
+import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError } from "@zhixing-ai/core/resources";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh";
 import {
   createExecutorDataPlaneAssignmentPair,
   type ExecutorDataPlaneAssignmentAuthorityPort,

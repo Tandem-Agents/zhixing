@@ -1,5 +1,5 @@
 {
-  "name": "zhixing",
+  "name": "zhixing-workspace",
   "version": "0.1.0",
   "private": true,
   "description": "知行 — 智能体引擎",
@@ -31,8 +31,8 @@
     "package:check": "node scripts/package-check.mjs",
     "package:structure:test": "node --test scripts/npm-delivery-structure.test.mjs",
     "package:publish": "node scripts/publish-npm.mjs",
-    "contracts:typecheck": "pnpm --filter @zhixing/core typecheck:contracts",
-    "contracts:lint": "pnpm --filter @zhixing/core lint:contract-schemas",
+    "contracts:typecheck": "pnpm --filter @zhixing-ai/core typecheck:contracts",
+    "contracts:lint": "pnpm --filter @zhixing-ai/core lint:contract-schemas",
     "security:supply-chain": "node scripts/check-mesh-security-supply-chain.mjs",
     "security:mesh-test-clock": "node scripts/check-mesh-live-tls-tests.mjs",
     "security:secrets": "node scripts/check-secret-boundaries.mjs",
@@ -40,12 +40,12 @@
     "s7:registry-golden:write": "node --import=tsx/esm scripts/s7-registry-golden.mjs --write",
     "s7:lint": "node --import=tsx/esm scripts/s7-entry-coverage.mjs && node --import=tsx/esm --test scripts/s7-entry-coverage.test.mjs && pnpm s7:registry-golden && node scripts/s7-behavior.mjs",
     "lint": "pnpm security:supply-chain && pnpm security:mesh-test-clock && pnpm security:secrets && pnpm s7:lint && biome check .",
-    "lint:prepare": "pnpm -r --filter @zhixing/core... --filter @zhixing/mesh... --filter @zhixing/orchestrator... --filter @zhixing/owner-kernel... --filter @zhixing/rpc... --filter @zhixing/runtime-host... --filter @zhixing/tools-builtin... exec tsup",
+    "lint:prepare": "pnpm -r --filter @zhixing-ai/core... --filter @zhixing-ai/mesh... --filter @zhixing-ai/orchestrator... --filter @zhixing-ai/owner-kernel... --filter @zhixing-ai/rpc... --filter @zhixing-ai/runtime-host... --filter @zhixing-ai/tools-builtin... exec tsup",
     "lint:fix": "biome check --write .",
     "clean": "pnpm -r run clean",
     "playground": "node --import=tsx/esm playground/chat.ts",
     "cli": "node --import=tsx/esm packages/cli/src/entry.ts",
-    "cli:build": "pnpm --filter @zhixing/cli build",
+    "cli:build": "pnpm --filter zhixing build",
     "serve": "node --import=tsx/esm packages/cli/src/entry.ts serve"
   },
   "devDependencies": {

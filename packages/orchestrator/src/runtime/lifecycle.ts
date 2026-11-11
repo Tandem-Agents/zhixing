@@ -20,7 +20,7 @@
  * 无注意力窗口换代，by-construction 不携带本钩子。
  */
 
-import type { ImageSource, LifecycleWarningInput, Message, TurnOrigin } from "@zhixing/core/types";
+import type { ImageSource, LifecycleWarningInput, Message, TurnOrigin } from "@zhixing-ai/core/types";
 import type { KernelRunCompletion } from "./kernel-terminal.js";
 import type { SystemPromptSegment } from "./system-prompt.js";
 

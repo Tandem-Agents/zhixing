@@ -1,10 +1,10 @@
-import type { ToolDefinition } from "@zhixing/core";
-import { protocolDigest } from "@zhixing/core/protocol";
+import type { ToolDefinition } from "@zhixing-ai/core";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import {
   validateConversationCommunicationRequest,
   type ConversationCommunicationRequest,
-} from "@zhixing/core/conversation/application";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/conversation/application";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 /** 工具只绑定真实运行身份；不持有目标状态，也不编排协作。 */
 export interface ConversationCommunicationTransport {

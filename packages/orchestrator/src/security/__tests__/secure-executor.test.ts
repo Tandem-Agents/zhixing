@@ -12,9 +12,9 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { EventBus } from "@zhixing/core/events";
-import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { EventBus } from "@zhixing-ai/core/events";
+import { PermissionStore, SecurityPipeline } from "@zhixing-ai/core/security";
 import {
   type AgentEventMap,
   type ToolDefinition,
@@ -22,20 +22,20 @@ import {
   type StreamEvent,
   type ToolExecutionContext,
   type ToolResult,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   type ConfirmationDecision,
   type ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,
   toPermissionContext,
-} from "@zhixing/core/security";
+} from "@zhixing-ai/core/security";
 import {
   TrustAdministrationExecutionApplicationService,
   type TrustAdministrationExecutionApplication,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 import {
   SecurityBlockError,
   createSecureExecuteTool as createProductionSecureExecuteTool,

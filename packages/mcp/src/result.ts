@@ -6,7 +6,7 @@
  * （当前不内联二进制 / 资源），并透传 isError。纯函数，便于独立单测。
  */
 
-import type { ToolResult } from "@zhixing/core";
+import type { ToolResult } from "@zhixing-ai/core";
 
 /** 只取我们消费的字段；结构与 SDK 的 CallToolResult 兼容（SDK 类型字段更多）。 */
 export interface McpCallOutcome {

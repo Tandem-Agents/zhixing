@@ -4,15 +4,15 @@ import { runtimeConfigurationObservation } from "../configuration-logging.js";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SecretRef } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { editConfiguration, loadConfigurationSnapshot } from "../configuration-edit.js";
 import { addMcpServerConfiguration, loadConfig, writeConfig } from "../config-loader.js";
 import { CONFIGURATION_EDIT_REF, inspectMcpCredentialBinding, loadCredentialSnapshot, writeCredentials } from "../credentials-loader.js";
 
 const durability = vi.hoisted(() => ({ afterDirectorySync: undefined as undefined | ((directory: string) => Promise<void>) }));
-vi.mock("@zhixing/core/persistence", async original => {
-  const actual = await original<typeof import("@zhixing/core/persistence")>();
+vi.mock("@zhixing-ai/core/persistence", async original => {
+  const actual = await original<typeof import("@zhixing-ai/core/persistence")>();
   return { ...actual, syncDirectory: async (directory: string) => {
     await actual.syncDirectory(directory);
     await durability.afterDirectorySync?.(directory);

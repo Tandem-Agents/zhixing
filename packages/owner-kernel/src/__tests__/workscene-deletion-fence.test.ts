@@ -1,9 +1,9 @@
 import path from 'node:path';
-import { FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import type { GlobalControlCallContext, Signature } from '@zhixing/core/contracts';
-import { protocolDigest } from '@zhixing/core/protocol';
-import { AnchorWorksceneGlobalStateAdapter } from '@zhixing/core/workscene';
-import { createTempDir } from '@zhixing/test-utils';
+import { FileArtifactStore, FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import type { GlobalControlCallContext, Signature } from '@zhixing-ai/core/contracts';
+import { protocolDigest } from '@zhixing-ai/core/protocol';
+import { AnchorWorksceneGlobalStateAdapter } from '@zhixing-ai/core/workscene';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { expect, it, onTestFinished } from 'vitest';
 import { AnchorResourceGovernor } from '../resource-governor.js';
 import { ControlAdmissionJournal, createInitialControlEnvelope } from '../control-admission.js';

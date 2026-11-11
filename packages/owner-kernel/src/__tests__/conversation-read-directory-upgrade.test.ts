@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest';
-import { FileAuthorityCommitLog, AuthorityCacheIntegrity } from '@zhixing/core/authority';
-import { createTempDir } from '@zhixing/test-utils';
+import { FileAuthorityCommitLog, AuthorityCacheIntegrity } from '@zhixing-ai/core/authority';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { ConversationDirectoryReducer, registerConversationReadProjection } from '../conversation-read-index.js';
 import { createConversationBaseHarness, BASE_NOW, baseVerifier } from './conversation-base-harness.js';
 

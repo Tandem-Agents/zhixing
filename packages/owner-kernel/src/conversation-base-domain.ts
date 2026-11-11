@@ -1,10 +1,10 @@
 import { collectArtifactRefs, artifactJsonIndex, createDurableProjectionOverlay, resolveDispatchArtifactClosure,
-  type DurableProjectionReadContext, type DurableProjectionMutation } from '@zhixing/core/authority';
-import type { JsonValue, LogicalRecord, TranscriptRunRecord, ArtifactRef } from '@zhixing/core/contracts';
+  type DurableProjectionReadContext, type DurableProjectionMutation } from '@zhixing-ai/core/authority';
+import type { JsonValue, LogicalRecord, TranscriptRunRecord, ArtifactRef } from '@zhixing-ai/core/contracts';
 import { canonicalize, validateConversationEnvelope, validateNonEmptyUserTurnInput, validateMutationBatch,
-  validateIntentStreamRecord, reduceDeferredGlobalIntent, validateConversationSealedBundle, validateTranscriptRunRecord } from '@zhixing/core/protocol';
-import { freezeAdvancementSessions } from '@zhixing/core/advancement';
-import { parseConversationId } from '@zhixing/core/conversation';
+  validateIntentStreamRecord, reduceDeferredGlobalIntent, validateConversationSealedBundle, validateTranscriptRunRecord } from '@zhixing-ai/core/protocol';
+import { freezeAdvancementSessions } from '@zhixing-ai/core/advancement';
+import { parseConversationId } from '@zhixing-ai/core/conversation';
 import { reduceImportedConversationGuard, reduceConversationSessionFact, validateImportedConversationCommit, assertAssignedMatchesDispatch,
   type ConversationCommitLogRecord, type RunProjection, type ConversationFactGroup } from './conversation-assignment.js';
 import { validateImportedConversationControl } from './control-admission.js';
@@ -201,7 +201,7 @@ async function assertFrozenDomain(source: ConversationBaseSource, view: DurableP
     const prefix = base(id) + suffix;
     if ((await view.scan({ gte: prefix, lt: prefix + '\uffff' }, 1)).entries.length) throw corruptRunJournal('Frozen conversation has unsettled source projection work');
   }
-  const key = 'conversation/' + (await import('@zhixing/core/protocol')).protocolDigest('ConversationRecoveryKey', 1, id).slice(7);
+  const key = 'conversation/' + (await import('@zhixing-ai/core/protocol')).protocolDigest('ConversationRecoveryKey', 1, id).slice(7);
   const obligations = await view.get(key) as unknown as { assignments: number; lifecycle: number } | undefined;
   if (obligations && (obligations.assignments !== 0 || obligations.lifecycle !== 0)) throw corruptRunJournal('Frozen conversation has unsettled source publication or finality');
 }

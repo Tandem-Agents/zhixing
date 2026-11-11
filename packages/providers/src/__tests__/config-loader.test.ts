@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   applyConfigPatch,
   ConfigSchemaError,

@@ -8,13 +8,13 @@ import type {
   ExecutorVersionInventory,
   ResourceLease,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedEvidenceRequest,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { EvidenceJournal } from "../evidence-journal.js";
 import { ExecutorEvidenceHandler } from "../executor-evidence.js";

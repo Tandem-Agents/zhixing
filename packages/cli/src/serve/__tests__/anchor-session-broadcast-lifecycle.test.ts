@@ -1,25 +1,25 @@
 import {
   createSessionBroadcastTransport,
   type SessionBroadcastTransport,
-} from "@zhixing/rpc/session-broadcast";
+} from "@zhixing-ai/rpc/session-broadcast";
 import { describe, expect, it, vi } from "vitest";
 import { AnchorSessionBroadcastLifecycle } from "../anchor-session-broadcast-lifecycle.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   advancementExecutionTurnId,
   type AdvancementRunReview,
   type ConfirmedRubricSnapshot,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import {
   AdvancementController,
   createAdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
-import { AdvancementReviewResultProjectionApplicationService } from "@zhixing/core/advancement/application";
-import { createAdvancementEventSink } from "@zhixing/server";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewAttemptApplication } from "@zhixing-ai/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
+import { AdvancementReviewResultProjectionApplicationService } from "@zhixing-ai/core/advancement/application";
+import { createAdvancementEventSink } from "@zhixing-ai/server";
 
 describe("AnchorSessionBroadcastLifecycle", () => {
   it("keeps stable ports fail-closed until one Server transport is installed", () => {

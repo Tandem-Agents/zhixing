@@ -1,7 +1,7 @@
 import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   assertPhysicallyIndependentDirectory,
   FileRecoveryCheckpointTarget,

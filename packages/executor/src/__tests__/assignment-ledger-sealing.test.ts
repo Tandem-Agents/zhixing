@@ -1,8 +1,8 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：sealing。
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { AssignmentActivationProof, AssignmentEntry, DispatchEnvelope } from "@zhixing/core/contracts";
-import { advanceAssignmentLedger, createSignedConversationEnvelope, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolDigest, createConversationSealedBundle, sealedBundleArtifact, signCancelProof, validateAssignmentEntry, validateConversationEnvelope, validateNonEmptyUserTurnInput, validateStagedMutationRecord, validateTranscriptRunRecord } from "@zhixing/core/protocol";
-import { InProcessConversationDispatcher } from "@zhixing/owner-kernel/conversation-assignment";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { AssignmentActivationProof, AssignmentEntry, DispatchEnvelope } from "@zhixing-ai/core/contracts";
+import { advanceAssignmentLedger, createSignedConversationEnvelope, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolDigest, createConversationSealedBundle, sealedBundleArtifact, signCancelProof, validateAssignmentEntry, validateConversationEnvelope, validateNonEmptyUserTurnInput, validateStagedMutationRecord, validateTranscriptRunRecord } from "@zhixing-ai/core/protocol";
+import { InProcessConversationDispatcher } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { NOW, EXECUTOR_ID, CONVERSATION_ID, RUN_ID, ASSIGNMENT_ID, SHA256_ZERO, ABORT_TICKET_DIGEST, DURABLE_IO_TEST_TIMEOUT_MS, allowOnceDecisionDigest, createUnassignedHarness, createHarness, createUnsignedEnvelope, ingress, ownerContext, submissionContext, storedAssignmentFact, appendCompleteConversationCommit, putRealSealedBundleRef, sealDefaultBundle, createAlternativeDispatch, createCancellationSubmission, createBundleSubmission, reopenJournal, withoutSignature, replayFixtureLog } from "./assignment-ledger-fixture.js";
 

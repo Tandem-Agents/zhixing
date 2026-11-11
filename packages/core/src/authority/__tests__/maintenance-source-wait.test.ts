@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex } from "../index.js";
 import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
 import { runDetachedMaintenanceContext, StorageMaintenanceCancelledError } from "../../resources/index.js";

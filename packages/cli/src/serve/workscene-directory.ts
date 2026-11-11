@@ -4,12 +4,12 @@ import type {
   WorksceneDto,
   WorkspaceProbeRequest,
   WorkspaceProbeResult,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   WorksceneConversationStorageProjectionCleanupPort,
   WorksceneWorkspaceReference,
-} from "@zhixing/core/workscene/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/workscene/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type { AnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";

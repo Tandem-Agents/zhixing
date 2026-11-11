@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
-import type { DurableProjectionReadContext } from '@zhixing/core/authority';
-import type { JsonValue } from '@zhixing/core/contracts';
+import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import type { JsonValue } from '@zhixing-ai/core/contracts';
 import { conversationStateBase as base, conversationStateFieldKey as fieldKey, conversationStateHash as hash,
   encodeConversationState as encode } from '../conversation-run-state-index.js';
 import { readIndexedConversationAuthority, readIndexedPendingDispatch, readIndexedRecoveryAssignments, readIndexedPendingProjections } from '../conversation-run-queries.js';

@@ -1,15 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ConfirmationBroker, type ConfirmationDecision, type ConfirmationRequest } from "@zhixing/core/confirmation";
-import { canonicalize, type ConversationInteractionOutcome } from "@zhixing/core/protocol";
+import { ConfirmationBroker, type ConfirmationDecision, type ConfirmationRequest } from "@zhixing-ai/core/confirmation";
+import { canonicalize, type ConversationInteractionOutcome } from "@zhixing-ai/core/protocol";
 import {
   DurablePermissionRuleStore,
   ExplicitApprovalEffects,
   explicitApprovalBucket,
   explicitApprovalRuleId,
-} from "@zhixing/core/security";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/security";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   DurableConversationInteractionObserver,
   type DurableInteractionBinding,

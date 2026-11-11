@@ -1,7 +1,7 @@
 import { corruptRunJournal } from './conversation-run-contracts.js';
-import { AuthorityStorageError, createDurableProjectionOverlay, type ArtifactStore, type AuthorityCommitLog, type DurableProjectionMutation, type DurableProjectionReadContext, type DurableLogCheckpoint } from '@zhixing/core/authority';
-import type { JsonValue, FinalFrame } from '@zhixing/core/contracts';
-import { canonicalize, protocolDigest, validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord } from '@zhixing/core/protocol';
+import { AuthorityStorageError, createDurableProjectionOverlay, type ArtifactStore, type AuthorityCommitLog, type DurableProjectionMutation, type DurableProjectionReadContext, type DurableLogCheckpoint } from '@zhixing-ai/core/authority';
+import type { JsonValue, FinalFrame } from '@zhixing-ai/core/contracts';
+import { canonicalize, protocolDigest, validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord } from '@zhixing-ai/core/protocol';
 import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from './conversation-publish-obligations.js';
 import { foldConversationBaseBindings, conversationBaseKey, conversationBaseUnavailableKey, conversationBaseRepairRequired, registerConversationBaseRepair, openConversationBase, conversationViewForSource, type ConversationBaseBinding } from './conversation-base-registry.js';
 import { isConversationSourceEvidenceError, type AuthenticatedConversationFacts, type ConversationBaseSource } from './conversation-base-source.js';
@@ -204,7 +204,7 @@ export async function conversationRecoveryPage(log: AuthorityCommitLog, artifact
 export type ConversationEffectSource = DurableLogCheckpoint | { readonly imported: import('./conversation-base-source.js').ConversationBaseLocation };
 /** Domain obligation folding uses an explicit location. An imported location
  * is never accepted by the WAL reader and never becomes a local cursor. */
-export async function reduceConversationRecoveryFacts(entries: readonly import('@zhixing/core/contracts').LogicalRecord<unknown>[],
+export async function reduceConversationRecoveryFacts(entries: readonly import('@zhixing-ai/core/contracts').LogicalRecord<unknown>[],
   at: string, position: number, location: ConversationEffectSource, current: DurableProjectionReadContext, artifacts: ArtifactStore): Promise<readonly DurableProjectionMutation[]> {
       const changes = new Map<string, JsonValue | undefined>();
       const roots = new Map<string, ConversationRoot>();

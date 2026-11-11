@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { SecretStorePort } from "@zhixing/core/contracts";
-import type { ExtensionBinding, ExtensionInstance, ExtensionManifest } from "@zhixing/core/extensions/contracts";
-import type { ChannelConfig } from "@zhixing/core/channels";
-import { channelDeclaration, validateChannelCredentials } from "@zhixing/core/channels/extension";
-import { canonicalize } from "@zhixing/core/protocol";
-import { loadConfig, loadConfigurationSnapshot, type CredentialStoreCoordinator, type ZhixingConfig, type ChannelCredentialProjection } from "@zhixing/providers/configuration";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { ExtensionBinding, ExtensionInstance, ExtensionManifest } from "@zhixing-ai/core/extensions/contracts";
+import type { ChannelConfig } from "@zhixing-ai/core/channels";
+import { channelDeclaration, validateChannelCredentials } from "@zhixing-ai/core/channels/extension";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { loadConfig, loadConfigurationSnapshot, type CredentialStoreCoordinator, type ZhixingConfig, type ChannelCredentialProjection } from "@zhixing-ai/providers/configuration";
 
 export interface ChannelProjection { readonly id: string; readonly config: ChannelConfig }
 interface ConfigurationPublication {

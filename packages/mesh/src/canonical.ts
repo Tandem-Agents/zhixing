@@ -3,4 +3,4 @@ export {
   canonicalize,
   protocolBytes,
   protocolDigest,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";

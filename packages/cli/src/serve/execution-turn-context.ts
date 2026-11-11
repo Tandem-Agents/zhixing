@@ -1,7 +1,7 @@
-import type { ConversationDispatch, IngressContext } from "@zhixing/core/contracts";
-import type { TurnContext } from "@zhixing/core/types";
-import { readAdvancementExecutionContext } from "@zhixing/core/advancement/execution-context";
-import { readWorksceneTaskContext } from "@zhixing/core/workscene/application";
+import type { ConversationDispatch, IngressContext } from "@zhixing-ai/core/contracts";
+import type { TurnContext } from "@zhixing-ai/core/types";
+import { readAdvancementExecutionContext } from "@zhixing-ai/core/advancement/execution-context";
+import { readWorksceneTaskContext } from "@zhixing-ai/core/workscene/application";
 
 /**
  * 执行体的运行上下文（本地执行与远端指派工人同一规则）：turnId 与来源取指派里的耐久 ingress，

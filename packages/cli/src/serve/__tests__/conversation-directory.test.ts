@@ -5,17 +5,17 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
-import { ConversationRepository, conversationsDir, parseConversationId, type ConversationScope, worksceneConversationId } from "@zhixing/core/conversation";
-import { ShardedTranscriptStore } from "@zhixing/core/transcript";
-import { extractFirstText } from "@zhixing/core";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { ConversationRepository, conversationsDir, parseConversationId, type ConversationScope, worksceneConversationId } from "@zhixing-ai/core/conversation";
+import { ShardedTranscriptStore } from "@zhixing-ai/core/transcript";
+import { extractFirstText } from "@zhixing-ai/core";
 import {
   ConversationDirectoryApplicationService,
   createConversationIdentityLifecycleApplication,
   projectConversationDelete,
-} from "@zhixing/core/conversation/application";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/core/conversation/application";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import { createAnchorConversationClearCommitPort } from "../conversation-clear-binding.js";
 import {
   createAnchorConversationDeleteCommitPort,

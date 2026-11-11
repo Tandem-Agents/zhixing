@@ -10,24 +10,24 @@ import {
   type ChannelChallengeMessage,
   type HttpHandler,
   type OutboundContent,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ExtensionApplication, ExtensionRevisionConflict } from "@zhixing/core/extensions/application";
-import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
-import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
-import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
-import { channelDeclaration, validateChannelReplacement } from "@zhixing/core/channels/extension";
+import { ExtensionApplication, ExtensionRevisionConflict } from "@zhixing-ai/core/extensions/application";
+import { ExtensionArtifacts } from "@zhixing-ai/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing-ai/core/extensions/candidate";
+import { ExtensionOnboarding } from "@zhixing-ai/core/extensions/onboarding";
+import { channelDeclaration, validateChannelReplacement } from "@zhixing-ai/core/channels/extension";
 import { ChannelVerification } from "../runtime/extensions/channel-verification.js";
-import { EXTENSION_LOG_SOURCE, ManagedExtensions } from "@zhixing/core/extensions/runtime";
-import type { ExtensionBinding, ExtensionCandidate, ExtensionInstance, ExtensionManifest, ExtensionOperation } from "@zhixing/core/extensions/contracts";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import type { ProductApiContribution } from "@zhixing/core/product-api";
+import { EXTENSION_LOG_SOURCE, ManagedExtensions } from "@zhixing-ai/core/extensions/runtime";
+import type { ExtensionBinding, ExtensionCandidate, ExtensionInstance, ExtensionManifest, ExtensionOperation } from "@zhixing-ai/core/extensions/contracts";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { ProductApiContribution } from "@zhixing-ai/core/product-api";
 import { packagedExtensions } from "../runtime/extensions/catalog.js";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { channelDeliveryResult, createChannelTypeBinding } from "../runtime/extensions/channel-binding.js";
 import { CHANNEL_LOG_SOURCE } from "../runtime/extensions/channel-logging.js";
-import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
+import type { ChannelDeliveryEffectSource } from "@zhixing-ai/core/delivery/channel-effect";
 import {
   APPROVE_KEYWORDS,
   DENY_KEYWORDS,
@@ -37,18 +37,18 @@ import {
   type InboundChannelPort,
   type InboundConversationApplicationPort,
   type InboundDeliveryOutboxPort,
-} from "@zhixing/server";
-import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/server";
+import type { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
 
 // ─── Channel Setup ───
 
 export interface SetupChannelsOptions {
-  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
+  readonly bindLogs?: import("@zhixing-ai/core/logging").BindLogSource;
   readonly authorityLog: () => AuthorityCommitLog;
   readonly commitDecision?: <T>(operation: () => Promise<T>) => Promise<T>;
   readonly isCurrentOwner: () => boolean;
@@ -150,7 +150,7 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   const candidates = new ExtensionCandidates(join(options.artifactDirectory, "..", "candidates"));
   const seeds = packagedExtensions();
   let instances: readonly ExtensionInstance[] = [];
-  const capabilities = new Map<string, { challenges: boolean; bindingPolicy?: import("@zhixing/core/channels").ChannelBindingPolicy }>();
+  const capabilities = new Map<string, { challenges: boolean; bindingPolicy?: import("@zhixing-ai/core/channels").ChannelBindingPolicy }>();
   let consumers: ConfiguredChannelConsumers | undefined;
   let active = false;
   let closed = false;

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import type { DeviceIdentity } from "../../contracts/index.js";
 import { FileArtifactStore } from "../../authority/artifact-store.js";
 import { FileAuthorityCommitLog } from "../../authority/commit-log.js";

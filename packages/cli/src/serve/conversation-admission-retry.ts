@@ -1,8 +1,8 @@
 import {
   currentMaintenanceAbortSignal, currentMaintenanceUrgency, isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError,
-} from "@zhixing/core/resources";
-import { awaitAuthorityPreparation } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/resources";
+import { awaitAuthorityPreparation } from "@zhixing-ai/core/authority";
 
 /** One stable control identity, one finite recovery window, and no wait inside a serial owner. */
 export async function retryControlAdmission<T>(

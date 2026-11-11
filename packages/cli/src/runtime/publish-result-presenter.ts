@@ -2,11 +2,11 @@ import {
   canonicalize,
   isProtocolIdentifier,
   validatePublishResultNotice,
-} from "@zhixing/core/protocol";
-import type { PublishResultNotice, WorksceneAppliedResult } from "@zhixing/core/contracts";
-import { publishConflictProductCopy } from "@zhixing/core/conversation/application";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
-import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
+} from "@zhixing-ai/core/protocol";
+import type { PublishResultNotice, WorksceneAppliedResult } from "@zhixing-ai/core/contracts";
+import { publishConflictProductCopy } from "@zhixing-ai/core/conversation/application";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc/session-wire";
+import type { SessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
 import type { CliWriter } from "../screen/index.js";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";
 

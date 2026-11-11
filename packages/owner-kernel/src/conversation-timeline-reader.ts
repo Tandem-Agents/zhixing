@@ -1,5 +1,5 @@
-import { artifactJsonIndex, type ArtifactStore } from '@zhixing/core/authority';
-import type { ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, UserTurnInput } from '@zhixing/core/contracts';
+import { artifactJsonIndex, type ArtifactStore } from '@zhixing-ai/core/authority';
+import type { ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, UserTurnInput } from '@zhixing-ai/core/contracts';
 import { ConversationBodyReader } from './conversation-body-reader.js';
 import { ConversationReadIndex, type TimelinePointer, type ReadMeta } from './conversation-read-index.js';
 

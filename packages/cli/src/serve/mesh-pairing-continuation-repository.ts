@@ -8,9 +8,9 @@ import type {
   PairingJoin,
   PairingOffer,
   PakeRound,
-} from "@zhixing/core/contracts";
-import type { PairingAttemptAdmission } from "@zhixing/mesh/bootstrap-authority";
-import type { SealedPairingDiscoverySecret } from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/core/contracts";
+import type { PairingAttemptAdmission } from "@zhixing-ai/mesh/bootstrap-authority";
+import type { SealedPairingDiscoverySecret } from "@zhixing-ai/mesh/bootstrap";
 
 export interface DurablePairingInvitation {
   readonly v: 1;

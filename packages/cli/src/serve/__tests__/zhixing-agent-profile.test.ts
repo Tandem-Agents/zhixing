@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { mainProfile, subAgentProfile } from "@zhixing/orchestrator/profile";
-import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "@zhixing/orchestrator/runtime";
+import { mainProfile, subAgentProfile } from "@zhixing-ai/orchestrator/profile";
+import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "@zhixing-ai/orchestrator/runtime";
 import { zhixingProfile, ZHIXING_IDENTITY, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
-import { createWebFetchTool } from "@zhixing/tools-builtin";
+import { createWebFetchTool } from "@zhixing-ai/tools-builtin";
 
 describe("知行产品身份投影", () => {
   it("逐字承接封版身份稿，职责不冒充角色的自述", () => {

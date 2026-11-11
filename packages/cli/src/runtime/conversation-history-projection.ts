@@ -1,7 +1,7 @@
 /** 现有 Conversation 历史的只读投影；无 ANSI、屏幕或第二套存储。 */
-import { extractText, type Message } from "@zhixing/core/types";
-import type { RunRecord } from "@zhixing/core/transcript";
-import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
+import { extractText, type Message } from "@zhixing-ai/core/types";
+import type { RunRecord } from "@zhixing-ai/core/transcript";
+import type { ConversationMessageStatus } from "@zhixing-ai/core/conversation/application";
 import { formatToolResult } from "../tool-card-format.js";
 
 /** 默认渲染的最近 run 数 —— 尾巴要短：唤起上下文即可，不是回放全史 */

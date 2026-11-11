@@ -1,4 +1,4 @@
-import { compareCanonicalStrings } from "@zhixing/core/protocol";
+import { compareCanonicalStrings } from "@zhixing-ai/core/protocol";
 import type { ExecutorReadiness } from "../setup-delivery.js";
 import type { CredentialExposureSecretProjection } from "../runtime/runtime-secret-projections.js";
 

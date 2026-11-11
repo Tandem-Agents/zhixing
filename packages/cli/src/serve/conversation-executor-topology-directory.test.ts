@@ -1,4 +1,4 @@
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
+import type { HomeTrustRecord } from "@zhixing-ai/core/contracts";
 import { describe, expect, it } from "vitest";
 import { createConversationAssignmentArtifactAuthorityIndex } from "./conversation-executor-dispatch.js";
 import {

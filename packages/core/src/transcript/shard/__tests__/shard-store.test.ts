@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import type { Message } from "../../../types/messages.js";
 import { ShardedTranscriptStore } from "../store.js";
 import { countRuns, readRunsReverse } from "../reader.js";

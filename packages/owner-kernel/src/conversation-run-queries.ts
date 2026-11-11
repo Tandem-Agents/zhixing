@@ -1,6 +1,6 @@
-import type { DurableProjectionReadContext } from '@zhixing/core/authority';
-import type { ConversationRunState } from '@zhixing/core/contracts';
-import { canonicalize } from '@zhixing/core/protocol';
+import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import type { ConversationRunState } from '@zhixing-ai/core/contracts';
+import { canonicalize } from '@zhixing-ai/core/protocol';
 import type { AssignedProjection, ConversationRunJournalRecord, RunProjection, SubmissionGuardProjection } from './conversation-assignment.js';
 import { corruptRunJournal } from './conversation-run-contracts.js';
 import { conversationFieldReader, conversationStateBase, readConversationGuardRoot, scanConversationState } from './conversation-run-state-index.js';

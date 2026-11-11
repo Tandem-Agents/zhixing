@@ -1,6 +1,6 @@
-# @zhixing/test-utils
+# @zhixing-ai/test-utils
 
-知行 monorepo 内部测试基础设施 —— 不发布，只被各 package 的 `*.test.ts` 通过 `import { ... } from "@zhixing/test-utils"` 使用。
+知行 monorepo 内部测试基础设施 —— 不发布，只被各 package 的 `*.test.ts` 通过 `import { ... } from "@zhixing-ai/test-utils"` 使用。
 
 ## API
 
@@ -9,7 +9,7 @@
 Fail-safe 临时目录管理：创建一个 `os.tmpdir()/zhixing-test-{label}-XXXXXX` 目录，**测试结束后自动清理**，调用方拿到的只有目录路径。
 
 ```ts
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 
 it("某个用例", async () => {
   const dir = await createTempDir("skill");

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PERSPECTIVES_DELIBERATION_DEFINITION_ID, PERSPECTIVES_CONVERGENCE_NODE_ID } from '@zhixing/core/conversation/application';
+import { PERSPECTIVES_DELIBERATION_DEFINITION_ID, PERSPECTIVES_CONVERGENCE_NODE_ID } from '@zhixing-ai/core/conversation/application';
 import { TerminalProcessSession } from '../process-session.js';
 
 function setup() {

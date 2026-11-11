@@ -16,7 +16,7 @@
 
 import chalk from "chalk";
 import { createRequire } from "node:module";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   readLock,
   isProcessAlive,
@@ -27,13 +27,13 @@ import {
   type ManagedHostActionCode,
   type ManagedHostPublicState,
   type ManagedHostPublicStatus,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import {
   createManagedServiceAdapter,
   ManagedServiceError,
   type ManagedServiceAdapter,
 } from "./managed-service.js";
-import { HostLaunchPlanError, resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { HostLaunchPlanError, resolveHostLaunchPlan } from "@zhixing-ai/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import type { ManagedServiceCurrentState } from "./managed-service-reconciler.js";
 

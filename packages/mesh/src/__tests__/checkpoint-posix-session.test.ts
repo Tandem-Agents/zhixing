@@ -4,7 +4,7 @@ import { PassThrough } from 'node:stream';
 import { access, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { checkpointFilesystemCompletion, ownedPosixFilesystem, POSIX_FILESYSTEM_LIMITS } from '../checkpoint-posix-session.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 function fixture(autoExit = true) {
   const sent: { id: number; op: string }[] = [];

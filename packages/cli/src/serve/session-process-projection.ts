@@ -1,10 +1,10 @@
-import type { StreamFrame } from '@zhixing/core/contracts';
-import type { ArtifactStore } from '@zhixing/core/authority';
-import { readStreamDisplayPayload } from '@zhixing/core/protocol';
+import type { StreamFrame } from '@zhixing-ai/core/contracts';
+import type { ArtifactStore } from '@zhixing-ai/core/authority';
+import { readStreamDisplayPayload } from '@zhixing-ai/core/protocol';
 import {
   boundedProcessValue, projectProcessYield, projectProcessEvent, processText, SESSION_PROCESS_METHOD,
   type SessionProcessProjection, type SessionProcessSource,
-} from '@zhixing/rpc/session-wire';
+} from '@zhixing-ai/rpc/session-wire';
 
 export interface SessionProcessProjectionOptions {
   /** Same Server-owned transport as other conversation notifications. */

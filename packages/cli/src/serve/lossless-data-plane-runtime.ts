@@ -1,16 +1,16 @@
-import type { ChannelChallengeAction, ChannelChallengeMessage, DeliveryResult } from "@zhixing/core/channels";
+import type { ChannelChallengeAction, ChannelChallengeMessage, DeliveryResult } from "@zhixing-ai/core/channels";
 import type {
   ConversationChannelChallengeToken,
   DataPlaneTicket,
   ExecutionRef,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   type ProtocolSignatureVerifier,
   type StreamVerifierCheckpoint,
-} from "@zhixing/core/protocol";
-import { ChannelChallengeOutbox } from "@zhixing/owner-kernel/channel-challenge-outbox";
-import { type ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/core/protocol";
+import { ChannelChallengeOutbox } from "@zhixing-ai/owner-kernel/channel-challenge-outbox";
+import { type ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   AssignmentStreamPathManager,
   AssignmentStreamPathsUnavailableError,

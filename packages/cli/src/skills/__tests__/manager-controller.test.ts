@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import type {
   SkillCatalogClient,
   SkillCatalogEntry,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 import { SkillManagerController } from "../manager-controller.js";
 
 const rec = (

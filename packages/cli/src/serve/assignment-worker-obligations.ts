@@ -1,5 +1,5 @@
-import { AuthorityStorageError } from "@zhixing/core/authority";
-import type { AuthorityCallContext, SealedBundle } from "@zhixing/core/contracts";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
+import type { AuthorityCallContext, SealedBundle } from "@zhixing-ai/core/contracts";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 
 /**

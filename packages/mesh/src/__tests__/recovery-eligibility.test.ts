@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { CheckpointEnvelope, CheckpointStreamRecord, RecoveryActivationPlan } from "@zhixing/core/contracts";
+import type { CheckpointEnvelope, CheckpointStreamRecord, RecoveryActivationPlan } from "@zhixing-ai/core/contracts";
 import { describe, expect, it } from "vitest";
 import { checkpointEnvelopeArtifact, checkpointPurpose, createRecoveryCheckpointVerification } from "../checkpoint.js";
 import { currentRecoveryEligibility } from "../recovery-eligibility.js";

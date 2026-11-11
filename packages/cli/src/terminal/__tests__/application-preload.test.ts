@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 const transports = vi.hoisted(() => ({ created: [] as EventEmitter[] }));
-vi.mock('@zhixing/terminal-ui/parent-transport', () => ({
+vi.mock('@zhixing-ai/terminal-ui/parent-transport', () => ({
   consumeTerminalParentEndpoint: () => 3,
   TerminalParentTransport: class extends EventEmitter {
     connected = true;

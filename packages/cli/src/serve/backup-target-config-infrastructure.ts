@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { open, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensureDurableDirectory, syncDirectory } from "@zhixing/core/persistence";
-import { canonicalize } from "@zhixing/core/protocol";
+import { ensureDurableDirectory, syncDirectory } from "@zhixing-ai/core/persistence";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   projectBackupTargetConfigurationRepository,
   type BackupTargetBinding,

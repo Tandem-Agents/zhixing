@@ -129,7 +129,7 @@ async function handleStopAction(options: { maintenance?: boolean } = {}): Promis
       ? await (await import("./maintenance/stop.js")).runMaintenanceStop()
       : await (await import("./serve/stop.js")).runStopCommand();
     if (options.maintenance && result.status !== "error" && result.status !== "refused") {
-      console.log("维护已准备完成；下一步：安装当前版本或运行 npm install -g @zhixing/cli@latest，然后运行 zz");
+      console.log("维护已准备完成；下一步：安装当前版本或运行 npm install -g zhixing@latest，然后运行 zz");
     }
     const exitCode =
       result.status === "error" || result.status === "refused" ? 1 : 0;
@@ -201,7 +201,7 @@ program
   })
   .action(async () => {
     const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE }, { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure }] = await Promise.all([
-      import("@zhixing/core/paths"), import("@zhixing/providers/configuration"), import("./logging/runtime.js"),
+      import("@zhixing-ai/core/paths"), import("@zhixing-ai/providers/configuration"), import("./logging/runtime.js"),
     ]);
     const home = getZhixingHome();
     const logging = beginRuntimeLogging(home, "repl", message => createStdoutWriter({ stdout: process.stderr }).notify(message));
@@ -229,7 +229,7 @@ program.hook("preAction", async (_root, action) => {
   }
   if (top !== program && cliLoggingMode(commandPath) === "recorder") {
     const [{ beginRuntimeLogging }, { getZhixingHome }] = await Promise.all([
-      import("./logging/runtime.js"), import("@zhixing/core/paths"),
+      import("./logging/runtime.js"), import("@zhixing-ai/core/paths"),
     ]);
     commandLogging = beginRuntimeLogging(
       getZhixingHome(),
@@ -265,7 +265,7 @@ logsCmd.command("search").description("查找记录（结果与扫描量有界�
     if (options.ref && separator < 1) throw new InvalidArgumentError("关联身份格式为 kind:id");
     await runLoggingCommand({ action: "search", filter: {
       ...(options.source ? { source: options.source } : {}),
-      ...(options.level ? { level: options.level as import("@zhixing/core/logging").LogLevel } : {}),
+      ...(options.level ? { level: options.level as import("@zhixing-ai/core/logging").LogLevel } : {}),
       ...(options.from ? { from: Date.parse(options.from) } : {}),
       ...(options.until ? { until: Date.parse(options.until) } : {}),
       ...(options.ref ? { ref: { kind: options.ref.slice(0, separator), id: options.ref.slice(separator + 1) } } : {}),
@@ -326,7 +326,7 @@ appCmd
       const { prepareApplicationUninstall } = await import("./maintenance/prepare-uninstall.js");
       await prepareApplicationUninstall();
       console.log("已停止且不再自动启动，程序尚未卸载");
-      console.log("下一步：运行 npm uninstall -g @zhixing/cli");
+      console.log("下一步：运行 npm uninstall -g zhixing");
       return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
@@ -907,7 +907,7 @@ const serveCmd = program
     managedSecretBackend?: string;
   }) => {
     try {
-      const { observeLogPhase } = await import("@zhixing/core/logging");
+      const { observeLogPhase } = await import("@zhixing-ai/core/logging");
       const { applyManagedServiceLaunchContext } = await observeLogPhase(peekEntryLogging()?.records, 'load-managed-service', () => import("./serve/managed-service.js"));
       applyManagedServiceLaunchContext({
         ...(options.managed ? { managed: true } : {}),

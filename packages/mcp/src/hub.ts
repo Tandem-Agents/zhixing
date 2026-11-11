@@ -15,8 +15,8 @@
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { randomUUID } from "node:crypto";
-import type { LogRecordPort, LogResult } from "@zhixing/core/logging";
-import type { NetworkPolicy } from "@zhixing/network";
+import type { LogRecordPort, LogResult } from "@zhixing-ai/core/logging";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 import {
   connectAndListTools,
   type ConnectedClient,

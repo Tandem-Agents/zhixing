@@ -2,9 +2,9 @@ import type {
   DataPlaneTicket,
   ExecutionAbortRequest,
   ExecutionRef,
-} from "@zhixing/core/contracts";
-import type { FirstPartyInteractionDecision } from "@zhixing/core/protocol";
-import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing/mesh";
+} from "@zhixing-ai/core/contracts";
+import type { FirstPartyInteractionDecision } from "@zhixing-ai/core/protocol";
+import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing-ai/mesh";
 import type { AssignmentStreamClient } from "./assignment-stream-mesh.js";
 import type { AssignmentRunStream } from "./conversation-assignment-worker.js";
 import type { ConversationInteractionAnswerPort } from "./durable-conversation-interactions.js";
@@ -20,7 +20,7 @@ export interface AssignmentDataPlaneLocalTransportPort {
   acceptTicket(ticket: DataPlaneTicket): Promise<void>;
   authorizeOwnerPresentedSurface(
     ticketId: string,
-    use: import("@zhixing/core/protocol").DataPlaneTicketUse,
+    use: import("@zhixing-ai/core/protocol").DataPlaneTicketUse,
     assignmentId: string,
   ): Promise<void>;
   ownerStreamClient(ownerDeviceId: string): AssignmentStreamClient;

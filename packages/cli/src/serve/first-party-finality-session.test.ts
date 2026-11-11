@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
+import type { ExecutionStatusNotice } from "@zhixing-ai/core/contracts";
 import {
   ExecutionStatusHub,
   FirstPartyFinalitySession,

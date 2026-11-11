@@ -1,12 +1,12 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：lifecycle。
-import { userMessageFromTurnInput, type Message } from "@zhixing/core";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import { userMessageFromTurnInput, type Message } from "@zhixing-ai/core";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime, DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
@@ -53,7 +53,7 @@ describe("ConversationProtocolRuntime", () => {
       zhixingHome: home,
       secretStore: new MemorySecretStore(),
     });
-    const resources = await import("@zhixing/core/resources");
+    const resources = await import("@zhixing-ai/core/resources");
     const apply = vi.spyOn(authority.controlAdmission, "lookup").mockImplementationOnce(async () => {
       expect(resources.isHoldingMaintenanceExclusion()).toBe(false);
       throw new resources.StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"probe-unavailable",retryAfterMs:1});
@@ -105,7 +105,7 @@ describe("ConversationProtocolRuntime", () => {
       zhixingHome: home,
       secretStore: new MemorySecretStore(),
     });
-    const resources = await import("@zhixing/core/resources");
+    const resources = await import("@zhixing-ai/core/resources");
     const apply = vi.spyOn(authority.controlAdmission, "apply").mockImplementationOnce(async () => {
       expect(resources.isHoldingMaintenanceExclusion()).toBe(false);
       throw new resources.StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"probe-unavailable",retryAfterMs:1});

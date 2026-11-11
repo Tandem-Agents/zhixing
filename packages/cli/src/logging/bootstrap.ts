@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { LogRecorder, type BindLogSource, type LogSink, type LogStatus, type LogAppendReceipt, type LogCapture, type LogHealth } from "@zhixing/core/logging";
+import { LogRecorder, type BindLogSource, type LogSink, type LogStatus, type LogAppendReceipt, type LogCapture, type LogHealth } from "@zhixing-ai/core/logging";
 import { RUNTIME_LOG_SOURCE } from "./runtime-source.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 

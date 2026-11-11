@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import type { ArtifactStore, DeviceLifecycleJournal } from "@zhixing/core/authority";
-import type { DeliveryLifecycleSourcePermit } from "@zhixing/core/delivery";
+import type { ArtifactStore, DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
+import type { DeliveryLifecycleSourcePermit } from "@zhixing-ai/core/delivery";
 import {
   canonicalize,
   protocolDigest,
@@ -8,7 +8,7 @@ import {
   type DeviceLifecycleOperation,
   type StopHostGeneration,
   type StopStrategy,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 export const HOST_STOP_ACCEPTED_WORK_OWNERS = [
   "conversation",

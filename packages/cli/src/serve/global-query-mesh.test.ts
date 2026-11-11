@@ -2,19 +2,19 @@ import type {
   AuthorityCapability,
   GlobalReadResult,
   GlobalStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/core/protocol";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import type {
   MeshServiceDefinition,
   MeshServiceRegistry,
-} from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh/service-registry";
 import { describe, expect, it, vi } from "vitest";
 import { createAssignmentGlobalQueryPort } from "./assignment-global-state-ports.js";
 import {

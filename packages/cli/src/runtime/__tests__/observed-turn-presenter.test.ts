@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentEventMap, Listener, Unsubscribe } from "@zhixing/core";
+import type { AgentEventMap, Listener, Unsubscribe } from "@zhixing-ai/core";
 import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 
 class FakeBus {

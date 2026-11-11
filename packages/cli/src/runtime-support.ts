@@ -1,4 +1,4 @@
-import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion } from "@zhixing/mesh/checkpoint-bridge-artifact";
+import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion } from "@zhixing-ai/mesh/checkpoint-bridge-artifact";
 
 const MINIMUM_NODE_MAJOR = 24;
 

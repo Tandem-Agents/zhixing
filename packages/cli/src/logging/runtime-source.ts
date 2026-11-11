@@ -1,4 +1,4 @@
-import { LOG_PHASE_EVENTS, LOG_FAILURE_FIELDS, type LogSource, type LogRecordPort } from "@zhixing/core/logging";
+import { LOG_PHASE_EVENTS, LOG_FAILURE_FIELDS, type LogSource, type LogRecordPort } from "@zhixing-ai/core/logging";
 const shown = new WeakSet<LogRecordPort>();
 export function recordFirstSurfaceOutput(records: LogRecordPort | undefined): void {
   if (!records || shown.has(records)) return;

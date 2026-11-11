@@ -6,9 +6,9 @@
 
 import { describe, expect, it } from "vitest";
 import { trackMessages } from "../track-messages.js";
-import { validateTranscriptRunRecord } from "@zhixing/core/protocol";
-import type { AgentYield } from "@zhixing/core/loop";
-import type { Message, ToolResultBlock } from "@zhixing/core/types";
+import { validateTranscriptRunRecord } from "@zhixing-ai/core/protocol";
+import type { AgentYield } from "@zhixing-ai/core/loop";
+import type { Message, ToolResultBlock } from "@zhixing-ai/core/types";
 
 function fresh(): { newMessages: Message[]; pending: ToolResultBlock[] } {
   return { newMessages: [], pending: [] };

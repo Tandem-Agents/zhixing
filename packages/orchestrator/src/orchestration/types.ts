@@ -1,12 +1,12 @@
-import type { EventBus } from "@zhixing/core/events";
-import type { AgentEventMap } from "@zhixing/core/types";
+import type { EventBus } from "@zhixing-ai/core/events";
+import type { AgentEventMap } from "@zhixing-ai/core/types";
 import type {
   NormalizedOrchestrationNodeV1,
   OrchestrationContextSnapshotV1,
   OrchestrationExecutableV1,
   OrchestrationNodeOutputV1,
   OrchestrationNodeRunResultV1,
-} from "@zhixing/core/orchestration";
+} from "@zhixing-ai/core/orchestration";
 
 export interface OrchestrationNodeExecutionContextV1 {
   readonly runId: string;

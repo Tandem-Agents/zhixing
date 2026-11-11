@@ -1,13 +1,13 @@
-import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   homeTrustEventDigest,
   homeTrustRecordDigest,
   replayTrustChain,
   verifyHomeTrustRecord,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 export const DISASTER_RECOVERY_TRUST_EVIDENCE_SERVICE =

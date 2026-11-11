@@ -1,4 +1,4 @@
-import { isUnusableSummaryError } from '@zhixing/core/context';
+import { isUnusableSummaryError } from '@zhixing-ai/core/context';
 import { modelFailureText } from './model-failure.js';
 
 /** 摘要失败给用户的原因：模型返回的摘要不可用单独说明；其余按模型失败的现行规则（已知类映射、未知类保留原文）。 */

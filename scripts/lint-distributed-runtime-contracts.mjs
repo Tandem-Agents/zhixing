@@ -172,7 +172,7 @@ for (const file of await walk(packagesRoot)) {
   inspect(tree);
   if (constructsProtocolByteDigest) {
     violations.push(
-      `${relative(packagesRoot, file)}: protocol B(bytes) digests must use @zhixing/core/protocol byteDigest`,
+      `${relative(packagesRoot, file)}: protocol B(bytes) digests must use @zhixing-ai/core/protocol byteDigest`,
     );
   }
 }

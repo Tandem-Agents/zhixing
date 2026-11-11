@@ -1,6 +1,6 @@
-import { createLogQueryTools } from "@zhixing/core/logging/application";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createLogQueryTools } from "@zhixing-ai/core/logging/application";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 /** Home-owned runtime assembly grants the current runtime its owner access, never tool input. */
 export function createRuntimeLogTools(

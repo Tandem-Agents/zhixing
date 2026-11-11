@@ -1,5 +1,5 @@
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
 import type { GlobalControlCallContext } from "../contracts/index.js";

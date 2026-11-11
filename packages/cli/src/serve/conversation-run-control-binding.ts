@@ -1,11 +1,11 @@
-import { generateTurnId } from "@zhixing/core";
+import { generateTurnId } from "@zhixing-ai/core";
 import {
   ConversationCancellationResponseEffect,
   type ConversationRunControlPort,
   type ConversationUncertainResolutionResult,
-} from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+} from "@zhixing-ai/core/conversation/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { parseConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 
 type ConversationCancellationInput = Parameters<
   ConversationRunControlPort["cancel"]

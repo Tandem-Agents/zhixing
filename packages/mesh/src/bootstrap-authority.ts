@@ -10,7 +10,7 @@ import type {
   PakeRound,
   RecoveryActivationPlan,
   RecoveryCheckpointVerification,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   checkpointEnvelopeArtifact,
   checkpointPurpose,

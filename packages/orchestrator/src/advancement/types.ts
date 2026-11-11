@@ -2,19 +2,19 @@ import type {
   AdvancementReviewRunInput,
   ConfirmedRubricSnapshot,
   EvidenceCapabilitySet,
-} from "@zhixing/core/advancement";
-import type { LLMProvider, ThinkingConfig } from "@zhixing/core/types";
-import type { ReviewEvidence } from "@zhixing/core/advancement";
-import type { SegmentThresholds, ITokenEstimator } from "@zhixing/core/context";
+} from "@zhixing-ai/core/advancement";
+import type { LLMProvider, ThinkingConfig } from "@zhixing-ai/core/types";
+import type { ReviewEvidence } from "@zhixing-ai/core/advancement";
+import type { SegmentThresholds, ITokenEstimator } from "@zhixing-ai/core/context";
 import type {
   AdvancementReviewerPort,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 export type {
   AdvancementReviewRunInput,
   AdvancementReviewRunOutcome,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 
 /** 推进侧裁判运行体——AdvancementReviewerPort 的生产实现形状。 */
 export type AdvancementRuntime = AdvancementReviewerPort;

@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createReadOnlyConversationStorage } from "../conversation-storage-infrastructure.js";
-import { extractFirstText } from "@zhixing/core";
-import { toSafePathSegment } from "@zhixing/core/paths";
-import { worksceneConversationId } from "@zhixing/core/conversation";
-import { createTempDir } from "@zhixing/test-utils";
+import { extractFirstText } from "@zhixing-ai/core";
+import { toSafePathSegment } from "@zhixing-ai/core/paths";
+import { worksceneConversationId } from "@zhixing-ai/core/conversation";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
-import { TranscriptByteReader } from "@zhixing/core/transcript";
+import { TranscriptByteReader } from "@zhixing-ai/core/transcript";
 
 let previousHome: string | undefined;
 

@@ -1,7 +1,7 @@
-import { localConversationId } from "@zhixing/core/conversation";
-import { FileAuthorityCommitLog } from '@zhixing/core/authority';
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel/deferred-global-intents";
+import { localConversationId } from "@zhixing-ai/core/conversation";
+import { FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { DeferredGlobalIntentRepository } from "@zhixing-ai/owner-kernel/deferred-global-intents";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js";
 import {

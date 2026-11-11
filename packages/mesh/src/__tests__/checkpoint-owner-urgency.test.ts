@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentMaintenanceUrgency } from "@zhixing/core/resources";
+import { currentMaintenanceUrgency } from "@zhixing-ai/core/resources";
 import { AuthorityCheckpointOwner } from "../checkpoint-owner.js";
 import type { AuthorityCheckpointService } from "../checkpoint-service.js";
 

@@ -1,6 +1,6 @@
-import { captureFileIo, defaultFileIoCategory } from "@zhixing/test-utils";
-import { validateLedgerEvidencePage } from "@zhixing/core/protocol";
-import type { LedgerEvidencePage } from "@zhixing/core/contracts";
+import { captureFileIo, defaultFileIoCategory } from "@zhixing-ai/test-utils";
+import { validateLedgerEvidencePage } from "@zhixing-ai/core/protocol";
+import type { LedgerEvidencePage } from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ASSIGNMENT_ID, CONVERSATION_ID, NOW, allowOnceDecisionDigest, createFormalReceiptHarness, mirrorReceipt, ownerContext } from "./assignment-ledger-fixture.js";
 

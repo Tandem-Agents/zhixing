@@ -1,4 +1,4 @@
-import { classifyProviderError, parseModelBudgetStop } from '@zhixing/core/resilience';
+import { classifyProviderError, parseModelBudgetStop } from '@zhixing-ai/core/resilience';
 
 const BUDGET_EXHAUSTED = '本次运行的模型用量已达上限，已停止：发送新消息会按新的额度继续；对话很长时可先用 /compact 整理上下文。';
 

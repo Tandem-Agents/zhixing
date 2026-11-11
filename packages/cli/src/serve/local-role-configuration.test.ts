@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
-import { loadConfig } from "@zhixing/providers";
-import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { loadConfig } from "@zhixing-ai/providers";
+import { resolveHostLaunchPlan } from "@zhixing-ai/mesh/bootstrap";
 import {
   continuedLocalInitialization,
   writeInitializedLocalRoles,

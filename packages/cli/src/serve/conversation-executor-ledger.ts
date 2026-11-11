@@ -2,11 +2,11 @@ import type {
   AuthorityError,
   ExecutionManifest,
   TrustRuleSnapshot,
-} from "@zhixing/core/contracts";
-import type { ExecutorCapabilitySnapshot } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import type { ExecutorCapabilitySnapshot } from "@zhixing-ai/core/protocol";
 import type {
   ConversationAssignmentLedger,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import type { ConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { createOwnerControlAuthorizer } from "./owner-control-authorizer.js";
 

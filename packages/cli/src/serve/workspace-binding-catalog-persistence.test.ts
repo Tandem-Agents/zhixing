@@ -1,4 +1,4 @@
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";

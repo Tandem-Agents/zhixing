@@ -3,9 +3,9 @@ import { existsSync } from 'node:fs';
 import { open, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import type { PlatformSecretStoreOptions } from '@zhixing/secrets';
+import type { PlatformSecretStoreOptions } from '@zhixing-ai/secrets';
 import { resolveProgramEntry } from '../cli-entry.js';
-import { observeLogPhase, type LogRecordPort } from '@zhixing/core/logging';
+import { observeLogPhase, type LogRecordPort } from '@zhixing-ai/core/logging';
 
 /** Composition-root adapter shared by Host and terminal application. Core and
  * Secrets only receive their existing identity/protection ports. */

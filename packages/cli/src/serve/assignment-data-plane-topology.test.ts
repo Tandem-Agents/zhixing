@@ -1,4 +1,4 @@
-import type { DataPlaneTicket } from "@zhixing/core/contracts";
+import type { DataPlaneTicket } from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   AssignmentDataPlaneTopologyAdapter,

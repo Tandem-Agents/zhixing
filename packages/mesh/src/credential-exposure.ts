@@ -1,7 +1,7 @@
 import type {
   CredentialBindingDescriptor,
   CredentialExposureRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { protocolDigest } from "./canonical.js";
 export {
   CREDENTIAL_EXPOSURE_PROJECTION_ID, credentialExposureIndex,

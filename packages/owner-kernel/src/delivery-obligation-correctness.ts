@@ -5,8 +5,8 @@ import {
   type DeliveryAuthority,
   type DeliveryClaimablePageRequest,
   type DeliveryStatusProjectionPort,
-} from "@zhixing/core/delivery";
-import { AuthorityStorageError } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/delivery";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
 import {
   DeliveryLifecycleApplicationService,
   DeliveryObligationApplicationService,
@@ -20,7 +20,7 @@ import {
   type DeliveryLifecycleMutation,
   type DeliveryLifecycleProjectionPort,
   type DeliveryObligationCorrectnessPort,
-} from "@zhixing/core/delivery/application";
+} from "@zhixing-ai/core/delivery/application";
 import { OwnerDeliveryParticipant } from "./delivery-participant.js";
 
 /** Delivery projection/fence adapter; it contains no producer mapping or enqueue rule. */

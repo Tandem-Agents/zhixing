@@ -40,7 +40,7 @@ import {
   type ConversationSecurityProjectionPort,
   type ConversationResolutionFence,
 } from "./application.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { ConversationRepository } from "./repository.js";
 
 class TestCancellationResponseEffect extends ConversationCancellationResponseEffect {

@@ -1,5 +1,5 @@
 import { recordingFixture } from "../../../../core/src/logging/__tests__/recording.js";
-import type { BindLogSource } from "@zhixing/core/logging";
+import type { BindLogSource } from "@zhixing-ai/core/logging";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,21 +8,21 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import ts from "typescript";
-import { FileAuthorityCommitLog, FileArtifactStore, DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "@zhixing/core/authority";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { FileAuthorityCommitLog, FileArtifactStore, DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "@zhixing-ai/core/authority";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { HostStopAcceptedWorkPendingError, HostStopCoordinator, freezeHostStopAcceptedWork, settleHostStopAcceptedWork, type HostStopAcceptedWorkPorts } from "../host-stop-lifecycle.js";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
-import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionApplyConfiguration, extensionList, extensionRefresh, extensionSetEnabled } from "@zhixing/core/extensions/application";
-import { validateExtensionManifest } from "@zhixing/core/extensions/contracts";
-import { EncryptedVaultSecretStore } from "@zhixing/secrets";
-import { editConfiguration, loadConfigurationSnapshot, writeConfig, writeCredentials } from "@zhixing/providers";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
+import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionApplyConfiguration, extensionList, extensionRefresh, extensionSetEnabled } from "@zhixing-ai/core/extensions/application";
+import { validateExtensionManifest } from "@zhixing-ai/core/extensions/contracts";
+import { EncryptedVaultSecretStore } from "@zhixing-ai/secrets";
+import { editConfiguration, loadConfigurationSnapshot, writeConfig, writeCredentials } from "@zhixing-ai/providers";
 import { setupChannels, type SetupChannelsResult, type ConfiguredChannelConsumers } from "../channels.js";
 import { ChannelConfiguration } from "../../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../../runtime/extensions/channel-readiness.js";
 import { messagingSection } from "../../config-editor/sections/messaging.js";
 import { disableMessaging, enableMessaging } from "../../config-editor/state.js";
 import { editRuntimeConfiguration, type ConfigurationApplicationDeps } from "../../runtime/configuration-application.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 async function applyConfigurationEdit(deps: ConfigurationApplicationDeps): Promise<void> {
   await editRuntimeConfiguration(deps, {
     kind: "config",
@@ -37,7 +37,7 @@ async function applyConfigurationEdit(deps: ConfigurationApplicationDeps): Promi
 const catalog = vi.hoisted(() => ({ seeds: [] as unknown[] }));
 const editor = vi.hoisted(() => ({ run: vi.fn(), store: undefined as unknown }));
 vi.mock("../../runtime/extensions/catalog.js", () => ({ packagedExtensions: () => catalog.seeds }));
-vi.mock("@zhixing/secrets", async (original) => ({ ...await original<typeof import("@zhixing/secrets")>(), createPlatformSecretStore: () => editor.store }));
+vi.mock("@zhixing-ai/secrets", async (original) => ({ ...await original<typeof import("@zhixing-ai/secrets")>(), createPlatformSecretStore: () => editor.store }));
 const systems: SetupChannelsResult[] = [];
 const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const outbound: ConfiguredChannelConsumers = { inbound: { kind: "absent", reason: "outbound-only" }, onChallengeAction: async () => {} };
@@ -66,7 +66,7 @@ async function fixture(ids = ["one"], options: Record<string, unknown> = {}, bin
       { id: "account", label: "账号", hint: "", example: "", sensitive: false },
       { id: "token", label: "密钥", hint: "", example: "", sensitive: true },
     ], capabilities: { chatTypes: ["dm"], media: false, edit: false, streaming: false } } });
-  const { ExtensionArtifacts } = await import("@zhixing/core/extensions/artifacts");
+  const { ExtensionArtifacts } = await import("@zhixing-ai/core/extensions/artifacts");
   const seedDirectory = join(root, "seed");
   const seedEntry = await new ExtensionArtifacts(seedDirectory).import(manifest, bytes);
   catalog.seeds = [{ manifest, directory: join(seedEntry, "..") }];

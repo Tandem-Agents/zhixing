@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   resolveExecutionTrustScope,
   TrustAdministrationExecutionApplicationService,

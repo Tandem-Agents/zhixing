@@ -11,9 +11,9 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { EventMeta } from "@zhixing/core";
-import type { RunBusContext } from "@zhixing/orchestrator/runtime";
-import type { SessionEventEnvelope } from "@zhixing/rpc";
+import type { EventMeta } from "@zhixing-ai/core";
+import type { RunBusContext } from "@zhixing-ai/orchestrator/runtime";
+import type { SessionEventEnvelope } from "@zhixing-ai/rpc";
 import { RpcEventBus } from "../rpc-event-bus.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 

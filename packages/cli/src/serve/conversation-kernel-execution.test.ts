@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
-import type { RunResult } from '@zhixing/core/loop';
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import type { RunResult } from '@zhixing-ai/core/loop';
 import { ConversationKernelExecution } from "./conversation-kernel-execution.js";
 
 describe("assignment kernel quiescence", () => {

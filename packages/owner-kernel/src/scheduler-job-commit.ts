@@ -5,14 +5,14 @@ import type {
   DurableProjectionMutation,
   DurableProjectionReadContext,
   RebuildableDurableProjectionIndex,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AuthorityError,
   GlobalStagedMutation,
   JsonValue,
   MutationBatch,
   PublishRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   CommittedMutationMaterializationError,
@@ -20,7 +20,7 @@ import {
   validateJobMutationBatch,
   validatePublishDecisionForBatch,
   validatePublishDecisionRecord,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type { JobCommitParticipant } from "./job-assignment.js";
 import type { GlobalMutationCommitCoordinator } from "./global-mutation-commit-coordinator.js";
 
@@ -392,7 +392,7 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
 }
 
 async function reduceJobPublishPending(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<JsonValue>,
+  envelope: import("@zhixing-ai/core/contracts").CommitEnvelope<JsonValue>,
   current: DurableProjectionReadContext,
 ): Promise<readonly DurableProjectionMutation[]> {
   const mutations: DurableProjectionMutation[] = [];

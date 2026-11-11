@@ -1,8 +1,8 @@
 import path from "node:path";
 
-import { buildGuidanceMessagePair, loadLayeredGuidance } from "@zhixing/core/context";
-import { type Message } from "@zhixing/core";
-import type { LifecycleWindowOpenContext } from "@zhixing/orchestrator/runtime";
+import { buildGuidanceMessagePair, loadLayeredGuidance } from "@zhixing-ai/core/context";
+import { type Message } from "@zhixing-ai/core";
+import type { LifecycleWindowOpenContext } from "@zhixing-ai/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import { createZhixingGuidanceLifecycle } from "../zhixing-guidance-lifecycle.js";

@@ -4,7 +4,7 @@ import {
   type BoundZhixingServer,
   type RunningServer,
   type ServerStateFile,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EXECUTOR_SERVER_LIFECYCLE_DESCRIPTORS,

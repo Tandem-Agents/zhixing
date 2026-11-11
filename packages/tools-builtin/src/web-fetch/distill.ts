@@ -7,7 +7,7 @@
  *   (如未来 WebSearch 的搜索结果摘要)
  */
 
-import type { StreamEvent } from "@zhixing/core";
+import type { StreamEvent } from "@zhixing-ai/core";
 
 export const DISTILL_SYSTEM_PROMPT = `You extract specific information from web content based on a user's prompt.
 

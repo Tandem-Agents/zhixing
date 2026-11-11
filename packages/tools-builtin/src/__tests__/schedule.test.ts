@@ -12,14 +12,14 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { createEventBus, type ToolExecutionContext } from "@zhixing/core";
-import { InMemoryTaskStore, Scheduler, LocalSchedulerFacade, type SchedulerEventMap, type SchedulerFacade } from "@zhixing/core/scheduler";
+import { createEventBus, type ToolExecutionContext } from "@zhixing-ai/core";
+import { InMemoryTaskStore, Scheduler, LocalSchedulerFacade, type SchedulerEventMap, type SchedulerFacade } from "@zhixing-ai/core/scheduler";
 import {
   ScheduleManagementApplicationService,
   ScheduleRuntimeApplicationService,
   type ScheduleManagementRepository,
-} from "@zhixing/core/scheduler/application";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/scheduler/application";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { createScheduleTool } from "../schedule.js";
 
 // ─── 测试工具 ───

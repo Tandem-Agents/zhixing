@@ -3,28 +3,28 @@ import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixtur
 import { createServer } from "node:net";
 import path from "node:path";
 import fs, { writeFile } from "node:fs/promises";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   StorageMaintenanceAdmissionError,
   type DeviceCapacityAdmission,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
-import { createRootActivationCheckpoint } from "@zhixing/mesh/checkpoint";
-import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
-import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/core/resources";
+import { createRootActivationCheckpoint } from "@zhixing-ai/mesh/checkpoint";
+import { enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";
+import { RecoveryRoot, keyIdForPublicKey } from "@zhixing-ai/mesh/recovery-root";
 import {
   PairedRecoveryCheckpointTarget,
   registerPairedCheckpointMeshService,
-} from "@zhixing/mesh/paired-checkpoint-target";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { createRecoveryRootEvent, createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/paired-checkpoint-target";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import { createRecoveryRootEvent, createSignedTrustEvent } from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { loadConfig } from "@zhixing/providers";
-import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
-import { encodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
+import { loadConfig } from "@zhixing-ai/providers";
+import { resolveHostLaunchPlan } from "@zhixing-ai/mesh/bootstrap";
+import { encodeRecoveryPackage } from "@zhixing-ai/mesh/recovery-package";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
@@ -210,7 +210,7 @@ describe("paired recovery backup setup", () => {
       expect(targetTrust?.recoveryRootPublicKey).toBe(sourceTrust?.recoveryRootPublicKey);
       expect(targetTrust?.recoveryBackupPublicKey).toBe(sourceTrust?.recoveryBackupPublicKey);
 
-      const records = await fixture.sourceBootstrap.bootstrapStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
+      const records = await fixture.sourceBootstrap.bootstrapStore.authorityLog().readStream<import("@zhixing-ai/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
       const verified = records.find((record) => record.t === "checkpoint-verified");
       expect(verified).toBeDefined();
       // 首次建根的激活检查点是完整范围、已复制并真解封验证：没有任何每日备份时材料即已完整验证。
@@ -308,7 +308,7 @@ describe("paired recovery backup setup", () => {
       } finally {
         await active.stop();
       }
-      expect((await fixture.sourceBootstrap.bootstrapStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body))).some((record) =>
+      expect((await fixture.sourceBootstrap.bootstrapStore.authorityLog().readStream<import("@zhixing-ai/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body))).some((record) =>
         record.t === "checkpoint-created" &&
         record.purpose.kind === "periodic" &&
         record.targetId === `backup-device:${fixture.targetDeviceId}`)).toBe(true);

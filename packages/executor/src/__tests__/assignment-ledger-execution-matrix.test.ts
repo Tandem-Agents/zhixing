@@ -1,16 +1,16 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：execution-matrix。
 import path from "node:path";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { CONVERSATION_RUN_INTERNAL_RECORD_TYPES, CONVERSATION_RUN_RECORD_SHAPES, ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
-import { createTempDir } from "@zhixing/test-utils";
-import { ConversationTransferSource, ConversationTransferTarget, readConversationTransferState } from "@zhixing/owner-kernel/conversation-transfer";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { CONVERSATION_RUN_INTERNAL_RECORD_TYPES, CONVERSATION_RUN_RECORD_SHAPES, ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { channelSurfacePrincipal } from "@zhixing-ai/owner-kernel/control-admission";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { ConversationTransferSource, ConversationTransferTarget, readConversationTransferState } from "@zhixing-ai/owner-kernel/conversation-transfer";
 import { ConversationBaseSource } from "../../../owner-kernel/src/conversation-base-source.js";
 import { bindConversationAnchorTenure } from "../../../cli/src/serve/conversation-anchor-tenure.js";
 import { installVerifiedAnchorTenure } from "../../../owner-kernel/src/__tests__/imported-base-fixture.js";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { InProcessAssignmentSubmission } from "../assignment-ledger.js";
-import { selectConversationAuthorityRecords } from "@zhixing/owner-kernel/conversation-transfer";
+import { selectConversationAuthorityRecords } from "@zhixing-ai/owner-kernel/conversation-transfer";
 import { NOW, EXECUTOR_ID, CONVERSATION_ID, ASSIGNMENT_ID, DURABLE_IO_TEST_TIMEOUT_MS, memoryStagingArea, submission, createHarness, ingress, ownerContext, submissionContext, sealDefaultBundle, ConversationBehaviorRecordType, ConversationRecordBehaviorSpec, CONVERSATION_BEHAVIOR_SCENARIOS, CONVERSATION_RECOVERY_PROBES, ConversationRecoveryProbeId, CONVERSATION_RECORD_BEHAVIOR, expectConversationRejected, expectConversationGuardReplayAccepted, replayFixtureLog } from "./assignment-ledger-fixture.js";
 
 // 多本日志的耐久读写：与同文件的迁移用例一样给耐久读写时限，不受全集并行负载下 5 秒默认时限的影响

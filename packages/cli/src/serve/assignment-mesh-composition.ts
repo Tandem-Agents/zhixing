@@ -1,4 +1,4 @@
-import type { ArtifactStore } from "@zhixing/core/authority";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -8,17 +8,17 @@ import type {
   RunExecutorPort,
   RunSubmissionPort,
   GlobalStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { OwnerControlPreflightPort } from "@zhixing/executor";
-import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/core/protocol";
+import type { OwnerControlPreflightPort } from "@zhixing-ai/executor";
+import type { MeshConnectionRegistry } from "@zhixing-ai/mesh/bootstrap";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import type {
   AssignmentSubmissionPreflightPort,
-} from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   MeshResourceUsageIntake,
   MeshRunExecutorPort,
@@ -189,7 +189,7 @@ export class AssignmentMeshComposition {
     peerDeviceId: string,
     capability: AuthorityCapability,
     anchorEpoch: number,
-  ): import("@zhixing/core/contracts").AssignmentGlobalQueryPort {
+  ): import("@zhixing-ai/core/contracts").AssignmentGlobalQueryPort {
     return new MeshAssignmentGlobalQueryPort(
       this.options.connections.client(peerDeviceId),
       capability,

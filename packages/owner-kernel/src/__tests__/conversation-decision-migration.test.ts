@@ -1,10 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { AUTHORITY_RECOVERY_BUDGET, AuthorityCacheIntegrity, AuthorityPreparationRequired, FileArtifactStore, FileAuthorityCommitLog, durableProjectionVersionDirectoryName,
-  type DurableLogCheckpoint, type DurableProjectionMutation } from '@zhixing/core/authority';
-import type { CommitEnvelope, JsonValue, Signature } from '@zhixing/core/contracts';
-import { canonicalize, protocolDigest } from '@zhixing/core/protocol';
-import { createTempDir } from '@zhixing/test-utils';
+  type DurableLogCheckpoint, type DurableProjectionMutation } from '@zhixing-ai/core/authority';
+import type { CommitEnvelope, JsonValue, Signature } from '@zhixing-ai/core/contracts';
+import { canonicalize, protocolDigest } from '@zhixing-ai/core/protocol';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import { AnchorResourceGovernor } from '../resource-governor.js';
 import { ConversationRunJournal, emptySubmissionGuardProjection, reduceConversationRunState, reduceConversationSubmissionGuard,

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ConfirmationRequest } from "@zhixing/core/confirmation";
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
-import { RpcClientClosedError, ServerNotRunningError } from "@zhixing/server";
+import type { ConfirmationRequest } from "@zhixing-ai/core/confirmation";
+import type { HomeTrustRecord } from "@zhixing-ai/core/contracts";
+import { RpcClientClosedError, ServerNotRunningError } from "@zhixing-ai/server";
 import { CoreHostConnection } from "../core-host-connection.js";
 import { RpcConfirmationBroker } from "../rpc-confirmation-broker.js";
 import { CurrentAnchorSurfaceRpcClient } from "../surface-core-host-link.js";

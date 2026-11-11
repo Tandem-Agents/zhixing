@@ -7,8 +7,8 @@ import {
   type DeviceCapacityBudget,
   type DeviceCapacityClass,
   type DeviceCapacityArbiterPort,
-} from "@zhixing/core/resources";
-import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/resources";
+import type { AgentRuntimeCapacityBinding } from "@zhixing-ai/orchestrator/runtime";
 import { mkdirSync } from "node:fs";
 import { diskPressure, type DiskSamplerStarter } from "./disk-pressure-sampler.js";
 

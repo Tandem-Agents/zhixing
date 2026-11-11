@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ConfirmationOption, SuggestedPattern } from "@zhixing/core/confirmation";
+import type { ConfirmationOption, SuggestedPattern } from "@zhixing-ai/core/confirmation";
 import { translate } from "../confirmation-decision.js";
 const PATTERN_NPM_INSTALL: SuggestedPattern = {
   pattern: { tool: "bash", argument: "npm install *" }, label: "npm install *",

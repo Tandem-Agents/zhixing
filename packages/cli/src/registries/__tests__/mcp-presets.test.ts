@@ -8,8 +8,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { isValidServerId } from "@zhixing/mcp";
-import { MCP_PRESETS, applyMcpPreset, findMcpPreset } from "@zhixing/core/mcp-management";
+import { isValidServerId } from "@zhixing-ai/mcp";
+import { MCP_PRESETS, applyMcpPreset, findMcpPreset } from "@zhixing-ai/core/mcp-management";
 
 describe("MCP 预设库", () => {
   it("每个预设 id 都是合法 server id（无 __ 等）", () => {

@@ -1,4 +1,4 @@
-import { withLogRefs, type LogRecordPort } from "@zhixing/core/logging";
+import { withLogRefs, type LogRecordPort } from "@zhixing-ai/core/logging";
 import type { Dir } from "node:fs";
 import { lstat, opendir, rm, rmdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -7,13 +7,13 @@ import {
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
   type ArtifactStore,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   runStorageMaintenanceStep,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/resources";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { DisasterRecoveryCandidateJournal } from "./disaster-recovery-candidate.js";
 import {
   DisasterRecoveryTransferJournal,

@@ -16,7 +16,7 @@ import type {
   SkillCatalogClient,
   SkillCatalogEntry,
   SkillMode,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 
 /** 渲染所需的视图快照 —— 外壳据此画列表 + 高亮。 */
 export interface SkillManagerView {

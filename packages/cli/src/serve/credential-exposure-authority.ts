@@ -3,9 +3,9 @@ import type {
   CredentialExposureRecord,
   SecretRef,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { type FileAuthorityCommitLog, type DurableProjectionReadContext, type ProjectionTransactionDecision } from "@zhixing/core/authority";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { type FileAuthorityCommitLog, type DurableProjectionReadContext, type ProjectionTransactionDecision } from "@zhixing-ai/core/authority";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   assertIndexedCredentialRoute, credentialExposureIndex, CREDENTIAL_EXPOSURE_PROJECTION_ID,
   exposureProjectionKey, readExposureBindingRevision, readExposureProjection, readExposureRecords,
@@ -13,7 +13,7 @@ import {
   createCredentialExposureRecordFromDescriptor,
   projectCredentialExposures,
   type CredentialExposureProjection,
-} from "@zhixing/mesh/credential-exposure";
+} from "@zhixing-ai/mesh/credential-exposure";
 
 export const CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR = Object.freeze({
   owner: "current-device",

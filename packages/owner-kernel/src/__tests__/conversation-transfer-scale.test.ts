@@ -4,10 +4,10 @@
  * 原先的全量列表随迁移历史线性增长，作为对照。
  */
 import path from "node:path";
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { Signature } from "@zhixing/core/contracts";
-import { protocolDigest, type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing/core/protocol";
-import { captureFileIo, createTempDir, type FileIoSnapshot } from "@zhixing/test-utils";
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { Signature } from "@zhixing-ai/core/contracts";
+import { protocolDigest, type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing-ai/core/protocol";
+import { captureFileIo, createTempDir, type FileIoSnapshot } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_TRANSFER_PROJECTION_ID,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { writeFile, access, readFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { StopRefusedError, runStopCommand, type StopDeps } from "../stop.js";
 
 const LOCK = {

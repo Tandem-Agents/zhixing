@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { LogPage, LogRecord } from "@zhixing/core/logging";
+import type { LogPage, LogRecord } from "@zhixing-ai/core/logging";
 import { runLogsCommand } from "../logs.js";
 
 const record = (seq: number): LogRecord => ({ storeId: "store-a", id: `record-${seq}`, seq, message: `记录 ${seq}` }) as LogRecord;

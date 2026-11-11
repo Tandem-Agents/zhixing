@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { readPlatformProcessBirth, type PlatformProcessBirth } from '../platform/secret-platform.js';
-import type { StopEndpointLock } from "@zhixing/core/protocol";
-import { isProcessAlive, resolveProcessStartTime } from "@zhixing/server/client";
-import type { BoundZhixingServer } from "@zhixing/server";
+import type { StopEndpointLock } from "@zhixing-ai/core/protocol";
+import { isProcessAlive, resolveProcessStartTime } from "@zhixing-ai/server/client";
+import type { BoundZhixingServer } from "@zhixing-ai/server";
 
 /**
  * Proves that a live PID at an old endpoint is this process reusing the exact

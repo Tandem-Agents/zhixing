@@ -2,12 +2,12 @@ import type {
   WorkspaceBindingCatalogPersistencePort,
   WorkspaceBindingCatalogRootCommit,
   WorkspaceBindingCatalogRootDocument,
-} from "@zhixing/core/environment/workspace-binding-catalog-persistence";
+} from "@zhixing-ai/core/environment/workspace-binding-catalog-persistence";
 import {
   acquireFileLock,
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename } from "node:fs/promises";
 import path from "node:path";

@@ -1,6 +1,6 @@
 # 飞书通道架构与能力边界
 
-本文说明 `@zhixing/channel-feishu` 的职责、有效体验目标及当前生产实现，不是新平台排期或 SDK 使用大全。平台选择见[IM 通道接入选型研究](../../research/channel-platforms.md)，确认合同见[确认接入与交互](../confirmation/surfaces.md)，可靠内容投递见[消息 Outbox](../delivery/outbox.md)。
+本文说明 `@zhixing-ai/channel-feishu` 的职责、有效体验目标及当前生产实现，不是新平台排期或 SDK 使用大全。平台选择见[IM 通道接入选型研究](../../research/channel-platforms.md)，确认合同见[确认接入与交互](../confirmation/surfaces.md)，可靠内容投递见[消息 Outbox](../delivery/outbox.md)。
 
 ## 目标与责任
 

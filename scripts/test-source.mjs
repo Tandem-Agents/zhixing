@@ -73,7 +73,7 @@ function sourceAliases() {
   const aliases = [];
   for (const dir of packageDirs()) {
     const manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
-    if (!manifest.name?.startsWith("@zhixing/") || !manifest.exports) continue;
+    if (!manifest.name?.startsWith("@zhixing-ai/") || !manifest.exports) continue;
     for (const [subpath, target] of Object.entries(manifest.exports)) {
       const file = typeof target === "string" ? target : target?.import ?? target?.default;
       if (typeof file !== "string" || !file.startsWith("./dist/") || !file.endsWith(".js")) continue;
@@ -263,7 +263,7 @@ ${aliases.map(({ specifier, source }) => `    { find: /^${escape(specifier)}$/, 
     maxWorkers: ${workers},
     setupFiles: ${JSON.stringify([...(physicalSync ? [] : [setupFile]), ...(cpuProf ? [profileSetupFile] : []), ...(countFs ? [countSetupFile] : [])].map((file) => file.split(path.sep).join("/")))},
     ${projects}
-    server: { deps: { inline: [/^@zhixing\\//] } },
+    server: { deps: { inline: [/^@zhixing-ai\\//] } },
     // 超时沿用 vitest 默认值（与各包自身配置一致），不为并发负载放宽。
   },
 };

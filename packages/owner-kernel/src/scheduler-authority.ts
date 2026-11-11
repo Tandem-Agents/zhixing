@@ -6,9 +6,9 @@ import {
   runDetachedDeviceCapacity,
   runDetachedMaintenanceContext,
   waitForMaintenanceRetry,
-} from "@zhixing/core/resources";
-import type { AgentTurnResult, ScheduledTask, SchedulerEventMap, SchedulerControlSource, SystemHandler, TaskPatch, TaskSpec, TaskPriority, TaskSchedule } from "@zhixing/core/scheduler";
-import type { IEventBus } from "@zhixing/core";
+} from "@zhixing-ai/core/resources";
+import type { AgentTurnResult, ScheduledTask, SchedulerEventMap, SchedulerControlSource, SystemHandler, TaskPatch, TaskSpec, TaskPriority, TaskSchedule } from "@zhixing-ai/core/scheduler";
+import type { IEventBus } from "@zhixing-ai/core";
 import {
   isScheduleFailure,
   decideScheduleTrigger,
@@ -19,7 +19,7 @@ import {
   schedulerNoticeGroupKey,
   type MissedSummaryGroup,
   type ScheduleOccurrence,
-} from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/scheduler/application";
 import type {
   AuthorityCallContext,
   IngressContext,
@@ -27,8 +27,8 @@ import type {
   JobRunState,
   JsonValue,
   TaskDefinition,
-} from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { createJobControlEnvelope } from "./control-admission.js";
 import type { ControlAdmissionJournal, TrustedControlSource } from "./control-admission.js";
 import type { JobJournal, JobLifecycleEvent } from "./job-assignment.js";

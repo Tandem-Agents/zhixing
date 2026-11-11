@@ -1,17 +1,17 @@
-import { AuthorityCheckpointOwner } from "@zhixing/mesh/checkpoint-owner";
-import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { decodeRecoveryPackage, encodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
-import { replayTrustChain } from "@zhixing/mesh/trust-chain";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import { createTempDir } from "@zhixing/test-utils";
+import { AuthorityCheckpointOwner } from "@zhixing-ai/mesh/checkpoint-owner";
+import { AuthorityCheckpointService } from "@zhixing-ai/mesh/checkpoint-service";
+import { FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { decodeRecoveryPackage, encodeRecoveryPackage } from "@zhixing-ai/mesh/recovery-package";
+import { replayTrustChain } from "@zhixing-ai/mesh/trust-chain";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
-import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
+import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
 import {
   HOST_STOP_ACCEPTED_WORK_OWNERS,
   freezeHostStopAcceptedWork,
@@ -25,20 +25,20 @@ import {
   validateDeviceLifecycleRecord,
   type AnchorUninstallLifecycleIdentity,
   type DeviceLifecycleEvidenceRef,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
   DeviceAdministrationCurrentRemovalRecoveryApplicationService,
-} from "@zhixing/core/device-administration/application";
+} from "@zhixing-ai/core/device-administration/application";
 import {
   createDeviceAdministrationCurrentRemovalAdmissionPort,
   createDeviceAdministrationCurrentRemovalMechanismPort,
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
   createDeviceAdministrationCurrentRemovalRecoveryBindingPort,
   createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
-} from "@zhixing/core/device-administration/correctness";
-import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing/core/backup-recovery/application";
-import { DeviceLifecycleJournal } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/device-administration/correctness";
+import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing-ai/core/backup-recovery/application";
+import { DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
 import {
   commitCurrentDeviceRetirementTransaction,
   readCurrentDeviceRemovalPhaseLsn,

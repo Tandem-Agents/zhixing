@@ -1,6 +1,6 @@
 # 网络出口架构
 
-`@zhixing/network` 为已接入的 WebFetch 与 MCP HTTP 消费者提供共享的 URL/IP 防护、HTTP 传输和文本净化原语，避免各自重复实现网络边界。它不是全项目所有出站请求的统一网关，也不拥有工具权限、业务重试或 MCP 会话协议。
+`@zhixing-ai/network` 为已接入的 WebFetch 与 MCP HTTP 消费者提供共享的 URL/IP 防护、HTTP 传输和文本净化原语，避免各自重复实现网络边界。它不是全项目所有出站请求的统一网关，也不拥有工具权限、业务重试或 MCP 会话协议。
 
 ## 一、设计取舍
 

@@ -1,5 +1,5 @@
-import type { ConversationUsageProjectionPort } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import type { ConversationUsageProjectionPort } from "@zhixing-ai/core/conversation/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 /** Anchor Correctness adapter; Conversation owns query/error/result semantics. */
 export function createAnchorConversationUsageProjectionPort(input: Readonly<{

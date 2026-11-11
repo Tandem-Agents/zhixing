@@ -14,7 +14,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { ShardedTranscriptStore } from "../../../transcript/shard/store.js";
 import { countRuns, readRunsReverse } from "../../../transcript/shard/reader.js";
 import { SnapshotStore } from "../../../transcript/snapshot/store.js";

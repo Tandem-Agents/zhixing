@@ -1,4 +1,4 @@
-import type { WorksceneDto } from "@zhixing/core/contracts";
+import type { WorksceneDto } from "@zhixing-ai/core/contracts";
 
 /** Anchor 产品工具所需的最小工作场景端口；持久化与 owner 装配留在组合根。 */
 export interface WorksceneToolDirectory {

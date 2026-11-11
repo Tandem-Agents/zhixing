@@ -5,7 +5,7 @@
  * getClient 可替换为抛错实现以断言"不连宿主"的被动语义。
  */
 
-import type { RpcClient } from "@zhixing/server";
+import type { RpcClient } from "@zhixing-ai/server";
 import type { CoreHostRpcLink } from "../core-host-connection.js";
 
 export interface RecordedRequest {

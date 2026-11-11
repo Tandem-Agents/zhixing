@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { McpManagementServerDraft } from '@zhixing/core/mcp-management';
-import type { NetworkPolicy } from '@zhixing/network';
+import type { McpManagementServerDraft } from '@zhixing-ai/core/mcp-management';
+import type { NetworkPolicy } from '@zhixing-ai/network';
 import { LogWorkerChannel } from '../logging/terminal-worker.js';
 import { toServerSpec } from '../runtime/mcp-config.js';
 import type { McpProbeRunnerRequest, McpProbeRunnerResult } from '../runtime/mcp-probe-request.js';

@@ -11,7 +11,7 @@ import type {
   McpManagementProbePort,
   McpManagementServerDraft,
   McpManagementSourceResult,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 import {
   applyMcpSetup,
   deriveServerId,
@@ -21,7 +21,7 @@ import {
   validateMcpSetup,
   type McpResolveDeps,
   type McpSetupCandidate,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 import { findMcpPreset } from "../../registries/index.js";
 
 // 据 README 抽取的 grounded 输出（无 transport——裸包名恒为 stdio）；含从 README 取到的 docUrl

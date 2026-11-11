@@ -4,8 +4,8 @@ import type {
   AuthorityError,
   ControlCompletionPort,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
-import type { LLMRole, ThinkingConfig } from "@zhixing/core/types";
+} from "@zhixing-ai/core/contracts";
+import type { LLMRole, ThinkingConfig } from "@zhixing-ai/core/types";
 import { meteredProviderCall } from "./create-agent-runtime.js";
 
 export interface ControlCompletionPortOptions {

@@ -11,8 +11,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ConversationRepository, parseConversationId, type ConversationScope, worksceneConversationId } from "@zhixing/core/conversation";
-import { createTempDir } from "@zhixing/test-utils";
+import { ConversationRepository, parseConversationId, type ConversationScope, worksceneConversationId } from "@zhixing-ai/core/conversation";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   ConversationRepoTaskListStore,
   InMemoryTaskListStore,

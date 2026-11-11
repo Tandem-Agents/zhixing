@@ -4,10 +4,10 @@ import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:f
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
-import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
+import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing-ai/core/resources';
+import { CheckpointDirectoryHandle } from '@zhixing-ai/mesh/filesystem';
 import { TerminalInstanceAssets, type TerminalIdentityResolver } from '../instance-assets.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 const owners: TerminalInstanceAssets[] = [];
 afterEach(async () => {

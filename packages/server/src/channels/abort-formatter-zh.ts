@@ -12,7 +12,7 @@
 
 import type {
   AbortReason,
-} from "@zhixing/core/interrupt";
+} from "@zhixing-ai/core/interrupt";
 
 /**
  * server 路径任意 abort 触发后,经 SessionAdapter outer controller + agent-loop

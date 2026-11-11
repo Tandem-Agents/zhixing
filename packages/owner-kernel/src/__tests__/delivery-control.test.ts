@@ -3,7 +3,7 @@ import {
   AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   DELIVERY_AUTHORITY_PROJECTION_ID,
   DeliveryAuthority,
@@ -13,17 +13,17 @@ import {
   prepareDeliveryEnqueues,
   reduceDeliveryAuthorityRecord,
   type DeliveryEnqueueInput,
-} from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/delivery";
 import {
   DeliveryProjectionInvariantError,
   DeliveryUncertainResolutionApplicationService,
   type DeliveryUncertainResolutionCommand,
-} from "@zhixing/core/delivery/application";
+} from "@zhixing-ai/core/delivery/application";
 import {
   createConversationSealedBundle,
   sealedBundleArtifact,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   ControlAdmissionJournal,

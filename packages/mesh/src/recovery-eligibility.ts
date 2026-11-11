@@ -1,4 +1,4 @@
-import type { CheckpointEnvelope, CheckpointStreamRecord } from "@zhixing/core/contracts";
+import type { CheckpointEnvelope, CheckpointStreamRecord } from "@zhixing-ai/core/contracts";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import { checkpointEnvelopeArtifact, checkpointPurpose } from "./checkpoint.js";
 import { keyIdForPublicKey, verifyRecoverySignature } from "./recovery-root.js";

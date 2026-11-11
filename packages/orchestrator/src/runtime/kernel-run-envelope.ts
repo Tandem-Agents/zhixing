@@ -1,13 +1,13 @@
-import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
+import type { DurableToolExecutionAuthorizer } from "@zhixing-ai/core/security";
 import type {
   Message,
   ModelProviderPhases,
   SessionEventProjection,
   ToolSideEffectObserver,
   TurnContext,
-} from "@zhixing/core/types";
-import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing/core/transcript";
-import type { WatchdogPolicy } from "@zhixing/core/interrupt";
+} from "@zhixing-ai/core/types";
+import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing-ai/core/transcript";
+import type { WatchdogPolicy } from "@zhixing-ai/core/interrupt";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -15,7 +15,7 @@ import type {
   ModelCallResourceMeter,
   ResourceLease,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type { KernelRunEvent } from "./kernel-run-event.js";
 
 /**
@@ -47,7 +47,7 @@ export interface KernelRunEnvelope {
     readonly modelProviderPhases?: ModelProviderPhases;
   };
   readonly correctness: {
-    readonly inputPort?: import("@zhixing/core/loop").RunInputPort;
+    readonly inputPort?: import("@zhixing-ai/core/loop").RunInputPort;
     readonly toolSideEffectObserver?: ToolSideEffectObserver;
     readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
     readonly assignmentMutations?: AssignmentMutationPort;

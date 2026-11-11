@@ -238,7 +238,7 @@ function exposesMeshTlsFactories(moduleName) {
   return (
     /(?:^|\/)handshake(?:\.js)?$/u.test(moduleName) ||
     /(?:^|\/)index(?:\.js)?$/u.test(moduleName) ||
-    moduleName === "@zhixing/mesh"
+    moduleName === "@zhixing-ai/mesh"
   );
 }
 

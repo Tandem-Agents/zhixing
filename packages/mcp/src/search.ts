@@ -9,7 +9,7 @@
  * 工具循环 catch 后回灌给 LLM，让它重试 / 换词 / 收尾，而非直接中断）。
  */
 
-import type { NetworkPolicy } from "@zhixing/network";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 import { defaultHttpGetText, httpErrText, type HttpGetText } from "./http.js";
 
 /** 一条真实搜索结果 —— 字段均取自 registry 返回，未加工。 */

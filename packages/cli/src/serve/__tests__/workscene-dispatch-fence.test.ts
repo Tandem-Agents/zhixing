@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
-import type { GlobalControlCallContext } from "@zhixing/core/contracts";
-import { AnchorWorksceneGlobalStateAdapter } from "@zhixing/core/workscene";
-import { createTempDir } from "@zhixing/test-utils";
+import type { GlobalControlCallContext } from "@zhixing-ai/core/contracts";
+import { AnchorWorksceneGlobalStateAdapter } from "@zhixing-ai/core/workscene";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 
 class MemorySecrets {

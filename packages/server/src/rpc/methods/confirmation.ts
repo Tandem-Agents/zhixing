@@ -17,13 +17,13 @@
 import type {
   ConfirmationDecision,
   ConfirmationRequest,
-} from "@zhixing/core/confirmation";
-import { confirmationDecisionDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/confirmation";
+import { confirmationDecisionDigest } from "@zhixing-ai/core/protocol";
 import type { MethodEntry } from "../handlers.js";
 import type { RpcConnection } from "../connection.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
-import { canObserveContinuationConfirmation } from "@zhixing/rpc";
+import { canObserveContinuationConfirmation } from "@zhixing-ai/rpc";
 import type {
   ServerConfirmationBinding,
   ServerConfirmationPendingEntry,

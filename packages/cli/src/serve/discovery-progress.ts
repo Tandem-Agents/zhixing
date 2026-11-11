@@ -1,12 +1,12 @@
-import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing/core/authority";
-import type { JsonValue } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import type { JsonValue } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 import type {
   HomeDiscoveryPurpose,
   HomeDiscoveryResumePoint,
   HomeTrustChainPoint,
-} from "@zhixing/mesh/home-discovery";
-import type { TrustProjection } from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/home-discovery";
+import type { TrustProjection } from "@zhixing-ai/mesh/trust-chain";
 
 /**
  * 家级发现的已验证进度：后缀超出单次会话预算时，本机把逐条验过原签名的前缀到达的点与该点投影耐久下来，

@@ -1,6 +1,6 @@
-import { logFailureEvidence } from '@zhixing/core/logging';
-import { TerminalChannel } from '@zhixing/terminal-ui/channel';
-import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { logFailureEvidence } from '@zhixing-ai/core/logging';
+import { TerminalChannel } from '@zhixing-ai/terminal-ui/channel';
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing-ai/terminal-ui/parent-transport';
 
 /** Only for a failed bootstrap, before the application consumes its endpoint.
  * S already owns a recorder and the real process: use that existing close

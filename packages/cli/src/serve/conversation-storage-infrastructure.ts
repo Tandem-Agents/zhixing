@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fromSafePathSegment, toSafePathSegment } from "@zhixing/core/paths";
-import { createFileLockAcquirer } from "@zhixing/core/persistence";
-import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing/core/workscene";
+import { fromSafePathSegment, toSafePathSegment } from "@zhixing-ai/core/paths";
+import { createFileLockAcquirer } from "@zhixing-ai/core/persistence";
+import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing-ai/core/workscene";
 import {
   ConversationRepository,
   readConversationDirectoryPage,
@@ -13,17 +13,17 @@ import {
   type ConversationScope,
   type SegmentMeta,
   type TaskListState,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 import type {
   ConversationCommittedViewStorage,
   ConversationDirectoryStorage,
   TaskListStore,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import {
   buildStartupBootstrap,
   createTokenEstimator,
   readBootstrapRunViews,
-} from "@zhixing/core/context";
+} from "@zhixing-ai/core/context";
 import {
   ShardedTranscriptStore,
   SnapshotStore,
@@ -34,7 +34,7 @@ import {
   runRetentionSweep,
   type RetentionSweepReport,
   type RunRecordWithRef,
-} from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/transcript";
 import type { ConversationRuntimeStoragePort } from "./access-surface.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { StartupHistoryPrefetch } from "./startup-history-prefetch.js";
@@ -273,7 +273,7 @@ export function createReadOnlyConversationStorage(zhixingHome: string, signal?: 
       const directory = path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(localId), 'transcript');
       return new TranscriptByteReader(directory, path.join(zhixingHome, 'cache', 'transcript-read-index'), { acquireFileLock });
     },
-    async listPage(input: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
+    async listPage(input: import('@zhixing-ai/core/conversation/application').ConversationDirectoryPageRequest) {
       const page = await readConversationDirectoryPage(root, input, undefined, signal);
       return { records: page.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: typeof item.createdAt === 'string' ? item.createdAt : item.lastActiveAt, lastActiveAt: item.lastActiveAt })), next: page.next };
     },

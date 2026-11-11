@@ -1,4 +1,4 @@
-import { byteDigest as coreByteDigest } from "@zhixing/core/protocol";
+import { byteDigest as coreByteDigest } from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import { byteDigest, canonicalize, protocolDigest } from "../canonical.js";
 import {

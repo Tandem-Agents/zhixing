@@ -1,4 +1,4 @@
-import type { ExecutionAssetBundle } from "@zhixing/core/contracts";
+import type { ExecutionAssetBundle } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedCapabilityDescriptor,
@@ -7,12 +7,12 @@ import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { SecureMeshConnection } from "@zhixing/mesh";
+} from "@zhixing-ai/core/protocol";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
 import type {
   MeshServiceDefinition,
   MeshServiceRegistry,
-} from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh/service-registry";
 import { describe, expect, it, vi } from "vitest";
 import {
   registerExecutionSnapshotMeshService,

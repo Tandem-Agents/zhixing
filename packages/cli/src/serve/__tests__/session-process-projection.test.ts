@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { FileArtifactStore } from '@zhixing/core/authority';
-import { prepareStreamDataPayload, validateStreamFrame } from '@zhixing/core/protocol';
-import type { StreamFrame } from '@zhixing/core/contracts';
-import { createSessionBroadcastTransport } from '@zhixing/rpc/session-broadcast';
+import { FileArtifactStore } from '@zhixing-ai/core/authority';
+import { prepareStreamDataPayload, validateStreamFrame } from '@zhixing-ai/core/protocol';
+import type { StreamFrame } from '@zhixing-ai/core/contracts';
+import { createSessionBroadcastTransport } from '@zhixing-ai/rpc/session-broadcast';
 import { SessionProcessProjector, SessionProcessProjectionOwner, PROCESS_COMPLETION_GRACE_MS } from '../session-process-projection.js';
 import { AssignmentStreamPathManager } from '../assignment-stream-path-manager.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 afterEach(() => { vi.useRealTimers(); });
 async function setup() {
   const root = await createTempDir('j3');

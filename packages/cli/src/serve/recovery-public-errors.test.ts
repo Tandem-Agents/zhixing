@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
-import type { SecretRef } from "@zhixing/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import type { SecretRef } from "@zhixing-ai/core/contracts";
 import { RecoveryRootUserError, recoveryRootPublicError } from "./backup-command.js";
 import { requireRecoveryPackageSurface } from "./recovery-package-input.js";
 

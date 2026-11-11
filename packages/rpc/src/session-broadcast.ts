@@ -8,7 +8,7 @@
  */
 
 import type { RpcNotificationConnection } from "./connection.js";
-import { stripPresentationFromAgentYield } from '@zhixing/core/loop';
+import { stripPresentationFromAgentYield } from '@zhixing-ai/core/loop';
 import { SESSION_PROCESS_METHOD, processForProfile, projectSessionArtifact, type SessionProcessProjection } from './session-presentation.js';
 import type { SessionDeltaPayload } from './session-wire.js';
 import {

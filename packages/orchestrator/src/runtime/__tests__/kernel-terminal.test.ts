@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentError, userMessage } from "@zhixing/core/types";
+import { AgentError, userMessage } from "@zhixing-ai/core/types";
 import {
   assertKernelTerminal,
   createKernelRunCompletion,

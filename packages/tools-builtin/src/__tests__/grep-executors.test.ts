@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { StreamDigestChain } from "@zhixing/core/protocol";
+import { StreamDigestChain } from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   createGrepSearchPlan,

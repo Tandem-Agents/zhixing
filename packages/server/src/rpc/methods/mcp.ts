@@ -1,6 +1,6 @@
 import { RpcErrors, type MethodEntry } from "../handlers.js";
-import { parseConversationId } from "@zhixing/core/conversation";
-import { MCP_PENDING_QUERY } from "@zhixing/core/mcp-management";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
+import { MCP_PENDING_QUERY } from "@zhixing-ai/core/mcp-management";
 
 /** Local authenticated configuration UI sees public candidates, never secrets or run internals. */
 export function buildMcpPendingMethod(): MethodEntry {

@@ -1,6 +1,6 @@
 /** Pure Host audit notices; no input or terminal ownership. */
 import chalk from "chalk";
-import type { PermissionContextId, SecurityEventMap } from "@zhixing/core/security";
+import type { PermissionContextId, SecurityEventMap } from "@zhixing-ai/core/security";
 import { tone } from "../tui/style.js";
 import { wrapAnsiLine } from "../tui/line-width.js";
 

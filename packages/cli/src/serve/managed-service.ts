@@ -7,9 +7,9 @@ import {
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
-import { byteDigest } from "@zhixing/core/protocol";
-import type { PlatformSecretStoreBackend } from "@zhixing/secrets";
+} from "@zhixing-ai/core/resources";
+import { byteDigest } from "@zhixing-ai/core/protocol";
+import type { PlatformSecretStoreBackend } from "@zhixing-ai/secrets";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 

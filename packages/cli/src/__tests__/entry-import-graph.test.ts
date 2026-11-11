@@ -78,7 +78,7 @@ describe("CLI entry import graph", () => {
       import { registerHooks } from 'node:module';
       const modules = new Set();
       registerHooks({ load(url, context, next) { modules.add(url); return next(url, context); } });
-      await import('@zhixing/network/proxy');
+      await import('@zhixing-ai/network/proxy');
       await import(${JSON.stringify(pathToFileURL(path.join(SRC_DIR, "render-events.ts")).href)});
       process.stdout.write(JSON.stringify([...modules].filter(url => /undici|cli-highlight|highlight\.js/u.test(url))));
     `], { timeout: 15000, windowsHide: true, cwd: PACKAGE_DIR });

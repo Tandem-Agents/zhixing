@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { programBundleEntry, resolveCliEntry } from '../cli-entry.js';
-import { getZhixingHome } from '@zhixing/core/paths';
+import { getZhixingHome } from '@zhixing-ai/core/paths';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
 import { runTerminalSupervisor } from './supervisor.js';

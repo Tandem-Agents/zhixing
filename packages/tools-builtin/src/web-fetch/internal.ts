@@ -7,7 +7,7 @@
  * - LRU 与 charset 探测都是纯函数/纯状态,可独立单测
  */
 
-import type { FetchResult, NetworkPolicy } from "@zhixing/network";
+import type { FetchResult, NetworkPolicy } from "@zhixing-ai/network";
 
 // ─── 默认 fetch policy ───
 

@@ -10,11 +10,11 @@
 
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
-import { extractFirstText } from "@zhixing/core";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { extractFirstText } from "@zhixing-ai/core";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import { createConversationServices, type CreateConversationServicesInput } from "../access-surfaces.js";
 import { createConversationLosslessDataPlaneAssemblyHandle } from "../lossless-data-plane-composition.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";

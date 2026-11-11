@@ -4,13 +4,13 @@ import {
   type ConversationDirectoryApplication,
   type ConversationMessageProjectionPort,
   type ConversationMessageExecutionRequest,
-} from "@zhixing/core/conversation/application";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/conversation/application";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
 import { createLocalConversationDirectoryApplication } from "./local-conversation-directory-application.js";
-import { assertLocalConversationIdForDevice, isLocalConversationId } from "@zhixing/core/conversation";
+import { assertLocalConversationIdForDevice, isLocalConversationId } from "@zhixing-ai/core/conversation";
 
 /** 本机地址是稳定身份，不是永久路由；非本机请求先询问当前 Anchor 的接管事实。 */
 export async function routeAddressedConversationCommunication(input: {

@@ -2,10 +2,10 @@
  * 作业域按键持久投影的新旧对照：把同一日志从起点用同一份归约在完整内存状态上重放一遍，
  * 逐行比较持久投影写下的行；再按原先遍历全集的判定重算各当前义务目录与索引，核对它们一致。
  */
-import { AuthorityPreparationRequired, type FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { DataPlaneTicket, JobOccurrence, JsonValue } from "@zhixing/core/contracts";
-import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
-import { canonicalize, MAX_CLOCK_SKEW_MS } from "@zhixing/core/protocol";
+import { AuthorityPreparationRequired, type FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { DataPlaneTicket, JobOccurrence, JsonValue } from "@zhixing-ai/core/contracts";
+import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing-ai/core/delivery";
+import { canonicalize, MAX_CLOCK_SKEW_MS } from "@zhixing-ai/core/protocol";
 import {
   createJobGuardState,
   createJobMainState,
@@ -14,10 +14,10 @@ import {
   jobProjectionView,
   jobSubmissionGuardView,
   occurrenceOrderKey,
-} from "@zhixing/owner-kernel/job-assignment";
-import { compareJobOccurrences } from "@zhixing/core/protocol";
-import { isScheduleFailure } from "@zhixing/core/scheduler/application";
-import { JobStateBinding, jobReductionFor, jobRunStateIndex } from "@zhixing/owner-kernel/job-run-state-index";
+} from "@zhixing-ai/owner-kernel/job-assignment";
+import { compareJobOccurrences } from "@zhixing-ai/core/protocol";
+import { isScheduleFailure } from "@zhixing-ai/core/scheduler/application";
+import { JobStateBinding, jobReductionFor, jobRunStateIndex } from "@zhixing-ai/owner-kernel/job-run-state-index";
 import { expect } from "vitest";
 
 const TERMINAL = new Set(["committed", "failed", "cancelled", "expired", "missed"]);

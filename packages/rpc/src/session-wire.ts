@@ -18,7 +18,7 @@
 import type {
   AgentResult,
   AgentYield,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 export * from "./session-presentation.js";
 import type {
   AdvancementClosureFacts,
@@ -28,29 +28,29 @@ import type {
   AdvancementSessionStatus,
   RubricContractDraftSnapshot,
   RubricDraftPersistenceChoice,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import type {
   ContextBudget,
-} from "@zhixing/core/context";
+} from "@zhixing-ai/core/context";
 import type {
   TaskListState,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 import type {
   TokenUsage,
   PostTurnControlIntent,
   PostTurnControlOutcome,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   RuntimeSubAgentUsageEntry,
-} from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/types";
 import type {
   ConversationAvailability,
   ConversationSecurityResult,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type {
   WorksceneEntryResult,
   WorksceneManagementSummary,
-} from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene/application";
 
 // ─── wire 投影 ───
 
@@ -220,7 +220,7 @@ export interface SessionSettledSubmissionResult extends SessionAcceptedSendResul
   submission: { turnId: string; disposition: "original-saved" | "revision-saved" | "not-saved" };
   message: string;
 }
-export type SessionInputReceipt = import("@zhixing/core/conversation/application").ConversationInputReceipt
+export type SessionInputReceipt = import("@zhixing-ai/core/conversation/application").ConversationInputReceipt
   | { readonly status: "settled"; readonly conversationId: string; readonly turnId: string; readonly result: SessionSendResult };
 
 export type SessionSendResult =
@@ -336,7 +336,7 @@ export interface SessionConversationEntry {
 }
 
 export interface SessionListResult {
-  next?: import("@zhixing/core/conversation/application").ConversationDirectoryCursor;
+  next?: import("@zhixing-ai/core/conversation/application").ConversationDirectoryCursor;
   conversations: SessionConversationEntry[];
   /** 第一方入口当前可用的会话能力；省略等价于无需额外确认。 */
   availability?: ConversationAvailability;

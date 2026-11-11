@@ -1,5 +1,5 @@
-import type { ConversationCommitSummary } from '@zhixing/core/contracts';
-import type { TranscriptRunRecord } from '@zhixing/core/transcript';
+import type { ConversationCommitSummary } from '@zhixing-ai/core/contracts';
+import type { TranscriptRunRecord } from '@zhixing-ai/core/transcript';
 
 export function conversationCommitSummary(record: Omit<TranscriptRunRecord, 'messages'>): ConversationCommitSummary {
   const control = record.postTurnControl, intent = control?.intent;

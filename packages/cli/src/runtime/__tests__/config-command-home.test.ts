@@ -10,13 +10,13 @@ const calls = vi.hoisted(() => ({
   editor: vi.fn(),
   reconcile: vi.fn(async () => undefined),
 }));
-vi.mock("@zhixing/providers/configuration", async (original) => ({
-  ...await original<typeof import("@zhixing/providers/configuration")>(),
+vi.mock("@zhixing-ai/providers/configuration", async (original) => ({
+  ...await original<typeof import("@zhixing-ai/providers/configuration")>(),
   loadConfig: calls.load,
   editConfiguration: calls.write,
   loadConfigurationSnapshot: calls.snapshot,
 }));
-vi.mock("@zhixing/secrets", () => ({ createPlatformSecretStore: calls.store }));
+vi.mock("@zhixing-ai/secrets", () => ({ createPlatformSecretStore: calls.store }));
 vi.mock("../../serve/managed-service-runtime.js", () => ({
   reconcileCurrentManagedService: calls.reconcile,
 }));

@@ -12,8 +12,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { failToDenyResolver } from "@zhixing/core/confirmation";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { failToDenyResolver } from "@zhixing-ai/core/confirmation";
 import { resolveSubAgentResolver } from "../child-broker.js";
 import type { SubAgentConfirmationPolicy } from "../../subagent/budget.js";
 

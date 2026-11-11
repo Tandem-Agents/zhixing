@@ -9,13 +9,13 @@ import {
   type AdvancementProposalFactPort,
   type RubricCatalogPort,
   type RubricContractCompleteOptions,
-} from "@zhixing/core/advancement";
-import { userMessage } from "@zhixing/core";
+} from "@zhixing-ai/core/advancement";
+import { userMessage } from "@zhixing-ai/core";
 import type {
   GlobalStatePort,
   ResourceReservationPort,
   SessionStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 /** 推进控制调用的治理端口：在通用资源端口之外，收尾使用同一所有者的“结算并释放”（同一帧、需两项授权）。 */
 type AdvancementResourcePort = ResourceReservationPort & {
@@ -24,19 +24,19 @@ type AdvancementResourcePort = ResourceReservationPort & {
 import {
   assertAdvancementModelProviderBinding,
   type AdvancementModelProviderFactory,
-} from "@zhixing/orchestrator/advancement";
+} from "@zhixing-ai/orchestrator/advancement";
 import {
   AdvancementController,
   AdvancementEvidenceCoordinator,
   SessionAdvancementStore,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewAttemptApplication } from "@zhixing-ai/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
 import type {
   AdvancementReviewAttemptApplication,
   AdvancementRubricArtifactPort,
   RubricPublicationPort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   GlobalRubricCatalog,
   GlobalRubricPublication,

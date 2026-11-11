@@ -1,4 +1,4 @@
-import { durableProjectionReadBudget, type FileArtifactStoreOptions, type FileAuthorityCommitLogOptions } from "@zhixing/core/authority";
+import { durableProjectionReadBudget, type FileArtifactStoreOptions, type FileAuthorityCommitLogOptions } from "@zhixing-ai/core/authority";
 import {
   claimDeviceCapacity,
   currentDeviceCapacityStep,
@@ -11,7 +11,7 @@ import {
   withDeviceCapacityStep,
   type DeviceCapacityArbiterPort,
   type DeviceCapacityBudget,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 
 /** Physical caller reads share the Host arbiter and the caller's execution slot. */
 export function artifactReadCapacity(

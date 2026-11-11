@@ -1,7 +1,7 @@
 import {
   acquireFileLock as acquireSharedFileLock,
   type FileLockOptions as SharedFileLockOptions,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 
 export type FileLockOptions = Omit<SharedFileLockOptions, "resourceName">;
 

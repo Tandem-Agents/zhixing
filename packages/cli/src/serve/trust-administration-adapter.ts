@@ -3,7 +3,7 @@ import {
   type TrustAdministrationApplication,
   type TrustAdministrationRepository,
   type TrustAdministrationScopeDescriber,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 
 /** 本机工作区登记：绑定身份摘要 → 显示名与当前绑定修订。 */
 export type WorkspaceTrustDirectory = () => Promise<

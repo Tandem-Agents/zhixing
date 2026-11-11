@@ -2,23 +2,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, rm, stat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
+import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing-ai/core/resources';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from '../display-store.js';
 import { projectHistorySegmentsReverse } from '../history-segments.js';
 import { TerminalBodyProjection, type BodyProjectionChange } from '../body-projection.js';
 import { TerminalManagedFiles } from '../managed-files.js';
-import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS } from '@zhixing-ai/terminal-ui/protocol';
 import { TerminalDisplayReplay, toolCardSegment, type DisplayReplayRecord, type DisplayReplaySource } from '../display-replay.js';
 import { TOOL_HISTORY_CARD_FORMAT } from '../../tool-card-format.js';
 import { TerminalOutputProjection } from '../output.js';
 import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 const stores: TerminalDisplayStore[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const store of stores.splice(0)) await store.close();
 });
-async function setup(replay?: (record: DisplayReplayRecord) => Promise<import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment>) {
+async function setup(replay?: (record: DisplayReplayRecord) => Promise<import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment>) {
   const root = await createTempDir('terminal-display');
   await mkdir(path.join(root, 'display'));
   let active = 0, outstanding = 0, stored = 0;

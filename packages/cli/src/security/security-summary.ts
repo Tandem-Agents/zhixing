@@ -6,14 +6,14 @@
  * 允许累计没有时间窗口，来源也不只是用户本人；调用频率才按当前窗口统计。
  */
 
-import type { SessionSecurityResult } from "@zhixing/rpc";
+import type { SessionSecurityResult } from "@zhixing-ai/rpc";
 import {
   TERMINAL_SUMMARY_LIMITS,
   type TerminalSummary,
   type TerminalSummaryRow,
   type TerminalSummarySection,
   type TerminalSummaryText,
-} from "@zhixing/terminal-ui/protocol";
+} from "@zhixing-ai/terminal-ui/protocol";
 import { fitSummary, paginateSummary, summaryText, SUMMARY_PAGES_BYTES } from "../summary-projection.js";
 
 type Snapshot = SessionSecurityResult;

@@ -1,9 +1,9 @@
 import { Buffer } from "node:buffer";
-import type { MeshServiceClient } from "@zhixing/mesh";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { RunInputPort } from "@zhixing/core/loop";
-import { isProtocolIdentifier, validateMessages } from "@zhixing/core/protocol";
-import { validateConversationCommunicationRequest } from "@zhixing/core/conversation/application";
+import type { MeshServiceClient } from "@zhixing-ai/mesh";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { RunInputPort } from "@zhixing-ai/core/loop";
+import { isProtocolIdentifier, validateMessages } from "@zhixing-ai/core/protocol";
+import { validateConversationCommunicationRequest } from "@zhixing-ai/core/conversation/application";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
 
 const SERVICE = "conversation.communication";

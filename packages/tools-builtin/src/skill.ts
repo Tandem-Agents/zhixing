@@ -12,15 +12,15 @@
  * 判 internal 自动放行,不每次弹确认;不设 maxResultChars,全文须完整入上下文。
  */
 
-import type { ContentThreat } from "@zhixing/core/skills/admission";
-import type { SkillMode } from "@zhixing/core/skills/catalog";
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import type { ContentThreat } from "@zhixing-ai/core/skills/admission";
+import type { SkillMode } from "@zhixing-ai/core/skills/catalog";
+import type { ToolDefinition, ToolResult } from "@zhixing-ai/core";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogAdmissionOutcome,
   SkillCatalogLoadApplication,
   SkillCatalogSaveApplication,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 
 export function createLoadSkillTool(
   application: SkillCatalogLoadApplication,

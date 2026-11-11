@@ -9,7 +9,7 @@
  * 3. 只有待确认义务：给出 /resolve 说明（等待活动，不随一次性说明让位），不携带身份（没有可停止的对象）。
  * 4. 其他：沿用过程展示；属于排队或待确认运行的旧过程不压过前面的说明，也不单独占据状态行。
  */
-import type { TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
+import type { TerminalProcessStatus } from '@zhixing-ai/terminal-ui/protocol';
 import type { RunLifecycle } from '../runtime/run-lifecycle.js';
 
 type TerminalProcessView = TerminalProcessStatus['view'];

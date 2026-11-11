@@ -2,7 +2,7 @@ import path from "node:path";
 import {
   FileResumableArtifactReceiver,
   type ArtifactStore,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   projectAssignmentArtifactReceiver,
   type AssignmentArtifactReceiverPort,

@@ -7,10 +7,10 @@ import type { ServerContext } from "../../context.js";
 import type {
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import type {
   Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   CONVERSATION_INPUT_RECEIPT_QUERY,
@@ -19,22 +19,22 @@ import {
   type ConversationRunControlPort,
   type ConversationAgentTurnAdmissionPort,
   type ConversationAgentTurnIdentityPort,
-} from "@zhixing/core/conversation/application";
-import { ProductApiDispatcher, bindProductApiOperation } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/conversation/application";
+import { ProductApiDispatcher, bindProductApiOperation } from "@zhixing-ai/core/product-api";
 import {
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_SUBMISSION_QUERY,
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
-} from "@zhixing/core/advancement/application";
-import { advancementProposalDispositionMessage } from "@zhixing/core/advancement/proposal-messages";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type SessionRuntime } from "@zhixing/owner-kernel/types";
-import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
+} from "@zhixing-ai/core/advancement/application";
+import { advancementProposalDispositionMessage } from "@zhixing-ai/core/advancement/proposal-messages";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import type { DurableConversationTurnExecutor } from "@zhixing-ai/owner-kernel/run-turn";
 import {
   createConversationAgentTurnAdmissionPort,
-} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
-import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+} from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
+import { parseConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 import { bindTestConversationManager } from "../../__tests__/server-conversation-binding-fixture.js";
 import {

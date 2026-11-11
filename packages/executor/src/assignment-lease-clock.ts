@@ -3,8 +3,8 @@ import {
   type AuthorityCommitLog,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
-} from "@zhixing/core/authority";
-import { assertProtocolIdentifier } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/authority";
+import { assertProtocolIdentifier } from "@zhixing-ai/core/protocol";
 
 /** Executor-owned time; projections may be discarded, elapsed time may not. */
 export class AssignmentLeaseClock {

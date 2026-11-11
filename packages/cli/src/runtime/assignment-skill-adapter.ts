@@ -6,7 +6,7 @@ import {
   acquireToStaging,
   computeStagingDigest,
   type AdmissionLlm,
-} from "@zhixing/core/skills/admission";
+} from "@zhixing-ai/core/skills/admission";
 import {
   SkillCatalogAdmissionApplicationService,
   SkillCatalogLoadApplicationService,
@@ -21,10 +21,10 @@ import {
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
   type SkillCatalogSaveOverlayRecord,
-} from "@zhixing/core/skills/catalog";
-import type { ArtifactStore } from "@zhixing/core/authority";
-import { assignmentMutationRequestId } from "@zhixing/core/protocol";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/skills/catalog";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
+import { assignmentMutationRequestId } from "@zhixing-ai/core/protocol";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();

@@ -1,4 +1,4 @@
-import { advancementSubmissionOutcome, advancementSubmissionRequestId, type AdvancementSubmissionIdentity, type AdvancementSubmissionReceipt, type AdvancementSubmissionOutcome } from "@zhixing/core/advancement";
+import { advancementSubmissionOutcome, advancementSubmissionRequestId, type AdvancementSubmissionIdentity, type AdvancementSubmissionReceipt, type AdvancementSubmissionOutcome } from "@zhixing-ai/core/advancement";
 import { randomUUID } from "node:crypto";
 import {
   runReviewedEvents,
@@ -20,12 +20,12 @@ import {
   type ConfirmedRubricSnapshot,
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
-} from "@zhixing/core/advancement";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/advancement";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 import type {
   AuthorityCallContext,
   SessionStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 /**
  * 推进会话存储的统一接口——文件控制日志与权威日志适配器同一形状，
@@ -38,15 +38,15 @@ export interface AdvancementSessionStore {
   regenerateSession(conversationId: string, previousSessionId: string, nextSessionId: string, draft: RubricContractDraftSnapshot, exit: AdvancementExit, submission?: AdvancementSubmissionIdentity): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }>;
   createSession(input: CreateAdvancementSessionInput): Promise<AdvancementSession>;
   /** 接受主 Agent 提议：同一提议重复接受返回同一会话；已有未终结会话时记为未被接受（建会话并同批取消）。 */
-  acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("@zhixing/core").UserTurnInput }>): Promise<AdvancementSession>;
-  supplementProposal(conversationId: string, sessionId: string, supplement: import("@zhixing/core").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession>;
+  acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("@zhixing-ai/core").UserTurnInput }>): Promise<AdvancementSession>;
+  supplementProposal(conversationId: string, sessionId: string, supplement: import("@zhixing-ai/core").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession>;
   transitionDraftAttempt(conversationId: string, sessionId: string, attempt: AdvancementDraftAttempt): Promise<AdvancementSession>;
   /** 已提交、尚未被接受或拒绝的提议运行，带原始输入身份与还原的原任务。 */
-  listPendingProposals(conversationId: string): Promise<readonly { readonly runId: string; readonly originalTurnId: string; readonly originalUserTask: import("@zhixing/core").UserTurnInput }[]>;
+  listPendingProposals(conversationId: string): Promise<readonly { readonly runId: string; readonly originalTurnId: string; readonly originalUserTask: import("@zhixing-ai/core").UserTurnInput }[]>;
   /** 写入已消费的尝试与草案（并入截至 revision 的补充），会话进入待确认。 */
   persistProposalDraft(conversationId: string, sessionId: string, attempt: AdvancementDraftAttempt, revision: number, draft: RubricContractDraftSnapshot): Promise<AdvancementSession>;
   directOriginalTask(conversationId: string, sessionId: string, admissionIntent: AdvancementOriginalTaskAdmissionIntent, exit: AdvancementExit, timestamp?: string, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession>;
-  rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp?: string): Promise<AdvancementSession>;
+  rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing-ai/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp?: string): Promise<AdvancementSession>;
   listPendingOriginalTasks(conversationId: string, after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }>;
 
   confirmRubric(
@@ -62,7 +62,7 @@ export interface AdvancementSessionStore {
     sessionId: string,
     settlement: {
       readonly turnId: string;
-      readonly inputDigest: import("@zhixing/core").Digest;
+      readonly inputDigest: import("@zhixing-ai/core").Digest;
       readonly runId: string;
     },
     timestamp?: string,
@@ -236,7 +236,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     return { exited, created };
   }
 
-  async acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("@zhixing/core").UserTurnInput }>): Promise<AdvancementSession> {
+  async acceptProposal(input: Readonly<{ conversationId: string; proposalId: string; runId: string; originalTurnId: string; originalUserTask: import("@zhixing-ai/core").UserTurnInput }>): Promise<AdvancementSession> {
     const sessionId = advancementProposalSessionId(input.proposalId);
     const existing = await this.loadSession(input.conversationId, sessionId);
     if (existing) return existing;
@@ -260,7 +260,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     return this.#port.listPendingAdvancementProposals(conversationId, this.#ctx(this.#requestIdFor()));
   }
 
-  async supplementProposal(conversationId: string, sessionId: string, supplement: import("@zhixing/core").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
+  async supplementProposal(conversationId: string, sessionId: string, supplement: import("@zhixing-ai/core").UserTurnInput, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
     return await this.#write(conversationId, [{ type: "proposal_supplemented", timestamp: this.#now(), sessionId, supplement }], undefined, submission);
   }
 
@@ -281,7 +281,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     return this.#write(conversationId, [{ type: "original_task_directed", sessionId, timestamp, admissionIntent, exit }], undefined, submission);
   }
 
-  async rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp = this.#now()): Promise<AdvancementSession> {
+  async rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing-ai/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp = this.#now()): Promise<AdvancementSession> {
     return this.#write(conversationId, [{ type: "original_task_admission_rejected", sessionId, timestamp, turnId: rejection.turnId, inputDigest: rejection.inputDigest, reason: rejection.reason }]);
   }
 
@@ -329,7 +329,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     sessionId: string,
     settlement: {
       readonly turnId: string;
-      readonly inputDigest: import("@zhixing/core").Digest;
+      readonly inputDigest: import("@zhixing-ai/core").Digest;
       readonly runId: string;
     },
     timestamp = this.#now(),

@@ -5,9 +5,9 @@
 
 import path from 'node:path';
 import { expect } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
-import { FileArtifactStore, FileAuthorityCommitLog, type ArtifactRef } from '@zhixing/core/authority';
-import { canonicalize, createConversationSealedBundle, protocolDigest, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+import { createTempDir } from '@zhixing-ai/test-utils';
+import { FileArtifactStore, FileAuthorityCommitLog, type ArtifactRef } from '@zhixing-ai/core/authority';
+import { canonicalize, createConversationSealedBundle, protocolDigest, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { resolutionFactDigest } from '../conversation-run-contracts.js';
 import { ConversationMessageInputReader, foldDeliveryFacts } from '../conversation-message-input-reader.js';
 import { ConversationReadIndex } from '../conversation-read-index.js';

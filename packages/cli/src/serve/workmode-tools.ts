@@ -31,14 +31,14 @@ import {
   getWorksceneToolPostTurnControlKind,
   worksceneToolRequiresExplicitConfirmation,
   type WorksceneManagementToolName,
-} from "@zhixing/core/workscene";
-import { type JsonSchema, type ToolDefinition } from "@zhixing/core";
-import type { WorksceneDto } from "@zhixing/core/contracts";
-import type { WorksceneAssignmentToolApplication, WorksceneRunToolApplication } from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene";
+import { type JsonSchema, type ToolDefinition } from "@zhixing-ai/core";
+import type { WorksceneDto } from "@zhixing-ai/core/contracts";
+import type { WorksceneAssignmentToolApplication, WorksceneRunToolApplication } from "@zhixing-ai/core/workscene/application";
 import {
   emitPostTurnControlIntent,
   hasPostTurnControlCapability,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import { WORKING_MODE_TEXT } from "./workscene-agent-guidance.js";
 export type { WorksceneToolDirectory } from "./workscene-port.js";

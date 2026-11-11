@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { onTestFinished } from "vitest";
 
 /** A live product-shaped entry with no home flag: only a real peer proof can exclude it. */

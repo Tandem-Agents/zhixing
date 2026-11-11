@@ -1,17 +1,17 @@
 import { Buffer } from "node:buffer";
 import path from "node:path";
 import { expect } from "vitest";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
-import type { AuthorityCallContext, Signature } from "@zhixing/core/contracts";
-import type { UserTurnInput } from "@zhixing/core/types";
-import type { AdvancementControlEvent } from "@zhixing/core/advancement";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import type { AuthorityCallContext, Signature } from "@zhixing-ai/core/contracts";
+import type { UserTurnInput } from "@zhixing-ai/core/types";
+import type { AdvancementControlEvent } from "@zhixing-ai/core/advancement";
 import {
   canonicalize, createConversationSealedBundle, sealedBundleArtifact, createSignedTrustRuleSnapshot,
   protocolDigest, type ProtocolSignatureVerifier, type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { ImageSource, PostTurnControlOutcome, TurnOriginAdvancementExecution } from "@zhixing/core/types";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import type { ImageSource, PostTurnControlOutcome, TurnOriginAdvancementExecution } from "@zhixing-ai/core/types";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { ConversationRunJournal, pendingAdvancementConversations } from "../conversation-assignment.js";
 import { createOwnerDeliveryParticipant } from "../delivery.js";
 import { ConversationSessionStateAdapter } from "../session-state-adapter.js";

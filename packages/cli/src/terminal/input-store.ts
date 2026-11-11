@@ -1,4 +1,4 @@
-import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing/core/resources';
+import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing-ai/core/resources';
 import type { TerminalAssetAccount } from './asset-client.js';
 import { terminalPhysicalStep } from './physical-step.js';
 import { TerminalManagedFiles } from './managed-files.js';

@@ -1,5 +1,5 @@
-import { getZhixingHome } from "@zhixing/core/paths";
-import type { LogFilter, LogPage, LogRecord } from "@zhixing/core/logging";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import type { LogFilter, LogPage, LogRecord } from "@zhixing-ai/core/logging";
 import { queryLocalLogs } from "../logging/local-query.js";
 import { normalizeLogLineCount } from "./log-line-count.js";
 

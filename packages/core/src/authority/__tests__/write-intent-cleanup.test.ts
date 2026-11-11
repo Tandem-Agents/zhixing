@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DurableLogCheckpoint } from "../interfaces.js";
 

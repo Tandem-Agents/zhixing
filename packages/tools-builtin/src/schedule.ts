@@ -17,8 +17,8 @@
  * - isReadOnly: false — create/update/delete 会修改持久化状态
  */
 
-import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
-import type { SchedulerFacade, ScheduledTask, TaskSchedule } from "@zhixing/core/scheduler";
+import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing-ai/core";
+import type { SchedulerFacade, ScheduledTask, TaskSchedule } from "@zhixing-ai/core/scheduler";
 
 const SCHEDULE_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `schedule` to create, list, update, delete, or run scheduled tasks",

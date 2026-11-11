@@ -2,7 +2,7 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   type WorkspaceSessionType,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import type { RuntimeWorkspaceConfigurationProjection } from "../runtime/runtime-configuration-projections.js";
 
 /**

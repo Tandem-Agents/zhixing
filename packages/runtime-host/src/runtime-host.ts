@@ -23,10 +23,10 @@ import {
   type KernelModelProviderFactory,
   type KernelRuntimeEnvironmentFactory,
   type RuntimeKind,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import type {
   IConfirmationBroker,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   assertConversationRuntimeProjection,
   assertRuntimeProductProjection,

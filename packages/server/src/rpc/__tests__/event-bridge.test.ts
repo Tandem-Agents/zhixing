@@ -1,5 +1,5 @@
-import type { ScheduleRuntimeEvent } from "@zhixing/core/scheduler/application";
-import { createEventBridge } from "@zhixing/rpc";
+import type { ScheduleRuntimeEvent } from "@zhixing-ai/core/scheduler/application";
+import { createEventBridge } from "@zhixing-ai/rpc";
 import { describe, expect, it, vi } from "vitest";
 import type { RpcConnection } from "../connection.js";
 

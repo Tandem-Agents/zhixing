@@ -1,26 +1,26 @@
 /** RuntimeHost owns generic assembly only; product decisions arrive frozen. */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mainProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile } from "@zhixing-ai/orchestrator/profile";
 import {
   createKernelWindowPromptProjection,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 const { createAgentRuntimeMock } = vi.hoisted(() => ({
   createAgentRuntimeMock: vi.fn(),
 }));
 
-vi.mock("@zhixing/orchestrator/runtime", async (orig) => {
-  const actual = await orig<typeof import("@zhixing/orchestrator/runtime")>();
+vi.mock("@zhixing-ai/orchestrator/runtime", async (orig) => {
+  const actual = await orig<typeof import("@zhixing-ai/orchestrator/runtime")>();
   return { ...actual, createAgentRuntime: createAgentRuntimeMock };
 });
 
-const { RuntimeHost } = await import("@zhixing/runtime-host/runtime-host");
+const { RuntimeHost } = await import("@zhixing-ai/runtime-host/runtime-host");
 const { createConversationRuntimeProjection } = await import(
-  "@zhixing/runtime-host/conversation-runtime-projection"
+  "@zhixing-ai/runtime-host/conversation-runtime-projection"
 );
 const { createRuntimeProductProjection, createRuntimeToolProjection } = await import(
-  "@zhixing/runtime-host/conversation-runtime-projection"
+  "@zhixing-ai/runtime-host/conversation-runtime-projection"
 );
 const defaultToolImplementation = Object.freeze({ create: vi.fn() });
 const defaultSecurityExecution = Object.freeze({ create: vi.fn() });

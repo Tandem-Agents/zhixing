@@ -6,23 +6,23 @@ import type {
   HomeTrustRecord,
   SecretRef,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createTerminalRouteSecret,
   currentAndPreviousTerminalRendezvousKeys,
   MeshConnectionRegistry,
   MeshEndpointDirectory,
-} from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/bootstrap";
 import {
   BlindRendezvousMatcher,
   readBlindRendezvousHello,
-} from "@zhixing/mesh/blind-rendezvous";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { connectAuthenticatedMesh } from "@zhixing/mesh/handshake";
-import { MeshRequestChannel } from "@zhixing/mesh/request-channel";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { createTempDir } from "@zhixing/test-utils";
-import { ServerStateFile } from "@zhixing/server";
+} from "@zhixing-ai/mesh/blind-rendezvous";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { connectAuthenticatedMesh } from "@zhixing-ai/mesh/handshake";
+import { MeshRequestChannel } from "@zhixing-ai/mesh/request-channel";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { ServerStateFile } from "@zhixing-ai/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { inspectLocalHealth } from "../maintenance/doctor.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";

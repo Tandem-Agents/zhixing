@@ -1,18 +1,18 @@
 import path from "node:path";
 import { readdir, readFile, stat } from "node:fs/promises";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent } from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { HomeAuthoritySources, openHomeAuthoritySources } from "./home-authority-sources.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { provePriorHostExited, reclaimRetiredContentCopies, RETIRED_CONTENT_COPIES } from "./retired-projection-copies.js";
-import { FileAuthorityCommitLog, durableProjectionDirectoryName } from "@zhixing/core/authority";
-import { verifyProtocolStep } from "@zhixing/core/protocol";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+import { FileAuthorityCommitLog, durableProjectionDirectoryName } from "@zhixing-ai/core/authority";
+import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import { mkdir, writeFile } from "node:fs/promises";
-import { conversationRecoveryPage } from "@zhixing/owner-kernel/conversation-assignment";
+import { conversationRecoveryPage } from "@zhixing-ai/owner-kernel/conversation-assignment";
 
 const AT = "2026-10-16T00:00:00.000Z";
 
@@ -143,7 +143,7 @@ describe("home authority sources", () => {
     expect(first.sources.integrity).toBeDefined();
     await expect(openHomeAuthoritySources({ home, secretStore: secrets, clock: () => AT })).rejects.toThrow("one commit clock");
     // 先无读取准入打开后，后来的打开者不能带着仲裁器沿用它（日志不会补上读取准入）
-    const arbiter = { acquire: vi.fn() } as unknown as import("@zhixing/core/resources").DeviceCapacityArbiterPort;
+    const arbiter = { acquire: vi.fn() } as unknown as import("@zhixing-ai/core/resources").DeviceCapacityArbiterPort;
     await expect(openHomeAuthoritySources({ home, secretStore: secrets, deviceCapacity: arbiter })).rejects.toThrow("one device capacity arbiter");
     await first.close();
     // 另一个使用者仍持有：日志尚未停止，可以继续读写。

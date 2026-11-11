@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { ConfirmationDecision, ConfirmationOption, ConfirmationRequest } from '@zhixing/core/confirmation';
+import type { ConfirmationDecision, ConfirmationOption, ConfirmationRequest } from '@zhixing-ai/core/confirmation';
 import { translate } from '../security/confirmation-decision.js';
 import type { SelectionRequest } from '../tui/selection/types.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';

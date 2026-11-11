@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ExtensionInstance, ExtensionProcess, ExtensionTypeBinding } from "@zhixing/core/extensions/contracts";
-import { channelDeclaration, validateChannelCredentials } from "@zhixing/core/channels/extension";
-import type { ChannelBindingPolicy, ChannelChallengeAction, DeliveryResult, HttpHandler, InboundMessage } from "@zhixing/core/channels";
+import type { ExtensionInstance, ExtensionProcess, ExtensionTypeBinding } from "@zhixing-ai/core/extensions/contracts";
+import { channelDeclaration, validateChannelCredentials } from "@zhixing-ai/core/channels/extension";
+import type { ChannelBindingPolicy, ChannelChallengeAction, DeliveryResult, HttpHandler, InboundMessage } from "@zhixing-ai/core/channels";
 import type { ChannelProjection } from "./channel-configuration.js";
 
 export interface ChannelConsumerBinding {
@@ -30,7 +30,7 @@ export function channelDeliveryResult(value: unknown): DeliveryResult {
 }
 
 export function createChannelTypeBinding(options: {
-  records?: import("@zhixing/core/logging").LogRecordPort;
+  records?: import("@zhixing-ai/core/logging").LogRecordPort;
   instance: ExtensionInstance;
   consumers: () => ChannelConsumerBinding;
   routes: Map<string, HttpHandler>;

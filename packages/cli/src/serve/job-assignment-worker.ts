@@ -1,7 +1,7 @@
-import { ConfirmationBroker, type IConfirmationBroker } from "@zhixing/core/confirmation";
-import { type AgentYield } from "@zhixing/core/loop";
-import { type PermissionRule } from "@zhixing/core/security";
-import { type ToolSideEffectObserver } from "@zhixing/core";
+import { ConfirmationBroker, type IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { type AgentYield } from "@zhixing-ai/core/loop";
+import { type PermissionRule } from "@zhixing-ai/core/security";
+import { type ToolSideEffectObserver } from "@zhixing-ai/core";
 import type {
   AuthorityCallContext,
   ChannelInteractionGrant,
@@ -14,18 +14,18 @@ import type {
   ResourceLease,
   ResourceReservationPort,
   SessionEventProjection,
-} from "@zhixing/core/contracts";
-import { AuthorityStorageError } from "@zhixing/core/authority";
-import { runDetachedDeviceCapacity, runDetachedMaintenanceContext } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/contracts";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
+import { runDetachedDeviceCapacity, runDetachedMaintenanceContext } from "@zhixing-ai/core/resources";
 import {
   dispatchEnvelopeDigest,
   type StreamFrameProducer,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
   JobRecoveryObligation,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import {
   asError,
   resumeSealedSubmission,
@@ -76,8 +76,8 @@ export interface JobRuntimeRunOptions {
   ) => Promise<void>;
   readonly authorizeToolExecution: () => Promise<readonly PermissionRule[]>;
   readonly toolSideEffectObserver: ToolSideEffectObserver;
-  readonly assignmentMutations: import("@zhixing/core/contracts").AssignmentMutationPort;
-  readonly globalQuery?: import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
+  readonly assignmentMutations: import("@zhixing-ai/core/contracts").AssignmentMutationPort;
+  readonly globalQuery?: import("@zhixing-ai/core/contracts").AssignmentGlobalQueryPort;
   readonly assignmentIssuedAt: string;
   readonly modelCallResourceMeter?: ModelCallResourceMeter;
   readonly resourceReservation?: {
@@ -130,9 +130,9 @@ export interface JobAssignmentWorkerOptions {
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   readonly resources: ResourceReservationPort;
   readonly globalQueryFor?: (
-    capability: import("@zhixing/core/contracts").AuthorityCapability,
+    capability: import("@zhixing-ai/core/contracts").AuthorityCapability,
     anchorEpoch: number,
-  ) => import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
+  ) => import("@zhixing-ai/core/contracts").AssignmentGlobalQueryPort;
   readonly createStream: (input: {
     readonly assignmentId: string;
     readonly ref: {

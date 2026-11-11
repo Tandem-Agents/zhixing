@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import type { DeviceCapacityArbiterPort } from '@zhixing-ai/core/resources';
 import type { TerminalManagedFiles } from '../managed-files.js';
 import { TerminalPendingSendStore } from '../pending-send-store.js';
 

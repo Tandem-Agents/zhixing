@@ -1,4 +1,4 @@
-import type { RunningServer } from "@zhixing/server";
+import type { RunningServer } from "@zhixing-ai/server";
 
 interface ExecutorRoleSignalSource {
   once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;

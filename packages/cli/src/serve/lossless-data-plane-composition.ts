@@ -10,8 +10,8 @@ import {
   type ChannelChallengeDeliveryProfile,
 } from "./lossless-data-plane-runtime.js";
 import type { AssignmentDataPlaneTargetDirectory } from "./assignment-data-plane-topology.js";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import type { ChannelChallengeAction } from "@zhixing/core/channels";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import type { ChannelChallengeAction } from "@zhixing-ai/core/channels";
 
 export interface LosslessDataPlaneCompositionOptions {
   readonly verifier: ProtocolSignatureVerifier;

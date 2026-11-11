@@ -1,21 +1,21 @@
 import path from "node:path";
 import { Buffer } from "node:buffer";
-import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing/core/rubrics";
-import { projectRubricContractDraft, type RubricContractDraftSnapshot } from "@zhixing/core/advancement";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing-ai/core/rubrics";
+import { projectRubricContractDraft, type RubricContractDraftSnapshot } from "@zhixing-ai/core/advancement";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
   ScheduleTaskSpecDto,
   TaskDefinition,
-} from "@zhixing/core/contracts";
-import { validateTaskDefinition } from "@zhixing/core/protocol";
-import { AnchorRubricGlobalStateAdapter } from "@zhixing/core/rubrics";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/contracts";
+import { validateTaskDefinition } from "@zhixing-ai/core/protocol";
+import { AnchorRubricGlobalStateAdapter } from "@zhixing-ai/core/rubrics";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { ControlAdmissionJournal } from "../control-admission.js";
 import { DeferredGlobalIntentAnchorReviewService } from "../deferred-global-intent-review.js";

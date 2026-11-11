@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/mcp",
+  "name": "@zhixing-ai/mcp",
   "version": "0.1.0",
   "description": "知行 MCP host — 连接外部 MCP server，把其工具接入 agent 工具集",
   "type": "module",
@@ -24,8 +24,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@zhixing/core": "workspace:*",
-    "@zhixing/network": "workspace:*"
+    "@zhixing-ai/core": "workspace:*",
+    "@zhixing-ai/network": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

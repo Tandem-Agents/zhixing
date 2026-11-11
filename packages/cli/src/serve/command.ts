@@ -13,11 +13,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { recordConversationFailure, recordRuntimeFailure } from "../logging/runtime.js";
 import { handoffLogging } from "../logging/handoff.js";
-import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
+import { beginLogPhase, observeLogPhase } from "@zhixing-ai/core/logging";
 import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
-import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
-import { currentMaintenanceAbortSignal } from '@zhixing/core/resources';
-import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing-ai/core/authority";
+import { currentMaintenanceAbortSignal } from '@zhixing-ai/core/resources';
+import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing-ai/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { hostToolPermissionRuleSets } from "../runtime/kernel-tool-implementation.js";
 import { isMainConversationId } from "../conversation-selection.js";
@@ -27,77 +27,77 @@ import { createConversationTool, createConversationCommunicationAssemblyHandle }
 import { createExtensionArtifactReceiver } from "./extension-artifact-receiver-infrastructure.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
 import { createLogAccess } from "../logging/access.js";
-import { createKernelLogFactory } from "@zhixing/orchestrator/runtime";
+import { createKernelLogFactory } from "@zhixing-ai/orchestrator/runtime";
 import { MCP_LOG_SOURCE } from "../runtime/mcp-runtime-adapter.js";
 import { createRuntimeLogTools } from "../logging/tools.js";
-import { LOG_PRODUCT_API_EXACT_SET } from "@zhixing/core/logging/application";
+import { LOG_PRODUCT_API_EXACT_SET } from "@zhixing-ai/core/logging/application";
 import { createExtensionContinuation, createExtensionNotificationHandle, createExtensionStatusObserver } from "./extension-continuation.js";
 import { createConversationCommunicationBinding, createLocalConversationCommunicationBinding, discoverConversations } from "./conversation-communication-binding.js";
-import { CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET, createConversationCommunicationProductApiContribution } from "@zhixing/core/conversation/application";
-import { McpManagementApplication, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET, createMcpManagementProductApiContribution } from "@zhixing/core/mcp-management";
-import { resolveAgentIdentity } from "@zhixing/core/identity";
-import { loadLayeredGuidance } from "@zhixing/core/context";
-import { type SchedulerEventMap } from "@zhixing/core/scheduler";
-import { worksceneConversationId } from "@zhixing/core/conversation";
-import { type DeliveryLifecycleSourcePermit } from "@zhixing/core/delivery";
+import { CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET, createConversationCommunicationProductApiContribution } from "@zhixing-ai/core/conversation/application";
+import { McpManagementApplication, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET, createMcpManagementProductApiContribution } from "@zhixing-ai/core/mcp-management";
+import { resolveAgentIdentity } from "@zhixing-ai/core/identity";
+import { loadLayeredGuidance } from "@zhixing-ai/core/context";
+import { type SchedulerEventMap } from "@zhixing-ai/core/scheduler";
+import { worksceneConversationId } from "@zhixing-ai/core/conversation";
+import { type DeliveryLifecycleSourcePermit } from "@zhixing-ai/core/delivery";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
   SkillCatalogApplicationService,
-} from "@zhixing/core/skills/catalog";
-import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing/core/skills/catalog-correctness";
+} from "@zhixing-ai/core/skills/catalog";
+import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing-ai/core/skills/catalog-correctness";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationPerspectivesApplicationService,
   ConversationDirectoryApplicationService,
   createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   AdvancementApplicationService,
   AdvancementConversationLifecycleApplicationService,
   createAdvancementProductApiContribution,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   createScheduleManagementProductApiContribution,
   createScheduleRuntimeProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
   SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
-} from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/scheduler/application";
 import {
   createTrustAdministrationProductApiContribution,
   TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   workspaceTrustIdentity,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 import {
   createDeliveryResolutionProductApiContribution,
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
-} from "@zhixing/core/delivery/application";
+} from "@zhixing-ai/core/delivery/application";
 import {
   createDeviceAdministrationProductApiContribution,
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DeviceAdministrationApplicationService,
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
   DeviceAdministrationCurrentRemovalRecoveryApplicationService,
-} from "@zhixing/core/device-administration/application";
+} from "@zhixing-ai/core/device-administration/application";
 import {
   createDeviceAdministrationCurrentRemovalAdmissionPort,
   createDeviceAdministrationCurrentRemovalMechanismPort,
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
   createDeviceAdministrationCurrentRemovalRecoveryBindingPort,
   createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
-} from "@zhixing/core/device-administration/correctness";
+} from "@zhixing-ai/core/device-administration/correctness";
 import {
   BackupRecoveryCurrentRemovalApplicationService,
   projectBackupRecoveryPublicStatus,
-} from "@zhixing/core/backup-recovery/application";
+} from "@zhixing-ai/core/backup-recovery/application";
 import {
   defineProductApiExactSet,
   ProductApiDispatcher,
   PRODUCT_API_LOG_SOURCE,
-} from "@zhixing/core/product-api";
-import { EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing/core/extensions/application";
+} from "@zhixing-ai/core/product-api";
+import { EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing-ai/core/extensions/application";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../runtime/extensions/channel-readiness.js";
 import {
@@ -106,14 +106,14 @@ import {
   WORKSCENE_PRODUCT_API_EXACT_SET,
   WorksceneApplicationError,
   type WorksceneWorkspaceReference,
-} from "@zhixing/core/workscene/application";
-import { DeviceLifecycleJournal } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/workscene/application";
+import { DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
 import {
   createSignedDeviceLifecycleAbort,
   protocolDigest,
   type DeviceLifecycleEvidenceRef,
   type StopHostGeneration,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   createServerContext,
   bindServer,
@@ -134,25 +134,25 @@ import {
   RpcAppError,
   type RunningServer,
   type ServerContext,
-} from "@zhixing/server";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
-import { conversationDecisionMigrationStatus, conversationDecisionPending, startConversationDecisionMigration, stopConversationDecisionMigration } from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/server";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
+import { conversationDecisionMigrationStatus, conversationDecisionPending, startConversationDecisionMigration, stopConversationDecisionMigration } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   createRunEventForwarder,
   SESSION_NOTIFICATIONS,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
-import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath, prepareProviderRoles } from "@zhixing/providers";
+import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath, prepareProviderRoles } from "@zhixing-ai/providers";
 import chalk from "chalk";
 import { ExecutionStatusHub, FirstPartyFinalitySession } from "./first-party-finality-session.js";
-import { isProcessAlive } from "@zhixing/server";
-import { RuntimeHost } from "@zhixing/runtime-host";
+import { isProcessAlive } from "@zhixing-ai/server";
+import { RuntimeHost } from "@zhixing-ai/runtime-host";
 import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import { createTransientSegmentDeps } from "./segment-deps.js";
 import {
   createConversationAgentTurnAdmissionPort,
-} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+} from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
 import { createConversationPerspectivesCorrectnessPort } from "./conversation-perspectives-correctness.js";
 import {
   createServerConfirmationBinding,
@@ -300,13 +300,13 @@ import {
   type HostStopAcceptedWorkPorts,
   type HostStopAcceptedWorkSnapshot,
 } from "./host-stop-lifecycle.js";
-import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
+import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing-ai/mesh/device-key-store";
 import {
   decodeRecoveryPackage,
   requireCurrentRecoveryPackage,
-} from "@zhixing/mesh/recovery-package";
-import { replayTrustChain } from "@zhixing/mesh/trust-chain";
-import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/recovery-package";
+import { replayTrustChain } from "@zhixing-ai/mesh/trust-chain";
+import { MeshConnectionRegistry } from "@zhixing-ai/mesh/bootstrap";
 import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { provePriorHostExited, reclaimRetiredContentCopies } from "./retired-projection-copies.js";
 import { AnchorInternalStopLifecycle } from "./anchor-internal-stop.js";
@@ -688,7 +688,7 @@ async function runServerProcess(
       disposeForward();
     };
   };
-  const createConversationPerspectives: (manager: import("@zhixing/owner-kernel/conversation-manager").ConversationManager) => import("@zhixing/core/conversation/application").ConversationPerspectivesApplication = (manager) =>
+  const createConversationPerspectives: (manager: import("@zhixing-ai/owner-kernel/conversation-manager").ConversationManager) => import("@zhixing-ai/core/conversation/application").ConversationPerspectivesApplication = (manager) =>
     new ConversationPerspectivesApplicationService({
     correctness: createConversationPerspectivesCorrectnessPort({ manager }),
     createRunEventBus: () => createEventBus<AgentEventMap>(),
@@ -975,7 +975,7 @@ async function runServerProcess(
   // ============================================================================
   // Static Host graph: core factories are unconditional; profile selects only adapters.
   // ============================================================================
-  const channelHttpRoutes: Map<string, import("@zhixing/core/channels").HttpHandler> = new Map();
+  const channelHttpRoutes: Map<string, import("@zhixing-ai/core/channels").HttpHandler> = new Map();
   const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle();
   const anchorInternalStop = anchorInternalStopLifecycle.port;
   const onTrustApplied = () => coordinateManagedHostTrustTransition({

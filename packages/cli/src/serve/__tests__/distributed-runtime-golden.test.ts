@@ -1,5 +1,5 @@
-import { CleanupRegistry } from "@zhixing/server";
-import { assertGolden } from "@zhixing/test-utils";
+import { CleanupRegistry } from "@zhixing-ai/server";
+import { assertGolden } from "@zhixing-ai/test-utils";
 import { describe, it, vi } from "vitest";
 import { AssemblyLifecycleContributions } from "../assembly-lifecycle.js";
 import { StartupRollback } from "../startup-rollback.js";

@@ -9,37 +9,37 @@ import type {
   FullAuthorityCheckpointPayload,
   HomeTrustEvent,
   RecoveryCheckpointVerification,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   decodeCommitEnvelope,
   type ArtifactStore,
-} from "@zhixing/core/authority";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   runStorageMaintenanceStep,
   storageMaintenanceRequest,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import {
   canonicalize,
   prepareAuthorityCatalog,
   protocolDigest,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   CheckpointPackage,
-} from "@zhixing/mesh/checkpoint";
+} from "@zhixing-ai/mesh/checkpoint";
 import {
   createRecoveryCheckpointVerification,
   verifyRecoveryCheckpointVerification,
   verifyStoredFullAuthorityCheckpoint,
-} from "@zhixing/mesh/checkpoint";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/mesh/checkpoint";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
 import {
   EMPTY_TRUST_STREAM_FOLD,
   foldTrustStreamRecord,
   homeTrustEventDigest,
   replayTrustChain,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { PendingObligationTracker } from "./planned-anchor-transfer.js";
 import type { DisasterRecoveryStagingReceiver } from "./disaster-recovery-staging.js";
 

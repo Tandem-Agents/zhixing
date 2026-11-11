@@ -1,18 +1,18 @@
-import type { ChannelChallengeAction } from "@zhixing/core/channels";
+import type { ChannelChallengeAction } from "@zhixing-ai/core/channels";
 import type {
   DataPlaneTicket,
   ExecutionRef,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   type AssignmentSubmissionPreflightPort,
   type ConversationRunJournal,
-} from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   ChannelChallengeOutbox,
   type ChannelChallengeOutboxStore,
-} from "@zhixing/owner-kernel/channel-challenge-outbox";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/owner-kernel/channel-challenge-outbox";
+import { channelSurfacePrincipal } from "@zhixing-ai/owner-kernel/control-admission";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import type { JobInteractionGrantPort } from "./durable-job-interactions.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import {

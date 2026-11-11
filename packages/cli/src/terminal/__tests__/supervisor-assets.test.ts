@@ -5,15 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DeviceCapacityAdmissionError, DeviceCapacityStepError } from '@zhixing/core/resources';
+import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DeviceCapacityAdmissionError, DeviceCapacityStepError } from '@zhixing-ai/core/resources';
 import { TerminalInstanceAssets, type TerminalIdentityResolver } from '../instance-assets.js';
-import type { LogDraft, LogRecordPort } from '@zhixing/core/logging';
+import type { LogDraft, LogRecordPort } from '@zhixing-ai/core/logging';
 import { checkpointFilesystemCompletion } from '../../../../mesh/src/checkpoint-filesystem-completion.js';
 import { TERMINAL_LIMITS } from '../../../../terminal-ui/src/protocol.js';
 import { TerminalChannel } from '../../../../terminal-ui/src/channel.js';
 import { recordTerminalFailure, TERMINAL_ASSET_FAILURE_CODES } from '../failure.js';
 import { TerminalAssetClient } from '../asset-client.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 // 执行生产的 S 资产请求处理：存储账户换成可控替身，期限常量由用例注入（生产值另行核对）
 const source = ts.createSourceFile('supervisor.ts', readFileSync(new URL('../supervisor.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);

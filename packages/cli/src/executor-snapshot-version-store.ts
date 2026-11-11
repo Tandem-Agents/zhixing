@@ -1,26 +1,26 @@
 import { createHash } from "node:crypto";
 import { open, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
-import type { AuthorityCacheIntegrity } from "@zhixing/core/authority";
-import type { TrustRuleSnapshot } from "@zhixing/core/contracts";
-import type { PermissionRule } from "@zhixing/core/security";
+import type { AuthorityCacheIntegrity } from "@zhixing-ai/core/authority";
+import type { TrustRuleSnapshot } from "@zhixing-ai/core/contracts";
+import type { PermissionRule } from "@zhixing-ai/core/security";
 import type {
   ExecutorCapabilityDirectoryState,
   ExecutorCapabilityDirectoryStore,
   ProtocolSignatureVerifier,
   ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   canonicalize,
   createSignedTrustRuleSnapshot,
   normalizeTrustRulesForSnapshot,
   validateTrustRuleSnapshot,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   acquireFileLock,
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 

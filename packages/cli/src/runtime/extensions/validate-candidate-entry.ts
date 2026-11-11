@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { validateExtensionCandidate } from "@zhixing/core/extensions/candidate";
-import { channelDeclaration } from "@zhixing/core/channels/extension";
+import { validateExtensionCandidate } from "@zhixing-ai/core/extensions/candidate";
+import { channelDeclaration } from "@zhixing-ai/core/channels/extension";
 
 try {
   if (!process.argv[2]) throw new Error("用法：node validate.mjs <candidate.json>");

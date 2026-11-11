@@ -2,7 +2,7 @@ import { expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { IsolatedLogStore } from "./store-process.js";
-import { LogAppendIndeterminateError, LogStorageError } from "@zhixing/core/logging";
+import { LogAppendIndeterminateError, LogStorageError } from "@zhixing-ai/core/logging";
 
 vi.mock("node:child_process", async original => ({ ...await original<typeof import("node:child_process")>(), fork: vi.fn() }));
 

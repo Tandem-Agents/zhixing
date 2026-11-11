@@ -1,9 +1,9 @@
-import type { AuthorityCommitLog, ProjectionTransactionContext } from '@zhixing/core/authority';
-import { assertLocalConversationIdForDevice } from '@zhixing/core/conversation';
-import { assertCurrentAnchorTenure } from '@zhixing/core/protocol';
-import { CONVERSATION_TRANSFER_PROJECTION_ID, localConversationAuthorityAt } from '@zhixing/owner-kernel/conversation-transfer';
-import { CONVERSATION_IDENTITY_PROJECTION_ID, conversationIdentityExistsAt } from '@zhixing/owner-kernel/control-admission';
-import { MeshProtocolError } from '@zhixing/mesh/errors';
+import type { AuthorityCommitLog, ProjectionTransactionContext } from '@zhixing-ai/core/authority';
+import { assertLocalConversationIdForDevice } from '@zhixing-ai/core/conversation';
+import { assertCurrentAnchorTenure } from '@zhixing-ai/core/protocol';
+import { CONVERSATION_TRANSFER_PROJECTION_ID, localConversationAuthorityAt } from '@zhixing-ai/owner-kernel/conversation-transfer';
+import { CONVERSATION_IDENTITY_PROJECTION_ID, conversationIdentityExistsAt } from '@zhixing-ai/owner-kernel/control-admission';
+import { MeshProtocolError } from '@zhixing-ai/mesh/errors';
 import type { HomeAuthoritySources } from './home-authority-sources.js';
 
 export interface ConversationAuthorityClaim {

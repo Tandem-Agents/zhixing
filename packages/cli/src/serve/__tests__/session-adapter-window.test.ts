@@ -10,13 +10,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildCompactSummaryPair, buildStartupBootstrapPair, type WindowCompact } from "@zhixing/core/context";
-import { type Message } from "@zhixing/core";
-import { type RunRecordInput } from "@zhixing/core/transcript";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type RuntimeFactory } from "@zhixing/owner-kernel/types";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
-import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
+import { buildCompactSummaryPair, buildStartupBootstrapPair, type WindowCompact } from "@zhixing-ai/core/context";
+import { type Message } from "@zhixing-ai/core";
+import { type RunRecordInput } from "@zhixing-ai/core/transcript";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
+import type { AgentRuntime } from "@zhixing-ai/orchestrator/runtime";
+import { createOwnerRuntimeAdapter } from "@zhixing-ai/runtime-host/session-adapter";
 
 // ─── 辅助 ───
 

@@ -3,8 +3,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { WorksceneBusyError } from "@zhixing/owner-kernel/conversation-manager";
-import { ProxyMessageScheduler } from "@zhixing/owner-services/advancement";
+import { WorksceneBusyError } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { ProxyMessageScheduler } from "@zhixing-ai/owner-services/advancement";
 import { createAdvancementProxyTurnPort } from "../adapters.js";
 
 describe("ProxyMessageScheduler", () => {

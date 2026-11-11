@@ -1,19 +1,19 @@
-import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
+import { DurableConversationAdmissionRejectedError } from "@zhixing-ai/owner-kernel/run-turn";
 import {
   WorksceneBusyError,
   type ConversationManager,
-} from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
 import type {
   AdvancementEventSink,
   AdvancementOriginalTaskAdmissionPort,
   AdvancementProxyTurnPort,
-} from "@zhixing/owner-services/advancement";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { advancementOriginalTaskInput } from "@zhixing/core/advancement";
-import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
-import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
+} from "@zhixing-ai/owner-services/advancement";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { advancementOriginalTaskInput } from "@zhixing-ai/core/advancement";
+import type { SessionBroadcast } from "@zhixing-ai/rpc/session-broadcast";
+import { createControlSessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc/session-wire";
 
 export function createAdvancementEventSink(
   sessionBroadcast: SessionBroadcast,

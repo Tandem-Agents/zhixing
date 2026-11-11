@@ -3,9 +3,9 @@ import type {
   DurableProjectionMutation,
   DurableProjectionReadContext,
   RebuildableDurableProjectionIndex,
-} from "@zhixing/core/authority";
-import type { CommitEnvelope, JsonValue, LogicalRecord } from "@zhixing/core/contracts";
-import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/authority";
+import type { CommitEnvelope, JsonValue, LogicalRecord } from "@zhixing-ai/core/contracts";
+import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing-ai/core/delivery";
 import {
   createJobGuardState,
   createJobMainState,

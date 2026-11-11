@@ -8,7 +8,7 @@ import {
   canonicalize,
   MAX_PROTOCOL_IDENTIFIER_LENGTH,
 } from "../../protocol/index.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   compileDeliveryContent,

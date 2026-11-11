@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/owner-services",
+  "name": "@zhixing-ai/owner-services",
   "version": "0.1.0",
   "description": "知行 owner 领域服务 — 推进控制、审查调度与恢复维护",
   "type": "module",
@@ -41,7 +41,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*"
+    "@zhixing-ai/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

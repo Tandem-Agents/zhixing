@@ -1,10 +1,10 @@
-import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing/core/authority";
-import { DurableProjectionRecordBindingError } from "@zhixing/core/authority";
-import type { DeviceIdentity, JsonValue, MeshEndpointDescriptor } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import { validateMeshEndpointDescriptor } from "@zhixing/mesh/bootstrap";
-import { validateDeviceTrustRoot } from "@zhixing/mesh/device-identity";
-import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
+import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import { DurableProjectionRecordBindingError } from "@zhixing-ai/core/authority";
+import type { DeviceIdentity, JsonValue, MeshEndpointDescriptor } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import { validateMeshEndpointDescriptor } from "@zhixing-ai/mesh/bootstrap";
+import { validateDeviceTrustRoot } from "@zhixing-ai/mesh/device-identity";
+import type { TrustedMeshPeer } from "@zhixing-ai/mesh/handshake";
 
 /**
  * 成员连接目录：本机认证过的公开连接资料（传输身份、端点），按设备与密钥代际绑定，写进权威日志，

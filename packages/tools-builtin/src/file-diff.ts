@@ -3,7 +3,7 @@ import type {
   FileDiffHunk,
   FileDiffLine,
   FileDiffPresentationArtifact,
-} from "@zhixing/core";
+} from "@zhixing-ai/core";
 
 const MAX_DIFF_INPUT_CHARS = 1_000_000;
 const MAX_ARTIFACT_LINES = 1_000;

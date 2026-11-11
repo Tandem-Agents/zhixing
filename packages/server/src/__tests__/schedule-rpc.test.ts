@@ -11,11 +11,11 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
   type ScheduledTask,
-} from "@zhixing/core/scheduler";
+} from "@zhixing-ai/core/scheduler";
 import {
   createEventBus,
   type IEventBus,
-} from "@zhixing/core/events";
+} from "@zhixing-ai/core/events";
 import {
   createScheduleManagementProductApiContribution,
   createScheduleRuntimeProductApiContribution,
@@ -26,8 +26,8 @@ import {
   type ScheduleManagementRepository,
   type ScheduleRuntimeApplication,
   type ScheduleRuntimeProjectionPort,
-} from "@zhixing/core/scheduler/application";
-import { defineProductApiExactSet, ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/scheduler/application";
+import { defineProductApiExactSet, ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";

@@ -1,4 +1,4 @@
-import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing/core";
+import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing-ai/core";
 import type {
   GrepContextLine,
   GrepFileResult,

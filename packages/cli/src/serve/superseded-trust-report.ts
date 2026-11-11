@@ -1,15 +1,15 @@
-import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing/core/authority";
-import type { DeviceRole, HomeTrustEvent, JsonValue } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
+import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import type { DeviceRole, HomeTrustEvent, JsonValue } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import {
   applyTrustEventWithHistory,
   createSignedTrustEvent,
   homeTrustEventDigest,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import type { CurrentIssuerDeviceRemovalAuthority } from "./device-removal.js";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 

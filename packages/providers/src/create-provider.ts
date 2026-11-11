@@ -9,7 +9,7 @@
  * - createProviderDirect()— 指定 provider ID + 显式 ProviderCredentialEntry，单角色 LLMProvider
  */
 
-import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing/core";
+import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing-ai/core";
 import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
 import { loadConfig } from "./config-loader.js";

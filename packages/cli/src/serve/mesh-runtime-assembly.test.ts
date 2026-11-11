@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import {
   MeshExecutorTopologyTrustState,
   DeviceAdministrationDutyMigrationAdmissionAdapter,
@@ -15,7 +15,7 @@ import type { PairingContinuation } from "./mesh-pairing-continuation-repository
 
 describe("Host current owner projection", () => {
   it("tracks reconciled trust and source-committed transfer through one stable owner", () => {
-    const trust = (deviceId: string) => ({ issuer: { deviceId } }) as import("@zhixing/core/contracts").HomeTrustRecord;
+    const trust = (deviceId: string) => ({ issuer: { deviceId } }) as import("@zhixing-ai/core/contracts").HomeTrustRecord;
     const state = new MeshExecutorTopologyTrustState(trust("first"));
     const owner = () => state.currentAnchorDeviceId();
     expect(owner()).toBe("first");

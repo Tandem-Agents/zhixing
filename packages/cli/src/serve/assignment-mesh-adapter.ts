@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { ArtifactStore } from "@zhixing/core/authority";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
 import {
   collectArtifactRefs,
   describeDispatchArtifactClosure,
@@ -10,7 +10,7 @@ import {
   resolveSealedBundleArtifactClosure,
   validateArtifactReadResponse,
   validateArtifactReceiveProgress,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AssignmentEntry,
@@ -35,8 +35,8 @@ import type {
   SealedBundle,
   SupersedeProof,
   UsageReport,
-} from "@zhixing/core/contracts";
-import { MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
+import { MAX_ASSIGNMENT_ARTIFACT_GRANT_TTL_MS } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   assignmentActivationDigest,
@@ -63,20 +63,20 @@ import {
   assertProtocolIdentifier,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import type {
   MeshServiceRegistry,
   SecureMeshConnection,
-} from "@zhixing/mesh";
+} from "@zhixing-ai/mesh";
 import type {
   OwnerControlPreflightPort,
   OwnerControlRequest,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import type {
   AssignmentSubmissionIdentity,
   AssignmentSubmissionPreflightPort,
-} from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
 import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
 
 export const ASSIGNMENT_ARTIFACT_SERVICE = "assignment.artifacts";
@@ -903,7 +903,7 @@ export class MeshRunSubmissionPort
     context: AuthorityCallContext,
   ): Promise<
     | { committed: true; commitRevision: number }
-    | { committed: false; error: import("@zhixing/core/contracts").AuthorityError }
+    | { committed: false; error: import("@zhixing-ai/core/contracts").AuthorityError }
   > {
     const capability = assignmentCapabilityFromContext(context, bundle.assignmentId);
     const durableAuthorization = await this.options.authorizationFor(bundle.assignmentId);
@@ -965,7 +965,7 @@ export class MeshRunSubmissionPort
     assignmentId: string,
     batch: InteractionMirrorBatch,
     context: AuthorityCallContext,
-  ): Promise<{ mirroredUpTo: number; ordinal: number; mirrorDigest: import("@zhixing/core/contracts").Digest }> {
+  ): Promise<{ mirroredUpTo: number; ordinal: number; mirrorDigest: import("@zhixing-ai/core/contracts").Digest }> {
     const receipt = decodeMirrorReceipt(decode(await this.options.client.request(
       RUN_SUBMISSION_SERVICE,
       encode({
@@ -1603,7 +1603,7 @@ function decodeRange(
 
 function decodeBundleResult(value: unknown):
   | { committed: true; commitRevision: number }
-  | { committed: false; error: import("@zhixing/core/contracts").AuthorityError } {
+  | { committed: false; error: import("@zhixing-ai/core/contracts").AuthorityError } {
   assertPlainObject(value, "Bundle submission result");
   if (value.committed === true) {
     assertExactKeys(value, ["commitRevision", "committed"]);
@@ -1620,7 +1620,7 @@ function decodeBundleResult(value: unknown):
 function decodeMirrorReceipt(value: unknown): {
   mirroredUpTo: number;
   ordinal: number;
-  mirrorDigest: import("@zhixing/core/contracts").Digest;
+  mirrorDigest: import("@zhixing-ai/core/contracts").Digest;
 } {
   assertPlainObject(value, "Interaction mirror receipt");
   assertExactKeys(value, ["mirrorDigest", "mirroredUpTo", "ordinal"]);

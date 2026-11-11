@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   DeviceIdentity,
@@ -12,27 +12,27 @@ import type {
   SecretRef,
   SecretStorePort,
   Signature,
-} from "@zhixing/core/contracts";
-import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/contracts";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import {
   canonicalize,
   createSignedDisasterRecoveryCommand,
   protocolDigest,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
-import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
-import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey, persistDeviceKey } from "@zhixing/mesh/device-key-store";
-import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
+} from "@zhixing-ai/core/protocol";
+import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing-ai/mesh/blind-rendezvous";
+import { MeshEndpointDirectory } from "@zhixing-ai/mesh/bootstrap";
+import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing-ai/mesh/device-identity";
+import { loadActiveAnchorIssuerKey, persistDeviceKey } from "@zhixing-ai/mesh/device-key-store";
+import { captureFullAuthorityCheckpoint } from "@zhixing-ai/mesh/full-checkpoint";
 import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
 import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
-import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
-import { projectDurableRecoveryBackupStatus } from "@zhixing/mesh/checkpoint-service";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+import { RecoveryActivationCoordinator } from "@zhixing-ai/mesh/bootstrap-authority";
+import { FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";
+import { projectDurableRecoveryBackupStatus } from "@zhixing-ai/mesh/checkpoint-service";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   applyTrustEvent,
   buildHomeTrustRecord,
@@ -45,9 +45,9 @@ import {
   readTrustProjectionAt,
   replayTrustChain,
   trustBranchAdoptionId,
-} from "@zhixing/mesh/trust-chain";
-import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
-import { currentAndPreviousRendezvousKeys } from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/trust-chain";
+import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
+import { currentAndPreviousRendezvousKeys } from "@zhixing-ai/mesh/bootstrap";
 import {
   localChainOfEvents,
   openHomeDiscovery,
@@ -55,7 +55,7 @@ import {
   type HomeDiscoveryBudget,
   type HomeDiscoveryResumePoint,
   type HomeDiscoveryServerPorts,
-} from "@zhixing/mesh/home-discovery";
+} from "@zhixing-ai/mesh/home-discovery";
 import { createPlannedAnchorReadinessCoordinator } from "../setup-delivery.js";
 import {
   createExecutorRemovalRecoveryEvidence,
@@ -1386,7 +1386,7 @@ async function liveTarget(f: Awaited<ReturnType<typeof createHome>>, relayPort: 
     target,
     progressLog: store.authorityLog(),
     async terminalReceipt(operationId: string) {
-      const { DeviceLifecycleJournal } = await import("@zhixing/core/authority");
+      const { DeviceLifecycleJournal } = await import("@zhixing-ai/core/authority");
       const state = await new DeviceLifecycleJournal(log, f.verifier).state(operationId);
       const ref = state?.peerEffects.find((effect) => effect.kind === "issuer-terminal")?.evidence.find((item) => item.artifact)?.artifact;
       if (!ref) throw new Error("no durable issuer terminal");

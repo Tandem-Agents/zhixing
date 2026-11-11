@@ -5,8 +5,8 @@
  * - 旧前缀历史只在证实写成（同一游标、同一代次）后才被公布；缺失或旧代都不把缺键当作首次使用。
  */
 import path from "node:path";
-import { AuthorityCacheIntegrity, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { captureFileIo, defaultFileIoCategory } from "@zhixing/test-utils";
+import { AuthorityCacheIntegrity, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { captureFileIo, defaultFileIoCategory } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { ConversationAssignmentLedger } from "../assignment-ledger.js";
 import { ExecutorResourceGovernor } from "../resource-governor.js";

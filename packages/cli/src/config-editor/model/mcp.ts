@@ -8,9 +8,9 @@
  * 不在此面板。
  */
 import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, WorkingState } from "../types.js";
-import type { McpManagementServerStatus } from "@zhixing/core/mcp-management";
+import type { McpManagementServerStatus } from "@zhixing-ai/core/mcp-management";
 import { clearInputBuffer, isMcpServerEnabled, listMcpServerIds, patchMcpSecrets, removeMcpServer, setInputBuffer, setMcpServerEnabled, upsertMcpServer } from "../state.js";
-import { applyMcpSetup, validateMcpSetup } from "@zhixing/core/mcp-management";
+import { applyMcpSetup, validateMcpSetup } from "@zhixing-ai/core/mcp-management";
 import type { KeyEvent } from "../../tui/key-event.js";
 
 export const ACTION_TOGGLE = 0;

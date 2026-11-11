@@ -23,7 +23,7 @@ const workspaceProjects = listWorkspaceProjects();
 const exactVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const directByName = new Map(inventory.direct.map((entry) => [entry.name, entry]));
 const declaredExternalDependencies = Object.keys(meshManifest.dependencies ?? {})
-  .filter((name) => name !== "@zhixing/core")
+  .filter((name) => name !== "@zhixing-ai/core")
   .sort();
 const reviewedDirectDependencies = [...directByName.keys()].sort();
 const reviewedProductionDependencies = inventory.direct
@@ -47,7 +47,7 @@ for (const project of workspaceProjects) {
   for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
     for (const name of reviewedDirectDependencies) {
       if (manifest[section]?.[name]) {
-        errors.push(`${name} may only be declared by @zhixing/mesh, not ${project.name ?? project.path}`);
+        errors.push(`${name} may only be declared by @zhixing-ai/mesh, not ${project.name ?? project.path}`);
       }
     }
   }
@@ -186,7 +186,7 @@ function installedSecurityClosure(rootNames) {
   const tree = installedMeshTree(false, "Infinity");
   const closure = new Set();
   const visit = (name, node) => {
-    if (!node || name === "@zhixing/core") return;
+    if (!node || name === "@zhixing-ai/core") return;
     const key = `${name}@${node.version}`;
     if (closure.has(key)) return;
     closure.add(key);
@@ -198,7 +198,7 @@ function installedSecurityClosure(rootNames) {
 }
 
 function installedMeshTree(productionOnly, depth) {
-  const args = ["--filter", "@zhixing/mesh", "list"];
+  const args = ["--filter", "@zhixing-ai/mesh", "list"];
   if (productionOnly) args.push("--prod");
   args.push("--depth", depth, "--json");
   const [tree] = JSON.parse(runPnpm(args));
@@ -315,7 +315,7 @@ async function validatePakeBoundary(approval, projects, validationErrors) {
         approval.status === "blocked" &&
         relative !== adapterRelative &&
         (source.includes("pairing-pake-cipherman") ||
-          source.includes(`@zhixing/mesh/${approval.exportSubpath?.replace(/^\.\//, "")}`))
+          source.includes(`@zhixing-ai/mesh/${approval.exportSubpath?.replace(/^\.\//, "")}`))
       ) {
         validationErrors.push(`blocked PAKE adapter is mounted by: ${relative}`);
       }

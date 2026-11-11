@@ -17,7 +17,7 @@ import ts from 'typescript';
 
 export const PROGRAM_BUNDLE_HELPER = 'zhixing:program-module-url';
 const HELPER_NAMESPACE = 'zhixing-program-module-url';
-const CLI_PACKAGE = '@zhixing/cli';
+const CLI_PACKAGE = 'zhixing';
 
 /** 运行时可能装入 bundle 之外代码的位置（非字面量 import()/require()/__require()/require.resolve()/createRequire(...)(x)）。
  * 逐条评审：按所属包与规范化后的调用文本归属（产物块名带哈希、每次构建都变，不作键），次数必须完全一致；

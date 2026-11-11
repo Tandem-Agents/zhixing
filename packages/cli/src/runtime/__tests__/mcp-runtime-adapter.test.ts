@@ -1,5 +1,5 @@
-import type { ToolExecutionContext } from "@zhixing/core";
-import type { McpHub, McpServerCatalog, McpServerStatus } from "@zhixing/mcp";
+import type { ToolExecutionContext } from "@zhixing-ai/core";
+import type { McpHub, McpServerCatalog, McpServerStatus } from "@zhixing-ai/mcp";
 import { describe, expect, it, vi } from "vitest";
 import { adaptMcpHub } from "../mcp-runtime-adapter.js";
 

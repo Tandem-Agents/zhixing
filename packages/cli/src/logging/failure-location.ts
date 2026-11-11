@@ -1,1 +1,1 @@
-export { failureSourceFrames } from '@zhixing/core/logging';
+export { failureSourceFrames } from '@zhixing-ai/core/logging';

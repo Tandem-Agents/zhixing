@@ -3,7 +3,7 @@ import { TextDecoder } from "node:util";
 import type {
   DataPlaneTicket,
   ExecutionAbortRequest,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   validateDataPlaneTicket,
@@ -11,15 +11,15 @@ import {
   validateFirstPartyInteractionDecision,
   type FirstPartyInteractionDecision,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   DataPlaneTicketRegistry,
-} from "@zhixing/executor";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/executor";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import type {
   MeshServiceRegistry,
   SecureMeshConnection,
-} from "@zhixing/mesh";
+} from "@zhixing-ai/mesh";
 import {
   ConversationInteractionRuntimeUnavailableError,
   type ConversationInteractionAnswerPort,

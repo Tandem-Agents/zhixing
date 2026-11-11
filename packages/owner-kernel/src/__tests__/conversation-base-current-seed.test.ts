@@ -8,7 +8,7 @@
  */
 
 import { expect, it, vi } from 'vitest';
-import type { DurableProjectionReadContext } from '@zhixing/core/authority';
+import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
 import { BASE_CONVERSATION, BASE_TRANSFER, baseVerifier, createConversationBaseHarness } from './conversation-base-harness.js';
 import { recordBuilders, type Body } from './outside-history-test-support.js';
 import { ConversationReadIndex } from '../conversation-read-index.js';

@@ -17,7 +17,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn as spawnProcess } from "node:child_process";
 import { spawnDaemon } from "../daemon.js";
-import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogDraft, type LogRecordPort, type LogSink, type LogStatus } from "@zhixing/core/logging";
+import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogDraft, type LogRecordPort, type LogSink, type LogStatus } from "@zhixing-ai/core/logging";
 import { RUNTIME_LOG_SOURCE } from "../../logging/runtime-source.js";
 
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
-import { parseConversationId } from '@zhixing/core/conversation';
+import { parseConversationId } from '@zhixing-ai/core/conversation';
 
 // 待确认任务的推进快照按会话作用域读取：场景会话不能经普通对话目录的 session.resume
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);

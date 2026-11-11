@@ -1,7 +1,7 @@
-import type { ConversationBodyCursor, ConversationRunOutcomesPage, TranscriptToolFacts } from '@zhixing/core/contracts';
-import type { TranscriptBodyCursor } from '@zhixing/core/transcript';
-import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
-import { sliceBodyNodes } from '@zhixing/terminal-ui/body-model';
+import type { ConversationBodyCursor, ConversationRunOutcomesPage, TranscriptToolFacts } from '@zhixing-ai/core/contracts';
+import type { TranscriptBodyCursor } from '@zhixing-ai/core/transcript';
+import type { TerminalDisplaySegment } from '@zhixing-ai/terminal-ui/protocol';
+import { sliceBodyNodes } from '@zhixing-ai/terminal-ui/body-model';
 import { HistoryBodyRangeCache } from './body-projection.js';
 import { formatHistoryToolCard } from '../tool-card-format.js';
 import { modelFailureText } from './model-failure.js';

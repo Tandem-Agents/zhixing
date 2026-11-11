@@ -11,7 +11,7 @@
 
 import type {
   InboundMessage,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 
 /**
  * 控制意图 — 当前仅 cancel,后续按需扩。

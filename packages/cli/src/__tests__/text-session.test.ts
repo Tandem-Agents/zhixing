@@ -3,9 +3,9 @@ import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoreHostConnection } from '../runtime/core-host-connection.js';
 import type { StartupCheckResult } from '../startup.js';
-import type { LogRecordPort } from '@zhixing/core/logging';
-import { PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing/core/conversation/application';
-import { DEFAULT_LOG_POLICY } from '@zhixing/core/logging';
+import type { LogRecordPort } from '@zhixing-ai/core/logging';
+import { PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing-ai/core/conversation/application';
+import { DEFAULT_LOG_POLICY } from '@zhixing-ai/core/logging';
 
 const f = vi.hoisted(() => ({
   options: undefined as any,
@@ -48,7 +48,7 @@ vi.mock('../runtime/observed-turn-presenter.js', () => ({ createObservedTurnPres
 }) }));
 vi.mock('../runtime/advancement-control-presenter.js', () => ({ createAdvancementControlPresenter: () => ({ dispose() {} }) }));
 vi.mock('../runtime/publish-result-presenter.js', () => ({ createPublishResultPresenter: () => ({ dispose() {} }) }));
-vi.mock('@zhixing/rpc/skill-catalog-client', () => ({ SkillCatalogRpcClient: class {
+vi.mock('@zhixing-ai/rpc/skill-catalog-client', () => ({ SkillCatalogRpcClient: class {
   query = f.skillQuery; onFact() { return f.skillDetach; }
 } }));
 vi.mock('../user-turn-input.js', () => ({ prepareUserTurnInput: async (text: string) => ({ input: { parts: [{ type: 'text', text }] }, errors: [] }) }));

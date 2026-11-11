@@ -16,7 +16,7 @@ import {
   type IToolArgumentExtractor,
   type PermissionRule,
   type SessionType,
-} from "@zhixing/core/security";
+} from "@zhixing-ai/core/security";
 import { describe, expect, it } from "vitest";
 import { createWebFetchTool, WEB_FETCH_DEFAULT_RULES } from "../index.js";
 

@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import { createExtensionArtifactReceiver } from "../extension-artifact-receiver-infrastructure.js";
-import { ExtensionApplication, extensionPublicSnapshot } from "@zhixing/core/extensions/application";
-import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
-import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
-import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
-import type { ExtensionCandidate } from "@zhixing/core/extensions/contracts";
-import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { MeshServiceClient } from "@zhixing/mesh";
+import { ExtensionApplication, extensionPublicSnapshot } from "@zhixing-ai/core/extensions/application";
+import { ExtensionArtifacts } from "@zhixing-ai/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing-ai/core/extensions/candidate";
+import { ExtensionOnboarding } from "@zhixing-ai/core/extensions/onboarding";
+import type { ExtensionCandidate } from "@zhixing-ai/core/extensions/contracts";
+import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { MeshServiceClient } from "@zhixing-ai/mesh";
 import { createMeshExtensionManagement, registerExtensionManagementMesh } from "../extension-management-mesh.js";
 
 async function fixture() {

@@ -1,5 +1,5 @@
 /**
- * @zhixing/orchestrator/runtime — 公共 API barrel。
+ * @zhixing-ai/orchestrator/runtime — 公共 API barrel。
  *
  * 仅导出真正面向消费者的契约,避免 internal helper 误入公共 API 表面。
  *

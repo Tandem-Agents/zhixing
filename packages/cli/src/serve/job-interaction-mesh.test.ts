@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import { canonicalize } from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import { describe, expect, it } from "vitest";
 import { JobInteractionMeshClient } from "./job-interaction-mesh.js";
 

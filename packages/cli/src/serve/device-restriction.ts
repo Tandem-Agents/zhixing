@@ -1,6 +1,6 @@
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-// 本模块也被终端监督进程 S 引用：S 的启动包只内联小而纯 ESM 的依赖，这里不引入 @zhixing/server/client 等重依赖；
+// 本模块也被终端监督进程 S 引用：S 的启动包只内联小而纯 ESM 的依赖，这里不引入 @zhixing-ai/server/client 等重依赖；
 // 非原生平台的出生时间回退由宿主与拉起方按需注入
 import { readPlatformProcessBirth, resolvePlatformProcessStartTime, type PlatformProcessBirth } from "../platform/secret-platform.js";
 import type { ExecutorRemovalDomainState, ExecutorRemovalLostCleanup } from "./device-removal.js";

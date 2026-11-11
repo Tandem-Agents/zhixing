@@ -1,7 +1,7 @@
 import type {
   ChannelChallengeToken,
   ChannelInteractionGrant,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedChannelChallengeToken,
   createSignedChannelInteractionGrant,
@@ -10,7 +10,7 @@ import {
   streamDigestSeed,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   advanceChannelInteractionJournal,

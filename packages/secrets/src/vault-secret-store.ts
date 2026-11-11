@@ -13,7 +13,7 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import type { MasterKeyProvider } from "./master-key.js";
 import { acquireFileLock, type FileLockOptions } from "./file-lock.js";
 

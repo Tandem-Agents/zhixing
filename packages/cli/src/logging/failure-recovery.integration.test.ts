@@ -3,7 +3,7 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile, fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { beginRuntimeLogging } from "./runtime.js";
 
 it("the native file worker preserves finite failure evidence across its IPC boundary", async () => {

@@ -1,4 +1,4 @@
-import { TERMINAL_LIMITS, TERMINAL_SUMMARY_LIMITS, TERMINAL_VIEW_ENVELOPE_BYTES, type TerminalView, type TerminalSelectionCancelCause, type TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, TERMINAL_SUMMARY_LIMITS, TERMINAL_VIEW_ENVELOPE_BYTES, type TerminalView, type TerminalSelectionCancelCause, type TerminalSummary } from '@zhixing-ai/terminal-ui/protocol';
 import type { SelectionRequest, SelectionResult } from '../tui/selection/types.js';
 
 export interface TerminalSelectionResponse { readonly itemId: string; readonly input?: string; readonly cancelCause?: TerminalSelectionCancelCause }

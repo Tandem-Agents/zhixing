@@ -1,5 +1,5 @@
-import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing/core/resources';
-import { BODY_PROJECTION_WORK_BYTES } from '@zhixing/terminal-ui/body-model';
+import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing-ai/core/resources';
+import { BODY_PROJECTION_WORK_BYTES } from '@zhixing-ai/terminal-ui/body-model';
 import { terminalPhysicalStep } from './physical-step.js';
 
 const budget: DeviceCapacityBudget = {

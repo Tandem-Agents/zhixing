@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from 'node:events';
 import { createRpcConnection } from '../../../../server/src/rpc/connection.js';
-import { projectProcessYield } from '@zhixing/rpc/session-wire';
-import { localConversationId, type TaskListState } from "@zhixing/core/conversation";
-import { RPC_ERROR_CODES, RpcAppError } from "@zhixing/server";
-import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+import { projectProcessYield } from '@zhixing-ai/rpc/session-wire';
+import { localConversationId, type TaskListState } from "@zhixing-ai/core/conversation";
+import { RPC_ERROR_CODES, RpcAppError } from "@zhixing-ai/server";
+import { parseConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import {
   ExecutorFirstPartyRpcRouter,
   LocalConversationRpcRouter,

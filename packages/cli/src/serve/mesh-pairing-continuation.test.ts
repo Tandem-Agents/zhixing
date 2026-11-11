@@ -1,5 +1,5 @@
-import { canonicalize } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";

@@ -10,8 +10,8 @@ import { terminalWriterDeclarationFactory } from '../writer-declaration.js';
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createPlatformSecretStore } from '@zhixing/secrets';
-import { createTempDir } from '@zhixing/test-utils';
+import { createPlatformSecretStore } from '@zhixing-ai/secrets';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 describe.skipIf(process.platform !== 'win32')('terminal native log declaration', () => {
   it('matches existing lock births and round-trips current-user DPAPI without shell-owned secrets', async () => {

@@ -1,4 +1,4 @@
-import { mainProfile, type AgentRoleProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile, type AgentRoleProfile } from "@zhixing-ai/orchestrator/profile";
 
 /** 知行产品共同价值；主助手与受委派子任务只在此定义一次。 */
 export const ZHIXING_VALUES = "你认真对待托付，胜过表现自己。守法向善，不为达成目标而不择手段或伤害他人。";

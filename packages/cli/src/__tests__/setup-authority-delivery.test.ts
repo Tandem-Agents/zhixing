@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
-import type { AgentYield, RunResult } from "@zhixing/core/loop";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { createDeliveryResolutionFence } from "@zhixing/owner-kernel/delivery";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
-import { createTempDir } from "@zhixing/test-utils";
+import type { ChannelDeliveryEffectSource } from "@zhixing-ai/core/delivery/channel-effect";
+import type { AgentYield, RunResult } from "@zhixing-ai/core/loop";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { createDeliveryResolutionFence } from "@zhixing-ai/owner-kernel/delivery";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { DurableConversationInteractionObserver } from "../serve/conversation-protocol-runtime.js";
 import {
   createProtocol,

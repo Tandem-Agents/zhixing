@@ -1,8 +1,8 @@
-import { canonicalize } from "@zhixing/core/protocol";
-import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import type { HomeTrustEvent, HomeTrustRecord } from "@zhixing-ai/core/contracts";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { CheckpointPackage } from "@zhixing-ai/mesh/checkpoint";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import { describe, expect, it, vi } from "vitest";
 import {
   createBorrowedMeshPairedCheckpointTargetSessions,

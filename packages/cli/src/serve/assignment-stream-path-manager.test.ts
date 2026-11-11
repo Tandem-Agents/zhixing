@@ -4,8 +4,8 @@ import type {
   StreamConsumerAuth,
   StreamFrame,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
-import { StreamConsumerDegradedError } from "@zhixing/executor/assignment-stream-spool";
+} from "@zhixing-ai/core/contracts";
+import { StreamConsumerDegradedError } from "@zhixing-ai/executor/assignment-stream-spool";
 import { describe, expect, it, vi } from "vitest";
 import {
   AssignmentStreamPathManager,

@@ -4,13 +4,13 @@ import {
   type ImmediateRootReservationInspection,
   type LocalEnvironmentControlContext,
   type ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   WorkspaceControlAttemptSpentError,
   type WorkspaceAdministrationControlPort,
   type WorkspaceAdministrationControlRequest,
-} from "@zhixing/core/environment/workspace-administration";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/environment/workspace-administration";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
 

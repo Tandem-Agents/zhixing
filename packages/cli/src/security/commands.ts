@@ -10,9 +10,9 @@ import chalk from "chalk";
 import type {
   TrustAdministrationRule,
   TrustAdministrationScopeGroup,
-} from "@zhixing/core/trust-administration";
-import type { SessionSecurityResult } from "@zhixing/rpc";
-import type { TerminalSummary } from "@zhixing/terminal-ui/protocol";
+} from "@zhixing-ai/core/trust-administration";
+import type { SessionSecurityResult } from "@zhixing-ai/rpc";
+import type { TerminalSummary } from "@zhixing-ai/terminal-ui/protocol";
 import type { CliWriter } from "../screen/index.js";
 import { formatGroupedRuleDescription, formatRuleDescription } from "./trust-rule-format.js";
 import { securityOverview, securityRulesDetail } from "./security-summary.js";

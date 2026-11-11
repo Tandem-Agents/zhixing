@@ -1,5 +1,5 @@
-import type { AdvancementProposalFact } from "@zhixing/core/advancement";
-import type { AdvancementPresentationEvent } from "@zhixing/owner-services/advancement";
+import type { AdvancementProposalFact } from "@zhixing-ai/core/advancement";
+import type { AdvancementPresentationEvent } from "@zhixing-ai/owner-services/advancement";
 
 /**
  * 提议阶段的结果沿现有推进事件出口推送：草案就绪为 contract_draft（发起端据此拉起确认面），

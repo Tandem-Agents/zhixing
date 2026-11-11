@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { SessionSecurityResult } from "@zhixing/rpc";
-import { TERMINAL_LIMITS, TERMINAL_SUMMARY_LIMITS } from "@zhixing/terminal-ui/protocol";
-import { TerminalChannel } from "@zhixing/terminal-ui/channel";
+import type { SessionSecurityResult } from "@zhixing-ai/rpc";
+import { TERMINAL_LIMITS, TERMINAL_SUMMARY_LIMITS } from "@zhixing-ai/terminal-ui/protocol";
+import { TerminalChannel } from "@zhixing-ai/terminal-ui/channel";
 import { securityOverview, securityRulesDetail, SECURITY_DETAIL_BYTES, SECURITY_OVERVIEW_ROWS } from "../security-summary.js";
 import { summaryLines } from "../../summary-projection.js";
 import { chooseTerminalSelection, terminalSelectionActions, type TerminalSelectionPort } from "../../terminal/selection.js";

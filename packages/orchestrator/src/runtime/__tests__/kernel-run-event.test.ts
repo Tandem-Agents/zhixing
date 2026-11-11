@@ -1,4 +1,4 @@
-import type { AgentYield } from "@zhixing/core/loop";
+import type { AgentYield } from "@zhixing-ai/core/loop";
 import { describe, expect, it } from "vitest";
 import { projectAgentYieldToKernelRunEvent } from "../kernel-run-event.js";
 

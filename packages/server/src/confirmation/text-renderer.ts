@@ -26,12 +26,12 @@ import type {
   DeliveryResult,
   DeliveryTarget,
   OutboundContent,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 import type {
   ConfirmationRequest,
   DisplayBody,
-} from "@zhixing/core/confirmation";
-import type { ConfirmationHub, HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/confirmation";
+import type { ConfirmationHub, HubEntry } from "@zhixing-ai/owner-kernel/confirmation-hub";
 
 // ─── 选项 ───
 

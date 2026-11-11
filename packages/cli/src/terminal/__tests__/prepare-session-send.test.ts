@@ -7,7 +7,7 @@ import { prepareSessionSendEngage } from '../../session-engage.js';
 import { prepareSessionSendSnapshot } from '../prepare-session-send.js';
 import { jsonStringBytes, SessionSendJsonWriter, SESSION_SEND_WIRE_BYTES } from '../session-send-encoding.js';
 import { readBoundedInputFile } from '../bounded-input-file.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 const identity = { turnId: 'test-turn', conversationId: 'test-conversation', surfaceCapabilities: { postTurnControl: true as const }, acceptLimitedCapabilities: true as const };
 
 async function fixture() {

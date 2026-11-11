@@ -1,4 +1,4 @@
-import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
+import type { CheckpointPackage } from "@zhixing-ai/mesh/checkpoint";
 
 export interface PublishedRecoveryCheckpointTarget {
   readonly targetId: string;

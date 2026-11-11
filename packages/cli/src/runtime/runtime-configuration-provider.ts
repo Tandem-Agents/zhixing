@@ -1,11 +1,11 @@
 import {
   describeProxy,
   type ProxyDescription,
-} from "@zhixing/network/proxy";
+} from "@zhixing-ai/network/proxy";
 import {
   loadConfig,
   type ZhixingConfig,
-} from "@zhixing/providers/configuration";
+} from "@zhixing-ai/providers/configuration";
 import {
   projectRuntimeConfiguration,
   type RuntimeTopologyConfigurationProjection,

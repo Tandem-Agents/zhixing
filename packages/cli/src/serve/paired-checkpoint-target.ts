@@ -1,5 +1,5 @@
-import type { HomeTrustEvent } from "@zhixing/core/contracts";
-import type { RootActivationRecord } from "@zhixing/mesh/paired-checkpoint-target";
+import type { HomeTrustEvent } from "@zhixing-ai/core/contracts";
+import type { RootActivationRecord } from "@zhixing-ai/mesh/paired-checkpoint-target";
 import type {
   InventoryPublishedRecoveryCheckpointTarget,
   PublishedRecoveryCheckpointTargetSession,

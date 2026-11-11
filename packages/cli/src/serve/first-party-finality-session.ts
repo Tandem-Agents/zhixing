@@ -1,13 +1,13 @@
 import {
   ExecutionFinalityProjection,
   type ExecutionProjectionSubject,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   ExecutionStatusNotice,
   FinalFrame,
   SealedBundle,
   StreamFrame,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 export interface ExecutionStatusCursor {
   readonly subject: ExecutionProjectionSubject;

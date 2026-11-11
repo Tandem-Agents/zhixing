@@ -1,6 +1,6 @@
-import { renderAcceptanceConditions } from "@zhixing/core/advancement";
-import type { AgentRuntimeLifecycle } from "@zhixing/orchestrator/runtime";
-import type { AdvancementController } from "@zhixing/owner-services/advancement";
+import { renderAcceptanceConditions } from "@zhixing-ai/core/advancement";
+import type { AgentRuntimeLifecycle } from "@zhixing-ai/orchestrator/runtime";
+import type { AdvancementController } from "@zhixing-ai/owner-services/advancement";
 
 /**
  * 契约验收条件对执行侧可见的注入订阅者。

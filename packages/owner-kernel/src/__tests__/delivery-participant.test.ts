@@ -3,8 +3,8 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type ProjectionTransactionContext,
-} from "@zhixing/core/authority";
-import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority } from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/authority";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority } from "@zhixing-ai/core/delivery";
 import type {
   CommitEnvelope,
   ConversationRunState,
@@ -14,15 +14,15 @@ import type {
   LogicalRecord,
   TaskDefinition,
   TranscriptRunRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createJobCommitFence,
   createJobSealedBundle,
   createMutationBatch,
   jobDeliveryPlanDigest,
   protocolDigest,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   createOwnerDeliveryLifecycleBinding,

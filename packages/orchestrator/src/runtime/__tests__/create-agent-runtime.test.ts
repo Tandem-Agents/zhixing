@@ -38,15 +38,15 @@ import {
   type AgentEventMap,
   type Message,
   type ToolDefinition,
-} from "@zhixing/core/types";
-import { buildGuidanceMessagePair, type TurnContextProvider } from "@zhixing/core/context";
-import { MockLLMProvider, deriveToolCalls } from "@zhixing/core/loop";
-import { PermissionStore, type PermissionRule } from "@zhixing/core/security";
-import { type IEventBus } from "@zhixing/core/events";
+} from "@zhixing-ai/core/types";
+import { buildGuidanceMessagePair, type TurnContextProvider } from "@zhixing-ai/core/context";
+import { MockLLMProvider, deriveToolCalls } from "@zhixing-ai/core/loop";
+import { PermissionStore, type PermissionRule } from "@zhixing-ai/core/security";
+import { type IEventBus } from "@zhixing-ai/core/events";
 import type {
   AssignmentGlobalQueryPort,
   ModelCallResourceMeter,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type { KernelRunEnvelope } from "../kernel-run-envelope.js";
 import { createKernelModelProviderBinding } from "../kernel-model-provider.js";
 import { createKernelRuntimeEnvironment } from "../kernel-runtime-environment.js";
@@ -63,7 +63,7 @@ import {
 import {
   bindPermissionRuleExecutionSource,
   toPermissionContext,
-} from "@zhixing/core/security";
+} from "@zhixing-ai/core/security";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 

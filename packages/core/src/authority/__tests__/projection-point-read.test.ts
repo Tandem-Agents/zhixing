@@ -3,7 +3,7 @@
  * 那不是顺序访问），区间扫描的顺序读取才成批预读。
  */
 import path from "node:path";
-import { captureFileIo, createTempDir } from "@zhixing/test-utils";
+import { captureFileIo, createTempDir } from "@zhixing-ai/test-utils";
 import { expect, it } from "vitest";
 import { FileDurableProjectionIndex, type DurableLogCheckpoint } from "../index.js";
 

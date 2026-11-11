@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import type { TerminalSummary } from '@zhixing-ai/terminal-ui/protocol';
 import { informationCompactLines, informationContextSummary, informationLines, informationModelLines,
   informationText, informationUsageSummary, type TerminalUsageProjection } from '../information-presentation.js';
 import { summaryLines } from '../../summary-projection.js';

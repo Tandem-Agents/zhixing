@@ -2,9 +2,9 @@
  * 装入重做的边界：缺行逐轮装入；轮数耗尽、或缺行属于本组却装了还缺，给出 JobStateExhausted
  * （不是准备或背压类错误，不进入任何自动重试）；缺行都不属于本组时原样交给外层；一次报出的成批缺行照常补齐。
  */
-import { AuthorityPreparationRequired, awaitAuthorityPreparation, type DurableProjectionReadContext } from "@zhixing/core/authority";
-import type { JsonValue } from "@zhixing/core/contracts";
-import { maintenanceRetryDelayMs } from "@zhixing/core/resources";
+import { AuthorityPreparationRequired, awaitAuthorityPreparation, type DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import type { JsonValue } from "@zhixing-ai/core/contracts";
+import { maintenanceRetryDelayMs } from "@zhixing-ai/core/resources";
 import { describe, expect, it } from "vitest";
 import {
   JobStateBinding,

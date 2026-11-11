@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { createTempDir, captureFileIo } from "@zhixing/test-utils";
+import { createTempDir, captureFileIo } from "@zhixing-ai/test-utils";
 import { AuthorityCacheIntegrity } from "../authority/startup-proofs.js";
 import { observeProjectionQueryWork } from "../test-support/projection-query-work.js";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertAdvancementModelProviderBinding } from "@zhixing/orchestrator/advancement";
-import type { ProviderCredentialProjection, ZhixingConfig } from "@zhixing/providers";
+import { assertAdvancementModelProviderBinding } from "@zhixing-ai/orchestrator/advancement";
+import type { ProviderCredentialProjection, ZhixingConfig } from "@zhixing-ai/providers";
 import { createHostAdvancementModelProviderFactory } from "../advancement-model-provider.js";
 import { projectRuntimeConfiguration } from "../runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../runtime-configuration-snapshot.js";

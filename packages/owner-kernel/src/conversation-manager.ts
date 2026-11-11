@@ -15,11 +15,11 @@
  * - 可测试：grace/idle 超时可通过配置注入
  */
 
-import { createAttentionWindow, type AttentionWindowState, type WindowCompact, type WindowFoldOutcome } from "@zhixing/core/context";
-import { type AbortReason } from "@zhixing/core/interrupt";
-import { type AgentEventMap, type Message } from "@zhixing/core";
-import { SnapshotAnchorInvariantError, TranscriptOutcomeUnknownError, type AppendRunOptions, type AppendRunResult, type AppendCommittedRunResult, type CommittedRunSource, type RunRecordInput, type RunRecordRef, type SnapshotInput, type TurnSource, type TranscriptRunRecord } from "@zhixing/core/transcript";
-import type { ConversationInvocation } from "@zhixing/core/contracts";
+import { createAttentionWindow, type AttentionWindowState, type WindowCompact, type WindowFoldOutcome } from "@zhixing-ai/core/context";
+import { type AbortReason } from "@zhixing-ai/core/interrupt";
+import { type AgentEventMap, type Message } from "@zhixing-ai/core";
+import { SnapshotAnchorInvariantError, TranscriptOutcomeUnknownError, type AppendRunOptions, type AppendRunResult, type AppendCommittedRunResult, type CommittedRunSource, type RunRecordInput, type RunRecordRef, type SnapshotInput, type TurnSource, type TranscriptRunRecord } from "@zhixing-ai/core/transcript";
+import type { ConversationInvocation } from "@zhixing-ai/core/contracts";
 import type {
   AbortResult,
   ConversationBootstrap,

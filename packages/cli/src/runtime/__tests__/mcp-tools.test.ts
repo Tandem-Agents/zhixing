@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createEventBus, type AgentEventMap } from "@zhixing-ai/core";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import { createMcpManagementTools } from "../../serve/mcp-tools.js";
-import { buildDisplayBody, buildConfirmationOptions } from "@zhixing/core/confirmation";
+import { buildDisplayBody, buildConfirmationOptions } from "@zhixing-ai/core/confirmation";
 
 const candidate = { serverId: "demo", source: "inferred", entry: { type: "stdio", command: "npx", args: ["-y", "fixture-server"] }, secretFields: [] };
 const handoff = { goal: "整理资料", constraints: ["不发布"], completed: ["已确认来源"], remaining: ["读取资料并总结"] };

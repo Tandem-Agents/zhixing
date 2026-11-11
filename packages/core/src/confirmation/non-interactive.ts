@@ -54,7 +54,7 @@ export const failToExpiredResolver: NonInteractiveResolver = {
  *
  * **唯一启用路径(仅测试)**:测试代码必须**直接构造 broker 注入**:
  * ```typescript
- * import { ConfirmationBroker, failToAllowResolver } from "@zhixing/core";
+ * import { ConfirmationBroker, failToAllowResolver } from "@zhixing-ai/core";
  * const testBroker = new ConfirmationBroker({ nonInteractiveResolver: failToAllowResolver });
  * ```
  *

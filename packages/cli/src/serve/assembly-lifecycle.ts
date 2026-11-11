@@ -2,7 +2,7 @@ import {
   registerCleanup,
   type CleanupRegistrationDescriptor,
   type CleanupRegistry,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import {
   type StartupCleanupHandle,
   type StartupRollback,

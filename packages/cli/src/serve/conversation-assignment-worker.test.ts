@@ -1,26 +1,26 @@
 import {
   AuthorityStorageError,
   type ArtifactStore,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AuthorityCapability,
   DispatchEnvelope,
   ExecutionAbortRequest,
   SealedBundle,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   InProcessAssignmentSubmission,
   type ConversationAssignmentLedger,
-} from "@zhixing/executor";
-import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
-import { MeshProtocolError } from "@zhixing/mesh/errors";
+} from "@zhixing-ai/executor";
+import type { RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
+import { MeshProtocolError } from "@zhixing-ai/mesh/errors";
 import {
   StreamDigestChain,
   type StreamFrameMeta,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
-import { worksceneTaskContext } from "@zhixing/core/workscene/application";
+import { worksceneTaskContext } from "@zhixing-ai/core/workscene/application";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 
 it("instantiates the exact signed profile when new tools appear before execution", async () => {

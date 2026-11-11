@@ -2440,7 +2440,7 @@ export function inspectChannelRuntimeBoundary(records) {
   if (
     count(channels, "new ManagedExtensions({") !== 1 ||
     count(channels, "new ExtensionApplication({") !== 1 ||
-    /ChannelRegistry|@zhixing\/channel-feishu/u.test(channels) ||
+    /ChannelRegistry|@zhixing-ai\/channel-feishu/u.test(channels) ||
     !channels.includes("createChannelTypeBinding({") ||
     count(channels, "channels: options.channels") !== 1 ||
     !channels.includes("statusSnapshot") ||
@@ -4270,7 +4270,7 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
     !runtimeSource.includes("const securityPipeline = new SecurityPipeline({") ||
     !runtimeSource.includes("permissionRuleSource: securityExecution.permissionRuleSource") ||
     (runtimeSource.match(/securityApproval: securityExecution/gu) ?? []).length !== 3 ||
-    /createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b|@zhixing\/core\/trust-administration|TrustAdministration/u.test(
+    /createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b|@zhixing-ai\/core\/trust-administration|TrustAdministration/u.test(
       runtimeSource,
     ) ||
     [...securityBindings].some(
@@ -4624,7 +4624,7 @@ export function inspectKernelProviderDependencyInversion(records) {
     !modelContract.includes("createKernelModelProviderBinding(") ||
     !modelContract.includes("assertKernelModelProviderBinding(") ||
     !modelContract.includes("Object.isFrozen(binding.roles[roleId])") ||
-    /ZhixingConfig|ProviderCredential|createProviderRoles|@zhixing\/providers/u.test(
+    /ZhixingConfig|ProviderCredential|createProviderRoles|@zhixing-ai\/providers/u.test(
       modelContract,
     )
   ) {
@@ -4635,7 +4635,7 @@ export function inspectKernelProviderDependencyInversion(records) {
     !environmentContract.includes("export interface KernelRuntimeEnvironmentFactory") ||
     !environmentContract.includes("createKernelRuntimeEnvironment(") ||
     !environmentContract.includes("assertKernelRuntimeEnvironment(") ||
-    /ZhixingConfig|resolveWorkspace|ensureWorkspaceDir|@zhixing\/providers/u.test(
+    /ZhixingConfig|resolveWorkspace|ensureWorkspaceDir|@zhixing-ai\/providers/u.test(
       environmentContract,
     )
   ) {
@@ -4652,7 +4652,7 @@ export function inspectKernelProviderDependencyInversion(records) {
     !runtime.includes("readonly runtimeEnvironment: KernelRuntimeEnvironment;") ||
     !runtime.includes("assertKernelModelProviderBinding(options.modelProvider, primaryRole);") ||
     !runtime.includes("assertKernelRuntimeEnvironment(options.runtimeEnvironment);") ||
-    /providerConfiguration|ZhixingConfig|ProviderCredential|createProviderRoles|resolveWorkspace|ensureWorkspaceDir|@zhixing\/providers/u.test(
+    /providerConfiguration|ZhixingConfig|ProviderCredential|createProviderRoles|resolveWorkspace|ensureWorkspaceDir|@zhixing-ai\/providers/u.test(
       runtime,
     )
   ) {
@@ -4665,7 +4665,7 @@ export function inspectKernelProviderDependencyInversion(records) {
     !host.includes("const runtimeEnvironment = this.opts.runtimeEnvironment.create({") ||
     !host.includes("modelProvider,") ||
     !host.includes("runtimeEnvironment,") ||
-    /providerConfiguration|ZhixingConfig|ProviderCredential|@zhixing\/providers/u.test(host) ||
+    /providerConfiguration|ZhixingConfig|ProviderCredential|@zhixing-ai\/providers/u.test(host) ||
     (host.match(/return this\.assemble\s*\(/gu) ?? []).length !== 3
   ) {
     failures.push("RuntimeHost does not issue every runtime through the Host-owned provider factories");
@@ -4710,7 +4710,7 @@ export function inspectKernelProviderDependencyInversion(records) {
   for (const record of records) {
     if (
       record.relative.startsWith("packages/orchestrator/src/") &&
-      record.text.includes("@zhixing/providers")
+      record.text.includes("@zhixing-ai/providers")
     ) {
       failures.push(`${record.relative}: Orchestrator imports the concrete Provider package`);
     }
@@ -4798,19 +4798,19 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     !contract.includes("readonly callText: (prompt: string) => Promise<string>;") ||
     !contract.includes("assembleKernelToolImplementation(") ||
     !contract.includes("exact requested sequence") ||
-    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|SkillCatalog|SkillMode|ArtifactStore/u.test(contract)
+    /@zhixing-ai\/tools-builtin|BUILTIN_TOOL_FACTORIES|SkillCatalog|SkillMode|ArtifactStore/u.test(contract)
   ) failures.push("Kernel Tool demand contract is not finite, exact and concrete-free");
   if (
     !runtime.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
     !runtime.includes("assembleKernelToolImplementation(") ||
     !runtime.includes("profile.enabledTools.filter((name) => name !== \"Task\")") ||
     !runtime.includes("callText: (prompt: string) => mainCallLLM([userMessage(prompt)])") ||
-    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|BUILTIN_TOOL_NAMES|WEB_FETCH_DEFAULT_RULES|createAssignmentSkillPorts|skillCatalogLoad|skillCatalogSave|skillCatalogAdmission|ArtifactStore/u.test(runtime)
+    /@zhixing-ai\/tools-builtin|BUILTIN_TOOL_FACTORIES|BUILTIN_TOOL_NAMES|WEB_FETCH_DEFAULT_RULES|createAssignmentSkillPorts|skillCatalogLoad|skillCatalogSave|skillCatalogAdmission|ArtifactStore/u.test(runtime)
   ) failures.push("AgentRuntime does not consume only the demand-owned Tool port");
   if (!runtimeIndex.includes('from "./kernel-tool-implementation.js";')) {
     failures.push("Kernel Tool contract escaped its runtime-only subpath");
   }
-  if (manifest.includes('"@zhixing/tools-builtin"')) {
+  if (manifest.includes('"@zhixing-ai/tools-builtin"')) {
     failures.push("Orchestrator still declares the concrete Tool implementation package");
   }
   if (
@@ -4896,7 +4896,7 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   const taskListToolEdgeLeaks = records.filter(
     (record) =>
       !record.relative.includes(".test.") &&
-      /import\s+(?:type\s+)?\{[^}]*\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b[^}]*\}\s+from\s+["']@zhixing\/tools-builtin["']/u.test(
+      /import\s+(?:type\s+)?\{[^}]*\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b[^}]*\}\s+from\s+["']@zhixing-ai\/tools-builtin["']/u.test(
         record.text,
       ),
   );
@@ -4938,8 +4938,8 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     !taskListBindingTest.includes("observed.calls") ||
     taskListDomainConsumers.some(
       ([, source]) =>
-        !source.includes('from "@zhixing/core/conversation/application"') ||
-        /import\s+(?:type\s+)?\{[^}]*\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b[^}]*\}\s+from\s+["']@zhixing\/tools-builtin["']/u.test(
+        !source.includes('from "@zhixing-ai/core/conversation/application"') ||
+        /import\s+(?:type\s+)?\{[^}]*\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b[^}]*\}\s+from\s+["']@zhixing-ai\/tools-builtin["']/u.test(
           source,
         ),
     )
@@ -4956,7 +4956,7 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     !worksceneApplication.includes("applyAssignmentOverlay(") ||
     !worksceneApplication.includes("expectedRevision: previous.revision") ||
     !worksceneTools.includes(
-      'from "@zhixing/core/workscene/application"',
+      'from "@zhixing-ai/core/workscene/application"',
     ) ||
     /runContextStorage|AssignmentMutation|GlobalStagedMutation|assignmentMutations\.stage/u.test(
       worksceneTools,
@@ -5008,7 +5008,7 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   for (const record of records) {
     if (
       record.relative.startsWith("packages/orchestrator/src/") &&
-      /(?:from\s+|import\s*\()["']@zhixing\/tools-builtin/u.test(record.text)
+      /(?:from\s+|import\s*\()["']@zhixing-ai\/tools-builtin/u.test(record.text)
     ) failures.push(`${record.relative}: Orchestrator imports the concrete Tool package`);
   }
   return failures;
@@ -5050,7 +5050,7 @@ export function inspectAdvancementProviderDependencyInversion(records) {
     !contract.includes("createAdvancementModelProviderBinding(") ||
     !contract.includes("assertAdvancementModelProviderBinding(") ||
     !contract.includes('"completion", "reviewer", "sessionTokenBudget"') ||
-    /@zhixing\/providers|ZhixingConfig|ProviderCredential|LLMRole|ModelCapability/u.test(
+    /@zhixing-ai\/providers|ZhixingConfig|ProviderCredential|LLMRole|ModelCapability/u.test(
       contract,
     )
   ) {
@@ -5085,7 +5085,7 @@ export function inspectAdvancementProviderDependencyInversion(records) {
     !application.includes("modelProvider.completion.complete({") ||
     !application.includes("reviewer: modelProvider.reviewer") ||
     !application.includes("modelProvider.sessionTokenBudget") ||
-    /@zhixing\/providers|ZhixingConfig|ProviderCredential|createProviderRoles|resolveModelCapability|resolveWorkspace|createAdvancementRuntime|createControlCompletionPort/u.test(
+    /@zhixing-ai\/providers|ZhixingConfig|ProviderCredential|createProviderRoles|resolveModelCapability|resolveWorkspace|createAdvancementRuntime|createControlCompletionPort/u.test(
       application,
     )
   ) {
@@ -5366,7 +5366,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     failures.push("Configuration Provider does not publish only finite frozen Surface projections");
   }
   if (
-    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|get config\s*\(/u.test(
+    /@zhixing-ai\/providers|\bloadConfig\b|\bZhixingConfig\b|get config\s*\(/u.test(
       replLocalView,
     ) ||
     !replLocalView.includes("configuration.readReplSurface()") ||
@@ -5376,19 +5376,19 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     !textSession.includes("getPrimaryModel: () => local.primaryModel") ||
     !terminal.includes("configuration: createRuntimeConfigurationProvider(") ||
     !textSession.includes("configuration: createRuntimeConfigurationProvider(") ||
-    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(
+    /@zhixing-ai\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(
       infoCommands,
     ) ||
     !infoCommands.includes("getPrimaryModel: () => RuntimePrimaryModelDisplayProjection") ||
     !statusPresentation.includes("model: RuntimePrimaryModelDisplayProjection") ||
     !statusPresentation.includes("proxy: RuntimeNetworkProxyDisplayProjection") ||
     !statusPresentation.includes("model.providerId") ||
-    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(statusPresentation)
+    /@zhixing-ai\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(statusPresentation)
   ) {
     failures.push("REPL Surface regained a raw or aggregate configuration path");
   }
   if (
-    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b/u.test(surfaceLink) ||
+    /@zhixing-ai\/providers|\bloadConfig\b|\bZhixingConfig\b/u.test(surfaceLink) ||
     !surfaceLink.includes("createRuntimeConfigurationProvider()") ||
     !surfaceLink.includes(".readTopology({ homeDir }).mesh")
   ) {
@@ -5723,12 +5723,12 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     records.some(
       (record) =>
         record.relative.startsWith("packages/runtime-host/src/") &&
-        /(?:BuiltinExtraToolsAssembly|WorksceneToolDirectory|TaskListService|McpHub|createPersistentSegmentDeps|createTransientSegmentDeps|createWorkmodeEnterTool|@zhixing\/(?:mcp|tools-builtin))/u.test(
+        /(?:BuiltinExtraToolsAssembly|WorksceneToolDirectory|TaskListService|McpHub|createPersistentSegmentDeps|createTransientSegmentDeps|createWorkmodeEnterTool|@zhixing-ai\/(?:mcp|tools-builtin))/u.test(
           record.text,
         ),
     ) ||
     records.some((record) =>
-      /@zhixing\/runtime-host\/(?:builtin-extra-tools|segment-deps|workmode-tools|workscene-port)/u.test(
+      /@zhixing-ai\/runtime-host\/(?:builtin-extra-tools|segment-deps|workmode-tools|workscene-port)/u.test(
         record.text,
       ),
     )
@@ -5740,7 +5740,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !schedulerAdapter.includes("export class ExecutionSchedulerFacade") ||
     !schedulerAdapter.includes("assignmentMutations") ||
     !schedulerAdapter.includes('domain: "global"') ||
-    schedulerAdapter.includes("@zhixing/runtime-host")
+    schedulerAdapter.includes("@zhixing-ai/runtime-host")
   ) {
     failures.push("Anchor staged scheduler adapter is not owned by product composition");
   }
@@ -5842,7 +5842,7 @@ export function inspectMcpRuntimeBoundary(records) {
     !ports.includes("export interface McpRuntimeLifecyclePort") ||
     !ports.includes("readonly tools: readonly Readonly<ToolDefinition>[]") ||
     !ports.includes("readonly serverIds: readonly string[]") ||
-    /@zhixing\/mcp|McpHub|catalog\(|applyConfig|Record<string|metadata|\bany\b/u.test(ports)
+    /@zhixing-ai\/mcp|McpHub|catalog\(|applyConfig|Record<string|metadata|\bany\b/u.test(ports)
   ) {
     failures.push("MCP demand ports are not finite or leak the concrete implementation");
   }
@@ -5863,7 +5863,7 @@ export function inspectMcpRuntimeBoundary(records) {
   }
 
   const concreteLeaks = [command, access, surfaces, tools, projection, executor, workspace]
-    .some((source) => /@zhixing\/mcp|\bMcpHub\b|createMcpHub|mapServerTools|\.catalog\(\)|\.serverStatuses\(\)/u.test(source));
+    .some((source) => /@zhixing-ai\/mcp|\bMcpHub\b|createMcpHub|mapServerTools|\.catalog\(\)|\.serverStatuses\(\)/u.test(source));
   if (concreteLeaks) {
     failures.push("MCP concrete Hub/catalog/mapping leaked past the Host infrastructure adapter");
   }
@@ -5887,7 +5887,7 @@ export function inspectMcpRuntimeBoundary(records) {
   }
 
   if (
-    /@zhixing\/mcp|\bMcpHub\b|mcpHub|mcpTools|McpRuntime|mapServerTools|\.catalog\(\)/u.test(
+    /@zhixing-ai\/mcp|\bMcpHub\b|mcpHub|mcpTools|McpRuntime|mapServerTools|\.catalog\(\)/u.test(
       tools,
     ) ||
     projection.includes(".catalog()") ||
@@ -5927,7 +5927,7 @@ export function inspectMcpManagementBoundary(records) {
     !contract.includes("export interface McpManagementDiscoveryPort") ||
     !contract.includes("export interface McpManagementInfrastructurePort") ||
     !contract.includes("readonly credentials: Readonly<Record<string, string>>") ||
-    /@zhixing\/mcp|McpServerSpec|McpToolDescriptor|NetworkPolicy|Record<string, unknown>|\bany\b/u.test(contract)
+    /@zhixing-ai\/mcp|McpServerSpec|McpToolDescriptor|NetworkPolicy|Record<string, unknown>|\bany\b/u.test(contract)
   ) {
     failures.push("MCP management demand contract is not finite or leaks infrastructure types");
   }
@@ -5957,7 +5957,7 @@ export function inspectMcpManagementBoundary(records) {
     commandRegistration,
   ];
   if (managementConsumers.some((source) =>
-    /@zhixing\/mcp|McpServerSpec|McpToolDescriptor|McpSearchResult|McpSourceResult|ProbeResult|probeServer|searchMcpServers|fetchMcpServerSource|toServerSpec\(|isValidServerId/u.test(source)
+    /@zhixing-ai\/mcp|McpServerSpec|McpToolDescriptor|McpSearchResult|McpSourceResult|ProbeResult|probeServer|searchMcpServers|fetchMcpServerSource|toServerSpec\(|isValidServerId/u.test(source)
   )) {
     failures.push("MCP management UI or product command regained concrete MCP ownership");
   }
@@ -5983,7 +5983,7 @@ export function inspectMcpManagementBoundary(records) {
   }
 
   const concreteImporters = records
-    .filter((record) => /from\s+["']@zhixing\/mcp["']/u.test(record.text))
+    .filter((record) => /from\s+["']@zhixing-ai\/mcp["']/u.test(record.text))
     .map((record) => record.relative)
     .sort();
   // mcp-probe-request：受管探测辅助进程里的一次探测请求（9b37de45）
@@ -6343,9 +6343,9 @@ export function inspectConversationStorageBoundary(records) {
   }
 
   if (
-    !adapter.includes('from "@zhixing/core/conversation"') ||
-    !adapter.includes('from "@zhixing/core/transcript"') ||
-    /ConversationRepository[\s\S]*?from\s+["']@zhixing\/core["']/u.test(adapter) ||
+    !adapter.includes('from "@zhixing-ai/core/conversation"') ||
+    !adapter.includes('from "@zhixing-ai/core/transcript"') ||
+    /ConversationRepository[\s\S]*?from\s+["']@zhixing-ai\/core["']/u.test(adapter) ||
     count(adapter, "new ConversationRepository(") !== 1 ||
     count(adapter, "new ShardedTranscriptStore(") !== 1 ||
     count(adapter, "new SnapshotStore(") !== 1 ||
@@ -6687,7 +6687,7 @@ export function inspectStorageRemainderBoundary(records) {
     /FileArtifactStore|ArtifactStore|referenceForDigest|readRange|rootDir|path|\?:/u.test(
       rubricPort,
     ) ||
-    /FileArtifactStore|@zhixing\/core\/authority|referenceForDigest|Pick\s*</u.test(
+    /FileArtifactStore|@zhixing-ai\/core\/authority|referenceForDigest|Pick\s*</u.test(
       `${advancementRubricLibrary}\n${advancementController}`,
     ) ||
     !advancementRubricLibrary.includes(
@@ -6803,7 +6803,7 @@ export function inspectStorageRemainderBoundary(records) {
     "packages/rpc/src/",
     "packages/tools-builtin/src/",
   ];
-  const forbiddenMechanisms = /@zhixing\/secrets|\bEncryptedVaultSecretStore\b|\bNodeManagedServiceAdapter\b|\bServerStateFile\b|zhixing-skill-admission|\b(?:FileArtifactStore|FileAuthorityCommitLog|FileDurableProjectionIndex|ArtifactLifecycleIndex)\b|llm-(?:raw|error)|keypress-\$\{/u;
+  const forbiddenMechanisms = /@zhixing-ai\/secrets|\bEncryptedVaultSecretStore\b|\bNodeManagedServiceAdapter\b|\bServerStateFile\b|zhixing-skill-admission|\b(?:FileArtifactStore|FileAuthorityCommitLog|FileDurableProjectionIndex|ArtifactLifecycleIndex)\b|llm-(?:raw|error)|keypress-\$\{/u;
   for (const record of records) {
     if (
       forbiddenDemandPrefixes.some((prefix) => record.relative.startsWith(prefix)) &&
@@ -7173,7 +7173,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     failures.push("Current-removal correctness regained product state or lost signed mechanism");
   }
   if (
-    !handler.includes('from "@zhixing/core/device-administration/application"') ||
+    !handler.includes('from "@zhixing-ai/core/device-administration/application"') ||
     handler.split("productApi?.supports(DEVICE_ADMINISTRATION_").length - 1 !== 8 ||
     handler.split("productApi?.supports(descriptor)").length - 1 !== 1 ||
     handler.split("productApi.query(DEVICE_ADMINISTRATION_").length - 1 !== 5 ||
@@ -7260,7 +7260,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     .map((record) => record.relative);
   if (
     workspaceResourceDemandSources.some((source) =>
-      /ExecutorResourceGovernor|@zhixing\/executor/u.test(source)
+      /ExecutorResourceGovernor|@zhixing-ai\/executor/u.test(source)
     ) ||
     !controlResourcesFinite(control) ||
     !hostResourcesFinite(host) ||
@@ -7385,9 +7385,10 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !/return Object\.freeze\(\{\s*deviceId: this\.#deviceId,\s*bindingRef: binding\.bindingRef,\s*\}\)/u.test(
       application,
     ) ||
-    /@zhixing\/(?:cli|executor)|LocalWorkspaceManagementHost|Workscene|ExecutorBackpressure|DeviceCapacity|StorageMaintenanceAdmission/u.test(
+    /@zhixing-ai\/executor|LocalWorkspaceManagementHost|Workscene|ExecutorBackpressure|DeviceCapacity|StorageMaintenanceAdmission/u.test(
       application,
-    )
+    ) ||
+    referencesPackage(application, "zhixing")
   ) {
     failures.push(
       "Workspace Administration does not uniquely own CRUD, reset, durable lifecycle and result delivery",
@@ -7405,7 +7406,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     constructionOwners.length !== 1 ||
     constructionOwners[0] !==
       "packages/cli/src/runtime/local-workspace-management-host.ts" ||
-    !host.includes('from "@zhixing/core/environment/workspace-administration"') ||
+    !host.includes('from "@zhixing-ai/core/environment/workspace-administration"') ||
     !host.includes("new ExecutorWorkspaceAdministrationControl(") ||
     (host.match(/new WorkspaceAdministrationApplicationService\s*\(/gu) ?? [])
       .length !== 1 ||
@@ -7717,7 +7718,7 @@ export function inspectTrustAdministrationOwnership(records) {
   ]) {
     if (
       !text.includes("KernelSecurityApprovalPort") ||
-      /@zhixing\/core\/trust-administration|TrustAdministration/u.test(text) ||
+      /@zhixing-ai\/core\/trust-administration|TrustAdministration/u.test(text) ||
       !text.includes(binding)
     ) {
       failures.push(`${relative}: child execution can bypass the one Trust application`);
@@ -7733,7 +7734,7 @@ export function inspectTrustAdministrationOwnership(records) {
   }
 
   if (
-    !handler.includes('from "@zhixing/core/trust-administration"') ||
+    !handler.includes('from "@zhixing-ai/core/trust-administration"') ||
     !handler.includes(".query(\n        TRUST_ADMINISTRATION_LIST_QUERY") ||
     !handler.includes(".command(\n          TRUST_ADMINISTRATION_REVOKE_COMMAND") ||
     handler.includes("TrustDirectory") ||
@@ -7753,7 +7754,7 @@ export function inspectTrustAdministrationOwnership(records) {
   }
 
   if (
-    !adapter.includes('from "@zhixing/core/trust-administration"') ||
+    !adapter.includes('from "@zhixing-ai/core/trust-administration"') ||
     // 90e804bc 起桥不再解析工作区（默认 main，工作区按登记目录命名），只保留归属禁令
     !adapter.includes("repository: deps.repository") ||
     /PermissionStore|createPermissionStoreTrustAdministrationRepository|new\s+\w*Store/u.test(
@@ -7847,7 +7848,7 @@ export function inspectTrustAdministrationOwnership(records) {
     ["packages/cli/src/security/trust-rule-arg-provider.ts", trustArgumentProvider],
   ]) {
     if (
-      !text.includes('from "@zhixing/core/trust-administration"') ||
+      !text.includes('from "@zhixing-ai/core/trust-administration"') ||
       /\bPermissionRule\b/u.test(text) && relative !== "packages/cli/src/security/commands.ts"
     ) {
       failures.push(`${relative}: Trust Surface bypasses its domain projection`);
@@ -8166,7 +8167,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !proxyScheduler.includes("createAdvancementReviewProxySchedulePort(") ||
     !proxyScheduler.includes("proxyTurns: AdvancementProxyTurnPort") ||
     proxyScheduler.includes("proxyTurns: () =>") ||
-    /ConversationManager|SessionBroadcast|@zhixing\/(?:server|rpc)|\.current/u.test(
+    /ConversationManager|SessionBroadcast|@zhixing-ai\/(?:server|rpc)|\.current/u.test(
       proxyScheduler,
     ) ||
     !reviewAttemptCorrectness.includes("createAdvancementReviewAttemptApplication(") ||
@@ -8195,7 +8196,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
       controller,
     ) ||
     !advancementComposition.includes(
-      'from "@zhixing/owner-services/advancement/review-attempt-correctness"',
+      'from "@zhixing-ai/owner-services/advancement/review-attempt-correctness"',
     ) ||
     !advancementComposition.includes("createAdvancementReviewAttemptApplication({") ||
     advancementComposition.split("createAdvancementReviewAttemptApplication(").length - 1 !== 1 ||
@@ -8439,12 +8440,12 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     application.split("ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND").length - 1 !== 3 ||
     !application.includes("application.retryProposalDraft(command)") ||
     application.split("defineProductApiFactEvent<").length - 1 !== 5 ||
-    /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
+    /@zhixing-ai\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
     advancementIndex.includes("./application.js") ||
     detail.length === 0 ||
-    !handler.includes('from "@zhixing/core/advancement/application"') ||
+    !handler.includes('from "@zhixing-ai/core/advancement/application"') ||
     !detail.includes("productApi?.supports(ADVANCEMENT_DETAIL_QUERY)") ||
     !detail.includes("productApi.query(ADVANCEMENT_DETAIL_QUERY") ||
     !detail.includes("projectAdvancementDetail(detail)") ||
@@ -8583,7 +8584,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ) ||
     !systemHandlers.includes("interface AdvancementGcDeps") ||
     !systemHandlers.includes("const r = await deps.runSweep()") ||
-    !composition.includes('from "@zhixing/core/advancement/application"') ||
+    !composition.includes('from "@zhixing-ai/core/advancement/application"') ||
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
@@ -8627,7 +8628,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !originalTaskAdapter.includes("createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(") ||
     !originalTaskAdapter.includes("new AdvancementOriginalTaskAdmissionError(") ||
     originalTaskAdapter.split("new AdvancementOriginalTaskAdmissionError(").length - 1 !== 2 ||
-    /@zhixing\/(?:server|rpc)|\.\.\/\.\.\/server/u.test(originalTaskAdapter) ||
+    /@zhixing-ai\/(?:server|rpc)|\.\.\/\.\.\/server/u.test(originalTaskAdapter) ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations") ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents") ||
     !composition.includes("...(advancementProductApi ? [advancementProductApi] : [])")
@@ -9178,7 +9179,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneApplication.split("defineProductApiCommand<").length - 1 !== 7 ||
     !worksceneApplication.includes("factEvents: []") ||
     !worksceneApplicationAdapter.includes(
-      'from "@zhixing/core/workscene/application"',
+      'from "@zhixing-ai/core/workscene/application"',
     ) ||
     !worksceneApplicationAdapter.includes("createAnchorWorksceneApplicationPorts") ||
     !worksceneApplicationAdapter.includes("readonly entry: WorksceneEntryPort") ||
@@ -9186,7 +9187,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !worksceneDirectory.includes("export type AnchorWorksceneDirectory = WorksceneToolDirectory &") ||
     !worksceneDirectory.includes("WorksceneToolDirectory & {") ||
     /\bWorksceneDirectory\b/u.test(worksceneDirectory) ||
-    worksceneDirectory.includes('from "@zhixing/server"') ||
+    worksceneDirectory.includes('from "@zhixing-ai/server"') ||
     /export interface AnchorWorksceneDirectory\s+extends/u.test(worksceneDirectory) ||
     /\b(?:list|create|rename|setWorkdir|remove)\s*\(/u.test(worksceneToolPort) ||
     worksceneTools.includes('Pick<WorksceneToolDirectory, "rename">') ||
@@ -9205,7 +9206,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "createWorksceneRenameCurrentTool(workscenes, identity)",
     ) ||
     !worksceneHandler.includes(
-      'from "@zhixing/core/workscene/application"',
+      'from "@zhixing-ai/core/workscene/application"',
     ) ||
     !worksceneApplicationHandlers.includes("requireWorksceneApplication(ctx.server)") ||
     !worksceneApplicationHandlers.includes("WORKSCENE_ENTRY_ENTER_COMMAND") ||
@@ -9270,7 +9271,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Schedule definition management lacks one domain application owner");
   }
   if (
-    !scheduleHandler.includes('from "@zhixing/core/scheduler/application"') ||
+    !scheduleHandler.includes('from "@zhixing-ai/core/scheduler/application"') ||
     !scheduleHandler.includes("SCHEDULE_MANAGEMENT_LIST_QUERY") ||
     !scheduleHandler.includes("SCHEDULE_MANAGEMENT_CREATE_COMMAND") ||
     !scheduleHandler.includes("SCHEDULE_MANAGEMENT_UPDATE_COMMAND") ||
@@ -9693,7 +9694,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     conversationApplication.includes('../advancement/') ||
     !conversationApplication.includes("orderDurableConversationRecords(") ||
     !sessionHandler.includes(
-      'from "@zhixing/core/conversation/application"',
+      'from "@zhixing-ai/core/conversation/application"',
     ) ||
     !sessionHandler.includes("CONVERSATION_LIST_QUERY") ||
     !sessionHandler.includes("CONVERSATION_HISTORY_QUERY") ||
@@ -9743,7 +9744,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "resolutionFence: createConversationResolutionFence(params.ownerEpoch)",
     ) ||
     !sessionHandler.includes(
-      'from "@zhixing/owner-kernel/conversation-control"',
+      'from "@zhixing-ai/owner-kernel/conversation-control"',
     ) ||
     /requireConversations\(ctx\.server\)\.(?:cancelDurableRuns|resolveDurableUncertain|abort)\s*\(/u.test(
       sessionHandler,
@@ -9827,7 +9828,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "resolutionFence: createConversationResolutionFence(value.ownerEpoch)",
     ) ||
     !localConversationRpc.includes(
-      'from "@zhixing/owner-kernel/conversation-control"',
+      'from "@zhixing-ai/owner-kernel/conversation-control"',
     ) ||
     !localConversationRpc.includes(
       "this.#application.prepareAgentTurnIdentity({",
@@ -9938,7 +9939,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "ownerEpoch: parseConversationResolutionFence(resolutionFence)",
     ) ||
     !conversationRunControlBinding.includes(
-      'from "@zhixing/owner-kernel/conversation-control"',
+      'from "@zhixing-ai/owner-kernel/conversation-control"',
     ) ||
     !conversationRunControlBinding.includes("durableControlPrincipal({") ||
     !localConversationApplication.includes("runControl: {") ||
@@ -9948,7 +9949,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "ownerEpoch: parseConversationResolutionFence(input.resolutionFence)",
     ) ||
     !localConversationOwner.includes(
-      'from "@zhixing/owner-kernel/conversation-control"',
+      'from "@zhixing-ai/owner-kernel/conversation-control"',
     ) ||
     !localConversationOwner.includes("createConversationAgentTurnAdmissionPort({") ||
     !localConversationOwner.includes("createAgentTurnExecution:") ||
@@ -10066,7 +10067,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationAgentTurnAdmission.includes("input.manager.admitDurableTurn({") ||
     !conversationAgentTurnAdmission.includes("start: admitted.task.execute") ||
     !composition.includes(
-      'from "@zhixing/owner-kernel/conversation-agent-turn-admission"',
+      'from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission"',
     ) ||
     !composition.includes("agentTurns: createConversationAgentTurnAdmissionPort({") ||
     !localConversationApplication.includes("agentTurns: input.owner.agentTurnAdmission") ||
@@ -10407,8 +10408,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     !context.includes("productApi?: ProductApiDispatcher") ||
-    !context.includes('from "@zhixing/core/product-api"') ||
-    /import\s+(?:type\s+)?\{[^}]*ProductApiDispatcher[^}]*\}\s+from\s+["']@zhixing\/core["']/u.test(context) ||
+    !context.includes('from "@zhixing-ai/core/product-api"') ||
+    /import\s+(?:type\s+)?\{[^}]*ProductApiDispatcher[^}]*\}\s+from\s+["']@zhixing-ai\/core["']/u.test(context) ||
     context.includes("skillCatalog") ||
     context.includes("SkillCatalogApplication") ||
     context.includes("SkillDirectory") ||
@@ -10420,11 +10421,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ["packages/server/src/rpc/methods/skill.ts", handler],
     ["packages/cli/src/serve/command.ts", composition],
   ]) {
-    if (!text.includes('from "@zhixing/core/skills/catalog"')) {
+    if (!text.includes('from "@zhixing-ai/core/skills/catalog"')) {
       failures.push(`${relative}: Skill Catalog contract bypasses its domain subpath`);
     }
     for (const match of text.matchAll(
-      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
+      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing-ai\/core)["']/gu,
     )) {
       if (/\bSkillCatalogApplication(?:Error|Service)?\b/u.test(match[1])) {
         failures.push(`${relative}: Skill Catalog contract leaked back through core root import`);
@@ -10437,7 +10438,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     composition.split("createDeliveryResolutionProductApiContribution(").length - 1 !== 1 ||
     composition.split("new SkillCatalogApplicationService(").length - 1 !== 1 ||
     composition.split("createAnchorSkillCatalogManagementCorrectnessPort({").length - 1 !== 1 ||
-    !composition.includes('from "@zhixing/core/skills/catalog-correctness"') ||
+    !composition.includes('from "@zhixing-ai/core/skills/catalog-correctness"') ||
     !composition.includes("globalState: () => authorityRuntime.globalState!") ||
     !composition.includes("anchorEpoch: () => authorityRuntime.anchorEpoch")
   ) {
@@ -10593,7 +10594,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     deliveryOutbox.includes("normalizeAuthorityDeliveryResult") ||
     deliveryOutbox.includes("authorityDeliveryFailure") ||
     !setupDelivery.includes(
-      'from "@zhixing/core/delivery/channel-effect"',
+      'from "@zhixing-ai/core/delivery/channel-effect"',
     ) ||
     !setupDelivery.includes("createChannelDeliveryEffect(channels") ||
     setupDelivery.includes("createOutboxSender") ||
@@ -10664,7 +10665,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryControl.includes("decideDeliveryResolution(") ||
     deliveryControl.includes("applyDeliveryResolutionControl") ||
     !setupDelivery.includes("resolutionApplication") ||
-    !setupDelivery.includes('await import("@zhixing/owner-kernel/delivery")') ||
+    !setupDelivery.includes('await import("@zhixing-ai/owner-kernel/delivery")') ||
     setupDelivery.includes("applyDeliveryResolutionControl") ||
     setupDelivery.includes("createDeliveryControlEnvelope")
   ) {
@@ -10690,7 +10691,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     deliveryParticipant.includes("prepareEnqueues") ||
     deliveryParticipant.includes("prepareDeliveryEnqueues") ||
     deliveryParticipant.includes("maxAttempts") ||
-    !deliveryParticipant.includes('from "@zhixing/core/delivery/application"') ||
+    !deliveryParticipant.includes('from "@zhixing-ai/core/delivery/application"') ||
     // 3f64a4ed 起参与者在自己已锁定的事务里精确准备：第三个实参是所在方法的事务参数
     !preparesInLockedTransaction(deliveryParticipant) ||
     !hasStringLiteral(deliveryAuthorityClass, "Delivery lifecycle admission projection") ||
@@ -10725,8 +10726,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     }
   }
   if (
-    !deliveryHandler.includes('from "@zhixing/core/delivery/application"') ||
-    !deliveryHandler.includes('from "@zhixing/owner-kernel/delivery"') ||
+    !deliveryHandler.includes('from "@zhixing-ai/core/delivery/application"') ||
+    !deliveryHandler.includes('from "@zhixing-ai/owner-kernel/delivery"') ||
     !deliveryHandler.includes("productApi.command(DELIVERY_RESOLVE_UNCERTAIN_COMMAND") ||
     !deliveryHandler.includes("resolutionFence: createDeliveryResolutionFence(params.anchorEpoch)") ||
     !deliveryHandler.includes("productApi?.supports(DELIVERY_RESOLVE_UNCERTAIN_COMMAND)") ||
@@ -10754,10 +10755,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Skill domain does not own the stable Query/Command/Fact client contract");
   }
   if (
-    !skillClientBinding.includes('from "@zhixing/core/skills/catalog"') ||
+    !skillClientBinding.includes('from "@zhixing-ai/core/skills/catalog"') ||
     !skillClientBinding.includes("implements SkillCatalogClient") ||
-    skillClientBinding.includes('from "@zhixing/core"') ||
-    /from\s+["']@zhixing\/(?:cli|server)(?:\/|["'])/u.test(skillClientBinding) ||
+    skillClientBinding.includes('from "@zhixing-ai/core"') ||
+    /from\s+["']@zhixing-ai\/server(?:\/|["'])/u.test(skillClientBinding) ||
+    referencesPackage(skillClientBinding, "zhixing") ||
     skillClientBinding.includes("as never") ||
     skillClientBinding.includes("[key: string]") ||
     skillClientBinding.includes("?? 0") ||
@@ -10803,13 +10805,13 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     terminal.split("new SkillCatalogRpcClient(this.#connection)").length - 1 !== 1 ||
-    !terminal.includes("import('@zhixing/rpc/skill-catalog-client')") ||
+    !terminal.includes("import('@zhixing-ai/rpc/skill-catalog-client')") ||
     !terminal.includes("new TerminalSkillCommands({ client, registry: this.#candidates.registry,") ||
     !terminal.includes("client: binding.client") ||
     !terminal.includes("refreshCommands: () => binding.commands.refresh()") ||
     !terminal.includes("this.#skillCommands?.dispose()") ||
     textSession.split("new SkillCatalogRpcClient(connection)").length - 1 !== 1 ||
-    !textSession.includes("from '@zhixing/rpc/skill-catalog-client'") ||
+    !textSession.includes("from '@zhixing-ai/rpc/skill-catalog-client'") ||
     !textSession.includes("new TerminalSkillCommands({ registry, client: new SkillCatalogRpcClient(connection),") ||
     !textSession.includes("skills?.dispose()") ||
     !dynamicSkills.includes("new SkillCommandSource({ client: options.client, findExisting })") ||
@@ -10827,7 +10829,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ["packages/cli/src/commands/skill-command-source.ts", skillCommandSource],
   ]) {
     if (
-      !/from ["']@zhixing\/core\/skills\/catalog["']/u.test(text) ||
+      !/from ["']@zhixing-ai\/core\/skills\/catalog["']/u.test(text) ||
       !text.includes("SkillCatalogClient") ||
       text.includes("SkillManagerStore") ||
       text.includes("listForManagement") ||
@@ -10851,11 +10853,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ["packages/tools-builtin/src/skill.ts", builtinSkill],
     ["packages/tools-builtin/src/factories.ts", builtinFactories],
   ]) {
-    if (!text.includes('from "@zhixing/core/skills/catalog"')) {
+    if (!text.includes('from "@zhixing-ai/core/skills/catalog"')) {
       failures.push(`${relative}: Skill application contract bypasses its domain subpath`);
     }
     for (const match of text.matchAll(
-      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
+      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing-ai\/core)["']/gu,
     )) {
       if (/\bSkillCatalog(?:Save|Admission|Load|KernelProjection)Application(?:Service)?\b/u.test(match[1])) {
         failures.push(`${relative}: Skill application contract leaked back through core root import`);
@@ -10885,7 +10887,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     );
   }
   if (
-    /@zhixing\/core\/skills|SkillCatalog|skillMode|createAssignmentSkillProjectionApplication/u.test(
+    /@zhixing-ai\/core\/skills|SkillCatalog|skillMode|createAssignmentSkillProjectionApplication/u.test(
       agentRuntime,
     ) ||
     !agentRuntime.includes(
@@ -10910,7 +10912,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     );
   }
   if (
-    /@zhixing\/core\/skills|SkillCatalog|skillMode|catalogRevision/u.test(
+    /@zhixing-ai\/core\/skills|SkillCatalog|skillMode|catalogRevision/u.test(
       kernelWindowPrompt,
     ) ||
     !kernelWindowPrompt.includes(
@@ -11751,7 +11753,7 @@ export function inspectManagedHostAssembly(records) {
     count(applicationHost, "await this.#runRoleComponents(") !== 1 ||
     count(applicationHost, 'importAnchorRole: () => import("./command.js")') !== 1 ||
     count(applicationHost, 'importExecutorRole: () => import("./executor-role-runtime.js")') !== 1 ||
-    count(applicationHost, 'importExecutorModule: () => import("@zhixing/executor")') !== 1 ||
+    count(applicationHost, 'importExecutorModule: () => import("@zhixing-ai/executor")') !== 1 ||
     count(applicationHost, ".runServeCommand(") !== 1 ||
     count(applicationHost, ".runExecutorRole(") !== 1 ||
     count(applicationHost, "const [anchorRole, executor] = await Promise.all([") !== 1 ||
@@ -12101,7 +12103,7 @@ export function inspectManagedHostAssembly(records) {
   ) failures.push("managed host authority plan or SecretStore context drifted");
   if (
     !publicStatus.includes("export function projectManagedHostStatus(") ||
-    !status.includes('from "@zhixing/server"') ||
+    !status.includes('from "@zhixing-ai/server"') ||
     !status.includes("export { projectManagedHostStatus }") ||
     !status.includes("export async function buildManagedHostPublicStatus(") ||
     !status.includes("export async function buildManagedHostStatusSnapshot(") ||
@@ -12310,7 +12312,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !backupApplication.includes("await this.mechanism.replayRootActivation(binding, target)") ||
     !backupApplication.includes("const binding = requireBinding(configured, candidate.targetId, \"verification\")") ||
     !backupApplication.includes('nextAction: "run-backup-verify"') ||
-    !backup.includes('from "@zhixing/core/backup-recovery/application"') ||
+    !backup.includes('from "@zhixing-ai/core/backup-recovery/application"') ||
     count(backup, "new BackupRecoveryAdministrationApplicationService(") !== 1 ||
     count(backup, ".setup(selection.directory !== undefined") !== 1 ||
     count(backup, "createBackupRecoveryAdministration(context, options).verify()") !== 1 ||
@@ -12333,14 +12335,14 @@ export function inspectRecoveryBackupAssembly(records) {
     !backupApplication.includes('return "check-backup-target"') ||
     !backupApplication.includes("Backup recovery unavailable reason is invalid") ||
     !serverContext.includes(
-      'import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application"',
+      'import type { BackupRecoveryPublicStatus } from "@zhixing-ai/core/backup-recovery/application"',
     ) ||
     !serverContext.includes(
       "recoveryBackupStatus?: () => Promise<BackupRecoveryPublicStatus>;",
     ) ||
     serverContext.includes("nextAction?: string") ||
     !managementFacade.includes(
-      'import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application"',
+      'import type { BackupRecoveryPublicStatus } from "@zhixing-ai/core/backup-recovery/application"',
     ) ||
     !managementFacade.includes("recoveryBackup?: BackupRecoveryPublicStatus;") ||
     !statusPresentation.includes("case 'restore-backup-connection':") ||
@@ -12370,7 +12372,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !backupApplication.includes("checkpointEnvelopeDigest: selected.entry.envelopeIdentity.digest") ||
     !backupApplication.includes("const transferId = this.mechanism.deriveTransferId(transferInput)") ||
     !backupApplication.includes("const prepare = this.mechanism.signPrepare(intent, recovered.root)") ||
-    !disasterCommand.includes('from "@zhixing/core/backup-recovery/application"') ||
+    !disasterCommand.includes('from "@zhixing-ai/core/backup-recovery/application"') ||
     count(disasterCommand, "new BackupRecoveryDisasterAdmissionApplicationService<") !== 1 ||
     count(disasterCommand, "validateBackupRecoveryDisasterAdmissionSelection(selection)") !== 1 ||
     count(disasterCommand, "return await application.admit(selection)") !== 1 ||
@@ -13131,7 +13133,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const publishedTargetConcreteImporters = records
     .filter(({ text }) =>
       text.includes("FileRecoveryCheckpointTarget") &&
-      text.includes('from "@zhixing/mesh/checkpoint-target"'))
+      text.includes('from "@zhixing-ai/mesh/checkpoint-target"'))
     .map(({ relative }) => relative)
     .sort();
   const publishedTargetFactoryConsumers = records
@@ -14644,7 +14646,7 @@ export function inspectWorkspaceProbePersistenceBoundary(records) {
   }
   if (
     !adapter.includes("implements WorkspaceProbePersistencePort") ||
-    !adapter.includes('from "@zhixing/core/environment/workspace-probe-persistence"') ||
+    !adapter.includes('from "@zhixing-ai/core/environment/workspace-probe-persistence"') ||
     !adapter.includes("readonly authorityLog: FileAuthorityCommitLog") ||
     !adapter.includes('"distributed-runtime",\n      "workspace-probes"') ||
     !adapter.includes('path.join(this.#rootDir, "probe-log-established")') ||
@@ -14767,7 +14769,7 @@ export function inspectWorkspaceBindingGenerationPersistenceBoundary(records) {
       "export class FileWorkspaceBindingGenerationPersistenceFactory",
     ) ||
     !adapter.includes(
-      'from "@zhixing/core/environment/workspace-binding-generation-persistence"',
+      'from "@zhixing-ai/core/environment/workspace-binding-generation-persistence"',
     ) ||
     !adapter.includes('"workspace-bindings"') ||
     !adapter.includes('"generations"') ||
@@ -14889,7 +14891,7 @@ export function inspectWorkspaceBindingCatalogPersistenceBoundary(records) {
     ) ||
     !adapter.includes("implements WorkspaceBindingCatalogPersistencePort") ||
     !adapter.includes(
-      'from "@zhixing/core/environment/workspace-binding-catalog-persistence"',
+      'from "@zhixing-ai/core/environment/workspace-binding-catalog-persistence"',
     ) ||
     !adapter.includes('"distributed-runtime"') ||
     !adapter.includes('"workspace-bindings"') ||
@@ -16861,7 +16863,7 @@ export function inspectConversationAdoptionAssembly(records) {
     !/interface\s+ServerConfirmationBinding\b/u.test(context.text) ||
     !/\bconversation\?:\s*ServerConversationBinding/u.test(context.text) ||
     !/\bconfirmation\?:\s*ServerConfirmationBinding/u.test(context.text) ||
-    /@zhixing\/owner-kernel|\bconversations\??\s*:|\bconfirmationHub\??\s*:/u.test(
+    /@zhixing-ai\/owner-kernel|\bconversations\??\s*:|\bconfirmationHub\??\s*:/u.test(
       context.text,
     )
   ) {
@@ -17631,7 +17633,7 @@ function allowedRpcCapabilityOwner(relative, symbol) {
 }
 
 function directRpcExposure(relative, specifier) {
-  if (specifier === "@zhixing/server") {
+  if (specifier === "@zhixing-ai/server") {
     return new Map([
       ["RpcClient", "RpcClient"],
       ["createRpcClient", "createRpcClient"],
@@ -17967,6 +17969,20 @@ function isPackageOrSubpath(specifier, packageName) {
   return specifier === packageName || specifier.startsWith(`${packageName}/`);
 }
 
+/** 按语法树判断源码是否以任一模块加载形式（import/export、副作用导入、import()、require、import = require）依赖指定包或其子路径；
+ * 同名的普通字符串、注释或仓库路径不算依赖。 */
+function referencesPackage(text, packageName) {
+  const source = ts.createSourceFile("reference.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node) => {
+    const reference = moduleReference(node);
+    if (reference?.literal && isPackageOrSubpath(reference.specifier, packageName)) found = true;
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
 function directOwnerBindings(node, exposedOwners) {
   const result = [];
   if (ts.isImportDeclaration(node) && node.importClause) {
@@ -18004,14 +18020,14 @@ export function inspectProductionManifest(relative, manifest) {
   const failures = [];
   const fields = ["dependencies", "optionalDependencies", "peerDependencies"];
   const edges = fields.flatMap((field) => Object.keys(manifest[field] ?? {}));
-  if (relative === "packages/server/package.json" && edges.includes("@zhixing/executor")) {
+  if (relative === "packages/server/package.json" && edges.includes("@zhixing-ai/executor")) {
     failures.push(`${relative}: server declares production dependency on executor`);
   }
-  if (relative === "packages/executor/package.json" && edges.includes("@zhixing/server")) {
+  if (relative === "packages/executor/package.json" && edges.includes("@zhixing-ai/server")) {
     failures.push(`${relative}: executor declares production dependency on server`);
   }
   if (relative === "packages/runtime-host/package.json") {
-    for (const dependency of ["@zhixing/mcp", "@zhixing/tools-builtin"]) {
+    for (const dependency of ["@zhixing-ai/mcp", "@zhixing-ai/tools-builtin"]) {
       if (edges.includes(dependency)) {
         failures.push(`${relative}: runtime-host declares product dependency ${dependency}`);
       }
@@ -18019,7 +18035,7 @@ export function inspectProductionManifest(relative, manifest) {
   }
   if (
     relative === "packages/orchestrator/package.json" &&
-    edges.includes("@zhixing/providers")
+    edges.includes("@zhixing-ai/providers")
   ) {
     failures.push(
       `${relative}: orchestrator declares concrete Provider production dependency`,
@@ -18027,7 +18043,7 @@ export function inspectProductionManifest(relative, manifest) {
   }
   if (
     relative === "packages/orchestrator/package.json" &&
-    edges.includes("@zhixing/tools-builtin")
+    edges.includes("@zhixing-ai/tools-builtin")
   ) {
     failures.push(
       `${relative}: orchestrator declares concrete Tool production dependency`,
@@ -18075,7 +18091,7 @@ export function inspectProductionSource(relative, text, options = {}) {
       } else {
         const specifier = reference.specifier;
         const exposedOwners = options.resolveOwnerExposure?.(relative, specifier) ??
-          (specifier === "@zhixing/core"
+          (specifier === "@zhixing-ai/core"
             ? new Map([...forbiddenWriteOwners].map((name) => [name, name]))
             : new Map());
         if (guarded) {
@@ -18089,8 +18105,8 @@ export function inspectProductionSource(relative, text, options = {}) {
             failures.push(`${relative}: forbidden writable owner namespace from ${specifier}`);
           }
         }
-      if (relative.startsWith("packages/server/") && isPackageOrSubpath(specifier, "@zhixing/executor")) failures.push(`${relative}: server imports executor`);
-      if (relative.startsWith("packages/executor/") && isPackageOrSubpath(specifier, "@zhixing/server")) failures.push(`${relative}: executor imports server`);
+      if (relative.startsWith("packages/server/") && isPackageOrSubpath(specifier, "@zhixing-ai/executor")) failures.push(`${relative}: server imports executor`);
+      if (relative.startsWith("packages/executor/") && isPackageOrSubpath(specifier, "@zhixing-ai/server")) failures.push(`${relative}: executor imports server`);
       }
     }
     if (

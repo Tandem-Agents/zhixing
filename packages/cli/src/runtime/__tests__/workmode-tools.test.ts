@@ -1,7 +1,7 @@
 import { createWorksceneRunToolApplication } from "../../serve/workscene-application-adapter.js";
 import { describe, expect, it, vi } from "vitest";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
-import { getEnabledWorksceneToolActions, getWorksceneToolBoundaries } from "@zhixing/core/workscene";
+import { createEventBus, type AgentEventMap } from "@zhixing-ai/core";
+import { getEnabledWorksceneToolActions, getWorksceneToolBoundaries } from "@zhixing-ai/core/workscene";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationOverlayRecord,
@@ -9,8 +9,8 @@ import type {
   AssignmentMutationRequest,
   GlobalReadResult,
   WorksceneDto,
-} from "@zhixing/core/contracts";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/contracts";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import {
   createWorkmodeEnterTool,
   createWorkmodeExitTool,

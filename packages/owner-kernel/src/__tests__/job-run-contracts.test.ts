@@ -1,8 +1,8 @@
-import type { SystemJobFence, TaskDefinition } from "@zhixing/core/contracts";
+import type { SystemJobFence, TaskDefinition } from "@zhixing-ai/core/contracts";
 import {
   type ProtocolSignatureVerifier,
   systemJobParamsDigest,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   assertJobAdmissionReplayContract,

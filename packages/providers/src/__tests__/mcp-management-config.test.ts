@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { addMcpServerConfiguration, loadConfig, mcpConfigurationRevision, writeConfig } from "../config-loader.js";
 
 const entry = { type: "stdio" as const, command: "node", args: ["fixture.js"] };

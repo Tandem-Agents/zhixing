@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ZhixingCredentials } from "@zhixing/providers";
+import type { ZhixingCredentials } from "@zhixing-ai/providers";
 import { projectRuntimeSecrets } from "../runtime-secret-projections.js";
 
 describe("runtime secret projections", () => {

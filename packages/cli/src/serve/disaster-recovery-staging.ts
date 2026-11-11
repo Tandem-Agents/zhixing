@@ -4,7 +4,7 @@ import type {
   DisasterRecoveryAbort,
   DisasterRecoveryCommand,
   TransferRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ArtifactReceiveProgress,
   ArtifactStore,
@@ -16,9 +16,9 @@ import type {
   ProjectionTransactionOptions,
   ProjectionTransactionReducer,
   ProjectionTransactionResult,
-} from "@zhixing/core/authority";
-import type { DisasterRecoveryState } from "@zhixing/core/protocol";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/core/authority";
+import type { DisasterRecoveryState } from "@zhixing-ai/core/protocol";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import type {
   DisasterRecoveryCandidateState,
   DisasterRecoveryInstallDecision,

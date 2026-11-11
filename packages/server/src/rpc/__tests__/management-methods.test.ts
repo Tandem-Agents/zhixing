@@ -6,21 +6,21 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   TaskView,
-} from "@zhixing/core/scheduler";
+} from "@zhixing-ai/core/scheduler";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_LIST_QUERY,
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
   SkillCatalogApplicationError,
   type SkillCatalogApplication,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 import {
   createTrustAdministrationProductApiContribution,
   TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   TrustAdministrationApplicationError,
   type TrustAdministrationApplication,
-} from "@zhixing/core/trust-administration";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/trust-administration";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import {
   createScheduleManagementProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
@@ -28,7 +28,7 @@ import {
   ScheduleManagementApplicationService,
   type ScheduleManagementApplication,
   type ScheduleManagementRepository,
-} from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/scheduler/application";
 import {
   buildTrustListMethod,
   buildTrustRevokeMethod,

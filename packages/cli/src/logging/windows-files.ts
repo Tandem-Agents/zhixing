@@ -3,8 +3,8 @@ import {
   CheckpointDirectoryHandle,
   type CheckpointFilesystemSession,
   type NodeProcessInventory,
-} from "@zhixing/mesh/filesystem";
-import type { LogFileInfo, LogFileSystem } from "@zhixing/core/logging/storage";
+} from "@zhixing-ai/mesh/filesystem";
+import type { LogFileInfo, LogFileSystem } from "@zhixing-ai/core/logging/storage";
 import { LegacyLogFiles, isLegacyLogFile, statLogFiles } from "./legacy-files.js";
 
 /** The parent directly owns the asynchronous native process and its OS lock. */

@@ -1,6 +1,6 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   ArtifactRef,
@@ -8,23 +8,23 @@ import type {
   DisasterRecoveryCommand,
   SecretRef,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/contracts";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import {
   createSignedDisasterRecoveryAbort,
   createSignedDisasterRecoveryCommand,
   protocolDigest,
-} from "@zhixing/core/protocol";
-import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/core/protocol";
+import { captureFullAuthorityCheckpoint } from "@zhixing-ai/mesh/full-checkpoint";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
 import {
   createRecoveryRootEvent,
   createSignedTrustEvent,
   homeTrustRecordDigest,
   replayTrustChain,
-} from "@zhixing/mesh/trust-chain";
-import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
+} from "@zhixing-ai/mesh/trust-chain";
+import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
 import { createPlannedAnchorReadinessCoordinator } from "../setup-delivery.js";
 import {
   DisasterRecoveryCandidateJournal,

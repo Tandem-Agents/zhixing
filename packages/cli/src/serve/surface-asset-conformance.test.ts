@@ -4,17 +4,17 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type SurfaceAssetCoordinator,
-} from "@zhixing/core/authority";
-import type { ControlEnvelope, ControlRecord } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/authority";
+import type { ControlEnvelope, ControlRecord } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { createSurfaceAssetAuthority } from "./surface-asset-authority.js";
 import type {
   ArtifactRef,
   Digest,
   SurfaceAssetGrant,
   SurfaceAssetScope,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   byteDigest,
   protocolDigest,
@@ -22,9 +22,9 @@ import {
   type ProtocolSigner,
   type SurfaceAssetGrantIssueBinding,
   type SurfaceAssetGrantOperationBinding,
-} from "@zhixing/core/protocol";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/core/protocol";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import { describe, expect, it } from "vitest";
 import {
   SURFACE_ASSET_SERVICE,

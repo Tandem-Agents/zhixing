@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   DefaultDeviceCapacityArbiter,

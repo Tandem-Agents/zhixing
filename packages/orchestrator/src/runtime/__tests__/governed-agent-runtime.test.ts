@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   DeviceCapacityArbiterPort,
   DeviceCapacityBudget,
-} from "@zhixing/core/resources";
-import type { ToolDefinition, ToolExecutionContext } from "@zhixing/core/types";
+} from "@zhixing-ai/core/resources";
+import type { ToolDefinition, ToolExecutionContext } from "@zhixing-ai/core/types";
 import {
   governToolExecution,
   type AgentRuntimeCapacityBinding,

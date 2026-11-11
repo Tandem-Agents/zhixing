@@ -164,7 +164,7 @@ export type OutboxEvent =
 
 // ─── 日志 & 回调接口 ───
 
-/** 最小 logger 接口（与 @zhixing/core 其他模块一致） */
+/** 最小 logger 接口（与 @zhixing-ai/core 其他模块一致） */
 export interface OutboxLogger {
   debug?(msg: string, data?: unknown): void;
   info?(msg: string, data?: unknown): void;

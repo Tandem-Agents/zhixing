@@ -3,14 +3,14 @@ import path from "node:path";
 import type {
   EvidenceExecutionResult,
   EvidenceRequest,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   evidenceRequestDigest,
   validateEvidenceBundle,
   validateEvidenceRequest,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 const DEFAULT_RETENTION_MS = 27 * 24 * 60 * 60 * 1_000;
 

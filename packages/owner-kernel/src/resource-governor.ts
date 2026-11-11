@@ -1,5 +1,5 @@
 import { assertAssignmentUsageEvidence, assertAssignmentTerminalEvidence } from "./conversation-resource-witness.js";
-import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import {
   GovernorStateRequired,
   ResourceGovernorIndexStore,
@@ -12,7 +12,7 @@ import {
   requireGovernorSettlementNeeds,
   type GovernorDecision,
   type GovernorSession,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AdmissionClass,
   AssignmentReservationRequest,
@@ -35,11 +35,11 @@ import type {
   SystemJobReservationOrigin,
   SystemJobResourceLease,
   UsageReport,
-} from "@zhixing/core/contracts";
-import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing-ai/core/contracts";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { observeLogPhase, type LogRecordPort } from "@zhixing-ai/core/logging";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import {
   applyGovernorRecord,
   acceptedRemoteIntervalRemainingMs,
@@ -71,7 +71,7 @@ import {
   type GovernorProjection,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type { SystemJobResourceCoordinator } from "./job-assignment.js";
 
 const GOVERNOR_STREAM = "governor";
@@ -1050,7 +1050,7 @@ export class AnchorResourceGovernor
   }
 
   async recover(input: {
-    readonly fence: import("@zhixing/core/contracts").SystemJobFence;
+    readonly fence: import("@zhixing-ai/core/contracts").SystemJobFence;
   }): Promise<
     | { readonly kind: "reuse"; readonly lease: SystemJobResourceLease }
     | {
@@ -1104,8 +1104,8 @@ export class AnchorResourceGovernor
   }
 
   assertActivationRecords(input: {
-    readonly previousFence?: import("@zhixing/core/contracts").SystemJobFence;
-    readonly fence: import("@zhixing/core/contracts").SystemJobFence;
+    readonly previousFence?: import("@zhixing-ai/core/contracts").SystemJobFence;
+    readonly fence: import("@zhixing-ai/core/contracts").SystemJobFence;
     readonly records: readonly LogicalRecord<unknown>[];
   } | {
     readonly lease: AssignmentResourceLease;
@@ -1149,8 +1149,8 @@ export class AnchorResourceGovernor
   }
 
   preflightActivationRecords(input: {
-    readonly previousFence?: import("@zhixing/core/contracts").SystemJobFence;
-    readonly fence: import("@zhixing/core/contracts").SystemJobFence;
+    readonly previousFence?: import("@zhixing-ai/core/contracts").SystemJobFence;
+    readonly fence: import("@zhixing-ai/core/contracts").SystemJobFence;
     readonly records: readonly LogicalRecord<unknown>[];
   }): void {
     this.assertActivationRecords(input);
@@ -1167,7 +1167,7 @@ export class AnchorResourceGovernor
   }
 
   preflightTerminalRecords(input: {
-    readonly fence: import("@zhixing/core/contracts").SystemJobFence;
+    readonly fence: import("@zhixing-ai/core/contracts").SystemJobFence;
     readonly outcome: "committed" | "failed";
     readonly records: readonly LogicalRecord<unknown>[];
   }): void {
@@ -1176,7 +1176,7 @@ export class AnchorResourceGovernor
   }
 
   assertTerminalRecords(input: {
-    readonly fence: import("@zhixing/core/contracts").SystemJobFence;
+    readonly fence: import("@zhixing-ai/core/contracts").SystemJobFence;
     readonly outcome: "committed" | "failed";
     readonly records: readonly LogicalRecord<unknown>[];
   } | {

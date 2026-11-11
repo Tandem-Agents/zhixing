@@ -1,15 +1,15 @@
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import path from "node:path";
 
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   FilePairedCheckpointStaging,
   PairedCheckpointReceiver,
   projectPairedCheckpointCommandReceiver,
   type PairedCheckpointCommandReceiver,
   type PairedCheckpointReceiverConfiguration,
-} from "@zhixing/mesh/paired-checkpoint-target";
-import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/mesh/paired-checkpoint-target";
+import { keyIdForPublicKey } from "@zhixing-ai/mesh/recovery-root";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import type { InventoryPublishedRecoveryCheckpointTarget } from "./published-checkpoint-target.js";

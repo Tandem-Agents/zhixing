@@ -1,6 +1,6 @@
-import type { DeviceIdentity, DeviceRole, HomeTrustEvent, MeshEndpointDescriptor, SecretStorePort } from "@zhixing/core/contracts";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
-import { canonicalize } from "@zhixing/core/protocol";
+import type { DeviceIdentity, DeviceRole, HomeTrustEvent, MeshEndpointDescriptor, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import type {
   DisasterRecoveryCommitProof,
   HomeDiscoveryResumePoint,
@@ -8,8 +8,8 @@ import type {
   HomeTrustChainPoint,
   VerifiedHomeDiscovery,
   VerifiedHomeDiscoveryProgress,
-} from "@zhixing/mesh/home-discovery";
-import { homeTrustEventDigest, type CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/home-discovery";
+import { homeTrustEventDigest, type CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import { readDisasterRecoveryCommit } from "./anchor-installation-index.js";
 import type { CurrentIssuerDeviceRemovalAuthority } from "./device-removal.js";
 import { readDiscoveryProgress, recordDiscoveryProgress, resumePointOf } from "./discovery-progress.js";

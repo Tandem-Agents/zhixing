@@ -4,14 +4,14 @@
  * 统一入口——避免 server-state / daemon / stop / status / logs 各自硬编码
  * 路径导致未来 spec 修改时需要多处同步。所有消费者都必须通过本模块获取默认路径。
  *
- * 所有路径遵循 `ZHIXING_HOME` 覆盖（由 `@zhixing/core` 的 `getZhixingHome()` 提供），
+ * 所有路径遵循 `ZHIXING_HOME` 覆盖（由 `@zhixing-ai/core` 的 `getZhixingHome()` 提供），
  * 天然支持 test 隔离、多部署目录。
  */
 
 import { join } from "node:path";
 import {
   getZhixingHome,
-} from "@zhixing/core/paths";
+} from "@zhixing-ai/core/paths";
 
 /** ~/.zhixing/server.pid —— 进程锁 + 连接发现 */
 export function getDefaultPidPath(zhixingHome: string = getZhixingHome()): string {

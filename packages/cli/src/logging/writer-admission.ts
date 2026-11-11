@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import path from "node:path";
-import { logFailureEvidence, type LogFailureEvidence } from "@zhixing/core/logging";
+import { logFailureEvidence, type LogFailureEvidence } from "@zhixing-ai/core/logging";
 
 type DeclarationFailure = (reason: string, failure?: LogFailureEvidence) => void;
 export type LogWriterDeclaration = { ready: Promise<void>; close(): Promise<void> };

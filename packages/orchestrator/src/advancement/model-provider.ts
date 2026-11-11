@@ -1,9 +1,9 @@
-import type { EvidenceCapabilitySet } from "@zhixing/core/advancement";
+import type { EvidenceCapabilitySet } from "@zhixing-ai/core/advancement";
 import type {
   AdvancementReviewerPort,
   ControlCompletionPort,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 export interface AdvancementModelProviderBinding {
   readonly completion: ControlCompletionPort;

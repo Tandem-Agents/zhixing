@@ -8,14 +8,14 @@
  * main 列表不混场景对话)。场景库句柄惰性建、按 sceneId 缓存。
  */
 
-import { parseConversationId, type Conversation, type ConversationRevealIntent, type IConversationRepository } from "@zhixing/core/conversation";
-import { readRunsReverse, type RunRecordWithRef, type TranscriptReadSource } from "@zhixing/core/transcript";
+import { parseConversationId, type Conversation, type ConversationRevealIntent, type IConversationRepository } from "@zhixing-ai/core/conversation";
+import { readRunsReverse, type RunRecordWithRef, type TranscriptReadSource } from "@zhixing-ai/core/transcript";
 import type {
   ConversationClearProjectionPort,
   ConversationDirectoryStorage,
   ConversationIdentityLifecycleMechanism,
   ConversationShellOptions,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
 
 interface ConversationDirectoryTranscriptPort extends TranscriptReadSource {
@@ -87,7 +87,7 @@ export function createConversationDirectory(deps: {
         lastActiveAt: item.lastActiveAt,
       }));
     },
-    ...(deps.user.repo.listPage ? { async listPage(page: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
+    ...(deps.user.repo.listPage ? { async listPage(page: import('@zhixing-ai/core/conversation/application').ConversationDirectoryPageRequest) {
       const result = await deps.user.repo.listPage!(page);
       return { records: result.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })), next: result.next };
     } } : {}),

@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import type { DeviceCapacityStepPermit } from '@zhixing/core/resources';
+import type { DeviceCapacityStepPermit } from '@zhixing-ai/core/resources';
 import { TerminalManagedFiles } from '../managed-files.js';
-import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
-import { createTempDir } from '@zhixing/test-utils';
+import type { CheckpointFilesystemSession } from '@zhixing-ai/mesh/filesystem';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 const fixtures: { root: string; files: TerminalManagedFiles }[] = [];
 const step: DeviceCapacityStepPermit = { claim() {}, complete() {} };

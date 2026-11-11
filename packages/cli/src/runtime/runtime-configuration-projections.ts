@@ -1,4 +1,4 @@
-import type { ZhixingConfig } from "@zhixing/providers/configuration";
+import type { ZhixingConfig } from "@zhixing-ai/providers/configuration";
 
 declare const runtimeConfigurationProjectionBrand: unique symbol;
 

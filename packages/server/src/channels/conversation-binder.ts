@@ -2,10 +2,10 @@ import {
   type ChannelBindingPolicy,
   type InboundMessage,
   DEFAULT_BINDING_POLICY,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 import {
   DEFAULT_CONVERSATION_ID,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 
 /**
  * 根据入站消息和归组策略，确定目标 conversationId。

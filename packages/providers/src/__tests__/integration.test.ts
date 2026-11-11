@@ -9,8 +9,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { userMessage, extractText, type Message } from "@zhixing/core";
-import { drainAgentLoop } from "@zhixing/core/loop";
+import { userMessage, extractText, type Message } from "@zhixing-ai/core";
+import { drainAgentLoop } from "@zhixing-ai/core/loop";
 import { createProvider, createProviderDirect } from "../create-provider.js";
 
 const SF_KEY = process.env["SILICONFLOW_API_KEY"];

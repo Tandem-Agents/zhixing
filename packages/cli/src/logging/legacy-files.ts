@@ -1,7 +1,7 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
-import type { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
-import type { LogFileInfo } from "@zhixing/core/logging/storage";
+import type { CheckpointDirectoryHandle } from "@zhixing-ai/mesh/filesystem";
+import type { LogFileInfo } from "@zhixing-ai/core/logging/storage";
 
 const timestamp = "\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z";
 const dump = new RegExp(`^(?:keypress|llm-raw|llm-error)-[1-9]\\d*-${timestamp}\\.log$`, "u");

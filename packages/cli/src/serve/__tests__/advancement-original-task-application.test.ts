@@ -3,11 +3,11 @@ import {
   ConversationApplicationError,
   type ConversationDirectoryApplication,
   type ConversationPreparedAgentTurnIdentity,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import {
   AdvancementOriginalTaskAdmissionError,
   type AdvancementOriginalTaskSurfacePort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
 } from "../advancement-original-task-application.js";

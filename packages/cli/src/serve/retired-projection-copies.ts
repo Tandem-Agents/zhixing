@@ -1,10 +1,10 @@
 import path from "node:path";
 import { stat } from "node:fs/promises";
-import { durableProjectionDirectoryName, durableProjectionVersionDirectoryName, type FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { LogRecordPort } from "@zhixing/core/logging";
-import type { StopEndpointLock } from "@zhixing/core/protocol";
-import { SCHEDULE_AUTHORITY_PROJECTION_ID } from "@zhixing/owner-kernel/startup-definitions";
-import { readLock, type ProcessLockPaths } from "@zhixing/server";
+import { durableProjectionDirectoryName, durableProjectionVersionDirectoryName, type FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { LogRecordPort } from "@zhixing-ai/core/logging";
+import type { StopEndpointLock } from "@zhixing-ai/core/protocol";
+import { SCHEDULE_AUTHORITY_PROJECTION_ID } from "@zhixing-ai/owner-kernel/startup-definitions";
+import { readLock, type ProcessLockPaths } from "@zhixing-ai/server";
 import { recordedHostMayBeAlive, type RecordedHostProbes } from "./startup-server-owner.js";
 
 /**

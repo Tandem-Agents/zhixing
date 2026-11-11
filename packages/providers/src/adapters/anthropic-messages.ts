@@ -17,10 +17,10 @@ import type {
   StopReason,
   StreamEvent,
   TokenUsage,
-} from "@zhixing/core";
-import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
+} from "@zhixing-ai/core";
+import type { Message, ContentBlock, ToolSpec } from "@zhixing-ai/core";
 import type { ResolvedProvider } from "../types.js";
-import { markRequestUndelivered } from "@zhixing/core/resilience";
+import { markRequestUndelivered } from "@zhixing-ai/core/resilience";
 import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
 import { buildAnthropicThinkingParam } from "./thinking-params.js";
 

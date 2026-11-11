@@ -16,7 +16,7 @@ import type {
   RecoveryCheckpointPurpose,
   RecoveryCheckpointVerification,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   byteDigest,
   canonicalize,

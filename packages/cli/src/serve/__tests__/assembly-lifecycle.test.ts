@@ -1,4 +1,4 @@
-import { CleanupRegistry } from "@zhixing/server";
+import { CleanupRegistry } from "@zhixing-ai/server";
 import { describe, expect, it, vi } from "vitest";
 import {
   ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS,

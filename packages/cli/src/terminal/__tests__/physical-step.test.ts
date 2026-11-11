@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { DeviceCapacityAdmissionError, type DeviceCapacityArbiterPort } from '@zhixing/core/resources';
-import { logFailureEvidence } from '@zhixing/core/logging';
-import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
+import { DeviceCapacityAdmissionError, type DeviceCapacityArbiterPort } from '@zhixing-ai/core/resources';
+import { logFailureEvidence } from '@zhixing-ai/core/logging';
+import type { CheckpointFilesystemSession } from '@zhixing-ai/mesh/filesystem';
 import { ownedPosixFilesystem } from '../../../../mesh/src/checkpoint-posix-session.js';
 
-vi.mock('@zhixing/mesh/filesystem', async () => {
+vi.mock('@zhixing-ai/mesh/filesystem', async () => {
   const module = await import('../../../../mesh/src/checkpoint-posix-session.js');
   return { checkpointFilesystemCompletion: module.checkpointFilesystemCompletion, CheckpointDirectoryHandle: {} };
 });

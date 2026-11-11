@@ -22,8 +22,8 @@
 import type {
   ProviderCredentialProjection,
   ZhixingConfig,
-} from "@zhixing/providers";
-import type { RoleId as ModelRole } from "@zhixing/providers";
+} from "@zhixing-ai/providers";
+import type { RoleId as ModelRole } from "@zhixing-ai/providers";
 
 /**
  * 模型字段缺失记录——field-based discriminated union。

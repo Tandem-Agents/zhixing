@@ -1,4 +1,4 @@
-import { assertLocalConversationIdForDevice, isLocalConversationId } from "@zhixing/core/conversation";
+import { assertLocalConversationIdForDevice, isLocalConversationId } from "@zhixing-ai/core/conversation";
 import type {
   AuthorityCallContext,
   AuthorityError,
@@ -6,24 +6,24 @@ import type {
   ResourceReservationPort,
   TrustRuleSnapshot,
   UsageReport,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ArtifactStore,
   AuthorityCommitLog,
   SurfaceAssetCoordinator,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ExecutorCapabilityDirectory,
   ProtocolSignatureVerifier,
   ProtocolSigner,
   ResourceReservationProjection,
-} from "@zhixing/core/protocol";
-import { protocolDigest } from "@zhixing/core/protocol";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { ExecutorAssignmentResourceCoordinator } from "@zhixing/executor";
-import type { AssignmentResourceCoordinator } from "@zhixing/owner-kernel/resource-governor";
-import type { ControlAdmissionJournal } from "@zhixing/owner-kernel/control-admission";
-import type { ConversationDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
+} from "@zhixing-ai/core/protocol";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { ExecutorAssignmentResourceCoordinator } from "@zhixing-ai/executor";
+import type { AssignmentResourceCoordinator } from "@zhixing-ai/owner-kernel/resource-governor";
+import type { ControlAdmissionJournal } from "@zhixing-ai/owner-kernel/control-admission";
+import type { ConversationDeliveryParticipant } from "@zhixing-ai/owner-kernel/delivery";
 import type {
   AuthorityRuntimeStack,
   PreparedConversationAssignmentAuthority,

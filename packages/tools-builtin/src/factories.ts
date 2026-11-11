@@ -11,13 +11,13 @@
  *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
  */
 
-import type { SkillMode } from "@zhixing/core/skills/catalog";
-import type { ToolDefinition } from "@zhixing/core";
+import type { SkillMode } from "@zhixing-ai/core/skills/catalog";
+import type { ToolDefinition } from "@zhixing-ai/core";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogLoadApplication,
   SkillCatalogSaveApplication,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";

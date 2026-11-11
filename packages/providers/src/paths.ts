@@ -8,7 +8,7 @@
  *   1. caller 显式 homeDir 参数
  *   2. ZHIXING_CONFIG_PATH 环境变量（精确文件路径覆盖；其 dirname 同时充当
  *      配置目录）
- *   3. ZHIXING_HOME 环境变量（来自 @zhixing/core 的 getZhixingHome）
+ *   3. ZHIXING_HOME 环境变量（来自 @zhixing-ai/core 的 getZhixingHome）
  *   4. 默认 ~/.zhixing
  *
  * 让 ZHIXING_HOME 与 ZHIXING_CONFIG_PATH 在本层互通——以前两 env var 各被
@@ -18,7 +18,7 @@
 
 import path from "node:path";
 
-import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
+import { expandUserHome, getZhixingHome } from "@zhixing-ai/core/paths";
 
 /**
  * 文件名常量——内部 path 拼接 + caller 在显式 homeDir 场景拼接时用。

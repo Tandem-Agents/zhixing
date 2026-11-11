@@ -5,7 +5,7 @@ import { cliLoggingMode, managedHomeArgument, normalizeCliArgs } from "./entry-m
 export function isProductLogWriter(argv: readonly string[], home: string, windows = false): boolean {
   const entry = (value: string): boolean => {
     const normalized = windows ? value.replaceAll("\\", "/").toLowerCase() : value;
-    return /(?:^|\/)(?:packages\/cli\/(?:src\/(?:index|entry)\.ts|dist\/index\.js)|node_modules\/@zhixing\/cli\/dist\/index\.js)$/u.test(normalized)
+    return /(?:^|\/)(?:packages\/cli\/(?:src\/(?:index|entry)\.ts|dist\/index\.js)|node_modules\/zhixing\/dist\/index\.js)$/u.test(normalized)
       || /^(?:[.]\/)?(?:src\/(?:index|entry)\.ts|dist\/index\.js)$/u.test(normalized);
   };
   let index = 1;

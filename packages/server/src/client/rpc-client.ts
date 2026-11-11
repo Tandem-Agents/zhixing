@@ -16,7 +16,7 @@
  *   await client.close();
  */
 
-import { restoreFailureDiagnostic } from "@zhixing/core/logging";
+import { restoreFailureDiagnostic } from "@zhixing-ai/core/logging";
 import { WebSocket } from "ws";
 import { RpcMessagePump } from "./rpc-message-pump.js";
 import { RpcRequestSender } from "./rpc-request-sender.js";

@@ -76,7 +76,7 @@
 | 脚本闸 | 负责人每次调用 Bash 前（PreToolUse 钩子，`script-guard.mjs`） | 拦截内联 `node -e/--eval/-p` 和用 heredoc 写 .js/.mjs/.cjs/.ts：这类写法被外层 shell 转义弄坏、反复返工。脚本须用 Write 写成文件再运行；拦截记入 `gate.log`，离线用例见 `script-guard.test.mjs` |
 | 轮询闸 | 同上（`script-guard.mjs`，只对负责人会话） | 拦前台的 sleep 循环与 ≥10 秒的 sleep：后台任务结束会自动通知，等待期间做作业方案里的轻活 |
 | 全集放行闸 | 同上（只对负责人会话） | 目录级测试（全集、整包、整目录、无路径参数的 `test-source`/`pnpm test:*`）须 `plan.md` 第4节证伪清单全部打勾，并有放行行：“全集放行：<ISO 时间> … 范围：<本段的选择依据> workers=<N>”，命令里的 `--workers` 与之相同。放行之后各包 `src` 或 `scripts/*.mjs` 又改过就拦回；放行时间晚于当前时间也拦回（照抄 `date` 的输出，未来时间会让前一项检查失效）；往进度日志追加的记录带未来时间同样拦回。按清单文件展开的定向重跑与单个用例文件不受放行限制。用 `bash`/`sh` 运行的 .sh 脚本，内容一并检查（轮询闸同） |
-| 构建闸 | 同上（`script-guard.mjs`） | 拦不带过滤的根 `pnpm build`：本机没有 bun，它会去构建 terminal-ui 并报 `spawn bun ENOENT`。全量重建用 `pnpm release:version:check && pnpm -r --filter '!@zhixing/terminal-ui' --filter '!zhixing' run build`，链首先核对 `process.cwd()` 盘符 |
+| 构建闸 | 同上（`script-guard.mjs`） | 拦不带过滤的根 `pnpm build`：本机没有 bun，它会去构建 terminal-ui 并报 `spawn bun ENOENT`。全量重建用 `pnpm release:version:check && pnpm -r --filter '!@zhixing-ai/terminal-ui' --filter '!zhixing-workspace' run build`，链首先核对 `process.cwd()` 盘符 |
 | 旅程运行闸 | 同上（`script-guard.mjs`，只对负责人会话） | 每次真实旅程（`package-2-journey.mjs <运行名>`）前，`plan.md` 须有“运行结果表：<运行名>”一行，写明问题、无收益或无变化时的结论与所需数据：跑之前就知道每种结果怎么解释、缺的数据是否在这次运行里，避免跑完再补一轮 |
 | 并发闸 | 同上（只对负责人会话） | 批量运行（目录级、按清单或变量展开、一次列 5 个以上文件）必须显式写 `--workers N`：默认 8 路只适合快车道，重 I/O 文件本机耐久吞吐几乎不随并发扩展，8 路只拉长单文件、制造超时噪声 |
 | 方案闸 | 负责人每次调用 Edit/Write 前（PreToolUse 钩子，`plan-guard.mjs`） | 改仓库 `packages/`、`scripts/` 前，`plan.md` 须有“方案自审：通过 <时间>”和“既有合同变更清单”（本次改了哪些已有行为、依赖它的现有测试；没有就写“无”并给理由）；文档、草稿、协作文件与其他会话不受限。另外，负责人往 `collab/supervision/` 下的记录文件（.md、.log）新写入的时间晚于当前时间时拦回（照抄 `date`，不估计）。离线用例见 `plan-guard.test.mjs`。用 Python 脚本改文件绕得过此闸，由巡检核对 |

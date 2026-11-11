@@ -1,5 +1,5 @@
-import { generateTurnId } from "@zhixing/core";
-import type { ConversationAgentTurnAdmissionPort } from "@zhixing/core/conversation/application";
+import { generateTurnId } from "@zhixing-ai/core";
+import type { ConversationAgentTurnAdmissionPort } from "@zhixing-ai/core/conversation/application";
 import {
   ConversationManager,
   WorksceneBusyError,

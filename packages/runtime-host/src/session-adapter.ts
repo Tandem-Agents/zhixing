@@ -1,7 +1,7 @@
 /**
  * AgentRuntime → SessionRuntime 适配器
  *
- * @zhixing/owner-kernel 定义抽象接口 SessionRuntime（AsyncGenerator 风格），
+ * @zhixing-ai/owner-kernel 定义抽象接口 SessionRuntime（AsyncGenerator 风格），
  * AgentRuntime 是 callback 风格（KernelRunEvent + Promise<KernelRunCompletion>）。
  * 此适配器在两者之间架桥——纯协议适配:会话状态(注意力窗口 / turnCount /
  * 接受协议)归 ConversationManager,adapter 不持有任何会话状态。
@@ -18,22 +18,22 @@
 import {
   AgentError,
   type Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   abortWithReason,
   createInterruptController,
   type AbortReason,
-} from "@zhixing/core/interrupt";
+} from "@zhixing-ai/core/interrupt";
 import type {
   AgentResult,
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import type {
   RunTurnOptions,
   RuntimeDisposeReason,
   SessionRuntime,
-} from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/types";
 import {
   assertKernelRunEvent,
   assertKernelTerminal,
@@ -41,7 +41,7 @@ import {
   type KernelRunEvent,
   type KernelRunCompletion,
   type KernelTerminal,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 // ─── 适配器 ───
 
@@ -160,7 +160,7 @@ function projectKernelTerminalToConversationAgentResult(
 /** Kernel completion → existing Conversation persistence/result contract. */
 function projectKernelCompletionToConversationRunResult(
   completion: KernelRunCompletion,
-  continuation?: import("@zhixing/core").TurnOrigin["worksceneContinuation"],
+  continuation?: import("@zhixing-ai/core").TurnOrigin["worksceneContinuation"],
 ): RunResult {
   const artifacts = completion.artifacts;
   return {

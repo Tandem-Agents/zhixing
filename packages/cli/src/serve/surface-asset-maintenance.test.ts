@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SurfaceAssetCoordinator } from "@zhixing/core/authority";
+import type { SurfaceAssetCoordinator } from "@zhixing-ai/core/authority";
 import {
   currentMaintenanceAbortSignal,
   currentMaintenanceUrgency,
   StorageMaintenanceTaskRunner,
   storageMaintenanceObligation,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import {
   SurfaceAssetMaintenance,
   shouldContinueSurfaceAssetCollection,

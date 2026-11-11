@@ -1,14 +1,14 @@
-import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import type { AgentYield, RunResult } from "@zhixing-ai/core/loop";
 import type {
   ConversationPerspectivesCorrectnessPort,
   ConversationPerspectivesDurableExecutionInput,
   ConversationPerspectivesRuntimePort,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type {
   ConversationManager,
   ManagedSession,
-} from "@zhixing/owner-kernel/conversation-manager";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 
 export function createConversationPerspectivesCorrectnessPort(input: Readonly<{
   manager: ConversationManager;
@@ -177,7 +177,7 @@ async function runDurablePerspective(
 }
 
 function roughEstimateMessages(
-  messages: readonly import("@zhixing/core").Message[],
+  messages: readonly import("@zhixing-ai/core").Message[],
 ): number {
   const chars = messages.reduce(
     (sum, message) => sum + JSON.stringify(message).length,

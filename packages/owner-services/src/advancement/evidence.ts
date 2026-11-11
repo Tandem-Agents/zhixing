@@ -6,7 +6,7 @@ import {
   validateEvidenceBundle,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   advancementEvidenceRequestId,
   isObjectiveEvidenceKind,
@@ -16,9 +16,9 @@ import {
   type EvidenceKind,
   type EvidenceLocator,
   type ReviewEvidence,
-} from "@zhixing/core/advancement";
-import { extractText, type Message } from "@zhixing/core";
-import { type RunRecordInput } from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/advancement";
+import { extractText, type Message } from "@zhixing-ai/core";
+import { type RunRecordInput } from "@zhixing-ai/core/transcript";
 import type {
   AuthorityCallContext,
   CapabilityDescriptor,
@@ -27,7 +27,7 @@ import type {
   ImmediateRootResourceLease,
   ResourceLease,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type { AdvancementSessionStore } from "./session-store.js";
 
 const MAX_STALE_RETRIES = 2;

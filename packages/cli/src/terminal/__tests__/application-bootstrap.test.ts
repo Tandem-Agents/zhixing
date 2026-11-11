@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ endpoint: 'fixture', transport: undefined as any }));
-vi.mock('@zhixing/terminal-ui/parent-transport', () => ({
+vi.mock('@zhixing-ai/terminal-ui/parent-transport', () => ({
   consumeTerminalParentEndpoint: () => state.endpoint,
   TerminalParentTransport: class { constructor() { return state.transport; } },
 }));

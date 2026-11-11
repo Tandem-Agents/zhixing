@@ -1,13 +1,13 @@
-import type { ArtifactStore } from "@zhixing/core/authority";
-import type { IConfirmationBroker } from "@zhixing/core/confirmation";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import path from "node:path";
-import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
-import { buildSystemPrompt } from "@zhixing/orchestrator/runtime";
+import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing-ai/orchestrator/runtime";
+import { buildSystemPrompt } from "@zhixing-ai/orchestrator/runtime";
 import { zhixingProfile as mainProfile, ZHIXING_IDENTITY, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createEventBus, type AgentEventMap, type PostTurnControlIntent } from "@zhixing/core";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import { WorksceneContinuationApplication, isWorksceneSupportConversation, type WorksceneContinuationSource, type WorksceneContinuationPort } from "@zhixing/core/workscene/application";
+import { createEventBus, type AgentEventMap, type PostTurnControlIntent } from "@zhixing-ai/core";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
+import { WorksceneContinuationApplication, isWorksceneSupportConversation, type WorksceneContinuationSource, type WorksceneContinuationPort } from "@zhixing-ai/core/workscene/application";
 import { createMcpManagementTools } from "../mcp-tools.js";
 import { projectConversationCapabilitiesForDevice } from "../workscene-runtime-projection.js";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
@@ -22,10 +22,10 @@ const runtimeMocks = vi.hoisted(() => ({
 
 vi.mock("../read-guidance-file.js", () => ({ readGuidanceFile: runtimeMocks.readGuidanceFile }));
 
-vi.mock("@zhixing/orchestrator/runtime", async () => {
+vi.mock("@zhixing-ai/orchestrator/runtime", async () => {
   const actual =
-    await vi.importActual<typeof import("@zhixing/orchestrator/runtime")>(
-      "@zhixing/orchestrator/runtime",
+    await vi.importActual<typeof import("@zhixing-ai/orchestrator/runtime")>(
+      "@zhixing-ai/orchestrator/runtime",
     );
   return {
     ...actual,

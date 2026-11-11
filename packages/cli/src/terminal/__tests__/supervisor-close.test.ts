@@ -8,7 +8,7 @@ import { TERMINAL_LIMITS, type TerminalEnvelope, type TerminalMessage } from '..
 import { terminalWriterDeadline, terminalCloseDeadline } from '../close-budget.js';
 import { recordTerminalFailure } from '../failure.js';
 import { checkpointFilesystemCompletion, retainCheckpointFilesystemCompletion } from '../../../../mesh/src/checkpoint-filesystem-completion.js';
-import { beginLogPhase } from '@zhixing/core/logging';
+import { beginLogPhase } from '@zhixing-ai/core/logging';
 
 // Load the production owner unchanged, adding only fixture access to its
 // existing spawn/close ports. Native process and endpoint ports are in memory;

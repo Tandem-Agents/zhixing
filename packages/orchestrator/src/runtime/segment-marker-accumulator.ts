@@ -8,9 +8,9 @@
  * 设计契约：单次 run 仅期望 ≤1 次段切换，重复触发后取最新。
  */
 
-import type { AgentEventMap } from "@zhixing/core/types";
-import type { IEventBus } from "@zhixing/core/events";
-import type { WindowCompact } from "@zhixing/core/context";
+import type { AgentEventMap } from "@zhixing-ai/core/types";
+import type { IEventBus } from "@zhixing-ai/core/events";
+import type { WindowCompact } from "@zhixing-ai/core/context";
 
 export interface SegmentMarkerAccumulator {
   /** 取累积的段切换窗口重构指令；本 run 未触发段切换时返 undefined */

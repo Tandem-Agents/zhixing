@@ -1,13 +1,13 @@
 // 执行端账本对维护准入背压的段外接续（注入背压的受控反例，不是完整的后台占额度竞争）：
 // 单次背压照常接续并收束；等待中取消则醒来后不再进入操作；持续背压按轮次上限或期限有界结束，不挂住。
 import { afterEach, expect, it, vi } from "vitest";
-import type { Message } from "@zhixing/core";
-import { StorageMaintenanceAdmissionError, runWithMaintenanceUrgency } from "@zhixing/core/resources";
-import { ConversationAssignmentLedger } from "@zhixing/executor";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import type { Message } from "@zhixing-ai/core";
+import { StorageMaintenanceAdmissionError, runWithMaintenanceUrgency } from "@zhixing-ai/core/resources";
+import { ConversationAssignmentLedger } from "@zhixing-ai/executor";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 import { executorIdForDevice } from "../executor-identity.js";
 import { loadOrCreateDeviceKey } from "../mesh-device-key.js";

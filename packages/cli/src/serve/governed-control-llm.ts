@@ -6,10 +6,10 @@ import type {
   ModelCallResourceMeter,
   ReservationOrigin,
   ResourceLease,
-} from "@zhixing/core/contracts";
-import type { ChatRequest, LLMProvider, StreamEvent } from "@zhixing/core";
-import type { SessionRuntimeTextCallOptions } from "@zhixing/owner-kernel/types";
-import { meteredProviderCall } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/contracts";
+import type { ChatRequest, LLMProvider, StreamEvent } from "@zhixing-ai/core";
+import type { SessionRuntimeTextCallOptions } from "@zhixing-ai/owner-kernel/types";
+import { meteredProviderCall } from "@zhixing-ai/orchestrator/runtime";
 
 /** control 类轻推理的治理端口窄面——由锚点 governor 履约（同进程消费，不经派发） */
 export interface ControlLlmGovernor {

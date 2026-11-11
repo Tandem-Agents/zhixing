@@ -1,5 +1,5 @@
-import type { WorkspaceAdministrationDurableInfrastructureFailure } from "@zhixing/core/environment/workspace-administration";
-import { WorkspaceBindingCancelledError } from "@zhixing/core/environment";
+import type { WorkspaceAdministrationDurableInfrastructureFailure } from "@zhixing-ai/core/environment/workspace-administration";
+import { WorkspaceBindingCancelledError } from "@zhixing-ai/core/environment";
 import {
   DeviceCapacityAdmissionError,
   StorageMaintenanceAdmissionError,
@@ -7,7 +7,7 @@ import {
   ExecutorResourceAdmissionExpiredError,
   ExecutorResourceAdmissionPendingError,
   ExecutorResourceBackpressureError,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { LocalWorkspaceResidualRootPendingError } from "./local-workspace-control.js";
 
 /**

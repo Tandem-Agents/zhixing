@@ -1,10 +1,10 @@
 import { afterEach, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { IsolatedLogStore } from "./store-process.js";
 import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
-import { LogRecorder } from "@zhixing/core/logging";
+import { LogRecorder } from "@zhixing-ai/core/logging";
 import { createLocalLogStore } from "./runtime.js";
-import type { DeviceCapacityArbiterPort } from "@zhixing/core/resources";
+import type { DeviceCapacityArbiterPort } from "@zhixing-ai/core/resources";
 import { fork } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";

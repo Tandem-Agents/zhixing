@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { projectProcessYield, type SessionProcessProjection } from '@zhixing/rpc/session-wire';
-import { processViewRows } from '@zhixing/terminal-ui/process-model';
+import { projectProcessYield, type SessionProcessProjection } from '@zhixing-ai/rpc/session-wire';
+import { processViewRows } from '@zhixing-ai/terminal-ui/process-model';
 import { TerminalProcessSession } from '../process-session.js';
 import { TerminalOutputProjection } from '../output.js';
 

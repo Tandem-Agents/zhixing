@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { connect, createServer, type Server, type Socket } from "node:net";
-import type { HomeTrustEvent } from "@zhixing/core/contracts";
-import { createSignedDisasterRecoveryCommit } from "@zhixing/core/protocol";
+import type { HomeTrustEvent } from "@zhixing-ai/core/contracts";
+import { createSignedDisasterRecoveryCommit } from "@zhixing-ai/core/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTerminalRouteSecret } from "../bootstrap.js";
 import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";

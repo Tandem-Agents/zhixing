@@ -8,14 +8,14 @@ import type {
   DeferredGlobalIntentPort,
   IntentStreamRecord,
   JsonValue,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   AuthorityCommitLog,
   DurableProjectionMutation,
   DurableProjectionReadContext,
   ProjectionTransactionContext,
   ProjectionTransactionDecision,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   assertPrincipalAllowsAuthorityMethod,
   deferredGlobalIntentDigest,
@@ -26,7 +26,7 @@ import {
   validateDeferredGlobalIntent,
   validateDeferredIntentMutation,
   validateIntentStreamRecord,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 export const DEFERRED_INTENT_PROJECTION_ID = "deferred-global-intents-v1";
 const INTENT_PREFIX = "intent:";

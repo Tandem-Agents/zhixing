@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { withS7TemporaryDirectoryRoot } from "@zhixing/core/test-support/s7-durable-harness";
-import { createTempDir } from "@zhixing/test-utils";
+import { withS7TemporaryDirectoryRoot } from "@zhixing-ai/core/test-support/s7-durable-harness";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   S7_DURABLE_CONTRACT_LEDGER,
@@ -76,7 +76,7 @@ describe("S7 production durable contract registry", () => {
     expect(source).not.toContain("observeOutcome(kind, caseKey)");
     expect(source).not.toContain("reasonCodeForOutcome(kind, caseKey)");
     expect(source).not.toContain(":observed");
-    expect(source).toContain("@zhixing/core/test-support/s7-durable");
+    expect(source).toContain("@zhixing-ai/core/test-support/s7-durable");
 
     for (const packageRegistry of [coreScenarios, ownerScenarios, cliScenarios]) {
       expect(packageRegistry).toContain("defineS7DurableScenarios");

@@ -1,7 +1,7 @@
-import { artifactJsonIndex, type ArtifactStore } from '@zhixing/core/authority';
-import type { ArtifactRef, TranscriptRunRecord } from '@zhixing/core/contracts';
-import type { Message } from '@zhixing/core';
-import { byteDigest, canonicalize, validateMessage, validateTranscriptRunRecord } from '@zhixing/core/protocol';
+import { artifactJsonIndex, type ArtifactStore } from '@zhixing-ai/core/authority';
+import type { ArtifactRef, TranscriptRunRecord } from '@zhixing-ai/core/contracts';
+import type { Message } from '@zhixing-ai/core';
+import { byteDigest, canonicalize, validateMessage, validateTranscriptRunRecord } from '@zhixing-ai/core/protocol';
 
 type Keys = readonly (string | number)[];
 /** This is explicitly a replay projection, never a transcript/message value.

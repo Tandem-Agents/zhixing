@@ -1,14 +1,14 @@
-import { LocalLogStore } from "@zhixing/core/logging/storage";
-import { LogAppendIndeterminateError, logFailureEvidence, logStorageFailure } from "@zhixing/core/logging";
-import type { DeviceCapacityAdmission, DeviceCapacityArbiterPort, DeviceCapacityDimension } from "@zhixing/core/resources";
+import { LocalLogStore } from "@zhixing-ai/core/logging/storage";
+import { LogAppendIndeterminateError, logFailureEvidence, logStorageFailure } from "@zhixing-ai/core/logging";
+import type { DeviceCapacityAdmission, DeviceCapacityArbiterPort, DeviceCapacityDimension } from "@zhixing-ai/core/resources";
 import { LogFilesProcess } from "./files-process.js";
 import { createLogWriterProbe } from "./writers.js";
 import type { CapacityReply, StoreWorkerInput, StoreWorkerOutput } from "./store-worker-protocol.js";
-import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing-ai/terminal-ui/parent-transport';
 import { LOG_STORE_FRAME_BYTES } from './store-process.js';
 import { consumeLogWorkerStdio, createTerminalLogWorker, runTerminalLogObserver } from './terminal-worker.js';
 import { createTerminalOwnedProcessFactory } from '../terminal/host-launch.js';
-import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
+import { CheckpointDirectoryHandle } from '@zhixing-ai/mesh/filesystem';
 
 const endpoint = consumeTerminalParentEndpoint('ZHIXING_LOG_STORE_PIPE');
 const parent = endpoint !== undefined ? new TerminalParentTransport(endpoint, LOG_STORE_FRAME_BYTES) : consumeLogWorkerStdio();

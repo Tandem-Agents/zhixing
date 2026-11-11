@@ -6,7 +6,7 @@ import { projectSessionEvent, type SessionEventProjection } from '../types/agent
 import { prepareStreamDataPayload, readStreamDisplayPayload, validateSessionEventProjection } from './stream.js';
 import { stripPresentationFromAgentYield } from '../loop/presentation.js';
 import { errorCauseSummary } from '../resilience/classify.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 async function store() { const root = await createTempDir('process'); return new FileArtifactStore(root); }
 describe('finite process events and canonical display read', () => {
   it('keeps the default result closed instead of exposing display extensions through alternate keys', () => {

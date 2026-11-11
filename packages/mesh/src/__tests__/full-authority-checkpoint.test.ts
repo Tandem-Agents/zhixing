@@ -1,7 +1,7 @@
 import { link, mkdir, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   ArtifactLifecycleIndex,
   FileArtifactStore,
@@ -12,8 +12,8 @@ import {
   type ArtifactStore,
   type AuthorityCommitLog,
   type DurableLogCheckpoint,
-} from "@zhixing/core/authority";
-import { MAX_SURFACE_ASSET_BYTES, type CheckpointStreamRecord, type HomeTrustRecord } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/authority";
+import { MAX_SURFACE_ASSET_BYTES, type CheckpointStreamRecord, type HomeTrustRecord } from "@zhixing-ai/core/contracts";
 import {
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
@@ -24,7 +24,7 @@ import {
   type DeviceCapacityAdmission,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceRequest,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { projectRecoveryReadiness } from "../bootstrap-authority.js";
 import { byteDigest, canonicalize, protocolDigest } from "../canonical.js";
 import { AuthorityCheckpointService } from "../checkpoint-service.js";

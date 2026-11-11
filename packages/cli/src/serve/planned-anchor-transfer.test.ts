@@ -5,35 +5,35 @@ import type {
   SecretRef,
   SecretStorePort,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedAnchorTransferAbort,
   createSignedAnchorTransferCommand,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   currentMaintenanceAbortSignal,
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
   type DeviceCapacityPolicy,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
-import type { SecureMeshConnection } from "@zhixing/mesh";
+} from "@zhixing-ai/core/resources";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
 import type {
   MeshServiceDefinition,
   MeshServiceRegistry,
-} from "@zhixing/mesh/service-registry";
-import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/service-registry";
+import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing-ai/mesh/device-identity";
 import {
   loadActiveAnchorIssuerKey,
   loadAnchorIssuerKey,
-} from "@zhixing/mesh/device-key-store";
-import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
-import { localConversationId } from '@zhixing/core/conversation';
-import { ConversationRunJournal } from '@zhixing/owner-kernel/conversation-assignment';
-import { loadCommittedConversationBase, resolveCurrentConversationAuthority } from '@zhixing/owner-kernel/conversation-transfer';
+} from "@zhixing-ai/mesh/device-key-store";
+import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent } from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { localConversationId } from '@zhixing-ai/core/conversation';
+import { ConversationRunJournal } from '@zhixing-ai/owner-kernel/conversation-assignment';
+import { loadCommittedConversationBase, resolveCurrentConversationAuthority } from '@zhixing-ai/owner-kernel/conversation-transfer';
 import { importAuthenticatedBase } from '../../../owner-kernel/src/__tests__/imported-base-fixture.js';
 import { describe, expect, it, onTestFinished } from "vitest";
 import { createConversationAuthorityVerifier } from "./conversation-authority-verifier.js";

@@ -1,7 +1,7 @@
-import type { AgentYield, RunResult } from "@zhixing/core/loop";
-import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
-import { isWorksceneSupportConversation } from "@zhixing/core/workscene/application";
-import type { IConfirmationBroker } from "@zhixing/core/confirmation";
+import type { AgentYield, RunResult } from "@zhixing-ai/core/loop";
+import { observeLogPhase, type LogRecordPort } from "@zhixing-ai/core/logging";
+import { isWorksceneSupportConversation } from "@zhixing-ai/core/workscene/application";
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import type {
   AssignmentMutationPort,
   AuthorityCallContext,
@@ -14,25 +14,25 @@ import type {
   RunExecutorPort,
   SupersedeProof,
   TrustRuleSnapshot,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   MAX_CONTROL_LEASE_TTL_MS,
   StreamDigestChain,
   type ExecutorCapabilitySnapshot,
   type StreamFrameProducer,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   ConversationRunJournal,
   InProcessConversationDispatcher,
   type InProcessDispatchContextFactory,
   type InProcessBundleSubmission,
-} from "@zhixing/owner-kernel/conversation-assignment";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import type { ConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import type { ConversationRuntimeBinding } from "../setup-delivery.js";
 import {
@@ -78,8 +78,8 @@ export const NO_REMOTE_CONVERSATION_EXECUTORS: ConversationExecutorTopologyDirec
 
 export interface ConversationAssignmentArtifactAuthorityReader {
   read(assignmentId: string): {
-    readonly capability: import("@zhixing/core/contracts").AuthorityCapability<"conversation">;
-    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
+    readonly capability: import("@zhixing-ai/core/contracts").AuthorityCapability<"conversation">;
+    readonly activation: import("@zhixing-ai/core/contracts").AssignmentActivationProof<"conversation">;
   };
 }
 
@@ -88,8 +88,8 @@ export interface ConversationAssignmentArtifactAuthorityIndex
   find(assignmentId: string): ReturnType<ConversationAssignmentArtifactAuthorityReader["read"]> | undefined;
   install(
     assignmentId: string,
-    capability: import("@zhixing/core/contracts").AuthorityCapability<"conversation">,
-    activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">,
+    capability: import("@zhixing-ai/core/contracts").AuthorityCapability<"conversation">,
+    activation: import("@zhixing-ai/core/contracts").AssignmentActivationProof<"conversation">,
   ): void;
   remove(assignmentId: string): void;
 }
@@ -97,8 +97,8 @@ export interface ConversationAssignmentArtifactAuthorityIndex
 export function createConversationAssignmentArtifactAuthorityIndex():
   ConversationAssignmentArtifactAuthorityIndex {
   const assignments = new Map<string, {
-    readonly capability: import("@zhixing/core/contracts").AuthorityCapability<"conversation">;
-    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
+    readonly capability: import("@zhixing-ai/core/contracts").AuthorityCapability<"conversation">;
+    readonly activation: import("@zhixing-ai/core/contracts").AssignmentActivationProof<"conversation">;
   }>();
   const index: ConversationAssignmentArtifactAuthorityIndex = {
     install(assignmentId, capability, activation) {
@@ -146,7 +146,7 @@ export interface ConversationExecutorExecutionEffect {
   startAndReport(context: AuthorityCallContext): Promise<void>;
   createStream(input: {
     readonly assignmentId: string;
-    readonly ref: import("@zhixing/core/contracts").ExecutionRef;
+    readonly ref: import("@zhixing-ai/core/contracts").ExecutionRef;
   }): Promise<ConversationExecutorAssignmentRunStream>;
   startHeartbeat(): { stop(): Promise<void> };
   createInteractionScope(input: {
@@ -155,10 +155,10 @@ export interface ConversationExecutorExecutionEffect {
     readonly context: AuthorityCallContext;
     readonly surfacePrincipal: string;
     readonly broker?: IConfirmationBroker;
-    readonly stream: import("@zhixing/core/protocol").StreamFrameAppender;
+    readonly stream: import("@zhixing-ai/core/protocol").StreamFrameAppender;
     readonly streamMeta: {
       readonly turnOrigin?: NonNullable<
-        import("@zhixing/core/contracts").IngressContext["turnOrigin"]
+        import("@zhixing-ai/core/contracts").IngressContext["turnOrigin"]
       >;
     };
   }): ConversationExecutorInteractionScope;
@@ -166,14 +166,14 @@ export interface ConversationExecutorExecutionEffect {
     readonly execution: "conversation";
     readonly anchorEpoch: number;
     readonly allowGlobal: boolean;
-    readonly capability?: import("@zhixing/core/contracts").AuthorityCapability;
+    readonly capability?: import("@zhixing-ai/core/contracts").AuthorityCapability;
   }): AssignmentMutationPort;
   authorizeToolExecution(
     lease: Extract<
       DispatchEnvelope,
       { readonly execution: "conversation" }
     >["permissionLease"],
-  ): Promise<readonly import("@zhixing/core/security").PermissionRule[]>;
+  ): Promise<readonly import("@zhixing-ai/core/security").PermissionRule[]>;
   hasOpenSideEffects(): Promise<boolean>;
   failExecution(input: {
     readonly reason: string;
@@ -193,10 +193,10 @@ export interface ConversationExecutorExecutionEffect {
   >;
   sealConversationBundle(input: {
     readonly runRecord:
-      | import("@zhixing/core/contracts").TranscriptRunRecord
-      | { readonly ref: import("@zhixing/core/contracts").ArtifactRef };
-    readonly windowCompact?: import("@zhixing/core/contracts").WindowCompactInstruction;
-    readonly contentAssets: readonly import("@zhixing/core/contracts").ContentAssetRef[];
+      | import("@zhixing-ai/core/contracts").TranscriptRunRecord
+      | { readonly ref: import("@zhixing-ai/core/contracts").ArtifactRef };
+    readonly windowCompact?: import("@zhixing-ai/core/contracts").WindowCompactInstruction;
+    readonly contentAssets: readonly import("@zhixing-ai/core/contracts").ContentAssetRef[];
     readonly streamFinal: { readonly finalSeq: number; readonly streamDigest: string };
     readonly usage: {
       readonly inputTokens: number;
@@ -236,7 +236,7 @@ export interface ConversationExecutorDispatchPlan {
   dispatch(input: {
     readonly journal: ConversationRunJournal;
     readonly envelope: Extract<DispatchEnvelope, { execution: "conversation" }>;
-    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
+    readonly activation: import("@zhixing-ai/core/contracts").AssignmentActivationProof<"conversation">;
     readonly contexts: InProcessDispatchContextFactory;
     readonly submissionContext: AuthorityCallContext;
   }): Promise<void>;
@@ -249,7 +249,7 @@ export interface ConversationExecutorDispatchPlan {
     ) => RunResult;
     readonly onRemoteSettled: () => void;
     /** 本尝试的前台义务：远端执行开始后让出，看到提交后重入直到回放完成（本地执行的阶段由运行体回调） */
-    readonly foreground?: Pick<import("@zhixing/core/resources").ForegroundObligation, "pause" | "resume">;
+    readonly foreground?: Pick<import("@zhixing-ai/core/resources").ForegroundObligation, "pause" | "resume">;
   }): AsyncGenerator<AgentYield, RunResult>;
   dispose(): Promise<void>;
 }
@@ -275,10 +275,10 @@ export interface ConversationAssignmentStagingPort {
   stageSession(
     assignmentId: string,
     input: {
-      readonly mutation: import("@zhixing/core/contracts").SessionStagedMutation;
+      readonly mutation: import("@zhixing-ai/core/contracts").SessionStagedMutation;
       readonly requestId: string;
     },
-  ): Promise<import("@zhixing/core/contracts").AssignmentStagedReceipt>;
+  ): Promise<import("@zhixing-ai/core/contracts").AssignmentStagedReceipt>;
 }
 
 export interface ConversationExecutorHostBoundaryOptions {
@@ -298,7 +298,7 @@ export interface ConversationExecutorHostBoundaryOptions {
     >[0]["dataPlaneTickets"];
     readonly createStream?: (input: {
       readonly assignmentId: string;
-      readonly ref: import("@zhixing/core/contracts").ExecutionRef;
+      readonly ref: import("@zhixing-ai/core/contracts").ExecutionRef;
     }) => Promise<ConversationExecutorAssignmentRunStream>;
   };
 }
@@ -342,10 +342,10 @@ interface LocalConversationSubmission {
     readonly context: AuthorityCallContext;
     readonly surfacePrincipal: string;
     readonly broker?: IConfirmationBroker;
-    readonly stream: import("@zhixing/core/protocol").StreamFrameAppender;
+    readonly stream: import("@zhixing-ai/core/protocol").StreamFrameAppender;
     readonly streamMeta: {
       readonly turnOrigin?: NonNullable<
-        import("@zhixing/core/contracts").IngressContext["turnOrigin"]
+        import("@zhixing-ai/core/contracts").IngressContext["turnOrigin"]
       >;
     };
   }): ConversationExecutorInteractionScope;
@@ -661,7 +661,7 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
   async dispatch(input: {
     readonly journal: ConversationRunJournal;
     readonly envelope: Extract<DispatchEnvelope, { execution: "conversation" }>;
-    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
+    readonly activation: import("@zhixing-ai/core/contracts").AssignmentActivationProof<"conversation">;
     readonly contexts: InProcessDispatchContextFactory;
     readonly submissionContext: AuthorityCallContext;
   }): Promise<void> {
@@ -734,7 +734,7 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
       committed: NonNullable<Awaited<ReturnType<ConversationRunJournal["committedRun"]>>>,
     ) => RunResult;
     readonly onRemoteSettled: () => void;
-    readonly foreground?: Pick<import("@zhixing/core/resources").ForegroundObligation, "pause" | "resume">;
+    readonly foreground?: Pick<import("@zhixing-ai/core/resources").ForegroundObligation, "pause" | "resume">;
   }): AsyncGenerator<AgentYield, RunResult> {
     const assignmentId = this.#assignmentId!;
     const journal = this.#journal!;
@@ -839,7 +839,7 @@ function createLocalConversationExecutorMechanism(
   });
   const createStream = local.createStream ?? ((input: {
     readonly assignmentId: string;
-    readonly ref: import("@zhixing/core/contracts").ExecutionRef;
+    readonly ref: import("@zhixing-ai/core/contracts").ExecutionRef;
   }) => Promise.resolve(new StreamDigestChain(input.assignmentId)));
 
   return {
@@ -1105,7 +1105,7 @@ function startControlHeartbeat(
 
 function remoteBundleSubmissionDeferred(): {
   readonly committed: false;
-  readonly error: import("@zhixing/core/contracts").AuthorityError;
+  readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
 } {
   return {
     committed: false,

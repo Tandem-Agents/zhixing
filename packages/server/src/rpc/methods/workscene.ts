@@ -25,11 +25,11 @@ import {
   WORKSCENE_ENTRY_ENTER_COMMAND,
   WORKSCENE_ENTRY_EXIT_COMMAND,
   WorksceneApplicationError,
-} from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene/application";
 import type {
   WorksceneEnterResult,
   WorksceneListResult,
-} from "@zhixing/rpc/session-wire";
+} from "@zhixing-ai/rpc/session-wire";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";

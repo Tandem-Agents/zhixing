@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
-} from "@zhixing/core/contracts";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/contracts";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import {
   EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE,
   PostAdoptionReviewCoordinator,

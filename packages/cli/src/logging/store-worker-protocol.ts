@@ -1,5 +1,5 @@
-import type { DeviceCapacityAdmission, DeviceCapacityBudget, DeviceCapacityRequest } from "@zhixing/core/resources";
-import type { LogAppendReceipt, LogCapture, LogStatus, LogStorageFailure, LogFailureEvidence } from "@zhixing/core/logging";
+import type { DeviceCapacityAdmission, DeviceCapacityBudget, DeviceCapacityRequest } from "@zhixing-ai/core/resources";
+import type { LogAppendReceipt, LogCapture, LogStatus, LogStorageFailure, LogFailureEvidence } from "@zhixing-ai/core/logging";
 
 export type StoreOperation = "initialize" | "append" | "maintain";
 export type CapacityReply = Exclude<DeviceCapacityAdmission, { kind: "granted" }> | { kind: "granted"; budget: DeviceCapacityBudget };

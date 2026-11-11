@@ -1,7 +1,7 @@
 import { expect, it, onTestFinished, vi } from 'vitest';
 import { open, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { FileAuthorityCommitLog } from '../commit-log.js';
 import { FileArtifactStore } from '../artifact-store.js';
 import { readWalVersion } from '../verified-wal-view.js';

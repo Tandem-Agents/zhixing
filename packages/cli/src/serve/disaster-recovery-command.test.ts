@@ -23,17 +23,17 @@ const fixture = vi.hoisted(() => ({
   signAbort: vi.fn((input: unknown) => ({ signedAbort: input })),
 }));
 
-vi.mock("@zhixing/core/protocol", async () => {
-  const actual = await vi.importActual<typeof import("@zhixing/core/protocol")>(
-    "@zhixing/core/protocol",
+vi.mock("@zhixing-ai/core/protocol", async () => {
+  const actual = await vi.importActual<typeof import("@zhixing-ai/core/protocol")>(
+    "@zhixing-ai/core/protocol",
   );
   return { ...actual, createSignedDisasterRecoveryAbort: fixture.signAbort };
 });
 
-vi.mock("@zhixing/core/backup-recovery/application", async () => {
+vi.mock("@zhixing-ai/core/backup-recovery/application", async () => {
   const actual = await vi.importActual<typeof import(
-    "@zhixing/core/backup-recovery/application"
-  )>("@zhixing/core/backup-recovery/application");
+    "@zhixing-ai/core/backup-recovery/application"
+  )>("@zhixing-ai/core/backup-recovery/application");
   return {
     ...actual,
     BackupRecoveryDisasterAdmissionApplicationService: class {
@@ -47,7 +47,7 @@ vi.mock("@zhixing/core/backup-recovery/application", async () => {
   };
 });
 
-vi.mock("@zhixing/providers", () => ({
+vi.mock("@zhixing-ai/providers", () => ({
   loadConfig: () => ({}),
   loadCredentialSnapshot: vi.fn(),
 }));

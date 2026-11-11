@@ -1,20 +1,20 @@
-import type { AnchorRubricGlobalStateAdapter } from "@zhixing/core/rubrics";
+import type { AnchorRubricGlobalStateAdapter } from "@zhixing-ai/core/rubrics";
 import {
   RUBRIC_AUTHORITY_STREAM,
-} from "@zhixing/core/rubrics";
+} from "@zhixing-ai/core/rubrics";
 import type {
   ArtifactRef,
   AuthorityCallContext,
   DeferredGlobalIntent,
   RubricWriteMutation,
   ScheduleWriteMutation,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertPrincipalAllowsAuthorityMethod,
   deferredGlobalIntentDigest,
   deferredIntentMutationDigest,
   deferredIntentStream,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   confirmedIntentRecord,
   DeferredGlobalIntentRepository,

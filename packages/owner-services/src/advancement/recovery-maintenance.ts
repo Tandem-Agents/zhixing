@@ -1,9 +1,9 @@
 import type {
   AdvancementReviewAttemptApplication,
   AdvancementReviewResultProjectionApplication,
-} from "@zhixing/core/advancement/application";
-import type { AdvancementProxyMessage, AdvancementSession, AdvancementReviewAttempt } from "@zhixing/core/advancement";
-import type { RunRecord, RunRecordRef } from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/advancement/application";
+import type { AdvancementProxyMessage, AdvancementSession, AdvancementReviewAttempt } from "@zhixing-ai/core/advancement";
+import type { RunRecord, RunRecordRef } from "@zhixing-ai/core/transcript";
 import type { AdvancementConversationDirectory } from "./conversation-directory-port.js";
 import type { AdvancementController } from "./controller.js";
 import type {
@@ -17,8 +17,8 @@ import {
   type ScheduleProxyMessageResult,
 } from "./proxy-scheduler.js";
 
-import { hasPendingWorksceneTask } from "@zhixing/core/workscene/application";
-import { runWithLogAttribution } from "@zhixing/core/logging";
+import { hasPendingWorksceneTask } from "@zhixing-ai/core/workscene/application";
+import { runWithLogAttribution } from "@zhixing-ai/core/logging";
 
 const RECOVERY_SCAN_PAGE_SIZE = 50;
 
@@ -39,8 +39,8 @@ export interface AdvancementRecoveryMaintenanceOptions {
   readonly logger?: Pick<Console, "warn">;
   readonly pending?: AdvancementRecoveryReadPort;
   /** 主 Agent 提议的接受与草案；恢复时兜底推进，排空与停止时中止它的在途草案调用。 */
-  readonly proposals?: Pick<import("@zhixing/core/advancement").AdvancementProposalApplicationService, "advance"> &
-    Partial<Pick<import("@zhixing/core/advancement").AdvancementProposalApplicationService, "beginDrain" | "resume" | "stop">>;
+  readonly proposals?: Pick<import("@zhixing-ai/core/advancement").AdvancementProposalApplicationService, "advance"> &
+    Partial<Pick<import("@zhixing-ai/core/advancement").AdvancementProposalApplicationService, "beginDrain" | "resume" | "stop">>;
 }
 
 export type AdvancementRecoveryResult =

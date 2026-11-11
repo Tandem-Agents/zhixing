@@ -1,5 +1,5 @@
-import type { AgentYield } from "@zhixing/core/loop";
-import { isToolResultDisposition, type ContentBlock, type Message, type TokenUsage, type ToolResult } from "@zhixing/core/types";
+import type { AgentYield } from "@zhixing-ai/core/loop";
+import { isToolResultDisposition, type ContentBlock, type Message, type TokenUsage, type ToolResult } from "@zhixing-ai/core/types";
 
 /**
  * The finite event stream emitted by one Intelligence Kernel run.

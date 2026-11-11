@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { prepareExclusiveFileClaim } from "../exclusive-file-claim.js";
 import { acquireFileLock, captureFileLockProcessIdentity, createFileLockAcquirer, withFileLockProcessIdentity } from "../file-lock.js";

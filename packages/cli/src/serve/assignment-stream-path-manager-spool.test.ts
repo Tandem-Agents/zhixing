@@ -1,18 +1,18 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import type {
   ExecutionRef,
   StreamAck,
   StreamConsumerAuth,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
-} from "@zhixing/executor/assignment-stream-spool";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/executor/assignment-stream-spool";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   createAssignmentStreamServiceHandler,

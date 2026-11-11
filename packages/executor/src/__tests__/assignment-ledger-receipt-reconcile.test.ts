@@ -1,6 +1,6 @@
 // 回执对账收敛为执行端的一份在途工作：并发调用合一；期间的新提交不被那一轮的结论覆盖；
 // 日志头未前进时不重扫；前台加入在途的一轮后按前台紧急度准入。经真实账本、真实执行端治理器与真实日志。
-import { StorageMaintenanceCancelledError, currentMaintenanceUrgency, runWithMaintenanceUrgency } from "@zhixing/core/resources";
+import { StorageMaintenanceCancelledError, currentMaintenanceUrgency, runWithMaintenanceUrgency } from "@zhixing-ai/core/resources";
 import { describe, expect, it, vi } from "vitest";
 import { ASSIGNMENT_ID, DURABLE_IO_TEST_TIMEOUT_MS, createFormalReceiptHarness, ownerContext } from "./assignment-ledger-fixture.js";
 

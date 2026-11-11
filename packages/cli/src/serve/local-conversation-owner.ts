@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { buildStartupBootstrapPair } from "@zhixing/core/context";
-import { localConversationId, type Conversation } from "@zhixing/core/conversation";
-import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing/core/rubrics";
-import { projectRubricContractDraft, type RubricContractDraftSnapshot, type RubricDraftPersistenceChoice } from "@zhixing/core/advancement";
-import { type RunRecordRef } from "@zhixing/core/transcript";
-import { type UserTurnInput } from "@zhixing/core";
+import { buildStartupBootstrapPair } from "@zhixing-ai/core/context";
+import { localConversationId, type Conversation } from "@zhixing-ai/core/conversation";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing-ai/core/rubrics";
+import { projectRubricContractDraft, type RubricContractDraftSnapshot, type RubricDraftPersistenceChoice } from "@zhixing-ai/core/advancement";
+import { type RunRecordRef } from "@zhixing-ai/core/transcript";
+import { type UserTurnInput } from "@zhixing-ai/core";
 import type {
   DeferredGlobalIntent,
   EvidenceHandlerPort,
@@ -15,15 +15,15 @@ import type {
   ScheduleWriteMutation,
   SessionStatePort,
   TranscriptRunRecord,
-} from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import type { ArtifactStore } from "@zhixing/core/authority";
-import type { SessionProcessProjection } from '@zhixing/rpc/session-wire';
+} from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
+import type { SessionProcessProjection } from '@zhixing-ai/rpc/session-wire';
 import { SessionProcessProjectionOwner } from './session-process-projection.js';
 import {
   AdvancementAcceptedTurnApplicationService,
   AdvancementReviewResultProjectionApplicationService,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   projectConversationClear,
   projectConversationDelete,
@@ -35,40 +35,40 @@ import {
   type ConversationRunControlPort,
   type ConversationTaskListMutationDecision,
   type ConversationTaskListPort,
-} from "@zhixing/core/conversation/application";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/conversation/application";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import {
   ConversationTransferSource,
   listOpenConversationTransfers,
   resolveCurrentConversationAuthority,
   type CurrentConversationAuthority,
-} from "@zhixing/owner-kernel/conversation-transfer";
-import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel/deferred-global-intents";
-import { type RuntimeFactory } from "@zhixing/owner-kernel/types";
-import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+} from "@zhixing-ai/owner-kernel/conversation-transfer";
+import { DeferredGlobalIntentRepository } from "@zhixing-ai/owner-kernel/deferred-global-intents";
+import { type RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
+import { parseConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import {
   createAdvancementRecoveryMaintenance,
   DeferredRubricPublication,
   renderRecentContextFromMessages,
   type AdvancementController,
   type AdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services/advancement";
-import { adjudicateAdvancementExecution } from "@zhixing/core/advancement/execution-context";
+} from "@zhixing-ai/owner-services/advancement";
+import { adjudicateAdvancementExecution } from "@zhixing-ai/core/advancement/execution-context";
 import {
   DeferredScheduleIntentProducer,
   type DeferredScheduleIntentResult,
-} from "@zhixing/owner-services/deferred-schedule-intent";
-import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
+} from "@zhixing-ai/owner-services/deferred-schedule-intent";
+import { createAdvancementReviewProxySchedulePort } from "@zhixing-ai/owner-services/advancement/proxy-scheduler";
 import {
   createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
-} from "@zhixing/server";
-import type { AdvancementModelProviderFactory } from "@zhixing/orchestrator/advancement";
+} from "@zhixing-ai/server";
+import type { AdvancementModelProviderFactory } from "@zhixing-ai/orchestrator/advancement";
 import {
   projectSessionTurn,
   type ProjectedSessionTurnResult,
   type SessionTurnNotify,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
 import {
   AdvancementEvidenceTopologyAdapter,
@@ -90,7 +90,7 @@ import {
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
 import {
   createConversationAgentTurnAdmissionPort,
-} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+} from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
 
 /** 本地域 port 的会话只读面:冻结读取子集;写入只能经 port 的命令 wrapper。 */
 export type LocalConversationSessionReadPort = Readonly<
@@ -128,7 +128,7 @@ type LocalConversationRunListener = (notification:
 ) => void;
 
 export interface LocalConversationOwnerPort {
-  readonly communicationMessages: import("@zhixing/core/conversation/application").ConversationMessageProjectionPort;
+  readonly communicationMessages: import("@zhixing-ai/core/conversation/application").ConversationMessageProjectionPort;
   createConversation(): Promise<string>;
   ensureSession(conversationId: string): Promise<void>;
   listConversations(): Promise<readonly string[]>;
@@ -151,7 +151,7 @@ export interface LocalConversationOwnerPort {
   readonly taskLists: ConversationTaskListPort;
   createAgentTurnExecution(input: {
     readonly input: UserTurnInput;
-    readonly turnOrigin?: import("@zhixing/core").TurnOrigin;
+    readonly turnOrigin?: import("@zhixing-ai/core").TurnOrigin;
     readonly surfacePrincipal?: string;
     readonly environment?: ExplicitEnvironmentSelection;
     readonly notify: SessionTurnNotify;
@@ -221,14 +221,14 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly executorDispatch: ConversationExecutorDispatchApplication;
   readonly assignmentStaging: ConversationAssignmentStagingPort;
   /** 宿主前台活动：本机会话的运行拥有者按尝试持有前台义务（见协议运行时 foreground 选项）。 */
-  readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
+  readonly foreground?: import("@zhixing-ai/core/resources").ForegroundActivityPort;
   /** 运行准备各步记为日志阶段的端口（只观测，见协议运行时 phaseRecords 选项）。 */
-  readonly phaseRecords?: import("@zhixing/core/logging").LogRecordPort;
+  readonly phaseRecords?: import("@zhixing-ai/core/logging").LogRecordPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly interactions: DurableConversationInteractionObserver;
   /** 本宿主是规则权威时，本地对话镜像里的沉淀由它接纳；非权威宿主不给（无效果）。 */
-  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
-  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
+  readonly trustSediments?: import("@zhixing-ai/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly advancementModelProvider: AdvancementModelProviderFactory;
   readonly evidence: EvidenceHandlerPort;
   readonly currentAnchorDeviceId: () => string | undefined;
@@ -917,7 +917,7 @@ export class LocalConversationOwnerAssembly {
       onRelease: (conversationId) => protocol.releaseConversation(conversationId),
       loadHistory: async (conversationId) => {
         for (;;) {
-          const context = await protocol.recoveryPage({ mode: 'context', conversationId }) as import('@zhixing/core/contracts').ConversationContextPage;
+          const context = await protocol.recoveryPage({ mode: 'context', conversationId }) as import('@zhixing-ai/core/contracts').ConversationContextPage;
           if (context.preparing) { await new Promise<void>(setImmediate); continue; }
           if (!context.turnCount) return undefined;
           return { bootstrap: context.text ? buildStartupBootstrapPair(context.text) : null, turnCount: context.turnCount };

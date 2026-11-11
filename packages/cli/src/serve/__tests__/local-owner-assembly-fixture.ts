@@ -4,22 +4,22 @@ import type {
   ExplicitEnvironmentSelection,
   SecretRef,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { userTurnInputFromText } from "@zhixing/core";
-import type { ProjectedSessionTurnResult } from "@zhixing/rpc";
+} from "@zhixing-ai/core/contracts";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { userTurnInputFromText } from "@zhixing-ai/core";
+import type { ProjectedSessionTurnResult } from "@zhixing-ai/rpc";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
-import type { ZhixingConfig } from "@zhixing/providers";
+import type { ZhixingConfig } from "@zhixing-ai/providers";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
   AssignmentStreamSpool,
   AssignmentStreamWriter,
   type ExecutorResourceGovernor,
-} from "@zhixing/executor";
-import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel/types";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/executor";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
   createConversationExecutorLedger,
@@ -41,7 +41,7 @@ import {
   LocalConversationOwnerAssembly,
   type LocalConversationOwnerPort,
 } from "../local-conversation-owner.js";
-import { createSignedTrustRuleSnapshot } from "@zhixing/core/protocol";
+import { createSignedTrustRuleSnapshot } from "@zhixing-ai/core/protocol";
 import { createLocalConversationDirectoryApplication } from "../local-conversation-directory-application.js";
 import { createHostAdvancementModelProviderFactory } from "../../runtime/advancement-model-provider.js";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";

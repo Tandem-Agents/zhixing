@@ -1,7 +1,7 @@
 import { cp, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import type { CommitEnvelope, JsonValue } from "../../contracts/index.js";
 import { AuthorityCacheIntegrity, normalizeProjectionMutationsInSlices, type DurableLogCheckpoint, type DurableProjectionMutation, type DurableProjectionReadContext } from "../index.js";
 import { FileArtifactStore } from "../artifact-store.js";

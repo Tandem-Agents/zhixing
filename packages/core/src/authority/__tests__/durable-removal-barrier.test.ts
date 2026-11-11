@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactRef } from "../../contracts/index.js";
 

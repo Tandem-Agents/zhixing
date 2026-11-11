@@ -8,13 +8,13 @@ import type {
   ImmediateRootWorkload,
   ReservationOrigin,
   ResourceLease,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   governControlProvider,
   governControlTextCall,
   type ControlLlmGovernor,
 } from "../governed-control-llm.js";
-import type { LLMProvider, StreamEvent } from "@zhixing/core";
+import type { LLMProvider, StreamEvent } from "@zhixing-ai/core";
 
 interface GovernorEvent {
   readonly op: string;

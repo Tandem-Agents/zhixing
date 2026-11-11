@@ -1,17 +1,17 @@
-import { artifactJsonIndex, createDurableProjectionOverlay, assertArtifactRef, type ArtifactStore, type AuthorityCommitLog } from '@zhixing/core/authority';
-import type { ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+import { artifactJsonIndex, createDurableProjectionOverlay, assertArtifactRef, type ArtifactStore, type AuthorityCommitLog } from '@zhixing-ai/core/authority';
+import type { ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { validateConversationRunRecord, validateFinalOutboxRecord } from './conversation-run-contracts.js';
-import type { JsonValue, SessionMeta, ArtifactRef, ConversationCommitSummary } from '@zhixing/core/contracts';
+import type { JsonValue, SessionMeta, ArtifactRef, ConversationCommitSummary } from '@zhixing-ai/core/contracts';
 import { conversationAttemptState, projectStatusEntry, type StatusHistoryEntry } from './conversation-status-projection.js';
-import { validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord, canonicalize } from '@zhixing/core/protocol';
-import type { DurableLogCheckpoint, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing/core/authority';
-import { parseConversationId } from '@zhixing/core/conversation';
+import { validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord, canonicalize } from '@zhixing-ai/core/protocol';
+import type { DurableLogCheckpoint, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import { parseConversationId } from '@zhixing-ai/core/conversation';
 import type { ConversationRunJournalRecord } from './conversation-run-contracts.js';
 import { isMessageDeliveryFact } from './conversation-message-delivery.js';
-import type { ConversationControlTargets } from '@zhixing/core/contracts';
+import type { ConversationControlTargets } from '@zhixing-ai/core/contracts';
 import { isConversationSourceEvidenceError, type ConversationBaseSource } from './conversation-base-source.js';
 import { conversationViewOverlay, conversationBaseKey, openConversationBase, foldConversationBaseBindings, registerConversationBaseContext, registerConversationBaseRepair, conversationBaseUnavailableKey, conversationBaseRepairRequired, type ConversationBaseBinding } from './conversation-base-registry.js';
-import { worksceneContinuationTurnId, type WorksceneContinuationSource } from '@zhixing/core/workscene/application';
+import { worksceneContinuationTurnId, type WorksceneContinuationSource } from '@zhixing-ai/core/workscene/application';
 import { loadStored, snapshotStored } from './control-admission.js';
 
 const interruptible = (state: string | undefined): state is ConversationControlTargets['targets'][number]['state'] =>
@@ -37,8 +37,8 @@ export interface ReadMeta {
   activity: string; sessionActivity?: string; clearId?: string; clearedLsn?: number; deleted?: boolean;
 }
 export interface ControlRead { readonly entry?: StatusHistoryEntry; readonly communication: boolean; readonly continuation: boolean; readonly commit?: CommitPointer }
-export interface CommitPointer { readonly timelineKey?: string; readonly runId: string; readonly assignmentId: string; readonly commitRevision: number; readonly bundle: ArtifactRef; readonly readSummary?: ConversationCommitSummary; readonly publish?: Extract<import('@zhixing/core/contracts').PublishRecord, { t: 'publish-decision' }> }
-export interface InputPointer { readonly runId: string; readonly inputKey: string; readonly position: number; readonly lsn: number; readonly identity: NonNullable<import('@zhixing/core').Message['inputIdentity']>; readonly checkpoint?: DurableLogCheckpoint; readonly item: number; readonly initial?: boolean }
+export interface CommitPointer { readonly timelineKey?: string; readonly runId: string; readonly assignmentId: string; readonly commitRevision: number; readonly bundle: ArtifactRef; readonly readSummary?: ConversationCommitSummary; readonly publish?: Extract<import('@zhixing-ai/core/contracts').PublishRecord, { t: 'publish-decision' }> }
+export interface InputPointer { readonly runId: string; readonly inputKey: string; readonly position: number; readonly lsn: number; readonly identity: NonNullable<import('@zhixing-ai/core').Message['inputIdentity']>; readonly checkpoint?: DurableLogCheckpoint; readonly item: number; readonly initial?: boolean }
 export type TimelinePointer = { readonly key: string; readonly lsn: number } & (
   { readonly kind: 'commit'; readonly commit: CommitPointer } | { readonly kind: 'input'; readonly input: InputPointer });
 const timelineKey = (lsn: number, item: number, local: boolean) => `${local ? 0 : 1}:${ordinal(Number.MAX_SAFE_INTEGER - lsn)}:${ordinal(Number.MAX_SAFE_INTEGER - item)}`;
@@ -416,7 +416,7 @@ export class ConversationReadIndex {
     for (const entry of local.entries) { const value = entry.value as unknown as StatusHistoryEntry; selected.set(value.statusRevision, value); }
     return [...selected.values()].sort((a, b) => a.statusRevision - b.statusRevision).slice(0, 65);
   }
-  async input(conversationId: string, runId: string, position: number, inputKey: string | undefined, imported: boolean, lowerLsn: number, upperLsn: number): Promise<{ pointer: InputPointer; input: import('./conversation-run-contracts.js').Stored<import('@zhixing/core/contracts').UserTurnInput> } | undefined> {
+  async input(conversationId: string, runId: string, position: number, inputKey: string | undefined, imported: boolean, lowerLsn: number, upperLsn: number): Promise<{ pointer: InputPointer; input: import('./conversation-run-contracts.js').Stored<import('@zhixing-ai/core/contracts').UserTurnInput> } | undefined> {
     const p = prefix(conversationId) + 'input:' + JSON.stringify(runId) + ':';
     let pointer: InputPointer | undefined;
     if (imported && this.#baseView) {

@@ -1,10 +1,10 @@
 import { AUTHORITY_RECOVERY_BUDGET, mergeNormalizedProjectionMutations, normalizeProjectionMutations, normalizeProjectionMutationsInSlices, type ArtifactStore, type AuthorityCommitLog, type DurableLogCheckpoint,
   type DurableProjectionMutation, type DurableProjectionReadContext, type DurableProjectionReducer, type DurableProjectionSource,
-  type NormalizedProjectionMutations, type PersistentSortedMap } from '@zhixing/core/authority';
-import type { CommitEnvelope, JsonValue } from '@zhixing/core/contracts';
-import { verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+  type NormalizedProjectionMutations, type PersistentSortedMap } from '@zhixing-ai/core/authority';
+import type { CommitEnvelope, JsonValue } from '@zhixing-ai/core/contracts';
+import { verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { currentMaintenanceAbortSignal, currentMaintenanceUrgency, maintenanceRetryDelayMs, runDetachedDeviceCapacity, runDetachedMaintenanceContext,
-  runWithMaintenanceUrgency, StorageMaintenanceCancelledError, waitForMaintenanceRetry, type StorageMaintenanceUrgency } from '@zhixing/core/resources';
+  runWithMaintenanceUrgency, StorageMaintenanceCancelledError, waitForMaintenanceRetry, type StorageMaintenanceUrgency } from '@zhixing-ai/core/resources';
 import { DECISION_MIGRATION_START, DECISION_MIGRATION_COMPLETE, DECISION_INDEXED_THROUGH, DECISION_CONVERSATION_PREFIX, TRANSFER_PARTITION,
   decisionPartitionKey, decisionConversationKey, decisionMigrationRequired, decisionMigrationActive, decisionPartitionReady,
   installDecisionMigrator } from './conversation-decision-partition-keys.js';

@@ -1,4 +1,4 @@
-import type { ConversationRunState, ConversationStatusNotice, ConversationUncertainClosure, UncertainResolutionFact, IsoTime } from '@zhixing/core/contracts';
+import type { ConversationRunState, ConversationStatusNotice, ConversationUncertainClosure, UncertainResolutionFact, IsoTime } from '@zhixing-ai/core/contracts';
 import { projectUncertainStatusTransition, conversationUncertainClosure, corruptRunJournal } from './conversation-run-contracts.js';
 
 export type StatusHistoryEntry = {

@@ -5,7 +5,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const fsGuard = vi.hoisted(() => ({
@@ -76,8 +76,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-import { getWorkSceneConversationsRoot, getWorkSceneDir } from "@zhixing/core/workscene";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { getWorkSceneConversationsRoot, getWorkSceneDir } from "@zhixing-ai/core/workscene";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../serve/workscene-storage-cleanup.js";
 

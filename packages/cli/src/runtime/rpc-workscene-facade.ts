@@ -12,13 +12,13 @@ import type {
   WorksceneEnterResult,
   WorksceneListResult,
   WorksceneSummary,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export class RpcWorksceneFacade {
   constructor(private readonly link: CoreHostRpcLink) {}
 
-  async tasks(conversationId: string): Promise<readonly import("@zhixing/core/workscene/application").WorksceneTaskReference[]> {
+  async tasks(conversationId: string): Promise<readonly import("@zhixing-ai/core/workscene/application").WorksceneTaskReference[]> {
     const client = await this.link.getClient();
     return client.request("workscene.tasks", { conversationId });
   }

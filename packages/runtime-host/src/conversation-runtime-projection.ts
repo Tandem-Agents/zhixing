@@ -1,6 +1,6 @@
 import type {
   ToolDefinition,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   assertKernelWindowPromptProjectionPort,
   type AgentRuntimeLifecycle,
@@ -8,7 +8,7 @@ import {
   type KernelSecurityExecutionFactory,
   type KernelWindowPromptProjectionPort,
   type KernelToolImplementationPort,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 type RuntimeProfile = NonNullable<CreateAgentRuntimeOptions["profile"]>;
 type RuntimePrimaryRole = NonNullable<CreateAgentRuntimeOptions["primaryRole"]>;

@@ -1,11 +1,11 @@
 import { WindowsLogFiles } from "./windows-files.js";
 import { spawn } from "node:child_process";
 import type { EventEmitter } from 'node:events';
-import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
+import type { CheckpointFilesystemSession } from '@zhixing-ai/mesh/filesystem';
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { LogFileInfo, LogFileSystem } from "@zhixing/core/logging/storage";
-import { LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogStorageFailure } from "@zhixing/core/logging";
+import type { LogFileInfo, LogFileSystem } from "@zhixing-ai/core/logging/storage";
+import { LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogStorageFailure } from "@zhixing-ai/core/logging";
 
 export type LogFilesWorker = EventEmitter & {
   readonly connected: boolean;

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
-import { FileArtifactStore, artifactJsonIndex } from '@zhixing/core/authority';
-import type { ConversationBodyCursor, ConversationBodyFragment } from '@zhixing/core/contracts';
+import { createTempDir } from '@zhixing-ai/test-utils';
+import { FileArtifactStore, artifactJsonIndex } from '@zhixing-ai/core/authority';
+import type { ConversationBodyCursor, ConversationBodyFragment } from '@zhixing-ai/core/contracts';
 import { ConversationBodyReader } from '../conversation-body-reader.js';
 import type { ConversationReadIndex, CommitPointer } from '../conversation-read-index.js';
 

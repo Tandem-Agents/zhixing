@@ -8,7 +8,7 @@
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createDescribeTempDir } from "@zhixing/test-utils";
+import { createDescribeTempDir } from "@zhixing-ai/test-utils";
 import { TrustClassifierMiddleware } from "../trust-classifier.js";
 import type { SecurityMiddlewareContext, TrustContext } from "../types.js";
 

@@ -1,5 +1,5 @@
-import type { createPlatformSecretStore } from '@zhixing/secrets';
-import type { TerminalMessage, TerminalView } from '@zhixing/terminal-ui/protocol';
+import type { createPlatformSecretStore } from '@zhixing-ai/secrets';
+import type { TerminalMessage, TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 import type { RuntimeLogging } from '../logging/runtime.js';
 import type { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import type { TerminalSelectionResponse } from './selection.js';
@@ -68,7 +68,7 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
     uninstall: { management: ports.management, signal: ports.signal, writeLine },
     uninstallIO: { interactive: true, confirm,
       readRecoveryPackage: async () => {
-        const { decodeRecoveryPackage, requireCurrentRecoveryPackage, encodeRecoveryPackage } = await import('@zhixing/mesh/recovery-package');
+        const { decodeRecoveryPackage, requireCurrentRecoveryPackage, encodeRecoveryPackage } = await import('@zhixing-ai/mesh/recovery-package');
         return encodeRecoveryPackage(requireCurrentRecoveryPackage(decodeRecoveryPackage(await ports.recovery.read())).root);
       },
       choosePath: async preflight => {

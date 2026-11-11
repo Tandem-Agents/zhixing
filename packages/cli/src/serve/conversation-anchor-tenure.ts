@@ -1,6 +1,6 @@
-import type { AuthorityCommitLog } from '@zhixing/core/authority';
-import { registerConversationAnchorTenure, type ConversationAnchorTenurePort } from '@zhixing/owner-kernel/conversation-owner-authority';
-import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentAnchorTenure, readAnchorTenureAt } from '@zhixing/mesh/trust-chain';
+import type { AuthorityCommitLog } from '@zhixing-ai/core/authority';
+import { registerConversationAnchorTenure, type ConversationAnchorTenurePort } from '@zhixing-ai/owner-kernel/conversation-owner-authority';
+import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentAnchorTenure, readAnchorTenureAt } from '@zhixing-ai/mesh/trust-chain';
 
 const port: ConversationAnchorTenurePort = Object.freeze({
   projectionId: CURRENT_TRUST_PROJECTION_ID,

@@ -1,4 +1,4 @@
-import type { ChannelStatus } from '@zhixing/core/channels';
+import type { ChannelStatus } from '@zhixing-ai/core/channels';
 import type { RuntimeControlWorkItem, ServerActiveWork, ServerInfoResult } from './rpc-management-facade.js';
 import type { SelectionOption, SelectionRequest } from '../tui/selection/types.js';
 

@@ -3,14 +3,14 @@ import type {
   ImmediateRootResourceLease,
   ResourceLease,
   WorkspaceProbeRequest,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedEnvironmentControlGrant,
   createSignedWorkspaceProbeResult,
   protocolDigest,
-} from "@zhixing/core/protocol";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/core/protocol";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
 import { describe, expect, it, vi } from "vitest";
 import { MeshExecutorTopologyTrustState } from "./mesh-runtime-assembly.js";
 import {

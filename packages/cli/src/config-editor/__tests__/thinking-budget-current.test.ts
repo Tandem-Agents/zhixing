@@ -5,8 +5,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@zhixing/providers/configuration", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@zhixing/providers/configuration")>();
+vi.mock("@zhixing-ai/providers/configuration", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@zhixing-ai/providers/configuration")>();
   const fixture = {
     name: "Budget fixture",
     baseUrl: "https://fixture.invalid",

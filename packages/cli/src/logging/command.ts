@@ -1,7 +1,7 @@
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core/paths";
-import { LOG_APPLY_POLICY, LOG_READ, LOG_SEARCH, LOG_STATUS } from "@zhixing/core/logging/application";
-import type { LogFilter } from "@zhixing/core/logging";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import { LOG_APPLY_POLICY, LOG_READ, LOG_SEARCH, LOG_STATUS } from "@zhixing-ai/core/logging/application";
+import type { LogFilter } from "@zhixing-ai/core/logging";
 import { createStdoutWriter } from "../screen/cli-writer.js";
 import { createLogAccess, createLocalLogProductApi, LOCAL_LOG_OWNER } from "./access.js";
 import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";

@@ -7,25 +7,25 @@
  * 此处按消费面做最小结构声明。
  */
 
-import type { ChannelStatus } from "@zhixing/core/channels";
-import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
+import type { ChannelStatus } from "@zhixing-ai/core/channels";
+import type { BackupRecoveryPublicStatus } from "@zhixing-ai/core/backup-recovery/application";
 import type {
   TrustAdministrationRule,
   TrustAdministrationRuleView,
   TrustAdministrationScopeGroup,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
   type ServerShutdownParams,
-} from "@zhixing/server/client";
-import type { SessionSecurityResult } from "@zhixing/rpc";
+} from "@zhixing-ai/server/client";
+import type { SessionSecurityResult } from "@zhixing-ai/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 import { boundedControlProjection } from './control-projection.js';
-import { LogRpcClient } from "@zhixing/rpc/log-client";
+import { LogRpcClient } from "@zhixing-ai/rpc/log-client";
 import { serverShutdownRequest } from "./server-shutdown-request.js";
 
-export type { ServerShutdownStrategy } from "@zhixing/server";
+export type { ServerShutdownStrategy } from "@zhixing-ai/server";
 
 export interface RuntimeControlWorkItem {
   id: string;
@@ -196,19 +196,19 @@ export class RpcManagementFacade {
     return client.request<ServerDescriptionResult>('server.info', { projection: 'description' });
   }
 
-  async mcpPending(conversationId: string): Promise<readonly import("@zhixing/core/mcp-management").McpPendingConnection[]> {
+  async mcpPending(conversationId: string): Promise<readonly import("@zhixing-ai/core/mcp-management").McpPendingConnection[]> {
     const client = await this.link.getClient();
     return client.request("mcp.pending", { conversationId });
   }
 
   logs(): LogRpcClient { return new LogRpcClient(this.link); }
 
-  async applyExtensionConfiguration(ids: readonly string[]): Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot> {
+  async applyExtensionConfiguration(ids: readonly string[]): Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionPublicSnapshot> {
     const client = await this.link.getClient();
     return client.request("extensions.apply-configuration", { ids });
   }
 
-  async extensions(): Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot> {
+  async extensions(): Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionPublicSnapshot> {
     const client = await this.link.getClient();
     return client.request("extensions.list");
   }

@@ -1,4 +1,4 @@
-import type { ConversationRunState } from '@zhixing/core/contracts';
+import type { ConversationRunState } from '@zhixing-ai/core/contracts';
 import type { ConversationRunJournalRecord } from './conversation-run-contracts.js';
 
 const messageFacts = new Set(['admitted', 'assigned', 'state', 'cancel-fence', 'supersede-started-observed',

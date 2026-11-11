@@ -23,7 +23,7 @@
  * **测试 escape hatch 不在本类型**:测试 / 开发想要 "auto-approve all"
  * 行为时,直接构造 broker 注入 `failToAllowResolver`:
  * ```typescript
- * import { ConfirmationBroker, failToAllowResolver } from "@zhixing/core";
+ * import { ConfirmationBroker, failToAllowResolver } from "@zhixing-ai/core";
  * const testBroker = new ConfirmationBroker({ nonInteractiveResolver: failToAllowResolver });
  * ```
  * 该设计让"生产策略"与"测试 escape hatch"在**类型层面**完全分离 ——

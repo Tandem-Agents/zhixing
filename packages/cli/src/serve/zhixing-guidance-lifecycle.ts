@@ -1,7 +1,7 @@
 import path from "node:path";
 
-import { buildGuidanceMessagePair, loadLayeredGuidance as defaultLoadLayeredGuidance, type GuidanceResolvedRoots, type GuidanceWarningInput, type ReadGuidanceFile } from "@zhixing/core/context";
-import type { AgentRuntimeLifecycle } from "@zhixing/orchestrator/runtime";
+import { buildGuidanceMessagePair, loadLayeredGuidance as defaultLoadLayeredGuidance, type GuidanceResolvedRoots, type GuidanceWarningInput, type ReadGuidanceFile } from "@zhixing-ai/core/context";
+import type { AgentRuntimeLifecycle } from "@zhixing-ai/orchestrator/runtime";
 
 export interface ZhixingGuidanceLifecycleDeps {
   readonly zhixingHome: string;

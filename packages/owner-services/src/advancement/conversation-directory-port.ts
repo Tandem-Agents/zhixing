@@ -1,5 +1,5 @@
-import type { Conversation } from "@zhixing/core/conversation";
-import type { RunRecordRef, RunRecordWithRef } from "@zhixing/core/transcript";
+import type { Conversation } from "@zhixing-ai/core/conversation";
+import type { RunRecordRef, RunRecordWithRef } from "@zhixing-ai/core/transcript";
 
 export interface AdvancementRunsPage {
   readonly runs: readonly RunRecordWithRef[];

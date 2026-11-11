@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import * as persistence from "../../persistence/index.js";
 import { FileDurableProjectionIndex } from "../durable-projection-index.js";
 import { AuthorityCacheIntegrity } from "../startup-proofs.js";

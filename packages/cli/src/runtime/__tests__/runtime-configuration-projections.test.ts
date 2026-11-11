@@ -1,4 +1,4 @@
-import type { ZhixingConfig } from "@zhixing/providers";
+import type { ZhixingConfig } from "@zhixing-ai/providers";
 import { describe, expect, it } from "vitest";
 import { projectRuntimeConfiguration } from "../runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../runtime-configuration-snapshot.js";

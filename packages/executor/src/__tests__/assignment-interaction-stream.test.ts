@@ -1,7 +1,7 @@
 import path from "node:path";
-import { FileArtifactStore } from "@zhixing/core/authority";
-import type { ExecutionRef } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import type { ExecutionRef } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { projectAssignmentInteractionStream } from "../assignment-interaction-stream.js";
 import {

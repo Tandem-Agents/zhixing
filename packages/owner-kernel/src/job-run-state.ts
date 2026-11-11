@@ -4,9 +4,9 @@ import {
   readDurableProjectionKeys,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
-} from "@zhixing/core/authority";
-import type { JsonValue } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/authority";
+import type { JsonValue } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 
 /**
  * 作业域状态按键落盘的工作集。投影的每个映射/集合字段逐条各占一行，按需装入；

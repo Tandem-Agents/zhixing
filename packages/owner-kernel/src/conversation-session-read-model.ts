@@ -1,12 +1,12 @@
-import { awaitAuthorityPreparation, type AuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing/core/authority';
+import { awaitAuthorityPreparation, type AuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing-ai/core/authority';
 import type { ConversationReadIndex } from './conversation-read-index.js';
-import type { CommitEnvelope, LogicalRecord } from '@zhixing/core/contracts';
-import { SerialTaskQueue } from '@zhixing/core/persistence';
-import { protocolDigest } from '@zhixing/core/protocol';
+import type { CommitEnvelope, LogicalRecord } from '@zhixing-ai/core/contracts';
+import { SerialTaskQueue } from '@zhixing-ai/core/persistence';
+import { protocolDigest } from '@zhixing-ai/core/protocol';
 import {
   currentMaintenanceAbortSignal, currentMaintenanceUrgency, isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError,
-} from '@zhixing/core/resources';
+} from '@zhixing-ai/core/resources';
 
 /** The owner reducer remains the single definition of advancement and its shared
  * session revision rules. Directory reads never hydrate execution artifacts. */

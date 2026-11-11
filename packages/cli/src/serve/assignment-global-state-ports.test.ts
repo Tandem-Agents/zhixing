@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AuthorityCapability } from "@zhixing/core/contracts";
-import type { ConversationAssignmentLedger } from "@zhixing/executor";
+import type { AuthorityCapability } from "@zhixing-ai/core/contracts";
+import type { ConversationAssignmentLedger } from "@zhixing-ai/executor";
 import {
   assignmentGlobalCapability,
   createAssignmentMutationPort,

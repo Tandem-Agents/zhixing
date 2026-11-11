@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RubricContractDraftSnapshot } from "@zhixing/core/advancement";
-import type { DeferredGlobalIntentPort } from "@zhixing/core/contracts";
+import type { RubricContractDraftSnapshot } from "@zhixing-ai/core/advancement";
+import type { DeferredGlobalIntentPort } from "@zhixing-ai/core/contracts";
 import { DeferredRubricPublication } from "./deferred-rubric-publication.js";
 
 const NOW = "2026-08-03T12:00:00.000Z";

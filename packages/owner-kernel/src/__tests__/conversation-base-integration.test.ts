@@ -3,13 +3,13 @@ import { BASE_CONVERSATION, BASE_TRANSFER, baseVerifier, createConversationBaseH
 import { ReferenceMessageInputReader } from './reference-message-input-reader.js';
 import { ConversationReadIndex } from '../conversation-read-index.js';
 import type { ConversationRunJournal } from '../conversation-assignment.js';
-import type { DurableLogCheckpoint, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunOutcomesPage } from '@zhixing/core/contracts';
+import type { DurableLogCheckpoint, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunOutcomesPage } from '@zhixing-ai/core/contracts';
 import { conversationRecoveryPage, conversationRecoveryPending } from '../conversation-recovery-index.js';
 import { ConversationBaseSource } from '../conversation-base-source.js';
 import { conversationBaseKey, openConversationBase, type ConversationBaseBinding } from '../conversation-base-registry.js';
-import { runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceCancelledError } from '@zhixing/core/resources';
-import { AuthorityPreparationRequired } from '@zhixing/core/authority';
+import { runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceCancelledError } from '@zhixing-ai/core/resources';
+import { AuthorityPreparationRequired } from '@zhixing-ai/core/authority';
 
 it('adopts authenticated domain facts and keeps the local write decision on base plus tail', async () => {
   const h = await createConversationBaseHarness();

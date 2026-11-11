@@ -1,6 +1,6 @@
-import { protocolDigest } from "@zhixing/core/protocol";
-import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalDispositionMessage, type AdvancementSubmissionIdentity } from "@zhixing/core/advancement";
-import type { SessionInputReceipt } from "@zhixing/rpc/session-wire";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalDispositionMessage, type AdvancementSubmissionIdentity } from "@zhixing-ai/core/advancement";
+import type { SessionInputReceipt } from "@zhixing-ai/rpc/session-wire";
 /**
  * session.* RPC 方法
  *
@@ -25,10 +25,10 @@ import type { SessionInputReceipt } from "@zhixing/rpc/session-wire";
  *   跟随权归发起接入面由结构保证(旁观端物理不可达)
  */
 
-import { CONVERSATION_COMMUNICATION_QUERY } from "@zhixing/core/conversation/application";
+import { CONVERSATION_COMMUNICATION_QUERY } from "@zhixing-ai/core/conversation/application";
 import {
   abortWithReason,
-} from "@zhixing/core/interrupt";
+} from "@zhixing-ai/core/interrupt";
 import {
   assistantMessage,
   emptyUsage,
@@ -38,14 +38,14 @@ import {
   type TurnOrigin,
   type UserTurnInput,
   userTurnInputFromText,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   AgentYield,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import type {
   RubricContractDraftSnapshot,
-} from "@zhixing/core/advancement";
-import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/advancement";
+import type { ExplicitEnvironmentSelection } from "@zhixing-ai/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
@@ -72,8 +72,8 @@ import {
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
   type PerspectivesTurnResult,
-} from "@zhixing/core/conversation/application";
-import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+} from "@zhixing-ai/core/conversation/application";
+import { createConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import {
   ADVANCEMENT_ACTIVE_STATE_QUERY,
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
@@ -94,9 +94,9 @@ import {
   type AdvancementOriginalTaskSurfacePort,
   type AdvancementRubricCancellationResult,
   type AdvancementActiveStateProjection,
-} from "@zhixing/core/advancement/application";
-import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
-import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/advancement/application";
+import type { ProductApiOperationDescriptor } from "@zhixing-ai/core/product-api";
+import { validateExplicitEnvironmentSelection } from "@zhixing-ai/core/protocol";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -106,8 +106,8 @@ import type {
   ServerContext,
   ServerConversationBinding,
 } from "../../context.js";
-import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
-import { notifySessionObserver } from '@zhixing/rpc/session-broadcast';
+import type { SessionBroadcast } from "@zhixing-ai/rpc/session-broadcast";
+import { notifySessionObserver } from '@zhixing-ai/rpc/session-broadcast';
 import {
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
@@ -141,10 +141,10 @@ import {
   type SessionTaskListResult,
   type SessionTaskListUpdateResult,
   type SessionUnsubscribeResult,
-} from "@zhixing/rpc/session-wire";
-import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import { generateConversationId } from "@zhixing/owner-kernel/conversation-manager";
-import { isProtocolIdentifier } from "@zhixing/core/protocol";
+} from "@zhixing-ai/rpc/session-wire";
+import { createControlSessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
+import { generateConversationId } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { isProtocolIdentifier } from "@zhixing-ai/core/protocol";
 // ─── session.send ───
 
 interface SessionSendParams extends ConversationIdParams {
@@ -1897,7 +1897,7 @@ export function buildSessionListMethod(): MethodEntry {
       );
       const view = await productApi.query(CONVERSATION_LIST_QUERY, {
         kind: "list",
-        ...((params as { page?: import("@zhixing/core/conversation/application").ConversationDirectoryPageRequest } | null)?.page ? { page: (params as { page: import("@zhixing/core/conversation/application").ConversationDirectoryPageRequest }).page } : {}),
+        ...((params as { page?: import("@zhixing-ai/core/conversation/application").ConversationDirectoryPageRequest } | null)?.page ? { page: (params as { page: import("@zhixing-ai/core/conversation/application").ConversationDirectoryPageRequest }).page } : {}),
       });
       return {
         conversations: view.conversations.map(projectConversationEntry),

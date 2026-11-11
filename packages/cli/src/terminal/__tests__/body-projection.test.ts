@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BODY_FRAGMENT_BYTES, BODY_FRAGMENT_ENCODED_BYTES, BODY_PARSE_BYTES, BODY_STYLE, validateBodyMetadata } from '@zhixing/terminal-ui/body-model';
+import { BODY_FRAGMENT_BYTES, BODY_FRAGMENT_ENCODED_BYTES, BODY_PARSE_BYTES, BODY_STYLE, validateBodyMetadata } from '@zhixing-ai/terminal-ui/body-model';
 import { TerminalBodyProjection, projectBodyHistory, mergeBodyAppends, type BodyAppend, type BodyProjectionChange } from '../body-projection.js';
 
 function apply(items: BodyAppend[], change: BodyProjectionChange) {

@@ -16,21 +16,21 @@ import {
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
   advancementExecutionTurnId,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import type {
   UserTurnInput,
-} from "@zhixing/core/types";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/types";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import type {
   AuthorityCallContext,
   SessionControlMutation,
   SessionStatePort,
   SessionStagedMutation,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   SessionAdvancementStore,
   type AdvancementSessionStore,
-} from "@zhixing/owner-services/advancement";
+} from "@zhixing-ai/owner-services/advancement";
 
 const NOW = "2026-08-02T00:00:00.000Z";
 
@@ -39,7 +39,7 @@ function createFakePort() {
   const folds = new Map<string, AdvancementFoldMap>();
   const writes: Array<{ conversationId: string; events: readonly AdvancementControlEvent[] }> = [];
   let failNextResponse = false;
-  const receipts = new Map<string, import("@zhixing/core/advancement").AdvancementSubmissionReceipt>();
+  const receipts = new Map<string, import("@zhixing-ai/core/advancement").AdvancementSubmissionReceipt>();
   const port: SessionStatePort = {
     async readAdvancementSubmission(conversationId, identity) {
       return receipts.get(JSON.stringify([conversationId, identity.surfacePrincipal, identity.submissionId])) ?? null;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogSink, type LogStatus } from '@zhixing/core/logging';
+import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogSink, type LogStatus } from '@zhixing-ai/core/logging';
 import { RUNTIME_LOG_SOURCE } from './runtime-source.js';
 import { recordTerminalFailure } from '../terminal/failure.js';
 

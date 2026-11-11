@@ -1,7 +1,7 @@
 /** 制品派生页的续读：按区间与上一页末键续读，不保留读视图，随后整理产生的退役不被旧代际视图挡住。 */
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { expect, it, vi } from 'vitest';
 import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '../index.js';
 

@@ -29,8 +29,8 @@ import {
   userMessage,
   type RuntimeExecutionProfile,
   projectSessionEvent,
-} from "@zhixing/core/types";
-import { type EventBus, type IEventBus, createEventBus } from "@zhixing/core/events";
+} from "@zhixing-ai/core/types";
+import { type EventBus, type IEventBus, createEventBus } from "@zhixing-ai/core/events";
 import {
   type WindowCompact,
   type ContextBudget,
@@ -48,17 +48,17 @@ import {
   computeContextTokens,
   TurnContextInjector,
   TimeProvider,
-} from "@zhixing/core/context";
+} from "@zhixing-ai/core/context";
 import {
   type ConfirmationFallbackStrategy,
   type ConfirmationLifecycleObserver,
   type IConfirmationBroker,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   type OrchestrationContextSnapshotV1,
   type OrchestrationExecutableV1,
   type OrchestrationRunResultV1,
-} from "@zhixing/core/orchestration";
+} from "@zhixing-ai/core/orchestration";
 import {
   type IToolArgumentExtractor,
   type MutableToolBoundaryRegistry,
@@ -70,22 +70,22 @@ import {
   BoundaryRegistry,
   ToolArgumentExtractor,
   SecurityPipeline,
-} from "@zhixing/core/security";
-import { type WatchdogPolicy, DEFAULT_WATCHDOG_POLICY } from "@zhixing/core/interrupt";
+} from "@zhixing-ai/core/security";
+import { type WatchdogPolicy, DEFAULT_WATCHDOG_POLICY } from "@zhixing-ai/core/interrupt";
 import {
   buildRunRecord,
   runAgentLoop,
   type WindowLifecycle,
   type WindowChangeReason,
   type AgentLoopDeps,
-} from "@zhixing/core/loop";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { wrapStreamWithWatchdog } from "@zhixing/core/interrupt";
-import { providerRequestNeverSent, withRetry } from "@zhixing/core/resilience";
+} from "@zhixing-ai/core/loop";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { wrapStreamWithWatchdog } from "@zhixing-ai/core/interrupt";
+import { providerRequestNeverSent, withRetry } from "@zhixing-ai/core/resilience";
 import type {
   AssignmentGlobalQueryPort,
   ModelCallResourceMeter,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
@@ -1912,7 +1912,7 @@ export async function createAgentRuntime(
 function resourceAwareRoles(
   roles: LLMRoles,
   defaultMaxOutputTokens: Readonly<Record<keyof LLMRoles, number>>,
-  records?: import("@zhixing/core/logging").LogRecordPort,
+  records?: import("@zhixing-ai/core/logging").LogRecordPort,
 ): LLMRoles {
   const wrap = (role: LLMRole, fallback: number): LLMRole => {
     const provider: LLMProvider = {

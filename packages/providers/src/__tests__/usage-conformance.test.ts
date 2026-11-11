@@ -20,7 +20,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { getTotalInputTokens, type TokenUsage } from "@zhixing/core";
+import { getTotalInputTokens, type TokenUsage } from "@zhixing-ai/core";
 import {
   extractUsage,
   type AnthropicUsageLike,

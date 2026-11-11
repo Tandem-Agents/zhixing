@@ -1,35 +1,35 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：admission-basics。
-import { ForegroundActivity, StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+import { ForegroundActivity, StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import { createServerConfirmationBinding, createServerConversationBinding } from "../server-product-bindings.js";
 import { buildConfirmationListMethod, buildConfirmationResolveMethod } from "../../../../server/src/rpc/methods/confirmation.js";
-import { userTurnInputFromText, type Message } from "@zhixing/core";
-import { TaskListService } from "@zhixing/core/conversation/application";
+import { userTurnInputFromText, type Message } from "@zhixing-ai/core";
+import { TaskListService } from "@zhixing-ai/core/conversation/application";
 import { createAnchorConversationTaskListPort } from "../conversation-task-list-application.js";
-import { createEventBus } from "@zhixing/core/events";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createEventBus } from "@zhixing-ai/core/events";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import { createAssignmentSkillPorts } from "../../runtime/assignment-skill-adapter.js";
-import { skillNameToId } from "@zhixing/core/skills/id";
-import { createSignedTrustRuleSnapshot } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
-import { SchedulerConversationMutationPublisher } from "@zhixing/owner-kernel/scheduler-conversation-publisher";
-import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing/owner-kernel/conversation-assignment";
-import { createConversationControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { ConversationAssignmentLedger, DataPlaneTicketRegistry, AssignmentStreamSpool } from "@zhixing/executor";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
-import { ShardedTranscriptStore, readRunsReverse } from "@zhixing/core/transcript";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
+import { createSignedTrustRuleSnapshot } from "@zhixing-ai/core/protocol";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { GlobalMutationCommitCoordinator } from "@zhixing-ai/owner-kernel/global-mutation-commit-coordinator";
+import { SchedulerConversationMutationPublisher } from "@zhixing-ai/owner-kernel/scheduler-conversation-publisher";
+import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { createConversationControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { ConversationAssignmentLedger, DataPlaneTicketRegistry, AssignmentStreamSpool } from "@zhixing-ai/executor";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { ShardedTranscriptStore, readRunsReverse } from "@zhixing-ai/core/transcript";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
-import { SessionAdvancementStore } from "@zhixing/owner-services/advancement";
-import { LLMRubricDraftGenerationStrategy, RubricContractBuilder } from "@zhixing/core/advancement";
-import { ExtensionApplication } from "@zhixing/core/extensions/application";
-import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
-import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
-import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
+import { SessionAdvancementStore } from "@zhixing-ai/owner-services/advancement";
+import { LLMRubricDraftGenerationStrategy, RubricContractBuilder } from "@zhixing-ai/core/advancement";
+import { ExtensionApplication } from "@zhixing-ai/core/extensions/application";
+import { ExtensionArtifacts } from "@zhixing-ai/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing-ai/core/extensions/candidate";
+import { ExtensionOnboarding } from "@zhixing-ai/core/extensions/onboarding";
 import { createExtensionContinuation, createExtensionStatusObserver, extensionContinuationText } from "../extension-continuation.js";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -47,7 +47,7 @@ describe("ConversationProtocolRuntime", () => {
     const home = await createTempDir(name);
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
-    const seen: Array<import("@zhixing/core/types").TurnContext | undefined> = [];
+    const seen: Array<import("@zhixing-ai/core/types").TurnContext | undefined> = [];
     const execution: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: name,
       async *run(messages, options) {
         seen.push(options?.turnContext);
@@ -371,7 +371,7 @@ describe("ConversationProtocolRuntime", () => {
       taskLists: cache, sessionState: protocol.sessionState,
       readMutationBase: (id, requestId) => protocol.taskListBeforeMutation(id, requestId) });
     const request = (conversationId: string) => ({ conversationId, operationId: "task:first-local-write",
-      decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => ({
+      decide: (current: { items: readonly import("@zhixing-ai/core/conversation").TaskItem[] }) => ({
         outcome: "added" as const, taskContent: "first task",
         next: { items: [...current.items, { id: "first-task", content: "first task", status: "pending" as const }] },
       }) });
@@ -411,12 +411,12 @@ describe("ConversationProtocolRuntime", () => {
     const cache = new TaskListService({ load: async () => { throw new Error("legacy storage must not be read"); } });
     const port = createAnchorConversationTaskListPort({ conversations: manager, exists: value => protocol.sessionExists(value), taskLists: cache,
       sessionState: protocol.sessionState, readMutationBase: (value, request) => protocol.taskListBeforeMutation(value, request) });
-    const add = (task: string) => ({ conversationId: id, operationId: `task:${task}`, decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => ({
+    const add = (task: string) => ({ conversationId: id, operationId: `task:${task}`, decide: (current: { items: readonly import("@zhixing-ai/core/conversation").TaskItem[] }) => ({
       outcome: "added" as const, taskContent: task, next: { items: [...current.items, { id: task, content: task, status: "pending" as const }] },
     }) });
     try {
       await protocol.ensureSession(id);
-      const noEffect = { conversationId: id, operationId: "task:initially-empty", decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => current.items.length === 0
+      const noEffect = { conversationId: id, operationId: "task:initially-empty", decide: (current: { items: readonly import("@zhixing-ai/core/conversation").TaskItem[] }) => current.items.length === 0
         ? { outcome: "not-found" as const, token: "1" }
         : { outcome: "completed" as const, taskContent: current.items[0]!.content, next: { items: current.items.map((item, index) => index === 0 ? { ...item, status: "completed" as const } : item) } } };
       await port.maintain(noEffect);
@@ -425,7 +425,7 @@ describe("ConversationProtocolRuntime", () => {
       await expect(port.maintain(noEffect)).resolves.toMatchObject({ decision: { outcome: "not-found" }, taskList: { items: [{ status: "pending" }, { status: "pending" }] } });
       protocol.releaseConversation(id);
       await expect(port.maintain(add("a"))).resolves.toMatchObject({ status: "done", taskList: { items: [{ id: "a" }, { id: "b" }] } });
-      const done = { conversationId: id, operationId: "task:done-first", decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => ({
+      const done = { conversationId: id, operationId: "task:done-first", decide: (current: { items: readonly import("@zhixing-ai/core/conversation").TaskItem[] }) => ({
         outcome: "completed" as const, taskContent: current.items[0]!.content,
         next: { items: current.items.map((item, index) => index === 0 ? { ...item, status: "completed" as const } : item) },
       }) };
@@ -654,7 +654,7 @@ describe("ConversationProtocolRuntime", () => {
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     const foreground = new ForegroundActivity();
     const observed: Record<string, boolean> = {};
-    let phases: import("@zhixing/core/types").ModelProviderPhases | undefined;
+    let phases: import("@zhixing-ai/core/types").ModelProviderPhases | undefined;
     const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: name,
       async *run(messages, options) {
         phases = options?.modelProviderPhases;

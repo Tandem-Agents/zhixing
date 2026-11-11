@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAdvancementModelProviderBinding } from "@zhixing/orchestrator/advancement";
+import { createAdvancementModelProviderBinding } from "@zhixing-ai/orchestrator/advancement";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
 
 const sessionState = Object.freeze({

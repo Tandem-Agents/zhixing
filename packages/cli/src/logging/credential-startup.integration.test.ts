@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
-import { createPlatformSecretStore } from "@zhixing/secrets";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import { LogFilesProcess } from "./files-process.js";
 import { IsolatedLogStore } from "./store-process.js";
 import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";

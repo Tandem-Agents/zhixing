@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertGolden } from "@zhixing/test-utils";
+import { assertGolden } from "@zhixing-ai/test-utils";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
@@ -52,48 +52,48 @@ describe("distributed runtime structural gates", () => {
 
     expect(findDependencyCycles(dependencyGraph.production)).toEqual([]);
     expect(topology.undeclaredPackageImports).toEqual([]);
-    expect(dependencyGraph.production["@zhixing/owner-services"]).toEqual([
-      "@zhixing/core",
+    expect(dependencyGraph.production["@zhixing-ai/owner-services"]).toEqual([
+      "@zhixing-ai/core",
     ]);
-    expect(dependencyGraph.production["@zhixing/runtime-host"]).toEqual([
-      "@zhixing/core",
-      "@zhixing/orchestrator",
-      "@zhixing/owner-kernel",
+    expect(dependencyGraph.production["@zhixing-ai/runtime-host"]).toEqual([
+      "@zhixing-ai/core",
+      "@zhixing-ai/orchestrator",
+      "@zhixing-ai/owner-kernel",
     ]);
-    expect(dependencyGraph.production["@zhixing/runtime-host"]).not.toContain(
-      "@zhixing/mcp",
+    expect(dependencyGraph.production["@zhixing-ai/runtime-host"]).not.toContain(
+      "@zhixing-ai/mcp",
     );
-    expect(dependencyGraph.production["@zhixing/runtime-host"]).not.toContain(
-      "@zhixing/tools-builtin",
+    expect(dependencyGraph.production["@zhixing-ai/runtime-host"]).not.toContain(
+      "@zhixing-ai/tools-builtin",
     );
-    expect(dependencyGraph.production["@zhixing/executor"]).toEqual([
-      "@zhixing/core",
-      "@zhixing/owner-kernel",
-      "@zhixing/runtime-host",
+    expect(dependencyGraph.production["@zhixing-ai/executor"]).toEqual([
+      "@zhixing-ai/core",
+      "@zhixing-ai/owner-kernel",
+      "@zhixing-ai/runtime-host",
     ]);
-    expect(dependencyGraph.production["@zhixing/mesh"]).toEqual([
-      "@zhixing/core",
+    expect(dependencyGraph.production["@zhixing-ai/mesh"]).toEqual([
+      "@zhixing-ai/core",
     ]);
-    expect(dependencyGraph.production["@zhixing/secrets"]).toEqual([
-      "@zhixing/core",
+    expect(dependencyGraph.production["@zhixing-ai/secrets"]).toEqual([
+      "@zhixing-ai/core",
     ]);
     expect(
       Object.entries(dependencyGraph.production)
         .filter(([name, dependencies]) =>
-          name !== "@zhixing/mesh" &&
-          name !== "@zhixing/cli" &&
-          dependencies.includes("@zhixing/mesh"),
+          name !== "@zhixing-ai/mesh" &&
+          name !== "zhixing" &&
+          dependencies.includes("@zhixing-ai/mesh"),
         )
         .map(([name]) => name),
     ).toEqual([]);
-    expect(dependencyGraph.production["@zhixing/cli"]).toContain(
-      "@zhixing/mesh",
+    expect(dependencyGraph.production["zhixing"]).toContain(
+      "@zhixing-ai/mesh",
     );
-    expect(dependencyGraph.production["@zhixing/executor"]).not.toContain(
-      "@zhixing/server",
+    expect(dependencyGraph.production["@zhixing-ai/executor"]).not.toContain(
+      "@zhixing-ai/server",
     );
-    expect(dependencyGraph.production["@zhixing/server"]).not.toContain(
-      "@zhixing/executor",
+    expect(dependencyGraph.production["@zhixing-ai/server"]).not.toContain(
+      "@zhixing-ai/executor",
     );
     const serveCommandRefs = await readModuleReferences(
       "packages/cli/src/serve/command.ts",
@@ -106,11 +106,11 @@ describe("distributed runtime structural gates", () => {
     );
     expect(serveCommandRefs).not.toContainEqual({
       kind: "import",
-      specifier: "@zhixing/executor",
+      specifier: "@zhixing-ai/executor",
     });
     expect(applicationHostRefs).toContainEqual({
       kind: "dynamic-import",
-      specifier: "@zhixing/executor",
+      specifier: "@zhixing-ai/executor",
     });
     expect(applicationHostRefs).toContainEqual({
       kind: "dynamic-import",
@@ -126,7 +126,7 @@ describe("distributed runtime structural gates", () => {
     });
     expect(executorRuntimeRefs).not.toContainEqual({
       kind: "import",
-      specifier: "@zhixing/owner-kernel",
+      specifier: "@zhixing-ai/owner-kernel",
     });
     expect(rpcContracts.length).toBeGreaterThan(40);
     expect(findDuplicateContractNames(rpcContracts)).toEqual([]);

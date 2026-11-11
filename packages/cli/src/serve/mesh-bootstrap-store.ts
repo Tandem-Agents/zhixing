@@ -12,27 +12,27 @@ import type {
   PairingStreamRecord,
   RecoveryActivationPlan,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   ArtifactLifecycleIndex,
   collectArtifactRefs,
   FileArtifactStore,
   FileAuthorityCommitLog,
   type ArtifactCheckpointRetentionPort,
-} from "@zhixing/core/authority";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import { credentialExposureIndex } from "@zhixing/mesh/credential-exposure";
-import { readCheckpointLifecycle } from "@zhixing/mesh/checkpoint-service";
-import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import { ensureDurableDirectory, SerialTaskQueue, syncDirectory } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/authority";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import { credentialExposureIndex } from "@zhixing-ai/mesh/credential-exposure";
+import { readCheckpointLifecycle } from "@zhixing-ai/mesh/checkpoint-service";
+import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import { ensureDurableDirectory, SerialTaskQueue, syncDirectory } from "@zhixing-ai/core/persistence";
 import {
   MeshEndpointDirectory,
   validateMeshEndpointDescriptor,
-} from "@zhixing/mesh/bootstrap";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/bootstrap";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import {
   validateDeviceTrustRoot,
-} from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/device-identity";
 import {
   homeTrustEventDigest,
   applyTrustEvent,
@@ -50,9 +50,9 @@ import {
   readTrustProjectionAt, readStagedTrustBranch, readTrustEventAt, readTrustEventsAfter, readRevokedTrustMemberAt, trustBranchAdoptionId,
   readTrustMemberPairing,
   type HomeTrustBranchAdoptedRecord, type HomeTrustBranchStagedRecord, type TrustStreamFold,
-} from "@zhixing/mesh/trust-chain";
-import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
-import type { HomeDiscoveryLocalChain } from "@zhixing/mesh/home-discovery";
+} from "@zhixing-ai/mesh/trust-chain";
+import type { TrustedMeshPeer } from "@zhixing-ai/mesh/handshake";
+import type { HomeDiscoveryLocalChain } from "@zhixing-ai/mesh/home-discovery";
 import type {
   BootstrapAuthorityPort,
   PairingAtomicCommit,
@@ -63,15 +63,15 @@ import type {
   PairingCommitReplay,
   RecoveryActivationAtomicCommit,
   RecoveryActivationReplay,
-} from "@zhixing/mesh/bootstrap-authority";
+} from "@zhixing-ai/mesh/bootstrap-authority";
 import {
   checkpointEnvelopeArtifact,
   checkpointPackageFromChunks,
   readCheckpointChunk,
   type CheckpointPackage,
-} from "@zhixing/mesh/checkpoint";
-import { validateRecoveryActivationPlan } from "@zhixing/mesh/bootstrap-authority";
-import { pairingOfferDigest } from "@zhixing/mesh/pairing";
+} from "@zhixing-ai/mesh/checkpoint";
+import { validateRecoveryActivationPlan } from "@zhixing-ai/mesh/bootstrap-authority";
+import { pairingOfferDigest } from "@zhixing-ai/mesh/pairing";
 import type {
   MeshBootstrapCompletionPersistencePort,
   MeshEndpointDirectoryPersistencePort,
@@ -120,7 +120,7 @@ import {
 } from "./member-connection-directory.js";
 
 export interface FileMeshBootstrapStoreOptions {
-  readonly records?: import("@zhixing/core/logging").LogRecordPort;
+  readonly records?: import("@zhixing-ai/core/logging").LogRecordPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly sources?: HomeAuthoritySourcesLease;
 }
@@ -1162,7 +1162,7 @@ interface PairingProjection {
   readonly attempts: ReadonlyMap<string, {
     readonly admission: PairingAttemptAdmission;
     readonly status: "started" | "failed" | "succeeded";
-    readonly acceptance?: import("@zhixing/core/contracts").PairingAcceptance;
+    readonly acceptance?: import("@zhixing-ai/core/contracts").PairingAcceptance;
     readonly trustEventDigest?: string;
   }>;
 }
@@ -1191,7 +1191,7 @@ class FilePairingAuthority implements PairingAuthorityPort {
   ) {}
 
   async beginPairingAttempt(
-    offer: import("@zhixing/core/contracts").PairingOffer,
+    offer: import("@zhixing-ai/core/contracts").PairingOffer,
     now: number,
   ): Promise<PairingAttemptDecision> {
     const result = await this.log.transactProjection<PairingProjection, BootstrapRecord, PairingAttemptDecision>(
@@ -1719,7 +1719,7 @@ function recoveryPlanEvents(plan: RecoveryActivationPlan): readonly HomeTrustEve
 
 function pairingReceipt(
   attempt: PairingAttemptAdmission,
-  acceptance: import("@zhixing/core/contracts").PairingAcceptance,
+  acceptance: import("@zhixing-ai/core/contracts").PairingAcceptance,
   event: HomeTrustEvent,
 ): PairingCommitReceipt {
   const trustEventDigest = homeTrustEventDigest(event);

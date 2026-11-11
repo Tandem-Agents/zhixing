@@ -1,10 +1,10 @@
-import type { LogRecordPort } from '@zhixing/core/authority';
-import { currentMaintenanceUrgency, runInMaintenanceContext, runDetachedMaintenanceContext } from '@zhixing/core/resources';
+import type { LogRecordPort } from '@zhixing-ai/core/authority';
+import { currentMaintenanceUrgency, runInMaintenanceContext, runDetachedMaintenanceContext } from '@zhixing-ai/core/resources';
 import { AuthorityWorkObserver } from '../../../core/src/authority/logging.js';
 import { open } from 'node:fs/promises';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import path from 'node:path';
 import { describe, expect, it, vi, onTestFinished, afterAll } from 'vitest';
 import * as runViews from '../conversation-run-state-view.js';

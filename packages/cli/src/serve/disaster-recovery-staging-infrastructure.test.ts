@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { access } from "node:fs/promises";
 import path from "node:path";
-import { FileArtifactStore } from "@zhixing/core/authority";
-import type { ArtifactRef, DeviceIdentity } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import type { ArtifactRef, DeviceIdentity } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { createDisasterRecoveryStagingInfrastructure } from
   "./disaster-recovery-staging-infrastructure.js";

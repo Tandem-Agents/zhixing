@@ -3,8 +3,8 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { PermissionRule, SecurityRule } from "@zhixing/core/security";
-import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
+import type { PermissionRule, SecurityRule } from "@zhixing-ai/core/security";
+import type { TrustAdministrationRule } from "@zhixing-ai/core/trust-administration";
 import { handleSecurityCommand, handleTrustCommand } from "../commands.js";
 import type { CliWriter } from "../../screen/index.js";
 

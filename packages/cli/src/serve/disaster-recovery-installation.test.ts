@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { createTempDir } from "@zhixing/test-utils";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   loadDisasterRecoveryPostInstallReceipt,
   recordDisasterRecoveryPostInstallReceipt,

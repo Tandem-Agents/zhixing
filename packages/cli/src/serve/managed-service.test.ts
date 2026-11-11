@@ -3,8 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { createTempDir } from "@zhixing/test-utils";
-import { byteDigest } from "@zhixing/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { byteDigest } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
   applyManagedServiceLaunchContext,

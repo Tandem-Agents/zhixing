@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import type { AgentEventMap } from "@zhixing/core";
+import type { AgentEventMap } from "@zhixing-ai/core";
 import { layout } from "./tui/style.js";
 
 const MAX_LIFECYCLE_WARNING_DEDUPE_KEYS = 1_000;

@@ -5,42 +5,42 @@ import {
   type InboundConversationApplicationPort,
   type InboundDeliveryOutboxPort,
 } from "../inbound-router.js";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { channelSurfacePrincipal } from "@zhixing-ai/owner-kernel/control-admission";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import {
   ConfirmationBroker,
   type ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   type ChannelAdapter,
   type ChannelLogger,
   type DeliveryResult,
   type InboundMessage,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 import {
   DEFAULT_CONVERSATION_ID,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 import {
   generateTurnId,
   type Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   OutboxRegistry,
-} from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/delivery";
 import type {
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
-import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
-import type { SessionRuntime, RuntimeFactory } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/core/loop";
+import type { DurableConversationTurnExecutor } from "@zhixing-ai/owner-kernel/run-turn";
+import type { SessionRuntime, RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
 
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 

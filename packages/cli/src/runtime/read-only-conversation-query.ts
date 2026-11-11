@@ -1,4 +1,4 @@
-import type { ConversationDirectoryStorage } from "@zhixing/core/conversation/application";
+import type { ConversationDirectoryStorage } from "@zhixing-ai/core/conversation/application";
 import { projectHistoryTail } from "./conversation-history-projection.js";
 
 /** 排序与归档过滤仍由 storage 决定；展示方按返回顺序逐项读取。 */
@@ -8,7 +8,7 @@ export async function listReadOnlyConversations(
 ) {
   if (storage.listPage) {
     const records: Array<Awaited<ReturnType<ConversationDirectoryStorage['list']>>[number]> = [];
-    let after: import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined;
+    let after: import('@zhixing-ai/core/conversation/application').ConversationDirectoryCursor | undefined;
     while (records.length < maxConversations) {
       const page = await storage.listPage({ limit: Math.min(100, maxConversations - records.length), after });
       records.push(...page.records); if (!page.next) break; after = page.next;

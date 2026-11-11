@@ -1,5 +1,5 @@
-import type { PermissionRule } from "@zhixing/core/security";
-import type { ToolDefinition } from "@zhixing/core/types";
+import type { PermissionRule } from "@zhixing-ai/core/security";
+import type { ToolDefinition } from "@zhixing-ai/core/types";
 
 /** Host-provided finite implementation input for one Kernel runtime instance. */
 export interface KernelToolImplementationRequest {

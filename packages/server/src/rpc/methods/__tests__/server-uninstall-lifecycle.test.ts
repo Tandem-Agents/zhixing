@@ -2,8 +2,8 @@ import {
   createDeviceAdministrationProductApiContribution,
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DeviceAdministrationApplicationService,
-} from "@zhixing/core/device-administration/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/device-administration/application";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import { describe, expect, it, vi } from "vitest";
 import type { HandlerContext } from "../../handlers.js";
 import { RPC_ERROR_CODES } from "../../protocol.js";

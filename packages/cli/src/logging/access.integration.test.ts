@@ -4,12 +4,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   DEFAULT_LOG_POLICY,
   type LogPolicy,
   type LogReadContext,
-} from "@zhixing/core/logging";
+} from "@zhixing-ai/core/logging";
 import {
   LogApplication,
   LOG_APPLY_POLICY,
@@ -21,18 +21,18 @@ import {
   formatLogAddress,
   conversationLogScope,
   parseLogAddress,
-} from "@zhixing/core/logging/application";
-import { LocalLogStore } from "@zhixing/core/logging/storage";
+} from "@zhixing-ai/core/logging/application";
+import { LocalLogStore } from "@zhixing-ai/core/logging/storage";
 import {
   bindLogSource,
   captureLog,
 } from "../../../core/src/logging/capture.js";
-import { createRuntimeToolProjection } from "@zhixing/runtime-host/conversation-runtime-projection";
+import { createRuntimeToolProjection } from "@zhixing-ai/runtime-host/conversation-runtime-projection";
 import { RpcDispatcher } from "../../../server/src/rpc/dispatcher.js";
 import { buildBuiltinRegistry } from "../../../server/src/rpc/methods/index.js";
 import type { RpcConnection } from "../../../server/src/rpc/connection.js";
 import type { ServerContext } from "../../../server/src/context.js";
-import { LogRpcClient } from "@zhixing/rpc";
+import { LogRpcClient } from "@zhixing-ai/rpc";
 import { LogFilesProcess } from "./files-process.js";
 import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import {
@@ -48,12 +48,12 @@ import {
   BoundaryRegistry,
   SecurityPipeline,
   restrictToolExecution,
-} from "@zhixing/core/security";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { createEventBus } from "@zhixing/core/events";
-import { MockLLMProvider } from "@zhixing/core/loop";
+} from "@zhixing-ai/core/security";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { createEventBus } from "@zhixing-ai/core/events";
+import { MockLLMProvider } from "@zhixing-ai/core/loop";
 import { declaredPeer } from "./__tests__/declared-peer.js";
-import type { AgentEventMap, ToolDefinition } from "@zhixing/core/types";
+import type { AgentEventMap, ToolDefinition } from "@zhixing-ai/core/types";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {

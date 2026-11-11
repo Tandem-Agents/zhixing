@@ -6,7 +6,7 @@
  * 失败。复用 hub 同一套安全连接路径（connectAndListTools → 同一个 createTransport）。
  */
 
-import type { NetworkPolicy } from "@zhixing/network";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 import {
   connectAndListTools,
   type ConnectedClient,

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { fileURLToPath } from "node:url";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import path from "node:path";

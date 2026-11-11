@@ -1,10 +1,10 @@
-import type { CommitEnvelope, DeviceIdentity, HomeTrustEvent, HomeTrustRecord, JsonValue } from "@zhixing/core/contracts";
+import type { CommitEnvelope, DeviceIdentity, HomeTrustEvent, HomeTrustRecord, JsonValue } from "@zhixing-ai/core/contracts";
 import {
   createDurableProjectionOverlay, DurableProjectionRecordBindingError,
   type AuthorityCommitLog, type DurableLogCheckpoint, type DurableProjectionReadContext,
   type RebuildableDurableProjectionIndex,
   type VerifiedAnchorTenure,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import {
   applyTrustEvent, applyTrustEventWithHistory, homeTrustEventDigest, homeTrustRecordDigest, initializeTrustChain,
@@ -565,7 +565,7 @@ function omitMembers(projection: TrustProjection): Omit<TrustProjection, "member
   const { members: _members, ...head } = projection; return head;
 }
 
-export type { VerifiedAnchorTenure } from '@zhixing/core/authority';
+export type { VerifiedAnchorTenure } from '@zhixing-ai/core/authority';
 /** A single historical point from the already verified chain, never a replay. */
 export async function readAnchorTenureAt(view: DurableProjectionReadContext, checkpoint: DurableLogCheckpoint): Promise<VerifiedAnchorTenure | undefined> {
   const head = readHead(await view.get(HEAD));

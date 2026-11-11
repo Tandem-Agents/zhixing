@@ -1,8 +1,8 @@
-import type { IEventBus } from "@zhixing/core";
-import type { SchedulerFacade, SchedulerEventMap, SystemHandler } from "@zhixing/core/scheduler";
-import type { PermissionRule } from "@zhixing/core/security";
-import { jobRunTrustScopeInput, type ExecutionTrustScopeInput } from "@zhixing/core/trust-administration";
-import { LocalSchedulerFacade } from "@zhixing/core/scheduler";
+import type { IEventBus } from "@zhixing-ai/core";
+import type { SchedulerFacade, SchedulerEventMap, SystemHandler } from "@zhixing-ai/core/scheduler";
+import type { PermissionRule } from "@zhixing-ai/core/security";
+import { jobRunTrustScopeInput, type ExecutionTrustScopeInput } from "@zhixing-ai/core/trust-administration";
+import { LocalSchedulerFacade } from "@zhixing-ai/core/scheduler";
 import {
   ScheduleApplicationService,
   ScheduleManagementApplicationService,
@@ -13,7 +13,7 @@ import {
   type ScheduleManualExecutionPort,
   type ScheduleLifecycleMechanismPort,
   type ScheduleRuntimeProjectionPort,
-} from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/scheduler/application";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -24,7 +24,7 @@ import type {
   OwnerControlGrant,
   RunExecutorPort,
   TaskDefinition,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   MAX_CONTROL_LEASE_TTL_MS,
   assertPrincipalAllowsAuthorityMethod,
@@ -32,30 +32,30 @@ import {
   ownerControlRequestDigest,
   protocolDigest,
   validateAuthorityCapability,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   AnchorScheduler,
-} from "@zhixing/owner-kernel/scheduler-authority";
+} from "@zhixing-ai/owner-kernel/scheduler-authority";
 import {
   AnchorSchedulerGlobalStateAdapter,
   AnchorSchedulerProductPort,
-} from "@zhixing/owner-kernel/scheduler-global-state";
-import { JobAssignmentAuthority } from "@zhixing/owner-kernel/job-assignment-authority";
-import { SchedulerJobCommitParticipant } from "@zhixing/owner-kernel/scheduler-job-commit";
+} from "@zhixing-ai/owner-kernel/scheduler-global-state";
+import { JobAssignmentAuthority } from "@zhixing-ai/owner-kernel/job-assignment-authority";
+import { SchedulerJobCommitParticipant } from "@zhixing-ai/owner-kernel/scheduler-job-commit";
 import {
   SchedulerConversationMutationPublisher,
-} from "@zhixing/owner-kernel/scheduler-conversation-publisher";
+} from "@zhixing-ai/owner-kernel/scheduler-conversation-publisher";
 import {
   GlobalMutationCommitCoordinator,
   listCurrentScheduleTaskIds,
-} from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
-import { findJobTaskForRun, openJobTaskIds } from "@zhixing/owner-kernel/job-run-state-index";
-import { SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
+} from "@zhixing-ai/owner-kernel/global-mutation-commit-coordinator";
+import { findJobTaskForRun, openJobTaskIds } from "@zhixing-ai/owner-kernel/job-run-state-index";
+import { SchedulerUserNoticeJournal } from "@zhixing-ai/owner-kernel/scheduler-user-notices";
 import {
   DeferredGlobalIntentAnchorReviewService,
-} from "@zhixing/owner-kernel/deferred-global-intent-review";
-import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel/deferred-global-intents";
-import { assignmentReservationId } from "@zhixing/owner-kernel/resource-governor";
+} from "@zhixing-ai/owner-kernel/deferred-global-intent-review";
+import { DeferredGlobalIntentRepository } from "@zhixing-ai/owner-kernel/deferred-global-intents";
+import { assignmentReservationId } from "@zhixing-ai/owner-kernel/resource-governor";
 import {
   InProcessJobDispatcher,
   JobJournal,
@@ -65,12 +65,12 @@ import {
   type PendingJobDispatch,
   type SystemJobHandler,
   type JobTrustSedimentPort,
-} from "@zhixing/owner-kernel/job-assignment";
+} from "@zhixing-ai/owner-kernel/job-assignment";
 import {
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
-} from "@zhixing/owner-kernel/conversation-assignment";
-import { type ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { type ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import type {
   JobRelayObligationDirectory,
@@ -122,13 +122,13 @@ export interface AnchorSchedulerRuntimeOptions {
   };
   readonly systemHandlers: ReadonlyMap<string, SystemHandler>;
   readonly systemTasks: NonNullable<
-    import("@zhixing/owner-kernel/scheduler-authority").AnchorSchedulerOptions["systemTasks"]
+    import("@zhixing-ai/owner-kernel/scheduler-authority").AnchorSchedulerOptions["systemTasks"]
   >;
   readonly now?: () => Date;
   readonly onError?: (error: Error) => void;
   /** job 镜像里的信任沉淀交规则权威接纳；只在规则权威所在的锚点宿主装配。 */
   readonly trustSediments?: JobTrustSedimentPort;
-  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
+  readonly trustRuleHits?: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort;
   /** job 派发冻结快照的规则：范围按 jobRunTrustScopeInput 推导，内置规则随签发的工具集合。 */
   readonly jobPermissionRules?: (input: {
     readonly scope: ExecutionTrustScopeInput;
@@ -1192,7 +1192,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     taskId: string,
     assignmentId: string,
     batchDigest: string,
-  ): Promise<import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitBatchState> {
+  ): Promise<import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitBatchState> {
     return this.#journal(taskId).trustRuleHitBatchState(assignmentId, batchDigest);
   }
 
@@ -1297,10 +1297,10 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
 
 function adaptSystemHandlers(
   handlers: ReadonlyMap<string, SystemHandler>,
-): ReadonlyMap<import("@zhixing/core/contracts").SystemHandlerId, SystemJobHandler> {
+): ReadonlyMap<import("@zhixing-ai/core/contracts").SystemHandlerId, SystemJobHandler> {
   return new Map(
     [...handlers].map(([id, handler]) => [
-      id as import("@zhixing/core/contracts").SystemHandlerId,
+      id as import("@zhixing-ai/core/contracts").SystemHandlerId,
       async ({ params }) => {
         const result = await handler(
           params && typeof params === "object" && !Array.isArray(params)
@@ -1376,7 +1376,7 @@ function jobDispatchContexts(input: {
   readonly signer: AnchorSchedulerRuntimeOptions["authority"]["signer"];
   readonly ownerDeviceId: string;
   readonly pending: PendingJobDispatch;
-  readonly controlLease: () => import("@zhixing/core/contracts").ControlLease;
+  readonly controlLease: () => import("@zhixing-ai/core/contracts").ControlLease;
 }): InProcessDispatchContextFactory {
   return {
     create(assignmentId, method, request) {

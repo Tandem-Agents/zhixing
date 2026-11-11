@@ -4,9 +4,9 @@ import {
   ConversationDirectoryPageCollector,
   type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
-} from "@zhixing/core/conversation/application";
-import type { AuthorityCallContext } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/conversation/application";
+import type { AuthorityCallContext } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
 
 const LIMITED_CONVERSATION_CAPABILITIES = Object.freeze([

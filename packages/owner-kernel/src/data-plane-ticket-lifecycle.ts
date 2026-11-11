@@ -1,5 +1,5 @@
-import type { DataPlaneTicket } from "@zhixing/core/contracts";
-import { MAX_CLOCK_SKEW_MS } from "@zhixing/core/protocol";
+import type { DataPlaneTicket } from "@zhixing-ai/core/contracts";
+import { MAX_CLOCK_SKEW_MS } from "@zhixing-ai/core/protocol";
 
 export interface DataPlaneTicketIssueIdentity {
   readonly ticketId: string;

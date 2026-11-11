@@ -1,11 +1,11 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { assertArtifactRef, validateArtifactReceiveProgress, type ArtifactStore, type ArtifactReceiveProgress } from "@zhixing/core/authority";
-import type { ArtifactRef } from "@zhixing/core/contracts";
-import { byteDigest } from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { ExtensionManagementRequest } from "@zhixing/core/extensions/contracts";
+import { assertArtifactRef, validateArtifactReceiveProgress, type ArtifactStore, type ArtifactReceiveProgress } from "@zhixing-ai/core/authority";
+import type { ArtifactRef } from "@zhixing-ai/core/contracts";
+import { byteDigest } from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { ExtensionManagementRequest } from "@zhixing-ai/core/extensions/contracts";
 import type { ExtensionManagementTransport } from "./extension-tools.js";
 
 const SERVICE = "extensions.management";

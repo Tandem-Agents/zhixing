@@ -3,8 +3,8 @@ import type {
   StreamConsumerAuth,
   StreamFrame,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
-import { StreamFrameVerifier } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { StreamFrameVerifier } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { AssignmentStreamPathConnection } from "./assignment-stream-path-manager.js";
 import {

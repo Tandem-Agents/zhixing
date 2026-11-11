@@ -1,4 +1,4 @@
-import type { AdvancementSubmissionIdentity, AdvancementSubmissionOutcome } from "@zhixing/core/advancement";
+import type { AdvancementSubmissionIdentity, AdvancementSubmissionOutcome } from "@zhixing-ai/core/advancement";
 import {
   RubricContractBuilder,
   ConservativeAdvancementAdmissionStrategy,
@@ -11,8 +11,8 @@ import {
   type ConfirmedRubricSnapshot,
   type RubricContractDraftSnapshot,
   type AdvancementClosureReport,
-} from "@zhixing/core/advancement";
-import { type Message, type UserTurnInput, extractText } from "@zhixing/core";
+} from "@zhixing-ai/core/advancement";
+import { type Message, type UserTurnInput, extractText } from "@zhixing-ai/core";
 import type {
   AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionDecision,
@@ -23,9 +23,9 @@ import type {
   AdvancementClosureSynthesizer,
   RubricPublicationOutcome,
   RubricPublicationPort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import { randomUUID } from "node:crypto";
-import { composeAdvancementClosureReport } from "@zhixing/core/advancement/application";
+import { composeAdvancementClosureReport } from "@zhixing-ai/core/advancement/application";
 import type { AdvancementSessionStore } from "./session-store.js";
 
 export interface AdvancementControllerOptions {
@@ -212,7 +212,7 @@ export class AdvancementController implements
   async persistRegeneratedRubricSession(input: Readonly<{
     submission?: AdvancementSubmissionIdentity;
     advancementSessionId: string; previousSessionId: string; conversationId: string;
-    exit: import("@zhixing/core/advancement").AdvancementExit; draft: RubricContractDraftSnapshot;
+    exit: import("@zhixing-ai/core/advancement").AdvancementExit; draft: RubricContractDraftSnapshot;
   }>): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }> {
     return this.store.regenerateSession(input.conversationId, input.previousSessionId, input.advancementSessionId, input.draft, input.exit, input.submission);
   }
@@ -274,11 +274,11 @@ export class AdvancementController implements
     return this.store.supplementProposal(input.conversationId, input.advancementSessionId, input.supplement, input.submission);
   }
 
-  persistDirectOriginalTask(input: Readonly<{ submission?: AdvancementSubmissionIdentity; conversationId: string; advancementSessionId: string; admissionIntent: import("@zhixing/core/advancement").AdvancementOriginalTaskAdmissionIntent; exit: import("@zhixing/core/advancement").AdvancementExit }>): Promise<AdvancementSession> {
+  persistDirectOriginalTask(input: Readonly<{ submission?: AdvancementSubmissionIdentity; conversationId: string; advancementSessionId: string; admissionIntent: import("@zhixing-ai/core/advancement").AdvancementOriginalTaskAdmissionIntent; exit: import("@zhixing-ai/core/advancement").AdvancementExit }>): Promise<AdvancementSession> {
     return this.store.directOriginalTask(input.conversationId, input.advancementSessionId, input.admissionIntent, input.exit, undefined, input.submission);
   }
 
-  persistOriginalTaskAdmissionRejection(input: Readonly<{ conversationId: string; advancementSessionId: string; turnId: string; inputDigest: import("@zhixing/core").Digest; reason: "conversation-not-found" | "idempotency-conflict" }>): Promise<AdvancementSession> {
+  persistOriginalTaskAdmissionRejection(input: Readonly<{ conversationId: string; advancementSessionId: string; turnId: string; inputDigest: import("@zhixing-ai/core").Digest; reason: "conversation-not-found" | "idempotency-conflict" }>): Promise<AdvancementSession> {
     return this.store.rejectOriginalTaskAdmission(input.conversationId, input.advancementSessionId, { turnId: input.turnId, inputDigest: input.inputDigest, reason: input.reason });
   }
 
@@ -299,7 +299,7 @@ export class AdvancementController implements
     readonly conversationId: string;
     readonly advancementSessionId: string;
     readonly turnId: string;
-    readonly inputDigest: import("@zhixing/core").Digest;
+    readonly inputDigest: import("@zhixing-ai/core").Digest;
     readonly runId: string;
   }>): Promise<AdvancementSession> {
     return this.store.settleOriginalTaskAdmission(

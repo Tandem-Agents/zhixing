@@ -1,12 +1,12 @@
-import { assertDeliveryEnvelopeCompanions, projectDeliveryDisplayText, validateDeliveryStreamRecord, type DeliveryLifecycleSourceRef } from "@zhixing/core/delivery";
-import { decideConversationStatusNotification, conversationControlResponseText, type ConversationControlResponse } from "@zhixing/core/conversation/application";
-import { decideScheduleStatusNotification } from "@zhixing/core/scheduler/application";
-import { worksceneResultReturnTarget } from "@zhixing/core/workscene/application";
+import { assertDeliveryEnvelopeCompanions, projectDeliveryDisplayText, validateDeliveryStreamRecord, type DeliveryLifecycleSourceRef } from "@zhixing-ai/core/delivery";
+import { decideConversationStatusNotification, conversationControlResponseText, type ConversationControlResponse } from "@zhixing-ai/core/conversation/application";
+import { decideScheduleStatusNotification } from "@zhixing-ai/core/scheduler/application";
+import { worksceneResultReturnTarget } from "@zhixing-ai/core/workscene/application";
 import type {
   DeliveryObligation,
   DeliveryObligationApplication,
-} from "@zhixing/core/delivery/application";
-import type { ProjectionTransactionContext } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/delivery/application";
+import type { ProjectionTransactionContext } from "@zhixing-ai/core/authority";
 import {
   type AuthorityError,
   type CommitEnvelope,
@@ -22,12 +22,12 @@ import {
   type TaskDefinition,
   type TranscriptRunRecord,
   type DeliveryIntentDto,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   protocolDigest,
   validatePublishDecisionForBatch,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 type JobBundle = SealedBundle & {
   readonly body: Extract<SealedBundle["body"], { t: "job" }>;
@@ -866,8 +866,8 @@ function finalAssistantText(record: TranscriptRunRecord): string {
 }
 
 function contentOf(
-  content: string | { readonly ref: import("@zhixing/core/contracts").ArtifactRef },
-): { readonly text: string; readonly markdown: string } | { readonly ref: import("@zhixing/core/contracts").ArtifactRef } {
+  content: string | { readonly ref: import("@zhixing-ai/core/contracts").ArtifactRef },
+): { readonly text: string; readonly markdown: string } | { readonly ref: import("@zhixing-ai/core/contracts").ArtifactRef } {
   return typeof content === "string"
     ? { text: content, markdown: content }
     : { ref: content.ref };

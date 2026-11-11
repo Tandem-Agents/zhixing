@@ -116,7 +116,7 @@ describe("inspectLocalHealth", () => {
     expect(report).toEqual({
       code: "device-maintenance-required",
       message: "这台设备需要更新后才能恢复完整协作",
-      action: "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
+      action: "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g zhixing@latest；再运行 zz，然后重试原操作",
     });
     expect(JSON.stringify(report)).not.toMatch(/connection:|device:|协议/u);
   });
@@ -136,7 +136,7 @@ describe("inspectLocalHealth", () => {
     expect(report).toEqual({
       code: "device-maintenance-required",
       message: "部分设备需要更新后才能恢复完整协作",
-      action: "请分别在 书房电脑、书房电脑、客厅电脑 完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
+      action: "请分别在 书房电脑、书房电脑、客厅电脑 完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g zhixing@latest；再运行 zz，然后重试原操作",
     });
   });
 
@@ -153,7 +153,7 @@ describe("inspectLocalHealth", () => {
     expect(report).toEqual({
       code: "device-maintenance-required",
       message: "部分设备需要更新后才能恢复完整协作",
-      action: "请分别在 书房电脑 完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
+      action: "请分别在 书房电脑 完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g zhixing@latest；再运行 zz，然后重试原操作",
     });
   });
 

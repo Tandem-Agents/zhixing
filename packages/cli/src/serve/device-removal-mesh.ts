@@ -5,9 +5,9 @@ import {
   type DeviceLifecycleAbort,
   type ExecutorRemovalReceipt,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,

@@ -1,4 +1,4 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import { canonicalize } from "../canonical.js";
 import { describe, expect, it } from "vitest";
 import {

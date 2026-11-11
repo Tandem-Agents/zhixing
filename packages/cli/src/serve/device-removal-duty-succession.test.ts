@@ -1,23 +1,23 @@
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import path from "node:path";
-import type { DeviceIdentity, MeshEndpointDescriptor, SecretRef, SecretStorePort, Signature } from "@zhixing/core/contracts";
-import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { createSignedExecutorRemovalReceipt, protocolDigest, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
+import type { DeviceIdentity, MeshEndpointDescriptor, SecretRef, SecretStorePort, Signature } from "@zhixing-ai/core/contracts";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { createSignedExecutorRemovalReceipt, protocolDigest, type ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing-ai/mesh/blind-rendezvous";
 import {
   currentAndPreviousDiscoveryRendezvousKeys,
   currentAndPreviousRendezvousKeys,
   MeshEndpointDirectory,
   terminalRouteDigest,
-} from "@zhixing/mesh/bootstrap";
-import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
-import { connectAuthenticatedMesh } from "@zhixing/mesh/handshake";
-import { localChainOfEvents } from "@zhixing/mesh/home-discovery";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { createSignedTrustEvent, replayTrustChain } from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/bootstrap";
+import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing-ai/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing-ai/mesh/device-key-store";
+import { connectAuthenticatedMesh } from "@zhixing-ai/mesh/handshake";
+import { localChainOfEvents } from "@zhixing-ai/mesh/home-discovery";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import { createSignedTrustEvent, replayTrustChain } from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import {
   CurrentIssuerDeviceRemovalAuthority,

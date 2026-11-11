@@ -1,8 +1,8 @@
-import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel/types";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import {
   createAssignmentRuntimeAdapter,
   createOwnerRuntimeAdapter,
-} from "@zhixing/runtime-host/session-adapter";
+} from "@zhixing-ai/runtime-host/session-adapter";
 
 type AgentRuntime = Parameters<typeof createOwnerRuntimeAdapter>[1];
 

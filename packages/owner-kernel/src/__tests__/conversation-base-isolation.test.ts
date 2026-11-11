@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { AuthorityStorageError } from '@zhixing/core/authority';
+import { AuthorityStorageError } from '@zhixing-ai/core/authority';
 import { baseVerifier, createConversationBaseHarness } from './conversation-base-harness.js';
 import { registerConversationRunProjection } from '../conversation-run-state-index.js';
 import { registerConversationRecoveryProjection, conversationRecoveryPage } from '../conversation-recovery-index.js';

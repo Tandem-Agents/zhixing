@@ -12,7 +12,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDurableDirectory, syncDirectory } from "@zhixing/core/persistence";
+import { ensureDurableDirectory, syncDirectory } from "@zhixing-ai/core/persistence";
 
 /**
  * 耐久原子写 JSON：同步临时文件，再 rename 并同步目录。

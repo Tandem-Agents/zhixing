@@ -8,18 +8,18 @@
 import type {
   ChannelStatus,
   HttpHandler,
-} from "@zhixing/core/channels";
-import type { ForegroundActivityPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/channels";
+import type { ForegroundActivityPort } from "@zhixing-ai/core/resources";
 import type {
   ConfirmationDecision,
   ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import type {
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
-} from "@zhixing/core/delivery";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
-import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
+} from "@zhixing-ai/core/delivery";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
+import type { BackupRecoveryPublicStatus } from "@zhixing-ai/core/backup-recovery/application";
 import type {
   ConversationStatusNotice,
   ExplicitEnvironmentSelection,
@@ -28,17 +28,17 @@ import type {
   JobStatusNotice,
   PublishResultNotice,
   SchedulerUserNotice,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   AgentEventMap,
   PostTurnControlOutcome,
   TurnContext,
   UserTurnInput,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "@zhixing/rpc/session-broadcast";
+} from "@zhixing-ai/rpc/session-broadcast";
 import type { ServerConfig } from "./types.js";
 import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
@@ -239,7 +239,7 @@ export interface ServerInfoRuntimeBinding {
       readonly afterStatusRevision: number;
     }[];
   }>;
-  readonly conversationRecovery?: (request: import('@zhixing/core/contracts').ConversationRecoveryRequest) => Promise<import('@zhixing/core/contracts').ConversationRecoveryPage>;
+  readonly conversationRecovery?: (request: import('@zhixing-ai/core/contracts').ConversationRecoveryRequest) => Promise<import('@zhixing-ai/core/contracts').ConversationRecoveryPage>;
   readonly jobStatus?: (
     after: readonly {
       readonly taskId: string;

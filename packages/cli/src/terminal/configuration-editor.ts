@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { ConfigurationEditPendingError } from '@zhixing-ai/providers/configuration';
 import { SUPPORTED_PROVIDERS } from '../registries/index.js';
-import type { TerminalAction, TerminalChoice, TerminalView } from '@zhixing/terminal-ui/protocol';
+import type { TerminalAction, TerminalChoice, TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 import type { ConfigurationEditResult, NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
 import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, SectionId, WorkingState } from '../config-editor/types.js';
 import { createInitialState, setInputBuffer, isMcpServerEnabled, readMcpServer } from '../config-editor/state.js';

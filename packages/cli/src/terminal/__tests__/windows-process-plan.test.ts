@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { windowsProcessPlan } from '../windows-process-plan.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 describe.runIf(process.platform === 'win32')('Windows owned process plans', () => {
   it('按子环境查找裸命令，准确传递脚本参数且不解释元字符', async () => {

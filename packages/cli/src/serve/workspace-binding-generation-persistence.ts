@@ -1,13 +1,13 @@
-import type { FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { workspaceCatalogGenerationStorageKey } from "@zhixing/core/environment";
+import type { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { workspaceCatalogGenerationStorageKey } from "@zhixing-ai/core/environment";
 import type {
   WorkspaceBindingGenerationPersistenceObservation,
   WorkspaceBindingGenerationPersistencePort,
-} from "@zhixing/core/environment/workspace-binding-generation-persistence";
+} from "@zhixing-ai/core/environment/workspace-binding-generation-persistence";
 import {
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 import { open, stat } from "node:fs/promises";
 import path from "node:path";
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SESSION_NOTIFICATIONS } from '@zhixing/rpc/session-wire';
-import { AdvancementReviewResultProjectionApplicationService } from '@zhixing/core/advancement/application';
-import { buildClosureFacts, type AdvancementSession, type AdvancementRunReview } from '@zhixing/core/advancement';
+import { SESSION_NOTIFICATIONS } from '@zhixing-ai/rpc/session-wire';
+import { AdvancementReviewResultProjectionApplicationService } from '@zhixing-ai/core/advancement/application';
+import { buildClosureFacts, type AdvancementSession, type AdvancementRunReview } from '@zhixing-ai/core/advancement';
 import { RpcSchedulerFacade } from '../../runtime/rpc-scheduler-facade.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
 import { TerminalTaskNotices, type TerminalTaskNotice, type TerminalTaskNoticeDelivery, type TerminalTaskNoticesOptions } from '../task-notices.js';

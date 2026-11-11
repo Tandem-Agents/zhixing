@@ -1,11 +1,11 @@
-import { canonicalize } from "@zhixing/core/protocol";
-import { SessionPresentationState } from '@zhixing/rpc/connection';
-import type { SessionPresentationProfile } from '@zhixing/rpc/session-wire';
-import { MeshProtocolError, type MeshServiceClient } from "@zhixing/mesh";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { SessionPresentationState } from '@zhixing-ai/rpc/connection';
+import type { SessionPresentationProfile } from '@zhixing-ai/rpc/session-wire';
+import { MeshProtocolError, type MeshServiceClient } from "@zhixing-ai/mesh";
 import type {
   MeshServiceHandler,
   MeshServiceRegistry,
-} from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh/service-registry";
 import {
   captureCurrentAnchorRelayMethods,
   RPC_ERROR_CODES,
@@ -15,7 +15,7 @@ import {
   type CanonicalFirstPartyConversationSurface,
   type FirstPartyConversationRpcRouter,
   type RpcConnection,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 
 export const FIRST_PARTY_CONVERSATION_MESH_SERVICE = "conversation.first-party";

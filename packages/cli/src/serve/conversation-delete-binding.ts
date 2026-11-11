@@ -1,12 +1,12 @@
-import { generateTurnId } from "@zhixing/core";
+import { generateTurnId } from "@zhixing-ai/core";
 import {
   projectConversationDelete,
   type ConversationDeleteCommitPort,
   type ConversationDeletedFact,
   type ConversationDeleteProjectionPort,
   type ConversationCommandCaller,
-} from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/conversation/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 interface AnchorConversationDeleteStorage {
   exists(conversationId: string): Promise<boolean>;

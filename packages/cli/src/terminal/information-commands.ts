@@ -1,10 +1,10 @@
-import type { LogRpcClient } from '@zhixing/rpc';
+import type { LogRpcClient } from '@zhixing-ai/rpc';
 import type { ConversationController } from '../runtime/conversation-controller.js';
 import type { RuntimePrimaryModelDisplayProjection } from '../runtime/runtime-configuration-provider.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { configureLogs } from '../logging/configuration.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';
-import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import type { TerminalSummary } from '@zhixing-ai/terminal-ui/protocol';
 import { INFORMATION_TEXT_BYTES, informationText, informationLines, informationModelLines,
   informationUsageSummary, informationContextSummary, informationCompactLines } from './information-presentation.js';
 

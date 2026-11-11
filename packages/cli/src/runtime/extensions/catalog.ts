@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateExtensionManifest, type ExtensionManifest } from "@zhixing/core/extensions/contracts";
+import { validateExtensionManifest, type ExtensionManifest } from "@zhixing-ai/core/extensions/contracts";
 
 export interface PackagedExtension { readonly manifest: ExtensionManifest; readonly directory: string }
 

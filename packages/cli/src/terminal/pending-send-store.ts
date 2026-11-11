@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing/core/resources';
-import type { RpcEncodedJsonSource } from '@zhixing/server/client';
+import type { DeviceCapacityArbiterPort, DeviceCapacityBudget } from '@zhixing-ai/core/resources';
+import type { RpcEncodedJsonSource } from '@zhixing-ai/server/client';
 import type { TerminalAssetAccount } from './asset-client.js';
 import type { TerminalManagedFiles } from './managed-files.js';
 import { terminalPhysicalStep } from './physical-step.js';

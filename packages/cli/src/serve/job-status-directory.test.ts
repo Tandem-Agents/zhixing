@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   JobStatusNotice,
   SchedulerUserNotice,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   JobStatusDirectory,
   type JobStatusSource,

@@ -1,21 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
+import type { ExecutionStatusNotice } from "@zhixing-ai/core/contracts";
 import {
   createDeliveryResolutionProductApiContribution,
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
   type DeliveryUncertainResolutionApplication,
-} from "@zhixing/core/delivery/application";
+} from "@zhixing-ai/core/delivery/application";
 import {
   createDeviceAdministrationProductApiContribution,
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DeviceAdministrationApplicationService,
   type DeviceAdministrationApplicationOptions,
-} from "@zhixing/core/device-administration/application";
+} from "@zhixing-ai/core/device-administration/application";
 import {
   createScheduleRuntimeProductApiContribution,
   SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
-} from "@zhixing/core/scheduler/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/scheduler/application";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import type { ServerInfoRuntimeBinding } from "../../../context.js";
 import {
   buildServerShutdownMethod,

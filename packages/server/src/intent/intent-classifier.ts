@@ -14,7 +14,7 @@
 
 import type {
   InboundMessage,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 import { DEFAULT_CANCEL_KEYWORDS } from "./cancel-keywords.js";
 import type { Intent, IntentClassifier } from "./types.js";
 

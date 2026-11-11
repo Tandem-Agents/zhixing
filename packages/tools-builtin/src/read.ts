@@ -11,7 +11,7 @@
  */
 
 import * as fs from "node:fs/promises";
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import type { ToolDefinition, ToolResult } from "@zhixing-ai/core";
 import { addLineNumbers, isBinaryContent, resolveToolPath } from "./utils.js";
 
 const MAX_RESULT_CHARS = 50_000;

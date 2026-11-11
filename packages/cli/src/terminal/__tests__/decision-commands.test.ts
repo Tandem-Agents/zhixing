@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionAdvancementDetailResult } from '@zhixing/rpc';
-import type { TrustAdministrationRule } from '@zhixing/core/trust-administration';
+import type { SessionAdvancementDetailResult } from '@zhixing-ai/rpc';
+import type { TrustAdministrationRule } from '@zhixing-ai/core/trust-administration';
 import { TerminalDecisionCommands, type TerminalDecisionController, type TerminalDecisionOptions, type TerminalDecisionScope } from '../decision-commands.js';
 import type { TerminalSelectionPort } from '../selection.js';
 

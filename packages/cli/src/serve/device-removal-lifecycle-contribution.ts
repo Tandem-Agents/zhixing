@@ -1,7 +1,7 @@
 import type {
   DeviceLifecycleEvidenceRef,
   ExecutorRemovalLifecycleIdentity,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 export interface DeviceRemovalAcceptedWorkItem {
   readonly owner:

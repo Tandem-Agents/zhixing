@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from "vitest";
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
-import type { HomeTrustEvent, HomeTrustEventBody } from "@zhixing/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import type { HomeTrustEvent, HomeTrustEventBody } from "@zhixing-ai/core/contracts";
 import { FileAuthorityCommitLog } from "../../../core/src/authority/commit-log.js";
 import { FileArtifactStore } from "../../../core/src/authority/artifact-store.js";
 import { AuthorityCacheIntegrity } from "../../../core/src/authority/startup-proofs.js";

@@ -8,7 +8,7 @@ import { TerminalCandidateSession } from '../../../../terminal-ui/src/candidate-
 import { chooseTerminalSelection } from '../selection.js';
 import { createStopSelectionRequest } from '../../runtime/stop-selection.js';
 import type { ServerInfoResult } from '../../runtime/rpc-management-facade.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 function owner(root = process.cwd()) {
   return new TerminalCandidatesOwner(() => ({ cwd: root, target: 'cli', features: { chrome: true }, now: 0, workspaceId: null, sessionBusy: false }));

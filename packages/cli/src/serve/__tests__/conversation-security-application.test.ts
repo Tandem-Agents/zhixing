@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { workspaceTrustIdentity } from "@zhixing/core/trust-administration";
+import { workspaceTrustIdentity } from "@zhixing-ai/core/trust-administration";
 import { createAnchorConversationSecurityProjectionPort } from "../conversation-security-application.js";
 
 const baseSnapshot = {

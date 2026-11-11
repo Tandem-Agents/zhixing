@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ConversationStatusNotice } from '@zhixing/core/contracts';
+import type { ConversationStatusNotice } from '@zhixing-ai/core/contracts';
 import { RunLifecycleTracker } from '../run-lifecycle.js';
 
 const DIGEST = `sha256:${'1'.repeat(64)}`;

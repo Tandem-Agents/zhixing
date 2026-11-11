@@ -1,6 +1,6 @@
 import { open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
-import type { FileArtifactStore } from "@zhixing/core/authority";
+import type { FileArtifactStore } from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AssignmentGlobalQueryPort,
@@ -8,7 +8,7 @@ import type {
   ExecutionAssetSnapshot,
   GlobalReadResult,
   GlobalStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   byteDigest,
   createSignedExecutionAssetSnapshot,
@@ -18,12 +18,12 @@ import {
   validateGlobalQueryResult,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   acquireFileLock,
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 
 const EMPTY_CACHE_REVISION = 1;
 

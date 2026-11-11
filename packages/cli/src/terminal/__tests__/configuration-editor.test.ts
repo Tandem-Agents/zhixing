@@ -2,14 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { TerminalConfigurationEditor } from '../configuration-editor.js';
-import type { TerminalView } from '@zhixing/terminal-ui/protocol';
+import type { TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 import type { ConfigEditorRuntime } from '../../config-editor/types.js';
 import type { ConfigurationEditResult } from '../../runtime/configuration-edit.js';
-import { CONFIGURATION_LOG_SOURCE, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { CONFIGURATION_LOG_SOURCE, ConfigurationEditPendingError } from '@zhixing-ai/providers/configuration';
 import { recordingFixture } from '../../../../core/src/logging/__tests__/recording.js';
 import { RUNTIME_LOG_SOURCE } from '../../logging/runtime.js';
-import type { McpSetupCandidate } from '@zhixing/core/mcp-management';
-import type { ZhixingConfig, ZhixingCredentials } from '@zhixing/providers';
+import type { McpSetupCandidate } from '@zhixing-ai/core/mcp-management';
+import type { ZhixingConfig, ZhixingCredentials } from '@zhixing-ai/providers';
 
 function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456', purpose: 'setup' | 'edit' = 'edit',
   session?: { config: ZhixingConfig; credentials: ZhixingCredentials }) {
@@ -74,7 +74,7 @@ describe('single-root Node configuration transaction', () => {
       .replace("await import('../runtime/configuration-application.js')", 'configurationApplication');
     const logs = recordingFixture();
     const configurationApplication = {
-      editRuntimeConfiguration: async (input: { configurationRecords: import('@zhixing/core/logging').LogRecordPort }) => {
+      editRuntimeConfiguration: async (input: { configurationRecords: import('@zhixing-ai/core/logging').LogRecordPort }) => {
         input.configurationRecords.record({ event: 'saved', data: { scope: 'global', selectionVersion: 'v1', selectionDigest: 'synthetic-digest' } });
         return { kind: 'local-applied' };
       },

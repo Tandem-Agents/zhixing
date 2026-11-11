@@ -1,7 +1,7 @@
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { expect, it, vi } from 'vitest';
-import { createRpcClient } from '@zhixing/server/client';
+import { createRpcClient } from '@zhixing-ai/server/client';
 import { RpcConversationFacade } from '../../../../cli/src/runtime/rpc-conversation-facade.js';
 import type { CoreHostRpcLink } from '../../../../cli/src/runtime/core-host-connection.js';
 

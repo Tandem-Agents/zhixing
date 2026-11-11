@@ -1,8 +1,8 @@
 import type {
   DeferredGlobalIntentPort,
   ScheduleWriteMutation,
-} from "@zhixing/core/contracts";
-import { validateDeferredIntentMutation } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { validateDeferredIntentMutation } from "@zhixing-ai/core/protocol";
 
 export const DEFERRED_SCHEDULE_MESSAGE =
   "已记录但尚未生效，连接值班设备后需确认";

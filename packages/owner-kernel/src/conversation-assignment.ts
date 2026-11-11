@@ -1,6 +1,6 @@
 import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts, type ConversationBaseLocation } from './conversation-base-source.js';
-import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
-import { projectionCheckpointKey, type DurableLogCheckpoint } from "@zhixing/core/authority";
+import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing-ai/core/protocol";
+import { projectionCheckpointKey, type DurableLogCheckpoint } from "@zhixing-ai/core/authority";
 import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from "./conversation-publish-obligations.js";
 import { conversationRecoveryPage, prepareConversationEffects, conversationRecoveryVersion, CONVERSATION_RECOVERY_PROJECTION_ID, type ConversationEffectSelection } from "./conversation-recovery-index.js";
 export { conversationRecoveryPage, conversationRecoveryPending } from "./conversation-recovery-index.js";
@@ -9,12 +9,12 @@ import { readIndexedConversationAuthority, readIndexedPendingDispatch, readIndex
 import { prepareConversationRunView, conversationDecisionScope, readConversationExactValue, type ConversationDecisionScope } from './conversation-run-state-view.js';
 import { registerAdvancementRecoveryProjection, readAdvancementRecovery, advancementPendingPrefix, advancementRecoveryPrefix, advancementRecoveryRoot, advancementRecoveryHead, advancementPendingRun, advancementPendingProposals, type AdvancementCleanupWork } from './advancement-recovery-index.js';
 import { CONVERSATION_RUN_STATE_PROJECTION_ID } from './conversation-run-state-index.js';
-import type { JsonValue } from '@zhixing/core/contracts';
+import type { JsonValue } from '@zhixing-ai/core/contracts';
 import { readConversationStateField } from './conversation-run-state-index.js';
 import { conversationStateFieldPrefix, decodeConversationState } from './conversation-run-state-index.js';
 import { readConversationRunRoot } from './conversation-run-state-extras.js';
 import { conversationBaseKey, conversationViewAt, type ConversationBaseBinding } from './conversation-base-registry.js';
-import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing/core/advancement";
+import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing-ai/core/advancement";
 
 function isAdvancementCleanupEvent(event: AdvancementControlEvent): boolean {
   return event.type === 'review_root_settled' || event.type === 'review_attempt_transitioned' && ['consumed', 'expired', 'deferred'].includes(event.attempt.phase);
@@ -33,13 +33,13 @@ export async function pendingAdvancementConversations(log: AuthorityCommitLog, a
   });
 }
 import { Buffer } from "node:buffer";
-import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
-import { userMessageFromTurnInput, userTurnInputFromMessages, type Message } from "@zhixing/core";
-import type { RunInputPort } from "@zhixing/core/loop";
-import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
-import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
-import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
-import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage, ConversationRunOutcomesPage } from '@zhixing/core/contracts';
+import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing-ai/core/resources";
+import { userMessageFromTurnInput, userTurnInputFromMessages, type Message } from "@zhixing-ai/core";
+import type { RunInputPort } from "@zhixing-ai/core/loop";
+import type { ConversationMessageStatus } from "@zhixing-ai/core/conversation/application";
+import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing-ai/core/workscene/application";
+import { defineDurableRuntimeContract } from "@zhixing-ai/core/contracts";
+import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage, ConversationRunOutcomesPage } from '@zhixing-ai/core/contracts';
 import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
 import { ConversationReadIndex, openRunState, sourceOrder, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
@@ -61,7 +61,7 @@ import {
   type AdvancementControlEvent,
   type AdvancementFoldMap,
   type AdvancementSession,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import {
   AuthorityStorageError,
   TransactionArtifactReferenceError,
@@ -77,7 +77,7 @@ import {
   type ProjectionTransactionDecision,
   AuthorityPreparationRequired,
   awaitAuthorityPreparation,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AssignmentEntry,
@@ -130,7 +130,7 @@ import type {
   TrustRuleHitMirrorEntry,
   UserTurnInput,
   UncertainResolutionFact,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   AssignmentSerialQueue,
   type TrustRuleHitBatchInput,
@@ -202,13 +202,13 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
-} from "@zhixing/core/protocol";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
-import { compileDeliveryContent, DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryContentValidationError, registerDeliveryAuthorityProjection, type CompiledDeliveryContent } from "@zhixing/core/delivery";
-import { parseConversationId } from "@zhixing/core/conversation";
-import { isWorksceneDeletedAt, registerWorksceneAuthorityProjection, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing/core/workscene";
+} from "@zhixing-ai/core/protocol";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
+import { compileDeliveryContent, DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryContentValidationError, registerDeliveryAuthorityProjection, type CompiledDeliveryContent } from "@zhixing-ai/core/delivery";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
+import { isWorksceneDeletedAt, registerWorksceneAuthorityProjection, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing-ai/core/workscene";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
-import { projectPublishConflicts, projectPublishResults, decideConversationControlResponse } from "@zhixing/core/conversation/application";
+import { projectPublishConflicts, projectPublishResults, decideConversationControlResponse } from "@zhixing-ai/core/conversation/application";
 import {
   DEFERRED_INTENT_PROJECTION_ID,
   type DeferredIntentConversationAuthorityState,
@@ -292,7 +292,7 @@ import type {
   ConversationStatusDeliveryInput,
 } from "./delivery-participant.js";
 import type { AssignmentResourceCoordinator, CoordinationOptions } from "./resource-governor.js";
-import type { RootResourceWorkload } from "@zhixing/core/contracts";
+import type { RootResourceWorkload } from "@zhixing-ai/core/contracts";
 import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
 import {
   advanceChannelInteractionJournal,
@@ -478,15 +478,15 @@ export interface ConversationTrustSedimentPort {
     readonly conversationId: string;
     readonly assignmentId: string;
     readonly executorId: string;
-    readonly environment: import("@zhixing/core/contracts").EnvironmentRequirement;
-    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+    readonly environment: import("@zhixing-ai/core/contracts").EnvironmentRequirement;
+    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
     /** 用户贡献引用的确认请求是否是本对话已答复的交互（同批或更早的镜像）。 */
     readonly answered: (requestId: string) => Promise<boolean>;
   }): Promise<void>;
   accept(input: {
     readonly conversationId: string;
     readonly assignmentId: string;
-    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
   }): Promise<void>;
 }
 
@@ -524,7 +524,7 @@ export interface ConversationCommitAuthority {
     | { readonly committed: true; readonly commitRevision: number }
     | {
         readonly committed: false;
-        readonly error: import("@zhixing/core/contracts").AuthorityError;
+        readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
       };
 }
 
@@ -534,8 +534,8 @@ export interface ConversationCommitProjectionInput {
   readonly commitRevision: number;
   readonly digest: string;
   readonly runRecord: TranscriptRunRecord;
-  readonly windowCompact?: import("@zhixing/core/contracts").WindowCompactInstruction;
-  readonly contentAssets: readonly import("@zhixing/core/contracts").ContentAssetRef[];
+  readonly windowCompact?: import("@zhixing-ai/core/contracts").WindowCompactInstruction;
+  readonly contentAssets: readonly import("@zhixing-ai/core/contracts").ContentAssetRef[];
   readonly sessionMutations: ReadonlyArray<{
     readonly seq: number;
     readonly mutation: SessionStagedMutation;
@@ -565,11 +565,11 @@ export type ConversationGlobalMutationDecision = ReadonlyArray<{
     | {
         readonly t: "granted";
         readonly targetRevision: number;
-        readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
+        readonly appliedResult?: import("@zhixing-ai/core/contracts").WorksceneAppliedResult;
       }
     | {
         readonly t: "conflicted";
-        readonly error: import("@zhixing/core/contracts").AuthorityError;
+        readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
       };
 }>;
 
@@ -616,7 +616,7 @@ export interface ConversationMutationPublisher {
     readonly mutation: SessionStagedMutation | GlobalStagedMutation;
     readonly requestId: string;
     readonly targetRevision: number;
-    readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
+    readonly appliedResult?: import("@zhixing-ai/core/contracts").WorksceneAppliedResult;
   }): Promise<void>;
 }
 
@@ -629,7 +629,7 @@ export interface CommittedConversationResult {
 export interface PendingConversationDispatch {
   readonly assignmentId: string;
   readonly envelope: Extract<
-    import("@zhixing/core/contracts").DispatchEnvelope,
+    import("@zhixing-ai/core/contracts").DispatchEnvelope,
     { execution: "conversation" }
   >;
   readonly activation: AssignmentActivationProof<"conversation">;
@@ -668,7 +668,7 @@ export interface ConversationDispatchPort {
     assignmentId: string,
     ctx: AuthorityCallContext,
     range?: { fromSeq: number; limit: number },
-  ): Promise<import("@zhixing/core/contracts").LedgerSnapshot | import("@zhixing/core/contracts").LedgerEvidencePage>;
+  ): Promise<import("@zhixing-ai/core/contracts").LedgerSnapshot | import("@zhixing-ai/core/contracts").LedgerEvidencePage>;
   cancel(
     assignmentId: string,
     fence: { fenceSeq: number; requestId: string },
@@ -856,7 +856,7 @@ export interface RunProjection {
   readonly bundleAcknowledgementOutbox: Set<string>;
   readonly commits: Array<Extract<ConversationRunJournalRecord, { t: "committed" }>>;
   readonly assignmentByCommitRevision: Map<number, string>;
-  readonly contentByRevision: Map<number, readonly import("@zhixing/core/contracts").ContentAssetRef[]>;
+  readonly contentByRevision: Map<number, readonly import("@zhixing-ai/core/contracts").ContentAssetRef[]>;
   readonly projectedByAssignment: Map<string, ConversationProjectionRecord>;
   readonly pendingCommitProjections: Map<
     string,
@@ -1278,7 +1278,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly challengeId: string;
     readonly receipt: {
       readonly acceptedAt: string;
-      readonly platformMessage?: import("@zhixing/core/contracts").ChannelMessageRef;
+      readonly platformMessage?: import("@zhixing-ai/core/contracts").ChannelMessageRef;
     };
   }): Promise<void> {
     const record = await verifyProtocolStep(() => validateConversationChannelChallengeRecord(
@@ -1487,7 +1487,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   async authorizeConversationChannelCallback(input: {
     readonly token: ConversationChannelChallengeToken;
-    readonly responder: import("@zhixing/core/contracts").ChannelResponderRef;
+    readonly responder: import("@zhixing-ai/core/contracts").ChannelResponderRef;
     readonly at?: string;
   }): Promise<{
     readonly assignmentId: string;
@@ -1707,7 +1707,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           run = await this.#reduceRunProjection(run, record, envelope, checks);
           submission = await this.#reduceSubmissionGuard(submission,
             record as LogicalRecord<ConversationCommitLogRecord>,
-            envelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>, checks);
+            envelope as import("@zhixing-ai/core/contracts").CommitEnvelope<ConversationCommitLogRecord>, checks);
         }
         next = records.next();
         processed++;
@@ -1791,7 +1791,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly candidateReferences?: readonly ArtifactRef[];
     readonly decide: (
       state: DeferredIntentConversationAuthorityState,
-      projection: import("@zhixing/core/authority").DurableProjectionReadContext,
+      projection: import("@zhixing-ai/core/authority").DurableProjectionReadContext,
       transaction: ProjectionTransactionContext,
     ) =>
       | ProjectionTransactionDecision<IntentStreamRecord, Value>
@@ -2210,7 +2210,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         this.#reduceRunProjection(
           state,
           record as LogicalRecord<ConversationCommitLogRecord>,
-          commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+          commit as import("@zhixing-ai/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
       candidateReferences: prepared.references,
       companionStreams: this.#delivery ? ["delivery"] : [],
@@ -3084,7 +3084,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async assignmentSecurityFacts(assignmentId: string): Promise<
     | {
         readonly runId: string;
-        readonly environment: import("@zhixing/core/contracts").EnvironmentRequirement;
+        readonly environment: import("@zhixing-ai/core/contracts").EnvironmentRequirement;
         readonly permissionSnapshotDigest: string;
       }
     | undefined
@@ -3518,7 +3518,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         this.#reduceRunProjection(
           state,
           record as LogicalRecord<ConversationCommitLogRecord>,
-          commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+          commit as import("@zhixing-ai/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
         ),
       companionStreams: this.#delivery ? ["delivery", "governor"] : ["governor"],
       prepareCompanions: async (state, context, plan) => {
@@ -5140,7 +5140,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     | { readonly committed: true; readonly commitRevision: number }
     | {
         readonly committed: false;
-        readonly error: import("@zhixing/core/contracts").AuthorityError;
+        readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
       }
   > {
     if (ctx.principal.kind !== "assignment") {
@@ -5421,7 +5421,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         | { readonly committed: true; readonly commitRevision: number }
         | {
             readonly committed: false;
-            readonly error: import("@zhixing/core/contracts").AuthorityError;
+            readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
           }
       >(
         async (state, authorityPrefix) => {
@@ -6172,7 +6172,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   /** Continuation facts are derived from admission, commit, lifecycle and control authority. */
-  async worksceneContinuationSources(query?: import("@zhixing/core/workscene/application").WorksceneContinuationQuery): Promise<readonly WorksceneContinuationSource[]> {
+  async worksceneContinuationSources(query?: import("@zhixing-ai/core/workscene/application").WorksceneContinuationQuery): Promise<readonly WorksceneContinuationSource[]> {
     // Unfinished obligations are discovered from bounded keyed markers: a queued
     // child stays visible without scanning admitted history, and a cancelled
     // child leaves the candidate set at its own cancelling fact.
@@ -6311,7 +6311,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     });
   }
 
-  #readAdvancementRecovery<T>(read: (view: import('@zhixing/core/authority').DurableProjectionReadContext) => Promise<T>): Promise<T> {
+  #readAdvancementRecovery<T>(read: (view: import('@zhixing-ai/core/authority').DurableProjectionReadContext) => Promise<T>): Promise<T> {
     registerAdvancementRecoveryProjection(this.#log, this.#artifacts);
     return readAdvancementRecovery(this.#log, read);
   }
@@ -6751,7 +6751,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   /** A query owns one synchronized source prefix; it never publishes a partial
    * execution working set or retains mutable rows after releasing that prefix. */
-  async #readCurrentIndexed<Value>(select: (view: import('@zhixing/core/authority').DurableProjectionReadContext) => Promise<Value>): Promise<Value> {
+  async #readCurrentIndexed<Value>(select: (view: import('@zhixing-ai/core/authority').DurableProjectionReadContext) => Promise<Value>): Promise<Value> {
     return this.#repeatWorkingSet(() => this.#operations.run(async () => {
       const result = await this.#log.transactDurableProjection<never, Value>(CONVERSATION_RUN_STATE_PROJECTION_ID,
         async current => ({ kind: 'return', value: await select(await conversationViewAt(this.#log, current, this.#conversationId)) }));
@@ -6929,7 +6929,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
   }
 
-  readonly #reduceSessionRead = async (state: RunProjection, record: LogicalRecord<unknown>, rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>, throughRevision = Infinity): Promise<RunProjection> => {
+  readonly #reduceSessionRead = async (state: RunProjection, record: LogicalRecord<unknown>, rawEnvelope: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>, throughRevision = Infinity): Promise<RunProjection> => {
     return this.#reduceSessionFacts(state, record, rawEnvelope, rawEnvelope.lsn, throughRevision);
   };
 
@@ -7004,7 +7004,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   readonly #reduceSubmissionGuard = async (state: SubmissionGuardProjection,
     record: LogicalRecord<ConversationCommitLogRecord>,
-    envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+    envelope: import("@zhixing-ai/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
     checks?: Array<() => void>): Promise<SubmissionGuardProjection> =>
     reduceConversationSubmissionGuard({ conversationId: this.#conversationId, verifier: this.#verifier,
       legacyAbortTickets: this.#legacyAbortTickets,
@@ -8241,7 +8241,7 @@ function decideConversationCancel(
 }
 
 function rejectedControl(
-  code: import("@zhixing/core/contracts").AuthorityError["code"],
+  code: import("@zhixing-ai/core/contracts").AuthorityError["code"],
   message: string,
 ): Extract<ControlResult, { status: "rejected" }> {
   return {
@@ -9082,7 +9082,7 @@ async function validateConversationBundleClosure(
       const bytes = await artifacts.get(bundle.body.runRecord.ref);
       const text = Buffer.from(bytes).toString("utf8");
       runRecord = validateTranscriptRunRecord(
-        JSON.parse(text) as import("@zhixing/core/contracts").TranscriptRunRecord,
+        JSON.parse(text) as import("@zhixing-ai/core/contracts").TranscriptRunRecord,
         bundle.body.runId,
       );
       if (canonicalize(runRecord) !== text) {
@@ -9170,7 +9170,7 @@ interface CompiledConversationDeliveryContents {
   readonly final?: CompiledDeliveryContent;
   readonly stagedContents: ReadonlyMap<
     number,
-    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+    import("@zhixing-ai/core/contracts").DeliveryIntentDto["content"]
   >;
   readonly stagedContentErrors: ReadonlyMap<number, AuthorityError>;
   readonly references: readonly ArtifactRef[];
@@ -9188,7 +9188,7 @@ async function compileConversationDeliveryContents(
       : undefined;
   const stagedContents = new Map<
     number,
-    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+    import("@zhixing-ai/core/contracts").DeliveryIntentDto["content"]
   >();
   const stagedContentErrors = new Map<number, AuthorityError>();
   const references: ArtifactRef[] = [...(final?.references ?? [])];
@@ -9639,7 +9639,7 @@ export function assertAssignedMatchesDispatch(
 }
 
 function assertCapabilityMatchesAssignedEnvelope(
-  capability: import("@zhixing/core/contracts").AuthorityCapability,
+  capability: import("@zhixing-ai/core/contracts").AuthorityCapability,
   envelope: Pick<PendingConversationDispatch["envelope"], "capabilities">,
 ): void {
   const assigned = envelope.capabilities.find(
@@ -9794,12 +9794,12 @@ function indexGlobalPublishBatchOutcomes(
 }
 
 function rejected(
-  code: import("@zhixing/core/contracts").AuthorityError["code"],
+  code: import("@zhixing-ai/core/contracts").AuthorityError["code"],
   message: string,
   retryable: boolean,
 ): {
   readonly committed: false;
-  readonly error: import("@zhixing/core/contracts").AuthorityError;
+  readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
 } {
   return { committed: false, error: { code, message, retryable } };
 }
@@ -11583,7 +11583,7 @@ export async function reduceConversationRunState(context: ConversationRunReducti
     if (record.stream !== runStream(context.conversationId)) {
       return state;
     }
-    const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
+    const envelope = rawEnvelope as import("@zhixing-ai/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
     const body = snapshot(
       record.body as ConversationRunJournalRecord | ConversationRunInternalRecord,
       "Run journal record",

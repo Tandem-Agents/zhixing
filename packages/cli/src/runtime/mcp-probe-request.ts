@@ -2,8 +2,8 @@
  * MCP 探测 runner 的一次请求：校验请求、经注入的创建工厂建外部命令、调用原 probeServer，
  * 并在回复之前确认本次建的外部命令都已由 owner 收束。入口只做帧收发，这里可单独测试。
  */
-import { probeServer, type McpServerSpec, type McpStdioProcessFactory } from "@zhixing/mcp";
-import type { NetworkPolicy } from "@zhixing/network";
+import { probeServer, type McpServerSpec, type McpStdioProcessFactory } from "@zhixing-ai/mcp";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 
 export interface McpProbeRunnerRequest {
   readonly v: 1;

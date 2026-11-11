@@ -2,8 +2,8 @@ import {
   ImmediateRootReplayTerminalError,
   type ImmediateRootResourceLease,
   type ResourceReservationPort,
-} from "@zhixing/core/contracts";
-import { WorkspaceControlAttemptSpentError } from "@zhixing/core/environment/workspace-administration";
+} from "@zhixing-ai/core/contracts";
+import { WorkspaceControlAttemptSpentError } from "@zhixing-ai/core/environment/workspace-administration";
 import { describe, expect, it, vi } from "vitest";
 import { ExecutorWorkspaceAdministrationControl, LocalWorkspaceResidualRootPendingError } from "./local-workspace-control.js";
 

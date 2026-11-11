@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import * as acorn from "acorn";
 import { ExtensionCandidates } from "./candidate.js";
 import type { ExtensionCandidate } from "./contracts.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 
 vi.mock("acorn", async (original) => {
   const actual = await original<typeof import("acorn")>();

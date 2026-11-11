@@ -1,20 +1,20 @@
 import path from "node:path";
-import { FileArtifactStore } from "@zhixing/core/authority";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
 import type {
   ExecutionRef,
   StreamConsumerAuth,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
   StreamConsumerDegradedError,
   StreamHistoryUnavailableError,
-} from "@zhixing/executor/assignment-stream-spool";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/executor/assignment-stream-spool";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   ASSIGNMENT_STREAM_SERVICE,

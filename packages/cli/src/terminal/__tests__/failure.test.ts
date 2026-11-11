@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { recordTerminalFailure, terminalStorageFullMessage } from '../failure.js';
-import type { LogDraft, LogRecordPort } from '@zhixing/core/logging';
+import type { LogDraft, LogRecordPort } from '@zhixing-ai/core/logging';
 
 describe('terminal first-cause logging', () => {
   it.each(['timeout', 'size', 'busy', 'incomplete', 'unavailable', 'encoding', 'read-failed', 'aborted', 'output-capacity'])

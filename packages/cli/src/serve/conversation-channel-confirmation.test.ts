@@ -4,7 +4,7 @@ import type {
   StreamAck,
   StreamFrame,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedDataPlaneTicket,
   byteDigest,
@@ -12,7 +12,7 @@ import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { AssignmentStreamPathConnection } from "./assignment-stream-path-manager.js";
 import {

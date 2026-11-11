@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { LogWriterObservation } from "@zhixing/core/logging/storage";
-import { logFailureEvidence } from "@zhixing/core/logging";
-import type { NodeProcessInventory } from "@zhixing/mesh/filesystem";
+import type { LogWriterObservation } from "@zhixing-ai/core/logging/storage";
+import { logFailureEvidence } from "@zhixing-ai/core/logging";
+import type { NodeProcessInventory } from "@zhixing-ai/mesh/filesystem";
 import { isProductLogWriter } from "./writer-classification.js";
 import { LOG_WRITE_PROTOCOL, writerEndpoint, writerRootKey } from "./writer-admission.js";
 

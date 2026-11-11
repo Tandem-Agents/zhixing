@@ -5,23 +5,23 @@ import {
   type LLMProvider,
   type UserTurnInput,
   userMessage,
-} from "@zhixing/core/types";
-import { MockLLMProvider } from "@zhixing/core/loop";
+} from "@zhixing-ai/core/types";
+import { MockLLMProvider } from "@zhixing-ai/core/loop";
 import {
   isAdvancementControlEvent,
   runReviewedEvents,
   type AdvancementRunReview,
   type AdvancementWindowState,
-} from "@zhixing/core/advancement";
-import { type RunRecordInput } from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/advancement";
+import { type RunRecordInput } from "@zhixing-ai/core/transcript";
 import type {
   ConfirmedRubricSnapshot,
   ReviewEvidence,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import type {
   AuthorityCallContext,
   ResourceLease,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
   createAdvancementRuntime as createProductionAdvancementRuntime,

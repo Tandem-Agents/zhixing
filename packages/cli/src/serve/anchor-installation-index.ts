@@ -1,7 +1,7 @@
-import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing/core/authority";
-import { DurableProjectionRecordBindingError } from "@zhixing/core/authority";
-import type { JsonValue } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import type { AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import { DurableProjectionRecordBindingError } from "@zhixing-ai/core/authority";
+import type { JsonValue } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 
 /**
  * 当前安装指针：transfer:anchor-current 的真正末条、按 transferId 的安装记录，以及两类安装收尾的完成凭据

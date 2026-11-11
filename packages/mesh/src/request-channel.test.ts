@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { DeviceIdentity } from "@zhixing/core/contracts";
-import { currentLogAttributionRefs, runWithLogAttribution } from "@zhixing/core/logging";
+import type { DeviceIdentity } from "@zhixing-ai/core/contracts";
+import { currentLogAttributionRefs, runWithLogAttribution } from "@zhixing-ai/core/logging";
 import { MeshProtocolError } from "./errors.js";
 import { MeshRequestChannel } from "./request-channel.js";
 import { MAX_RUNTIME_TIMER_DELAY_MS } from "./runtime-time.js";

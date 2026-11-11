@@ -6,7 +6,7 @@ import {
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import {
   assertCheckpointEnvelopeShape,

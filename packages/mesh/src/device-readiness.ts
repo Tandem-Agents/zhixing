@@ -1,4 +1,4 @@
-import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
+import type { DeviceRole, SecretStorePort } from "@zhixing-ai/core/contracts";
 import type { TrustProjection } from "./trust-chain.js";
 
 export type DeviceReadinessState =

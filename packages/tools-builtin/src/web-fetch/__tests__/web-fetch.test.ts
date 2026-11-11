@@ -1,13 +1,13 @@
-import type { LLMRoles, StreamEvent, ToolExecutionContext } from "@zhixing/core";
-import type { FetchResult } from "@zhixing/network";
+import type { LLMRoles, StreamEvent, ToolExecutionContext } from "@zhixing-ai/core";
+import type { FetchResult } from "@zhixing-ai/network";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { safeFetchMock } = vi.hoisted(() => ({
   safeFetchMock: vi.fn(),
 }));
 
-vi.mock("@zhixing/network", async (importActual) => {
-  const actual = await importActual<typeof import("@zhixing/network")>();
+vi.mock("@zhixing-ai/network", async (importActual) => {
+  const actual = await importActual<typeof import("@zhixing-ai/network")>();
   return {
     ...actual,
     safeFetch: safeFetchMock,

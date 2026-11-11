@@ -5,29 +5,29 @@ import type {
   DeliveryTarget,
   InboundMessage,
   OutboundContent,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 import type {
   EmissionSource,
-} from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/delivery";
 import {
   type TurnContext,
   extractText,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   isFreeTextDeny,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import type {
   AgentResult,
-} from "@zhixing/core/loop";
-import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/loop";
+import type { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import type {
   ConversationAbortedResult,
   ConversationPreparedAgentTurnIdentity,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "@zhixing/rpc/session-broadcast";
+} from "@zhixing-ai/rpc/session-broadcast";
 import {
   APPROVE_KEYWORDS,
   DENY_KEYWORDS,

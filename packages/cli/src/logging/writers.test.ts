@@ -3,7 +3,7 @@ import { classifyWindowsWriters, createLogWriterProbe } from "./writers.js";
 import { isProductLogWriter } from "./writer-classification.js";
 import { declareLogWriter, writerEndpoint, writerRootKey } from "./writer-admission.js";
 import { LogFilesProcess } from "./files-process.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { managedHomeArgument, normalizeCliArgs } from "./entry-mode.js";
 import { spawn } from "node:child_process";
 
@@ -91,6 +91,11 @@ describe("log writer OS observation", () => {
     { args: [entry, "serve", "--managed-home", "c:\\HOME", "--managed-home=C:\\elsewhere"], writer: false },
     { args: ["--eval", entry], writer: false },
     { args: ["unrelated.js", entry], writer: false },
+    // 全局安装的入口按安装包目录识别；只是路径里含 zhixing 的其他位置不算产品写者。
+    { args: ["C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\zhixing\\dist\\index.js"], writer: true },
+    { args: ["C:\\Users\\u\\zhixing\\dist\\index.js"], writer: false },
+    { args: ["C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\zhixing-other\\dist\\index.js"], writer: false },
+    { args: ["C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@zhixing\\cli\\dist\\index.js"], writer: false },
   ])("classifies $args with conservative option parsing", ({ args, writer }) => {
     expect(isProductLogWriter(["node", ...args], home, true)).toBe(writer);
   });

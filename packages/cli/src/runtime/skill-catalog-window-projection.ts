@@ -2,12 +2,12 @@ import {
   SkillCatalogKernelProjectionApplicationService,
   type SkillCatalogKernelProjectionSource,
   type SkillMode,
-} from "@zhixing/core/skills/catalog";
-import type { AssignmentGlobalQueryPort } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/skills/catalog";
+import type { AssignmentGlobalQueryPort } from "@zhixing-ai/core/contracts";
 import {
   createKernelWindowPromptProjection,
   type KernelWindowPromptProjectionPort,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 /**
  * Anchor/Executor product-edge binding from the Skill domain projection to the

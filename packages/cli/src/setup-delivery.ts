@@ -10,10 +10,10 @@
  * 不关心运行模式（REPL/serve），两端调用方式一样。
  */
 
-import { type RuntimeExecutionProfile, createEventBus } from "@zhixing/core";
+import { type RuntimeExecutionProfile, createEventBus } from "@zhixing-ai/core";
 import { artifactReadCapacity, projectionReadCapacity } from "./serve/artifact-read-capacity.js";
 import { createConversationAuthorityVerifier, type ConversationAuthorityVerifier } from './serve/conversation-authority-verifier.js';
-import { type PermissionRule } from "@zhixing/core/security";
+import { type PermissionRule } from "@zhixing-ai/core/security";
 import {
   AuthorityDeliveryPipeline,
   DeliveryAuthority,
@@ -26,11 +26,11 @@ import {
   type DeliverySubjectCursor,
   type OutboxEvent,
   type OutboxRegistry,
-} from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/delivery";
 import {
   createChannelDeliveryEffect,
   type ChannelDeliveryEffectSource,
-} from "@zhixing/core/delivery/channel-effect";
+} from "@zhixing-ai/core/delivery/channel-effect";
 import type {
   AuthorityError,
   CapabilityDescriptor,
@@ -49,7 +49,7 @@ import type {
   WorkspaceBindingAdminPort,
   WorkspaceBindingMigrationPort,
   WorkspaceBindingRecoveryPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedCapabilityDescriptor,
@@ -64,14 +64,14 @@ import {
   type ExecutorCapabilitySnapshot,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/protocol";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import {
   runInMaintenanceContext,
   StorageMaintenanceTaskRunner,
   type DeviceCapacityArbiterPort,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import {
   deriveEnvironmentRequirement,
   executionProfileForEnvironment,
@@ -83,42 +83,42 @@ import {
   workspaceCatalogGenerationStorageKey,
   WorkspaceProbeHandler,
   type WorkspaceProbePort,
-} from "@zhixing/core/environment";
-import { AnchorRubricGlobalStateAdapter } from "@zhixing/core/rubrics";
-import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
-import { AnchorWorksceneGlobalStateAdapter, isWorksceneDeletedAt, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing/core/workscene";
-import { parseConversationId } from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/environment";
+import { AnchorRubricGlobalStateAdapter } from "@zhixing-ai/core/rubrics";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing-ai/core/skills/global-state";
+import { AnchorWorksceneGlobalStateAdapter, isWorksceneDeletedAt, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing-ai/core/workscene";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
 import {
   DeliveryUncertainResolutionApplicationService,
   type DeliveryUncertainResolutionApplication,
-} from "@zhixing/core/delivery/application";
-import type { AdvancementRubricArtifactPort } from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/delivery/application";
+import type { AdvancementRubricArtifactPort } from "@zhixing-ai/core/advancement/application";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type SurfaceAssetCoordinator,
-} from "@zhixing/core/authority";
-import type { ControlAdmissionJournal } from "@zhixing/owner-kernel/control-admission";
-import type { AnchorResourceGovernor } from "@zhixing/owner-kernel/resource-governor";
+} from "@zhixing-ai/core/authority";
+import type { ControlAdmissionJournal } from "@zhixing-ai/owner-kernel/control-admission";
+import type { AnchorResourceGovernor } from "@zhixing-ai/owner-kernel/resource-governor";
 import type {
   ConversationAssignmentCredentialPolicy,
-} from "@zhixing/owner-kernel/conversation-assignment-authority";
-import type { JobAssignmentCredentialPolicy } from "@zhixing/owner-kernel/job-assignment-authority";
+} from "@zhixing-ai/owner-kernel/conversation-assignment-authority";
+import type { JobAssignmentCredentialPolicy } from "@zhixing-ai/owner-kernel/job-assignment-authority";
 import type {
   GlobalMutationCommitParticipant,
-} from "@zhixing/owner-kernel/global-mutation-participant";
+} from "@zhixing-ai/owner-kernel/global-mutation-participant";
 import {
   createOwnerDeliveryLifecycleBinding,
   createOwnerDeliveryParticipant,
   type OwnerDeliveryLifecycleBinding,
   type OwnerDeliveryParticipant,
-} from "@zhixing/owner-kernel/delivery";
-import type { ExecutorResourceGovernor } from "@zhixing/executor";
+} from "@zhixing-ai/owner-kernel/delivery";
+import type { ExecutorResourceGovernor } from "@zhixing-ai/executor";
 import {
   DeviceKey,
   deviceIdFromPublicKey,
   enrollDeviceIdentity,
-} from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/device-identity";
 
 import * as fsp from "node:fs/promises";
 import path from "node:path";
@@ -133,7 +133,7 @@ import {
   rebindSurfaceAssetAuthority,
 } from "./serve/surface-asset-authority.js";
 import { openHomeAuthoritySources, type HomeAuthoritySourcesLease } from "./serve/home-authority-sources.js";
-import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
+import { beginLogPhase, observeLogPhase } from "@zhixing-ai/core/logging";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
@@ -273,13 +273,13 @@ export interface AuthorityRuntimeStack {
   readonly rubricArtifacts: AdvancementRubricArtifactPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly surfaceAssets: SurfaceAssetCoordinator;
-  readonly checkpointRetention: import("@zhixing/core/authority").ArtifactCheckpointRetentionPort;
+  readonly checkpointRetention: import("@zhixing-ai/core/authority").ArtifactCheckpointRetentionPort;
   readonly participant: OwnerDeliveryParticipant;
   readonly controlAdmission: ControlAdmissionJournal;
   readonly localControlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
   /** 权威存储日志的工作计量端口（只记录），供同一宿主内的其他存储日志沿用。 */
-  readonly storageRecords?: import("@zhixing/core/logging").LogRecordPort;
+  readonly storageRecords?: import("@zhixing-ai/core/logging").LogRecordPort;
   readonly resourceGovernor: AnchorResourceGovernor;
   readonly executorResourceGovernor: ExecutorResourceGovernor;
   readonly environment?: EnvironmentPort;
@@ -466,8 +466,8 @@ export interface DeliveryStack {
 
 export interface DeliveryAcceptedWorkLifecyclePort {
   capture(): Promise<readonly { readonly id: string; readonly revision: string }[]>;
-  install(input: import("@zhixing/core/delivery").DeliveryLifecycleAdmission): Promise<void>;
-  restore(input: import("@zhixing/core/delivery").DeliveryLifecycleRestoration): Promise<void>;
+  install(input: import("@zhixing-ai/core/delivery").DeliveryLifecycleAdmission): Promise<void>;
+  restore(input: import("@zhixing-ai/core/delivery").DeliveryLifecycleRestoration): Promise<void>;
   seal(operationId: string): Promise<void>;
   release(operationId: string): Promise<void>;
   read(
@@ -510,9 +510,9 @@ export interface ExecutorReadiness {
 }
 
 export interface SetupAuthorityRuntimeOptions {
-  readonly records?: import("@zhixing/core/logging").LogRecordPort;
+  readonly records?: import("@zhixing-ai/core/logging").LogRecordPort;
   /** 装配各步骤的子阶段记录（启动阶段来源）；只用于观测。 */
-  readonly phaseRecords?: import("@zhixing/core/logging").LogRecordPort;
+  readonly phaseRecords?: import("@zhixing-ai/core/logging").LogRecordPort;
   readonly extensionReadiness?: (log: FileAuthorityCommitLog) => Promise<{ channels: readonly string[]; revision: string }>;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
@@ -564,7 +564,7 @@ function projectAdvancementRubricArtifacts(
 }
 
 /** 顺序子阶段：进入下一段即结束上一段；只记录，不改变执行顺序与失败语义。 */
-function sequentialLogPhases(records: import("@zhixing/core/logging").LogRecordPort | undefined) {
+function sequentialLogPhases(records: import("@zhixing-ai/core/logging").LogRecordPort | undefined) {
   let current: ReturnType<typeof beginLogPhase> | undefined;
   return {
     enter(phase: string): void {
@@ -634,15 +634,15 @@ export async function setupAuthorityRuntime(
     phases.enter("authority-load-runtime");
     const ownerRuntime = anchorEnabled || localExecutorEnabled
       ? await Promise.all([
-          import("@zhixing/owner-kernel/control-admission"),
-          import("@zhixing/owner-kernel/resource-governor"),
+          import("@zhixing-ai/owner-kernel/control-admission"),
+          import("@zhixing-ai/owner-kernel/resource-governor"),
         ]).then(([controlAdmission, resourceGovernor]) => ({
           ControlAdmissionJournal: controlAdmission.ControlAdmissionJournal,
           AnchorResourceGovernor: resourceGovernor.AnchorResourceGovernor,
         }))
       : undefined;
     const executorRuntime = localExecutorEnabled
-      ? await import("@zhixing/executor")
+      ? await import("@zhixing-ai/executor")
       : undefined;
     executorLog = localExecutorEnabled ? sources.executor : undefined;
     let anchorEpoch = options.anchorEpoch ?? 1;
@@ -2376,9 +2376,9 @@ function createGlobalStateRouter(
     },
     mutate: ((
       mutation:
-        | import("@zhixing/core/contracts").GlobalControlMutation
-        | import("@zhixing/core/contracts").GlobalStagedMutation,
-      context: import("@zhixing/core/contracts").AuthorityCallContext,
+        | import("@zhixing-ai/core/contracts").GlobalControlMutation
+        | import("@zhixing-ai/core/contracts").GlobalStagedMutation,
+      context: import("@zhixing-ai/core/contracts").AuthorityCallContext,
     ) =>
       routeMutation(mutation).mutate(
         mutation,
@@ -2566,7 +2566,7 @@ export async function setupDelivery(
 ): Promise<DeliveryStack> {
   const { channels, logger } = options;
   const { createDeliveryResolutionCorrectnessPort } =
-    await import("@zhixing/owner-kernel/delivery");
+    await import("@zhixing-ai/owner-kernel/delivery");
 
   // Delivery owns the effect contract; this concrete binding only combines
   // Channel readiness/send evidence with the shared per-target Outbox.

@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/test-utils",
+  "name": "@zhixing-ai/test-utils",
   "version": "0.1.0",
   "private": true,
   "description": "知行 monorepo 内部测试基础设施 —— fail-safe 临时目录管理等共享 primitives",

@@ -1,4 +1,4 @@
-import { AuthorityPreparationRequired, type AuthorityCommitLog, type DurableProjectionReadContext } from '@zhixing/core/authority';
+import { AuthorityPreparationRequired, type AuthorityCommitLog, type DurableProjectionReadContext } from '@zhixing-ai/core/authority';
 import { conversationStateKeyHash as hash } from './conversation-state-key.js';
 
 /**

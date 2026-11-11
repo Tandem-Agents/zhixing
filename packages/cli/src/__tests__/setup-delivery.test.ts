@@ -9,20 +9,20 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthorityDeliveryPipeline, OutboxRegistry } from "@zhixing/core/delivery";
-import { type PermissionRule } from "@zhixing/core/security";
-import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
-import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { AuthorityDeliveryPipeline, OutboxRegistry } from "@zhixing-ai/core/delivery";
+import { type PermissionRule } from "@zhixing-ai/core/security";
+import type { ChannelDeliveryEffectSource } from "@zhixing-ai/core/delivery/channel-effect";
+import { SurfaceAssetCoordinator } from "@zhixing-ai/core/authority";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import {
   createExecutionManifest,
   matchManifest,
   protocolDigest,
   validateTrustRuleSnapshot,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { createSignedTrustEvent } from "@zhixing-ai/mesh/trust-chain";
 import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
 import {
   INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
@@ -37,8 +37,8 @@ import {
 } from "../executor-snapshot-version-store.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-fixture.js";
 import { StartupRollback } from "../serve/startup-rollback.js";
-import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
-import { userMessage, type LLMRole } from "@zhixing/core/types";
+import { createControlCompletionPort } from "@zhixing-ai/orchestrator/runtime";
+import { userMessage, type LLMRole } from "@zhixing-ai/core/types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -178,7 +178,7 @@ describe("setupDelivery — Channel effect binding", () => {
     const setup = await readFile(resolve(__dirname, "..", "setup-delivery.ts"), "utf-8");
 
     expect(setup).toContain(
-      'from "@zhixing/core/delivery/channel-effect"',
+      'from "@zhixing-ai/core/delivery/channel-effect"',
     );
     expect(setup.match(/createChannelDeliveryEffect\(/g)).toHaveLength(1);
     expect(setup).toContain("createChannelDeliveryEffect(channels");

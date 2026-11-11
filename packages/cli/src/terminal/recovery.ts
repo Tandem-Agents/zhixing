@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { RecoveryInputReceiver, RECOVERY_INPUT_BYTES } from '@zhixing/terminal-ui/recovery-input';
-import type { TerminalAction, TerminalMessage, TerminalView } from '@zhixing/terminal-ui/protocol';
+import { RecoveryInputReceiver, RECOVERY_INPUT_BYTES } from '@zhixing-ai/terminal-ui/recovery-input';
+import type { TerminalAction, TerminalMessage, TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 
 const PAGE_UNITS = 8192;
 /** One volatile secret page/read-back. Values never enter body/history/log/result sinks. */

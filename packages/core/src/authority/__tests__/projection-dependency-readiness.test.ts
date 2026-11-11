@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { AuthorityCacheIntegrity, FileDurableProjectionIndex } from '../index.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { FileArtifactStore } from '../artifact-store.js';
 import { FileAuthorityCommitLog } from '../commit-log.js';
 

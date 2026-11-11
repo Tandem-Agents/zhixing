@@ -9,7 +9,7 @@ import type {
   TrustAdministrationContext,
   TrustAdministrationContribution,
   TrustAdministrationRule,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 
 /** 「生效范围 · contributors · 匹配次数」三段紧凑信息。 */
 export function formatRuleDescription(rule: TrustAdministrationRule): string {

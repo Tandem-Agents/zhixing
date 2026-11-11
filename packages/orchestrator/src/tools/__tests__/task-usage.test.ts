@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "@zhixing/core/types";
+import type { Message } from "@zhixing-ai/core/types";
 import { formatChildResultAsToolResult } from "../task.js";
 import { parseTaskUsageFromMessages } from "../task-usage.js";
 import type { ChildAgentResult } from "../../subagent/factory.js";

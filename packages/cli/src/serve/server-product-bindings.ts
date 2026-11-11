@@ -1,10 +1,10 @@
 import type {
   ServerConfirmationBinding,
   ServerConversationBinding,
-} from "@zhixing/server";
-import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
+} from "@zhixing-ai/server";
+import type { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
 
 /** Adapts the Conversation owner without exposing ManagedSession or owner internals. */
 export function createServerConversationBinding(

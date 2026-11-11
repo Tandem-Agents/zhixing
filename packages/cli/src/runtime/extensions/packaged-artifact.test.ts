@@ -3,11 +3,11 @@ import { fork, type ForkOptions } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { packagedExtensions } from "./catalog.js";
-import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
-import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
-import { ExtensionPeer } from "@zhixing/core/extensions/protocol";
-import { channelDeclaration } from "@zhixing/core/channels/extension";
-import { createTempDir } from "@zhixing/test-utils";
+import { ExtensionArtifacts } from "@zhixing-ai/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing-ai/core/extensions/candidate";
+import { ExtensionPeer } from "@zhixing-ai/core/extensions/protocol";
+import { channelDeclaration } from "@zhixing-ai/core/channels/extension";
+import { createTempDir } from "@zhixing-ai/test-utils";
 
 describe("packaged migration artifact", () => {
   it("runs from a standalone copied file without platform packages or repository sources", async () => {

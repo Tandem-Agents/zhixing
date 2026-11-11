@@ -8,7 +8,7 @@
 import type {
   EnvironmentRequirement,
   TrustRuleHitMirrorEntry,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 /** 命中来自哪本 owner 日志（重开核对时据此查回）。 */
 export type TrustRuleHitOrigin =

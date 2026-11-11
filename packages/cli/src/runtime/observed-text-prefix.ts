@@ -1,5 +1,5 @@
 import { createHash, type Hash } from 'node:crypto';
-import type { Message } from '@zhixing/core/types';
+import type { Message } from '@zhixing-ai/core/types';
 
 const STRIDE = Math.floor(32 * 1024 / 3);
 

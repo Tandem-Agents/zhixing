@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PermissionRule } from "@zhixing/core/security";
-import { workspaceTrustIdentity } from "@zhixing/core/trust-administration";
-import { createTempDir } from "@zhixing/test-utils";
+import type { PermissionRule } from "@zhixing-ai/core/security";
+import { workspaceTrustIdentity } from "@zhixing-ai/core/trust-administration";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";
 
@@ -212,7 +212,7 @@ describe("Host permission storage infrastructure", () => {
     const anchor = createPermissionStorageInfrastructure({ zhixingHome: home, persistentApprovals: true });
     const port = anchor.trustSediments!;
     const binding = { deviceId: "device-1", bindingRef: "binding-1", workspaceBindingRevision: 4 };
-    const fact = (overrides: Partial<import("@zhixing/core/contracts").TrustSedimentFact> = {}) => ({
+    const fact = (overrides: Partial<import("@zhixing-ai/core/contracts").TrustSedimentFact> = {}) => ({
       pattern: { tool: "bash", argument: "npm install *" },
       riskLevel: "medium" as const,
       operation: { tool: "bash", arguments: { command: "npm install left-pad" } },

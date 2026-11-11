@@ -1,7 +1,7 @@
 /** Error text shared by command and noninteractive entry points. */
 import chalk from "chalk";
-import { getZhixingHome } from "@zhixing/core/paths";
-import { getGlobalConfigPath } from "@zhixing/providers/configuration";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import { getGlobalConfigPath } from "@zhixing-ai/providers/configuration";
 import type { CliWriter } from "./screen/cli-writer.js";
 
 export function renderError(error: unknown, writer: CliWriter): void {

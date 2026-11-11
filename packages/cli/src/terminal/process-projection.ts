@@ -1,10 +1,10 @@
-import type { AgentYield } from '@zhixing/core/loop';
-import { getTotalInputTokens, type SessionEventProjection } from '@zhixing/core/types';
-import { validateSessionEventProjection } from '@zhixing/core/protocol/stream';
-import { boundedProcessValue, processText, projectSessionArtifact, validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource } from '@zhixing/rpc/session-wire';
-import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
-import type { TerminalProcessView, ProcessChildView } from '@zhixing/terminal-ui/process-model';
-import { cleanProcessText } from '@zhixing/terminal-ui/process-model';
+import type { AgentYield } from '@zhixing-ai/core/loop';
+import { getTotalInputTokens, type SessionEventProjection } from '@zhixing-ai/core/types';
+import { validateSessionEventProjection } from '@zhixing-ai/core/protocol/stream';
+import { boundedProcessValue, processText, projectSessionArtifact, validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource } from '@zhixing-ai/rpc/session-wire';
+import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
+import type { TerminalProcessView, ProcessChildView } from '@zhixing-ai/terminal-ui/process-model';
+import { cleanProcessText } from '@zhixing-ai/terminal-ui/process-model';
 import { modelFailureText } from './model-failure.js';
 import { emergencyFloorCostText, summaryFailureText } from './compact-outcome-text.js';
 import { getToolRenderStrategy, processArtifactText, processArtifactSpans, processArtifactLines, processBatch, processToolInput, processToolSnapshot, processToolSummary, type ProcessBlock, type ProcessToolSnapshot } from './process-presentation.js';

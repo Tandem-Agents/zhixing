@@ -1,7 +1,7 @@
 import type {
   ConversationAdoptionReviewProjection,
   ConversationResumePort,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 
 type ConversationResumeIdentity = Parameters<
   ConversationResumePort["restoreIdentity"]

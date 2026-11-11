@@ -10,13 +10,13 @@
  * 编辑器自身不感知调用上下文。
  */
 
-import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import type { McpSetupCandidate, McpResolveResult } from "@zhixing/core/mcp-management";
-import type { McpDiscoveryChoice } from "@zhixing/core/mcp-management";
+import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing-ai/providers";
+import type { McpSetupCandidate, McpResolveResult } from "@zhixing-ai/core/mcp-management";
+import type { McpDiscoveryChoice } from "@zhixing-ai/core/mcp-management";
 import type {
   McpManagementProbePort,
   McpManagementServerStatus,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 
 // ─── Section（用户视角的配置块） ───
 
@@ -164,7 +164,7 @@ export interface ConfigEditorRuntime {
    * 由 caller 注入需求方有限 probe port；具体 MCP spec/transport 只存在于 Host adapter。
    */
   mcpProbe?: McpManagementProbePort;
-  mcpPending?: readonly import("@zhixing/core/mcp-management").McpPendingConnection[];
+  mcpPending?: readonly import("@zhixing-ai/core/mcp-management").McpPendingConnection[];
   /**
    * 把用户输入（包名 / 关键词 / URL / 命令 / 预设名）解析为接入候选或候选列表（缺省 =
    * 统一输入接入不可用）—— 由 caller 注入（生产经 resolveMcpSetup + main LLM + 搜索，

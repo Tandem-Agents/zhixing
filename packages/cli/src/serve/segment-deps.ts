@@ -17,10 +17,10 @@
  * 工厂——避免任一处漏装、避免"两入口不对齐"类回归。
  */
 
-import { createSegmentPersistence, type SegmentPersistence, type TaskListReader } from "@zhixing/core/context";
-import { type IConversationRepository } from "@zhixing/core/conversation";
-import type { TaskListService } from "@zhixing/core/conversation/application";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createSegmentPersistence, type SegmentPersistence, type TaskListReader } from "@zhixing-ai/core/context";
+import { type IConversationRepository } from "@zhixing-ai/core/conversation";
+import type { TaskListService } from "@zhixing-ai/core/conversation/application";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 export interface RuntimeHostSegmentDeps {
   readonly taskListReader: TaskListReader;

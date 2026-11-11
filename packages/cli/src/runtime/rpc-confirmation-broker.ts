@@ -16,9 +16,9 @@
  * 适配器原样转发、不自建队列。
  */
 
-import type { ConfirmationDecision, ConfirmationRendererPort, ConfirmationRequest, RequestListener } from "@zhixing/core/confirmation";
-import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc/confirmation-bridge";
-import { RpcClientClosedError } from "@zhixing/server/client";
+import type { ConfirmationDecision, ConfirmationRendererPort, ConfirmationRequest, RequestListener } from "@zhixing-ai/core/confirmation";
+import { CONFIRMATION_NOTIFICATIONS } from "@zhixing-ai/rpc/confirmation-bridge";
+import { RpcClientClosedError } from "@zhixing-ai/server/client";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface RpcConfirmationBrokerOptions {

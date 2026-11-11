@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { appendFile, open, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { readWalVersion, resetWalPathStatAgreementForTesting } from '../verified-wal-view.js';
 
 // 统计按路径打开 WAL 的次数，并可让按路径 stat 在某一次返回改动后的值（模拟两次读之间文件被追加）

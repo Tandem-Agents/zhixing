@@ -29,7 +29,7 @@ import {
   type AuthResult,
   type RpcClient,
   type ServerEndpoint,
-} from "@zhixing/server/client";
+} from "@zhixing-ai/server/client";
 import { spawnDaemon, type SpawnDaemonOptions } from "../serve/daemon.js";
 import { deviceRestrictionNotice, type DeviceRestriction } from "../serve/device-restriction.js";
 import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
@@ -39,7 +39,7 @@ import { serverShutdownRequest } from "./server-shutdown-request.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { observeStartupPhase } from "../logging/runtime.js";
 import { hostStartFailureNotice, occupiedHostPort } from "./host-port-occupancy.js";
-import type { LogRecordPort } from "@zhixing/core/logging";
+import type { LogRecordPort } from "@zhixing-ai/core/logging";
 
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
 // One deadline covers OS admission, process launch and durable recovery. Child

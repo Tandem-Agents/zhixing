@@ -1,7 +1,7 @@
 import path from "node:path";
-import { AUTHORITY_RECOVERY_BUDGET, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
-import type { Digest, SecretRef, SecretStorePort, SurfaceAssetScope } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
+import { AUTHORITY_RECOVERY_BUDGET, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing-ai/core/authority";
+import type { Digest, SecretRef, SecretStorePort, SurfaceAssetScope } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { createHomeAssetLifecycle } from "../home-asset-lifecycle.js";
 import { FileMeshBootstrapStore } from "../mesh-bootstrap-store.js";

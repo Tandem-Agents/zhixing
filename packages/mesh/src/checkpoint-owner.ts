@@ -1,11 +1,11 @@
 import type { CheckpointPackage } from "./checkpoint.js";
-import type { RecoveryCheckpointRequest, RecoveryCheckpointVerification } from "@zhixing/core/contracts";
+import type { RecoveryCheckpointRequest, RecoveryCheckpointVerification } from "@zhixing-ai/core/contracts";
 import type { RecoveryRoot } from "./recovery-root.js";
 import {
   runWithMaintenanceForegroundYield,
   runWithMaintenanceUrgency,
   type StorageMaintenanceUrgency,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import type {
   AuthorityCheckpointService,
   RecoveryBackupStatus,

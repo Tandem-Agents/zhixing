@@ -1,8 +1,8 @@
 import { fork, type ForkOptions, type SpawnOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { EventEmitter } from "node:events";
-import type { DeviceCapacityArbiterPort, DeviceCapacityBudget, DeviceCapacityPermit, DeviceCapacityStepPermit } from "@zhixing/core/resources";
-import { LogAppendIndeterminateError, LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogAppendReceipt, type LogCapture, type LogSink, type LogStatus } from "@zhixing/core/logging";
+import type { DeviceCapacityArbiterPort, DeviceCapacityBudget, DeviceCapacityPermit, DeviceCapacityStepPermit } from "@zhixing-ai/core/resources";
+import { LogAppendIndeterminateError, LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogAppendReceipt, type LogCapture, type LogSink, type LogStatus } from "@zhixing-ai/core/logging";
 import type { StoreOperation, StoreWorkerInput, StoreWorkerOutput } from "./store-worker-protocol.js";
 
 export type LogStoreWorker = EventEmitter & {

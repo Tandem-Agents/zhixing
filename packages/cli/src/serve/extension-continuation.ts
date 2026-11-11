@@ -1,9 +1,9 @@
-import type { ExtensionInstance, ExtensionOperation } from "@zhixing/core/extensions/contracts";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { isLocalConversationId } from "@zhixing/core/conversation";
-import type { TurnOrigin } from "@zhixing/core";
+import type { ExtensionInstance, ExtensionOperation } from "@zhixing-ai/core/extensions/contracts";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { isLocalConversationId } from "@zhixing-ai/core/conversation";
+import type { TurnOrigin } from "@zhixing-ai/core";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
-import type { ConversationStatusNotice } from "@zhixing/core/contracts";
+import type { ConversationStatusNotice } from "@zhixing-ai/core/contracts";
 import type { ExtensionManagementTransport } from "./extension-tools.js";
 
 export function createExtensionStatusObserver(management: ExtensionManagementTransport) {

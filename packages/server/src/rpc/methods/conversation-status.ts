@@ -1,5 +1,5 @@
-import { isProtocolIdentifier } from "@zhixing/core/protocol";
-import type { ConversationRecoveryRequest } from '@zhixing/core/contracts';
+import { isProtocolIdentifier } from "@zhixing-ai/core/protocol";
+import type { ConversationRecoveryRequest } from '@zhixing-ai/core/contracts';
 import { RpcErrors, type MethodEntry } from "../handlers.js";
 
 export function parseConversationRecoveryRequest(raw: unknown): ConversationRecoveryRequest | undefined {

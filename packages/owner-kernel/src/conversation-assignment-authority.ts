@@ -7,7 +7,7 @@ import type {
   IngressContext,
   PermissionSnapshotLease,
   TrustRuleSnapshot,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   MAX_CONTROL_LEASE_TTL_MS,
   MAX_PERMISSION_LEASE_TTL_MS,
@@ -21,7 +21,7 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 export interface ConversationAssignmentIssueInput {
   readonly runId: string;

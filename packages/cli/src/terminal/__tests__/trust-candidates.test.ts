@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ArgumentProvider, DefaultCommandRegistry, type RuntimeContext, type SuggestionItem } from '@zhixing/core/typeahead';
-import type { TrustAdministrationRule } from '@zhixing/core/trust-administration';
+import { ArgumentProvider, DefaultCommandRegistry, type RuntimeContext, type SuggestionItem } from '@zhixing-ai/core/typeahead';
+import type { TrustAdministrationRule } from '@zhixing-ai/core/trust-administration';
 import { TerminalTrustCandidates, type TerminalTrustController } from '../trust-candidates.js';
 
 const runtime: RuntimeContext = { sessionBusy: false, workspaceId: null, cwd: '/tmp', target: 'cli', features: {}, now: 0 };

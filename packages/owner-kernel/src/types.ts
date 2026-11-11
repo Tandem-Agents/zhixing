@@ -7,18 +7,18 @@
  * - 流式输出复用 core 的 AgentYield/AgentResult
  */
 
-import type { AbortReason } from "@zhixing/core/interrupt";
-import type { AgentEventMap, EventBus, Message, TextCallLLMResult, TurnContext } from "@zhixing/core";
-import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import type { AbortReason } from "@zhixing-ai/core/interrupt";
+import type { AgentEventMap, EventBus, Message, TextCallLLMResult, TurnContext } from "@zhixing-ai/core";
+import type { AgentYield, RunResult } from "@zhixing-ai/core/loop";
 import type {
   ContextBudget,
   EmergencyFloorPriorContext,
   WindowCompact,
-} from "@zhixing/core/context";
-import type { DurableToolExecutionAuthorizer, PermissionContextId, PermissionRule, RiskLevel, SecurityRule } from "@zhixing/core/security";
-import type { IConfirmationBroker } from "@zhixing/core/confirmation";
-import type { OrchestrationContextSnapshotV1, OrchestrationExecutableV1, OrchestrationRunResultV1 } from "@zhixing/core/orchestration";
-import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/context";
+import type { DurableToolExecutionAuthorizer, PermissionContextId, PermissionRule, RiskLevel, SecurityRule } from "@zhixing-ai/core/security";
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import type { OrchestrationContextSnapshotV1, OrchestrationExecutableV1, OrchestrationRunResultV1 } from "@zhixing-ai/core/orchestration";
+import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing-ai/core/transcript";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -27,9 +27,9 @@ import type {
   ModelCallResourceMeter,
   ResourceLease,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
-// TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
+// TurnContext 的唯一定义在 @zhixing-ai/core（types/tools.ts）——此处只做 re-export，
 // 方便 owner-kernel 及其下游从统一入口获取。
 export type { TurnContext };
 
@@ -38,7 +38,7 @@ export interface RunTurnOptions {
   /** Existing owner run identity, carried unchanged through local/remote execution. */
   readonly runId?: string;
   readonly assignmentId?: string;
-  inputPort?: import("@zhixing/core/loop").RunInputPort;
+  inputPort?: import("@zhixing-ai/core/loop").RunInputPort;
   abortSignal?: AbortSignal;
   turnContext?: TurnContext;
   /** Authenticated stable surface identity; transport connection ids are not identities. */
@@ -63,16 +63,16 @@ export interface RunTurnOptions {
   advancement?: RunRecordAdvancementMetadata;
   /** Closed runtime-event projection consumed by durable stream producers. */
   onProtocolEvent?: (
-    event: import("@zhixing/core").SessionEventProjection,
+    event: import("@zhixing-ai/core").SessionEventProjection,
     meta: { readonly lineage?: string },
   ) => void | Promise<void>;
-  toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
+  toolSideEffectObserver?: import("@zhixing-ai/core").ToolSideEffectObserver;
   /** Fail-closed durable authority check invoked immediately before each tool call. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** Durable per-provider-call resource accounting for this assigned run. */
   modelCallResourceMeter?: ModelCallResourceMeter;
   /** 运行拥有者的主循环模型调用阶段回调（预留之后进入 provider、终结或失败后回到本地处理）。 */
-  modelProviderPhases?: import("@zhixing/core").ModelProviderPhases;
+  modelProviderPhases?: import("@zhixing-ai/core").ModelProviderPhases;
   /** Unified assignment-local staged write/overlay inherited by descendants. */
   assignmentMutations?: AssignmentMutationPort;
   /** Read-only global authority facade bound to this assignment. */
@@ -96,7 +96,7 @@ export type RuntimeDisposeReason =
 
 export interface SessionRuntime {
   /** Trusted owner identity for auxiliary execution that bypasses the main loop. */
-  withRunObservation?<T>(identity: { readonly conversationId?: string; readonly refs?: readonly import("@zhixing/core/logging").LogRef[] }, work: () => Promise<T>): Promise<T>;
+  withRunObservation?<T>(identity: { readonly conversationId?: string; readonly refs?: readonly import("@zhixing-ai/core/logging").LogRef[] }, work: () => Promise<T>): Promise<T>;
   readonly sessionId: string;
   /**
    * 执行一轮对话——纯执行体:输入消息由调用方构造(窗口事实 + 本轮用户消息),
@@ -135,7 +135,7 @@ export interface SessionRuntime {
   /**
    * 确认交互 broker —— 可选。
    *
-   * `@zhixing/cli` 的 `AgentRuntime` 天然实现（broker 作为 readonly public 字段暴露）；
+   * `zhixing` 的 `AgentRuntime` 天然实现（broker 作为 readonly public 字段暴露）；
    * 其它 SessionRuntime 实现（如测试 stub）可以不提供，此时 ConfirmationHub 不接入。
    *
    * 远程确认通道通过 Hub 聚合 per-runtime broker。
@@ -209,7 +209,7 @@ export interface SessionRuntime {
    */
   executionPermissionRules?(scope?: PermissionContextId): readonly PermissionRule[];
   /** Exact non-secret dependencies of this immutable assembled runtime. */
-  executionProfile?(): import("@zhixing/core").RuntimeExecutionProfile;
+  executionProfile?(): import("@zhixing-ai/core").RuntimeExecutionProfile;
   /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
   readonly calibrationFactor?: number;
 }
@@ -309,9 +309,9 @@ export interface RuntimeFactory {
       /** Executor-local path obtained only after the frozen binding is revalidated. */
         readonly workspaceRoot: string | null;
         /** Select the already-frozen capability set when newer additive capabilities exist. */
-        readonly executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile;
+        readonly executionProfile?: import("@zhixing-ai/core/types").RuntimeExecutionProfile;
         /** 已验签清单里的工作区绑定，授权范围由它推导；清单不带工作区时为 null。 */
-        readonly workspaceBinding?: import("@zhixing/core/contracts").EnvironmentRequirement["workspace"] | null;
+        readonly workspaceBinding?: import("@zhixing-ai/core/contracts").EnvironmentRequirement["workspace"] | null;
     },
   ): Promise<SessionRuntime>;
 }

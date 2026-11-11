@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileDurableProjectionIndex } from "../index.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 const checkpoint = (lsn: number) => ({ logId: "segment-operation", lsn, frameEndOffset: 64 + lsn, prefixDigest: `sha256:${String(lsn).padStart(64, "0")}` });
 
 async function fixture() {

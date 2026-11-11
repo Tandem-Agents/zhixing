@@ -22,9 +22,9 @@
 import type {
   ConfirmationRequest,
   DisplayBody,
-} from "@zhixing/core/confirmation";
-import type { ConfirmationHub, HubEntry, HubEvent } from "@zhixing/owner-kernel/confirmation-hub";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/confirmation";
+import type { ConfirmationHub, HubEntry, HubEvent } from "@zhixing-ai/owner-kernel/confirmation-hub";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import type { RpcNotificationConnection } from "./connection.js";
 
 /** 确认域推送通知的方法名——发射端(本 Bridge)与接入面订阅端共用 */

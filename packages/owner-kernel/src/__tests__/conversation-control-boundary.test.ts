@@ -7,9 +7,9 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing/core/authority';
-import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunFactsPage, ConversationRunOutcomesPage, Signature } from '@zhixing/core/contracts';
-import { protocolDigest } from '@zhixing/core/protocol';
+import { FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing-ai/core/authority';
+import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunFactsPage, ConversationRunOutcomesPage, Signature } from '@zhixing-ai/core/contracts';
+import { protocolDigest } from '@zhixing-ai/core/protocol';
 import { AnchorResourceGovernor } from '../resource-governor.js';
 import { ConversationRunJournal } from '../conversation-assignment.js';
 import { ConversationReadIndex } from '../conversation-read-index.js';

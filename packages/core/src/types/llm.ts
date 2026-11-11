@@ -428,7 +428,7 @@ export interface LLMRole {
 /**
  * 会话级可用的 LLM 角色集合。
  *
- * 三角色（角色集单一事实源 = `@zhixing/providers` 的 ROLE_SPECS 注册表，
+ * 三角色（角色集单一事实源 = `@zhixing-ai/providers` 的 ROLE_SPECS 注册表，
  * 本接口键与注册表 id 一一对应；新增角色 = 注册表加一行 + 本接口加一字段）：
  *   - main ：必填，主对话循环 / 用户可见输出
  *   - light：选填，后台杂活（WebFetch 蒸馏 / 工具结果摘要 /

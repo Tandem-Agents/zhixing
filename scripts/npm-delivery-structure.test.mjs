@@ -80,7 +80,7 @@ test("public package manifests expose only prebuilt assets and no lifecycle inst
   const expressiveReadme = [
     "# Runtime building blocks",
     "",
-    "Install `@zhixing/cli` and follow the project documentation.",
+    "Install `zhixing` and follow the project documentation.",
     `[Zhixing](${canonicalHomepage}) also requires [Node.js](https://nodejs.org/).`,
     "Released under MIT.",
   ].join("\n");
@@ -172,7 +172,7 @@ function run(executable, args) {
 
 function assertPackageReadme(readme, packageName) {
   assert.notEqual(readme.trim(), "", `${packageName} README content`);
-  assert.match(readme, /@zhixing\/cli/u, `${packageName} README user installation entry`);
+  assert.match(readme, /`zhixing`|npm install -g zhixing\b/u, `${packageName} README user installation entry`);
   assert.ok(readme.includes(canonicalHomepage), `${packageName} README canonical documentation`);
   assert.match(readme, /MIT/u, `${packageName} README license`);
 }

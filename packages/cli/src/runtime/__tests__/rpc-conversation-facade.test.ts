@@ -8,12 +8,12 @@ import {
   RPC_ERROR_CODES,
   RpcClientClosedError,
   RpcClientError,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import type {
   SessionDeltaPayload,
   SessionChangedPayload,
   SessionActivityPayload,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 

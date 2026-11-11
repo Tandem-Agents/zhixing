@@ -14,7 +14,7 @@
 import type {
   ChannelCredentialProjection,
   ZhixingConfig,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import { listSupportedChannels, findSupportedChannel } from "../../registries/index.js";
 
 export interface MessagingIssue {

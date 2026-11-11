@@ -9,18 +9,18 @@
 import {
   stripPresentationFromAgentYield,
   type RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import {
   type UserTurnInput,
   userTurnInputFromText,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   ConversationManager,
   ManagedSession,
-} from "@zhixing/owner-kernel/conversation-manager";
-import type { RunTurnOptions } from "@zhixing/owner-kernel/types";
-import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
-import { runTurnWithCommit, type RunTurnHooks } from "@zhixing/owner-kernel/run-turn";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { RunTurnOptions } from "@zhixing-ai/owner-kernel/types";
+import type { ExplicitEnvironmentSelection } from "@zhixing-ai/core/contracts";
+import { runTurnWithCommit, type RunTurnHooks } from "@zhixing-ai/owner-kernel/run-turn";
 import {
   SESSION_NOTIFICATIONS,
   toWireAgentResult,

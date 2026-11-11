@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationCommitSummary, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunFactsPage } from '@zhixing/core/contracts';
+import type { ConversationCommitSummary, ConversationControlCursor, ConversationControlFact, ConversationControlPage, ConversationRunFactsPage } from '@zhixing-ai/core/contracts';
 import { ConversationController } from '../conversation-controller.js';
 import type { RpcConversationFacade } from '../rpc-conversation-facade.js';
 import type { RpcWorksceneFacade } from '../rpc-workscene-facade.js';

@@ -1,4 +1,4 @@
-import type { LogSource } from "@zhixing/core/logging";
+import type { LogSource } from "@zhixing-ai/core/logging";
 
 export const MCP_LOG_SOURCE: LogSource = {
   id: "mcp", version: 1,

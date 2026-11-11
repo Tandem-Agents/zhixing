@@ -48,9 +48,9 @@
  *   - max_turns 不走 abort 通道(loop 内置 reason="max_turns"),不占用本槽位
  */
 
-import { abortWithReason } from "@zhixing/core/interrupt";
-import { drainAgentLoop, type AgentResult } from "@zhixing/core/loop";
-import { type AbortReason, type WatchdogPolicy } from "@zhixing/core/interrupt";
+import { abortWithReason } from "@zhixing-ai/core/interrupt";
+import { drainAgentLoop, type AgentResult } from "@zhixing-ai/core/loop";
+import { type AbortReason, type WatchdogPolicy } from "@zhixing-ai/core/interrupt";
 import {
   type AgentErrorType,
   type AgentEventMap,
@@ -62,10 +62,10 @@ import {
   type TokenUsage,
   type ToolDefinition,
   type ToolResultBlock,
-} from "@zhixing/core/types";
-import { type EventBus } from "@zhixing/core/events";
-import { type IConfirmationBroker } from "@zhixing/core/confirmation";
-import { type SecurityPipeline } from "@zhixing/core/security";
+} from "@zhixing-ai/core/types";
+import { type EventBus } from "@zhixing-ai/core/events";
+import { type IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { type SecurityPipeline } from "@zhixing-ai/core/security";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { createSecureExecuteTool } from "../security/secure-executor.js";
 import type {
@@ -145,7 +145,7 @@ export interface RunSubAgentLoopOptions {
   securityPipeline: SecurityPipeline;
   /** 从父运行树继承的有限安全批准端口。 */
   securityApproval: KernelSecurityApprovalPort;
-  readonly agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  readonly agentIdentity?: import("@zhixing-ai/core/identity").AgentIdentity;
   /** 子 confirmation broker —— 与父 broker 隔离,默认 fail-deny resolver */
   confirmationBroker: IConfirmationBroker;
   /**

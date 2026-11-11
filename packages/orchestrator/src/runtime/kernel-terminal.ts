@@ -5,12 +5,12 @@ import {
   type Message,
   type PostTurnControlOutcome,
   type TokenUsage,
-} from "@zhixing/core/types";
-import { type AgentResult } from "@zhixing/core/loop";
-import { isToolResultDisposition } from "@zhixing/core/types";
-import { type AbortReason } from "@zhixing/core/interrupt";
-import { type RunRecordInput } from "@zhixing/core/transcript";
-import { type WindowCompact } from "@zhixing/core/context";
+} from "@zhixing-ai/core/types";
+import { type AgentResult } from "@zhixing-ai/core/loop";
+import { isToolResultDisposition } from "@zhixing-ai/core/types";
+import { type AbortReason } from "@zhixing-ai/core/interrupt";
+import { type RunRecordInput } from "@zhixing-ai/core/transcript";
+import { type WindowCompact } from "@zhixing-ai/core/context";
 
 /** The finite terminal state of one Intelligence Kernel run. */
 export type KernelTerminal =

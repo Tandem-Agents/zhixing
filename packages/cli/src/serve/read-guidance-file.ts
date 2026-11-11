@@ -1,8 +1,8 @@
 import { constants } from "node:fs";
 import { lstat as fsLstat, open as fsOpen } from "node:fs/promises";
 
-import { PathGuard } from "@zhixing/core/security";
-import { type ReadGuidanceFile } from "@zhixing/core/context";
+import { PathGuard } from "@zhixing-ai/core/security";
+import { type ReadGuidanceFile } from "@zhixing-ai/core/context";
 
 export interface GuidanceFileReaderDeps {
   readonly lstat: typeof fsLstat;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { LogFilesProcess } from './files-process.js';
 
 describe('native log home initialization', () => {

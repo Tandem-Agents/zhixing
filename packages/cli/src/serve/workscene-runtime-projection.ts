@@ -1,12 +1,12 @@
 import { createWorksceneRunToolApplication } from "./workscene-application-adapter.js";
-import { type SchedulerFacade } from "@zhixing/core/scheduler";
-import { type ToolDefinition } from "@zhixing/core";
-import type { ArtifactStore } from "@zhixing/core/authority";
-import type { SkillMode } from "@zhixing/core/skills/catalog";
+import { type SchedulerFacade } from "@zhixing-ai/core/scheduler";
+import { type ToolDefinition } from "@zhixing-ai/core";
+import type { ArtifactStore } from "@zhixing-ai/core/authority";
+import type { SkillMode } from "@zhixing-ai/core/skills/catalog";
 import type {
   JobExecutionInstruction,
-} from "@zhixing/core/contracts";
-import { jobRunTrustScopeInput, type ExecutionTrustScopeInput } from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/contracts";
+import { jobRunTrustScopeInput, type ExecutionTrustScopeInput } from "@zhixing-ai/core/trust-administration";
 import {
   WorksceneApplicationError,
   isWorksceneSupportConversation,
@@ -14,16 +14,16 @@ import {
   type WorksceneConversationRuntimeQuery,
   type WorksceneAssignmentToolApplication,
   type WorksceneWorkspaceReference,
-} from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene/application";
 import { zhixingProfile } from "./zhixing-agent-profile.js";
 import { createAdvancementProposalTool } from "./advancement-proposal-tool.js";
-import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing/core/advancement/proposal-identity";
+import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing-ai/core/advancement/proposal-identity";
 import { powerProfile } from "./workscene-agent-guidance.js";
 import {
   createKernelWindowPromptProjection,
   type AgentRuntimeLifecycle,
   type AgentRuntime,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import {
   createConversationRuntimeProjection,
@@ -32,7 +32,7 @@ import {
   type ConversationRuntimeProjection,
   type RuntimeProductProjection,
   type RuntimeToolProjection,
-} from "@zhixing/runtime-host/conversation-runtime-projection";
+} from "@zhixing-ai/runtime-host/conversation-runtime-projection";
 import { selectJobRuntimeTools, type JobRuntimeCapabilities } from "./job-runtime-tool-selection.js";
 import {
   createWorkmodeEnterTool,
@@ -54,7 +54,7 @@ import type {
   RuntimeSecurityExecutionBindOptions,
   RuntimeSecurityExecutionInfrastructure,
 } from "./permission-storage-infrastructure.js";
-import type { RuntimeExecutionProfile } from "@zhixing/core/types";
+import type { RuntimeExecutionProfile } from "@zhixing-ai/core/types";
 
 /** Conversation inventories are device-local, not a task's declared tool requirements.
  * Keep portable tools mandatory; MCP and owner-only management are projected by location.
@@ -87,7 +87,7 @@ type WorksceneRuntimeSceneIdentity = Extract<
 >["scene"];
 
 type RuntimeWorkspaceBinding = NonNullable<
-  NonNullable<Parameters<import("@zhixing/owner-kernel/types").RuntimeFactory["create"]>[1]>["workspaceBinding"]
+  NonNullable<Parameters<import("@zhixing-ai/owner-kernel/types").RuntimeFactory["create"]>[1]>["workspaceBinding"]
 >;
 
 export interface AnchorRuntimeProjectionAssembly {
@@ -210,7 +210,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
   readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
-  readonly agentIdentity: import("@zhixing/core/identity").AgentIdentity;
+  readonly agentIdentity: import("@zhixing-ai/core/identity").AgentIdentity;
   readonly capabilities: AnchorRuntimeCapabilityCatalog;
   readonly workscenes: WorksceneToolDirectory;
   readonly worksceneAssignmentTools: WorksceneAssignmentToolApplication;
@@ -366,7 +366,7 @@ export function createWorksceneConversationRuntimeFactory(input: {
   ) => Promise<void>;
 }): (
   sessionId: string,
-  environment?: Parameters<import("@zhixing/owner-kernel/types").RuntimeFactory["create"]>[1],
+  environment?: Parameters<import("@zhixing-ai/owner-kernel/types").RuntimeFactory["create"]>[1],
 ) => Promise<AgentRuntime> {
   return async (sessionId, environment) => {
     const issue = (projection: ConversationRuntimeProjection) => input.issue(selectFrozenRuntimeCapabilities(projection, environment?.executionProfile));
@@ -424,7 +424,7 @@ export function createWorksceneConversationRuntimeFactory(input: {
 }
 
 /** Additive lifecycle changes must not widen an assignment that was already issued. */
-export function selectFrozenRuntimeCapabilities(projection: ConversationRuntimeProjection, expected?: import("@zhixing/core/types").RuntimeExecutionProfile): ConversationRuntimeProjection {
+export function selectFrozenRuntimeCapabilities(projection: ConversationRuntimeProjection, expected?: import("@zhixing-ai/core/types").RuntimeExecutionProfile): ConversationRuntimeProjection {
   if (!expected) return projection;
   return createConversationRuntimeProjection({ ...projection, runtimeTools: createRuntimeToolProjection({
     extraTools: projection.runtimeTools.extraTools.filter((tool) => expected.tools.includes(tool.name)),

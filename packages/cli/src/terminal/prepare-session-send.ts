@@ -1,6 +1,6 @@
-import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias } from '@zhixing-ai/terminal-ui/protocol';
 import * as path from 'node:path';
-import { expandUserHome } from '@zhixing/core/paths';
+import { expandUserHome } from '@zhixing-ai/core/paths';
 import type { InputMaterialRegistry } from '../input-material-registry.js';
 import { detectMimeType } from '../input-material-ingest.js';
 import { readBoundedInputFile } from './bounded-input-file.js';

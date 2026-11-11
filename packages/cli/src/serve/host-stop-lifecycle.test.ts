@@ -1,7 +1,7 @@
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
-import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog, registerDeviceLifecycleProjection } from "@zhixing/core/authority";
-import { protocolDigest } from "@zhixing/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog, registerDeviceLifecycleProjection } from "@zhixing-ai/core/authority";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
   HOST_STOP_ACCEPTED_WORK_OWNERS,

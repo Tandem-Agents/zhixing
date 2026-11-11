@@ -1,4 +1,4 @@
-import type { AgentRoleProfile } from "@zhixing/orchestrator/profile";
+import type { AgentRoleProfile } from "@zhixing-ai/orchestrator/profile";
 import { zhixingProfile } from "./zhixing-agent-profile.js";
 
 /** Product input: workspace availability is resolved before runtime issuance. */

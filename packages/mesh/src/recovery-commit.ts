@@ -1,5 +1,5 @@
-import type { AnchorTransferCommit, HomeTrustEvent } from "@zhixing/core/contracts";
-import { validateDisasterRecoveryCommit } from "@zhixing/core/protocol";
+import type { AnchorTransferCommit, HomeTrustEvent } from "@zhixing-ai/core/contracts";
+import { validateDisasterRecoveryCommit } from "@zhixing-ai/core/protocol";
 import { verifyRecoverySignature } from "./recovery-root.js";
 import { homeTrustEventDigest, type TrustProjection } from "./trust-chain.js";
 

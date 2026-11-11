@@ -2,16 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import type {
   Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   RunRecordInput,
-} from "@zhixing/core/transcript";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
+} from "@zhixing-ai/core/transcript";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 
 function createRuntime(yields: readonly AgentYield[]): SessionRuntime {

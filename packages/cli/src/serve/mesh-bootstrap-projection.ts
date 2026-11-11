@@ -1,6 +1,6 @@
-import type { MeshEndpointDescriptor } from "@zhixing/core/contracts";
-import type { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
-import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
+import type { MeshEndpointDescriptor } from "@zhixing-ai/core/contracts";
+import type { MeshEndpointDirectory } from "@zhixing-ai/mesh/bootstrap";
+import type { TrustedMeshPeer } from "@zhixing-ai/mesh/handshake";
 
 /** Demand-owned access to the local Mesh endpoint projection. */
 export interface MeshEndpointDirectoryPersistencePort {

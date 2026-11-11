@@ -1,5 +1,5 @@
-import type { CommandDef, ICommandRegistry } from '@zhixing/core/typeahead';
-import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
+import type { CommandDef, ICommandRegistry } from '@zhixing-ai/core/typeahead';
+import type { SkillCatalogClient } from '@zhixing-ai/core/skills/catalog';
 import { SkillCommandSource } from '../commands/skill-command-source.js';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 

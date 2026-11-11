@@ -10,7 +10,7 @@ import { ExtensionArtifacts } from "./artifacts.js";
 import { ExtensionCandidates, validateExtensionCandidate } from "./candidate.js";
 import { ExtensionOnboarding } from "./onboarding.js";
 import type { ExtensionBinding, ExtensionCandidate, ExtensionOperation } from "./contracts.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 const owners: FileAuthorityCommitLog[] = [];
 const managers: ExtensionOnboarding[] = [];
 afterEach(async () => {

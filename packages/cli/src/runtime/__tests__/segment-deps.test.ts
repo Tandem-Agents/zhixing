@@ -12,14 +12,14 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { IConversationRepository, SegmentMeta } from "@zhixing/core/conversation";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import type { IConversationRepository, SegmentMeta } from "@zhixing-ai/core/conversation";
+import { createEventBus, type AgentEventMap } from "@zhixing-ai/core";
 import type {
   AssignmentMutationOverlayRecord,
   AssignmentMutationPort,
-} from "@zhixing/core/contracts";
-import { TaskListService } from "@zhixing/core/conversation/application";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/contracts";
+import { TaskListService } from "@zhixing-ai/core/conversation/application";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
   createPersistentSegmentDeps,

@@ -1,16 +1,16 @@
-import type { ToolDefinition } from "@zhixing/core";
+import type { ToolDefinition } from "@zhixing-ai/core";
 import {
   validateMcpCandidate,
   type McpManagementDiscoveryPort,
   type McpManagementStatusPort,
   MCP_PRESETS,
-} from "@zhixing/core/mcp-management";
-import { isLocalConversationId } from "@zhixing/core/conversation";
-import { validateWorksceneTaskHandoff } from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/mcp-management";
+import { isLocalConversationId } from "@zhixing-ai/core/conversation";
+import { validateWorksceneTaskHandoff } from "@zhixing-ai/core/workscene/application";
 import {
   emitPostTurnControlIntent,
   runContextStorage,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 /** Thin model binding. Discovery is inert; connection executes only after the approved run commits. */
 export function createMcpManagementTools(

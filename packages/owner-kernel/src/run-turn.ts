@@ -14,10 +14,10 @@
  * （partial 内容已经由 yield 流推给用户，但不成为对话事实）。
  */
 
-import { userMessageFromTurnInput, type Message, type UserTurnInputLike } from "@zhixing/core";
-import { type AbortReason } from "@zhixing/core/interrupt";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { TranscriptOutcomeUnknownError, type TurnSource } from "@zhixing/core/transcript";
+import { userMessageFromTurnInput, type Message, type UserTurnInputLike } from "@zhixing-ai/core";
+import { type AbortReason } from "@zhixing-ai/core/interrupt";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { TranscriptOutcomeUnknownError, type TurnSource } from "@zhixing-ai/core/transcript";
 import type { ConversationManager } from "./conversation-manager.js";
 import type { RunTurnOptions, SessionRuntime } from "./types.js";
 import type {
@@ -27,7 +27,7 @@ import type {
   ExplicitEnvironmentSelection,
   SessionControlMutation,
   SessionStagedMutation,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 // ─── Hooks ───
 
@@ -122,7 +122,7 @@ export interface DurableConversationCancelInput {
    * 空批次回执由 cancel-batch 权威决定经 DeliveryAuthority 产出。
    */
   readonly response?: {
-    readonly replyTarget: import("@zhixing/core/contracts").DeliveryTargetDto;
+    readonly replyTarget: import("@zhixing-ai/core/contracts").DeliveryTargetDto;
   };
 }
 
@@ -213,7 +213,7 @@ export type DurableConversationSessionWriteResult =
  * 测试夹具必须提供显式完整 adapter。
  */
 export interface DurableConversationTurnExecutor {
-  inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing/core/conversation/application').ConversationInputReceipt>;
+  inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing-ai/core/conversation/application').ConversationInputReceipt>;
   admit(
     input: DurableConversationAdmissionInput,
   ): Promise<DurableConversationAdmissionResult>;

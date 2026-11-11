@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ConfirmationRequest } from '@zhixing/core/confirmation';
+import type { ConfirmationRequest } from '@zhixing-ai/core/confirmation';
 import { projectTerminalConfirmation, resolveTerminalConfirmation, targetPath } from '../confirmation.js';
 
 it('shows a Windows absolute path as its actual target with native separators', () => {

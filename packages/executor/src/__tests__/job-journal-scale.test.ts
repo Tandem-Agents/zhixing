@@ -18,16 +18,16 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   FileDurableProjectionIndex,
-} from "@zhixing/core/authority";
-import type { AuthorityCallContext, Signature, TaskDefinition } from "@zhixing/core/contracts";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
-import { canonicalize, protocolBytes, type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing/core/protocol";
-import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
-import { listCurrentScheduleTaskIds } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
-import { JobJournal, registerJobJournalProjection } from "@zhixing/owner-kernel/job-assignment";
-import { JOB_RUN_STATE_PROJECTION_ID, openJobTaskIds } from "@zhixing/owner-kernel/job-run-state-index";
-import { SCHEDULER_NOTICE_INDEX_PROJECTION_ID, SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
-import { captureFileIo, createTempDir, defaultFileIoCategory, type FileIoSnapshot } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/authority";
+import type { AuthorityCallContext, Signature, TaskDefinition } from "@zhixing-ai/core/contracts";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import { canonicalize, protocolBytes, type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing-ai/core/protocol";
+import { createOwnerDeliveryParticipant } from "@zhixing-ai/owner-kernel/delivery";
+import { listCurrentScheduleTaskIds } from "@zhixing-ai/owner-kernel/global-mutation-commit-coordinator";
+import { JobJournal, registerJobJournalProjection } from "@zhixing-ai/owner-kernel/job-assignment";
+import { JOB_RUN_STATE_PROJECTION_ID, openJobTaskIds } from "@zhixing-ai/owner-kernel/job-run-state-index";
+import { SCHEDULER_NOTICE_INDEX_PROJECTION_ID, SchedulerUserNoticeJournal } from "@zhixing-ai/owner-kernel/scheduler-user-notices";
+import { captureFileIo, createTempDir, defaultFileIoCategory, type FileIoSnapshot } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
 const TASK_ID = "task-scale";

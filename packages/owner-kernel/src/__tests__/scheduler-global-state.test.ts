@@ -1,6 +1,6 @@
-import { createEventBus } from "@zhixing/core";
-import { type SchedulerEventMap, type TaskView } from "@zhixing/core/scheduler";
-import type { GlobalStatePort } from "@zhixing/core/contracts";
+import { createEventBus } from "@zhixing-ai/core";
+import { type SchedulerEventMap, type TaskView } from "@zhixing-ai/core/scheduler";
+import type { GlobalStatePort } from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorSchedulerProductPort,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { renderClosureReport, type AdvancementRunReview } from "@zhixing/core/advancement";
-import type { TerminalSummary } from "@zhixing/terminal-ui/protocol";
+import { renderClosureReport, type AdvancementRunReview } from "@zhixing-ai/core/advancement";
+import type { TerminalSummary } from "@zhixing-ai/terminal-ui/protocol";
 import {
   ADVANCEMENT_TURN_LABEL,
   describeAdvancementExitReason,

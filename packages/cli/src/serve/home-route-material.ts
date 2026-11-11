@@ -4,13 +4,13 @@ import type {
   DurableProjectionMutation,
   DurableProjectionReadContext,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import { DurableProjectionRecordBindingError } from "@zhixing/core/authority";
-import type { ArtifactRef, JsonValue, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import { assertTerminalRouteSecret, createTerminalRouteSecret } from "@zhixing/mesh/bootstrap";
-import type { RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import { encodeX25519PublicKey, importEncodedPublicKey } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/core/authority";
+import { DurableProjectionRecordBindingError } from "@zhixing-ai/core/authority";
+import type { ArtifactRef, JsonValue, SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import { assertTerminalRouteSecret, createTerminalRouteSecret } from "@zhixing-ai/mesh/bootstrap";
+import type { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
+import { encodeX25519PublicKey, importEncodedPublicKey } from "@zhixing-ai/mesh/recovery-root";
 
 /**
  * 家级路由材料：同一 home 两份互相独立的 32 字节随机秘密。terminal 给被移除的设备找回终态入口与终态取证，

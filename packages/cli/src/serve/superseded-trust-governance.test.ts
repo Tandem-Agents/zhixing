@@ -1,16 +1,16 @@
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
-import type { DeviceIdentity, HomeTrustEvent, SecretRef, SecretStorePort, Signature } from "@zhixing/core/contracts";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing/mesh/device-identity";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import type { DeviceIdentity, HomeTrustEvent, SecretRef, SecretStorePort, Signature } from "@zhixing-ai/core/contracts";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import { DeviceKey, enrollDeviceIdentity, verifyDeviceSignature } from "@zhixing-ai/mesh/device-identity";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import {
   applyTrustEvent,
   createSignedTrustEvent,
   homeTrustEventDigest,
   replayTrustChain,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { CurrentIssuerDeviceRemovalAuthority } from "./device-removal.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {

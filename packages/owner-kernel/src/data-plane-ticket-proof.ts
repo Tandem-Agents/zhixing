@@ -1,8 +1,8 @@
 import type {
   CancelProofBody,
   DataPlaneTicket,
-} from "@zhixing/core/contracts";
-import { dataPlaneTicketDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { dataPlaneTicketDigest } from "@zhixing-ai/core/protocol";
 
 export function hasOwnerIssuedAbortTicketProof(input: {
   readonly assignmentId: string;

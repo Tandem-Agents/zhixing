@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { ConversationDirectoryPageCollector, assertDirectoryPage, type ConversationDirectoryCursor } from '../directory-page.js';
 import { ConversationRepository, conversationsDir } from '../repository.js';
 import { readConversationDirectoryPage } from '../directory-reader.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 

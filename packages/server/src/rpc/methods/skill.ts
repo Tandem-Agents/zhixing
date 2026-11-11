@@ -14,8 +14,8 @@ import {
   SkillCatalogApplicationError,
   type SkillCatalogChangedFact,
   type SkillCatalogStatePatch,
-} from "@zhixing/core/skills/catalog";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/skills/catalog";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";

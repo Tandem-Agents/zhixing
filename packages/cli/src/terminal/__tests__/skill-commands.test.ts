@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DefaultCommandRegistry } from '@zhixing/core/typeahead';
-import type { SkillCatalogClient, SkillCatalogEntry, SkillCatalogChangedFact } from '@zhixing/core/skills/catalog';
+import { DefaultCommandRegistry } from '@zhixing-ai/core/typeahead';
+import type { SkillCatalogClient, SkillCatalogEntry, SkillCatalogChangedFact } from '@zhixing-ai/core/skills/catalog';
 import { TerminalSkillCommands, terminalSkillCommandRoute } from '../skill-commands.js';
 import { BUILTIN_COMMANDS } from '../../commands/builtin-definitions.js';
 

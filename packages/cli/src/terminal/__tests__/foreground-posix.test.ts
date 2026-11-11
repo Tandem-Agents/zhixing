@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { TerminalForegroundProcesses } from '../foreground-process.js';
 import { randomUUID } from 'node:crypto';
 import type { Socket } from 'node:net';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 async function bounded<T>(work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

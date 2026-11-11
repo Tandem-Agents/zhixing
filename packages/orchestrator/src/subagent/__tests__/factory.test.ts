@@ -17,32 +17,32 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { createEventBus } from "@zhixing/core/events";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { createEventBus } from "@zhixing-ai/core/events";
 import {
   extractFirstText,
   type AgentEventMap,
   type LLMRole,
   type LLMRoles,
   type ToolDefinition,
-} from "@zhixing/core/types";
-import { MockLLMProvider } from "@zhixing/core/loop";
-import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
+} from "@zhixing-ai/core/types";
+import { MockLLMProvider } from "@zhixing-ai/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing-ai/core/security";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
   ChildResourceLease,
   ResourceLease,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   DeviceCapacityArbiterPort,
   DeviceCapacityBudget,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { runChildAgent, type RunChildAgentOptions } from "../factory.js";
 import { runContextStorage, type RunContext } from "../../runtime/run-context.js";
 import { KERNEL_LOG_SOURCE } from "../../runtime/logging.js";
-import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogStatus } from "@zhixing/core/logging";
+import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogStatus } from "@zhixing-ai/core/logging";
 
 // ConfirmationBroker.prototype.cancelAll 的 spy 验证仍依赖该类作为
 // 子 broker 实例化目标(factory 内部 new ConfirmationBroker())

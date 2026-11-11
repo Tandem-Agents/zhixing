@@ -1,7 +1,7 @@
-import type { ArtifactStore, AuthorityCommitLog } from '@zhixing/core/authority';
-import type { ArtifactRef, ConversationRunState, JsonValue, TranscriptRunRecord, UserTurnInput } from '@zhixing/core/contracts';
+import type { ArtifactStore, AuthorityCommitLog } from '@zhixing-ai/core/authority';
+import type { ArtifactRef, ConversationRunState, JsonValue, TranscriptRunRecord, UserTurnInput } from '@zhixing-ai/core/contracts';
 import { canonicalize, interactionMirrorBatchDigest, validateConversationEnvelope, validateConversationSealedBundle,
-  validateNonEmptyUserTurnInput, validateTranscriptRunRecord, verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+  validateNonEmptyUserTurnInput, validateTranscriptRunRecord, verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { emptyConversationRunProjection, type RunProjection, type AdmittedProjection, type ConversationAbortTicketAuthorizer,
   type ConversationRunJournalRecord } from './conversation-assignment.js';
 import { readConversationRunRoot, type ConversationInputLocation } from './conversation-run-state-extras.js';
@@ -93,7 +93,7 @@ export async function readConversationExactValue<T>(log: AuthorityCommitLog, id:
 }
 
 export type ConversationRunView = Awaited<ReturnType<typeof readConversationRunViewMetadata>>;
-export async function readConversationRunViewMetadata(view: import('@zhixing/core/authority').DurableProjectionReadContext, id: string, scope: ConversationDecisionScope) {
+export async function readConversationRunViewMetadata(view: import('@zhixing-ai/core/authority').DurableProjectionReadContext, id: string, scope: ConversationDecisionScope) {
     const extra = await readConversationRunRoot(view, id);
     const fields = conversationFieldReader(view, id);
     const get = <T>(name: string, key: string | number) => fields.get<T>('extra-' + name, key);
@@ -251,7 +251,7 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
     const advances = new Set([...scope.advancementIds ?? [], ...[...controls.values()].flatMap(value => value.advancementSessionId ? [value.advancementSessionId] : [])]);
     if (scope.advancement && extra.openAdvancementSessionId) advances.add(extra.openAdvancementSessionId);
     for (const sessionId of advances) {
-      const status = await get<import('@zhixing/core/advancement').AdvancementSession['status']>('advancementStatuses', sessionId);
+      const status = await get<import('@zhixing-ai/core/advancement').AdvancementSession['status']>('advancementStatuses', sessionId);
       if (status) state.advancementStatuses.set(sessionId, status);
       if (scope.advancement) {
         const value = await get<NonNullable<ReturnType<typeof state.advancementSessions.get>>>('advancementSessions', sessionId);
@@ -269,10 +269,10 @@ export function materializedDispatchEnvelope<T extends { readonly work: object }
 export async function materializeConversationRunView(options: {
   conversationId: string; artifacts: ArtifactStore; verifier: ProtocolSignatureVerifier; scope: ConversationDecisionScope;
   selected: ConversationRunView; previous?: Pick<RunProjection, 'admittedByRun' | 'appendedInputs' | 'assignedById'>;
-  readEnvelopeAt(location: import('@zhixing/core/authority').DurableLogCheckpoint): Promise<import('@zhixing/core/contracts').CommitEnvelope<unknown>>;
+  readEnvelopeAt(location: import('@zhixing-ai/core/authority').DurableLogCheckpoint): Promise<import('@zhixing-ai/core/contracts').CommitEnvelope<unknown>>;
   readImportedRecord?(location: import('./conversation-base-source.js').ConversationBaseLocation): Promise<import('./conversation-transfer.js').ConversationTransferAuthorityRecord>;
   prefetchImported?(locations: readonly import('./conversation-base-source.js').ConversationBaseLocation[]): Promise<void>;
-  readAdvancementStatus?(id: string): Promise<import('@zhixing/core/advancement').AdvancementSession['status'] | undefined>;
+  readAdvancementStatus?(id: string): Promise<import('@zhixing-ai/core/advancement').AdvancementSession['status'] | undefined>;
 }) {
   const { conversationId: id, artifacts, verifier, scope, selected } = options;
   const { state, inputs, appended, mirrors, controls } = selected;

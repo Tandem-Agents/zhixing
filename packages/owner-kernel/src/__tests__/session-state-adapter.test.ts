@@ -6,8 +6,8 @@ import {
   AuthorityCacheIntegrity, FileDurableProjectionIndex, durableProjectionDirectoryName,
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
 import type {
   AdvancementExit,
   AdvancementProxyMessage,
@@ -20,22 +20,22 @@ import type {
   RubricContractDraftSnapshot,
   Signature,
   UserTurnInput,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   advancementEvidenceRequestId,
   advancementExecutionTurnId,
   type AdvancementControlEvent,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import {
   canonicalize, createMutationBatch, createConversationSealedBundle, sealedBundleArtifact,
   createSignedEvidenceRequest, createSignedTrustRuleSnapshot,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { isHoldingMaintenanceExclusion, StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
+import { isHoldingMaintenanceExclusion, StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
 import {
   ControlAdmissionJournal,
   createConversationControlEnvelope,
@@ -887,7 +887,7 @@ it("retains exact cancelled direct intent across a new head and authority replay
 }, DURABLE_IO_TEST_TIMEOUT_MS);
 
 it("advancement submission receipt shares the business commit and survives head replacement", async () => {
-  const { advancementSubmissionRequestId } = await import("@zhixing/core/advancement");
+  const { advancementSubmissionRequestId } = await import("@zhixing-ai/core/advancement");
   const h = await createHarness();
   const identity = { surfacePrincipal: "surface:test", submissionId: "turn-submission", requestDigest: protocolDigest("Submission", 1, { text: "task" }) };
   const requestId = advancementSubmissionRequestId("conv-1", identity.surfacePrincipal, identity.submissionId);
@@ -911,7 +911,7 @@ it("advancement submission receipt shares the business commit and survives head 
 }, DURABLE_IO_TEST_TIMEOUT_MS);
 
 it('retains deleted conversation resource cleanup until its exact durable receipt, without resurrecting identity', async () => {
-  const { advancementReviewLineageId, advancementReviewAttemptId, advancementReviewRootRequestId } = await import('@zhixing/core/advancement');
+  const { advancementReviewLineageId, advancementReviewAttemptId, advancementReviewRootRequestId } = await import('@zhixing-ai/core/advancement');
   const h = await createHarness(); await h.write([createdEvent(), confirmedEvent()]);
   const runRecordRef = { shardId: 'owner-log', runIndex: 0 }, lineageId = advancementReviewLineageId('session-1', runRecordRef);
   const attempt = { lineageId, generation: 1, runId: 'accepted-run', runIndex: 0, runRecordRef, phase: 'started' as const,
@@ -990,7 +990,7 @@ it.each(['pending-delete','session-text','session-state','session-key','session-
     const published = new FileDurableProjectionIndex({rootDir:folder,projectionId:id,reducerVersion:version,
       authenticated:true,integrity,readOnly:true,allowSegmentReclamation:false});
     await published.initialize(manifest.checkpoints);
-    const publicRows: Array<{key:string;value:import('@zhixing/core/contracts').JsonValue}> = [];
+    const publicRows: Array<{key:string;value:import('@zhixing-ai/core/contracts').JsonValue}> = [];
     let publishedCursor: string | undefined;
     do { const page=await published.scan({},256,publishedCursor); publicRows.push(...page.entries); publishedCursor=page.continuation; } while(publishedCursor);
     await published.stopStorageMaintenance();
@@ -999,7 +999,7 @@ it.each(['pending-delete','session-text','session-state','session-key','session-
     const index = new FileDurableProjectionIndex({rootDir:folder,projectionId:id,reducerVersion:version,allowSegmentReclamation:false});
     await index.initialize(manifest.checkpoints);
     let changed = 0;
-    const mutations: import('@zhixing/core/authority').DurableProjectionMutation[] = [];
+    const mutations: import('@zhixing-ai/core/authority').DurableProjectionMutation[] = [];
     {
       for (const row of publicRows) {
         const text = JSON.stringify(row.value);

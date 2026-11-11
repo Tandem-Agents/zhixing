@@ -11,7 +11,7 @@ import type {
   LogicalRecord,
   PublishRecord,
 } from "../../contracts/index.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   DELIVERY_AUTHORITY_PROJECTION_ID,

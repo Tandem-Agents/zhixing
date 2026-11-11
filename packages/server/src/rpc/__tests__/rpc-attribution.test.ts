@@ -3,7 +3,7 @@
  * 内层产品接口的标签照旧覆盖；未注册的方法不产生标签（标签集合有限）。
  */
 import { describe, expect, it } from "vitest";
-import { currentLogAttributionRefs, runWithLogAttribution } from "@zhixing/core/logging";
+import { currentLogAttributionRefs, runWithLogAttribution } from "@zhixing-ai/core/logging";
 import { HandlerRegistry, type HandlerContext } from "../handlers.js";
 
 // 存储观测在操作开始时读的就是这份上下文：跨过计时器后再取

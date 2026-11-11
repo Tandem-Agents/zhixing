@@ -1,8 +1,8 @@
 import path from "node:path";
-import type { HomeTrustRecord, SecretStorePort } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import { MESH_ENDPOINT_SERVICE_ID } from "@zhixing/mesh/bootstrap";
-import { createTempDir } from "@zhixing/test-utils";
+import type { HomeTrustRecord, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import { MESH_ENDPOINT_SERVICE_ID } from "@zhixing-ai/mesh/bootstrap";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";

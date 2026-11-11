@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { ChatRequest, StreamEvent } from "@zhixing/core";
-import { userMessage } from "@zhixing/core";
-import { providerRequestNeverSent } from "@zhixing/core/resilience";
+import type { ChatRequest, StreamEvent } from "@zhixing-ai/core";
+import { userMessage } from "@zhixing-ai/core";
+import { providerRequestNeverSent } from "@zhixing-ai/core/resilience";
 import type { ResolvedProvider } from "../types.js";
 import { DEFAULT_QUIRKS } from "../types.js";
 import { createAnthropicProvider } from "../adapters/anthropic-messages.js";

@@ -3,26 +3,26 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ExecutionRef,
   StreamConsumerAuth,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   StreamFrameVerifier,
   byteDigest,
   canonicalize,
   streamLogicalFrameDigest,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   StorageMaintenanceAdmissionError,
   type DeviceCapacityAdmission,
   type DeviceCapacityDimension,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceRequest,
-} from "@zhixing/core/resources";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/resources";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   AssignmentStreamSpool,

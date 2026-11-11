@@ -11,7 +11,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { ShardedTranscriptStore } from "../../../transcript/shard/store.js";
 import { SnapshotStore } from "../../../transcript/snapshot/store.js";
 import type { Message } from "../../../types/messages.js";

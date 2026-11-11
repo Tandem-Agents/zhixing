@@ -17,7 +17,7 @@ import type {
   ConversationUncertainResolutionResult,
   ConversationCommunicationHistory as RunsPage,
   ConversationHistoryCursor as RunsPageCursor,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type {
   SessionInputReceipt,
   SessionChangedPayload,
@@ -46,13 +46,13 @@ import type {
   SessionRubricPersistenceChoice,
   SessionSendEngage,
   SessionUsageResult,
-} from "@zhixing/rpc";
-import { generateTurnId, type UserTurnInput } from "@zhixing/core/types";
+} from "@zhixing-ai/rpc";
+import { generateTurnId, type UserTurnInput } from "@zhixing-ai/core/types";
 import type {
   ConversationStatusNotice,
   FinalFrame,
   StreamFrame,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   RpcClientError,
   RpcClientClosedError,
@@ -60,9 +60,9 @@ import {
   RPC_ERROR_CODES,
   type RpcClient,
   type RpcEncodedJsonSource,
-} from "@zhixing/server/client";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
-import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
+} from "@zhixing-ai/server/client";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc/session-wire";
+import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing-ai/core/contracts';
 import { boundedControlProjection } from './control-projection.js';
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
@@ -322,7 +322,7 @@ export class RpcConversationFacade {
     return (await this.listPage()).conversations;
   }
 
-  async listPage(page?: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest): Promise<SessionListResult> {
+  async listPage(page?: import('@zhixing-ai/core/conversation/application').ConversationDirectoryPageRequest): Promise<SessionListResult> {
     const client = await this.link.getClient();
     const result = await client.request<SessionListResult>("session.list", page ? { page } : undefined);
     const nextRequirement =
@@ -664,7 +664,7 @@ export class RpcConversationFacade {
   }
 
   async subscribePresentation(
-    conversationId: string, presentation: import('@zhixing/rpc/session-wire').SessionPresentationProfile,
+    conversationId: string, presentation: import('@zhixing-ai/rpc/session-wire').SessionPresentationProfile,
     afterCommitRevision = 0, replayFinals?: boolean,
   ): Promise<SessionSubscribeResult> {
     const client = await this.link.getClient();
@@ -675,12 +675,12 @@ export class RpcConversationFacade {
     return result;
   }
 
-  async controlTargets(conversationId: string): Promise<import('@zhixing/core/contracts').ConversationControlTargets> {
+  async controlTargets(conversationId: string): Promise<import('@zhixing-ai/core/contracts').ConversationControlTargets> {
     const client = await this.link.getClient();
     return boundedControlProjection(await client.request('session.statusHistory', { mode: 'control-targets', conversationId }), 16 * 1024);
   }
 
-  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[], historyThrough?: import('@zhixing/core/authority').DurableLogCheckpoint): Promise<ConversationControlPage> {
+  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[], historyThrough?: import('@zhixing-ai/core/authority').DurableLogCheckpoint): Promise<ConversationControlPage> {
     const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}), ...(historyThrough ? { historyThrough } : {}) };
     const consume = (page: ConversationControlPage): ConversationControlPage => boundedControlProjection({ ...page,
       facts: page.facts.map(fact => fact.kind === 'status' && 'reason' in fact.notice
@@ -690,27 +690,27 @@ export class RpcConversationFacade {
       : consume(await client.request<ConversationControlPage>('session.statusHistory', params));
   }
   /** 指定运行（至多 32 个）在历史边界之前的终态与已提交的 final */
-  async runFacts(conversationId: string, runIds: readonly string[], historyThroughInputLsn: number): Promise<import('@zhixing/core/contracts').ConversationRunFactsPage> {
+  async runFacts(conversationId: string, runIds: readonly string[], historyThroughInputLsn: number): Promise<import('@zhixing-ai/core/contracts').ConversationRunFactsPage> {
     const client = await this.link.getClient();
-    const page = await client.request<import('@zhixing/core/contracts').ConversationRunFactsPage>('session.statusHistory', { mode: 'run-facts', conversationId, runIds, historyThroughInputLsn });
+    const page = await client.request<import('@zhixing-ai/core/contracts').ConversationRunFactsPage>('session.statusHistory', { mode: 'run-facts', conversationId, runIds, historyThroughInputLsn });
     return boundedControlProjection({ entries: page.entries.map(({ order, fact }) => ({ order, fact: fact.kind === 'status' && 'reason' in fact.notice
       ? { ...fact, notice: { ...fact.notice, reason: fact.notice.reason?.slice(0, 2048) } } : fact })) }, 512 * 1024);
   }
   /** 指定运行（至多 32 个）的当前状态：历史据此在每个运行末尾标出结果，只读 */
-  async runOutcomes(conversationId: string, runIds: readonly string[]): Promise<import('@zhixing/core/contracts').ConversationRunOutcomesPage> {
+  async runOutcomes(conversationId: string, runIds: readonly string[]): Promise<import('@zhixing-ai/core/contracts').ConversationRunOutcomesPage> {
     const client = await this.link.getClient();
-    const page = await client.request<import('@zhixing/core/contracts').ConversationRunOutcomesPage>('session.statusHistory', { mode: 'run-outcomes', conversationId, runIds });
+    const page = await client.request<import('@zhixing-ai/core/contracts').ConversationRunOutcomesPage>('session.statusHistory', { mode: 'run-outcomes', conversationId, runIds });
     return boundedControlProjection({ entries: page.entries.filter(entry => runIds.includes(entry.runId))
       .map(({ runId, state, reason }) => ({ runId, state, ...(reason ? { reason: reason.slice(0, 512) } : {}) })) }, 64 * 1024);
   }
-  async completion(conversationId: string, runId: string, ownerEpoch?: number): Promise<import('@zhixing/core/contracts').ConversationCompletionPage> {
+  async completion(conversationId: string, runId: string, ownerEpoch?: number): Promise<import('@zhixing-ai/core/contracts').ConversationCompletionPage> {
     const client = await this.link.getClient();
     return boundedControlProjection(await client.request('session.statusHistory', { mode: 'completion', conversationId, runId, ownerEpoch }), 32 * 1024);
   }
-  async bodyPage(conversationId: string, cursor?: import('@zhixing/core/contracts').ConversationBodyCursor,
-    options: { direction?: 'forward' | 'reverse'; runId?: string; includeInputs?: true } = {}): Promise<import('@zhixing/core/contracts').ConversationBodyPage> {
+  async bodyPage(conversationId: string, cursor?: import('@zhixing-ai/core/contracts').ConversationBodyCursor,
+    options: { direction?: 'forward' | 'reverse'; runId?: string; includeInputs?: true } = {}): Promise<import('@zhixing-ai/core/contracts').ConversationBodyPage> {
     const client = await this.link.getClient();
-    const page = await client.request<import('@zhixing/core/contracts').ConversationBodyPage>('session.statusHistory', { mode: 'body-page', conversationId, ...(cursor ? { cursor } : {}), ...options });
+    const page = await client.request<import('@zhixing-ai/core/contracts').ConversationBodyPage>('session.statusHistory', { mode: 'body-page', conversationId, ...(cursor ? { cursor } : {}), ...options });
     return boundedControlProjection(page, 224 * 1024);
   }
 
@@ -727,8 +727,8 @@ export class RpcConversationFacade {
 
   // ─── 通知还原(持久订阅,跨重连) ───
 
-  onProcess(handler: (payload: import('@zhixing/rpc/session-wire').SessionProcessProjection) => void): () => void {
-    return this.link.onNotification('session.process', payload => handler(payload as import('@zhixing/rpc/session-wire').SessionProcessProjection));
+  onProcess(handler: (payload: import('@zhixing-ai/rpc/session-wire').SessionProcessProjection) => void): () => void {
+    return this.link.onNotification('session.process', payload => handler(payload as import('@zhixing-ai/rpc/session-wire').SessionProcessProjection));
   }
 
   /** 主通道 turn 产出流(AgentYield 原样)——接入面还原为 onYield 喂主渲染。 */

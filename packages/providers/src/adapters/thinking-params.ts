@@ -20,7 +20,7 @@
  *   - none     ：不发送任何思考参数
  */
 
-import type { ThinkingConfig } from "@zhixing/core";
+import type { ThinkingConfig } from "@zhixing-ai/core";
 import type { ThinkingDialect } from "../types.js";
 
 /**

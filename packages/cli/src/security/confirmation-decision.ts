@@ -1,4 +1,4 @@
-import type { ConfirmationDecision, ConfirmationOption } from "@zhixing/core/confirmation";
+import type { ConfirmationDecision, ConfirmationOption } from "@zhixing-ai/core/confirmation";
 import type { SelectResult } from "../tui/select-types.js";
 
 export function translate(

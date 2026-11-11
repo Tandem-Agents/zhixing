@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { FileArtifactStore, artifactJsonIndex } from '@zhixing/core/authority';
-import { canonicalize } from '@zhixing/core/protocol';
-import { createTempDir } from '@zhixing/test-utils';
+import { FileArtifactStore, artifactJsonIndex } from '@zhixing-ai/core/authority';
+import { canonicalize } from '@zhixing-ai/core/protocol';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { readConversationReplayRecord } from '../conversation-replay-record.js';
 
 describe('bounded conversation replay validation', () => {

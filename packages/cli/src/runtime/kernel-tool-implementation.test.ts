@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { skillNameToId } from "@zhixing/core/skills/id";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
 import { createHostKernelToolImplementation } from "./kernel-tool-implementation.js";
 
 describe("Host Kernel Tool implementation", () => {

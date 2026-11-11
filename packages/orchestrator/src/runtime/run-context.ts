@@ -19,9 +19,9 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgentEventMap, ModelProviderPhases, PostTurnControlIntent, TurnOrigin } from "@zhixing/core/types";
-import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
-import type { EventBus } from "@zhixing/core/events";
+import type { AgentEventMap, ModelProviderPhases, PostTurnControlIntent, TurnOrigin } from "@zhixing-ai/core/types";
+import type { DurableToolExecutionAuthorizer } from "@zhixing-ai/core/security";
+import type { EventBus } from "@zhixing-ai/core/events";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -29,13 +29,13 @@ import type {
   ModelCallResourceMeter,
   ResourceReservationPort,
   ResourceLease,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   DeviceCapacityArbiterPort,
   DeviceCapacityBudget,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 
-export type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
+export type { DurableToolExecutionAuthorizer } from "@zhixing-ai/core/security";
 
 /**
  * Per-run/per-spawn 上下文 —— 跨嵌套异步链路传递的最小集合。
@@ -53,7 +53,7 @@ export interface RunContext {
   childTaskId?: string;
   readonly logPorts?: import("./logging.js").KernelLogPorts;
   /** Trusted capability ceiling, inherited by descendants; normal approval cannot expand it. */
-  readonly toolExecutionCeiling?: import("@zhixing/core/security").ToolExecutionCeiling;
+  readonly toolExecutionCeiling?: import("@zhixing-ai/core/security").ToolExecutionCeiling;
   bus: EventBus<AgentEventMap>;
   lineage: string;
   /**
@@ -69,7 +69,7 @@ export interface RunContext {
    * 远程确认或通知目标时从这里读取明确目标。
    */
   turnOrigin?: TurnOrigin;
-  worksceneTasks?: readonly import("@zhixing/core/workscene/application").WorksceneTaskReference[];
+  worksceneTasks?: readonly import("@zhixing-ai/core/workscene/application").WorksceneTaskReference[];
   /** Assignment-scoped authority inherited by every descendant tool executor. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** One shared metering sequence for every provider attempt in this durable run tree. */

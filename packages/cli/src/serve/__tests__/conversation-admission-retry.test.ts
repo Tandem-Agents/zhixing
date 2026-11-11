@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion } from "@zhixing/core/resources";
+import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion } from "@zhixing-ai/core/resources";
 import { retryControlAdmission, retryResourceUsage } from "../conversation-admission-retry.js";
 afterEach(()=>vi.useRealTimers());
 const pressure=()=>new StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"probe-unavailable",retryAfterMs:10});
@@ -29,9 +29,9 @@ it("does not wait on permanent failures or while holding exclusion", async()=>{
 });
 
 it("recovers a cold external control envelope after lookup pressure using real storage", async()=>{
-  const {createTempDir}=await import("@zhixing/test-utils");
-  const {FileArtifactStore,FileAuthorityCommitLog}=await import("@zhixing/core/authority");
-  const {ControlAdmissionJournal,createInitialControlEnvelope}=await import("@zhixing/owner-kernel/control-admission");
+  const {createTempDir}=await import("@zhixing-ai/test-utils");
+  const {FileArtifactStore,FileAuthorityCommitLog}=await import("@zhixing-ai/core/authority");
+  const {ControlAdmissionJournal,createInitialControlEnvelope}=await import("@zhixing-ai/owner-kernel/control-admission");
   const {join}=await import("node:path");
   const root=await createTempDir("cold-control-admission");
   const artifacts=new FileArtifactStore(join(root,"artifacts"));

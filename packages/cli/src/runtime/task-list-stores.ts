@@ -13,8 +13,8 @@
  * 给 `createBuiltinExtraToolsAssembly()`。
  */
 
-import type { IConversationRepository, TaskListState } from "@zhixing/core/conversation";
-import type { TaskListStore } from "@zhixing/core/conversation/application";
+import type { IConversationRepository, TaskListState } from "@zhixing-ai/core/conversation";
+import type { TaskListStore } from "@zhixing-ai/core/conversation/application";
 
 // ─── 持久化 store ───
 

@@ -3,15 +3,15 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { ConversationController } from '../../runtime/conversation-controller.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
-import { RpcClientClosedError } from '@zhixing/server';
+import { RpcClientClosedError } from '@zhixing-ai/server';
 import { PendingInputReceiptError, RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js';
 import { boundedControlProjection } from '../../runtime/control-projection.js';
-import { ADVANCEMENT_PROPOSED_NOTICE, advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
+import { ADVANCEMENT_PROPOSED_NOTICE, advancementProposalStalledMessage } from '@zhixing-ai/core/advancement/proposal-messages';
 import { projectCommittedTerminalOutcome } from '../session-commands.js';
-import type { AdvancementProposalFact } from '@zhixing/core/advancement';
-import { createControlSessionEventEnvelope } from '@zhixing/rpc/session-events';
+import type { AdvancementProposalFact } from '@zhixing-ai/core/advancement';
+import { createControlSessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
 import { advancementProposalEvent } from '../../serve/advancement-proposal-events.js';
-import { parseConversationId } from '@zhixing/core/conversation';
+import { parseConversationId } from '@zhixing-ai/core/conversation';
 
 // Run the production page methods with controlled transport/controller results.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);

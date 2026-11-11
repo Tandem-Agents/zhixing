@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import {
   createAnchorRuntimeCapabilityCatalog,
@@ -8,8 +8,8 @@ import {
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
 import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 import { hostToolPermissionRuleSets } from "../../runtime/kernel-tool-implementation.js";
-import { jobRunTrustScopeInput } from "@zhixing/core/trust-administration";
-import type { SecretRef } from "@zhixing/core/contracts";
+import { jobRunTrustScopeInput } from "@zhixing-ai/core/trust-administration";
+import type { SecretRef } from "@zhixing-ai/core/contracts";
 
 class MemorySecrets {
   entries = new Map<string, string>();

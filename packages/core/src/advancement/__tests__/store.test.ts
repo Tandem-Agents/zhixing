@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { advancementLogPath } from "../paths.js";
 import { AdvancementStore } from "../store.js";
 import { advancementExecutionTurnId } from "../proposal-identity.js";

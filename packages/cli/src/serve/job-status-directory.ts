@@ -1,4 +1,4 @@
-import type { JobStatusNotice, SchedulerUserNotice } from "@zhixing/core/contracts";
+import type { JobStatusNotice, SchedulerUserNotice } from "@zhixing-ai/core/contracts";
 
 export interface JobStatusSource {
   statusHistory(

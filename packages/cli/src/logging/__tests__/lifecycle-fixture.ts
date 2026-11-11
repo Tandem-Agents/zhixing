@@ -1,5 +1,5 @@
 import { beginRuntimeLogging } from "../runtime.js";
-import { runServer, createServerContext, DEFAULT_SERVER_CONFIG } from "@zhixing/server";
+import { runServer, createServerContext, DEFAULT_SERVER_CONFIG } from "@zhixing-ai/server";
 import assert from 'node:assert/strict';
 import { LogFilesProcess } from '../files-process.js';
 import { writerEndpoint, writerRootKey } from '../writer-admission.js';

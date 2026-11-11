@@ -7,12 +7,12 @@ import type {
   WorksceneManagementPort,
   WorksceneRuntimeProjectionReadPort,
   WorksceneWorkspaceAdministrationReadPort,
-} from "@zhixing/core/workscene/application";
-import type { AdvancementActiveStateProjection } from "@zhixing/core/advancement/application";
-import { WorksceneAssignmentToolApplicationService, WorksceneRunToolApplicationService, type WorksceneRunToolApplication } from "@zhixing/core/workscene/application";
-import type { WorksceneWriteMutation } from "@zhixing/core/contracts";
-import { parseConversationId } from "@zhixing/core/conversation";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/workscene/application";
+import type { AdvancementActiveStateProjection } from "@zhixing-ai/core/advancement/application";
+import { WorksceneAssignmentToolApplicationService, WorksceneRunToolApplicationService, type WorksceneRunToolApplication } from "@zhixing-ai/core/workscene/application";
+import type { WorksceneWriteMutation } from "@zhixing-ai/core/contracts";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
 
 interface AnchorConversationStorageProjection {

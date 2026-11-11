@@ -1,14 +1,14 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：recovery。
-import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import type { ConversationStatusNotice } from "@zhixing/core/contracts";
-import { userMessageFromTurnInput, type Message } from "@zhixing/core";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { InProcessAssignmentSubmission } from "@zhixing/executor";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import { StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
+import type { ConversationStatusNotice } from "@zhixing-ai/core/contracts";
+import { userMessageFromTurnInput, type Message } from "@zhixing-ai/core";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { InProcessAssignmentSubmission } from "@zhixing-ai/executor";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime, DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
@@ -364,7 +364,7 @@ describe("ConversationProtocolRuntime", () => {
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("does not start a cancelled control after waiting for the terminal owner", async () => {
-    const { runWithMaintenanceUrgency } = await import("@zhixing/core/resources");
+    const { runWithMaintenanceUrgency } = await import("@zhixing-ai/core/resources");
     const home = await createTempDir("conversation-cancel-queue-signal");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     const protocol = createProtocol({ authority, manager: () => { throw Error("unused"); },

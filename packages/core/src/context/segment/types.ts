@@ -26,7 +26,7 @@ import type { SegmentLedger } from "./coverage.js";
  * SegmentManager 关心的 attention 阈值子集。
  *
  * 用专用结构兼容接口而不是直接依赖 ModelCapability，是因为 ModelCapability
- * 完整类型与数据归属 @zhixing/providers 包（与 vendor presets 同质），而 core
+ * 完整类型与数据归属 @zhixing-ai/providers 包（与 vendor presets 同质），而 core
  * 包不应反向 import providers。调用方传入完整 ModelCapability 时 TypeScript
  * 结构兼容性自动接受。
  */
@@ -141,7 +141,7 @@ export interface SegmentPersistence {
 /**
  * task_list 状态读取接口 —— 段切换决策时判断"是否有 in-progress 任务"。
  *
- * 抽象目的：core 不能反向 import @zhixing/tools-builtin（依赖倒置）；
+ * 抽象目的：core 不能反向 import @zhixing-ai/tools-builtin（依赖倒置）；
  * 通过 reader 接口由 cli 装配层注入实现。
  *
  * 实现契约：

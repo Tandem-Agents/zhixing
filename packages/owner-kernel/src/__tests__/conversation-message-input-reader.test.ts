@@ -1,11 +1,11 @@
 /** 按消息 id 的状态查询：历史外读取的语义与规模见 conversation-outside-history 的两个测试文件 */
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
-import { FileArtifactStore, FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing/core/authority';
+import { createTempDir } from '@zhixing-ai/test-utils';
+import { FileArtifactStore, FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing-ai/core/authority';
 import { ConversationMessageInputReader } from '../conversation-message-input-reader.js';
 import type { ConversationReadIndex, InputPointer } from '../conversation-read-index.js';
-import { canonicalize, createConversationSealedBundle } from '@zhixing/core/protocol';
+import { canonicalize, createConversationSealedBundle } from '@zhixing-ai/core/protocol';
 import { trackAuthorityLog, DURABLE_IO_TEST_TIMEOUT_MS } from './durable-io-test-support.js';
 
 const admission = (id: string, position = 0, source = 'user') => ({ t: 'admitted', runId: id, ingressKey: id, queuedPosition: position,

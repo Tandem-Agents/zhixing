@@ -1,23 +1,23 @@
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import path from "node:path";
-import type { MeshEndpointDescriptor, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceLifecycleJournal, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing/core/authority";
-import { canonicalize, createSignedExecutorRemovalReceipt, protocolDigest } from "@zhixing/core/protocol";
-import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
-import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
-import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import { MeshServiceRegistry, type MeshServiceDefinition } from "@zhixing/mesh/service-registry";
+import type { MeshEndpointDescriptor, SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog, FileDurableProjectionIndex } from "@zhixing-ai/core/authority";
+import { canonicalize, createSignedExecutorRemovalReceipt, protocolDigest } from "@zhixing-ai/core/protocol";
+import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
+import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing-ai/mesh/blind-rendezvous";
+import { MeshEndpointDirectory } from "@zhixing-ai/mesh/bootstrap";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import { MeshServiceRegistry, type MeshServiceDefinition } from "@zhixing-ai/mesh/service-registry";
 import {
   buildHomeTrustRecord,
   createSignedTrustEvent,
   CURRENT_TRUST_PROJECTION_ID,
   replayTrustChain,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
-import { captureFileIo, createTempDir, type FileIoSnapshot } from "@zhixing/test-utils";
+import { captureFileIo, createTempDir, type FileIoSnapshot } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   CurrentIssuerDeviceRemovalAuthority,

@@ -1,4 +1,4 @@
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 
 /** Process-local execution lifetime, distinct from owner commit/cancellation. */
 export class ConversationKernelExecution {

@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
-import { acquireFileLock } from '@zhixing/core/persistence';
-import { recoverOrphanTmp, writeAtomic } from '@zhixing/core/transcript';
+import { acquireFileLock } from '@zhixing-ai/core/persistence';
+import { recoverOrphanTmp, writeAtomic } from '@zhixing-ai/core/transcript';
 import type { SchedulerNoticePage, SchedulerNoticeView } from '../runtime/rpc-scheduler-facade.js';
 
 /**

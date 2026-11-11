@@ -1,4 +1,4 @@
-import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
+import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing-ai/core/protocol";
 import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime,
   leaseClockProjectionId, readLeaseClockSummary, registerLeaseClockProjection, type LeaseClockSummary } from "./assignment-lease-clock.js";
 import { ASSIGNMENT_LEDGER_INDEX_ID, assignmentChangedAfter, assignmentIdFromStream, hasAssignmentHistoryKeys, readAssignmentEnvelopes, readAssignmentEnvelopesAfter,
@@ -8,7 +8,7 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError, currentMaintenanceAbortSignal, currentMaintenanceUrgency,
   isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runDetachedDeviceCapacity, runDetachedMaintenanceContext, runWithMaintenanceUrgency, waitForMaintenanceRetry,
-  type StorageMaintenanceUrgency } from "@zhixing/core/resources";
+  type StorageMaintenanceUrgency } from "@zhixing-ai/core/resources";
 import {
   AuthorityStorageError,
   awaitAuthorityPreparation,
@@ -28,7 +28,7 @@ import {
   type RebuildableDurableProjectionIndex,
   AuthorityPreparationRequired,
   projectionCheckpointKey,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AssignmentActivationPayload,
@@ -75,12 +75,12 @@ import type {
   RunExecutorPort,
   StreamConsumerAuth,
   StreamFrame,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   MAX_LEDGER_EVIDENCE_PAGE_BYTES,
   MAX_LEDGER_EVIDENCE_PAGE_ENTRIES,
-} from "@zhixing/core/contracts";
-import type { PermissionRule, TrustRuleSnapshot } from "@zhixing/core/security";
+} from "@zhixing-ai/core/contracts";
+import type { PermissionRule, TrustRuleSnapshot } from "@zhixing-ai/core/security";
 import {
   assertActivePermissionSnapshotLease,
   acceptedRemoteIntervalRemainingMs,
@@ -161,17 +161,17 @@ import {
   type ProtocolSigner,
   type StreamDataFramePayload,
   type StreamVerifierCheckpoint,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type { ExecutorAssignmentResourceCoordinator, ExecutorCoordinationOptions, ExecutorExecutionScope } from "./resource-governor.js";
 import type { DataPlaneAssignmentBinding, DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 
 type ConversationEnvelope = Extract<
-  import("@zhixing/core/contracts").DispatchEnvelope,
+  import("@zhixing-ai/core/contracts").DispatchEnvelope,
   { execution: "conversation" }
 >;
 type JobEnvelope = Extract<
-  import("@zhixing/core/contracts").DispatchEnvelope,
+  import("@zhixing-ai/core/contracts").DispatchEnvelope,
   { execution: "job" }
 >;
 type AssignmentEnvelope = ConversationEnvelope | JobEnvelope;
@@ -598,7 +598,7 @@ interface JobRecoveryIndexValue {
 
 export interface JobRecoveryObligation {
   readonly envelope: Extract<
-    import("@zhixing/core/contracts").DispatchEnvelope,
+    import("@zhixing-ai/core/contracts").DispatchEnvelope,
     { execution: "job" }
   >;
   readonly execution: boolean;
@@ -2621,7 +2621,7 @@ export class ConversationAssignmentLedger implements
 
   async readStagedMutationOverlay(
     assignmentId: string,
-  ): Promise<readonly import("@zhixing/core/contracts").AssignmentMutationOverlayRecord[]> {
+  ): Promise<readonly import("@zhixing-ai/core/contracts").AssignmentMutationOverlayRecord[]> {
     return this.#select(assignmentId, (state) =>
       state.stagedMutations.map((record) => ({
         recordSeq: record.seq,
@@ -2671,7 +2671,7 @@ export class ConversationAssignmentLedger implements
     } else {
       validateTranscriptRunRecord(input.runRecord, envelope.work.runId);
     }
-    let batchValue: import("@zhixing/core/contracts").MutationBatch | undefined;
+    let batchValue: import("@zhixing-ai/core/contracts").MutationBatch | undefined;
     let batchSummary:
       | { readonly ref: ArtifactRef; readonly sessionCount: number; readonly globalCount: number }
       | undefined;
@@ -2761,7 +2761,7 @@ export class ConversationAssignmentLedger implements
     if (staged.some((record) => record.domain !== "global")) {
       throw corruptLedger("Job assignment contains a session mutation");
     }
-    let batchValue: import("@zhixing/core/contracts").MutationBatch | undefined;
+    let batchValue: import("@zhixing-ai/core/contracts").MutationBatch | undefined;
     let batchSummary:
       | { readonly ref: ArtifactRef; readonly sessionCount: 0; readonly globalCount: number }
       | undefined;
@@ -3474,7 +3474,7 @@ export class ConversationAssignmentLedger implements
     assignmentId: string,
     bundle: SealedBundle,
     bundleRef: ArtifactRef,
-    mutationBatch?: import("@zhixing/core/contracts").MutationBatch,
+    mutationBatch?: import("@zhixing-ai/core/contracts").MutationBatch,
   ): Promise<void> {
     const mutationBatchRef = mutationBatchArtifactReference(mutationBatch);
     const references = [
@@ -4764,7 +4764,7 @@ export class ConversationAssignmentLedger implements
   readonly #reduce = async (
     state: LedgerProjection,
     record: LogicalRecord<unknown>,
-    commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     receiptRetirement = false,
   ): Promise<LedgerProjection> => {
     if (record.stream !== assignmentStream(state.assignmentId)) {
@@ -5018,7 +5018,7 @@ export class ConversationAssignmentLedger implements
       const batchBytes = await this.#artifacts.get(sealed.mutationBatch.ref);
       const candidate = JSON.parse(
         Buffer.from(batchBytes).toString("utf8"),
-      ) as import("@zhixing/core/contracts").MutationBatch;
+      ) as import("@zhixing-ai/core/contracts").MutationBatch;
       const batch = expectedExecution === "job"
         ? validateJobMutationBatch(candidate)
         : validateMutationBatch(candidate);
@@ -6352,7 +6352,7 @@ function isReferenceContainer(value: unknown): value is { readonly ref: Artifact
 }
 
 function mutationBatchArtifactReference(
-  batch: import("@zhixing/core/contracts").MutationBatch | undefined,
+  batch: import("@zhixing-ai/core/contracts").MutationBatch | undefined,
 ): ArtifactRef | undefined {
   return batch ? mutationBatchArtifact(batch).ref : undefined;
 }

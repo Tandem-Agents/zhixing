@@ -1,4 +1,4 @@
-import type { StreamEvent } from "@zhixing/core";
+import type { StreamEvent } from "@zhixing-ai/core";
 import { describe, expect, it } from "vitest";
 import { DISTILL_SYSTEM_PROMPT, buildDistillPrompt, collectStream } from "../distill.js";
 

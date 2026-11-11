@@ -11,10 +11,10 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { SchedulerProvider, TaskListProvider } from "@zhixing/core/context";
-import { type TaskStatusSummary } from "@zhixing/core/scheduler";
-import { TaskListService } from "@zhixing/core/conversation/application";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { SchedulerProvider, TaskListProvider } from "@zhixing-ai/core/context";
+import { type TaskStatusSummary } from "@zhixing-ai/core/scheduler";
+import { TaskListService } from "@zhixing-ai/core/conversation/application";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
   EMPTY_TASK_STATUS_SUMMARY,

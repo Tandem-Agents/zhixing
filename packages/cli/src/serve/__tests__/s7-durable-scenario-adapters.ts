@@ -1,12 +1,12 @@
 import {
   createCoreS7DurableScenarios,
-} from "@zhixing/core/test-support/s7-durable";
+} from "@zhixing-ai/core/test-support/s7-durable";
 import type {
   S7ExecutableScenario,
-} from "@zhixing/core/test-support/s7-durable-harness";
+} from "@zhixing-ai/core/test-support/s7-durable-harness";
 import {
   createOwnerKernelS7DurableScenarios,
-} from "@zhixing/owner-kernel/test-support/s7-durable";
+} from "@zhixing-ai/owner-kernel/test-support/s7-durable";
 import { createCliS7DurableScenarios } from "./s7-durable-runtime-witness.js";
 
 type ScenarioMap = ReadonlyMap<string, S7ExecutableScenario>;

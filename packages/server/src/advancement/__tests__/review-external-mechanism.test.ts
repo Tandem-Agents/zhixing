@@ -4,17 +4,17 @@ import type {
   AdvancementReviewRootContract,
   AdvancementRunReview,
   AdvancementSession,
-} from "@zhixing/core/advancement";
-import type { ImmediateRootResourceLease } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/advancement";
+import type { ImmediateRootResourceLease } from "@zhixing-ai/core/contracts";
 import type {
   AdvancementReviewAttemptInput,
   AdvancementReviewRootBinding,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   AdvancementEvidenceDeferredError,
   type AdvancementEvidenceTarget,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
 
 describe("Advancement review external mechanism", () => {
   it("binds concurrently resolved evidence targets to the originating accepted request", async () => {

@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { access } from "node:fs/promises";
 import path from "node:path";
-import { FileArtifactStore } from "@zhixing/core/authority";
-import type { ArtifactRef } from "@zhixing/core/contracts";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import type { ArtifactRef } from "@zhixing-ai/core/contracts";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import type { PlannedAnchorCandidateIdentity } from "./planned-anchor-transfer.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";

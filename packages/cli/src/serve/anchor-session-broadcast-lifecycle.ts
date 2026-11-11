@@ -3,7 +3,7 @@ import {
   type SessionActivityBroadcast,
   type SessionBroadcast,
   type SessionBroadcastTransport,
-} from "@zhixing/rpc/session-broadcast";
+} from "@zhixing-ai/rpc/session-broadcast";
 
 export interface AnchorSessionBroadcastPort {
   readonly session: SessionBroadcast;

@@ -12,7 +12,7 @@
  * - dispatcher 自身无状态，可重用于多个连接
  */
 
-import { failureDiagnostic, runWithLogAttribution } from "@zhixing/core/logging";
+import { failureDiagnostic, runWithLogAttribution } from "@zhixing-ai/core/logging";
 import type { RpcConnection } from "./connection.js";
 import type { ServerContext } from "../context.js";
 import { RPC_ERROR_CODES, type JsonRpcError } from "./protocol.js";

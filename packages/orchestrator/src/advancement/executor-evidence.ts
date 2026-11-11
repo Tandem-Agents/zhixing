@@ -9,7 +9,7 @@ import type {
   EvidenceExecutionResult,
   EvidenceHandlerPort,
   EvidenceRequest,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   byteDigest,
   canonicalize,
@@ -19,11 +19,11 @@ import {
   validateEvidenceRequest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { scrubSecrets } from "@zhixing/core/security";
-import { runWithDeviceCapacity } from "@zhixing/core/resources";
-import type { EvidenceKind, EvidenceLocator } from "@zhixing/core/advancement";
-import { PathGuard } from "@zhixing/core/security";
+} from "@zhixing-ai/core/protocol";
+import { scrubSecrets } from "@zhixing-ai/core/security";
+import { runWithDeviceCapacity } from "@zhixing-ai/core/resources";
+import type { EvidenceKind, EvidenceLocator } from "@zhixing-ai/core/advancement";
+import { PathGuard } from "@zhixing-ai/core/security";
 import type { AgentRuntimeCapacityBinding } from "../runtime/governed-agent-runtime.js";
 import { EvidenceJournal } from "./evidence-journal.js";
 

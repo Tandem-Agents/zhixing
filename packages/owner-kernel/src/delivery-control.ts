@@ -9,17 +9,17 @@ import {
   projectDeliveryApplicationProjection,
   type DeliveryAuthority,
   type DeliveryProjection,
-} from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/delivery";
 import type {
   DeliveryUncertainResolutionCommand,
   DeliveryUncertainResolutionCorrectnessPort,
   DeliveryUncertainResolutionDecide,
   DeliveryResolutionFence,
-} from "@zhixing/core/delivery/application";
+} from "@zhixing-ai/core/delivery/application";
 import type {
   DeliveryStatusNotice,
   DeliveryStreamRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ControlAdmissionJournal,
 } from "./control-admission.js";

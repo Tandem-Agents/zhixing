@@ -1,6 +1,6 @@
-import { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
+import { CheckpointDirectoryHandle } from "@zhixing-ai/mesh/filesystem";
 import path from "node:path";
-import { logFailureEvidence, logStorageFailure } from "@zhixing/core/logging";
+import { logFailureEvidence, logStorageFailure } from "@zhixing-ai/core/logging";
 import { LegacyLogFiles, isLegacyLogFile, statLogFiles } from "./legacy-files.js";
 import { consumeLogWorkerStdio } from './terminal-worker.js';
 

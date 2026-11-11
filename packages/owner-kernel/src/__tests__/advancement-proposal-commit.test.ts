@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { RubricContractDraftSnapshot } from "@zhixing/core/contracts";
+import type { RubricContractDraftSnapshot } from "@zhixing-ai/core/contracts";
 import {
   ADVANCEMENT_PROPOSAL_TOOL,
   advancementProposalId,
   advancementProposalSessionId,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import { DURABLE_IO_TEST_TIMEOUT_MS } from "./durable-io-test-support.js";
 import {
   PROPOSAL, PROPOSAL_CONVERSATION as CONVERSATION, PROPOSAL_NOW as NOW,

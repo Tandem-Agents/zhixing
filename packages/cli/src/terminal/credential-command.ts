@@ -1,4 +1,4 @@
-import type { PlatformSecretStoreOptions } from '@zhixing/secrets';
+import type { PlatformSecretStoreOptions } from '@zhixing-ai/secrets';
 import { createTerminalOwnedProcessFactory } from './host-launch.js';
 export { nativeSecretPlatform as terminalSecretPlatform } from '../platform/secret-platform.js';
 

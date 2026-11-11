@@ -1,15 +1,15 @@
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { worksceneConversationId } from "@zhixing/core/conversation";
+import { worksceneConversationId } from "@zhixing-ai/core/conversation";
 import {
   createPermissionStoreTrustAdministrationRepository,
   PermissionStore,
-} from "@zhixing/core/security";
+} from "@zhixing-ai/core/security";
 import {
   workspaceTrustIdentity,
   type TrustAdministrationRepositoryRule,
-} from "@zhixing/core/trust-administration";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/trust-administration";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";
 import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 

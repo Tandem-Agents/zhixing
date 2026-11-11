@@ -1,12 +1,12 @@
-import type { AgentYield } from "@zhixing/core/loop";
-import type { IConfirmationBroker } from "@zhixing/core/confirmation";
-import type { ToolSideEffectObserver } from "@zhixing/core";
+import type { AgentYield } from "@zhixing-ai/core/loop";
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import type { ToolSideEffectObserver } from "@zhixing-ai/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
   KernelRunEvent,
   KernelTerminal,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
 

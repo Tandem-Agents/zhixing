@@ -1,13 +1,13 @@
-import type { EnvironmentRequirement } from "@zhixing/core/contracts";
-import { parseConversationId } from "@zhixing/core/conversation";
+import type { EnvironmentRequirement } from "@zhixing-ai/core/contracts";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
 import type {
   ConversationSecurityPermissionRule,
   ConversationSecurityProjectionPort,
   ConversationSecurityResult,
-} from "@zhixing/core/conversation/application";
-import type { TrustRuleSnapshot } from "@zhixing/core/security";
-import { resolveExecutionTrustScope } from "@zhixing/core/trust-administration";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/conversation/application";
+import type { TrustRuleSnapshot } from "@zhixing-ai/core/security";
+import { resolveExecutionTrustScope } from "@zhixing-ai/core/trust-administration";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 /** 对话当前正在执行的运行：指派的已验签清单环境与冻结权限快照摘要。 */
 export type ActiveRunSecurityFacts = (conversationId: string) => Promise<

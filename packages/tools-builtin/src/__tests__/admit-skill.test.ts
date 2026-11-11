@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogAdmissionOutcome,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 import { createAdmitSkillTool } from "../skill.js";
 
 const CTX = { workingDirectory: "/tmp", toolCallId: "tool-admit" } as never;

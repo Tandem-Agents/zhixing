@@ -1,13 +1,13 @@
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
+import type { HomeTrustRecord } from "@zhixing-ai/core/contracts";
 import { rm, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { persistDeviceKey } from "@zhixing-ai/mesh/device-key-store";
 import {
   createPlatformSecretStore,
   readPlatformSecretStoreBackendBinding,
-} from "@zhixing/secrets";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/secrets";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   captureManagedHostAdmission,
@@ -18,8 +18,8 @@ import {
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
-import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
-import { loadConfig } from "@zhixing/providers";
+import { resolveHostLaunchPlan } from "@zhixing-ai/mesh/bootstrap";
+import { loadConfig } from "@zhixing-ai/providers";
 
 describe("managed host trust transition", () => {
   it("keeps a current anchor online after reconciling the durable plan", async () => {

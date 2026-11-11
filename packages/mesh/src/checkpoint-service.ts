@@ -7,12 +7,12 @@ import type {
   RecoveryCheckpointGeneration,
   RecoveryCheckpointRequest,
   RecoveryCheckpointVerification,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   AuthorityCommitLog,
   ArtifactCheckpointRetentionPort,
   MutableArtifactStore,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import {
   checkpointEnvelopeArtifact,
@@ -48,7 +48,7 @@ import {
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 
 const FULL_SCOPE = Object.freeze([
   "global-authority",
@@ -661,7 +661,7 @@ async function appendCheckpointRecords(
 function assertFullBinding(
   created: Extract<CheckpointStreamRecord, { t: "checkpoint-created" }>,
   checkpoint: CheckpointPackage,
-  payload: import("@zhixing/core/contracts").FullAuthorityCheckpointPayload,
+  payload: import("@zhixing-ai/core/contracts").FullAuthorityCheckpointPayload,
   trust: HomeTrustRecord,
 ): void {
   if (

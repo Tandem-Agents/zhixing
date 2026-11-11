@@ -3,7 +3,7 @@ import type {
   McpCredentialProjection,
   ProviderCredentialProjection,
   ZhixingCredentials,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 
 export interface CredentialExposureSecretProjection {
   readonly providers?: ProviderCredentialProjection["providers"];

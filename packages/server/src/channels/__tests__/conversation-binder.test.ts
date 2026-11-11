@@ -2,11 +2,11 @@ import { describe, it, expect } from "vitest";
 import { resolveConversationId } from "../conversation-binder.js";
 import {
   DEFAULT_CONVERSATION_ID,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 import type {
   ChannelBindingPolicy,
   InboundMessage,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 
 function dm(channelId: string, from: string): InboundMessage {
   return { channelId, from, text: "hi", chatType: "dm" };

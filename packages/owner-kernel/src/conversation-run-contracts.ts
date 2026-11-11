@@ -1,7 +1,7 @@
-import { validateConversationCommitSummary } from "@zhixing/core/contracts";
-import { AuthorityStorageError } from "@zhixing/core/authority";
-import { isAdvancementControlEvent } from "@zhixing/core/advancement";
-import type { AdvancementControlEvent } from "@zhixing/core/advancement";
+import { validateConversationCommitSummary } from "@zhixing-ai/core/contracts";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
+import { isAdvancementControlEvent } from "@zhixing-ai/core/advancement";
+import type { AdvancementControlEvent } from "@zhixing-ai/core/advancement";
 import type {
   ArtifactRef,
   FinalOutboxRecord,
@@ -24,7 +24,7 @@ import type {
   SupersedeProof,
   UncertainResolutionFact,
   UserTurnInput,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 
 /**
  * Shared replay predicates compare literal state values only, so the
@@ -49,7 +49,7 @@ import {
   validateSupersedeProof,
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   validateConversationChannelChallengeRecord,
   type ConversationChannelChallengeRecord,
@@ -208,7 +208,7 @@ export type ConversationRunJournalRecord =
       readonly assignmentId: string;
       readonly bundle: { readonly ref: ArtifactRef };
       readonly commitRevision: number;
-      readonly readSummary?: import('@zhixing/core/contracts').ConversationCommitSummary;
+      readonly readSummary?: import('@zhixing-ai/core/contracts').ConversationCommitSummary;
     }
   | {
       readonly t: "bundle-ack-observed";
@@ -1729,7 +1729,7 @@ export function assertCommittedRunRecord(value: unknown): asserts value is Extra
   if (value.readSummary !== undefined) assertConversationCommitSummary(value.readSummary);
 }
 
-export function assertConversationCommitSummary(value: unknown): asserts value is import('@zhixing/core/contracts').ConversationCommitSummary {
+export function assertConversationCommitSummary(value: unknown): asserts value is import('@zhixing-ai/core/contracts').ConversationCommitSummary {
   try { validateConversationCommitSummary(value); }
   catch (error) { throw corruptRunJournal(error instanceof Error ? error.message : 'Invalid committed read summary'); }
 }

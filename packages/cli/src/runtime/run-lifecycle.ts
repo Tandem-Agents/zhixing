@@ -5,7 +5,7 @@
  * 两类证据各有计数域：状态事实按每个运行自己的 statusRevision 去重；final 帧的 commitRevision 属于会话提交侧，
  * 只说明该运行已提交，不与 statusRevision 比较。已确认的终态不会被晚到的状态事实或回执复活；uncertain 不是终态。
  */
-import type { ConversationStatusNotice } from '@zhixing/core/contracts';
+import type { ConversationStatusNotice } from '@zhixing-ai/core/contracts';
 
 export type RunLifecycleState = 'unknown' | 'queued' | 'dispatched' | 'running' | 'cancel-requested' | 'uncertain' | 'terminal';
 

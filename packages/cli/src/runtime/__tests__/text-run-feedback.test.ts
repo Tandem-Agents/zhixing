@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing/core/conversation/application';
+import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing-ai/core/conversation/application';
 import { createTextRunFeedback } from '../text-run-feedback.js';
 import { makeFakeHostLink } from './fake-host-link.js';
 

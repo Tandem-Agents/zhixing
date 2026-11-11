@@ -1,10 +1,10 @@
 import path from 'node:path';
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage, Signature } from '@zhixing/core/contracts';
-import { protocolDigest, canonicalize, createConversationSealedBundle } from '@zhixing/core/protocol';
-import { createTempDir } from '@zhixing/test-utils';
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage, Signature } from '@zhixing-ai/core/contracts';
+import { protocolDigest, canonicalize, createConversationSealedBundle } from '@zhixing-ai/core/protocol';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { describe, expect, it, vi } from 'vitest';
-import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency } from '@zhixing/core/resources';
+import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency } from '@zhixing-ai/core/resources';
 import { AnchorResourceGovernor } from '../resource-governor.js';
 import { ControlAdmissionJournal, createInitialControlEnvelope } from '../control-admission.js';
 import { ConversationRunJournal } from '../conversation-assignment.js';
@@ -591,11 +591,11 @@ async function timelineFixture() {
   await add('success-4', 'success-4', 3); await commit('success-4', 'success-4', 2);
   return { ...h, add, commit };
 }
-type BodyPage = import('@zhixing/core/contracts').ConversationBodyPage;
-type BodyCursor = import('@zhixing/core/contracts').ConversationBodyCursor;
+type BodyPage = import('@zhixing-ai/core/contracts').ConversationBodyPage;
+type BodyCursor = import('@zhixing-ai/core/contracts').ConversationBodyCursor;
 async function timelinePages(journal: ConversationRunJournal, terminalCursor = false) {
   let cursor: BodyCursor | undefined;
-  const fragments: import('@zhixing/core/contracts').ConversationBodyFragment[] = [];
+  const fragments: import('@zhixing-ai/core/contracts').ConversationBodyFragment[] = [];
   for (let i = 0; i < 150; i++) {
     const page = await journal.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', includeInputs: true, cursor }) as BodyPage;
     expect(page.reset).toBe(false); expect(page.fragments.length).toBeLessThanOrEqual(4);

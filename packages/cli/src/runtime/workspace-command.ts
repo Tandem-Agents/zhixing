@@ -1,12 +1,12 @@
 import type { RuntimeLogContext } from "../logging/runtime.js";
-import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
-import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing-ai/core/authority";
+import { CONFIGURATION_LOG_SOURCE } from "@zhixing-ai/providers";
 import { MCP_LOG_SOURCE } from "./mcp-runtime-adapter.js";
-import { createKernelLogFactory } from "@zhixing/orchestrator/runtime";
+import { createKernelLogFactory } from "@zhixing-ai/orchestrator/runtime";
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core/paths";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { createPlatformSecretStore } from "@zhixing/secrets";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import { createStdoutWriter } from "../screen/cli-writer.js";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
@@ -50,10 +50,10 @@ import {
   type WorkspaceAdministrationDurableOperationRecord,
   type WorkspaceAdministrationView,
   type WorkspaceControlAuthorization,
-} from "@zhixing/core/environment/workspace-administration";
+} from "@zhixing-ai/core/environment/workspace-administration";
 import type {
   WorksceneSummary,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 
 export function worksceneCreateRequestIdForLocalWorkspace(
   credential: WorkspaceAdministrationConsumptionCredential,

@@ -1,4 +1,4 @@
-import type { SuggestedPattern } from "@zhixing/core/confirmation";
+import type { SuggestedPattern } from "@zhixing-ai/core/confirmation";
 import type {
   PermissionContextId,
   PermissionRule,
@@ -6,7 +6,7 @@ import type {
   RiskLevel,
   SecurityRequest,
   TrustContext,
-} from "@zhixing/core/security";
+} from "@zhixing-ai/core/security";
 import type { KernelToolPermissionRuleSet } from "./kernel-tool-implementation.js";
 
 export type KernelSecurityApproval =

@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { canonicalize, protocolDigest } from "../../protocol/canonical.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import { FileArtifactStore } from "../artifact-store.js";

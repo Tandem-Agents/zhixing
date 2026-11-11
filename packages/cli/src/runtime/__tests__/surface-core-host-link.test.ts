@@ -1,5 +1,5 @@
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
-import type { MeshServiceClient } from "@zhixing/mesh";
+import type { HomeTrustRecord } from "@zhixing-ai/core/contracts";
+import type { MeshServiceClient } from "@zhixing-ai/mesh";
 import { describe, expect, it, vi } from "vitest";
 import { FirstPartyConversationMeshTarget } from "../../serve/first-party-conversation-mesh.js";
 import {

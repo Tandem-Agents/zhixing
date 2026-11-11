@@ -2,13 +2,13 @@ import type {
   HomeTrustEvent,
   HomeTrustRecord,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   DEVICE_LIFECYCLE_PROJECTION_ID,
   DeviceLifecycleJournal,
   readDeviceLifecycleOperation,
   type FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   createSignedDeviceLifecycleAbort,
   canonicalize,
@@ -29,18 +29,18 @@ import {
   type ExecutorRemovalReceipt,
   type ExecutorRemovalSuccessor,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import type { MeshEndpointDescriptor, SecretRef } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/protocol";
+import type { MeshEndpointDescriptor, SecretRef } from "@zhixing-ai/core/contracts";
 import {
   assertTerminalRouteSecret,
   deriveTerminalRouteLocator,
   isTerminalRouteLocator,
   terminalRouteDigest,
   validateMeshEndpointDescriptor,
-} from "@zhixing/mesh/bootstrap";
-import { verifyDeviceSignature, type DeviceKey } from "@zhixing/mesh/device-identity";
-import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
-import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
+} from "@zhixing-ai/mesh/bootstrap";
+import { verifyDeviceSignature, type DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing-ai/mesh/device-key-store";
+import type { TrustedMeshPeer } from "@zhixing-ai/mesh/handshake";
 import {
   applyTrustEvent,
   applyTrustEventWithHistory,
@@ -53,12 +53,12 @@ import {
   readTrustEventByDigest,
   readTrustMemberPairing,
   replayTrustChain,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import {
   CREDENTIAL_EXPOSURE_PROJECTION_ID,
   credentialExposureIndex,
   readExposureRecords,
-} from "@zhixing/mesh/credential-exposure";
+} from "@zhixing-ai/mesh/credential-exposure";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
 import { loadOrCreateHomeRouteMaterial } from "./home-route-material.js";

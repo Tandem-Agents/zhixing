@@ -1,4 +1,4 @@
-import type { StopStrategy } from "@zhixing/core/protocol";
+import type { StopStrategy } from "@zhixing-ai/core/protocol";
 import { createIdleExitGate } from "./idle-policy.js";
 
 export interface ExecutorInternalStopRequest {

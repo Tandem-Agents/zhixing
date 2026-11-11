@@ -1,19 +1,19 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import { defineDurableRuntimeContract } from "@zhixing-ai/core/contracts";
 import {
   type WorkspaceAdministrationDurableOperation,
   type WorkspaceAdministrationDurableOperationKey,
   type WorkspaceAdministrationDurableOperationRecord,
   validateWorkspaceAdministrationDurableOperation,
-} from "@zhixing/core/environment/workspace-administration";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/environment/workspace-administration";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   runStorageMaintenanceStep,
   storageMaintenanceRequest,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 
 const VERSION = 1;
 const EMPTY_PREFIX = protocolDigest("LocalWorkspaceOperationPrefix", 1, null);

@@ -1,9 +1,9 @@
 import { createWorksceneRunToolApplication } from "../workscene-application-adapter.js";
 import { describe, expect, it } from "vitest";
-import { subAgentProfile } from "@zhixing/orchestrator/profile";
+import { subAgentProfile } from "@zhixing-ai/orchestrator/profile";
 import { zhixingProfile as mainProfile, ZHIXING_IDENTITY as MAIN_IDENTITY_INSTRUCTIONS, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
-import { buildSystemPrompt, CACHE_BOUNDARY, SUB_AGENT_SEGMENTS } from "@zhixing/orchestrator/runtime";
-import type { ToolDefinition } from "@zhixing/core/types";
+import { buildSystemPrompt, CACHE_BOUNDARY, SUB_AGENT_SEGMENTS } from "@zhixing-ai/orchestrator/runtime";
+import type { ToolDefinition } from "@zhixing-ai/core/types";
 import { powerProfile, WORKING_MODE_TEXT } from "../workscene-agent-guidance.js";
 import { createWorkmodeEnterTool, createWorkmodeExitTool } from "../workmode-tools.js";
 import { selectJobRuntimeTools } from "../job-runtime-tool-selection.js";

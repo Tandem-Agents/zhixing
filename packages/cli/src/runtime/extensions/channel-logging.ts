@@ -1,4 +1,4 @@
-import type { LogSource } from "@zhixing/core/logging";
+import type { LogSource } from "@zhixing-ai/core/logging";
 
 export const CHANNEL_LOG_SOURCE: LogSource = {
   id: "channel", version: 1, events: {

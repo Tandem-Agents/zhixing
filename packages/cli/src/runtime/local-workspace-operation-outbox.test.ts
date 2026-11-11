@@ -1,10 +1,10 @@
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { LocalWorkspaceOperationOutbox } from "./local-workspace-operation-outbox.js";
-import { WORKSPACE_CATALOG_RESET_IMPACT } from "@zhixing/core/environment/workspace-administration";
+import { WORKSPACE_CATALOG_RESET_IMPACT } from "@zhixing-ai/core/environment/workspace-administration";
 
 async function createRoot(): Promise<string> {
   return path.join(await createTempDir("workspace-outbox"), "outbox");

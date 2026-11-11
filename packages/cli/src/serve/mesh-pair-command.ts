@@ -1,14 +1,14 @@
 import type { RuntimeLogContext } from "../logging/runtime.js";
-import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal } from "@zhixing/core/authority";
-import { getDefaultPidPath, getDefaultPortPath, isProcessAlive, readLock, resolveProcessStartTime } from "@zhixing/server/client";
+import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
+import { getDefaultPidPath, getDefaultPortPath, isProcessAlive, readLock, resolveProcessStartTime } from "@zhixing-ai/server/client";
 import { readPlatformProcessBirth } from "../platform/secret-platform.js";
 import { readDeviceRestriction, retrievingHostAlive } from "./device-restriction.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces, hostname, platform } from "node:os";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import QRCode from "qrcode";
-import { getZhixingHome } from "@zhixing/core/paths";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import type {
   DeviceIdentity,
   DeviceRole,
@@ -21,8 +21,8 @@ import type {
   PairingOffer,
   PakeRound,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { canonicalize, EXECUTION_PROTOCOL_VERSION } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { canonicalize, EXECUTION_PROTOCOL_VERSION } from "@zhixing-ai/core/protocol";
 import {
   createMeshEndpointDescriptor,
   deletePairwiseRendezvousSecret,
@@ -32,36 +32,36 @@ import {
   sealPairingDiscoverySecret,
   validateMeshEndpointDescriptor,
   validateRendezvousKey,
-} from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/bootstrap";
 import {
   ensureSealedHomeRouteMaterial,
   loadHomeDiscoverySecret,
   loadOrCreateHomeRouteMaterial,
   persistHomeDiscoverySecret,
 } from "./home-route-material.js";
-import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
-import { encodeBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
-import { PairingCommitCoordinator } from "@zhixing/mesh/bootstrap-authority";
-import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
+import { keyIdForPublicKey } from "@zhixing-ai/mesh/recovery-root";
+import { encodeBlindRendezvousHello } from "@zhixing-ai/mesh/blind-rendezvous";
+import { PairingCommitCoordinator } from "@zhixing-ai/mesh/bootstrap-authority";
+import { RecoveryActivationCoordinator } from "@zhixing-ai/mesh/bootstrap-authority";
 import {
   createCheckpointId,
   type CheckpointPackage,
-} from "@zhixing/mesh/checkpoint";
-import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
+} from "@zhixing-ai/mesh/checkpoint";
+import { captureFullAuthorityCheckpoint } from "@zhixing-ai/mesh/full-checkpoint";
 import {
   type PairedCheckpointCommand,
   type PairedCheckpointResult,
-} from "@zhixing/mesh/paired-checkpoint-target";
+} from "@zhixing-ai/mesh/paired-checkpoint-target";
 import {
   decodeRecoveryPackage,
   encodeRecoveryPackage,
-} from "@zhixing/mesh/recovery-package";
+} from "@zhixing-ai/mesh/recovery-package";
 import {
   enrollDeviceIdentity,
   verifyDeviceSignature,
   type DeviceKey,
-} from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
+} from "@zhixing-ai/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing-ai/mesh/device-key-store";
 import {
   assemblePairingFinished,
   assertPairingOfferJoin,
@@ -72,7 +72,7 @@ import {
   verifyPairingAcceptance,
   type PairingOfferMaterial,
   type PairingOfferRepository,
-} from "@zhixing/mesh/pairing";
+} from "@zhixing-ai/mesh/pairing";
 import {
   applyTrustEvent,
   createRecoveryRootEvent,
@@ -81,18 +81,18 @@ import {
   replayTrustChain,
   verifyHomeTrustRecord,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
-import { currentAndPreviousDiscoveryRendezvousKeys } from "@zhixing/mesh/bootstrap";
-import { openHomeDiscovery, type VerifiedHomeDiscovery } from "@zhixing/mesh/home-discovery";
+} from "@zhixing-ai/mesh/trust-chain";
+import { currentAndPreviousDiscoveryRendezvousKeys } from "@zhixing-ai/mesh/bootstrap";
+import { openHomeDiscovery, type VerifiedHomeDiscovery } from "@zhixing-ai/mesh/home-discovery";
 import { adoptDiscoveredTrust, memberDiscoveryResume } from "./home-discovery-service.js";
 import { openRelaySocket } from "./mesh-control-plane.js";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
 import { createPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import { createPairingSocketPublishedCheckpointTarget } from "./paired-checkpoint-target-infrastructure.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import type { PublishedCheckpointPairedSessions } from "./published-checkpoint-target.js";
-import { createPlatformSecretStore } from "@zhixing/secrets";
-import { loadConfig, writeConfig } from "@zhixing/providers";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
+import { loadConfig, writeConfig } from "@zhixing-ai/providers";
 import { writeInitializedLocalRoles } from "./local-role-configuration.js";
 import {
   loadCandidateDeviceKey,
@@ -427,7 +427,7 @@ export async function activateInitialRecoveryRoot(input: {
   readonly createTarget: (binding: {
     readonly checkpointId: string;
     readonly recipientKeyId: string;
-  }) => Promise<import("@zhixing/mesh/bootstrap-authority").RecoveryCheckpointTarget>;
+  }) => Promise<import("@zhixing-ai/mesh/bootstrap-authority").RecoveryCheckpointTarget>;
   readonly writeLine: (line: string) => void;
   readonly confirmRecoveryPackage?: (recoveryPackage: string) => Promise<string>;
 }): Promise<TrustProjection> {

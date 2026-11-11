@@ -2,7 +2,7 @@ import type {
   DeferredGlobalIntentPort,
   ScheduleTaskSpecDto,
   ScheduleWriteMutation,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFERRED_SCHEDULE_MESSAGE,

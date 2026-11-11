@@ -3,21 +3,21 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
 import type {
   ContentAssetRef,
   ConversationInvocation,
   ControlRecord,
   ControlResult,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   channelSurfacePrincipal,

@@ -1,7 +1,7 @@
 import { expect, it, onTestFinished, vi } from "vitest";
 import path from "node:path";
 import { appendFile, mkdir, writeFile, readFile, utimes, stat } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { FileAuthorityCommitLog } from "../commit-log.js";

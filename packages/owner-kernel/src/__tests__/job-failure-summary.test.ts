@@ -3,9 +3,9 @@
  * 每步只读写定位路径上的节点；一次改动多处分散的条目时，按层成批装入，轮数不超过树高加一；
  * 归约前只为可能改动摘要的记录预装定位路径，每层一次读取。
  */
-import type { DurableProjectionReadContext } from "@zhixing/core/authority";
-import type { JobOccurrence, JsonValue } from "@zhixing/core/contracts";
-import { compareJobOccurrences } from "@zhixing/core/protocol";
+import type { DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import type { JobOccurrence, JsonValue } from "@zhixing-ai/core/contracts";
+import { compareJobOccurrences } from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   FAILURE_SUMMARY_NODE_CAPACITY,

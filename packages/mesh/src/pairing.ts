@@ -16,7 +16,7 @@ import type {
   PairingOffer,
   PakeRound,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { byteDigest, protocolBytes, protocolDigest } from "./canonical.js";
 import { verifyDeviceSignature } from "./device-identity.js";
 import { createUlid } from "./identifiers.js";

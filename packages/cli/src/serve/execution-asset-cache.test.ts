@@ -1,22 +1,22 @@
 import { writeFile } from "node:fs/promises";
-import { FileArtifactStore } from "@zhixing/core/authority";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
 import type {
   AssignmentGlobalQueryPort,
   GlobalReadResult,
   GlobalStatePort,
   Signature,
   SkillCatalogEntry,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedExecutionAssetSnapshot,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { SkillCatalogKernelProjectionApplicationService } from "@zhixing/core/skills/catalog";
-import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing/core/rubrics";
-import { skillNameToId } from "@zhixing/core/skills/id";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { SkillCatalogKernelProjectionApplicationService } from "@zhixing-ai/core/skills/catalog";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing-ai/core/rubrics";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
 import { FileExecutionAssetCache } from "./execution-asset-cache.js";

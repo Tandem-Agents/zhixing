@@ -6,9 +6,9 @@
  * 同批其他调用不启动，成功后本运行结束（批次门在 core loop）。工具常驻会话运行时，是否可用由每次运行的
  * turnOrigin.enabledControls 决定，不逐回合增删工具集。
  */
-import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing/core/advancement/proposal-identity";
-import type { ToolDefinition } from "@zhixing/core";
-import { emitPostTurnControlIntent } from "@zhixing/orchestrator/runtime";
+import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing-ai/core/advancement/proposal-identity";
+import type { ToolDefinition } from "@zhixing-ai/core";
+import { emitPostTurnControlIntent } from "@zhixing-ai/orchestrator/runtime";
 
 const DESCRIPTION = [
   "当用户交来的是值得“先确认验收标准（Rubric）、再执行并由独立验收盯到完成”的任务时调用，",

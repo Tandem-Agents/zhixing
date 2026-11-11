@@ -10,7 +10,7 @@ import {
   type TerminalSummaryRow,
   type TerminalSummarySection,
   type TerminalSummaryText,
-} from "@zhixing/terminal-ui/protocol";
+} from "@zhixing-ai/terminal-ui/protocol";
 import { stripAnsi } from "./tui/ansi.js";
 
 /** 去掉 ANSI、控制字符与双向覆写字符，另把换行与制表符换成空格：

@@ -1,9 +1,9 @@
 import type {
   ExecutionAbortRequest,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ConversationAssignmentLedger,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import type {
   ConversationInteractionAnswerPort,
 } from "./durable-conversation-interactions.js";

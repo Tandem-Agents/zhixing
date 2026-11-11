@@ -14,7 +14,7 @@
  * 索引。本注册表只驱动"角色集是什么 + 各角色元信息"这一机械重复维度。
  */
 
-import type { LLMRoles } from "@zhixing/core";
+import type { LLMRoles } from "@zhixing-ai/core";
 
 export interface RoleSpec {
   /** 角色 id —— 与 LLMRoles / ZhixingConfig.llm 的键一一对应 */

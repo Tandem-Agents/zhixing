@@ -3,7 +3,7 @@ import { setImmediate as yieldImmediate } from 'node:timers/promises';
 import {
   BODY_FRAGMENT_BYTES, BODY_FRAGMENT_ENCODED_BYTES, BODY_PARSE_BYTES, BODY_PARSE_NODES, BODY_STYLE,
   sliceBodyNodes, validateBodyMetadata, type BodyKind, type BodyNode, type BodyRun, type BodyFragmentMetadata,
-} from '@zhixing/terminal-ui/body-model';
+} from '@zhixing-ai/terminal-ui/body-model';
 
 export interface BodyAppend {
   readonly kind: 'append'; readonly contentOffset: number; readonly text: string; readonly body: BodyFragmentMetadata;

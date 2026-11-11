@@ -1,20 +1,20 @@
-import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError, holdForegroundObligation, type ForegroundActivityPort, type ForegroundObligation } from "@zhixing/core/resources";
-import { beginLogPhase, observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
+import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError, holdForegroundObligation, type ForegroundActivityPort, type ForegroundObligation } from "@zhixing-ai/core/resources";
+import { beginLogPhase, observeLogPhase, type LogRecordPort } from "@zhixing-ai/core/logging";
 import { retryControlAdmission, retryResourceUsage } from "./conversation-admission-retry.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
-import { AuthorityStorageError } from "@zhixing/core/authority";
-import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from "@zhixing/executor";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
+import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from "@zhixing-ai/executor";
 import { randomUUID } from "node:crypto";
-import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext } from "@zhixing/core/workscene/application";
-import { advancementExecutionContextBlock, type AdvancementExecutionMaterial } from "@zhixing/core/advancement/execution-context";
-import type { TurnOriginAdvancementExecution } from "@zhixing/core/types";
+import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext } from "@zhixing-ai/core/workscene/application";
+import { advancementExecutionContextBlock, type AdvancementExecutionMaterial } from "@zhixing-ai/core/advancement/execution-context";
+import type { TurnOriginAdvancementExecution } from "@zhixing-ai/core/types";
 import { executionTurnContext, withoutRecoveredSurfaceCapabilities } from "./execution-turn-context.js";
-import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
-import { parseConversationId, parseLocalConversationId } from "@zhixing/core/conversation";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { toPermissionContext } from "@zhixing/core/security";
-import { conversationRunTrustScope } from "@zhixing/core/trust-administration";
+import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing-ai/core";
+import { parseConversationId, parseLocalConversationId } from "@zhixing-ai/core/conversation";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { toPermissionContext } from "@zhixing-ai/core/security";
+import { conversationRunTrustScope } from "@zhixing-ai/core/trust-administration";
 import type {
   AuthorityCapability,
   AuthorityCallContext,
@@ -34,7 +34,7 @@ import type {
   ReservationOrigin,
   StreamFrame,
   TranscriptRunRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertPrincipalAllowsAuthorityMethod,
   MAX_CONTROL_LEASE_TTL_MS,
@@ -48,7 +48,7 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type StreamDataFramePayload,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   ConversationRunJournal,
   pendingAdvancementConversations,
@@ -66,32 +66,32 @@ import {
   type ConversationMutationPublisher,
   type PendingConversationInput,
   type InProcessDispatchContextFactory,
-} from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   ConversationAssignmentAuthority,
-} from "@zhixing/owner-kernel/conversation-assignment-authority";
-import { assignmentReservationId, ResourceCandidateStaleError } from "@zhixing/owner-kernel/resource-governor";
+} from "@zhixing-ai/owner-kernel/conversation-assignment-authority";
+import { assignmentReservationId, ResourceCandidateStaleError } from "@zhixing-ai/owner-kernel/resource-governor";
 import type {
   DeferredIntentConversationAuthority,
   DeferredIntentConversationTransaction,
-} from "@zhixing/owner-kernel/deferred-global-intents";
+} from "@zhixing-ai/owner-kernel/deferred-global-intents";
 import {
   loadCommittedConversationBase, readCommittedConversationTransferHeader, isConversationSourceEvidenceError,
   resolveCurrentConversationAuthority, resolveConversationPublicationOwner,
   type ConversationTransferPublication,
-} from "@zhixing/owner-kernel/conversation-transfer";
-import { ConversationSessionStateAdapter } from "@zhixing/owner-kernel/session-state-adapter";
+} from "@zhixing-ai/owner-kernel/conversation-transfer";
+import { ConversationSessionStateAdapter } from "@zhixing-ai/owner-kernel/session-state-adapter";
 import {
   channelSurfacePrincipal,
   createConversationControlEnvelope,
   createInitialControlEnvelope,
-} from "@zhixing/owner-kernel/control-admission";
+} from "@zhixing-ai/owner-kernel/control-admission";
 import {
   type ConversationManager,
   type ManagedSession,
   type TurnCommittedInfo,
-} from "@zhixing/owner-kernel/conversation-manager";
-import { type SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import {
   DurableConversationAdmissionRejectedError,
   runTurnWithCommit,
@@ -107,8 +107,8 @@ import {
   type DurableConversationSessionWriteResult,
   type DurableConversationTurnExecutor,
   type DurableConversationTurnInput,
-} from "@zhixing/owner-kernel/run-turn";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/owner-kernel/run-turn";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import type {
   AuthorityRuntimeStack,
 } from "../setup-delivery.js";
@@ -116,7 +116,7 @@ import {
   anchorConversationOwnerRuntime,
   type ConversationOwnerRuntimeStack,
 } from "./conversation-owner-runtime.js";
-import type { ConversationRunState, SessionStatePort } from "@zhixing/core/contracts";
+import type { ConversationRunState, SessionStatePort } from "@zhixing-ai/core/contracts";
 import {
   DurableConversationInteractionObserver,
 } from "./durable-conversation-interactions.js";
@@ -159,8 +159,8 @@ export interface ConversationProtocolRuntimeOptions {
    * 镜像里的信任沉淀交本宿主规则所有者接纳；规则权威宿主在构造时就给出（日志实例创建即可用，
    * 不存在后绑定窗口）。不给的宿主（非规则权威）沉淀条目只进日志、无效果。
    */
-  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
-  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
+  readonly trustSediments?: import("@zhixing-ai/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
   /** 运行准备各步记为日志阶段的端口（只观测）。 */
   readonly phaseRecords?: LogRecordPort;
@@ -174,12 +174,12 @@ export interface ConversationProtocolRuntimeOptions {
     readonly source: "interactive" | "channel";
     readonly abortSignal?: AbortSignal;
     readonly turnContext: NonNullable<
-      import("@zhixing/owner-kernel/types").RunTurnOptions["turnContext"]
+      import("@zhixing-ai/owner-kernel/types").RunTurnOptions["turnContext"]
     >;
     readonly authorizeToolExecution?: NonNullable<
-      import("@zhixing/owner-kernel/types").RunTurnOptions["authorizeToolExecution"]
+      import("@zhixing-ai/owner-kernel/types").RunTurnOptions["authorizeToolExecution"]
     >;
-    readonly modelCallMetering?: import("@zhixing/owner-kernel/types").SessionRuntimeModelCallMetering;
+    readonly modelCallMetering?: import("@zhixing-ai/owner-kernel/types").SessionRuntimeModelCallMetering;
   }) => Promise<RunResult>;
   readonly onFailure?: (error: unknown, context: { readonly phase: "run" | "recovery"; readonly conversationId: string; readonly runId?: string }) => void;
   readonly onStatus?: (notice: ConversationStatusNotice) => void | Promise<void>;
@@ -223,7 +223,7 @@ interface AppliedConversationAdmission {
   readonly runId: string;
   readonly ingress: IngressContext;
   readonly attachments: PendingConversationInput["attachments"];
-  readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
+  readonly environment?: import("@zhixing-ai/core/contracts").ExplicitEnvironmentSelection;
   readonly replayed: boolean;
 }
 
@@ -234,7 +234,7 @@ interface PreparedConversationAdmission {
   readonly input: PendingConversationInput["input"];
   readonly attachments: PendingConversationInput["attachments"];
   readonly invocation: ConversationInvocation;
-  readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
+  readonly environment?: import("@zhixing-ai/core/contracts").ExplicitEnvironmentSelection;
   /** 立即可调度时接纳起登记的前台义务；接管这份准备的 run() 取走，未被接管就随准备的清除关闭。 */
   readonly foreground?: ForegroundObligation;
   /** 这份接纳的序号：调度任务结束时凭它认出自己的准备，不误收同一运行后来的接纳。 */
@@ -398,8 +398,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | undefined;
   readonly #onFirstPartyFrame: ConversationProtocolRuntimeOptions['onFirstPartyFrame'];
   readonly #onFirstPartyAssignment: ConversationProtocolRuntimeOptions['onFirstPartyAssignment'];
-  readonly #trustSediments: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort | undefined;
-  readonly #trustRuleHits: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort | undefined;
+  readonly #trustSediments: import("@zhixing-ai/owner-kernel/conversation-assignment").ConversationTrustSedimentPort | undefined;
+  readonly #trustRuleHits: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort | undefined;
   #createFirstPartyFinality:
     | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
     | undefined;
@@ -935,7 +935,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return this.#journal(conversationId).messageInputsOutsideHistory();
   }
 
-  async recoveryPage(request: import('@zhixing/core/contracts').ConversationRecoveryRequest) {
+  async recoveryPage(request: import('@zhixing-ai/core/contracts').ConversationRecoveryRequest) {
     const id = request.conversationId;
     await this.#adopt(id);
     if (!this.#acceptsConversationId(id)) throw Error('Conversation recovery owner is unavailable');
@@ -1134,7 +1134,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     conversationId: string,
     assignmentId: string,
     batchDigest: string,
-  ): Promise<import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitBatchState> {
+  ): Promise<import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitBatchState> {
     await this.#adopt(conversationId);
     return this.#journal(conversationId).trustRuleHitBatchState(assignmentId, batchDigest);
   }
@@ -1243,7 +1243,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return false;
   }
 
-  async #applyReceivedCancellations(envelopes: readonly import("@zhixing/owner-kernel/control-admission").ConversationControlEnvelope[]): Promise<number> {
+  async #applyReceivedCancellations(envelopes: readonly import("@zhixing-ai/owner-kernel/control-admission").ConversationControlEnvelope[]): Promise<number> {
     let count = 0;
     for (const envelope of envelopes) {
       const body = envelope.body;
@@ -1982,7 +1982,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw error;
       };
       let runResult: RunResult;
-      let inputPort: import("@zhixing/core/loop").RunInputPort | undefined;
+      let inputPort: import("@zhixing-ai/core/loop").RunInputPort | undefined;
       let releaseConfirmation: (() => void) | undefined;
       try {
         releaseConfirmation = this.#requiredManager().bindExecutionConfirmation(input.conversationId, executionRuntime);
@@ -2530,7 +2530,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   async #assertUploadAdoption(
     input: Parameters<
-      import("@zhixing/core/authority").SurfaceAssetCoordinator["assertUploadAdoption"]
+      import("@zhixing-ai/core/authority").SurfaceAssetCoordinator["assertUploadAdoption"]
     >[0],
   ): Promise<void> {
     if (this.#authority.surfaceAssets) {
@@ -3922,7 +3922,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   #rememberAssignment(
     envelope: Extract<
-      import("@zhixing/core/contracts").DispatchEnvelope,
+      import("@zhixing-ai/core/contracts").DispatchEnvelope,
       { execution: "conversation" }
     >,
     activation: AssignmentActivationProof<"conversation">,
@@ -3993,7 +3993,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#interactions.releaseAssignment(assignmentId);
   }
 
-  async worksceneContinuationSources(conversationId: string, query?: import("@zhixing/core/workscene/application").WorksceneContinuationQuery) {
+  async worksceneContinuationSources(conversationId: string, query?: import("@zhixing-ai/core/workscene/application").WorksceneContinuationQuery) {
     await this.#adopt(conversationId);
     if (query && 'root' in query) {
       const frontiers = await this.#journal(conversationId).worksceneContinuationFrontiers(query.root);
@@ -4124,7 +4124,7 @@ function runOptionsForPending(
 
 
 function assignmentContext(
-  envelope: Extract<import("@zhixing/core/contracts").DispatchEnvelope, { execution: "conversation" }>,
+  envelope: Extract<import("@zhixing-ai/core/contracts").DispatchEnvelope, { execution: "conversation" }>,
 ): AuthorityCallContext {
   const capability = envelope.capabilities[0];
   if (!capability) throw new Error("Conversation assignment has no submission capability");
@@ -4136,7 +4136,7 @@ function assignmentContext(
 }
 
 function assignmentResourceContext(
-  envelope: Extract<import("@zhixing/core/contracts").DispatchEnvelope, { execution: "conversation" }>,
+  envelope: Extract<import("@zhixing-ai/core/contracts").DispatchEnvelope, { execution: "conversation" }>,
 ): AuthorityCallContext {
   const context = assignmentContext(envelope);
   return {
@@ -4384,8 +4384,8 @@ function requireRuntimeExecutionPermissionRules(
 /** 本次运行的授权范围（推导见 conversationRunTrustScope），按派发快照的范围参数形态给出。 */
 function runTrustScope(
   conversationId: string,
-  environment: import("@zhixing/core/contracts").ExplicitEnvironmentSelection | undefined,
-): import("@zhixing/core/security").PermissionContextId {
+  environment: import("@zhixing-ai/core/contracts").ExplicitEnvironmentSelection | undefined,
+): import("@zhixing-ai/core/security").PermissionContextId {
   return toPermissionContext(conversationRunTrustScope(conversationId, environment));
 }
 

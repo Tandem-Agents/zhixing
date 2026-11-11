@@ -7,8 +7,8 @@
  */
 
 import chalk from "chalk";
-import type { AgentEventMap, MessageInputIdentity } from "@zhixing/core";
-import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
+import type { AgentEventMap, MessageInputIdentity } from "@zhixing-ai/core";
+import type { DecorateRunBusFn } from "@zhixing-ai/orchestrator/runtime";
 import { ADVANCEMENT_TURN_LABEL } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import { clampLine } from "../tui/line-width.js";

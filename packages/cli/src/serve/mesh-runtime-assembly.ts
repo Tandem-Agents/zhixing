@@ -1,4 +1,4 @@
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import {
   adoptDiscoveredTrust,
   createHomeDiscoveryService,
@@ -10,7 +10,7 @@ import {
   reportSupersededTrust,
   SupersededTrustGovernance,
 } from "./superseded-trust-report.js";
-import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing/core/conversation";
+import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing-ai/core/conversation";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
   DeviceAdministrationDutyMigrationAdmissionPort,
@@ -18,7 +18,7 @@ import type {
   DeviceAdministrationMemberStatus,
   DeviceAdministrationRemovalEffectOutcome,
   DeviceAdministrationRemovalEffectPort,
-} from "@zhixing/core/device-administration/application";
+} from "@zhixing-ai/core/device-administration/application";
 import type {
   AuthorityCallContext,
   DeviceRole,
@@ -28,8 +28,8 @@ import type {
   RunSubmissionPort,
   EvidenceHandlerPort,
   HomeTrustRecord,
-} from "@zhixing/core/contracts";
-import { readCheckpointLifecycle } from "@zhixing/mesh/checkpoint-service";
+} from "@zhixing-ai/core/contracts";
+import { readCheckpointLifecycle } from "@zhixing-ai/mesh/checkpoint-service";
 import { createMeshRunInput, createMeshConversationCommunication, registerConversationCommunicationMesh } from "./conversation-communication-mesh.js";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
 import type { ExtensionManagementTransport } from "./extension-tools.js";
@@ -40,19 +40,19 @@ import {
   type DeviceLifecycleAbort,
   type ExecutorRemovalLifecycleIdentity,
   type ExecutorRemovalReceipt,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   MeshConnectionRegistry,
   MeshEndpointDirectory,
-} from "@zhixing/mesh/bootstrap";
-import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh/bootstrap";
+import type { TrustedMeshPeer } from "@zhixing-ai/mesh/handshake";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing-ai/mesh/device-key-store";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import type {
   AssignmentSubmissionPreflightPort,
-} from "@zhixing/owner-kernel/conversation-assignment";
-import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
+import type { RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
 import {
   ConversationTransferTarget,
   listCommittedConversationIds,
@@ -61,12 +61,12 @@ import {
   readConversationTransferState,
   type ConversationTransferPublication,
   type ConversationTransferStagingArea,
-} from "@zhixing/owner-kernel/conversation-transfer";
-import { listPendingDeferredIntentConversations } from "@zhixing/owner-kernel/deferred-global-intents";
+} from "@zhixing-ai/owner-kernel/conversation-transfer";
+import { listPendingDeferredIntentConversations } from "@zhixing-ai/owner-kernel/deferred-global-intents";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import {
   INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
   type AuthorityRuntimeStack,
@@ -140,11 +140,11 @@ import {
   FirstPartyConversationMeshClient,
   FirstPartyConversationMeshSurfaceLifecycle,
 } from "./first-party-conversation-mesh.js";
-import type { CanonicalFirstPartyConversationSurface } from "@zhixing/server";
+import type { CanonicalFirstPartyConversationSurface } from "@zhixing-ai/server";
 import {
   registerPairedCheckpointMeshService,
   type PairedCheckpointCommandReceiver,
-} from "@zhixing/mesh/paired-checkpoint-target";
+} from "@zhixing-ai/mesh/paired-checkpoint-target";
 import {
   completePlannedAnchorInstallationBeforeBootstrap,
   finishPlannedAnchorPostInstall,
@@ -185,7 +185,7 @@ import {
   loadHomeDiscoverySecret,
   loadOrCreateHomeRouteMaterial,
 } from "./home-route-material.js";
-import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
+import { keyIdForPublicKey } from "@zhixing-ai/mesh/recovery-root";
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
@@ -193,7 +193,7 @@ import {
   type ExecutorRemovalPublicState,
   type ExecutorRemovalTerminalRoute,
 } from "./device-removal.js";
-import type { MeshRouteResolution } from "@zhixing/mesh/handshake";
+import type { MeshRouteResolution } from "@zhixing-ai/mesh/handshake";
 import { ExecutorRemovalRetrievalOwner } from "./device-removal-retrieval.js";
 import {
   DeviceRemovalIssuerMeshClient,
@@ -327,7 +327,7 @@ function routedSubmissionMeshRole(
 export interface MeshRuntimeAssemblyOptions {
   readonly onTrustApplied?: (record: CurrentTrustProjection) => void | Promise<void>;
   /** 本设备的前台活动：对端请求在本机处理期间登记，后台维护据此让路（宿主装配传入；执行设备没有按安静推进的后台）。 */
-  readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
+  readonly foreground?: import("@zhixing-ai/core/resources").ForegroundActivityPort;
   readonly zhixingHome: string;
   readonly trust: CurrentTrustProjection;
   readonly configuration: MeshRoleBootConfig;
@@ -363,7 +363,7 @@ export interface MeshRuntimeAssemblyOptions {
       readonly owner: ExecutorJobOwner;
     };
   };
-  readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
+  readonly secretStore: import("@zhixing-ai/core/contracts").SecretStorePort;
   readonly onError?: (error: Error) => void;
 }
 
@@ -820,7 +820,7 @@ export class MeshRuntimeAssembly
         conversation: worker!,
         ...(jobOwner ? { job: jobOwner } : {}),
       });
-      const surfacePrincipalFor = (connection: import("@zhixing/mesh").SecureMeshConnection) =>
+      const surfacePrincipalFor = (connection: import("@zhixing-ai/mesh").SecureMeshConnection) =>
         `surface:device:${connection.peer.deviceId}`;
       this.#disposers.push(
         dataPlane.registerMeshServices({
@@ -1203,9 +1203,9 @@ export class MeshRuntimeAssembly
   }
 
   globalQueryForAnchor(
-    capability: import("@zhixing/core/contracts").AuthorityCapability,
+    capability: import("@zhixing-ai/core/contracts").AuthorityCapability,
     anchorEpoch: number,
-  ): import("@zhixing/core/contracts").AssignmentGlobalQueryPort {
+  ): import("@zhixing-ai/core/contracts").AssignmentGlobalQueryPort {
     return this.#composition.globalQueryPort(
       this.#currentAnchorDeviceId(),
       capability,
@@ -2553,7 +2553,7 @@ export async function finalizeCommittedPairingBootstrapContinuation(input: {
   readonly peerDeviceId: string;
   readonly continuations: MeshPairingContinuationRepository;
   readonly completions: MeshBootstrapCompletionPersistencePort;
-  readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
+  readonly secretStore: import("@zhixing-ai/core/contracts").SecretStorePort;
 }): Promise<void> {
   const continuation = await input.continuations.load();
   if (

@@ -10,9 +10,9 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { AgentYield } from "@zhixing/core/loop";
-import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
-import { RPC_ERROR_CODES, RpcClientError, RpcClientClosedError } from "@zhixing/server";
+import type { AgentYield } from "@zhixing-ai/core/loop";
+import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing-ai/core/contracts';
+import { RPC_ERROR_CODES, RpcClientError, RpcClientClosedError } from "@zhixing-ai/server";
 import {
   ConversationController,
   AcceptedTurnOutcomeUnknownError,
@@ -25,8 +25,8 @@ import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 import { TerminalOutputProjection } from '../../terminal/output.js';
 import { presentRunActivity } from '../../terminal/run-activity.js';
 import { createUserSubmission } from "../user-submission.js";
-import { projectProcessYield } from '@zhixing/rpc/session-wire';
-import { advancementExecutionTurnId } from "@zhixing/core/advancement/proposal-identity";
+import { projectProcessYield } from '@zhixing-ai/rpc/session-wire';
+import { advancementExecutionTurnId } from "@zhixing-ai/core/advancement/proposal-identity";
 
 import { makeFakeHostLink } from "./fake-host-link.js";
 
@@ -142,7 +142,7 @@ function makeFakes() {
     unsubscribe: vi.fn(async () => {}),
     abort: vi.fn(async () => {}),
     history: vi.fn(async () => ({ runs: [], hasMore: false })),
-    controlTargets: vi.fn(async () => ({ targets: [] } as import("@zhixing/core/contracts").ConversationControlTargets)),
+    controlTargets: vi.fn(async () => ({ targets: [] } as import("@zhixing-ai/core/contracts").ConversationControlTargets)),
     statusHistory: vi.fn(async () => ({ notices: [], next: [] })),
     resolveUncertain: vi.fn(async () => ({ state: "cancelled" })),
   };

@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, writeFile, readFile, readdir, stat, rename, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
+import { CheckpointDirectoryHandle } from "@zhixing-ai/mesh/filesystem";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { LocalLogStore, type LogWriterObservation } from "../../../core/src/logging/storage.js";
 import { LogApplication } from "../../../core/src/logging/application.js";
 import { DEFAULT_LOG_POLICY } from "../../../core/src/logging/policy.js";

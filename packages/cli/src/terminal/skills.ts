@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
-import { SKILLS_PAGE_DEFAULT, skillsDisplayText, validateSkillsAction, type TerminalSkillsAction, type TerminalSkillsView } from '@zhixing/terminal-ui/skills-model';
+import type { SkillCatalogClient } from '@zhixing-ai/core/skills/catalog';
+import { SKILLS_PAGE_DEFAULT, skillsDisplayText, validateSkillsAction, type TerminalSkillsAction, type TerminalSkillsView } from '@zhixing-ai/terminal-ui/skills-model';
 import { SkillManagerController } from '../skills/manager-controller.js';
 
 /** A single page lifetime. The controller and client retain Catalog semantics;

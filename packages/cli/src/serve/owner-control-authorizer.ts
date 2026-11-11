@@ -1,12 +1,12 @@
-import type { OwnerControlAuthorizer } from "@zhixing/executor";
+import type { OwnerControlAuthorizer } from "@zhixing-ai/executor";
 import {
   assertAuthorizedOwnerControlGrant,
   ownerControlRequestDigest,
   type ProtocolSignatureVerifier,
   validateOwnerControlGrant, validateControlLease, verifyProtocolStep, canonicalize,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type { ConversationAuthorityVerifier } from './conversation-authority-verifier.js';
-import { MeshProtocolError } from '@zhixing/mesh/errors';
+import { MeshProtocolError } from '@zhixing-ai/mesh/errors';
 
 /** Single authorization predicate shared by every local executor composition. */
 export function createOwnerControlAuthorizer(

@@ -1,10 +1,10 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing/core";
-import { StreamDigestChain } from "@zhixing/core/protocol";
+import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing-ai/core";
+import { StreamDigestChain } from "@zhixing-ai/core/protocol";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { isRipgrepAvailable } from "../grep/core.js";
 import { createGrepTool } from "../grep.js";
 

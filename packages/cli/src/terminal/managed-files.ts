@@ -1,5 +1,5 @@
-import { checkpointFilesystemCompletion, CheckpointDirectoryHandle, type CheckpointEntry, type CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
-import type { DeviceCapacityStepPermit } from '@zhixing/core/resources';
+import { checkpointFilesystemCompletion, CheckpointDirectoryHandle, type CheckpointEntry, type CheckpointFilesystemSession } from '@zhixing-ai/mesh/filesystem';
+import type { DeviceCapacityStepPermit } from '@zhixing-ai/core/resources';
 import { closeTerminalFiles } from './close-budget.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 

@@ -1,5 +1,5 @@
-import type { DeviceRole } from "@zhixing/core/contracts";
-import { loadConfig, writeConfig } from "@zhixing/providers";
+import type { DeviceRole } from "@zhixing-ai/core/contracts";
+import { loadConfig, writeConfig } from "@zhixing-ai/providers";
 
 type LoadedConfig = ReturnType<typeof loadConfig>;
 

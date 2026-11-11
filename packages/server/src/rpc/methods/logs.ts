@@ -6,12 +6,12 @@ import {
   parseLogPolicyRequest,
   parseLogReadRequest,
   parseLogSearchRequest,
-} from "@zhixing/core/logging/application";
-import type { LogReadContext } from "@zhixing/core/logging";
+} from "@zhixing-ai/core/logging/application";
+import type { LogReadContext } from "@zhixing-ai/core/logging";
 import {
   LogRequestError,
   publicLogErrorMessage,
-} from "@zhixing/core/logging/application";
+} from "@zhixing-ai/core/logging/application";
 import {
   RpcAppError,
   RpcErrors,

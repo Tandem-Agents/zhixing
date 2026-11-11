@@ -20,8 +20,8 @@ import {
   generateRequestId,
   type ConfirmationRequest,
   type ConfirmationDecision,
-} from "@zhixing/core/confirmation";
-import { ConfirmationHub, type HubEvent } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/confirmation";
+import { ConfirmationHub, type HubEvent } from "@zhixing-ai/owner-kernel/confirmation-hub";
 
 // ─── 测试辅助 ───
 

@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/network",
+  "name": "@zhixing-ai/network",
   "version": "0.1.0",
   "description": "知行网络出口原语 — SSRF 安全的 fetch、URL/IP 防护、文本净化",
   "type": "module",

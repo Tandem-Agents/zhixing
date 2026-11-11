@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { dispatchEnvelopeArtifact } from "@zhixing/core/protocol";
+import { dispatchEnvelopeArtifact } from "@zhixing-ai/core/protocol";
 import { ASSIGNMENT_ID, CONVERSATION_ID, NOW, createAlternativeDispatch, createFormalReceiptHarness, createHarness, ownerContext } from "./assignment-ledger-fixture.js";
 
 // 恢复候选行带同一提交写下的分类：列表先排除分类上确定不属于本类的候选，不为它们冷重放、不验签；

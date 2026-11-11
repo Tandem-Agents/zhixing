@@ -4,7 +4,7 @@ import type {
   HomeTrustRecord,
   SecretRef,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   MeshEndpointDirectory,

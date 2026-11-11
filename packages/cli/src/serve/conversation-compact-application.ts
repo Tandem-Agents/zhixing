@@ -1,5 +1,5 @@
-import type { ConversationCompactPort } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import type { ConversationCompactPort } from "@zhixing-ai/core/conversation/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 /** Anchor Correctness adapter; Conversation owns compact admission and result semantics. */
 export function createAnchorConversationCompactPort(input: Readonly<{

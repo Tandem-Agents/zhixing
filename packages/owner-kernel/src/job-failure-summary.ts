@@ -1,4 +1,4 @@
-import { compareJobOccurrences } from "@zhixing/core/protocol";
+import { compareJobOccurrences } from "@zhixing-ai/core/protocol";
 import { corruptJobJournal } from "./job-run-contracts.js";
 import type { KeyedMap } from "./job-run-state.js";
 

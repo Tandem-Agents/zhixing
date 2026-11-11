@@ -1,4 +1,4 @@
-import type { JsonSchema, JsonSchemaProperty } from "@zhixing/core/types";
+import type { JsonSchema, JsonSchemaProperty } from "@zhixing-ai/core/types";
 import type {
   NormalizedOrchestrationInputContractV1,
   NormalizedOrchestrationOutputContractV1,
@@ -6,7 +6,7 @@ import type {
   OrchestrationErrorV1,
   OrchestrationNodeOutputV1,
   OrchestrationValidationIssueV1,
-} from "@zhixing/core/orchestration";
+} from "@zhixing-ai/core/orchestration";
 
 export function validateRunInputV1(
   contract: NormalizedOrchestrationInputContractV1 | undefined,

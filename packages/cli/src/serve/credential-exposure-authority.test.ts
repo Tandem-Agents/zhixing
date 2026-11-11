@@ -1,9 +1,9 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   CredentialExposureAuthority,
   exposureGuardedSecretStore,

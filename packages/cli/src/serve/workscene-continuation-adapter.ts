@@ -1,12 +1,12 @@
 import type {
   WorksceneApplication,
   WorksceneContinuationPort,
-} from "@zhixing/core/workscene/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/workscene/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
-import type { AdvancementReviewAttemptApplication } from "@zhixing/core/advancement/application";
-import { worksceneConversationId } from "@zhixing/core/conversation";
-import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
+import type { AdvancementReviewAttemptApplication } from "@zhixing-ai/core/advancement/application";
+import { worksceneConversationId } from "@zhixing-ai/core/conversation";
+import { DurableConversationAdmissionRejectedError } from "@zhixing-ai/owner-kernel/run-turn";
 
 /** Infrastructure mapping; continuation decisions remain in the Workscene application. */
 export function createWorksceneContinuationPort(input: {
@@ -17,7 +17,7 @@ export function createWorksceneContinuationPort(input: {
     AdvancementReviewAttemptApplication,
     "queryActiveState" | "cancelSession"
   >;
-  readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
+  readonly mcp?: import("@zhixing-ai/core/mcp-management").McpConnectionPort;
   readonly canRunIsolatedMain?: boolean;
 }): WorksceneContinuationPort {
   const { manager, protocol, workscene } = input;

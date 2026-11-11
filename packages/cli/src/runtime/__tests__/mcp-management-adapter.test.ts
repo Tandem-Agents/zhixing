@@ -6,8 +6,8 @@ const doubles = vi.hoisted(() => ({
   fetchMcpServerSource: vi.fn(),
 }));
 
-vi.mock("@zhixing/mcp", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@zhixing/mcp")>()),
+vi.mock("@zhixing-ai/mcp", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@zhixing-ai/mcp")>()),
   isValidServerId: (serverId: string) =>
     serverId.length > 0 && serverId.length <= 40 && !serverId.includes("__") &&
     /^[a-zA-Z0-9](?:[a-zA-Z0-9_-]*[a-zA-Z0-9])?$/.test(serverId),

@@ -1,4 +1,4 @@
-import { AuthorityStorageError } from "@zhixing/core/authority";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 
 /** Retains a durable obligation across transient local or remote failures. */

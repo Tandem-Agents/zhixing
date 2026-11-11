@@ -8,8 +8,8 @@
  *
  * 导航：↑↓ 选 / Enter 进入 / Esc pop / Ctrl+C 退出
  */
-import { getPreset, ROLE_RECOMMENDATIONS, ROLE_SPECS } from "@zhixing/providers/configuration";
-import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
+import { getPreset, ROLE_RECOMMENDATIONS, ROLE_SPECS } from "@zhixing-ai/providers/configuration";
+import type { ThinkingConfig, ThinkingControl } from "@zhixing-ai/core";
 import type { PanelAction, PanelDescriptor, WorkingState } from "../types.js";
 import { clearModelRole, readModelRole, readModelThinking, readProviderEntry, writeModelRole, writeModelThinking } from "../state.js";
 import { SUPPORTED_PROVIDERS } from "../../registries/index.js";

@@ -2,7 +2,7 @@ import type {
   ChannelInteractionGrant,
   DispatchEnvelope,
   ExecutionAbortRequest,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   JobInteractionRuntimeUnavailableError,
   type JobInteractionAnswerPort,

@@ -1,4 +1,4 @@
-import type { StopStrategy } from "@zhixing/core/protocol";
+import type { StopStrategy } from "@zhixing-ai/core/protocol";
 
 export interface AnchorInternalStopRequest {
   readonly reason: string;

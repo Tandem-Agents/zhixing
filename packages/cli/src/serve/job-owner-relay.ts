@@ -5,17 +5,17 @@ import type {
   JobChannelChallengeToken,
   StreamConsumerAuth,
   StreamFrame,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   type InlineInteractionDisplay,
   validateStreamConsumerAuth,
   type StreamVerifierCheckpoint,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   JobChannelChallengePreparation,
   JobChannelRelayAdoption,
-} from "@zhixing/owner-kernel/job-assignment";
+} from "@zhixing-ai/owner-kernel/job-assignment";
 import {
   AssignmentStreamPathManager,
   type AssignmentStreamPathConnector,
@@ -23,7 +23,7 @@ import {
 } from "./assignment-stream-path-manager.js";
 
 type JobExecutionRef = Extract<
-  import("@zhixing/core/contracts").ExecutionRef,
+  import("@zhixing-ai/core/contracts").ExecutionRef,
   { readonly execution: "job" }
 >;
 type OwnerRelayAuth = Extract<

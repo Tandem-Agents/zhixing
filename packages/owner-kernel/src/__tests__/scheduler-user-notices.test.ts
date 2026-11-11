@@ -1,11 +1,11 @@
 import path from "node:path";
-import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing-ai/core/delivery";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type ProjectionTransactionContext,
-} from "@zhixing/core/authority";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/authority";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnerDeliveryParticipant } from "../delivery-obligation-correctness.js";
 import { SchedulerUserNoticeJournal } from "../scheduler-user-notices.js";

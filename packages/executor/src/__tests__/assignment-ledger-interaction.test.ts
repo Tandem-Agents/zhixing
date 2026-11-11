@@ -1,10 +1,10 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：interaction。
 import path from "node:path";
 import { rm } from "node:fs/promises";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { AssignmentEntry, DispatchEnvelope, LedgerEvidencePage, PermissionSnapshotLease } from "@zhixing/core/contracts";
-import { MAX_LEDGER_EVIDENCE_PAGE_BYTES, MAX_LEDGER_EVIDENCE_PAGE_ENTRIES } from "@zhixing/core/contracts";
-import { advanceAssignmentLedger, assignmentLedgerSeed, canonicalize, channelResponderPrincipal, confirmationDecisionDigest, createSignedChannelChallengeToken, createSignedChannelInteractionGrant, interactionDisplayDigest, createSignedTrustRuleSnapshot, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolDigest, type UnsignedConversationEnvelope } from "@zhixing/core/protocol";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { AssignmentEntry, DispatchEnvelope, LedgerEvidencePage, PermissionSnapshotLease } from "@zhixing-ai/core/contracts";
+import { MAX_LEDGER_EVIDENCE_PAGE_BYTES, MAX_LEDGER_EVIDENCE_PAGE_ENTRIES } from "@zhixing-ai/core/contracts";
+import { advanceAssignmentLedger, assignmentLedgerSeed, canonicalize, channelResponderPrincipal, confirmationDecisionDigest, createSignedChannelChallengeToken, createSignedChannelInteractionGrant, interactionDisplayDigest, createSignedTrustRuleSnapshot, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolDigest, type UnsignedConversationEnvelope } from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission, type AssignmentLedgerOptions } from "../assignment-ledger.js";
 import { NOW, EXECUTOR_ID, CONVERSATION_ID, RUN_ID, ASSIGNMENT_ID, SHA256_ZERO, DURABLE_IO_TEST_TIMEOUT_MS, matchingSnapshotFor, matchingPermissionSnapshotFor, allowOnceDecisionDigest, ConversationEnvelope, TestProtocolIdentity, signedMirrorBatch, mirrorReceipt, ownerControl, createUnassignedHarness, createHarness, createUnsignedEnvelope, ingress, ownerContext, submissionContext, sealDefaultBundle, withoutSignature } from "./assignment-ledger-fixture.js";

@@ -7,20 +7,20 @@ import {
   unlink,
 } from "node:fs/promises";
 import path from "node:path";
-import { toSafePathSegment } from "@zhixing/core/paths";
+import { toSafePathSegment } from "@zhixing-ai/core/paths";
 import {
   durablyRemoveDirectory,
   durablyRemoveFile,
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/persistence";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import {
   claimDeviceCapacity,
   runStorageMaintenanceStep,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import type {
   WorksceneConversationStorageRemovalPort,
   WorksceneSceneStorageRemovalPort,

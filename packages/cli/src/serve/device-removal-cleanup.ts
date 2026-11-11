@@ -1,15 +1,15 @@
 import path from "node:path";
 import type { Dir } from "node:fs";
 import { lstat, opendir, rmdir, unlink } from "node:fs/promises";
-import type { SecretStorePort } from "@zhixing/core/contracts";
-import { protocolDigest, type DeviceLifecycleEvidenceRef } from "@zhixing/core/protocol";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
+import { protocolDigest, type DeviceLifecycleEvidenceRef } from "@zhixing-ai/core/protocol";
 import {
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/core/resources";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import { cleanupRemovedDeviceSecrets } from "./device-removal.js";
 import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
 

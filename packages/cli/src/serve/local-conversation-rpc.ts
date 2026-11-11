@@ -1,16 +1,16 @@
-import { assertLocalConversationIdForDevice } from "@zhixing/core/conversation";
+import { assertLocalConversationIdForDevice } from "@zhixing-ai/core/conversation";
 import { createLocalConversationCommunicationBinding } from "./conversation-communication-binding.js";
-import { isNonEmptyUserTurnInput, userTurnInputFromText, type UserTurnInput } from "@zhixing/core";
+import { isNonEmptyUserTurnInput, userTurnInputFromText, type UserTurnInput } from "@zhixing-ai/core";
 import {
   ConversationApplicationError,
   mergeConversationDirectoryEntries,
   type ConversationDirectoryApplication,
   type ConversationDirectoryEntry,
-} from "@zhixing/core/conversation/application";
-import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
-import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import { notifySessionObserver } from '@zhixing/rpc/session-broadcast';
-import { canonicalize, isProtocolIdentifier } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/conversation/application";
+import { createConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
+import { createControlSessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
+import { notifySessionObserver } from '@zhixing-ai/rpc/session-broadcast';
+import { canonicalize, isProtocolIdentifier } from "@zhixing-ai/core/protocol";
 import type {
   SessionConversationEntry,
   SessionListResult,
@@ -18,7 +18,7 @@ import type {
   SessionResumeResult,
   SessionTaskListResult,
   SessionTaskListUpdateResult,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import {
   RPC_ERROR_CODES,
   RpcAppError,
@@ -27,7 +27,7 @@ import {
   parseConversationStatusRequest,
   parseConversationRecoveryRequest,
   type FirstPartyConversationRpcRouter,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
 import {
   FirstPartyConversationMeshClient,

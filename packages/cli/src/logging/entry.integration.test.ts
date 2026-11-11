@@ -4,8 +4,8 @@ import { spawn } from "node:child_process";
 import { writeFile, readFile, readdir, stat, mkdir, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createTempDir } from "@zhixing/test-utils";
-import { getGlobalConfigPath } from "@zhixing/providers";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { getGlobalConfigPath } from "@zhixing-ai/providers";
 
 const cli = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
 function run(

@@ -1,11 +1,11 @@
-import { extractText, type Message } from "@zhixing/core/types";
-import { finalAssistantMessageOf } from "@zhixing/core/loop";
-import { type RunRecordInput } from "@zhixing/core/transcript";
+import { extractText, type Message } from "@zhixing-ai/core/types";
+import { finalAssistantMessageOf } from "@zhixing-ai/core/loop";
+import { type RunRecordInput } from "@zhixing-ai/core/transcript";
 import type {
   EvidenceRequirementSpec,
   ObjectiveSignalKind,
   ReviewEvidence,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 
 const OBJECTIVE_EVIDENCE_KINDS = new Set<ObjectiveSignalKind>([
   "file-diff",

@@ -9,7 +9,7 @@
  * 命名规则（消毒 / 长度 / 去重）委托 naming 模块，本层只做字段映射。
  */
 
-import type { JsonSchema, ToolDefinition, ToolResult } from "@zhixing/core";
+import type { JsonSchema, ToolDefinition, ToolResult } from "@zhixing-ai/core";
 import { makeUniqueToolName, parseToolName } from "./naming.js";
 import type { McpCallFn, McpServerContext, McpToolDescriptor } from "./types.js";
 

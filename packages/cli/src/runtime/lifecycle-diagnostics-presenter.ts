@@ -1,5 +1,5 @@
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
-import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc/session-wire";
+import type { SessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
 import {
   createLifecycleWarningDeduper,
   renderLifecycleWarningLine,
@@ -7,7 +7,7 @@ import {
 } from "../lifecycle-diagnostics-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";
-import type { AgentEventMap } from "@zhixing/core";
+import type { AgentEventMap } from "@zhixing-ai/core";
 
 export interface LifecycleDiagnosticsPresenterOptions {
   readonly link: CoreHostNotificationLink;

@@ -1,8 +1,8 @@
 // 信任沉淀随交互镜像链回到 owner：真实执行端台账＋真实 owner 对话日志。
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { TrustSedimentFact } from "@zhixing/core/contracts";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { TrustSedimentFact } from "@zhixing-ai/core/contracts";
 import { describe, expect, it } from "vitest";
-import type { ConversationTrustSedimentPort } from "@zhixing/owner-kernel/conversation-assignment";
+import type { ConversationTrustSedimentPort } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import {
   ASSIGNMENT_ID,

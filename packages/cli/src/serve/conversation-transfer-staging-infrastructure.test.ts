@@ -4,29 +4,29 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { ArtifactRef, Signature } from "@zhixing/core/contracts";
-import { localConversationId } from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/authority";
+import type { ArtifactRef, Signature } from "@zhixing-ai/core/contracts";
+import { localConversationId } from "@zhixing-ai/core/conversation";
 import {
   createSignedConversationTransferAbort,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/core/protocol";
+import { ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   ConversationTransferSource,
   ConversationTransferTarget,
-} from "@zhixing/owner-kernel/conversation-transfer";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/owner-kernel/conversation-transfer";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
 import {
   applyTrustEvent,
   buildHomeTrustRecord,
   createSignedTrustEvent,
   createTrustGenesisEvent,
   initializeTrustChain,
-} from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { bindConversationAnchorTenure } from "./conversation-anchor-tenure.js";
 import { createConversationTransferStagingInfrastructure } from "./conversation-transfer-staging-infrastructure.js";

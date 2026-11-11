@@ -36,20 +36,20 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { MockLLMProvider, drainAgentLoop } from "@zhixing/core/loop";
-import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
-import { userMessage, type Message, type ToolDefinition } from "@zhixing/core/types";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { MockLLMProvider, drainAgentLoop } from "@zhixing-ai/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing-ai/core/security";
+import { userMessage, type Message, type ToolDefinition } from "@zhixing-ai/core/types";
 import {
   type ConfirmationDecision,
   type ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,
   toPermissionContext,
-} from "@zhixing/core/security";
-import { TrustAdministrationExecutionApplicationService } from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/security";
+import { TrustAdministrationExecutionApplicationService } from "@zhixing-ai/core/trust-administration";
 import { createSecureExecuteTool } from "../secure-executor.js";
 
 // ─── 测试辅助 ───

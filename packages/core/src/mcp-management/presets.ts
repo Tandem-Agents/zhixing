@@ -1,7 +1,7 @@
 /**
  * UI 暴露的 MCP server 预设——CLI 接入流程共享的"一键接入"名单。
  *
- * 与 @zhixing/mcp 的连接能力解耦：预设只产出 config 形态（McpServerConfigEntry）+ 密钥
+ * 与 @zhixing-ai/mcp 的连接能力解耦：预设只产出 config 形态（McpServerConfigEntry）+ 密钥
  * 字段描述，由接入流程写进 config.mcp / credentials.mcp，再由装配层连接。新增预设 = 加一
  * 项数据，无需改代码。
  *
@@ -11,7 +11,7 @@
  *
  * 增加预设流程：
  *   1. 这里加一项（连接模板 entry + 需用户填的 secretFields）
- *   2. id 须是合法 server id（无 `__` 等，见 @zhixing/mcp 的 isValidServerId）
+ *   2. id 须是合法 server id（无 `__` 等，见 @zhixing-ai/mcp 的 isValidServerId）
  */
 
 import type { McpServerConfigEntry } from "./types.js";

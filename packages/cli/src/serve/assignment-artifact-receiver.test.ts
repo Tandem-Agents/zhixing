@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { access } from "node:fs/promises";
-import { FileArtifactStore } from "@zhixing/core/authority";
-import type { ArtifactRef } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import type { ArtifactRef } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { projectAssignmentArtifactReceiver } from "./assignment-artifact-receiver.js";
 import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";

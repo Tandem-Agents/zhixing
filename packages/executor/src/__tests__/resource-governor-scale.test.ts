@@ -10,10 +10,10 @@ import {
   FileAuthorityCommitLog,
   RESOURCE_CAPABILITY_ACTIVATION_PROJECTION_ID,
   RESOURCE_GOVERNOR_INDEX_PROJECTION_ID,
-} from "@zhixing/core/authority";
-import type { AuthorityCallContext, GovernorRecord, ResourceLease, Signature } from "@zhixing/core/contracts";
-import { protocolDigest, type ProtocolSigner } from "@zhixing/core/protocol";
-import { captureFileIo, createTempDir, type FileIoSnapshot } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/authority";
+import type { AuthorityCallContext, GovernorRecord, ResourceLease, Signature } from "@zhixing-ai/core/contracts";
+import { protocolDigest, type ProtocolSigner } from "@zhixing-ai/core/protocol";
+import { captureFileIo, createTempDir, type FileIoSnapshot } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { ExecutorResourceGovernor } from "../resource-governor.js";
 

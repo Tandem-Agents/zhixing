@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing-ai/terminal-ui/parent-transport';
 
 /** S 的放行：只在耐久意向、身份绑定与完整准入之后到达，携带实例目录与目录身份。 */
 export interface TerminalPreloadRelease {

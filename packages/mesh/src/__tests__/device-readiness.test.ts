@@ -1,4 +1,4 @@
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
 import { describe, expect, it } from "vitest";
 import {
   assertDeviceReadyForRole,

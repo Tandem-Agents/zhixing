@@ -1,4 +1,4 @@
-import { AuthorityStorageError } from "@zhixing/core/authority";
+import { AuthorityStorageError } from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   AssignmentTerminationProof,
@@ -14,7 +14,7 @@ import type {
   SystemJobFence,
   TaskDefinition,
   UncertainResolutionFact,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   isProtocolIdentifier,
@@ -32,7 +32,7 @@ import {
   validateSystemJobFence,
   validateTaskDefinition,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   validateResolutionFact,
   type Stored,
@@ -937,7 +937,7 @@ function validateConflictContainmentProof(
   assertRecord(value, "Assignment termination proof");
   if ("dispatchDigest" in value) {
     validateDispatchRejectionProof(
-      value as unknown as import("@zhixing/core/contracts").DispatchRejectionProof,
+      value as unknown as import("@zhixing-ai/core/contracts").DispatchRejectionProof,
       verifier,
     );
     throw corruptJobJournal(

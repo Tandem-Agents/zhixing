@@ -13,7 +13,7 @@ import { modelSection } from "../sections/model.js";
 import { buildProviderListMeta } from "../model/list.js";
 import { deriveEntryIssues } from "../entry.js";
 import type { SectionEntry } from "../types.js";
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { ZhixingConfig, ZhixingCredentials } from "@zhixing-ai/providers";
 
 function entriesOf(
   config: ZhixingConfig,

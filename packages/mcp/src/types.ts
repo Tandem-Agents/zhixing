@@ -6,7 +6,7 @@
  * 由此映射层与 SDK 解耦，可脱离真实连接独立单测，SDK 升级也不会穿透到映射逻辑。
  */
 
-import type { ToolResult } from "@zhixing/core";
+import type { ToolResult } from "@zhixing-ai/core";
 
 /** MCP server 的传输方式 —— 决定映射出工具的中断语义（stdio 持有子进程需优雅停止）。 */
 export type McpTransportKind = "stdio" | "http";
@@ -74,5 +74,5 @@ export type McpCallFn = (
   serverId: string,
   toolName: string,
   input: Record<string, unknown>,
-  options: { signal?: AbortSignal; records?: import("@zhixing/core/logging").LogRecordPort; toolCallId?: string },
+  options: { signal?: AbortSignal; records?: import("@zhixing-ai/core/logging").LogRecordPort; toolCallId?: string },
 ) => Promise<ToolResult>;

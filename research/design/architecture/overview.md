@@ -75,14 +75,14 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 
 ### 进程与 Host
 
-1. `@zhixing/cli` 的 `zz` 与 `zhixing` 两个 bin 指向轻量入口 `packages/cli/src/entry.ts`：默认 TTY 对话直接进入 S；管理命令按 Commander 描述符选择交互或文本表面，内部 `serve` 走命令入口。各实际进程入口建立自己的运行观察身份，再进入所属生命周期。
+1. `zhixing` 的 `zz` 与 `zhixing` 两个 bin 指向轻量入口 `packages/cli/src/entry.ts`：默认 TTY 对话直接进入 S；管理命令按 Commander 描述符选择交互或文本表面，内部 `serve` 走命令入口。各实际进程入口建立自己的运行观察身份，再进入所属生命周期。
 2. 持久服务入口 `packages/cli/src/serve/topology-command.ts` 解析进程模式，取得 home、启动检查和秘密投影，然后只创建一个 `PersistentApplicationHost`。
 3. `PersistentApplicationHost` 完成 Mesh/bootstrap maintenance、恢复根前置、容量与本机 workspace lease，再用 `planServeTopology` 选择 `anchor-host`、`executor-host` 或 disabled；Anchor+Executor 仍是同一个 Host 中的两项角色贡献，不是第二组合根。
 4. Host 在任何角色副作用前装入所需模块。Anchor-only 不装入 Executor，Executor-only 不装入 Anchor；角色正常返回或失败后，外层资源都由同一个 Host 终止路径释放。
 
 ### 运行日志
 
-`@zhixing/core/logging` 分为来源只写端口、Recorder、有界独立 Store 和授权 LogApplication；记录不是业务事实，生产方不能反向读取日志恢复状态。轻入口的 Recorder 与正式存储接续共用身份及有界队列；容量端口就绪后才开始受管持久化，Host 沿用并在业务清理后排空。关键阶段成对记录并关联父阶段、进程交接、等待对象和工作量；有界健康状态保留首次失败、后续变化及恢复。备份／恢复、配对及离线工作区命令显式传递同一进程 owner，纯日志查询不启动写者。
+`@zhixing-ai/core/logging` 分为来源只写端口、Recorder、有界独立 Store 和授权 LogApplication；记录不是业务事实，生产方不能反向读取日志恢复状态。轻入口的 Recorder 与正式存储接续共用身份及有界队列；容量端口就绪后才开始受管持久化，Host 沿用并在业务清理后排空。关键阶段成对记录并关联父阶段、进程交接、等待对象和工作量；有界健康状态保留首次失败、后续变化及恢复。备份／恢复、配对及离线工作区命令显式传递同一进程 owner，纯日志查询不启动写者。
 
 每个来源在实际边界投影安全字段和既有身份，共用有界队列；Authority 在持久提交完成后观察，Kernel 使用明确事件绑定及 Provider 实际调用，扩展经宿主 IPC 校验和实例限流。领域事件与直接采集不重复订阅。未知效果保留原判断，后续证据追加关联。
 
@@ -92,13 +92,13 @@ Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小
 
 - Anchor 组合根创建唯一 sealed `ProductApiDispatcher`，组合当前领域贡献。Server 接收该 dispatcher；RPC handler 只做认证、wire 校验、调用、错误映射和事件传输。
 - CLI 的 Node 应用适配与 Feishu Channel 的 conversation binding 调用同一领域应用语义，不直接读取领域日志或复制状态机。交互终端分为 S 生命周期、N 应用适配、U 显示交互与 R 最终恢复；U 通过有限协议消费显示投影，替换终端不改变内核权威。前台关闭不终止独立 PersistentApplicationHost；非交互文本入口共享同一产品语义。
-- `@zhixing/server` 在同一已绑定 endpoint 上完成 handler、连接设施、运行期贡献和关闭责任后才从 inactive 503 激活 HTTP/REST、WebSocket 与 JSON-RPC，并随后发布发现与 ready 状态。
+- `@zhixing-ai/server` 在同一已绑定 endpoint 上完成 handler、连接设施、运行期贡献和关闭责任后才从 inactive 503 激活 HTTP/REST、WebSocket 与 JSON-RPC，并随后发布发现与 ready 状态。
 
 ### 智能运行
 
-- Conversation、scheduled ephemeral、本机 durable job 和远端 Executor assignment 都服从 `@zhixing/orchestrator/runtime` 的同一组 `KernelRunEnvelope`、`KernelRunEvent` 和 `KernelRunCompletion` 合同。
+- Conversation、scheduled ephemeral、本机 durable job 和远端 Executor assignment 都服从 `@zhixing-ai/orchestrator/runtime` 的同一组 `KernelRunEnvelope`、`KernelRunEvent` 和 `KernelRunCompletion` 合同。
 - Workscene 是 conversation 发放前形成的产品投影，不是 Kernel 或 RuntimeHost 内的第二产品分支。
-- `@zhixing/runtime-host` 只消费已裁决、不可变的运行投影，装配模型、环境、工具实现、权限存储和 TurnContext providers；它不定义 Workscene、Schedule、TaskList 或 MCP 产品规则。
+- `@zhixing-ai/runtime-host` 只消费已裁决、不可变的运行投影，装配模型、环境、工具实现、权限存储和 TurnContext providers；它不定义 Workscene、Schedule、TaskList 或 MCP 产品规则。
 - 本机与远端执行只在 Host/Infrastructure 的适配选择处分叉。领域与 Kernel 不以 Anchor、epoch、Mesh、本机或远端为产品判断条件。
 
 ### 扩展管理与外部 APP
@@ -111,21 +111,21 @@ Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小
 
 ## 当前产品领域
 
-领域边界主要由 `@zhixing/core` 的窄 subpath 合同及其单一应用服务表达；耐久机制和物理适配可以位于其他包。包位置不改变事实所有权。
+领域边界主要由 `@zhixing-ai/core` 的窄 subpath 合同及其单一应用服务表达；耐久机制和物理适配可以位于其他包。包位置不改变事实所有权。
 
 | 领域责任 | 合同/应用主入口 | 机制与适配落点 |
 |---|---|---|
-| Conversation | `@zhixing/core/conversation/application` | `@zhixing/owner-kernel` 的会话 owner、运行提交与 assignment；RPC/CLI/Channel 只绑定 |
-| Workspace Administration | `@zhixing/core/environment/workspace-administration` | Core 持久端口与 CLI 本机 workspace 适配 |
-| Workscene | `@zhixing/core/workscene/application` | CLI Anchor 组合边界形成运行/工具投影 |
-| Schedule | `@zhixing/core/scheduler/application` | `@zhixing/owner-kernel` 的调度 Authority/Job 提交与 CLI runtime effect |
-| Advancement | `@zhixing/core/advancement/application` | `@zhixing/owner-services/advancement` 的 review、proxy、恢复与外部机制适配 |
-| Delivery | `@zhixing/core/delivery/application` | `@zhixing/owner-kernel/delivery` 与 Channel effect 适配；Delivery 拥有义务和终态 |
-| Extension Management | `@zhixing/core/extensions/application`、`extensions/contracts` | Core 的 `extensions/runtime`、`process`、`protocol`、`artifacts`、`onboarding` 执行受管生命周期；CLI `runtime/extensions` 与 `serve/channels.ts` 提供 Channel 类型及本机配置绑定 |
-| Trust Administration | `@zhixing/core/trust-administration` | Security/permission 机制执行已提交规则 |
-| Skill Catalog | `@zhixing/core/skills/catalog` | Authority/CAS 与 assignment Correctness；Kernel/Executor 只消费不可变投影 |
-| Device Administration | `@zhixing/core/device-administration/application` | CLI/Mesh 适配物理配对、移除和值班迁移效果 |
-| Backup & Recovery Administration | `@zhixing/core/backup-recovery/application` | Mesh checkpoint/传输与 CLI 恢复适配提供机制 |
+| Conversation | `@zhixing-ai/core/conversation/application` | `@zhixing-ai/owner-kernel` 的会话 owner、运行提交与 assignment；RPC/CLI/Channel 只绑定 |
+| Workspace Administration | `@zhixing-ai/core/environment/workspace-administration` | Core 持久端口与 CLI 本机 workspace 适配 |
+| Workscene | `@zhixing-ai/core/workscene/application` | CLI Anchor 组合边界形成运行/工具投影 |
+| Schedule | `@zhixing-ai/core/scheduler/application` | `@zhixing-ai/owner-kernel` 的调度 Authority/Job 提交与 CLI runtime effect |
+| Advancement | `@zhixing-ai/core/advancement/application` | `@zhixing-ai/owner-services/advancement` 的 review、proxy、恢复与外部机制适配 |
+| Delivery | `@zhixing-ai/core/delivery/application` | `@zhixing-ai/owner-kernel/delivery` 与 Channel effect 适配；Delivery 拥有义务和终态 |
+| Extension Management | `@zhixing-ai/core/extensions/application`、`extensions/contracts` | Core 的 `extensions/runtime`、`process`、`protocol`、`artifacts`、`onboarding` 执行受管生命周期；CLI `runtime/extensions` 与 `serve/channels.ts` 提供 Channel 类型及本机配置绑定 |
+| Trust Administration | `@zhixing-ai/core/trust-administration` | Security/permission 机制执行已提交规则 |
+| Skill Catalog | `@zhixing-ai/core/skills/catalog` | Authority/CAS 与 assignment Correctness；Kernel/Executor 只消费不可变投影 |
+| Device Administration | `@zhixing-ai/core/device-administration/application` | CLI/Mesh 适配物理配对、移除和值班迁移效果 |
+| Backup & Recovery Administration | `@zhixing-ai/core/backup-recovery/application` | Mesh checkpoint/传输与 CLI 恢复适配提供机制 |
 
 跨领域协作只能调用对方应用端口或消费已提交事件；不得直接读取对方仓库、Reducer、Authority 日志或内部状态。
 
@@ -135,24 +135,24 @@ Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小
 
 | 包 | 当前生产责任 |
 |---|---|
-| `@zhixing/core` | Agent Loop 等共享原语、领域拥有的窄合同/应用 subpath，以及 Authority、持久化、安全、资源等明确 Correctness subpath；根导出不是新增责任的默认入口 |
-| `@zhixing/orchestrator` | `runtime` 窄入口下的 Intelligence Kernel、AgentRuntime、Run 合同、模型/工具执行和子 Agent/编排实现 |
-| `@zhixing/runtime-host` | 通用 AgentRuntime 装配、冻结运行投影和 Kernel/Conversation adapter；不实现产品领域装配 |
-| `@zhixing/owner-kernel` | Conversation owner、运行/assignment 提交，以及 Schedule/Delivery 等所需的耐久 Correctness 机制 |
-| `@zhixing/owner-services` | Advancement 的控制、审查、外部机制与恢复服务 |
-| `@zhixing/rpc` | Product API RPC client/binding、会话 wire/stream/event 投影与确认桥；不拥有领域规则 |
-| `@zhixing/server` | HTTP、WebSocket、JSON-RPC、认证、连接和订阅网关；消费注入的 Product API dispatcher |
-| `@zhixing/cli` | `zz`/`zhixing` 产品表面与进程入口、唯一 ApplicationHost 组合根，以及当前 Anchor/拓扑物理适配；不拥有领域语义 |
-| `@zhixing/executor` | Executor 角色、远端 assignment 执行、ledger、stream spool 与 data-plane ticket 机制 |
-| `@zhixing/mesh` | 设备互认证、bootstrap/pairing、隧道、传输及 checkpoint/recovery 的物理机制 |
-| `@zhixing/providers` | 模型 Provider 协议适配、预设与配置解析 |
-| `@zhixing/tools-builtin` | Read、Write、Edit、Glob、Grep、Bash 等内置工具实现与薄 binding |
-| `@zhixing/mcp` | 外部 MCP server 连接与工具接入机制 |
-| `@zhixing/network` | SSRF 安全 fetch、URL/IP 防护与网络出口原语 |
-| `@zhixing/secrets` | 设备本地平台密钥保护与加密 SecretStore |
-| `@zhixing/channel-feishu` | `packages/channels/feishu` 构建固定摘要的独立 Channel 扩展与 manifest，承接飞书／Lark 长连接和卡片／文本发送；无 JS 库入口，CLI 仅在构建期取用迁移制品 |
-| `@zhixing/terminal-ui` | private 的 OpenTUI/Solid 终端表面与固定平台资产构建；资产随 CLI 交付，不拥有业务事实或执行权威 |
-| `@zhixing/test-utils` | private 的跨包测试基础设施；没有生产运行责任 |
+| `@zhixing-ai/core` | Agent Loop 等共享原语、领域拥有的窄合同/应用 subpath，以及 Authority、持久化、安全、资源等明确 Correctness subpath；根导出不是新增责任的默认入口 |
+| `@zhixing-ai/orchestrator` | `runtime` 窄入口下的 Intelligence Kernel、AgentRuntime、Run 合同、模型/工具执行和子 Agent/编排实现 |
+| `@zhixing-ai/runtime-host` | 通用 AgentRuntime 装配、冻结运行投影和 Kernel/Conversation adapter；不实现产品领域装配 |
+| `@zhixing-ai/owner-kernel` | Conversation owner、运行/assignment 提交，以及 Schedule/Delivery 等所需的耐久 Correctness 机制 |
+| `@zhixing-ai/owner-services` | Advancement 的控制、审查、外部机制与恢复服务 |
+| `@zhixing-ai/rpc` | Product API RPC client/binding、会话 wire/stream/event 投影与确认桥；不拥有领域规则 |
+| `@zhixing-ai/server` | HTTP、WebSocket、JSON-RPC、认证、连接和订阅网关；消费注入的 Product API dispatcher |
+| `zhixing` | `zz`/`zhixing` 产品表面与进程入口、唯一 ApplicationHost 组合根，以及当前 Anchor/拓扑物理适配；不拥有领域语义 |
+| `@zhixing-ai/executor` | Executor 角色、远端 assignment 执行、ledger、stream spool 与 data-plane ticket 机制 |
+| `@zhixing-ai/mesh` | 设备互认证、bootstrap/pairing、隧道、传输及 checkpoint/recovery 的物理机制 |
+| `@zhixing-ai/providers` | 模型 Provider 协议适配、预设与配置解析 |
+| `@zhixing-ai/tools-builtin` | Read、Write、Edit、Glob、Grep、Bash 等内置工具实现与薄 binding |
+| `@zhixing-ai/mcp` | 外部 MCP server 连接与工具接入机制 |
+| `@zhixing-ai/network` | SSRF 安全 fetch、URL/IP 防护与网络出口原语 |
+| `@zhixing-ai/secrets` | 设备本地平台密钥保护与加密 SecretStore |
+| `@zhixing-ai/channel-feishu` | `packages/channels/feishu` 构建固定摘要的独立 Channel 扩展与 manifest，承接飞书／Lark 长连接和卡片／文本发送；无 JS 库入口，CLI 仅在构建期取用迁移制品 |
+| `@zhixing-ai/terminal-ui` | private 的 OpenTUI/Solid 终端表面与固定平台资产构建；资产随 CLI 交付，不拥有业务事实或执行权威 |
+| `@zhixing-ai/test-utils` | private 的跨包测试基础设施；没有生产运行责任 |
 
 正式库公共面以各包 `package.json#exports` 和 CLI `bin` 为准；飞书可执行制品的公共合同是扩展 manifest 和版本化协议。源码内部路径、测试入口、旧 `dist` 或目录名称不能用来推导公开合同。
 

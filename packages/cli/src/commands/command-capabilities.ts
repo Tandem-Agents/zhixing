@@ -1,4 +1,4 @@
-import type { CommandVisibility } from '@zhixing/core/typeahead';
+import type { CommandVisibility } from '@zhixing-ai/core/typeahead';
 
 /** Shared capability contract; independent of either terminal renderer. */
 export const FEATURE_CHROME = 'chrome';

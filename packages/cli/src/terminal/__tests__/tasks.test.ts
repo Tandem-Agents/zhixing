@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { TaskListState } from '@zhixing/core/conversation';
-import type { TaskView } from '@zhixing/core/scheduler';
-import type { SessionTaskListAction } from '@zhixing/rpc/session-wire';
+import type { TaskListState } from '@zhixing-ai/core/conversation';
+import type { TaskView } from '@zhixing-ai/core/scheduler';
+import type { SessionTaskListAction } from '@zhixing-ai/rpc/session-wire';
 import { RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js';
 import { RpcSchedulerFacade } from '../../runtime/rpc-scheduler-facade.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';

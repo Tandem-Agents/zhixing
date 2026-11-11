@@ -1,5 +1,5 @@
 import type { AuthorityCommitLog, DurableLogCheckpoint, DurableProjectionReadContext, DurableProjectionSource,
-  ProjectionTransactionContext, VerifiedAnchorTenure } from '@zhixing/core/authority';
+  ProjectionTransactionContext, VerifiedAnchorTenure } from '@zhixing-ai/core/authority';
 
 /** Composition binds the trust domain's verified projection; the conversation
  * owner never reads mesh storage or accepts a request's claimed tenure. */

@@ -29,7 +29,7 @@ MCP 为知行补充外部服务能力，不重复内置文件、命令与网络�
 Host 另持 lifecycle.connect/close；管理面只消费 status.snapshot。
 ```
 
-`@zhixing/mcp` 不依赖 CLI 的配置编辑器或应用装配。`mcp-config.ts` 将配置及秘密投影变成中性的连接规格；`mcp-runtime-adapter.ts` 隐藏具体 hub，只向消费者提供工具、状态、生命周期三个需求端口。
+`@zhixing-ai/mcp` 不依赖 CLI 的配置编辑器或应用装配。`mcp-config.ts` 将配置及秘密投影变成中性的连接规格；`mcp-runtime-adapter.ts` 隐藏具体 hub，只向消费者提供工具、状态、生命周期三个需求端口。
 
 常驻 Host 在 `serve/command.ts` 创建 MCP 资源并登记关闭，再连接、装配运行体；executor role 在其执行设备独立拥有同类资源与关闭链。`workspace-command.ts` 的独立执行路径同样负责连接与 finally 关闭。不是跨设备的全局连接单例，也不由 CLI 展示会话持有所有连接。
 
@@ -67,7 +67,7 @@ Host 另持 lifecycle.connect/close；管理面只消费 status.snapshot。
 
 MCP 工具与内置工具共用边界注册、权限、信任及执行机制。`query/invoke` 是分类输入，不能简化成“只读必放行、其他必确认”：实际结果还取决于有效策略，且分类依赖 server 提供的 hint。
 
-stdio 使用 SDK 默认环境白名单，再过滤显式 env 中的解释器启动型危险变量；并非继承全部宿主环境。HTTP transport 注入 `@zhixing/network` 的 safe fetch，使用统一代理与 SSRF 出站约束，不走 SDK 默认全局 fetch 旁路。这些保护不能把任意本地进程变成沙箱。
+stdio 使用 SDK 默认环境白名单，再过滤显式 env 中的解释器启动型危险变量；并非继承全部宿主环境。HTTP transport 注入 `@zhixing-ai/network` 的 safe fetch，使用统一代理与 SSRF 出站约束，不走 SDK 默认全局 fetch 旁路。这些保护不能把任意本地进程变成沙箱。
 
 MCP 秘密留在设备 SecretStore，由组合根发放最小投影；stdio 注入 env，HTTP 注入 header。秘密文件族的保护属于共同安全边界，不能通过 MCP 工具绕过。一次性接入探测与常驻连接复用同一建链与 transport 安全逻辑。
 

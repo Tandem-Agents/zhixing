@@ -25,7 +25,7 @@ import {
   type SurfaceAssetGrantLedgerAppendResult,
   type SurfaceAssetGrantLedgerIssuedResult,
   type SurfaceAssetGrantLedgerSnapshot,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   type ArtifactRef,
   type CommitEnvelope,
@@ -37,20 +37,20 @@ import {
   type LogicalRecord,
   type SurfaceAssetGrant,
   type SurfaceAssetScope,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
 import type { HomeAssetLifecycle } from "./home-asset-lifecycle.js";
 
 import { foldConversationBaseBindings, conversationBaseKey, openConversationBase, registerConversationBaseContext,
   registerConversationTransferProjection, resolveCurrentConversationAuthorityAt, CONVERSATION_TRANSFER_PROJECTION_ID,
-  type ConversationBaseBinding } from '@zhixing/owner-kernel/conversation-transfer';
-import { conversationAnchorAtPrefix, conversationAnchorProjectionIds } from '@zhixing/owner-kernel/conversation-owner-authority';
+  type ConversationBaseBinding } from '@zhixing-ai/owner-kernel/conversation-transfer';
+import { conversationAnchorAtPrefix, conversationAnchorProjectionIds } from '@zhixing-ai/owner-kernel/conversation-owner-authority';
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SURFACE_ASSET_PROJECTION_ID = "surface-asset-grants";

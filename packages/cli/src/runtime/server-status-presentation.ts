@@ -1,6 +1,6 @@
 import type { ServerInfoResult } from './rpc-management-facade.js';
 import type { RuntimeNetworkProxyDisplayProjection, RuntimePrimaryModelDisplayProjection } from './runtime-configuration-provider.js';
-import type { TerminalSummary, TerminalSummaryRow, TerminalSummarySection, TerminalSummaryText } from '@zhixing/terminal-ui/protocol';
+import type { TerminalSummary, TerminalSummaryRow, TerminalSummarySection, TerminalSummaryText } from '@zhixing-ai/terminal-ui/protocol';
 import { activeWork, countWork, formatWorkItems, liveChannels, otherRpcConnections } from './stop-selection.js';
 import { paginateSummary, summaryLines, summaryText } from '../summary-projection.js';
 

@@ -1,13 +1,13 @@
-import { validateProtocolVersion } from "@zhixing/core/protocol";
+import { validateProtocolVersion } from "@zhixing-ai/core/protocol";
 import type {
   MeshConnectionProjectionEntry,
   MeshConnectionProjectionPort,
-} from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/bootstrap";
 import type {
   PidFileContents,
   ServerStateFile,
   ServerStateSnapshot,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 
 export const MESH_COMPATIBILITY_EXTENSION_KEY = "meshCompatibility";
 

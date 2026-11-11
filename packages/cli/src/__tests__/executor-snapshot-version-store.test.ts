@@ -1,13 +1,13 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import type { PermissionRule } from "@zhixing/core/security";
-import { protocolDigest } from "@zhixing/core/protocol";
+import type { PermissionRule } from "@zhixing-ai/core/security";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 import type {
   ExecutorCapabilityDirectoryState,
   ProtocolSignatureVerifier,
   ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
   FileExecutionSnapshotVersionStore,

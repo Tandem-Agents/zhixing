@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { expect, it, onTestFinished } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
@@ -10,7 +10,7 @@ import {
   ForegroundActivity,
   holdForegroundObligation,
   type DeviceCapacityArbiterPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { projectionReadCapacity } from "./artifact-read-capacity.js";
 import { AuthorityIdleMaintenance } from "./authority-idle-maintenance.js";
 

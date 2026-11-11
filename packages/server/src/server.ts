@@ -15,14 +15,14 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { Duplex } from "node:stream";
-import { captureFileLockProcessIdentity } from "@zhixing/core/persistence";
+import { captureFileLockProcessIdentity } from "@zhixing-ai/core/persistence";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { ScheduleRuntimeApplication } from "@zhixing/core/scheduler/application";
-import { createEventBridge, type DisposeBridge } from "@zhixing/rpc/event-bridge";
+import type { ScheduleRuntimeApplication } from "@zhixing-ai/core/scheduler/application";
+import { createEventBridge, type DisposeBridge } from "@zhixing-ai/rpc/event-bridge";
 import {
   createSessionBroadcastTransport,
   type SessionBroadcastTransport,
-} from "@zhixing/rpc/session-broadcast";
+} from "@zhixing-ai/rpc/session-broadcast";
 import { dispatchRest } from "./routes.js";
 import type { ServerContext } from "./context.js";
 import { DEFAULT_SERVER_CONFIG, type ServerConfig } from "./types.js";

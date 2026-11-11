@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { access } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
-import type { ArtifactRef } from "@zhixing/core/contracts";
+import type { ArtifactRef } from "@zhixing-ai/core/contracts";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
 

@@ -1,10 +1,10 @@
 import http from 'node:http';
 import net from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { ModelCallResourceMeter } from '@zhixing/core/contracts';
-import type { ChatRequest, StreamEvent } from '@zhixing/core/types';
-import { meteredProviderCall } from '@zhixing/orchestrator/runtime';
-import { DEFAULT_QUIRKS, createOpenAICompatibleProvider, type ResolvedProvider } from '@zhixing/providers';
+import type { ModelCallResourceMeter } from '@zhixing-ai/core/contracts';
+import type { ChatRequest, StreamEvent } from '@zhixing-ai/core/types';
+import { meteredProviderCall } from '@zhixing-ai/orchestrator/runtime';
+import { DEFAULT_QUIRKS, createOpenAICompatibleProvider, type ResolvedProvider } from '@zhixing-ai/providers';
 import { createAnthropicProvider } from '../../../providers/src/adapters/anthropic-messages.js';
 
 // 真实适配器、真实 SDK、计量包装与合成回环：只有整次调用都没送达才按 0 token 结算（Z101）。

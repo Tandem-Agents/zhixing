@@ -1,10 +1,10 @@
-import { generateTurnId } from "@zhixing/core";
+import { generateTurnId } from "@zhixing-ai/core";
 import {
   projectConversationClear,
   type ConversationClearCommitPort,
   type ConversationClearedFact,
-} from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/conversation/application";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 /** Anchor Correctness binding for the Conversation-owned clear command. */
 export function createAnchorConversationClearCommitPort(input: Readonly<{

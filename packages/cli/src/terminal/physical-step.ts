@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { DeviceCapacityAdmissionError, DeviceCapacityStepError, type DeviceCapacityArbiterPort, type DeviceCapacityBudget, type DeviceCapacityStepPermit } from '@zhixing/core/resources';
-import { checkpointFilesystemCompletion } from '@zhixing/mesh/filesystem';
+import { DeviceCapacityAdmissionError, DeviceCapacityStepError, type DeviceCapacityArbiterPort, type DeviceCapacityBudget, type DeviceCapacityStepPermit } from '@zhixing-ai/core/resources';
+import { checkpointFilesystemCompletion } from '@zhixing-ai/mesh/filesystem';
 
 /** Capacity covers one completed physical operation; retained pages belong to
  * the terminal root's separate durable byte account, never to this permit. */

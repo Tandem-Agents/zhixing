@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ToolDefinition } from "@zhixing/core/types";
+import type { ToolDefinition } from "@zhixing-ai/core/types";
 import {
   assembleKernelToolImplementation,
   type KernelToolImplementationPort,

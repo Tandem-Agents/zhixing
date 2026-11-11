@@ -7,8 +7,8 @@ import {
   type AuthorityCommitLog,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
-} from "@zhixing/core/authority";
-import type { CommitEnvelope, JsonValue, LogicalRecord } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/authority";
+import type { CommitEnvelope, JsonValue, LogicalRecord } from "@zhixing-ai/core/contracts";
 import {
   applyValidatedAssignmentEntry,
   createAssignmentLedgerValidationState,
@@ -16,7 +16,7 @@ import {
   validateAssignmentEntry,
   type AssignmentLedgerValidationState,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 /**
  * 派发账本的领域索引。每个派发按键各存两样东西：

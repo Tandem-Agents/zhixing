@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { DurableProjectionReadContext } from "@zhixing/core/authority";
-import type { AdvancementControlEvent } from "@zhixing/core/advancement";
+import type { DurableProjectionReadContext } from "@zhixing-ai/core/authority";
+import type { AdvancementControlEvent } from "@zhixing-ai/core/advancement";
 import {
   advancementPendingPrefix,
   advancementPendingProposals,
@@ -9,7 +9,7 @@ import {
 } from "../advancement-recovery-index.js";
 import { conversationStateKeyHash } from "../conversation-state-key.js";
 import { conversationCommitSummary } from "../conversation-commit-summary.js";
-import { validateConversationCommitSummary } from "@zhixing/core/contracts";
+import { validateConversationCommitSummary } from "@zhixing-ai/core/contracts";
 
 const NOW = "2026-10-30T00:00:00.000Z";
 

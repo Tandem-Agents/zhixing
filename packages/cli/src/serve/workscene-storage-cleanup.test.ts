@@ -9,8 +9,8 @@ import path from "node:path";
 import type {
   StorageMaintenanceGovernorPort,
   StorageMaintenanceRequest,
-} from "@zhixing/core/resources";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/resources";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
 

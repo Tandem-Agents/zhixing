@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceKey } from "@zhixing/mesh/device-identity";
-import { loadDeviceKey, persistDeviceKey } from "@zhixing/mesh/device-key-store";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { loadDeviceKey, persistDeviceKey } from "@zhixing-ai/mesh/device-key-store";
 import {
   loadExistingDeviceKey,
   loadOrCreateCandidateDeviceKey,

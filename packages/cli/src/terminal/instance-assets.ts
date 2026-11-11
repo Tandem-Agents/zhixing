@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
-import { CheckpointDirectoryHandle, type CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
-import type { DeviceCapacityArbiterPort, DeviceCapacityStepPermit } from '@zhixing/core/resources';
-import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
+import { CheckpointDirectoryHandle, type CheckpointFilesystemSession } from '@zhixing-ai/mesh/filesystem';
+import type { DeviceCapacityArbiterPort, DeviceCapacityStepPermit } from '@zhixing-ai/core/resources';
+import { TERMINAL_LIMITS } from '@zhixing-ai/terminal-ui/protocol';
 import { terminalMetadataStep, terminalPhysicalStep } from './physical-step.js';
 import { closeTerminalFiles } from './close-budget.js';
 

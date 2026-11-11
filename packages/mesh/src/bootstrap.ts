@@ -7,7 +7,7 @@ import type {
   MeshRoleBootConfig,
   RendezvousKey,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import type { TrustProjection } from "./trust-chain.js";
 import { MeshProtocolError } from "./errors.js";

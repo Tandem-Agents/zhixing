@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { readConversationGuardView, conversationStateBase, conversationStateFieldKey, encodeConversationState } from '../conversation-run-state-index.js';
-import type { JsonValue } from '@zhixing/core/contracts';
+import type { JsonValue } from '@zhixing-ai/core/contracts';
 
 it('reads a finite guard field set in batches and does not reread missing fields on its relation-closing pass', async () => {
   const id = 'field-batch-conversation';

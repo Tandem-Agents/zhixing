@@ -8,7 +8,7 @@ import {
   ServerNotRunningError,
   type RpcClient,
   type ServerEndpoint,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 
 const endpoint: ServerEndpoint = {
   url: "ws://127.0.0.1:18900/ws",
@@ -243,7 +243,7 @@ describe("CoreHostConnection", () => {
     });
 
     await expect(conn.getClient()).rejects.toThrow(
-      "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
+      "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g zhixing@latest；再运行 zz，然后重试原操作",
     );
     expect(stopUnresponsiveHost).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
@@ -269,7 +269,7 @@ describe("CoreHostConnection", () => {
     });
 
     await expect(conn.getClient()).rejects.toThrow(
-      "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
+      "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g zhixing@latest；再运行 zz，然后重试原操作",
     );
     expect(spawn).not.toHaveBeenCalled();
     expect(client.request).not.toHaveBeenCalled();

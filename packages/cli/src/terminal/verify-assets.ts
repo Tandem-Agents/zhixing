@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
-import { TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
-import { beginLogPhase, type LogRecordPort } from '@zhixing/core/logging';
+import { TerminalChannelRetiredError } from '@zhixing-ai/terminal-ui/channel';
+import { beginLogPhase, type LogRecordPort } from '@zhixing-ai/core/logging';
 import type { TerminalChunk, TerminalChunkTable } from './chunk-table.js';
 
 interface Artifact { readonly name: string; readonly bytes: number; readonly sha256: string }

@@ -1,7 +1,7 @@
 /**
  * UI 暴露的 provider 子集——CLI 各 UI 入口共享。
  *
- * 与 `@zhixing/providers` 的 PROVIDER_PRESETS 区分：
+ * 与 `@zhixing-ai/providers` 的 PROVIDER_PRESETS 区分：
  *   - PROVIDER_PRESETS：协议层全集。所有可解析的 provider（含未来未上线的）。
  *   - 此 registry：UI 层白名单。当前曝光给用户选择的子集。
  *

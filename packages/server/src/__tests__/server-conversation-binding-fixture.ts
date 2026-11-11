@@ -1,5 +1,5 @@
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
 import type { ServerConversationBinding } from "../context.js";
 
 /** Test-only bridge for Server integration tests that exercise a real owner. */

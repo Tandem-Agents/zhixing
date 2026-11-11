@@ -23,15 +23,15 @@
  *     维护 cache —— 这是 conversation 边界事件，不在 runtime 边界
  */
 
-import type { SchedulerFacade } from "@zhixing/core/scheduler";
-import type { ToolDefinition } from "@zhixing/core";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import { createScheduleTool, createTaskListTool } from "@zhixing/tools-builtin";
+import type { SchedulerFacade } from "@zhixing-ai/core/scheduler";
+import type { ToolDefinition } from "@zhixing-ai/core";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
+import { createScheduleTool, createTaskListTool } from "@zhixing-ai/tools-builtin";
 import {
   TaskListService,
   type TaskListStore,
   type ConversationTaskListToolApplication,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 
 export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
   {

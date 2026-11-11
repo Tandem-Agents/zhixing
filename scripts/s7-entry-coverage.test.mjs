@@ -525,7 +525,7 @@ test("all production CleanupRegistry constructions bind exact topology owners", 
       ...records,
       {
         relative: "packages/cli/src/runtime/unregistered-cleanup.ts",
-        text: 'import { CleanupRegistry as Registry } from "@zhixing/server"; new Registry({ activeOwners: ["anchor-host"] });',
+        text: 'import { CleanupRegistry as Registry } from "@zhixing-ai/server"; new Registry({ activeOwners: ["anchor-host"] });',
       },
     ])).join("\n"),
     /unregistered production CleanupRegistry construction/,
@@ -535,7 +535,7 @@ test("all production CleanupRegistry constructions bind exact topology owners", 
       ...records,
       {
         relative: "packages/cli/src/runtime/namespace-cleanup.ts",
-        text: 'import * as server from "@zhixing/server"; new server.CleanupRegistry({ activeOwners: ["anchor-host"] });',
+        text: 'import * as server from "@zhixing-ai/server"; new server.CleanupRegistry({ activeOwners: ["anchor-host"] });',
       },
     ])).join("\n"),
     /unregistered production CleanupRegistry construction/,
@@ -545,7 +545,7 @@ test("all production CleanupRegistry constructions bind exact topology owners", 
       ...records,
       {
         relative: "packages/cli/src/runtime/cleanup-bridge.ts",
-        text: 'import { CleanupRegistry as Local } from "@zhixing/server"; export { Local as Registry };',
+        text: 'import { CleanupRegistry as Local } from "@zhixing-ai/server"; export { Local as Registry };',
       },
       {
         relative: "packages/cli/src/runtime/transduced-cleanup.ts",
@@ -562,7 +562,7 @@ test("lazy named RPC bindings retain ownership, namespace and escape restriction
   assert.deepEqual(inspectProductionSource(entry, binding + " new Connection({});"), []);
   assert.match(inspectProductionSource(entry, binding + " export function leak() { return new Connection({}); }").join("\n"), /raw RPC capability returned/);
   assert.match(inspectProductionSource(entry, binding + " const c = new Connection({}); c.getClient();").join("\n"), /client accessed outside facade/);
-  assert.match(inspectProductionSource(entry, 'const { createRpcClient } = await import("@zhixing/server");').join("\n"), /acquired outside owner/);
+  assert.match(inspectProductionSource(entry, 'const { createRpcClient } = await import("@zhixing-ai/server");').join("\n"), /acquired outside owner/);
   assert.match(inspectProductionSource(entry, 'const { CoreHostConnection, ...rest } = await import("./runtime/core-host-connection.js");').join("\n"), /namespace capability loaded dynamically/);
   assert.match(inspectProductionSource("packages/cli/src/runtime/unowned.ts", 'const { CoreHostConnection: Connection } = await import("./core-host-connection.js");').join("\n"), /acquired outside owner/);
 });
@@ -626,7 +626,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/local-conversation-owner.ts",
-      (text) => `import type { GlobalStatePort } from "@zhixing/core/contracts";\n${text}`,
+      (text) => `import type { GlobalStatePort } from "@zhixing-ai/core/contracts";\n${text}`,
     )).join("\n"),
     /forbidden capability GlobalStatePort/,
   );
@@ -2695,7 +2695,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/backup-command.ts",
-      (text) => `${text}\nimport { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";`,
+      (text) => `${text}\nimport { FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";`,
     )).join("\n"),
     /published checkpoint filesystem target factory, bounded session or retention boundary drifted/,
   );
@@ -4005,11 +4005,11 @@ test("planned duty migration stays bound to two production roots and a finite ow
     [[["packages/cli/src/serve/planned-anchor-transfer-mesh.ts", "event.seq !== cursor.seq + 1 || ", ""]],
       /owner\/receiver phase exact-set drifted/],
     [[["packages/cli/src/serve/planned-anchor-transfer.ts", "export interface PlannedAnchorJournalStorage {",
-      'declare const leakedLog: import("@zhixing/core/authority").AuthorityCommitLog;\nexport interface PlannedAnchorJournalStorage {']],
+      'declare const leakedLog: import("@zhixing-ai/core/authority").AuthorityCommitLog;\nexport interface PlannedAnchorJournalStorage {']],
       /staging physical ownership or finite boundary drifted/],
     [[["packages/cli/src/serve/planned-anchor-transfer.ts",
-      'durableProjection: import("@zhixing/core/authority").AuthorityCommitLog["durableProjection"];',
-      'durableProjection: import("@zhixing/core/authority").AuthorityCommitLog["append"];']],
+      'durableProjection: import("@zhixing-ai/core/authority").AuthorityCommitLog["durableProjection"];',
+      'durableProjection: import("@zhixing-ai/core/authority").AuthorityCommitLog["append"];']],
       /staging physical ownership or finite boundary drifted/],
     [[["packages/cli/src/serve/planned-anchor-transfer.ts",
       '        await this.#candidates.terminal(identity, "aborted", state.abort!);\n        // 中止的清理可重复执行；确认后候选离开未完目录\n        await this.#cleanupAborted(context, state);\n',
@@ -4032,10 +4032,10 @@ test("planned duty migration stays bound to two production roots and a finite ow
   // 写法无关性回归（第 3 组返修）：日志能力按类型结构与导入绑定判定（与引号无关），连续性守卫与候选恢复按真实调用判定。
   const plannedTransfer = "packages/cli/src/serve/planned-anchor-transfer.ts";
   const plannedMesh = "packages/cli/src/serve/planned-anchor-transfer-mesh.ts";
-  const logSignature = 'import("@zhixing/core/authority").AuthorityCommitLog["durableProjection"]';
+  const logSignature = 'import("@zhixing-ai/core/authority").AuthorityCommitLog["durableProjection"]';
   assertMutationTable(inspectPlannedAnchorTransferAssembly, records, [
     [[[plannedTransfer, (text) =>
-      `import type { AuthorityCommitLog as CommitLog } from "@zhixing/core/authority";\ndeclare const leaked: CommitLog;\n${text}`]],
+      `import type { AuthorityCommitLog as CommitLog } from "@zhixing-ai/core/authority";\ndeclare const leaked: CommitLog;\n${text}`]],
       /staging physical ownership or finite boundary drifted/],
     [[[plannedMesh, "throw new TypeError('Trust reconciliation skips or conflicts with an event');",
       "/* throw new TypeError('Trust reconciliation skips or conflicts with an event'); */ void 0;"]],
@@ -4044,9 +4044,9 @@ test("planned duty migration stays bound to two production roots and a finite ow
       "        // 中止的清理可重复执行；确认后候选离开未完目录\n        // await this.#cleanupAborted(context, state);\n"]],
       /signed abort or candidate terminal recovery drifted/],
   ], [
-    [[plannedTransfer, logSignature, "import('@zhixing/core/authority').AuthorityCommitLog['durableProjection']"]],
+    [[plannedTransfer, logSignature, "import('@zhixing-ai/core/authority').AuthorityCommitLog['durableProjection']"]],
     [[plannedTransfer, (text) =>
-      `import type { AuthorityCommitLog as CommitLog } from "@zhixing/core/authority";\n${replaceOnce(text, logSignature, 'CommitLog["durableProjection"]')}`]],
+      `import type { AuthorityCommitLog as CommitLog } from "@zhixing-ai/core/authority";\n${replaceOnce(text, logSignature, 'CommitLog["durableProjection"]')}`]],
     [[plannedMesh, withinSegment("async function reconcileTrustFromPeer(", "\n}\n", renameAll(["cursor", "head"], ["event", "item"]))]],
     [[plannedTransfer, withinSegment(
       "  async recoverBeforeAdmission(): Promise<void> {\n    for (const candidate of (await this.#candidates.unfinishedStates()).values())",
@@ -4916,11 +4916,11 @@ test("device lifecycle stays on one journal, two production roots and local-only
 
 test("retired entry, live writable Store and reverse package dependency mutations fail", () => {
   assert.match(
-    inspectProductionSource("packages/orchestrator/src/mutation.ts", 'import { SkillStore } from "@zhixing/core";')[0],
+    inspectProductionSource("packages/orchestrator/src/mutation.ts", 'import { SkillStore } from "@zhixing-ai/core";')[0],
     /forbidden writable owner import SkillStore/,
   );
   assert.match(
-    inspectProductionSource("packages/server/src/bad.ts", 'import "@zhixing/executor";')[0],
+    inspectProductionSource("packages/server/src/bad.ts", 'import "@zhixing-ai/executor";')[0],
     /server imports executor/,
   );
   assert.match(
@@ -6306,7 +6306,7 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
   assert.match(
     inspectKernelProviderDependencyInversion(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
-      (text) => `import { createProviderRoles } from "@zhixing/providers";\n${text}`,
+      (text) => `import { createProviderRoles } from "@zhixing-ai/providers";\n${text}`,
     )).join("\n"),
     /concrete Provider|concrete Provider\/configuration/,
   );
@@ -6349,7 +6349,7 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
   );
   assert.match(
     inspectProductionManifest("packages/orchestrator/package.json", {
-      dependencies: { "@zhixing/providers": "workspace:*" },
+      dependencies: { "@zhixing-ai/providers": "workspace:*" },
     }).join("\n"),
     /concrete Provider production dependency/,
   );
@@ -6401,7 +6401,7 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
   assert.deepEqual(inspectKernelToolImplementationDependencyInversion(records), []);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
-    (text) => `import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";\n${text}`,
+    (text) => `import { BUILTIN_TOOL_FACTORIES } from "@zhixing-ai/tools-builtin";\n${text}`,
   )).join("\n"), /demand-owned Tool port|concrete Tool package/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/orchestrator/src/runtime/kernel-tool-implementation.ts",
@@ -6454,8 +6454,8 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/cli/src/runtime/task-list-stores.ts",
     (text) => text.replace(
-      'from "@zhixing/core/conversation/application"',
-      'from "@zhixing/tools-builtin"',
+      'from "@zhixing-ai/core/conversation/application"',
+      'from "@zhixing-ai/tools-builtin"',
     ),
   )).join("\n"), /task-list state, cache, subscription and Store port/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
@@ -6482,7 +6482,7 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     ),
   )).join("\n"), /parent controlled-effect chain/);
   assert.match(inspectProductionManifest("packages/orchestrator/package.json", {
-    dependencies: { "@zhixing/tools-builtin": "workspace:*" },
+    dependencies: { "@zhixing-ai/tools-builtin": "workspace:*" },
   }).join("\n"), /concrete Tool production dependency/);
 });
 
@@ -6508,7 +6508,7 @@ test("Advancement model providers are concrete only at the Host edge", async () 
   assert.match(
     inspectAdvancementProviderDependencyInversion(mutate(
       "packages/cli/src/serve/advancement-controller.ts",
-      (text) => `import { createProviderRoles } from "@zhixing/providers";\n${text}`,
+      (text) => `import { createProviderRoles } from "@zhixing-ai/providers";\n${text}`,
     )).join("\n"),
     /concrete Provider configuration/,
   );
@@ -6766,9 +6766,9 @@ test("validated configuration crosses composition roots as finite frozen project
   for (const transform of [
     (text) => replaceOnce(text, loadedConfigType, `${loadedConfigType}\nexport const loadNow = () => loadConfig();`),
     (text) => `${aliasImport(text)}\nexport async function unintendedLoad() { return readConfiguration(); }\n`,
-    (text) => `${text}\nimport * as providerModule from "@zhixing/providers";\nexport const viaNamespace = () => providerModule.loadConfig();\n`,
-    (text) => `${text}\nexport async function viaDynamic() { const { loadConfig: read } = await import("@zhixing/providers"); return read(); }\n`,
-    (text) => `${text}\nexport async function viaModule() { const providerModule = await import("@zhixing/providers"); return providerModule.loadConfig(); }\n`,
+    (text) => `${text}\nimport * as providerModule from "@zhixing-ai/providers";\nexport const viaNamespace = () => providerModule.loadConfig();\n`,
+    (text) => `${text}\nexport async function viaDynamic() { const { loadConfig: read } = await import("@zhixing-ai/providers"); return read(); }\n`,
+    (text) => `${text}\nexport async function viaModule() { const providerModule = await import("@zhixing-ai/providers"); return providerModule.loadConfig(); }\n`,
   ]) {
     assert.match(
       inspectRuntimeConfigurationProjectionBoundary([...records, { ...roleConfiguration, text: transform(roleConfiguration.text) }]).join("\n"),
@@ -6822,7 +6822,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     ["packages/orchestrator/src/profile/default-profiles.ts", (text) => `${text}\nconst renamedProfile = { instructions: "Call workmode_exit when done" };`],
     ["packages/orchestrator/src/profile/index.ts", (text) => `${text}\nexport { powerProfile as sceneProfile } from "./default-profiles.js";`],
     ["packages/cli/src/serve/workmode-tools.ts", (text) => text.replace("systemPromptGuidance: WORKING_MODE_TEXT,", "")],
-    ["packages/cli/src/serve/executor-role-runtime.ts", (text) => text.replace('import { powerProfile } from "./workscene-agent-guidance.js"', 'import { powerProfile } from "@zhixing/orchestrator/profile"')],
+    ["packages/cli/src/serve/executor-role-runtime.ts", (text) => text.replace('import { powerProfile } from "./workscene-agent-guidance.js"', 'import { powerProfile } from "@zhixing-ai/orchestrator/profile"')],
   ]) {
     assert.match(inspectWorksceneRuntimeProjectionBoundary(mutate(relative, transform)).join("\n"), /guidance must be product-owned/u);
   }
@@ -6901,7 +6901,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => `${text}\nimport "@zhixing/runtime-host/workmode-tools";`,
+      (text) => `${text}\nimport "@zhixing-ai/runtime-host/workmode-tools";`,
     )).join("\n"),
     /retained a product implementation or consumer path/,
   );
@@ -7073,7 +7073,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   assert.deepEqual(inspectMcpManagementBoundary(records), []);
   // 具体 MCP 导入只在 4 个 CLI 基础设施适配器（9b37de45 新增受管探测请求）
   assertMutationTable(inspectMcpManagementBoundary, records, [
-    [[["packages/cli/src/serve/mcp-tools.ts", (text) => `import { probeServer } from "@zhixing/mcp";\n${text}`]],
+    [[["packages/cli/src/serve/mcp-tools.ts", (text) => `import { probeServer } from "@zhixing-ai/mcp";\n${text}`]],
       /Concrete MCP imports escaped the finite CLI infrastructure adapters/],
   ]);
   assert.match(
@@ -7114,7 +7114,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   assert.match(
     inspectMcpManagementBoundary(mutate(
       "packages/cli/src/config-editor/sections/mcp.ts",
-      (text) => `import type { McpServerStatus } from "@zhixing/mcp";\n${text}`,
+      (text) => `import type { McpServerStatus } from "@zhixing-ai/mcp";\n${text}`,
     )).join("\n"),
     /regained concrete MCP ownership|Concrete MCP imports escaped/,
   );
@@ -7144,6 +7144,26 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
       ? { ...record, text: transform(record.text) }
       : record
   );
+  // 领域应用不得以任何模块加载形式依赖 CLI 包 zhixing；同名普通字符串不是依赖。
+  for (const dependency of [
+    'import "zhixing";',
+    'const cli = require("zhixing/dist/index.js");',
+    'export type { Cli } from "zhixing";',
+    'void import("zhixing");',
+  ]) {
+    assert.match(
+      inspectWorkspaceAdministrationOwnership(mutate(
+        "packages/core/src/environment/workspace-administration.ts",
+        (text) => `${text}\n${dependency}`,
+      )).join("\n"),
+      /uniquely own CRUD/,
+      dependency,
+    );
+  }
+  assert.deepEqual(inspectWorkspaceAdministrationOwnership(mutate(
+    "packages/core/src/environment/workspace-administration.ts",
+    (text) => `${text}\nconst productCommand = "zhixing"; // repo/zhixing/packages`,
+  )), []);
 
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -7341,7 +7361,7 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
       "packages/cli/src/runtime/local-workspace-control.ts",
-      (text) => `import type { ExecutorResourceGovernor } from "@zhixing/executor";\n${text}`,
+      (text) => `import type { ExecutorResourceGovernor } from "@zhixing-ai/executor";\n${text}`,
     )).join("\n"),
     /resource admission escaped its required finite Host projection/,
   );
@@ -8591,6 +8611,21 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
+  // Skill RPC 绑定不得依赖 CLI 包 zhixing；同名普通字符串不是依赖。
+  for (const dependency of ['import "zhixing";', 'const cli = require("zhixing");']) {
+    assert.match(
+      inspectSkillCatalogApplicationOwnership(mutate(
+        "packages/rpc/src/skill-catalog-client.ts",
+        (text) => `${text}\n${dependency}`,
+      )).join("\n"),
+      /Skill RPC client binding is not uniquely RPC-owned/,
+      dependency,
+    );
+  }
+  assert.deepEqual(inspectSkillCatalogApplicationOwnership(mutate(
+    "packages/rpc/src/skill-catalog-client.ts",
+    (text) => `${text}\nconst productCommand = "zhixing";`,
+  )), []);
   assert.match(
     inspectSkillCatalogApplicationOwnership([
       ...records,
@@ -9708,7 +9743,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
-      (text) => `${text}\nimport { SkillCatalogKernelProjectionApplicationService } from "@zhixing/core/skills/catalog";`,
+      (text) => `${text}\nimport { SkillCatalogKernelProjectionApplicationService } from "@zhixing-ai/core/skills/catalog";`,
     )).join("\n"),
     /reconstructs Skill projection/,
   );
@@ -10027,8 +10062,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/setup-delivery.ts",
       (text) => text.replace(
-        '@zhixing/core/delivery/channel-effect',
-        '@zhixing/core',
+        '@zhixing-ai/core/delivery/channel-effect',
+        '@zhixing-ai/core',
       ),
     )).join("\n"),
     /send effect is not uniquely domain-owned/,
@@ -10133,8 +10168,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/context.ts",
       (text) => text.replace(
-        '@zhixing/core/product-api',
-        '@zhixing/core',
+        '@zhixing-ai/core/product-api',
+        '@zhixing-ai/core',
       ),
     )).join("\n"),
     /expose only the Product API dispatcher binding/,
@@ -10160,8 +10195,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/tools-builtin/src/skill.ts",
       (text) => text.replaceAll(
-        '@zhixing/core/skills/catalog',
-        '@zhixing/core',
+        '@zhixing-ai/core/skills/catalog',
+        '@zhixing-ai/core',
       ),
     )).join("\n"),
     /bypasses its domain subpath|leaked back through core root import/,
@@ -10308,7 +10343,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     )).join("\n"),
     /RPC client binding is not uniquely RPC-owned, domain-bound or strict fail-closed/,
   );
-  for (const dependency of ["@zhixing/server", "@zhixing/cli"]) {
+  for (const dependency of ["@zhixing-ai/server", "zhixing"]) {
     assert.match(
       inspectSkillCatalogApplicationOwnership(mutate(
         "packages/rpc/src/skill-catalog-client.ts",
@@ -10365,20 +10400,20 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
 test("finite dependency syntax and manifests cannot bypass owner or role isolation", () => {
   const guarded = "packages/orchestrator/src/mutation.ts";
   for (const source of [
-    'import { SkillStore as Alias } from "@zhixing/core";',
-    'export { SkillStore as Alias } from "@zhixing/core";',
-    'import * as core from "@zhixing/core";',
-    'export * from "@zhixing/core";',
-    'const core = await import("@zhixing/core");',
-    'const core = require("@zhixing/core");',
-    'import core = require("@zhixing/core");',
+    'import { SkillStore as Alias } from "@zhixing-ai/core";',
+    'export { SkillStore as Alias } from "@zhixing-ai/core";',
+    'import * as core from "@zhixing-ai/core";',
+    'export * from "@zhixing-ai/core";',
+    'const core = await import("@zhixing-ai/core");',
+    'const core = require("@zhixing-ai/core");',
+    'import core = require("@zhixing-ai/core");',
   ]) {
     assert.match(inspectProductionSource(guarded, source).join("\n"), /forbidden writable owner/);
   }
   assert.match(
     inspectProductionSource(
       "packages/server/src/bad-owner.ts",
-      'import { SkillStore } from "@zhixing/core";',
+      'import { SkillStore } from "@zhixing-ai/core";',
     ).join("\n"),
     /forbidden writable owner import SkillStore/,
   );
@@ -10389,32 +10424,32 @@ test("finite dependency syntax and manifests cannot bypass owner or role isolati
   assert.deepEqual(
     inspectProductionSource(
       guarded,
-      'import type { SchedulerFacade } from "@zhixing/core";',
+      'import type { SchedulerFacade } from "@zhixing-ai/core";',
     ),
     [],
   );
   assert.match(
     inspectProductionSource(
       "packages/server/src/bad.ts",
-      'const executor = await import("@zhixing/executor");',
+      'const executor = await import("@zhixing-ai/executor");',
     ).join("\n"),
     /server imports executor/,
   );
   assert.match(
     inspectProductionManifest("packages/server/package.json", {
-      dependencies: { "@zhixing/executor": "workspace:*" },
+      dependencies: { "@zhixing-ai/executor": "workspace:*" },
     }).join("\n"),
     /production dependency on executor/,
   );
   assert.deepEqual(
     inspectProductionManifest("packages/server/package.json", {
-      devDependencies: { "@zhixing/executor": "workspace:*" },
+      devDependencies: { "@zhixing-ai/executor": "workspace:*" },
     }),
     [],
   );
   assert.match(
     inspectProductionManifest("packages/runtime-host/package.json", {
-      dependencies: { "@zhixing/mcp": "workspace:*" },
+      dependencies: { "@zhixing-ai/mcp": "workspace:*" },
     }).join("\n"),
     /runtime-host declares product dependency/,
   );
@@ -10432,11 +10467,11 @@ test("workspace re-export aliases resolve back to the writable owner", async () 
     },
     {
       relative: "packages/bridge/src/index.ts",
-      text: 'import { SkillStore as LocalStore } from "@zhixing/core"; export { LocalStore as WritableSkill };',
+      text: 'import { SkillStore as LocalStore } from "@zhixing-ai/core"; export { LocalStore as WritableSkill };',
     },
   ];
   const resolver = await buildWorkspaceOwnerExposure(records, new Map([
-    ["@zhixing/core", "packages/core/src/index.ts"],
+    ["@zhixing-ai/core", "packages/core/src/index.ts"],
     ["@test/bridge", "packages/bridge/src/index.ts"],
   ]));
   assert.match(
@@ -10469,7 +10504,7 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
   assert.match(
     inspectProductionSource(
       "packages/cli/src/serve/aliased-client.ts",
-      'import { createRpcClient as connect } from "@zhixing/server"; const client = connect({}); client.request(method);',
+      'import { createRpcClient as connect } from "@zhixing-ai/server"; const client = connect({}); client.request(method);',
     ).join("\n"),
     /raw RPC capability createRpcClient acquired outside owner/,
   );
@@ -10536,14 +10571,14 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
   assert.match(
     inspectProductionSource(
       "packages/cli/src/runtime/rpc-dynamic.ts",
-      'const server = await import("@zhixing/server"); server.createRpcClient({});',
+      'const server = await import("@zhixing-ai/server"); server.createRpcClient({});',
     ).join("\n"),
     /raw RPC namespace capability loaded dynamically/,
   );
   assert.match(
     inspectProductionSource(
       "packages/cli/src/runtime/rpc-import-equals.ts",
-      'import server = require("@zhixing/server"); server.createRpcClient({});',
+      'import server = require("@zhixing-ai/server"); server.createRpcClient({});',
     ).join("\n"),
     /raw RPC namespace capability import/,
   );
@@ -10732,7 +10767,7 @@ test("Conversation storage implementations stay behind one finite Host adapter",
   assert.match(
     inspectConversationStorageBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
-      (text) => `${text}\nimport { ShardedTranscriptStore } from "@zhixing/core/transcript";`,
+      (text) => `${text}\nimport { ShardedTranscriptStore } from "@zhixing-ai/core/transcript";`,
     )).join("\n"),
     /concrete Conversation storage ShardedTranscriptStore escaped/,
   );
@@ -11005,7 +11040,7 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
   assert.match(
     inspectStorageRemainderBoundary(mutate(
       "packages/core/src/conversation/application.ts",
-      (text) => text + '\nimport { LocalLogStore } from "@zhixing/core/logging/storage";',
+      (text) => text + '\nimport { LocalLogStore } from "@zhixing-ai/core/logging/storage";',
     )).join("\n"),
     /P15 producer depends on a log reader or store/,
   );
@@ -11153,7 +11188,7 @@ test("runtime logging P15 rejects reverse reader dependencies and private writer
   const inspect = (input) => inspectStorageRemainderBoundary(input).filter(failure => failure.includes("P15"));
   assert.deepEqual(inspect(records), []);
   const append = text => records.map(record => record.relative === paths[2] ? { ...record, text: record.text + text } : record);
-  assert.match(inspect(append('\nimport { LocalLogStore } from "@zhixing/core/logging/storage";')).join("\n"), /producer depends on a log reader or store/);
+  assert.match(inspect(append('\nimport { LocalLogStore } from "@zhixing-ai/core/logging/storage";')).join("\n"), /producer depends on a log reader or store/);
   assert.match(inspect(append('\nconst privateRoot = path.join(home, "logs", "llm-error");')).join("\n"), /retired private log writer returned/);
   assert.match(inspect(append('\nnew LogRecorder(store, {});')).join("\n"), /production recorder.*multiplicity/);
   assert.match(inspect(records.map(record => record.relative === paths[0]

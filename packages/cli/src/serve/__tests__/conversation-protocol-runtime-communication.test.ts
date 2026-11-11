@@ -1,27 +1,27 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：communication。
-import { ConfirmationBroker, buildConfirmationRequest } from "@zhixing/core/confirmation";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
-import { createConfirmationBridge } from "@zhixing/rpc";
+import { ConfirmationBroker, buildConfirmationRequest } from "@zhixing-ai/core/confirmation";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
+import { createConfirmationBridge } from "@zhixing-ai/rpc";
 import { createMcpManagementTools } from "../mcp-tools.js";
 import { createServerConfirmationBinding, createServerConversationBinding } from "../server-product-bindings.js";
 import { buildConfirmationListMethod, buildConfirmationResolveMethod } from "../../../../server/src/rpc/methods/confirmation.js";
-import { type Message } from "@zhixing/core";
-import { runAgentLoop, MockLLMProvider, type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, type ConversationMessageExecutionRequest } from "@zhixing/core/conversation/application";
-import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import { type Message } from "@zhixing-ai/core";
+import { runAgentLoop, MockLLMProvider, type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, type ConversationMessageExecutionRequest } from "@zhixing-ai/core/conversation/application";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
 import { trackMessages } from "../../../../orchestrator/src/runtime/track-messages.js";
-import { createEventBus } from "@zhixing/core/events";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createEventBus } from "@zhixing-ai/core/events";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import { createConversationTool } from "../conversation-tools.js";
 import { createConversationCommunicationBinding } from "../conversation-communication-binding.js";
-import { SkillCatalogLoadApplicationService } from "@zhixing/core/skills/catalog";
-import { skillNameToId } from "@zhixing/core/skills/id";
-import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
-import { createSignedTrustRuleSnapshot, protocolDigest } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import { SkillCatalogLoadApplicationService } from "@zhixing-ai/core/skills/catalog";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
+import { BUILTIN_TOOL_FACTORIES } from "@zhixing-ai/tools-builtin";
+import { createSignedTrustRuleSnapshot, protocolDigest } from "@zhixing-ai/core/protocol";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime, DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
@@ -59,7 +59,7 @@ describe("ConversationProtocolRuntime", () => {
       async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
         if (id === ids[1]) { bStarted(); await whenAFinishes; }
         const captured: Message[] = [];
-        const pending: import("@zhixing/core").ToolResultBlock[] = [];
+        const pending: import("@zhixing-ai/core").ToolResultBlock[] = [];
         const communication = createConversationTool({ invoke: async (source, request) => {
           const response = await binding.invoke(source, request);
           if (source === ids[0] && request.action === "send" && request.input === "请核实后回信") await whenBStarts;
@@ -151,7 +151,7 @@ describe("ConversationProtocolRuntime", () => {
       async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
         executions++;
         const received: Message[] = [];
-        const pending: import("@zhixing/core").ToolResultBlock[] = [];
+        const pending: import("@zhixing-ai/core").ToolResultBlock[] = [];
         const port = options!.inputPort!;
         expect(port).toBeDefined();
         const iterator = runAgentLoop({ provider, model: "mock-model", messages: [...messages],
@@ -314,7 +314,7 @@ describe("ConversationProtocolRuntime", () => {
       async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
         executions++;
         const received: Message[] = [];
-        const pending: import("@zhixing/core").ToolResultBlock[] = [];
+        const pending: import("@zhixing-ai/core").ToolResultBlock[] = [];
         const port = options!.inputPort!;
         const iterator = runAgentLoop({ provider, model: "mock-model", maxTurns: ending.endsWith("limit") ? 1 : 3,
           messages: [...messages], abortSignal: controller.signal,
@@ -414,7 +414,7 @@ describe("ConversationProtocolRuntime", () => {
     const owner = { id: 1, authenticated: true, loopback: true, closed: false, surfacePrincipal: "rpc:owner", notify: vi.fn() };
     const observer = { ...owner, id: 2, surfacePrincipal: "rpc:other", notify: vi.fn() };
     const connections = new Set([owner, observer]);
-    const source = (entry: { conversationId?: string; request: import("@zhixing/core/confirmation").ConfirmationRequest }) => f.application.interactionSource(entry.conversationId!, entry.request.turnOrigin);
+    const source = (entry: { conversationId?: string; request: import("@zhixing-ai/core/confirmation").ConfirmationRequest }) => f.application.interactionSource(entry.conversationId!, entry.request.turnOrigin);
     const binding = createServerConfirmationBinding(hub, source);
     const server = { confirmation: binding, conversation: createServerConversationBinding(f.manager) };
     const bridge = createConfirmationBridge({ connections, hub, conversations: f.manager, continuationSource: source });

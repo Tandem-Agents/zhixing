@@ -1,8 +1,8 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：fences。
-import type { AssignmentEntry, AuthorityCallContext, AuthorityCapability, CancelProofBody, LedgerEvidencePage, LedgerSnapshot, IngressContext } from "@zhixing/core/contracts";
-import { advanceAssignmentLedger, assignmentLedgerSeed, dispatchEnvelopeDigest, protocolDigest, signCancelProof, type ConversationInteractionMirrorBatch } from "@zhixing/core/protocol";
-import { InProcessConversationDispatcher, type AssignmentSubmissionAuthorizer } from "@zhixing/owner-kernel/conversation-assignment";
-import { ControlAdmissionJournal, channelSurfacePrincipal, createConversationControlEnvelope, createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
+import type { AssignmentEntry, AuthorityCallContext, AuthorityCapability, CancelProofBody, LedgerEvidencePage, LedgerSnapshot, IngressContext } from "@zhixing-ai/core/contracts";
+import { advanceAssignmentLedger, assignmentLedgerSeed, dispatchEnvelopeDigest, protocolDigest, signCancelProof, type ConversationInteractionMirrorBatch } from "@zhixing-ai/core/protocol";
+import { InProcessConversationDispatcher, type AssignmentSubmissionAuthorizer } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { ControlAdmissionJournal, channelSurfacePrincipal, createConversationControlEnvelope, createInitialControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
 import { describe, expect, it } from "vitest";
 import { InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import { NOW, EXPIRY, EXECUTOR_ID, CONVERSATION_ID, RUN_ID, ASSIGNMENT_ID, SHA256_ZERO, ABORT_TICKET_DIGEST, DURABLE_IO_TEST_TIMEOUT_MS, allowOnceDecisionDigest, CountingArtifactStore, signedMirrorBatch, submission, createRevocationAwareSubmission, createUnassignedHarness, createHarness, ingress, ownerContext, submissionContext, trustedControlSource, applyResolutionControl, applyCancelControl, replaceAssignmentAfterUncertain, sealDefaultBundle, createAlternativeDispatch, createCancellationSubmission, createBundleSubmission, reopenJournal, withoutSignature, replayFixtureLog } from "./assignment-ledger-fixture.js";

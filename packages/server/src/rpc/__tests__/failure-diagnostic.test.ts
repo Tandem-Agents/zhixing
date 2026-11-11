@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { logFailureEvidence, failureSourceFrames, restoreFailureDiagnostic } from "@zhixing/core/logging";
+import { logFailureEvidence, failureSourceFrames, restoreFailureDiagnostic } from "@zhixing-ai/core/logging";
 import { toJsonRpcError } from "../handlers.js";
 import { RpcClientError } from "../../client/rpc-client.js";
 it("preserves bounded original evidence across JSON RPC without private error text",()=>{

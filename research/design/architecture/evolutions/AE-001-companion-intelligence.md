@@ -284,15 +284,15 @@ ApplicationHost ──────► Concrete Components（仅装配和生命�
 
 | 当前落点 | 目标责任 | 演进重点 |
 |---|---|---|
-| `@zhixing/core` | 最小公共原语与明确 subpath 合同 | 停止扩大根导出；领域合同随领域归位，具体装配和产品实现退出公共中心 |
-| `@zhixing/orchestrator` | 封闭 Intelligence Kernel | 收窄 `AgentRuntime`；移除产品领域知识和宿主管理内部对象 |
-| `@zhixing/runtime-host` | Runtime Assembly / Factory | 只消费已解析 Run Envelope 与组件贡献，不直接认识 Workscene、Schedule 等领域 |
-| `@zhixing/owner-kernel` | 通用 Authority、Commit、Recovery 与 Effect 原语 | 保留通用机制，领域 Reducer、状态机和用户语义回到领域单元 |
-| `@zhixing/owner-services` | 当前领域单元的候选承载区 | 先在包内形成独立源码边界；不得把全部产品能力重新聚成服务大包 |
-| `@zhixing/rpc` | Product API 的 RPC 绑定与运行事件投影 | 不拥有领域合同和应用用例 |
-| `@zhixing/server` | 认证、连接、编解码、订阅和协议宿主 | 以 Product API dispatcher 取代巨型领域上下文；handler 不编排业务 |
-| `@zhixing/cli` / Channel | 产品表面与进程入口 | 移出领域实现、Owner、Mesh 和生产后端，只保留输入、呈现、表面交互与启动选择 |
-| `@zhixing/executor` / `@zhixing/mesh` | 执行与拓扑适配器 | 实现上层端口，不感知产品领域和表面 |
+| `@zhixing-ai/core` | 最小公共原语与明确 subpath 合同 | 停止扩大根导出；领域合同随领域归位，具体装配和产品实现退出公共中心 |
+| `@zhixing-ai/orchestrator` | 封闭 Intelligence Kernel | 收窄 `AgentRuntime`；移除产品领域知识和宿主管理内部对象 |
+| `@zhixing-ai/runtime-host` | Runtime Assembly / Factory | 只消费已解析 Run Envelope 与组件贡献，不直接认识 Workscene、Schedule 等领域 |
+| `@zhixing-ai/owner-kernel` | 通用 Authority、Commit、Recovery 与 Effect 原语 | 保留通用机制，领域 Reducer、状态机和用户语义回到领域单元 |
+| `@zhixing-ai/owner-services` | 当前领域单元的候选承载区 | 先在包内形成独立源码边界；不得把全部产品能力重新聚成服务大包 |
+| `@zhixing-ai/rpc` | Product API 的 RPC 绑定与运行事件投影 | 不拥有领域合同和应用用例 |
+| `@zhixing-ai/server` | 认证、连接、编解码、订阅和协议宿主 | 以 Product API dispatcher 取代巨型领域上下文；handler 不编排业务 |
+| `zhixing` / Channel | 产品表面与进程入口 | 移出领域实现、Owner、Mesh 和生产后端，只保留输入、呈现、表面交互与启动选择 |
+| `@zhixing-ai/executor` / `@zhixing-ai/mesh` | 执行与拓扑适配器 | 实现上层端口，不感知产品领域和表面 |
 | `cli/src/serve` | 当前组合根、生命周期资产与大量暂居实现 | 原地形成 ApplicationHost 边界后按所有权迁出；不一次性搬迁 |
 
 只有同时满足下列事实才新增物理包：边界已经稳定；存在独立消费者、发布、生命周期或故障隔离价值；拆包能够消除一条受门禁约束的错误依赖。否则优先用目录、subpath 和包内可见性建立边界。

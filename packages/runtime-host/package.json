@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/runtime-host",
+  "name": "@zhixing-ai/runtime-host",
   "version": "0.1.0",
   "description": "知行运行宿主 — 通用 AgentRuntime 装配与 Kernel/Conversation 适配",
   "type": "module",
@@ -30,9 +30,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*",
-    "@zhixing/orchestrator": "workspace:*",
-    "@zhixing/owner-kernel": "workspace:*"
+    "@zhixing-ai/core": "workspace:*",
+    "@zhixing-ai/orchestrator": "workspace:*",
+    "@zhixing-ai/owner-kernel": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

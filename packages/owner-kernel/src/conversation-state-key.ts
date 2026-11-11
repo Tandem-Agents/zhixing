@@ -1,4 +1,4 @@
-import { protocolDigest } from '@zhixing/core/protocol';
+import { protocolDigest } from '@zhixing-ai/core/protocol';
 
 // 会话状态键摘要只取决于输入值；同一会话、字段与主体在每个事实的工作集读取里被反复求值。
 // 有界记忆只省去重复的规范化与 SHA-256，满了整体清空；非原始值照常直接计算。

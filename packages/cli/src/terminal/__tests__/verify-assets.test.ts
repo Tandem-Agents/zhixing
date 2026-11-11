@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
-import type { LogRecordPort } from '@zhixing/core/logging';
+import { TerminalChannelRetiredError } from '@zhixing-ai/terminal-ui/channel';
+import type { LogRecordPort } from '@zhixing-ai/core/logging';
 const ports = vi.hoisted(() => ({ open: vi.fn(), worker: undefined as undefined | ((...args: unknown[]) => unknown) }));
 vi.mock('node:fs/promises', () => ({ open: ports.open }));
 // 默认用真实核验线程；个别用例换成可控替身，模拟崩溃、挂起与延迟回报

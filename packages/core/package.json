@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/core",
+  "name": "@zhixing-ai/core",
   "version": "0.1.0",
   "description": "知行核心引擎 — AsyncGenerator Agent Loop、事件系统、工具管线",
   "type": "module",
@@ -306,7 +306,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@zhixing/test-utils": "workspace:*",
+    "@zhixing-ai/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

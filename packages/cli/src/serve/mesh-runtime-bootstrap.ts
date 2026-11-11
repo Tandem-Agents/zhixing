@@ -1,25 +1,25 @@
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import type {
   DeviceIdentity,
   DeviceRole,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createMeshEndpointDescriptor,
   isLocalOnlyTopology,
   resolveEffectiveMeshRoles,
   validateMeshRoleBootConfig,
   type MeshEndpointDirectory,
-} from "@zhixing/mesh/bootstrap";
-import { canonicalize, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
-import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
-import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
-import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
-import { DeviceLifecycleJournal } from "@zhixing/core/authority";
+} from "@zhixing-ai/mesh/bootstrap";
+import { canonicalize, type ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { loadActiveAnchorIssuerKey } from "@zhixing-ai/mesh/device-key-store";
+import { deleteDeviceKey } from "@zhixing-ai/mesh/device-key-store";
+import type { TrustedMeshPeer } from "@zhixing-ai/mesh/handshake";
+import { DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
 import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { settleExecutorRemovalBeforeBootstrap } from "./device-removal.js";
@@ -90,7 +90,7 @@ export interface ExecutorRemovalRetrievalBootstrap {
 }
 
 export interface PrepareMeshRuntimeBootstrapInput {
-  readonly records?: import("@zhixing/core/logging").LogRecordPort;
+  readonly records?: import("@zhixing-ai/core/logging").LogRecordPort;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;

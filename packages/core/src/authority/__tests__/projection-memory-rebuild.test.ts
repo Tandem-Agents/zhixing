@@ -1,7 +1,7 @@
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import type { CommitEnvelope, JsonValue } from "../../contracts/index.js";
 import { AuthorityCacheIntegrity, FileDurableProjectionIndex, durableProjectionVersionDirectoryName,
   type DurableProjectionMutation, type DurableProjectionReadContext } from "../index.js";

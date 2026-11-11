@@ -8,7 +8,7 @@ import os from 'node:os';
 import { TerminalPrivateEndpoint } from '../../../../terminal-ui/src/parent-transport.js';
 import { TerminalForegroundProcesses, type TerminalForegroundChild } from '../foreground-process.js';
 import { TerminalWindowsWriterAdmission, createTerminalOwnedProcessFactory } from '../host-launch.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 // 超时报出卡在哪一步，偶发失败自带定位信息
 async function bounded<T>(work: Promise<T>, step: string): Promise<T> {

@@ -20,11 +20,11 @@ const harness = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@zhixing/core/paths", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@zhixing/core/paths")>(),
+vi.mock("@zhixing-ai/core/paths", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@zhixing-ai/core/paths")>(),
   getZhixingHome: () => "test-home",
 }));
-vi.mock("@zhixing/secrets", () => ({
+vi.mock("@zhixing-ai/secrets", () => ({
   createPlatformSecretStore: () => harness.secretStore,
 }));
 vi.mock("../startup.js", () => ({

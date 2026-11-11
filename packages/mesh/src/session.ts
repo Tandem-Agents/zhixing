@@ -1,4 +1,4 @@
-import type { DeviceIdentity } from "@zhixing/core/contracts";
+import type { DeviceIdentity } from "@zhixing-ai/core/contracts";
 import { MeshProtocolError } from "./errors.js";
 import {
   type MeshProtocolCompatibility,

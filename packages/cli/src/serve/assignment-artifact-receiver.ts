@@ -1,7 +1,7 @@
 import type {
   ArtifactReceiveProgress,
-} from "@zhixing/core/authority";
-import type { ArtifactRef } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/authority";
+import type { ArtifactRef } from "@zhixing-ai/core/contracts";
 
 /** Finite durable-prefix receiver required by assignment Mesh transport. */
 export interface AssignmentArtifactReceiverPort {

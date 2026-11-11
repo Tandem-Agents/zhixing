@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { McpSetupCandidate } from "@zhixing/core/mcp-management";
+import type { McpSetupCandidate } from "@zhixing-ai/core/mcp-management";
 import { createMcpConnectionAdapter } from "../mcp-connection-adapter.js";
 
 const state = vi.hoisted(() => ({
@@ -7,7 +7,7 @@ const state = vi.hoisted(() => ({
   secrets: { demo: { TOKEN: "fixture-token", OTHER: "unrelated-fixture" } },
   read: vi.fn(), commit: vi.fn(),
 }));
-vi.mock("@zhixing/providers", () => ({
+vi.mock("@zhixing-ai/providers", () => ({
   getGlobalConfigPath: () => "fixture-config",
   loadConfig: () => ({ mcp: { servers: state.servers } }),
   mcpConfigurationRevision: () => state.revision,

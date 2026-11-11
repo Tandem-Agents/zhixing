@@ -15,10 +15,10 @@
  * result 摘要按工具差异化（read 取行数 / bash 取行数+用时 / 失败统一取 error 首行）。
  */
 
-import type { ToolResult } from "@zhixing/core";
-import type { TranscriptToolFacts } from "@zhixing/core/contracts";
-import { parseToolName } from "@zhixing/mcp/naming";
-import { builtinToolDisplayName } from "@zhixing/core/tool-display-names";
+import type { ToolResult } from "@zhixing-ai/core";
+import type { TranscriptToolFacts } from "@zhixing-ai/core/contracts";
+import { parseToolName } from "@zhixing-ai/mcp/naming";
+import { builtinToolDisplayName } from "@zhixing-ai/core/tool-display-names";
 import { conversationStateLabel } from "./conversation-state-label.js";
 
 const TARGET_TRUNCATE = 60;
@@ -241,7 +241,7 @@ export function formatHistoryToolCard(facts: TranscriptToolFacts): { readonly te
 /**
  * 用户拒绝场景的 user-facing 文案 —— 从 LLM-facing prompt 提取 reason。
  *
- * **隐式契约**（与 `@zhixing/orchestrator` 的 secure-executor 耦合）：
+ * **隐式契约**（与 `@zhixing-ai/orchestrator` 的 secure-executor 耦合）：
  *   - 输入有 reason：`用户拒绝了这次工具调用。用户的反馈:<reason>。请根据该反馈调整方案。`
  *   - 输入无 reason：`用户拒绝了这次工具调用。`
  *   - 来源：`packages/orchestrator/src/security/secure-executor.ts:257-258`

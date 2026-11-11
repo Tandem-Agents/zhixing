@@ -1,4 +1,4 @@
-import type { CommandDef } from "@zhixing/core/typeahead";
+import type { CommandDef } from "@zhixing-ai/core/typeahead";
 import { chromeOnlyVisibility } from "./command-capabilities.js";
 
 /** Shared names, aliases, descriptions and visibility for every terminal surface. */

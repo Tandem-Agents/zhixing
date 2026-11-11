@@ -1,4 +1,4 @@
-import type { BlindRendezvousHello, RendezvousKey } from "@zhixing/core/contracts";
+import type { BlindRendezvousHello, RendezvousKey } from "@zhixing-ai/core/contracts";
 import type { Duplex } from "node:stream";
 import { canonicalize } from "./canonical.js";
 import { bridgeBlindRelay } from "./blind-relay.js";

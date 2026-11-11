@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
+import type { TerminalProcessStatus } from '@zhixing-ai/terminal-ui/protocol';
 import type { RunLifecycle } from '../../runtime/run-lifecycle.js';
 import { presentRunActivity } from '../run-activity.js';
 

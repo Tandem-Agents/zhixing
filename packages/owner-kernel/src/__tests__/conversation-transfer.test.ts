@@ -2,18 +2,18 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { ArtifactRef, Signature, TransferRecord } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/authority";
+import type { ArtifactRef, Signature, TransferRecord } from "@zhixing-ai/core/contracts";
 import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   StorageMaintenanceGovernorPort,
   StorageMaintenanceRequest,
-} from "@zhixing/core/resources";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/resources";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { ConversationRunJournal } from '../conversation-assignment.js';
 import { describe, expect, it } from "vitest";
 import {

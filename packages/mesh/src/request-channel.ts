@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { LogRecordPort, LogRef, LogSource } from "@zhixing/core/logging";
+import type { LogRecordPort, LogRef, LogSource } from "@zhixing-ai/core/logging";
 
 export const HANDOFF_LOG_SOURCE: LogSource = {
   id: "handoff", version: 1, events: {

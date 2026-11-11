@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import path from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { AuthorityCacheIntegrity, frameIndexMac } from "../startup-proofs.js";
 import { AuthenticatedFrameIndex, decodeFrameIndexRow, frameIndexRowStreams, FRAME_INDEX_ROW_BYTES } from "../frame-index.js";
 import { AUTHORITY_WAL_MAX_PAYLOAD_BYTES } from "../wal-frame.js";

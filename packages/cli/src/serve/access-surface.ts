@@ -1,6 +1,6 @@
 /** Finite contracts shared by the Host construction and activation phases. */
 import type { AdvancementRecentContextPort } from "./advancement-controller.js";
-import type { AdvancementProposalApplicationService, AdvancementProposalFactPort } from "@zhixing/core/advancement";
+import type { AdvancementProposalApplicationService, AdvancementProposalFactPort } from "@zhixing-ai/core/advancement";
 import type { AdvancementEvidenceRemoteDirectory } from "./advancement-evidence-topology.js";
 import type { AssignmentDataPlaneRemoteDirectory } from "./assignment-data-plane-topology.js";
 import type { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
@@ -14,12 +14,12 @@ import type { PostAdoptionReviewLifecycleContribution } from "./post-adoption-re
 import type {
   AdvancementConversationLifecycleApplication,
   AdvancementReviewAttemptApplication,
-} from "@zhixing/core/advancement/application";
-import type { SessionStatePort } from "@zhixing/core/contracts";
-import type { DeliveryLifecycleRestoration } from "@zhixing/core/delivery";
-import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
-import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel/conversation-manager";
-import type { AdvancementController } from "@zhixing/owner-services/advancement";
+} from "@zhixing-ai/core/advancement/application";
+import type { SessionStatePort } from "@zhixing-ai/core/contracts";
+import type { DeliveryLifecycleRestoration } from "@zhixing-ai/core/delivery";
+import type { MeshConnectionRegistry } from "@zhixing-ai/mesh/bootstrap";
+import type { ConversationManagerCallbacks } from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { AdvancementController } from "@zhixing-ai/owner-services/advancement";
 
 type ConversationRuntimeStorageCallbacks =
   Required<

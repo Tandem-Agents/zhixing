@@ -1,6 +1,6 @@
 import { readFile, writeFile, stat, utimes } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { protocolDigest, type StopLifecycleIdentity } from "../protocol/index.js";
 import type { ProtocolSignatureVerifier, ProtocolSigner } from "../protocol/signature.js";

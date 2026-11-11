@@ -1,4 +1,4 @@
-import type { AdvancementReviewRootContract } from "@zhixing/core/advancement";
+import type { AdvancementReviewRootContract } from "@zhixing-ai/core/advancement";
 import {
   AdvancementReviewAttemptApplicationService,
   type AdvancementClosureSynthesizer,
@@ -6,11 +6,11 @@ import {
   type AdvancementReviewAttemptMechanismPort,
   type AdvancementReviewAttemptStatePort,
   type AdvancementReviewRootLifecyclePort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import type {
   AuthorityCallContext,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type { AdvancementSessionStore } from "./session-store.js";
 
 export interface AdvancementReviewAttemptCorrectnessOptions {

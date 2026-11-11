@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { readFile, access, unlink } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 const work = vi.hoisted(() => ({ enabled: false, offsetReads: 0, offsetBytes: 0, canonicalizations: 0, failManifest: false,
   failManifestAfter: undefined as number | undefined, manifestWrites: 0 }));

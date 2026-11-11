@@ -3,19 +3,19 @@ import {
   isValidServerId,
   probeServer,
   searchMcpServers,
-} from "@zhixing/mcp";
-import type { NetworkPolicy } from "@zhixing/network";
+} from "@zhixing-ai/mcp";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 import type {
   McpManagementInfrastructurePort,
   McpManagementServerDraft,
   McpManagementServerStatus,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 import { toServerSpec } from "./mcp-config.js";
 
 export interface CreateMcpManagementAdapterOptions {
   readonly proxy?: NetworkPolicy["proxy"];
   readonly readStatusWire: () => Promise<unknown>;
-  readonly createStdioProcess?: import('@zhixing/mcp').McpStdioProcessFactory;
+  readonly createStdioProcess?: import('@zhixing-ai/mcp').McpStdioProcessFactory;
 }
 
 /** Host infrastructure edge for MCP status, one-shot probe and npm-backed discovery. */

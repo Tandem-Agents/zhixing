@@ -2,11 +2,11 @@ import type {
   AuthorityCapability,
   DispatchEnvelope,
   InteractionSettlementStreamProof,
-} from "@zhixing/core/contracts";
-import type { ConversationAssignmentLedger } from "@zhixing/executor";
+} from "@zhixing-ai/core/contracts";
+import type { ConversationAssignmentLedger } from "@zhixing-ai/executor";
 import { currentDeviceCapacityStep, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
   isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runInMaintenanceContext,
-  withDeviceCapacityStep } from "@zhixing/core/resources";
+  withDeviceCapacityStep } from "@zhixing-ai/core/resources";
 import { describe, expect, it, vi } from "vitest";
 import {
   JobAssignmentWorker,

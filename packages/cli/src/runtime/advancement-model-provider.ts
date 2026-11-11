@@ -2,13 +2,13 @@ import {
   validateThinkingConfig,
   type LLMRole,
   type ThinkingConfig,
-} from "@zhixing/core";
+} from "@zhixing-ai/core";
 import {
   createAdvancementModelProviderBinding,
   createAdvancementRuntime,
   type AdvancementModelProviderFactory,
-} from "@zhixing/orchestrator/advancement";
-import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/advancement";
+import { createControlCompletionPort } from "@zhixing-ai/orchestrator/runtime";
 import {
   createProviderRoles,
   getModelCapabilityOverride,
@@ -17,7 +17,7 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   type ProviderCredentialProjection,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import type { RuntimeAdvancementConfigurationProjection } from "./runtime-configuration-projections.js";
 
 export function createHostAdvancementModelProviderFactory(input: {

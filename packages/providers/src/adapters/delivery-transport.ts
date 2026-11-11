@@ -9,7 +9,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isConnectPhaseFailure } from "@zhixing/core/resilience";
+import { isConnectPhaseFailure } from "@zhixing-ai/core/resilience";
 
 export interface DeliveryRecord {
   attempts: number;

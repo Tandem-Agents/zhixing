@@ -16,7 +16,7 @@
 
 import type {
   SystemHandler,
-} from "@zhixing/core/scheduler";
+} from "@zhixing-ai/core/scheduler";
 
 // ─── __health-check ───
 

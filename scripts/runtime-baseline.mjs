@@ -11,20 +11,20 @@ const environment = update
   : process.env;
 
 const commands = [
-  ["--filter", "@zhixing/test-utils", "build"],
-  ["--filter", "@zhixing/core", "build"],
-  ["--filter", "@zhixing/owner-kernel", "build"],
-  ["--filter", "@zhixing/rpc", "build"],
-  ["--filter", "@zhixing/owner-services", "build"],
-  ["--filter", "@zhixing/runtime-host", "build"],
-  ["--filter", "@zhixing/executor", "build"],
-  ["--filter", "@zhixing/mesh", "build"],
-  ["--filter", "@zhixing/secrets", "build"],
-  ["--filter", "@zhixing/server", "build"],
+  ["--filter", "@zhixing-ai/test-utils", "build"],
+  ["--filter", "@zhixing-ai/core", "build"],
+  ["--filter", "@zhixing-ai/owner-kernel", "build"],
+  ["--filter", "@zhixing-ai/rpc", "build"],
+  ["--filter", "@zhixing-ai/owner-services", "build"],
+  ["--filter", "@zhixing-ai/runtime-host", "build"],
+  ["--filter", "@zhixing-ai/executor", "build"],
+  ["--filter", "@zhixing-ai/mesh", "build"],
+  ["--filter", "@zhixing-ai/secrets", "build"],
+  ["--filter", "@zhixing-ai/server", "build"],
   ["runtime:package-exports"],
-  ["--filter", "@zhixing/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-golden.test.ts"],
-  ["--filter", "@zhixing/cli", "exec", "vitest", "run", "src/serve/__tests__/distributed-runtime-golden.test.ts"],
-  ["--filter", "@zhixing/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-structure.test.ts"],
+  ["--filter", "@zhixing-ai/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-golden.test.ts"],
+  ["--filter", "zhixing", "exec", "vitest", "run", "src/serve/__tests__/distributed-runtime-golden.test.ts"],
+  ["--filter", "@zhixing-ai/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-structure.test.ts"],
 ];
 
 const fixtures = [

@@ -1,4 +1,4 @@
-import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
+import type { AuthorityCheckpointOwnerPort } from "@zhixing-ai/mesh/checkpoint-owner";
 import type { InstalledAuthorityGenerationReceipt } from "../setup-delivery.js";
 import type {
   InstalledAuthorityGeneration,

@@ -1,4 +1,4 @@
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { ZhixingConfig, ZhixingCredentials } from "@zhixing-ai/providers";
 import type { SupportedChannel } from "../registries/channels.js";
 
 export type ConfigurationEditResult =

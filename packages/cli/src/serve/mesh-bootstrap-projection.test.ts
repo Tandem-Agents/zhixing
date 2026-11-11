@@ -1,12 +1,12 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   createMeshEndpointDescriptor,
   MeshEndpointDirectory,
-} from "@zhixing/mesh/bootstrap";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/bootstrap";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";

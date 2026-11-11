@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import type { SecretStorePort } from "@zhixing/core/contracts";
-import type { CredentialStoreCoordinator } from "@zhixing/providers";
-import type { ExtensionApplication } from "@zhixing/core/extensions/application";
-import type { ExtensionInstance, ExtensionOperation, ExtensionProcess } from "@zhixing/core/extensions/contracts";
-import type { InboundMessage, DeliveryTarget } from "@zhixing/core/channels";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { CredentialStoreCoordinator } from "@zhixing-ai/providers";
+import type { ExtensionApplication } from "@zhixing-ai/core/extensions/application";
+import type { ExtensionInstance, ExtensionOperation, ExtensionProcess } from "@zhixing-ai/core/extensions/contracts";
+import type { InboundMessage, DeliveryTarget } from "@zhixing-ai/core/channels";
 import { channelDeliveryResult } from "./channel-binding.js";
 
 interface Verification {

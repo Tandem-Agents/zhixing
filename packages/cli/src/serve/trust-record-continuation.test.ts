@@ -1,8 +1,8 @@
-import type { HomeTrustEvent, HomeTrustEventBody } from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import { MeshServiceRegistry, type MeshServiceDefinition } from "@zhixing/mesh/service-registry";
+import type { HomeTrustEvent, HomeTrustEventBody } from "@zhixing-ai/core/contracts";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import { MeshServiceRegistry, type MeshServiceDefinition } from "@zhixing-ai/mesh/service-registry";
 import {
   applyTrustEvent,
   buildHomeTrustRecord,
@@ -12,8 +12,8 @@ import {
   LEGACY_TRUST_RECORD_MESSAGE,
   replayTrustChain,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {

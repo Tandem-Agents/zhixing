@@ -1,7 +1,7 @@
-import type { RunRecordAdvancementMetadata } from "@zhixing/core/transcript";
-import type { TurnContext, UserTurnInput } from "@zhixing/core";
-import type { AdvancementSession, RubricContractDraftSnapshot } from "@zhixing/core/advancement";
-import type { AdvancementReviewPresentationEvent } from "@zhixing/core/advancement/application";
+import type { RunRecordAdvancementMetadata } from "@zhixing-ai/core/transcript";
+import type { TurnContext, UserTurnInput } from "@zhixing-ai/core";
+import type { AdvancementSession, RubricContractDraftSnapshot } from "@zhixing-ai/core/advancement";
+import type { AdvancementReviewPresentationEvent } from "@zhixing-ai/core/advancement/application";
 
 export type AdvancementProxyScheduleResult =
   | { readonly status: "immediate" | "queued" }

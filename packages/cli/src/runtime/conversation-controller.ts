@@ -19,12 +19,12 @@ import { PendingInputReceiptError } from "./rpc-conversation-facade.js";
  *   模式视图由对话全域键纯函数派生。
  */
 
-import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
-import { advancementExecutionTurnId } from "@zhixing/core/advancement/proposal-identity";
-import { validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource, type SessionPresentationProfile } from "@zhixing/rpc/session-wire";
-import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
-import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core/types";
-import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
+import { finalAssistantMessageOf, type AgentYield } from "@zhixing-ai/core/loop";
+import { advancementExecutionTurnId } from "@zhixing-ai/core/advancement/proposal-identity";
+import { validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource, type SessionPresentationProfile } from "@zhixing-ai/rpc/session-wire";
+import { resolveWorksceneMainReturn } from "@zhixing-ai/core/workscene/application";
+import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing-ai/core/types";
+import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing-ai/core/conversation";
 import { isMainConversationId } from "../conversation-selection.js";
 import type {
   ConversationStatusNotice,
@@ -37,7 +37,7 @@ import type {
   ConversationInputFragment,
   ConversationCommitSummary,
   ConversationBodyCursor,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   SessionAdvancementCancelResult,
   SessionCompactResult,
@@ -57,9 +57,9 @@ import type {
   SessionContractFailedResult,
   SessionSendEngage,
   SessionSendResult,
-} from "@zhixing/rpc";
-import type { ConversationCommunicationHistory as RunsPage } from "@zhixing/core/conversation/application";
-import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server/client";
+} from "@zhixing-ai/rpc";
+import type { ConversationCommunicationHistory as RunsPage } from "@zhixing-ai/core/conversation/application";
+import { RPC_ERROR_CODES, RpcClientError } from "@zhixing-ai/server/client";
 import type { RpcConversationFacade, ConversationStatusCursor } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 import type { ConversationOutputIdentity, ConversationOutputSource } from "./conversation-output.js";
@@ -246,7 +246,7 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   onRecoveryReset?: (conversationId: string, current: () => boolean) => Promise<void>;
   historyRunIds?: () => readonly string[];
   /** 已显示历史首页冻结的本地权威边界；控制恢复从这里起步，边界之前只补齐仍有义务的运行。 */
-  historyThrough?: () => import('@zhixing/core/authority').DurableLogCheckpoint | undefined;
+  historyThrough?: () => import('@zhixing-ai/core/authority').DurableLogCheckpoint | undefined;
 }
 
 export interface InitialConversationSelection {
@@ -2310,7 +2310,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     await this.reconcileObservedRuns();
   }
 
-  async listConversationPage(page: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
+  async listConversationPage(page: import('@zhixing-ai/core/conversation/application').ConversationDirectoryPageRequest) {
     return this.opts.conversation.listPage(page);
   }
 
@@ -2653,7 +2653,7 @@ function advancedStatusCursors(
     cursor.afterStatusRevision > before.afterStatusRevision));
 }
 
-type ExactFact = import('@zhixing/core/contracts').ConversationRunFactsPage['entries'][number];
+type ExactFact = import('@zhixing-ai/core/contracts').ConversationRunFactsPage['entries'][number];
 
 /**
  * 把精确补齐的事实与本页开头的当前集合段按源顺序合并。当前集合段在本页读完时，剩余的精确事实排在其后的

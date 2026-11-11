@@ -1,4 +1,4 @@
-import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import type {
   ArtifactRef,
   CommitEnvelope,
@@ -10,16 +10,16 @@ import type {
   LogicalRecord,
   SecretStorePort,
   TransferRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ArtifactStore,
   PlannedAnchorPrefixInstallation,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   runStorageMaintenanceStep,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import {
   canonicalize,
   anchorTransferCommitDigest,
@@ -34,27 +34,27 @@ import {
   type DisasterRecoveryState,
   type DisasterRecoveryVerifiers,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   createAnchorTransferReadyProof,
   validateAnchorTransferReadyProof,
-} from "@zhixing/mesh/anchor-transfer-ready";
-import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
+} from "@zhixing-ai/mesh/anchor-transfer-ready";
+import type { CheckpointPackage } from "@zhixing-ai/mesh/checkpoint";
 import {
   activateAnchorIssuerKey,
   deleteAnchorIssuerKey,
   loadActiveAnchorIssuerKey,
   loadAnchorIssuerKey,
   loadOrCreateAnchorIssuerKey,
-} from "@zhixing/mesh/device-key-store";
+} from "@zhixing-ai/mesh/device-key-store";
 import {
   type DeviceKey,
   verifyDeviceSignature,
-} from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/device-identity";
 import {
   RecoveryRoot,
   verifyRecoverySignature,
-} from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/mesh/recovery-root";
 import {
   applyTrustEvent,
   buildHomeTrustRecord,
@@ -62,8 +62,8 @@ import {
   EMPTY_TRUST_STREAM_FOLD,
   foldTrustStreamRecord,
   replayTrustChain,
-} from "@zhixing/mesh/trust-chain";
-import { projectDeviceCredentialRevocation } from "@zhixing/mesh/credential-exposure";
+} from "@zhixing-ai/mesh/trust-chain";
+import { projectDeviceCredentialRevocation } from "@zhixing-ai/mesh/credential-exposure";
 import {
   type PlannedAnchorReadinessPort,
 } from "./planned-anchor-transfer.js";
@@ -139,7 +139,7 @@ export type DisasterRecoveryAbortState =
   | {
       readonly phase: "aborted";
       readonly transferId: string;
-      readonly abort: import("@zhixing/core/contracts").DisasterRecoveryAbort;
+      readonly abort: import("@zhixing-ai/core/contracts").DisasterRecoveryAbort;
     };
 
 /** 已收尾的安装只带当前安装与代际；未收尾时才带私有状态与待办义务。 */
@@ -153,7 +153,7 @@ export type DisasterRecoveryPostInstallDescriptor =
       readonly installation: DisasterRecoveryInstallation;
       readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
       readonly state?: DisasterRecoveryState;
-      readonly pendingObligations: import("@zhixing/core/contracts").AuthorityCatalog["pendingObligations"];
+      readonly pendingObligations: import("@zhixing-ai/core/contracts").AuthorityCatalog["pendingObligations"];
       readonly requiresPostInstallCompletion: true;
     };
 
@@ -750,7 +750,7 @@ export class DisasterRecoveryTarget {
   }
 
   async abort(input: {
-    readonly abort: import("@zhixing/core/contracts").DisasterRecoveryAbort;
+    readonly abort: import("@zhixing-ai/core/contracts").DisasterRecoveryAbort;
     readonly recoveryRoot: RecoveryRoot;
   }): Promise<DisasterRecoveryAbortState> {
     const candidate = this.#staging.candidateFor(input.recoveryRoot.rootPublicKey);
@@ -1038,8 +1038,8 @@ export class DisasterRecoveryTarget {
 
 function disasterReadyCandidateDigest(input: {
   readonly prepare: PrepareCommand;
-  readonly baseline: import("@zhixing/core/contracts").DisasterRecoveryBaseline;
-  readonly onsiteVerification: import("@zhixing/core/contracts").RecoveryCheckpointVerification;
+  readonly baseline: import("@zhixing-ai/core/contracts").DisasterRecoveryBaseline;
+  readonly onsiteVerification: import("@zhixing-ai/core/contracts").RecoveryCheckpointVerification;
   readonly trustEvidenceDigest: string;
 }): string {
   return protocolDigest("DisasterRecoveryReadyCandidate", 1, {
@@ -1166,7 +1166,7 @@ export async function finishDisasterRecoveryPostInstall(input: {
   readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
   readonly participants: readonly string[];
   readonly readBack: readonly {
-    readonly kind: import("@zhixing/core/contracts").AuthorityCatalog["pendingObligations"][number]["kind"];
+    readonly kind: import("@zhixing-ai/core/contracts").AuthorityCatalog["pendingObligations"][number]["kind"];
     readonly id: string;
     readonly disposition: "current-owner" | "terminal";
   }[];

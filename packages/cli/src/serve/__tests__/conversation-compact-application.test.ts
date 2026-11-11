@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import { createAnchorConversationCompactPort } from "../conversation-compact-application.js";
 
 describe("createAnchorConversationCompactPort", () => {

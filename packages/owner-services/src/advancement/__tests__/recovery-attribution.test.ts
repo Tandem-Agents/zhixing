@@ -2,7 +2,7 @@
  * 推进恢复的 1 秒轮询发起的存储读取带固定归属标签 advancement:recovery（只记录，不改轮询与恢复语义）。
  */
 import { afterEach, expect, it, vi } from "vitest";
-import { currentLogAttributionRefs } from "@zhixing/core/logging";
+import { currentLogAttributionRefs } from "@zhixing-ai/core/logging";
 import { createAdvancementRecoveryMaintenance, type AdvancementRecoveryMaintenanceOptions } from "../recovery-maintenance.js";
 
 afterEach(() => { vi.useRealTimers(); });

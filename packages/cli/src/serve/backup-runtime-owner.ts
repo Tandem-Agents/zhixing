@@ -1,20 +1,20 @@
-import { canonicalize } from "@zhixing/core/protocol";
-import type { ArtifactCheckpointRetentionPort } from "@zhixing/core/authority";
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { CheckpointPackage, CheckpointSigner } from "@zhixing/mesh/checkpoint";
-import type { RecoveryCheckpointVerification } from "@zhixing/core/contracts";
-import type { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import type { ArtifactCheckpointRetentionPort } from "@zhixing-ai/core/authority";
+import type { HomeTrustRecord } from "@zhixing-ai/core/contracts";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { CheckpointPackage, CheckpointSigner } from "@zhixing-ai/mesh/checkpoint";
+import type { RecoveryCheckpointVerification } from "@zhixing-ai/core/contracts";
+import type { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
 import {
   AuthorityCheckpointOwner,
   type AuthorityCheckpointOwnerPort,
-} from "@zhixing/mesh/checkpoint-owner";
+} from "@zhixing-ai/mesh/checkpoint-owner";
 import {
   AuthorityCheckpointService,
   projectDurableRecoveryBackupStatus,
   type RecoveryBackupStatus,
-} from "@zhixing/mesh/checkpoint-service";
-import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/mesh/checkpoint-service";
+import { keyIdForPublicKey } from "@zhixing-ai/mesh/recovery-root";
 import type {
   BackupTargetBinding,
   BackupTargetConfigurationRepository,

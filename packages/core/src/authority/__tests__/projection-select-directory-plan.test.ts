@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { FileDurableProjectionIndex } from "../index.js";
 import { DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, createDefaultDeviceCapacityPolicy } from "../../resources/index.js";
 

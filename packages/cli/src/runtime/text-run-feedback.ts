@@ -1,5 +1,5 @@
-import { SESSION_NOTIFICATIONS, validateSessionProcessProjection } from '@zhixing/rpc/session-wire';
-import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
+import { SESSION_NOTIFICATIONS, validateSessionProcessProjection } from '@zhixing-ai/rpc/session-wire';
+import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
 import type { CoreHostNotificationLink } from './core-host-connection.js';
 import { TerminalProcessSession } from '../terminal/process-session.js';
 

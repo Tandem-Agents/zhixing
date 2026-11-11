@@ -1,12 +1,12 @@
-import type { FileAuthorityCommitLog } from "@zhixing/core/authority";
+import type { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import type {
   WorkspaceProbePersistenceObservation,
   WorkspaceProbePersistencePort,
-} from "@zhixing/core/environment/workspace-probe-persistence";
+} from "@zhixing-ai/core/environment/workspace-probe-persistence";
 import {
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 import { open, stat } from "node:fs/promises";
 import path from "node:path";
 

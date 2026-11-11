@@ -1,4 +1,4 @@
-import type { FileAuthorityCommitLog } from "@zhixing/core/authority";
+import type { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
 import { onTestFinished } from "vitest";
 
 export const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;

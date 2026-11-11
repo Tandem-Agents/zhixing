@@ -16,8 +16,8 @@ import type {
   ModelInfo,
   ModelInputCapabilityOverride,
   ThinkingConfig,
-} from "@zhixing/core";
-import type { MeshRoleBootConfig } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core";
+import type { MeshRoleBootConfig } from "@zhixing-ai/core/contracts";
 import type { ModelCapabilityOverride } from "./model-capability.js";
 
 // ─── 协议类型 ───
@@ -307,8 +307,8 @@ export interface MessagingChannelEntry {
  * 出现在 config.mcp.servers 即视为接入；远程 server 的凭证（token 等）在
  * credentials.mcp.<id>，本表只放连接决策（传输方式 + 启动信息 + 启用开关）。
  */
-export type { McpServerConfigEntry } from "@zhixing/core/mcp-management";
-import type { McpServerConfigEntry } from "@zhixing/core/mcp-management";
+export type { McpServerConfigEntry } from "@zhixing-ai/core/mcp-management";
+import type { McpServerConfigEntry } from "@zhixing-ai/core/mcp-management";
 
 /**
  * MCP host 配置 —— 知行作为 MCP client 接入的外部 server 集合。
@@ -386,7 +386,7 @@ export interface ZhixingConfig {
   intent?: IntentConfig;
   /** 工作区配置（安全信任边界） */
   workspace?: WorkspaceConfig;
-  /** 网络出口配置（@zhixing/network 共享底座） */
+  /** 网络出口配置（@zhixing-ai/network 共享底座） */
   network?: NetworkConfig;
   /** 任务推进闭环配置（单会话保险丝阈值等） */
   advancement?: AdvancementConfig;

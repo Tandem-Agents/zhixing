@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { SnapshotStore } from "../store.js";
 import { SnapshotAnchorInvariantError, SnapshotIndexDamagedError, type SegmentSnapshotFile } from "../types.js";
 

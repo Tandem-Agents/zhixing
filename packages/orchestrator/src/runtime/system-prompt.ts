@@ -30,9 +30,9 @@
  */
 
 import * as os from "node:os";
-import { COMMITMENT_SIGNAL } from "@zhixing/core/loop";
-import { SYSTEM_META_PROMPT_SECTION } from "@zhixing/core/context";
-import { type ToolDefinition } from "@zhixing/core/types";
+import { COMMITMENT_SIGNAL } from "@zhixing-ai/core/loop";
+import { SYSTEM_META_PROMPT_SECTION } from "@zhixing-ai/core/context";
+import { type ToolDefinition } from "@zhixing-ai/core/types";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { mainProfile } from "../profile/default-profiles.js";
 
@@ -299,7 +299,7 @@ function buildPrinciples(): string {
  * 告知 LLM 对话历史中可能出现的 `<system-meta kind="...">` 标签格式与处理规则。
  *
  * 这些标签由上下文管理机制(compact / drop 等)插入,不是用户原话。
- * 文本内容由 `@zhixing/core` 的 `SYSTEM_META_PROMPT_SECTION` 常量提供 ——
+ * 文本内容由 `@zhixing-ai/core` 的 `SYSTEM_META_PROMPT_SECTION` 常量提供 ——
  * 与产生标签的 `system-meta` 模块同源,改一处自动同步。
  */
 function buildMetaProtocol(): string {

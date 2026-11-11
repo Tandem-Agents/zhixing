@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionEventProjection } from '@zhixing/core/types';
-import type { AgentYield } from '@zhixing/core/loop';
+import type { SessionEventProjection } from '@zhixing-ai/core/types';
+import type { AgentYield } from '@zhixing-ai/core/loop';
 import { TerminalProcessProjection } from '../process-projection.js';
 import { processArtifactText } from '../process-presentation.js';
 function setup(source: 'legacy' | 'assignment' = 'legacy') {

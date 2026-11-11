@@ -2,16 +2,16 @@ import { stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { resolveProgramEntry } from '../cli-entry.js';
-import type { SecretStorePort } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
-import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
-import { loadConfig, writeConfig } from "@zhixing/providers/configuration";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { expandUserHome, getZhixingHome } from "@zhixing-ai/core/paths";
+import { loadConfig, writeConfig } from "@zhixing-ai/providers/configuration";
 import { continuedLocalInitialization } from "./local-role-configuration.js";
 import {
   createPlatformSecretStore,
   readPlatformSecretStoreBackendBinding,
   type PlatformSecretStoreBackend,
-} from "@zhixing/secrets";
+} from "@zhixing-ai/secrets";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
@@ -27,7 +27,7 @@ import {
   type ManagedServiceReconcileResult,
   type ManagedServiceReconcileTrigger,
 } from "./managed-service-reconciler.js";
-import { resolveEffectiveMeshRoles, resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { resolveEffectiveMeshRoles, resolveHostLaunchPlan } from "@zhixing-ai/mesh/bootstrap";
 
 export interface ManagedHostTrustTransitionDeps {
   readonly loadCurrent?: typeof loadCurrentManagedServiceState;

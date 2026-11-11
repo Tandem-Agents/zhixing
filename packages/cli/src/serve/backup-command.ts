@@ -1,9 +1,9 @@
 import type { RuntimeLogContext } from "../logging/runtime.js";
-import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing-ai/core/authority";
 import { handoffLogging } from "../logging/handoff.js";
 import { hostname, platform } from "node:os";
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core/paths";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
 import {
   BackupRecoveryAdministrationApplicationService,
   BackupRecoveryAdministrationError,
@@ -14,7 +14,7 @@ import {
   BackupRecoveryRootLifecycleError,
   type BackupRecoveryRootActivationPlan,
   type BackupRecoveryRootLifecycleContext,
-} from "@zhixing/core/backup-recovery/application";
+} from "@zhixing-ai/core/backup-recovery/application";
 import type {
   DeviceIdentity,
   HomeTrustEvent,
@@ -22,34 +22,34 @@ import type {
   HomeTrustRecord,
   MeshRoleBootConfig,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { StorageMaintenanceAdmissionError, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import { canonicalize } from "@zhixing/core/protocol";
-import { createPlatformSecretStore } from "@zhixing/secrets";
-import { loadConfig } from "@zhixing/providers";
+} from "@zhixing-ai/core/contracts";
+import { StorageMaintenanceAdmissionError, type StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
+import { loadConfig } from "@zhixing-ai/providers";
 import { writeInitializedLocalRoles } from "./local-role-configuration.js";
-import { RecoveryActivationCoordinator } from "@zhixing/mesh/bootstrap-authority";
+import { RecoveryActivationCoordinator } from "@zhixing-ai/mesh/bootstrap-authority";
 import {
   createCheckpointId,
   type CheckpointPackage,
   type CheckpointSigner,
-} from "@zhixing/mesh/checkpoint";
-import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
-import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
+} from "@zhixing-ai/mesh/checkpoint";
+import { AuthorityCheckpointService } from "@zhixing-ai/mesh/checkpoint-service";
+import { captureFullAuthorityCheckpoint } from "@zhixing-ai/mesh/full-checkpoint";
 import {
   decodeRecoveryPackage,
   encodeRecoveryPackage,
   requireCurrentRecoveryPackage,
-} from "@zhixing/mesh/recovery-package";
-import { enrollDeviceIdentity, type DeviceKey } from "@zhixing/mesh/device-identity";
+} from "@zhixing-ai/mesh/recovery-package";
+import { enrollDeviceIdentity, type DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import {
   activateAnchorIssuerKey,
   loadActiveAnchorIssuerKey,
   loadDeviceKey,
   persistAnchorIssuerKey,
-} from "@zhixing/mesh/device-key-store";
-import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh/device-key-store";
+import { RecoveryRoot, keyIdForPublicKey } from "@zhixing-ai/mesh/recovery-root";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   applyTrustEvent,
   buildHomeTrustRecord,
@@ -59,7 +59,7 @@ import {
   createSignedTrustEvent,
   type DomainResetApproval,
   type TrustProjection,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { createStdoutWriter } from "../screen/index.js";
 import {
   type BackupTargetBinding,
@@ -81,7 +81,7 @@ import {
   createPublishedCheckpointTargetInfrastructure,
   preflightDirectoryCheckpointTarget,
 } from "./published-checkpoint-target-infrastructure.js";
-import { RecoveryCheckpointTargetError } from "@zhixing/mesh/checkpoint-target";
+import { RecoveryCheckpointTargetError } from "@zhixing-ai/mesh/checkpoint-target";
 import type {
   PublishedCheckpointDirectorySessions,
   RetirablePublishedRecoveryCheckpointTarget,

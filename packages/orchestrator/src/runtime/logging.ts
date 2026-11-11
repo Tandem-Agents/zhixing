@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { PROCESS_LOG_SOURCE } from "@zhixing/core/interrupt";
-import type { IEventBus } from "@zhixing/core/events";
-import { LOG_FAILURE_FIELDS, type BindLogSource, type LogDraft, type LogRecordPort, type LogRef, type LogSource } from "@zhixing/core/logging";
-import type { AgentEventMap, ChatRequest, StreamEvent } from "@zhixing/core/types";
+import { PROCESS_LOG_SOURCE } from "@zhixing-ai/core/interrupt";
+import type { IEventBus } from "@zhixing-ai/core/events";
+import { LOG_FAILURE_FIELDS, type BindLogSource, type LogDraft, type LogRecordPort, type LogRef, type LogSource } from "@zhixing-ai/core/logging";
+import type { AgentEventMap, ChatRequest, StreamEvent } from "@zhixing-ai/core/types";
 import { runContextStorage } from "./run-context.js";
 
 const fields = {

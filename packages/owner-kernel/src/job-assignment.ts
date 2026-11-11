@@ -1,7 +1,7 @@
-import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
+import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing-ai/core/protocol";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { DELIVERY_AUTHORITY_PROJECTION_ID, registerDeliveryAuthorityProjection, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
+import { DELIVERY_AUTHORITY_PROJECTION_ID, registerDeliveryAuthorityProjection, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing-ai/core/delivery";
 import {
   DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
   decideScheduleCapabilityGap,
@@ -13,7 +13,7 @@ import {
   ScheduleRuntimePolicyError,
   type ScheduleFailurePolicyDecision,
   type ScheduleOccurrence,
-} from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/scheduler/application";
 import {
   AuthorityStorageError,
   TransactionArtifactReferenceError,
@@ -29,14 +29,14 @@ import {
   type ProjectionTransactionDecision,
   AuthorityPreparationRequired,
   awaitAuthorityPreparation,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   currentMaintenanceAbortSignal,
   isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
   StorageMaintenanceCancelledError,
   waitForMaintenanceRetry,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import type {
   ArtifactRef,
   AssignmentActivationProof,
@@ -79,7 +79,7 @@ import type {
   TaskDefinitionBody,
   StreamFrame,
   UncertainResolutionFact,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertProtocolIdentifier as assertIdentifier,
   assertChannelChallengeActiveAt,
@@ -150,8 +150,8 @@ import {
   type StreamVerifierCheckpoint,
   type ExecutorCapabilitySnapshot,
   type UnsignedJobEnvelope,
-} from "@zhixing/core/protocol";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/protocol";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import { ManifestSelectionError } from "./conversation-assignment-authority.js";
 import {
   AssignmentSerialQueue,
@@ -160,7 +160,7 @@ import {
   type TrustRuleHitPort,
 } from "./trust-rule-hits.js";
 import type { AssignmentResourceCoordinator } from "./resource-governor.js";
-import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
+import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing-ai/core/delivery";
 import type {
   AssignmentSubmissionAuthorizer,
   AssignmentSubmissionAuthorization,
@@ -302,7 +302,7 @@ type JobChannelInteractions = { readonly domain: "job" } & {
 };
 
 type JobEnvelope = Extract<
-  import("@zhixing/core/contracts").DispatchEnvelope,
+  import("@zhixing-ai/core/contracts").DispatchEnvelope,
   { execution: "job" }
 >;
 type JobBundle = ReturnType<typeof validateJobSealedBundle>;
@@ -410,7 +410,7 @@ interface JobSubmissionGuardProjection {
       readonly requestIds: ReadonlySet<string>;
       readonly outcomes: ReadonlyMap<
         string,
-        import("@zhixing/core/contracts").InteractionAnswerMirrorEntry["outcome"]
+        import("@zhixing-ai/core/contracts").InteractionAnswerMirrorEntry["outcome"]
       >;
     }
   >;
@@ -499,7 +499,7 @@ interface JobProjection {
       readonly requestIds: ReadonlySet<string>;
       readonly outcomes: ReadonlyMap<
         string,
-        import("@zhixing/core/contracts").InteractionAnswerMirrorEntry["outcome"]
+        import("@zhixing-ai/core/contracts").InteractionAnswerMirrorEntry["outcome"]
       >;
     }
   >;
@@ -866,7 +866,7 @@ function failureSummaryCandidates(
 export async function preloadFailureSummaryPaths(
   set: JobStateSet,
   bodies: readonly unknown[],
-  read: import("@zhixing/core/authority").DurableProjectionReadContext,
+  read: import("@zhixing-ai/core/authority").DurableProjectionReadContext,
 ): Promise<void> {
   // 根行由按主体预装一并装入；没有根行就没有可定位的路径
   if (!set.isLoaded(set.rootKey)) return;
@@ -1045,7 +1045,7 @@ function candidateStateNeeds(
 export async function preloadJobScope(
   sets: { readonly main?: JobStateSet; readonly guard?: JobStateSet },
   scope: JobScope,
-  read: import("@zhixing/core/authority").DurableProjectionReadContext,
+  read: import("@zhixing-ai/core/authority").DurableProjectionReadContext,
 ): Promise<void> {
   const load = async () => {
     for (const [set, subjects] of [[sets.main, JOB_MAIN_SUBJECTS], [sets.guard, JOB_GUARD_SUBJECTS]] as const) {
@@ -1162,7 +1162,7 @@ interface InProcessJobDispatcherBaseOptions {
    */
   readonly onDispatchAccepted?: (
     envelope: Extract<
-      import("@zhixing/core/contracts").DispatchEnvelope,
+      import("@zhixing-ai/core/contracts").DispatchEnvelope,
       { execution: "job" }
     >,
   ) => void | Promise<void>;
@@ -1282,7 +1282,7 @@ export interface SystemJobHandlerContext {
   readonly taskId: string;
   readonly jobRunId: string;
   readonly attempt: number;
-  readonly params: import("@zhixing/core/contracts").JsonValue | undefined;
+  readonly params: import("@zhixing-ai/core/contracts").JsonValue | undefined;
 }
 
 export type SystemJobHandler = (
@@ -1349,15 +1349,15 @@ export interface JobTrustSedimentPort {
     readonly taskId: string;
     readonly assignmentId: string;
     readonly executorId: string;
-    readonly environment: import("@zhixing/core/contracts").EnvironmentRequirement;
-    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+    readonly environment: import("@zhixing-ai/core/contracts").EnvironmentRequirement;
+    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
     /** 用户贡献引用的确认请求是否是本指派已答复的交互（同批或更早的镜像）。 */
     readonly answered: (requestId: string) => Promise<boolean>;
   }): Promise<void>;
   accept(input: {
     readonly taskId: string;
     readonly assignmentId: string;
-    readonly entry: import("@zhixing/core/contracts").TrustSedimentMirrorEntry;
+    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
   }): Promise<void>;
 }
 
@@ -5107,7 +5107,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     readonly challengeId: string;
     readonly receipt: {
       readonly acceptedAt: string;
-      readonly platformMessage?: import("@zhixing/core/contracts").ChannelMessageRef;
+      readonly platformMessage?: import("@zhixing-ai/core/contracts").ChannelMessageRef;
     };
   }): Promise<void> {
     const record = await verifyProtocolStep(() => validateChannelInteractionRelayRecord(
@@ -9126,7 +9126,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
    * 本作业的工作集会话：两份投影已装入的行与它们对应的持久头位置。头位置没变（期间没有别的写入
    * 触及本作业）就沿用已装入的行，否则换新会话；行数超过上限也换新，常驻工作集有界。
    */
-  async #sessionAt(view: import("@zhixing/core/authority").DurableProjectionReadContext): Promise<JobJournalSession> {
+  async #sessionAt(view: import("@zhixing-ai/core/authority").DurableProjectionReadContext): Promise<JobJournalSession> {
     const head = await view.get(jobStateHeadKey(this.#taskId)) as number | undefined;
     const current = this.#session;
     if (current && current.head === head &&
@@ -10129,7 +10129,7 @@ export class InProcessJobDispatcher {
 
 interface ValidatedJobBundleClosure {
   readonly artifact: ReturnType<typeof sealedBundleArtifact>;
-  readonly batch?: import("@zhixing/core/contracts").MutationBatch;
+  readonly batch?: import("@zhixing-ai/core/contracts").MutationBatch;
   readonly references: ArtifactRef[];
 }
 
@@ -10797,9 +10797,9 @@ function assertDispatchMatchesOccurrence(
 }
 
 function assertCapabilityMatchesAssignedEnvelope(
-  capability: import("@zhixing/core/contracts").AuthorityCapability,
+  capability: import("@zhixing-ai/core/contracts").AuthorityCapability,
   envelope: Extract<
-    import("@zhixing/core/contracts").DispatchEnvelope,
+    import("@zhixing-ai/core/contracts").DispatchEnvelope,
     { execution: "job" }
   >,
 ): void {
@@ -11432,7 +11432,7 @@ function errorMessage(error: unknown): string {
 function rejectedControl(
   code: AuthorityError["code"],
   message: string,
-): Extract<import("@zhixing/core/contracts").ControlResult, { status: "rejected" }> {
+): Extract<import("@zhixing-ai/core/contracts").ControlResult, { status: "rejected" }> {
   return {
     v: 1,
     status: "rejected",
@@ -11457,7 +11457,7 @@ interface CompiledJobDeliveryContents {
   readonly result?: CompiledDeliveryContent;
   readonly stagedContents: ReadonlyMap<
     number,
-    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+    import("@zhixing-ai/core/contracts").DeliveryIntentDto["content"]
   >;
   readonly stagedContentErrors: ReadonlyMap<number, AuthorityError>;
   readonly references: readonly ArtifactRef[];
@@ -11474,7 +11474,7 @@ async function compileJobDeliveryContents(
     : undefined;
   const stagedContents = new Map<
     number,
-    import("@zhixing/core/contracts").DeliveryIntentDto["content"]
+    import("@zhixing-ai/core/contracts").DeliveryIntentDto["content"]
   >();
   const stagedContentErrors = new Map<number, AuthorityError>();
   const references: ArtifactRef[] = [...(result?.references ?? [])];
@@ -11518,13 +11518,13 @@ async function validateJobBundleClosure(
   }
 
   const references = [artifact.ref, ...closure.transfer];
-  let batch: import("@zhixing/core/contracts").MutationBatch | undefined;
+  let batch: import("@zhixing-ai/core/contracts").MutationBatch | undefined;
   if (bundle.body.mutationBatch) {
     try {
       const bytes = await artifacts.get(bundle.body.mutationBatch.ref);
       const text = Buffer.from(bytes).toString("utf8");
       batch = validateJobMutationBatch(
-        JSON.parse(text) as import("@zhixing/core/contracts").MutationBatch,
+        JSON.parse(text) as import("@zhixing-ai/core/contracts").MutationBatch,
       );
       const batchArtifact = mutationBatchArtifact(batch);
       if (

@@ -10,9 +10,9 @@
  * RPC 响应只确认可重放的 ready-to-stop，不会把后台失败吞掉。
  */
 
-import { isDeliveryItemId } from "@zhixing/core/delivery";
-import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
-import { createDeliveryResolutionFence } from "@zhixing/owner-kernel/delivery";
+import { isDeliveryItemId } from "@zhixing-ai/core/delivery";
+import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing-ai/core/delivery/application";
+import { createDeliveryResolutionFence } from "@zhixing-ai/owner-kernel/delivery";
 import {
   DeviceAdministrationApplicationError,
   DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
@@ -28,11 +28,11 @@ import {
   DEVICE_ADMINISTRATION_LIST_QUERY,
   DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_STATUS_QUERY,
-} from "@zhixing/core/device-administration/application";
-import { SCHEDULE_RUNTIME_STATUS_QUERY } from "@zhixing/core/scheduler/application";
-import { isProtocolIdentifier } from "@zhixing/core/protocol";
-import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
+} from "@zhixing-ai/core/device-administration/application";
+import { SCHEDULE_RUNTIME_STATUS_QUERY } from "@zhixing-ai/core/scheduler/application";
+import { isProtocolIdentifier } from "@zhixing-ai/core/protocol";
+import type { ExecutionStatusNotice } from "@zhixing-ai/core/contracts";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc";
 import { RpcAppError, RpcErrors, type MethodEntry } from "../handlers.js";
 import {
   PROTOCOL_VERSION,
@@ -714,7 +714,7 @@ export function buildAnchorUninstallStatusMethod(): MethodEntry {
 
 function localAnchorUninstallMethod(
   name: string,
-  descriptor: import("@zhixing/core/product-api").ProductApiOperationDescriptor,
+  descriptor: import("@zhixing-ai/core/product-api").ProductApiOperationDescriptor,
   operation: (
     params: unknown,
     productApi: NonNullable<import("../../context.js").ServerContext["productApi"]>,

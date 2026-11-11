@@ -2,7 +2,7 @@
 // 也不能把对方新清单引用的段丢成既不被引用、也不在退役链里的孤儿。
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { expect, it, vi } from "vitest";
 
 // 只对清单的只读 open 注入一次 I/O 失败，不改磁盘内容

@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import type { LogDraft } from '@zhixing/core/logging';
+import type { LogDraft } from '@zhixing-ai/core/logging';
 import { nativeSecretPlatform, readPlatformProcessBirth, resolvePlatformProcessStartTime } from './secret-platform.js';
 
 vi.mock('../cli-entry.js', () => ({ resolveProgramEntry: () => fileURLToPath(new URL('../../dist/index.js', import.meta.url)) }));

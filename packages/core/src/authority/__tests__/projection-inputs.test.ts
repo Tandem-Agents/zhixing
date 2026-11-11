@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import { AuthorityCacheIntegrity } from "../startup-proofs.js";

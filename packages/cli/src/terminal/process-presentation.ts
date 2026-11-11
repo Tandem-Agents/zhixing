@@ -1,6 +1,6 @@
-import type { AgentYield } from '@zhixing/core/loop';
-import type { SessionPresentationArtifact } from '@zhixing/rpc/session-wire';
-import { PROCESS_TOOL_INPUT_KEYS, processText } from '@zhixing/rpc/session-wire';
+import type { AgentYield } from '@zhixing-ai/core/loop';
+import type { SessionPresentationArtifact } from '@zhixing-ai/rpc/session-wire';
+import { PROCESS_TOOL_INPUT_KEYS, processText } from '@zhixing-ai/rpc/session-wire';
 import { displayToolName, formatBatchDetailLine, formatBatchSummary, formatToolHeader, formatToolResult, formatToolDuration,
   type BatchEventSnapshot } from '../tool-card-format.js';
 export { getToolRenderStrategy } from '../tool-render-strategy.js';

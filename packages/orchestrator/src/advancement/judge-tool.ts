@@ -7,10 +7,10 @@ import type {
   ReviewCriterionAttribution,
   ReviewCriterionVerdict,
   ReviewEvidence,
-} from "@zhixing/core/advancement";
-import { deriveUnmetCriteriaTexts } from "@zhixing/core/advancement";
-import type { JsonSchema, ToolDefinition, ToolResult } from "@zhixing/core/types";
-import type { RunRecordRef } from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/advancement";
+import { deriveUnmetCriteriaTexts } from "@zhixing-ai/core/advancement";
+import type { JsonSchema, ToolDefinition, ToolResult } from "@zhixing-ai/core/types";
+import type { RunRecordRef } from "@zhixing-ai/core/transcript";
 import { requiresIndependentEvidence } from "./evidence.js";
 
 export const ADVANCEMENT_SUBMIT_REVIEW_TOOL =

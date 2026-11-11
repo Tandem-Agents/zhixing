@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/owner-kernel",
+  "name": "@zhixing-ai/owner-kernel",
   "version": "0.1.0",
   "description": "知行对话 owner 内核 — 会话权威、运行提交与确认聚合",
   "type": "module",
@@ -138,11 +138,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*"
+    "@zhixing-ai/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@zhixing/test-utils": "workspace:*",
+    "@zhixing-ai/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

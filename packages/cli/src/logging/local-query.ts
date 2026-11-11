@@ -1,6 +1,6 @@
 import path from "node:path";
-import { LOG_SEARCH, LOG_READ, LogStoreNotInitializedError } from "@zhixing/core/logging/application";
-import type { LogFilter, LogPage } from "@zhixing/core/logging";
+import { LOG_SEARCH, LOG_READ, LogStoreNotInitializedError } from "@zhixing-ai/core/logging/application";
+import type { LogFilter, LogPage } from "@zhixing-ai/core/logging";
 import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
 import { createLogAccess, createLocalLogProductApi, LOCAL_LOG_OWNER } from "./access.js";
 

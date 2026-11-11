@@ -1,10 +1,10 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceKey } from "@zhixing/mesh/device-identity";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceKey } from "@zhixing-ai/mesh/device-identity";
 import {
   deleteDeviceKey,
   loadDeviceKey,
   persistDeviceKey,
-} from "@zhixing/mesh/device-key-store";
+} from "@zhixing-ai/mesh/device-key-store";
 
 /**
  * 本机当前设备身份只有一份（device-key/device/v1/）。显式重新配对需要新身份时（原身份已被撤销），

@@ -1,17 +1,17 @@
 import path from "node:path";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { type ChannelChallengeMessage } from "@zhixing/core/channels";
-import { type Message, type ToolDefinition } from "@zhixing/core";
-import { SecurityPipeline, type PermissionRule } from "@zhixing/core/security";
-import { createSecureExecuteTool } from "@zhixing/orchestrator/security";
-import type { KernelSecurityExecution } from "@zhixing/orchestrator/runtime";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { type ChannelChallengeMessage } from "@zhixing-ai/core/channels";
+import { type Message, type ToolDefinition } from "@zhixing-ai/core";
+import { SecurityPipeline, type PermissionRule } from "@zhixing-ai/core/security";
+import { createSecureExecuteTool } from "@zhixing-ai/orchestrator/security";
+import type { KernelSecurityExecution } from "@zhixing-ai/orchestrator/runtime";
 import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -23,7 +23,7 @@ import type {
   StreamFrame,
   TaskDefinition,
   TrustRuleSnapshot,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createAuthorityPrincipalMethodGuard,
   createJobCommitFence,
@@ -37,36 +37,36 @@ import {
   type ExecutorCapabilitySnapshot,
   type ProtocolSigner,
   type UnsignedJobEnvelope,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
-} from "@zhixing/executor/assignment-stream-spool";
+} from "@zhixing-ai/executor/assignment-stream-spool";
 import {
   ConversationAssignmentLedger,
   DataPlaneTicketRegistry,
   ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
-} from "@zhixing/executor";
-import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { registerDeviceLifecycleProjection } from "@zhixing/core/authority/startup-definitions";
+} from "@zhixing-ai/executor";
+import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { createInitialControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { registerDeviceLifecycleProjection } from "@zhixing-ai/core/authority/startup-definitions";
 import { registerControlAdmissionProjection, registerConversationIdentityProjection, registerConversationRecoveryProjection,
-  registerConversationTransferProjection, registerDeferredIntentProjection } from "@zhixing/owner-kernel/startup-definitions";
+  registerConversationTransferProjection, registerDeferredIntentProjection } from "@zhixing-ai/owner-kernel/startup-definitions";
 import {
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
-} from "@zhixing/owner-kernel/conversation-assignment";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import {
   InProcessJobDispatcher,
   JobJournal,
   type JobAssignmentPlan,
-} from "@zhixing/owner-kernel/job-assignment";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/owner-kernel/job-assignment";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { setupAuthorityRuntime, type AuthorityRuntimeStack } from "../../setup-delivery.js";
 import {
@@ -104,7 +104,7 @@ import {
   DataPlaneTicketMeshClient,
 } from "../data-plane-ticket-mesh.js";
 import type { JobInteractionAnswerPort } from "../durable-job-interactions.js";
-import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
 import {
   createExecutorDataPlaneAssignmentPair,
   type ExecutorDataPlaneRuntime,
@@ -311,7 +311,7 @@ function createRuntime(
   home: string,
   interactions: DurableConversationInteractionObserver,
   surface: ConversationSurface,
-  receiveAtBoundary?: (port: import("@zhixing/core/loop").RunInputPort) => Promise<readonly Message[]>,
+  receiveAtBoundary?: (port: import("@zhixing-ai/core/loop").RunInputPort) => Promise<readonly Message[]>,
 ): SessionRuntime {
   const broker = new ConfirmationBroker({ lifecycleObserver: interactions });
   if (surface === "first-party") {

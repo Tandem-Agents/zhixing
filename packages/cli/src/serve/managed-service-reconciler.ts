@@ -1,10 +1,10 @@
-import type { MeshRoleBootConfig } from "@zhixing/core/contracts";
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import type { MeshRoleBootConfig } from "@zhixing-ai/core/contracts";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import path from "node:path";
 import {
   resolveHostLaunchPlan,
   type HostLaunchPlan,
-} from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/mesh/bootstrap";
 import type {
   ManagedServiceAdapter,
   ManagedServiceInspection,

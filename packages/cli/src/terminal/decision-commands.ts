@@ -1,7 +1,7 @@
 import type { ConversationController } from '../runtime/conversation-controller.js';
 import type { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import type { CliWriter } from '../screen/cli-writer.js';
-import type { SessionSecurityResult } from '@zhixing/rpc';
+import type { SessionSecurityResult } from '@zhixing-ai/rpc';
 import { handleSecurityCommand, handleTrustCommand } from '../security/commands.js';
 import { securityOverview, securityRulesDetail } from '../security/security-summary.js';
 import { advancementDetailSummary, renderAdvancementEmptyLine } from '../advancement-presentation.js';

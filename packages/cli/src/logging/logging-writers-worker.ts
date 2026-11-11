@@ -1,10 +1,10 @@
 import { opendir, readlink, stat, open } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { readDarwinProcessBirth, readLocalProcessDeclaration } from "@zhixing/mesh/filesystem";
+import { readDarwinProcessBirth, readLocalProcessDeclaration } from "@zhixing-ai/mesh/filesystem";
 import { LOG_WRITE_PROTOCOL, writerEndpoint, writerRootKey } from "./writer-admission.js";
-import type { LogWriterIdentity, LogWriterObservation } from "@zhixing/core/logging/storage";
-import { logFailureEvidence, type LogFailureEvidence } from "@zhixing/core/logging";
+import type { LogWriterIdentity, LogWriterObservation } from "@zhixing-ai/core/logging/storage";
+import { logFailureEvidence, type LogFailureEvidence } from "@zhixing-ai/core/logging";
 const parentPid = Number(process.argv[3]);
 import { isProductLogWriter as productWriter } from "./writer-classification.js";
 async function prefix(file: string, max = 65536): Promise<Buffer> {
@@ -65,7 +65,7 @@ async function posix(home: string): Promise<Omit<LogWriterObservation, "at">> {
     const identity = { pid, birth };
     if (identity.pid === parentPid) { self = identity; candidates.push(identity); continue; }
     // ps loses argv quoting. Ambiguous product commands block rather than claim compatibility.
-    if (productWriter(match[4]!.split(/\s+/u), home) || /@zhixing\/cli|packages\/cli/u.test(match[4]!)) candidates.push(identity);
+    if (productWriter(match[4]!.split(/\s+/u), home) || /node_modules\/zhixing\/|packages\/cli/u.test(match[4]!)) candidates.push(identity);
   }
   return { complete: complete && self !== undefined, self, candidates, ...(failure ? { failure } : {}) };
 }

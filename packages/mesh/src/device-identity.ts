@@ -8,7 +8,7 @@ import {
   X509Certificate,
   type KeyObject,
 } from "node:crypto";
-import type { DeviceIdentity, Signature } from "@zhixing/core/contracts";
+import type { DeviceIdentity, Signature } from "@zhixing-ai/core/contracts";
 import type { Crypto, CryptoKey as CertificateCryptoKey } from "@peculiar/webcrypto";
 import { protocolBytes } from "./canonical.js";
 import { MeshProtocolError } from "./errors.js";

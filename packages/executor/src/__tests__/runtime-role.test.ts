@@ -1,8 +1,8 @@
 import {
   defineRuntimeFactoryConformance,
   type RuntimeFactoryConformanceHarness,
-} from "@zhixing/test-utils";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/test-utils";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import { describe, expect, it, vi } from "vitest";
 import {
   createExecutorRole,

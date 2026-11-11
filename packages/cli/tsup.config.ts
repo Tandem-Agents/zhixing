@@ -68,16 +68,16 @@ async function bundleSupervisorEntry() {
   await build({ entryPoints: [join('dist', entry)], outfile: join('dist', entry),
     bundle: true, allowOverwrite: true, platform: 'node', format: 'esm', target: 'node24',
     // Mesh owns its native filesystem assets relative to its own package.
-    external: ['@zhixing/mesh/*'], sourcemap: true, logLevel: 'silent' });
+    external: ['@zhixing-ai/mesh/*'], sourcemap: true, logLevel: 'silent' });
 }
 
 /** 单份启动图里允许出现的非字面量动态装入位置（逐条评审；变化即构建失败）。都是装原生件，不装 JS。 */
 const PROGRAM_DYNAMIC_SITES: readonly ProgramBundleDynamicSite[] = [
-  { package: "@zhixing/cli", call: "createRequire(<module-url>)(artifact)", count: 4,
+  { package: "zhixing", call: "createRequire(<module-url>)(artifact)", count: 4,
     reason: "host-launch、foreground-process、writer-declaration 装分发目录 terminal/<平台>/ 下按清单核验过的原生件（S 的 launch 块里另有同源副本，宿主与 N 不会装入该块）" },
-  { package: "@zhixing/cli", call: "createRequire(<module-url>)(filename)", count: 2,
+  { package: "zhixing", call: "createRequire(<module-url>)(filename)", count: 2,
     reason: "secret-platform 装 foreground.node：先按清单核对字节数与 sha256 再装入（含 S 的 launch 块副本）" },
-  { package: "@zhixing/mesh", call: "createRequire(<module-url>)(verifyCheckpointBridgeArtifact( fileURLToPath(new URL(\"../\", <module-url>)), target ))", count: 1,
+  { package: "@zhixing-ai/mesh", call: "createRequire(<module-url>)(verifyCheckpointBridgeArtifact( fileURLToPath(new URL(\"../\", <module-url>)), target ))", count: 1,
     reason: "mesh 装检查点桥接原生件：路径由 mesh 包根解析，装入前经 verifyCheckpointBridgeArtifact 核验" },
 ];
 /** ws 的可选原生加速依赖：运行时 require 失败即退回纯 JS，与逐文件形态一致。 */
@@ -96,7 +96,7 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   target: "node24",
-  noExternal: ["@zhixing/terminal-ui"],
+  noExternal: ["@zhixing-ai/terminal-ui"],
   banner: { js: "#!/usr/bin/env node" },
   onSuccess: async () => {
     await bundleSupervisorEntry();

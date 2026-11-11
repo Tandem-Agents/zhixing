@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { execFile, fork } from "node:child_process";
 import { once } from "node:events";
 import { promisify } from "node:util";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { createLocalLogStore } from "./runtime.js";
 
 // Test the Windows console, not just the spawn option or redirected output.

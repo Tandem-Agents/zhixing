@@ -1,4 +1,4 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import { DeviceKey, type DeviceKeyMaterial } from "./device-identity.js";
 
 const DEVICE_KEY_NAMESPACE = "device/v1/";

@@ -1,4 +1,4 @@
-import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import {
   GovernorStateRequired,
   ResourceGovernorIndexStore,
@@ -10,9 +10,9 @@ import {
   requireGovernorRecordNeeds,
   type GovernorDecision,
   type GovernorSession,
-} from "@zhixing/core/authority";
-import { ExecutorResourceBackpressureError, ExecutorResourceAdmissionPendingError, ExecutorResourceAdmissionExpiredError } from "@zhixing/core/resources";
-export { ExecutorResourceBackpressureError, ExecutorResourceAdmissionPendingError, ExecutorResourceAdmissionExpiredError } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import { ExecutorResourceBackpressureError, ExecutorResourceAdmissionPendingError, ExecutorResourceAdmissionExpiredError } from "@zhixing-ai/core/resources";
+export { ExecutorResourceBackpressureError, ExecutorResourceAdmissionPendingError, ExecutorResourceAdmissionExpiredError } from "@zhixing-ai/core/resources";
 import type {
   AdmissionClass,
   AssignmentReservationRequest,
@@ -34,11 +34,11 @@ import type {
   SystemJobReservationOrigin,
   SystemJobResourceLease,
   UsageReport,
-} from "@zhixing/core/contracts";
-import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/contracts";
+import { ImmediateRootReplayTerminalError } from "@zhixing-ai/core/contracts";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { observeLogPhase, type LogRecordPort } from "@zhixing-ai/core/logging";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import {
   applyGovernorRecord,
   acceptedRemoteIntervalRemainingMs,
@@ -68,7 +68,7 @@ import {
   type ResourceReservationProjection,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
 const MAX_LEASE_TTL_MS = RESOURCE_LEASE_MAX_TTL_MS;
@@ -87,7 +87,7 @@ type AuthorizedResourceMethod =
 export interface ExecutorResourceGuard {
   assert(
     principal: AuthorityCallContext["principal"],
-    method: import("@zhixing/core/contracts").AuthorityPortMethodId,
+    method: import("@zhixing-ai/core/contracts").AuthorityPortMethodId,
   ): void;
 }
 

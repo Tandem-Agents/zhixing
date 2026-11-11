@@ -1,9 +1,9 @@
 import { stripVTControlCharacters } from 'node:util';
-import type { SessionCompactResult, SessionUsageResult } from '@zhixing/rpc/session-wire';
+import type { SessionCompactResult, SessionUsageResult } from '@zhixing-ai/rpc/session-wire';
 import type { RuntimePrimaryModelDisplayProjection } from '../runtime/runtime-configuration-provider.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
-import { DEFAULT_THRESHOLDS } from '@zhixing/core/context';
-import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from '@zhixing/terminal-ui/protocol';
+import { DEFAULT_THRESHOLDS } from '@zhixing-ai/core/context';
+import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from '@zhixing-ai/terminal-ui/protocol';
 import { fitSummary, paginateSummary, summaryText } from '../summary-projection.js';
 import { emergencyFloorCostText, summaryFailureText } from './compact-outcome-text.js';
 

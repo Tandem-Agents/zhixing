@@ -1,5 +1,5 @@
-import type { EvidenceRequest } from "@zhixing/core/contracts";
-import { validateEvidenceRequest, verifyProtocolStep } from "@zhixing/core/protocol";
+import type { EvidenceRequest } from "@zhixing-ai/core/contracts";
+import { validateEvidenceRequest, verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 
 export function createConversationEvidenceAuthorityVerifier(options: {

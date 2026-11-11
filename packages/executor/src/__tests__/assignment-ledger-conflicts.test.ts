@@ -1,8 +1,8 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：conflicts。
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { AssignmentEntry, CancelProofBody } from "@zhixing/core/contracts";
-import { advanceAssignmentLedger, createConversationSealedBundle, sealedBundleArtifact, signCancelProof, signSupersedeProof, validateCancelProof, validateDispatchConflictProof, validateSupersedeProof } from "@zhixing/core/protocol";
-import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing/owner-kernel/conversation-assignment";
+import { FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { AssignmentEntry, CancelProofBody } from "@zhixing-ai/core/contracts";
+import { advanceAssignmentLedger, createConversationSealedBundle, sealedBundleArtifact, signCancelProof, signSupersedeProof, validateCancelProof, validateDispatchConflictProof, validateSupersedeProof } from "@zhixing-ai/core/protocol";
+import { ConversationRunJournal, InProcessConversationDispatcher } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import { NOW, EXECUTOR_ID, CONVERSATION_ID, RUN_ID, ASSIGNMENT_ID, SHA256_ZERO, ABORT_TICKET_DIGEST, DURABLE_IO_TEST_TIMEOUT_MS, matchingSnapshotFor, matchingPermissionSnapshotFor, allowOnceDecisionDigest, deliveryParticipant, signedMirrorBatch, mirrorReceipt, ownerControl, submission, createRevocationAwareSubmission, createUnassignedHarness, createHarness, createUnsignedEnvelope, ownerContext, submissionContext, applyResolutionControl, replaceAssignmentAfterUncertain, sealDefaultBundle, createAlternativeDispatch, createCancellationSubmission, createBundleSubmission, reopenJournal, withoutSignature, replayFixtureLog } from "./assignment-ledger-fixture.js";

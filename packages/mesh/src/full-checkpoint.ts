@@ -6,7 +6,7 @@ import type {
   FullAuthorityCheckpointPayload,
   HomeTrustRecord,
   LogicalRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { createHash } from "node:crypto";
 import {
   classifyRegisteredArtifactReferences,
@@ -16,7 +16,7 @@ import {
   type ArtifactCheckpointRetentionPort,
   type AuthorityCommitLog,
   type DurableLogCheckpoint,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   runStorageMaintenanceStep,
   currentMaintenanceUrgencyOr,
@@ -27,7 +27,7 @@ import {
   waitForMaintenanceRetry,
   yieldMaintenanceToForeground,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import {
   createStoredFullAuthorityCheckpoint,

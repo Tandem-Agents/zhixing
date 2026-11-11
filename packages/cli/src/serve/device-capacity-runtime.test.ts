@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
-import { createDefaultDeviceCapacityPolicy } from "@zhixing/core/resources";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { createDefaultDeviceCapacityPolicy } from "@zhixing-ai/core/resources";
 import { createDeviceCapacityRuntime as createRuntime } from "./device-capacity-runtime.js";
 import { diskSampleCount, threadDiskSampler, writeDiskSample, type DiskSamplerStarter } from "./disk-pressure-sampler.js";
 import { beginRuntimeLogging } from "../logging/runtime.js";

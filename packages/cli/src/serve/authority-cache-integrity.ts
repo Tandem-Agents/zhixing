@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { AuthorityCacheIntegrity } from "@zhixing/core/authority";
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import { AuthorityCacheIntegrity } from "@zhixing-ai/core/authority";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
 
 const REFERENCE = { kind: "authority-integrity", bindingId: "startup-proofs:v1" } as const;
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import path from 'node:path';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import type { Message } from '../../types/messages.js';
 import type { ArtifactJsonIndex } from '../../authority/artifact-json-index.js';
 import type { ArtifactRef } from '../../contracts/index.js';

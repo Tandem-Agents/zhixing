@@ -4,18 +4,18 @@ import type {
   HomeTrustEvent,
   HomeTrustRecord,
   ReadyProof,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   protocolDigest,
   validateAnchorTransferCommand,
   validateAnchorTransferResult,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { currentMaintenanceAbortSignal } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/protocol";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import { currentMaintenanceAbortSignal } from "@zhixing-ai/core/resources";
 import type {
   PlannedAnchorTransferArtifactSourcePort,
   PlannedAnchorCandidateIdentity,

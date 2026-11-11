@@ -1,7 +1,7 @@
-import type { RunRecordWithRef } from '@zhixing/core/transcript';
-import type { ContentBlock } from '@zhixing/core/types';
-import type { BodyFragmentMetadata } from '@zhixing/terminal-ui/body-model';
-import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
+import type { RunRecordWithRef } from '@zhixing-ai/core/transcript';
+import type { ContentBlock } from '@zhixing-ai/core/types';
+import type { BodyFragmentMetadata } from '@zhixing-ai/terminal-ui/body-model';
+import type { TerminalDisplaySegment } from '@zhixing-ai/terminal-ui/protocol';
 import { projectBodyHistory } from './body-projection.js';
 
 export interface TerminalHistorySegment {

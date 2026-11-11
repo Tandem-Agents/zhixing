@@ -1,4 +1,4 @@
-import type { SkillCatalogChangedFact } from "@zhixing/core/skills/catalog";
+import type { SkillCatalogChangedFact } from "@zhixing-ai/core/skills/catalog";
 import { describe, expect, it, vi } from "vitest";
 import {
   SkillCatalogRpcClient,

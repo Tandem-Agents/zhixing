@@ -8,7 +8,7 @@ import type {
   JsonValue,
   SourceFreezeProof,
   TransferRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ArtifactReceiveProgress,
   ArtifactStore,
@@ -18,18 +18,18 @@ import type {
   IdentifiedPhysicalStepRunner,
   DurableProjectionSource, VerifiedAnchorTenure,
   DurableLogCheckpoint,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   validateAdmittedControlEnvelope,
   resolveDispatchArtifactClosure,
   resolveSealedBundleArtifactClosure,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   runStorageMaintenanceStep,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import {
   canonicalize,
   conversationTransferCommitDigest,
@@ -47,10 +47,10 @@ import {
   type ConversationTransferState,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import { ConversationBaseSource, type ConversationBaseManifest } from "./conversation-base-source.js";
 import { registerConversationBaseContext } from "./conversation-base-registry.js";
-import { isLocalConversationId } from '@zhixing/core/conversation';
+import { isLocalConversationId } from '@zhixing-ai/core/conversation';
 export { isConversationSourceEvidenceError } from './conversation-base-source.js';
 export { foldConversationBaseBindings, conversationBaseKey, openConversationBase, registerConversationBaseContext } from './conversation-base-registry.js';
 export type { ConversationBaseBinding } from './conversation-base-registry.js';

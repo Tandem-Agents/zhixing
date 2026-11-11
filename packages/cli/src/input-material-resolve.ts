@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 
-import type { UserInputPart, UserTurnInput } from "@zhixing/core";
+import type { UserInputPart, UserTurnInput } from "@zhixing-ai/core";
 
 import { detectMimeType } from "./input-material-ingest.js";
 import {

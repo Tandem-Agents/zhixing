@@ -6,7 +6,7 @@ import {
   expectFailure,
   observeReasonCode,
   type DurableCaseKind,
-} from "@zhixing/core/test-support/s7-durable-harness";
+} from "@zhixing-ai/core/test-support/s7-durable-harness";
 import {
   LocalWorkspaceOperationOutbox,
 } from "../../runtime/local-workspace-operation-outbox.js";
@@ -19,7 +19,7 @@ import {
   WORKSPACE_CATALOG_RESET_IMPACT,
   WorkspaceAdministrationDurableLifecycleApplicationService,
   type WorkspaceAdministrationDurableOperation,
-} from "@zhixing/core/environment/workspace-administration";
+} from "@zhixing-ai/core/environment/workspace-administration";
 import { observeLocalWorkspaceDurableInfrastructureFailure } from "../../runtime/local-workspace-durable-lifecycle-adapter.js";
 
 export async function executeLocalWorkspaceOutboxCase(

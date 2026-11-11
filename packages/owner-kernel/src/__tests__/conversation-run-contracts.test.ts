@@ -1,4 +1,4 @@
-import { protocolDigest, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
+import { protocolDigest, type ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   assertAdmissionReplayContract,

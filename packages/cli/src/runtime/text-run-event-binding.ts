@@ -1,8 +1,8 @@
-import type { DecorateRunBusFn } from '@zhixing/orchestrator/runtime';
-import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
-import { validateSessionEventProjection } from '@zhixing/core/protocol/stream';
-import type { SessionEventProjection } from '@zhixing/core/types';
-import { boundedProcessValue } from '@zhixing/rpc/session-wire';
+import type { DecorateRunBusFn } from '@zhixing-ai/orchestrator/runtime';
+import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
+import { validateSessionEventProjection } from '@zhixing-ai/core/protocol/stream';
+import type { SessionEventProjection } from '@zhixing-ai/core/types';
+import { boundedProcessValue } from '@zhixing-ai/rpc/session-wire';
 import type { CliWriter } from '../screen/index.js';
 import { createRunEventSubscribers } from '../render-events.js';
 import type { LifecycleWarningDeduper } from '../lifecycle-diagnostics-presentation.js';

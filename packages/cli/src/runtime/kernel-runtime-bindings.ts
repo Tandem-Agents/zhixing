@@ -1,12 +1,12 @@
-import { resolveAgentIdentity } from "@zhixing/core/identity";
-import { resolveModelInfo } from "@zhixing/core/context";
-import { resolveModelInputCapabilities, validateThinkingConfig, type LLMRole, type ThinkingConfig } from "@zhixing/core";
+import { resolveAgentIdentity } from "@zhixing-ai/core/identity";
+import { resolveModelInfo } from "@zhixing-ai/core/context";
+import { resolveModelInputCapabilities, validateThinkingConfig, type LLMRole, type ThinkingConfig } from "@zhixing-ai/core";
 import {
   createKernelModelProviderBinding,
   createKernelRuntimeEnvironment,
   type KernelModelProviderFactory,
   type KernelRuntimeEnvironmentFactory,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import {
   createProviderRoles,
   ensureWorkspaceDir,
@@ -18,7 +18,7 @@ import {
   resolveWorkspaceSessionType,
   ROLE_SPECS,
   type ProviderCredentialProjection,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import type {
   RuntimeKernelEnvironmentConfigurationProjection,
   RuntimeModelConfigurationProjection,

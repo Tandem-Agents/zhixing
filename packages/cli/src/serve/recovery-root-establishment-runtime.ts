@@ -1,10 +1,10 @@
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
 import {
   registerPairedCheckpointMeshService,
   type PairedCheckpointCommand,
   type PairedCheckpointCommandReceiver,
-} from "@zhixing/mesh/paired-checkpoint-target";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/mesh/paired-checkpoint-target";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";

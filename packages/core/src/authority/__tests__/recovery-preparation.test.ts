@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "../commit-log.js";
 import { AuthorityCacheIntegrity } from "../startup-proofs.js";

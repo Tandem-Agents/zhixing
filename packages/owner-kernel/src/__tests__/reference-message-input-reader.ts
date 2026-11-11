@@ -2,13 +2,13 @@
  * 早期的历史外输入读取实现（首次读取折叠会话的全部消息事实），原样保留在测试里，
  * 作为新实现的语义差分参照。只在测试中使用。
  */
-import { userMessageFromTurnInput } from '@zhixing/core';
-import type { ConversationMessageStatus } from '@zhixing/core/conversation/application';
-import { awaitAuthorityPreparation, type ArtifactStore, type AuthorityCommitLog, type DurableLogCheckpoint, type DurableProjectionReadContext } from '@zhixing/core/authority';
-import type { ConversationRunState, UserTurnInput } from '@zhixing/core/contracts';
-import { validateNonEmptyUserTurnInput } from '@zhixing/core/protocol';
+import { userMessageFromTurnInput } from '@zhixing-ai/core';
+import type { ConversationMessageStatus } from '@zhixing-ai/core/conversation/application';
+import { awaitAuthorityPreparation, type ArtifactStore, type AuthorityCommitLog, type DurableLogCheckpoint, type DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import type { ConversationRunState, UserTurnInput } from '@zhixing-ai/core/contracts';
+import { validateNonEmptyUserTurnInput } from '@zhixing-ai/core/protocol';
 import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs,
-  StorageMaintenanceCancelledError, waitForMaintenanceRetry } from '@zhixing/core/resources';
+  StorageMaintenanceCancelledError, waitForMaintenanceRetry } from '@zhixing-ai/core/resources';
 import { consumedInitialRuns, projectInputDelivery, isMessageDeliveryFact, type MessageDeliveryRecord } from '../conversation-message-delivery.js';
 import type { ConversationReadIndex, InputPointer, TimelinePointer } from '../conversation-read-index.js';
 import type { ConversationBaseSource } from '../conversation-base-source.js';

@@ -1,15 +1,15 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：assembly。
-import { localConversationId } from "@zhixing/core/conversation";
-import { userMessageFromTurnInput, type Message } from "@zhixing/core";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { type PermissionRule } from "@zhixing/core/security";
-import { createSignedTrustRuleSnapshot, protocolDigest } from "@zhixing/core/protocol";
-import { ConversationManager, type TurnCommittedInfo } from "@zhixing/owner-kernel/conversation-manager";
-import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import { localConversationId } from "@zhixing-ai/core/conversation";
+import { userMessageFromTurnInput, type Message } from "@zhixing-ai/core";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { type PermissionRule } from "@zhixing-ai/core/security";
+import { createSignedTrustRuleSnapshot, protocolDigest } from "@zhixing-ai/core/protocol";
+import { ConversationManager, type TurnCommittedInfo } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { createInitialControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { DurableConversationAdmissionRejectedError } from "@zhixing-ai/owner-kernel/run-turn";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime, DurableConversationInteractionObserver, createConversationAuxiliaryRecoveryAssemblyHandle, createConversationCommittedTurnListenerAssemblyHandle, createConversationManagerAssemblyHandle } from "../conversation-protocol-runtime.js";
 import { anchorConversationOwnerRuntime } from "../conversation-owner-runtime.js";

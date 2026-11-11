@@ -1,4 +1,4 @@
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { expect, it } from "vitest";
 import { createCoreS7DurableScenarios } from "./s7-durable.js";
 import { withS7TemporaryDirectoryRoot } from "./s7-durable-harness.js";

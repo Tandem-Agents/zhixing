@@ -1,6 +1,6 @@
-import { channelDeclaration, type ChannelField } from "@zhixing/core/channels/extension";
+import { channelDeclaration, type ChannelField } from "@zhixing-ai/core/channels/extension";
 import { packagedExtensions } from "../runtime/extensions/catalog.js";
-import type { ExtensionPublicSnapshot, ExtensionManifest } from "@zhixing/core/extensions/contracts";
+import type { ExtensionPublicSnapshot, ExtensionManifest } from "@zhixing-ai/core/extensions/contracts";
 
 export type ChannelFieldSpec = ChannelField;
 export interface SupportedChannel {

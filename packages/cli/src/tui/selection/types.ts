@@ -1,4 +1,4 @@
-import type { TerminalSummary } from "@zhixing/terminal-ui/protocol";
+import type { TerminalSummary } from "@zhixing-ai/terminal-ui/protocol";
 
 export const MAX_SELECTION_OPTIONS = 5;
 

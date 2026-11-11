@@ -1,8 +1,8 @@
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/authority";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";

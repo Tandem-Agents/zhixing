@@ -6,26 +6,26 @@ import type {
   ConfirmationLifecycleObserver,
   ConfirmationRequest,
   ConfirmationResolutionSource,
-} from "@zhixing/core/confirmation";
-import type { ToolDefinition, ToolSideEffectObserver } from "@zhixing/core";
+} from "@zhixing-ai/core/confirmation";
+import type { ToolDefinition, ToolSideEffectObserver } from "@zhixing-ai/core";
 import type {
   AuthorityCallContext,
   ChannelInteractionGrant,
   IngressContext,
   TrustRuleHitFact,
   TrustSedimentFact,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   channelInteractionConfirmationDecision,
   confirmationDecisionDigest,
   type AssignmentInteractionOutcome,
   type StreamFrameAppender,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import {
   AssignmentInteractionProjector,
   finishAssignmentSideEffect,

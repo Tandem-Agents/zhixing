@@ -1,6 +1,6 @@
-import type { TaskListState } from '@zhixing/core/conversation';
-import type { TaskView } from '@zhixing/core/scheduler';
-import type { SessionChangedPayload, SessionTaskListAction } from '@zhixing/rpc/session-wire';
+import type { TaskListState } from '@zhixing-ai/core/conversation';
+import type { TaskView } from '@zhixing-ai/core/scheduler';
+import type { SessionChangedPayload, SessionTaskListAction } from '@zhixing-ai/rpc/session-wire';
 import type { RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import type { RpcSchedulerFacade } from '../runtime/rpc-scheduler-facade.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';

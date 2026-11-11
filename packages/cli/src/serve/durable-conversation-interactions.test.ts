@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ConfirmationBroker, type ConfirmationRequest } from "@zhixing/core/confirmation";
+import { ConfirmationBroker, type ConfirmationRequest } from "@zhixing-ai/core/confirmation";
 import {
   DurableConversationInteractionObserver,
   type DurableInteractionBinding,

@@ -1,8 +1,8 @@
-import type { ArtifactStore, AuthorityCommitLog, DurableProjectionDefinition, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing/core/authority';
-import { createDurableProjectionOverlay, readDurableProjectionKeys } from '@zhixing/core/authority';
-import type { JsonValue, LogicalRecord, CommitEnvelope, ReservableResourceLease, UsageReport } from '@zhixing/core/contracts';
+import type { ArtifactStore, AuthorityCommitLog, DurableProjectionDefinition, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import { createDurableProjectionOverlay, readDurableProjectionKeys } from '@zhixing-ai/core/authority';
+import type { JsonValue, LogicalRecord, CommitEnvelope, ReservableResourceLease, UsageReport } from '@zhixing-ai/core/contracts';
 import { canonicalize, validateGovernorRecord, requiresFormalResourceCoordination, dataPlaneTicketDigest,
-  type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+  type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { emptySubmissionGuardProjection, reduceConversationSubmissionGuard, reduceConversationRunState,
   type RunProjection, type ConversationRunReductionContext, type SubmissionGuardProjection, type ConversationCommitLogRecord, type ConversationAbortTicketAuthorizer,
   type ConversationSubmissionGuardContext } from './conversation-assignment.js';
@@ -425,12 +425,12 @@ function registerConversationStateProjection(log: AuthorityCommitLog, _artifacts
           for (const record of records) if (record.t === 'advancement-event') {
             const stored = record.event;
             events.push(stored && typeof stored === 'object' && 'ref' in stored
-              ? JSON.parse(Buffer.from(await _artifacts.get((stored as { ref: import('@zhixing/core/contracts').ArtifactRef }).ref)).toString('utf8')) as unknown : stored);
+              ? JSON.parse(Buffer.from(await _artifacts.get((stored as { ref: import('@zhixing-ai/core/contracts').ArtifactRef }).ref)).toString('utf8')) as unknown : stored);
           }
           for (const record of records) if (record.t === 'committed') {
             const publish = envelope.entries.find(value => value.stream === 'publish' &&
               (value.body as { t?: string; assignmentId?: string })?.t === 'publish-decision' && (value.body as { assignmentId?: string }).assignmentId === record.assignmentId);
-            const ref = (publish?.body as { batch?: { ref?: import('@zhixing/core/contracts').ArtifactRef } } | undefined)?.batch?.ref;
+            const ref = (publish?.body as { batch?: { ref?: import('@zhixing-ai/core/contracts').ArtifactRef } } | undefined)?.batch?.ref;
             if (ref) batches.push(JSON.parse(Buffer.from(await _artifacts.get(ref)).toString('utf8')));
           }
           const scope = conversationDecisionScope({ records, events, batches }, { current: false, hydrate: true, advancement: events.length > 0,

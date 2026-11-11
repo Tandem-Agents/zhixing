@@ -13,8 +13,8 @@
  */
 
 import type { WebSocket } from "ws";
-import type { SessionPresentationProfile } from '@zhixing/rpc/session-wire';
-import { SessionPresentationState } from '@zhixing/rpc/connection';
+import type { SessionPresentationProfile } from '@zhixing-ai/rpc/session-wire';
+import { SessionPresentationState } from '@zhixing-ai/rpc/connection';
 import {
   encodeError,
   encodeNotification,

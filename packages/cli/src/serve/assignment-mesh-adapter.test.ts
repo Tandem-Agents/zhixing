@@ -3,19 +3,19 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Server as TlsServer } from "node:tls";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
-import { skillNameToId } from "@zhixing/core/skills/id";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import { createEventBus, type AgentEventMap } from "@zhixing-ai/core";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
 import {
   SkillCatalogSaveApplicationService,
   type SkillCatalogSaveOverlayRecord,
-} from "@zhixing/core/skills/catalog";
+} from "@zhixing-ai/core/skills/catalog";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
   type ArtifactStore,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AssignmentActivationPayload,
   AssignmentActivationProof,
@@ -33,7 +33,7 @@ import type {
   Signature,
   TaskDefinition,
   TranscriptRunRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   buildConversationActivationPayload,
   assignmentMutationRequestId,
@@ -60,9 +60,9 @@ import {
   type ProtocolSigner,
   type UnsignedJobEnvelope,
   type UnsignedConversationEnvelope,
-} from "@zhixing/core/protocol";
-import { ConversationAssignmentLedger } from "@zhixing/executor";
-import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
+} from "@zhixing-ai/core/protocol";
+import { ConversationAssignmentLedger } from "@zhixing-ai/executor";
+import { BUILTIN_TOOL_FACTORIES } from "@zhixing-ai/tools-builtin";
 import {
   DeviceKey,
   HandshakeReplayWindow,
@@ -73,21 +73,21 @@ import {
   enrollDeviceIdentity,
   type SecureMeshConnection,
   type TrustedMeshPeer,
-} from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import {
   ConversationRunJournal,
   type AssignmentSubmissionAuthorizer,
-} from "@zhixing/owner-kernel/conversation-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
 import {
   createOwnerDeliveryParticipant,
   OwnerDeliveryParticipant,
-} from "@zhixing/owner-kernel/delivery";
+} from "@zhixing-ai/owner-kernel/delivery";
 import {
   JobJournal,
   type JobAssignmentPlan,
-} from "@zhixing/owner-kernel/job-assignment";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/owner-kernel/job-assignment";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ASSIGNMENT_ARTIFACT_SERVICE,
@@ -103,7 +103,7 @@ import {
 } from "./assignment-mesh-adapter.js";
 import { createAssignmentMutationPort } from "./assignment-global-state-ports.js";
 import { createAssignmentSkillPorts } from "../runtime/assignment-skill-adapter.js";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 const NOW = "2026-07-21T00:00:00.000Z";
 const EXPIRY = "2026-07-21T01:00:00.000Z";
@@ -1979,7 +1979,7 @@ function executorSubmissionPortSecurity(
 function transferAuthorization(input: {
   readonly fixture: AssignmentMeshFixture;
   readonly direction: "owner-to-executor" | "executor-to-owner";
-  readonly refs: readonly import("@zhixing/core/contracts").ArtifactRef[];
+  readonly refs: readonly import("@zhixing-ai/core/contracts").ArtifactRef[];
   readonly capability?: AuthorityCapability;
   readonly activation?: AssignmentActivationProof<"conversation"> | AssignmentActivationProof<"job">;
   readonly clock?: () => number;
@@ -2803,8 +2803,8 @@ function createUnsignedJobEnvelope(
 
 function createUnsignedEnvelope(
   identity: TestProtocolIdentity,
-  windowRef: import("@zhixing/core/contracts").ArtifactRef,
-  dependency: import("@zhixing/core/contracts").ArtifactRef,
+  windowRef: import("@zhixing-ai/core/contracts").ArtifactRef,
+  dependency: import("@zhixing-ai/core/contracts").ArtifactRef,
   executorId: string,
 ): UnsignedConversationEnvelope {
   const manifestBody = {

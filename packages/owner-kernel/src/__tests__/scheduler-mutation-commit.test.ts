@@ -1,12 +1,12 @@
 import path from "node:path";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing-ai/core/skills/global-state";
 import type {
   MutationBatch,
   PublishRecord,
   ScheduleWriteMutation,
   TaskDefinition,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createJobCommitFence,
   createJobSealedBundle,
@@ -14,8 +14,8 @@ import {
   CommittedMutationMaterializationError,
   mutationBatchArtifact,
   sealedBundleArtifact,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { SchedulerConversationMutationPublisher } from "../scheduler-conversation-publisher.js";
 import { SchedulerJobCommitParticipant } from "../scheduler-job-commit.js";
@@ -26,7 +26,7 @@ import {
   SCHEDULE_AUTHORITY_REDUCER_VERSION,
 } from "../global-mutation-commit-coordinator.js";
 import { readdir, readFile } from "node:fs/promises";
-import { AuthorityCacheIntegrity, durableProjectionVersionDirectoryName } from "@zhixing/core/authority";
+import { AuthorityCacheIntegrity, durableProjectionVersionDirectoryName } from "@zhixing-ai/core/authority";
 import {
   planScheduleMutationCommit,
   scheduleMutationTaskId,

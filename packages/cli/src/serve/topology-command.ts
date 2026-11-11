@@ -1,8 +1,8 @@
-import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers/configuration";
+import { CONFIGURATION_LOG_SOURCE } from "@zhixing-ai/providers/configuration";
 import type { ServeOptions } from "./command.js";
-import { getZhixingHome } from "@zhixing/core/paths";
-import { createPlatformSecretStore } from "@zhixing/secrets";
-import { withFileLockProcessIdentity } from '@zhixing/core/persistence';
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
+import { withFileLockProcessIdentity } from '@zhixing-ai/core/persistence';
 import { nativeSecretPlatform } from '../platform/secret-platform.js';
 import { peekEntryLogging } from '../logging/bootstrap.js';
 import chalk from "chalk";
@@ -23,11 +23,11 @@ import {
   getDefaultPortPath,
   getDefaultTokenPath,
   ServerNotRunningError,
-} from "@zhixing/server/client";
-import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+} from "@zhixing-ai/server/client";
+import { resolveHostLaunchPlan } from "@zhixing-ai/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure } from "../logging/runtime.js";
-import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing-ai/terminal-ui/parent-transport';
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,

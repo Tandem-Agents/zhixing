@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ConversationResolutionFence } from "@zhixing/core/conversation/application";
+import type { ConversationResolutionFence } from "@zhixing-ai/core/conversation/application";
 import {
   createConversationResolutionFence,
   parseConversationResolutionFence,

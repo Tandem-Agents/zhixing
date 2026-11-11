@@ -1,13 +1,13 @@
-import type { RubricContractDraftSnapshot, RubricDraftPersistenceChoice } from "@zhixing/core/advancement";
+import type { RubricContractDraftSnapshot, RubricDraftPersistenceChoice } from "@zhixing-ai/core/advancement";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
   DeferredGlobalIntentPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   RubricPublicationOutcome,
   RubricPublicationPort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 
 const DEFERRED_MESSAGE = "已用于本任务，连接值班设备后保存";
 

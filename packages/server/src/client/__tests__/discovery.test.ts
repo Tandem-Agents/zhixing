@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { discoverServer, readToken, ServerNotRunningError } from "../discovery.js";
 
 describe("discovery", () => {

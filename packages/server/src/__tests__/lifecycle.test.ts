@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { runServer, type RunningServer } from "../lifecycle.js";
 import { bindServer } from "../server.js";
 import { createServerContext } from "../context.js";

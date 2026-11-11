@@ -3,9 +3,9 @@ import { PassThrough, Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { TextLineInput, TextSessionOutput, createTextSelection, attachTextInterrupts, TEXT_INPUT_MAX_LINE_BYTES } from '../text-session-io.js';
 import { resolveTerminalConfirmation, projectTerminalConfirmation } from '../terminal/confirmation.js';
-import type { ConfirmationRequest } from '@zhixing/core/confirmation';
+import type { ConfirmationRequest } from '@zhixing-ai/core/confirmation';
 import { chooseTerminalSelection } from '../terminal/selection.js';
-import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import type { TerminalSummary } from '@zhixing-ai/terminal-ui/protocol';
 import { summaryLines } from '../summary-projection.js';
 
 function output() {

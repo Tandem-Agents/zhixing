@@ -1,6 +1,6 @@
 import childProcess, { type ChildProcess } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { LogRecorder } from "@zhixing/core/logging";
+import { LogRecorder } from "@zhixing-ai/core/logging";
 import { IsolatedLogStore } from "../store-process.js";
 import { createDeviceCapacityRuntime } from "../../serve/device-capacity-runtime.js";
 

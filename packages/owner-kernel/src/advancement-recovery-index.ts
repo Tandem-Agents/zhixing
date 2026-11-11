@@ -1,13 +1,13 @@
-import {createDurableProjectionOverlay,type AuthorityCommitLog,type ArtifactStore,type DurableProjectionDefinition,type DurableProjectionMutation} from '@zhixing/core/authority';
-import type {JsonValue,ArtifactRef} from '@zhixing/core/contracts';
+import {createDurableProjectionOverlay,type AuthorityCommitLog,type ArtifactStore,type DurableProjectionDefinition,type DurableProjectionMutation} from '@zhixing-ai/core/authority';
+import type {JsonValue,ArtifactRef} from '@zhixing-ai/core/contracts';
 import {CONVERSATION_RUN_STATE_PROJECTION_ID} from './conversation-run-state-index.js';
 import {foldConversationBaseBindings,conversationViewAt,preserveBaseDeletions,registerConversationBaseRepair,conversationBaseUnavailableKey,conversationBaseRepairRequired,conversationBaseKey,type ConversationBaseBinding} from './conversation-base-registry.js';
 import {isConversationSourceEvidenceError} from './conversation-base-source.js';
-import type { DurableProjectionReadContext } from '@zhixing/core/authority';
-import type { AdvancementControlEvent, AdvancementSession, AdvancementReviewAttempt } from '@zhixing/core/advancement';
+import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import type { AdvancementControlEvent, AdvancementSession, AdvancementReviewAttempt } from '@zhixing-ai/core/advancement';
 import { loadCommittedBundleBinding, type ConversationFactGroup } from './conversation-assignment.js';
-import type { TranscriptRunRecord } from '@zhixing/core/contracts';
-import { hasPendingWorksceneTask } from '@zhixing/core/workscene/application';
+import type { TranscriptRunRecord } from '@zhixing-ai/core/contracts';
+import { hasPendingWorksceneTask } from '@zhixing-ai/core/workscene/application';
 import { conversationStateKeyHash as hash } from './conversation-state-key.js';
 import { partitionedDecisionReducer, decisionSeedAtSource, decisionStartAtSource } from './conversation-decision-partitions.js';
 

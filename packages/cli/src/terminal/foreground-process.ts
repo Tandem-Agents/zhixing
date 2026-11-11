@@ -4,8 +4,8 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { closeSync } from 'node:fs';
-import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
-import { adoptTerminalSocket, TerminalPrivateEndpoint, TerminalJsonFrames } from '@zhixing/terminal-ui/parent-transport';
+import { TERMINAL_LIMITS } from '@zhixing-ai/terminal-ui/protocol';
+import { adoptTerminalSocket, TerminalPrivateEndpoint, TerminalJsonFrames } from '@zhixing-ai/terminal-ui/parent-transport';
 
 interface NativeState {
   ready: boolean; created: boolean; resumed: boolean; cancelled: boolean;

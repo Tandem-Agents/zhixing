@@ -1,5 +1,5 @@
-import { observationRefs, type BindLogSource } from "@zhixing/core/logging";
-import { HANDOFF_LOG_SOURCE, type MeshRequestChannelOptions } from "@zhixing/mesh/request-channel";
+import { observationRefs, type BindLogSource } from "@zhixing-ai/core/logging";
+import { HANDOFF_LOG_SOURCE, type MeshRequestChannelOptions } from "@zhixing-ai/mesh/request-channel";
 
 /** These service messages carry explicit existing business identities; bodies are never recorded. */
 export function handoffLogging(bind?: BindLogSource): MeshRequestChannelOptions | undefined {

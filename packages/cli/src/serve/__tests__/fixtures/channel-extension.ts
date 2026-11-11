@@ -1,5 +1,5 @@
-import { serveChannelExtension } from "@zhixing/core/channels/extension-worker";
-import type { ChannelContext } from "@zhixing/core/channels";
+import { serveChannelExtension } from "@zhixing-ai/core/channels/extension-worker";
+import type { ChannelContext } from "@zhixing-ai/core/channels";
 
 let context: ChannelContext;
 

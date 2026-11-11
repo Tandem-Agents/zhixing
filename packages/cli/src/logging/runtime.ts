@@ -6,8 +6,8 @@ import {
   type LogRecordPort,
   type LogResult,
   type LogSink,
-} from "@zhixing/core/logging";
-import { LocalLogStore } from "@zhixing/core/logging/storage";
+} from "@zhixing-ai/core/logging";
+import { LocalLogStore } from "@zhixing-ai/core/logging/storage";
 import {
   createDeviceCapacityRuntime,
   type DeviceCapacityRuntime,

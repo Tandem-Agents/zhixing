@@ -1,5 +1,5 @@
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
-import type { MeshRequestChannelOptions, MeshServiceClient } from "@zhixing/mesh/request-channel";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
+import type { MeshRequestChannelOptions, MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import { once } from "node:events";
 import {
   connect as connectNet,
@@ -12,8 +12,8 @@ import type {
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   currentAndPreviousDiscoveryRendezvousKeys,
   currentAndPreviousRendezvousKeys,
@@ -23,10 +23,10 @@ import {
   MESH_ENDPOINT_SERVICE_ID,
   persistPairwiseRendezvousSecret,
   registerMeshEndpointService,
-} from "@zhixing/mesh/bootstrap";
-import { encodeBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
-import type { DeviceKey } from "@zhixing/mesh/device-identity";
-import { MeshProtocolError } from "@zhixing/mesh/errors";
+} from "@zhixing-ai/mesh/bootstrap";
+import { encodeBlindRendezvousHello } from "@zhixing-ai/mesh/blind-rendezvous";
+import type { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { MeshProtocolError } from "@zhixing-ai/mesh/errors";
 import {
   acceptAuthenticatedMeshSocket,
   connectAuthenticatedMesh,
@@ -34,7 +34,7 @@ import {
   type MeshConnectionRoute,
   type MeshRouteResolution,
   type TrustedMeshPeer,
-} from "@zhixing/mesh/handshake";
+} from "@zhixing-ai/mesh/handshake";
 import {
   openHomeDiscovery,
   serveHomeDiscovery,
@@ -46,11 +46,11 @@ import {
   type HomeDiscoveryServerPorts,
   type VerifiedHomeDiscovery,
   type VerifiedHomeDiscoveryProgress,
-} from "@zhixing/mesh/home-discovery";
-import { OutboundMeshTunnel } from "@zhixing/mesh/outbound-tunnel";
-import { HandshakeReplayWindow } from "@zhixing/mesh/replay-window";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import type { SecureMeshConnection } from "@zhixing/mesh/transport";
+} from "@zhixing-ai/mesh/home-discovery";
+import { OutboundMeshTunnel } from "@zhixing-ai/mesh/outbound-tunnel";
+import { HandshakeReplayWindow } from "@zhixing-ai/mesh/replay-window";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh/transport";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 import type {
   MeshEndpointDirectoryPersistencePort,

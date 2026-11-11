@@ -1,9 +1,9 @@
-import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
-import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
-import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
-import type { CredentialStoreCoordinator } from "@zhixing/providers";
-import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing/providers/configuration";
-import { isLocalOnlyTopology } from "@zhixing/mesh/bootstrap";
+import type { DeviceRole, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { observeLogPhase, type LogRecordPort } from "@zhixing-ai/core/logging";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing-ai/core/authority";
+import type { CredentialStoreCoordinator } from "@zhixing-ai/providers";
+import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing-ai/providers/configuration";
+import { isLocalOnlyTopology } from "@zhixing-ai/mesh/bootstrap";
 import type { ServeOptions } from "./command.js";
 import type { StartupCheckResult } from "../startup.js";
 import {
@@ -41,7 +41,7 @@ import {
 } from "./role-topology.js";
 import type { HostProcessMode } from "./self-exec.js";
 import { DeviceRestrictedError, deviceRestrictionHostStartTime, publishDeviceRestriction, watchRestrictedHostStop, type DeviceRestriction } from "./device-restriction.js";
-import { resolveProcessStartTime } from "@zhixing/server/client";
+import { resolveProcessStartTime } from "@zhixing-ai/server/client";
 import {
   projectRuntimeConfiguration,
   type RuntimeConfigurationProjections,
@@ -83,7 +83,7 @@ export interface PersistentApplicationHostInput<Options> {
   readonly onRecoveryRootRequired: () => void;
   readonly deviceCapacity?: DeviceCapacityRuntime;
   readonly logRecords?: LogRecordPort;
-  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
+  readonly bindLogs?: import("@zhixing-ai/core/logging").BindLogSource;
 }
 
 export interface PersistentApplicationHostDependencies<Options> {
@@ -333,7 +333,7 @@ export class PersistentApplicationHost<Options> {
     const bootstrap = Object.freeze({
       zhixingHome: this.#input.zhixingHome,
       mesh,
-      bindLogs: this.#input.bindLogs ? ((source, access, refs = [], admission) => this.#input.bindLogs!(source, access, [{ kind: "device", id: mesh.deviceKey.deviceId }, ...refs], admission)) as import("@zhixing/core/logging").BindLogSource : undefined,
+      bindLogs: this.#input.bindLogs ? ((source, access, refs = [], admission) => this.#input.bindLogs!(source, access, [{ kind: "device", id: mesh.deviceKey.deviceId }, ...refs], admission)) as import("@zhixing-ai/core/logging").BindLogSource : undefined,
       deviceCapacity,
       secretStore: this.#input.secretStore,
       modelConfiguration: this.#configuration.model,
@@ -510,7 +510,7 @@ export function createPersistentApplicationHost(
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,
     importAnchorRole: () => import("./command.js"),
     importExecutorRole: () => import("./executor-role-runtime.js"),
-    importExecutorModule: () => import("@zhixing/executor"),
+    importExecutorModule: () => import("@zhixing-ai/executor"),
   });
 }
 

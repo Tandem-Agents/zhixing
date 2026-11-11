@@ -1,5 +1,5 @@
-import { extractUserTurnInputText } from "@zhixing/core";
-import type { SessionSendEngage } from "@zhixing/rpc";
+import { extractUserTurnInputText } from "@zhixing-ai/core";
+import type { SessionSendEngage } from "@zhixing-ai/rpc";
 import {
   prepareUserTurnInput,
   type PreparedUserTurnInput,

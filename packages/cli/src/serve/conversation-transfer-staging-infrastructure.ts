@@ -3,11 +3,11 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileResumableArtifactReceiver,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ConversationTransferStaging,
   ConversationTransferStagingArea,
-} from "@zhixing/owner-kernel/conversation-transfer";
+} from "@zhixing-ai/owner-kernel/conversation-transfer";
 
 const MAX_CONVERSATION_TRANSFER_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const CONVERSATION_TRANSFER_CHUNK_BYTES = 256 * 1024;

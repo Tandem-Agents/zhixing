@@ -3,8 +3,8 @@ import {
   ArtifactLifecycleIndex,
   type FileArtifactStore,
   type FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   createSurfaceAssetStagingInfrastructure,
   type SurfaceAssetStagingInfrastructure,

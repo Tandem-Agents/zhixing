@@ -1,5 +1,5 @@
-import { observeLogPhase } from "@zhixing/core/logging";
-import { getZhixingHome } from "@zhixing/core/paths";
+import { observeLogPhase } from "@zhixing-ai/core/logging";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
 import { beginEntryLogging } from "./logging/bootstrap.js";
 import { cliLoggingMode, managedHomeArgument, normalizeCliArgs } from "./logging/entry-mode.js";
 import { beginWriterDeclaration } from "./logging/writer-admission.js";

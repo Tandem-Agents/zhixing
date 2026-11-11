@@ -1,12 +1,12 @@
 import { artifactJsonIndex, AuthorityPreparationRequired, AuthorityStorageError, assertArtifactRef, readDurableProjectionKeys,
   type ArtifactStore, type AuthorityCommitLog, type ArtifactProjectionCache, type DurableLogCheckpoint,
-  type DurableProjectionReadContext } from '@zhixing/core/authority';
-import type { ArtifactRef, ConversationTransferManifest, JsonValue, LogicalRecord } from '@zhixing/core/contracts';
+  type DurableProjectionReadContext } from '@zhixing-ai/core/authority';
+import type { ArtifactRef, ConversationTransferManifest, JsonValue, LogicalRecord } from '@zhixing-ai/core/contracts';
 import { canonicalize, protocolDigest, createProtocolDigestAccumulator, sourceFreezeProofDigest,
   validateConversationTransferCommit, validateConversationTransferManifest, validateSourceFreezeProof,
-  assertConversationFreezeProofBinding, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+  assertConversationFreezeProofBinding, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, waitForMaintenanceRetry,
-  StorageMaintenanceCancelledError } from '@zhixing/core/resources';
+  StorageMaintenanceCancelledError } from '@zhixing-ai/core/resources';
 import type { ConversationTransferAuthorityRecord } from './conversation-transfer.js';
 
 export type ConversationBaseManifest = Omit<ConversationTransferManifest, 'contentAssets'>;
@@ -349,7 +349,7 @@ export class ConversationBaseSource {
     await this.cache.update(async view => {
       const current = await view.get('source/header') as unknown as SourceHeader;
       if (current.phase !== 'records' || current.recordNext !== header.recordNext) return { mutations: [], value: undefined };
-      const mutations: import('@zhixing/core/authority').DurableProjectionMutation[] = [];
+      const mutations: import('@zhixing-ai/core/authority').DurableProjectionMutation[] = [];
       let previous = current.previous;
       for (const { location, record } of rows) {
         if (record.lsn > current.manifest.lastLsn || previous && (record.lsn < previous.lsn || record.lsn === previous.lsn && record.at !== previous.at)) throw new TypeError('Conversation source order is invalid');

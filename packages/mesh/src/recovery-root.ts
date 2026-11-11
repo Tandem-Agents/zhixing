@@ -9,7 +9,7 @@ import {
   verify,
   type KeyObject,
 } from "node:crypto";
-import type { Signature } from "@zhixing/core/contracts";
+import type { Signature } from "@zhixing-ai/core/contracts";
 import { protocolBytes } from "./canonical.js";
 
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");

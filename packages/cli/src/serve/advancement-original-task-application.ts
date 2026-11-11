@@ -1,12 +1,12 @@
 import {
   AdvancementOriginalTaskAdmissionError,
   type AdvancementConfirmedOriginalTaskAdmissionPort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   ConversationApplicationError,
   type ConversationDirectoryApplication,
-} from "@zhixing/core/conversation/application";
-import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
+} from "@zhixing-ai/core/conversation/application";
+import { DurableConversationAdmissionRejectedError } from "@zhixing-ai/owner-kernel/run-turn";
 
 /**
  * Original-task adapter for confirmed or direct execution. The committed Advancement intent supplies the

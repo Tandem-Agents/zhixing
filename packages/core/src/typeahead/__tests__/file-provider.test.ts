@@ -16,7 +16,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createDescribeTempDir } from "@zhixing/test-utils";
+import { createDescribeTempDir } from "@zhixing-ai/test-utils";
 import { FileProvider } from "../providers/file-provider.js";
 import type { RuntimeContext, TriggerContext, TriggerMatch } from "../types.js";
 

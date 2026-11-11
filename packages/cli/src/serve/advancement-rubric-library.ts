@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft, type RubricIndexEntry } from "@zhixing/core/rubrics";
-import { projectRubricContractDraft, type RubricCatalogPort } from "@zhixing/core/advancement";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft, type RubricIndexEntry } from "@zhixing-ai/core/rubrics";
+import { projectRubricContractDraft, type RubricCatalogPort } from "@zhixing-ai/core/advancement";
 import type {
   AssignmentGlobalQueryPort,
   Digest,
   GlobalControlCallContext,
   GlobalReadCallContext,
   GlobalStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   AdvancementRubricArtifactPort,
   RubricPublicationOutcome,
   RubricPublicationPort,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 
 export interface AdvancementRubricLibraryOptions {
   readonly globalState: () => GlobalStatePort | undefined;

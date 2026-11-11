@@ -1,14 +1,14 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { PathGuard } from "@zhixing/core/security";
-import { type Message } from "@zhixing/core/types";
+import { PathGuard } from "@zhixing-ai/core/security";
+import { type Message } from "@zhixing-ai/core/types";
 import type {
   EvidenceCapabilitySet,
   EvidenceRequirementSpec,
   ObjectiveSignalKind,
   ReviewEvidence,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import type {
   AdvancementEvidenceCollectionInput,
   AdvancementEvidenceProvider,

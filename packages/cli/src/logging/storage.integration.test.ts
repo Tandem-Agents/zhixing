@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLogWriterProbe } from "./writers.js";
 import { declaredPeer } from "./__tests__/declared-peer.js";
 import { readdir, readFile, stat, rm, open, writeFile, link, rename } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {

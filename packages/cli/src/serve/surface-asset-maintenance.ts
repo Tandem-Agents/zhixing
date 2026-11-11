@@ -1,8 +1,8 @@
 import type {
   SurfaceAssetCollectionResult,
   SurfaceAssetCoordinator,
-} from "@zhixing/core/authority";
-import { runInMaintenanceContext, runWithMaintenanceUrgency } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import { runInMaintenanceContext, runWithMaintenanceUrgency } from "@zhixing-ai/core/resources";
 
 const SURFACE_ASSET_GC_INTERVAL_MS = 60 * 60 * 1_000;
 // 派生索引的空闲维护：启动后先留出启动窗口，此后按较短周期追平并排空过期、退休、接管与临时任务。

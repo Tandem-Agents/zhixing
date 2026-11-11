@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { canonicalize } from "../../protocol/canonical.js";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";

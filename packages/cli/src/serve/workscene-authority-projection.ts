@@ -7,12 +7,12 @@ import type {
   WorksceneDto,
   WorkspaceProbeRequest,
   WorkspaceProbeResult,
-} from "@zhixing/core/contracts";
-import { environmentControlSubject } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { environmentControlSubject } from "@zhixing-ai/core/protocol";
 import type {
   WorksceneRuntimeProjectionReadPort,
   WorksceneWorkspaceReference,
-} from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene/application";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import type { WorksceneRemoteWorkspaceProbePort } from "./workscene-directory.js";

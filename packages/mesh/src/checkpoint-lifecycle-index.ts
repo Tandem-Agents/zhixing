@@ -1,9 +1,9 @@
-import type { CheckpointStreamRecord, JsonValue, RecoveryCheckpointGeneration } from "@zhixing/core/contracts";
+import type { CheckpointStreamRecord, JsonValue, RecoveryCheckpointGeneration } from "@zhixing-ai/core/contracts";
 import {
   DurableProjectionRecordBindingError, createDurableProjectionOverlay,
   type AuthorityCommitLog, type DurableProjectionReadContext, type DurableProjectionMutation,
-} from "@zhixing/core/authority";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/authority";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 
 /**
  * checkpoint 生命周期的按键投影：替代每次从 LSN 0 按流重放 checkpoint 记录。

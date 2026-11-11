@@ -27,10 +27,10 @@
  *   - 三态结果都保留结构化 <usage> trailer，让主 LLM 和用量视图读取同一协议
  */
 
-import { restrictToolExecution, type BoundaryCrossing, type SecurityPipeline } from "@zhixing/core/security";
-import { conversationLogScope, restrictLogQueryTools } from "@zhixing/core/logging/application";
+import { restrictToolExecution, type BoundaryCrossing, type SecurityPipeline } from "@zhixing-ai/core/security";
+import { conversationLogScope, restrictLogQueryTools } from "@zhixing-ai/core/logging/application";
 import { randomUUID } from "node:crypto";
-import { type IConfirmationBroker } from "@zhixing/core/confirmation";
+import { type IConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import {
   type JsonSchema,
   type LLMProvider,
@@ -41,7 +41,7 @@ import {
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { runChildAgent, type ChildAgentResult } from "../subagent/factory.js";
 import { formatAbortReasonForLLM } from "../subagent/abort-format.js";
@@ -87,7 +87,7 @@ export interface TaskToolEnv {
   securityPipeline: SecurityPipeline;
   /** 与父 runtime 共用的有限安全批准端口。 */
   securityApproval: KernelSecurityApprovalPort;
-  readonly agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  readonly agentIdentity?: import("@zhixing-ai/core/identity").AgentIdentity;
   readonly delegationInstructions?: string;
   /** 工作区路径(null 表示无工作区) */
   workspace: string | null;

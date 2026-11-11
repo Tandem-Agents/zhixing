@@ -16,7 +16,7 @@
 import type {
   ConfirmationDecision,
   ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 
 // ─── 词集定义 ───
 //
@@ -95,7 +95,7 @@ const TRAILING_PUNCT_RE = /[。！？、,，：;；!?.:~～\s]+$/u;
  *
  * 结构化 deny 和自由文本 deny 共用 `kind: "deny"`——语义上都是"用户拒绝"；
  * 下游（埋点 / Bridge 推送 / secure-executor）通过 `reason` 是否存在区分。
- * 判别辅助见 `@zhixing/core` 的 `isFreeTextDeny`。
+ * 判别辅助见 `@zhixing-ai/core` 的 `isFreeTextDeny`。
  *
  * 空白输入应由调用方提前过滤（见 InboundRouter.tryHandleAsConfirmationReply）。
  */

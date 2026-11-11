@@ -1,34 +1,34 @@
 import path from "node:path";
-import { MockLLMProvider } from "@zhixing/core/loop";
-import { advancementExecutionTurnId, advancementReviewAttemptId, advancementReviewLineageId, advancementReviewRootRequestId, type AdvancementReviewAttempt, type ConfirmedRubricSnapshot } from "@zhixing/core/advancement";
-import { type RunRecordInput } from "@zhixing/core/transcript";
+import { MockLLMProvider } from "@zhixing-ai/core/loop";
+import { advancementExecutionTurnId, advancementReviewAttemptId, advancementReviewLineageId, advancementReviewRootRequestId, type AdvancementReviewAttempt, type ConfirmedRubricSnapshot } from "@zhixing-ai/core/advancement";
+import { type RunRecordInput } from "@zhixing-ai/core/transcript";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   AuthorityCallContext,
   ImmediateRootResourceLease,
   ResourceReservationPort,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createSignedCapabilityDescriptor,
   protocolDigest,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
   createAdvancementRuntime,
-} from "@zhixing/orchestrator/advancement";
-import { AnchorResourceGovernor } from "@zhixing/owner-kernel/resource-governor";
+} from "@zhixing-ai/orchestrator/advancement";
+import { AnchorResourceGovernor } from "@zhixing-ai/owner-kernel/resource-governor";
 import {
   AdvancementEvidenceCoordinator,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewAttemptApplication } from "@zhixing-ai/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 
 const NOW = "2026-08-04T00:00:00.000Z";

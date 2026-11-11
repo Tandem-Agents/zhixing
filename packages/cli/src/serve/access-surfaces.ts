@@ -5,9 +5,9 @@
  * handles, not references to services or a general-purpose setup registry.
  */
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
-import { observeLogPhase } from "@zhixing/core/logging";
+import { observeLogPhase } from "@zhixing-ai/core/logging";
 import { recordRuntimeFailure } from "../logging/runtime.js";
-import { WorksceneContinuationApplication } from "@zhixing/core/workscene/application";
+import { WorksceneContinuationApplication } from "@zhixing-ai/core/workscene/application";
 import { createWorksceneContinuationPort } from "./workscene-continuation-adapter.js";
 import {
   createExecutorLocalWorkspaceHost,
@@ -109,13 +109,13 @@ import type { WorksceneSceneStorageRemovalPort } from "./workscene-storage-remov
 import {
   AdvancementAcceptedTurnApplicationService,
   AdvancementReviewResultProjectionApplicationService,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import type {
   AuthorityCallContext,
   DeviceRole,
   EvidenceHandlerPort,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   type ConversationClearProjectionPort,
   type ConversationCommittedViewStorage,
@@ -125,31 +125,31 @@ import {
   projectConversationClear,
   projectConversationDelete,
   type TaskListService,
-} from "@zhixing/core/conversation/application";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/conversation/application";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import {
   WorksceneApplicationService,
   type WorksceneConversationStorageProjectionCleanupPort,
-} from "@zhixing/core/workscene/application";
-import type { ConversationAssignmentLedger } from "@zhixing/executor";
-import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
-import { EvidenceJournal, ExecutorEvidenceHandler } from "@zhixing/orchestrator/advancement";
-import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
-import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/core/workscene/application";
+import type { ConversationAssignmentLedger } from "@zhixing-ai/executor";
+import type { MeshConnectionRegistry } from "@zhixing-ai/mesh/bootstrap";
+import { EvidenceJournal, ExecutorEvidenceHandler } from "@zhixing-ai/orchestrator/advancement";
+import type { AgentRuntimeCapacityBinding } from "@zhixing-ai/orchestrator/runtime";
+import type { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
 import {
   type AdvancementController,
   type AdvancementConversationDirectory,
   createAdvancementRecoveryMaintenance,
   renderRecentContextFromMessages,
-} from "@zhixing/owner-services/advancement";
-import { adjudicateAdvancementExecution } from "@zhixing/core/advancement/execution-context";
+} from "@zhixing-ai/owner-services/advancement";
+import { adjudicateAdvancementExecution } from "@zhixing-ai/core/advancement/execution-context";
 import {
   createAdvancementReviewProxySchedulePort,
-} from "@zhixing/owner-services/advancement/proxy-scheduler";
+} from "@zhixing-ai/owner-services/advancement/proxy-scheduler";
 import { advancementProposalEvent } from "./advancement-proposal-events.js";
-import type { ProviderCredentialProjection } from "@zhixing/providers";
+import type { ProviderCredentialProjection } from "@zhixing-ai/providers";
 import {
   createConfirmationBridge,
   createControlSessionEventEnvelope,
@@ -157,13 +157,13 @@ import {
   type SessionActivityBroadcast,
   type SessionBroadcast,
   type SessionChangedPayload,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import {
   createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
   type RunningServer,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import chalk from "chalk";
 import path from "node:path";
 
@@ -296,9 +296,9 @@ export interface PrepareMeshRuntimeInput {
   readonly jobRelayObligations: JobRelayObligationDirectory;
   readonly executor?: MeshRuntimeAssemblyOptions["executor"];
   readonly secretStore: SecretStorePort;
-  readonly onTrustApplied?: (record: import("@zhixing/mesh/trust-chain").CurrentTrustProjection) => void | Promise<void>;
+  readonly onTrustApplied?: (record: import("@zhixing-ai/mesh/trust-chain").CurrentTrustProjection) => void | Promise<void>;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
-  readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
+  readonly foregroundActivity?: import('@zhixing-ai/core/resources').ForegroundActivityPort;
 }
 
 export async function prepareMeshRuntime(
@@ -500,25 +500,25 @@ export async function createHostLosslessDataPlane(
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
   /** 运行准备与本机执行准备记为日志阶段的端口（只观测）。 */
-  readonly phaseRecords?: import('@zhixing/core/logging').LogRecordPort;
+  readonly phaseRecords?: import('@zhixing-ai/core/logging').LogRecordPort;
   /** 宿主启动期日志：按子步骤记录装配耗时（只观测）。 */
-  readonly startupRecords?: import("@zhixing/core/logging").LogRecordPort;
-  readonly deviceCapacity: import('@zhixing/core/resources').DeviceCapacityArbiterPort;
+  readonly startupRecords?: import("@zhixing-ai/core/logging").LogRecordPort;
+  readonly deviceCapacity: import('@zhixing-ai/core/resources').DeviceCapacityArbiterPort;
   /** 本机执行的运行计为宿主前台活动。 */
-  readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
+  readonly foregroundActivity?: import('@zhixing-ai/core/resources').ForegroundActivityPort;
   /** 宿主前台安静判定：执行端票据资格的定时合批确认先等它。 */
   readonly whenQuiet?: (signal: AbortSignal) => Promise<void>;
   readonly onFailure?: import("./conversation-protocol-runtime.js").ConversationProtocolRuntimeOptions["onFailure"];
-  readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
-  readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
+  readonly onRunStatus?: (notice: import("@zhixing-ai/core/contracts").ConversationStatusNotice) => void;
+  readonly mcp?: import("@zhixing-ai/core/mcp-management").McpConnectionPort;
   readonly conversationNamingStorage: NamerConversationRepo;
   readonly meshBootstrap: MeshRuntimeBootstrap;
   readonly meshConnections?: MeshConnectionRegistry;
   readonly meshExecutorTopologyTrust?: import("./mesh-runtime-assembly.js").MeshExecutorTopologyTrustState;
   readonly durableInteractions: DurableConversationInteractionObserver;
   /** 本宿主是规则权威时的沉淀接纳端口，构造协议运行时即交入。 */
-  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
-  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
+  readonly trustSediments?: import("@zhixing-ai/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly conversationRuntimeStorage: ConversationRuntimeStoragePort;
   readonly confirmationHub: ConfirmationHub;
@@ -1043,17 +1043,17 @@ export async function createConversationServices(
 /** Device-local owner: internal-only and present exactly when an executor is loaded. */
 export interface CreateLocalConversationOwnerInput {
   /** 运行准备与本机执行准备记为日志阶段的端口（只观测）。 */
-  readonly phaseRecords?: import('@zhixing/core/logging').LogRecordPort;
-  readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
+  readonly phaseRecords?: import('@zhixing-ai/core/logging').LogRecordPort;
+  readonly onRunStatus?: (notice: import("@zhixing-ai/core/contracts").ConversationStatusNotice) => void;
   /** 本机执行的运行计为宿主前台活动。 */
-  readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
+  readonly foregroundActivity?: import('@zhixing-ai/core/resources').ForegroundActivityPort;
   readonly executorRoleModule: ExecutorRoleModule;
   readonly evidenceHandler: EvidenceHandlerPort & { stopAccepting(): void };
   readonly assignmentRuntimeFactory: RuntimeFactory;
   readonly durableInteractions: DurableConversationInteractionObserver;
   /** 本宿主是规则权威时的沉淀接纳端口（本地对话同样由它接纳）。 */
-  readonly trustSediments?: import("@zhixing/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
-  readonly trustRuleHits?: import("@zhixing/owner-kernel/conversation-assignment").TrustRuleHitPort;
+  readonly trustSediments?: import("@zhixing-ai/owner-kernel/conversation-assignment").ConversationTrustSedimentPort;
+  readonly trustRuleHits?: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;
   readonly providerCredentials?: ProviderCredentialProjection;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
@@ -1178,7 +1178,7 @@ export interface CreateExecutorJobOwnerInput {
   readonly conversationExecutorLedger: ConversationAssignmentLedger;
   readonly executorDataPlane: ExecutorDataPlaneRuntime;
   /** job 执行与收束失败的首因进宿主日志；标准输出只记“已观察到”，正文不采集。 */
-  readonly records?: import("@zhixing/core/logging").LogRecordPort;
+  readonly records?: import("@zhixing-ai/core/logging").LogRecordPort;
 }
 
 export async function createExecutorJobOwner(
@@ -1283,19 +1283,19 @@ function channelOwnership(
 
 /** 社交通道 —— 只装稳定机制；inbound consumer 与物理连接等待 Delivery Outbox。 */
 export interface PrepareChannelInput {
-  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
-  readonly notifyOperation?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<unknown>;
-  readonly preparationClosed?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<boolean>;
-  readonly repairSource?: (instance: import("@zhixing/core/extensions/contracts").ExtensionInstance) => Promise<import("@zhixing/core/extensions/contracts").ExtensionOperation["source"] | undefined>;
+  readonly bindLogs?: import("@zhixing-ai/core/logging").BindLogSource;
+  readonly notifyOperation?: (operation: import("@zhixing-ai/core/extensions/contracts").ExtensionOperation) => Promise<unknown>;
+  readonly preparationClosed?: (operation: import("@zhixing-ai/core/extensions/contracts").ExtensionOperation) => Promise<boolean>;
+  readonly repairSource?: (instance: import("@zhixing-ai/core/extensions/contracts").ExtensionInstance) => Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionOperation["source"] | undefined>;
   readonly authorityRuntime: AuthorityRuntimeStack;
   readonly zhixingHome: string;
   readonly configPath: string;
-  readonly secretStore: import("@zhixing/core/contracts").SecretStorePort & import("@zhixing/providers").CredentialStoreCoordinator;
+  readonly secretStore: import("@zhixing-ai/core/contracts").SecretStorePort & import("@zhixing-ai/providers").CredentialStoreCoordinator;
   readonly isCurrentOwner: () => boolean;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<
     string,
-    import("@zhixing/core/channels").HttpHandler
+    import("@zhixing-ai/core/channels").HttpHandler
   >;
   readonly conversations: ConversationManager;
   readonly channelConfiguration: RuntimeChannelConfigurationProjection;
@@ -1444,9 +1444,9 @@ export async function prepareDelivery(
   router.refuseNewMessages();
   const inbound = Object.freeze({
     kind: "router" as const,
-    handleMessage: (message: import("@zhixing/core/channels").InboundMessage) =>
+    handleMessage: (message: import("@zhixing-ai/core/channels").InboundMessage) =>
       router.handleMessage(message),
-    handleControlMessage: (message: import("@zhixing/core/channels").InboundMessage) => router.handleControlMessage(message),
+    handleControlMessage: (message: import("@zhixing-ai/core/channels").InboundMessage) => router.handleControlMessage(message),
   });
   const consumers = Object.freeze({
     inbound,
@@ -1474,7 +1474,7 @@ export async function prepareDelivery(
  * activation gate 统一移交正常关闭链。
  */
 export interface InstallConfirmationBridgeInput {
-  readonly continuationSource?: import("@zhixing/rpc").ConfirmationContinuationSource;
+  readonly continuationSource?: import("@zhixing-ai/rpc").ConfirmationContinuationSource;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly conversations: ConversationManager;
   readonly confirmationHub: ConfirmationHub;

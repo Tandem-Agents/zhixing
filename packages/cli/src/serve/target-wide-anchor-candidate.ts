@@ -1,5 +1,5 @@
-import type { LogicalRecord } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import type { LogicalRecord } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 
 export const ANCHOR_CANDIDATE_STREAM = "transfer:anchor-candidate";
 

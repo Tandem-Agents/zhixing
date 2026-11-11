@@ -1,7 +1,7 @@
 /** Local Configuration owns the read policy; startup/terminal adapters receive
  * one application snapshot and do not compose Authority or exposure rules. */
-import { loadConfigurationSnapshot, editConfiguration, type CredentialStoreCoordinator } from "@zhixing/providers/configuration";
-import type { SecretStorePort } from "@zhixing/core/contracts";
+import { loadConfigurationSnapshot, editConfiguration, type CredentialStoreCoordinator } from "@zhixing-ai/providers/configuration";
+import type { SecretStorePort } from "@zhixing-ai/core/contracts";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 
@@ -15,8 +15,8 @@ export function createLocalConfigurationApplication(options: {
   readonly homeDir: string;
   readonly configPath: string;
   readonly store: SecretStorePort & CredentialStoreCoordinator;
-  readonly records?: import("@zhixing/core/logging").LogRecordPort;
-  readonly processIdentityResolver?: import("@zhixing/core/persistence").FileLockOptions["processIdentityResolver"];
+  readonly records?: import("@zhixing-ai/core/logging").LogRecordPort;
+  readonly processIdentityResolver?: import("@zhixing-ai/core/persistence").FileLockOptions["processIdentityResolver"];
 }): LocalConfigurationPort {
   return {
     edit: (base, edit, policy) => editConfiguration(base, edit, {

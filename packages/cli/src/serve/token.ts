@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import { readFile, writeFile, chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { getDefaultTokenPath } from "@zhixing/server";
+import { getDefaultTokenPath } from "@zhixing-ai/server";
 
 export async function loadOrCreateToken(tokenPath?: string): Promise<{
   token: string;

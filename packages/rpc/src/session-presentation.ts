@@ -1,9 +1,9 @@
 import { stripVTControlCharacters } from 'node:util';
-import { stripPresentationFromAgentYield, type AgentYield } from '@zhixing/core/loop';
-import type { FileDiffPresentationArtifact, NotStartedPresentationArtifact, SubAgentResultPresentationArtifact, SessionEventProjection } from '@zhixing/core/types';
-import type { TurnContext } from '@zhixing/core/types';
-import { TOOL_TARGET_INPUT_KEYS } from '@zhixing/core/tool-display-names';
-import { validateAgentYield, validateSessionEventProjection } from '@zhixing/core/protocol/stream';
+import { stripPresentationFromAgentYield, type AgentYield } from '@zhixing-ai/core/loop';
+import type { FileDiffPresentationArtifact, NotStartedPresentationArtifact, SubAgentResultPresentationArtifact, SessionEventProjection } from '@zhixing-ai/core/types';
+import type { TurnContext } from '@zhixing-ai/core/types';
+import { TOOL_TARGET_INPUT_KEYS } from '@zhixing-ai/core/tool-display-names';
+import { validateAgentYield, validateSessionEventProjection } from '@zhixing-ai/core/protocol/stream';
 
 export type SessionPresentationProfile = 'default' | 'bounded-v1';
 export const SESSION_PROCESS_METHOD = 'session.process';

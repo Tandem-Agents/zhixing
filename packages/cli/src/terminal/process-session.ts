@@ -1,11 +1,11 @@
-import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing/core/conversation/application';
-import { validateSessionEventProjection } from '@zhixing/core/protocol/stream';
-import type { SessionEventProjection } from '@zhixing/core/types';
-import { boundedProcessValue, processText } from '@zhixing/rpc/session-wire';
-import type { AgentYield } from '@zhixing/core/loop';
-import type { SessionProcessProjection } from '@zhixing/rpc/session-wire';
-import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
-import type { TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
+import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from '@zhixing-ai/core/conversation/application';
+import { validateSessionEventProjection } from '@zhixing-ai/core/protocol/stream';
+import type { SessionEventProjection } from '@zhixing-ai/core/types';
+import { boundedProcessValue, processText } from '@zhixing-ai/rpc/session-wire';
+import type { AgentYield } from '@zhixing-ai/core/loop';
+import type { SessionProcessProjection } from '@zhixing-ai/rpc/session-wire';
+import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
+import type { TerminalProcessStatus } from '@zhixing-ai/terminal-ui/protocol';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalProcessProjection, type ProcessProjectionPorts, type ProcessScope } from './process-projection.js';
 

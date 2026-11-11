@@ -2,8 +2,8 @@
 
 import chalk from "chalk";
 import { readFile, stat, unlink } from "node:fs/promises";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { getZhixingHome } from "@zhixing/core/paths";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
 import {
   createRpcClient,
   getDefaultReadyMarkerPath,
@@ -16,7 +16,7 @@ import {
   releaseLock,
   resolveProcessStartTime,
   type PidFileContents,
-} from "@zhixing/server/client";
+} from "@zhixing-ai/server/client";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { recordedHostMayBeAlive } from "./startup-server-owner.js";
 import { readPlatformProcessBirth, type PlatformProcessBirth } from "../platform/secret-platform.js";

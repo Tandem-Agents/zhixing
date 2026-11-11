@@ -2,26 +2,26 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ADMISSION_TOKEN_TTL_MS } from "@zhixing/core/skills/admission";
-import { createEventBus } from "@zhixing/core/events";
-import { skillNameToId } from "@zhixing/core/skills/id";
-import { type AgentEventMap } from "@zhixing/core/types";
+import { ADMISSION_TOKEN_TTL_MS } from "@zhixing-ai/core/skills/admission";
+import { createEventBus } from "@zhixing-ai/core/events";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
+import { type AgentEventMap } from "@zhixing-ai/core/types";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogEntry,
-} from "@zhixing/core/skills/catalog";
-import { FileArtifactStore } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/skills/catalog";
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
 import {
   createDefaultDeviceCapacityPolicy,
   currentDeviceCapacityStep,
   DefaultDeviceCapacityArbiter,
   runWithDeviceCapacity,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { artifactReadCapacity } from "../serve/artifact-read-capacity.js";
 import {
   assignmentMutationRequestId,
   protocolDigest,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationOverlayRecord,
@@ -29,12 +29,12 @@ import type {
   AssignmentMutationRequest,
   GlobalQuery,
   GlobalReadResult,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   createAssignmentSkillPorts,
 } from "./assignment-skill-adapter.js";
 import { createSkillCatalogWindowPromptProjection } from "./skill-catalog-window-projection.js";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 const ISSUED_AT = "2026-08-04T00:00:00.000Z";
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MeshServiceClient } from "@zhixing/mesh";
-import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+import type { MeshServiceClient } from "@zhixing-ai/mesh";
+import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import {
   createMeshConversationCommunication,
   createMeshRunInput,

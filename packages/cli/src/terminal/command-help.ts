@@ -1,5 +1,5 @@
-import type { CommandDef } from '@zhixing/core/typeahead';
-import type { TerminalSummary } from '@zhixing/terminal-ui/protocol';
+import type { CommandDef } from '@zhixing-ai/core/typeahead';
+import type { TerminalSummary } from '@zhixing-ai/terminal-ui/protocol';
 import { paginateSummary, summaryText } from '../summary-projection.js';
 
 /** 命令注册表 category 的中文标题；顺序沿用 CommandCategory 的声明顺序。不在表里的类别进“其他” */

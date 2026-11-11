@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { serialize } from "node:v8";
 import type { LogDraft } from "../../logging/contracts.js";
 

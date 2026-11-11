@@ -18,8 +18,8 @@
  *     failed/aborted 才考虑 partial,且优先用最后一条 assistant 文本
  */
 
-import type { AgentResult } from "@zhixing/core/loop";
-import type { Message, TextBlock } from "@zhixing/core/types";
+import type { AgentResult } from "@zhixing-ai/core/loop";
+import type { Message, TextBlock } from "@zhixing-ai/core/types";
 import type { BudgetExceededKind } from "./budget.js";
 
 export type ChildResultKind = "completed" | "failed" | "aborted";

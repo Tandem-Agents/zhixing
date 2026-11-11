@@ -1,14 +1,14 @@
 import type {
   CredentialExposureRecord,
   HomeTrustEvent,
-} from "@zhixing/core/contracts";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
+} from "@zhixing-ai/core/contracts";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
 import {
   assertDeviceAdministrationRetirementAuthority,
-} from "@zhixing/core/device-administration/correctness";
+} from "@zhixing-ai/core/device-administration/correctness";
 import {
   decideCurrentDeviceRetirementCredentialExposures,
-} from "@zhixing/core/device-administration/application";
+} from "@zhixing-ai/core/device-administration/application";
 import {
   emptyDeviceLifecycleProjection,
   protocolDigest,
@@ -18,9 +18,9 @@ import {
   type DeviceLifecycleEvidenceRef,
   type DeviceLifecycleProjection,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import { credentialExposureIndex, projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
-import { EMPTY_TRUST_STREAM_FOLD, foldTrustStreamRecord, replayTrustChain, type TrustStreamFold } from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/core/protocol";
+import { credentialExposureIndex, projectCredentialExposures } from "@zhixing-ai/mesh/credential-exposure";
+import { EMPTY_TRUST_STREAM_FOLD, foldTrustStreamRecord, replayTrustChain, type TrustStreamFold } from "@zhixing-ai/mesh/trust-chain";
 
 interface CurrentDeviceRetirementProjection {
   readonly trustEvents: readonly HomeTrustEvent[];

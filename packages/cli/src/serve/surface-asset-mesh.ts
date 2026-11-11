@@ -6,11 +6,11 @@ import {
   validateArtifactReadResponse,
   validateArtifactReceiveProgress,
   type SurfaceAssetCoordinator,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   SurfaceAssetGrant,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertSurfaceAssetGrantIssueBinding,
   canonicalize,
@@ -19,12 +19,12 @@ import {
   type ProtocolSignatureVerifier,
   type SurfaceAssetGrantIssueBinding,
   type SurfaceAssetGrantOperationBinding,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import type {
   MeshServiceRegistry,
   SecureMeshConnection,
-} from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 
 export const SURFACE_ASSET_SERVICE = "surface.assets";
 

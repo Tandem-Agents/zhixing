@@ -1,7 +1,7 @@
-import type { AuthorityCommitLog, ProjectionTransactionContext } from "@zhixing/core/authority";
-import { localConversationId } from "@zhixing/core/conversation";
-import { CONVERSATION_IDENTITY_PROJECTION_ID } from "@zhixing/owner-kernel/control-admission";
-import { CONVERSATION_TRANSFER_PROJECTION_ID } from "@zhixing/owner-kernel/conversation-transfer";
+import type { AuthorityCommitLog, ProjectionTransactionContext } from "@zhixing-ai/core/authority";
+import { localConversationId } from "@zhixing-ai/core/conversation";
+import { CONVERSATION_IDENTITY_PROJECTION_ID } from "@zhixing-ai/owner-kernel/control-admission";
+import { CONVERSATION_TRANSFER_PROJECTION_ID } from "@zhixing-ai/owner-kernel/conversation-transfer";
 import { describe, expect, it } from "vitest";
 import { createConversationAuthorityVerifier } from "./conversation-authority-verifier.js";
 import type { HomeAuthoritySources } from "./home-authority-sources.js";

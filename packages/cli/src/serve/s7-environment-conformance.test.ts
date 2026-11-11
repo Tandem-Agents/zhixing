@@ -5,43 +5,43 @@ import type {
   ResourceLease,
   SecretRef,
   SecretStorePort,
-} from "@zhixing/core/contracts";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { type Message } from "@zhixing/core";
+} from "@zhixing-ai/core/contracts";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { type Message } from "@zhixing-ai/core";
 import type {
   KernelRunCompletion,
   KernelRunEnvelope,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import {
   createExecutorRole,
   createInProcessAssignmentRuntimeFactory,
   createInProcessRuntimeFactory,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import {
   LocalWorkspaceProbeAdapter,
   selectExecutorForEnvironment,
   type WorkspaceProbePort,
-} from "@zhixing/core/environment";
+} from "@zhixing-ai/core/environment";
 import {
   createExecutionManifest,
   protocolDigest,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
-} from "@zhixing/core/resources";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { runTurnWithCommit } from "@zhixing/owner-kernel/run-turn";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/core/resources";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { runTurnWithCommit } from "@zhixing-ai/owner-kernel/run-turn";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import type {
   MeshServiceDefinition,
   MeshServiceRegistry,
-} from "@zhixing/mesh/service-registry";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/mesh/service-registry";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import {
   acquireExecutorLocalWorkspaceOwner,
@@ -74,7 +74,7 @@ import { anchorConversationOwnerRuntime } from "./conversation-owner-runtime.js"
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import {
   MeshExecutionSnapshotClient,
   registerExecutionSnapshotMeshService,

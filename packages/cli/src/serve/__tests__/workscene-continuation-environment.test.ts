@@ -1,10 +1,10 @@
 import { it, expect, vi } from "vitest";
 import { resolve } from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import {
   WorksceneContinuationApplication,
   type WorksceneContinuationSource,
-} from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene/application";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
 import { createDeviceCapacityRuntime } from "../../__tests__/device-capacity-fixture.js";
@@ -88,7 +88,7 @@ it("retains the original remote workspace through product continuation, admissio
           executorId: remote.executorId,
           deviceId: remote.deviceId,
           synchronizePermission: (
-            snapshot: import("@zhixing/core/contracts").TrustRuleSnapshot,
+            snapshot: import("@zhixing-ai/core/contracts").TrustRuleSnapshot,
           ) => remote.installPermissionSnapshot(snapshot),
         },
       ],
@@ -134,7 +134,7 @@ it("retains the original remote workspace through product continuation, admissio
       },
     ];
     const admissions: Parameters<
-      import("@zhixing/owner-kernel/conversation-manager").ConversationManager["admitDurableTurn"]
+      import("@zhixing-ai/owner-kernel/conversation-manager").ConversationManager["admitDurableTurn"]
     >[0][] = [];
     const manager = {
       findDurableRunByIngress: async () => undefined,

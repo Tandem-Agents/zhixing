@@ -593,7 +593,7 @@ async function verifyMigrationPackageSurfaces(failures) {
         }
       }
       await verifyNoProductionBarePackageImport(
-        `@zhixing/${packageName}`,
+        `@zhixing-ai/${packageName}`,
         failures,
       );
     }
@@ -1222,7 +1222,7 @@ async function verifyRuntimeHostProductBoundary(failures) {
       } catch {}
     }
   }
-  for (const dependency of ["@zhixing/mcp", "@zhixing/tools-builtin"]) {
+  for (const dependency of ["@zhixing-ai/mcp", "@zhixing-ai/tools-builtin"]) {
     if (dependency in (manifest.dependencies ?? {})) {
       failures.push(`runtime-host:${dependency}:retired-product-dependency`);
     }

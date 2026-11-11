@@ -1,5 +1,5 @@
 /**
- * @zhixing/orchestrator/confirmation — 子 agent confirmation 装配 helper 公共 API
+ * @zhixing-ai/orchestrator/confirmation — 子 agent confirmation 装配 helper 公共 API
  *
  * 当前仅暴露 `resolveSubAgentResolver` —— 把 `SubAgentConfirmationPolicy` 映射到
  * `NonInteractiveResolver`,供 `runChildAgent` 内部装配 child broker 时调用。

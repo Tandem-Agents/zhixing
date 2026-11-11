@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ChatRequest, LLMRole, StreamEvent } from "@zhixing/core/types";
+import type { ChatRequest, LLMRole, StreamEvent } from "@zhixing-ai/core/types";
 import type {
   AuthorityCallContext,
   ImmediateRootResourceLease,
   ResourceLease,
-} from "@zhixing/core/contracts";
-import { userMessage } from "@zhixing/core/types";
+} from "@zhixing-ai/core/contracts";
+import { userMessage } from "@zhixing-ai/core/types";
 import { createControlCompletionPort } from "../control-completion-port.js";
 
 const NOW = "2026-08-02T00:00:00.000Z";

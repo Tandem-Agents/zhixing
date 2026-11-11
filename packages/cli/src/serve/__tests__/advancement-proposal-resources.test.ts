@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
-import { createAdvancementModelProviderBinding } from "@zhixing/orchestrator/advancement";
-import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalId, advancementProposalSessionId } from "@zhixing/core/advancement";
+import { createControlCompletionPort } from "@zhixing-ai/orchestrator/runtime";
+import { createAdvancementModelProviderBinding } from "@zhixing-ai/orchestrator/advancement";
+import { ADVANCEMENT_PROPOSAL_TOOL, advancementProposalId, advancementProposalSessionId } from "@zhixing-ai/core/advancement";
 import {
   AdvancementAcceptedTurnApplicationService,
   AdvancementConversationLifecycleApplicationService,
-} from "@zhixing/core/advancement/application";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import type { ChatRequest, LLMRole } from "@zhixing/core/types";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/advancement/application";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { ChatRequest, LLMRole } from "@zhixing-ai/core/types";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import { createServeAdvancementApplications } from "../advancement-controller.js";
 import { advancementProposalEvent } from "../advancement-proposal-events.js";

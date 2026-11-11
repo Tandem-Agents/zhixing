@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { open } from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";

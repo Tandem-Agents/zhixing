@@ -1,4 +1,4 @@
-import type { DeviceRole } from "@zhixing/core/contracts";
+import type { DeviceRole } from "@zhixing-ai/core/contracts";
 import {
   LocalWorkspaceManagementHost,
   createLocalWorkspaceManagementHost,

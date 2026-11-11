@@ -13,7 +13,7 @@ import type {
   HomeTrustRecord,
   MeshEndpointDescriptor,
   Signature,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { validateMeshEndpointDescriptor } from "./bootstrap.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import { validateDeviceTrustRoot, verifyDeviceSignature } from "./device-identity.js";

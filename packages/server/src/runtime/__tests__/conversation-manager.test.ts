@@ -2,26 +2,26 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ConfirmationBroker,
   type IConfirmationBroker,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import type {
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import type {
   Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   SnapshotAnchorInvariantError,
   TranscriptOutcomeUnknownError,
   type TranscriptRunRecord,
-} from "@zhixing/core/transcript";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/transcript";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import {
   ConversationManager,
   WorksceneBusyError,
-} from "@zhixing/owner-kernel/conversation-manager";
-import { type DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
-import { type SessionRuntime, type RuntimeFactory } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type DurableConversationTurnExecutor } from "@zhixing-ai/owner-kernel/run-turn";
+import { type SessionRuntime, type RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
 
 // ─── Mock Runtime ───
 

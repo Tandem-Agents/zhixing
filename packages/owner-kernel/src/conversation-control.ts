@@ -1,4 +1,4 @@
-import type { ConversationResolutionFence } from "@zhixing/core/conversation/application";
+import type { ConversationResolutionFence } from "@zhixing-ai/core/conversation/application";
 
 const CONVERSATION_RESOLUTION_FENCE_PREFIX = "conversation-resolution-fence:v1:";
 

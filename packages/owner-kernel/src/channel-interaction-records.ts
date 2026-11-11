@@ -6,7 +6,7 @@ import type {
   ExecutionRef,
   InteractionDisplay,
   JobChannelChallengeToken,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertChannelChallengeBinding,
   assertChannelInteractionGrantBinding,
@@ -18,7 +18,7 @@ import {
   validateInteractionDisplay,
   type ProtocolSignatureVerifier,
   type StreamVerifierCheckpoint,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 export interface ConversationChannelChallengePreparedRecord {
   readonly t: "channel-challenge-prepared";

@@ -1,13 +1,13 @@
-import type { ChannelStatus } from "@zhixing/core/channels";
-import type { LLMProvider, Message } from "@zhixing/core";
-import type { SecretRef } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import type { ChannelStatus } from "@zhixing-ai/core/channels";
+import type { LLMProvider, Message } from "@zhixing-ai/core";
+import type { SecretRef } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 import type { McpRuntimeServerStatus } from "../runtime/mcp-runtime-ports.js";
 import {
   createProvider,
   resolveProvider,
   type ProviderCredentialProjection,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
 import type { RuntimeCredentialRotationConfigurationProjection } from "../runtime/runtime-configuration-projections.js";

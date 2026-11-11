@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import {
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
@@ -10,7 +10,7 @@ import {
   runWithMaintenanceForegroundYield,
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { projectionReadCapacity } from "../artifact-read-capacity.js";
 import { retryControlAdmission } from "../conversation-admission-retry.js";
 

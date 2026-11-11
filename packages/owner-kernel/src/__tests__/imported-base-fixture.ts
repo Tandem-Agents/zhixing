@@ -1,9 +1,9 @@
 import {
   type ArtifactStore,
   type AuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { ArtifactRef, TransferRecord } from "@zhixing/core/contracts";
-import { type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/authority";
+import type { ArtifactRef, TransferRecord } from "@zhixing-ai/core/contracts";
+import { type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing-ai/core/protocol";
 import { DeviceKey, enrollDeviceIdentity } from "../../../mesh/src/device-identity.js";
 import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent, createTrustGenesisEvent, initializeTrustChain } from "../../../mesh/src/trust-chain.js";
 import { bindConversationAnchorTenure } from "../../../cli/src/serve/conversation-anchor-tenure.js";

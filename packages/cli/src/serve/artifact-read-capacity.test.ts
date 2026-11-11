@@ -2,8 +2,8 @@ import { rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FileArtifactStore } from "@zhixing/core/authority";
-import { AssignmentStreamSpool } from '@zhixing/executor';
+import { FileArtifactStore } from "@zhixing-ai/core/authority";
+import { AssignmentStreamSpool } from '@zhixing-ai/executor';
 import {
   claimDeviceCapacity,
   createDefaultDeviceCapacityPolicy,
@@ -16,10 +16,10 @@ import {
   runWithMaintenanceUrgency,
   withDeviceCapacityStep,
   type DeviceCapacityBudget,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import { artifactReadCapacity, projectionReadCapacity } from "./artifact-read-capacity.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 const MIB = 1024 * 1024;
 const abort = new AbortController().signal;

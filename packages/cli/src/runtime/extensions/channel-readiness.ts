@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import { ExtensionApplication } from "@zhixing/core/extensions/application";
-import type { ExtensionManifest } from "@zhixing/core/extensions/contracts";
-import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
-import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
-import { canonicalize } from "@zhixing/core/protocol";
+import type { AuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { ExtensionApplication } from "@zhixing-ai/core/extensions/application";
+import type { ExtensionManifest } from "@zhixing-ai/core/extensions/contracts";
+import { ExtensionArtifacts } from "@zhixing-ai/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing-ai/core/extensions/candidate";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import type { ChannelConfiguration } from "./channel-configuration.js";
 import { packagedExtensions } from "./catalog.js";
 

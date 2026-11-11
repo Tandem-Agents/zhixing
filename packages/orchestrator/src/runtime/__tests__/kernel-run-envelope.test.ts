@@ -1,4 +1,4 @@
-import { userMessage } from "@zhixing/core/types";
+import { userMessage } from "@zhixing-ai/core/types";
 import { describe, expect, it, vi } from "vitest";
 import {
   captureKernelRunEnvelope,

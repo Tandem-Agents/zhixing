@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/tools-builtin",
+  "name": "@zhixing-ai/tools-builtin",
   "version": "0.1.0",
   "description": "知行内置工具集 — Read、Write、Edit、Glob、Grep、Bash",
   "type": "module",
@@ -20,8 +20,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*",
-    "@zhixing/network": "workspace:*",
+    "@zhixing-ai/core": "workspace:*",
+    "@zhixing-ai/network": "workspace:*",
     "diff": "9.0.0",
     "glob": "13.0.6",
     "turndown": "7.2.4"
@@ -29,7 +29,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/turndown": "^5.0.5",
-    "@zhixing/test-utils": "workspace:*",
+    "@zhixing-ai/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

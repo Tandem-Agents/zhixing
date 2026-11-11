@@ -1,9 +1,9 @@
-import type { CredentialExposureRecord, JsonValue } from "@zhixing/core/contracts";
+import type { CredentialExposureRecord, JsonValue } from "@zhixing-ai/core/contracts";
 import {
   DurableProjectionRecordBindingError, createDurableProjectionOverlay,
   type AuthorityCommitLog, type DurableProjectionReadContext, type DurableProjectionMutation,
-} from "@zhixing/core/authority";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/authority";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 import { projectCredentialExposures } from "./credential-exposure.js";
 
 export const CREDENTIAL_EXPOSURE_PROJECTION_ID = "credential-exposures-v1";

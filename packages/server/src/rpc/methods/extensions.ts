@@ -1,4 +1,4 @@
-import { extensionList, extensionSetEnabled, extensionRefresh, extensionApplyConfiguration, extensionLocalSetup } from "@zhixing/core/extensions/application";
+import { extensionList, extensionSetEnabled, extensionRefresh, extensionApplyConfiguration, extensionLocalSetup } from "@zhixing-ai/core/extensions/application";
 import { RpcErrors, type MethodEntry } from "../handlers.js";
 
 export function buildExtensionMethods(): MethodEntry[] {

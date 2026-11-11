@@ -2,7 +2,7 @@
 // 不随键总数按比例增长，也不重放权威日志。
 import path from "node:path";
 import { expect, it } from "vitest";
-import { captureFileIo, createTempDir } from "@zhixing/test-utils";
+import { captureFileIo, createTempDir } from "@zhixing-ai/test-utils";
 import { AuthorityCacheIntegrity } from "../startup-proofs.js";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";

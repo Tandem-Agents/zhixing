@@ -2,15 +2,15 @@
 import path from "node:path";
 import { ExecutorResourceGovernor } from "../resource-governor.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { AuthorityCacheIntegrity, AuthorityStorageError, FileArtifactStore, FileAuthorityCommitLog, type ArtifactStore } from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
-import type { AuthorityCallContext, AuthorityCapability, DispatchEnvelope, IngressContext, PermissionSnapshotLease, Signature, StreamFrame, TrustRuleSnapshot } from "@zhixing/core/contracts";
-import { buildConversationActivationPayload, canonicalize, confirmationDecisionDigest, createSignedConversationEnvelope, createSignedTrustRuleSnapshot, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolBytes, protocolDigest, createConversationSealedBundle, createSignedConversationInteractionMirrorBatch, interactionMirrorSeed, ownerControlRequestDigest, permissionSnapshotLeaseDigest, sealedBundleArtifact, signConversationActivation, type ProtocolSignatureVerifier, type ProtocolSigner, type ConversationInteractionMirrorBatch, type ConversationInteractionMirrorEntry, type ExecutorCapabilitySnapshot, type UnsignedConversationEnvelope } from "@zhixing/core/protocol";
-import { CONVERSATION_RUN_INTERNAL_RECORD_TYPES, ConversationRunJournal, InProcessConversationDispatcher, type ConversationTrustSedimentPort, type TrustRuleHitPort, type AssignmentSubmissionAuthorizer, type ConversationCommitAuthority, type ConversationCommitProjection, type ConversationCommitProjectionInput, type ConversationMutationPublisher, type ConversationRunRecordType } from "@zhixing/owner-kernel/conversation-assignment";
-import { ControlAdmissionJournal, channelSurfacePrincipal, createConversationControlEnvelope, createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { createOwnerDeliveryParticipant, type OwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
-import { createTempDir } from "@zhixing/test-utils";
-import { type ConversationTransferStaging, type ConversationTransferStagingArea } from "@zhixing/owner-kernel/conversation-transfer";
+import { AuthorityCacheIntegrity, AuthorityStorageError, FileArtifactStore, FileAuthorityCommitLog, type ArtifactStore } from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import type { AuthorityCallContext, AuthorityCapability, DispatchEnvelope, IngressContext, PermissionSnapshotLease, Signature, StreamFrame, TrustRuleSnapshot } from "@zhixing-ai/core/contracts";
+import { buildConversationActivationPayload, canonicalize, confirmationDecisionDigest, createSignedConversationEnvelope, createSignedTrustRuleSnapshot, dispatchEnvelopeArtifact, dispatchEnvelopeDigest, protocolBytes, protocolDigest, createConversationSealedBundle, createSignedConversationInteractionMirrorBatch, interactionMirrorSeed, ownerControlRequestDigest, permissionSnapshotLeaseDigest, sealedBundleArtifact, signConversationActivation, type ProtocolSignatureVerifier, type ProtocolSigner, type ConversationInteractionMirrorBatch, type ConversationInteractionMirrorEntry, type ExecutorCapabilitySnapshot, type UnsignedConversationEnvelope } from "@zhixing-ai/core/protocol";
+import { CONVERSATION_RUN_INTERNAL_RECORD_TYPES, ConversationRunJournal, InProcessConversationDispatcher, type ConversationTrustSedimentPort, type TrustRuleHitPort, type AssignmentSubmissionAuthorizer, type ConversationCommitAuthority, type ConversationCommitProjection, type ConversationCommitProjectionInput, type ConversationMutationPublisher, type ConversationRunRecordType } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { ControlAdmissionJournal, channelSurfacePrincipal, createConversationControlEnvelope, createInitialControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { createOwnerDeliveryParticipant, type OwnerDeliveryParticipant } from "@zhixing-ai/owner-kernel/delivery";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { type ConversationTransferStaging, type ConversationTransferStagingArea } from "@zhixing-ai/owner-kernel/conversation-transfer";
 import { expect, onTestFinished } from "vitest";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission, type AssignmentLedgerOptions, type OwnerControlAuthorizer } from "../assignment-ledger.js";
 

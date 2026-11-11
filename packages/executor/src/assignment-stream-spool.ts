@@ -11,7 +11,7 @@ import {
   type PhysicalStorageStepRunner,
   type ProjectionCursor,
   type ProjectionTransactionDecision,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   type AgentYield,
   type ArtifactRef,
@@ -23,7 +23,7 @@ import {
   type StreamConsumerAuth,
   type StreamFrame,
   type StreamSubscribe,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   StreamDigestChain,
   StreamFrameVerifier,
@@ -40,18 +40,18 @@ import {
   type StreamFrameMeta,
   type StreamFrameProducer,
   type StreamVerifierCheckpoint,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   SerialTaskQueue,
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 import {
   isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
   waitForMaintenanceRetry,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 
 export const DEFAULT_ASSIGNMENT_STREAM_SPOOL_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_ASSIGNMENT_STREAM_RECLAIM_DELAY_MS =

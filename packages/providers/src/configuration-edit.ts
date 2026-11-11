@@ -2,15 +2,15 @@ import { runtimeConfigurationObservation } from "./configuration-logging.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { acquireFileLock, ensureDurableDirectory, syncDirectory, type FileLockOptions } from "@zhixing/core/persistence";
-import { canonicalize } from "@zhixing/core/protocol/canonical";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { acquireFileLock, ensureDurableDirectory, syncDirectory, type FileLockOptions } from "@zhixing-ai/core/persistence";
+import { canonicalize } from "@zhixing-ai/core/protocol/canonical";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import { applyConfigPatch, assertAbsoluteWorkspaceRoot, assertNoConfigurationCommit, loadConfig, writeConfigUnlocked } from "./config-loader.js";
 import { applyCredentialEdits, assertNoConfigurationEdit, commitCredentialsUnlocked, CONFIGURATION_EDIT_REF,
   loadCredentialsUnlocked, loadCredentialSnapshotUnlocked, mutationCoordinator, type CredentialSnapshotOptions } from "./credentials-loader.js";
 import { writeJsonAtomic } from "./internal/io.js";
 import type { ZhixingConfig, ZhixingCredentials } from "./types.js";
-import type { LogRecordPort, LogSource } from "@zhixing/core/logging";
+import type { LogRecordPort, LogSource } from "@zhixing-ai/core/logging";
 
 export const CONFIGURATION_LOG_SOURCE: LogSource = { id: "configuration", version: 1, events: {
   saved: { message: "配置保存已完成", level: "info", tier: "critical", fields: { scope: "text", selectionVersion: "text", selectionDigest: "text", omitted: "text" } },

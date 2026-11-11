@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/server",
+  "name": "@zhixing-ai/server",
   "version": "0.1.0",
   "description": "知行常驻服务网关 — HTTP + WebSocket + JSON-RPC 2.0",
   "type": "module",
@@ -24,16 +24,16 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*",
-    "@zhixing/owner-kernel": "workspace:*",
-    "@zhixing/owner-services": "workspace:*",
-    "@zhixing/rpc": "workspace:*",
+    "@zhixing-ai/core": "workspace:*",
+    "@zhixing-ai/owner-kernel": "workspace:*",
+    "@zhixing-ai/owner-services": "workspace:*",
+    "@zhixing-ai/rpc": "workspace:*",
     "ws": "8.20.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.13",
-    "@zhixing/test-utils": "workspace:*",
+    "@zhixing-ai/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

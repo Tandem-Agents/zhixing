@@ -3,12 +3,12 @@ import { createLifecycleWarningDeduper } from './lifecycle-diagnostics-presentat
 /** Non-TTY conversation binding: one line reader, one Host connection, and the
  * existing application commands. It never owns a terminal or replays input. */
 import type { Readable } from 'node:stream';
-import type { LogRecordPort } from '@zhixing/core/logging';
-import { extractText } from '@zhixing/core/types';
-import { CommandDispatcher, DefaultCommandRegistry, type RuntimeContext } from '@zhixing/core/typeahead';
-import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
-import { SkillCatalogRpcClient } from '@zhixing/rpc/skill-catalog-client';
-import { loadConfig } from '@zhixing/providers/configuration';
+import type { LogRecordPort } from '@zhixing-ai/core/logging';
+import { extractText } from '@zhixing-ai/core/types';
+import { CommandDispatcher, DefaultCommandRegistry, type RuntimeContext } from '@zhixing-ai/core/typeahead';
+import type { SessionAdvancementStateSnapshot } from '@zhixing-ai/rpc';
+import { SkillCatalogRpcClient } from '@zhixing-ai/rpc/skill-catalog-client';
+import { loadConfig } from '@zhixing-ai/providers/configuration';
 import { BUILTIN_COMMANDS } from './commands/builtin-definitions.js';
 import { FEATURE_CHROME } from './commands/command-capabilities.js';
 import { observeStartupPhase, recordRuntimeFailure, recordStartupFailure } from './logging/runtime.js';

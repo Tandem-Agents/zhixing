@@ -1,15 +1,15 @@
 import type {
   HomeTrustEvent,
   RecoveryActivationPlan,
-} from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
-import type { RootActivationRecord } from "@zhixing/mesh/paired-checkpoint-target";
+} from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import type { RootActivationRecord } from "@zhixing-ai/mesh/paired-checkpoint-target";
 import {
   applyTrustEvent,
   homeTrustEventDigest,
   verifyHistoricalHomeTrustRecord,
   verifyHomeTrustRecord,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 export async function commitRecoveryRootActivation(

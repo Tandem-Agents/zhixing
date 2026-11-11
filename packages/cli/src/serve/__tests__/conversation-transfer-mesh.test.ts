@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Signature, TransferRecord } from "@zhixing/core/contracts";
+import type { Signature, TransferRecord } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedConversationTransferCommand,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   ConversationTransferMeshClient,
   ConversationTransferRejectedError,

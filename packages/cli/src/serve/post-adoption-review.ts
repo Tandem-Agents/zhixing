@@ -1,11 +1,11 @@
-import { ConfirmationBroker, type ConfirmationDecision, type ConfirmationLifecycleObserver, type ConfirmationRequest } from "@zhixing/core/confirmation";
-import { parseLocalConversationId } from "@zhixing/core/conversation";
+import { ConfirmationBroker, type ConfirmationDecision, type ConfirmationLifecycleObserver, type ConfirmationRequest } from "@zhixing-ai/core/confirmation";
+import { parseLocalConversationId } from "@zhixing-ai/core/conversation";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
-} from "@zhixing/core/contracts";
-import type { ConversationAdoptionReviewProjection } from "@zhixing/core/conversation/application";
-import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/contracts";
+import type { ConversationAdoptionReviewProjection } from "@zhixing-ai/core/conversation/application";
+import type { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 
 interface DeferredIntentReviewPort {
   list(

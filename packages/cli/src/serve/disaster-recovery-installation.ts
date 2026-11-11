@@ -3,16 +3,16 @@ import type {
   AuthorityCatalog,
   HomeTrustEvent,
   HomeTrustRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   DurableLogCheckpoint,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   anchorTransferCommitDigest,
   canonicalize,
   protocolDigest,
-} from "@zhixing/core/protocol";
-import type { AnchorTransferCommit } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/protocol";
+import type { AnchorTransferCommit } from "@zhixing-ai/core/contracts";
 import {
   DISASTER_POST_INSTALL_STREAM,
   readAnchorInstallationState,

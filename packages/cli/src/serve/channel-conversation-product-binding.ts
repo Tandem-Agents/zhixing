@@ -1,6 +1,6 @@
-import type { BindLogSource, LogDraft } from "@zhixing/core/logging";
+import type { BindLogSource, LogDraft } from "@zhixing-ai/core/logging";
 import { CHANNEL_LOG_SOURCE } from "../runtime/extensions/channel-logging.js";
-import { userTurnInputFromText, type TurnContext } from "@zhixing/core";
+import { userTurnInputFromText, type TurnContext } from "@zhixing-ai/core";
 import {
   CONVERSATION_ABORT_COMMAND,
   CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
@@ -8,16 +8,16 @@ import {
   ConversationApplicationError,
   type ConversationAgentTurnExecutionPort,
   type ConversationPreparedAgentTurnIdentity,
-} from "@zhixing/core/conversation/application";
-import { protocolDigest } from "@zhixing/core/protocol";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
-import { type ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
+} from "@zhixing-ai/core/conversation/application";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
+import { channelSurfacePrincipal } from "@zhixing-ai/owner-kernel/control-admission";
+import { type ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
 import type {
   InboundConversationApplicationPort,
   InboundConversationTurnOutcome,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import { createChannelCancellationResponseEffect } from "./conversation-run-control-binding.js";
 
 /**

@@ -4,16 +4,16 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type AuthorityCommitLog,
-} from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/authority";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
 import {
   byteDigest,
   canonicalize,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { advancementExecutionTurnId, type AdvancementControlEvent } from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/protocol";
+import { advancementExecutionTurnId, type AdvancementControlEvent } from "@zhixing-ai/core/advancement";
 import {
   ConversationRunJournal,
 } from "../conversation-assignment.js";
@@ -23,7 +23,7 @@ import {
   createS7TempDir,
   expectFailure,
   type DurableCaseKind,
-} from "@zhixing/core/test-support/s7-durable-harness";
+} from "@zhixing-ai/core/test-support/s7-durable-harness";
 
 const NOW = "2026-08-01T00:00:00.000Z";
 

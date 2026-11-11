@@ -6,14 +6,14 @@ import {
   runWithMaintenanceUrgency,
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
+} from "@zhixing-ai/core/resources";
 import type { MeshServiceClient } from "./request-channel.js";
 import type { MeshServiceRegistry } from "./service-registry.js";
 import type {
   HomeTrustEvent,
   HomeTrustRecord,
   RecoveryActivationPlan,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import { byteDigest, canonicalize } from "./canonical.js";
 import type { HistoricalHomeTrustRecord } from "./trust-chain.js";
 import {

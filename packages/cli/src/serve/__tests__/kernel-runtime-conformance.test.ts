@@ -1,17 +1,17 @@
-import { userMessage, type ToolSideEffectObserver } from "@zhixing/core";
-import { type AbortReason } from "@zhixing/core/interrupt";
-import { type AgentYield } from "@zhixing/core/loop";
-import { type IConfirmationBroker } from "@zhixing/core/confirmation";
-import { createExecutorRole, createInProcessAssignmentRuntimeFactory } from "@zhixing/executor";
+import { userMessage, type ToolSideEffectObserver } from "@zhixing-ai/core";
+import { type AbortReason } from "@zhixing-ai/core/interrupt";
+import { type AgentYield } from "@zhixing-ai/core/loop";
+import { type IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { createExecutorRole, createInProcessAssignmentRuntimeFactory } from "@zhixing-ai/executor";
 import type {
   AgentRuntime,
   KernelRunCompletion,
   KernelRunEnvelope,
   KernelRunEvent,
   KernelTerminal,
-} from "@zhixing/orchestrator/runtime";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
-import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
+} from "@zhixing-ai/orchestrator/runtime";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { createOwnerRuntimeAdapter } from "@zhixing-ai/runtime-host/session-adapter";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
 import { runEphemeralTurn } from "../ephemeral-executor.js";

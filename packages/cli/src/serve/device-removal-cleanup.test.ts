@@ -1,9 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceKey } from "@zhixing/mesh/device-identity";
-import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { persistDeviceKey } from "@zhixing-ai/mesh/device-key-store";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";

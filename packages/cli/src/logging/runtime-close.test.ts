@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { expect, it, vi } from "vitest";
-import { DEFAULT_LOG_POLICY } from "@zhixing/core/logging";
+import { DEFAULT_LOG_POLICY } from "@zhixing-ai/core/logging";
 import { beginRuntimeLogging } from "./runtime.js";
 import type { StoreWorkerInput } from "./store-worker-protocol.js";
 

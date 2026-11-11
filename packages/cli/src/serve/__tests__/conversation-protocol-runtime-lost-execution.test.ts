@@ -1,10 +1,10 @@
 // 宿主模式下本地执行帧的执行作用域：开始执行前打开、帧出口关闭；执行以待确认离开执行帧之后，
 // 同一进程不重启，执行端租约到期后的恢复一轮即退休它的资源根。权威时钟由注入控制，只证明时序合同。
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { ConversationAssignmentLedger } from "@zhixing/executor";
-import { createTempDir } from "@zhixing/test-utils";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { ConversationAssignmentLedger } from "@zhixing-ai/executor";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 import {

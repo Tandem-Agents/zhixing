@@ -5,9 +5,9 @@ import type {
   TrustRuleHitMirrorEntry,
   TrustSedimentFact,
   TrustSedimentMirrorEntry,
-} from "@zhixing/core/contracts";
-import { parseConversationId } from "@zhixing/core/conversation";
-import { canonicalize } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,
@@ -23,7 +23,7 @@ import {
   type PendingRuleHit,
   type PermissionContextId,
   type PermissionRule,
-} from "@zhixing/core/security";
+} from "@zhixing-ai/core/security";
 import type {
   ExecutionTrustScopeInput,
   TrustAdministrationExecutionApplication,
@@ -31,25 +31,25 @@ import type {
   TrustAdministrationRepository,
   TrustAdministrationRepositoryRule,
   TrustSedimentSubmission,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 import {
   jobRunTrustScopeInput,
   resolveExecutionTrustScope,
   TrustAdministrationExecutionApplicationService,
   trustSedimentIsConsistent,
-} from "@zhixing/core/trust-administration";
+} from "@zhixing-ai/core/trust-administration";
 import type {
   ConversationTrustSedimentPort,
   TrustRuleHitBatchInput,
   TrustRuleHitBatchState,
   TrustRuleHitPort,
-} from "@zhixing/owner-kernel/conversation-assignment";
-import type { JobTrustSedimentPort } from "@zhixing/owner-kernel/job-assignment";
+} from "@zhixing-ai/owner-kernel/conversation-assignment";
+import type { JobTrustSedimentPort } from "@zhixing-ai/owner-kernel/job-assignment";
 import type {
   KernelSecurityApprovalResult,
   KernelSecurityExecution,
   KernelSecurityExecutionFactory,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 export interface RuntimeSecurityExecutionBindOptions {
   /**

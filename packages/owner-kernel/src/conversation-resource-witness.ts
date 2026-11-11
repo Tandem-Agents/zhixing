@@ -1,7 +1,7 @@
 /** Finite evidence consumed by conversation fact validation. It neither grants
  * reservations nor replaces the resource governor's quota/clock decisions. */
-import type { AssignmentResourceLease, GovernorRecord, LogicalRecord, ReservableResourceLease, UsageReport } from '@zhixing/core/contracts';
-import { acceptedRemoteIntervalRemainingMs, canonicalize, protocolDigest, validateGovernorRecord, validateReservableResourceLease, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+import type { AssignmentResourceLease, GovernorRecord, LogicalRecord, ReservableResourceLease, UsageReport } from '@zhixing-ai/core/contracts';
+import { acceptedRemoteIntervalRemainingMs, canonicalize, protocolDigest, validateGovernorRecord, validateReservableResourceLease, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 
 export function assertAssignmentActivationEvidence(input: { readonly lease: AssignmentResourceLease;
   readonly records: readonly LogicalRecord<unknown>[]; readonly acceptedAt: string }, verifier: ProtocolSignatureVerifier): void {

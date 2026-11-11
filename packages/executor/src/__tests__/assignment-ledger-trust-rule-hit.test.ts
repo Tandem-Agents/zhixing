@@ -1,10 +1,10 @@
 // 规则命中随交互镜像链回到 owner 并在规则权威侧累计：真实执行端台账＋真实 owner 对话日志＋真实规则库。
-import { createTempDir } from "@zhixing/test-utils";
-import { DurablePermissionRuleStore, GLOBAL_PERMISSION_BUCKET } from "@zhixing/core/security";
-import type { TrustSedimentFact } from "@zhixing/core/contracts";
-import { interactionMirrorBatchDigest } from "@zhixing/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { DurablePermissionRuleStore, GLOBAL_PERMISSION_BUCKET } from "@zhixing-ai/core/security";
+import type { TrustSedimentFact } from "@zhixing-ai/core/contracts";
+import { interactionMirrorBatchDigest } from "@zhixing-ai/core/protocol";
 import { describe, expect, it } from "vitest";
-import type { TrustRuleHitBatchInput, TrustRuleHitPort } from "@zhixing/owner-kernel/conversation-assignment";
+import type { TrustRuleHitBatchInput, TrustRuleHitPort } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import { InProcessAssignmentSubmission } from "../assignment-ledger.js";
 import {
   ASSIGNMENT_ID,

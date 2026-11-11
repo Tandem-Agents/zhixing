@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   ConversationPerspectivesDurableExecutionInput,
   ConversationPerspectivesRuntimePort,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import type {
   ConversationManager,
   ManagedSession,
-} from "@zhixing/owner-kernel/conversation-manager";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import {
   createConversationPerspectivesCorrectnessPort,
   projectConversationPerspectivesRuntime,

@@ -1,17 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { AnchorWorksceneGlobalStateAdapter } from "@zhixing/core/workscene";
-import { parseConversationId } from "@zhixing/core/conversation";
+import { AnchorWorksceneGlobalStateAdapter } from "@zhixing-ai/core/workscene";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   WorkspaceProbeResult,
-} from "@zhixing/core/contracts";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/contracts";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createAnchorWorksceneConversationStorageProjectionCleanup } from "../workscene-application-adapter.js";

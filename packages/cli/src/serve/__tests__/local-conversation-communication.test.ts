@@ -3,10 +3,10 @@ import { createLocalOwnerAssemblyFixture } from "./local-owner-assembly-fixture.
 import { createLocalConversationCommunicationBinding } from "../conversation-communication-binding.js";
 import { ExecutorFirstPartyRpcRouter, LocalConversationRpcRouter } from "../local-conversation-rpc.js";
 import { CurrentAnchorFirstPartyRpcRouter } from "../first-party-conversation-mesh.js";
-import { buildBuiltinRegistry } from "@zhixing/server";
+import { buildBuiltinRegistry } from "@zhixing-ai/server";
 import { RpcConversationFacade } from "../../runtime/rpc-conversation-facade.js";
-import type { ConversationCommunicationApplication } from "@zhixing/core/conversation/application";
-import { localConversationId } from "@zhixing/core/conversation";
+import type { ConversationCommunicationApplication } from "@zhixing-ai/core/conversation/application";
+import { localConversationId } from "@zhixing-ai/core/conversation";
 import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js";
 import { createConversationCommunicationAssemblyHandle } from "../conversation-tools.js";
 import { ConversationController } from "../../runtime/conversation-controller.js";

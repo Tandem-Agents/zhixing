@@ -8,8 +8,8 @@
  * 在所有模式可达，此 provider 仅是 typeahead 下的增强。
  */
 
-import { type ArgChoice, type ArgChoiceProvider, type ArgQueryContext } from "@zhixing/core/typeahead";
-import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
+import { type ArgChoice, type ArgChoiceProvider, type ArgQueryContext } from "@zhixing-ai/core/typeahead";
+import type { TrustAdministrationRule } from "@zhixing-ai/core/trust-administration";
 import { formatRuleDescription } from "./trust-rule-format.js";
 
 /**

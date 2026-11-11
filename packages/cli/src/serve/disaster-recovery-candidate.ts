@@ -8,10 +8,10 @@ import type {
   HomeTrustEvent,
   LogicalRecord,
   RecoveryCheckpointVerification,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assertArtifactRef,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import {
   authorityCatalogDigest,
   canonicalize,
@@ -21,11 +21,11 @@ import {
   validateDisasterRecoveryCommit,
   validateDisasterRecoveryAbort,
   validateDisasterRecoveryCommand,
-} from "@zhixing/core/protocol";
-import { homeTrustRecordDigest, replayTrustChain, verifyHomeTrustRecord } from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/core/protocol";
+import { homeTrustRecordDigest, replayTrustChain, verifyHomeTrustRecord } from "@zhixing-ai/mesh/trust-chain";
 import {
   verifyRecoverySignature,
-} from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/mesh/recovery-root";
 import {
   ANCHOR_CANDIDATE_STREAM,
   assertTargetWideAnchorCandidateAvailable,
@@ -416,7 +416,7 @@ export class DisasterRecoveryCandidateJournal {
   #transact<Value>(
     decide: (
       projection: CandidateProjection,
-    ) => import("@zhixing/core/authority").ProjectionTransactionDecision<unknown, Value>,
+    ) => import("@zhixing-ai/core/authority").ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
     return this.log.transactProjection(
@@ -855,12 +855,12 @@ function validateDecisionInstallation(
   const commit = validateDisasterRecoveryCommit(value.commit, verifier);
   const transition = value.transition as HomeTrustEvent;
   const revoke = value.revoke as HomeTrustEvent;
-  const trustRecord = value.trustRecord as import("@zhixing/core/contracts").HomeTrustRecord;
+  const trustRecord = value.trustRecord as import("@zhixing-ai/core/contracts").HomeTrustRecord;
   const authorityRecords = value.authorityRecords as ArtifactRef;
   const catalog = value.catalog as ArtifactRef;
   assertArtifactRef(authorityRecords);
   assertArtifactRef(catalog);
-  const sourceHead = value.sourceHead as import("@zhixing/core/authority").DurableLogCheckpoint;
+  const sourceHead = value.sourceHead as import("@zhixing-ai/core/authority").DurableLogCheckpoint;
   if (
     value.v !== 1 || value.t !== "disaster-anchor-installed" ||
     value.transferId !== prepare.transferId ||

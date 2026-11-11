@@ -17,11 +17,11 @@ import type {
   SectionEntry,
   WorkingState,
 } from "../types.js";
-import type { McpManagementServerStatus } from "@zhixing/core/mcp-management";
+import type { McpManagementServerStatus } from "@zhixing-ai/core/mcp-management";
 import { isMcpServerEnabled, listMcpServerIds } from "../state.js";
-import { presetToCandidate } from "@zhixing/core/mcp-management";
+import { presetToCandidate } from "@zhixing-ai/core/mcp-management";
 import { MCP_PRESETS } from "../../registries/index.js";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 
 export const mcpSection: Section = {
   id: "mcp",

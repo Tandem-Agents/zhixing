@@ -1,8 +1,8 @@
-# @zhixing/cli
+# zhixing
 
 > 知行命令行入口 —— 交互对话、运行控制、诊断入口
 
-这是知行面向普通用户的安装包；其余 `@zhixing/*` 包是由 CLI 组合使用的内部实现与协议组件，不代表独立 SDK 稳定性承诺。项目总览与英文入口见[知行主文档](https://github.com/Tandem-Agents/zhixing#readme)。
+这是知行面向普通用户的安装包；其余 `@zhixing-ai/*` 包是由 CLI 组合使用的内部实现与协议组件，不代表独立 SDK 稳定性承诺。项目总览与英文入口见[知行主文档](https://github.com/Tandem-Agents/zhixing#readme)。
 
 ## 概览
 
@@ -90,7 +90,7 @@ RPC 提供 `logs.search`（`filter?、cursor?`）、`logs.read`（`address、vie
 安装使用 Node `>=24.0.0` 与 npm；各平台目标及验收状态见[运行时边界](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/node-runtime-boundaries.md)。版本发布后使用：
 
 ```text
-npm install -g @zhixing/cli
+npm install -g zhixing
 zz
 ```
 
@@ -99,7 +99,7 @@ zz
 ```powershell
 $ZhixingVersion = zz --version
 zz stop --maintenance
-npm install -g "@zhixing/cli@$ZhixingVersion"
+npm install -g "zhixing@$ZhixingVersion"
 zz
 ```
 
@@ -107,7 +107,7 @@ zz
 
 ```powershell
 zz stop --maintenance
-npm install -g @zhixing/cli@latest
+npm install -g zhixing@latest
 zz
 ```
 
@@ -115,7 +115,7 @@ zz
 
 ```text
 zz app remove
-npm uninstall -g @zhixing/cli
+npm uninstall -g zhixing
 ```
 
 全局目录不可写时只使用 Node 官方的用户级安装或修复方式；不要使用 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置。知行不会后台替换程序，也不会修改用户 Node、npm 或 PATH。

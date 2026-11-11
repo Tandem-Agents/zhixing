@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEventBus } from "@zhixing/core/events";
-import type { AgentEventMap } from "@zhixing/core";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import { SkillCatalogLoadApplicationService } from "@zhixing/core/skills/catalog";
+import { createEventBus } from "@zhixing-ai/core/events";
+import type { AgentEventMap } from "@zhixing-ai/core";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
+import { SkillCatalogLoadApplicationService } from "@zhixing-ai/core/skills/catalog";
 import { builtinIndexEntries } from "../../../../core/src/skills/builtin.js";
-import { skillNameToId } from "@zhixing/core/skills/id";
-import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
+import { skillNameToId } from "@zhixing-ai/core/skills/id";
+import { BUILTIN_TOOL_FACTORIES } from "@zhixing-ai/tools-builtin";
 import { createConversationTool } from "../conversation-tools.js";
 import { discoverConversations } from "../conversation-communication-binding.js";
 

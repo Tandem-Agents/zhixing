@@ -13,12 +13,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import type {
   ChatRequest,
   LLMProvider,
   StreamEvent,
-} from "@zhixing/core";
+} from "@zhixing-ai/core";
 import { ProviderConfigError, resolveLLMRoles } from "../resolve.js";
 import { bindRole, createProviderRoles } from "../create-provider.js";
 import type {

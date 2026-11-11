@@ -11,8 +11,8 @@
  * 本监听器自身不持有对话指针。
  */
 
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
-import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
+import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc/session-wire";
+import type { SessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
 import { renderAdvancementControlEventLines } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";

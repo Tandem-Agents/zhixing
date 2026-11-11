@@ -10,10 +10,10 @@ import { describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import type {
   WorkScene,
-} from "@zhixing/core/workscene/types";
+} from "@zhixing-ai/core/workscene/types";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
-import { createTempDir } from "@zhixing/test-utils";
-import { AdvancementController } from "@zhixing/owner-services/advancement";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { AdvancementController } from "@zhixing-ai/owner-services/advancement";
 import {
   buildWorksceneListMethod,
   buildWorksceneTasksMethod,
@@ -29,16 +29,16 @@ import { RPC_ERROR_CODES } from "../protocol.js";
 import {
   WorksceneBusyError,
   type ConversationManager,
-} from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/owner-kernel/conversation-manager";
 import {
   AdvancementReviewAttemptApplicationService,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   createWorksceneProductApiContribution,
   WORKSCENE_PRODUCT_API_EXACT_SET,
   WorksceneApplicationService,
-} from "@zhixing/core/workscene/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/workscene/application";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import type { ServerContext } from "../../context.js";
 
 type TestWorksceneMechanism = {
@@ -159,7 +159,7 @@ function memoryWorkscenes(): TestWorksceneMechanism {
 }
 
 function makeCtx(opts: {
-  continuation?: Pick<import("@zhixing/core/workscene/application").WorksceneContinuationApplication, "tasks" | "stop">;
+  continuation?: Pick<import("@zhixing-ai/core/workscene/application").WorksceneContinuationApplication, "tasks" | "stop">;
   workscenes?: TestWorksceneMechanism;
   activeConversations?: string[];
   advancement?: AdvancementController;

@@ -1,10 +1,10 @@
-import type { AgentYield } from '@zhixing/core/loop';
-import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
+import type { AgentYield } from '@zhixing-ai/core/loop';
+import type { TerminalDisplaySegment } from '@zhixing-ai/terminal-ui/protocol';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { textFragments } from './history-segments.js';
 import { TerminalBodyProjection, type BodyAmend } from './body-projection.js';
-import { BODY_INTERRUPTED_LIMIT, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, BODY_PROJECTION_WORK_BYTES, sliceBodyNodes, type BodyPage, type BodySegment, type BodyFragmentMetadata, type BodyNode, type BodyRun } from '@zhixing/terminal-ui/body-model';
-import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
+import { BODY_INTERRUPTED_LIMIT, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, BODY_PROJECTION_WORK_BYTES, sliceBodyNodes, type BodyPage, type BodySegment, type BodyFragmentMetadata, type BodyNode, type BodyRun } from '@zhixing-ai/terminal-ui/body-model';
+import { TERMINAL_LIMITS } from '@zhixing-ai/terminal-ui/protocol';
 import type { ProcessBlock } from './process-presentation.js';
 
 // Part of the bounded hot prefix, before transport admission. Includes the

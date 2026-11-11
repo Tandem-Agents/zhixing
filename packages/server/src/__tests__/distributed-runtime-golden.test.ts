@@ -3,42 +3,42 @@ import { join } from "node:path";
 import {
   ConfirmationBroker,
   type ConfirmationRequest,
-} from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/confirmation";
 import {
   ConversationRepository,
-} from "@zhixing/core/conversation";
+} from "@zhixing-ai/core/conversation";
 import {
   ShardedTranscriptStore,
   SnapshotStore,
   type RunRecordInput,
-} from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/transcript";
 import {
   createEventBus,
-} from "@zhixing/core/events";
+} from "@zhixing-ai/core/events";
 import type {
   AgentEventMap,
   Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   AgentYield,
   RunResult,
-} from "@zhixing/core/loop";
+} from "@zhixing-ai/core/loop";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { ControlResult } from "@zhixing/core/contracts";
-import { assertGolden, createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/authority";
+import type { ControlResult } from "@zhixing-ai/core/contracts";
+import { assertGolden, createTempDir } from "@zhixing-ai/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import {
   ControlAdmissionJournal,
   createInitialControlEnvelope,
-} from "@zhixing/owner-kernel/control-admission";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/owner-kernel/control-admission";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import {
   createConversationAgentTurnAdmissionPort,
-} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+} from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
 import { createServerContext } from "../context.js";
 import {
   buildBuiltinRegistry,
@@ -53,17 +53,17 @@ import {
   createConfirmationBridge,
   createRunEventForwarder,
   projectSessionTurn,
-} from "@zhixing/rpc";
+} from "@zhixing-ai/rpc";
 import { toJsonRpcError, type HandlerContext } from "../rpc/handlers.js";
-import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel/types";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
   type ConversationDirectoryStorage,
-} from "@zhixing/core/conversation/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/conversation/application";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import { bindTestConversationManager } from "./server-conversation-binding-fixture.js";
 
 const FIXED_NOW = new Date("2026-07-11T12:00:00.000Z");

@@ -1,4 +1,4 @@
-import type { MutationBatch, PublishRecord } from '@zhixing/core/contracts';
+import type { MutationBatch, PublishRecord } from '@zhixing-ai/core/contracts';
 
 export function mutationNeedsExternalPublish(record: MutationBatch['records'][number]): boolean {
   return record.domain === 'global' && record.mutation.kind !== 'delivery-enqueue';

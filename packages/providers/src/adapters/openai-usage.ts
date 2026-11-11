@@ -47,7 +47,7 @@
  * 主适配器(openai-compatible.ts)无需任何改动 —— 这是 Open-Closed 原则的落地。
  */
 
-import type { TokenUsage } from "@zhixing/core";
+import type { TokenUsage } from "@zhixing-ai/core";
 import type { UsageDialect } from "../types.js";
 
 // ─── Strategy 接口 ───

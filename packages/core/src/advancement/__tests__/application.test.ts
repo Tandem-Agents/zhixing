@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { AdvancementStore } from "../store.js";
 import { ProductApiDispatcher } from "../../product-api/catalog.js";
 import { buildClosureFacts, renderClosureReport } from "../closure.js";

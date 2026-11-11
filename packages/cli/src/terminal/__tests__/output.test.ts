@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TerminalOutputProjection, type TerminalOutputBody } from '../output.js';
 import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
 import type { ConversationOutputSource } from '../../runtime/conversation-output.js';
-import type { AgentYield } from '@zhixing/core/loop';
-import { bodyPageSegments, decodeBodyPage, encodeBodyPage, type BodySegment } from '@zhixing/terminal-ui/body-model';
+import type { AgentYield } from '@zhixing-ai/core/loop';
+import { bodyPageSegments, decodeBodyPage, encodeBodyPage, type BodySegment } from '@zhixing-ai/terminal-ui/body-model';
 const source = { conversationId: 'synthetic', turnId: 'turn', kind: 'delta' } as ConversationOutputSource;
 const body: TerminalOutputBody = { last: 0, work: action => action(), amend: async () => {}, seal: async () => {} };
 afterEach(() => vi.useRealTimers());
@@ -24,7 +24,7 @@ describe('terminal output projection', () => {
   });
   it('publishes live thinking in queue order and replaces it only after final append acknowledgement', async () => {
     vi.useFakeTimers();
-    const segments: import('@zhixing/terminal-ui/body-model').BodySegment[] = [];
+    const segments: import('@zhixing-ai/terminal-ui/body-model').BodySegment[] = [];
     let acknowledge: (() => void) | undefined;
     const projection = new TerminalOutputProjection(async segment => {
       await new Promise<void>(resolve => { acknowledge = resolve; }); segments.push(segment);
@@ -58,7 +58,7 @@ describe('terminal output projection', () => {
   });
   it('keeps an interrupted tail before new output through recovery instead of moving it to the latest message', async () => {
     vi.useFakeTimers(); let fail = true;
-    const segments: import('@zhixing/terminal-ui/body-model').BodySegment[] = [];
+    const segments: import('@zhixing-ai/terminal-ui/body-model').BodySegment[] = [];
     const projection = new TerminalOutputProjection(async segment => { if (fail) throw Error('disk'); segments.push(segment); }, async () => {}, async () => {}, body);
     const page = () => ({ first: 0, last: segments.length, start: 0, follow: true, segments: [...segments] });
     projection.updateThinking({ blockId: 'thinking', role: 'thinking', text: 'interrupted' }, 10, true);
@@ -132,7 +132,7 @@ describe('terminal output projection', () => {
     ['trailing', ['alpha();', '']], ['only', ['']], ['two', ['', '']],
     ['middle', ['alpha();', '', 'omega();']], ['fragmented', ['界'.repeat(12000), '']],
   ] as [string, string[]][])('preserves real blank diff rows at EOF and fragment boundaries: %s', async (_name, contents) => {
-    const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [], gap = vi.fn();
+    const segments: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment[] = [], gap = vi.fn();
     const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, gap, body);
     const artifact = { kind: 'file-diff' as const, path: 'blank.ts', operation: 'modified' as const,
       changeStats: { kind: 'exact' as const, addedLines: contents.length, removedLines: 0 },
@@ -154,7 +154,7 @@ describe('terminal output projection', () => {
   });
   it('keeps structured diff gutters out of source across Unicode fragment boundaries', async () => {
     vi.useFakeTimers();
-    const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const segments: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment[] = [];
     const gap = vi.fn();
     const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, gap, body);
     const code = 'const 中文 = "🙂";'.repeat(2600);
@@ -190,7 +190,7 @@ describe('terminal output projection', () => {
   it('retains completed process text once as immutable plain fragments with exact source offsets', async () => {
     vi.useFakeTimers();
     const text = '**literal** 中文🙂\r\n'.repeat(1800);
-    const parts: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const parts: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment[] = [];
     const amend = vi.fn(), seal = vi.fn(), gap = vi.fn(async () => {});
     const projection = new TerminalOutputProjection(async part => { parts.push(part); }, async () => {}, gap,
       { work: action => action(), amend, seal });
@@ -221,7 +221,7 @@ describe('terminal output projection', () => {
   it('waits for the old physical append before resuming with distinct retained block identities', async () => {
     vi.useFakeTimers();
     let finish!: () => void;
-    const parts: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const parts: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment[] = [];
     const projection = new TerminalOutputProjection(async segment => {
       if (!parts.length) await new Promise<void>(resolve => { finish = resolve; });
       parts.push(segment);
@@ -244,7 +244,7 @@ describe('terminal output projection', () => {
   });
   it('shares the actual run block across assignment-only identity, recovered turn identity and end', async () => {
     vi.useFakeTimers();
-    const parts: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [], seal = vi.fn(async () => {});
+    const parts: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment[] = [], seal = vi.fn(async () => {});
     const projection = new TerminalOutputProjection(async segment => { parts.push(segment); }, async () => {}, async () => {}, { ...body, seal });
     const live: ConversationOutputSource = { conversationId: 'c', runId: 'r', kind: 'stream', frame: {
       v: 1, ref: { execution: 'conversation', conversationId: 'c', runId: 'r', ownerEpoch: 0 },
@@ -262,7 +262,7 @@ describe('terminal output projection', () => {
   });
   it('uses the existing body queue for immutable process blocks, with one tool display owner', async () => {
     vi.useFakeTimers();
-    const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const segments: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment[] = [];
     const seal = vi.fn(async () => {}), accept = vi.fn();
     const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, async () => {},
       { ...body, seal }, { accept });
@@ -282,7 +282,7 @@ describe('terminal output projection', () => {
     vi.useFakeTimers();
     let release!: () => void;
     const seal = vi.fn(async () => {}), gap = vi.fn(async () => {});
-    let latest: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment | undefined;
+    let latest: import('@zhixing-ai/terminal-ui/protocol').TerminalDisplaySegment | undefined;
     const projection = new TerminalOutputProjection(async segment => { latest = segment; }, async () => {}, gap, {
       last: 0, work: action => action(), seal,
       amend: async (_block, change) => {

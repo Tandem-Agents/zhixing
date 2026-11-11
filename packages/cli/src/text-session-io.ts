@@ -1,7 +1,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
 import type { Readable } from 'node:stream';
-import type { AgentYield } from '@zhixing/core/loop';
+import type { AgentYield } from '@zhixing-ai/core/loop';
 import type { TerminalSelectionPort } from './terminal/selection.js';
 import { summaryLines } from './summary-projection.js';
 

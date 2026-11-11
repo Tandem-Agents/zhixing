@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { CheckpointDirectoryHandle } from '../checkpoint-child-bridge.js';
 import { checkpointBridgeTarget, verifyCheckpointBridgeArtifact } from '../checkpoint-bridge-artifact.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 
 const posix = process.platform === 'linux' || process.platform === 'darwin';
 

@@ -1,9 +1,9 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { loadConfig } from "@zhixing/providers";
-import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing/mesh/blind-rendezvous";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { loadConfig } from "@zhixing-ai/providers";
+import { BlindRendezvousMatcher, readBlindRendezvousHello } from "@zhixing-ai/mesh/blind-rendezvous";
+import { FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
 import {
   applyTrustEvent,
   createDomainResetEvent,
@@ -11,9 +11,9 @@ import {
   createSignedTrustEvent,
   createTrustGenesisEvent,
   initializeTrustChain,
-} from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
-import { EncryptedVaultSecretStore } from '@zhixing/secrets';
+} from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { EncryptedVaultSecretStore } from '@zhixing-ai/secrets';
 import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
@@ -259,7 +259,7 @@ describe("production mesh pairing command", () => {
       ]);
       const anchorId = anchorTrust!.issuer.deviceId;
       const executorId = anchorTrust!.members.find((member) => member.device.deviceId !== anchorId)!.device.deviceId;
-      const checkpointRecords = await anchorStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
+      const checkpointRecords = await anchorStore.authorityLog().readStream<import("@zhixing-ai/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
       const created = checkpointRecords.find((record) =>
         record.t === "checkpoint-created" && record.targetId === `backup-device:${executorId}`);
       expect(created?.purpose.kind).toBe("root-activation");

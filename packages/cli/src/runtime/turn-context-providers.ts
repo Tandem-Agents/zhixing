@@ -24,10 +24,10 @@
  *   service 引用——所有 caller 装配代码不动。**杜绝"两入口不对齐"类回归**。
  */
 
-import { SchedulerProvider, TaskListProvider, type TurnContextProvider } from "@zhixing/core/context";
-import { type TaskStatusSummary } from "@zhixing/core/scheduler";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import type { TaskListService } from "@zhixing/core/conversation/application";
+import { SchedulerProvider, TaskListProvider, type TurnContextProvider } from "@zhixing-ai/core/context";
+import { type TaskStatusSummary } from "@zhixing-ai/core/scheduler";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
+import type { TaskListService } from "@zhixing-ai/core/conversation/application";
 
 /**
  * Scheduler 不可用时的空状态 fallback —— serve 模式 lazy scheduler ref 未就绪时

@@ -1,4 +1,4 @@
-import type { LogPage, LogStatus } from "@zhixing/core/logging";
+import type { LogPage, LogStatus } from "@zhixing-ai/core/logging";
 import {
   parseLogPolicyRequest,
   parseLogReadRequest,
@@ -6,7 +6,7 @@ import {
   type LogPolicyRequest,
   type LogReadRequest,
   type LogSearchRequest,
-} from "@zhixing/core/logging/application";
+} from "@zhixing-ai/core/logging/application";
 
 /** Transport binding only: authorization and all query/policy semantics stay in LogApplication. */
 export class LogRpcClient {

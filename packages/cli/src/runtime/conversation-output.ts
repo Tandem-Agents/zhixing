@@ -1,6 +1,6 @@
-import type { ConversationStatusNotice, FinalFrame, StreamFrame } from "@zhixing/core/contracts";
-import type { SessionDeltaPayload } from "@zhixing/rpc";
-import type { SessionProcessProjection } from "@zhixing/rpc/session-wire";
+import type { ConversationStatusNotice, FinalFrame, StreamFrame } from "@zhixing-ai/core/contracts";
+import type { SessionDeltaPayload } from "@zhixing-ai/rpc";
+import type { SessionProcessProjection } from "@zhixing-ai/rpc/session-wire";
 
 export interface ConversationOutputIdentity {
   readonly conversationId: string;

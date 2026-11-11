@@ -5,9 +5,9 @@
  * 按流从起点重放、整读日志（旧做法）随历史线性增长，作为对照。
  */
 import path from "node:path";
-import { AuthorityCacheIntegrity, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { createSignedConversationEnvelope } from "@zhixing/core/protocol";
-import { captureFileIo, defaultFileIoCategory, type FileIoSnapshot } from "@zhixing/test-utils";
+import { AuthorityCacheIntegrity, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { createSignedConversationEnvelope } from "@zhixing-ai/core/protocol";
+import { captureFileIo, defaultFileIoCategory, type FileIoSnapshot } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { AuthenticatedFrameIndex } from "../../../core/src/authority/frame-index.js";
 import { ConversationAssignmentLedger } from "../assignment-ledger.js";

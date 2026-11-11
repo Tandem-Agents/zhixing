@@ -3,12 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 // 同一台机器上的两个 home 默认都用本机名：配对时按角色给出不同名称，按名称选择移除目标
 const host = vi.hoisted(() => ({ name: "duty-device" }));
 vi.mock("node:os", async (original) => ({ ...await original<typeof import("node:os")>(), hostname: () => host.name }));
-import type { MeshEndpointDescriptor, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { DeviceLifecycleJournal } from "@zhixing/core/authority";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import { applyTrustEvent, buildHomeTrustRecord, createDomainResetEvent, createRecoveryRootEvent, homeTrustEventDigest, replayTrustChain } from "@zhixing/mesh/trust-chain";
+import type { MeshEndpointDescriptor, SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
+import { applyTrustEvent, buildHomeTrustRecord, createDomainResetEvent, createRecoveryRootEvent, homeTrustEventDigest, replayTrustChain } from "@zhixing-ai/mesh/trust-chain";
 import { CurrentIssuerDeviceRemovalAuthority, ExecutorRemovalTarget, settleExecutorRemovalBeforeBootstrap, supersedeRemovalsByPairing } from "./device-removal.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadExistingDeviceKey, replacedDeviceOf } from "./mesh-device-key.js";

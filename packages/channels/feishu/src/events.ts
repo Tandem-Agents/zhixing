@@ -1,7 +1,7 @@
 import type {
   ChatType,
   InboundMessage,
-} from "@zhixing/core/channels";
+} from "@zhixing-ai/core/channels";
 
 export interface FeishuMessageEvent {
   sender: {

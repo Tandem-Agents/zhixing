@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import path from "node:path";
-import { createTempDir, captureFileIo } from "@zhixing/test-utils";
+import { createTempDir, captureFileIo } from "@zhixing-ai/test-utils";
 import { observeProjectionQueryWork } from "../test-support/projection-query-work.js";
 import { FileAuthorityCommitLog } from "../authority/commit-log.js";
 import { FileArtifactStore } from "../authority/artifact-store.js";

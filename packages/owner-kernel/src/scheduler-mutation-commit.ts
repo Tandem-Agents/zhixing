@@ -4,8 +4,8 @@ import type {
   LogicalRecord,
   ScheduleWriteMutation,
   TaskDefinition,
-} from "@zhixing/core/contracts";
-import { canonicalize, validateTaskDefinition } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { canonicalize, validateTaskDefinition } from "@zhixing-ai/core/protocol";
 import { scheduleTaskIdForRequest } from "./scheduler-authority.js";
 
 export type SchedulePublishOutcome =

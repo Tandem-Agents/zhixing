@@ -20,8 +20,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { gracefulKill } from "@zhixing/core/interrupt";
-import { type ToolDefinition, type ToolResult } from "@zhixing/core";
+import { gracefulKill } from "@zhixing-ai/core/interrupt";
+import { type ToolDefinition, type ToolResult } from "@zhixing-ai/core";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESULT_CHARS = 30_000;
@@ -120,7 +120,7 @@ export function createBashTool(): ToolDefinition {
 // ─── 内部实现 ───
 
 interface ExecOptions {
-  records?: import("@zhixing/core/logging").LogRecordPort;
+  records?: import("@zhixing-ai/core/logging").LogRecordPort;
   cwd: string;
   timeout: number;
   signal?: AbortSignal;

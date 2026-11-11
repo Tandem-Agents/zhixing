@@ -13,7 +13,7 @@
  * HTTP 经 SSRF-safe fetch；`httpGetText` 可注入以便单测（不真联网）。
  */
 
-import type { NetworkPolicy } from "@zhixing/network";
+import type { NetworkPolicy } from "@zhixing-ai/network";
 import { defaultHttpGetText, httpErrText, type HttpGetText } from "./http.js";
 
 // 查源与搜索共用的 HTTP 底座现集中在 ./http.js；此处再导出 HttpGetText 保持既有引用路径。

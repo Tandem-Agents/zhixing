@@ -1,25 +1,25 @@
-import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias } from '@zhixing-ai/terminal-ui/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createRpcClient } from '@zhixing/server/client';
-import { createPlatformSecretStore } from '@zhixing/secrets';
+import { createRpcClient } from '@zhixing-ai/server/client';
+import { createPlatformSecretStore } from '@zhixing-ai/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
-import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing/core/contracts';
-import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
+import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing-ai/core/contracts';
+import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing-ai/core/transcript';
 import { isAbsolute, join as joinPath } from 'node:path';
-import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
-import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing-ai/terminal-ui/channel';
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing-ai/terminal-ui/parent-transport';
 import type { TerminalPreloadRelease } from './application-preload.js';
-import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
-import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing/terminal-ui/protocol';
-import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
-import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing/providers/configuration';
+import { CheckpointDirectoryHandle } from '@zhixing-ai/mesh/filesystem';
+import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing-ai/terminal-ui/protocol';
+import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
+import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing-ai/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
-import { LocalLogStore } from '@zhixing/core/logging/storage';
-import { observeLogPhase } from '@zhixing/core/logging';
+import { LocalLogStore } from '@zhixing-ai/core/logging/storage';
+import { observeLogPhase } from '@zhixing-ai/core/logging';
 import { LogFilesProcess } from '../logging/files-process.js';
 import { createLogWriterProbe } from '../logging/writers.js';
 import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
@@ -41,23 +41,23 @@ import type { TerminalSchedulerNotices } from './scheduler-notices.js';
 import type { TerminalInformationCommands } from './information-commands.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
 import { formatRelativeTimeText } from '../commands/format.js';
-import { advancementProposalStalledMessage } from '@zhixing/core/advancement/proposal-messages';
-import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
-import { parseConversationId } from '@zhixing/core/conversation';
-import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
+import { advancementProposalStalledMessage } from '@zhixing-ai/core/advancement/proposal-messages';
+import type { SessionAdvancementStateSnapshot } from '@zhixing-ai/rpc';
+import { parseConversationId } from '@zhixing-ai/core/conversation';
+import type { SkillCatalogClient } from '@zhixing-ai/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AdvancementOperationTarget, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
 import { PendingInputReceiptError, RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
 import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
-import type { AgentYield } from '@zhixing/core/loop';
+import type { AgentYield } from '@zhixing-ai/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
 import { TerminalDisplayReplay, runOutcomeSegment, runOutcomeText, toolCardSegment, type DisplayReplaySource, type RunOutcomeState, type ToolReplaySource } from './display-replay.js';
 import { TOOL_HISTORY_CARD_FORMAT } from '../tool-card-format.js';
-import { encodeBodyPage, type BodyPageRevision } from '@zhixing/terminal-ui/body-model';
+import { encodeBodyPage, type BodyPageRevision } from '@zhixing-ai/terminal-ui/body-model';
 import { textFragments } from './history-segments.js';
 import { TerminalBodyWork } from './body-work.js';
 import { TerminalInputStore } from './input-store.js';
@@ -90,7 +90,7 @@ type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillComman
 class EmptyTerminalSubmission extends Error {}
 interface TerminalHistoryState {
   /** 历史首页冻结的本地权威边界；控制恢复从这里起步 */
-  historyThrough?: import('@zhixing/core/authority').DurableLogCheckpoint;
+  historyThrough?: import('@zhixing-ai/core/authority').DurableLogCheckpoint;
   conversationId: string;
   /** 阅读代次：每个新的历史范围（启动、切换、清空、来源要求重读、离线选历史）各一代，U 只显示与视图声明相同代次的正文 */
   generation: number;
@@ -1223,7 +1223,7 @@ class TerminalApplication {
       if (this.#mainView.kind !== 'history') this.#historyReturn = this.#mainView;
       const storage = await this.#readOnlyStorage();
       await this.#publish({ ...this.#mainView, message: '正在准备本机对话目录…' });
-      const pages: Array<import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
+      const pages: Array<import('@zhixing-ai/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
       for (;;) {
         const result = await storage.listPage!({ limit: 24, after: pages.at(-1) });
         const entries = result.records;
@@ -1633,7 +1633,7 @@ class TerminalApplication {
       if (source.via === 'owner') {
         page = await this.#conversation.bodyPage(source.conversationId, { ...source.cursor, offset: 0 }, { direction: 'forward', runId: source.runId });
       } else {
-        const cursor = source.cursor as import('@zhixing/core/transcript').TranscriptBodyCursor;
+        const cursor = source.cursor as import('@zhixing-ai/core/transcript').TranscriptBodyCursor;
         page = await (await this.#displayReplayBodyReader(source.conversationId)).page({ cursor: { ...cursor, offset: 0 }, forward: true, signal: this.#abort.signal });
       }
       if (page.reset) throw Error('terminal-history-generation-changed');
@@ -2371,7 +2371,7 @@ class TerminalApplication {
     return this.#skillsBinding ??= (async () => {
       this.#abort.signal.throwIfAborted();
       const [{ SkillCatalogRpcClient }, { TerminalSkillCommands, terminalSkillCommandRoute }] = await Promise.all([
-        import('@zhixing/rpc/skill-catalog-client'), import('./skill-commands.js'),
+        import('@zhixing-ai/rpc/skill-catalog-client'), import('./skill-commands.js'),
       ]);
       this.#abort.signal.throwIfAborted();
       const client = new SkillCatalogRpcClient(this.#connection);

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { FileDurableProjectionIndex } from '../durable-projection-index.js';
 import { runWithMaintenanceUrgency } from '../../resources/maintenance-context.js';
 const fault = vi.hoisted(() => ({ mode: '' as string, attempts: 0, controller: undefined as AbortController | undefined }));

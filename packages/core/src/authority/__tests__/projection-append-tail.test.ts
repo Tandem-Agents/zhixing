@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, it } from 'vitest';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { SerialTaskQueue } from '../../persistence/index.js';
 import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, runInMaintenanceContext,
   type StorageMaintenanceGovernorPort } from '../../resources/index.js';

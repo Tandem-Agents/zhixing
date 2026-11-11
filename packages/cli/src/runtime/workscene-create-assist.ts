@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
-import { buildWorksceneChangeSummary, normalizeSceneName, normalizeWorkdir, probeWorkdir } from "@zhixing/core/workscene";
-import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "@zhixing/core/tool-loop";
-import type { WorksceneSummary } from "@zhixing/rpc";
+import { buildWorksceneChangeSummary, normalizeSceneName, normalizeWorkdir, probeWorkdir } from "@zhixing-ai/core/workscene";
+import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "@zhixing-ai/core/tool-loop";
+import type { WorksceneSummary } from "@zhixing-ai/rpc";
 import type { SelectionRequest } from "../tui/selection/types.js";
 
 export interface WorksceneCreateAssistScene {

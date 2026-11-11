@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertKernelModelProviderBinding } from "@zhixing/orchestrator/runtime";
+import { assertKernelModelProviderBinding } from "@zhixing-ai/orchestrator/runtime";
 import type {
   ProviderCredentialProjection,
   ZhixingConfig,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,

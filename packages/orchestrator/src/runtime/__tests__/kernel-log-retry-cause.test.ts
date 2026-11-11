@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createEventBus } from "@zhixing/core/events";
-import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogStatus } from "@zhixing/core/logging";
-import type { AgentEventMap } from "@zhixing/core/types";
+import { createEventBus } from "@zhixing-ai/core/events";
+import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogStatus } from "@zhixing-ai/core/logging";
+import type { AgentEventMap } from "@zhixing-ai/core/types";
 import { KERNEL_LOG_SOURCE, observeKernelRun } from "../logging.js";
 
 // 重试首因摘要经真实事件映射与记录器捕获落进日志：捕获只取声明字段，未声明的 cause 会被静默丢掉

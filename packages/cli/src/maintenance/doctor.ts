@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core/paths";
-import { loadConfig } from "@zhixing/providers";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
+import { loadConfig } from "@zhixing-ai/providers";
 import type { BackupTargetConfigurationRepository } from "../serve/backup-target-config.js";
 import { createBackupTargetConfigurationInfrastructure } from "../serve/backup-target-config-infrastructure.js";
 import {

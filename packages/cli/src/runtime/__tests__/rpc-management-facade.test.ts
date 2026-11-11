@@ -3,7 +3,7 @@ import {
   RPC_ERROR_CODES,
   RpcClientError,
   type RpcClient,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import { RpcManagementFacade } from "../rpc-management-facade.js";
 import type { CoreHostRpcLink } from "../core-host-connection.js";
 import { buildServerShutdownMethod } from "../../../../server/src/rpc/methods/server.js";

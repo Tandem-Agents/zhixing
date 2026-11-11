@@ -1,18 +1,18 @@
 // conversation-protocol-runtime.test.ts 拆分后的共享常量与助手。
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { userTurnInputFromText, type Message } from "@zhixing/core";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { type ConversationMutationPublisher } from "@zhixing/owner-kernel/conversation-assignment";
-import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { ConversationAssignmentLedger, AssignmentStreamWriter, InProcessAssignmentSubmission } from "@zhixing/executor";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { WorksceneContinuationApplication, type WorksceneApplication, type WorksceneTaskReference } from "@zhixing/core/workscene/application";
-import type { PostTurnControlOutcome } from "@zhixing/core/types";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { userTurnInputFromText, type Message } from "@zhixing-ai/core";
+import { type AgentYield, type RunResult } from "@zhixing-ai/core/loop";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { type ConversationMutationPublisher } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { createInitialControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { ConversationAssignmentLedger, AssignmentStreamWriter, InProcessAssignmentSubmission } from "@zhixing-ai/executor";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { WorksceneContinuationApplication, type WorksceneApplication, type WorksceneTaskReference } from "@zhixing-ai/core/workscene/application";
+import type { PostTurnControlOutcome } from "@zhixing-ai/core/types";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { resolve } from "node:path";
 import { createDeviceCapacityRuntime } from "../../__tests__/device-capacity-fixture.js";
 import { expect, vi, onTestFinished } from "vitest";
@@ -111,7 +111,7 @@ export function createProtocol(
       readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
       readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
       readonly runtimeFactory: RuntimeFactory;
-      readonly createStream?: (input: { readonly assignmentId: string; readonly ref: import("@zhixing/core/contracts").ExecutionRef }) => Promise<AssignmentStreamWriter>;
+      readonly createStream?: (input: { readonly assignmentId: string; readonly ref: import("@zhixing-ai/core/contracts").ExecutionRef }) => Promise<AssignmentStreamWriter>;
     };
   },
 ): ConversationProtocolRuntime {
@@ -305,12 +305,12 @@ export async function worksceneContinuationHarness(nextControl?: (tasks: readonl
   canRunIsolatedMain?: boolean;
   withWorkspace?: boolean;
   withAdvancement?: boolean;
-  beforeRun?: (conversationId: string, origin: import("@zhixing/core").TurnOrigin | undefined) => Promise<void>;
+  beforeRun?: (conversationId: string, origin: import("@zhixing-ai/core").TurnOrigin | undefined) => Promise<void>;
 }) {
   const home = await createTempDir("workscene-continuation");
   const capacity = probe?.withWorkspace ? createDeviceCapacityRuntime(resolve(home, "capacity")) : undefined;
   const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore(), ...(capacity ? { deviceCapacity: capacity.arbiter, storageMaintenance: capacity.storage } : {}) });
-  let environment: import("@zhixing/core/contracts").ExplicitEnvironmentSelection | undefined;
+  let environment: import("@zhixing-ai/core/contracts").ExplicitEnvironmentSelection | undefined;
   if (probe?.withWorkspace) {
     const migration = authority.workspaceBindingMigration!;
     const binding = await migration.importLegacy({ migrationId: "continuation-workspace", sourceSnapshotToken: "initial", displayName: "Original project", absolutePath: resolve(home, "project") }, new AbortController().signal);

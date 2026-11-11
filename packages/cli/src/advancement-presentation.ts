@@ -14,11 +14,11 @@
  */
 
 import chalk from "chalk";
-import { closureHeading, describeClosureVerdict, type AdvancementExit, type AdvancementRunReview, type ReviewEvidence } from "@zhixing/core/advancement";
-import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from "@zhixing/terminal-ui/protocol";
+import { closureHeading, describeClosureVerdict, type AdvancementExit, type AdvancementRunReview, type ReviewEvidence } from "@zhixing-ai/core/advancement";
+import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from "@zhixing-ai/terminal-ui/protocol";
 import { paginateSummary, summaryText } from "./summary-projection.js";
-import { advancementProposalStalledMessage, describeAdvancementProposalStage } from "@zhixing/core/advancement/proposal-messages";
-import type { SessionAdvancementDetailResult } from "@zhixing/rpc";
+import { advancementProposalStalledMessage, describeAdvancementProposalStage } from "@zhixing-ai/core/advancement/proposal-messages";
+import type { SessionAdvancementDetailResult } from "@zhixing-ai/rpc";
 import { clampLine } from "./tui/line-width.js";
 import { layout } from "./tui/style.js";
 

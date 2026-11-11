@@ -1,17 +1,17 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
-import { AuthorityCacheIntegrity } from "@zhixing/core/authority";
+import { AuthorityCacheIntegrity } from "@zhixing-ai/core/authority";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
-import type { PermissionRule } from "@zhixing/core/security";
+import type { PermissionRule } from "@zhixing-ai/core/security";
 import {
   createSignedTrustRuleSnapshot,
   normalizeTrustRulesForSnapshot,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { captureFileIo, createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { captureFileIo, createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { FileTrustRuleSnapshotCatalog } from "../executor-snapshot-version-store.js";
 

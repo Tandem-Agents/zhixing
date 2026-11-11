@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_LOG_POLICY } from '@zhixing/core/logging';
-import { LogRpcClient } from '@zhixing/rpc';
-import type { SessionUsageResult, SessionCompactResult } from '@zhixing/rpc/session-wire';
+import { DEFAULT_LOG_POLICY } from '@zhixing-ai/core/logging';
+import { LogRpcClient } from '@zhixing-ai/rpc';
+import type { SessionUsageResult, SessionCompactResult } from '@zhixing-ai/rpc/session-wire';
 import { RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
 import { TerminalInformationCommands, type TerminalInformationController, type TerminalInformationOptions } from '../information-commands.js';

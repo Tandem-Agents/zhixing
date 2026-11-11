@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { FileResumableArtifactReceiver, type ArtifactStore } from "@zhixing/core/authority";
+import { FileResumableArtifactReceiver, type ArtifactStore } from "@zhixing-ai/core/authority";
 import type { ExtensionArtifactReceiverPort } from "./extension-management-mesh.js";
 
 /** Physical staging stays at the Host infrastructure edge, outside Mesh routing. */

@@ -2,7 +2,7 @@
  * 技能(Skill)模块 —— 桶导出。
  *
  * 根桶只保留通用 Skill 数据、builtin 内容与接入原语。领域应用合同只从
- * `@zhixing/core/skills/catalog` 发布，Authority/CAS 不经本桶暴露写入口。
+ * `@zhixing-ai/core/skills/catalog` 发布，Authority/CAS 不经本桶暴露写入口。
  */
 
 export { skillNameToId } from "./id.js";

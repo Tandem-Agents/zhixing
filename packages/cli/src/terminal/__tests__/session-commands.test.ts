@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ActiveConversation, ConversationController, TurnOutcome } from '../../runtime/conversation-controller.js';
 import type { RpcWorksceneFacade } from '../../runtime/rpc-workscene-facade.js';
 import { TerminalSessionCommands, projectCommittedTerminalOutcome, projectTerminalTurnOutcome, type TerminalTurnOutcome } from '../session-commands.js';
-import { ADVANCEMENT_PROPOSED_NOTICE } from '@zhixing/core/advancement/proposal-messages';
+import { ADVANCEMENT_PROPOSED_NOTICE } from '@zhixing-ai/core/advancement/proposal-messages';
 import type { TerminalSelectionPort } from '../selection.js';
 import { TerminalCandidatesOwner } from '../candidates.js';
 

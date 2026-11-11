@@ -1,9 +1,9 @@
 // 拆分自 assignment-ledger.test.ts（按主题分文件以便并行执行）：bundles。
 import { rm } from "node:fs/promises";
-import { FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "@zhixing/core/authority";
-import type { TranscriptRunRecord } from "@zhixing/core/contracts";
-import { canonicalize, createConversationSealedBundle, createMutationBatch, mutationBatchArtifact, sealedBundleArtifact } from "@zhixing/core/protocol";
-import { ConversationRunJournal, InProcessConversationDispatcher, type ConversationCommitAuthority, type ConversationCommitProjection, type ConversationCommitProjectionInput, type ConversationMutationPublisher } from "@zhixing/owner-kernel/conversation-assignment";
+import { FileAuthorityCommitLog, MAX_INLINE_LOGICAL_RECORD_BYTES } from "@zhixing-ai/core/authority";
+import type { TranscriptRunRecord } from "@zhixing-ai/core/contracts";
+import { canonicalize, createConversationSealedBundle, createMutationBatch, mutationBatchArtifact, sealedBundleArtifact } from "@zhixing-ai/core/protocol";
+import { ConversationRunJournal, InProcessConversationDispatcher, type ConversationCommitAuthority, type ConversationCommitProjection, type ConversationCommitProjectionInput, type ConversationMutationPublisher } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationAssignmentLedger, InProcessAssignmentSubmission, type InteractionOutcome } from "../assignment-ledger.js";
 import { NOW, EXECUTOR_ID, CONVERSATION_ID, RUN_ID, ASSIGNMENT_ID, SHA256_ZERO, ABORT_TICKET_DIGEST, DURABLE_IO_TEST_TIMEOUT_MS, matchingSnapshotFor, matchingPermissionSnapshotFor, allowOnceDecisionDigest, deliveryParticipant, CountingArtifactStore, signedMirrorBatch, ownerControl, submission, createUnassignedHarness, createHarness, createUnsignedEnvelope, ingress, ownerContext, submissionContext, sealDefaultBundle, createCancellationSubmission, createBundleSubmission, reopenJournal, withoutSignature, replayFixtureLog } from "./assignment-ledger-fixture.js";
@@ -1418,7 +1418,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
           kind: "workscene-create",
           name: "Focus",
           authorityClaim: "attacker-controlled",
-        } as unknown as import("@zhixing/core/contracts").GlobalStagedMutation,
+        } as unknown as import("@zhixing-ai/core/contracts").GlobalStagedMutation,
       }),
     ).rejects.toThrow("unknown field");
     await expect(
@@ -1483,7 +1483,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
             tokensBefore: 10,
             tokensAfter: 5,
             authorityClaim: "attacker-controlled",
-          } as unknown as import("@zhixing/core/contracts").WindowCompactInstruction,
+          } as unknown as import("@zhixing-ai/core/contracts").WindowCompactInstruction,
         },
       }),
     ).toThrow("unknown field");

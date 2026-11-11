@@ -1,14 +1,14 @@
-import type { AssignmentMutationPort } from "@zhixing/core/contracts";
-import type { AgentTurnResult, ScheduleMutationContext, SchedulerFacade, SchedulerFacadeEventHandler, TaskPatch, TaskView } from "@zhixing/core/scheduler";
+import type { AssignmentMutationPort } from "@zhixing-ai/core/contracts";
+import type { AgentTurnResult, ScheduleMutationContext, SchedulerFacade, SchedulerFacadeEventHandler, TaskPatch, TaskView } from "@zhixing-ai/core/scheduler";
 import {
   deriveScheduleNextRun,
   ScheduleManagementApplicationService,
   type ScheduleManagementRepository,
   type ScheduleTaskDraft,
-} from "@zhixing/core/scheduler/application";
-import type { ScheduleTaskSpecDto } from "@zhixing/core/contracts";
-import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel/scheduler-authority";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/core/scheduler/application";
+import type { ScheduleTaskSpecDto } from "@zhixing-ai/core/contracts";
+import { scheduleTaskIdForRequest } from "@zhixing-ai/owner-kernel/scheduler-authority";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 
 interface StagedViewState {
   nextOperation: number;

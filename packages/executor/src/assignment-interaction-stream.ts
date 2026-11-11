@@ -6,7 +6,7 @@ import type {
   StreamDataFramePayload,
   StreamFrameAppender,
   StreamFrameMeta,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 
 export interface AssignmentInteractionProjectionWriter {
   appendInteractionProjection(

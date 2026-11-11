@@ -1,20 +1,20 @@
 import { createServer } from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, onTestFinished } from "vitest";
-import type { DeviceIdentity, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { createTempDir } from "@zhixing/test-utils";
-import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
-import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import type { DeviceIdentity, SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import { createTempDir } from "@zhixing-ai/test-utils";
+import { MeshEndpointDirectory } from "@zhixing-ai/mesh/bootstrap";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import {
   MeshServiceRegistry,
   type MeshServiceDefinition,
-} from "@zhixing/mesh/service-registry";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
+} from "@zhixing-ai/mesh/service-registry";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
 import {
   createRecoveryRootEvent,
   createSignedTrustEvent,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";

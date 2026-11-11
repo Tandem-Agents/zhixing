@@ -1,13 +1,13 @@
-import type { DataPlaneTicket, ExecutionAbortRequest } from "@zhixing/core/contracts";
+import type { DataPlaneTicket, ExecutionAbortRequest } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedDataPlaneTicket,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { SecureMeshConnection } from "@zhixing/mesh";
+} from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
 import { describe, expect, it, vi } from "vitest";
 import {
   DATA_PLANE_TICKET_SERVICE,

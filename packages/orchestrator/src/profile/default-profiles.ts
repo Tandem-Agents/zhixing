@@ -7,8 +7,8 @@
  *     user message 注入，避免动态任务文本污染 system prompt 前缀
  */
 
-import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "@zhixing/core/identity";
-import { WORKSPACE_DEPENDENT_TOOL_IDS } from "@zhixing/core/environment";
+import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "@zhixing-ai/core/identity";
+import { WORKSPACE_DEPENDENT_TOOL_IDS } from "@zhixing-ai/core/environment";
 import type { AgentRoleProfile } from "./agent-role-profile.js";
 
 /**

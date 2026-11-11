@@ -22,12 +22,12 @@ import {
   validateWorkspaceControlAuthorization,
   validateWorkspaceAdministrationDurableResult,
   workspaceAdministrationResultValue,
-} from "@zhixing/core/environment/workspace-administration";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/environment/workspace-administration";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import type {
   ResourceReservationPort,
   WorkspaceBindingResetReceipt,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   LocalWorkspaceOperationOutbox,
   validateLocalWorkspaceOperation,
@@ -218,8 +218,8 @@ export function createLocalWorkspaceManagementHost(input: {
   readonly management: {
     readonly deviceId: string;
     readonly executorId: string;
-    readonly admin: import("@zhixing/core/contracts").WorkspaceBindingAdminPort;
-    readonly recovery: import("@zhixing/core/contracts").WorkspaceBindingRecoveryPort;
+    readonly admin: import("@zhixing-ai/core/contracts").WorkspaceBindingAdminPort;
+    readonly recovery: import("@zhixing-ai/core/contracts").WorkspaceBindingRecoveryPort;
     readonly resources: Pick<
       ResourceReservationPort,
       "acquireRoot" | "settle" | "release" | "inspectImmediateRoot"

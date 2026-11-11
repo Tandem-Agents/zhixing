@@ -1,20 +1,20 @@
 import { Buffer } from "node:buffer";
-import type { SurfaceAssetCoordinator } from "@zhixing/core/authority";
+import type { SurfaceAssetCoordinator } from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   Digest,
   SurfaceAssetGrant,
   SurfaceAssetScope,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   createSignedSurfaceAssetGrant,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import type { SecureMeshConnection } from "@zhixing/mesh";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/core/protocol";
+import type { SecureMeshConnection } from "@zhixing-ai/mesh";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import { describe, expect, it, vi } from "vitest";
 import {
   SURFACE_ASSET_SERVICE,

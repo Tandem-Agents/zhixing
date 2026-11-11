@@ -1,6 +1,6 @@
-import type { DeviceIdentity } from "@zhixing/core/contracts";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import { verifyDeviceSignature } from "@zhixing/mesh/device-identity";
+import type { DeviceIdentity } from "@zhixing-ai/core/contracts";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import { verifyDeviceSignature } from "@zhixing-ai/mesh/device-identity";
 
 /** Builds the production verifier from one frozen trusted-device exact set. */
 export function createTrustedDeviceProtocolVerifier(

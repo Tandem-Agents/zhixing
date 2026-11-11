@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import type { DeviceCapacityArbiterPort } from '@zhixing-ai/core/resources';
 import type { TerminalManagedFiles } from '../managed-files.js';
 import { TerminalInputStore } from '../input-store.js';
 

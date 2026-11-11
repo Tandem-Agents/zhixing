@@ -1,10 +1,10 @@
-import type { ToolDefinition } from "@zhixing/core";
-import type { IngressContext } from "@zhixing/core/contracts";
-import type { StreamFrameAppender } from "@zhixing/core/protocol";
+import type { ToolDefinition } from "@zhixing-ai/core";
+import type { IngressContext } from "@zhixing-ai/core/contracts";
+import type { StreamFrameAppender } from "@zhixing-ai/core/protocol";
 import {
   projectAssignmentInteractionStream,
   type ConversationAssignmentLedger,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 
 /**
  * conversation/job 交互承载共享的底层耐久投影与副作用原语。交互的

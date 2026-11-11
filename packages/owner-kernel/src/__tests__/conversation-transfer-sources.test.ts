@@ -1,7 +1,7 @@
 import path from "node:path";
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import { captureFileIo, createTempDir } from "@zhixing/test-utils";
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import { captureFileIo, createTempDir } from "@zhixing-ai/test-utils";
 import { expect, it } from "vitest";
 import { readConversationTransferEnvelopes, registerConversationTransferSources, selectConversationAuthorityRecords } from "../conversation-transfer.js";
 import { trackAuthorityLog } from "./durable-io-test-support.js";

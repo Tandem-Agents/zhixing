@@ -2,15 +2,15 @@ import path from "node:path";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
-} from "@zhixing/core/authority";
-import type { DataPlaneTicket, ExecutionRef } from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/authority";
+import type { DataPlaneTicket, ExecutionRef } from "@zhixing-ai/core/contracts";
 import {
   createSignedDataPlaneTicket,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { AssignmentStreamSpool } from "../assignment-stream-spool.js";
 import { DataPlaneTicketRegistry } from "../data-plane-ticket-registry.js";

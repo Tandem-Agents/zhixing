@@ -19,7 +19,7 @@
 
 ## 合同与职责
 
-入口为 `@zhixing/core/tool-loop` 的 `runToolLoop(spec, deps, signal)`，不依赖具体 Provider、MCP 或工作场景业务。
+入口为 `@zhixing-ai/core/tool-loop` 的 `runToolLoop(spec, deps, signal)`，不依赖具体 Provider、MCP 或工作场景业务。
 
 | 合同 | 责任 |
 |---|---|

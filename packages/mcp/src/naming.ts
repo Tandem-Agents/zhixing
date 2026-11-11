@@ -9,7 +9,7 @@
  * 这样权限通配 `mcp__<server>__*` 的反解析（parseToolName）按 `__` split 必得三段。
  */
 
-export { isValidMcpServerId as isValidServerId } from "@zhixing/core/mcp-management";
+export { isValidMcpServerId as isValidServerId } from "@zhixing-ai/core/mcp-management";
 
 const PREFIX = "mcp";
 const SEP = "__";

@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { executionTurnContext } from "./execution-turn-context.js";
-import { type ArtifactStore } from "@zhixing/core/authority";
-import { type Message } from "@zhixing/core";
-import { type RunResult } from "@zhixing/core/loop";
+import { type ArtifactStore } from "@zhixing-ai/core/authority";
+import { type Message } from "@zhixing-ai/core";
+import { type RunResult } from "@zhixing-ai/core/loop";
 import type {
   AuthorityCallContext,
   DispatchEnvelope,
@@ -12,17 +12,17 @@ import type {
   RunSubmissionPort,
   SealedBundle,
   TranscriptRunRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   StreamDigestChain,
   type StreamFrameProducer,
-} from "@zhixing/core/protocol";
-import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
+} from "@zhixing-ai/core/protocol";
+import type { RuntimeFactory } from "@zhixing-ai/owner-kernel/types";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
-} from "@zhixing/executor";
+} from "@zhixing-ai/executor";
 import {
   asError,
   resumeSealedSubmission,
@@ -47,7 +47,7 @@ import {
 const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 
 export interface ConversationAssignmentWorkerOptions {
-  readonly inputFor?: (envelope: Extract<DispatchEnvelope, { execution: "conversation" }>) => Promise<import("@zhixing/core/loop").RunInputPort>;
+  readonly inputFor?: (envelope: Extract<DispatchEnvelope, { execution: "conversation" }>) => Promise<import("@zhixing-ai/core/loop").RunInputPort>;
   readonly ledger: ConversationAssignmentLedger;
   readonly runtimeFactory: RuntimeFactory;
   readonly preflightEnvironment?: (
@@ -55,7 +55,7 @@ export interface ConversationAssignmentWorkerOptions {
     assignmentId: string,
   ) => Promise<{
     readonly workspaceRoot: string | null;
-    readonly error?: import("@zhixing/core/contracts").AuthorityError;
+    readonly error?: import("@zhixing-ai/core/contracts").AuthorityError;
   }>;
   readonly releasePreflightEnvironment?: (
     manifest: ConversationEnvelope["manifest"],
@@ -64,9 +64,9 @@ export interface ConversationAssignmentWorkerOptions {
   readonly artifacts: ArtifactStore;
   readonly submissionFor: (envelope: ConversationEnvelope) => RunSubmissionPort;
   readonly globalQueryFor?: (
-    capability: import("@zhixing/core/contracts").AuthorityCapability,
+    capability: import("@zhixing-ai/core/contracts").AuthorityCapability,
     anchorEpoch: number,
-  ) => import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
+  ) => import("@zhixing-ai/core/contracts").AssignmentGlobalQueryPort;
   readonly finalizeUsage: (input: {
     readonly assignmentId: string;
     readonly envelope: ConversationEnvelope;
@@ -291,7 +291,7 @@ export class ConversationAssignmentWorker {
       | Parameters<DurableConversationInteractionObserver["drainAssignment"]>[0]
       | undefined;
     let executionError: Error | undefined;
-    let inputPort: import("@zhixing/core/loop").RunInputPort | undefined;
+    let inputPort: import("@zhixing-ai/core/loop").RunInputPort | undefined;
     try {
       const activeStream = this.options.createStream
         ? await this.options.createStream({ assignmentId, ref: streamRef })

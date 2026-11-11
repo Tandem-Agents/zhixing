@@ -1,5 +1,5 @@
-import type { TerminalChannel } from '@zhixing/terminal-ui/channel';
-import type { TerminalMessage } from '@zhixing/terminal-ui/protocol';
+import type { TerminalChannel } from '@zhixing-ai/terminal-ui/channel';
+import type { TerminalMessage } from '@zhixing-ai/terminal-ui/protocol';
 
 export interface TerminalAssetAccount {
   reserve(bucket: 'display' | 'input', bytes: number): Promise<string>;

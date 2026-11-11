@@ -1,7 +1,7 @@
 // 丢失执行的资源退休：宿主中断或执行以待确认结束后，已开始、没有终局、本进程没有执行作用域、
 // 执行端资源租约已明确到期的分配根，在一笔账本协调事务里退休；退休之后执行端不再给它写终局。
 // 经真实账本、真实执行端治理与真实日志；时钟由注入控制，只证明时序合同，不代表真实等过默认租约。
-import type { AssignmentEntry } from "@zhixing/core/contracts";
+import type { AssignmentEntry } from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { AssignmentExecutionResourceRetiredError } from "../assignment-ledger.js";
 import {

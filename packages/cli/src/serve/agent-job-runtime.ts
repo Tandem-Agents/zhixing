@@ -1,14 +1,14 @@
-import { extractText, userMessage } from "@zhixing/core";
-import { type AgentYield } from "@zhixing/core/loop";
-import { type IConfirmationBroker } from "@zhixing/core/confirmation";
-import type { JobExecutionInstruction } from "@zhixing/core/contracts";
+import { extractText, userMessage } from "@zhixing-ai/core";
+import { type AgentYield } from "@zhixing-ai/core/loop";
+import { type IConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import type { JobExecutionInstruction } from "@zhixing-ai/core/contracts";
 import {
   assertKernelRunEvent,
   assertKernelTerminal,
   type AgentRuntime,
   type KernelRunEvent,
   type KernelTerminal,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import type {
   JobRunOutcome,
   JobRuntimePort,

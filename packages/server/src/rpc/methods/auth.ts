@@ -15,8 +15,8 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
-import { SCHEDULE_MANAGEMENT_LIST_QUERY } from "@zhixing/core/scheduler/application";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { SCHEDULE_MANAGEMENT_LIST_QUERY } from "@zhixing-ai/core/scheduler/application";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcErrors } from "../handlers.js";
 import { PROTOCOL_VERSION, SUPPORTED_PROTOCOL_RANGE } from "../protocol.js";

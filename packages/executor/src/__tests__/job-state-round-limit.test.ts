@@ -6,19 +6,19 @@
  */
 import path from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import type { AuthorityCallContext, Signature, TaskDefinition } from "@zhixing/core/contracts";
-import { DeliveryAuthority } from "@zhixing/core/delivery";
-import { protocolBytes, type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing/core/protocol";
-import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
-import { JobJournal, JobReduction } from "@zhixing/owner-kernel/job-assignment";
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import type { AuthorityCallContext, Signature, TaskDefinition } from "@zhixing-ai/core/contracts";
+import { DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import { protocolBytes, type ProtocolSignatureVerifier, type ProtocolSigner } from "@zhixing-ai/core/protocol";
+import { createOwnerDeliveryParticipant } from "@zhixing-ai/owner-kernel/delivery";
+import { JobJournal, JobReduction } from "@zhixing-ai/owner-kernel/job-assignment";
 import {
   JOB_RUN_STATE_PROJECTION_ID,
   JobStateExhausted,
   JobStateRequired,
   registerJobRunStateProjection,
-} from "@zhixing/owner-kernel/job-run-state-index";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/owner-kernel/job-run-state-index";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 
 const TASK_ID = "task-round-limit";

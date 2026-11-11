@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { assertArtifactRef, collectArtifactRefs } from "@zhixing/core/authority";
+import { assertArtifactRef, collectArtifactRefs } from "@zhixing-ai/core/authority";
 import type {
   ArtifactStore,
   AuthorityCommitLog,
@@ -7,7 +7,7 @@ import type {
   DurableProjectionReadContext,
   ProjectionTransactionContext,
   DurableLogCheckpoint,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   GlobalStagedMutation,
   JsonValue,
@@ -15,9 +15,9 @@ import type {
   ScheduleWriteMutation,
   TaskDefinition,
   ArtifactRef,
-} from "@zhixing/core/contracts";
-import { validateTaskDefinition } from "@zhixing/core/protocol";
-import { CommittedMutationMaterializationError } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { validateTaskDefinition } from "@zhixing-ai/core/protocol";
+import { CommittedMutationMaterializationError } from "@zhixing-ai/core/protocol";
 import type {
   GlobalMutationCommitParticipant,
   GlobalMutationCommitRecord,
@@ -237,7 +237,7 @@ export class GlobalMutationCommitCoordinator {
     readonly mutation: GlobalStagedMutation;
     readonly requestId: string;
     readonly targetRevision: number;
-    readonly appliedResult?: import("@zhixing/core/contracts").WorksceneAppliedResult;
+    readonly appliedResult?: import("@zhixing-ai/core/contracts").WorksceneAppliedResult;
   }): Promise<void> {
     if (isScheduleMutation(input.mutation)) {
       await this.#materializeSchedule(
@@ -336,7 +336,7 @@ interface ScheduleDefinitionLocator {
 }
 
 async function reduceScheduleProjection(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<JsonValue>,
+  envelope: import("@zhixing-ai/core/contracts").CommitEnvelope<JsonValue>,
   current: DurableProjectionReadContext,
   artifacts: ArtifactStore,
   checkpoint: DurableLogCheckpoint,
@@ -445,7 +445,7 @@ async function loadTaskDefinition(
 ): Promise<TaskDefinition> {
   if (isArtifactReference(stored)) {
     const bytes = await artifacts.get(
-      stored.ref as unknown as import("@zhixing/core/contracts").ArtifactRef,
+      stored.ref as unknown as import("@zhixing-ai/core/contracts").ArtifactRef,
     );
     return validateTaskDefinition(
       JSON.parse(Buffer.from(bytes).toString("utf8")) as TaskDefinition,
@@ -560,8 +560,8 @@ function isPlainRecord(value: unknown): value is Record<string, JsonValue> {
 }
 
 function conflict(
-  code: import("@zhixing/core/contracts").AuthorityError["code"],
+  code: import("@zhixing-ai/core/contracts").AuthorityError["code"],
   message: string,
-): { readonly t: "conflicted"; readonly error: import("@zhixing/core/contracts").AuthorityError } {
+): { readonly t: "conflicted"; readonly error: import("@zhixing-ai/core/contracts").AuthorityError } {
   return { t: "conflicted", error: { code, message, retryable: false } };
 }

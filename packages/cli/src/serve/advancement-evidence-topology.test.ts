@@ -1,4 +1,4 @@
-import type { EvidenceClientPort, Signature } from "@zhixing/core/contracts";
+import type { EvidenceClientPort, Signature } from "@zhixing-ai/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   AdvancementEvidenceHostBinding,

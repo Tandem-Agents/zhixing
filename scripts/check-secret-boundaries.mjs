@@ -40,7 +40,7 @@ for (const file of productionFiles) {
       errors.push(`${relative} references the retired plaintext credential file`);
     }
   }
-  if (source.includes("@zhixing/secrets") && !relative.startsWith("packages/cli/src/")) {
+  if (source.includes("@zhixing-ai/secrets") && !relative.startsWith("packages/cli/src/")) {
     errors.push(`${relative} bypasses the CLI composition root for SecretStore implementation`);
   }
   if (
@@ -172,7 +172,7 @@ for (const [relative, requiredBoundaries] of dynamicBoundaryFiles) {
   }
 }
 const externalRuntimeDependencies = Object.keys(secretsManifest.dependencies ?? {}).filter(
-  (name) => !name.startsWith("@zhixing/"),
+  (name) => !name.startsWith("@zhixing-ai/"),
 );
 if (externalRuntimeDependencies.length > 0) {
   errors.push(

@@ -24,27 +24,27 @@ import {
   type SecurityPipeline,
   type SessionType,
   type RiskLevel,
-} from "@zhixing/core/security";
-import type { AgentIdentity } from "@zhixing/core/identity";
-import { buildConfirmationRequest } from "@zhixing/core/confirmation";
+} from "@zhixing-ai/core/security";
+import type { AgentIdentity } from "@zhixing-ai/core/identity";
+import { buildConfirmationRequest } from "@zhixing-ai/core/confirmation";
 import {
   type AgentEventMap,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
   type TurnContext,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import {
   type ConfirmationDecision,
   type ConfirmationFallbackStrategy,
   type IConfirmationBroker,
-} from "@zhixing/core/confirmation";
-import { type IEventBus } from "@zhixing/core/events";
+} from "@zhixing-ai/core/confirmation";
+import { type IEventBus } from "@zhixing-ai/core/events";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { AISecuritySteward } from "./ai-steward.js";
 import type { StewardOperation, StewardVerdict } from "./ai-steward.js";
 import { runContextStorage } from "../runtime/run-context.js";
-import { withLogRefs } from "@zhixing/core/logging";
+import { withLogRefs } from "@zhixing-ai/core/logging";
 
 // ─── 错误类型 ───
 

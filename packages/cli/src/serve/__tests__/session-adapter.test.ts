@@ -2,7 +2,7 @@
  * SessionRuntime 适配器测试 — 用 mock AgentRuntime 验证 callback → AsyncGenerator 桥接。
  *
  * adapter 是纯执行体:输入消息由调用方构造(窗口归 ConversationManager,接受协议
- * 与历史投影的测试在 @zhixing/server 侧),此处只锁协议桥接契约——yield 流转、
+ * 与历史投影的测试在 @zhixing-ai/server 侧),此处只锁协议桥接契约——yield 流转、
  * RunResult / 错误透传、参数透传(messages / conversationId / turnIndex / source)、
  * abort 行为、broker 与 dispose 透传。
  *
@@ -12,21 +12,21 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { AgentError, type AgentEventMap, type Message } from "@zhixing/core";
-import { ConfirmationBroker } from "@zhixing/core/confirmation";
-import { getAbortReason, type AbortReason } from "@zhixing/core/interrupt";
-import { type AgentResult, type AgentYield } from "@zhixing/core/loop";
+import { AgentError, type AgentEventMap, type Message } from "@zhixing-ai/core";
+import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
+import { getAbortReason, type AbortReason } from "@zhixing-ai/core/interrupt";
+import { type AgentResult, type AgentYield } from "@zhixing-ai/core/loop";
 import {
   createAssignmentRuntimeAdapter,
   createOwnerRuntimeAdapter,
-} from "@zhixing/runtime-host/session-adapter";
-import type { RunResult } from "@zhixing/core/loop";
+} from "@zhixing-ai/runtime-host/session-adapter";
+import type { RunResult } from "@zhixing-ai/core/loop";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
   KernelRunEvent,
   KernelRunCompletion,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 
 const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
   { type: "text_delta", text: "hello" },
@@ -661,11 +661,11 @@ describe("createOwnerRuntimeAdapter", () => {
 
   it("delivers coalesced output and finality through the real durable stream spool", async () => {
     const { join } = await import("node:path");
-    const { createTempDir } = await import("@zhixing/test-utils");
-    const { FileArtifactStore } = await import("@zhixing/core/authority");
-    const { createGrepTool } = await import("@zhixing/tools-builtin");
+    const { createTempDir } = await import("@zhixing-ai/test-utils");
+    const { FileArtifactStore } = await import("@zhixing-ai/core/authority");
+    const { createGrepTool } = await import("@zhixing-ai/tools-builtin");
     const { writeFile } = await import("node:fs/promises");
-    const { AssignmentStreamSpool, AssignmentStreamWriter } = await import("@zhixing/executor/assignment-stream-spool");
+    const { AssignmentStreamSpool, AssignmentStreamWriter } = await import("@zhixing-ai/executor/assignment-stream-spool");
     const root = await createTempDir("adapter-stream");
     const spool = new AssignmentStreamSpool(join(root, "streams"), new FileArtifactStore(join(root, "artifacts")));
     const writer = await AssignmentStreamWriter.open(spool, "adapter-assignment", { execution: "conversation", conversationId: "adapter-conversation", runId: "adapter-run", ownerEpoch: 1 });
@@ -890,7 +890,7 @@ describe("createOwnerRuntimeAdapter", () => {
       await gen.next();
 
       // parent 触发 abort,带 typed reason
-      const { abortWithReason } = await import("@zhixing/core/interrupt");
+      const { abortWithReason } = await import("@zhixing-ai/core/interrupt");
       abortWithReason(parent, { kind: "user-cancel", source: "rpc", pressedAt: 99 });
 
       let result: RunResult | undefined;

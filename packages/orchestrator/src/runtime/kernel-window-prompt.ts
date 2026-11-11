@@ -1,4 +1,4 @@
-import type { AssignmentGlobalQueryPort } from "@zhixing/core/contracts";
+import type { AssignmentGlobalQueryPort } from "@zhixing-ai/core/contracts";
 import type { DataDrivenSegment } from "./lifecycle.js";
 
 /**

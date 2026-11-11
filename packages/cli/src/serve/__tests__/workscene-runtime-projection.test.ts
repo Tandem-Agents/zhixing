@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildSystemPrompt, CACHE_BOUNDARY } from "@zhixing/orchestrator/runtime";
+import { buildSystemPrompt, CACHE_BOUNDARY } from "@zhixing-ai/orchestrator/runtime";
 import { WORKING_MODE_TEXT } from "../workscene-agent-guidance.js";
 import { ZHIXING_IDENTITY, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
 import {
   WorksceneApplicationError,
   type WorksceneConversationRuntimeProjection,
-} from "@zhixing/core/workscene/application";
+} from "@zhixing-ai/core/workscene/application";
 import {
   createAnchorRuntimeCapabilityCatalog,
   createWorksceneConversationRuntimeFactory,
@@ -32,9 +32,9 @@ function fixture(mcpTools = {
     tools: [{ name: "mcp__alpha__tool" }],
     serverIds: ["alpha", "beta"],
   }),
-} as never, communicationTools: readonly import("@zhixing/core").ToolDefinition[] = [],
-extensionTools: readonly import("@zhixing/core").ToolDefinition[] = [],
-logTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
+} as never, communicationTools: readonly import("@zhixing-ai/core").ToolDefinition[] = [],
+extensionTools: readonly import("@zhixing-ai/core").ToolDefinition[] = [],
+logTools: readonly import("@zhixing-ai/core").ToolDefinition[] = []) {
   const workscenes = {} as never;
   const extraTools = {
     taskListService: {},
@@ -78,7 +78,7 @@ logTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
 
 describe("Workscene product runtime projection", () => {
   it("projects logs into applicable local/remote runtimes while respecting frozen job grants", () => {
-    const tools = ["log_search", "log_read"].map(name => ({ name }) as import("@zhixing/core").ToolDefinition);
+    const tools = ["log_search", "log_read"].map(name => ({ name }) as import("@zhixing-ai/core").ToolDefinition);
     const assembly = fixture(undefined, [], [], tools);
     const manifest = assembly.jobCapabilities();
     for (const projection of [assembly.main(), assembly.scene({ scene: scene().scene, absolutePath: null }), assembly.ephemeral(), assembly.job({ kind: "agent-turn", prompt: "trace" }, manifest)]) {
@@ -90,7 +90,7 @@ describe("Workscene product runtime projection", () => {
     expect(projectConversationCapabilitiesForDevice({ profile: { tools: names, mcpServers: [], providerIds: [] }, ownerDeviceId: "anchor", executorDeviceId: "executor", capabilities: { tools: names, mcpServers: [] } }).tools).toEqual([...names].sort());
   });
   it("provides extension management in main/work and remote projections without widening frozen jobs", () => {
-    const tools = ["extension", "extension_connect"].map(name => ({ name }) as import("@zhixing/core").ToolDefinition);
+    const tools = ["extension", "extension_connect"].map(name => ({ name }) as import("@zhixing-ai/core").ToolDefinition);
     const assembly = fixture(undefined, [], tools);
     for (const tool of tools) {
       expect(assembly.main().runtimeTools.extraTools).toContainEqual(tool);
@@ -104,7 +104,7 @@ describe("Workscene product runtime projection", () => {
       ownerDeviceId: "owner", executorDeviceId: "remote", capabilities: { tools: names, mcpServers: [] } }).tools).toEqual(names);
   });
   it("binds communication in main/work, keeps it portable and excludes jobs", () => {
-    const communication = { name: "conversation" } as import("@zhixing/core").ToolDefinition;
+    const communication = { name: "conversation" } as import("@zhixing-ai/core").ToolDefinition;
     const assembly = fixture(undefined, [communication]);
     expect(assembly.main().runtimeTools.extraTools).toContainEqual(communication);
     expect(assembly.scene({ scene: scene().scene, absolutePath: null }).runtimeTools.extraTools).toContainEqual(communication);

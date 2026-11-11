@@ -1,4 +1,4 @@
-import type { LogRpcClient } from "@zhixing/rpc";
+import type { LogRpcClient } from "@zhixing-ai/rpc";
 import type { CliWriter } from "../screen/index.js";
 
 /** Existing /config surface, applying the same versioned policy action without a second config file. */

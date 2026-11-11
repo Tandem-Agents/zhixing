@@ -8,10 +8,10 @@
  * fire-and-forget 且静默兜错，不影响用户主路径。
  */
 
-import { buildConversationNamerPrompt, parseConversationId, sanitizeConversationName, type Conversation } from "@zhixing/core/conversation";
-import { extractText } from "@zhixing/core";
-import { userMessageOf } from "@zhixing/core/loop";
-import type { TurnCommittedInfo } from "@zhixing/owner-kernel/conversation-manager";
+import { buildConversationNamerPrompt, parseConversationId, sanitizeConversationName, type Conversation } from "@zhixing-ai/core/conversation";
+import { extractText } from "@zhixing-ai/core";
+import { userMessageOf } from "@zhixing-ai/core/loop";
+import type { TurnCommittedInfo } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 /** 自动命名所需的 meta 仓窄面 */
 export interface NamerConversationRepo {

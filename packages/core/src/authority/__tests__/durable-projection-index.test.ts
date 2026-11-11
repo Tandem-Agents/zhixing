@@ -1,7 +1,7 @@
 import { open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { CommitEnvelope, JsonValue } from "../../contracts/index.js";
 import {

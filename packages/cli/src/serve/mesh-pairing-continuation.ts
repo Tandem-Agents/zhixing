@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { canonicalize } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import {
   acquireFileLock,
   ensureDurableDirectory,
   syncDirectory,
-} from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/persistence";
 import {
   projectMeshPairingContinuationRepository,
   type MeshPairingContinuationRepository,

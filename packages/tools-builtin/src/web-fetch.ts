@@ -2,7 +2,7 @@
  * WebFetch 工具 — 抓取 URL 内容,可选用 light LLM 蒸馏。
  *
  * 设计要点:
- * - 编排型工具: 只串联 @zhixing/network(safeFetch/sanitize)、processContent(charset+turndown)、
+ * - 编排型工具: 只串联 @zhixing-ai/network(safeFetch/sanitize)、processContent(charset+turndown)、
  *   ctx.llm.light(distill);自身不发明任何能力
  * - 21A 自描述: boundaries + permissionArgumentKey 让 SecurityPipeline 自动接入
  * - graceful degrade: !ctx.llm || !prompt 时退到 raw markdown(单测/automation/无 light 配置场景)
@@ -14,8 +14,8 @@ import {
   type ToolExecutionContext,
   type ToolResult,
   userMessage,
-} from "@zhixing/core";
-import type { FetchError, NetworkPolicy } from "@zhixing/network";
+} from "@zhixing-ai/core";
+import type { FetchError, NetworkPolicy } from "@zhixing-ai/network";
 import {
   DISTILL_SYSTEM_PROMPT,
   buildDistillPrompt,
@@ -185,7 +185,7 @@ async function fetchAndProcess(
   }
 
   // 网络出口栈（含 undici）只在真正抓取时加载，不进入宿主启动的模块图。
-  const { safeFetch, sanitizeUntrustedText } = await import("@zhixing/network");
+  const { safeFetch, sanitizeUntrustedText } = await import("@zhixing-ai/network");
   const result = await safeFetch(
     parsed.url,
     { ...defaultWebFetchPolicy, proxy },

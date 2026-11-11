@@ -6,22 +6,22 @@ import {
   FileAuthorityCommitLog,
   type DurableLogCheckpoint,
   type VerifiedAnchorTenure,
-} from "@zhixing/core/authority";
-import { ProtocolVerificationIdentityCache, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import type { DeviceIdentity, SecretStorePort } from "@zhixing/core/contracts";
-import type { LogRecordPort } from "@zhixing/core/logging";
-import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import { ProtocolVerificationIdentityCache, type ProtocolSignatureVerifier } from "@zhixing-ai/core/protocol";
+import type { DeviceIdentity, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { LogRecordPort } from "@zhixing-ai/core/logging";
+import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 import { bindConversationAnchorTenure } from './conversation-anchor-tenure.js';
 import {
   CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readTrustIdentity, readCurrentAnchorTenure, readCurrentTrustMember,
   type CurrentTrustProjection,
-} from "@zhixing/mesh/trust-chain";
+} from "@zhixing-ai/mesh/trust-chain";
 import { createLiveTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import { loadAuthorityCacheIntegrity } from "./authority-cache-integrity.js";
 import { artifactReadCapacity, projectionReadCapacity } from "./artifact-read-capacity.js";
 import { loadExistingDeviceKey } from "./mesh-device-key.js";
 import { executorIdForDevice } from "./executor-identity.js";
-import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
 import { createHomeAssetLifecycle, type HomeAssetLifecycle } from "./home-asset-lifecycle.js";
 
 export interface HomeAuthoritySourcesOptions {
@@ -238,14 +238,14 @@ export class HomeAuthoritySources {
    */
   async #registerDefinitions(localExecutorId: string | undefined): Promise<void> {
     const [core, owner, executorDefinitions, mesh, surfaceAssets, protocol, extensions, checkpoints] = await Promise.all([
-      import("@zhixing/core/authority/startup-definitions"),
-      import("@zhixing/owner-kernel/startup-definitions"),
-      import("@zhixing/executor/startup-definitions"),
-      import("@zhixing/mesh/credential-exposure"),
+      import("@zhixing-ai/core/authority/startup-definitions"),
+      import("@zhixing-ai/owner-kernel/startup-definitions"),
+      import("@zhixing-ai/executor/startup-definitions"),
+      import("@zhixing-ai/mesh/credential-exposure"),
       import("./surface-asset-authority.js"),
-      import("@zhixing/core/protocol"),
-      import("@zhixing/core/extensions/application"),
-      import("@zhixing/mesh/checkpoint-service"),
+      import("@zhixing-ai/core/protocol"),
+      import("@zhixing-ai/core/extensions/application"),
+      import("@zhixing-ai/mesh/checkpoint-service"),
     ]);
     const { registerDeviceLifecycleProjection, registerSkillAuthorityProjection, registerWorksceneAuthorityProjection,
       registerRubricAuthorityProjection, registerWorksceneActivityProjection, registerWorkspaceBindingProjection,

@@ -49,7 +49,7 @@ export function verifyCheckpointBridgeArtifact(packageRoot: string, target: Chec
     const manifest = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string };
     verifyArtifact(binary, descriptor, manifest.version, target);
   } catch (cause) {
-    throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 @zhixing/cli`, { cause });
+    throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 zhixing`, { cause });
   }
   return file;
 }
@@ -73,7 +73,7 @@ export async function verifyCheckpointBridgeArtifactAsync(packageRoot: string, t
       (JSON.parse(manifest.value.toString('utf8')) as { version: string }).version, target);
     return file;
   } catch (cause) {
-    throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 @zhixing/cli`, { cause });
+    throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 zhixing`, { cause });
   }
 }
 function verifyArtifact(binary: Buffer, descriptor: unknown, version: string, target: CheckpointBridgeTarget): void {

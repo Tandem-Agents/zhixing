@@ -19,7 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { PermissionStore } from "../permission-store.js";
 import type {
   PermissionContextId,

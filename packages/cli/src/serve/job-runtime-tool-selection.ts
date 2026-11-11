@@ -1,10 +1,10 @@
-import type { ToolDefinition } from "@zhixing/core";
-import type { JobExecutionInstruction } from "@zhixing/core/contracts";
-import type { AgentRoleProfile } from "@zhixing/orchestrator/profile";
+import type { ToolDefinition } from "@zhixing-ai/core";
+import type { JobExecutionInstruction } from "@zhixing-ai/core/contracts";
+import type { AgentRoleProfile } from "@zhixing-ai/orchestrator/profile";
 import {
   createRuntimeToolProjection,
   type RuntimeToolProjection,
-} from "@zhixing/runtime-host/conversation-runtime-projection";
+} from "@zhixing-ai/runtime-host/conversation-runtime-projection";
 
 export interface JobRuntimeToolSelection {
   readonly profile: Readonly<AgentRoleProfile>;
@@ -13,7 +13,7 @@ export interface JobRuntimeToolSelection {
 }
 
 export type JobRuntimeCapabilities = Pick<
-  import("@zhixing/core/types").RuntimeExecutionProfile,
+  import("@zhixing-ai/core/types").RuntimeExecutionProfile,
   "tools" | "mcpServers"
 >;
 

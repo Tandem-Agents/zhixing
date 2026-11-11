@@ -14,8 +14,8 @@
  * 共享同一 buffer,直到下一个 turn_complete 触发刷新。
  */
 
-import type { AgentYield } from "@zhixing/core/loop";
-import { toolResultDisposition, type Message, type ToolResultBlock } from "@zhixing/core/types";
+import type { AgentYield } from "@zhixing-ai/core/loop";
+import { toolResultDisposition, type Message, type ToolResultBlock } from "@zhixing-ai/core/types";
 
 export function trackMessages(
   event: AgentYield,

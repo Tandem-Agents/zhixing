@@ -14,11 +14,11 @@ import { describe, it, expect, vi } from "vitest";
 import {
   ConfirmationBroker,
   type ConfirmationRequest,
-} from "@zhixing/core/confirmation";
-import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+} from "@zhixing-ai/core/confirmation";
+import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import type { RpcConnection } from "../connection.js";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { createConfirmationBridge } from "@zhixing/rpc";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { createConfirmationBridge } from "@zhixing-ai/rpc";
 
 // ─── 测试辅助 ───
 

@@ -1,5 +1,5 @@
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import {
   decodePairedCheckpointResult,
   MeshPairedCheckpointTransport,
@@ -7,7 +7,7 @@ import {
   type PairedCheckpointCommand,
   type PairedCheckpointResult,
   type PairedCheckpointTransport,
-} from "@zhixing/mesh/paired-checkpoint-target";
+} from "@zhixing-ai/mesh/paired-checkpoint-target";
 import {
   type BorrowedPairedCheckpointTargetSessions,
   type OwnedPairedCheckpointInventorySession,

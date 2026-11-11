@@ -2,7 +2,7 @@ import { expect, it, onTestFinished, vi } from "vitest";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { acquireFileLock } from "../../persistence/file-lock.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import { FileArtifactStore } from "../artifact-store.js";

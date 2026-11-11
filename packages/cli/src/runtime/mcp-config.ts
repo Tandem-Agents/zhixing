@@ -1,7 +1,7 @@
 /**
  * config.mcp → McpServerSpec[] 的装配层桥接。
  *
- * 配置 schema 归 providers、MCP 连接能力归 @zhixing/mcp，二者由装配层（cli）桥接 ——
+ * 配置 schema 归 providers、MCP 连接能力归 @zhixing-ai/mcp，二者由装配层（cli）桥接 ——
  * 与 setupChannels 读 config.messaging 装配 channel 实例同款分工，能力包不反向依赖
  * 配置层。
  *
@@ -9,12 +9,12 @@
  * `mcp__<server>__<tool>` 三段解析的字符）—— 后者从源头挡掉命名错位（fail-safe）。
  */
 
-import { isValidServerId, type McpServerSpec } from "@zhixing/mcp";
+import { isValidServerId, type McpServerSpec } from "@zhixing-ai/mcp";
 import type {
   McpCredentialProjection,
   McpConfig,
   McpServerConfigEntry,
-} from "@zhixing/providers";
+} from "@zhixing-ai/providers";
 
 /**
  * config.mcp（决策层）+ credentials.mcp（内容层）→ 连接规格。

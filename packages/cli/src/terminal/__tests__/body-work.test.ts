@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import type { DeviceCapacityArbiterPort } from '@zhixing-ai/core/resources';
 import { TerminalBodyWork } from '../body-work.js';
 
 it('holds one accounted parser workspace through actual consumer acknowledgement and serializes cold/live users', async () => {

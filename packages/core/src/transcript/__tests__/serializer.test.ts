@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { recoverOrphanTmp, writeAtomic } from "../serializer.js";
 
 let dir: string;

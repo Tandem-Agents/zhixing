@@ -1,4 +1,4 @@
-import { runWithMaintenanceUrgency } from "@zhixing/core/resources";
+import { runWithMaintenanceUrgency } from "@zhixing-ai/core/resources";
 
 // 授权日志投影的空闲维护：就绪后先留出启动窗口，此后按周期在前台安静时推进
 const AUTHORITY_IDLE_FIRST_DELAY_MS = 5_000;

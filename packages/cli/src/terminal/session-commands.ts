@@ -1,7 +1,7 @@
-import { NO_MATCH_HINT, type CommandDef, type ArgChoiceProvider } from '@zhixing/core/typeahead';
-import type { PostTurnControlOutcome } from '@zhixing/core/types';
-import { ADVANCEMENT_PROPOSED_NOTICE, describeAdvancementProposalStage } from '@zhixing/core/advancement/proposal-messages';
-import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
+import { NO_MATCH_HINT, type CommandDef, type ArgChoiceProvider } from '@zhixing-ai/core/typeahead';
+import type { PostTurnControlOutcome } from '@zhixing-ai/core/types';
+import { ADVANCEMENT_PROPOSED_NOTICE, describeAdvancementProposalStage } from '@zhixing-ai/core/advancement/proposal-messages';
+import type { SessionAdvancementStateSnapshot } from '@zhixing-ai/rpc';
 import type { ActiveConversation, ConversationController, TurnOutcome } from '../runtime/conversation-controller.js';
 import type { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
@@ -27,7 +27,7 @@ export interface TerminalTurnOutcome {
   readonly bodyPending?: true;
   readonly control?: { readonly navigation?: Navigation; readonly handedOff: boolean; readonly conflict: boolean; readonly advancementProposal?: true };
 }
-export function projectCommittedTerminalOutcome(summary: import('@zhixing/core/contracts').ConversationCommitSummary): TerminalTurnOutcome {
+export function projectCommittedTerminalOutcome(summary: import('@zhixing-ai/core/contracts').ConversationCommitSummary): TerminalTurnOutcome {
   // 提议运行结束不是任务完成：状态取推进领域的“已提出推进”
   return { reason: 'completed', message: summary.advancementProposal ? ADVANCEMENT_PROPOSED_NOTICE : '本次运行已提交。', bodyPending: true,
     control: { navigation: summary.navigation, handedOff: summary.handedOff, conflict: summary.conflict,
@@ -208,7 +208,7 @@ export class TerminalSessionCommands {
     await this.navigate({ kind: 'enter', sceneId: target.id });
   }
   async #resume(argument: string, scope: { controller: ConversationController<TerminalTurnOutcome>; current(switched?: boolean): void }): Promise<void> {
-    const pages: Array<import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
+    const pages: Array<import('@zhixing-ai/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
     for (;;) {
       const page = await scope.controller.listConversationPage({ limit: 20, after: pages.at(-1), query: argument.trim() || undefined }); scope.current();
       const exact = argument.trim() && page.conversations.find(item => item.conversationId === argument.trim());

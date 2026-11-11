@@ -1,8 +1,8 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import type { AdvancementControlEvent } from "@zhixing/core/advancement";
-import { localConversationId } from "@zhixing/core/conversation";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { AdvancementControlEvent } from "@zhixing-ai/core/advancement";
+import { localConversationId } from "@zhixing-ai/core/conversation";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it } from "vitest";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import {

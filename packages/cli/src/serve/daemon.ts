@@ -15,11 +15,11 @@
 import { spawn, type SpawnOptions, type ChildProcess } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { getZhixingHome } from "@zhixing/core/paths";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import type { EventEmitter } from 'node:events';
-import { logFailureEvidence, type LogDraft, type LogRecordPort } from "@zhixing/core/logging";
+import { logFailureEvidence, type LogDraft, type LogRecordPort } from "@zhixing-ai/core/logging";
 import chalk from "chalk";
 import { deviceRestrictionNotice, readDeviceRestriction, restrictionOfLaunch, retrievingHostAlive, type DeviceRestriction, type DeviceRestrictionMarker, type ProcessBirthReader } from "./device-restriction.js";
 import {
@@ -31,7 +31,7 @@ import {
   getDefaultReadyMarkerPath,
   resolveProcessStartTime,
   type PidFileContents,
-} from "@zhixing/server/client";
+} from "@zhixing-ai/server/client";
 import { readPlatformProcessBirth } from "../platform/secret-platform.js";
 import {
   resolveSelfExec,

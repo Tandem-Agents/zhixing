@@ -8,11 +8,11 @@ import {
   mcpProgressText,
   runMcpDiscovery,
   type McpDiscoveryDeps,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 import type {
   McpManagementSearchResult,
   McpManagementSourceResult,
-} from "@zhixing/core/mcp-management";
+} from "@zhixing-ai/core/mcp-management";
 
 function pkg(
   name: string,

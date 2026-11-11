@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { LogApplication } from "@zhixing/core/logging/application";
+import { LogApplication } from "@zhixing-ai/core/logging/application";
 import { createLocalLogStore } from "../runtime.js";
 
 // No timer, IPC or other application handle may keep this process alive for close().

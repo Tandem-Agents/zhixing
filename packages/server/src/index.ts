@@ -1,5 +1,5 @@
 /**
- * @zhixing/server — 知行常驻服务网关
+ * @zhixing-ai/server — 知行常驻服务网关
  *
  * 只导出网关、注册面与组合 adapter；领域内核和传输合同由各自包导出。
  */

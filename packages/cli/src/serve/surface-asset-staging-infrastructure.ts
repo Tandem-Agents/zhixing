@@ -6,9 +6,9 @@ import {
   projectSurfaceAssetStagingPorts,
   type MutableArtifactStore,
   type SurfaceAssetStagingPorts,
-} from "@zhixing/core/authority";
-import { MAX_SURFACE_ASSET_BYTES } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+} from "@zhixing-ai/core/authority";
+import { MAX_SURFACE_ASSET_BYTES } from "@zhixing-ai/core/contracts";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
 
 export interface SurfaceAssetStagingInfrastructure
   extends SurfaceAssetStagingPorts {

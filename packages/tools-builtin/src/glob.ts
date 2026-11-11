@@ -14,7 +14,7 @@
 import { glob } from "glob/raw";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import type { ToolDefinition, ToolResult } from "@zhixing-ai/core";
 import { resolveToolPath } from "./utils.js";
 
 const MAX_RESULTS = 200;

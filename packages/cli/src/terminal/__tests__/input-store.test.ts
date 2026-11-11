@@ -1,15 +1,15 @@
-import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias } from '@zhixing-ai/terminal-ui/protocol';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
+import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing-ai/core/resources';
 import { TerminalInputStore } from '../input-store.js';
 import { TerminalInputHistoryReader } from '../input-history.js';
 import { TerminalInputSession } from '../../../../terminal-ui/src/input-session.js';
 import type { TerminalAction } from '../../../../terminal-ui/src/protocol.js';
-import { createTempDir } from '@zhixing/test-utils';
+import { createTempDir } from '@zhixing-ai/test-utils';
 const stores: TerminalInputStore[] = [];
 afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();

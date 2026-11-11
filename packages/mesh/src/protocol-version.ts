@@ -1,5 +1,5 @@
-import type { ProtocolVersion } from "@zhixing/core/contracts";
-import { validateProtocolVersion } from "@zhixing/core/protocol";
+import type { ProtocolVersion } from "@zhixing-ai/core/contracts";
+import { validateProtocolVersion } from "@zhixing-ai/core/protocol";
 
 /** Inclusive range of monotonically increasing mesh protocol versions. */
 export interface MeshProtocolRange {

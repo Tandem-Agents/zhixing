@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { advancementProposalExecutionInput, type AdvancementSession } from "@zhixing/core/advancement";
-import type { LifecycleBeforeRunContext } from "@zhixing/orchestrator/runtime";
+import { advancementProposalExecutionInput, type AdvancementSession } from "@zhixing-ai/core/advancement";
+import type { LifecycleBeforeRunContext } from "@zhixing-ai/orchestrator/runtime";
 import { createAdvancementAcceptanceLifecycle } from "../advancement-acceptance-lifecycle.js";
 
 function activeSession(id = "session-1", criterion = "测试通过"): AdvancementSession {

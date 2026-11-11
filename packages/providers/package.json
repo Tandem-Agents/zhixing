@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/providers",
+  "name": "@zhixing-ai/providers",
   "version": "0.1.0",
   "description": "知行 LLM Provider 层 — 协议适配器、预设注册表、配置解析",
   "type": "module",
@@ -24,13 +24,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.85.0",
-    "@zhixing/core": "workspace:*",
+    "@zhixing-ai/core": "workspace:*",
     "jsonc-parser": "3.3.1",
     "openai": "6.33.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@zhixing/test-utils": "workspace:*",
+    "@zhixing-ai/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

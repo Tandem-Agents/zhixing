@@ -1,12 +1,12 @@
 /** task_list Agent binding: schema, validation and product presentation only. */
 
-import type { TaskItem, TaskListState } from "@zhixing/core/conversation";
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import type { TaskItem, TaskListState } from "@zhixing-ai/core/conversation";
+import type { ToolDefinition, ToolResult } from "@zhixing-ai/core";
 import {
   ConversationApplicationError,
   type ConversationTaskListToolApplication,
   type ConversationTaskListToolItemDraft,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 
 /** Agent binding: schema/presentation only; Conversation owns the command. */
 export function createTaskListTool(

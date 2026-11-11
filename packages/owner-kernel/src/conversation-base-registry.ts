@@ -1,7 +1,7 @@
-﻿import type { ArtifactStore, AuthorityCommitLog, DurableProjectionReadContext, DurableProjectionSource, DurableLogCheckpoint } from '@zhixing/core/authority';
-import { assertArtifactRef, createDurableProjectionOverlay, readDurableProjectionKeys, AuthorityPreparationRequired } from '@zhixing/core/authority';
-import type { ArtifactRef, JsonValue, LogicalRecord, TransferRecord } from '@zhixing/core/contracts';
-import { canonicalize, protocolDigest, reduceConversationTransfer, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
+﻿import type { ArtifactStore, AuthorityCommitLog, DurableProjectionReadContext, DurableProjectionSource, DurableLogCheckpoint } from '@zhixing-ai/core/authority';
+import { assertArtifactRef, createDurableProjectionOverlay, readDurableProjectionKeys, AuthorityPreparationRequired } from '@zhixing-ai/core/authority';
+import type { ArtifactRef, JsonValue, LogicalRecord, TransferRecord } from '@zhixing-ai/core/contracts';
+import { canonicalize, protocolDigest, reduceConversationTransfer, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { ConversationBaseSource, isConversationSourceEvidenceError } from './conversation-base-source.js';
 import { conversationStateKeyHash } from './conversation-state-key.js';
 import { decisionMigrationRequired, decisionPartitionReady } from './conversation-decision-partition-keys.js';

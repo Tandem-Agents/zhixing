@@ -1,5 +1,5 @@
 {
-  "name": "@zhixing/rpc",
+  "name": "@zhixing-ai/rpc",
   "version": "0.1.0",
   "description": "知行 RPC 投影层 — 会话流、事件组播与确认桥接",
   "type": "module",
@@ -54,8 +54,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*",
-    "@zhixing/owner-kernel": "workspace:*"
+    "@zhixing-ai/core": "workspace:*",
+    "@zhixing-ai/owner-kernel": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

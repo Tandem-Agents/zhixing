@@ -4,7 +4,7 @@ import type {
   InteractionDisplay,
   StreamConsumerAuth,
   StreamFrame,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   streamConsumerKey,
@@ -16,11 +16,11 @@ import {
   validateStreamSubscribe,
   type StreamVerifierCheckpoint,
   type InlineInteractionDisplay,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   StreamConsumerDegradedError,
   StreamHistoryUnavailableError,
-} from "@zhixing/executor/assignment-stream-spool";
+} from "@zhixing-ai/executor/assignment-stream-spool";
 import type { AssignmentStreamClient } from "./assignment-stream-mesh.js";
 
 export type AssignmentStreamPath = "direct" | "relay";

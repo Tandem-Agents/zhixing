@@ -12,8 +12,8 @@ import {
   type ServerStateFile,
   type ServerStateSnapshot,
   type ZhixingServerInstance,
-} from "@zhixing/server";
-import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
+} from "@zhixing-ai/server";
+import type { AuthorityCheckpointOwnerPort } from "@zhixing-ai/mesh/checkpoint-owner";
 import type { StartupCleanupHandle, StartupRollback } from "./startup-rollback.js";
 
 export const ANCHOR_HOST_SHELL_RESOURCE_DESCRIPTORS = [

@@ -1,7 +1,7 @@
 import path from "node:path";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
-import { assertPhysicallyIndependentDirectory, FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import type { CheckpointPackage } from "@zhixing-ai/mesh/checkpoint";
+import { assertPhysicallyIndependentDirectory, FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";
 import {
   type InventoryPublishedRecoveryCheckpointTarget,
   type PublishedCheckpointTargetInfrastructure,

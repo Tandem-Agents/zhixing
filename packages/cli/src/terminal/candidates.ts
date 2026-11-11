@@ -1,6 +1,6 @@
-import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type InlineActionSupport, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing/core/typeahead';
+import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type InlineActionSupport, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing-ai/core/typeahead';
 import type { TerminalTrustCandidates } from './trust-candidates.js';
-import { normalizeLeadingSlashAlias, type TerminalCandidates } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias, type TerminalCandidates } from '@zhixing-ai/terminal-ui/protocol';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
 

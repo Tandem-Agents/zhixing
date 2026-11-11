@@ -16,7 +16,7 @@ import type {
   SchedulerControlSource,
   TaskPatch,
   TaskSpec,
-} from "@zhixing/core/scheduler";
+} from "@zhixing-ai/core/scheduler";
 import {
   SCHEDULE_MANAGEMENT_CREATE_COMMAND,
   SCHEDULE_MANAGEMENT_DELETE_COMMAND,
@@ -26,8 +26,8 @@ import {
   SCHEDULE_MANUAL_RUN_COMMAND,
   ScheduleManagementApplicationError,
   type ScheduleManagementOperation,
-} from "@zhixing/core/scheduler/application";
-import type { ProductApiDispatcher } from "@zhixing/core/product-api";
+} from "@zhixing-ai/core/scheduler/application";
+import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";

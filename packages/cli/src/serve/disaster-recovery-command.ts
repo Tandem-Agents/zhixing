@@ -1,10 +1,10 @@
 import type { RuntimeLogContext } from "../logging/runtime.js";
-import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing-ai/core/authority";
 import { handoffLogging } from "../logging/handoff.js";
 import path from "node:path";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../runtime/extensions/channel-readiness.js";
-import { getZhixingHome } from "@zhixing/core/paths";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
 import {
   BackupRecoveryDisasterAdmissionApplicationService,
   BackupRecoveryDisasterAdmissionError,
@@ -13,28 +13,28 @@ import {
   type BackupRecoveryDisasterCompletion,
   type BackupRecoveryDisasterAdmissionTargetSelection,
   validateBackupRecoveryDisasterAdmissionSelection,
-} from "@zhixing/core/backup-recovery/application";
+} from "@zhixing-ai/core/backup-recovery/application";
 import type {
   DeviceIdentity,
   DisasterRecoveryCommand,
   MeshRoleBootConfig,
   SecretStorePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   protocolDigest,
   createSignedDisasterRecoveryAbort,
   createSignedDisasterRecoveryCommand,
-} from "@zhixing/core/protocol";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import { createPlatformSecretStore } from "@zhixing/secrets";
+} from "@zhixing-ai/core/protocol";
+import type { StorageMaintenanceGovernorPort } from "@zhixing-ai/core/resources";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import {
   loadConfig,
   loadConfigurationSnapshot,
   type CredentialStoreCoordinator,
-} from "@zhixing/providers";
-import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
-import { keyIdForPublicKey, type RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/providers";
+import type { CheckpointPackage } from "@zhixing-ai/mesh/checkpoint";
+import { keyIdForPublicKey, type RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import { createStdoutWriter } from "../screen/index.js";
 import {
   createPlannedAnchorReadinessCoordinator,
@@ -206,7 +206,7 @@ async function admitDisasterRecoveryCandidate(
       readRecoveryRoot: async () => {
         signal.throwIfAborted();
         context.writeLine("请输入恢复包以验证备份；输入内容不会显示。");
-        const recoveryPackages = await import("@zhixing/mesh/recovery-package");
+        const recoveryPackages = await import("@zhixing-ai/mesh/recovery-package");
         const encoded = options.readRecoveryPackage ? await options.readRecoveryPackage() : undefined;
         signal.throwIfAborted();
         if (encoded !== undefined) assertRecoveryPackageInputLimit(encoded);

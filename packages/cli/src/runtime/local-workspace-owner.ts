@@ -3,8 +3,8 @@ import { mkdir, open, readFile, rename, rm, chmod } from "node:fs/promises";
 import net, { type Server, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { acquireFileLock, captureFileLockProcessIdentity } from "@zhixing/core/persistence";
-import { canonicalize } from "@zhixing/core/protocol";
+import { acquireFileLock, captureFileLockProcessIdentity } from "@zhixing-ai/core/persistence";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 
 const TRANSPORT_VERSION = 1;
 

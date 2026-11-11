@@ -1,7 +1,7 @@
 import type {
   ExecutionAssetBundle,
   TrustRuleSnapshot,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   type ExecutorCapabilitySnapshot,
@@ -9,9 +9,9 @@ import {
   validateExecutorCapabilitySnapshot,
   validateTrustRuleSnapshot,
   type ProtocolSignatureVerifier,
-} from "@zhixing/core/protocol";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
-import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
+} from "@zhixing-ai/core/protocol";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
+import type { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 
 const EXECUTION_SNAPSHOT_SERVICE = "execution.snapshot";
 

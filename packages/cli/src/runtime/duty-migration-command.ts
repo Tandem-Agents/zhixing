@@ -1,4 +1,4 @@
-import { getZhixingHome } from "@zhixing/core/paths";
+import { getZhixingHome } from "@zhixing-ai/core/paths";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import {

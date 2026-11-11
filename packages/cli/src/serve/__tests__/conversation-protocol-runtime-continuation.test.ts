@@ -1,22 +1,22 @@
 // 拆分自 conversation-protocol-runtime.test.ts（按主题分文件以便并行执行）：continuation。
-import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
-import { userTurnInputFromText, type Message } from "@zhixing/core";
-import { protocolDigest } from "@zhixing/core/protocol";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
-import { createConversationControlEnvelope } from "@zhixing/owner-kernel/control-admission";
-import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import type { PostTurnControlOutcome } from "@zhixing/core/types";
-import { createTempDir } from "@zhixing/test-utils";
+import { StorageMaintenanceAdmissionError } from "@zhixing-ai/core/resources";
+import { userTurnInputFromText, type Message } from "@zhixing-ai/core";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import { ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { createConversationControlEnvelope } from "@zhixing-ai/owner-kernel/control-admission";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import type { PostTurnControlOutcome } from "@zhixing-ai/core/types";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { expect, it, vi, onTestFinished } from "vitest";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 import { FileMeshBootstrapStore } from "../mesh-bootstrap-store.js";
 import { registerConversationReadProjection } from "../../../../owner-kernel/src/conversation-read-index.js";
 import { stagingArea } from "../../../../owner-kernel/src/__tests__/imported-base-fixture.js";
 import { ConversationTransferTarget, selectConversationAuthorityRecords, loadCommittedConversationBase, listCommittedConversationIds,
-  listCommittedConversationTransferIds } from "@zhixing/owner-kernel/conversation-transfer";
-import { canonicalize, prepareConversationTransferManifest, createSignedSourceFreezeProof } from "@zhixing/core/protocol";
+  listCommittedConversationTransferIds } from "@zhixing-ai/owner-kernel/conversation-transfer";
+import { canonicalize, prepareConversationTransferManifest, createSignedSourceFreezeProof } from "@zhixing-ai/core/protocol";
 import { createLocalOwnerAssemblyFixture, fixtureLocalOwnerRuntime } from "./local-owner-assembly-fixture.js";
 import { TEST_RUNTIME_AUTHORITY_FACTS, setupAuthorityRuntime, createProtocol, registerActiveConversation, expectSettled, MemorySecretStore, worksceneContinuationHarness } from "./conversation-protocol-runtime-fixture.js";
 

@@ -1,12 +1,12 @@
 // 可用之后的消息无关准备（prepareAfterUsable）的单一准备责任：在真实准备入口上加可控阻塞，证明
 // 准备卡住时发送照常完成、同会话在途时复用同一份、换会话后旧准备不再起新步、停止后不再起新工作。
 import { afterEach, expect, it, vi } from "vitest";
-import type { Message } from "@zhixing/core";
-import { ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
-import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import type { SessionRuntime } from "@zhixing/owner-kernel/types";
-import { projectSessionTurn } from "@zhixing/rpc";
-import { createTempDir } from "@zhixing/test-utils";
+import type { Message } from "@zhixing-ai/core";
+import { ConversationRunJournal } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
+import type { SessionRuntime } from "@zhixing-ai/owner-kernel/types";
+import { projectSessionTurn } from "@zhixing-ai/rpc";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
 import { executorIdForDevice } from "../executor-identity.js";
 import { loadOrCreateDeviceKey } from "../mesh-device-key.js";

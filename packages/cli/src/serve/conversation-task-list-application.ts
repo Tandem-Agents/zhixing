@@ -1,18 +1,18 @@
 import { createHash } from "node:crypto";
-import type { SessionStatePort, TaskListState } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import type { SessionStatePort, TaskListState } from "@zhixing-ai/core/contracts";
+import { canonicalize } from "@zhixing-ai/core/protocol";
 import type {
   ConversationTaskListMutationDecision,
   ConversationTaskListPort,
-} from "@zhixing/core/conversation/application";
+} from "@zhixing-ai/core/conversation/application";
 import {
   ConversationApplicationError,
   ConversationTaskListToolApplicationService,
   type ConversationTaskListToolApplication,
   type TaskListService,
-} from "@zhixing/core/conversation/application";
-import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+} from "@zhixing-ai/core/conversation/application";
+import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
+import type { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 
 /**
  * Anchor Correctness adapter for the agent-facing replacement command. The

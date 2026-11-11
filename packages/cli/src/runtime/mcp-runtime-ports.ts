@@ -1,4 +1,4 @@
-import type { ToolDefinition } from "@zhixing/core";
+import type { ToolDefinition } from "@zhixing-ai/core";
 
 /** A fresh, immutable view of the MCP tools available to one runtime issue. */
 export interface McpRuntimeToolProjection {
@@ -27,7 +27,7 @@ export interface McpRuntimeStatusProjectionPort {
 /** Host-owned connection lifecycle. Runtime consumers never receive this port. */
 export interface McpRuntimeLifecyclePort {
   /** Add-only activation preserves every existing connection and frozen run tool set. */
-  add?(draft: import("@zhixing/core/mcp-management").McpManagementServerDraft): Promise<void>;
+  add?(draft: import("@zhixing-ai/core/mcp-management").McpManagementServerDraft): Promise<void>;
   connect(): Promise<void>;
   close(): Promise<void>;
 }

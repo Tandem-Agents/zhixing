@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
+import { currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing-ai/core/resources";
 import {
   artifactJsonIndex,
   AuthorityStorageError,
@@ -16,7 +16,7 @@ import {
   type ProjectionCursor,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
   ChannelResponderRef,
@@ -28,7 +28,7 @@ import type {
   IngressContext,
   JsonValue,
   LogicalRecord,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
   assertProtocolIdentifier,
@@ -39,12 +39,12 @@ import {
   validateCancelBatchControlResultBody,
   validateIngressContext,
   validateAuthorityError,
-} from "@zhixing/core/protocol";
-import { SerialTaskQueue } from "@zhixing/core/persistence";
+} from "@zhixing-ai/core/protocol";
+import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import {
   assertDeliveryEnvelopeCompanions,
   deliveryResolutionFactBindsRequest,
-} from "@zhixing/core/delivery";
+} from "@zhixing-ai/core/delivery";
 
 const MAX_AUTHORITY_PROJECTION_CACHES = 8;
 export const CONTROL_PROJECTION_ID = "control-admission-v1";
@@ -517,7 +517,7 @@ export class ControlAdmissionJournal {
   }
 
   /** Read the original input outcome without replaying input or admission effects. */
-  async inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing/core/conversation/application').ConversationInputReceipt> {
+  async inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing-ai/core/conversation/application').ConversationInputReceipt> {
     const requestId = `input:${protocolDigest("ConversationInputIdentity", 1, { surfacePrincipal: input.surfacePrincipal, ingressId: input.turnId })}`;
     if (!this.#recovered) await this.#control.checkpoints();
     return this.#operations.run(async () => {
@@ -571,7 +571,7 @@ export class ControlAdmissionJournal {
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
-      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+      commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     ) => State | Promise<State>;
     readonly decide: (
       state: State,
@@ -582,7 +582,7 @@ export class ControlAdmissionJournal {
     readonly readProjectionIds?: readonly string[];
     readonly observe?: (
       record: LogicalRecord<unknown>,
-      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+      commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     ) => void | Promise<void>;
     readonly prepareCompanions?: (
       state: State,
@@ -591,7 +591,7 @@ export class ControlAdmissionJournal {
     ) => readonly LogicalRecord<unknown>[] | Promise<readonly LogicalRecord<unknown>[]>;
     readonly onCommitted?: (
       state: State,
-      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+      commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     ) => void;
     /** 所属 owner 接管已验证的状态与游标；接管后控制适配不再保留同一可变状态。 */
     readonly onProjected?: (state: State, cursor: ProjectionCursor) => void;
@@ -664,7 +664,7 @@ export class ControlAdmissionJournal {
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
-      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+      commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     ) => State | Promise<State>;
     readonly decide: (
       state: State,
@@ -675,7 +675,7 @@ export class ControlAdmissionJournal {
     readonly readProjectionIds?: readonly string[];
     readonly observe?: (
       record: LogicalRecord<unknown>,
-      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+      commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     ) => void | Promise<void>;
     readonly prepareCompanions?: (
       state: State,
@@ -684,7 +684,7 @@ export class ControlAdmissionJournal {
     ) => readonly LogicalRecord<unknown>[] | Promise<readonly LogicalRecord<unknown>[]>;
     readonly onCommitted?: (
       state: State,
-      commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+      commit: import("@zhixing-ai/core/contracts").CommitEnvelope<unknown>,
     ) => void;
     readonly onProjected?: (state: State, cursor: ProjectionCursor) => void;
   }): Promise<ControlAdmissionOutcome> {

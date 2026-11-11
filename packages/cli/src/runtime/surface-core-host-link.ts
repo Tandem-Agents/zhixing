@@ -1,19 +1,19 @@
-import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
+import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import { randomUUID } from "node:crypto";
-import type { RpcEncodedJsonSource, RpcRequestDeadline } from '@zhixing/server/client';
+import type { RpcEncodedJsonSource, RpcRequestDeadline } from '@zhixing-ai/server/client';
 
 
-import { canonicalize } from "@zhixing/core/protocol";
-import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
-import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { createPlatformSecretStore } from "@zhixing/secrets";
+import { canonicalize } from "@zhixing-ai/core/protocol";
+import { validateMeshRoleBootConfig } from "@zhixing-ai/mesh/bootstrap";
+import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import {
   PROTOCOL_VERSION,
   RpcAppError,
   RpcClientClosedError,
   type AuthResult,
   type RpcClient,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import {
   FirstPartyConversationMeshClient,

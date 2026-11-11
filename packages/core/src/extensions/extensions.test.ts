@@ -11,7 +11,7 @@ import { ExtensionArtifacts } from "./artifacts.js";
 import { ManagedExtensions } from "./runtime.js";
 import { validateExtensionManifest, type ExtensionBinding } from "./contracts.js";
 import { ExtensionPeer } from "./protocol.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 const runtimes: ManagedExtensions[] = [];
 const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => {

@@ -5,7 +5,7 @@ import ts from "typescript";
 import {
   CompletedWorkspaceAdministrationOperationError,
   type WorkspaceAdministrationConsumptionCredential,
-} from "@zhixing/core/environment/workspace-administration";
+} from "@zhixing-ai/core/environment/workspace-administration";
 import {
   LocalWorkspaceHostNotWritableError,
   type LocalWorkspaceClient,

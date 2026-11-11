@@ -1,8 +1,8 @@
 /** Shared run notices: usable by the headless Host without loading terminal UI. */
 import chalk from "chalk";
-import type { AgentEventMap, IEventBus } from "@zhixing/core";
-import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
-import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from "@zhixing/core/conversation/application";
+import type { AgentEventMap, IEventBus } from "@zhixing-ai/core";
+import type { DecorateRunBusFn } from "@zhixing-ai/orchestrator/runtime";
+import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from "@zhixing-ai/core/conversation/application";
 import type { CliWriter } from "./screen/index.js";
 import { emergencyFloorCostText, summaryFailureText } from "./terminal/compact-outcome-text.js";
 import { ANCHOR_SUB_AGENT } from "./output/speaker-state.js";

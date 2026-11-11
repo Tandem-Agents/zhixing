@@ -9,7 +9,7 @@ import {
   FileAuthorityCommitLog,
   FileDurableProjectionIndex,
   surfaceAssetRequestKey,
-} from "@zhixing/core/authority";
+} from "@zhixing-ai/core/authority";
 import type {
   ControlEnvelope,
   ControlRecord,
@@ -17,7 +17,7 @@ import type {
   JsonValue,
   SurfaceAssetGrant,
   SurfaceAssetScope,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   byteDigest,
   canonicalize,
@@ -25,8 +25,8 @@ import {
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-} from "@zhixing/core/protocol";
-import { createTempDir } from "@zhixing/test-utils";
+} from "@zhixing-ai/core/protocol";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { createSurfaceAssetAuthority } from "./surface-asset-authority.js";
 

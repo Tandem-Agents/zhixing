@@ -3,15 +3,15 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { AbortReason } from "@zhixing/core/interrupt";
-import type { AgentResult, AgentYield } from "@zhixing/core/loop";
-import type { Message } from "@zhixing/core";
+import type { AbortReason } from "@zhixing-ai/core/interrupt";
+import type { AgentResult, AgentYield } from "@zhixing-ai/core/loop";
+import type { Message } from "@zhixing-ai/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
   KernelRunEvent,
   KernelRunCompletion,
-} from "@zhixing/orchestrator/runtime";
+} from "@zhixing-ai/orchestrator/runtime";
 import { runEphemeralTurn } from "../ephemeral-executor.js";
 
 const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [

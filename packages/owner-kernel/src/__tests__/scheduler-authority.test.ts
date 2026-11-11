@@ -1,14 +1,14 @@
-import type { SchedulerEventMap } from "@zhixing/core/scheduler";
-import { countScheduleConsecutiveFailures, type ScheduleOccurrence } from "@zhixing/core/scheduler/application";
-import { createEventBus } from "@zhixing/core";
+import type { SchedulerEventMap } from "@zhixing-ai/core/scheduler";
+import { countScheduleConsecutiveFailures, type ScheduleOccurrence } from "@zhixing-ai/core/scheduler/application";
+import { createEventBus } from "@zhixing-ai/core";
 import { currentDeviceCapacityStep, currentMaintenanceAbortSignal, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
-  isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceAdmissionError, withDeviceCapacityStep } from "@zhixing/core/resources";
+  isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceAdmissionError, withDeviceCapacityStep } from "@zhixing-ai/core/resources";
 import type {
   JobOccurrence,
   JobRunState,
   TaskDefinition,
-} from "@zhixing/core/contracts";
-import { compareJobOccurrences, protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { compareJobOccurrences, protocolDigest } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { ControlAdmissionJournal } from "../control-admission.js";
 import type { JobJournal, JobLifecycleEvent } from "../job-assignment.js";

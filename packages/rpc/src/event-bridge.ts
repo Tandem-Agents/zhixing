@@ -14,7 +14,7 @@
 import type {
   ScheduleRuntimeApplication,
   ScheduleRuntimeEvent,
-} from "@zhixing/core/scheduler/application";
+} from "@zhixing-ai/core/scheduler/application";
 import type { RpcNotificationConnection } from "./connection.js";
 
 export interface EventBridgeDeps {

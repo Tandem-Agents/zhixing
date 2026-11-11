@@ -1,5 +1,5 @@
-import { artifactJsonIndex, type ArtifactStore } from '@zhixing/core/authority';
-import type { UserTurnInput } from '@zhixing/core/contracts';
+import { artifactJsonIndex, type ArtifactStore } from '@zhixing-ai/core/authority';
+import type { UserTurnInput } from '@zhixing-ai/core/contracts';
 import type { Stored } from './conversation-run-contracts.js';
 
 /** One input page reads only its selected text range, never the complete stored input. */

@@ -1,13 +1,13 @@
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import type { CheckpointStreamRecord } from "@zhixing/core/contracts";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import { projectRecoveryReadiness } from "@zhixing/mesh/bootstrap-authority";
-import { createRootActivationCheckpoint } from "@zhixing/mesh/checkpoint";
-import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
-import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import { createRecoveryRootEvent } from "@zhixing/mesh/trust-chain";
-import { createTempDir } from "@zhixing/test-utils";
+import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
+import type { CheckpointStreamRecord } from "@zhixing-ai/core/contracts";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
+import { projectRecoveryReadiness } from "@zhixing-ai/mesh/bootstrap-authority";
+import { createRootActivationCheckpoint } from "@zhixing-ai/mesh/checkpoint";
+import { enrollDeviceIdentity } from "@zhixing-ai/mesh/device-identity";
+import { FileRecoveryCheckpointTarget } from "@zhixing-ai/mesh/checkpoint-target";
+import { RecoveryRoot } from "@zhixing-ai/mesh/recovery-root";
+import { createRecoveryRootEvent } from "@zhixing-ai/mesh/trust-chain";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { prepareMeshRuntimeBootstrap as prepareProductionMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
@@ -394,7 +394,7 @@ describe("production mesh runtime bootstrap", () => {
 
       const trust = await local.bootstrapStore.loadTrustProjection();
       if (!trust) throw new Error("recovery trust projection is missing");
-      const records = await local.bootstrapStore.authorityLog().readStream<import("@zhixing/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
+      const records = await local.bootstrapStore.authorityLog().readStream<import("@zhixing-ai/core/contracts").CheckpointStreamRecord>("checkpoint").then((entries) => entries.map((entry) => entry.body));
       const readiness = projectRecoveryReadiness({
         trust,
         verifiedRecords: records.filter(
@@ -627,11 +627,11 @@ async function removeTargetUntilFinalizeCrash(
 }
 
 import path from "node:path";
-import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { createSignedExecutorRemovalReceipt } from "@zhixing/core/protocol";
-import { DeviceKey } from "@zhixing/mesh/device-identity";
-import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
-import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
+import { DeviceLifecycleJournal, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { createSignedExecutorRemovalReceipt } from "@zhixing-ai/core/protocol";
+import { DeviceKey } from "@zhixing-ai/mesh/device-identity";
+import { deleteDeviceKeyExact } from "@zhixing-ai/mesh/device-key-store";
+import { createSignedTrustEvent } from "@zhixing-ai/mesh/trust-chain";
 import { CurrentIssuerDeviceRemovalAuthority, ExecutorRemovalTarget } from "./device-removal.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createLiveTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";

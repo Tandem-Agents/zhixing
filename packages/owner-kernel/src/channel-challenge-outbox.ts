@@ -4,7 +4,7 @@ import type {
   ConversationChannelChallengeToken,
   InteractionDisplay,
   JobChannelChallengeToken,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   ChannelChallengeLifecycleRecord,
   ConversationChannelChallengePreparedRecord,

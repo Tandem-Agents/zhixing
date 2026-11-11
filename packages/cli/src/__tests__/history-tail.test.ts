@@ -6,8 +6,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { userMessage, type Message } from "@zhixing/core";
-import { type RunRecord } from "@zhixing/core/transcript";
+import { userMessage, type Message } from "@zhixing-ai/core";
+import { type RunRecord } from "@zhixing-ai/core/transcript";
 import { projectHistoryTail, DEFAULT_TAIL_RUNS } from "../runtime/conversation-history-projection.js";
 
 function assistantMsg(text: string): Message {

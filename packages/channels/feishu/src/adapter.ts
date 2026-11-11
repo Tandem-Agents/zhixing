@@ -8,8 +8,8 @@ import type {
   DeliveryResult,
   DeliveryTarget,
   OutboundContent,
-} from "@zhixing/core/channels";
-import { validateChannelChallengeCallback } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/channels";
+import { validateChannelChallengeCallback } from "@zhixing-ai/core/protocol";
 import { buildChallengeCard, buildReplyCard } from "./cards.js";
 import { FeishuApiError, FeishuClient, detectReceiveIdType, resolveDomain } from "./client.js";
 import { resolveConfig } from "./config.js";
@@ -165,7 +165,7 @@ export class FeishuAdapter implements ChannelAdapter {
     this.logger = null;
   }
 
-  async send(target: DeliveryTarget, content: OutboundContent, meta?: import("@zhixing/core/channels").DeliveryAdapterSendMeta): Promise<DeliveryResult> {
+  async send(target: DeliveryTarget, content: OutboundContent, meta?: import("@zhixing-ai/core/channels").DeliveryAdapterSendMeta): Promise<DeliveryResult> {
     if (!this.client) {
       return { success: false, error: "Adapter not connected", retryable: true, attempted: false };
     }

@@ -3,7 +3,7 @@ import type {
   RunningServer,
   ServerStateFile,
   ServerStateSnapshot,
-} from "@zhixing/server";
+} from "@zhixing-ai/server";
 
 export const EXECUTOR_SERVER_LIFECYCLE_DESCRIPTORS = [
   { owner: "executor-server", id: "internalStop.close" },

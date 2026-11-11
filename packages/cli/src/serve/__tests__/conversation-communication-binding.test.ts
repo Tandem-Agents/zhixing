@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { localConversationId } from "@zhixing/core/conversation";
+import { localConversationId } from "@zhixing-ai/core/conversation";
 import { routeAddressedConversationCommunication } from "../conversation-communication-binding.js";
 import type { ConversationCommunicationTransport } from "../conversation-tools.js";
 

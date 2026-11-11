@@ -7,9 +7,9 @@ import type {
   StreamConsumerAuth,
   StreamFrame,
   StreamSubscribe,
-} from "@zhixing/core/contracts";
-import { assertArtifactRef } from "@zhixing/core/authority";
-import { runWithLogAttribution } from "@zhixing/core/logging";
+} from "@zhixing-ai/core/contracts";
+import { assertArtifactRef } from "@zhixing-ai/core/authority";
+import { runWithLogAttribution } from "@zhixing-ai/core/logging";
 import {
   canonicalize,
   streamConsumerKey,
@@ -17,20 +17,20 @@ import {
   validateStreamConsumerAuth,
   validateStreamFrame,
   validateStreamSubscribe,
-} from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/protocol";
 import {
   DEFAULT_STREAM_READ_BATCH_BYTES,
   DEFAULT_STREAM_READ_BATCH_FRAMES,
   StreamConsumerDegradedError,
   StreamHistoryUnavailableError,
   type AssignmentStreamSpool,
-} from "@zhixing/executor/assignment-stream-spool";
-import type { DataPlaneTicketRegistry } from "@zhixing/executor/data-plane-ticket-registry";
-import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+} from "@zhixing-ai/executor/assignment-stream-spool";
+import type { DataPlaneTicketRegistry } from "@zhixing-ai/executor/data-plane-ticket-registry";
+import type { MeshServiceClient } from "@zhixing-ai/mesh/request-channel";
 import type {
   MeshServiceRegistry,
   SecureMeshConnection,
-} from "@zhixing/mesh";
+} from "@zhixing-ai/mesh";
 
 export const ASSIGNMENT_STREAM_SERVICE = "assignment.stream";
 

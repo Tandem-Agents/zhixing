@@ -1,5 +1,5 @@
-import type { DeviceRole } from "@zhixing/core/contracts";
-import type { PairedCheckpointCommandReceiver } from "@zhixing/mesh/paired-checkpoint-target";
+import type { DeviceRole } from "@zhixing-ai/core/contracts";
+import type { PairedCheckpointCommandReceiver } from "@zhixing-ai/mesh/paired-checkpoint-target";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PersistentApplicationHost,

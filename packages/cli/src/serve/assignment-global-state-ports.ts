@@ -4,14 +4,14 @@ import type {
   AssignmentMutationRequest,
   AuthorityCapability,
   GlobalStatePort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import {
   assignmentMutationRequestId,
   protocolDigest,
   validateGlobalQuery,
   validateGlobalQueryResult,
-} from "@zhixing/core/protocol";
-import type { ConversationAssignmentLedger } from "@zhixing/executor";
+} from "@zhixing-ai/core/protocol";
+import type { ConversationAssignmentLedger } from "@zhixing-ai/executor";
 
 export function createAssignmentGlobalQueryPort(input: {
   readonly state: GlobalStatePort;

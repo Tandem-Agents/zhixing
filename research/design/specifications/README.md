@@ -16,7 +16,7 @@
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 | 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
 | 010 | 上下文管理架构 | [现行文档](../../../docs/modules/context/architecture.md) | 已迁移 |
-| 011 | 网络出口原语（@zhixing/network） | [网络出口架构](../../../docs/modules/network/architecture.md) | 已归位 |
+| 011 | 网络出口原语（@zhixing-ai/network） | [网络出口架构](../../../docs/modules/network/architecture.md) | 已归位 |
 | 014 | 子 Agent 执行与展示 | [执行架构](../../../docs/modules/subagents/architecture.md) · [CLI 展示](../../../docs/modules/cli/subagents.md) | 已归位 |
 | 015 | 用户秘密存储与首次引导 | [秘密存储](../../../docs/modules/secrets/architecture.md) · [首次引导](../../../docs/modules/secrets/onboarding.md) | 已迁移，现状与差异见正文 |
 | 016 | 运行期配置应用 | [宿主换代、恢复与失败边界](../../../docs/modules/configuration/runtime-application.md) | 已迁移，现状与差异见正文 |

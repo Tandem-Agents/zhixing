@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
-import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionRefresh, extensionSetEnabled } from "@zhixing/core/extensions/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing-ai/core/authority";
+import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionRefresh, extensionSetEnabled } from "@zhixing-ai/core/extensions/application";
+import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import { buildExtensionMethods } from "../methods/extensions.js";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 
 vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
 

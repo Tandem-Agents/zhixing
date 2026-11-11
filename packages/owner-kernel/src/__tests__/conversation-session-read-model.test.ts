@@ -1,8 +1,8 @@
 import path from 'node:path';
-import { FileArtifactStore, FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing/core/authority';
-import { acquireFileLock } from '@zhixing/core/persistence';
-import { isHoldingMaintenanceExclusion } from '@zhixing/core/resources';
-import { createTempDir } from '@zhixing/test-utils';
+import { FileArtifactStore, FileAuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing-ai/core/authority';
+import { acquireFileLock } from '@zhixing-ai/core/persistence';
+import { isHoldingMaintenanceExclusion } from '@zhixing-ai/core/resources';
+import { createTempDir } from '@zhixing-ai/test-utils';
 import { expect, it, vi } from 'vitest';
 import { ConversationSessionReadModel } from '../conversation-session-read-model.js';
 import type { ConversationReadIndex } from '../conversation-read-index.js';

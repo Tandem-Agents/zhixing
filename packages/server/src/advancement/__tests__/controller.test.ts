@@ -1,32 +1,32 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createTempDir } from "@zhixing/test-utils";
+import { createTempDir } from "@zhixing-ai/test-utils";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import type {
   AdvancementRunReview,
   AdvancementWindowState,
   ConfirmedRubricSnapshot,
   RubricContractDraftSnapshot,
-} from "@zhixing/core/advancement";
+} from "@zhixing-ai/core/advancement";
 import type {
   Message,
-} from "@zhixing/core/types";
+} from "@zhixing-ai/core/types";
 import type {
   RunRecordInput,
-} from "@zhixing/core/transcript";
+} from "@zhixing-ai/core/transcript";
 import {
   AdvancementController as OwnerAdvancementController,
   type AdvancementControllerOptions,
-} from "@zhixing/owner-services/advancement";
-import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
-import type { AdvancementReviewAttemptApplication } from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/owner-services/advancement";
+import { createAdvancementReviewAttemptApplication } from "@zhixing-ai/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing-ai/owner-services/advancement/review-external-mechanism";
+import type { AdvancementReviewAttemptApplication } from "@zhixing-ai/core/advancement/application";
 import type {
   AdvancementReviewerPort,
   ImmediateRootResourceLease,
   ResourceReservationPort,
-} from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
+} from "@zhixing-ai/core/contracts";
+import { protocolDigest } from "@zhixing-ai/core/protocol";
 
 function fakeResources(): ResourceReservationPort {
   const leaseFor = (id: string): ImmediateRootResourceLease => {

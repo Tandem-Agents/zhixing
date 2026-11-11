@@ -1,13 +1,13 @@
-import type { AdvancementReviewRunOutcome, AdvancementRunReview } from "@zhixing/core/advancement";
-import type { RunRecordRef } from "@zhixing/core/transcript";
+import type { AdvancementReviewRunOutcome, AdvancementRunReview } from "@zhixing-ai/core/advancement";
+import type { RunRecordRef } from "@zhixing-ai/core/transcript";
 import type {
   AdvancementReviewerPort,
-} from "@zhixing/core/contracts";
+} from "@zhixing-ai/core/contracts";
 import type {
   AdvancementReviewAttemptInput,
   AdvancementReviewAttemptMechanismPort,
   AdvancementReviewRootBinding,
-} from "@zhixing/core/advancement/application";
+} from "@zhixing-ai/core/advancement/application";
 import {
   AdvancementEvidenceDeferredError,
   type AdvancementEvidenceCoordinator,
@@ -175,9 +175,9 @@ export function createAdvancementReviewExternalMechanism(
 }
 
 function reviewEvidenceDelegation(
-  budget: import("@zhixing/core/contracts").ResourceLease["budget"],
+  budget: import("@zhixing-ai/core/contracts").ResourceLease["budget"],
   executorId: string,
-): NonNullable<import("@zhixing/core/contracts").ResourceLease["delegation"]> {
+): NonNullable<import("@zhixing-ai/core/contracts").ResourceLease["delegation"]> {
   if (!Number.isSafeInteger(budget.maxCalls) || budget.maxCalls! <= 0) {
     throw new TypeError("Advancement evidence requires a bounded review call budget");
   }
