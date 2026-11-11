@@ -2,11 +2,11 @@ import { createRequire } from "node:module";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { S7_BEHAVIOR_EVIDENCE } from "./s7-behavior-evidence.mjs";
 import { FEISHU_INBOUND_EVENT_NAMES } from "../packages/channels/feishu/src/adapter.ts";
 import { SKILL_COMMAND_SOURCE_DESCRIPTOR } from "../packages/cli/src/commands/skill-command-source.ts";
 import { BUILTIN_COMMANDS } from "../packages/cli/src/commands/builtin-definitions.ts";
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
-import { packagedExtensions } from "../packages/cli/src/runtime/extensions/catalog.ts";
 import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
 import { createAnchorRuntimeProjectionAssembly } from "../packages/cli/src/serve/workscene-runtime-projection.ts";
 import { SEGMENT_TRANSITION_HOOK_PHASES } from "../packages/core/src/context/segment/types.ts";
@@ -197,6 +197,1534 @@ function literalProperty(object, name) {
 
 function sourceFile(relative, text) {
   return ts.createSourceFile(relative, text, ts.ScriptTarget.Latest, true);
+}
+
+// 等待步骤的定位按真实调用，而不是全文字面。调用算“被等待执行”须同时满足：
+// 1. 调用被 await；或者是透传函数的返回值（表达式体或 return）。透传函数只有两种：阶段观测
+//    observeLogPhase(记录, 阶段, 回调) 的回调，以及立即调用的函数表达式。透传调用自身也须按同一规则被等待执行。
+// 2. 最外层宿主是函数声明、方法、构造器，或对象属性上的具名回调。变量上的闭包、传给其他调用的回调、
+//    只发起不等待的调用都不算；注释与字符串天然不在语法树里。
+// 阶段观测只记录耗时：await 原工作、原样抛错、返回原值（packages/core/src/logging/phase.ts）。
+const stepSourceCache = new Map();
+function stepSource(text) {
+  let source = stepSourceCache.get(text);
+  if (!source) {
+    source = ts.createSourceFile("step.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    stepSourceCache.set(text, source);
+  }
+  return source;
+}
+function stepExpressionParent(node) {
+  let current = node;
+  while (current.parent && (ts.isParenthesizedExpression(current.parent) || ts.isNonNullExpression(current.parent))) {
+    current = current.parent;
+  }
+  return { node: current, parent: current.parent };
+}
+function enclosingStepFunction(node) {
+  let current = node.parent;
+  while (current && !ts.isFunctionLike(current)) current = current.parent;
+  return current;
+}
+function passThroughCall(fn) {
+  const { node, parent } = stepExpressionParent(fn);
+  if (
+    parent && ts.isCallExpression(parent) && ts.isIdentifier(parent.expression) &&
+    parent.expression.text === "observeLogPhase" && parent.arguments[2] === node
+  ) {
+    return parent;
+  }
+  if (parent && ts.isCallExpression(parent) && parent.expression === node && parent.arguments.length === 0) {
+    return parent;
+  }
+  return undefined;
+}
+function isAwaitedStep(call) {
+  const { node, parent } = stepExpressionParent(call);
+  let fn;
+  if (parent && ts.isAwaitExpression(parent)) {
+    fn = enclosingStepFunction(parent);
+    // 模块顶层 await 在导入时执行
+    if (!fn) return true;
+  } else if (
+    parent && ((ts.isReturnStatement(parent) && parent.expression === node) ||
+      (ts.isArrowFunction(parent) && parent.body === node))
+  ) {
+    fn = ts.isArrowFunction(parent) ? parent : enclosingStepFunction(parent);
+    if (!fn || !passThroughCall(fn)) return false;
+  } else {
+    return false;
+  }
+  if (!fn) return false;
+  const through = passThroughCall(fn);
+  if (through) return isAwaitedStep(through);
+  return ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn) || ts.isConstructorDeclaration(fn) ||
+    ((ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) &&
+      ts.isPropertyAssignment(fn.parent) && fn.parent.initializer === fn);
+}
+function stepCallee(call, source) {
+  return call.expression.getText(source).replace(/\s+/gu, "").replaceAll("?.", ".").replaceAll("!", "");
+}
+/** 被等待执行的 `callee(...)` 调用起点，按出现顺序；matches 可再限定实参。 */
+function awaitedStepPositions(text, callee, matches = () => true) {
+  const source = stepSource(text);
+  const positions = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && stepCallee(node, source) === callee && matches(node, source) && isAwaitedStep(node)) {
+      positions.push(node.getStart(source));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return positions;
+}
+const firstObjectArgument = (call) => call.arguments.length >= 1 && ts.isObjectLiteralExpression(call.arguments[0]);
+const noArguments = (call) => call.arguments.length === 0;
+const homeTokenPath = (call, source) =>
+  call.arguments.length === 1 && call.arguments[0].getText(source) === "getDefaultTokenPath(zhixingHome)";
+/** 任意 `callee(...)` 调用（不要求等待）的起点；只认语法树里的真实调用。 */
+function callPositions(text, callee, matches = () => true) {
+  const source = stepSource(text);
+  const positions = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && stepCallee(node, source) === callee && matches(node, source)) {
+      positions.push(node.getStart(source));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return positions;
+}
+function firstAwaitedStep(text, callee, matches, from = 0) {
+  return awaitedStepPositions(text, callee, matches).find((position) => position >= from) ?? -1;
+}
+function lastAwaitedStep(text, callee, matches) {
+  return awaitedStepPositions(text, callee, matches).at(-1) ?? -1;
+}
+/** `Pick<X, …>` 的 X 是 bootstrap 持久化能力（含按导入别名引入的同一类型）。 */
+function picksBootstrapPersistence(text) {
+  const source = stepSource(text);
+  const protectedType = /^(?:FileMeshBootstrapStore|Mesh\w*PersistencePort|MeshTransportPeerInventoryPort|MeshBootstrapProjectionPorts)$/u;
+  const names = new Set();
+  const collect = (node) => {
+    if (ts.isImportSpecifier(node) && protectedType.test((node.propertyName ?? node.name).text)) names.add(node.name.text);
+    ts.forEachChild(node, collect);
+  };
+  collect(source);
+  let picked = false;
+  const visit = (node) => {
+    if (
+      ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && node.typeName.text === "Pick" &&
+      node.typeArguments?.length
+    ) {
+      const target = node.typeArguments[0];
+      const name = ts.isTypeReferenceNode(target)
+        ? (ts.isIdentifier(target.typeName) ? target.typeName.text : target.typeName.right.text)
+        : undefined;
+      if (name && (names.has(name) || protectedType.test(name))) picked = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return picked;
+}
+// —— 有限的绑定与调用核对：只看语法树里的真实声明与调用，不看注释、字符串、引号或局部变量的拼写 ——
+function stripExpression(node) {
+  let current = node;
+  while (current && (ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current) ||
+    ts.isAsExpression(current) || ts.isTypeAssertionExpression(current))) current = current.expression;
+  return current;
+}
+/** 标识符在外层作用域里的 const 声明（遇到同名参数即停）；返回声明节点。 */
+function constDeclaration(identifier) {
+  const name = identifier.text;
+  for (let scope = identifier.parent; scope; scope = scope.parent) {
+    if (ts.isFunctionLike(scope) && scope.parameters?.some((parameter) =>
+      ts.isIdentifier(parameter.name) && parameter.name.text === name)) return undefined;
+    const statements = ts.isBlock(scope) || ts.isSourceFile(scope) ? scope.statements : undefined;
+    for (const statement of statements ?? []) {
+      if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.name.text === name && declaration.initializer) return declaration;
+      }
+    }
+  }
+  return undefined;
+}
+/** 按 const 绑定展开后的成员链：`port.committedFor` 在 `const port = this.#committedTransfers!` 下即 `this.#committedTransfers.committedFor`。 */
+function resolvedChain(node, source, depth = 0) {
+  const current = stripExpression(node);
+  if (!current) return "";
+  if (ts.isIdentifier(current)) {
+    const initializer = depth < 4 ? stripExpression(constDeclaration(current)?.initializer) : undefined;
+    return initializer && (ts.isIdentifier(initializer) || ts.isPropertyAccessExpression(initializer) ||
+      initializer.kind === ts.SyntaxKind.ThisKeyword)
+      ? resolvedChain(initializer, source, depth + 1)
+      : current.text;
+  }
+  if (ts.isPropertyAccessExpression(current)) return `${resolvedChain(current.expression, source, depth)}.${current.name.text}`;
+  return current.getText(source).replace(/\s+/gu, "").replaceAll("?.", ".").replaceAll("!", "");
+}
+/** 节点是函数第 index 个参数本身（而不是同名的其他绑定）。 */
+function isParameter(node, fn, index) {
+  const current = stripExpression(node);
+  const parameter = fn?.parameters[index];
+  return !!parameter && !!current && ts.isIdentifier(parameter.name) && ts.isIdentifier(current) &&
+    current.text === parameter.name.text && constDeclaration(current) === undefined;
+}
+/** 按名字（含 #私有名）找方法或函数声明；可再用 predicate 在同名者中挑选。 */
+function findCallable(source, name, predicate = () => true) {
+  let found;
+  const visit = (node) => {
+    if (found) return;
+    if ((ts.isMethodDeclaration(node) || ts.isFunctionDeclaration(node)) && node.name && node.body &&
+        node.name.text === name && predicate(node)) {
+      found = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+/** 范围内的真实调用（不进入嵌套函数，除非 includeNested）。 */
+function callsWithin(node, predicate, includeNested = false) {
+  const calls = [];
+  const visit = (current) => {
+    if (current !== node && !includeNested && ts.isFunctionLike(current)) return;
+    if (ts.isCallExpression(current) && predicate(current)) calls.push(current);
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return calls;
+}
+const calleeIs = (source, chain) => (call) => resolvedChain(call.expression, source) === chain;
+const stringLiteralText = (node) => node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : undefined;
+
+// —— 第 4 组：权威存储与秘密物理归属，同样按真实声明、绑定与控制关系判定 ——
+const recordText = (records, relative) => records.find((record) => record.relative === relative)?.text;
+/** node 位于某个 `左 ?? 右` 的右侧，且左侧满足 predicate（即只在左侧缺失时才执行）。 */
+function inNullishFallback(node, predicate) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (
+      ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken &&
+      node.pos >= current.right.pos && node.end <= current.right.end && predicate(stripExpression(current.left))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+/** `path.join(根, "段")`：返回 [根节点, 段]；否则 undefined。 */
+function pathJoinSegment(node, source) {
+  const call = stripExpression(node);
+  if (!call || !ts.isCallExpression(call) || resolvedChain(call.expression, source) !== "path.join" || call.arguments.length !== 2) {
+    return undefined;
+  }
+  const segment = stringLiteralText(stripExpression(call.arguments[1]));
+  return segment === undefined ? undefined : [stripExpression(call.arguments[0]), segment];
+}
+/**
+ * Surface 资产暂存在生产写入路径上只来自同一 home 的共享资产生命周期（1f583e08：包5a）：
+ * - home-asset-lifecycle 恰好构造一次暂存，根取自入参的 distributedRoot；
+ * - HomeAuthoritySources 用构造 CAS/WAL 的同一个根绑定建生命周期；
+ * - 资产权威的工厂调用只在 `<options>.shared.staging ?? …` 的回退侧；
+ * - bootstrap 存储的工厂调用只在 `<共享来源>.assetLifecycle().lifecycle ?? …` 的回退侧，共享来源是
+ *   `options.sources.sources`（只读入口不给）；
+ * - setup 的两处资产权威构造都传 `shared: <来源>.assetLifecycle()`。
+ */
+function surfaceStagingSharedFirst(records) {
+  const factory = "createSurfaceAssetStagingInfrastructure";
+  const lifecycleText = recordText(records, "packages/cli/src/serve/home-asset-lifecycle.ts");
+  const sourcesText = recordText(records, "packages/cli/src/serve/home-authority-sources.ts");
+  const authorityText = recordText(records, "packages/cli/src/serve/surface-asset-authority.ts");
+  const bootstrapText = recordText(records, "packages/cli/src/serve/mesh-bootstrap-store.ts");
+  const setupText = recordText(records, "packages/cli/src/setup-delivery.ts");
+  if (!lifecycleText || !sourcesText || !authorityText || !bootstrapText || !setupText) return false;
+  const lifecycle = stepSource(lifecycleText);
+  const create = findCallable(lifecycle, "createHomeAssetLifecycle");
+  const lifecycleCalls = callsWithin(lifecycle, calleeIs(lifecycle, factory), true);
+  const rootFromInput = lifecycleCalls.length === 1 && !!create && lifecycleCalls[0].pos > create.pos && lifecycleCalls[0].end < create.end &&
+    (() => {
+      const root = stripExpression(propertyInitializer(stripExpression(lifecycleCalls[0].arguments[0]), "distributedRoot"));
+      return !!root && ts.isPropertyAccessExpression(root) && root.name.text === "distributedRoot" && isParameter(root.expression, create, 0);
+    })();
+  const sources = stepSource(sourcesText);
+  const storeRoots = new Set(mainStoreConstructions(sources).map(({ root }) => ts.isIdentifier(root) ? constDeclaration(root) : undefined));
+  const sharedRoot = callsWithin(sources, calleeIs(sources, "createHomeAssetLifecycle"), true).some((call) => {
+    const root = stripExpression(propertyInitializer(stripExpression(call.arguments[0]), "distributedRoot"));
+    const declaration = root && ts.isIdentifier(root) ? constDeclaration(root) : undefined;
+    return !!declaration && storeRoots.has(declaration) && homeDistributedRoot(declaration, sources);
+  });
+  const authority = stepSource(authorityText);
+  const authorityCalls = callsWithin(authority, calleeIs(authority, factory), true);
+  const authorityShared = authorityCalls.length === 1 && inNullishFallback(authorityCalls[0], (left) =>
+    ts.isPropertyAccessExpression(left) && left.name.text === "staging" &&
+    ts.isPropertyAccessExpression(stripExpression(left.expression)) && stripExpression(left.expression).name.text === "shared");
+  const bootstrap = stepSource(bootstrapText);
+  const bootstrapCalls = callsWithin(bootstrap, calleeIs(bootstrap, factory), true);
+  const bootstrapShared = bootstrapCalls.length === 1 && inNullishFallback(bootstrapCalls[0], (left) => {
+    if (!ts.isPropertyAccessExpression(left) || left.name.text !== "lifecycle") return false;
+    const call = stripExpression(left.expression);
+    if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression) || call.expression.name.text !== "assetLifecycle") return false;
+    const holder = stripExpression(call.expression.expression);
+    const declaration = holder && ts.isIdentifier(holder) ? constDeclaration(holder) : undefined;
+    const initializer = declaration && stripExpression(declaration.initializer);
+    return !!initializer && ts.isConditionalExpression(initializer) &&
+      resolvedChain(initializer.whenTrue, bootstrap) === "options.sources.sources" &&
+      resolvedChain(initializer.whenFalse, bootstrap) === "undefined";
+  });
+  const setup = stepSource(setupText);
+  let injected = 0;
+  const visit = (node) => {
+    if (ts.isPropertyAssignment(node) && propertyNameText(node.name) === "shared") {
+      const value = stripExpression(node.initializer);
+      if (ts.isCallExpression(value) && value.arguments.length === 0 && ts.isPropertyAccessExpression(value.expression) &&
+          value.expression.name.text === "assetLifecycle") injected += 1;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(setup);
+  return rootFromInput && sharedRoot && authorityShared && bootstrapShared && injected === 2;
+}
+/**
+ * backup 的平台秘密存储一律注入优先（bc57f878 新增预检）：每处 createPlatformSecretStore 都在
+ * `<第一个参数>.secretStore ?? …` 的回退侧，且 homeDir 是本函数里 `<第一个参数>.zhixingHome ?? getZhixingHome()` 的 const。
+ */
+function backupSecretStoreInjectionFirst(text) {
+  const source = stepSource(text);
+  const calls = callsWithin(source, calleeIs(source, "createPlatformSecretStore"), true);
+  return calls.length === 3 && calls.every((call) => {
+    let owner = call.parent;
+    while (owner && !(ts.isFunctionDeclaration(owner) || ts.isMethodDeclaration(owner) || ts.isArrowFunction(owner) || ts.isFunctionExpression(owner))) owner = owner.parent;
+    const injected = owner && inNullishFallback(call, (left) =>
+      ts.isPropertyAccessExpression(left) && left.name.text === "secretStore" && isParameter(left.expression, owner, 0));
+    const home = stripExpression(propertyInitializer(stripExpression(call.arguments[0]), "homeDir"));
+    const declaration = home && ts.isIdentifier(home) ? constDeclaration(home) : undefined;
+    const initializer = declaration && stripExpression(declaration.initializer);
+    return !!injected && !!initializer && ts.isBinaryExpression(initializer) &&
+      initializer.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken &&
+      ts.isPropertyAccessExpression(stripExpression(initializer.left)) && stripExpression(initializer.left).name.text === "zhixingHome" &&
+      isParameter(stripExpression(initializer.left).expression, owner, 0) &&
+      ts.isCallExpression(stripExpression(initializer.right)) && calleeIs(source, "getZhixingHome")(stripExpression(initializer.right));
+  });
+}
+/**
+ * 主 CAS 与两本 WAL 只在统一 home 来源里构造（d4721f31）：同一个 `const 根 = path.join(<home>, "distributed-runtime")`
+ * 下各恰好一次 `new FileArtifactStore(path.join(根, "artifacts"))`、`new FileAuthorityCommitLog(path.join(根, "authority"))`、
+ * `new FileAuthorityCommitLog(path.join(根, "executor-authority"))`；setup 不得在主路径上另建（workspace-bindings 下的除外）。
+ */
+function mainStoreConstructions(source) {
+  const found = [];
+  const visit = (node) => {
+    if (ts.isNewExpression(node) && ["FileArtifactStore", "FileAuthorityCommitLog"].includes(resolvedChain(node.expression, source))) {
+      const joined = pathJoinSegment(node.arguments?.[0], source);
+      if (joined) found.push({ kind: resolvedChain(node.expression, source), root: joined[0], segment: joined[1] });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+/** 统一来源的根：`const 根 = path.join(<所在构造器的第一个参数，即 home>, "distributed-runtime")`。 */
+function homeDistributedRoot(declaration, source) {
+  const joined = declaration && pathJoinSegment(declaration.initializer, source);
+  const constructor = declaration && enclosingStepFunction(declaration);
+  return !!joined && joined[1] === "distributed-runtime" && !!constructor && ts.isConstructorDeclaration(constructor) &&
+    isParameter(joined[0], constructor, 0);
+}
+function mainAuthorityPhysicalOwners(records) {
+  const sourcesText = recordText(records, "packages/cli/src/serve/home-authority-sources.ts");
+  const setupText = recordText(records, "packages/cli/src/setup-delivery.ts");
+  if (!sourcesText || !setupText) return false;
+  const sources = stepSource(sourcesText);
+  const owned = mainStoreConstructions(sources);
+  const roots = owned.map(({ root }) => (ts.isIdentifier(root) ? constDeclaration(root) : undefined));
+  const rootDeclaration = roots[0];
+  const expected = [["FileArtifactStore", "artifacts"], ["FileAuthorityCommitLog", "authority"], ["FileAuthorityCommitLog", "executor-authority"]];
+  const ownedOk = owned.length === 3 && roots.every((declaration) => declaration && declaration === rootDeclaration) &&
+    homeDistributedRoot(rootDeclaration, sources) &&
+    expected.every(([kind, segment]) => owned.filter((item) => item.kind === kind && item.segment === segment).length === 1);
+  const setup = stepSource(setupText);
+  const stray = mainStoreConstructions(setup).filter(({ root, segment }) => {
+    if (!["artifacts", "authority", "executor-authority"].includes(segment)) return false;
+    const declaration = ts.isIdentifier(root) ? constDeclaration(root) : undefined;
+    const nested = declaration && pathJoinSegment(declaration.initializer, setup);
+    return !(nested && nested[1] === "workspace-bindings");
+  });
+  return ownedOk && stray.length === 0;
+}
+/**
+ * 每次读配置都挂当前设备的凭据守卫（d4721f31），并且守卫真的在实际读取链里生效：
+ * read 打开 bootstrap 只读视图（owner），在 try 中读一次当前信任（trust）；守卫 const = `条件 ? new
+ * CredentialExposureAuthority({ log: owner.authorityLog(), … }) : undefined`，条件 const 由本次 trust 求得；read 实际等待并返回的
+ * loadConfigurationSnapshot 调用，其选项（直接写出或经 const 绑定）以该守卫为条件展开 authorizeCredentialRead；
+ * 该函数的 try 先等待 `守卫.assertConfigurationRoute(…)` 再返回 true（之前不得 return），catch 只返回 false；finally 等待停止维护。
+ */
+function perReadCredentialGuard(text) {
+  if (!text) return false;
+  const source = stepSource(text);
+  const read = findCallable(source, "read");
+  const attempt = read?.body.statements.find((statement) => ts.isTryStatement(statement));
+  if (!attempt || !attempt.finallyBlock) return false;
+  const ownerDeclaration = read.body.statements.flatMap((statement) =>
+    ts.isVariableStatement(statement) && (statement.declarationList.flags & ts.NodeFlags.Const) !== 0
+      ? [...statement.declarationList.declarations] : []).find((declaration) => {
+    const initializer = stripExpression(declaration.initializer);
+    const call = initializer && ts.isAwaitExpression(initializer) ? stripExpression(initializer.expression) : undefined;
+    return !!call && ts.isCallExpression(call) && calleeIs(source, "FileMeshBootstrapStore.open")(call);
+  });
+  if (!ownerDeclaration || !ts.isIdentifier(ownerDeclaration.name)) return false;
+  const bindsTo = (node, declaration) => {
+    const current = stripExpression(node);
+    return !!current && ts.isIdentifier(current) && constDeclaration(current) === declaration;
+  };
+  const memberCallOn = (call, member, declaration) => ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.name.text === member && bindsTo(call.expression.expression, declaration);
+  // 本次读到的信任
+  const trustDeclaration = attempt.tryBlock.statements.flatMap((statement) =>
+    ts.isVariableStatement(statement) ? [...statement.declarationList.declarations] : []).find((declaration) => {
+    const initializer = stripExpression(declaration.initializer);
+    return !!initializer && ts.isAwaitExpression(initializer) && ts.isCallExpression(stripExpression(initializer.expression)) &&
+      memberCallOn(stripExpression(initializer.expression), "loadCurrentTrust", ownerDeclaration);
+  });
+  const cleanup = callsWithin(attempt.finallyBlock, (call) => ts.isAwaitExpression(stepExpressionParent(call).parent) &&
+    memberCallOn(call, "stopStorageMaintenance", ownerDeclaration), true).length === 1;
+  if (!trustDeclaration || !cleanup) return false;
+  // read 实际等待并返回的读取调用及其选项
+  const returned = attempt.tryBlock.statements.find((statement) => ts.isReturnStatement(statement) && statement.expression);
+  const awaitedLoad = returned && stripExpression(returned.expression);
+  const load = awaitedLoad && ts.isAwaitExpression(awaitedLoad) ? stripExpression(awaitedLoad.expression) : undefined;
+  if (!load || !ts.isCallExpression(load) || !calleeIs(source, "loadConfigurationSnapshot")(load)) return false;
+  let options = stripExpression(load.arguments[0]);
+  if (options && ts.isIdentifier(options)) options = stripExpression(constDeclaration(options)?.initializer);
+  if (!options || !ts.isObjectLiteralExpression(options)) return false;
+  const usesTrust = (node) => {
+    let used = false;
+    const visit = (child) => {
+      if (ts.isIdentifier(child) && constDeclaration(child) === trustDeclaration) used = true;
+      ts.forEachChild(child, visit);
+    };
+    visit(node);
+    return used;
+  };
+  return options.properties.some((property) => {
+    if (!ts.isSpreadAssignment(property)) return false;
+    const conditional = stripExpression(property.expression);
+    if (!conditional || !ts.isConditionalExpression(conditional)) return false;
+    const guard = stripExpression(conditional.condition);
+    const guardDeclaration = guard && ts.isIdentifier(guard) ? constDeclaration(guard) : undefined;
+    const created = guardDeclaration && stripExpression(guardDeclaration.initializer);
+    const authority = created && ts.isConditionalExpression(created) ? stripExpression(created.whenTrue) : undefined;
+    if (!authority || !ts.isNewExpression(authority) || resolvedChain(authority.expression, source) !== "CredentialExposureAuthority") return false;
+    const log = stripExpression(propertyInitializer(stripExpression(authority.arguments?.[0]), "log"));
+    const condition = stripExpression(created.condition);
+    const conditionDeclaration = condition && ts.isIdentifier(condition) ? constDeclaration(condition) : undefined;
+    if (
+      !log || !ts.isCallExpression(log) || !memberCallOn(log, "authorityLog", ownerDeclaration) ||
+      !conditionDeclaration || !usesTrust(conditionDeclaration.initializer)
+    ) {
+      return false;
+    }
+    const whenFalse = stripExpression(conditional.whenFalse);
+    const authorize = stripExpression(propertyInitializer(stripExpression(conditional.whenTrue), "authorizeCredentialRead"));
+    const check = authorize && (ts.isArrowFunction(authorize) || ts.isFunctionExpression(authorize)) && ts.isBlock(authorize.body)
+      ? authorize.body.statements.find((statement) => ts.isTryStatement(statement)) : undefined;
+    if (!check?.catchClause || !ts.isObjectLiteralExpression(whenFalse) || whenFalse.properties.length !== 0) return false;
+    const steps = check.tryBlock.statements;
+    const assertIndex = steps.findIndex((statement) => {
+      const awaited = ts.isExpressionStatement(statement) ? stripExpression(statement.expression) : undefined;
+      const call = awaited && ts.isAwaitExpression(awaited) ? stripExpression(awaited.expression) : undefined;
+      return !!call && ts.isCallExpression(call) && memberCallOn(call, "assertConfigurationRoute", guardDeclaration);
+    });
+    const firstReturn = steps.findIndex((statement) => ts.isReturnStatement(statement));
+    const approve = steps[firstReturn];
+    const catchReturns = check.catchClause.block.statements.filter((statement) => ts.isReturnStatement(statement));
+    return assertIndex >= 0 && firstReturn > assertIndex && approve.expression?.kind === ts.SyntaxKind.TrueKeyword &&
+      catchReturns.length > 0 && catchReturns.every((statement) => statement.expression?.kind === ts.SyntaxKind.FalseKeyword);
+  });
+}
+/** 启动按当前描述符发布凭据绑定：setup 恰好一次 `new CredentialExposureAuthority(…).ensureActiveBindings({ bindings, … })`，且该方法真实等待写事务。 */
+function activeBindingsPublished(setupText, exposureText) {
+  if (!setupText || !exposureText) return false;
+  const setup = stepSource(setupText);
+  const published = callsWithin(setup, (call) => ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.name.text === "ensureActiveBindings" && ts.isNewExpression(stripExpression(call.expression.expression)) &&
+    resolvedChain(stripExpression(call.expression.expression).expression, setup) === "CredentialExposureAuthority" &&
+    propertyInitializer(stripExpression(call.arguments[0]), "bindings") !== undefined, true);
+  const exposure = stepSource(exposureText);
+  const ensure = findCallable(exposure, "ensureActiveBindings");
+  const writes = ensure ? callsWithin(ensure.body, (call) => ts.isAwaitExpression(stepExpressionParent(call).parent) &&
+    calleeIs(exposure, "this.#transact")(call), true).length : 0;
+  return published.length === 1 && writes >= 1;
+}
+/** 有限资源类型：`Pick<ResourceReservationPort, 4 个字面成员> & { reclaimExpired(): … }`，同文件类型别名先展开；与成员顺序、引号无关（286dae66）。 */
+function finiteResourceType(node, source) {
+  let current = node;
+  for (let depth = 0; current && ts.isTypeReferenceNode(current) && ts.isIdentifier(current.typeName) && depth < 3; depth += 1) {
+    const name = current.typeName.text;
+    const alias = source.statements.find((statement) => ts.isTypeAliasDeclaration(statement) && statement.name.text === name);
+    if (!alias) break;
+    current = alias.type;
+  }
+  if (!current || !ts.isIntersectionTypeNode(current) || current.types.length !== 2) return false;
+  const [pick, extra] = current.types;
+  const members = ts.isTypeReferenceNode(pick) && resolvedChain(pick.typeName, source) === "Pick" &&
+    pick.typeArguments?.length === 2 && resolvedChain(pick.typeArguments[0], source) === "ResourceReservationPort"
+    ? (ts.isUnionTypeNode(pick.typeArguments[1]) ? pick.typeArguments[1].types : [pick.typeArguments[1]])
+      .map((member) => ts.isLiteralTypeNode(member) ? stringLiteralText(member.literal) : undefined)
+    : undefined;
+  const extraMembers = ts.isTypeLiteralNode(extra) ? extra.members : [];
+  return !!members && [...members].sort().join(",") === ["acquireRoot", "inspectImmediateRoot", "release", "settle"].join(",") &&
+    extraMembers.length === 1 && !!extraMembers[0].name && propertyNameText(extraMembers[0].name) === "reclaimExpired" &&
+    !extraMembers[0].questionToken;
+}
+/** 类型字面量里某成员的类型节点。 */
+function memberType(typeNode, name) {
+  const member = typeNode && ts.isTypeLiteralNode(typeNode)
+    ? typeNode.members.find((item) => item.name && propertyNameText(item.name) === name) : undefined;
+  return member && ts.isPropertySignature(member) ? member.type : undefined;
+}
+/**
+ * 控制类真正消费的资源是有限端口：构造参数的 resources 与私有字段 #resources 都解析为有限类型，
+ * 且字段恰由 `this.#resources = <参数>.resources` 赋值。
+ */
+function controlResourcesFinite(text) {
+  const source = stepSource(text);
+  const control = source.statements.find((statement) =>
+    ts.isClassDeclaration(statement) && statement.name?.text === "ExecutorWorkspaceAdministrationControl");
+  const constructor = control?.members.find((member) => ts.isConstructorDeclaration(member) && member.body);
+  const field = control?.members.find((member) =>
+    ts.isPropertyDeclaration(member) && member.name && member.name.text === "#resources");
+  if (!constructor || !field || constructor.parameters.length !== 1 || !finiteResourceType(field.type, source) ||
+      !finiteResourceType(memberType(constructor.parameters[0].type, "resources"), source)) return false;
+  return constructor.body.statements.some((statement) => {
+    const assignment = ts.isExpressionStatement(statement) ? stripExpression(statement.expression) : undefined;
+    const value = assignment && ts.isBinaryExpression(assignment) && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      resolvedChain(assignment.left, source) === "this.#resources" ? stripExpression(assignment.right) : undefined;
+    return !!value && ts.isPropertyAccessExpression(value) && value.name.text === "resources" &&
+      isParameter(value.expression, constructor, 0);
+  });
+}
+/** Host 把入参 management.resources（解析为有限类型）原样交给控制类。 */
+function hostResourcesFinite(text) {
+  const source = stepSource(text);
+  let passed = false;
+  const visit = (node) => {
+    if (ts.isNewExpression(node) && resolvedChain(node.expression, source) === "ExecutorWorkspaceAdministrationControl") {
+      const resources = stripExpression(propertyInitializer(stripExpression(node.arguments?.[0]), "resources"));
+      let host = node.parent;
+      while (host && !ts.isFunctionLike(host)) host = host.parent;
+      const management = resources && ts.isPropertyAccessExpression(resources) && resources.name.text === "resources"
+        ? stripExpression(resources.expression) : undefined;
+      if (
+        host && management && ts.isPropertyAccessExpression(management) && management.name.text === "management" &&
+        isParameter(management.expression, host, 0) &&
+        finiteResourceType(memberType(memberType(host.parameters[0].type, "management"), "resources"), source)
+      ) {
+        passed = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return passed;
+}
+
+// —— 第 5 至 7 组：只核归属、导入导出与声明关系；运行效果由 S7_BEHAVIOR_EVIDENCE 登记的行为测试承担 ——
+/** 存在 `X.member(…)` 调用，X 是 const 绑定到 `factory(…)` 调用结果的标识符（名字与参数不限）。 */
+function callsOnFactoryResult(text, member, factory) {
+  const source = stepSource(text);
+  return callsWithin(source, (call) => {
+    const callee = stripExpression(call.expression);
+    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== member) return false;
+    const target = stripExpression(callee.expression);
+    const initializer = target && ts.isIdentifier(target) ? stripExpression(constDeclaration(target)?.initializer) : undefined;
+    return !!initializer && ts.isCallExpression(initializer) && calleeIs(source, factory)(initializer);
+  }, true).length > 0;
+}
+/** 函数体末尾 `return Object.freeze({…})` 或 `return {…}` 的属性名（排序后逗号连接）；没有这样的返回则为空串。 */
+function returnedPropertyNames(text, functionName) {
+  const fn = findCallable(stepSource(text), functionName);
+  const returned = fn?.body.statements.filter((statement) => ts.isReturnStatement(statement)).at(-1);
+  let value = stripExpression(returned?.expression);
+  if (value && ts.isCallExpression(value) && resolvedChain(value.expression, stepSource(text)) === "Object.freeze") {
+    value = stripExpression(value.arguments[0]);
+  }
+  if (!value || !ts.isObjectLiteralExpression(value)) return "";
+  return value.properties.map((property) => property.name ? propertyNameText(property.name) : "…").sort().join(",");
+}
+/** 文件按导入绑定（含别名）真实调用了导入的 name。 */
+function callsImported(text, name) {
+  const source = stepSource(text);
+  const locals = new Set();
+  for (const statement of source.statements) {
+    const bindings = ts.isImportDeclaration(statement) ? statement.importClause?.namedBindings : undefined;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      if (!element.isTypeOnly && (element.propertyName ?? element.name).text === name) locals.add(element.name.text);
+    }
+  }
+  return locals.size > 0 && callsWithin(source, (call) => {
+    const callee = stripExpression(call.expression);
+    return ts.isIdentifier(callee) && locals.has(callee.text) && constDeclaration(callee) === undefined;
+  }, true).length > 0;
+}
+/** 带方法体的同名方法声明个数；给 className 时只数该类里的。 */
+function methodDeclarationCount(text, name, className) {
+  let count = 0;
+  const visit = (node, inClass) => {
+    if (ts.isClassDeclaration(node)) inClass = !className || node.name?.text === className;
+    if (inClass && ts.isMethodDeclaration(node) && node.body && node.name && propertyNameText(node.name) === name) count += 1;
+    ts.forEachChild(node, (child) => visit(child, inClass));
+  };
+  visit(stepSource(text), !className);
+  return count;
+}
+/** 文件里有内容恰为 value 的字符串字面量（与引号写法无关）。 */
+function hasStringLiteral(text, value) {
+  let found = false;
+  const visit = (node) => {
+    if (stringLiteralText(node) === value) found = true;
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(stepSource(text));
+  return found;
+}
+/** 参与者里恰有一次被等待的 `this.#application.prepare(…)`，第三个实参是所在方法类型为事务句柄的参数本身。 */
+function preparesInLockedTransaction(text) {
+  const source = stepSource(text);
+  const calls = callsWithin(source, calleeIs(source, "this.#application.prepare"), true);
+  if (calls.length !== 1 || !ts.isAwaitExpression(stepExpressionParent(calls[0]).parent)) return false;
+  const fn = enclosingStepFunction(calls[0]);
+  const index = fn?.parameters.findIndex((parameter) => parameter.type && ts.isTypeReferenceNode(parameter.type) &&
+    resolvedChain(parameter.type.typeName, source) === "ProjectionTransactionContext") ?? -1;
+  return index >= 0 && isParameter(calls[0].arguments[2], fn, index);
+}
+/**
+ * Delivery 应用对权威包的唯一依赖是事务句柄类型：来自 `../authority/` 的导入恰为一条只含 `ProjectionTransactionContext`
+ * 的 type-only 导入；凡以该类型声明的函数参数，在函数体里只作为调用实参原样转交（不读成员、不调用）。
+ */
+function authorityImportOnlyForwardsTransaction(text) {
+  const source = stepSource(text);
+  const imports = source.statements.filter((statement) => ts.isImportDeclaration(statement) &&
+    ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text.startsWith("../authority/"));
+  if (imports.length !== 1) return false;
+  const clause = imports[0].importClause;
+  const elements = clause?.namedBindings && ts.isNamedImports(clause.namedBindings) ? clause.namedBindings.elements : [];
+  if (!clause || clause.name || elements.length !== 1 || (elements[0].propertyName ?? elements[0].name).text !== "ProjectionTransactionContext" ||
+      !(clause.isTypeOnly || elements[0].isTypeOnly)) return false;
+  const local = elements[0].name.text;
+  let forwardedOnly = true;
+  const visit = (node) => {
+    if (ts.isFunctionLike(node) && node.body) {
+      for (const parameter of node.parameters) {
+        if (!ts.isIdentifier(parameter.name) || !parameter.type || !ts.isTypeReferenceNode(parameter.type) ||
+            !ts.isIdentifier(parameter.type.typeName) || parameter.type.typeName.text !== local) continue;
+        const name = parameter.name.text;
+        const check = (child) => {
+          if (ts.isIdentifier(child) && child.text === name && child !== parameter.name) {
+            const { node: used, parent } = stepExpressionParent(child);
+            const isArgument = parent && ts.isCallExpression(parent) && parent.arguments.includes(used);
+            const isPropertyName = parent && (ts.isPropertyAccessExpression(parent) && parent.name === child);
+            if (!isArgument && !isPropertyName) forwardedOnly = false;
+          }
+          ts.forEachChild(child, check);
+        };
+        check(node.body);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return forwardedOnly;
+}
+/**
+ * 唯一的 Product API 应用：文件里每个由 `defineProductApiQuery/Command(…)` 定义的 const 都列在 exactSetName 的
+ * `operations` 里，`operations` 也只列这些定义（不限名字和个数，aefd1da8 起多一个提交查询）。
+ */
+function productApiDefinitionsInExactSet(text, exactSetName) {
+  const source = stepSource(text);
+  const defined = [];
+  let listed;
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      const call = stripExpression(declaration.initializer);
+      if (!ts.isIdentifier(declaration.name) || !call || !ts.isCallExpression(call)) continue;
+      const callee = resolvedChain(call.expression, source);
+      if (callee === "defineProductApiQuery" || callee === "defineProductApiCommand") defined.push(declaration.name.text);
+      if (declaration.name.text === exactSetName && callee === "defineProductApiExactSet") {
+        const operations = stripExpression(propertyInitializer(stripExpression(call.arguments[0]), "operations"));
+        listed = operations && ts.isArrayLiteralExpression(operations)
+          ? operations.elements.map((element) => ts.isIdentifier(element) ? element.text : "…") : undefined;
+      }
+    }
+  }
+  return !!listed && defined.length > 0 && [...defined].sort().join(",") === [...listed].sort().join(",");
+}
+/** 顶层类声明的源码文本；找不到则为空串。 */
+function classText(text, className) {
+  const source = stepSource(text);
+  const declaration = source.statements.find((statement) => ts.isClassDeclaration(statement) && statement.name?.text === className);
+  return declaration ? declaration.getText(source) : "";
+}
+/** 文件里有 `return Object.freeze({…})` 或 `return {…}`，其属性名（排序后逗号连接）恰为 names。 */
+function returnsObjectWithExactly(text, names) {
+  const source = stepSource(text);
+  let found = false;
+  const visit = (node) => {
+    if (ts.isReturnStatement(node)) {
+      let value = stripExpression(node.expression);
+      if (value && ts.isCallExpression(value) && resolvedChain(value.expression, source) === "Object.freeze") value = stripExpression(value.arguments[0]);
+      if (value && ts.isObjectLiteralExpression(value) &&
+          value.properties.map((property) => property.name ? propertyNameText(property.name) : "…").sort().join(",") === names) found = true;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+/** 对象字面量里有名为 name 的属性（含简写）。 */
+function hasObjectProperty(object, name) {
+  return !!object && ts.isObjectLiteralExpression(object) && object.properties.some((property) =>
+    (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && propertyNameText(property.name) === name);
+}
+/** 一个文件里 `new <name>(…)` 构造（按语法树，callee 经 const 展开）。 */
+function constructionsOf(source, name) {
+  const found = [];
+  const visit = (node) => {
+    if (ts.isNewExpression(node) && resolvedChain(node.expression, source) === name) found.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+/**
+ * 权限文件机制只有一份物理存储（90e804bc）：生产代码里 `new DurablePermissionRuleStore` 只在 Host 权限基础设施恰好一次，
+ * 根为 `path.join(input.zhixingHome, "permissions")`；core 的 PermissionStore 只在 `options.durable ?? …` 的回退侧保留默认，
+ * 而生产里每处 `new PermissionStore` 都显式接这份存储，回退不会走到。
+ */
+function permissionMechanismConfined(records) {
+  const infrastructure = "packages/cli/src/serve/permission-storage-infrastructure.ts";
+  const storeOwner = "packages/core/src/security/permission-store.ts";
+  let infrastructureStores = 0;
+  for (const record of records) {
+    if (!/DurablePermissionRuleStore|PermissionStore/u.test(record.text)) continue;
+    const source = stepSource(record.text);
+    for (const construction of constructionsOf(source, "DurablePermissionRuleStore")) {
+      if (record.relative === infrastructure) {
+        const joined = pathJoinSegment(construction.arguments?.[0], source);
+        if (!joined || joined[1] !== "permissions" || resolvedChain(joined[0], source) !== "input.zhixingHome") return false;
+        infrastructureStores += 1;
+      } else if (!(record.relative === storeOwner && inNullishFallback(construction, (left) =>
+        ts.isPropertyAccessExpression(left) && left.name.text === "durable"))) {
+        return false;
+      }
+    }
+    if (record.relative === storeOwner) continue;
+    if (constructionsOf(source, "PermissionStore").some((construction) =>
+      !hasObjectProperty(stripExpression(construction.arguments?.[0]), "durable"))) return false;
+  }
+  return infrastructureStores === 1;
+}
+/**
+ * 激活回放按入链时的规则核验历史元组：方法里真实调用 `verifyHistoricalHomeTrustRecord(记录, 历史投影)`，
+ * 历史投影是本方法里由 `replayTrustChain(…)` 重建的 const（名字不限）；不得改用只认当前规则的 verifyHomeTrustRecord。
+ */
+function replayVerifiesHistoricalTuple(text) {
+  const source = stepSource(text);
+  const replay = findCallable(source, "loadRecoveryRootActivationReplay");
+  if (!replay) return false;
+  // 历史投影只能由“遇到晚于匹配提交的 LSN 就停止”的那次折叠重建：在某个 for-of 里 `折叠 = foldTrustStreamRecord(折叠, …)`，
+  // 且同一循环里有 `if (….lsn > ….lsn) break`；由整份快照折叠出的当前投影不算（名字不限）。
+  const boundedFold = (name) => {
+    let bounded = false;
+    const visit = (node) => {
+      if (ts.isForOfStatement(node)) {
+        let folds = false;
+        let stops = false;
+        const scan = (child) => {
+          if (
+            ts.isBinaryExpression(child) && child.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isIdentifier(child.left) && child.left.text === name && ts.isCallExpression(stripExpression(child.right)) &&
+            calleeIs(source, "foldTrustStreamRecord")(stripExpression(child.right)) &&
+            ts.isIdentifier(stripExpression(stripExpression(child.right).arguments[0])) &&
+            stripExpression(stripExpression(child.right).arguments[0]).text === name
+          ) {
+            folds = true;
+          }
+          if (
+            ts.isIfStatement(child) && (ts.isBreakStatement(child.thenStatement) ||
+              (ts.isBlock(child.thenStatement) && child.thenStatement.statements.some((item) => ts.isBreakStatement(item)))) &&
+            ts.isBinaryExpression(stripExpression(child.expression)) &&
+            stripExpression(child.expression).operatorToken.kind === ts.SyntaxKind.GreaterThanToken &&
+            [stripExpression(child.expression).left, stripExpression(child.expression).right].every((side) =>
+              ts.isPropertyAccessExpression(stripExpression(side)) && stripExpression(side).name.text === "lsn")
+          ) {
+            stops = true;
+          }
+          ts.forEachChild(child, scan);
+        };
+        scan(node.statement);
+        if (folds && stops) bounded = true;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(replay.body);
+    return bounded;
+  };
+  const verified = callsWithin(replay.body, calleeIs(source, "verifyHistoricalHomeTrustRecord"), true).some((call) => {
+    const historical = stripExpression(call.arguments[1]);
+    const declaration = call.arguments.length === 2 && ts.isIdentifier(historical) ? constDeclaration(historical) : undefined;
+    const initializer = declaration && stripExpression(declaration.initializer);
+    const events = initializer && ts.isCallExpression(initializer) && calleeIs(source, "replayTrustChain")(initializer)
+      ? stripExpression(initializer.arguments[0]) : undefined;
+    return !!events && ts.isPropertyAccessExpression(events) && events.name.text === "events" &&
+      ts.isIdentifier(stripExpression(events.expression)) && boundedFold(stripExpression(events.expression).text) &&
+      declaration.pos > replay.pos && declaration.end < replay.end;
+  });
+  return verified && callsWithin(replay.body, calleeIs(source, "verifyHomeTrustRecord"), true).length === 0;
+}
+/**
+ * 恢复就绪投影里真实存在 `canonicalize(候选.generation) === canonicalize(当前代际)`：右侧是本函数里构造的当前代际 const
+ * （名字不限），注释或字符串里的同样文字不算。
+ */
+function readinessComparesCurrentGeneration(text) {
+  const source = stepSource(text);
+  const projector = findCallable(source, "projectDurableRecoveryBackupStatus");
+  if (!projector) return false;
+  let compared = false;
+  const canonical = (node) => {
+    const current = stripExpression(node);
+    return ts.isCallExpression(current) && calleeIs(source, "canonicalize")(current) && current.arguments.length === 1
+      ? stripExpression(current.arguments[0]) : undefined;
+  };
+  const visit = (node) => {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken) {
+      const candidate = canonical(node.left);
+      const current = canonical(node.right);
+      const declaration = current && ts.isIdentifier(current) ? constDeclaration(current) : undefined;
+      if (
+        candidate && ts.isPropertyAccessExpression(candidate) && candidate.name.text === "generation" &&
+        declaration && declaration.pos > projector.pos && declaration.end < projector.end
+      ) {
+        compared = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(projector.body);
+  return compared;
+}
+/**
+ * 终端经结构化摘要呈现运行状态（9ba3ede8）：调用 `serverStatusSummary(名, this.#localView.primaryModel,
+ * this.#localView.networkProxy, 状态)`；逐行版 `serverStatusLines` 只是原样转交四个参数给摘要再 `.flatMap(summaryLines)`。
+ */
+function statusSummaryRoutes(terminalText, presentationText) {
+  const terminal = stepSource(terminalText);
+  const routed = callsWithin(terminal, calleeIs(terminal, "serverStatusSummary"), true).some((call) =>
+    call.arguments.length === 4 &&
+    resolvedChain(call.arguments[1], terminal) === "this.#localView.primaryModel" &&
+    resolvedChain(call.arguments[2], terminal) === "this.#localView.networkProxy");
+  const presentation = stepSource(presentationText);
+  const lines = findCallable(presentation, "serverStatusLines");
+  const [only] = lines?.body.statements ?? [];
+  const derived = only && ts.isReturnStatement(only) ? stripExpression(only.expression) : undefined;
+  const summary = derived && ts.isCallExpression(derived) && ts.isPropertyAccessExpression(derived.expression) &&
+    derived.expression.name.text === "flatMap" && derived.arguments.length === 1 &&
+    resolvedChain(derived.arguments[0], presentation) === "summaryLines"
+    ? stripExpression(derived.expression.expression) : undefined;
+  return routed && !!lines && lines.body.statements.length === 1 && !!summary && ts.isCallExpression(summary) &&
+    calleeIs(presentation, "serverStatusSummary")(summary) && summary.arguments.length === 4 &&
+    summary.arguments.every((argument, index) => isParameter(argument, lines, index));
+}
+/**
+ * 生产装配经 `this.#disposers.push(options.protocol.bindCommittedConversationTransfers({…}))` 绑定已提交收编端口：
+ * committedFor 用当前权威日志与验签器按会话列出，load 交给本装配的迁移目标读取已提交底座（参数名与局部名不限）。
+ */
+function committedTransferBinding(source) {
+  return callsWithin(source, calleeIs(source, "options.protocol.bindCommittedConversationTransfers"), true).some((call) => {
+    const pushed = stripExpression(call).parent;
+    if (!pushed || !ts.isCallExpression(pushed) || !calleeIs(source, "this.#disposers.push")(pushed)) return false;
+    const port = stripExpression(call.arguments[0]);
+    if (!port || !ts.isObjectLiteralExpression(port)) return false;
+    const arrow = (name) => {
+      const property = port.properties.find((item) => ts.isPropertyAssignment(item) && propertyNameText(item.name) === name);
+      const value = property && stripExpression(property.initializer);
+      return value && ts.isArrowFunction(value) && value.parameters.length === 1 && !ts.isBlock(value.body) ? value : undefined;
+    };
+    const committedFor = arrow("committedFor");
+    const load = arrow("load");
+    const committedCall = committedFor && stripExpression(committedFor.body);
+    const loadCall = load && stripExpression(load.body);
+    return !!committedCall && ts.isCallExpression(committedCall) &&
+      calleeIs(source, "listCommittedConversationTransferIds")(committedCall) &&
+      resolvedChain(committedCall.arguments[0], source) === "options.authority.authorityLog" &&
+      resolvedChain(committedCall.arguments[1], source) === "options.authority.verifier" &&
+      isParameter(committedCall.arguments[2], committedFor, 0) &&
+      !!loadCall && ts.isCallExpression(loadCall) && calleeIs(source, "this.#transferTarget.committedBaseSource")(loadCall) &&
+      isParameter(loadCall.arguments[0], load, 0);
+  });
+}
+/**
+ * 协议首次触及装入：#adopt 先以 `!this.#needsAdoption(会话)` 守卫返回，再调用 `this.#installAdoption(会话)`；
+ * #installAdoption 对 `await this.#committedTransfers.committedFor(会话)` 逐个迁移：先 `const 准备 = await
+ * this.prepareCommittedConversationTransfer(…)`，其后同一循环体里真实调用 `准备.publish()`。只认语法树里的调用。
+ */
+function firstTouchInstallation(source) {
+  const adopt = findCallable(source, "#adopt");
+  const install = findCallable(source, "#installAdoption");
+  if (!adopt || !install || adopt.parameters.length !== 1 || install.parameters.length !== 1) return false;
+  const [guard] = adopt.body.statements;
+  const guardCondition = guard && ts.isIfStatement(guard) ? stripExpression(guard.expression) : undefined;
+  const guarded = !!guardCondition && ts.isPrefixUnaryExpression(guardCondition) &&
+    guardCondition.operator === ts.SyntaxKind.ExclamationToken && ts.isCallExpression(stripExpression(guardCondition.operand)) &&
+    calleeIs(source, "this.#needsAdoption")(stripExpression(guardCondition.operand)) &&
+    isParameter(stripExpression(guardCondition.operand).arguments[0], adopt, 0) &&
+    (ts.isReturnStatement(guard.thenStatement) ||
+      (ts.isBlock(guard.thenStatement) && guard.thenStatement.statements.some((item) => ts.isReturnStatement(item))));
+  const delegated = callsWithin(adopt.body, calleeIs(source, "this.#installAdoption"), true)
+    .some((call) => isParameter(call.arguments[0], adopt, 0));
+  const loop = install.body.statements.find((statement) => {
+    if (!ts.isForOfStatement(statement)) return false;
+    const listed = stripExpression(statement.expression);
+    return ts.isAwaitExpression(listed) && ts.isCallExpression(listed.expression) &&
+      calleeIs(source, "this.#committedTransfers.committedFor")(listed.expression) &&
+      isParameter(listed.expression.arguments[0], install, 0);
+  });
+  if (!guarded || !delegated || !loop || !ts.isBlock(loop.statement)) return false;
+  const statements = loop.statement.statements;
+  const prepareIndex = statements.findIndex((statement) => {
+    if (!ts.isVariableStatement(statement) || statement.declarationList.declarations.length !== 1) return false;
+    const initializer = stripExpression(statement.declarationList.declarations[0].initializer);
+    return !!initializer && ts.isAwaitExpression(initializer) && ts.isCallExpression(initializer.expression) &&
+      calleeIs(source, "this.prepareCommittedConversationTransfer")(initializer.expression);
+  });
+  if (prepareIndex < 0) return false;
+  const prepared = statements[prepareIndex].declarationList.declarations[0].name;
+  return ts.isIdentifier(prepared) && statements.slice(prepareIndex + 1).some((statement) => {
+    const expression = ts.isExpressionStatement(statement) ? stripExpression(statement.expression) : undefined;
+    return !!expression && ts.isCallExpression(expression) && expression.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(expression.expression) && expression.expression.name.text === "publish" &&
+      ts.isIdentifier(stripExpression(expression.expression.expression)) &&
+      stripExpression(expression.expression.expression).text === prepared.text;
+  });
+}
+/**
+ * AuthorityCommitLog 只能作为两个按键投影方法签名的索引类型出现：`AuthorityCommitLog["durableProjection" |
+ * "transactDurableProjection"]`，无论经 `import("…")` 类型还是导入别名、单双引号；其他任何引用（实例类型、值、
+ * 其他方法签名）都算持有日志能力。
+ */
+function holdsCommitLogBeyondProjectionSignatures(text) {
+  const source = stepSource(text);
+  const aliases = new Set(["AuthorityCommitLog"]);
+  const collect = (node) => {
+    if (ts.isImportSpecifier(node) && (node.propertyName ?? node.name).text === "AuthorityCommitLog") aliases.add(node.name.text);
+    ts.forEachChild(node, collect);
+  };
+  collect(source);
+  const allowedSignature = (node) => {
+    const parent = node.parent;
+    return ts.isIndexedAccessTypeNode(parent) && parent.objectType === node &&
+      ts.isLiteralTypeNode(parent.indexType) &&
+      ["durableProjection", "transactDurableProjection"].includes(stringLiteralText(parent.indexType.literal));
+  };
+  let held = false;
+  const visit = (node) => {
+    if (ts.isImportTypeNode(node) && node.qualifier) {
+      const name = ts.isIdentifier(node.qualifier) ? node.qualifier.text : node.qualifier.right.text;
+      if (name === "AuthorityCommitLog") {
+        if (!allowedSignature(node)) held = true;
+        return;
+      }
+    }
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && aliases.has(node.typeName.text)) {
+      if (!allowedSignature(node)) held = true;
+      return;
+    }
+    if (
+      ts.isIdentifier(node) && aliases.has(node.text) &&
+      !ts.isImportSpecifier(node.parent) && !ts.isImportClause(node.parent)
+    ) {
+      held = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return held;
+}
+
+/**
+ * Host 准备 Mesh 恰好三处：初次、撤销取回后（a0f9922d）、根建立后；每处都被等待，且三处在同一实参位置引用同一个
+ * const 绑定——两个暂存分别是 Host 用 createPlannedAnchorTransferStaging / createDisasterRecoveryStaging 构造的那一个。
+ */
+function prepareMeshCallsShareStagings(applicationHost) {
+  const source = stepSource(applicationHost);
+  const calls = callsNamed(source, source, "#prepareMesh")
+    .filter((call) => call.expression.expression.kind === ts.SyntaxKind.ThisKeyword);
+  if (calls.length !== 3 || !calls.every((call) => isAwaitedStep(call) && call.arguments.length === 3)) return false;
+  const bindings = [0, 1, 2].map((index) => calls.map((call) => {
+    const argument = stripExpression(call.arguments[index]);
+    return ts.isIdentifier(argument) ? constDeclaration(argument) ?? argument.text : undefined;
+  }));
+  if (bindings.some((row) => !row[0] || row.some((binding) => binding !== row[0]))) return false;
+  const factory = (binding, name) => typeof binding !== "string" &&
+    ts.isCallExpression(stripExpression(binding.initializer)) &&
+    resolvedChain(stripExpression(binding.initializer).expression, source) === `this.#dependencies.${name}`;
+  return factory(bindings[1][0], "createPlannedAnchorTransferStaging") &&
+    factory(bindings[2][0], "createDisasterRecoveryStaging");
+}
+/**
+ * 信任对账真实拒绝不连续的链段（局部名不限）：同一个 if 里比较 `事件.seq !== 游标.seq + 1` 与
+ * `事件.prevEventDigest !== 游标.eventDigest` 并抛错；另有一个 if 在分页没有连续推进时抛
+ * 'Trust reconciliation page makes no contiguous progress'。
+ */
+function reconciliationRequiresContiguousPrefix(text) {
+  const source = stepSource(text);
+  const reconcile = findCallable(source, "reconcileTrustFromPeer");
+  if (!reconcile) return false;
+  const throwsIn = (statement) => (ts.isBlock(statement) ? statement.statements : [statement])
+    .some((item) => ts.isThrowStatement(item) && ts.isNewExpression(stripExpression(item.expression)));
+  const thrownMessage = (statement) => (ts.isBlock(statement) ? statement.statements : [statement])
+    .map((item) => ts.isThrowStatement(item) && ts.isNewExpression(stripExpression(item.expression))
+      ? stringLiteralText(stripExpression(item.expression).arguments?.[0]) : undefined)
+    .find((message) => message !== undefined);
+  const comparisons = (condition) => {
+    const found = [];
+    const scan = (node) => {
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken) found.push(node);
+      ts.forEachChild(node, scan);
+    };
+    scan(condition);
+    return found;
+  };
+  let skipGuard = false;
+  let progressGuard = false;
+  const visit = (node) => {
+    if (ts.isIfStatement(node) && throwsIn(node.thenStatement)) {
+      const found = comparisons(node.expression);
+      const sequence = found.find((item) => {
+        const left = stripExpression(item.left);
+        const right = stripExpression(item.right);
+        return ts.isPropertyAccessExpression(left) && left.name.text === "seq" && ts.isBinaryExpression(right) &&
+          right.operatorToken.kind === ts.SyntaxKind.PlusToken && ts.isPropertyAccessExpression(stripExpression(right.left)) &&
+          stripExpression(right.left).name.text === "seq" && stripExpression(right.right).getText(source) === "1";
+      });
+      const cursor = sequence && resolvedChain(stripExpression(stripExpression(sequence.right).left).expression, source);
+      const event = sequence && resolvedChain(stripExpression(sequence.left).expression, source);
+      if (sequence && found.some((item) => {
+        const left = stripExpression(item.left);
+        const right = stripExpression(item.right);
+        return ts.isPropertyAccessExpression(left) && left.name.text === "prevEventDigest" &&
+          resolvedChain(left.expression, source) === event &&
+          ts.isPropertyAccessExpression(right) && right.name.text === "eventDigest" && resolvedChain(right.expression, source) === cursor;
+      })) {
+        skipGuard = true;
+      }
+      if (thrownMessage(node.thenStatement) === "Trust reconciliation page makes no contiguous progress") progressGuard = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(reconcile.body);
+  return skipGuard && progressGuard;
+}
+/**
+ * 计划迁居的启动前恢复（局部名不限）：在 `(await this.#candidates.unfinishedStates()).values()` 的遍历里，先读该候选的
+ * 日记账阶段（`await …journal.state(…)`），之后的真实调用中：等待 `this.#candidates.terminal(…, "aborted", …)` 后，
+ * 同一块里再等待 `this.#cleanupAborted(…)`；另有等待 `this.#candidates.terminal(…, "committed")`。不再遍历暂存目录。
+ */
+function candidateRecoveryOrdersTerminalAndCleanup(text) {
+  const source = stepSource(text);
+  if (callsWithin(source, calleeIs(source, "this.#staging.recoverableTransferIds"), true).length !== 0) return false;
+  const loops = [];
+  const findLoop = (node) => {
+    if (ts.isForOfStatement(node)) {
+      const values = stripExpression(node.expression);
+      const listed = ts.isCallExpression(values) && ts.isPropertyAccessExpression(values.expression) &&
+        values.expression.name.text === "values" ? stripExpression(values.expression.expression) : undefined;
+      if (listed && ts.isAwaitExpression(listed) && ts.isCallExpression(stripExpression(listed.expression)) &&
+          calleeIs(source, "this.#candidates.unfinishedStates")(stripExpression(listed.expression))) loops.push(node);
+    }
+    ts.forEachChild(node, findLoop);
+  };
+  findLoop(source);
+  if (loops.length !== 1 || !ts.isBlock(loops[0].statement)) return false;
+  const body = loops[0].statement;
+  const awaited = (chain) => callsWithin(body, (call) =>
+    ts.isAwaitExpression(stepExpressionParent(call).parent) && calleeIs(source, chain)(call), true);
+  const phaseRead = callsWithin(body, (call) => ts.isAwaitExpression(stepExpressionParent(call).parent) &&
+    ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === "state" &&
+    ts.isPropertyAccessExpression(stripExpression(call.expression.expression)) &&
+    stripExpression(call.expression.expression).name.text === "journal", true)[0];
+  if (!phaseRead) return false;
+  const after = (call) => call.getStart(source) > phaseRead.getStart(source);
+  const terminal = (kind) => awaited("this.#candidates.terminal")
+    .filter((call) => after(call) && stringLiteralText(stripExpression(call.arguments[1])) === kind);
+  const enclosingBlock = (node) => { let current = node.parent; while (current && !ts.isBlock(current)) current = current.parent; return current; };
+  const aborted = terminal("aborted")[0];
+  const cleaned = aborted && awaited("this.#cleanupAborted").some((call) =>
+    call.getStart(source) > aborted.getStart(source) && enclosingBlock(call) === enclosingBlock(aborted));
+  return !!cleaned && terminal("committed").length > 0;
+}
+/**
+ * 信任对账恰有两处真实调用：计划迁居的对账，以及会话当前权威的认证信任追赶。后者只在
+ * `this.#disposers.push(options.authority.conversationAuthority.installTrustCatchUp(async (对端) => {…}))` 的回调里：
+ * 等待 `reconcilePlannedAnchorTrustFromPeer(this.connections.client(对端), { store: options.bootstrapStore,
+ * localDeviceId: options.authority.deviceId })`，再把结果交给 `this.#control.reconcileTrust(结果)`（名字不限）。
+ */
+function trustCatchUpRegistered(text) {
+  const source = stepSource(text);
+  if (callsWithin(source, calleeIs(source, "reconcilePlannedAnchorTrustFromPeer"), true).length !== 2) return false;
+  return callsWithin(source, calleeIs(source, "options.authority.conversationAuthority.installTrustCatchUp"), true).some((install) => {
+    const pushed = stepExpressionParent(install).parent;
+    const callback = stripExpression(install.arguments[0]);
+    if (
+      !pushed || !ts.isCallExpression(pushed) || !calleeIs(source, "this.#disposers.push")(pushed) ||
+      !callback || !ts.isArrowFunction(callback) || callback.parameters.length !== 1 || !ts.isBlock(callback.body)
+    ) {
+      return false;
+    }
+    const reconcile = callsWithin(callback.body, calleeIs(source, "reconcilePlannedAnchorTrustFromPeer"))[0];
+    const client = reconcile && stripExpression(reconcile.arguments[0]);
+    const options = reconcile && stripExpression(reconcile.arguments[1]);
+    const declaration = reconcile && stepExpressionParent(reconcile).parent;
+    const binding = declaration && ts.isAwaitExpression(declaration) ? declaration.parent : undefined;
+    return !!client && ts.isCallExpression(client) && calleeIs(source, "this.connections.client")(client) &&
+      isParameter(client.arguments[0], callback, 0) && !!options && ts.isObjectLiteralExpression(options) &&
+      resolvedChain(propertyInitializer(options, "store"), source) === "options.bootstrapStore" &&
+      resolvedChain(propertyInitializer(options, "localDeviceId"), source) === "options.authority.deviceId" &&
+      !!binding && ts.isVariableDeclaration(binding) && ts.isIdentifier(binding.name) &&
+      callsWithin(callback.body, (call) => ts.isAwaitExpression(stepExpressionParent(call).parent) &&
+        calleeIs(source, "this.#control.reconcileTrust")(call) &&
+        ts.isIdentifier(stripExpression(call.arguments[0])) && stripExpression(call.arguments[0]).text === binding.name.text).length === 1;
+  });
+}
+/** 设备移除效果适配器恰好构造一次：`new DeviceRemovalTargetEffectAdapter(this.connections, (op) => this.#terminalRouteFor(op))`（参数名不限）。 */
+function removalAdapterRoutesTerminal(text) {
+  const source = stepSource(text);
+  const created = [];
+  const visit = (node) => {
+    if (ts.isNewExpression(node) && resolvedChain(node.expression, source) === "DeviceRemovalTargetEffectAdapter") created.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (created.length !== 1 || created[0].arguments?.length !== 2) return false;
+  const [connections, route] = created[0].arguments.map(stripExpression);
+  const routed = route && ts.isArrowFunction(route) && route.parameters.length === 1 && !ts.isBlock(route.body)
+    ? stripExpression(route.body) : undefined;
+  return resolvedChain(connections, source) === "this.connections" && !!routed && ts.isCallExpression(routed) &&
+    calleeIs(source, "this.#terminalRouteFor")(routed) && isParameter(routed.arguments[0], route, 0);
+}
+/** 对象字面量里某属性的初始化表达式（去掉括号与断言）。 */
+function propertyInitializer(object, name) {
+  const property = object?.properties?.find((item) => ts.isPropertyAssignment(item) && propertyNameText(item.name) === name);
+  return property ? stripExpression(property.initializer) : undefined;
+}
+/**
+ * 灾备安装回执经共享安装索引写入：回执函数里真实调用 `recordAnchorInstallationCompletion(第一个参数.log, {
+ * stream: DISASTER_POST_INSTALL_STREAM, …, conflictMessage: … })`（参数名不限）。
+ */
+function disasterReceiptUsesInstallationIndex(text) {
+  const source = stepSource(text);
+  const receipt = findCallable(source, "recordDisasterRecoveryPostInstallReceipt");
+  const parameter = receipt?.parameters[0]?.name;
+  if (!receipt || !parameter || !ts.isIdentifier(parameter)) return false;
+  return callsWithin(receipt.body, calleeIs(source, "recordAnchorInstallationCompletion"), true).some((call) => {
+    const log = stripExpression(call.arguments[0]);
+    const options = stripExpression(call.arguments[1]);
+    return !!log && ts.isPropertyAccessExpression(log) && log.name.text === "log" && isParameter(log.expression, receipt, 0) &&
+      !!options && ts.isObjectLiteralExpression(options) &&
+      resolvedChain(propertyInitializer(options, "stream"), source) === "DISASTER_POST_INSTALL_STREAM" &&
+      propertyInitializer(options, "conflictMessage") !== undefined;
+  });
+}
+/**
+ * 共享安装索引的完成记录（参数名、局部名不限）：在第一个参数（日志）的 transactDurableProjection 事务里，已有记录与
+ * 本次值不全等就真实抛出 `new Error(第二个参数.conflictMessage)`，全等则返回 `{ kind: "return" }`，否则 `{ kind: "append" }`。
+ */
+function installationIndexKeepsConflicts(records) {
+  const text = records.find((record) => record.relative === "packages/cli/src/serve/anchor-installation-index.ts")?.text ?? "";
+  const source = stepSource(text);
+  const completion = findCallable(source, "recordAnchorInstallationCompletion");
+  if (!completion || completion.parameters.length !== 2) return false;
+  const transaction = callsWithin(completion.body, (call) =>
+    ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === "transactDurableProjection" &&
+    isParameter(call.expression.expression, completion, 0), true);
+  if (transaction.length !== 1) return false;
+  let conflictThrow = false;
+  let replayReturn = false;
+  let append = false;
+  const visit = (node) => {
+    if (ts.isIfStatement(node)) {
+      const thrown = ts.isBlock(node.thenStatement) ? node.thenStatement.statements : [node.thenStatement];
+      const comparesValue = (expression) => ts.isBinaryExpression(expression) &&
+        expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+        [expression.left, expression.right].some((side) => {
+          const call = stripExpression(side);
+          const argument = ts.isCallExpression(call) && calleeIs(source, "canonicalize")(call) ? stripExpression(call.arguments[0]) : undefined;
+          return !!argument && ts.isPropertyAccessExpression(argument) && argument.name.text === "value" &&
+            isParameter(argument.expression, completion, 1);
+        });
+      let compares = false;
+      const scan = (child) => { if (comparesValue(child)) compares = true; ts.forEachChild(child, scan); };
+      scan(node.expression);
+      if (compares && thrown.some((statement) => {
+        if (!ts.isThrowStatement(statement) || !ts.isNewExpression(stripExpression(statement.expression))) return false;
+        const created = stripExpression(statement.expression);
+        const message = stripExpression(created.arguments?.[0]);
+        return resolvedChain(created.expression, source) === "Error" && !!message && ts.isPropertyAccessExpression(message) &&
+          message.name.text === "conflictMessage" && isParameter(message.expression, completion, 1);
+      })) {
+        conflictThrow = true;
+      }
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      const kind = stringLiteralText(propertyInitializer(node, "kind"));
+      if (kind === "return") replayReturn = true;
+      if (kind === "append") append = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(transaction[0]);
+  return conflictThrow && replayReturn && append;
+}
+function namedPropertyAssignments(source, name) {
+  const found = [];
+  const visit = (node) => {
+    if (ts.isPropertyAssignment(node) && propertyNameText(node.name) === name) found.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+function singleParameterHandler(property, name) {
+  if (ts.isMethodDeclaration(property) && propertyNameText(property.name) === name && property.body) {
+    return property.parameters.length === 1 && ts.isIdentifier(property.parameters[0].name)
+      ? { parameter: property.parameters[0].name.text, body: property.body }
+      : undefined;
+  }
+  if (
+    ts.isPropertyAssignment(property) && propertyNameText(property.name) === name &&
+    (ts.isArrowFunction(property.initializer) || ts.isFunctionExpression(property.initializer)) &&
+    ts.isBlock(property.initializer.body) && property.initializer.parameters.length === 1 &&
+    ts.isIdentifier(property.initializer.parameters[0].name)
+  ) {
+    return { parameter: property.initializer.parameters[0].name.text, body: property.initializer.body };
+  }
+  return undefined;
+}
+function callsNamed(node, source, member) {
+  const calls = [];
+  const visit = (current) => {
+    if (
+      ts.isCallExpression(current) && ts.isPropertyAccessExpression(current.expression) &&
+      current.expression.name.text === member
+    ) {
+      calls.push(current);
+    }
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return calls;
+}
+const passesOnlyParameter = (call, parameter) =>
+  call.arguments.length === 1 && ts.isIdentifier(call.arguments[0]) && call.arguments[0].text === parameter;
+/**
+ * 场景删除端口委托唯一的清理机制：直接给 `worksceneStorageCleanup.scenes`，或是只有 removeScene 的适配器，
+ * 方法体顶层（不在 try 里）恰好一次等待或返回 `worksceneStorageCleanup.scenes.removeScene(同一参数)`，
+ * 整个端口内没有第二个物理删除。适配器可附带清理自身缓存（1f583e08：同 id 再出现时按新场景初始化）。
+ */
+function sceneRemovalDelegated(text) {
+  const source = stepSource(text);
+  const properties = namedPropertyAssignments(source, "worksceneSceneStorageRemoval");
+  if (properties.length !== 1) return false;
+  const value = properties[0].initializer;
+  if (value.getText(source).replace(/\s+/gu, "") === "worksceneStorageCleanup.scenes") return true;
+  if (!ts.isObjectLiteralExpression(value) || value.properties.length !== 1) return false;
+  const handler = singleParameterHandler(value.properties[0], "removeScene");
+  if (!handler) return false;
+  const removals = callsNamed(value, source, "removeScene");
+  if (
+    removals.length !== 1 ||
+    removals[0].expression.expression.getText(source).replace(/\s+/gu, "") !== "worksceneStorageCleanup.scenes" ||
+    !passesOnlyParameter(removals[0], handler.parameter)
+  ) {
+    return false;
+  }
+  const { parent } = stepExpressionParent(removals[0]);
+  const statement = ts.isAwaitExpression(parent) ? stepExpressionParent(parent).parent : parent;
+  return (ts.isExpressionStatement(statement) && ts.isAwaitExpression(parent) || ts.isReturnStatement(statement)) &&
+    statement.parent === handler.body;
+}
+/**
+ * 停止入口委托唯一的停止协调器，并承担待结清工作的错误转换（9d26827d；server.shutdown prepare 抛出的既有
+ * RpcAppError 原样进入 wire：research/design/modules/distributed-runtime/specification.md 中 server.shutdown 错误条款）。
+ * 所以适配器只有 prepare：函数体只有一个 try，try 里只 `return await stopCoordinator.prepare(同一参数)`——
+ * 不 await 时异步拒绝绕过本地 catch，转换失效；catch 以 `hostStopPendingWorkReason(捕获变量)` 判别后
+ * `throw new RpcAppError(`，其余原样抛出捕获变量，不 return。直接交出 stopCoordinator 会丢掉转换。
+ */
+function shutdownDelegated(text) {
+  const source = stepSource(text);
+  const properties = namedPropertyAssignments(source, "lifecycleShutdown");
+  if (properties.length !== 1) return false;
+  const value = properties[0].initializer;
+  if (!ts.isObjectLiteralExpression(value) || value.properties.length !== 1) return false;
+  const handler = singleParameterHandler(value.properties[0], "prepare");
+  if (!handler || handler.body.statements.length !== 1) return false;
+  const [attempt] = handler.body.statements;
+  if (!ts.isTryStatement(attempt) || attempt.finallyBlock || !attempt.catchClause) return false;
+  if (callsNamed(value, source, "prepare").length !== 1) return false;
+  const [returned] = attempt.tryBlock.statements;
+  if (
+    attempt.tryBlock.statements.length !== 1 || !ts.isReturnStatement(returned) || !returned.expression ||
+    !ts.isAwaitExpression(returned.expression)
+  ) {
+    return false;
+  }
+  const delegated = returned.expression.expression;
+  if (
+    !ts.isCallExpression(delegated) || delegated.expression.getText(source).replace(/\s+/gu, "") !== "stopCoordinator.prepare" ||
+    !passesOnlyParameter(delegated, handler.parameter)
+  ) {
+    return false;
+  }
+  const caught = attempt.catchClause.variableDeclaration?.name;
+  const recovery = attempt.catchClause.block;
+  if (!caught || !ts.isIdentifier(caught) || recovery.statements.length === 0) return false;
+  let returns = false;
+  let rethrows = false;
+  let classifies = false;
+  let converts = false;
+  const visit = (node) => {
+    if (ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) returns = true;
+    if (ts.isThrowStatement(node) && ts.isIdentifier(node.expression) && node.expression.text === caught.text) rethrows = true;
+    if (
+      ts.isThrowStatement(node) && ts.isNewExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "RpcAppError"
+    ) {
+      converts = true;
+    }
+    if (
+      ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "hostStopPendingWorkReason" &&
+      node.arguments.length === 1 && ts.isIdentifier(node.arguments[0]) && node.arguments[0].text === caught.text
+    ) {
+      classifies = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(recovery);
+  return !returns && rethrows && classifies && converts && ts.isThrowStatement(recovery.statements.at(-1));
+}
+/**
+ * 持有配置加载器：受限的是导入的 loadConfig 能力，不是这个拼写。按真实绑定识别值引用——具名导入的本地名
+ * （含 `loadConfig as 别名`）、命名空间导入上的 `ns.loadConfig`、从动态导入解构出的绑定、裸标识符；
+ * 导入说明符本身与 `typeof` 类型查询不算。
+ */
+function referencesConfigurationLoader(text) {
+  if (!/\bloadConfig\b/u.test(text)) return false;
+  const source = stepSource(text);
+  const loaderNames = new Set(["loadConfig"]);
+  const namespaces = new Set();
+  const collectBindings = (node) => {
+    if (ts.isImportSpecifier(node) && (node.propertyName ?? node.name).text === "loadConfig") {
+      loaderNames.add(node.name.text);
+    }
+    if (ts.isNamespaceImport(node)) namespaces.add(node.name.text);
+    if (
+      ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+      ts.isAwaitExpression(node.initializer) && ts.isCallExpression(node.initializer.expression) &&
+      node.initializer.expression.expression.kind === ts.SyntaxKind.ImportKeyword
+    ) {
+      namespaces.add(node.name.text);
+    }
+    if (ts.isBindingElement(node) && ts.isIdentifier(node.name) &&
+        (node.propertyName && ts.isIdentifier(node.propertyName) ? node.propertyName.text : node.name.text) === "loadConfig") {
+      loaderNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collectBindings);
+  };
+  collectBindings(source);
+  let held = false;
+  const visit = (node) => {
+    if (ts.isIdentifier(node) && loaderNames.has(node.text)) {
+      const parent = node.parent;
+      const notValueReference =
+        ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isTypeQueryNode(parent) ||
+        (ts.isBindingElement(parent) && (parent.name === node || parent.propertyName === node)) ||
+        (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+        (ts.isPropertyAssignment(parent) && parent.name === node);
+      if (!notValueReference) held = true;
+    }
+    if (
+      ts.isPropertyAccessExpression(node) && node.name.text === "loadConfig" &&
+      ts.isIdentifier(node.expression) && namespaces.has(node.expression.text) &&
+      !ts.isTypeQueryNode(node.parent)
+    ) {
+      held = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return held;
+}
+/**
+ * job 投影只经唯一的投影 owner，实参按 `createAgentJobRuntimePort({ create })` 回调参数的职责位置判定，名字不限：
+ * job(第 0 位 instruction, 第 2 位 capabilities[, 第 3 位 workspaceBinding 或 `它 ?? null`])（90e804bc：授权范围由
+ * job 清单的工作区绑定决定）。结果绑定到任意名字的 const，且必须展开进同一回调里的 `runtimeHost.createJobRuntime(`。
+ */
+function jobProjectionBound(text) {
+  const source = stepSource(text);
+  const calls = callsNamed(source, source, "job")
+    .filter((call) => call.expression.expression.getText(source) === "anchorRuntimeProjections");
+  if (calls.length !== 1) return false;
+  const [call] = calls;
+  const create = enclosingStepFunction(call);
+  if (
+    !create || !(ts.isArrowFunction(create) || ts.isFunctionExpression(create)) ||
+    !ts.isPropertyAssignment(create.parent) || propertyNameText(create.parent.name) !== "create" ||
+    !ts.isObjectLiteralExpression(create.parent.parent) || !ts.isCallExpression(create.parent.parent.parent) ||
+    create.parent.parent.parent.expression.getText(source) !== "createAgentJobRuntimePort" ||
+    create.parameters.length !== 4 || !create.parameters.every((parameter) => ts.isIdentifier(parameter.name))
+  ) {
+    return false;
+  }
+  const parameter = (index) => create.parameters[index].name.text;
+  const isParameter = (node, index) => ts.isIdentifier(node) && node.text === parameter(index);
+  const args = call.arguments;
+  if (args.length < 2 || args.length > 3 || !isParameter(args[0], 0) || !isParameter(args[1], 2)) return false;
+  if (args.length === 3) {
+    const third = args[2];
+    const binding = ts.isBinaryExpression(third) && third.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken &&
+        third.right.kind === ts.SyntaxKind.NullKeyword
+      ? third.left
+      : third;
+    if (!isParameter(binding, 3)) return false;
+  }
+  const declaration = call.parent;
+  if (
+    !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name) ||
+    (declaration.parent.flags & ts.NodeFlags.Const) === 0
+  ) {
+    return false;
+  }
+  const projected = declaration.name.text;
+  const consumers = callsNamed(create, source, "createJobRuntime")
+    .filter((consumer) => consumer.expression.expression.getText(source) === "runtimeHost");
+  return consumers.length === 1 && consumers[0].arguments.length === 1 &&
+    ts.isObjectLiteralExpression(consumers[0].arguments[0]) &&
+    consumers[0].arguments[0].properties.some((property) =>
+      ts.isSpreadAssignment(property) && ts.isIdentifier(property.expression) && property.expression.text === projected);
+}
+/**
+ * 推进已受理轮次的补审接入：唯一的 AdvancementAcceptedTurnApplicationService 构造里，catchUp 恰好只有
+ * `catchUpAcceptedTurn: (会话, 轮次) => R.recoverConversation(会话, { beforeRunIndex: 轮次 })`，
+ * R 是同文件唯一由 createAdvancementRecoveryMaintenance 绑定的 const。
+ */
+function advancementCatchUpWired(text) {
+  const source = stepSource(text);
+  const constructions = [];
+  const recoveryBindings = new Set();
+  const visit = (node) => {
+    if (
+      ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === "AdvancementAcceptedTurnApplicationService"
+    ) {
+      constructions.push(node);
+    }
+    if (
+      ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+      ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression) &&
+      node.initializer.expression.text === "createAdvancementRecoveryMaintenance" &&
+      (node.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      recoveryBindings.add(node.name.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (constructions.length !== 1 || recoveryBindings.size !== 1) return false;
+  const options = constructions[0].arguments?.[0];
+  if (!options || !ts.isObjectLiteralExpression(options)) return false;
+  const catchUp = options.properties.find((property) =>
+    ts.isPropertyAssignment(property) && propertyNameText(property.name) === "catchUp");
+  if (!catchUp || !ts.isObjectLiteralExpression(catchUp.initializer) || catchUp.initializer.properties.length !== 1) {
+    return false;
+  }
+  const [entry] = catchUp.initializer.properties;
+  if (
+    !ts.isPropertyAssignment(entry) || propertyNameText(entry.name) !== "catchUpAcceptedTurn" ||
+    !ts.isArrowFunction(entry.initializer) || entry.initializer.parameters.length !== 2 ||
+    !entry.initializer.parameters.every((parameter) => ts.isIdentifier(parameter.name))
+  ) {
+    return false;
+  }
+  const [conversation, runIndex] = entry.initializer.parameters.map((parameter) => parameter.name.text);
+  let body = entry.initializer.body;
+  if (ts.isBlock(body)) {
+    const [only] = body.statements;
+    if (body.statements.length !== 1 || !ts.isReturnStatement(only) || !only.expression) return false;
+    body = only.expression;
+  }
+  while (ts.isParenthesizedExpression(body)) body = body.expression;
+  if (
+    !ts.isCallExpression(body) || !ts.isPropertyAccessExpression(body.expression) ||
+    body.expression.name.text !== "recoverConversation" || !ts.isIdentifier(body.expression.expression) ||
+    !recoveryBindings.has(body.expression.expression.text) || body.arguments.length !== 2
+  ) {
+    return false;
+  }
+  const [first, second] = body.arguments;
+  if (!ts.isIdentifier(first) || first.text !== conversation) return false;
+  if (!ts.isObjectLiteralExpression(second) || second.properties.length !== 1) return false;
+  const [option] = second.properties;
+  return (
+    (ts.isPropertyAssignment(option) && propertyNameText(option.name) === "beforeRunIndex" &&
+      ts.isIdentifier(option.initializer) && option.initializer.text === runIndex) ||
+    (ts.isShorthandPropertyAssignment(option) && option.name.text === "beforeRunIndex" &&
+      runIndex === "beforeRunIndex")
+  );
+}
+/**
+ * 数据面启动：被等待执行的 `X.start()`，X 是 `dataPlane` 本身，或外层块里 `const X = dataPlane` 的别名
+ * （闭包内类型收窄需要别名，见阶段观测包装的启动写法）。返回各启动调用的起点。
+ */
+function dataPlaneStartPositions(text) {
+  const source = stepSource(text);
+  const aliasOfDataPlane = (identifier) => {
+    if (identifier.text === "dataPlane") return true;
+    for (let scope = identifier.parent; scope; scope = scope.parent) {
+      if (!ts.isBlock(scope)) continue;
+      for (const statement of scope.statements) {
+        if (
+          ts.isVariableStatement(statement) &&
+          (statement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
+          statement.declarationList.declarations.some((declaration) =>
+            ts.isIdentifier(declaration.name) && declaration.name.text === identifier.text &&
+            declaration.initializer && ts.isIdentifier(declaration.initializer) &&
+            declaration.initializer.text === "dataPlane")
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  const positions = [];
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) && node.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "start" &&
+      ts.isIdentifier(node.expression.expression) && aliasOfDataPlane(node.expression.expression) &&
+      isAwaitedStep(node)
+    ) {
+      positions.push(node.getStart(source));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return positions;
 }
 
 function unwrapExpression(expression) {
@@ -882,14 +2410,11 @@ export function inspectChannelRuntimeBoundary(records) {
     "const channelConnections = Object.freeze({",
     routerContribution,
   );
-  const assemblyOrder = command;
-  const channelPreparation = assemblyOrder.lastIndexOf(
-    "await prepareChannel({",
-  );
-  const losslessComposition = assemblyOrder.lastIndexOf("await createHostLosslessDataPlane({");
-  const jobOwnerRecovery = assemblyOrder.lastIndexOf("await startExecutorJobOwner({");
-  const interactionRecovery = assemblyOrder.lastIndexOf("await recoverChannelInteractions({");
-  const deliveryAssembly = assemblyOrder.lastIndexOf("await prepareDelivery({");
+  const channelPreparation = lastAwaitedStep(command, "prepareChannel", firstObjectArgument);
+  const losslessComposition = lastAwaitedStep(command, "createHostLosslessDataPlane", firstObjectArgument);
+  const jobOwnerRecovery = lastAwaitedStep(command, "startExecutorJobOwner", firstObjectArgument);
+  const interactionRecovery = lastAwaitedStep(command, "recoverChannelInteractions", firstObjectArgument);
+  const deliveryAssembly = lastAwaitedStep(command, "prepareDelivery", firstObjectArgument);
   const challengeCallback = composition.indexOf("const onChallengeAction = Object.freeze(");
   const protocolCompletion = access.indexOf(
     "assembly.complete(composition.coordinator)",
@@ -1078,7 +2603,8 @@ export function inspectChannelRuntimeBoundary(records) {
     count(access, "assembly.complete(composition.coordinator)") !== 1 ||
     count(command, "}, conversationLosslessDataPlane)") !== 2 ||
     command.indexOf("conversationLosslessDataPlane.assertComplete()") < 0 ||
-    command.indexOf("conversationLosslessDataPlane.assertComplete()") >= command.indexOf("await startExecutorJobOwner({") ||
+    command.indexOf("conversationLosslessDataPlane.assertComplete()") >=
+      lastAwaitedStep(command, "startExecutorJobOwner", firstObjectArgument) ||
     !conversationAssembly.includes('kind: "available"') ||
     !conversationAssembly.includes("port: losslessDataPlane.port") ||
     !losslessAssembly.includes("assembly.complete(composition.coordinator)") ||
@@ -1109,27 +2635,34 @@ export function inspectChannelRuntimeBoundary(records) {
       "Channel Conversation Product API binding or unique Host composition drifted",
     );
   }
-  const activation = command.slice(
-    command.indexOf("beforeActivate: async (openingRunner) =>"),
-    command.indexOf("beforePublish: async (openingServer) =>"),
-  );
+  const activationStart = command.indexOf("beforeActivate: async (openingRunner) =>");
+  const activationEnd = command.indexOf("beforePublish: async (openingServer) =>");
+  const activation = command.slice(activationStart, activationEnd);
+  const inActivation = (positions) => positions
+    .filter((position) => activationStart >= 0 && position >= activationStart && position < activationEnd)
+    .map((position) => position - activationStart);
+  const activationStep = (callee, matches) => inActivation(awaitedStepPositions(command, callee, matches))[0] ?? -1;
+  const advancementStarts = inActivation(callPositions(command, "advancementRecovery.start", noArguments));
+  // 推进恢复：入口激活前读待办（prepare），后台轮转随后启动；所选会话在准入时经 catchUp 补审，
+  // 该接入由推进应用的装配检查守住（依据：terminal-migration-remaining-work.md 包1b R1 的按会话准备路线）。
   const startupReadinessOrder = [
-    "sessionBroadcastLifecycle.install(sessionTransport)",
-    "await installConfirmationBridge({",
-    "boundChannelConversationProduct?.assertBound()",
-    "await startAnchorRuntime()",
-    "await recoverHostStop()",
-    "await currentRemovalMigrationApplication?.resumeActive()",
-    "await currentRemovalRecoveryApplication?.resumeActive()",
-    "await recoverAdvancementAcceptedWork()",
-    "await boundChannelConnections?.activate()",
-  ].map((token) => activation.indexOf(token));
+    activation.indexOf("sessionBroadcastLifecycle.install(sessionTransport)"),
+    activationStep("installConfirmationBridge", firstObjectArgument),
+    activation.indexOf("boundChannelConversationProduct?.assertBound()"),
+    activationStep("startAnchorRuntime", noArguments),
+    activationStep("recoverHostStop", noArguments),
+    activationStep("currentRemovalMigrationApplication.resumeActive", noArguments),
+    activationStep("currentRemovalRecoveryApplication.resumeActive", noArguments),
+    activationStep("advancementRecovery.prepare", noArguments),
+    advancementStarts.length === 1 ? advancementStarts[0] : -1,
+    activationStep("boundChannelConnections.activate", noArguments),
+  ];
   if (
     startupReadinessOrder.some((position, index) =>
       position < 0 || (index > 0 && position <= startupReadinessOrder[index - 1])) ||
-    count(command, "await startAnchorRuntime()") !== 1 ||
-    count(command, "await recoverHostStop()") !== 1 ||
-    count(command, "await boundChannelConnections?.activate()") !== 1 ||
+    awaitedStepPositions(command, "startAnchorRuntime", noArguments).length !== 1 ||
+    awaitedStepPositions(command, "recoverHostStop", noArguments).length !== 1 ||
+    awaitedStepPositions(command, "boundChannelConnections.activate", noArguments).length !== 1 ||
     command.indexOf("boundChannelConversationProduct?.bind(productApi)") >=
       command.indexOf("runner = await runServer({") ||
     !binding.includes("assertBound(): void") || /#waiters|new Promise\(/u.test(binding) ||
@@ -1167,7 +2700,17 @@ async function collectProductionConstants() {
   validateInboundRouterAssembly(
     await readFile(path.join(root, "packages/cli/src/serve/channels.ts"), "utf8"),
   );
-  const channelAdapters = packagedExtensions().filter(({ manifest }) => manifest.type === "channel").map(({ manifest }) => ({ configType: manifest.id, adapterType: manifest.id }));
+  // 打包的通道扩展以 packages/channels/*/extension.json 为源头：cli 构建把每个通道目录的产物原样复制进
+  // dist/extensions，manifest 的 id/type 即来自这份声明。直接读声明，lint 不依赖 cli 产物是否存在或过期。
+  const channelsRoot = path.join(root, "packages", "channels");
+  const channelDeclarations = [];
+  for (const entry of await readdir(channelsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const declaration = JSON.parse(await readFile(path.join(channelsRoot, entry.name, "extension.json"), "utf8"));
+    if (typeof declaration.id !== "string" || typeof declaration.type !== "string") throw new Error(`channel extension declaration is malformed: ${entry.name}`);
+    channelDeclarations.push(declaration);
+  }
+  const channelAdapters = channelDeclarations.filter((manifest) => manifest.type === "channel").map((manifest) => ({ configType: manifest.id, adapterType: manifest.id }));
   assertUnique(channelAdapters.map((item) => item.configType), "channel config type");
   assertUnique(channelAdapters.map((item) => item.adapterType), "channel adapter type");
   const inboundEvents = [...FEISHU_INBOUND_EVENT_NAMES];
@@ -1559,7 +3102,8 @@ export function inspectKernelRunEnvelopeOwnership(records) {
       "advancement",
       "turnContext",
     ],
-    control: ["abortSignal", "watchdog", "modelCallResourceMeter"],
+    // modelProviderPhases：运行拥有者给本次主循环模型调用的阶段回调（0b27b02c）
+    control: ["abortSignal", "watchdog", "modelCallResourceMeter", "modelProviderPhases"],
     correctness: [
       "inputPort",
       "toolSideEffectObserver",
@@ -3869,7 +5413,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     if (
       record.relative.startsWith("packages/cli/src/") &&
       !/\.test\.ts$|\/__tests__\//u.test(record.relative) &&
-      /\bloadConfig\b/u.test(record.text) &&
+      referencesConfigurationLoader(record.text) &&
       !allowedConfigurationSourceOwners.has(record.relative)
     ) {
       failures.push(`${record.relative}: ordinary runtime Surface owns a configuration loader`);
@@ -3969,7 +5513,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     ["Kernel environment edge", runtimeBindings, "RuntimeKernelEnvironmentConfigurationProjection"],
     ["Advancement edge", advancement, "RuntimeAdvancementConfigurationProjection"],
     ["default workspace edge", defaultWorkspace, "RuntimeWorkspaceConfigurationProjection"],
-    ["Trust edge", trust, "RuntimeWorkspaceConfigurationProjection"],
+    // Trust 边自 90e804bc 起完全不读配置（默认 main，工作区按登记目录），只受上面的聚合配置禁令约束
     ["credential rotation edge", rotation, "RuntimeCredentialRotationConfigurationProjection"],
   ]) {
     if (!new RegExp(`(?:readonly\\s+)?configuration:\\s*${expectedType}`, "u").test(source)) {
@@ -4220,12 +5764,12 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("windowPrompt: createSkillCatalogWindowPromptProjection(mode)") ||
     !product.includes("createConversationRuntimeProjection({") ||
     !product.includes("securityExecution: input.securityExecution.bind(") ||
-    !product.includes('Object.freeze({ kind: "scene", sceneId })') ||
+    // 各模式投影的出口恰为这一组（范围与持久批准的效果由 workscene-runtime-projection 行为测试承担，90e804bc）
+    returnedPropertyNames(product, "createAnchorRuntimeProjectionAssembly") !==
+      "capabilityCatalog,ephemeral,job,jobCapabilities,main,scene" ||
     !product.includes("lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)]") ||
     !product.includes("profile: zhixingProfile(") ||
     !product.includes("profile: powerProfile(") ||
-    !product.includes('const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");') ||
-    !product.includes("const job = (instruction: JobExecutionInstruction, capabilities: JobRuntimeCapabilities) =>") ||
     !product.includes("selectJobRuntimeTools({") ||
     !product.includes("export function createAnchorRuntimeCapabilityCatalog(") ||
     !product.includes("...zhixingProfile().enabledTools") ||
@@ -4246,7 +5790,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     (command.match(/runtimeHost\.createConversationRuntime\s*\(/gu) ?? []).length !== 1 ||
     !command.includes("createAgentRuntime: createConversationAgentRuntime") ||
     !command.includes("projections: anchorRuntimeProjections") ||
-    !command.includes("const projection = anchorRuntimeProjections.job(instruction, capabilities);") ||
+    !jobProjectionBound(command) ||
     !command.includes("anchorRuntimeProjections.ephemeral()") ||
     !command.includes("capabilities: anchorRuntimeCapabilities,") ||
     !command.includes("capabilities: () => anchorRuntimeProjections.jobCapabilities()") ||
@@ -4442,9 +5986,11 @@ export function inspectMcpManagementBoundary(records) {
     .filter((record) => /from\s+["']@zhixing\/mcp["']/u.test(record.text))
     .map((record) => record.relative)
     .sort();
+  // mcp-probe-request：受管探测辅助进程里的一次探测请求（9b37de45）
   const allowedConcreteImporters = [
     "packages/cli/src/runtime/mcp-config.ts",
     "packages/cli/src/runtime/mcp-management-adapter.ts",
+    "packages/cli/src/runtime/mcp-probe-request.ts",
     "packages/cli/src/runtime/mcp-runtime-adapter.ts",
   ];
   const cliConcreteImporters = concreteImporters.filter((relative) =>
@@ -4454,7 +6000,49 @@ export function inspectMcpManagementBoundary(records) {
     cliConcreteImporters.length !== allowedConcreteImporters.length ||
     cliConcreteImporters.some((relative, index) => relative !== allowedConcreteImporters[index])
   ) {
-    failures.push("Concrete MCP imports escaped the three finite CLI infrastructure adapters");
+    failures.push("Concrete MCP imports escaped the finite CLI infrastructure adapters");
+  }
+  return failures;
+}
+
+/**
+ * 行为承接登记的静态前置：每个用例在其文件里有 `it/test("名字", …)` 或 `it.each(…)("模板", …)` 声明，登记不为空，
+ * 且 `s7:lint` 运行登记（s7-behavior.mjs）。是否真的收集到并通过（跳过、todo、不可达声明、重名）由运行层核对。
+ * readText 按仓库相对路径读文件；缺文件按缺用例处理。
+ */
+export async function inspectBehaviorEvidence(
+  evidence = S7_BEHAVIOR_EVIDENCE,
+  readText = (relative) => readFile(path.join(root, relative), "utf8"),
+) {
+  const failures = evidence.length === 0 ? ["S7 behavior evidence registry is empty"] : [];
+  const declared = new Map();
+  for (const { file, test, cases } of evidence) {
+    if (cases !== undefined && (!Array.isArray(cases) || cases.length === 0)) failures.push(`${file}: S7 behavior evidence has empty cases: ${test}`);
+    if (!declared.has(file)) {
+      const names = new Set();
+      const text = await readText(file).catch(() => undefined);
+      if (text !== undefined) {
+        const source = stepSource(text);
+        const visit = (node) => {
+          if (ts.isCallExpression(node)) {
+            let callee = stripExpression(node.expression);
+            // 参数化声明 `it.each(表)(标题模板, …)`：标题在外层调用上
+            if (callee && ts.isCallExpression(callee)) callee = stripExpression(callee.expression);
+            const base = callee && ts.isPropertyAccessExpression(callee) ? stripExpression(callee.expression) : callee;
+            const name = stringLiteralText(stripExpression(node.arguments[0]));
+            if (base && ts.isIdentifier(base) && (base.text === "it" || base.text === "test") && name !== undefined) names.add(name);
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(source);
+      }
+      declared.set(file, names);
+    }
+    if (!declared.get(file).has(test)) failures.push(`${file}: S7 behavior evidence is missing: ${test}`);
+  }
+  const manifest = JSON.parse(await readText("package.json"));
+  if (!/\bscripts\/s7-behavior\.mjs\b/u.test(manifest.scripts?.["s7:lint"] ?? "")) {
+    failures.push("s7:lint does not run the S7 behavior evidence");
   }
   return failures;
 }
@@ -4493,6 +6081,7 @@ export async function validateS7Structure() {
   failures.push(...inspectMeshBootstrapProjectionBoundary(records));
   failures.push(...inspectMeshPairingContinuationPersistenceBoundary(records));
   failures.push(...inspectSurfaceAssetStagingPersistenceBoundary(records));
+  failures.push(...await inspectBehaviorEvidence());
   failures.push(...inspectAssignmentArtifactReceiverBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationDirectoryTopologyBoundary(records));
@@ -4577,7 +6166,12 @@ export async function validateS7Structure() {
     ));
   }
   const deliveryIndex = await readFile(path.join(root, "packages/core/src/delivery/index.ts"), "utf8");
-  if (!deliveryIndex.includes("AuthorityDeliveryPipeline") || !deliveryIndex.includes("AuthorityDeliveryQueue")) {
+  // 3f64a4ed 退役 AuthorityDeliveryQueue（按键目录取代），入口改为导出 Pipeline 与 DeliveryAuthority
+  if (
+    !/\bAuthorityDeliveryPipeline\b/u.test(deliveryIndex) ||
+    !/\bDeliveryAuthority\b/u.test(deliveryIndex) ||
+    records.some((record) => /\bAuthorityDeliveryQueue\b/u.test(record.text))
+  ) {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
@@ -4862,7 +6456,7 @@ export function inspectWorksceneStorageCleanupBoundary(records) {
     !command.includes(
       "worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations",
     ) ||
-    !command.includes("worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes")
+    !sceneRemovalDelegated(command)
   ) {
     failures.push(
       "Workscene cleanup concrete mechanism is not constructed once at the Host edge",
@@ -5019,7 +6613,8 @@ export function inspectStorageRemainderBoundary(records) {
       ["packages/cli/src/runtime/configuration-application.ts", 1],
       ["packages/cli/src/runtime/surface-core-host-link.ts", 1],
       ["packages/cli/src/runtime/workspace-command.ts", 1],
-      ["packages/cli/src/serve/backup-command.ts", 2],
+      // 第三处是备份初始化预检（bc57f878），三处都注入优先（见下方 backupSecretStoreInjectionFirst）
+      ["packages/cli/src/serve/backup-command.ts", 3],
       ["packages/cli/src/serve/disaster-recovery-command.ts", 1],
       ["packages/cli/src/serve/managed-service-runtime.ts", 1],
       ["packages/cli/src/serve/mesh-pair-command.ts", 1],
@@ -5030,6 +6625,9 @@ export function inspectStorageRemainderBoundary(records) {
     "P01 SecretStore concrete factory",
     new Set(["packages/secrets/src/platform-secret-store.ts"]),
   );
+  if (!backupSecretStoreInjectionFirst(required("packages/cli/src/serve/backup-command.ts"))) {
+    failures.push("P01 SecretStore fallback must prefer the injected store for the same home");
+  }
 
   if (
     count(skillAdapter, 'path.join(os.tmpdir(), "zhixing-skill-admission")') !== 1 ||
@@ -5049,9 +6647,8 @@ export function inspectStorageRemainderBoundary(records) {
     !commitLog.includes("export class FileAuthorityCommitLog") ||
     !projection.includes("export class FileDurableProjectionIndex") ||
     !lifecycleIndex.includes("export class ArtifactLifecycleIndex") ||
-    !authoritySetup.includes('path.join(authorityRoot, "artifacts")') ||
-    !authoritySetup.includes('path.join(authorityRoot, "authority")') ||
-    !authoritySetup.includes('path.join(authorityRoot, "executor-authority")')
+    // 主 CAS 与两本 WAL 的物理构造随统一 home 来源迁到 home-authority-sources（d4721f31）
+    !mainAuthorityPhysicalOwners(records)
   ) {
     failures.push("P06 CAS/WAL/projection physical owner exact-set drifted");
   }
@@ -5133,8 +6730,8 @@ export function inspectStorageRemainderBoundary(records) {
     !serverState.includes("return readServerStateSnapshotAt(getDefaultStatePath())") ||
     !status.includes("return readServerStateSnapshot();") ||
     /\bServerStateFile\b|getDefaultStatePath|getDefaultReadyMarkerPath/u.test(status) ||
-    count(anchor, "await loadOrCreateToken(getDefaultTokenPath(zhixingHome))") !== 1 ||
-    count(executor, "await loadOrCreateToken(getDefaultTokenPath(zhixingHome))") !== 1 ||
+    awaitedStepPositions(anchor, "loadOrCreateToken", homeTokenPath).length !== 1 ||
+    awaitedStepPositions(executor, "loadOrCreateToken", homeTokenPath).length !== 1 ||
     !token.includes("export async function loadOrCreateToken(") ||
     !anchorShell.includes("implements ServerLifecycleOwner") ||
     !executorShell.includes("export class ExecutorServerLifecycle") ||
@@ -5446,7 +7043,8 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   if (
     composition.includes("isDeviceRemovalTargetConnected") ||
     mesh.includes("isDeviceRemovalTargetConnected") ||
-    mesh.split("new DeviceRemovalTargetEffectAdapter(this.connections)").length - 1 !== 1 ||
+    // 第二参是执行端移除的终态路由（a0f9922d：撤销按原回执收束），连通判断仍只在适配器内部
+    !removalAdapterRoutesTerminal(mesh) ||
     removalTargetEffects.split("this.connections.has(input.targetDeviceId)").length - 1 !== 3 ||
     removalTargetEffects.split('kind: "unavailable"').length - 1 !== 3 ||
     removalTargetEffects.split('kind: "completed"').length - 1 !== 3
@@ -5655,8 +7253,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   const command = required("packages/cli/src/runtime/workspace-command.ts");
   const terminal = required("packages/cli/src/terminal/application.ts");
 
-  const finiteWorkspaceResourcePort =
-    /Pick<\s*ResourceReservationPort,\s*"acquireRoot"\s*\|\s*"settle"\s*\|\s*"release"\s*>/u;
+  // 有限端口按 Pick 成员集合与唯一的 reclaimExpired 判定（286dae66：收束上一尝试的残留根）
   const workspaceResourceDemandSources = [control, host, bootstrap];
   const controlOwners = records
     .filter((record) => record.text.includes("new ExecutorWorkspaceAdministrationControl("))
@@ -5665,8 +7262,8 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     workspaceResourceDemandSources.some((source) =>
       /ExecutorResourceGovernor|@zhixing\/executor/u.test(source)
     ) ||
-    !finiteWorkspaceResourcePort.test(control) ||
-    !finiteWorkspaceResourcePort.test(host) ||
+    !controlResourcesFinite(control) ||
+    !hostResourcesFinite(host) ||
     /readonly\s+resources\s*\?/u.test(control) ||
     /readonly\s+resources\s*\?/u.test(host) ||
     controlOwners.length !== 1 ||
@@ -6084,7 +7681,8 @@ export function inspectTrustAdministrationOwnership(records) {
   if (
     !agentRuntime.includes("assembleKernelSecurityExecution(") ||
     !agentRuntime.includes("securityExecution.securitySnapshot()") ||
-    !agentRuntime.includes("securityExecution.executionPermissionRules()") ||
+    // 90e804bc 起按范围取规则：只核调用目标是组合出的 securityExecution，参数不限
+    !callsOnFactoryResult(agentRuntime, "executionPermissionRules", "assembleKernelSecurityExecution") ||
     !agentRuntime.includes("permissionRuleSource: securityExecution.permissionRuleSource") ||
     /TrustAdministration|new PermissionStore|createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b/u.test(
       agentRuntime,
@@ -6156,9 +7754,8 @@ export function inspectTrustAdministrationOwnership(records) {
 
   if (
     !adapter.includes('from "@zhixing/core/trust-administration"') ||
+    // 90e804bc 起桥不再解析工作区（默认 main，工作区按登记目录命名），只保留归属禁令
     !adapter.includes("repository: deps.repository") ||
-    !adapter.includes("deps.workspaceIdentity(workspace.path)") ||
-    !adapter.includes("resolveWorkspace(deps.config") ||
     /PermissionStore|createPermissionStoreTrustAdministrationRepository|new\s+\w*Store/u.test(
       adapter,
     ) ||
@@ -6177,9 +7774,8 @@ export function inspectTrustAdministrationOwnership(records) {
     concreteConstructors.length !== 1 ||
     concreteConstructors[0]?.relative !==
       "packages/cli/src/serve/permission-storage-infrastructure.ts" ||
-    (permissionInfrastructure.match(/new PermissionStore\s*\(/gu) ?? []).length !==
-      1 ||
-    !permissionInfrastructure.includes('path.join(input.zhixingHome, "permissions")') ||
+    // 90e804bc 起物理机制是唯一的持久规则存储，PermissionStore 是按运行的内存视图，必须都接这份存储
+    !permissionMechanismConfined(records) ||
     !permissionInfrastructure.includes(
       "createPermissionStoreTrustAdministrationRepository(",
     ) ||
@@ -6189,9 +7785,9 @@ export function inspectTrustAdministrationOwnership(records) {
     !permissionInfrastructure.includes("createKernelSecurityExecution(") ||
     !permissionInfrastructure.includes("application.recordApproval(approval)") ||
     !permissionInfrastructure.includes("permissionRuleSource") ||
-    /resolveWorkspace|parseConversationId|SUGGESTION_THRESHOLDS/u.test(
-      permissionInfrastructure,
-    )
+    // 范围由领域 resolveExecutionTrustScope 推导；基础设施只用对话域解析器取 sceneId 作输入
+    !permissionInfrastructure.includes("resolveExecutionTrustScope(") ||
+    /resolveWorkspace|SUGGESTION_THRESHOLDS/u.test(permissionInfrastructure)
   ) {
     failures.push(
       "Permission file mechanism is not confined to the one Host infrastructure adapter",
@@ -6464,18 +8060,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     "export function createAnchorConversationDeleteCommitPort(",
   );
   const deleteCommit = commitStart >= 0 ? deleteBinding.slice(commitStart) : "";
-  const lifecycleApplicationStart = application.indexOf(
-    "export class AdvancementConversationLifecycleApplicationService",
-  );
-  const lifecycleApplicationEnd = application.indexOf(
-    "/** Path-free mechanisms used by the no-open-session new-task decision. */",
-    lifecycleApplicationStart,
-  );
-  const lifecycleApplication =
-    lifecycleApplicationStart >= 0 &&
-    lifecycleApplicationEnd > lifecycleApplicationStart
-      ? application.slice(lifecycleApplicationStart, lifecycleApplicationEnd)
-      : "";
+  // 生命周期应用的范围按语法树取类本身（原段尾注释已随 22212aa4 删除）
+  const lifecycleApplication = classText(application, "AdvancementConversationLifecycleApplicationService");
   const detailApplicationStart = application.indexOf(
     "export class AdvancementApplicationService",
   );
@@ -6614,12 +8200,14 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !advancementComposition.includes("createAdvancementReviewAttemptApplication({") ||
     advancementComposition.split("createAdvancementReviewAttemptApplication(").length - 1 !== 1 ||
     !advancementComposition.includes("createAdvancementReviewExternalMechanism({") ||
-    !advancementComposition.includes("return Object.freeze({ controller, reviews });") ||
+    // 组合出口精确集：22212aa4 起含 proposals
+    !returnsObjectWithExactly(advancementComposition, "controller,proposals,reviews") ||
     !recovery.includes("readonly reviews: AdvancementReviewAttemptApplication;") ||
-    !recovery.includes("this.options.reviews.reconcileConversation(conversationId)") ||
+    // 2ebbdc42 起对账带当前工作项：只核恢复经 reviews 应用对账，参数不限
+    callPositions(recovery, "this.options.reviews.reconcileConversation").length === 0 ||
     !recovery.includes("this.options.reviews.reviewAcceptedRun({") ||
     !recovery.includes("this.options.reviews.rebuildMissingProxyMessage(session)") ||
-    !composition.includes("return Object.freeze({ controller, reviews, lifecycle });") ||
+    !returnsObjectWithExactly(composition, "controller,lifecycle,proposals,reviews") ||
     !recovery.includes("this.options.reviewResults.projectReviewResult({") ||
     recovery.includes("dispatchAdvancementReviewResult") ||
     !accessSurfaces.includes("new AdvancementAcceptedTurnApplicationService({") ||
@@ -6744,8 +8332,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !lifecycleApplication.includes("removeConversationDataCandidate(") ||
     detailApplication.includes("cancelConversationLifecycle(") ||
     detailApplication.includes("sweepOrphanData(") ||
-    !application.includes("interface AdvancementNewTaskMechanismPort") ||
-    !application.includes("interface AdvancementNewTaskConversationPort") ||
+    // 22212aa4/aefd1da8 以提议准入与已确认原任务准入取代旧新任务决策：流程语义由 S7_BEHAVIOR_EVIDENCE 的 Advancement 用例承担，这里只留归属
     !application.includes("interface AdvancementActiveUserTurnMechanismPort") ||
     !application.includes("interface AdvancementActiveUserTurnRuntimePort") ||
     !application.includes("interface AdvancementActiveUserTurnSurfacePort") ||
@@ -6772,7 +8359,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("interface AdvancementAwaitingRubricAdmissionMechanismPort") ||
     !application.includes("interface AdvancementRubricConfirmationMechanismPort") ||
     !application.includes("interface AdvancementConfirmedOriginalTaskAdmissionPort") ||
-    !application.includes("interface AdvancementOriginalTaskExecutionPort") ||
     !application.includes("interface AdvancementOriginalTaskSurfacePort") ||
     !application.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||
     !application.includes('"advancement.command.cancel-rubric"') ||
@@ -6794,47 +8380,27 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("session.conversationId !== command.conversationId") ||
     !application.includes("session.id !== command.advancementSessionId") ||
     !application.includes("persistRubricCancellation({") ||
-    !application.includes('message: command.executeOriginal') ||
     !application.includes('committed.status !== "cancelled"') ||
     !application.includes("committed.conversationId !== command.conversationId") ||
     !application.includes("committed.id !== command.advancementSessionId") ||
     cancellationFact < 0 ||
-    originalTaskHandoff < 0 ||
-    cancellationFact > originalTaskHandoff ||
     confirmationFact < 0 ||
     confirmedAdmission < 0 ||
     confirmationFact > confirmedAdmission ||
     !application.includes("persistRubricConfirmation({") ||
     !application.includes("persistOriginalTaskAdmissionSettlement({") ||
-    !application.includes('error.reason === "conversation-not-found"') ||
     !application.includes('error.reason === "idempotency-conflict"') ||
-    !application.includes('reason: "original-task-admission-failed"') ||
     awaitingControl.length === 0 ||
     !awaitingControl.includes("decideAwaitingRubricAdmission({") ||
     !awaitingControl.includes('admission.action === "keep-awaiting-confirmation"') ||
     !awaitingControl.includes('admission.action === "downgrade-to-direct"') ||
     !awaitingControl.includes('admission.action !== "cancel-pending-task"') ||
-    !awaitingControl.includes('message: executeOriginal') ||
     !awaitingControl.includes('reason: "user-cancelled"') ||
     awaitingControl.indexOf("await command.fact.publish(decision.fact)") < 0 ||
-    awaitingControl.indexOf("await this.#originalTask.execute") < 0 ||
-    awaitingControl.indexOf("await command.fact.publish(decision.fact)") >
-      awaitingControl.indexOf("await this.#originalTask.execute") ||
     newTask.length === 0 ||
-    !newTask.includes("loadOpenNewTaskSession(") ||
-    !newTask.includes("if (open)") ||
     !newTask.includes('kind: "not-applicable"') ||
-    !newTask.includes("decideNewTaskAdmission({") ||
-    !newTask.includes('admission.action !== "start-advancement"') ||
-    !newTask.includes('admission.action !== "run-direct"') ||
-    !newTask.includes("buildNewTaskRubricDraft({") ||
-    !newTask.includes('command.conversationScope === "new"') ||
-    !newTask.includes("await this.#newTaskConversation.ensureShell(") ||
-    !newTask.includes("persistNewTaskAwaitingSession({") ||
-    !newTask.includes("assertCommittedNewTaskSession(") ||
     newTask.indexOf("await this.#newTaskConversation.ensureShell(") >
       newTask.indexOf("persistNewTaskAwaitingSession({") ||
-    !newTask.includes('kind: "advancement-contract-draft-created"') ||
     !newTask.includes("this.#maintenance.runExisting(") ||
     !newTask.includes("this.#maintenance.runNew(") ||
     activeUserTurn.length === 0 ||
@@ -6867,7 +8433,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
-    application.split("defineProductApiQuery<").length - 1 !== 2 ||
+    !productApiDefinitionsInExactSet(application, "ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     application.split("defineProductApiCommand<").length - 1 !== 7 ||
     !application.includes('"advancement.command.redraft-proposal"') ||
     application.split("ADVANCEMENT_REDRAFT_PROPOSAL_COMMAND").length - 1 !== 3 ||
@@ -6927,8 +8493,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ) ||
     !send.includes('conversationScope: id ? "existing" : "new"') ||
     !send.includes('prepared.kind === "owner-busy"') ||
-    !send.includes('prepared.kind === "awaiting-rubric-confirmation"') ||
-    !send.includes('prepared.kind === "contract-failed"') ||
     !send.includes("newTaskNotApplicable") ||
     !send.includes("const dispatchActiveAdvancementUserTurn = async () =>") ||
     !send.includes("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND") ||
@@ -6964,16 +8528,11 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("persistRubricDraftRevision(") ||
     controller.includes("async cancelRubric(input:") ||
     !controller.includes("loadRubricCancellationSession(") ||
-    controller.includes("persistRubricCancellation(input:") ||
+    !application.includes("interface AdvancementRubricCancellationMechanismPort") ||
     !controller.includes("decideAwaitingRubricAdmission(") ||
-    !controller.includes("loadOpenNewTaskSession(") ||
-    !controller.includes("decideNewTaskAdmission(") ||
-    !controller.includes("buildNewTaskRubricDraft(") ||
-    !controller.includes("persistNewTaskAwaitingSession(") ||
     controller.includes('readonly kind: "run-direct"') ||
     controller.includes('readonly kind: "awaiting-rubric-confirmation"') ||
     controller.includes("this.contractBuilder.buildDraft({") ||
-    controller.split("this.store.createSession({").length - 1 !== 2 ||
     !controller.includes("hasOpenAdvancementSession: true") ||
     controller.includes('readonly kind: "await-existing-confirmation"') ||
     controller.includes('readonly kind: "cancelled-pending-task"') ||
@@ -7028,8 +8587,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
-    !composition.includes("newTask: advancementDetailController") ||
-    !composition.includes("newTaskConversation: {") ||
     !composition.includes("activeUserTurn: advancementDetailController") ||
     !composition.includes("activeUserTurnRuntime: {") ||
     composition.split("new AdvancementConversationLifecycleApplicationService(")
@@ -7053,25 +8610,20 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("abortInFlight(conversationId, {") ||
     !composition.includes("recoverConversation(conversationId)") ||
     !composition.includes("boundConversations!.runMaintenance(conversationId, operation)") ||
-    !composition.includes('.ensureShell({ kind: "ensure-shell", conversationId })') ||
     !composition.includes("boundConversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("rubricCancellation: {") ||
     !composition.includes(
       "advancementDetailController.loadRubricCancellationSession(",
     ) ||
-    !composition.includes("advancementReviews.cancelSession(input)") ||
     composition.includes("rubricCancellation: advancementDetailController") ||
     !composition.includes("awaitingRubricAdmission: advancementDetailController") ||
     !composition.includes("rubricConfirmation: advancementDetailController") ||
     !composition.includes("rubricPublication: {") ||
-    !composition.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||
     !composition.includes("createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(") ||
     !composition.includes("conversationApplication,") ||
-    !originalTaskAdapter.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||
     !originalTaskAdapter.includes("conversations.prepareAgentTurnIdentity({") ||
     !originalTaskAdapter.includes("await conversations.admitAgentTurn({") ||
-    originalTaskAdapter.split("await conversations.admitAgentTurn({").length - 1 !== 2 ||
     !originalTaskAdapter.includes("createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(") ||
     !originalTaskAdapter.includes("new AdvancementOriginalTaskAdmissionError(") ||
     originalTaskAdapter.split("new AdvancementOriginalTaskAdmissionError(").length - 1 !== 2 ||
@@ -7084,10 +8636,24 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
       "Advancement detail/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner",
     );
   }
+  // 所选会话在准入时补审：已受理轮次的 catchUp 必须经同文件绑定的恢复维护，按 beforeRunIndex 补审欠账。
+  // 启动时推进恢复只读待办、后台轮转（见 Host 就绪顺序），前台补审义务由这条接入承担。
+  for (const [relative, text] of [
+    ["packages/cli/src/serve/access-surfaces.ts", accessSurfaces],
+    ["packages/cli/src/serve/local-conversation-owner.ts", localOwner],
+  ]) {
+    if (!advancementCatchUpWired(text)) {
+      failures.push(
+        `${relative}: Advancement accepted-turn catch-up must route through the bound recovery maintenance with beforeRunIndex`,
+      );
+    }
+  }
 
   const managerCompleted = accessSurfaces.indexOf("managerAssembly.complete(manager);");
-  const advancementCreated = accessSurfaces.indexOf(
-    "await input.advancementConversationComposition.create({",
+  const advancementCreated = firstAwaitedStep(
+    accessSurfaces,
+    "input.advancementConversationComposition.create",
+    firstObjectArgument,
   );
   const advancementRecoveryCreated = accessSurfaces.indexOf(
     "const advancementRecovery = createAdvancementRecoveryMaintenance({",
@@ -7098,12 +8664,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const applicationPublished = accessSurfaces.indexOf(
     "conversations: manager,\n    conversationProtocol: protocol,",
   );
-  const readinessRecovery = accessSurfaces.indexOf(
-    "await protocol.recoverReadinessProjections();",
-  );
-  const firstAssemblyPass = composition.indexOf(
-    "await createConversationServices({",
-  );
+  const readinessRecovery = firstAwaitedStep(accessSurfaces, "protocol.recoverReadinessProjections", noArguments);
+  const firstAssemblyPass = firstAwaitedStep(composition, "createConversationServices", firstObjectArgument);
   const runtimeHostConstruction = composition.indexOf(
     "const runtimeHost = new RuntimeHost({",
   );
@@ -7270,7 +8832,13 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Delivery resolution-only source path remains alongside the canonical application");
   }
   const deliveryIndex = required("packages/core/src/delivery/index.ts");
-  const deliveryAuthority = required("packages/core/src/delivery/authority.ts");
+  // 3f64a4ed 把事务方法拆进 delivery-authority.ts 的 DeliveryAuthority：权威面按两个文件合并核对，禁令同样覆盖新文件
+  const deliveryAuthorityBase = required("packages/core/src/delivery/authority.ts");
+  const deliveryAuthorityClass = required("packages/core/src/delivery/delivery-authority.ts");
+  const deliveryAuthority = `${deliveryAuthorityBase}\n${deliveryAuthorityClass}`;
+  const deliveryTransactionOwned = (method) =>
+    methodDeclarationCount(deliveryAuthorityBase, method) + methodDeclarationCount(deliveryAuthorityClass, method) === 1 &&
+    methodDeclarationCount(deliveryAuthorityClass, method, "DeliveryAuthority") === 1;
   const deliveryPipeline = required(
     "packages/core/src/delivery/authority-pipeline.ts",
   );
@@ -7754,11 +9322,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !scheduleRuntimePolicy.includes("function selectPendingScheduleAutoDisable<") ||
     !scheduleAuthority.includes("selectDueScheduleEntries(this.#nextRunByTask, now)") ||
     !scheduleAuthority.includes("const decision = decideScheduleTrigger({") ||
-    !scheduleAuthority.includes("deriveScheduleNextRun(view.schedule, occurrences") ||
-    !scheduleAuthority.includes("countScheduleConsecutiveFailures(input.occurrences)") ||
+    // 66f8a540 起失败计数由可合并摘要合成：只核两处按导入绑定调用领域的判定与下次运行推导
+    !callsImported(scheduleAuthority, "deriveScheduleNextRun") ||
     !scheduleAuthority.includes("scheduleAutoDisableOperationId({") ||
-    !jobAssignment.includes("policy = decideScheduleFailurePolicy({") ||
-    !jobAssignment.includes("pendingAutoDisable: selectPendingScheduleAutoDisable(") ||
+    !callsImported(jobAssignment, "scheduleFailurePolicyForCount") ||
     !/options\.schedulerFailureThreshold\s*\?\?\s*DEFAULT_SCHEDULE_FAILURE_THRESHOLD/u.test(jobAssignment) ||
     !jobAssignment.includes("error instanceof ScheduleRuntimePolicyError") ||
     /function (?:consecutiveSchedulerFailures|frozenFailureNextFire)\(/u.test(jobAssignment) ||
@@ -8215,7 +9782,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /AnchorConversationDirectoryMechanism|readonly conversationDirectory\s*:/u.test(
       accessSurfaceContext,
     ) ||
-    accessSurfaces.split("inputConversationIdentityLifecycle.").length - 1 !== 5 ||
+    // 调用次数不承担归属（1d94ecda 新增 settleRevealIntents）；归属由类型声明与直接机制禁令承担
     /ctx\.conversationDirectory\.(?:exists|ensure|ensureTranscript)\s*\(/u.test(
       accessSurfaces,
     ) ||
@@ -8565,7 +10132,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     deliveryIndex.includes("./application.js") ||
-    deliveryApplication.includes("../authority/") ||
+    // 3f64a4ed 起只以 type-only 方式取事务句柄类型，并原样转交 Correctness 端口
+    !authorityImportOnlyForwardsTransaction(deliveryApplication) ||
     deliveryApplication.includes("AuthorityStorageError") ||
     !deliveryApplication.includes("class DeliveryProjectionInvariantError")
   ) {
@@ -8954,6 +10522,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryLifecyclePolicy.includes("deliveryUnknownOutcomeDisposition") ||
     !deliveryLifecyclePolicy.includes("deliveryFailureDisposition") ||
     !deliveryAuthority.includes("transactDeliveryLifecycle<Value>") ||
+    !deliveryTransactionOwned("transactDeliveryLifecycle") ||
     /\basync\s+(?:claim|recordPreflightFailure|recordOutcome)\s*\(/u.test(deliveryAuthority) ||
     deliveryAuthority.includes("function makeAttemptStarted(") ||
     deliveryAuthority.includes("function deliveryFailureDisposition(") ||
@@ -9046,9 +10615,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryApplication.includes("lifecycleAcceptedDeliveryItems(") ||
     !deliveryApplication.includes("async settleAcceptedWork(input:") ||
     !deliveryApplication.includes('input.strategy === "immediate"') ||
-    !deliveryApplication.includes('item.state === "uncertain"') ||
+    // 3f64a4ed 起 uncertain 经 Correctness 端口按键取得；“遇 uncertain 停止收束”由 authority-pipeline 行为测试承担
     !deliveryApplication.includes("Delivery accepted work did not reach a durable terminal state") ||
     !deliveryAuthority.includes("transactDeliveryAdmission<Value>") ||
+    !deliveryTransactionOwned("transactDeliveryAdmission") ||
     deliveryAuthority.includes("installLifecycleAdmission(") ||
     deliveryAuthority.includes("restoreLifecycleAdmission(") ||
     deliveryAuthority.includes("sealLifecycleAdmission(") ||
@@ -9121,8 +10691,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     deliveryParticipant.includes("prepareDeliveryEnqueues") ||
     deliveryParticipant.includes("maxAttempts") ||
     !deliveryParticipant.includes('from "@zhixing/core/delivery/application"') ||
-    !deliveryParticipant.includes("this.#application.prepare(inputs, commitAt)") ||
-    !deliveryAuthority.includes('"Delivery lifecycle admission projection"') ||
+    // 3f64a4ed 起参与者在自己已锁定的事务里精确准备：第三个实参是所在方法的事务参数
+    !preparesInLockedTransaction(deliveryParticipant) ||
+    !hasStringLiteral(deliveryAuthorityClass, "Delivery lifecycle admission projection") ||
     !ownerKernelDelivery.includes("delivery-obligation-correctness") ||
     !setupDelivery.includes("createOwnerDeliveryParticipant,") ||
     setupDelivery.includes("ownerRuntime!.createOwnerDeliveryParticipant") ||
@@ -9741,6 +11312,12 @@ export function inspectManagedHostAssembly(records) {
     "losslessDataPlane.close",
     "ephemeralRuntime.dispose",
     "sessionProcess.dispose",
+    // 按会话准备的推进恢复与决定状态后台迁移（terminal-migration-remaining-work.md 包1b R1 路线）
+    "advancementRecovery.stop",
+    "decisionMigration.stop",
+    // 前台安静时的授权投影空闲维护与启动历史预读（包 7 已验收）
+    "authorityIdleMaintenance.stop",
+    "startupHistoryPrefetch.close",
   ];
   const anchorRuntimeLifecycleIds = [
     "anchorInternalStop.close",
@@ -9763,15 +11340,14 @@ export function inspectManagedHostAssembly(records) {
   );
   const contributionCount = (identity) => {
     const escaped = identity.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    // 单双引号只是写法差异，计数仍须精确为 1。
     const pattern = new RegExp(
-      `(?:lifecycleContributions|inputLifecycleContributions)\\.(?:acquire|contribute)\\(\\s*"${escaped}"`,
+      `(?:lifecycleContributions|inputLifecycleContributions)\\.(?:acquire|contribute)\\(\\s*(["'])${escaped}\\1`,
       "gu",
     );
     return [...`${accessSurfaces}\n${command}`.matchAll(pattern)].length;
   };
-  const postServerSetup = command.indexOf(
-    'await installConfirmationBridge({',
-  );
+  const postServerSetup = firstAwaitedStep(command, "installConfirmationBridge", firstObjectArgument);
   const postServerTransfer = command.indexOf(
     'lifecycleContributions.transferExactTo(\n        registry,\n        "post-server",',
     postServerSetup,
@@ -9807,10 +11383,8 @@ export function inspectManagedHostAssembly(records) {
     '"execution.abortAllAndWait",',
     managerConstruction,
   );
-  const managerFirstEffect = accessSurfaces.indexOf(
-    "if (dataPlane) await dataPlane.start()",
-    managerConstruction,
-  );
+  const managerFirstEffect = dataPlaneStartPositions(accessSurfaces)
+    .find((position) => position >= managerConstruction) ?? -1;
   const inboundConstruction = accessSurfaces.indexOf(
     "const router = createInboundChannelRouter({",
   );
@@ -9889,8 +11463,8 @@ export function inspectManagedHostAssembly(records) {
     count(assemblyLifecycle, "transferExactTo(") !== 1 ||
     !assemblyLifecycle.includes("Assembly lifecycle ${stage} exact-set mismatch") ||
     anchorRuntimeLifecycleIds.some((identity) =>
-      command.includes(`id: "${identity}"`) ||
-      accessSurfaces.includes(`id: "${identity}"`)
+      [`id: "${identity}"`, `id: '${identity}'`].some((token) =>
+        command.includes(token) || accessSurfaces.includes(token))
     )
   ) failures.push("Anchor activation-gate runtime lifecycle contribution ownership drifted");
   if (
@@ -10216,7 +11790,7 @@ export function inspectManagedHostAssembly(records) {
     !serverShutdown.includes("return await lifecycle.prepare({") ||
     !serverShutdown.includes("queueMicrotask(() => trigger(`${reason}:${strategy}`));") ||
     !command.includes("const stopCoordinator = new HostStopCoordinator({") ||
-    !command.includes("lifecycleShutdown: stopCoordinator,") ||
+    !shutdownDelegated(command) ||
     !command.includes("runtime: {\n      closeAdmission: async (operationId) => {") ||
     !command.includes("drainAcceptedWork: async () => {") ||
     closeOldClient < 0 || disableFuture < closeOldClient || oldTurnover < disableFuture || successor < oldTurnover
@@ -10320,8 +11894,10 @@ export function inspectManagedHostAssembly(records) {
     'lifecycleContributions.transferTo(registry, "surface")',
     foundationTransfer,
   );
-  const postServerContribution = command.indexOf(
-    'await installConfirmationBridge({',
+  const postServerContribution = firstAwaitedStep(
+    command,
+    "installConfirmationBridge",
+    firstObjectArgument,
     anchorOpenGate,
   );
   const cleanupTransfer = command.indexOf("startupRollback.commit()", anchorOpenGate);
@@ -10385,7 +11961,7 @@ export function inspectManagedHostAssembly(records) {
   const serverGate = server.indexOf("await opts.activationGate?.(server)");
   const serverActivate = server.indexOf("boundServer.activate({", serverGate);
   if (
-    count(command, "await bindServer({") !== 1 ||
+    awaitedStepPositions(command, "bindServer", firstObjectArgument).length !== 1 ||
     count(command, "runner = await runServer({") !== 1 ||
     count(command, "beforeActivate: async (openingRunner) =>") !== 1 ||
     count(command, "publishReady: async (openingRunner) =>") !== 1 ||
@@ -10769,7 +12345,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !managementFacade.includes("recoveryBackup?: BackupRecoveryPublicStatus;") ||
     !statusPresentation.includes("case 'restore-backup-connection':") ||
     !statusPresentation.includes("formatRecoveryBackupState(info.recoveryBackup)") ||
-    !terminal.includes("serverStatusLines(name, this.#localView.primaryModel, this.#localView.networkProxy, status)") ||
+    // 终端改用结构化摘要（9ba3ede8），文本会话的逐行输出由同一摘要派生；两者都含恢复备份状态
+    !statusSummaryRoutes(terminal, statusPresentation) ||
     !textSession.includes("serverStatusLines(activeController.current.name, local.primaryModel, local.networkProxy, await management.serverInfo().catch(() => null))") ||
     !backup.includes('case "restore-backup-connection":') ||
     records.some(({ text }) => text.includes("start-authenticated-mesh"))
@@ -10967,7 +12544,8 @@ export function inspectRecoveryBackupAssembly(records) {
   }
   if (
     !checkpointService.includes("export async function projectDurableRecoveryBackupStatus(") ||
-    !checkpointService.includes("canonicalize(record.generation) === canonicalize(generation)") ||
+    // 候选按键读取后仍须与当前代际全等（b597be31：包5e 按键投影）
+    !readinessComparesCurrentGeneration(checkpointService) ||
     count(checkpointService, "return projectDurableRecoveryBackupStatus({") !== 1 ||
     !owner.includes("projectDurableRecoveryBackupStatus({") ||
     count(owner, "fullBackupReady: status.fullBackupReady") !== 1
@@ -10994,11 +12572,9 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("paired root establishment must freeze package identity before target connection");
   }
   const limitedBranch = applicationHost.indexOf("await this.#dependencies.runRecoveryRoot({");
-  const oldBootstrapStop = applicationHost.indexOf("await this.#releaseCurrentMesh();");
-  const residentBootstrap = applicationHost.indexOf(
-    "mesh = await this.#prepareMesh(",
-    oldBootstrapStop,
-  );
+  // 撤销取回分支（a0f9922d）也先回收再准备：根建立分支的回收与重新准备，从 runRecoveryRoot 之后定位
+  const oldBootstrapStop = applicationHost.indexOf("await this.#releaseCurrentMesh();", Math.max(limitedBranch, 0));
+  const residentBootstrap = firstAwaitedStep(applicationHost, "this.#prepareMesh", undefined, Math.max(oldBootstrapStop, 0));
   const workspaceAdmission = applicationHost.indexOf(
     'await observeLogPhase(this.#input.logRecords, "workspace-owner-admission", () => this.#dependencies.acquireLocalWorkspaceOwner(',
   );
@@ -11014,9 +12590,7 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("trusted-home root establishment must remain a finite pre-business topology");
   }
   if (
-    [...applicationHost.matchAll(
-      /await this\.#prepareMesh\(\s*deviceCapacity,\s*plannedAnchorTransferStaging,\s*disasterRecoveryStaging,\s*\)/gu,
-    )].length !== 2 ||
+    !prepareMeshCallsShareStagings(applicationHost) ||
     !rootEstablishment.includes("watchTrust: false") ||
     !backup.includes("watchTrust: false") ||
     !controlPlane.includes("this.options.watchTrust !== false")
@@ -11079,7 +12653,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !replayQuery.includes('body.t === "recovery-activation-committed"') ||
     !replayQuery.includes('protocolDigest("RecoveryActivationPlan", 1, body.commit.plan)') ||
     !replayQuery.includes("envelope.lsn > match.lsn") ||
-    !replayQuery.includes("verifyHomeTrustRecord(record, historical)") ||
+    // 历史元组按入链时的版本规则核验：v2 委托当前核验，v1 按原规则逐项比对（a0f9922d：有界信任快照）
+    !replayVerifiesHistoricalTuple(bootstrapStore) ||
     !replayQuery.includes("current.recoveryActivationDigest !== input.activationDigest") ||
     !replayQuery.includes("const event = plan.rootEvent") ||
     !replayQuery.includes("const record = activationRecords[0]!") ||
@@ -11439,16 +13014,17 @@ export function inspectRecoveryBackupAssembly(records) {
   const expectedExposureDescriptor = {
     owner: "current-device",
     protectedKinds: ["provider", "channel", "mcp", "webhook", "rendezvous"],
-    excludedKinds: ["device-key"],
+    // 内部密钥不经凭据暴露路由：设备密钥、home 完整性密钥（2412c584）、执行端移除终态路由密钥（a0f9922d）
+    excludedKinds: ["device-key", "authority-integrity", "terminal-route"],
     states: ["active", "compromised", "rotated"],
   };
   if (
     JSON.stringify(exposureDescriptor) !== JSON.stringify(expectedExposureDescriptor) ||
     count(exposureAuthority, "CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR.excludedKinds") !== 1 ||
     count(exposureAuthority, "CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR.protectedKinds") !== 1 ||
-    count(startup, "const credentialReadGuard = await createCredentialReadGuard(") !== 1 ||
-    count(startup, "authorizeCredentialRead: credentialReadGuard") !== 1 ||
-    count(setupDelivery, ").publishActiveBindings({") !== 1 ||
+    // 读守卫随统一 home 来源改为每次读配置时用新鲜信任构造（d4721f31），启动发布改为 ensureActiveBindings
+    !perReadCredentialGuard(byPath.get("packages/cli/src/serve/local-configuration-application.ts")) ||
+    !activeBindingsPublished(setupDelivery, exposureAuthority) ||
     count(pairing, "exposureGuardedSecretStore(") !== 1 ||
     !disasterCommand.includes("credentialRouteGuard: new CredentialExposureAuthority({")
   ) {
@@ -11498,7 +13074,9 @@ export function inspectRecoveryBackupAssembly(records) {
     !bootstrap.includes("await completeDisasterRecoveryInstallationBeforeBootstrap({") ||
     !bootstrap.includes("disasterRecoveryPostInstall ?? plannedAnchorPostInstall") ||
     !disasterInstallation.includes('t: "disaster-post-install-completed"') ||
-    !disasterInstallation.includes("input.log.transactProjection<") ||
+    // 回执经共享的按 transferId 安装索引幂等写入并检测冲突（f1b293cb：包5e），不再重放回执流
+    !disasterReceiptUsesInstallationIndex(disasterInstallation) ||
+    !installationIndexKeepsConflicts(records) ||
     count(disasterCommand, "const context = await openRecoveryContext(options, false)") !== 2 ||
     !backupApplication.includes("if (currentDeviceId === issuerDeviceId)") ||
     !disasterCommand.includes("await waitForDisasterRecoveryPostInstallReceipt({") ||
@@ -11685,9 +13263,12 @@ export function inspectDisasterRecoveryStagingBoundary(records) {
   if (
     count(applicationHost, "createDisasterRecoveryStagingInfrastructure,") !== 2 ||
     count(applicationHost, "createDisasterRecoveryStaging({") !== 1 ||
-    count(applicationHost, "disasterRecoveryStaging,") !== 4 ||
-    count(bootstrap, "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;") !== 3 ||
-    count(bootstrap, "disasterRecoveryStaging: input.disasterRecoveryStaging") !== 2 ||
+    // 同一暂存实例：Host 托管一次并传给全部三处 #prepareMesh；bootstrap 的三种变体（单机、可信 home、撤销取回
+    // a0f9922d）与准备输入各声明一次必需字段，三种变体都原样携带输入里的这一个实例
+    !prepareMeshCallsShareStagings(applicationHost) ||
+    count(bootstrap, "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;") !== 4 ||
+    count(bootstrap, "readonly disasterRecoveryStaging?:") !== 0 ||
+    count(bootstrap, "disasterRecoveryStaging: input.disasterRecoveryStaging") !== 3 ||
     count(bootstrap, "staging: input.disasterRecoveryStaging") !== 1 ||
     count(assembly, "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;") !== 1 ||
     count(assembly, "staging: this.options.disasterRecoveryStaging") !== 2 ||
@@ -11786,13 +13367,16 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     targetPhases: ["prepare", "status", "freeze", "import", "commit", "abort"],
     sourcePhases: ["probe", "read-range"],
     order: ["ready", "prepare", "freeze", "import", "commit"],
-    trustReconciliation: "single-planned-issuer-transition",
+    // 落后多任时须补齐并验证连续链段，不能跳过中间 transition（规格「已收编会话的权威承接与锚点任期」；e6917784）
+    trustReconciliation: "verified-contiguous-trust-prefix",
     readinessReservation: "target-lifecycle",
   };
   if (
     JSON.stringify(descriptor) !== JSON.stringify(expectedDescriptor) ||
     count(mesh, "PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR.targetPhases.includes(") !== 1 ||
-    count(mesh, "PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR.sourcePhases.includes(") !== 1
+    count(mesh, "PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR.sourcePhases.includes(") !== 1 ||
+    // 描述符与实际校验入口绑定：每个事件必须恰为下一序号并接上前一摘要，分页必须连续推进
+    !reconciliationRequiresContiguousPrefix(mesh)
   ) {
     failures.push("planned anchor transfer owner/receiver phase exact-set drifted");
   }
@@ -11858,13 +13442,16 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     !stagingInfrastructure.includes('path.join(transferRoot, "promotion-partials")') ||
     !stagingInfrastructure.includes("cleanupTransferAndJournal: async () => {") ||
     !stagingInfrastructure.includes("cleanupPostInstall(transferId: string): Promise<void>") ||
-    !transfer.includes("interface PlannedAnchorAuthorityReadPort {") ||
+    // 读端口只继承共享的安装索引端口（f1b293cb：包5e 安装完成按键索引）
+    !transfer.includes("interface PlannedAnchorAuthorityReadPort extends AnchorInstallationIndexPort {") ||
     !transfer.includes("interface PlannedAnchorInstallAuthorityPort extends PlannedAnchorAuthorityReadPort {") ||
     !transfer.includes("export interface PlannedAnchorJournalStorage {") ||
     !transfer.includes("interface PlannedAnchorSourceAuthorityPort") ||
     /conversation-transfer-staging|disaster-recovery-staging/u.test(stagingInfrastructure) ||
     /from\s+["']node:(?:fs|fs\/promises|path)["']/u.test(transfer) ||
-    /\bAuthorityCommitLog\b|FileArtifactStore|FileAuthorityCommitLog|FileResumableArtifactReceiver|stagingRoot|privateRoot|Pick\s*</u.test(transfer) ||
+    // 日志能力只允许以两个按键投影方法的签名索引出现（类型层借用签名，不持有日志）；实例、构造与其他具体类型照旧禁止
+    holdsCommitLogBeyondProjectionSignatures(transfer) ||
+    /FileArtifactStore|FileAuthorityCommitLog|FileResumableArtifactReceiver|stagingRoot|privateRoot|Pick\s*</u.test(transfer) ||
     /anchor-transfer-staging|stagingRoot|privateRoot|FileResumableArtifactReceiver/u.test(assembly) ||
     /anchor-transfer-staging|stagingRoot|privateRoot|FileResumableArtifactReceiver/u.test(bootstrap)
   ) {
@@ -11873,9 +13460,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   if (
     count(applicationHost, "createPlannedAnchorTransferStagingInfrastructure,") !== 2 ||
     count(applicationHost, "createPlannedAnchorTransferStaging({") !== 1 ||
-    [...applicationHost.matchAll(
-      /await this\.#prepareMesh\(\s*deviceCapacity,\s*plannedAnchorTransferStaging,\s*disasterRecoveryStaging,\s*\)/gu,
-    )].length !== 2 ||
+    !prepareMeshCallsShareStagings(applicationHost) ||
     count(applicationHost, "plannedAnchorTransferStaging.close()") !== 1 ||
     count(
       bootstrap,
@@ -11903,7 +13488,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor staging Host/bootstrap required instance flow drifted");
   }
   if (
-    count(accessRoot, "inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()") !== 2 ||
+    // 证据核验不再自带锚点 fallback（e6917784），只剩本地 owner 构造这一处
+    count(accessRoot, "inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()") !== 1 ||
     count(accessRoot, "mesh?.currentAnchorDeviceId()") !== 1 ||
     count(executorRoot, "mesh?.currentAnchorDeviceId()") !== 1 ||
     count(assembly, "currentSourceDeviceId: () => this.#control.currentTrust().issuer.deviceId") !== 1 ||
@@ -11992,13 +13578,12 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "state = await context.journal.append(decision.prepared);",
     remoteAbort,
   );
-  const candidateRecovery = transfer.indexOf(
-    "for (const candidate of (await this.#candidates.states()).values())",
-  );
-  const phaseRecovery = transfer.indexOf(
-    "for (const transferId of await this.#staging.recoverableTransferIds())",
-    candidateRecovery,
-  );
+  // 候选与阶段恢复合并为同一次遍历未完成索引（f1b293cb：包5e 当前未完成项小索引）：逐个候选读日记账阶段，
+  // 中止的先登记终态再做可重复的清理，清理确认后候选才离开未完目录；不再另行遍历暂存目录
+  const candidateRecoveryOk = candidateRecoveryOrdersTerminalAndCleanup(transfer);
+  if (!candidateRecoveryOk) {
+    failures.push("planned anchor signed abort or candidate terminal recovery drifted");
+  }
   if (
     count(transfer, "readonly prepared?: PlannedAnchorPreparedRecord;") !== 1 ||
     count(transfer, "readonly abort?: AnchorTransferAbort;") !== 1 ||
@@ -12007,7 +13592,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(transfer, "async decideRemoteAbort(") !== 1 ||
     remoteAbort < 0 || remoteAbortCleanup < remoteAbort ||
     remotePreparedMaterialization < remoteAbort ||
-    candidateRecovery < 0 || phaseRecovery < candidateRecovery ||
+    !candidateRecoveryOk ||
     count(transfer, "assertCandidateReadyProofIdentity(candidate);") !== 2 ||
     count(transfer, "await this.#assertCandidateIssuerKey(candidate);") !== 2
   ) {
@@ -12226,7 +13811,9 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     admission < startupRecovery || reconcile < 0 ||
     connectionRecovery < reconcile || freeze < 0 || commitCall < freeze ||
     count(assembly, "registerPlannedAnchorTrustReconciliationService(") !== 1 ||
-    count(assembly, "reconcilePlannedAnchorTrustFromPeer(") !== 1 ||
+    // 第二处是会话当前权威的认证信任追赶（规格「已收编会话的权威承接与锚点任期」：大于本地任期须经认证追赶补齐
+    // 连续链段；e6917784），只能挂在 installTrustCatchUp 回调里并登记处置
+    !trustCatchUpRegistered(assembly) ||
     !transfer.includes("await this.options.onInstalled?.(record)") ||
     !assembly.includes("await this.#control.reconcileTrust(record)")
   ) {
@@ -12786,9 +14373,8 @@ export function inspectAssignmentDataPlaneBoundary(records) {
     /bindAssignmentAuthority\(/u.test(`${access}\n${executorRole}`) ||
     !access.includes("authority: boundary.localLedger,") ||
     !executorRole.includes("authority: ledger") ||
-    access.indexOf("if (dataPlane) await dataPlane.start();") < 0 ||
-    access.indexOf("executorDataPlane: dataPlane,") <
-      access.indexOf("if (dataPlane) await dataPlane.start();")
+    dataPlaneStartPositions(access).length !== 1 ||
+    access.indexOf("executorDataPlane: dataPlane,") < dataPlaneStartPositions(access)[0]
   ) {
     failures.push("Host assignment/data-plane pair composition or publication order drifted");
   }
@@ -12858,9 +14444,11 @@ export function inspectAdvancementEvidenceTopologyBoundary(records) {
     !access.includes("readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort") ||
     count(access, "input.advancementEvidenceRuntime.bind({") !== 1 ||
     count(access, "new AdvancementEvidenceTopologyAdapter({") !== 1 ||
-    command.indexOf("return prepareMeshRuntime({") < 0 ||
-    command.indexOf("await bindAdvancementEvidenceTopology({") <= command.indexOf("return prepareMeshRuntime({") ||
-    command.indexOf("await prepareChannel({") <= command.indexOf("await bindAdvancementEvidenceTopology({") ||
+    awaitedStepPositions(command, "prepareMeshRuntime", firstObjectArgument).length !== 1 ||
+    firstAwaitedStep(command, "bindAdvancementEvidenceTopology", firstObjectArgument) <=
+      firstAwaitedStep(command, "prepareMeshRuntime", firstObjectArgument) ||
+    firstAwaitedStep(command, "prepareChannel", firstObjectArgument) <=
+      firstAwaitedStep(command, "bindAdvancementEvidenceTopology", firstObjectArgument) ||
     count(localOwner, "new AdvancementEvidenceTopologyAdapter({") !== 1
   ) {
     failures.push("Host Advancement evidence topology construction exact-set drifted");
@@ -13374,22 +14962,38 @@ export function inspectMeshBootstrapProjectionBoundary(records) {
   const surface = required("packages/cli/src/runtime/surface-core-host-link.ts");
   const pairing = required("packages/cli/src/serve/mesh-pair-command.ts");
 
+  // 对端目录按成员键读写，全量清单拆成只供灾备人工命令的独立端口（a0f9922d：包5c 路线A 成员连接目录）。
+  // 成员的可选性看成员自身（属性或方法签名的 ?），方法的可选参数不算（98c2660c：重新配对的 replacePrevious）。
+  const projectionSource = stepSource(projection);
   for (const [role, methods] of [
     ["MeshEndpointDirectoryPersistencePort", ["loadEndpoints", "acceptEndpoint"]],
-    ["MeshTransportPeerDirectoryPersistencePort", ["loadTransportPeers", "acceptTransportPeer"]],
+    ["MeshTransportPeerDirectoryPersistencePort", ["transportPeer", "acceptTransportPeer"]],
+    ["MeshTransportPeerInventoryPort", ["listTransportPeers"]],
     ["MeshBootstrapCompletionPersistencePort", ["markBootstrapComplete", "bootstrapCompleted"]],
   ]) {
-    const start = projection.indexOf(`export interface ${role}`);
-    const end = projection.indexOf("\n}", start);
-    const declaration = start < 0 || end < 0 ? "" : projection.slice(start, end);
+    const declaration = projectionSource.statements.find((node) =>
+      ts.isInterfaceDeclaration(node) && node.name.text === role &&
+      node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword));
+    const members = declaration?.members ?? [];
+    const names = members.map((member) => member.name && propertyNameText(member.name));
     if (
-      start < 0 ||
-      methods.some((method) => !declaration.includes(`readonly ${method}:`)) ||
-      declaration.includes("?:") ||
-      /FileMeshBootstrapStore|node:fs|node:path/u.test(declaration)
+      !declaration || declaration.heritageClauses?.length ||
+      names.length !== methods.length || methods.some((method) => !names.includes(method)) ||
+      members.some((member) =>
+        !(ts.isPropertySignature(member) || ts.isMethodSignature(member)) || member.questionToken ||
+        (ts.isPropertySignature(member) && !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword))) ||
+      /FileMeshBootstrapStore|node:fs|node:path/u.test(declaration.getText(projectionSource))
     ) {
       failures.push(`Mesh bootstrap ${role} exact-set or dependency boundary drifted`);
     }
+  }
+  const inventoryConsumers = records
+    .filter((record) =>
+      ![projectionPath, storePath].includes(record.relative) && record.text.includes("listTransportPeers") &&
+      callsNamed(stepSource(record.text), stepSource(record.text), "listTransportPeers").length > 0)
+    .map((record) => record.relative);
+  if (inventoryConsumers.some((relative) => relative !== "packages/cli/src/serve/disaster-recovery-command.ts")) {
+    failures.push("Mesh bootstrap MeshTransportPeerInventoryPort escaped its manual recovery consumer");
   }
   if (
     !projection.includes("return Object.freeze({") ||
@@ -13408,7 +15012,9 @@ export function inspectMeshBootstrapProjectionBoundary(records) {
     !store.includes("MeshBootstrapCompletionPersistencePort") ||
     !store.includes("implements\n    MeshEndpointDirectoryPersistencePort") ||
     !store.includes('"mesh-endpoints.json"') ||
-    !store.includes('"mesh-peers.json"') ||
+    // 对端按成员键存放在目录里，旧的整读清单文件不得回来
+    !store.includes('path.join(distributedRoot, "mesh-peers")') ||
+    store.includes('"mesh-peers.json"') ||
     !store.includes('"mesh-bootstrap-completions.json"')
   ) {
     failures.push("File Mesh bootstrap projection ownership drifted");
@@ -13419,7 +15025,9 @@ export function inspectMeshBootstrapProjectionBoundary(records) {
     control.indexOf("/** Owns direct listeners"),
   );
   if (
-    /FileMeshBootstrapStore|\bbootstrapStore\b|Pick\s*</u.test(control) ||
+    /FileMeshBootstrapStore|\bbootstrapStore\b/u.test(control) ||
+    // Pick 只限制在 bootstrap 持久化能力上（按导入绑定识别）；控制面收窄自身（f1b293cb 逐对重协商服务）不受限
+    picksBootstrapPersistence(control) ||
     !controlOptions.includes("readonly endpointDirectory: MeshEndpointDirectoryPersistencePort;") ||
     !controlOptions.includes(
       "readonly transportPeerDirectory: MeshTransportPeerDirectoryPersistencePort;",
@@ -13427,7 +15035,9 @@ export function inspectMeshBootstrapProjectionBoundary(records) {
     controlOptions.includes("readonly endpointDirectory?:") ||
     controlOptions.includes("readonly transportPeerDirectory?:") ||
     !control.includes("options.endpointDirectory.acceptEndpoint(descriptor)") ||
-    !control.includes("this.options.transportPeerDirectory.loadTransportPeers()")
+    // 对端按成员键读取，控制面不枚举全量清单
+    callPositions(control, "this.options.transportPeerDirectory.transportPeer").length === 0 ||
+    callsNamed(stepSource(control), stepSource(control), "listTransportPeers").length !== 0
   ) {
     failures.push("Mesh control plane regained concrete or optional bootstrap persistence");
   }
@@ -13620,7 +15230,27 @@ export function inspectMeshPairingContinuationPersistenceBoundary(records) {
     )
     .map((record) => record.relative)
     .sort();
-  const expectedFactoryConsumers = [accessPath, executorPath, pairPath].sort();
+  // 启动引导只读判定“重新配对已提交、本机接续未完成”（98c2660c：包6 受限设备以新身份重新加入）：
+  // 同一 home 上的唯一一处工厂调用，结果只立即 .load()，不保存、不清除、不外传。
+  const bootstrapReadPath = "packages/cli/src/serve/mesh-runtime-bootstrap.ts";
+  const expectedFactoryConsumers = [accessPath, executorPath, pairPath, bootstrapReadPath].sort();
+  const bootstrapRead = records.find((record) => record.relative === bootstrapReadPath)?.text ?? "";
+  const bootstrapFactoryCalls = callPositions(bootstrapRead, "createFileMeshPairingContinuationRepository");
+  const bootstrapLoads = callsNamed(stepSource(bootstrapRead), stepSource(bootstrapRead), "load").filter((call) => {
+    const receiver = call.expression.expression;
+    return ts.isCallExpression(receiver) &&
+      receiver.expression.getText(stepSource(bootstrapRead)) === "createFileMeshPairingContinuationRepository" &&
+      receiver.arguments.length === 1 && ts.isIdentifier(receiver.arguments[0]) && receiver.arguments[0].text === "zhixingHome" &&
+      call.arguments.length === 0;
+  });
+  if (
+    bootstrapFactoryCalls.length !== 1 || bootstrapLoads.length !== 1 ||
+    /\b(?:save|clear)\s*\(/u.test(
+      bootstrapRead.slice(bootstrapFactoryCalls[0], bootstrapRead.indexOf("\n}", bootstrapFactoryCalls[0])),
+    )
+  ) {
+    failures.push("Mesh pairing continuation bootstrap read acquired write or second-instance use");
+  }
   const concreteOwners = records
     .filter((record) =>
       record.text.includes("new FileMeshPairingContinuationStore(")
@@ -13770,7 +15400,8 @@ export function inspectSurfaceAssetStagingPersistenceBoundary(records) {
     )
     .map((record) => record.relative)
     .sort();
-  const expectedConsumers = [authorityPath, bootstrapPath].sort();
+  // 第三处是每 home 一份的共享资产生命周期（1f583e08：包5a）；另两处只在共享缺席时回退自建（只读入口与测试）
+  const expectedConsumers = [authorityPath, bootstrapPath, "packages/cli/src/serve/home-asset-lifecycle.ts"].sort();
   const physicalRootOwners = records
     .filter((record) =>
       record.text.includes('"surface-asset-temporary"') ||
@@ -13786,6 +15417,9 @@ export function inspectSurfaceAssetStagingPersistenceBoundary(records) {
     physicalRootOwners.some((relative, index) => relative !== expectedRootOwners[index])
   ) {
     failures.push("Surface asset staging acquired a second physical root or composition entry");
+  }
+  if (!surfaceStagingSharedFirst(records)) {
+    failures.push("Surface asset staging must come from the one shared home lifecycle on production write paths");
   }
   if (
     count(cleanup, 'path.join(distributed, "surface-asset-partials")') !== 1 ||
@@ -14309,6 +15943,10 @@ export function inspectLocalConversationOwnerIsolation(records) {
   const frozenDependencyKeys = [
     "assignmentResources",
     "artifacts",
+    // 窄的当前权威核验/准备端口（运行时栈上只露 readProjectionIds、prepare、verify；prepare 含已授权的信任追赶准备）。
+    // 依据：分布式运行时 specification.md「已收编会话的权威承接与锚点任期」的统一责任条——共享的
+    // current-owner/当前任期解析服务写栅栏、恢复与执行端授权，由组合层注入现有端口。
+    "conversationAuthority",
     "deviceId",
     "executionResources",
     "executorCapabilities",
@@ -14424,7 +16062,57 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "currentAnchorDeviceId",
     // 本地对话 owner 把镜像里的规则命中交规则权威累计（规则权威宿主装配，否则为空）
     "trustRuleHits",
+    // 运行拥有者按指派尝试持有宿主前台义务，本机派发从运行时装配到释放计为前台活动
+    // （依据：terminal-migration-delivery-plan.md 已验收的“维护撞首发”单元）
+    "foreground",
+    // 运行准备各步的阶段记录端口，只观测、不授予权威能力
+    "phaseRecords",
+    // 规则权威宿主接纳本地对话镜像带回的权限沉淀，非权威宿主不给
+    // （依据：docs/modules/security/trust.md 的“现状边界”）
+    "trustSediments",
   ]);
+  // 必需依赖不得条件传入，与装配合同是否把它写成可选无关。
+  const requiredCreateProperties = [
+    "owner",
+    "executorDispatch",
+    "assignmentStaging",
+    "runtimeFactory",
+    "interactions",
+    "advancementModelProvider",
+    "evidence",
+  ];
+  // 装配合同里声明为可选的键：只有这些键允许按精确可选属性的条件写法传入。
+  const optionalCreateProperties = new Set(
+    (assemblyOptions?.members ?? [])
+      .filter((member) => ts.isPropertySignature(member) && member.questionToken && ts.isIdentifier(member.name))
+      .map((member) => member.name.text),
+  );
+  const unwrapParentheses = (node) => {
+    let current = node;
+    while (current && ts.isParenthesizedExpression(current)) current = current.expression;
+    return current;
+  };
+  // `...(条件 ? { 键: 值 } : {})` 是精确可选属性类型下的条件传参：真分支恰好一个具名属性赋值、
+  // 假分支为空对象、键在装配合同里可选且不是必需依赖，才视同该具名属性；其余展开一律按匿名能力拒绝。
+  const conditionalOptionalProperty = (property) => {
+    if (!ts.isSpreadAssignment(property)) return undefined;
+    const expression = unwrapParentheses(property.expression);
+    if (!expression || !ts.isConditionalExpression(expression)) return undefined;
+    const whenTrue = unwrapParentheses(expression.whenTrue);
+    const whenFalse = unwrapParentheses(expression.whenFalse);
+    if (
+      !ts.isObjectLiteralExpression(whenTrue) || whenTrue.properties.length !== 1 ||
+      !ts.isObjectLiteralExpression(whenFalse) || whenFalse.properties.length !== 0
+    ) {
+      return undefined;
+    }
+    const [inner] = whenTrue.properties;
+    if (!ts.isPropertyAssignment(inner) || !inner.name) return undefined;
+    const name = propertyNameText(inner.name);
+    return name && optionalCreateProperties.has(name) && !requiredCreateProperties.includes(name)
+      ? inner
+      : undefined;
+  };
   for (const record of records.filter(({ relative }) => productionRoots.has(relative))) {
     const source = sourceFile(record.relative, record.text);
     const factoryCalls = [];
@@ -14590,7 +16278,8 @@ export function inspectLocalConversationOwnerIsolation(records) {
           failures.push(`${record.relative}: local owner construction must use one object literal`);
         } else {
           const properties = new Map();
-          for (const property of options.properties) {
+          for (const candidate of options.properties) {
+            const property = conditionalOptionalProperty(candidate) ?? candidate;
             if (!property.name || ts.isSpreadAssignment(property)) {
               failures.push(`${record.relative}: local owner construction cannot use spread or anonymous properties`);
               continue;
@@ -14606,15 +16295,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
           if (!initializer || !isSingleLocalRuntime(initializer)) {
             failures.push(`${record.relative}: local owner construction must receive the single local runtime construction`);
           }
-          for (const required of [
-            "owner",
-            "executorDispatch",
-            "assignmentStaging",
-            "runtimeFactory",
-            "interactions",
-            "advancementModelProvider",
-            "evidence",
-          ]) {
+          for (const required of requiredCreateProperties) {
             if (!properties.has(required)) {
               failures.push(`${record.relative}: local owner construction is missing ${required}`);
             }
@@ -14686,6 +16367,124 @@ export function inspectLocalConversationOwnerIsolation(records) {
     }
   }
   return failures;
+}
+
+// 证据请求只经共享的当前权威谓词接纳：核验函数先验签并绑定结果，再在函数体顶层 await 谓词，
+// 声明字段全部取自已验签结果；不允许调用方 fallback、宿主默认身份或代次，也不允许在谓词之前提前返回。
+// 谓词本身的拒绝语义由行为测试证明，这里只守执行链与字段来源。
+// 依据：分布式运行时 specification.md「已收编会话的权威承接与锚点任期」——统一责任、不能拿调用方 fallback 覆盖、
+// 不再用执行端默认 anchorEpoch 代替当前性。
+function inspectEvidenceAuthorityAdmission(record) {
+  const signed = `${record.relative}: evidence verifier must bind the signature-verified request before authority admission`;
+  const sealed = `${record.relative}: evidence verifier must preserve the verified request binding and prevent mutation or escape before authority admission`;
+  const admitted = `${record.relative}: evidence verifier must await the one current conversation authority predicate on every admission path`;
+  const bound = `${record.relative}: evidence verifier must bind signer identity and owner/anchor epochs from the verified request`;
+  const source = sourceFile(record.relative, record.text);
+  const chain = (node) => node.getText(source).replace(/\s+/gu, "");
+  const factory = source.statements.find(
+    (node) => ts.isFunctionDeclaration(node) && node.name?.text === "createConversationEvidenceAuthorityVerifier",
+  );
+  const returned = factory?.body?.statements.find((node) => ts.isReturnStatement(node))?.expression;
+  if (
+    !returned || !ts.isArrowFunction(returned) || returned.parameters.length !== 1 ||
+    !ts.isIdentifier(returned.parameters[0].name) || !ts.isBlock(returned.body)
+  ) {
+    return [admitted];
+  }
+  const requestName = returned.parameters[0].name.text;
+  const statements = returned.body.statements;
+  const isValidation = (node) =>
+    node && ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+    node.expression.text === "validateEvidenceRequest" && node.arguments.length === 2 &&
+    ts.isIdentifier(node.arguments[0]) && node.arguments[0].text === requestName &&
+    chain(node.arguments[1]) === "options.authority.verifier";
+  const validatedBinding = (statement) => {
+    if (!ts.isVariableStatement(statement) || statement.declarationList.declarations.length !== 1) return undefined;
+    const [declaration] = statement.declarationList.declarations;
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer) return undefined;
+    const initializer = declaration.initializer;
+    if (isValidation(initializer)) return declaration.name.text;
+    // 经 verifyProtocolStep 包装时必须 await，绑定的才是已验结果而不是 Promise。
+    if (
+      ts.isAwaitExpression(initializer) && ts.isCallExpression(initializer.expression) &&
+      ts.isIdentifier(initializer.expression.expression) &&
+      initializer.expression.expression.text === "verifyProtocolStep" &&
+      initializer.expression.arguments.length === 1 &&
+      ts.isArrowFunction(initializer.expression.arguments[0]) &&
+      initializer.expression.arguments[0].parameters.length === 0 &&
+      isValidation(initializer.expression.arguments[0].body)
+    ) {
+      return declaration.name.text;
+    }
+    return undefined;
+  };
+  const validationIndex = statements.findIndex((statement) => validatedBinding(statement) !== undefined);
+  if (validationIndex < 0) return [signed];
+  const verified = validatedBinding(statements[validationIndex]);
+  const isAuthorityVerify = (node) =>
+    ts.isCallExpression(node) && chain(node.expression) === "options.authority.conversationAuthority.verify";
+  let verifyCalls = 0;
+  const countVerify = (node) => {
+    if (isAuthorityVerify(node)) verifyCalls += 1;
+    ts.forEachChild(node, countVerify);
+  };
+  countVerify(source);
+  const admissionIndex = statements.findIndex(
+    (statement, index) => index > validationIndex && ts.isExpressionStatement(statement) &&
+      ts.isAwaitExpression(statement.expression) && isAuthorityVerify(statement.expression.expression),
+  );
+  // 谓词之前任何一处 return（嵌套函数体内的除外）都会让某条路径绕过谓词。
+  let returnsEarly = false;
+  const findReturn = (node) => {
+    if (ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) returnsEarly = true;
+    ts.forEachChild(node, findReturn);
+  };
+  for (const statement of statements.slice(0, Math.max(admissionIndex, 0))) findReturn(statement);
+  if (verifyCalls !== 1 || admissionIndex < 0 || returnsEarly) return [admitted];
+  const claim = statements[admissionIndex].expression.expression.arguments;
+  const expected = new Map([
+    ["conversationId", `${verified}.conversationId`],
+    ["ownerEpoch", `${verified}.ownerEpoch`],
+    ["anchorEpoch", `${verified}.anchorEpoch`],
+    ["signerDeviceId", `${verified}.signature.keyId`],
+  ]);
+  if (
+    claim.length !== 1 || !ts.isObjectLiteralExpression(claim[0]) ||
+    claim[0].properties.length !== expected.size ||
+    new Set(claim[0].properties.map((property) => property.name && propertyNameText(property.name))).size !== expected.size ||
+    claim[0].properties.some((property) =>
+      !ts.isPropertyAssignment(property) ||
+      !ts.isPropertyAccessExpression(property.initializer) ||
+      expected.get(propertyNameText(property.name)) !== chain(property.initializer))
+  ) {
+    return [bound];
+  }
+  // 已验结果从验签绑定到当前权威核验之间不得被重绑、改写或逃逸：绑定必须是 const；核验语句及其之前
+  // （含验签之前定义的闭包）只允许出现声明名与谓词声明里四个字段访问的基对象，其余任何引用都可能
+  // 替换受保护字段。核验之后的使用不影响本次判定。原请求不受限：验签返回的是深拷贝。
+  if ((statements[validationIndex].declarationList.flags & ts.NodeFlags.Const) === 0) return [sealed];
+  const declarationName = statements[validationIndex].declarationList.declarations[0].name;
+  const claimBases = new Set(
+    claim[0].properties.map((property) => {
+      let base = property.initializer;
+      while (ts.isPropertyAccessExpression(base)) base = base.expression;
+      return base;
+    }),
+  );
+  let escapes = false;
+  const findReference = (node) => {
+    if (ts.isIdentifier(node) && node.text === verified) {
+      const parent = node.parent;
+      const propertyName =
+        (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+        (ts.isPropertyAssignment(parent) && parent.name === node);
+      if (!propertyName && node !== declarationName && !claimBases.has(node)) escapes = true;
+    }
+    ts.forEachChild(node, findReference);
+  };
+  for (const statement of statements.slice(0, admissionIndex + 1)) findReference(statement);
+  return escapes ? [sealed] : [];
 }
 
 export function inspectConversationAdoptionAssembly(records) {
@@ -14843,7 +16642,15 @@ export function inspectConversationAdoptionAssembly(records) {
     const recoveryBody = recoveryBoundary >= 0 && recoveryEnd > recoveryBoundary
       ? mesh.text.slice(recoveryBoundary, recoveryEnd)
       : "";
-    const restore = recoveryBody.indexOf("await this.#restoreCommittedTransfers()");
+    // 启动不重放全部已提交收编（规格「已收编会话的权威承接与锚点任期」：迁居不遍历改写全部已收编会话，启动不重放
+    // 全部迁居链；66f8a540 有界恢复）：准入前只复核有待决延期意图的会话，其余由协议在首次触及时按键装入。
+    const recoverySource = stepSource(mesh.text);
+    const recoveryMethod = findCallable(recoverySource, "#recoverStartupState");
+    const pendingReview = recoveryMethod
+      ? callsWithin(recoveryMethod.body, (call) =>
+        ts.isAwaitExpression(stepExpressionParent(call).parent) && calleeIs(recoverySource, "this.#reviewPendingAdoptions")(call), true)
+      : [];
+    const restore = pendingReview.length === 1 ? pendingReview[0].getStart(recoverySource) - recoveryBoundary : -1;
     const prematureAdmission = recoveryBody.indexOf("await this.#startControl()");
     const lifecycleResume = mesh.text.slice(
       mesh.text.indexOf("  async recoverAcceptedWorkForLifecycle():"),
@@ -14870,8 +16677,55 @@ export function inspectConversationAdoptionAssembly(records) {
   ) {
     failures.push(`${mesh.relative}: post-adoption review lifecycle must be installed before replaying durable commits`);
   }
-  if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?lifecycle\.kind\s*!==\s*"anchor"[\s\S]*?lifecycle\.review\.reviewAfterAdoption\s*\(/u.test(mesh.text)) {
+  // 现场提交：先等待安装已认证的提交底座，再按 anchor 判别做延期意图复核（安装实参随 e6917784 改为 {manifest, source}）。
+  const meshSource = stepSource(mesh.text);
+  const awaitedIn = (node, source, chain) => callsWithin(node, (call) => isAwaitedStep(call) && calleeIs(source, chain)(call));
+  const reviewChain = "this.#postAdoptionReviewLifecycle.review.reviewAfterAdoption";
+  const installMethod = findCallable(meshSource, "#installCommittedTransfer");
+  const committedInstall = installMethod
+    ? awaitedIn(installMethod.body, meshSource, "this.options.protocol.installCommittedConversationTransfer") : [];
+  const committedReview = installMethod ? awaitedIn(installMethod.body, meshSource, reviewChain) : [];
+  let anchorGuard = -1;
+  const findAnchorGuard = (node) => {
+    if (
+      anchorGuard < 0 && ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+      resolvedChain(node.left, meshSource) === "this.#postAdoptionReviewLifecycle.kind" && stringLiteralText(node.right) === "anchor"
+    ) {
+      anchorGuard = node.getStart(meshSource);
+    }
+    ts.forEachChild(node, findAnchorGuard);
+  };
+  if (installMethod) findAnchorGuard(installMethod.body);
+  if (
+    committedInstall.length !== 1 || committedReview.length !== 1 ||
+    !(committedInstall[0].getStart(meshSource) < anchorGuard && anchorGuard < committedReview[0].getStart(meshSource))
+  ) {
     failures.push(`${mesh.relative}: committed authority must install before deferred-intent review`);
+  }
+  // 启动复核只针对待决延期意图：逐个经同一复核入口，不遍历全部收编会话
+  const pendingMethod = findCallable(meshSource, "#reviewPendingAdoptions");
+  const pendingLoop = pendingMethod?.body.statements.find((statement) => {
+    if (!ts.isForOfStatement(statement) || !ts.isVariableDeclarationList(statement.initializer)) return false;
+    const listed = stripExpression(statement.expression);
+    return ts.isAwaitExpression(listed) && ts.isCallExpression(listed.expression) &&
+      calleeIs(meshSource, "listPendingDeferredIntentConversations")(listed.expression) &&
+      resolvedChain(listed.expression.arguments[0], meshSource) === "this.options.authority.authorityLog";
+  });
+  const pendingItem = pendingLoop?.initializer.declarations[0]?.name;
+  if (
+    !pendingLoop || !pendingItem || !ts.isIdentifier(pendingItem) ||
+    !awaitedIn(pendingLoop.statement, meshSource, reviewChain).some((call) =>
+      ts.isIdentifier(stripExpression(call.arguments[0])) && stripExpression(call.arguments[0]).text === pendingItem.text) ||
+    callsWithin(pendingMethod.body, (call) => /listConversationTransferStates|installCommittedConversationTransfer/u.test(
+      resolvedChain(call.expression, meshSource))).length !== 0
+  ) {
+    failures.push(`${mesh.relative}: startup must review only pending adoptions before admission`);
+  }
+  // 首次触及装入：生产装配经 disposers 绑定按键的已提交收编端口；协议在首次触及时按 committedFor → prepare → publish
+  // 装入，与原先启动时逐个安装的校验相同（重启首触的行为证据：conversation-protocol-runtime-continuation.test.ts）。
+  const protocolRecord = records.find((record) => record.relative === "packages/cli/src/serve/conversation-protocol-runtime.ts");
+  if (!protocolRecord || !committedTransferBinding(meshSource) || !firstTouchInstallation(stepSource(protocolRecord.text))) {
+    failures.push(`${mesh.relative}: committed adoptions must install on first touch through the bound committed-transfer port`);
   }
 
   const productionRoots = [
@@ -14906,12 +16760,7 @@ export function inspectConversationAdoptionAssembly(records) {
   requireCount(executorRoot, /conversationRpc\s*,/gu, 1, "first-party ownership composite injection");
 
   const evidence = required.get("packages/cli/src/serve/conversation-evidence-authority.ts");
-  if (!/resolveCurrentConversationAuthority\s*\([\s\S]*?request\.conversationId/u.test(evidence.text)) {
-    failures.push(`${evidence.relative}: evidence verifier must resolve the durable current conversation authority`);
-  }
-  if (!/current\.deviceId\s*!==\s*request\.signature\.keyId[\s\S]*?current\.ownerEpoch\s*!==\s*request\.ownerEpoch/u.test(evidence.text)) {
-    failures.push(`${evidence.relative}: evidence verifier must bind both owner identity and owner epoch`);
-  }
+  failures.push(...inspectEvidenceAuthorityAdmission(evidence));
 
   const router = required.get("packages/cli/src/serve/local-conversation-rpc.ts");
   if (

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile as readFileRaw } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { behaviorEvidenceFailures } from "./s7-behavior-evidence.mjs";
 
 async function readFile(file, encoding) {
   const value = await readFileRaw(file, encoding);
@@ -9,6 +11,7 @@ async function readFile(file, encoding) {
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import {
   buildWorkspaceOwnerExposure,
+  inspectBehaviorEvidence,
   buildWorkspaceSymbolExposure,
   buildServeRoleConfigurations,
   captureS7EntryCoverage,
@@ -71,6 +74,68 @@ import {
   validateInboundRouterAssembly,
   validateSchedulerCurrentArchitecture,
 } from "./s7-entry-coverage.mjs";
+
+// 第 2 组等待步骤的变异锚点（与生产源码当前写法一致）。
+const dataPlaneStartLine =
+  'if (dataPlane) { const started = dataPlane; await observeLogPhase(input.startupRecords, "start-data-plane", () => started.start()); }';
+const bindEvidenceHead =
+  'await observeLogPhase(startupRecords, "bind-advancement-evidence", () => bindAdvancementEvidenceTopology({';
+const advancementPrepareLine =
+  '      await observeLogPhase(startupRecords, "activate-advancement-recovery", async () => { await advancementRecovery?.prepare(); });\n';
+const advancementStartBlock =
+  "      if (advancementRecovery && !startupLifecycleOperation) {\n        advancementRecovery.start();\n      }\n";
+const channelActivationLine =
+  '      if (boundChannelConnections) await observeLogPhase(startupRecords, "activate-channel-connections", () => boundChannelConnections.activate());\n';
+
+// 字面串版的 replaceExactlyOnce：源码改写后旧串不再出现时，变异不会悄悄变成空操作。
+function replaceOnce(text, from, to) {
+  return replaceExactlyOnce(text, new RegExp(from.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"), () => to, from.slice(0, 80));
+}
+
+// 写法无关性的正例工具：只在 start 到其后第一个 end 之间变换；renameAll 改全部同名标识符（含参数与类型注解，
+// 排除成员访问与 #私有名），保证改名前后程序等价。
+function withinSegment(start, end, transform) {
+  return (text) => {
+    const from = text.indexOf(start);
+    assert.ok(from >= 0, `segment start missing: ${start.slice(0, 60)}`);
+    const to = text.indexOf(end, from + start.length);
+    assert.ok(to >= 0, `segment end missing: ${end.slice(0, 60)}`);
+    return text.slice(0, from) + transform(text.slice(from, to)) + text.slice(to);
+  };
+}
+function renameAll(...pairs) {
+  return (segment) => pairs.reduce(
+    (text, [from, to]) => text.replace(new RegExp(`(?<![.#\\w])${from}\\b`, "gu"), to),
+    segment,
+  );
+}
+
+// 表驱动的变异：每条编辑为 [文件, 原串, 新串]（原串须恰好命中一次）或 [文件, 变换函数]（必须改变文本）；
+// 文件须在本测试的输入里。红例须命中给定规则，等价合法形态须与干净集合完全一致。
+function assertMutationTable(inspect, records, reds, equivalents = []) {
+  const apply = (edits) => {
+    for (const [relative] of edits) {
+      assert.ok(records.some((record) => record.relative === relative), `mutation target missing from fixture: ${relative}`);
+    }
+    return records.map((record) => {
+      let text = record.text;
+      for (const [relative, from, to] of edits) {
+        if (relative !== record.relative) continue;
+        if (typeof from === "function") {
+          const changed = from(text);
+          assert.notEqual(changed, text, `mutation transform did not change ${relative}`);
+          text = changed;
+        } else {
+          text = replaceOnce(text, from, to);
+        }
+      }
+      return text === record.text ? record : { ...record, text };
+    });
+  };
+  for (const [edits, expected] of reds) assert.match(inspect(apply(edits)).join("\n"), expected);
+  const clean = inspect(records);
+  for (const edits of equivalents) assert.deepEqual(inspect(apply(edits)), clean);
+}
 
 const rowIds = ["known-row"];
 const entry = { key: "rpc:one", category: "rpc" };
@@ -778,6 +843,76 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     )).join("\n"),
     /deferred intent capability is exposed outside its internal owner seam/,
   );
+  // 条件可选写法只对装配合同里可选、且非必需的单个具名属性成立；其余展开仍按匿名能力拒绝。
+  const mutateBoth = (edits) => records.map((record) => {
+    const transform = edits[record.relative];
+    return transform ? { ...record, text: transform(record.text) } : record;
+  });
+  const foregroundLine =
+    "    assignmentStaging: localExecutorBoundary.staging,\n    ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),\n";
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(foregroundLine, "    assignmentStaging: localExecutorBoundary.staging,\n    ...input,\n"),
+    )).join("\n"),
+    /local owner construction cannot use spread or anonymous properties/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        foregroundLine,
+        "    assignmentStaging: localExecutorBoundary.staging,\n    ...(input.foregroundActivity ? { foreground: input.foregroundActivity, delivery: input.foregroundActivity } : {}),\n",
+      ),
+    )).join("\n"),
+    /local owner construction cannot use spread or anonymous properties/,
+  );
+  for (const optionalOwnerContract of [false, true]) {
+    const failures = inspectLocalConversationOwnerIsolation(mutateBoth({
+      "packages/cli/src/serve/access-surfaces.ts": (text) =>
+        text.replace("    owner: localOwner,\n", "    ...(localOwner ? { owner: localOwner } : {}),\n"),
+      ...(optionalOwnerContract
+        ? {
+            "packages/cli/src/serve/local-conversation-owner.ts": (text) => text.replace(
+              "  readonly owner: LocalConversationOwnerRuntimeStack;",
+              "  readonly owner?: LocalConversationOwnerRuntimeStack;",
+            ),
+          }
+        : {}),
+    })).join("\n");
+    assert.match(failures, /local owner construction cannot use spread or anonymous properties/);
+    assert.match(failures, /local owner construction is missing owner/);
+  }
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutateBoth({
+      "packages/cli/src/serve/local-conversation-owner.ts": (text) => text.replace(
+        "  readonly closeDrainBudgetMs?: number;",
+        "  readonly closeDrainBudgetMs?: number;\n  readonly delivery?: unknown;",
+      ),
+      "packages/cli/src/serve/access-surfaces.ts": (text) => text.replace(
+        "    trustRuleHits: input.trustRuleHits,\n",
+        "    trustRuleHits: input.trustRuleHits,\n    ...(input.trustSediments ? { delivery: input.trustSediments } : {}),\n",
+      ),
+    })).join("\n"),
+    /local owner construction has forbidden or duplicate capability delivery/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(foregroundLine, `${foregroundLine}    foreground: input.foregroundActivity,\n`),
+    )).join("\n"),
+    /local owner construction has forbidden or duplicate capability foreground/,
+  );
+  assert.match(
+    inspectLocalConversationOwnerIsolation(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "conversationAuthority: inputAuthorityRuntime.conversationAuthority,",
+        "conversationAuthority: conversationAuthority,",
+      ),
+    )).join("\n"),
+    /local runtime dependency conversationAuthority must bind inputAuthorityRuntime\.conversationAuthority/,
+  );
 });
 
 test("conversation dispatch application stays separate from the Host topology mechanism", async () => {
@@ -1169,12 +1304,33 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
   assert.match(
     inspectAssignmentDataPlaneBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
-      (text) => text.replace(
-        "if (dataPlane) await dataPlane.start();",
+      (text) => replaceOnce(
+        text,
+        dataPlaneStartLine,
         "return Object.freeze({ executorDataPlane: dataPlane });",
       ),
     )).join("\n"),
     /Host assignment\/data-plane pair composition/u,
+  );
+  // 经别名与阶段观测启动的必须是同一个 dataPlane；直接 await 启动是等价写法。
+  for (const after of [
+    dataPlaneStartLine.replace("const started = dataPlane;", "const started = otherDataPlane;"),
+    dataPlaneStartLine.replace("const started", "let started"),
+  ]) {
+    assert.match(
+      inspectAssignmentDataPlaneBoundary(mutate(
+        "packages/cli/src/serve/access-surfaces.ts",
+        (text) => replaceOnce(text, dataPlaneStartLine, after),
+      )).join("\n"),
+      /Host assignment\/data-plane pair composition/u,
+    );
+  }
+  assert.deepEqual(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => replaceOnce(text, dataPlaneStartLine, "if (dataPlane) await dataPlane.start();"),
+    )),
+    inspectAssignmentDataPlaneBoundary(records),
   );
   assert.match(
     inspectAssignmentDataPlaneBoundary(mutate(
@@ -1261,6 +1417,27 @@ test("Advancement evidence selects local or Mesh only through one finite Host di
       (text) => `${text}\nconst duplicateEvidenceClient = new EvidenceMeshClient(client, verifier);\n`,
     )).join("\n"),
     /Mesh client or service acquired a second production owner/u,
+  );
+  // 绑定步骤须被等待执行：阶段观测包装外层漏 await、同名调用放进变量闭包（注释里的同名串）都不算；
+  // 直接 await 是等价写法。
+  for (const after of [
+    bindEvidenceHead.replace("await observeLogPhase", "void observeLogPhase"),
+    `// ${bindEvidenceHead}\n  const deferredBind = () => observeLogPhase(startupRecords, "bind-advancement-evidence", () => bindAdvancementEvidenceTopology({`,
+  ]) {
+    assert.match(
+      inspectAdvancementEvidenceTopologyBoundary(mutate(
+        "packages/cli/src/serve/command.ts",
+        (text) => replaceOnce(text, bindEvidenceHead, after),
+      )).join("\n"),
+      /Host Advancement evidence topology construction exact-set drifted/u,
+    );
+  }
+  assert.deepEqual(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => replaceOnce(text, bindEvidenceHead, "await bindAdvancementEvidenceTopology({"),
+    )),
+    inspectAdvancementEvidenceTopologyBoundary(records),
   );
 });
 
@@ -1640,10 +1817,43 @@ test("P09 Mesh bootstrap projections stay finite and required at Host edges", as
     ]).join("\n"),
     /second factory or physical owner/u,
   );
+  // 对端目录按成员键读写、清单端口只给灾备人工命令；成员可选性看成员自身，可选参数放行；Pick 只限 bootstrap 持久化。
+  assertMutationTable(inspectMeshBootstrapProjectionBoundary, records, [
+    [[["packages/cli/src/serve/mesh-bootstrap-projection.ts",
+      "  readonly acceptTransportPeer: (peer: TrustedMeshPeer) => Promise<void>;\n",
+      "  readonly acceptTransportPeer: (peer: TrustedMeshPeer) => Promise<void>;\n  readonly loadTransportPeers: () => Promise<readonly TrustedMeshPeer[]>;\n"]],
+      /MeshTransportPeerDirectoryPersistencePort exact-set or dependency boundary drifted/],
+    [[["packages/cli/src/serve/mesh-bootstrap-store.ts", 'path.join(distributedRoot, "mesh-peers")', 'path.join(distributedRoot, "mesh-peers.json")']],
+      /File Mesh bootstrap projection ownership drifted/],
+    [[["packages/cli/src/serve/mesh-control-plane.ts",
+      "const peer = await this.options.transportPeerDirectory.transportPeer(deviceId);",
+      "const peer = (await this.options.transportPeerDirectory.listTransportPeers()).find((item) => item.deviceId === deviceId);"]],
+      /Mesh control plane regained concrete or optional bootstrap persistence/],
+    [[["packages/cli/src/serve/access-surfaces.ts", "export async function createLocalConversationOwner(",
+      "void inputBootstrap.bootstrapProjection.transportPeers.listTransportPeers();\nexport async function createLocalConversationOwner("]],
+      /MeshTransportPeerInventoryPort escaped its manual recovery consumer/],
+    [[["packages/cli/src/serve/mesh-bootstrap-projection.ts", "  readonly bootstrapCompleted: (\n", "  readonly bootstrapCompleted?: (\n"]],
+      /MeshBootstrapCompletionPersistencePort exact-set or dependency boundary drifted/],
+    [[["packages/cli/src/serve/mesh-bootstrap-projection.ts",
+      "  readonly bootstrapCompleted: (\n    peerDeviceId: string,\n    offerId: string,\n  ) => Promise<boolean>;\n",
+      "  bootstrapCompleted?(peerDeviceId: string, offerId: string): Promise<boolean>;\n"]],
+      /MeshBootstrapCompletionPersistencePort exact-set or dependency boundary drifted/],
+    [[["packages/cli/src/serve/mesh-control-plane.ts", "export const MESH_PAIRWISE_RENEGOTIATE_SERVICE_ID",
+      'import type { MeshTransportPeerDirectoryPersistencePort as PeerPort } from "./mesh-bootstrap-projection.js";\ntype NarrowPeers = Pick<PeerPort, "transportPeer">;\nexport const MESH_PAIRWISE_RENEGOTIATE_SERVICE_ID']],
+      /Mesh control plane regained concrete or optional bootstrap persistence/],
+  ], [
+    [["packages/cli/src/serve/mesh-bootstrap-projection.ts",
+      "  readonly acceptTransportPeer: (peer: TrustedMeshPeer) => Promise<void>;\n",
+      "  readonly acceptTransportPeer: (peer: TrustedMeshPeer, options?: { readonly reason?: string }) => Promise<void>;\n"]],
+    [["packages/cli/src/serve/mesh-control-plane.ts", "export const MESH_PAIRWISE_RENEGOTIATE_SERVICE_ID",
+      'type NarrowControl = Pick<ProductionMeshControlPlane, "authorizesPairwiseRenegotiation">;\nexport const MESH_PAIRWISE_RENEGOTIATE_SERVICE_ID']],
+  ]);
 });
 
 test("P09 pairing continuation stays finite, durable, and required at command/Host edges", async () => {
   const paths = [
+    // 启动引导的只读接续判定（第四个工厂消费者）
+    "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
     "packages/cli/src/serve/mesh-pairing-continuation-repository.ts",
     "packages/cli/src/serve/mesh-pairing-continuation.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
@@ -1718,10 +1928,22 @@ test("P09 pairing continuation stays finite, durable, and required at command/Ho
     ]).join("\n"),
     /second factory or physical owner/u,
   );
+  // 第四个工厂消费者只能是启动引导对同一 home 的立即 .load() 只读判定；写入或第五个消费者都拒。
+  assertMutationTable(inspectMeshPairingContinuationPersistenceBoundary, records, [
+    [[["packages/cli/src/serve/mesh-runtime-bootstrap.ts", "createFileMeshPairingContinuationRepository(zhixingHome).load()",
+      'createFileMeshPairingContinuationRepository(zhixingHome).clear("offer")']],
+      /bootstrap read acquired write or second-instance use/],
+    [[["packages/cli/src/serve/device-removal-cleanup.ts", "export ", "void createFileMeshPairingContinuationRepository(home);\nexport "]],
+      /second factory or physical owner/],
+  ]);
 });
 
 test("P09 Surface asset staging stays finite and physical only at two composition entries", async () => {
   const paths = [
+    // 第 4 组新检查读取的源文件
+    "packages/cli/src/serve/home-asset-lifecycle.ts",
+    "packages/cli/src/serve/home-authority-sources.ts",
+    "packages/cli/src/setup-delivery.ts",
     "packages/core/src/authority/surface-asset-staging.ts",
     "packages/core/src/authority/surface-assets.ts",
     "packages/core/src/authority/artifact-lifecycle-index.ts",
@@ -1803,6 +2025,30 @@ test("P09 Surface asset staging stays finite and physical only at two compositio
     ]).join("\n"),
     /second physical root/u,
   );
+  // 第 4 组：生产写入路径只用同一 home 的共享资产生命周期；回退被无条件执行、漏传共享、换了根都拒；局部改名与注释不误报。
+  const homeAssetLifecycle = "packages/cli/src/serve/home-asset-lifecycle.ts";
+  const homeSources = "packages/cli/src/serve/home-authority-sources.ts";
+  const sharedFailure = /Surface asset staging must come from the one shared home lifecycle on production write paths/;
+  assertMutationTable(inspectSurfaceAssetStagingPersistenceBoundary, records, [
+    [[["packages/cli/src/serve/surface-asset-authority.ts", "options.shared?.staging ?? createSurfaceAssetStagingInfrastructure({",
+      "createSurfaceAssetStagingInfrastructure({"]], sharedFailure],
+    [[["packages/cli/src/serve/mesh-bootstrap-store.ts", "shared?.assetLifecycle().lifecycle ?? (() => {", "(() => {"]], sharedFailure],
+    [[["packages/cli/src/setup-delivery.ts", "          ownsLogs: false,\n          shared: sources.assetLifecycle(),\n",
+      "          ownsLogs: false,\n"]], sharedFailure],
+    [[[homeAssetLifecycle, "    distributedRoot: input.distributedRoot,\n    storageMaintenance: input.storageMaintenance,\n  });\n  const lifecycle",
+      "    distributedRoot: otherRoot,\n    storageMaintenance: input.storageMaintenance,\n  });\n  const lifecycle"]], sharedFailure],
+    [[[homeSources, "      distributedRoot: root,\n", '      distributedRoot: path.join(home, "elsewhere"),\n']], sharedFailure],
+    // 生命周期另用一个同值根，与 CAS/WAL 的根不是同一绑定
+    [[[homeSources, 'const root = path.join(home, "distributed-runtime");',
+      'const root = path.join(home, "distributed-runtime");\n    const lifecycleRoot = path.join(home, "distributed-runtime");'],
+      [homeSources, "      distributedRoot: root,\n", "      distributedRoot: lifecycleRoot,\n"]], sharedFailure],
+  ], [
+    [[homeAssetLifecycle, withinSegment("export function createHomeAssetLifecycle(", "\n}\n", renameAll(["staging", "temporaries"]))]],
+    [["packages/cli/src/serve/mesh-bootstrap-store.ts", withinSegment("    const shared = options.sources",
+      "        storageMaintenance: options.storageMaintenance,", renameAll(["shared", "sharedSources"]))]],
+    [["packages/cli/src/serve/surface-asset-authority.ts", "  const staging = options.shared?.staging ?? ",
+      "  // 共享优先\n  const staging = options.shared?.staging ?? "]],
+  ]);
 });
 
 test("P09 assignment artifact partial receiver stays finite and Host-composed", async () => {
@@ -1887,6 +2133,8 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/serve/disaster-recovery-target.ts",
     "packages/cli/src/serve/device-removal-cleanup.ts",
     "packages/cli/src/serve/conversation-evidence-authority.ts",
+    // 已提交收编在首次触及时按键装入
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
     "packages/cli/src/serve/conversation-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
@@ -1987,9 +2235,10 @@ test("conversation adoption stays bound to the two production roots and ordered 
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
-      (text) => text.replace(
-        "      await this.#restoreCommittedTransfers();",
-        "      await this.#startControl();\n      await this.#restoreCommittedTransfers();",
+      (text) => replaceOnce(
+        text,
+        "      await this.#reviewPendingAdoptions();\n",
+        "      await this.#startControl();\n      await this.#reviewPendingAdoptions();\n",
       ),
     )).join("\n"),
     /restore before mesh admission opens/,
@@ -2136,13 +2385,76 @@ test("conversation adoption stays bound to the two production roots and ordered 
     )).join("\n"),
     /demand ports, shared promotion and durable-abort cleanup/,
   );
-  assert.match(
-    inspectConversationAdoptionAssembly(mutate(
-      "packages/cli/src/serve/conversation-evidence-authority.ts",
-      (text) => text.replace("current.ownerEpoch !== request.ownerEpoch", "false"),
-    )).join("\n"),
-    /bind both owner identity and owner epoch/,
-  );
+  // 证据核验的执行链：先验签绑定，再在顶层 await 共享当前权威谓词，声明字段全部取自已验结果。
+  const verifyCall = "    await options.authority.conversationAuthority.verify(";
+  const admitted = /must await the one current conversation authority predicate on every admission path/;
+  const bound = /must bind signer identity and owner\/anchor epochs from the verified request/;
+  const signed = /must bind the signature-verified request before authority admission/;
+  for (const [from, to, expected] of [
+    [verifyCall, "    options.authority.conversationAuthority.verify(", admitted],
+    [verifyCall, "    if (false) await options.authority.conversationAuthority.verify(", admitted],
+    [verifyCall, "    const later = async () => await options.authority.conversationAuthority.verify(", admitted],
+    [verifyCall, `    if (verified.v === 2) return;\n${verifyCall}`, admitted],
+    [
+      `${verifyCall}{ conversationId: verified.conversationId, ownerEpoch: verified.ownerEpoch,\n      anchorEpoch: verified.anchorEpoch, signerDeviceId: verified.signature.keyId });\n`,
+      "",
+      admitted,
+    ],
+    ["signerDeviceId: verified.signature.keyId", "signerDeviceId: options.authority.deviceId", bound],
+    ["ownerEpoch: verified.ownerEpoch,", "ownerEpoch: verified.ownerEpoch ?? options.authority.localOwnerEpoch,", bound],
+    ["ownerEpoch: verified.ownerEpoch,", "ownerEpoch: request.ownerEpoch,", bound],
+    [
+      "const verified = await verifyProtocolStep(() => validateEvidenceRequest(request, options.authority.verifier));",
+      "const verified = request;",
+      signed,
+    ],
+    ["const verified = await verifyProtocolStep(", "const verified = verifyProtocolStep(", signed],
+  ]) {
+    const evidencePath = "packages/cli/src/serve/conversation-evidence-authority.ts";
+    assert.equal(records.find((record) => record.relative === evidencePath).text.split(from).length, 2, from);
+    assert.match(inspectConversationAdoptionAssembly(mutate(evidencePath, (text) => text.replace(from, to))).join("\n"), expected);
+  }
+  // 已验结果在当前权威核验前不得被重绑、改写或逃逸；核验之后的使用与无关语句不受限。
+  const evidencePath = "packages/cli/src/serve/conversation-evidence-authority.ts";
+  const sealed = /must preserve the verified request binding and prevent mutation or escape before authority admission/;
+  for (const transform of [
+    (text) => text.replace("const verified", "let verified").replace(verifyCall, `    verified = request;\n${verifyCall}`),
+    (text) => text.replace(
+      verifyCall,
+      `    Object.assign(verified, { ownerEpoch: request.ownerEpoch, signature: request.signature });\n${verifyCall}`,
+    ),
+    (text) => text.replace("const verified", "let verified"),
+    (text) => text.replace(verifyCall, `    verified.ownerEpoch = request.ownerEpoch;\n${verifyCall}`),
+    (text) => text.replace(verifyCall, `    const alias = verified;\n    alias.signature = request.signature;\n${verifyCall}`),
+    (text) => text.replace(verifyCall, `    normalize(verified);\n${verifyCall}`),
+    (text) => text
+      .replace(
+        "  return async request => {\n",
+        "  return async request => {\n    const tamper = () => Object.assign(verified, { ownerEpoch: 0 });\n",
+      )
+      .replace(verifyCall, `    tamper();\n${verifyCall}`),
+    (text) => text.replace(verifyCall, `    record({ verified });\n${verifyCall}`),
+  ]) {
+    assert.match(inspectConversationAdoptionAssembly(mutate(evidencePath, transform)).join("\n"), sealed);
+  }
+  const cleanAdoption = inspectConversationAdoptionAssembly(records);
+  for (const transform of [
+    (text) => text.replaceAll("verified", "validated"),
+    (text) => text.replace(verifyCall, `    const admittedAt = Date.now();\n${verifyCall}`),
+    (text) => text.replace(
+      "await verifyProtocolStep(() => validateEvidenceRequest(request, options.authority.verifier))",
+      "validateEvidenceRequest(request, options.authority.verifier)",
+    ),
+    (text) => text.replace(
+      "signerDeviceId: verified.signature.keyId });\n",
+      "signerDeviceId: verified.signature.keyId });\n    void verified.requestId;\n",
+    ),
+  ]) {
+    const changed = mutate(evidencePath, transform);
+    assert.notEqual(changed.find((record) => record.relative === evidencePath).text,
+      records.find((record) => record.relative === evidencePath).text);
+    assert.deepEqual(inspectConversationAdoptionAssembly(changed), cleanAdoption);
+  }
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/owner-kernel/src/conversation-run-contracts.ts",
@@ -2247,10 +2559,67 @@ test("conversation adoption stays bound to the two production roots and ordered 
   assert.match(inspectConversationAdoptionAssembly(mutate("packages/cli/src/text-session.ts", text => replaceExactlyOnce(
     text, /(confirmContinuation: async unavailable => \{[\s\S]*?)return false;/u, "$1return true;", "text must not auto-accept limitations",
   ))).join("\n"), /exact capability consequences/);
+  // 启动只复核待决收编；其余收编在首次触及时经绑定的端口按 committedFor → prepare → publish 装入；现场提交先等待安装。
+  assertMutationTable(inspectConversationAdoptionAssembly, records, [
+    [[["packages/cli/src/serve/mesh-runtime-assembly.ts", "      await this.#reviewPendingAdoptions();\n", ""]],
+      /committed transfers must restore before mesh admission opens/],
+    [[["packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "await listPendingDeferredIntentConversations(this.options.authority.authorityLog)",
+      "await listCommittedConversationIds(this.options.authority.authorityLog, this.options.authority.verifier)"]],
+      /startup must review only pending adoptions before admission/],
+    [[["packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "!this.#unavailableTransfers.has(conversationId)) continue;\n      prepared.publish();\n",
+      "!this.#unavailableTransfers.has(conversationId)) continue;\n"]],
+      /committed adoptions must install on first touch/],
+    [[["packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "if (!this.#needsAdoption(conversationId)) return Promise.resolve();", "return Promise.resolve();"]],
+      /committed adoptions must install on first touch/],
+    [[["packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "this.#disposers.push(options.protocol.bindCommittedConversationTransfers({",
+      "void (options.protocol.bindCommittedConversationTransfers({"]],
+      /committed adoptions must install on first touch/],
+    [[["packages/cli/src/serve/mesh-runtime-assembly.ts", "    await protocol.installCommittedConversationTransfer({",
+      "    void protocol.installCommittedConversationTransfer({"]],
+      /committed authority must install before deferred-intent review/],
+  ], [
+    [["packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "for (const conversationId of await listPendingDeferredIntentConversations(this.options.authority.authorityLog)) {\n      await lifecycle.review.reviewAfterAdoption(conversationId);",
+      "for (const pending of await listPendingDeferredIntentConversations(this.options.authority.authorityLog)) {\n      await lifecycle.review.reviewAfterAdoption(pending);"]],
+  ]);
+  // 写法无关性回归（第 3 组返修）：按方法、绑定与真实调用判定首触装入与待决复核——局部改名、插入注释不误报；
+  // 注释掉 publish、注释掉守卫或复核调用必须拒绝。
+  const protocolRuntime = "packages/cli/src/serve/conversation-protocol-runtime.ts";
+  const meshAssembly = "packages/cli/src/serve/mesh-runtime-assembly.ts";
+  const firstTouchFailure = /committed adoptions must install on first touch/;
+  assertMutationTable(inspectConversationAdoptionAssembly, records, [
+    [[[protocolRuntime, withinSegment("  async #installAdoption(", "\n  }\n",
+      (segment) => segment.replace("      prepared.publish();", "      // prepared.publish();"))]], firstTouchFailure],
+    [[[protocolRuntime, "if (!this.#needsAdoption(conversationId)) return Promise.resolve();",
+      "// if (!this.#needsAdoption(conversationId)) return Promise.resolve();"]], firstTouchFailure],
+    [[[meshAssembly, withinSegment("  async #reviewPendingAdoptions(", "\n  }\n", (segment) => segment.replace(
+      "      await lifecycle.review.reviewAfterAdoption(conversationId);",
+      "      // await lifecycle.review.reviewAfterAdoption(conversationId);"))]],
+      /startup must review only pending adoptions before admission/],
+  ], [
+    [[protocolRuntime, withinSegment("  async #installAdoption(", "\n  }\n",
+      renameAll(["prepared", "installation"], ["port", "committedSource"]))]],
+    [[protocolRuntime, withinSegment("  async #installAdoption(", "\n  }\n",
+      (segment) => segment.replace("      let publication", "      // 逐个装入已提交的迁移\n      let publication"))]],
+    [[meshAssembly, withinSegment("      // 收编会话按键就地装入：启动不遍历全部已提交收编", "      }));\n    }",
+      renameAll(["target", "transferTarget"], ["log", "authorityLog"], ["conversationId", "id"]))]],
+    [[meshAssembly, withinSegment("  async #reviewPendingAdoptions(", "\n  }\n",
+      renameAll(["lifecycle", "adoption"], ["conversationId", "pending"]))]],
+    [[meshAssembly, withinSegment("  async #installCommittedTransfer(", "\n  }\n",
+      renameAll(["protocol", "owner"], ["lifecycle", "adoption"]))]],
+  ]);
 });
 
 test("recovery backup stays bound to one current-anchor owner and finite paired receivers", async () => {
   const paths = [
+    // 第 4 组新检查读取的源文件
+    "packages/cli/src/serve/local-configuration-application.ts",
+    // 灾备安装回执经共享的按键安装索引写入
+    "packages/cli/src/serve/anchor-installation-index.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/backup-command.ts",
     "packages/cli/src/serve/backup-target-config.ts",
@@ -2669,9 +3038,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-bootstrap-store.ts",
-      (text) => text.replace(
-        "verifyHomeTrustRecord(record, historical)",
-        "verifyHomeTrustRecord(record, current)",
+      (text) => replaceOnce(
+        text,
+        "verifyHistoricalHomeTrustRecord(record, historical)",
+        "verifyHistoricalHomeTrustRecord(record, current)",
       ),
     )).join("\n"),
     /originating commit and same-LSN historical trust tuple/,
@@ -2991,7 +3361,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/disaster-recovery-installation.ts",
-      (text) => text.replace("input.log.transactProjection<", "Promise.resolve<"),
+      (text) => replaceOnce(text, "recordAnchorInstallationCompletion(input.log, {", "Promise.resolve({"),
     )).join("\n"),
     /disaster installation completion, consumer recovery or public-open order drifted/,
   );
@@ -3016,12 +3386,106 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     /disaster installation completion, consumer recovery or public-open order drifted/,
   );
   for (const [relative, pattern] of [
-    ["packages/cli/src/terminal/application.ts", /serverStatusLines\(name, this\.#localView\.primaryModel, this\.#localView\.networkProxy, status\)/u],
+    ["packages/cli/src/terminal/application.ts", /serverStatusSummary\(name, this\.#localView\.primaryModel, this\.#localView\.networkProxy, status\)/u],
     ["packages/cli/src/text-session.ts", /serverStatusLines\(activeController\.current\.name, local\.primaryModel, local\.networkProxy, await management\.serverInfo\(\)\.catch\(\(\) => null\)\)/u],
     ["packages/cli/src/runtime/server-status-presentation.ts", /formatRecoveryBackupState\(info\.recoveryBackup\)/u],
   ]) assert.match(inspectRecoveryBackupAssembly(mutate(relative, text => replaceExactlyOnce(
     text, pattern, "'generic status'", `${relative}: backup recovery projection`,
   ))).join("\n"), /public unavailable actions must stay exact and topology-neutral/);
+  // 就绪候选按键读取后仍须代际全等；回执经共享安装索引并保留冲突检测；Mesh 准备三处共用同一暂存；
+  // 根建立先回收再准备；状态逐行由摘要派生且含恢复备份；历史元组按版本核验。
+  const reprepare = "      await this.#releaseCurrentMesh();\n      const reprepared = await this.#prepareMesh(\n";
+  assertMutationTable(inspectRecoveryBackupAssembly, records, [
+    [[["packages/mesh/src/checkpoint-service.ts", "canonicalize(created.generation) === canonicalize(generation)", "created.generation !== null"]],
+      /durable recovery readiness projector or unavailable consumer drifted/],
+    [[["packages/cli/src/serve/disaster-recovery-installation.ts", "recordAnchorInstallationCompletion(input.log, {",
+      "appendPostInstallReceipt(input.log, {"]],
+      /disaster installation completion, consumer recovery or public-open order drifted/],
+    [[["packages/cli/src/serve/anchor-installation-index.ts", "throw new Error(input.conflictMessage);", "void input.conflictMessage;"]],
+      /disaster installation completion, consumer recovery or public-open order drifted/],
+    [[["packages/cli/src/serve/application-host.ts", reprepare,
+      "      await this.#releaseCurrentMesh();\n      await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging, disasterRecoveryStaging);\n      const reprepared = await this.#prepareMesh(\n"]],
+      /root-establishment transport must stay stable/],
+    [[["packages/cli/src/serve/application-host.ts", reprepare, "      const reprepared = await this.#prepareMesh(\n"]],
+      /trusted-home root establishment must remain a finite pre-business topology/],
+    [[["packages/cli/src/runtime/server-status-presentation.ts", "formatRecoveryBackupState(info.recoveryBackup)",
+      "String(info.recoveryBackup.state)"]],
+      /public unavailable actions must stay exact and topology-neutral/],
+    [[["packages/cli/src/runtime/server-status-presentation.ts",
+      "return serverStatusSummary(name, model, proxy, info).flatMap(summaryLines);", "return [name];"]],
+      /public unavailable actions must stay exact and topology-neutral/],
+    [[["packages/cli/src/serve/mesh-bootstrap-store.ts", "verifyHistoricalHomeTrustRecord(record, historical);",
+      "verifyHomeTrustRecord(record, historical);"]],
+      /same-LSN historical trust tuple/],
+  ]);
+  // 写法无关性回归（第 3 组返修）：状态派生、当前代际比较、历史元组、回执与冲突抛错、暂存身份按绑定与真实调用判定。
+  const statusPresentation = "packages/cli/src/runtime/server-status-presentation.ts";
+  const checkpointService = "packages/mesh/src/checkpoint-service.ts";
+  const bootstrapStore = "packages/cli/src/serve/mesh-bootstrap-store.ts";
+  const disasterInstallation = "packages/cli/src/serve/disaster-recovery-installation.ts";
+  const installationIndex = "packages/cli/src/serve/anchor-installation-index.ts";
+  const applicationHost = "packages/cli/src/serve/application-host.ts";
+  assertMutationTable(inspectRecoveryBackupAssembly, records, [
+    [[[statusPresentation, "  return serverStatusSummary(name, model, proxy, info).flatMap(summaryLines);",
+      "  // return serverStatusSummary(name, model, proxy, info).flatMap(summaryLines);\n  return [];"]],
+      /public unavailable actions must stay exact and topology-neutral/],
+    [[[checkpointService, "canonicalize(created.generation) === canonicalize(generation)",
+      "true /* canonicalize(created.generation) === canonicalize(generation) */"]],
+      /durable recovery readiness projector or unavailable consumer drifted/],
+    [[[bootstrapStore, "    verifyHistoricalHomeTrustRecord(record, historical);",
+      "    // verifyHistoricalHomeTrustRecord(record, historical);"]], /same-LSN historical trust tuple/],
+    [[[installationIndex, "throw new Error(input.conflictMessage);", "/* throw new Error(input.conflictMessage); */"]],
+      /disaster installation completion, consumer recovery or public-open order drifted/],
+    [[[applicationHost, "      await this.#releaseCurrentMesh();\n      const reprepared = await this.#prepareMesh(\n",
+      "      await this.#releaseCurrentMesh();\n      const disasterRecoveryStaging = otherDisasterStaging;\n      const reprepared = await this.#prepareMesh(\n"]],
+      /root-establishment transport must stay stable/],
+  ], [
+    [[statusPresentation, withinSegment("export function serverStatusLines(", "\n}\n",
+      renameAll(["name", "label"], ["model", "primary"], ["proxy", "networkProxy"], ["info", "serverInfo"]))]],
+    [[checkpointService, withinSegment("export async function projectDurableRecoveryBackupStatus(", "\n}\n",
+      renameAll(["generation", "currentGeneration"]))]],
+    [[bootstrapStore, withinSegment("  async loadRecoveryRootActivationReplay(input:", "\n  async ",
+      renameAll(["historical", "historicalTrust"], ["historicalFold", "boundedFold"]))]],
+    [[disasterInstallation, withinSegment("export async function recordDisasterRecoveryPostInstallReceipt(", "\n}\n",
+      renameAll(["input", "request"]))]],
+    [[installationIndex, withinSegment("export async function recordAnchorInstallationCompletion<", "\n}\n",
+      renameAll(["existing", "prior"], ["input", "request"]))]],
+    [[applicationHost, "      const reprepared = await this.#prepareMesh(\n        deviceCapacity,\n",
+      "      const reprepared = await this.#prepareMesh(\n        // 同一组暂存\n        deviceCapacity,\n"]],
+  ]);
+  // 第 4 组：每次读配置都在实际读取链里挂凭据守卫（新鲜信任、拒绝即 false、finally 停止维护），内部密钥不可暴露，启动发布当前绑定。
+  const configurationRead = "packages/cli/src/serve/local-configuration-application.ts";
+  const exposureRoutes = "packages/cli/src/serve/credential-exposure-authority.ts";
+  const exposureFailure = /credential exposure projection, guard or production read route exact-set drifted/;
+  assertMutationTable(inspectRecoveryBackupAssembly, records, [
+    [[[configurationRead, "...(exposure ? { authorizeCredentialRead:", "...(false ? { authorizeCredentialRead:"]], exposureFailure],
+    [[[configurationRead, "catch { return false; }", "catch { return true; }"]], exposureFailure],
+    [[[configurationRead, "} finally { await owner.stopStorageMaintenance(); }",
+      "} finally { /* await owner.stopStorageMaintenance(); */ }"]], exposureFailure],
+    [[[exposureRoutes, '"device-key", "authority-integrity", "terminal-route"', '"device-key", "authority-integrity"']], exposureFailure],
+    [[[exposureRoutes, '"device-key", "authority-integrity", "terminal-route"', '"authority-integrity", "terminal-route"']], exposureFailure],
+    [[["packages/cli/src/setup-delivery.ts", "}).ensureActiveBindings({", "}).projection({"]], exposureFailure],
+    // 片段都在、只切断关系：守卫选项另存未用、先放行后核验、核验别的对象、日志或信任或收尾不属于本次打开的视图
+    [[[configurationRead, "        return await loadConfigurationSnapshot({\n", "        const unusedGuardedOptions = {\n"],
+      [configurationRead, "          } } : {}),\n        });\n      } finally", "          } } : {}),\n        };\n" +
+        "        return await loadConfigurationSnapshot({ configPath: options.configPath, store: options.store, records: options.records, " +
+        "processIdentityResolver: options.processIdentityResolver, legacyHomeDir: options.homeDir });\n      } finally"]], exposureFailure],
+    [[[configurationRead, "try { await exposure.assertConfigurationRoute(kind, id); return true; }",
+      "try { return true; await exposure.assertConfigurationRoute(kind, id); }"]], exposureFailure],
+    [[[configurationRead, "await exposure.assertConfigurationRoute(kind, id)", "await otherExposure.assertConfigurationRoute(kind, id)"]], exposureFailure],
+    [[[configurationRead, "log: owner.authorityLog()", "log: otherOwner.authorityLog()"]], exposureFailure],
+    [[[configurationRead, "const guarded = deviceId && trust?.members.some(", "const guarded = deviceId && staleTrust?.members.some("]], exposureFailure],
+    [[[configurationRead, "} finally { await owner.stopStorageMaintenance(); }", "} finally { await otherOwner.stopStorageMaintenance(); }"]],
+      exposureFailure],
+  ], [
+    [[configurationRead, withinSegment("    async read() {", "\n    },\n",
+      renameAll(["owner", "bootstrapOwner"], ["exposure", "routeGuard"], ["guarded", "eligible"]))]],
+    [[configurationRead, "        return await loadConfigurationSnapshot({\n", "        const loadOptions = {\n"],
+      [configurationRead, "          } } : {}),\n        });\n      } finally",
+        "          } } : {}),\n        };\n        return await loadConfigurationSnapshot(loadOptions);\n      } finally"]],
+    [[configurationRead, "try { await exposure.assertConfigurationRoute(kind, id); return true; }",
+      "try { await exposure.assertConfigurationRoute(kind, id); /* 已核验 */ return true; }"]],
+  ]);
 });
 
 test("planned duty migration stays bound to two production roots and a finite owner/receiver exact-set", async () => {
@@ -3284,8 +3748,9 @@ test("planned duty migration stays bound to two production roots and a finite ow
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/planned-anchor-transfer.ts",
-      (text) => text.replace(
-        "for (const candidate of (await this.#candidates.states()).values())",
+      (text) => replaceOnce(
+        text,
+        "for (const candidate of (await this.#candidates.unfinishedStates()).values())",
         "for (const candidate of [])",
       ),
     )).join("\n"),
@@ -3531,6 +3996,64 @@ test("planned duty migration stays bound to two production roots and a finite ow
       /leaks internal topology terms/,
     );
   }
+  // 连续信任前缀与实际校验入口绑定；日志只以两个方法签名索引出现；候选恢复只遍历未完成索引且中止先登记再清理；
+  // 证据核验无锚点 fallback；认证信任追赶只挂在 installTrustCatchUp 并登记处置。
+  assertMutationTable(inspectPlannedAnchorTransferAssembly, records, [
+    [[["packages/cli/src/serve/planned-anchor-transfer-mesh.ts", 'trustReconciliation: "verified-contiguous-trust-prefix"',
+      'trustReconciliation: "single-planned-issuer-transition"']],
+      /owner\/receiver phase exact-set drifted/],
+    [[["packages/cli/src/serve/planned-anchor-transfer-mesh.ts", "event.seq !== cursor.seq + 1 || ", ""]],
+      /owner\/receiver phase exact-set drifted/],
+    [[["packages/cli/src/serve/planned-anchor-transfer.ts", "export interface PlannedAnchorJournalStorage {",
+      'declare const leakedLog: import("@zhixing/core/authority").AuthorityCommitLog;\nexport interface PlannedAnchorJournalStorage {']],
+      /staging physical ownership or finite boundary drifted/],
+    [[["packages/cli/src/serve/planned-anchor-transfer.ts",
+      'durableProjection: import("@zhixing/core/authority").AuthorityCommitLog["durableProjection"];',
+      'durableProjection: import("@zhixing/core/authority").AuthorityCommitLog["append"];']],
+      /staging physical ownership or finite boundary drifted/],
+    [[["packages/cli/src/serve/planned-anchor-transfer.ts",
+      '        await this.#candidates.terminal(identity, "aborted", state.abort!);\n        // 中止的清理可重复执行；确认后候选离开未完目录\n        await this.#cleanupAborted(context, state);\n',
+      '        await this.#candidates.terminal(identity, "aborted", state.abort!);\n']],
+      /signed abort or candidate terminal recovery drifted/],
+    [[["packages/cli/src/serve/access-surfaces.ts", "export async function createLocalConversationOwner(",
+      "const fallbackAnchor = () => inputMeshExecutorTopologyTrust!.currentAnchorDeviceId();\nexport async function createLocalConversationOwner("]],
+      /current-owner resolver exact-set drifted/],
+    [[["packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "this.#disposers.push(options.authority.conversationAuthority.installTrustCatchUp(",
+      "void (options.authority.conversationAuthority.installTrustCatchUp("]],
+      /recovery\/commit\/admission order drifted/],
+  ], [
+    [["packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "installTrustCatchUp(async (peerDeviceId) => {\n      const trust = await reconcilePlannedAnchorTrustFromPeer(this.connections.client(peerDeviceId), {",
+      "installTrustCatchUp(async (peer) => {\n      const reconciled = await reconcilePlannedAnchorTrustFromPeer(this.connections.client(peer), {"],
+     ["packages/cli/src/serve/mesh-runtime-assembly.ts", "      await this.#control.reconcileTrust(trust);\n    }));",
+      "      await this.#control.reconcileTrust(reconciled);\n    }));"]],
+  ]);
+  // 写法无关性回归（第 3 组返修）：日志能力按类型结构与导入绑定判定（与引号无关），连续性守卫与候选恢复按真实调用判定。
+  const plannedTransfer = "packages/cli/src/serve/planned-anchor-transfer.ts";
+  const plannedMesh = "packages/cli/src/serve/planned-anchor-transfer-mesh.ts";
+  const logSignature = 'import("@zhixing/core/authority").AuthorityCommitLog["durableProjection"]';
+  assertMutationTable(inspectPlannedAnchorTransferAssembly, records, [
+    [[[plannedTransfer, (text) =>
+      `import type { AuthorityCommitLog as CommitLog } from "@zhixing/core/authority";\ndeclare const leaked: CommitLog;\n${text}`]],
+      /staging physical ownership or finite boundary drifted/],
+    [[[plannedMesh, "throw new TypeError('Trust reconciliation skips or conflicts with an event');",
+      "/* throw new TypeError('Trust reconciliation skips or conflicts with an event'); */ void 0;"]],
+      /owner\/receiver phase exact-set drifted/],
+    [[[plannedTransfer, "        // 中止的清理可重复执行；确认后候选离开未完目录\n        await this.#cleanupAborted(context, state);\n",
+      "        // 中止的清理可重复执行；确认后候选离开未完目录\n        // await this.#cleanupAborted(context, state);\n"]],
+      /signed abort or candidate terminal recovery drifted/],
+  ], [
+    [[plannedTransfer, logSignature, "import('@zhixing/core/authority').AuthorityCommitLog['durableProjection']"]],
+    [[plannedTransfer, (text) =>
+      `import type { AuthorityCommitLog as CommitLog } from "@zhixing/core/authority";\n${replaceOnce(text, logSignature, 'CommitLog["durableProjection"]')}`]],
+    [[plannedMesh, withinSegment("async function reconcileTrustFromPeer(", "\n}\n", renameAll(["cursor", "head"], ["event", "item"]))]],
+    [[plannedTransfer, withinSegment(
+      "  async recoverBeforeAdmission(): Promise<void> {\n    for (const candidate of (await this.#candidates.unfinishedStates()).values())",
+      "\n  }\n", renameAll(["context", "ctx"], ["state", "journalState"], ["identity", "candidateIdentity"]))]],
+    [["packages/cli/src/serve/mesh-runtime-assembly.ts", "installTrustCatchUp(async (peerDeviceId) => {\n",
+      "installTrustCatchUp(async (peerDeviceId) => {\n      // 经认证连接追赶连续链段\n"]],
+  ]);
 });
 
 test("managed host stays bound to the finite launch plans, triggers and one serve root", async () => {
@@ -4216,6 +4739,68 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   assert.match(inspectManagedHostAssembly(mutate("packages/cli/src/terminal/application.ts", text => replaceExactlyOnce(
     text, /return prepareCurrentManagedServiceConfigTurnover\(undefined, this\.home\)/u, "return undefined", "managed service config turnover",
   ))).join("\n"), /configuration turnover|turnover|managed host/i);
+  // 生命周期贡献按描述符精确登记：重复（单引号）、漏登记、多一个未列入的描述符都拒；引号互换是等价写法。
+  const advancementStopAcquire =
+    "  inputLifecycleContributions.acquire('advancementRecovery.stop', () => advancementRecovery.stop());\n";
+  const prefetchDescriptor =
+    "  { owner: 'anchor-host', role: 'runtime', id: 'startupHistoryPrefetch.close', stage: 'runtime' },\n";
+  for (const [relative, after] of [
+    ["packages/cli/src/serve/access-surfaces.ts", advancementStopAcquire + advancementStopAcquire],
+    ["packages/cli/src/serve/access-surfaces.ts", ""],
+  ]) {
+    assert.match(
+      inspectManagedHostAssembly(mutate(relative, (text) => replaceOnce(text, advancementStopAcquire, after))).join("\n"),
+      /Anchor pre-server lifecycle contribution ownership drifted/,
+    );
+  }
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      (text) => replaceOnce(
+        text,
+        prefetchDescriptor,
+        `${prefetchDescriptor}  { owner: 'anchor-host', role: 'runtime', id: 'ghost.stop', stage: 'runtime' },\n`,
+      ),
+    )).join("\n"),
+    /Anchor pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.deepEqual(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => replaceOnce(text, "acquire('advancementRecovery.stop',", 'acquire("advancementRecovery.stop",'),
+    )),
+    inspectManagedHostAssembly(records),
+  );
+  // 停止入口委托唯一的停止协调器，并在 catch 里承担待结清工作的转换：吞错、改写委托实参、try 里不 await
+  // （异步拒绝绕过 catch）、去掉转换、直接交出协调器都拒；参数与捕获变量改名是等价写法。
+  for (const [from, to] of [
+    ["          if (reason === undefined) throw error;\n", "          if (reason === undefined) return undefined as never;\n"],
+    ["          return await stopCoordinator.prepare(input);\n", "          return await stopCoordinator.prepare({ ...input, force: true });\n"],
+    ["          return await stopCoordinator.prepare(input);\n", "          return stopCoordinator.prepare(input);\n"],
+    ['          throw new RpcAppError(RPC_ERROR_CODES.INTERNAL_ERROR, reason, {\n            action: "retry-same-request",\n          });\n',
+      "          throw error;\n"],
+    ["    lifecycleShutdown: {\n", "    lifecycleShutdown: stopCoordinator,\n    retiredShutdown: {\n"],
+  ]) {
+    assert.match(
+      inspectManagedHostAssembly(mutate("packages/cli/src/serve/command.ts", (text) => replaceOnce(text, from, to))).join("\n"),
+      /managed host accepted-work drain or generation-safe turnover order drifted/,
+    );
+  }
+  const shutdownAdapterHead =
+    "      prepare: async (input) => {\n        try {\n          return await stopCoordinator.prepare(input);\n" +
+    "        } catch (error) {\n          const reason = hostStopPendingWorkReason(error);\n          if (reason === undefined) throw error;\n";
+  assert.deepEqual(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => replaceOnce(text, shutdownAdapterHead, shutdownAdapterHead
+        .replace("async (input) =>", "async (request) =>")
+        .replace("stopCoordinator.prepare(input)", "stopCoordinator.prepare(request)")
+        .replace("catch (error)", "catch (failure)")
+        .replace("hostStopPendingWorkReason(error)", "hostStopPendingWorkReason(failure)")
+        .replace("throw error;", "throw failure;")),
+    )),
+    inspectManagedHostAssembly(records),
+  );
 });
 
 test("device lifecycle stays on one journal, two production roots and local-only host control", async () => {
@@ -4733,6 +5318,20 @@ test("Device Administration reads, paired/current removal and duty migration hav
     )).join("\n"),
     /unique Host application composition drifted/,
   );
+  // 移除效果适配器的第二参是执行端移除终态路由（参数名不限），构造恰好一次。
+  assertMutationTable(inspectDeviceAdministrationReadOwnership, records, [
+    [[["packages/cli/src/serve/mesh-runtime-assembly.ts", "(operationId) => this.#terminalRouteFor(operationId),",
+      'async () => ({ kind: "unknown" }) as never,']],
+      /physical removal outcome adapter drifted/],
+  ], [
+    [["packages/cli/src/serve/mesh-runtime-assembly.ts", "(operationId) => this.#terminalRouteFor(operationId),",
+      "(id) => this.#terminalRouteFor(id),"]],
+  ]);
+  // 写法无关性回归（第 3 组返修）：适配器构造按语法树判定，参数之间插入注释不误报。
+  assertMutationTable(inspectDeviceAdministrationReadOwnership, records, [], [
+    [["packages/cli/src/serve/mesh-runtime-assembly.ts", "      this.connections,\n      (operationId) => this.#terminalRouteFor(operationId),\n",
+      "      this.connections,\n      // 执行端移除终态路由\n      (operationId) => this.#terminalRouteFor(operationId),\n"]],
+  ]);
 });
 
 test("Channel concrete runtime stays behind Host-owned demand ports", async () => {
@@ -4769,17 +5368,43 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     ["packages/cli/src/serve/channels.ts", 'revision !== connectionRevision || closed', 'closed'],
     ["packages/cli/src/serve/channel-conversation-product-binding.ts", "assertBound(): void",
       "assertBoundLater(): void"],
-    ["packages/cli/src/serve/command.ts", "      await startAnchorRuntime();",
+    ["packages/cli/src/serve/command.ts",
+      '      await observeLogPhase(startupRecords, "activate-anchor-runtime", () => startAnchorRuntime());',
       "      void startAnchorRuntime;"],
     ["packages/cli/src/serve/command.ts", "      sessionBroadcastLifecycle.install(sessionTransport);",
       "      await boundChannelConnections?.activate();\n      sessionBroadcastLifecycle.install(sessionTransport);"],
-    ["packages/cli/src/serve/command.ts", "      await recoverHostStop();",
+    ["packages/cli/src/serve/command.ts",
+      '      await observeLogPhase(startupRecords, "activate-host-stop-recovery", () => recoverHostStop());',
       "      void recoverHostStop;"],
+    // 推进恢复：块体回调只发起不等待、后台轮转早于读待办，都不算就绪顺序成立
+    ["packages/cli/src/serve/command.ts", "async () => { await advancementRecovery?.prepare(); }",
+      "async () => { advancementRecovery?.prepare(); }"],
+    ["packages/cli/src/serve/command.ts", advancementPrepareLine + advancementStartBlock,
+      advancementStartBlock + advancementPrepareLine],
   ]) {
-    const changed = records.map((record) => record.relative === relative
-      ? { ...record, text: record.text.replace(before, after) } : record);
+    // 有的锚点按合同出现两次（只改第一处）：这里只要求替换确实生效，不变成空操作。
+    const changed = records.map((record) => {
+      if (record.relative !== relative) return record;
+      const text = record.text.replace(before, after);
+      assert.notEqual(text, record.text, `mutation anchor missing: ${before.slice(0, 80)}`);
+      return { ...record, text };
+    });
     assert.match(inspectChannelRuntimeBoundary(changed).join("\n"), /precede activation readiness/u);
   }
+  // 后台轮转晚于 Channel 物理入口激活
+  assert.match(
+    inspectChannelRuntimeBoundary(records.map((record) => record.relative === "packages/cli/src/serve/command.ts"
+      ? {
+          ...record,
+          text: replaceOnce(
+            replaceOnce(record.text, advancementStartBlock, ""),
+            channelActivationLine,
+            channelActivationLine + advancementStartBlock,
+          ),
+        }
+      : record)).join("\n"),
+    /precede activation readiness/u,
+  );
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
@@ -4966,9 +5591,10 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => text.replace(
-        "await prepareChannel({",
-        "await retiredPrepareChannel({",
+      (text) => replaceOnce(
+        text,
+        "() => prepareChannel({",
+        "() => retiredPrepareChannel({",
       ),
     )).join("\n"),
     /challenge static composition or physical callback drifted/u,
@@ -5061,6 +5687,14 @@ test("Kernel run input has one finite Envelope owner and three production bindin
   );
 
   assert.deepEqual(inspectKernelRunEnvelopeOwnership(records), []);
+  // control 分区是有限精确集：0b27b02c 的阶段回调在集合里，增删都拒
+  assertMutationTable(inspectKernelRunEnvelopeOwnership, records, [
+    [[["packages/orchestrator/src/runtime/kernel-run-envelope.ts", "    readonly modelProviderPhases?: ModelProviderPhases;\n", ""]],
+      /Kernel Run Envelope control field exact-set drifted/],
+    [[["packages/orchestrator/src/runtime/kernel-run-envelope.ts", "    readonly modelProviderPhases?: ModelProviderPhases;\n",
+      "    readonly modelProviderPhases?: ModelProviderPhases;\n    readonly extraControl?: unknown;\n"]],
+      /Kernel Run Envelope control field exact-set drifted/],
+  ]);
   assert.deepEqual(
     inspectKernelRunEnvelopeOwnership(mutate(
       "packages/cli/src/serve/execution-scheduler-facade.ts",
@@ -6075,12 +6709,12 @@ test("validated configuration crosses composition roots as finite frozen project
   assert.match(
     inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/serve/trust-administration-adapter.ts",
-      (text) => text.replace(
-        "readonly configuration: RuntimeWorkspaceConfigurationProjection;",
-        "readonly configuration: RuntimeModelConfigurationProjection;",
+      (text) => replaceOnce(text,
+        "readonly repository: TrustAdministrationRepository;",
+        "readonly repository: TrustAdministrationRepository;\n  readonly config: ZhixingConfig;",
       ),
     )).join("\n"),
-    /Trust edge misses its finite runtime configuration projection/,
+    /Trust Administration edge can still consume or reconstruct aggregate configuration/,
   );
   assert.match(
     inspectRuntimeConfigurationProjectionBoundary(mutate(
@@ -6112,6 +6746,39 @@ test("validated configuration crosses composition roots as finite frozen project
   ]) assert.match(inspectRuntimeConfigurationProjectionBoundary(mutate(relative, text => replaceExactlyOnce(
     text, pattern, "getPrimaryModel: () => loadConfig()", `${relative}: finite model projection`,
   ))).join("\n"), /Surface regained a raw or aggregate configuration path/);
+  // 配置写入 helper 只在类型里引用 loadConfig 不算持有加载器；一旦调用就拒。
+  const roleConfiguration = {
+    relative: "packages/cli/src/serve/local-role-configuration.ts",
+    text: await readFile("packages/cli/src/serve/local-role-configuration.ts", "utf8"),
+  };
+  assert.deepEqual(
+    inspectRuntimeConfigurationProjectionBoundary([...records, roleConfiguration]),
+    inspectRuntimeConfigurationProjectionBoundary(records),
+  );
+  // 受限的是导入的加载能力，不是拼写：别名、命名空间、动态导入（解构或整模块）后的调用都算持有；
+  // 别名只作类型引用不算。
+  const loadedConfigType = "type LoadedConfig = ReturnType<typeof loadConfig>;";
+  const aliasImport = (text) => replaceOnce(
+    replaceOnce(text, "import { loadConfig, writeConfig }", "import { loadConfig as readConfiguration, writeConfig }"),
+    "typeof loadConfig",
+    "typeof readConfiguration",
+  );
+  for (const transform of [
+    (text) => replaceOnce(text, loadedConfigType, `${loadedConfigType}\nexport const loadNow = () => loadConfig();`),
+    (text) => `${aliasImport(text)}\nexport async function unintendedLoad() { return readConfiguration(); }\n`,
+    (text) => `${text}\nimport * as providerModule from "@zhixing/providers";\nexport const viaNamespace = () => providerModule.loadConfig();\n`,
+    (text) => `${text}\nexport async function viaDynamic() { const { loadConfig: read } = await import("@zhixing/providers"); return read(); }\n`,
+    (text) => `${text}\nexport async function viaModule() { const providerModule = await import("@zhixing/providers"); return providerModule.loadConfig(); }\n`,
+  ]) {
+    assert.match(
+      inspectRuntimeConfigurationProjectionBoundary([...records, { ...roleConfiguration, text: transform(roleConfiguration.text) }]).join("\n"),
+      /local-role-configuration\.ts: ordinary runtime Surface owns a configuration loader/,
+    );
+  }
+  assert.deepEqual(
+    inspectRuntimeConfigurationProjectionBoundary([...records, { ...roleConfiguration, text: aliasImport(roleConfiguration.text) }]),
+    inspectRuntimeConfigurationProjectionBoundary(records),
+  );
 });
 
 test("Anchor tool and MCP projection is outside the one generic RuntimeHost issuance", async () => {
@@ -6141,6 +6808,15 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
 
   assert.deepEqual(inspectWorksceneRuntimeProjectionBoundary(records), []);
+  // 各模式投影的出口恰为一组：多出口或缺模式都拒，属性换序不影响
+  const projectionProduct = "packages/cli/src/serve/workscene-runtime-projection.ts";
+  assertMutationTable(inspectWorksceneRuntimeProjectionBoundary, records, [
+    [[[projectionProduct, "    jobCapabilities,\n    capabilityCatalog:", "    jobCapabilities,\n    audit: () => undefined,\n    capabilityCatalog:"]],
+      /Workscene product owner projection or capability exact-set drifted/],
+    [[[projectionProduct, "    ephemeral,\n    job,\n", "    job,\n"]], /Workscene product owner projection or capability exact-set drifted/],
+  ], [
+    [[projectionProduct, "    main,\n    scene,\n    ephemeral,\n", "    scene,\n    main,\n    ephemeral,\n"]],
+  ]);
   for (const [relative, transform] of [
     ["packages/orchestrator/src/runtime/system-prompt.ts", (text) => `${text}\nfunction renamedPolicy(tools) { return tools.some(t => t.name === "workmode_enter") ? "scene policy" : null; }`],
     ["packages/orchestrator/src/profile/default-profiles.ts", (text) => `${text}\nconst renamedProfile = { instructions: "Call workmode_exit when done" };`],
@@ -6277,6 +6953,45 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     )).join("\n"),
     /ExecutorRuntimeSubstrate/,
   );
+  // job 投影只经唯一 owner，实参按 create 回调参数的职责位置：第 0 位 instruction、第 2 位 capabilities、
+  // 可选第 3 位 workspaceBinding（?? null）；结果须展开进 createJobRuntime。局部名与参数名不是义务。
+  const jobProjection = "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null)";
+  const projectionFailure = /Anchor production graph does not use the one Workscene projection owner/;
+  for (const [from, to] of [
+    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null, extra)"],
+    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, otherBinding)"],
+    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? defaultBinding)"],
+    [jobProjection, `${jobProjection};\n          const second = anchorRuntimeProjections.job(instruction, capabilities)`],
+    [jobProjection, "anchorRuntimeProjections.job(capabilities, instruction, workspaceBinding ?? null)"],
+    [jobProjection, "anchorRuntimeProjections.job(instruction, confirmationBroker, workspaceBinding ?? null)"],
+    ["            ...projection,\n", "            ...otherProjection,\n"],
+  ]) {
+    assert.match(
+      inspectWorksceneRuntimeProjectionBoundary(mutate(
+        "packages/cli/src/serve/command.ts",
+        (text) => replaceOnce(text, from, to),
+      )).join("\n"),
+      projectionFailure,
+    );
+  }
+  const jobCallbackHead =
+    "        create: (instruction, confirmationBroker, capabilities, workspaceBinding) => {\n" +
+    `          const projection = ${jobProjection};\n` +
+    "          return runtimeHost.createJobRuntime({\n            confirmationBroker,\n            ...projection,\n";
+  for (const transform of [
+    (text) => replaceOnce(text, jobProjection, "anchorRuntimeProjections.job(instruction, capabilities)"),
+    (text) => replaceOnce(text, jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding)"),
+    (text) => replaceOnce(text, jobCallbackHead, jobCallbackHead.replaceAll(/\bprojection\b/gu, "runtimeProjection")),
+    (text) => replaceOnce(text, jobCallbackHead, jobCallbackHead
+      .replace("(instruction, confirmationBroker, capabilities, workspaceBinding) =>", "(jobInstruction, broker, jobCapabilities, binding) =>")
+      .replace(jobProjection, "anchorRuntimeProjections.job(jobInstruction, jobCapabilities, binding ?? null)")
+      .replace("            confirmationBroker,\n", "            confirmationBroker: broker,\n")),
+  ]) {
+    assert.deepEqual(
+      inspectWorksceneRuntimeProjectionBoundary(mutate("packages/cli/src/serve/command.ts", transform)),
+      inspectWorksceneRuntimeProjectionBoundary(records),
+    );
+  }
 });
 
 test("MCP runtime consumers use finite demand-owned ports behind one Host adapter", async () => {
@@ -6338,6 +7053,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
     "packages/cli/src/runtime/mcp-management-adapter.ts",
     "packages/cli/src/runtime/mcp-config.ts",
     "packages/cli/src/runtime/mcp-runtime-adapter.ts",
+    "packages/cli/src/runtime/mcp-probe-request.ts",
     "packages/core/src/mcp-management/setup.ts",
     "packages/core/src/mcp-management/discovery.ts",
     "packages/cli/src/config-editor/types.ts",
@@ -6355,6 +7071,11 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   );
 
   assert.deepEqual(inspectMcpManagementBoundary(records), []);
+  // 具体 MCP 导入只在 4 个 CLI 基础设施适配器（9b37de45 新增受管探测请求）
+  assertMutationTable(inspectMcpManagementBoundary, records, [
+    [[["packages/cli/src/serve/mcp-tools.ts", (text) => `import { probeServer } from "@zhixing/mcp";\n${text}`]],
+      /Concrete MCP imports escaped the finite CLI infrastructure adapters/],
+  ]);
   assert.match(
     inspectMcpManagementBoundary(mutate(
       "packages/core/src/mcp-management/ports.ts",
@@ -6651,6 +7372,31 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
     )).join("\n"),
     /resource admission escaped its required finite Host projection/,
   );
+  // 第 4 组：资源准入端口恰为 4 个 Pick 成员加 reclaimExpired；成员顺序与引号不影响，多成员或多方法都拒。
+  const workspaceControl = "packages/cli/src/runtime/local-workspace-control.ts";
+  const managementHost = "packages/cli/src/runtime/local-workspace-management-host.ts";
+  const resourceMembers = '"acquireRoot" | "settle" | "release" | "inspectImmediateRoot"';
+  const finiteFailure = /Workspace resource admission escaped its required finite Host projection/;
+  const hostResources = `    readonly resources: Pick<\n      ResourceReservationPort,\n      ${resourceMembers}\n    > & { reclaimExpired(): Promise<number> };\n`;
+  assertMutationTable(inspectWorkspaceAdministrationOwnership, records, [
+    [[[workspaceControl, resourceMembers, `${resourceMembers} | "reserve"`]], finiteFailure],
+    [[[workspaceControl, "> & { reclaimExpired(): Promise<number> };",
+      "> & { reclaimExpired(): Promise<number>; drainAll(): Promise<void> };"]], finiteFailure],
+    // 有限类型还在、只是没被实际消费：构造参数或私有字段放宽、字段取自别的对象、Host 入参放宽或传了别的资源
+    [[[workspaceControl, "    readonly resources: ControlResources;\n  }) {",
+      "    readonly resources: ResourceReservationPort & { reclaimExpired(): Promise<number> };\n  }) {"]], finiteFailure],
+    [[[workspaceControl, "  readonly #resources: ControlResources;", "  readonly #resources: ResourceReservationPort;"]], finiteFailure],
+    [[[workspaceControl, "this.#resources = input.resources;", "this.#resources = wideInput.resources;"]], finiteFailure],
+    [[[managementHost, hostResources, "    readonly resources: ResourceReservationPort & { reclaimExpired(): Promise<number> };\n"],
+      [managementHost, (text) => `type UnusedFinite = Pick<ResourceReservationPort, ${resourceMembers}> & { reclaimExpired(): Promise<number> };\n${text}`]],
+      finiteFailure],
+    [[[managementHost, "    resources: input.management.resources,", "    resources: input.wideResources,"]], finiteFailure],
+  ], [
+    [[workspaceControl, resourceMembers, "'release' | 'inspectImmediateRoot' | 'acquireRoot' | 'settle'"]],
+    [[workspaceControl, (text) => text.replace(/\bControlResources\b/gu, "FiniteResources")]],
+    [[managementHost, hostResources, "    readonly resources: ManagementResources;\n"],
+      [managementHost, (text) => `type ManagementResources = Pick<ResourceReservationPort, ${resourceMembers}> & { reclaimExpired(): Promise<number> };\n${text}`]],
+  ]);
 });
 
 test("Trust Administration management has one domain application and Product API boundary", async () => {
@@ -6685,6 +7431,24 @@ test("Trust Administration management has one domain application and Product API
     text: await readFile(relative, "utf8"),
   })));
   assert.deepEqual(inspectTrustAdministrationOwnership(records), []);
+  // Agent runtime 只从组合出的 securityExecution 取规则；权限物理机制只有一份持久存储，内存视图都接它
+  const agentRuntimeSource = "packages/orchestrator/src/runtime/create-agent-runtime.ts";
+  const permissionInfrastructureSource = "packages/cli/src/serve/permission-storage-infrastructure.ts";
+  const permissionFailure = /Permission file mechanism is not confined to the one Host infrastructure adapter/;
+  assertMutationTable(inspectTrustAdministrationOwnership, records, [
+    [[[agentRuntimeSource, "  const securityExecution = assembleKernelSecurityExecution(",
+      "  const detachedRules = createDetachedRules();\n  const securityExecution = assembleKernelSecurityExecution("],
+      [agentRuntimeSource, "securityExecution.executionPermissionRules(scope)", "detachedRules.executionPermissionRules(scope)"]],
+      /Agent runtime does not compose the one Trust application and readonly Security projection/],
+    [[[permissionInfrastructureSource, "  effects = hostPersistentApprovals ? new ExplicitApprovalEffects(durable) : undefined;",
+      "  effects = hostPersistentApprovals ? new ExplicitApprovalEffects(durable) : undefined;\n" +
+        "  const shadow = new DurablePermissionRuleStore(path.join(input.zhixingHome, \"permissions-shadow\"));"]], permissionFailure],
+    [[[permissionInfrastructureSource, "      const store = new PermissionStore({ durable });", "      const store = new PermissionStore({});"]], permissionFailure],
+    [[[permissionInfrastructureSource, '    path.join(input.zhixingHome, "permissions"),', '    path.join(input.zhixingHome, "permissions-v2"),']],
+      permissionFailure],
+  ], [
+    [[permissionInfrastructureSource, '    path.join(input.zhixingHome, "permissions"),', "    path.join(input.zhixingHome, 'permissions'),"]],
+  ]);
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
@@ -6840,6 +7604,19 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     text: await readFile(relative, "utf8"),
   })));
   assert.deepEqual(inspectAdvancementDetailApplicationOwnership(records), []);
+  // 唯一的 Product API 应用与生命周期应用：游离定义、生命周期类换名都拒；精确集换序不影响
+  const advancementApplication = "packages/core/src/advancement/application.ts";
+  const advancementFailure =
+    /Advancement detail\/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner/;
+  assertMutationTable(inspectAdvancementDetailApplicationOwnership, records, [
+    [[[advancementApplication, "export class AdvancementConversationLifecycleApplicationService",
+      "export class AdvancementConversationLifecycleService"]], advancementFailure],
+    [[["packages/owner-services/src/advancement/recovery-maintenance.ts", "this.options.reviews.reconcileConversation(",
+      "this.options.reconcileConversation("]], advancementFailure],
+  ], [
+    [[advancementApplication, "    ADVANCEMENT_ACTIVE_STATE_QUERY,\n    ADVANCEMENT_DETAIL_QUERY,\n",
+      "    ADVANCEMENT_DETAIL_QUERY,\n    ADVANCEMENT_ACTIVE_STATE_QUERY,\n"]],
+  ]);
   assert.deepEqual(
     ADVANCEMENT_APPLICATION_OWNER_EXACT_SET.map(({ family }) => family),
     [
@@ -6888,9 +7665,9 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => text.replace(
-        "advancementReviews.cancelSession(input)",
-        "advancementDetailController.persistRubricCancellation(input)",
+      (text) => replaceOnce(text,
+        "return Object.freeze({ controller, reviews, lifecycle, proposals });",
+        "return Object.freeze({ controller, reviews, lifecycle, proposals, retired: reviews });",
       ),
     )).join("\n"),
     failure,
@@ -7444,18 +8221,15 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/cli/src/serve/command.ts",
-      (text) => text.replace("newTask: advancementDetailController,", ""),
+      "packages/cli/src/serve/advancement-controller.ts",
+      (text) => replaceOnce(text, "return Object.freeze({ controller, reviews, proposals });", "return Object.freeze({ controller, reviews });"),
     )).join("\n"),
     failure,
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/core/src/advancement/application.ts",
-      (text) => text.replace(
-        "await this.#newTaskConversation.ensureShell(command.conversationId);",
-        "void this.#newTaskConversation.ensureShell(command.conversationId);",
-      ),
+      (text) => `${text}\nexport const ADVANCEMENT_STRAY_QUERY = defineProductApiQuery<"advancement.query.stray", void, null>("advancement.query.stray");`,
     )).join("\n"),
     failure,
   );
@@ -7646,6 +8420,31 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     )).join("\n"),
     compositionFailure,
   );
+  // 已受理轮次的补审必须经同文件绑定的恢复维护并带 beforeRunIndex：丢轮次、绕开恢复维护、断开、固定轮次都拒。
+  const anchorCatchUp =
+    "advancementRecovery.recoverConversation(conversationId, {\n            beforeRunIndex,\n          }),";
+  const localCatchUp = "recovery.recoverConversation(conversationId, { beforeRunIndex }),";
+  const catchUpFailure = /Advancement accepted-turn catch-up must route through the bound recovery maintenance with beforeRunIndex/;
+  for (const [relative, from, to] of [
+    ["packages/cli/src/serve/access-surfaces.ts", anchorCatchUp, "advancementRecovery.recoverConversation(conversationId),"],
+    ["packages/cli/src/serve/access-surfaces.ts", anchorCatchUp,
+      anchorCatchUp.replace("advancementRecovery.recoverConversation", "otherRecovery.recoverConversation")],
+    ["packages/cli/src/serve/access-surfaces.ts", anchorCatchUp, 'Promise.resolve({ status: "continuous" as const }),'],
+    ["packages/cli/src/serve/local-conversation-owner.ts", localCatchUp,
+      "recovery.recoverConversation(conversationId, { beforeRunIndex: 0 }),"],
+  ]) {
+    assert.match(
+      inspectAdvancementDetailApplicationOwnership(mutate(relative, (text) => replaceOnce(text, from, to))).join("\n"),
+      catchUpFailure,
+    );
+  }
+  assert.deepEqual(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => replaceOnce(text, localCatchUp, "recovery.recoverConversation(conversationId, { beforeRunIndex: beforeRunIndex }),"),
+    )),
+    inspectAdvancementDetailApplicationOwnership(records),
+  );
 });
 
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
@@ -7661,6 +8460,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/scheduler/facade.ts",
     "packages/core/src/delivery/application.ts",
     "packages/core/src/delivery/authority.ts",
+    "packages/core/src/delivery/delivery-authority.ts",
     "packages/core/src/delivery/authority-pipeline.ts",
     "packages/core/src/delivery/channel-effect.ts",
     "packages/core/src/delivery/lifecycle-policy.ts",
@@ -7755,6 +8555,38 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     text: await readFile(relative, "utf8"),
   })));
   assert.deepEqual(inspectSkillCatalogApplicationOwnership(records), []);
+  // Delivery：应用只以 type-only 取事务句柄并原样转交；事务方法只归 DeliveryAuthority；参与者在已锁定事务里准备
+  const deliveryApplicationSource = "packages/core/src/delivery/application.ts";
+  const deliveryAuthoritySource = "packages/core/src/delivery/delivery-authority.ts";
+  const authorityImport = 'import type { ProjectionTransactionContext } from "../authority/index.js";';
+  assertMutationTable(inspectSkillCatalogApplicationOwnership, records, [
+    [[[deliveryApplicationSource, authorityImport, 'import { ProjectionTransactionContext } from "../authority/index.js";']],
+      /Delivery application source ownership drifted/],
+    [[[deliveryApplicationSource, authorityImport,
+      'import type { ProjectionTransactionContext, DurableProjectionReadContext } from "../authority/index.js";']],
+      /Delivery application source ownership drifted/],
+    [[[deliveryApplicationSource, "      ), transaction, candidates);", "      ), transaction, candidates, transaction.lastLsn);"]],
+      /Delivery application source ownership drifted/],
+    [[["packages/core/src/delivery/authority.ts", (text) =>
+      `${text}\nexport class RetiredAuthority { async transactDeliveryLifecycle<Value>() { return undefined as Value; } }\n`]],
+      /attempt lifecycle does not have one domain application/],
+    [[["packages/core/src/delivery/authority.ts", (text) =>
+      `${text}\nexport class RetiredAuthority { async transactDeliveryAdmission<Value>() { return undefined as Value; } }\n`]],
+      /accepted-work lifecycle does not have one domain application/],
+    [[["packages/owner-kernel/src/delivery-participant.ts",
+      "const decision = await this.#application.prepare(inputs, commitAt, transaction, candidates);",
+      "const decision = await this.#application.prepare(inputs, commitAt, await this.#openTransaction(), candidates);"]],
+      /Delivery obligations do not have one domain decision and one narrow Correctness adapter/],
+    [[[deliveryAuthoritySource, '"Delivery lifecycle admission projection"', '"Delivery admission projection"']],
+      /Delivery obligations do not have one domain decision and one narrow Correctness adapter/],
+  ], [
+    [[deliveryApplicationSource, (text) => replaceOnce(text, authorityImport,
+      'import type { ProjectionTransactionContext as LockedTransaction } from "../authority/index.js";')
+      .replaceAll("transaction: ProjectionTransactionContext", "transaction: LockedTransaction")]],
+    [[deliveryAuthoritySource, '"Delivery lifecycle admission projection"', "'Delivery lifecycle admission projection'"]],
+    [["packages/owner-kernel/src/job-assignment.ts", "  scheduleFailurePolicyForCount,\n", "  scheduleFailurePolicyForCount as countBasedFailurePolicy,\n"],
+      ["packages/owner-kernel/src/job-assignment.ts", "policy = scheduleFailurePolicyForCount({", "policy = countBasedFailurePolicy({"]],
+  ]);
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
@@ -8640,10 +9472,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/owner-kernel/src/job-assignment.ts",
-      (text) => text.replace(
-        "pendingAutoDisable: selectPendingScheduleAutoDisable(",
-        "pendingAutoDisable: [...state.failurePolicyByRun.values()].filter(",
-      ),
+      (text) => replaceOnce(text, "policy = scheduleFailurePolicyForCount({", "policy = localFailurePolicy({"),
     )).join("\n"),
     /Schedule timing, offline and failure policy escaped its domain owner/,
   );
@@ -9213,11 +10042,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/src/delivery/authority.ts",
-      (text) => text.replace(
-        "async transactDeliveryLifecycle<Value>",
-        "async claim<Value>",
-      ),
+      "packages/core/src/delivery/delivery-authority.ts",
+      (text) => replaceOnce(text, "async transactDeliveryLifecycle<Value>(", "async claim<Value>("),
     )).join("\n"),
     /attempt lifecycle does not have one domain application/,
   );
@@ -9995,20 +10821,28 @@ test("Workscene cleanup cursor and walker stay behind finite Host effects", asyn
     )).join("\n"),
     /Retired Workscene cleanup constructor or fallback returned/,
   );
-  assert.match(
-    inspectWorksceneStorageCleanupBoundary(mutate(
-      "packages/cli/src/serve/command.ts",
-      (text) => text.replace(
-        "worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes",
-        "worksceneSceneStorageRemoval: undefined",
-      ),
-    )).join("\n"),
-    /not constructed once at the Host edge/,
-  );
+  // 场景删除适配器须在方法体顶层恰好一次等待唯一清理机制：不委托、委托两次、放进吞错的 try、只发起不等待都拒。
+  const sceneRemoval = "        await worksceneStorageCleanup.scenes.removeScene(sceneId);\n";
+  for (const after of [
+    "        await conversationStorage.forgetScene(sceneId);\n",
+    sceneRemoval + sceneRemoval,
+    "        try { await worksceneStorageCleanup.scenes.removeScene(sceneId); } catch {}\n",
+    "        worksceneStorageCleanup.scenes.removeScene(sceneId);\n",
+  ]) {
+    assert.match(
+      inspectWorksceneStorageCleanupBoundary(mutate(
+        "packages/cli/src/serve/command.ts",
+        (text) => replaceOnce(text, sceneRemoval, after),
+      )).join("\n"),
+      /not constructed once at the Host edge/,
+    );
+  }
 });
 
 test("non-topology storage mechanisms stay behind finite Infrastructure edges", async () => {
   const paths = [
+    // 第 4 组新检查读取的源文件
+    "packages/cli/src/serve/home-authority-sources.ts",
     "packages/providers/src/config-loader.ts",
     "packages/providers/src/credentials-loader.ts",
     "packages/secrets/src/platform-secret-store.ts",
@@ -10182,6 +11016,48 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     )).join("\n"),
     /unified Storage facade returned/,
   );
+  // Anchor 令牌只经一次被等待的本 home 加载（阶段观测包装是等价写法）：换路径实参、重复加载都拒。
+  const anchorTokenLoad = "() => loadOrCreateToken(getDefaultTokenPath(zhixingHome)));";
+  for (const after of [
+    "() => loadOrCreateToken(getDefaultTokenPath(otherHome)));",
+    `${anchorTokenLoad}\n  await loadOrCreateToken(getDefaultTokenPath(zhixingHome));`,
+  ]) {
+    assert.match(
+      inspectStorageRemainderBoundary(mutate(
+        "packages/cli/src/serve/command.ts",
+        (text) => replaceOnce(text, anchorTokenLoad, after),
+      )).join("\n"),
+      /P13 discovery\/auth\/state\/log ownership or read-only demand boundary drifted/,
+    );
+  }
+  // 第 4 组：备份的平台秘密存储注入优先且同一 home；主 CAS/WAL 只在统一 home 来源的同一根下构造。
+  const backupCommand = "packages/cli/src/serve/backup-command.ts";
+  const authoritySources = "packages/cli/src/serve/home-authority-sources.ts";
+  const preflight = (transform) => withinSegment("async function inspectSetupPreconditions(", "\n}\n", transform);
+  assertMutationTable(inspectStorageRemainderBoundary, records, [
+    [[[backupCommand, preflight((segment) => segment.replace(
+      "options.secretStore ?? createPlatformSecretStore({ homeDir: home })", "createPlatformSecretStore({ homeDir: home })"))]],
+      /P01 SecretStore fallback must prefer the injected store for the same home/],
+    [[[backupCommand, preflight((segment) => segment.replace(
+      "createPlatformSecretStore({ homeDir: home })", "createPlatformSecretStore({ homeDir: otherHome })"))]],
+      /P01 SecretStore fallback must prefer the injected store for the same home/],
+    [[[authoritySources, 'path.join(root, "executor-authority")', 'path.join(root, "executor")']],
+      /P06 CAS\/WAL\/projection physical owner exact-set drifted/],
+    [[[authoritySources, 'const root = path.join(home, "distributed-runtime");', 'const root = path.join(home, "other-runtime");']],
+      /P06 CAS\/WAL\/projection physical owner exact-set drifted/],
+    // 根不来自本构造器的 home
+    [[[authoritySources, 'const root = path.join(home, "distributed-runtime");', 'const root = path.join("wrong-home", "distributed-runtime");']],
+      /P06 CAS\/WAL\/projection physical owner exact-set drifted/],
+    [[[authoritySources, 'const root = path.join(home, "distributed-runtime");', 'const root = path.join(otherHome, "distributed-runtime");']],
+      /P06 CAS\/WAL\/projection physical owner exact-set drifted/],
+    [[["packages/cli/src/setup-delivery.ts", (text) =>
+      `${text}\nexport const strayLog = new FileAuthorityCommitLog(path.join(authorityRoot, "authority"), artifacts);\n`]],
+      /P06 CAS\/WAL\/projection physical owner exact-set drifted/],
+  ], [
+    [[backupCommand, preflight(renameAll(["home", "homeDir"], ["secretStore", "store"]))]],
+    [[authoritySources, withinSegment('    const root = path.join(home, "distributed-runtime");',
+      "storageMaintenance: options.storageMaintenance,\n    });", renameAll(["root", "distributedRoot"]))]],
+  ]);
 });
 
 test("disaster-recovery staging keeps one physical adapter and required Host flow", async () => {
@@ -10225,9 +11101,10 @@ test("disaster-recovery staging keeps one physical adapter and required Host flo
   assert.match(
     inspectDisasterRecoveryStagingBoundary(mutate(
       "packages/cli/src/serve/application-host.ts",
-      (text) => text.replace(
-        "disasterRecoveryStaging,\n    );",
-        "this.#dependencies.createDisasterRecoveryStaging({ zhixingHome: this.#input.zhixingHome }),\n    );",
+      (text) => replaceOnce(
+        text,
+        '        disasterRecoveryStaging,\n      );\n      if (prepared.mode === "removal-retrieval") {',
+        '        this.#dependencies.createDisasterRecoveryStaging({ zhixingHome: this.#input.zhixingHome }),\n      );\n      if (prepared.mode === "removal-retrieval") {',
       ),
     )).join("\n"),
     /Host\/bootstrap required instance flow drifted/,
@@ -10259,6 +11136,15 @@ test("disaster-recovery staging keeps one physical adapter and required Host flo
     )).join("\n"),
     /exact cleanup ownership drifted/,
   );
+  // 三种 bootstrap 变体都携带输入里的同一灾备暂存；Host 三处准备都传入托管的那一个实例。
+  assertMutationTable(inspectDisasterRecoveryStagingBoundary, records, [
+    [[["packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+      "      disasterRecoveryStaging: input.disasterRecoveryStaging,\n      trustedIdentities: [],\n", "      trustedIdentities: [],\n"]],
+      /Host\/bootstrap required instance flow drifted/],
+    [[["packages/cli/src/serve/application-host.ts", "        disasterRecoveryStaging,\n      );\n      if (reprepared.mode",
+      "        otherDisasterStaging,\n      );\n      if (reprepared.mode"]],
+      /Host\/bootstrap required instance flow drifted/],
+  ]);
 });
 
 test("runtime logging P15 rejects reverse reader dependencies and private writers", async () => {
@@ -10273,4 +11159,65 @@ test("runtime logging P15 rejects reverse reader dependencies and private writer
   assert.match(inspect(records.map(record => record.relative === paths[0]
     ? { ...record, text: record.text.replace("takeEntryLogging() ?? createBootstrapLogging(mode)", "createBootstrapLogging(mode)") }
     : record)).join("\n"), /unique runtime log owner/);
+});
+
+test("S7 behavior evidence is declared in its files and run by s7:lint", async () => {
+  assert.deepEqual(await inspectBehaviorEvidence(), []);
+  const entry = { responsibility: "r", file: "packages/x.test.ts", test: "does it" };
+  const files = new Map([
+    ["packages/x.test.ts", 'describe("d", () => { it("does it", () => {}); });'],
+    ["package.json", JSON.stringify({ scripts: { "s7:lint": "node scripts/s7-behavior.mjs" } })],
+  ]);
+  const read = (overrides = {}) => async (relative) => {
+    const text = overrides[relative] ?? files.get(relative);
+    if (text === undefined) throw new Error(`missing ${relative}`);
+    return text;
+  };
+  // 引号写法与 test/it 别名不影响
+  assert.deepEqual(await inspectBehaviorEvidence([entry], read({ "packages/x.test.ts": "test('does it', () => {});" })), []);
+  assert.deepEqual(await inspectBehaviorEvidence([entry], read()), []);
+  for (const overrides of [
+    { "packages/x.test.ts": 'it("does it differently", () => {});' },
+    { "packages/x.test.ts": '// it("does it", () => {});' },
+    { "packages/x.test.ts": 'const name = "does it";' },
+  ]) {
+    assert.match((await inspectBehaviorEvidence([entry], read(overrides))).join("\n"), /S7 behavior evidence is missing: does it/);
+  }
+  assert.match((await inspectBehaviorEvidence([{ ...entry, file: "packages/gone.test.ts" }], read())).join("\n"),
+    /S7 behavior evidence is missing/);
+  assert.match(
+    (await inspectBehaviorEvidence([entry], read({ "package.json": JSON.stringify({ scripts: { "s7:lint": "node x.mjs" } }) }))).join("\n"),
+    /s7:lint does not run the S7 behavior evidence/,
+  );
+  // 参数化声明按模板认；空登记、空 cases 都拒
+  const each = { ...entry, test: "does %s", cases: ["does a", "does b"] };
+  assert.deepEqual(await inspectBehaviorEvidence([each], read({ "packages/x.test.ts": 'it.each(["a", "b"])("does %s", () => {});' })), []);
+  assert.match((await inspectBehaviorEvidence([], read())).join("\n"), /S7 behavior evidence registry is empty/);
+  assert.match((await inspectBehaviorEvidence([{ ...each, cases: [] }], read({ "packages/x.test.ts": 'it.each(["a"])("does %s", () => {});' }))).join("\n"),
+    /S7 behavior evidence has empty cases/);
+});
+
+test("S7 behavior evidence passes only when each registered case was collected once and passed", () => {
+  const root = path.resolve("/repo");
+  const file = "packages/x.test.ts";
+  const report = (...results) => ({ testResults: [{ name: path.join(root, file), assertionResults: results }] });
+  const result = (title, status = "passed") => ({ title, status, fullName: title, ancestorTitles: [] });
+  const entry = { responsibility: "r", file, test: "does it" };
+  const each = { responsibility: "r", file, test: "does %s", cases: ["does a", "does b"] };
+  assert.deepEqual(behaviorEvidenceFailures(report(result("does it"), result("other", "skipped")), root, [entry]), []);
+  assert.deepEqual(behaviorEvidenceFailures(report(result("does a"), result("does b")), root, [each]), []);
+  for (const [name, input, evidence, expected] of [
+    ["空登记", report(result("does it")), [], /registry is empty/],
+    ["空结果", { testResults: [] }, [entry], /was not collected: does it/],
+    ["名字不符（运行器把它当作被过滤而跳过）", report(result("does it again", "skipped")), [entry], /was not collected: does it/],
+    ["跳过", report(result("does it", "skipped")), [entry], /did not pass \(skipped\)/],
+    ["todo", report(result("does it", "todo")), [entry], /did not pass \(todo\)/],
+    ["失败", report(result("does it", "failed")), [entry], /did not pass \(failed\)/],
+    ["同名多例", report(result("does it"), result("does it")), [entry], /ambiguous \(2 cases\)/],
+    ["参数化缺一例", report(result("does a")), [each], /was not collected: does b/],
+    ["别的文件里的同名用例", { testResults: [{ name: path.join(root, "packages/y.test.ts"), assertionResults: [result("does it")] }] }, [entry],
+      /was not collected: does it/],
+  ]) {
+    assert.match(behaviorEvidenceFailures(input, root, evidence).join("\n"), expected, name);
+  }
 });
