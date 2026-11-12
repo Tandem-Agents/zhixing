@@ -161,6 +161,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
       wsPath: opts.wsPath,
       onError: opts.onError,
       scheduleRuntimeEvents: opts.scheduleRuntimeEvents,
+      skillCatalogEvents: opts.skillCatalogEvents,
       activationGate: async (preparedServer) => {
         if (!injected && !opts.skipProcessLock) {
           registerCleanup(

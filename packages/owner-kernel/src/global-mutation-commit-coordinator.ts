@@ -186,6 +186,24 @@ export class GlobalMutationCommitCoordinator {
     return { records: plannedRecords, outcomes };
   }
 
+  /** 父运行提交成功之后：把本次实际追加的记录按所属参与者交给它观察；定时任务记录不经过这里。 */
+  async afterCommit(records: readonly GlobalMutationCommitRecord[]): Promise<void> {
+    // 参与者之间互不影响：一个失败不跳过其余参与者，失败汇总后交给调用方上报
+    const failures: unknown[] = [];
+    for (const participant of this.#participants) {
+      if (!participant.observeCommittedMutations) continue;
+      const owned = records.filter((record) => participant.ownsStagedMutation(record.mutation));
+      if (!owned.length) continue;
+      try {
+        await participant.observeCommittedMutations(owned);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Committed global mutation observation failed");
+  }
+
   async prepareDeferredScheduleIntent(input: {
     readonly intentId: string;
     readonly requestId: string;

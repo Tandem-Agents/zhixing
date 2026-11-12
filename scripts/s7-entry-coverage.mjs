@@ -11079,16 +11079,36 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push("Skill RPC binding bypasses the Product API dispatcher");
   }
-  const executeCalls = [...handler.matchAll(/const result = await callSkillApplication/gu)]
-    .map((match) => match.index);
-  const factTransports = [...handler.matchAll(/for \(const fact of result\.facts\) broadcastChanged/gu)]
-    .map((match) => match.index);
+  // 技能目录的结构变化只由目录拥有者在提交成功之后发出：管理提交在权威事务之后、staged 变更在提交事务之外
+  // 经 afterGlobalCommit（恢复确认补偿）观察；宿主把同一个中继交给 Server 事件桥，只推给已认证连接；
+  // RPC 方法层不再另设出口，否则同一变化会被重复广播
+  const between = (text, start, end) => {
+    const from = text.indexOf(start);
+    const to = from < 0 ? -1 : text.indexOf(end, from + start.length);
+    return from < 0 || to < 0 ? "" : text.slice(from, to);
+  };
+  const ordered = (text, first, second) =>
+    text.includes(first) && text.indexOf(second, text.indexOf(first) + first.length) >= 0;
+  const managementCommit = between(skillAuthority, "  async mutate(", "  async #observeCatalog(");
+  const stagedConfirmation = between(skillAuthority, "  async applyStagedMutation(", "  async observeCommittedMutations(");
+  const runCommit = between(conversationAssignment, "  async submitBundle(", "  async resumeCommittedProjections(");
+  const skillWire = between(scheduleEventBridge, "function wireSkillCatalogEvents(", "\n}");
   if (
-    executeCalls.length !== 2 ||
-    factTransports.length !== 2 ||
-    executeCalls.some((position, index) => factTransports[index] <= position)
+    handler.includes("broadcastChanged") ||
+    handler.includes('"skill.changed"') ||
+    !ordered(managementCommit, "await this.#log.transactDurableProjection<", "await this.#observeCatalog();") ||
+    !ordered(stagedConfirmation, "await this.#assertCommittedMutation(", "await this.#observeCatalog();") ||
+    !ordered(runCommit, "if (!transaction) {", "await this.#publisher?.afterGlobalCommit?.({") ||
+    !conversationProtocolRuntime.includes("await this.#requiredMutationPublisher().afterGlobalCommit?.(input);") ||
+    !setupDelivery.includes("const skillCatalogEvents = new SkillCatalogChangeRelay(") ||
+    setupDelivery.split("catalogChanges: skillCatalogEvents,").length - 1 !== 2 ||
+    !composition.includes("skillCatalogEvents: authorityRuntime.skillCatalogEvents,") ||
+    !serverRuntime.includes("skillCatalogEvents: opts.skillCatalogEvents,") ||
+    !scheduleEventBridge.includes("wireSkillCatalogEvents(deps.skillCatalogEvents, deps.connections)") ||
+    !ordered(skillWire, "if (!conn.authenticated || conn.closed) continue;",
+      'conn.notify("skill.changed", { structuralVersion: fact.catalogRevision });')
   ) {
-    failures.push("Skill RPC fact transport must follow each successful application command");
+    failures.push("Skill catalog change facts must leave only the committed catalog owner through the authenticated event bridge");
   }
   return failures;
 }

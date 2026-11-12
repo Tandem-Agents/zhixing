@@ -608,6 +608,19 @@ export interface ConversationMutationPublisher {
     readonly outcomes: ConversationGlobalMutationDecision;
     readonly records: readonly LogicalRecord<unknown>[];
   }>;
+  /**
+   * 父运行提交事务成功之后、在事务之外调用；只含这次实际追加且已授予的全局记录，重放、拒绝、冲突都不调用。
+   * 用于及时观察已提交的结果；失败不改变已提交的结论，物化与补偿仍由 apply 与恢复路径承担。
+   */
+  afterGlobalCommit?(input: {
+    readonly conversationId: string;
+    readonly assignmentId: string;
+    readonly records: ReadonlyArray<{
+      readonly seq: number;
+      readonly requestId: string;
+      readonly mutation: GlobalStagedMutation;
+    }>;
+  }): Promise<void>;
   /** Granted decisions are final; replaying the same assignment/seq must not duplicate effects. */
   apply(input: {
     readonly assignmentId: string;
@@ -5417,6 +5430,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       ? await this.#publisher?.collectStagedReferences?.(globalStagedRecords) ?? []
       : [];
 
+    // 本次事务实际追加且已授予的全局记录；事务可能重跑回调，每次进入先清空，只有走到追加分支才会被填入
+    let appendedGlobalRecords: ReadonlyArray<{
+      readonly seq: number;
+      readonly requestId: string;
+      readonly mutation: GlobalStagedMutation;
+    }> = [];
     const transaction = await this.#transact<
         | { readonly committed: true; readonly commitRevision: number }
         | {
@@ -5425,6 +5444,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           }
       >(
         async (state, authorityPrefix) => {
+        appendedGlobalRecords = [];
         this.#assertActivatedSubmissionCapability(state, ctx, {
           method: "submission.submitBundle",
           assignmentId,
@@ -5703,6 +5723,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             globalRecords,
             prepared.outcomes,
           );
+          appendedGlobalRecords = globalRecords
+            .filter((record) => globalOutcomes.get(record.seq)?.t === "granted")
+            .map(({ seq, requestId, mutation }) => ({ seq, requestId, mutation }));
           for (const record of batch.records) {
             if (record.domain === "session") {
               outcomes.push({
@@ -5852,6 +5875,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     // The CAS result is authoritative. Transcript and staged-mutation
     // materialization are durable projections redriven by the runtime; their
     // failure must never reclassify an already committed run.
+    if (transaction.value.committed && appendedGlobalRecords.length) {
+      try {
+        await this.#publisher?.afterGlobalCommit?.({
+          conversationId: this.#conversationId,
+          assignmentId: bundle.assignmentId,
+          records: appendedGlobalRecords,
+        });
+      } catch {
+        // 观察失败由 publisher 自行上报诊断；这里只保证不改变已提交的结论
+      }
+    }
     return transaction.value;
   }
 

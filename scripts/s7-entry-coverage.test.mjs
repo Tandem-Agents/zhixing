@@ -9889,16 +9889,40 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     )).join("\n"),
     /application contract leaked into its source barrel/,
   );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/rpc/methods/skill.ts",
-      (text) => text.replace(
-        "for (const fact of result.facts) broadcastChanged(ctx.server, fact);",
-        "for (const fact of result.facts) { broadcastChanged(ctx.server, fact); broadcastChanged(ctx.server, fact); }",
-      ),
-    )).join("\n"),
-    /fact transport must follow each successful application command/,
-  );
+  // 技能目录变化的事实出口：只由提交成功后的目录拥有者经同一中继与事件桥送达已认证连接，方法层没有重复出口
+  const skillAuthoritySource = "packages/core/src/skills/global-state-adapter.ts";
+  for (const [relative, transform, label] of [
+    ["packages/server/src/rpc/methods/skill.ts",
+      (text) => `${text}\nconst restored = (server, fact) => broadcastChanged(server, fact);\n`, "方法层恢复广播"],
+    ["packages/server/src/rpc/methods/skill.ts",
+      (text) => `${text}\nconst direct = (conn) => conn.notify("skill.changed", {});\n`, "方法层直接通知"],
+    [skillAuthoritySource, (text) => replaceOnce(
+      replaceOnce(text, 'if (mutation.kind !== "skill-usage") await this.#observeCatalog();', ""),
+      "const transaction = await this.#log.transactDurableProjection<",
+      "await this.#observeCatalog();\n    const transaction = await this.#log.transactDurableProjection<",
+    ), "管理提交前就观察"],
+    [skillAuthoritySource, (text) => replaceOnce(
+      text, 'if (input.mutation.kind !== "skill-usage") await this.#observeCatalog();', ""), "物化确认不再补偿观察"],
+    ["packages/owner-kernel/src/conversation-assignment.ts", (text) => replaceOnce(
+      text, "await this.#publisher?.afterGlobalCommit?.({", "void ({"), "运行提交后不通知目录拥有者"],
+    ["packages/cli/src/serve/conversation-protocol-runtime.ts", (text) => replaceOnce(
+      text, "await this.#requiredMutationPublisher().afterGlobalCommit?.(input);", "void input;"), "代理不转发"],
+    // 两处构造（首次与换代）各注入一次；只去掉首次那一处
+    ["packages/cli/src/setup-delivery.ts", (text) => text.replace(
+      "catalogChanges: skillCatalogEvents,", ""), "一处适配器构造未注入中继"],
+    ["packages/cli/src/serve/command.ts", (text) => replaceOnce(
+      text, "skillCatalogEvents: authorityRuntime.skillCatalogEvents,", ""), "组合根不把中继交给 Server"],
+    ["packages/server/src/server.ts", (text) => replaceOnce(
+      text, "skillCatalogEvents: opts.skillCatalogEvents,", ""), "Server 不把中继交给事件桥"],
+    ["packages/rpc/src/event-bridge.ts", (text) => replaceOnce(
+      text, "if (!conn.authenticated || conn.closed) continue;", "if (conn.closed) continue;"), "事件桥推给未认证连接"],
+  ]) {
+    assert.match(
+      inspectSkillCatalogApplicationOwnership(mutate(relative, transform)).join("\n"),
+      /Skill catalog change facts must leave only the committed catalog owner through the authenticated event bridge/,
+      label,
+    );
+  }
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/rpc/methods/skill.ts",

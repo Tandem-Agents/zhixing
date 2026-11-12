@@ -1,6 +1,7 @@
 /**
  * trust.* / skill.* 管理面方法契约 —— 薄壳直达目录、坏参数
- * fail-fast、skill 写后向全连接广播 skill.changed(携结构版本)。
+ * fail-fast。skill 写后的 skill.changed 由目录拥有者确认提交后经事件桥发出,
+ * 方法层不再另发(否则同一次变更会到达两次)。
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -353,7 +354,7 @@ describe("skill.*", () => {
     expect(direct).toEqual({ entries: [{ id: "s1" }], catalogRevision: 7 });
   });
 
-  it("setState:patch 校验(空 patch / 坏类型 / 坏 mode 拒)、成功后广播 skill.changed 携新版本", async () => {
+  it("setState:patch 校验(空 patch / 坏类型 / 坏 mode 拒),成功与失败都不在方法层广播", async () => {
     const skills = makeSkills();
     const broadcastAll = vi.fn();
     const ctx = makeCtx({ productApi: makeProductApi(skills), broadcastAll });
@@ -382,9 +383,7 @@ describe("skill.*", () => {
 
     await call(method, { skillId: "s1", pinned: true, mode: "work" }, ctx);
     expect(skills.calls).toEqual([["execute", command]]);
-    expect(broadcastAll).toHaveBeenCalledWith("skill.changed", {
-      structuralVersion: 8,
-    });
+    expect(broadcastAll).not.toHaveBeenCalled();
 
     await expect(
       call(method, { skillId: "ghost", disabled: true }, ctx),
@@ -400,10 +399,10 @@ describe("skill.*", () => {
     await expect(
       call(method, { skillId: "failed", disabled: true }, ctx),
     ).rejects.toThrow("commit failed");
-    expect(broadcastAll).toHaveBeenCalledTimes(1);
+    expect(broadcastAll).not.toHaveBeenCalled();
   });
 
-  it("archive:成功广播、不存在 NOT_FOUND 不广播", async () => {
+  it("archive:成功与 NOT_FOUND 都不在方法层广播", async () => {
     const skills = makeSkills();
     const broadcastAll = vi.fn();
     const ctx = makeCtx({ productApi: makeProductApi(skills), broadcastAll });
@@ -415,12 +414,12 @@ describe("skill.*", () => {
     });
 
     await call(buildSkillArchiveMethod(), { skillId: "s1" }, ctx);
-    expect(broadcastAll).toHaveBeenCalledTimes(1);
+    expect(broadcastAll).not.toHaveBeenCalled();
 
     await expect(
       call(buildSkillArchiveMethod(), { skillId: "ghost" }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
-    expect(broadcastAll).toHaveBeenCalledTimes(1);
+    expect(broadcastAll).not.toHaveBeenCalled();
   });
 
   it("preserves all three methods and pre-migration errors through the real dispatcher", async () => {

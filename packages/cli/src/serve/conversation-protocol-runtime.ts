@@ -484,6 +484,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           Promise.resolve(publisher.decideGlobalBatchAtPrefix(input))
             .then((outcomes) => ({ outcomes, records: [] })));
       },
+      // 提交成功后的观察只产生诊断，不把失败抛回提交方
+      afterGlobalCommit: async (input) => {
+        try {
+          await this.#requiredMutationPublisher().afterGlobalCommit?.(input);
+        } catch (error) {
+          this.#observeFailure(error, { phase: "run", conversationId: input.conversationId });
+        }
+      },
       apply: (input) => this.#requiredMutationPublisher().apply(input),
     };
     this.#authority = authority;

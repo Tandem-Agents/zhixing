@@ -18,7 +18,7 @@ import type { Duplex } from "node:stream";
 import { captureFileLockProcessIdentity } from "@zhixing-ai/core/persistence";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ScheduleRuntimeApplication } from "@zhixing-ai/core/scheduler/application";
-import { createEventBridge, type DisposeBridge } from "@zhixing-ai/rpc/event-bridge";
+import { createEventBridge, type DisposeBridge, type EventBridgeDeps } from "@zhixing-ai/rpc/event-bridge";
 import {
   createSessionBroadcastTransport,
   type SessionBroadcastTransport,
@@ -74,6 +74,8 @@ export interface StartServerOptions {
   onError?: (err: unknown, context: { method?: string; messageId?: string | number | null }) => void;
   /** Schedule 领域已裁决的用户可见运行事件。 */
   scheduleRuntimeEvents?: Pick<ScheduleRuntimeApplication, "onEvent">;
+  /** 技能目录拥有者确认的结构变化；投影为 skill.changed，Server 关闭时随事件桥解除订阅。 */
+  skillCatalogEvents?: EventBridgeDeps["skillCatalogEvents"];
   /** 已在最终端点取得 OS owner、但尚未开放业务入口的 server handle。 */
   boundServer?: BoundZhixingServer;
   /**
@@ -375,6 +377,7 @@ async function startServerWithOwner(
   const disposeBridge: DisposeBridge = createEventBridge({
     connections,
     scheduleRuntimeEvents: opts.scheduleRuntimeEvents,
+    skillCatalogEvents: opts.skillCatalogEvents,
   });
 
   const cleanupActive = async () => {

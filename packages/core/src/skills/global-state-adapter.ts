@@ -28,6 +28,7 @@ import {
 } from "../protocol/index.js";
 import { skillNameToId } from "./id.js";
 import type { SkillCatalogEntry } from "./types.js";
+import type { SkillCatalogChangedFact } from "./catalog-application.js";
 
 const SKILL_STREAM = "intent:skill-authority";
 export const SKILL_AUTHORITY_PROJECTION_ID = "global-skill-authority-v1";
@@ -67,6 +68,99 @@ export interface AnchorSkillGlobalStateAdapterOptions {
   readonly log: AuthorityCommitLog;
   readonly anchorEpoch: number;
   readonly clock?: () => string;
+  /** 已确认提交的目录结构变化经此上报；宿主传入跨换代共用的中继。不提供时不观察。 */
+  readonly catalogChanges?: SkillCatalogObservationSink;
+  /** 观察失败的诊断入口。观察发生在提交确认之后，失败不改变已提交操作的结果。 */
+  readonly onCatalogObservationError?: (error: unknown) => void;
+}
+
+/** 某一时刻的目录：权威目录版本与结构指纹。 */
+export interface SkillCatalogObservation {
+  readonly catalogRevision: number;
+  readonly fingerprint: string;
+}
+
+/** 目录观察的接收端：适配器在确认提交后上报，接收端判断是否构成需要通知的结构变化。 */
+export interface SkillCatalogObservationSink {
+  /** 已观察到的最高目录版本；尚未建立基线时为 undefined。 */
+  readonly observedRevision: number | undefined;
+  /** 建立基线：尚无基线时只记录、不通知；已有基线（如换代）时与 observe 相同。 */
+  prime(observation: SkillCatalogObservation): void;
+  observe(observation: SkillCatalogObservation): void;
+}
+
+/**
+ * 目录结构指纹：去掉使用统计（usage）、条目版本（revision）与条目摘要（digest），
+ * 按 id 的码点顺序排序后规范化求摘要。每次命中技能，usage 都会推进目录版本和条目版本，
+ * 但发现入口与管理页显示的内容不变，所以不计入指纹。
+ */
+export function skillCatalogStructureFingerprint(
+  entries: Iterable<SkillCatalogEntry>,
+): string {
+  const structure = [...entries]
+    .map(({ usage: _usage, revision: _revision, digest: _digest, ...rest }) => rest)
+    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  return protocolDigest("SkillCatalogStructure", 1, structure);
+}
+
+/**
+ * 宿主级目录变化中继：在一个宿主内只建一次，供初次与换代后的适配器共用。
+ * 水位只存在内存里，记录最后一次观察到的版本与结构指纹，宿主重启后从权威目录重新建立：
+ * - 版本不高于水位：忽略（同批重复、重放、旧适配器的陈旧读取）；
+ * - 版本升高、指纹不变：只推进版本，不通知（只有 usage 的变化）；
+ * - 版本升高、指纹改变：通知一次。
+ * 还没有基线就收到观察时直接通知：多通知一次只会让表面多重查一次，漏通知则让表面一直停在旧目录。
+ */
+export class SkillCatalogChangeRelay implements SkillCatalogObservationSink {
+  #observed: SkillCatalogObservation | undefined;
+  readonly #listeners = new Set<(fact: SkillCatalogChangedFact) => void>();
+  readonly #onListenerError: ((error: unknown) => void) | undefined;
+
+  constructor(options: { readonly onListenerError?: (error: unknown) => void } = {}) {
+    this.#onListenerError = options.onListenerError;
+  }
+
+  get observedRevision(): number | undefined {
+    return this.#observed?.catalogRevision;
+  }
+
+  prime(observation: SkillCatalogObservation): void {
+    if (this.#observed) {
+      this.observe(observation);
+      return;
+    }
+    this.#observed = { catalogRevision: observation.catalogRevision, fingerprint: observation.fingerprint };
+  }
+
+  observe(observation: SkillCatalogObservation): void {
+    const last = this.#observed;
+    if (last && observation.catalogRevision <= last.catalogRevision) return;
+    this.#observed = { catalogRevision: observation.catalogRevision, fingerprint: observation.fingerprint };
+    if (last && observation.fingerprint === last.fingerprint) return;
+    const fact: SkillCatalogChangedFact = {
+      kind: "skill-catalog-changed",
+      catalogRevision: observation.catalogRevision,
+    };
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener(fact);
+      } catch (error) {
+        // 一个监听者出错不影响其他监听者，诊断本身出错也不外抛
+        try {
+          this.#onListenerError?.(error);
+        } catch {
+          // 已无更安全的上报去处
+        }
+      }
+    }
+  }
+
+  onChanged(listener: (fact: SkillCatalogChangedFact) => void): () => void {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
 }
 
 /** Anchor-owned Skill Catalog; immutable documents live only in ArtifactStore. */
@@ -75,6 +169,8 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
   readonly #anchorEpoch: number;
   readonly #clock: () => string;
   readonly #durable: RebuildableDurableProjectionIndex;
+  readonly #catalogChanges: SkillCatalogObservationSink | undefined;
+  readonly #onCatalogObservationError: ((error: unknown) => void) | undefined;
   #opening: Promise<void> | undefined;
 
   constructor(options: AnchorSkillGlobalStateAdapterOptions) {
@@ -82,6 +178,23 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     this.#anchorEpoch = positiveInteger(options.anchorEpoch, "Skill anchor epoch");
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#durable = registerSkillAuthorityProjection(this.#log);
+    this.#catalogChanges = options.catalogChanges;
+    this.#onCatalogObservationError = options.onCatalogObservationError;
+  }
+
+  /**
+   * 建立目录观察基线。宿主在构造之后、开放服务与接受提交之前调用，保证首个结构变化不会被当作基线吞掉；
+   * 换代时中继已有水位，这次读取会与之比较，补发换代期间漏观察的结构变化。
+   */
+  async primeCatalogObservation(): Promise<void> {
+    const sink = this.#catalogChanges;
+    if (!sink) return;
+    try {
+      await this.#ensureOpen();
+      sink.prime(await this.#readCatalogObservation());
+    } catch (error) {
+      this.#reportCatalogObservationError(error);
+    }
   }
 
   readonly stagedProjectionId = SKILL_AUTHORITY_PROJECTION_ID;
@@ -178,6 +291,25 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
       input.mutation,
       input.targetRevision,
     );
+    if (input.mutation.kind !== "skill-usage") await this.#observeCatalog();
+  }
+
+  /**
+   * 父运行提交成功之后、在提交事务之外调用：目录记录已与运行同帧提交，这里立即观察，不等恢复轮的物化确认。
+   * 只有 usage 时不读目录；之后 applyStagedMutation 与恢复路径的观察被水位去重，只在这次观察失败或进程中断时补发。
+   */
+  async observeCommittedMutations(records: ReadonlyArray<{
+    readonly mutation: GlobalStagedMutation;
+  }>): Promise<void> {
+    if (!this.#catalogChanges) return;
+    if (!records.some((record) => isStagedSkillMutation(record.mutation) && record.mutation.kind !== "skill-usage")) return;
+    try {
+      await this.#refreshDurableProjection();
+    } catch (error) {
+      this.#reportCatalogObservationError(error);
+      return;
+    }
+    await this.#observeCatalog();
   }
 
   async refreshStagedMutations(records: ReadonlyArray<{
@@ -193,6 +325,8 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         );
       }
     }
+    // 恢复路径没有 mutation 清单：先比版本，只有目录版本越过水位才读全表比较结构指纹
+    await this.#observeCatalog();
   }
 
   async read(
@@ -307,7 +441,40 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         candidateReferences,
       },
     );
+    if (mutation.kind !== "skill-usage") await this.#observeCatalog();
     return transaction.value;
+  }
+
+  /** 已确认提交之后观察目录。版本未越过水位时只读一个版本键；失败只上报诊断，不改变已提交的结果。 */
+  async #observeCatalog(): Promise<void> {
+    const sink = this.#catalogChanges;
+    if (!sink) return;
+    try {
+      const observed = sink.observedRevision;
+      if (observed !== undefined) {
+        const revision = readCatalogRevision(await this.#durable.get(SKILL_META_KEY));
+        if (revision <= observed) return;
+      }
+      sink.observe(await this.#readCatalogObservation());
+    } catch (error) {
+      this.#reportCatalogObservationError(error);
+    }
+  }
+
+  async #readCatalogObservation(): Promise<SkillCatalogObservation> {
+    const projection = await readSkillProjection(this.#durable);
+    return {
+      catalogRevision: projection.catalogRevision,
+      fingerprint: skillCatalogStructureFingerprint(projection.entries.values()),
+    };
+  }
+
+  #reportCatalogObservationError(error: unknown): void {
+    try {
+      this.#onCatalogObservationError?.(error);
+    } catch {
+      // 诊断入口本身出错也不能影响已提交的结果
+    }
   }
 
   async #assertCommittedMutation(

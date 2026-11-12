@@ -3483,6 +3483,7 @@ async function runServerProcess(
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     registry: serverRegistry,
     scheduleRuntimeEvents: schedulerApplication,
+    skillCatalogEvents: authorityRuntime.skillCatalogEvents,
     cleanupRegistry: registry,
     lifecycleOwner: hostShellLifecycle,
     logger: {

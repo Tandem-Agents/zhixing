@@ -1,10 +1,8 @@
 /**
- * skill.* RPC binding —— 认证后的 wire 参数编解码、Skill 应用调用、
- * 错误映射与事实事件传输。
+ * skill.* RPC binding —— 认证后的 wire 参数编解码、Skill 应用调用与错误映射。
  *
- * 写操作(setState / archive)成功后向全部已认证连接广播
- * `skill.changed { structuralVersion }`——技能是全局域(非会话),变更对一切
- * 接入面可见;接入面据版本号刷新补全候选(与本地 skillVersionSeen 机制同构)。
+ * `skill.changed { structuralVersion }` 不在这里发：技能是全局域，管理命令与运行中的
+ * 保存、接入都由目录拥有者在确认提交后经事件桥统一广播给已认证连接，接入面据此重查目录。
  */
 
 import {
@@ -12,7 +10,6 @@ import {
   SKILL_CATALOG_LIST_QUERY,
   SKILL_CATALOG_SET_STATE_COMMAND,
   SkillCatalogApplicationError,
-  type SkillCatalogChangedFact,
   type SkillCatalogStatePatch,
 } from "@zhixing-ai/core/skills/catalog";
 import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
@@ -31,15 +28,6 @@ function requireProductApi(server: ServerContext): ProductApiDispatcher {
     );
   }
   return server.productApi;
-}
-
-function broadcastChanged(
-  server: ServerContext,
-  fact: SkillCatalogChangedFact,
-): void {
-  server.broadcastAll?.("skill.changed", {
-    structuralVersion: fact.catalogRevision,
-  });
 }
 
 async function callSkillApplication<T>(operation: () => Promise<T>): Promise<T> {
@@ -113,14 +101,13 @@ export function buildSkillSetStateMethod(): MethodEntry {
           "skill.setState requires at least one of: pinned / disabled / mode",
         );
       }
-      const result = await callSkillApplication(() =>
+      await callSkillApplication(() =>
         requireProductApi(ctx.server).command(SKILL_CATALOG_SET_STATE_COMMAND, {
           kind: "set-state",
           skillId: params.skillId!,
           patch,
         })
       );
-      for (const fact of result.facts) broadcastChanged(ctx.server, fact);
       return { ok: true };
     },
   };
@@ -135,13 +122,12 @@ export function buildSkillArchiveMethod(): MethodEntry {
       if (typeof params.skillId !== "string" || params.skillId.length === 0) {
         throw RpcErrors.invalidParams("skill.archive requires 'skillId'");
       }
-      const result = await callSkillApplication(() =>
+      await callSkillApplication(() =>
         requireProductApi(ctx.server).command(SKILL_CATALOG_ARCHIVE_COMMAND, {
           kind: "archive",
           skillId: params.skillId!,
         })
       );
-      for (const fact of result.facts) broadcastChanged(ctx.server, fact);
       return { ok: true };
     },
   };

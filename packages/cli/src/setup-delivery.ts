@@ -85,7 +85,7 @@ import {
   type WorkspaceProbePort,
 } from "@zhixing-ai/core/environment";
 import { AnchorRubricGlobalStateAdapter } from "@zhixing-ai/core/rubrics";
-import { AnchorSkillGlobalStateAdapter } from "@zhixing-ai/core/skills/global-state";
+import { AnchorSkillGlobalStateAdapter, SkillCatalogChangeRelay } from "@zhixing-ai/core/skills/global-state";
 import { AnchorWorksceneGlobalStateAdapter, isWorksceneDeletedAt, WORKSCENE_AUTHORITY_PROJECTION_ID } from "@zhixing-ai/core/workscene";
 import { parseConversationId } from "@zhixing-ai/core/conversation";
 import {
@@ -133,7 +133,7 @@ import {
   rebindSurfaceAssetAuthority,
 } from "./serve/surface-asset-authority.js";
 import { openHomeAuthoritySources, type HomeAuthoritySourcesLease } from "./serve/home-authority-sources.js";
-import { beginLogPhase, observeLogPhase } from "@zhixing-ai/core/logging";
+import { beginLogPhase, logFailureEvidence, observeLogPhase } from "@zhixing-ai/core/logging";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
@@ -267,6 +267,8 @@ export interface AuthorityRuntimeStack {
   readonly authority: DeliveryAuthority;
   readonly deliveryLifecycle?: OwnerDeliveryLifecycleBinding;
   readonly authorityLog: FileAuthorityCommitLog;
+  /** 技能目录结构变化的宿主级中继；Server 启动时订阅并投影为 skill.changed。非锚点宿主上没有适配器上报，不会发出。 */
+  readonly skillCatalogEvents: SkillCatalogChangeRelay;
   readonly localExecutorEnabled: boolean;
   readonly executorLog: FileAuthorityCommitLog;
   readonly artifacts: FileArtifactStore;
@@ -564,6 +566,19 @@ function projectAdvancementRubricArtifacts(
 }
 
 /** 顺序子阶段：进入下一段即结束上一段；只记录，不改变执行顺序与失败语义。 */
+/** 技能目录观察或通知失败的诊断：提交已经成功，这里只留证据，不改变任何结果。 */
+function recordSkillCatalogObservationFailure(
+  records: import("@zhixing-ai/core/logging").LogRecordPort | undefined,
+  phase: "observe" | "listener",
+  error: unknown,
+): void {
+  records?.record(() => ({
+    event: "skillCatalogObservationFailed",
+    result: "failure",
+    data: { phase, failure: logFailureEvidence(error) },
+  }));
+}
+
 function sequentialLogPhases(records: import("@zhixing-ai/core/logging").LogRecordPort | undefined) {
   let current: ReturnType<typeof beginLogPhase> | undefined;
   return {
@@ -593,6 +608,10 @@ export async function setupAuthorityRuntime(
   let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
   let worksceneGlobalState: AnchorWorksceneGlobalStateAdapter | undefined;
   let skillGlobalState: AnchorSkillGlobalStateAdapter | undefined;
+  // 初次与换代后的技能适配器共用同一中继，换代时只比较、不重设基线
+  const skillCatalogEvents = new SkillCatalogChangeRelay({
+    onListenerError: (error) => recordSkillCatalogObservationFailure(options.records, "listener", error),
+  });
   let rubricGlobalState: AnchorRubricGlobalStateAdapter | undefined;
   let schedulerGlobalState: GlobalStatePort | undefined;
   let workspaceBindings: WorkspaceBindingCatalog | undefined;
@@ -1181,8 +1200,12 @@ export async function setupAuthorityRuntime(
           log: authorityLog,
           anchorEpoch,
           clock,
+          catalogChanges: skillCatalogEvents,
+          onCatalogObservationError: (error) => recordSkillCatalogObservationFailure(options.records, "observe", error),
         })
       : undefined;
+    // 基线必须早于宿主开放服务与任何提交，首个结构变化才不会被当作基线吞掉
+    await skillGlobalState?.primeCatalogObservation();
     rubricGlobalState = authorityLog
       ? new AnchorRubricGlobalStateAdapter({
           log: authorityLog,
@@ -2025,7 +2048,11 @@ export async function setupAuthorityRuntime(
         log: authorityLog,
         anchorEpoch: generation.anchorEpoch,
         clock,
+        catalogChanges: skillCatalogEvents,
+        onCatalogObservationError: (error) => recordSkillCatalogObservationFailure(options.records, "observe", error),
       });
+      // 与现有水位比较：换代期间已提交但未被观察到的结构变化在此补发一次
+      await nextSkill.primeCatalogObservation();
       const nextRubric = new AnchorRubricGlobalStateAdapter({
         log: authorityLog,
         artifacts,
@@ -2120,6 +2147,7 @@ export async function setupAuthorityRuntime(
           throw new Error("Anchor authority role is not enabled");
         return authorityLog;
       },
+      skillCatalogEvents,
       get executorLog() {
         if (!executorLog) throw new Error("Local executor role is not enabled");
         return executorLog;

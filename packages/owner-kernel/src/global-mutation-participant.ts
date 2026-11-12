@@ -53,4 +53,11 @@ export interface GlobalMutationCommitParticipant {
     records: readonly GlobalMutationCommitRecord[],
     requestId?: string,
   ): Promise<void>;
+  /**
+   * 父运行提交成功之后、在提交事务之外调用，参数只含本次实际追加且已授予的本域记录。
+   * 用于及时观察已提交的结果；物化确认仍由 applyStagedMutation 承担，恢复路径兜底。
+   */
+  observeCommittedMutations?(
+    records: readonly GlobalMutationCommitRecord[],
+  ): Promise<void>;
 }

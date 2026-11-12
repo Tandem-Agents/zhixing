@@ -74,6 +74,12 @@ export class SchedulerConversationMutationPublisher
     };
   }
 
+  async afterGlobalCommit(
+    input: Parameters<NonNullable<ConversationMutationPublisher["afterGlobalCommit"]>>[0],
+  ): Promise<void> {
+    await this.#options.coordinator.afterCommit(input.records);
+  }
+
   async apply(input: Parameters<ConversationMutationPublisher["apply"]>[0]): Promise<void> {
     if (input.domain !== "global") {
       throw new Error("This publisher only materializes global mutations");
