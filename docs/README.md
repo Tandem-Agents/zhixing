@@ -37,6 +37,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 ## 架构与研究 / Architecture and research
 
+- [知行架构与实现综合评估（对比 DeepSeek Harness 与 OpenClaw）](research/zhixing-architecture-and-implementation-evaluation.md)
 - [多智能体机制梳理](research/agent-concepts-and-multi-agent-direction.md)
 - [Codex 跨会话协作能力调研](research/codex-cross-thread-collaboration.md)
 - [Reason Network与知行：产品、架构与通信判断](research/reason-network-and-zhixing.md)
