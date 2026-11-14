@@ -22,6 +22,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [路径解析与资源隔离](engineering/path-and-resource-isolation.md)
 - [仓库组织与包边界](engineering/repository-structure.md)
 - [状态、重放与合同一致性的工程经验](engineering/state-replay-contract-lessons.md)
+- [Antigravity + Gemini 4 Carbon (High) 工作方法](engineering/antigravity-gemini-4-carbon-high-efficiency.md)
 - [架构概览 / Architecture overview](../research/design/architecture/overview.md)
 - [架构演进记录索引](../research/design/architecture/evolutions/README.md)
 
