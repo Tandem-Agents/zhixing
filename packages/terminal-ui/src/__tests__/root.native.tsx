@@ -1658,6 +1658,38 @@ try {
     assert.match(text(), /Enter 继续创建 · Esc 取消/); assert.ok(!text().includes('› 取消'));
     await test.mockInput.typeText('论文'); test.mockInput.pressEnter(); await flush();
     assert.deepEqual(lastSelection(), { kind: 'selection', requestId: 'scene-new', itemId: 'save', input: '论文' });
+    // 权限确认单字段补充说明（B4-01）：保留原工具与参数摘要，中文输入+粘贴按 Enter 经 confirmation/submit/note 提交并锁住，空说明与 Esc 返回正常，回主对话后可继续输入
+    const lastConfirmation = () => actions.findLast(action => action.kind === 'confirmation') as Extract<TerminalAction, { kind: 'confirmation' }> | undefined;
+    await show({ kind: 'confirmation', selectionLayer: 'input', title: '保存技能 · 拒绝并说明原因',
+      message: '保存技能「b4-demo」\n说明：测试摘要', requestId: 'confirm-deny-1',
+      field: { id: 'selection-input', label: '告诉知行哪里错了', value: '', secret: false },
+      fieldSubmit: { id: 'submit', label: '提交说明' }, cancelLabel: '返回' });
+    assert.match(text(), /保存技能 · 拒绝并说明原因/); assert.match(text(), /保存技能「b4-demo」/); assert.match(text(), /说明：测试摘要/);
+    assert.match(text(), /Enter 提交说明 · Esc 返回/); assert.ok(!text().includes('› 返回'));
+    const confirmStart = actions.length;
+    await test.mockInput.typeText('参数不对，请调整'); await flush();
+    const confirmPaste = externalPaste?.(); confirmPaste?.write(new TextEncoder().encode('！')); confirmPaste?.end(); await flush(); await pause(25); await flush();
+    test.mockInput.pressEnter(); await flush();
+    assert.deepEqual(lastConfirmation(), { kind: 'confirmation', requestId: 'confirm-deny-1', action: 'submit', note: '参数不对，请调整！' });
+    assert.match(text(), /正在提交…/);
+    test.mockInput.pressEnter(); test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.equal(actions.slice(confirmStart).filter(action => action.kind === 'confirmation').length, 1, 'duplicate Enter and Escape while locked do not emit extra confirmation actions');
+    await show(conversation); editor().setText(''); await flush();
+    await test.mockInput.typeText('拒绝后继续对话'); await flush();
+    assert.equal(editor().plainText, '拒绝后继续对话'); editor().setText(''); await flush();
+    await show({ kind: 'confirmation', selectionLayer: 'input', title: 'WebFetch · 拒绝并说明原因',
+      message: '参数：{"url":"https://example.com"}', requestId: 'confirm-deny-empty',
+      field: { id: 'selection-input', label: '告诉知行哪里错了', value: '', secret: false },
+      fieldSubmit: { id: 'submit', label: '提交说明' }, cancelLabel: '返回' });
+    assert.match(text(), /WebFetch · 拒绝并说明原因/); assert.match(text(), /https:\/\/example\.com/);
+    test.mockInput.pressEnter(); await flush();
+    assert.deepEqual(lastConfirmation(), { kind: 'confirmation', requestId: 'confirm-deny-empty', action: 'submit', note: '' });
+    await show({ kind: 'confirmation', selectionLayer: 'input', title: 'WebFetch · 拒绝并说明原因',
+      message: '参数：{"url":"https://example.com"}', requestId: 'confirm-deny-esc',
+      field: { id: 'selection-input', label: '告诉知行哪里错了', value: '', secret: false },
+      fieldSubmit: { id: 'submit', label: '提交说明' }, cancelLabel: '返回' });
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.deepEqual(lastConfirmation(), { kind: 'confirmation', requestId: 'confirm-deny-esc', action: 'cancelled', cancelCause: 'escape' });
     await show(conversation); editor().setText(''); await flush();
     checks.push('inline field obeys the available height and falls back to a page; page fields show their own verbs without an action list');
   }

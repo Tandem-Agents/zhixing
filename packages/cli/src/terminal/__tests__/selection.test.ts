@@ -79,6 +79,41 @@ describe('terminal selection contract', () => {
     const empty = [{ itemId: 'option:note' }, { itemId: 'submit', input: '' }];
     expect(await chooseTerminalSelection(optional, async () => empty.shift())).toEqual({ kind: 'selected', value: 'note', input: '' });
   });
+  it('carries body title and current-page excerpt into input pages while safely refusing oversized input frames', async () => {
+    const pages: TerminalSelectionPage[] = [];
+    const withBody: SelectionRequest = {
+      title: 'WebFetch',
+      body: ['参数：{"url":"https://example.com"}', 'x'.repeat(4200)],
+      options: [{ value: 'deny', label: '拒绝并说明原因...', description: '附加说明', input: { placeholder: '告诉知行哪里错了', allowEmpty: true } }],
+    };
+    const answers: TerminalSelectionResponse[] = [{ itemId: 'option:deny' }, { itemId: 'submit', input: '不要抓外网' }];
+    const result = await chooseTerminalSelection(withBody, async page => { pages.push(page); return answers.shift(); });
+    expect(result).toEqual({ kind: 'selected', value: 'deny', input: '不要抓外网' });
+    expect(pages[1]).toMatchObject({ selectionLayer: 'input', title: 'WebFetch · 拒绝并说明原因' });
+    expect(pages[1]!.message).toContain('参数：{"url":"https://example.com"}');
+    expect(pages[1]!.message).toContain('（正文 1/2，按 Esc 返回可翻页）');
+    expect(pages[1]!.message).toContain('附加说明');
+
+    // Outer frame fits (< 256 KiB), but placeholder + context pushes inputView over frameBytes -> safe return to select list without oversized frame
+    const nearLimitDesc = 'd'.repeat(250 * 1024);
+    const oversizedInput: SelectionRequest = {
+      title: '保存技能',
+      body: ['保存技能「demo」'],
+      options: [
+        { value: 'deny-direct', label: '直接拒绝' },
+        { value: 'deny-note', label: '拒绝并说明原因...', description: nearLimitDesc, input: { placeholder: 'p'.repeat(8 * 1024), allowEmpty: true } },
+      ],
+    };
+    const seen: TerminalSelectionPage[] = [];
+    const flow: TerminalSelectionResponse[] = [{ itemId: 'option:deny-note' }, { itemId: 'return' }, { itemId: 'option:deny-direct' }];
+    const fallbackResult = await chooseTerminalSelection(oversizedInput, async page => {
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(256 * 1024);
+      seen.push(page);
+      return flow.shift();
+    });
+    expect(fallbackResult).toEqual({ kind: 'selected', value: 'deny-direct' });
+    expect(seen.map(page => page.title)).toEqual(['保存技能', '无法完整展示此请求', '保存技能']);
+  });
   it('rejects nonexistent/disabled initial values, duplicate shortcuts and detail/action collisions', async () => {
     await expect(chooseTerminalSelection({ ...request, initialValue: 'disabled' }, async () => undefined)).rejects.toThrow('initial');
     expect(() => terminalSelectionActions({ kind: 'selection', title: '', choices: [{ id: 'a', label: '', hotkey: 'a' }, { id: 'b', label: '', hotkey: 'A' }] })).toThrow('hotkey');

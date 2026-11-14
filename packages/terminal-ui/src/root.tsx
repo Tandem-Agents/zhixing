@@ -458,10 +458,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       const value = editorValue();
       if (Buffer.byteLength(value) > 8192) { setStatus('说明过长，请缩短后再提交。'); return; }
       // 单字段页：Enter 以字段声明的提交动作应答；提交后锁住字段，直到 N 给出下一视图（重开、结束或下一步）
-      if (current.fieldSubmit && current.kind === 'selection') {
+      if (current.fieldSubmit && (current.kind === 'selection' || current.kind === 'confirmation')) {
         if (fieldSaving() === current.requestId) return;
         setFieldSaving(current.requestId);
-        const accepted = await action({ kind: 'selection', requestId: current.requestId, itemId: current.fieldSubmit.id, input: value });
+        const accepted = current.kind === 'confirmation'
+          ? await action({ kind: 'confirmation', requestId: current.requestId, action: current.fieldSubmit.id, note: value })
+          : await action({ kind: 'selection', requestId: current.requestId, itemId: current.fieldSubmit.id, input: value });
         if (!accepted && fieldSaving() === current.requestId) setFieldSaving(undefined);
         return;
       }

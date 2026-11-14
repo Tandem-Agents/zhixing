@@ -127,12 +127,26 @@ export async function chooseTerminalSelection<T extends string>(request: Selecti
       if (cancelled || confirmed.itemId !== 'confirm') continue;
     }
     if (option.input) {
-      // 单字段页：Enter 提交、Esc 返回选项列表。不允许空值时，空提交留在输入层说明原因，不悄悄退回列表
+      // 单字段页：Enter 提交、Esc 返回选项列表。有正文上下文时保留待决标题与当前页有界摘要；不允许空值时空提交留在输入层说明原因
+      const hasBody = !summaries.length && body.length > 0;
+      const actionLabel = option.label.replace(/(?:\.\.\.|…)+$/u, '').trim();
+      const inputTitle = hasBody && request.title && actionLabel && request.title !== actionLabel
+        ? `${request.title} · ${actionLabel}` : option.label;
+      const bodyContext = hasBody ? pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}，按 Esc 返回可翻页）` : '') : '';
+      const inputMessage = hasBody ? [bodyContext, option.description].filter(Boolean).join('\n\n') : option.description;
       let value = '', error: string | undefined, entered: TerminalSelectionResponse | undefined;
       for (;;) {
-        entered = await choose({ kind: 'selection', selectionLayer: 'input', title: option.label, message: option.description,
+        const inputView: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'input', title: inputTitle,
+          ...(inputMessage !== undefined ? { message: inputMessage } : {}),
           field: { id: 'selection-input', label: option.input.placeholder, value, secret: false, ...(error ? { error } : {}) },
-          fieldSubmit: { id: 'submit', label: request.submitLabel ?? '提交说明' }, cancelLabel: '返回' });
+          fieldSubmit: { id: 'submit', label: request.submitLabel ?? '提交说明' }, cancelLabel: '返回' };
+        terminalSelectionActions(inputView);
+        if (Buffer.byteLength(JSON.stringify(inputView)) + TERMINAL_VIEW_ENVELOPE_BYTES > TERMINAL_LIMITS.frameBytes) {
+          entered = await choose({ kind: 'selection', selectionLayer: 'confirm', initialItemId: 'return', title: '无法完整展示此请求',
+            message: '内容超过当前安全展示容量，补充输入已禁用。可返回选择列表继续处理。', choices: [{ id: 'return', label: '返回' }] });
+          break;
+        }
+        entered = await choose(inputView);
         if (!entered || cancellation(entered) || entered.itemId !== 'submit') break;
         if (!option.input.allowEmpty && !entered.input?.trim()) { value = entered.input ?? ''; error = '请填写说明后再提交。'; continue; }
         return { kind: 'selected', value: option.value, input: entered.input ?? '' };
