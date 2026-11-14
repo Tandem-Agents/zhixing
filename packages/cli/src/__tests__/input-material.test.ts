@@ -3,13 +3,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ingestPastedMaterials } from "../input-material-ingest.js";
+import {
+  ingestPastedMaterials,
+  ingestSelectedMaterial,
+} from "../input-material-ingest.js";
 import {
   InputMaterialRegistry,
   MATERIAL_TOKEN_PATTERN,
 } from "../input-material-registry.js";
 import { resolveInputMaterials } from "../input-material-resolve.js";
+import { prepareSessionSendEngage } from "../session-engage.js";
 import { stringWidth } from "../tui/index.js";
+import { prepareUserTurnInput } from "../user-turn-input.js";
 
 const tempDirs: string[] = [];
 
@@ -755,6 +760,102 @@ describe("input materials", () => {
       mimeType: "image/png",
       size: bytes.length,
     });
+  });
+
+  it("无后缀及单点纯 UTF-8 文本在保持 octet-stream 登记下可提交，且保留空文本、BOM、换行（含 NEL）与首尾空白", async () => {
+    const root = await makeTempDir();
+    const dotPath = path.join(root, ".hidden-b4");
+    const barePath = path.join(root, "Makefile");
+    const emptyPath = path.join(root, ".empty-note");
+    const cross64kPath = path.join(root, "README");
+
+    const dotContent = "\uFEFF  第一行\r\n\t第二行\u0085第三行\u000b\u000c 🦞  \n";
+    const cross64kContent = `${"a".repeat(64 * 1024 - 1)}汉${"b".repeat(2048)}`;
+    await fs.writeFile(dotPath, dotContent, "utf-8");
+    await fs.writeFile(barePath, "all:\n\techo ok\n", "utf-8");
+    await fs.writeFile(emptyPath, "", "utf-8");
+    await fs.writeFile(cross64kPath, cross64kContent, "utf-8");
+
+    const registry = new InputMaterialRegistry();
+    const dotToken = ingestSelectedMaterial(dotPath, registry, { workspaceRoot: root });
+    const bareToken = ingestSelectedMaterial(barePath, registry, { workspaceRoot: root });
+    const emptyToken = ingestSelectedMaterial(emptyPath, registry, { workspaceRoot: root });
+    const crossToken = ingestSelectedMaterial(cross64kPath, registry, { workspaceRoot: root });
+
+    expect(registry.get(1)?.mimeType).toBe("application/octet-stream");
+    expect(registry.get(2)?.mimeType).toBe("application/octet-stream");
+
+    const resolved = await resolveInputMaterials(
+      `${dotToken}\n${bareToken}\n${emptyToken}\n${crossToken}`,
+      registry,
+    );
+    expect(resolved.errors).toEqual([]);
+    expect(resolved.input.parts).toEqual([
+      {
+        type: "text",
+        text:
+          `<file path="${dotPath.replace(/\\/g, "/")}">\n${dotContent}\n</file>\n` +
+          `<file path="${barePath.replace(/\\/g, "/")}">\nall:\n\techo ok\n\n</file>\n` +
+          `<file path="${emptyPath.replace(/\\/g, "/")}">\n\n</file>\n` +
+          `<file path="${cross64kPath.replace(/\\/g, "/")}">\n${cross64kContent}\n</file>`,
+      },
+    ]);
+  });
+
+  it("无后缀材料在提交时拒绝非法 UTF-8、64KiB 后坏尾、NUL/非空白控制字符、容器头及带后缀未知扩展名，且支持修正后重发与超限实时校验", async () => {
+    const root = await makeTempDir();
+    const cases: Array<[string, Buffer]> = [
+      [".bad-utf8", Buffer.from([0x61, 0xff, 0x62])],
+      [".bad-tail", Buffer.concat([Buffer.alloc(66 * 1024, 0x61), Buffer.from([0x00])])],
+      [".ctrl-byte", Buffer.from("hello\u0007world", "utf-8")],
+      [".c1-pad", Buffer.from("hello\u0080world", "utf-8")],
+      [".c1-csi", Buffer.from("hello\u009b31mworld", "utf-8")],
+      [".zip-bin", Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00])],
+      [".elf-bin", Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01])],
+      [".ascii-pdf", Buffer.from("%PDF-1.7\n1 0 obj\n%%EOF\n", "ascii")],
+      [".ascii-rtf", Buffer.from("{\\rtf1\\ansi hello}", "ascii")],
+      ["unknown.dat", Buffer.from("plain utf8 but has unknown extension", "utf-8")],
+    ];
+
+    for (const [name, content] of cases) {
+      const filePath = path.join(root, name);
+      await fs.writeFile(filePath, content);
+      const registry = new InputMaterialRegistry();
+      const token = ingestSelectedMaterial(filePath, registry, { workspaceRoot: root });
+      const result = await resolveInputMaterials(token, registry);
+      expect(result.input.parts, name).toEqual([]);
+      expect(result.errors[0], name).toContain("当前版本尚不能直接发送");
+    }
+
+    // 采集时是文本、提交前被覆写为二进制 -> 拒绝；再修正回纯文本（含 NEL）-> 可发送；增长超限 -> 按当前真实字节判定
+    const mutablePath = path.join(root, ".mutable-note");
+    await fs.writeFile(mutablePath, "initial valid text", "utf-8");
+    const registry = new InputMaterialRegistry();
+    const mutableToken = ingestSelectedMaterial(mutablePath, registry, { workspaceRoot: root });
+
+    await fs.writeFile(mutablePath, Buffer.from([0x00, 0x01, 0x02]));
+    const rejectedBinary = await resolveInputMaterials(mutableToken, registry);
+    expect(rejectedBinary.errors[0]).toContain("当前版本尚不能直接发送");
+
+    await fs.writeFile(mutablePath, "line1\u0085line2 修复内容", "utf-8");
+    const prepared = await prepareUserTurnInput(`${mutableToken}\n@ 审查`, {
+      workspaceRoot: root,
+      materialRegistry: registry,
+    });
+    const engage = await prepareSessionSendEngage(`${mutableToken}\n@ 审查`, {
+      workspaceRoot: root,
+      materialRegistry: registry,
+    });
+    expect(prepared?.errors).toEqual([]);
+    expect(engage?.kind).toBe("ready");
+    if (engage?.kind === "ready") {
+      expect(engage.question).toContain("line1\u0085line2 修复内容");
+    }
+
+    // 采集旧 byteSize 很小，但提交时文件已超过上限 -> 按实际字节报文本文件过大
+    await fs.writeFile(mutablePath, "x".repeat(100 * 1024 + 1), "utf-8");
+    const rejectedOversize = await resolveInputMaterials(mutableToken, registry);
+    expect(rejectedOversize.errors[0]).toContain("文本文件过大");
   });
 });
 

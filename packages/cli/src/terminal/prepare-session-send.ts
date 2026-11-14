@@ -3,6 +3,11 @@ import * as path from 'node:path';
 import { expandUserHome } from '@zhixing-ai/core/paths';
 import type { InputMaterialRegistry } from '../input-material-registry.js';
 import { detectMimeType } from '../input-material-ingest.js';
+import {
+  decodeUnclassifiedPlainUtf8Material,
+  isSupportedTextMaterialMime,
+  isUnclassifiedExtensionlessMaterial,
+} from '../plain-text-material.js';
 import { readBoundedInputFile } from './bounded-input-file.js';
 import { SessionSendJsonWriter } from './session-send-encoding.js';
 import type { SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-facade.js';
@@ -270,11 +275,17 @@ class MaterialSnapshots {
       const mediaType = detectMimeType(entry.filePath, bytes);
       if (!mediaType.startsWith('image/')) throw Error('文件内容不是可识别图片；草稿已保留。');
       value = { kind: 'image', data: bytes.toString('base64'), mediaType, name: entry.name, size: bytes.length };
-    } else {
-      if (!entry.mimeType.startsWith('text/') && !['application/json', 'application/xml'].includes(entry.mimeType)) {
+    } else if (isSupportedTextMaterialMime(entry.mimeType)) {
+      value = await this.#textFile(entry.filePath);
+    } else if (isUnclassifiedExtensionlessMaterial(entry)) {
+      const bytes = await readMaterialFile(entry.name, () => readBoundedInputFile(entry.filePath, 100 * 1024, this.options.signal));
+      const text = decodeUnclassifiedPlainUtf8Material(entry.filePath, bytes);
+      if (text === null) {
         throw Error('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
       }
-      value = await this.#textFile(entry.filePath);
+      value = { kind: 'text', text: `<file path="${entry.filePath.replace(/\\/g, '/')}">\n${text}\n</file>` };
+    } else {
+      throw Error('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
     }
     await emitValue(value, sink);
     this.#values.set(key, value);

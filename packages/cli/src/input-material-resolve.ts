@@ -9,6 +9,11 @@ import {
   type InputMaterialKind,
   type InputMaterialRegistry,
 } from "./input-material-registry.js";
+import {
+  decodeUnclassifiedPlainUtf8Material,
+  isSupportedTextMaterialMime,
+  isUnclassifiedExtensionlessMaterial,
+} from "./plain-text-material.js";
 
 export interface ResolveInputMaterialsOptions {
   readonly maxTextFileSize?: number;
@@ -127,14 +132,32 @@ async function pushMaterial(
     return;
   }
 
-  if (!isTextLike(entry.mimeType)) {
+  const maxTextFileSize = options.maxTextFileSize ?? 100 * 1024;
+
+  if (isSupportedTextMaterialMime(entry.mimeType)) {
+    if (stat.size > maxTextFileSize) {
+      errors.push(
+        `${entry.name} -> 文本文件过大 (${formatByteSize(stat.size)} > ${formatByteSize(maxTextFileSize)})`,
+      );
+      return;
+    }
+
+    const content = await readLocalTextFile(entry, errors);
+    if (content === null) return;
+    pushText(
+      parts,
+      `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`,
+    );
+    return;
+  }
+
+  if (!isUnclassifiedExtensionlessMaterial(entry)) {
     errors.push(
       `${entry.name} -> 当前版本尚不能直接发送 ${entry.mimeType} 文件；请先转成文本、图片，或等待文件解析 / provider 文件能力接入`,
     );
     return;
   }
 
-  const maxTextFileSize = options.maxTextFileSize ?? 100 * 1024;
   if (stat.size > maxTextFileSize) {
     errors.push(
       `${entry.name} -> 文本文件过大 (${formatByteSize(stat.size)} > ${formatByteSize(maxTextFileSize)})`,
@@ -142,9 +165,26 @@ async function pushMaterial(
     return;
   }
 
-  const content = await readLocalTextFile(entry, errors);
-  if (content === null) return;
-  pushText(parts, `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`);
+  const bytes = await readBoundedTextFallbackBytes(
+    entry,
+    stat.size,
+    maxTextFileSize,
+    errors,
+  );
+  if (!bytes) return;
+
+  const content = decodeUnclassifiedPlainUtf8Material(entry.filePath, bytes);
+  if (content === null) {
+    errors.push(
+      `${entry.name} -> 当前版本尚不能直接发送 ${entry.mimeType} 文件；请先转成文本、图片，或等待文件解析 / provider 文件能力接入`,
+    );
+    return;
+  }
+
+  pushText(
+    parts,
+    `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`,
+  );
 }
 
 function tokenLabelForKind(kind: InputMaterialKind): InputMaterialTokenLabel {
@@ -192,6 +232,65 @@ async function readLocalTextFile(
   }
 }
 
+async function readBoundedTextFallbackBytes(
+  entry: InputMaterialEntry,
+  expectedSize: number,
+  maxBytes: number,
+  errors: string[],
+): Promise<Buffer | null> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(entry.filePath, "r");
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      errors.push(`${entry.name} -> 不是普通文件`);
+      return null;
+    }
+    if (stat.size > maxBytes) {
+      errors.push(
+        `${entry.name} -> 文本文件过大 (${formatByteSize(stat.size)} > ${formatByteSize(maxBytes)})`,
+      );
+      return null;
+    }
+
+    let buffer = Buffer.allocUnsafe(
+      Math.min(Math.max(stat.size, expectedSize) + 1, maxBytes + 1),
+    );
+    let length = 0;
+    while (length <= maxBytes) {
+      if (length === buffer.length) {
+        const grown = Buffer.allocUnsafe(
+          Math.min(buffer.length * 2, maxBytes + 1),
+        );
+        buffer.copy(grown, 0, 0, length);
+        buffer = grown;
+      }
+      const read = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (read.bytesRead === 0) {
+        return buffer.subarray(0, length);
+      }
+      length += read.bytesRead;
+    }
+
+    errors.push(
+      `${entry.name} -> 文本文件过大 (${formatByteSize(length)} > ${formatByteSize(maxBytes)})`,
+    );
+    return null;
+  } catch (err) {
+    errors.push(`${entry.name} -> 文件不可读取 (${errorMessage(err)})`);
+    return null;
+  } finally {
+    if (handle) {
+      await handle.close().catch(() => {});
+    }
+  }
+}
+
 function pushText(parts: UserInputPart[], text: string): void {
   if (text.length === 0) return;
   const last = parts[parts.length - 1];
@@ -202,7 +301,10 @@ function pushText(parts: UserInputPart[], text: string): void {
   parts.push({ type: "text", text });
 }
 
-function pushParts(parts: UserInputPart[], nextParts: readonly UserInputPart[]): void {
+function pushParts(
+  parts: UserInputPart[],
+  nextParts: readonly UserInputPart[],
+): void {
   for (const part of nextParts) {
     if (part.type === "text") {
       pushText(parts, part.text);
@@ -210,14 +312,6 @@ function pushParts(parts: UserInputPart[], nextParts: readonly UserInputPart[]):
       parts.push(part);
     }
   }
-}
-
-function isTextLike(mimeType: string): boolean {
-  return (
-    mimeType.startsWith("text/") ||
-    mimeType === "application/json" ||
-    mimeType === "application/xml"
-  );
 }
 
 function formatByteSize(bytes: number): string {

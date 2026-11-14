@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { writeFile, rm } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
 import { InputMaterialRegistry } from '../../input-material-registry.js';
+import { ingestSelectedMaterial } from '../../input-material-ingest.js';
 import { prepareUserTurnInput } from '../../user-turn-input.js';
 import { prepareSessionSendEngage } from '../../session-engage.js';
 import { prepareSessionSendSnapshot } from '../prepare-session-send.js';
@@ -139,4 +140,73 @@ it('normalizes only an alias proven in the raw draft, keeping ordinary expanded 
       signal: new AbortController().signal, commandAliasOffset }, async bytes => { parts.push(Buffer.from(bytes)); });
     expect(JSON.parse(Buffer.concat(parts).toString()).input.parts[0].text).toBe(expected);
   }
+});
+
+it('prepares unclassified extensionless/dot plain UTF-8 materials once per snapshot and rejects binary/container/unknown-ext files', async () => {
+  const directory = await createTempDir('send-b404b');
+  const registry = new InputMaterialRegistry();
+  const dotFile = join(directory, '.hidden-b4');
+  const dotContent = `\uFEFF${'甲'.repeat(22_000)}\r\n  tail  `;
+  await writeFile(dotFile, dotContent, 'utf8');
+  const dotToken = ingestSelectedMaterial(dotFile, registry, { workspaceRoot: directory });
+
+  let mutated = false;
+  const pages: Buffer[] = [];
+  const draft = `前缀 ${dotToken} ${'x'.repeat(40_000)} @ 检查单点文件`;
+  await prepareSessionSendSnapshot(draft, identity, {
+    workspaceRoot: directory,
+    materialRegistry: registry,
+    signal: new AbortController().signal,
+  }, async bytes => {
+    pages.push(Buffer.from(bytes));
+    if (!mutated) {
+      mutated = true;
+      await writeFile(dotFile, Buffer.from([0x00, 0xff, 0xfe]));
+    }
+  });
+  const payload = JSON.parse(Buffer.concat(pages).toString());
+  const expectedWrapped = `<file path="${dotFile.replace(/\\/g, '/')}">\n${dotContent}\n</file>`;
+  expect(payload.input.parts[0].text).toContain(expectedWrapped);
+  expect(payload.engage.question).toContain(expectedWrapped);
+
+  // Subsequent new submission sees the mutated binary bytes and rejects cleanly
+  await expect(prepareSessionSendSnapshot(dotToken, identity, {
+    workspaceRoot: directory,
+    materialRegistry: registry,
+    signal: new AbortController().signal,
+  }, async () => {})).rejects.toThrow('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
+
+  // Extensionless ASCII PDF header and unknown-extension UTF-8 file must also reject
+  const pdfDot = join(directory, '.fake-text-pdf');
+  await writeFile(pdfDot, '%PDF-1.4\n1 0 obj\n%%EOF\n', 'ascii');
+  const pdfToken = ingestSelectedMaterial(pdfDot, registry, { workspaceRoot: directory });
+  await expect(prepareSessionSendSnapshot(pdfToken, identity, {
+    workspaceRoot: directory,
+    materialRegistry: registry,
+    signal: new AbortController().signal,
+  }, async () => {})).rejects.toThrow('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
+
+  const unknownExt = join(directory, 'plain.dat');
+  await writeFile(unknownExt, 'hello utf8', 'utf8');
+  const unknownToken = ingestSelectedMaterial(unknownExt, registry, { workspaceRoot: directory });
+  await expect(prepareSessionSendSnapshot(unknownToken, identity, {
+    workspaceRoot: directory,
+    materialRegistry: registry,
+    signal: new AbortController().signal,
+  }, async () => {})).rejects.toThrow('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
+
+  //Oversize and disappeared errors remain intact for extensionless files
+  await writeFile(dotFile, Buffer.alloc(100 * 1024 + 1, 0x61));
+  await expect(prepareSessionSendSnapshot(dotToken, identity, {
+    workspaceRoot: directory,
+    materialRegistry: registry,
+    signal: new AbortController().signal,
+  }, async () => {})).rejects.toThrow('文件过大');
+
+  await rm(dotFile);
+  await expect(prepareSessionSendSnapshot(dotToken, identity, {
+    workspaceRoot: directory,
+    materialRegistry: registry,
+    signal: new AbortController().signal,
+  }, async () => {})).rejects.toThrow('材料「.hidden-b4」的文件已不存在');
 });
