@@ -244,6 +244,8 @@ async function defaultRpcShutdown(
       reason: "serve-stop",
       timeoutMs,
       strategy: "cancel",
+    }, {
+      deadline: Date.now() + timeoutMs + 5_000,
     });
   } finally {
     await client.close().catch(() => undefined);

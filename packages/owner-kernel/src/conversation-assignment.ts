@@ -15,6 +15,7 @@ import { conversationStateFieldPrefix, decodeConversationState } from './convers
 import { readConversationRunRoot } from './conversation-run-state-extras.js';
 import { conversationBaseKey, conversationViewAt, type ConversationBaseBinding } from './conversation-base-registry.js';
 import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing-ai/core/advancement";
+import { admittedConversationRunLifecycleSource } from "@zhixing-ai/core/delivery";
 
 function isAdvancementCleanupEvent(event: AdvancementControlEvent): boolean {
   return event.type === 'review_root_settled' || event.type === 'review_attempt_transitioned' && ['consumed', 'expired', 'deferred'].includes(event.attempt.phase);
@@ -3048,6 +3049,115 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => cancellableRunDescriptors(state), conversationDecisionScope({  }));
   }
 
+  /**
+   * All durably admitted runs in this conversation that have not reached a
+   * terminal state (`committed`, `cancelled`, `failed`, `expired`), in FIFO
+   * `queuedPosition` order.
+   */
+  async unsettledAdmittedRuns(): Promise<
+    readonly { readonly runId: string; readonly queuedPosition: number }[]
+  > {
+    return this.#select((state) => {
+      const candidateRunIds = new Set<string>();
+      for (const position of state.queuedPositionHeap) {
+        const runId = state.queuedRunByPosition.get(position);
+        if (runId) candidateRunIds.add(runId);
+      }
+      if (state.activeRunId !== undefined) {
+        candidateRunIds.add(state.activeRunId);
+      }
+      for (const assignmentId of state.recoveryAssignments) {
+        const assigned = state.assignedById.get(assignmentId);
+        if (assigned) candidateRunIds.add(assigned.record.runId);
+      }
+      const runs: Array<{ readonly runId: string; readonly queuedPosition: number }> = [];
+      for (const runId of candidateRunIds) {
+        const current = state.stateByRun.get(runId)?.state;
+        if (
+          current !== "queued" &&
+          current !== "dispatched" &&
+          current !== "running" &&
+          current !== "cancel-requested" &&
+          current !== "uncertain"
+        ) {
+          continue;
+        }
+        const admitted = state.admittedByRun.get(runId);
+        if (!admitted) {
+          throw corruptRunJournal("Unsettled conversation run has no durable admission");
+        }
+        runs.push(
+          Object.freeze({
+            runId,
+            queuedPosition: admitted.record.queuedPosition,
+          }),
+        );
+      }
+      runs.sort((left, right) => left.queuedPosition - right.queuedPosition);
+      return Object.freeze(runs);
+    }, conversationDecisionScope({  }));
+  }
+
+  /**
+   * Authoritative provenance for one assignment (active or historical), used to
+   * deterministically classify frozen slices and derive legacy permit sources
+   * without consulting live active maps.
+   */
+  async assignmentLifecycleProvenance(assignmentId: string): Promise<
+    | {
+        readonly conversationId: string;
+        readonly runId: string;
+        readonly queuedPosition: number;
+        readonly executorId: string;
+        readonly dispatchDigest: string;
+        readonly reservationId: string;
+        readonly committed: boolean;
+      }
+    | undefined
+  > {
+    assertIdentifier(assignmentId, "Assignment id");
+    return this.#select((state) => {
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned) return undefined;
+      const admitted = state.admittedByRun.get(assigned.record.runId);
+      if (!admitted) {
+        throw corruptRunJournal("Assigned run has no durable admission");
+      }
+      return Object.freeze({
+        conversationId: this.#conversationId,
+        runId: assigned.record.runId,
+        queuedPosition: admitted.record.queuedPosition,
+        executorId: assigned.record.executorId,
+        dispatchDigest: assigned.record.dispatchDigest,
+        reservationId: assigned.record.reservation.reservationId,
+        committed: state.committedByAssignment.has(assignmentId),
+      });
+    }, conversationDecisionScope({ assignmentId }));
+  }
+
+  /** Permanent fallback check whether a conversation assignment owned `reservationId`. */
+  async ownsReservation(reservationId: string): Promise<boolean> {
+    assertIdentifier(reservationId, "Reservation id");
+    const candidateAssignmentId = reservationId.startsWith("reservation:")
+      ? reservationId.slice("reservation:".length)
+      : undefined;
+    return this.#select(
+      (state) => {
+        for (const assigned of state.assignedById.values()) {
+          if (assigned.record.reservation.reservationId === reservationId) {
+            return true;
+          }
+        }
+        return false;
+      },
+      conversationDecisionScope(
+        candidateAssignmentId && candidateAssignmentId.length > 0
+          ? { assignmentId: candidateAssignmentId }
+          : {},
+      ),
+    );
+  }
+
   async runControlDescriptor(
     runId: string,
   ): Promise<ConversationRunControlDescriptor | undefined> {
@@ -5642,22 +5752,24 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         let globalMutationRecords: readonly LogicalRecord<unknown>[] = [];
         const admitted = state.admittedByRun.get(body.runId);
         if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
+        const runLifecycleSource = admittedConversationRunLifecycleSource({
+          conversationId: this.#conversationId,
+          runId: body.runId,
+          queuedPosition: admitted.record.queuedPosition,
+        });
         const deliveryInput: ConversationDeliveryCommitInput = {
           at: authorityPrefix.at,
           conversationId: this.#conversationId,
           runId: body.runId,
           assignmentId: bundle.assignmentId,
           commitRevision,
-          conversationLifecycleSource: {
-            owner: "conversation",
-            id: `${this.#conversationId}:${body.runId}`,
-            revision: String(commitRevision),
-          },
+          conversationLifecycleSource: runLifecycleSource,
           assignmentLifecycleSource: {
             owner: "assignment",
             id: `${assigned.record.executorId === this.#currentAuthority?.executorId ? "local" : "relay"}:${bundle.assignmentId}`,
             revision: assigned.record.dispatchDigest,
           },
+          stagedDeliveryLifecycleSource: runLifecycleSource,
           ingress: admitted.record.ingress,
           runRecord: committedRunRecord,
           ...(batch ? { mutationBatch: batch } : {}),
@@ -12806,6 +12918,11 @@ export async function reduceConversationRunState(context: ConversationRunReducti
           );
         }
         const committedMetadata = 'metadata' in closure ? closure.metadata : closure.runRecord;
+        const replayRunLifecycleSource = admittedConversationRunLifecycleSource({
+          conversationId: context.conversationId,
+          runId: body.runId,
+          queuedPosition: admitted.record.queuedPosition,
+        });
         try {
           context.delivery?.assertConversationCommit(
             {
@@ -12814,16 +12931,13 @@ export async function reduceConversationRunState(context: ConversationRunReducti
               runId: body.runId,
               assignmentId: body.assignmentId,
               commitRevision: body.commitRevision,
-              conversationLifecycleSource: {
-                owner: "conversation",
-                id: `${context.conversationId}:${body.runId}`,
-                revision: String(body.commitRevision),
-              },
+              conversationLifecycleSource: replayRunLifecycleSource,
               assignmentLifecycleSource: {
                 owner: "assignment",
                 id: `${assigned.record.executorId === context.currentAuthority?.executorId ? "local" : "relay"}:${body.assignmentId}`,
                 revision: assigned.record.dispatchDigest,
               },
+              stagedDeliveryLifecycleSource: replayRunLifecycleSource,
               ingress: admitted.record.ingress,
               runRecord: committedMetadata,
               ...(closure.batch ? { mutationBatch: closure.batch } : {}),

@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import ts from "typescript";
 import { FileAuthorityCommitLog, FileArtifactStore, DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "@zhixing-ai/core/authority";
+import { parseAdmittedConversationRunSource } from "@zhixing-ai/core/delivery";
 import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { composeConversationHostStopPorts } from "../anchor-conversation-stop-owner.js";
 import { HostStopAcceptedWorkPendingError, HostStopCoordinator, freezeHostStopAcceptedWork, settleHostStopAcceptedWork, type HostStopAcceptedWorkPorts } from "../host-stop-lifecycle.js";
 import { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
 import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionApplyConfiguration, extensionList, extensionRefresh, extensionSetEnabled } from "@zhixing-ai/core/extensions/application";
@@ -128,7 +130,7 @@ async function lifecycleBindings(ports: Record<string, unknown>) {
   const external = ["closeAdmission", "captureAcceptedWork", "settleAcceptedWork", "releaseAdmission"]
     .map((name) => `${name}: ${property(removal.arguments[0]!, name).getText(source)}`).join(",");
   const body = ["let managedHostStopping = false; let removalAdmissionOperationId;",
-    ...["assertAcceptedWorkSubset", "deliveryLifecycleSourcesFromOwnerItems", "captureStopAcceptedWork", "assertStopAcceptedWorkSettled", "stopPort", "acceptedWork", "captureExternal"].map(declaration),
+    ...["assertAcceptedWorkSubset", "deliveryLifecycleSourcesFromOwnerItems", "conversationStopPorts", "captureStopAcceptedWork", "assertStopAcceptedWorkSettled", "stopPort", "acceptedWork", "captureExternal"].map(declaration),
     `return { acceptedWork, close: ${close}, removal: {${external}} };`].join("\n");
   const script = compile(`function create(){${body}}`);
   return new Function(...Object.keys(ports), `${script}; return create();`)(...Object.values(ports)) as {
@@ -573,7 +575,8 @@ describe("managed Channel production composition", () => {
     const jobOwner = { acceptedWorkItems: async () => [], pauseAccepting() {}, drain: async () => {}, resumeAccepting() {} };
     const inbound = { refuseNewMessages() {}, drainAcceptedMessages: async () => {}, resumeNewMessages() {} };
     const authority = { resourceGovernor: { coordinate: async (fn: () => Promise<void>) => fn() } };
-    const binding = await lifecycleBindings({ protocolDigest, advancementRecovery: undefined, boundLocalConversationOwner: undefined, boundConversations: undefined,
+    const binding = await lifecycleBindings({ protocolDigest, parseAdmittedConversationRunSource, composeConversationHostStopPorts,
+      advancementRecovery: undefined, boundAnchorConversationStopOwner: undefined, boundLocalConversationOwner: undefined, boundConversations: undefined,
       boundJobRelayObligations: undefined, boundExecutorJobOwner: undefined, boundConversationProtocol: undefined,
       boundInboundRouter: inbound, boundAuthorityRuntime: authority, boundDeliveryStack: { lifecycle: delivery },
       boundChannelStatuses: channel.statuses, boundChannelConnections: channel,

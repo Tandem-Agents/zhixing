@@ -1,7 +1,12 @@
 import { normalizeLeadingSlashAlias } from '@zhixing-ai/terminal-ui/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createRpcClient } from '@zhixing-ai/server/client';
+import {
+  createRpcClient,
+  RpcClientClosedError,
+  RpcClientError,
+  RpcRequestInterruptedError,
+} from '@zhixing-ai/server/client';
 import { createPlatformSecretStore } from '@zhixing-ai/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
@@ -2828,7 +2833,57 @@ class TerminalApplication {
     this.#abort.signal.throwIfAborted();
     const choice = await this.#selectionFlow(() => chooseTerminalSelection(createStopSelectionRequest(status), view => this.#choosePage(view)));
     if (!choice || choice.kind === 'cancelled' || choice.value === 'cancel') { await this.#publish(this.#mainView); return; }
-    await this.#management.serverShutdown({ reason: 'user-stop', strategy: shutdownStrategyForChoice(choice.value), timeoutMs: 30_000 });
+    const strategy = shutdownStrategyForChoice(choice.value);
+    const waitingMessage = strategy === 'drain'
+      ? '正在等待当前运行完成后停止知行服务…'
+      : strategy === 'cancel'
+        ? '正在取消运行中的工作并停止知行服务…'
+        : '正在安全停止知行服务…';
+    this.#mainView = { ...this.#mainView, message: waitingMessage, choices: undefined };
+    await this.#publish(this.#mainView);
+    try {
+      await this.#management.serverShutdown({ reason: 'user-stop', strategy, timeoutMs: 30_000 });
+    } catch (error) {
+      if (this.#abort.signal.aborted) return;
+      const retrySameRequest = error instanceof RpcClientError &&
+        typeof error.data === 'object' &&
+        error.data !== null &&
+        (error.data as { action?: unknown }).action === 'retry-same-request';
+      if (retrySameRequest) {
+        const suffix = strategy === 'drain'
+          ? '当前运行继续进行，完成后可再次执行 /stop 继续停止。'
+          : '可查看 /status 或再次执行 /stop 继续同一次安全停止。';
+        this.#mainView = { ...this.#mainView, message: `${error.message}；${suffix}` };
+        if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
+        return;
+      }
+      if (
+        error instanceof RpcClientClosedError ||
+        (error instanceof RpcRequestInterruptedError && error.stage === 'waiting-receipt')
+      ) {
+        recordTerminalFailure(this.#logging.records, error, 'terminal-stop-outcome-uncertain');
+        this.#mainView = {
+          ...this.#mainView,
+          message: '停止请求结果尚未确认（连接中断或响应超时），服务可能仍在安全收尾；请按 Enter 或用 /status 核对状态，需要时再次执行 /stop 续办。',
+        };
+        if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
+        return;
+      }
+      recordTerminalFailure(this.#logging.records, error, 'terminal-stop-failed');
+      this.#mainView = {
+        ...this.#mainView,
+        message: `停止未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请查看 /status 或稍后重试。'}`,
+      };
+      if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
+      return;
+    }
+    const active = this.#state.activeTurnPromise;
+    if (strategy === 'drain' && active) {
+      await Promise.race([
+        active.catch(() => {}),
+        new Promise<void>(resolve => setTimeout(resolve, 1_000)),
+      ]);
+    }
     void this.#close(0, 'user-stop');
   }
 

@@ -1,3 +1,4 @@
+import { protocolDigest } from "../protocol/canonical.js";
 import {
   assertPrefixedUlid,
   assertProtocolIdentifier,
@@ -9,6 +10,62 @@ import type { DeliveryLifecycleSourceRef } from "./types.js";
 export const MAX_DELIVERY_IDENTIFIER_LENGTH = MAX_PROTOCOL_IDENTIFIER_LENGTH;
 export const MAX_DELIVERY_DIAGNOSTIC_TEXT_LENGTH = 480;
 export const DELIVERY_ITEM_ID_PREFIX = "dlv-";
+
+const ADMITTED_CONVERSATION_RUN_PREFIX = "admitted-run:";
+const ADMITTED_CONVERSATION_RUN_SUFFIX_LENGTH = ":sha256:".length + 64;
+const ADMITTED_CONVERSATION_RUN_SUFFIX_PATTERN = /^:sha256:[0-9a-f]{64}$/u;
+
+export function admittedConversationRunLifecycleSource(input: {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly queuedPosition: number;
+}): DeliveryLifecycleSourceRef {
+  assertDeliveryIdentifier(input.conversationId, "Admitted run conversation id");
+  assertDeliveryIdentifier(input.runId, "Admitted run id");
+  if (!Number.isSafeInteger(input.queuedPosition) || input.queuedPosition < 0) {
+    throw new TypeError("Admitted run queuedPosition must be a non-negative safe integer");
+  }
+  const identityDigest = protocolDigest("AdmittedConversationRunIdentity", 1, {
+    conversationId: input.conversationId,
+    runId: input.runId,
+  });
+  const id = `${ADMITTED_CONVERSATION_RUN_PREFIX}${input.conversationId}:${identityDigest}`;
+  assertDeliveryIdentifier(id, "Admitted run lifecycle source id");
+  const revision = protocolDigest("AdmittedConversationRunLifecycleSource", 1, {
+    conversationId: input.conversationId,
+    runId: input.runId,
+    queuedPosition: input.queuedPosition,
+  });
+  return Object.freeze({
+    owner: "conversation" as const,
+    id,
+    revision,
+  });
+}
+
+export function parseAdmittedConversationRunSource(
+  id: string,
+): { readonly conversationId: string; readonly identityDigest: string } | undefined {
+  if (
+    typeof id !== "string" ||
+    !id.startsWith(ADMITTED_CONVERSATION_RUN_PREFIX) ||
+    id.length <= ADMITTED_CONVERSATION_RUN_PREFIX.length + ADMITTED_CONVERSATION_RUN_SUFFIX_LENGTH ||
+    id.length > MAX_DELIVERY_IDENTIFIER_LENGTH
+  ) {
+    return undefined;
+  }
+  const suffixStart = id.length - ADMITTED_CONVERSATION_RUN_SUFFIX_LENGTH;
+  const suffix = id.slice(suffixStart);
+  if (!ADMITTED_CONVERSATION_RUN_SUFFIX_PATTERN.test(suffix)) {
+    return undefined;
+  }
+  const conversationId = id.slice(ADMITTED_CONVERSATION_RUN_PREFIX.length, suffixStart);
+  if (conversationId.length === 0) return undefined;
+  return Object.freeze({
+    conversationId,
+    identityDigest: suffix.slice(1),
+  });
+}
 
 export function assertDeliveryIdentifier(value: unknown, label: string): asserts value is string {
   assertProtocolIdentifier(value, label);

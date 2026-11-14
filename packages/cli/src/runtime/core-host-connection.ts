@@ -612,9 +612,12 @@ export class CoreHostConnection implements CoreHostRpcLink {
     endpoint: ServerEndpoint,
     oldVersion: string,
   ): Promise<EstablishedClient> {
-    await client.request("server.shutdown", serverShutdownRequest(endpoint.pid, {
+    const params = serverShutdownRequest(endpoint.pid, {
       reason: "client-version-change",
-    }));
+    });
+    await client.request("server.shutdown", params, {
+      deadline: Date.now() + (params.timeoutMs ?? 30_000) + 5_000,
+    });
     await client.close().catch(() => {});
     await this.waitForEndpointTurnover(endpoint, {});
 

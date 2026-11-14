@@ -4,7 +4,11 @@ import {
   FileAuthorityCommitLog,
   type ProjectionTransactionContext,
 } from "@zhixing-ai/core/authority";
-import { DELIVERY_AUTHORITY_PROJECTION_ID, DeliveryAuthority } from "@zhixing-ai/core/delivery";
+import {
+  admittedConversationRunLifecycleSource,
+  DELIVERY_AUTHORITY_PROJECTION_ID,
+  DeliveryAuthority,
+} from "@zhixing-ai/core/delivery";
 import type {
   CommitEnvelope,
   ConversationRunState,
@@ -800,5 +804,94 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
 
     const upgraded = await participant(5);
     expect(() => upgraded.assertConversationCommit(input, envelope)).not.toThrow();
+  });
+
+  it("binds conversation final and staged deliveries to admittedConversationRunLifecycleSource while keeping legacy assignment fallback", async () => {
+    const { authority, owner } = await participantFixture(3);
+    const lifecycle = createOwnerDeliveryLifecycleBinding({ authority }).application;
+    const admittedSource = admittedConversationRunLifecycleSource({
+      conversationId: "conversation-1",
+      runId: "run-1",
+      queuedPosition: 2,
+    });
+    // Install admission permitting ONLY admittedSource (not CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE)
+    await lifecycle.installAdmission({
+      operationId: "op-admitted-1",
+      sources: [admittedSource],
+      deliveries: [],
+    });
+    const input = {
+      at: NOW,
+      conversationId: "conversation-1",
+      runId: "run-1",
+      assignmentId: "assignment-conversation",
+      commitRevision: 1,
+      conversationLifecycleSource: admittedSource,
+      assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
+      stagedDeliveryLifecycleSource: admittedSource,
+      ingress: channelIngress,
+      runRecord,
+      mutationBatch: stagedMutation("assignment-conversation", "explicit"),
+    } as const;
+    const prepared = await owner.prepareConversationCommit(input);
+    if (!prepared.accepted) throw new Error("admitted-source commit was rejected");
+    expect(deliveryKinds(prepared.records)).toEqual([
+      "conversation-final-delivery",
+      "staged-delivery",
+    ]);
+    for (const record of prepared.records) {
+      const body = record.body as {
+        readonly lifecycleBinding?: { readonly operationId: string; readonly sources: readonly unknown[] };
+      };
+      expect(body.lifecycleBinding).toEqual({
+        operationId: "op-admitted-1",
+        sources: [admittedSource],
+      });
+    }
+    // Wrong/unfrozen source is rejected when stagedDeliveryLifecycleSource is omitted and assignment source is not permitted
+    await expect(
+      owner.prepareConversationCommit({
+        at: NOW,
+        conversationId: "conversation-1",
+        runId: "run-2",
+        assignmentId: "assignment-conversation",
+        commitRevision: 1,
+        conversationLifecycleSource: admittedSource,
+        assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
+        ingress: channelIngress,
+        runRecord,
+        mutationBatch: stagedMutation("assignment-conversation", "explicit"),
+      }),
+    ).rejects.toThrow("not part of the frozen lifecycle operation");
+
+    // Legacy fallback: without stagedDeliveryLifecycleSource, staged-delivery binds to assignmentLifecycleSource when permitted
+    const { authority: legacyAuth, owner: legacyOwner } = await participantFixture(3);
+    const legacyLifecycle = createOwnerDeliveryLifecycleBinding({ authority: legacyAuth }).application;
+    await legacyLifecycle.installAdmission({
+      operationId: "op-legacy-1",
+      sources: [CONVERSATION_COMMIT_LIFECYCLE_SOURCE, CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE],
+      deliveries: [],
+    });
+    const legacyPrepared = await legacyOwner.prepareConversationCommit({
+      at: NOW,
+      conversationId: "conversation-1",
+      runId: "run-1",
+      assignmentId: "assignment-conversation",
+      commitRevision: 1,
+      conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE,
+      assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
+      ingress: channelIngress,
+      runRecord,
+      mutationBatch: stagedMutation("assignment-conversation", "explicit"),
+    });
+    expect(legacyPrepared.accepted).toBe(true);
+    if (!legacyPrepared.accepted) return;
+    expect(
+      legacyPrepared.records.map(
+        (r) =>
+          (r.body as { readonly lifecycleBinding?: { readonly sources: readonly unknown[] } })
+            .lifecycleBinding?.sources,
+      ),
+    ).toEqual([[CONVERSATION_COMMIT_LIFECYCLE_SOURCE], [CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE]]);
   });
 });

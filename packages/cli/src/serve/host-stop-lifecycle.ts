@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer";
 import type { ArtifactStore, DeviceLifecycleJournal } from "@zhixing-ai/core/authority";
-import type { DeliveryLifecycleSourcePermit } from "@zhixing-ai/core/delivery";
+import {
+  parseAdmittedConversationRunSource,
+  type DeliveryLifecycleSourcePermit,
+} from "@zhixing-ai/core/delivery";
 import {
   canonicalize,
   protocolDigest,
@@ -199,6 +202,7 @@ export class HostStopCoordinator {
       if (state.identity.kind !== "stop") throw new Error("Stop journal identity changed");
       const gated = state;
       const stopIdentity = state.identity;
+      const settleDeadline = Date.now() + timeoutMs;
       if (this.options.acceptedWork) {
         const ports = this.options.acceptedWork;
         if (!this.options.artifactStore) {
@@ -210,17 +214,21 @@ export class HostStopCoordinator {
         await this.#stage("settle-accepted-work", () => settleHostStopAcceptedWork({
           operationId: stopIdentity.operationId,
           strategy: stopIdentity.strategy,
-          timeoutMs,
+          timeoutMs: Math.max(0, settleDeadline - Date.now()),
           snapshot,
           ports,
         }));
       } else if (state.identity.strategy === "cancel") {
-        await this.#stage("cancel-accepted-work", () => this.options.runtime.cancelAcceptedWork(timeoutMs));
-        await this.#stage("drain-accepted-work", () => this.options.runtime.drainAcceptedWork(timeoutMs));
+        await this.#stage("cancel-accepted-work", () =>
+          this.options.runtime.cancelAcceptedWork(Math.max(0, settleDeadline - Date.now())));
+        await this.#stage("drain-accepted-work", () =>
+          this.options.runtime.drainAcceptedWork(Math.max(0, settleDeadline - Date.now())));
       } else if (state.identity.strategy === "drain") {
-        await this.#stage("drain-accepted-work", () => this.options.runtime.drainAcceptedWork(timeoutMs));
+        await this.#stage("drain-accepted-work", () =>
+          this.options.runtime.drainAcceptedWork(Math.max(0, settleDeadline - Date.now())));
       } else {
-        await this.#stage("settle-immediate", () => this.options.runtime.settleImmediate(timeoutMs));
+        await this.#stage("settle-immediate", () =>
+          this.options.runtime.settleImmediate(Math.max(0, settleDeadline - Date.now())));
       }
       state = await this.#stage("work-settled", () => this.options.journal.advance(stopIdentity.operationId, "work-settled", [{
         kind: "accepted-work",
@@ -304,7 +312,8 @@ export function hostStopDeliveryLifecycleSources(
               conversationId: item.id,
             }),
           }
-        : owner === "final"
+        : owner === "final" ||
+            (owner === "intent" && parseAdmittedConversationRunSource(item.id) !== undefined)
           ? { owner: "conversation" as const, id: item.id, revision: item.revision }
           : owner === "assignment" ||
               (owner === "remote" && (item.id.startsWith("relay:") || item.id.startsWith("local:")))
@@ -379,13 +388,14 @@ export async function settleHostStopAcceptedWork(input: {
   readonly snapshot: HostStopAcceptedWorkSnapshot;
   readonly ports: HostStopAcceptedWorkPorts;
 }): Promise<void> {
+  const deadline = Date.now() + input.timeoutMs;
   for (const owner of HOST_STOP_ACCEPTED_WORK_OWNERS) {
     const port = input.ports[owner];
     const frozen = input.snapshot.owners[owner];
     await port.settle({
       operationId: input.operationId,
       strategy: input.strategy,
-      timeoutMs: input.timeoutMs,
+      timeoutMs: Math.max(0, deadline - Date.now()),
       frozen,
     });
     await port.readBack({

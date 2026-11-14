@@ -39,7 +39,10 @@ import { resolveAgentIdentity } from "@zhixing-ai/core/identity";
 import { loadLayeredGuidance } from "@zhixing-ai/core/context";
 import { type SchedulerEventMap } from "@zhixing-ai/core/scheduler";
 import { worksceneConversationId } from "@zhixing-ai/core/conversation";
-import { type DeliveryLifecycleSourcePermit } from "@zhixing-ai/core/delivery";
+import {
+  parseAdmittedConversationRunSource,
+  type DeliveryLifecycleSourcePermit,
+} from "@zhixing-ai/core/delivery";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
@@ -288,6 +291,12 @@ import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-sta
 import { buildManagedHostPublicStatus } from "./status.js";
 import { createHostDefaultWorkspaceProjection } from "./host-default-workspace.js";
 import {
+  composeConversationHostStopPorts,
+  createAnchorConversationStopOwner,
+  resolveHostStopDeliveryLifecycleSources,
+  restoreConversationHostStopSnapshot,
+} from "./anchor-conversation-stop-owner.js";
+import {
   HostStopAcceptedWorkPendingError,
   HostStopCoordinator,
   freezeHostStopAcceptedWork,
@@ -503,6 +512,7 @@ async function runServerProcess(
     throw new Error("More than one local device lifecycle operation owns startup admission");
   }
   const startupLifecycleOperation = localLifecycleOperations[0];
+  let startupHostStopSnapshot: HostStopAcceptedWorkSnapshot | undefined;
   let startupLifecycle: StartupLifecycleRestoration | undefined;
   if (startupLifecycleOperation) {
     let sources: readonly DeliveryLifecycleSourcePermit[] = [];
@@ -515,6 +525,7 @@ async function runServerProcess(
         startupLifecycleOperation,
         bootstrap.mesh.bootstrapStore.artifactStore(),
       );
+      startupHostStopSnapshot = snapshot;
       sources = hostStopDeliveryLifecycleSources(snapshot);
       deliveries = snapshot.owners.delivery;
       artifactReady = true;
@@ -1261,6 +1272,37 @@ async function runServerProcess(
     channelCoordinator: losslessDataPlane.coordinator,
     startupLifecycle,
   }));
+  const boundAnchorConversationStopOwner = createAnchorConversationStopOwner({
+    manager: conversationServices.conversations,
+    protocol: conversationServices.conversationProtocol,
+    advancementRecovery: conversationServices.advancementRecovery,
+  });
+  if (
+    startupLifecycleOperation &&
+    startupLifecycle &&
+    startupLifecycleOperation.identity.kind !== "executor-removal"
+  ) {
+    await boundAnchorConversationStopOwner?.openClosedStartup(
+      startupLifecycleOperation.identity.operationId,
+      { alreadySettled: startupLifecycle.alreadySettled },
+    );
+  }
+  if (startupHostStopSnapshot && startupLifecycle) {
+    const resolvedSources = await resolveHostStopDeliveryLifecycleSources(
+      startupHostStopSnapshot,
+      {
+        anchor: boundAnchorConversationStopOwner,
+        local: localExecutor?.owner,
+      },
+    );
+    startupLifecycle = {
+      ...startupLifecycle,
+      delivery: {
+        ...startupLifecycle.delivery,
+        sources: resolvedSources,
+      },
+    };
+  }
   const delivery = enabledSurfaces.has("delivery") ? await observeLogPhase(startupRecords, "prepare-delivery", () => prepareDelivery({
     authorityRuntime,
     startupRollback,
@@ -1536,7 +1578,10 @@ async function runServerProcess(
     if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
     startupLifecycleFrozenRecoveryStarted = true;
     try {
-      await observeLogPhase(startupRecords, "accepted-work-conversations", async () => { await boundLocalConversationOwner?.recoverAcceptedWorkForLifecycle(); });
+      await observeLogPhase(startupRecords, "accepted-work-conversations", async () => {
+        await boundAnchorConversationStopOwner?.recoverAcceptedWorkForLifecycle();
+        await boundLocalConversationOwner?.recoverAcceptedWorkForLifecycle();
+      });
       await observeLogPhase(startupRecords, "accepted-work-jobs", async () => { await boundExecutorJobOwner?.recoverAcceptedWorkForLifecycle(); });
       await observeLogPhase(startupRecords, "accepted-work-mesh", async () => { await meshRuntime?.recoverAcceptedWorkForLifecycle(); });
       await observeLogPhase(startupRecords, "accepted-work-channels", async () => { await boundChannelCoordinator?.recover(); });
@@ -2120,26 +2165,17 @@ async function runServerProcess(
         startedAt: processStartedAt,
         endpointLock: stopEndpointLock,
       };
+  const conversationStopPorts = composeConversationHostStopPorts({
+    anchor: boundAnchorConversationStopOwner,
+    local: boundLocalConversationOwner,
+  });
   async function captureStopAcceptedWork(
-    owner: keyof HostStopAcceptedWorkPorts,
-    operationId: string,
+    owner: Exclude<
+      keyof HostStopAcceptedWorkPorts,
+      "conversation" | "intent" | "final" | "assignment" | "lease" | "permit"
+    >,
+    _operationId: string,
   ) {
-    const localOwners = new Set(["conversation", "intent", "final", "assignment", "lease", "permit"]);
-    if (localOwners.has(owner) && boundLocalConversationOwner) {
-      return boundLocalConversationOwner.hostStopAcceptedWorkItems(
-        operationId,
-        owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
-      );
-    }
-    const conversations = (boundConversations?.list() ?? [])
-      .map((item) => ({
-        id: item.conversationId,
-        revision: protocolDigest("HostStopConversation", 1, {
-          conversationId: item.conversationId,
-          sessionId: item.sessionId,
-        }),
-      }));
-    if (owner === "conversation") return conversations;
     if (owner === "remote") {
       const relay = (await boundJobRelayObligations?.listOpen() ?? []).map((opening) => ({
         id: `relay:${opening.assignmentId}`,
@@ -2169,23 +2205,14 @@ async function runServerProcess(
     return [];
   }
   const assertStopAcceptedWorkSettled = async (
-    owner: keyof HostStopAcceptedWorkPorts,
+    owner: Exclude<
+      keyof HostStopAcceptedWorkPorts,
+      "conversation" | "intent" | "final" | "assignment" | "lease" | "permit"
+    >,
     operationId: string,
     frozen: readonly HostStopAcceptedWorkItem[],
     strategy: "immediate" | "drain" | "cancel",
   ) => {
-    if (
-      ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
-      boundLocalConversationOwner
-    ) {
-      await boundLocalConversationOwner.assertHostStopAcceptedWorkSettled(
-        operationId,
-        owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
-        strategy,
-        frozen,
-      );
-      return;
-    }
     if (owner === "scheduler") {
       await schedulerApplication.assertAcceptedWorkSettled(frozen);
       return;
@@ -2194,27 +2221,6 @@ async function runServerProcess(
       ? await boundDeliveryStack?.lifecycle.read(operationId) ?? []
       : await captureStopAcceptedWork(owner, operationId);
     assertAcceptedWorkSubset(current, frozen, `host-stop ${owner}`);
-    if (owner === "conversation") {
-      if ((boundConversations?.list() ?? []).some((item) => item.busy)) {
-        throw new HostStopAcceptedWorkPendingError(owner, "Conversation accepted work is still active");
-      }
-      return;
-    }
-    if (["intent", "final", "assignment", "lease", "permit"].includes(owner)) {
-      const closure = await boundConversationProtocol?.pendingClosureWork();
-      const remaining = owner === "final"
-        ? closure?.pendingFinals ?? 0
-        : owner === "assignment"
-          ? closure?.pendingAssignments ?? 0
-          : owner === "intent"
-            ? closure?.recoveryBacklog ?? 0
-            : closure?.activeLocalLeases ?? 0;
-      const durableImmediateOwner = owner === "intent" || owner === "final" || owner === "assignment";
-      if (remaining !== 0 && !(strategy === "immediate" && durableImmediateOwner)) {
-        throw new HostStopAcceptedWorkPendingError(owner, `${owner} accepted work is not settled`);
-      }
-      return;
-    }
     if (owner === "remote") {
       if (strategy !== "immediate" && current.length !== 0) {
         throw new HostStopAcceptedWorkPendingError(owner, "Remote accepted work is not settled");
@@ -2235,7 +2241,10 @@ async function runServerProcess(
     }
   };
   const stopPort = (
-    owner: keyof HostStopAcceptedWorkPorts,
+    owner: Exclude<
+      keyof HostStopAcceptedWorkPorts,
+      "conversation" | "intent" | "final" | "assignment" | "lease" | "permit"
+    >,
     settle: (input: {
       readonly operationId: string;
       readonly strategy: "immediate" | "drain" | "cancel";
@@ -2256,17 +2265,6 @@ async function runServerProcess(
       if (owner !== "delivery") {
         assertAcceptedWorkSubset(current, input.frozen, `host-stop ${owner} settlement`);
       }
-      if (
-        ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
-        boundLocalConversationOwner
-      ) {
-        await boundLocalConversationOwner.settleHostStopAcceptedWork(
-          input.operationId,
-          input.strategy,
-          input.timeoutMs,
-        );
-        return;
-      }
       await settle(input);
     },
     readBack: (input: {
@@ -2281,24 +2279,10 @@ async function runServerProcess(
     ),
   });
   const acceptedWork: HostStopAcceptedWorkPorts = {
-    conversation: stopPort("conversation", async ({ strategy, timeoutMs }) => {
-      if (strategy === "cancel") {
-        await boundConversations?.abortAllAndWait(
-          { kind: "external", origin: "server-shutdown" },
-          timeoutMs,
-        );
-      }
-      await boundInboundRouter?.drainAcceptedMessages();
-    }),
-    intent: stopPort("intent", async () => {
-      await boundExecutorJobOwner?.drain();
-    }),
-    final: stopPort("final", async () => {
-      await boundExecutorJobOwner?.drain();
-    }),
-    assignment: stopPort("assignment", async () => {
-      await boundExecutorJobOwner?.drain();
-    }),
+    conversation: conversationStopPorts.conversation,
+    intent: conversationStopPorts.intent,
+    final: conversationStopPorts.final,
+    assignment: conversationStopPorts.assignment,
     remote: stopPort("remote", async () => {
       await boundInboundRouter?.drainAcceptedMessages();
       await boundExecutorJobOwner?.drain();
@@ -2314,14 +2298,20 @@ async function runServerProcess(
     }),
     delivery: stopPort("delivery", async ({ operationId, strategy, timeoutMs }) => {
       await boundDeliveryStack?.lifecycle.seal(operationId);
-      await boundDeliveryStack?.lifecycle.settle({ operationId, strategy, timeoutMs });
+      try {
+        await boundDeliveryStack?.lifecycle.settle({ operationId, strategy, timeoutMs });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("did not reach a durable terminal state before the deadline")
+        ) {
+          throw new HostStopAcceptedWorkPendingError("delivery", error.message);
+        }
+        throw error;
+      }
     }),
-    lease: stopPort("lease", async () => {
-      await boundAuthorityRuntime?.resourceGovernor.coordinate(async () => undefined);
-    }),
-    permit: stopPort("permit", async () => {
-      await boundAuthorityRuntime?.resourceGovernor.coordinate(async () => undefined);
-    }),
+    lease: conversationStopPorts.lease,
+    permit: conversationStopPorts.permit,
   };
   const isLifecycleHostStopped = async (candidateHost: StopHostGeneration): Promise<boolean> => {
     const endpoint = candidateHost.endpointLock;
@@ -2370,14 +2360,17 @@ async function runServerProcess(
     recordStageFailure: (stage, error) => recordRuntimeFailure(startupRecords, error, `host-stop:${stage}`),
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     onAcceptedWorkFrozen: async (snapshot) => {
-      const sources = hostStopDeliveryLifecycleSources(snapshot);
-      boundLocalConversationOwner?.restoreHostStopAcceptedWork(
-        snapshot.operationId,
-        Object.entries(snapshot.owners).flatMap(([owner, items]) =>
-          items.map((item) => ({
-            owner: owner as keyof HostStopAcceptedWorkSnapshot["owners"],
-            ...item,
-          }))),
+      const sources = await resolveHostStopDeliveryLifecycleSources(snapshot, {
+        anchor: boundAnchorConversationStopOwner,
+        local: boundLocalConversationOwner,
+      });
+      await restoreConversationHostStopSnapshot(
+        snapshot,
+        {
+          anchor: boundAnchorConversationStopOwner,
+          local: boundLocalConversationOwner,
+        },
+        startupLifecycle?.alreadySettled ?? false,
       );
       await boundDeliveryStack?.lifecycle.install({
         operationId: snapshot.operationId,
@@ -2389,12 +2382,14 @@ async function runServerProcess(
     runtime: {
       closeAdmission: async (operationId) => {
         managedHostStopping = true;
-        await advancementRecovery?.beginDrain();
         boundInboundRouter?.refuseNewMessages();
+        await boundInboundRouter?.drainAcceptedMessages();
+        await advancementRecovery?.beginDrain();
         boundExecutorJobOwner?.pauseAccepting();
         schedulerApplication.closeAdmission();
         boundDeliveryStack?.lifecycle.close();
         await Promise.all([
+          boundAnchorConversationStopOwner?.closeHostStopAdmission(operationId),
           boundLocalConversationOwner?.closeHostStopAdmission(operationId),
           boundChannelConnections?.suspendConfigured(),
         ]);
@@ -2442,6 +2437,7 @@ async function runServerProcess(
         throw new Error("Durable host-stop recovery did not prove the old host terminal");
       }
       await observeLogPhase(startupRecords, "stop-recovery-release-admission", async () => {
+        await boundAnchorConversationStopOwner?.releaseHostStopAdmission(operationId);
         await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
       });
       await observeLogPhase(startupRecords, "stop-recovery-delivery", async () => {
@@ -2515,18 +2511,27 @@ async function runServerProcess(
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     closeAdmission: async (operationId: string) => {
       managedHostStopping = true;
-      await advancementRecovery?.beginDrain();
       boundInboundRouter?.refuseNewMessages();
+      await boundInboundRouter?.drainAcceptedMessages();
+      await advancementRecovery?.beginDrain();
       boundExecutorJobOwner?.pauseAccepting();
       schedulerApplication.closeAdmission();
       boundDeliveryStack?.lifecycle.close();
       await Promise.all([
+        boundAnchorConversationStopOwner?.closeHostStopAdmission(operationId),
         boundLocalConversationOwner?.closeHostStopAdmission(operationId),
         boundChannelConnections?.suspendConfigured(),
       ]);
     },
     onFrozen: async (snapshot: HostStopAcceptedWorkSnapshot) => {
-      const sources = hostStopDeliveryLifecycleSources(snapshot);
+      const sources = await resolveHostStopDeliveryLifecycleSources(snapshot, {
+        anchor: boundAnchorConversationStopOwner,
+        local: boundLocalConversationOwner,
+      });
+      await restoreConversationHostStopSnapshot(snapshot, {
+        anchor: boundAnchorConversationStopOwner,
+        local: boundLocalConversationOwner,
+      });
       await boundDeliveryStack?.lifecycle.install({
         operationId: snapshot.operationId,
         sources,
@@ -2613,12 +2618,18 @@ async function runServerProcess(
         journal: currentRemovalJournal,
         signAbort: (input) => createSignedDeviceLifecycleAbort(input, uninstallIssuerKey),
         releaseAdmission: async (operationId) => {
+          await boundAnchorConversationStopOwner?.releaseHostStopAdmission(operationId);
+          await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
           await boundDeliveryStack?.lifecycle.release(operationId);
           await boundDeliveryStack?.lifecycle.resume();
           boundConversationProtocol?.startRecoveryLoop();
+          advancementRecovery?.resume();
+          boundExecutorJobOwner?.resumeAccepting();
           schedulerApplication.resumeAdmission();
           boundInboundRouter?.resumeNewMessages();
           await boundChannelConnections?.connectConfigured();
+          boundLocalConversationOwner?.resumeRecoveryAfterLifecycle();
+          managedHostStopping = false;
         },
       })
     : undefined;
@@ -3269,6 +3280,16 @@ async function runServerProcess(
         alreadySettled: startupLifecycle.alreadySettled,
       } }
     : {}); });
+  if (startupHostStopSnapshot && startupLifecycle) {
+    await restoreConversationHostStopSnapshot(
+      startupHostStopSnapshot,
+      {
+        anchor: boundAnchorConversationStopOwner,
+        local: localExecutor?.owner,
+      },
+      startupLifecycle.alreadySettled,
+    );
+  }
   boundChannelConversationProduct?.bind(productApi);
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
@@ -3769,7 +3790,8 @@ function deliveryLifecycleSourcesFromOwnerItems(
             conversationId: item.id,
           }),
         }
-      : item.owner === "final"
+      : item.owner === "final" ||
+          (item.owner === "intent" && parseAdmittedConversationRunSource(item.id) !== undefined)
         ? {
             owner: "conversation" as const,
             id: item.id,

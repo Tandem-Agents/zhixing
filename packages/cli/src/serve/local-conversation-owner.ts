@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { buildStartupBootstrapPair } from "@zhixing-ai/core/context";
-import { localConversationId, type Conversation } from "@zhixing-ai/core/conversation";
+import { isLocalConversationId, localConversationId, type Conversation } from "@zhixing-ai/core/conversation";
 import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing-ai/core/rubrics";
 import { projectRubricContractDraft, type RubricContractDraftSnapshot, type RubricDraftPersistenceChoice } from "@zhixing-ai/core/advancement";
 import { type RunRecordRef } from "@zhixing-ai/core/transcript";
@@ -91,6 +91,7 @@ import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
 import {
   createConversationAgentTurnAdmissionPort,
 } from "@zhixing-ai/owner-kernel/conversation-agent-turn-admission";
+import { HostStopAcceptedWorkPendingError } from "./host-stop-lifecycle.js";
 
 /** 本地域 port 的会话只读面:冻结读取子集;写入只能经 port 的命令 wrapper。 */
 export type LocalConversationSessionReadPort = Readonly<
@@ -1113,7 +1114,12 @@ export class LocalConversationOwnerAssembly {
               this.#hostStopSettledOperationId = options.lifecycle.operationId;
             }
           }
-          this.#protocol.beginShutdownDrain();
+          if (
+            options.lifecycle.kind === "executor-removal" ||
+            options.lifecycle.alreadySettled === true
+          ) {
+            this.#protocol.beginShutdownDrain();
+          }
         }
         // 只读未终结迁移的二级键，不遍历已终结的迁移历史
         for (const transfer of await listOpenConversationTransfers(
@@ -1164,6 +1170,7 @@ export class LocalConversationOwnerAssembly {
     ) return true;
     const closure = await this.#protocol.pendingClosureWork();
     if (
+      closure.pendingAdmittedRuns > 0 ||
       closure.pendingFinals > 0 ||
       closure.pendingAssignments > 0 ||
       closure.recoveryBacklog > 0 ||
@@ -1227,12 +1234,14 @@ export class LocalConversationOwnerAssembly {
       const closure = await this.#protocol.pendingClosureWork();
       const activeWork = this.#manager.hasActiveWork();
       lastReadings =
-        `activeWork=${activeWork} pendingFinals=${closure.pendingFinals}` +
+        `activeWork=${activeWork} pendingAdmittedRuns=${closure.pendingAdmittedRuns}` +
+        ` pendingFinals=${closure.pendingFinals}` +
         ` pendingAssignments=${closure.pendingAssignments}` +
         ` recoveryBacklog=${closure.recoveryBacklog}` +
         ` activeLocalLeases=${closure.activeLocalLeases}`;
       return (
         !activeWork &&
+        closure.pendingAdmittedRuns === 0 &&
         closure.pendingFinals === 0 &&
         closure.pendingAssignments === 0 &&
         closure.recoveryBacklog === 0 &&
@@ -1325,10 +1334,12 @@ export class LocalConversationOwnerAssembly {
       throw new Error("Another host-stop operation owns the local conversation gate");
     }
     this.#hostStopOperationId = operationId;
-    this.#protocol.beginShutdownDrain();
     await this.#recovery.beginDrain();
     await this.#waitForCommandDrain();
-    this.#hostStopSnapshot ??= await this.preflightForDeviceRemoval(operationId);
+    await this.#manager.closeExternalAdmission(operationId);
+    this.#hostStopSnapshot ??= await this.#protocol.whileRecoveryPaused(() =>
+      this.preflightForDeviceRemoval(operationId),
+    );
   }
 
   restoreHostStopAcceptedWork(
@@ -1386,6 +1397,7 @@ export class LocalConversationOwnerAssembly {
     if (this.#hostStopOperationId !== operationId) {
       throw new Error("Host-stop release does not own the local conversation gate");
     }
+    this.#manager.releaseExternalAdmission(operationId);
     this.#protocol.resumeAfterShutdownDrain();
     this.#hostStopOperationId = undefined;
     this.#hostStopSnapshot = undefined;
@@ -1419,6 +1431,8 @@ export class LocalConversationOwnerAssembly {
     const settlement = (async () => {
       const deadline = Date.now() + timeoutMs;
       if (strategy === "immediate") {
+        this.#protocol.beginShutdownDrain();
+        await this.#recovery.beginDrain();
         await this.#protocol.stopRecoveryLoop();
         while (true) {
           const closure = await this.#protocol.pendingClosureWork();
@@ -1427,15 +1441,21 @@ export class LocalConversationOwnerAssembly {
             return;
           }
           if (Date.now() >= deadline) {
-            throw new Error("Host stop could not reach the local durable safe point before its deadline");
+            const pendingOwner = this.#manager.hasActiveWork() ? "conversation" : "lease";
+            throw new HostStopAcceptedWorkPendingError(
+              pendingOwner,
+              "Host stop could not reach the local durable safe point before its deadline",
+            );
           }
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
       if (strategy === "cancel") {
+        this.#protocol.beginShutdownDrain();
+        await this.#recovery.beginDrain();
         await this.#manager.abortAllAndWait(
           { kind: "external", origin: "server-shutdown" },
-          Math.max(1, timeoutMs),
+          Math.max(1, deadline - Date.now()),
         );
       }
       while (true) {
@@ -1444,17 +1464,32 @@ export class LocalConversationOwnerAssembly {
         const closure = await this.#protocol.pendingClosureWork();
         if (
           !this.#manager.hasActiveWork() &&
+          closure.pendingAdmittedRuns === 0 &&
           closure.pendingFinals === 0 &&
           closure.pendingAssignments === 0 &&
           closure.recoveryBacklog === 0 &&
           closure.activeLocalLeases === 0
         ) {
+          this.#protocol.beginShutdownDrain();
+          await this.#recovery.beginDrain();
           await this.#protocol.stopRecoveryLoop();
           this.#hostStopSettledOperationId = operationId;
           return;
         }
         if (Date.now() >= deadline) {
-          throw new Error("Host stop could not settle local accepted work before its deadline");
+          const pendingOwner = this.#manager.hasActiveWork()
+            ? "conversation"
+            : closure.pendingFinals !== 0
+              ? "final"
+              : closure.pendingAssignments !== 0
+                ? "assignment"
+                : closure.pendingAdmittedRuns !== 0 || closure.recoveryBacklog !== 0
+                  ? "intent"
+                  : "lease";
+          throw new HostStopAcceptedWorkPendingError(
+            pendingOwner,
+            "Host stop could not settle local accepted work before its deadline",
+          );
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -1476,14 +1511,19 @@ export class LocalConversationOwnerAssembly {
   ): Promise<void> {
     const expected = this.hostStopAcceptedWorkItems(operationId, owner);
     assertExactAcceptedWork(expected, frozen, `host-stop ${owner} frozen input`);
-    const current = (await this.preflightForDeviceRemoval(operationId)).ownerItems
-      .filter((item) => item.owner === owner)
-      .map(({ id, revision }) => ({ id, revision }));
+    const current = await this.#protocol.whileRecoveryPaused(async () =>
+      (await this.preflightForDeviceRemoval(operationId)).ownerItems
+        .filter((item) => item.owner === owner)
+        .map(({ id, revision }) => ({ id, revision })),
+    );
     assertCurrentAcceptedWorkBelongsToFrozen(current, frozen, `host-stop ${owner}`);
     if (owner === "conversation") {
       assertExactAcceptedWork(current, frozen, "host-stop conversation read-back");
       if (this.#manager.hasActiveWork()) {
-        throw new Error("Host stop still has active conversation work");
+        throw new HostStopAcceptedWorkPendingError(
+          "conversation",
+          "Host stop still has active conversation work",
+        );
       }
       return;
     }
@@ -1492,8 +1532,85 @@ export class LocalConversationOwnerAssembly {
       (owner === "intent" || owner === "final" || owner === "assignment")
     ) return;
     if (current.length !== 0) {
-      throw new Error(`Host stop ${owner} accepted work is not settled`);
+      throw new HostStopAcceptedWorkPendingError(
+        owner,
+        `Host stop ${owner} accepted work is not settled`,
+      );
     }
+  }
+
+  async ownsConversation(conversationId: string): Promise<boolean> {
+    if (!isLocalConversationId(conversationId)) return false;
+    if (!(await this.#protocol.sessionExists(conversationId))) return false;
+    const authority = await this.#currentAuthority(conversationId);
+    return (
+      authority.state === "current" ||
+      authority.state === "frozen" ||
+      authority.state === "importing"
+    );
+  }
+
+  async ownsDeferredIntent(intentId: string): Promise<boolean> {
+    const conversationId = await this.#intents.locateConversation(intentId);
+    if (!conversationId) return false;
+    return this.ownsConversation(conversationId);
+  }
+
+  async assignmentLifecycleProvenance(
+    assignmentId: string,
+    candidateConversationIds?: readonly string[],
+  ): Promise<Awaited<ReturnType<ConversationProtocolRuntime["assignmentLifecycleProvenance"]>>> {
+    const checked = new Set<string>();
+    const candidates = candidateConversationIds ?? (await this.#protocol.listSessions());
+    for (const conversationId of candidates) {
+      checked.add(conversationId);
+      if (!(await this.ownsConversation(conversationId))) continue;
+      const provenance = await this.#protocol.assignmentLifecycleProvenance(
+        conversationId,
+        assignmentId,
+      );
+      if (provenance) return provenance;
+    }
+    if (candidateConversationIds) {
+      for (const conversationId of await this.#protocol.listSessions()) {
+        if (checked.has(conversationId)) continue;
+        if (!(await this.ownsConversation(conversationId))) continue;
+        const provenance = await this.#protocol.assignmentLifecycleProvenance(
+          conversationId,
+          assignmentId,
+        );
+        if (provenance) return provenance;
+      }
+    }
+    return undefined;
+  }
+
+  async ownsReservation(
+    reservationId: string,
+    candidateConversationIds?: readonly string[],
+  ): Promise<boolean> {
+    const scopedConversationId = await this.#protocol.reservationConversationScope(reservationId);
+    if (scopedConversationId !== undefined) {
+      return (
+        (await this.ownsConversation(scopedConversationId)) &&
+        (await this.#protocol.ownsReservation(scopedConversationId, reservationId))
+      );
+    }
+    const checked = new Set<string>();
+    const candidates = candidateConversationIds ?? (await this.#protocol.listSessions());
+    for (const conversationId of candidates) {
+      checked.add(conversationId);
+      if (!(await this.ownsConversation(conversationId))) continue;
+      if (await this.#protocol.ownsReservation(conversationId, reservationId)) return true;
+    }
+    if (candidateConversationIds) {
+      for (const conversationId of await this.#protocol.listSessions()) {
+        if (checked.has(conversationId)) continue;
+        if (!(await this.ownsConversation(conversationId))) continue;
+        if (await this.#protocol.ownsReservation(conversationId, reservationId)) return true;
+      }
+    }
+    return false;
   }
 
   async checkpointAcceptedWork(): Promise<string> {
@@ -1550,6 +1667,9 @@ export class LocalConversationOwnerAssembly {
       }
       for (const item of closure.items.assignments) {
         ownerItems.push(Object.freeze({ owner: "assignment", ...item }));
+      }
+      for (const item of closure.items.admittedRuns) {
+        ownerItems.push(Object.freeze({ owner: "intent", ...item }));
       }
       for (const item of closure.items.recovery) {
         ownerItems.push(Object.freeze({ owner: "intent", ...item }));
@@ -1704,6 +1824,7 @@ export class LocalConversationOwnerAssembly {
         }
         const closure = await this.#protocol.pendingClosureWork(conversationId);
         if (
+          closure.pendingAdmittedRuns !== 0 ||
           closure.pendingFinals !== 0 ||
           closure.pendingAssignments !== 0 ||
           closure.recoveryBacklog !== 0 ||

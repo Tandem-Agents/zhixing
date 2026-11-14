@@ -318,9 +318,13 @@ describe("CoreHostConnection", () => {
     const got = await conn.getClient();
 
     expect(got).toBe(asClient(c2));
-    expect(c1.request).toHaveBeenCalledWith("server.shutdown", serverShutdownRequest(endpoint.pid, {
-      reason: "client-version-change",
-    }));
+    expect(c1.request).toHaveBeenCalledWith(
+      "server.shutdown",
+      serverShutdownRequest(endpoint.pid, {
+        reason: "client-version-change",
+      }),
+      expect.objectContaining({ deadline: expect.any(Number) }),
+    );
     expect(c1.close).toHaveBeenCalled();
     expect(spawn).toHaveBeenCalledOnce();
     expect(sleep).toHaveBeenCalledWith(100);
@@ -598,9 +602,13 @@ describe("CoreHostConnection", () => {
         });
       });
 
-      expect(c1.request).toHaveBeenCalledWith("server.shutdown", serverShutdownRequest(endpoint.pid, {
-        reason: "client-version-change",
-      }));
+      expect(c1.request).toHaveBeenCalledWith(
+        "server.shutdown",
+        serverShutdownRequest(endpoint.pid, {
+          reason: "client-version-change",
+        }),
+        expect.objectContaining({ deadline: expect.any(Number) }),
+      );
       expect(c1.close).toHaveBeenCalled();
       expect(spawn).toHaveBeenCalledOnce();
       expect(notices).toContainEqual({

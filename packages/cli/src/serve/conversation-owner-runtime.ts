@@ -55,6 +55,7 @@ export interface ConversationResourceRecoveryPort {
     readonly ownerEpoch: number;
     readonly revision: string;
   }[]>;
+  reservationConversationScope?(reservationId: string): Promise<string | undefined>;
 }
 
 interface ConversationResourceReclaimer {
@@ -64,6 +65,7 @@ interface ConversationResourceReclaimer {
 interface ConversationResourceReservationReader {
   /** 仍为 active 的预留，经活跃目录定位；读量只随当前占用，不随保留期内的历史。 */
   activeReservations(): Promise<readonly ResourceReservationProjection[]>;
+  reservationConversationScope?(reservationId: string): Promise<string | undefined>;
 }
 
 /** Correctness adapter for owner recovery; consumers never receive a governor snapshot. */
@@ -99,6 +101,8 @@ export function createConversationResourceRecoveryPort(options: {
           });
         });
     },
+    reservationConversationScope: async (reservationId: string) =>
+      options.acceptedWork?.reservationConversationScope?.(reservationId),
   });
 }
 

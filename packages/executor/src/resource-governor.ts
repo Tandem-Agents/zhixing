@@ -333,6 +333,22 @@ export class ExecutorResourceGovernor
       .filter(reservation => reservation.state === "active")), { caller: "executor-governor.active-reservations" });
   }
 
+  /**
+   * Reads the conversationId bound to a reservation (active, released, or reclaimed)
+   * from the durable governor projection without relying on currently active maps.
+   */
+  async reservationConversationScope(reservationId: string): Promise<string | undefined> {
+    requireIdentifier(reservationId, "Reservation id");
+    return this.coordinate(
+      () =>
+        this.#session!.resolve((state) => {
+          const scope = state.reservations.get(reservationId)?.lease.scopeBinding;
+          return scope?.kind === "conversation" ? scope.conversationId : undefined;
+        }),
+      { caller: "executor-governor.reservation-conversation-scope" },
+    );
+  }
+
   /** Called in coordinate after the ledger proves a durable never-started fence. */
   prepareSupersededReceiptRelease(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[] {
     const validated = this.#validateAcceptedRoot(lease);

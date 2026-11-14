@@ -11,6 +11,7 @@ import type { CoreHostRpcLink } from "../core-host-connection.js";
 export interface RecordedRequest {
   method: string;
   params: unknown;
+  options?: unknown;
 }
 
 export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
@@ -21,8 +22,8 @@ export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
   const connected = opts.connected ?? true;
 
   const client = {
-    request: async (method: string, params?: unknown) => {
-      requests.push({ method, params });
+    request: async (method: string, params?: unknown, options?: unknown) => {
+      requests.push(options === undefined ? { method, params } : { method, params, options });
       return responder(method, params);
     },
   } as unknown as RpcClient;

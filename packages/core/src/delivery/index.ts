@@ -47,11 +47,13 @@ export {
 export type { DeliveryNoticePosition } from "./authority-index.js";
 export { validateOutboundContentDto } from "./content-schema.js";
 export {
+  admittedConversationRunLifecycleSource,
   assertDeliveryItemId,
   DELIVERY_ITEM_ID_PREFIX,
   isDeliveryItemId,
   MAX_DELIVERY_DIAGNOSTIC_TEXT_LENGTH,
   MAX_DELIVERY_IDENTIFIER_LENGTH,
+  parseAdmittedConversationRunSource,
   projectDeliveryDisplayText,
 } from "./validation.js";
 export type {

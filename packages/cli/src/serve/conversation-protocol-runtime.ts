@@ -109,6 +109,7 @@ import {
   type DurableConversationTurnInput,
 } from "@zhixing-ai/owner-kernel/run-turn";
 import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
+import { admittedConversationRunLifecycleSource } from "@zhixing-ai/core/delivery";
 import type {
   AuthorityRuntimeStack,
 } from "../setup-delivery.js";
@@ -2969,17 +2970,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    * 在恢复循环停止后读取;两者皆零才可宣称 durable 义务已收束。
    */
   async pendingClosureWork(conversationId?: string): Promise<{
+    readonly pendingAdmittedRuns: number;
     readonly pendingFinals: number;
     readonly pendingAssignments: number;
     readonly recoveryBacklog: number;
     readonly activeLocalLeases: number;
     readonly items: {
+      readonly admittedRuns: readonly { readonly id: string; readonly revision: string }[];
       readonly finals: readonly { readonly id: string; readonly revision: string }[];
       readonly assignments: readonly { readonly id: string; readonly revision: string }[];
       readonly recovery: readonly { readonly id: string; readonly revision: string }[];
       readonly leases: readonly { readonly id: string; readonly revision: string }[];
     };
   }> {
+    const admittedRuns: Array<{ id: string; revision: string }> = [];
     const finals: Array<{ id: string; revision: string }> = [];
     const assignments: Array<{ id: string; revision: string }> = [];
     const conversations = conversationId === undefined
@@ -2988,6 +2992,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     for (const currentConversationId of conversations) {
       await this.#adopt(currentConversationId);
       const journal = this.#journal(currentConversationId);
+      for (const run of await journal.unsettledAdmittedRuns()) {
+        const source = admittedConversationRunLifecycleSource({
+          conversationId: currentConversationId,
+          runId: run.runId,
+          queuedPosition: run.queuedPosition,
+        });
+        admittedRuns.push({
+          id: source.id,
+          revision: source.revision,
+        });
+      }
       for (const final of await journal.pendingFinalFrames()) {
         finals.push({
           id: `${final.conversationId}:${final.runId}`,
@@ -3036,17 +3051,58 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const sortItems = <T extends { readonly id: string }>(items: T[]) =>
       Object.freeze(items.sort((left, right) => left.id.localeCompare(right.id, "en-US")));
     return {
+      pendingAdmittedRuns: admittedRuns.length,
       pendingFinals: finals.length,
       pendingAssignments: assignments.length,
       recoveryBacklog: recovery.length,
       activeLocalLeases: leases.length,
       items: Object.freeze({
+        admittedRuns: sortItems(admittedRuns),
         finals: sortItems(finals),
         assignments: sortItems(assignments),
         recovery: sortItems(recovery),
         leases: sortItems(leases),
       }),
     };
+  }
+
+  async assignmentLifecycleProvenance(
+    conversationId: string,
+    assignmentId: string,
+  ): Promise<{
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly queuedPosition: number;
+    readonly assignmentId: string;
+    readonly assignmentItemId: string;
+    readonly executorId: string;
+    readonly dispatchDigest: string;
+    readonly committed: boolean;
+  } | undefined> {
+    await this.#adopt(conversationId);
+    if (!this.#acceptsConversationId(conversationId)) return undefined;
+    if (this.#unavailableTransfers.has(conversationId)) return undefined;
+    const provenance = await this.#journalForQuery(conversationId).assignmentLifecycleProvenance(
+      assignmentId,
+    );
+    if (!provenance) return undefined;
+    return Object.freeze({
+      ...provenance,
+      assignmentItemId: `${
+        provenance.executorId === this.#authority.executorId ? "local" : "relay"
+      }:${assignmentId}`,
+    });
+  }
+
+  async ownsReservation(conversationId: string, reservationId: string): Promise<boolean> {
+    await this.#adopt(conversationId);
+    if (!this.#acceptsConversationId(conversationId)) return false;
+    if (this.#unavailableTransfers.has(conversationId)) return false;
+    return this.#journalForQuery(conversationId).ownsReservation(reservationId);
+  }
+
+  async reservationConversationScope(reservationId: string): Promise<string | undefined> {
+    return this.#authority.resourceRecovery.reservationConversationScope?.(reservationId);
   }
 
   sessionAuthorityState(conversationId: string) {

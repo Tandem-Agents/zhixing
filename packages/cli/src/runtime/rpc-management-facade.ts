@@ -368,7 +368,10 @@ export class RpcManagementFacade {
         ? { reason: request }
         : request;
     const target = await client.request<ServerInfoResult>("server.info");
-    await client.request("server.shutdown", serverShutdownRequest(target, input));
+    const params = serverShutdownRequest(target, input);
+    await client.request("server.shutdown", params, {
+      deadline: Date.now() + (params.timeoutMs ?? 30_000) + 5_000,
+    });
   }
 
   // ─── llm(可信面轻推理通道) ───

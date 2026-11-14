@@ -50,6 +50,7 @@ export interface ConversationDeliveryCommitInput {
   readonly commitRevision: number;
   readonly conversationLifecycleSource: DeliveryLifecycleSourceRef;
   readonly assignmentLifecycleSource: DeliveryLifecycleSourceRef;
+  readonly stagedDeliveryLifecycleSource?: DeliveryLifecycleSourceRef;
   readonly ingress: IngressContext;
   /** Local replay needs metadata only; channel final delivery requires body. */
   readonly runRecord: Omit<TranscriptRunRecord, 'messages'> & { readonly messages?: TranscriptRunRecord['messages'] };
@@ -608,7 +609,9 @@ function conversationCommitInputs(
         source: { kind: "agent", conversationId: input.conversationId },
         createdAt: input.at,
       },
-      lifecycleSources: [input.assignmentLifecycleSource],
+      lifecycleSources: [
+        input.stagedDeliveryLifecycleSource ?? input.assignmentLifecycleSource,
+      ],
     });
   }
   return result;

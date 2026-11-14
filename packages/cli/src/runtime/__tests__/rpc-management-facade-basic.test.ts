@@ -110,4 +110,61 @@ describe("RpcManagementFacade · 基础宿主信息面", () => {
     await expect(new RpcManagementFacade(fake.link).dutyMigrationTargets())
       .rejects.toThrow("fields are invalid");
   });
+
+  it("serverShutdown 为 server.shutdown 传入绝对 deadline = Date.now() + timeoutMs + 5_000 并保持同请求身份", async () => {
+    const fake = makeFakeHostLink();
+    const info = {
+      version: "0.1.0",
+      protocol: 1,
+      pid: 321,
+      startedAt: "2026-11-14T00:00:00.000Z",
+      uptimeSec: 12,
+      activeConversations: 1,
+      busyConversations: 1,
+      connectionCount: 1,
+      memoryRssBytes: 4096,
+    };
+    fake.setResponder((method) => {
+      if (method === "server.info") return info;
+      if (method === "server.shutdown") return { ok: true };
+      throw new Error(`unexpected method: ${method}`);
+    });
+    const facade = new RpcManagementFacade(fake.link);
+    const before = Date.now();
+    await expect(
+      facade.serverShutdown({
+        reason: "user-stop",
+        strategy: "drain",
+        timeoutMs: 30_000,
+      }),
+    ).resolves.toBeUndefined();
+    const after = Date.now();
+    await expect(
+      facade.serverShutdown({
+        reason: "user-stop",
+        strategy: "drain",
+        timeoutMs: 30_000,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(fake.requests).toHaveLength(4);
+    expect(fake.requests[0]).toEqual({ method: "server.info", params: undefined });
+    const firstShutdown = fake.requests[1]!;
+    const secondShutdown = fake.requests[3]!;
+    expect(firstShutdown).toMatchObject({
+      method: "server.shutdown",
+      params: {
+        reason: "user-stop",
+        strategy: "drain",
+        timeoutMs: 30_000,
+      },
+    });
+    const firstParams = firstShutdown.params as { requestId?: string };
+    const secondParams = secondShutdown.params as { requestId?: string };
+    expect(firstParams.requestId).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(secondParams.requestId).toBe(firstParams.requestId);
+    const options = firstShutdown.options as { deadline?: number } | undefined;
+    expect(options?.deadline).toBeGreaterThanOrEqual(before + 35_000);
+    expect(options?.deadline).toBeLessThanOrEqual(after + 35_000);
+  });
 });

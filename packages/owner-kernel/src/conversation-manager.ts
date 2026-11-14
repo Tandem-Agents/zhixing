@@ -446,6 +446,10 @@ export class ConversationManager implements ConversationCommitProjection {
    * 在等待 —— `setBusy(false)` 路径不会误触发。
    */
   private drainResolver: (() => void) | null = null;
+  private externalAdmissionOperationId?: string;
+  private activeExternalAdmissions = 0;
+  private externalAdmissionDrain?: Promise<void>;
+  private resolveExternalAdmissionDrain?: () => void;
 
   constructor(
     factory: RuntimeFactory,
@@ -746,6 +750,60 @@ export class ConversationManager implements ConversationCommitProjection {
    * queued/full/not-found 均已在 owner 内形成确定状态,不会在 RPC 层留下
    * 可被 delete/clear 插入的半开放窗口。
    */
+  /**
+   * Closes external turn/maintenance admission for one durable lifecycle
+   * operation and waits for any already-entered external admission to finish
+   * durable pre-admission and queue registration before returning. Already
+   * durably admitted queued runs (`capacityReserved: true`) remain schedulable
+   * during `drain`.
+   */
+  async closeExternalAdmission(operationId: string): Promise<void> {
+    if (!operationId) {
+      throw new Error("ConversationManager.closeExternalAdmission requires an operationId");
+    }
+    if (
+      this.externalAdmissionOperationId !== undefined &&
+      this.externalAdmissionOperationId !== operationId
+    ) {
+      throw new Error("Another lifecycle operation already owns conversation external admission");
+    }
+    this.externalAdmissionOperationId = operationId;
+    if (this.externalAdmissionDrain) {
+      await this.externalAdmissionDrain;
+    }
+  }
+
+  releaseExternalAdmission(operationId: string): void {
+    if (this.externalAdmissionOperationId === undefined) return;
+    if (this.externalAdmissionOperationId !== operationId) {
+      throw new Error("Lifecycle release does not own conversation external admission");
+    }
+    this.externalAdmissionOperationId = undefined;
+  }
+
+  private beginExternalAdmission(): () => void {
+    if (this.externalAdmissionOperationId !== undefined) {
+      throw new WorksceneBusyError("This host is stopping; conversation admission is closed");
+    }
+    if (this.activeExternalAdmissions === 0) {
+      this.externalAdmissionDrain = new Promise<void>((resolve) => {
+        this.resolveExternalAdmissionDrain = resolve;
+      });
+    }
+    this.activeExternalAdmissions += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeExternalAdmissions -= 1;
+      if (this.activeExternalAdmissions === 0) {
+        this.resolveExternalAdmissionDrain?.();
+        this.resolveExternalAdmissionDrain = undefined;
+        this.externalAdmissionDrain = undefined;
+      }
+    };
+  }
+
   async admitTurn(input: {
     conversationId?: string;
     createConversation?: () => Promise<string>;
@@ -753,6 +811,26 @@ export class ConversationManager implements ConversationCommitProjection {
     connectionId?: string;
     source?: TurnSource;
     /** Work already counted by the durable journal; requeue must not consume admission twice. */
+    capacityReserved?: boolean;
+    beforeEnqueue?: (managed: ManagedSession) => Promise<TurnPreAdmissionResult>;
+    makeTask: (managed: ManagedSession) => PendingTask;
+  }): Promise<TurnAdmissionResult> {
+    const releaseExternal = input.capacityReserved
+      ? undefined
+      : this.beginExternalAdmission();
+    try {
+      return await this.admitTurnInternal(input);
+    } finally {
+      releaseExternal?.();
+    }
+  }
+
+  private async admitTurnInternal(input: {
+    conversationId?: string;
+    createConversation?: () => Promise<string>;
+    exists?: ConversationExists;
+    connectionId?: string;
+    source?: TurnSource;
     capacityReserved?: boolean;
     beforeEnqueue?: (managed: ManagedSession) => Promise<TurnPreAdmissionResult>;
     makeTask: (managed: ManagedSession) => PendingTask;
@@ -1886,20 +1964,25 @@ export class ConversationManager implements ConversationCommitProjection {
     conversationId: string,
     fn: () => Promise<T>,
   ): Promise<{ status: "done"; value: T } | { status: "busy" }> {
-    const acquired = this.acquireExclusive(conversationId);
-    if (acquired === "busy") return { status: "busy" };
-    if (acquired !== "not-active") {
-      return this.runActiveMaintenance(acquired, fn);
-    }
-
-    return this.withIdLock(conversationId, async () => {
-      const acq2 = this.acquireExclusive(conversationId);
-      if (acq2 === "busy") return { status: "busy" };
-      if (acq2 !== "not-active") {
-        return this.runActiveMaintenance(acq2, fn);
+    const releaseExternal = this.beginExternalAdmission();
+    try {
+      const acquired = this.acquireExclusive(conversationId);
+      if (acquired === "busy") return { status: "busy" };
+      if (acquired !== "not-active") {
+        return await this.runActiveMaintenance(acquired, fn);
       }
-      return { status: "done", value: await fn() };
-    });
+
+      return await this.withIdLock(conversationId, async () => {
+        const acq2 = this.acquireExclusive(conversationId);
+        if (acq2 === "busy") return { status: "busy" };
+        if (acq2 !== "not-active") {
+          return this.runActiveMaintenance(acq2, fn);
+        }
+        return { status: "done", value: await fn() };
+      });
+    } finally {
+      releaseExternal();
+    }
   }
 
   async runMaintenanceExisting<T>(
@@ -1911,21 +1994,26 @@ export class ConversationManager implements ConversationCommitProjection {
     | { status: "busy" }
     | { status: "not-found" }
   > {
-    const acquired = this.acquireExclusive(conversationId);
-    if (acquired === "busy") return { status: "busy" };
-    if (acquired !== "not-active") {
-      return this.runActiveMaintenance(acquired, fn);
-    }
-
-    return this.withIdLock(conversationId, async () => {
-      const acq2 = this.acquireExclusive(conversationId);
-      if (acq2 === "busy") return { status: "busy" };
-      if (acq2 !== "not-active") {
-        return this.runActiveMaintenance(acq2, fn);
+    const releaseExternal = this.beginExternalAdmission();
+    try {
+      const acquired = this.acquireExclusive(conversationId);
+      if (acquired === "busy") return { status: "busy" };
+      if (acquired !== "not-active") {
+        return await this.runActiveMaintenance(acquired, fn);
       }
-      if (exists && !(await exists())) return { status: "not-found" };
-      return { status: "done", value: await fn() };
-    });
+
+      return await this.withIdLock(conversationId, async () => {
+        const acq2 = this.acquireExclusive(conversationId);
+        if (acq2 === "busy") return { status: "busy" };
+        if (acq2 !== "not-active") {
+          return this.runActiveMaintenance(acq2, fn);
+        }
+        if (exists && !(await exists())) return { status: "not-found" };
+        return { status: "done", value: await fn() };
+      });
+    } finally {
+      releaseExternal();
+    }
   }
 
   private async runActiveMaintenance<T>(

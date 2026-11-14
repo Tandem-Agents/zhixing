@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createTempDir } from "@zhixing-ai/test-utils";
 import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog, registerDeviceLifecycleProjection } from "@zhixing-ai/core/authority";
+import { admittedConversationRunLifecycleSource } from "@zhixing-ai/core/delivery";
 import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
   HostStopAcceptedWorkPendingError,
   HostStopCoordinator,
   hostStopAlreadySettled,
+  hostStopDeliveryLifecycleSources,
   hostStopPendingWorkReason,
   type HostStopAcceptedWorkPorts,
   type HostStopRuntime,
@@ -30,6 +32,77 @@ describe("host stop pending-work reason", () => {
 
   it("leaves other stop failures to the generic wording", () => {
     expect(hostStopPendingWorkReason(new Error("disk full"))).toBeUndefined();
+  });
+
+  it("maps admitted-run intent items to conversation delivery permits without granting queued recovery intents", () => {
+    const admittedSource = admittedConversationRunLifecycleSource({
+      conversationId: "chat-20261114-admitted",
+      runId: "run:queued-1",
+      queuedPosition: 2,
+    });
+    const sources = hostStopDeliveryLifecycleSources({
+      v: 1,
+      operationId: "op-1",
+      strategy: "drain",
+      capturedAt: "2026-11-14T00:00:00.000Z",
+      owners: {
+        conversation: [{ id: "chat-20261114-admitted", revision: "active" }],
+        intent: [
+          { id: admittedSource.id, revision: admittedSource.revision },
+          { id: "queued:chat-20261114-admitted", revision: "sha256:backlog" },
+        ],
+        final: [{ id: "chat-20261114-admitted:run:done-0", revision: "1" }],
+        assignment: [{ id: "assign-1", revision: "running" }],
+        remote: [{ id: "local:job-assign-1", revision: "digest-job-1" }],
+        channel: [],
+        scheduler: [{ id: "sched-1", revision: "1" }],
+        delivery: [],
+        lease: [],
+        permit: [],
+      },
+    });
+    expect(sources).toEqual([
+      { owner: "assignment", id: "assign-1", revision: "running" },
+      { owner: "assignment", id: "local:job-assign-1", revision: "digest-job-1" },
+      admittedSource,
+      {
+        owner: "conversation",
+        id: "chat-20261114-admitted",
+        revision: protocolDigest("ConversationDeliveryLifecycleSource", 1, {
+          conversationId: "chat-20261114-admitted",
+        }),
+      },
+      { owner: "conversation", id: "chat-20261114-admitted:run:done-0", revision: "1" },
+      { owner: "scheduler", id: "sched-1", revision: "1" },
+    ]);
+    expect(sources.some((s) => s.id.startsWith("queued:"))).toBe(false);
+  });
+
+  it("passes a single shared remaining deadline budget across owners during settlement", async () => {
+    const fixture = await createFixture();
+    const observedBudgets: Array<{ owner: string; timeoutMs: number }> = [];
+    const origConvSettle = fixture.acceptedWork.conversation.settle;
+    fixture.acceptedWork.conversation.settle = async (input) => {
+      observedBudgets.push({ owner: "conversation", timeoutMs: input.timeoutMs });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return origConvSettle(input);
+    };
+    const origDeliverySettle = fixture.acceptedWork.delivery.settle;
+    fixture.acceptedWork.delivery.settle = async (input) => {
+      observedBudgets.push({ owner: "delivery", timeoutMs: input.timeoutMs });
+      return origDeliverySettle(input);
+    };
+
+    const result = await fixture.coordinator.prepare({
+      requestId: "request-shared-budget",
+      reason: "test",
+      strategy: "drain",
+      timeoutMs: 500,
+    });
+    expect(result.phase).toBe("ready-to-stop");
+    expect(observedBudgets).toHaveLength(2);
+    expect(observedBudgets[0]!.timeoutMs).toBeLessThanOrEqual(500);
+    expect(observedBudgets[1]!.timeoutMs).toBeLessThanOrEqual(observedBudgets[0]!.timeoutMs - 100);
   });
 });
 
