@@ -1513,18 +1513,32 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async projectSession(
     input: DurableConversationSessionProjectionInput,
   ): Promise<void> {
-    await this.#adopt(input.conversationId);
-    const journal = this.#journal(input.conversationId);
-    const fact = await journal.lifecycleRequest(input.requestId);
-    if (
-      !fact ||
-      fact.conversationId !== input.conversationId ||
-      fact.mutation !== input.mutation ||
-      fact.domainRevision !== input.domainRevision
-    ) {
-      throw new Error("Lifecycle projection does not bind its durable authority fact");
+    let verified = false;
+    try {
+      await retryControlAdmission(
+        async () => {
+          await this.#adopt(input.conversationId);
+          const journal = this.#journal(input.conversationId);
+          if (!verified) {
+            const fact = await journal.lifecycleRequest(input.requestId);
+            if (
+              !fact ||
+              fact.conversationId !== input.conversationId ||
+              fact.mutation !== input.mutation ||
+              fact.domainRevision !== input.domainRevision
+            ) {
+              throw new Error("Lifecycle projection does not bind its durable authority fact");
+            }
+            verified = true;
+          }
+          await this.#resumeLifecycleProjections(input.conversationId, journal);
+        },
+        () => this.#prepareConversationBasis(input.conversationId),
+      );
+    } catch (error) {
+      if (verified) this.#markRecovery(input.conversationId);
+      throw error;
     }
-    await this.#resumeLifecycleProjections(input.conversationId, journal);
   }
 
   async *run(input: DurableConversationTurnInput): AsyncGenerator<AgentYield, RunResult> {
