@@ -2,8 +2,8 @@ import type { ArtifactStore, AuthorityCommitLog } from '@zhixing-ai/core/authori
 import type { ArtifactRef, ConversationRunState, JsonValue, TranscriptRunRecord, UserTurnInput } from '@zhixing-ai/core/contracts';
 import { canonicalize, interactionMirrorBatchDigest, validateConversationEnvelope, validateConversationSealedBundle,
   validateNonEmptyUserTurnInput, validateTranscriptRunRecord, verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
-import { emptyConversationRunProjection, type RunProjection, type AdmittedProjection, type ConversationAbortTicketAuthorizer,
-  type ConversationRunJournalRecord } from './conversation-assignment.js';
+import { emptyConversationRunProjection, type RunProjection, type AdmittedProjection, type ConversationAbortTicketAuthorizer } from './conversation-journal/contracts.js';
+import type { ConversationRunJournalRecord } from './conversation-run-contracts.js';
 import { readConversationRunRoot, type ConversationInputLocation } from './conversation-run-state-extras.js';
 import { CONVERSATION_RUN_STATE_PROJECTION_ID, registerConversationRunProjection, readConversationGuardView,
   conversationStateBase as base, conversationStateHash as hash, readConversationStateField as field, scanConversationState as scan,

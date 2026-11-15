@@ -14,8 +14,8 @@ import {
   jobSubmissionGuardView,
   preloadFailureSummaryPaths,
   preloadJobScope,
-  type JobReduction,
-} from "./job-assignment.js";
+} from "./job-journal/contracts.js";
+import type { JobReduction } from "./job-assignment.js";
 import {
   JobStateBinding,
   jobStateSubject,

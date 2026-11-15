@@ -3,9 +3,10 @@ import { createDurableProjectionOverlay, readDurableProjectionKeys } from '@zhix
 import type { JsonValue, LogicalRecord, CommitEnvelope, ReservableResourceLease, UsageReport } from '@zhixing-ai/core/contracts';
 import { canonicalize, validateGovernorRecord, requiresFormalResourceCoordination, dataPlaneTicketDigest,
   type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
-import { emptySubmissionGuardProjection, reduceConversationSubmissionGuard, reduceConversationRunState,
+import { emptySubmissionGuardProjection,
   type RunProjection, type ConversationRunReductionContext, type SubmissionGuardProjection, type ConversationCommitLogRecord, type ConversationAbortTicketAuthorizer,
-  type ConversationSubmissionGuardContext } from './conversation-assignment.js';
+  type ConversationSubmissionGuardContext } from './conversation-journal/contracts.js';
+import { reduceConversationSubmissionGuard, reduceConversationRunState } from './conversation-assignment.js';
 import { assertAssignmentActivationEvidence, assertAssignmentTerminalEvidence, assertAssignmentUsageEvidence } from './conversation-resource-witness.js';
 import { conversationDecisionScope, readConversationRunViewMetadata, materializeConversationRunView, materializedDispatchEnvelope } from './conversation-run-state-view.js';
 import { dataPlaneTicketSyncBoundary } from './data-plane-ticket-lifecycle.js';

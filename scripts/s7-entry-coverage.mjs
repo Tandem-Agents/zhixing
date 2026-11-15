@@ -2378,13 +2378,14 @@ export function inspectChannelRuntimeBoundary(records) {
   const lossless = byPath.get("packages/cli/src/serve/lossless-data-plane-runtime.ts");
   const coordinator = byPath.get("packages/cli/src/serve/channel-interaction-coordinator.ts");
   const protocol = byPath.get("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const protocolContracts = byPath.get("packages/cli/src/serve/conversation-protocol/contracts.ts");
   const localOwner = byPath.get("packages/cli/src/serve/local-conversation-owner.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
     !channels || !access || !assemblyContext || !composition ||
     !binding || !command || !conversationApplication ||
     !admission || !runControl || !context || !server || !inbound ||
-    !confirmation || !delivery || !lossless || !coordinator || !protocol ||
+    !confirmation || !delivery || !lossless || !coordinator || !protocol || !protocolContracts ||
     !localOwner || !setupDelivery
   ) {
     return ["channel runtime boundary production sources are missing"];
@@ -2422,7 +2423,7 @@ export function inspectChannelRuntimeBoundary(records) {
   const compositionOptions = composition.match(
     /export interface LosslessDataPlaneCompositionOptions\s*\{([\s\S]*?)\n\}/u,
   )?.[1] ?? "";
-  const protocolTopology = protocol.match(
+  const protocolTopology = protocolContracts.match(
     /export type ConversationLosslessDataPlaneTopology\s*=([\s\S]*?);\n\n/u,
   )?.[1] ?? "";
   const conversationAssembly = access.slice(
@@ -7946,6 +7947,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const conversationProtocol = required(
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
   );
+  const conversationProtocolContracts = required(
+    "packages/cli/src/serve/conversation-protocol/contracts.ts",
+  );
   const advancementComposition = required(
     "packages/cli/src/serve/advancement-controller.ts",
   );
@@ -8289,20 +8293,26 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ) ||
     !conversationProtocol.includes("if (!options.recoverAuxiliary)") ||
     !conversationProtocol.includes("this.#recoverAuxiliary = options.recoverAuxiliary;") ||
-    !conversationProtocol.includes("createConversationAuxiliaryRecoveryAssemblyHandle()") ||
-    !conversationProtocol.includes("createConversationCommittedTurnListenerAssemblyHandle()") ||
-    !conversationProtocol.includes("Conversation committed-turn listener is not assembled") ||
-    !conversationProtocol.includes("Conversation committed-turn listener is already assembled") ||
+    !conversationProtocolContracts.includes("createConversationAuxiliaryRecoveryAssemblyHandle()") ||
+    !conversationProtocolContracts.includes("createConversationCommittedTurnListenerAssemblyHandle()") ||
+    !conversationProtocolContracts.includes("Conversation committed-turn listener is not assembled") ||
+    !conversationProtocolContracts.includes("Conversation committed-turn listener is already assembled") ||
     !conversationProtocol.includes("await this.#recoverAuxiliary(conversationId);") ||
     !conversationProtocol.includes("readonly manager: () => ConversationManager;") ||
     !conversationProtocol.includes("readonly #manager: () => ConversationManager;") ||
-    !conversationProtocol.includes("createConversationManagerAssemblyHandle()") ||
+    !conversationProtocolContracts.includes("createConversationManagerAssemblyHandle()") ||
     !conversationProtocol.includes("return this.#manager();") ||
     /readonly manager\?:|bindManager\(|assertManagerBound\(|#manager:\s*\(\(\) => ConversationManager\) \| undefined/u.test(
       conversationProtocol,
     ) ||
+    /readonly manager\?:|bindManager\(|assertManagerBound\(/u.test(
+      conversationProtocolContracts,
+    ) ||
     /readonly recoverAuxiliary\?:|bindAuxiliaryRecovery\(|#recoverAuxiliary:\s*\(\(conversationId: string\) => Promise<void>\) \| undefined|#recoverAuxiliary\?\./u.test(
       conversationProtocol,
+    ) ||
+    /readonly recoverAuxiliary\?:|bindAuxiliaryRecovery\(/u.test(
+      conversationProtocolContracts,
     ) ||
     ownerIndex.includes("dispatchAdvancementReviewResult") ||
     ownerIndex.includes("createAdvancementAcceptedTurnReviewMechanism") ||
@@ -14301,6 +14311,7 @@ export function inspectAssignmentDataPlaneBoundary(records) {
   const composition = required("packages/cli/src/serve/lossless-data-plane-composition.ts");
   const coordinator = required("packages/cli/src/serve/channel-interaction-coordinator.ts");
   const protocol = required("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const protocolContracts = required("packages/cli/src/serve/conversation-protocol/contracts.ts");
   const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const access = required("packages/cli/src/serve/access-surfaces.ts");
   const executorRole = required("packages/cli/src/serve/executor-role-runtime.ts");
@@ -14342,7 +14353,8 @@ export function inspectAssignmentDataPlaneBoundary(records) {
   if (
     !coordinator.includes("export interface ChannelInteractionDataPlanePort") ||
     coordinator.includes("LosslessDataPlaneRuntime") ||
-    !protocol.includes("export interface ConversationLosslessDataPlanePort") ||
+    !protocolContracts.includes("export interface ConversationLosslessDataPlanePort") ||
+    protocolContracts.includes("LosslessDataPlaneRuntime") ||
     protocol.includes("LosslessDataPlaneRuntime")
   ) {
     failures.push("assignment data-plane upper consumers depend on a concrete runtime");

@@ -3,8 +3,9 @@ import type { ArtifactStore, AuthorityCommitLog, DurableLogCheckpoint, DurablePr
 import { PersistentSortedMap, createDurableProjectionOverlay } from '@zhixing-ai/core/authority';
 import type { CommitEnvelope, JsonValue, LogicalRecord } from '@zhixing-ai/core/contracts';
 import { canonicalize, interactionMirrorBatchDigest, protocolDigest, validateGovernorRecord, verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
-import { reduceConversationRunState, reduceConversationSubmissionGuard, loadCommittedBundleBinding, emptyConversationRunProjection, emptySubmissionGuardProjection,
-  type RunProjection, type SubmissionGuardProjection, type ConversationCommitLogRecord, type ConversationFactGroup } from './conversation-assignment.js';
+import { emptyConversationRunProjection, emptySubmissionGuardProjection,
+  type RunProjection, type SubmissionGuardProjection, type ConversationCommitLogRecord, type ConversationFactGroup } from './conversation-journal/contracts.js';
+import { reduceConversationRunState, reduceConversationSubmissionGuard, loadCommittedBundleBinding } from './conversation-assignment.js';
 import { conversationRunStateReducer, conversationStateBase as base, conversationStateHash as hash, conversationStateFieldKey as fieldKey,
   encodeConversationState as encode, conversationGuardRows, storeConversationGuard, assignmentResourceLive,
   conversationResourceWitnessKey, conversationResourceHoldKey, conversationResourceUsageKey, conversationReductionContexts, CONVERSATION_RUN_STATE_PROJECTION_ID,

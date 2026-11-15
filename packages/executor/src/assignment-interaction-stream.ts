@@ -1,7 +1,7 @@
 import type {
-  ConversationAssignmentLedger,
+  AssignmentInteractionStreamSourcePort,
   InteractionStreamProjectionReceipt,
-} from "./assignment-ledger.js";
+} from "./ledger/contracts.js";
 import type {
   StreamDataFramePayload,
   StreamFrameAppender,
@@ -19,10 +19,7 @@ export interface AssignmentInteractionProjectionWriter {
 
 export interface AssignmentInteractionStreamProjectionOptions {
   readonly assignmentId: string;
-  readonly ledger: Pick<
-    ConversationAssignmentLedger,
-    "interactionStreamEvents" | "interactionStreamProjectedUpTo"
-  >;
+  readonly ledger: AssignmentInteractionStreamSourcePort;
   readonly writer: StreamFrameAppender;
   readonly meta: StreamFrameMeta;
   readonly afterRecordSeq?: number;

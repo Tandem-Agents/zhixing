@@ -7,7 +7,6 @@ import {
   decideScheduleCapabilityGap,
   decideScheduleCapabilityGapClosure,
   projectSchedulePublishNotices,
-  type ScheduleCapabilityGapState,
   isScheduleFailure,
   scheduleFailurePolicyForCount,
   ScheduleRuntimePolicyError,
@@ -56,7 +55,6 @@ import type {
   JobChannelChallengeToken,
   JobRunState,
   JobStatusNotice,
-  JobUncertainClosure,
   InteractionAnswerMirrorEntry,
   TrustSedimentMirrorEntry,
   TrustRuleHitMirrorEntry,
@@ -68,7 +66,6 @@ import type {
   LogicalRecord,
   MutationBatch,
   PublishRecord,
-  RootResourceWorkload,
   RunExecutorPort,
   SealedBundle,
   SupersedeProof,
@@ -148,7 +145,6 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type StreamVerifierCheckpoint,
-  type ExecutorCapabilitySnapshot,
   type UnsignedJobEnvelope,
 } from "@zhixing-ai/core/protocol";
 import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
@@ -167,12 +163,11 @@ import type {
   AssignmentSubmissionIdentity,
   AssignmentSubmissionPreflightPort,
   AssignmentSubmissionPreflightResult,
-  ConversationAbortTicketAuthorizer,
   DataPlaneTicketFacts,
   DataPlaneTicketIssueRequest,
-  InProcessBundleSubmission,
   InProcessDispatchContextFactory,
-} from "./conversation-assignment.js";
+} from "./shared-protocol/contracts.js";
+import type { ConversationAbortTicketAuthorizer } from "./conversation-journal/contracts.js";
 import {
   assertAssignmentReplayContract,
   assertAssignmentSupersededReplayContract,
@@ -246,10 +241,94 @@ import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
 import { SCHEDULER_NOTICE_STREAM, type SchedulerUserNoticeJournal } from "./scheduler-user-notices.js";
 // 权威记录注册表随公开 job 模块再导出:执行点行为矩阵(生产/full/guard/
 // 恢复/对抗)按它做类型级闭合,新增记录类型缺行即编译失败。
+import {
+  JOB_CHANNEL_FIELDS,
+  JOB_JOURNAL_RECORD_SHAPES,
+  JOB_MAIN_SUBJECTS,
+  MAX_JOB_SESSION_ROWS,
+  createJobGuardState,
+  createJobMainState,
+  failureSummaryCandidates,
+  jobGuardStatePrefix,
+  jobMainStatePrefix,
+  jobProjectionView,
+  jobScopeOf,
+  jobSubmissionGuardView,
+  jobViewStore,
+  occurrenceOrderKey,
+  occurrenceSortKey,
+  preloadFailureSummaryPaths,
+  preloadJobScope,
+  scopeKeys,
+  type AssignedJob,
+  type InProcessJobBundleSubmission,
+  type InProcessJobCancellationSubmission,
+  type JobAssignmentPlan,
+  type JobBundle,
+  type JobCancelResult,
+  type JobChannelChallengePreparation,
+  type JobChannelInteractions,
+  type JobChannelRelayAdoption,
+  type JobCommitParticipant,
+  type JobEnvelope,
+  type JobIngressAuthorizer,
+  type JobInteractionRoute,
+  type JobJournalOptions,
+  type JobJournalRecordType,
+  type JobJournalSession,
+  type JobLifecycleEvent,
+  type JobProjection,
+  type JobRecoveryCandidate,
+  type JobReductionOptions,
+  type JobResolutionFact,
+  type JobSchedulerReadView,
+  type JobScope,
+  type JobStateEntry,
+  type JobStatusHistoryEntry,
+  type JobSubmissionGuardProjection,
+  type JobTrustSedimentPort,
+  type PendingJobDispatch,
+  type PendingJobFence,
+  type SystemJobHandler,
+  type SystemJobHandlerContext,
+  type SystemJobResourceCoordinator,
+} from "./job-journal/contracts.js";
 export {
   JOB_JOURNAL_RECORD_SHAPES,
+  createJobGuardState,
+  createJobMainState,
+  jobGuardStatePrefix,
+  jobMainStatePrefix,
+  jobProjectionView,
+  jobScopeOf,
+  jobSubmissionGuardView,
+  occurrenceOrderKey,
+  occurrenceSortKey,
+  preloadFailureSummaryPaths,
+  preloadJobScope,
+  type InProcessJobBundleSubmission,
+  type InProcessJobCancellationSubmission,
+  type JobAssignmentPlan,
+  type JobCancelResult,
+  type JobChannelChallengePreparation,
+  type JobChannelRelayAdoption,
+  type JobCommitParticipant,
+  type JobIngressAuthorizer,
+  type JobInteractionRoute,
+  type JobJournalOptions,
   type JobJournalRecordType,
-} from "./job-run-contracts.js";
+  type JobLifecycleEvent,
+  type JobRecoveryCandidate,
+  type JobReductionOptions,
+  type JobSchedulerReadView,
+  type JobScope,
+  type JobTrustSedimentPort,
+  type PendingJobDispatch,
+  type PendingJobFence,
+  type SystemJobHandler,
+  type SystemJobHandlerContext,
+  type SystemJobResourceCoordinator,
+};
 import {
   type AtomicControlApplicationContext,
   type ControlAdmissionJournal,
@@ -261,7 +340,6 @@ import {
   applyChannelInteractionRecord,
   validateChannelInteractionRelayRecord,
   type ChannelInteractionRelayRecord,
-  type ChannelInteractionJournalState,
   type JobChannelChallengePreparedRecord,
 } from "./channel-interaction-records.js";
 import {
@@ -274,10 +352,7 @@ import {
   runWithJobState,
   tallyJobStateNeeds,
   KeyedMap,
-  KeyedOrder,
   KeyedSet,
-  jobStateTaskBase,
-  type JobStateField,
 } from "./job-run-state.js";
 import {
   JOB_RUN_STATE_PROJECTION_ID,
@@ -287,423 +362,10 @@ import {
 import {
   failuresBefore,
   latestFailures,
-  missingFailureSummaryNodes,
   requireFailureSummaryPaths,
   setFailureSummaryEntry,
-  type FailureSummaryNode,
-  type FailureSummaryPosition,
 } from "./job-failure-summary.js";
 
-type ChannelTables = Omit<ChannelInteractionJournalState, "domain">;
-/** 作业的频道交互状态：与会话共用同一份规则，按键落盘。 */
-type JobChannelInteractions = { readonly domain: "job" } & {
-  readonly [Name in keyof ChannelTables]: ChannelTables[Name] extends ReadonlyMap<infer K, infer V>
-    ? KeyedMap<K & string, V> : never;
-};
-
-type JobEnvelope = Extract<
-  import("@zhixing-ai/core/contracts").DispatchEnvelope,
-  { execution: "job" }
->;
-type JobBundle = ReturnType<typeof validateJobSealedBundle>;
-type JobResolutionFact = Extract<
-  UncertainResolutionFact,
-  { subject: { execution: "job" } }
->;
-
-interface AssignedJob {
-  readonly record: Extract<JobJournalRecord, { t: "assigned" }>;
-  readonly envelope: JobEnvelope;
-  readonly commit: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string };
-  acked: boolean;
-}
-
-interface JobStateEntry {
-  readonly state: JobRunState;
-  readonly statusRevision: number;
-}
-
-type JobStatusHistoryEntry = JobStateEntry & {
-  readonly at: string;
-} & (
-    | { readonly uncertainTransition?: undefined }
-    | { readonly uncertainTransition: "opened"; readonly openFactDigest: string }
-    | ({ readonly uncertainTransition: "closed"; readonly openFactDigest: string } &
-        JobUncertainClosure)
-  );
-
-/**
- * Zero-ArtifactStore submission guard projection (RunSubmissionPort
- * submission contract): consumes job-stream
- * inline facts only, executes the same shared replay predicates as the full
- * reducer with a compact data closure, and never dereferences dispatch or
- * bundle closures. Preflights stable rejections and exact committed replays.
- */
-interface JobSubmissionGuardProjection {
-  latestDefinitionState: "enabled" | "disabled" | "deleted";
-  latestDefinitionRevision: number | undefined;
-  readonly definitionKinds: KeyedMap<number, "user" | "system">;
-  readonly taskOperations: KeyedMap<
-    string,
-    { readonly digest: string; readonly taskRevision: number }
-  >;
-  readonly systemMissAliases: KeyedSet<string>;
-  pendingSystemMissedJobRunId: string | undefined;
-  readonly occurrences: KeyedMap<
-    string,
-    {
-      readonly scheduledFor: string;
-      readonly taskRevision: number;
-      readonly deliveryPlanDigest: string;
-      readonly deliveryRequired: boolean;
-    }
-  >;
-  readonly states: KeyedMap<string, JobStateEntry>;
-  readonly admittedJobs: KeyedSet<string>;
-  readonly ingressByJob: KeyedMap<string, IngressContext>;
-  activeJobRunId: string | undefined;
-  readonly assignedById: KeyedMap<
-    string,
-    {
-      readonly record: Extract<JobJournalRecord, { t: "assigned" }>;
-      readonly commit: {
-        readonly lsn: number;
-        readonly envelopeDigest: string;
-        readonly at: string;
-      };
-      readonly capIds: ReadonlySet<string>;
-      acked: boolean;
-    }
-  >;
-  readonly assignmentByJob: KeyedMap<string, string>;
-  readonly conflictAssignments: KeyedSet<string>;
-  readonly openConflictAssignments: KeyedSet<string>;
-  readonly supersedeRequests: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "supersede-requested" }>
-  >;
-  readonly supersedeStartedAssignments: KeyedSet<string>;
-  readonly cancelFences: KeyedMap<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
-  readonly interactionSettlementFences: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "interaction-settlement-fence" }>
-  >;
-  readonly completedInteractionSettlements: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "interaction-settlement-completed" }>
-  >;
-  readonly acceptedCancellations: KeyedSet<string>;
-  readonly durableStarted: KeyedSet<string>;
-  readonly closedAssignments: KeyedSet<string>;
-  readonly revokedCapabilities: KeyedSet<string>;
-  readonly ticketsById: KeyedMap<string, DataPlaneTicket>;
-  readonly ticketIdsByAssignment: KeyedMap<string, Set<string>>;
-  readonly ticketReplacementsById: KeyedMap<string, string>;
-  readonly revokedTickets: KeyedSet<string>;
-  ticketSyncFrontier: string | undefined;
-  readonly interactionMirrors: KeyedMap<
-    string,
-    {
-      readonly upTo: number;
-      readonly ordinal: number;
-      readonly digest: string;
-      readonly requestIds: ReadonlySet<string>;
-      readonly outcomes: ReadonlyMap<
-        string,
-        import("@zhixing-ai/core/contracts").InteractionAnswerMirrorEntry["outcome"]
-      >;
-    }
-  >;
-  readonly interactionMirrorBatches: KeyedSet<string>;
-  readonly resolutions: KeyedMap<string, JobResolutionFact>;
-  readonly committedByAssignment: KeyedMap<
-    string,
-    { readonly ref: ArtifactRef; readonly jobRevision: number }
-  >;
-  readonly bundleAcknowledgements: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "bundle-ack-observed" }>
-  >;
-  readonly systemFences: KeyedMap<string, SystemJobFence>;
-  readonly systemResults: KeyedSet<string>;
-  readonly channelInteractions: JobChannelInteractions;
-  /** 每个 run 已用过的最大派发尝试序号：下一次派发据此取号，不遍历全部派发。 */
-  readonly assignmentAttemptByRun: KeyedMap<string, number>;
-  /** 票据按同步边界排序：前沿推进与在用票据按区间读取。 */
-  readonly ticketExpiry: KeyedOrder<string>;
-  nextJobRevision: number;
-}
-
-interface JobProjection {
-  definition?: TaskDefinition;
-  readonly definitions: KeyedMap<number, TaskDefinition>;
-  readonly taskOperations: KeyedMap<
-    string,
-    { readonly digest: string; readonly taskRevision: number }
-  >;
-  readonly occurrences: KeyedMap<string, JobOccurrence>;
-  legacyNextFire?: Extract<JobJournalRecord, { t: "legacy-next-fire" }>;
-  readonly missedNextFireByRun: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "missed-next-fire" }>
-  >;
-  readonly failurePolicyByRun: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "failure-policy" }>
-  >;
-  readonly autoDisableSettledRuns: KeyedSet<string>;
-  readonly capabilityGapByRun: KeyedMap<string, ScheduleCapabilityGapState>;
-  readonly systemMissAliases: KeyedMap<
-    string,
-    { readonly scheduledFor: string; readonly coalescedJobRunId: string }
-  >;
-  readonly admittedJobs: KeyedSet<string>;
-  readonly ingressByJob: KeyedMap<string, IngressContext>;
-  readonly states: KeyedMap<string, JobStateEntry>;
-  activeJobRunId?: string;
-  pendingSystemMissedJobRunId?: string;
-  readonly assignedById: KeyedMap<string, AssignedJob>;
-  readonly assignmentByJob: KeyedMap<string, string>;
-  readonly conflicts: KeyedMap<string, Extract<JobJournalRecord, { t: "dispatch-conflict" }>>;
-  readonly containedFacts: KeyedSet<string>;
-  readonly superseded: KeyedMap<string, Extract<JobJournalRecord, { t: "assignment-superseded" }>>;
-  readonly supersedeRequests: KeyedMap<string, Extract<JobJournalRecord, { t: "supersede-requested" }>>;
-  readonly supersedeStarted: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "supersede-started-observed" }>
-  >;
-  readonly cancelFences: KeyedMap<string, Extract<JobJournalRecord, { t: "cancel-fence" }>>;
-  readonly interactionSettlementFences: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "interaction-settlement-fence" }>
-  >;
-  readonly completedInteractionSettlements: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "interaction-settlement-completed" }>
-  >;
-  readonly acceptedCancellations: KeyedMap<string, Extract<JobJournalRecord, { t: "cancel-proof-accepted" }>>;
-  readonly rejectedNotStarted: KeyedMap<string, Extract<JobJournalRecord, { t: "not-started-rejected" }>>;
-  readonly durableStarted: KeyedSet<string>;
-  readonly revokedCapabilities: KeyedSet<string>;
-  readonly ticketsById: KeyedMap<string, DataPlaneTicket>;
-  readonly ticketIdsByAssignment: KeyedMap<string, Set<string>>;
-  readonly ticketReplacementsById: KeyedMap<string, string>;
-  readonly revokedTickets: KeyedSet<string>;
-  ticketSyncFrontier: string | undefined;
-  readonly interactionMirrors: KeyedMap<
-    string,
-    {
-      readonly upTo: number;
-      readonly ordinal: number;
-      readonly digest: string;
-      readonly requestIds: ReadonlySet<string>;
-      readonly outcomes: ReadonlyMap<
-        string,
-        import("@zhixing-ai/core/contracts").InteractionAnswerMirrorEntry["outcome"]
-      >;
-    }
-  >;
-  readonly interactionMirrorBatches: KeyedSet<string>;
-  readonly containments: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "dispatch-conflict-contained" | "cancel-contained" }>
-  >;
-  readonly resolutions: KeyedMap<string, JobResolutionFact>;
-  readonly statusHistoryByRun: KeyedMap<string, JobStatusHistoryEntry[]>;
-  readonly committed: KeyedMap<string, Extract<JobJournalRecord, { t: "committed" }>>;
-  readonly outcomeByRun: KeyedMap<string, JobBundle["body"]["outcome"]>;
-  readonly bundleAcknowledgements: KeyedMap<
-    string,
-    Extract<JobJournalRecord, { t: "bundle-ack-observed" }>
-  >;
-  readonly recoveryAssignments: KeyedSet<string>;
-  readonly bundleAcknowledgementOutbox: KeyedSet<string>;
-  nextJobRevision: number;
-  readonly systemFences: KeyedMap<string, SystemJobFence>;
-  readonly systemResults: KeyedMap<
-    string,
-    MaterializedSystemJobResult
-  >;
-  readonly channelInteractions: JobChannelInteractions;
-  readonly assignmentAttemptByRun: KeyedMap<string, number>;
-  readonly ticketExpiry: KeyedOrder<string>;
-  /** occurrence 按计划时间倒序：最近一次与历史分页按区间读取。 */
-  readonly occurrenceOrder: KeyedOrder<string>;
-  /**
-   * 连续失败的可合并摘要（job-failure-summary.ts）：非错过的 occurrence 按完整次序成树，错过的不计也不打断。
-   * 是否错过在 occurrence 写入时就定了（错过没有后继状态，也没有状态迁入错过），成员此后不变。
-   * 调度视图与失败策略由定位路径上的摘要合成计数，不倒扫失败历史。
-   */
-  readonly failureSummaryNodes: KeyedMap<number, FailureSummaryNode>;
-  failureSummaryRoot: number | undefined;
-  failureSummaryNextNode: number;
-  /** 摘要里记下的这一条是否失败；不在即尚未进摘要。状态推进而失败与否不变时，只读这一行。 */
-  readonly failureFlagByRun: KeyedMap<string, boolean>;
-  /** 已有的非错过 occurrence 数：调度视图的运行次数。 */
-  runCount: number;
-  // 当前义务目录：由同一归约在每条记录后维护，只含仍未完成的主体
-  readonly openRuns: KeyedSet<string>;
-  readonly openAssignments: KeyedSet<string>;
-  readonly pendingSettlements: KeyedSet<string>;
-  readonly openChallenges: KeyedSet<string>;
-  readonly pendingGrants: KeyedSet<string>;
-  readonly pendingAutoDisable: KeyedSet<string>;
-  /** 错过且尚未汇总通知的用户任务 run；汇总通知提交时由持久投影移出。 */
-  readonly pendingMissed: KeyedSet<string>;
-}
-
-// ---- 按键工作集上的两份投影 ----
-
-interface JobStateLayout {
-  readonly maps: readonly string[];
-  readonly sets: readonly string[];
-  /** 只含当前义务、可整体列出的集合。 */
-  readonly enumerable: readonly string[];
-  readonly orders: readonly string[];
-  /** 根行里的标量字段及其缺省值。 */
-  readonly root: Readonly<Record<string, unknown>>;
-}
-
-const JOB_CHANNEL_FIELDS = {
-  preparedByChallenge: "chPrepared",
-  challengeByInteraction: "chInteraction",
-  deliveredByChallenge: "chDelivered",
-  closedByChallenge: "chClosed",
-  grantByChallenge: "chGranted",
-  cursorByAssignment: "chCursor",
-} as const;
-
-const JOB_MAIN_LAYOUT: JobStateLayout = {
-  maps: [
-    "definitions", "taskOperations", "occurrences", "missedNextFireByRun", "failurePolicyByRun", "failureFlagByRun",
-    "failureSummaryNodes", "capabilityGapByRun", "systemMissAliases", "ingressByJob", "states", "assignedById", "assignmentByJob",
-    "conflicts", "superseded", "supersedeRequests", "supersedeStarted", "cancelFences",
-    "interactionSettlementFences", "completedInteractionSettlements", "acceptedCancellations",
-    "rejectedNotStarted", "ticketsById", "ticketIdsByAssignment", "ticketReplacementsById",
-    "interactionMirrors", "containments", "resolutions", "statusHistoryByRun", "committed", "outcomeByRun",
-    "bundleAcknowledgements", "systemFences", "systemResults", "assignmentAttemptByRun",
-  ],
-  sets: [
-    "autoDisableSettledRuns", "admittedJobs", "containedFacts", "durableStarted", "revokedCapabilities",
-    "revokedTickets", "interactionMirrorBatches",
-  ],
-  enumerable: [
-    "recoveryAssignments", "bundleAcknowledgementOutbox", "openRuns", "openAssignments", "pendingSettlements",
-    "openChallenges", "pendingGrants", "pendingAutoDisable", "pendingMissed",
-  ],
-  orders: ["ticketExpiry", "occurrenceOrder"],
-  root: {
-    definition: undefined, legacyNextFire: undefined, activeJobRunId: undefined,
-    pendingSystemMissedJobRunId: undefined, ticketSyncFrontier: undefined, nextJobRevision: 1, runCount: 0,
-    failureSummaryRoot: undefined, failureSummaryNextNode: 1,
-  },
-};
-
-const JOB_GUARD_LAYOUT: JobStateLayout = {
-  maps: [
-    "definitionKinds", "taskOperations", "occurrences", "states", "ingressByJob", "assignedById",
-    "assignmentByJob", "supersedeRequests", "cancelFences", "interactionSettlementFences",
-    "completedInteractionSettlements", "ticketsById", "ticketIdsByAssignment", "ticketReplacementsById",
-    "interactionMirrors", "resolutions", "committedByAssignment", "bundleAcknowledgements", "systemFences",
-    "assignmentAttemptByRun",
-  ],
-  sets: [
-    "systemMissAliases", "admittedJobs", "conflictAssignments", "openConflictAssignments",
-    "supersedeStartedAssignments", "acceptedCancellations", "durableStarted", "closedAssignments",
-    "revokedCapabilities", "revokedTickets", "interactionMirrorBatches", "systemResults",
-  ],
-  enumerable: [],
-  orders: ["ticketExpiry"],
-  root: {
-    latestDefinitionState: "enabled", latestDefinitionRevision: undefined, pendingSystemMissedJobRunId: undefined,
-    activeJobRunId: undefined, ticketSyncFrontier: undefined, nextJobRevision: 1,
-  },
-};
-
-const layoutFields = (layout: JobStateLayout): ReadonlyMap<string, JobStateField> => new Map<string, JobStateField>([
-  ...layout.maps.map((name) => [name, { name, kind: "map" }] as const),
-  ...Object.values(JOB_CHANNEL_FIELDS).map((name) => [name, { name, kind: "map" }] as const),
-  ...layout.sets.map((name) => [name, { name, kind: "set" }] as const),
-  ...layout.enumerable.map((name) => [name, { name, kind: "set", enumerable: true }] as const),
-  ...layout.orders.map((name) => [name, { name, kind: "order" }] as const),
-]);
-const JOB_MAIN_FIELDS = layoutFields(JOB_MAIN_LAYOUT);
-const JOB_GUARD_FIELDS = layoutFields(JOB_GUARD_LAYOUT);
-
-export function jobMainStatePrefix(taskId: string): string { return `${jobStateTaskBase(taskId)}m/`; }
-export function jobGuardStatePrefix(taskId: string): string { return `${jobStateTaskBase(taskId)}g/`; }
-
-/** 主投影的工作集；complete 用于从零重放（未装入即不存在）。 */
-export function createJobMainState(taskId: string, complete = false): JobStateSet {
-  return new JobStateSet(jobMainStatePrefix(taskId), JOB_MAIN_FIELDS, complete);
-}
-
-export function createJobGuardState(taskId: string, complete = false): JobStateSet {
-  return new JobStateSet(jobGuardStatePrefix(taskId), JOB_GUARD_FIELDS, complete);
-}
-
-function buildJobView(binding: JobStateBinding, layout: JobStateLayout): Record<string, unknown> {
-  const view: Record<string, unknown> = {};
-  for (const name of layout.maps) view[name] = new KeyedMap(binding, name);
-  for (const name of [...layout.sets, ...layout.enumerable]) view[name] = new KeyedSet(binding, name);
-  for (const name of layout.orders) view[name] = new KeyedOrder(binding, name);
-  view.channelInteractions = {
-    domain: "job",
-    ...Object.fromEntries(Object.entries(JOB_CHANNEL_FIELDS).map(([property, field]) => [property, new KeyedMap(binding, field)])),
-  };
-  for (const [name, fallback] of Object.entries(layout.root)) {
-    Object.defineProperty(view, name, {
-      enumerable: true,
-      get: () => {
-        const root = binding.store.root;
-        return name in root ? root[name] : fallback;
-      },
-      set: (value: unknown) => { binding.store.root[name] = value; },
-    });
-  }
-  return view;
-}
-
-/** 绑定之上的主投影对象：读写都落到绑定当前持有的工作集。 */
-export function jobProjectionView(binding: JobStateBinding): JobProjection {
-  return buildJobView(binding, JOB_MAIN_LAYOUT) as unknown as JobProjection;
-}
-
-export function jobSubmissionGuardView(binding: JobStateBinding): JobSubmissionGuardProjection {
-  return buildJobView(binding, JOB_GUARD_LAYOUT) as unknown as JobSubmissionGuardProjection;
-}
-
-/** 投影对象所在的工作集（目录维护按它查改动）。 */
-function jobViewStore(state: { readonly states: KeyedMap<string, unknown> }): JobStateSet {
-  return state.states.binding.store;
-}
-
-// ---- 当前义务目录 ----
-
-/** occurrence 的倒序时间键：计划时间越晚越靠前。 */
-export function occurrenceSortKey(scheduledFor: string): string {
-  const at = Date.parse(scheduledFor);
-  if (!Number.isFinite(at) || at < 0) throw new TypeError("Occurrence time is invalid");
-  return String(8_640_000_000_000_000 - at).padStart(16, "0");
-}
-
-const ORDER_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-/**
- * occurrence 在次序索引里的键：倒序时间键，加 jobRunId 的倒序定宽编码与终止符 `~`，正向读取即
- * compareJobOccurrences 的逆序（新到旧，同一时间 id 大的在前）。每个码元编成 3 位 base-62，取 65535 减码元，
- * 字母表按码元升序，于是同一时间里 id 大的键小；一个 id 是另一个的前缀时，长者多出的首字符不大于 `z`，
- * 小于终止符，长者在前。各键以 `~` 结尾、内部没有 `~`，整条存储键的次序就是次序键的次序。
- * 最长 480 码元的 id 编成 1440 字符，加前缀与主体哈希仍在投影键上限内。
- */
-export function occurrenceOrderKey(occurrence: Pick<JobOccurrence, "scheduledFor" | "jobRunId">): string {
-  let encoded = "";
-  for (let index = 0; index < occurrence.jobRunId.length; index += 1) {
-    const value = 65535 - occurrence.jobRunId.charCodeAt(index);
-    encoded += ORDER_DIGITS[Math.floor(value / 3844)]! + ORDER_DIGITS[Math.floor(value / 62) % 62]! + ORDER_DIGITS[value % 62]!;
-  }
-  return `${occurrenceSortKey(occurrence.scheduledFor)}${encoded}~`;
-}
 
 /**
  * 每条记录归约后，按本工作集里改动过的主体重算各当前义务目录。只看改动过的主体，
@@ -837,47 +499,6 @@ function refreshFailureSummary(state: JobProjection): void {
   }
 }
 
-const SCHEDULE_FAILURE_STATES: ReadonlySet<unknown> = new Set(["failed", "expired", "committed"]);
-
-/**
- * 这些作业流记录可能改动连续失败摘要的位置：新的非错过 occurrence，以及进入 failed、expired、committed 的 run
- * （只有这三种状态能让 isScheduleFailure 成立；终态不再改变）。普通状态推进不在其中。
- * 只用已装入的 occurrence：没装入的留给归约时的逐层报缺。
- */
-function failureSummaryCandidates(
-  state: Pick<JobProjection, "occurrences">,
-  bodies: readonly unknown[],
-): FailureSummaryPosition[] {
-  const positions: FailureSummaryPosition[] = [];
-  for (const raw of bodies) {
-    const body = raw as { readonly t?: unknown; readonly occ?: JobOccurrence; readonly state?: unknown; readonly jobRunId?: unknown };
-    if (body.t === "occurrence" && body.occ && body.occ.state !== "missed") positions.push(body.occ);
-    if (body.t !== "state" || typeof body.jobRunId !== "string" || !SCHEDULE_FAILURE_STATES.has(body.state)) continue;
-    const occurrence = state.occurrences.peek(body.jobRunId);
-    if (occurrence && occurrence.state !== "missed") positions.push(occurrence);
-  }
-  return positions;
-}
-
-/**
- * 归约这些记录之前，把它们在连续失败摘要里的定位路径按层成批装入：每层一次读取，
- * 归约时不再逐层缺键重做（重做会再走一遍整封信封，committed 记录还要重读密封包）。
- */
-export async function preloadFailureSummaryPaths(
-  set: JobStateSet,
-  bodies: readonly unknown[],
-  read: import("@zhixing-ai/core/authority").DurableProjectionReadContext,
-): Promise<void> {
-  // 根行由按主体预装一并装入；没有根行就没有可定位的路径
-  if (!set.isLoaded(set.rootKey)) return;
-  const view = jobProjectionView(new JobStateBinding(set));
-  const positions = failureSummaryCandidates(view, bodies);
-  for (;;) {
-    const missing = missingFailureSummaryNodes(view, positions);
-    if (!missing.length) return;
-    await loadJobState(set, missing.map((key) => ({ key })), read);
-  }
-}
 
 /** 最近一次 occurrence：次序索引的第一行。 */
 function latestOccurrence(state: Pick<JobProjection, "occurrenceOrder" | "occurrences">): JobOccurrence | undefined {
@@ -918,110 +539,6 @@ function byOccurrenceOrder(
     .map((occurrence) => occurrence.jobRunId);
 }
 
-/** 调度读取的当前视图：不含历史 run 的全集。 */
-export interface JobSchedulerReadView {
-  readonly definition?: TaskDefinition;
-  /** 非错过 occurrence 的总数。 */
-  readonly runCount: number;
-  /** 最近一次起向前的连续失败次数。 */
-  readonly consecutiveFailures: number;
-  readonly last?: ScheduleOccurrence;
-  /** 未结束的 occurrence，按计划时间、id 升序。 */
-  readonly open: readonly ScheduleOccurrence[];
-}
-
-// ---- 按主体预先装入：一条记录或一次决定通常只碰到少数 run/派发/票据/挑战 ----
-
-type JobSubjectKind = "run" | "assignment" | "ticket" | "challenge" | "revision" | "operation";
-
-const JOB_MAIN_SUBJECTS: Readonly<Record<string, JobSubjectKind>> = {
-  occurrences: "run", missedNextFireByRun: "run", failurePolicyByRun: "run", failureFlagByRun: "run", capabilityGapByRun: "run",
-  systemMissAliases: "run", ingressByJob: "run", states: "run", assignmentByJob: "run", resolutions: "run",
-  statusHistoryByRun: "run", outcomeByRun: "run", systemFences: "run", systemResults: "run",
-  assignmentAttemptByRun: "run", autoDisableSettledRuns: "run", admittedJobs: "run", openRuns: "run",
-  pendingAutoDisable: "run", pendingMissed: "run",
-  assignedById: "assignment", superseded: "assignment", supersedeRequests: "assignment",
-  supersedeStarted: "assignment", cancelFences: "assignment", interactionSettlementFences: "assignment",
-  completedInteractionSettlements: "assignment", acceptedCancellations: "assignment",
-  ticketIdsByAssignment: "assignment", interactionMirrors: "assignment", committed: "assignment",
-  bundleAcknowledgements: "assignment", durableStarted: "assignment", recoveryAssignments: "assignment",
-  bundleAcknowledgementOutbox: "assignment", openAssignments: "assignment", pendingSettlements: "assignment",
-  [JOB_CHANNEL_FIELDS.cursorByAssignment]: "assignment",
-  ticketsById: "ticket", ticketReplacementsById: "ticket", revokedTickets: "ticket",
-  [JOB_CHANNEL_FIELDS.preparedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.deliveredByChallenge]: "challenge",
-  [JOB_CHANNEL_FIELDS.closedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.grantByChallenge]: "challenge",
-  openChallenges: "challenge", pendingGrants: "challenge",
-  definitions: "revision", taskOperations: "operation",
-};
-
-const JOB_GUARD_SUBJECTS: Readonly<Record<string, JobSubjectKind>> = {
-  occurrences: "run", states: "run", ingressByJob: "run", assignmentByJob: "run", resolutions: "run",
-  systemFences: "run", systemResults: "run", assignmentAttemptByRun: "run", admittedJobs: "run",
-  systemMissAliases: "run",
-  assignedById: "assignment", supersedeRequests: "assignment", cancelFences: "assignment",
-  interactionSettlementFences: "assignment", completedInteractionSettlements: "assignment",
-  ticketIdsByAssignment: "assignment", interactionMirrors: "assignment", committedByAssignment: "assignment",
-  bundleAcknowledgements: "assignment", conflictAssignments: "assignment", openConflictAssignments: "assignment",
-  supersedeStartedAssignments: "assignment", acceptedCancellations: "assignment", durableStarted: "assignment",
-  closedAssignments: "assignment", [JOB_CHANNEL_FIELDS.cursorByAssignment]: "assignment",
-  ticketsById: "ticket", ticketReplacementsById: "ticket", revokedTickets: "ticket",
-  [JOB_CHANNEL_FIELDS.preparedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.deliveredByChallenge]: "challenge",
-  [JOB_CHANNEL_FIELDS.closedByChallenge]: "challenge", [JOB_CHANNEL_FIELDS.grantByChallenge]: "challenge",
-  definitionKinds: "revision", taskOperations: "operation",
-};
-
-/** 一次归约或决定涉及的主体。 */
-export interface JobScope {
-  readonly runs: Set<string>;
-  readonly assignments: Set<string>;
-  readonly tickets: Set<string>;
-  readonly challenges: Set<string>;
-  readonly revisions: Set<number>;
-  readonly operations: Set<string>;
-}
-
-const JOB_SCOPE_NAMES: Readonly<Record<string, Exclude<keyof JobScope, "revisions">>> = {
-  jobRunId: "runs", requestedJobRunId: "runs", coalescedJobRunId: "runs", assignmentId: "assignments",
-  ticketId: "tickets", replacesTicketId: "tickets", challengeId: "challenges", operationId: "operations",
-};
-
-/** 从记录或请求里收集主体标识：只看协议标识字段，不进入正文与载荷。 */
-export function jobScopeOf(...inputs: unknown[]): JobScope {
-  const scope: JobScope = {
-    runs: new Set(), assignments: new Set(), tickets: new Set(), challenges: new Set(),
-    revisions: new Set(), operations: new Set(),
-  };
-  let visited = 0;
-  const visit = (value: unknown, depth: number) => {
-    if (++visited > 4096 || depth > 8 || !value || typeof value !== "object") return;
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return;
-    for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
-      const target = JOB_SCOPE_NAMES[name];
-      if (target && typeof item === "string") scope[target].add(item);
-      if ((name === "taskRevision" || name === "disabledTaskRevision") && typeof item === "number") scope.revisions.add(item);
-      if (name !== "input" && name !== "output" && name !== "display" && name !== "spec") visit(item, depth + 1);
-    }
-  };
-  for (const input of inputs) visit(input, 0);
-  return scope;
-}
-
-function scopeKeys(set: JobStateSet, subjects: Readonly<Record<string, JobSubjectKind>>, scope: JobScope): string[] {
-  const values: Record<JobSubjectKind, Iterable<string | number>> = {
-    run: scope.runs, assignment: scope.assignments, ticket: scope.tickets, challenge: scope.challenges,
-    revision: scope.revisions, operation: scope.operations,
-  };
-  const keys = [set.rootKey];
-  for (const [field, kind] of Object.entries(subjects)) {
-    for (const subject of values[kind]) keys.push(set.storageKey(field, subject));
-  }
-  return keys.filter((key) => !set.isLoaded(key));
-}
 
 /** 本作业流上的记录正文。 */
 function jobStreamBodies(entries: readonly LogicalRecord<unknown>[], taskId: string): unknown[] {
@@ -1038,118 +555,6 @@ function candidateStateNeeds(
   return scopeKeys(set, JOB_MAIN_SUBJECTS, scope).map((key) => ({ key }));
 }
 
-/**
- * 按主体成批装入两份投影的行：先装记录直接涉及的主体，再按装入的结果补齐它们连带的
- * run、当前派发与定义版本（第二轮）。之后仍缺的由重做补齐。
- */
-export async function preloadJobScope(
-  sets: { readonly main?: JobStateSet; readonly guard?: JobStateSet },
-  scope: JobScope,
-  read: import("@zhixing-ai/core/authority").DurableProjectionReadContext,
-): Promise<void> {
-  const load = async () => {
-    for (const [set, subjects] of [[sets.main, JOB_MAIN_SUBJECTS], [sets.guard, JOB_GUARD_SUBJECTS]] as const) {
-      if (!set) continue;
-      await loadJobState(set, scopeKeys(set, subjects, scope).map((key) => ({ key })), read);
-    }
-  };
-  await load();
-  const grown = { runs: scope.runs.size, assignments: scope.assignments.size, revisions: scope.revisions.size };
-  for (const set of [sets.main, sets.guard]) {
-    if (!set) continue;
-    const view = (set === sets.main ? jobProjectionView : jobSubmissionGuardView)(new JobStateBinding(set)) as unknown as {
-      readonly activeJobRunId?: string; readonly pendingSystemMissedJobRunId?: string;
-      readonly assignedById: KeyedMap<string, { readonly record: { readonly jobRunId: string } }>;
-      readonly assignmentByJob: KeyedMap<string, string>;
-      readonly occurrences: KeyedMap<string, { readonly taskRevision: number }>;
-    };
-    for (const jobRunId of [view.activeJobRunId, view.pendingSystemMissedJobRunId]) if (jobRunId) scope.runs.add(jobRunId);
-    for (const assignmentId of scope.assignments) {
-      const jobRunId = view.assignedById.peek(assignmentId)?.record.jobRunId;
-      if (jobRunId) scope.runs.add(jobRunId);
-    }
-    for (const jobRunId of scope.runs) {
-      const assignmentId = view.assignmentByJob.peek(jobRunId);
-      if (assignmentId) scope.assignments.add(assignmentId);
-      const revision = view.occurrences.peek(jobRunId)?.taskRevision;
-      if (revision !== undefined) scope.revisions.add(revision);
-    }
-  }
-  if (scope.runs.size !== grown.runs || scope.assignments.size !== grown.assignments || scope.revisions.size !== grown.revisions) await load();
-}
-
-/** 作业日志的工作集会话。 */
-interface JobJournalSession {
-  main: JobStateSet;
-  guard: JobStateSet;
-  /** 已装入的行对应的持久头位置（最后一封触及本作业的信封）；undefined 表示尚无写入。 */
-  head: number | undefined;
-  /** 上一次事务结束时的日志游标：下一次事务只续读其后的尾部。 */
-  cursor: ProjectionCursor | undefined;
-}
-
-/** 会话复用的工作集上限：超过后换新会话，进程内常驻的已装入行有界。 */
-const MAX_JOB_SESSION_ROWS = 4096;
-
-export interface PendingJobDispatch {
-  readonly assignmentId: string;
-  readonly envelope: JobEnvelope;
-  readonly activation: AssignmentActivationProof<"job">;
-}
-
-export interface PendingJobFence {
-  readonly assignmentId: string;
-  readonly fence: { readonly fenceSeq: number; readonly requestId: string };
-}
-
-/** 待恢复或待回执的单个指派（owner 侧收尾对账的输入）。 */
-export interface JobRecoveryCandidate {
-  readonly assignmentId: string;
-  readonly state:
-    | "dispatched"
-    | "running"
-    | "cancel-requested"
-    | "uncertain"
-    | "committed";
-  readonly stoppedProofKinds: readonly NotStartedProofKind[];
-  readonly dispatch: PendingJobDispatch;
-}
-
-/**
- * Process-local wakeups derived only after the authoritative journal commit.
- * They are never replay or recovery facts; consumers rebuild from JobJournal.
- */
-export type JobLifecycleEvent =
-  | {
-      readonly kind: "job-state-changed";
-      readonly ref: {
-        readonly execution: "job";
-        readonly taskId: string;
-        readonly jobRunId: string;
-        readonly anchorEpoch: number;
-      };
-      readonly state: JobRunState;
-      readonly statusRevision: number;
-      readonly assignmentId?: string;
-      readonly at: string;
-    }
-  | {
-      readonly kind: "assignment-retired";
-      readonly ref: {
-        readonly execution: "job";
-        readonly taskId: string;
-        readonly jobRunId: string;
-        readonly anchorEpoch: number;
-      };
-      readonly assignmentId: string;
-      readonly at: string;
-    };
-
-export interface InProcessJobCancellationSubmission {
-  submitCancellation(assignmentId: string): Promise<boolean>;
-}
-
-export type InProcessJobBundleSubmission = InProcessBundleSubmission;
 
 interface InProcessJobDispatcherBaseOptions {
   readonly journal: JobJournal;
@@ -1194,134 +599,6 @@ export type InProcessJobDispatcherOptions = InProcessJobDispatcherBaseOptions &
       }
   );
 
-export interface JobCommitParticipant {
-  readonly readProjectionIds?: readonly string[];
-  collectStagedReferences?(batch: MutationBatch): Promise<readonly ArtifactRef[]>;
-  prepare(input: {
-    readonly authorityPrefixLsn: number;
-    readonly authorityContext: ProjectionTransactionContext;
-    readonly occurrence: JobOccurrence;
-    readonly bundle: JobBundle;
-    readonly mutationBatch: MutationBatch;
-  }): Promise<
-    | {
-        readonly accepted: true;
-        readonly records: readonly LogicalRecord[];
-        readonly outcomes: ReadonlyMap<
-          number,
-          Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"]
-        >;
-      }
-    | { readonly accepted: false; readonly error: AuthorityError }>;
-  applyGranted?(input: {
-    readonly assignmentId: string;
-    readonly seq: number;
-    readonly mutationBatch: MutationBatch;
-    readonly outcome: Extract<
-      Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"],
-      { readonly t: "granted" }
-    >;
-  }): Promise<void>;
-  wakePendingPublishing?(taskId: string): void;
-  resumePendingPublishing?(taskId: string): Promise<void>;
-}
-
-export interface SystemJobResourceCoordinator {
-  /** Read-only callbacks must not append authority records. */
-  coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T>;
-  prepareQueuedTerminal(input: {
-    readonly workload: Extract<RootResourceWorkload, { readonly kind: "job" }>;
-    readonly reason: "cancelled" | "failed" | "expired";
-  }): readonly LogicalRecord<unknown>[];
-  prepare(input: {
-    readonly taskId: string;
-    readonly jobRunId: string;
-    readonly anchorEpoch: number;
-    readonly attempt: number;
-  }): Promise<{
-    readonly lease: SystemJobResourceLease;
-    readonly records: readonly LogicalRecord<unknown>[];
-  }>;
-  recover(input: {
-    readonly fence: SystemJobFence;
-  }): Promise<
-    | { readonly kind: "reuse"; readonly lease: SystemJobResourceLease }
-    | {
-        readonly kind: "replace";
-        readonly lease: SystemJobResourceLease;
-        readonly records: readonly LogicalRecord<unknown>[];
-      }
-  >;
-  terminal(input: {
-    readonly lease: SystemJobResourceLease;
-    readonly outcome: "committed" | "failed";
-  }): readonly LogicalRecord<unknown>[];
-  preflightActivationRecords(input: {
-    readonly previousFence?: SystemJobFence;
-    readonly fence: SystemJobFence;
-    readonly records: readonly LogicalRecord<unknown>[];
-  }): void;
-  preflightTerminalRecords(input: {
-    readonly fence: SystemJobFence;
-    readonly outcome: "committed" | "failed";
-    readonly records: readonly LogicalRecord<unknown>[];
-  }): void;
-  assertActivationRecords(input: {
-    readonly previousFence?: SystemJobFence;
-    readonly fence: SystemJobFence;
-    readonly records: readonly LogicalRecord<unknown>[];
-  }): void;
-  assertTerminalRecords(input: {
-    readonly fence: SystemJobFence;
-    readonly outcome: "committed" | "failed";
-    readonly records: readonly LogicalRecord<unknown>[];
-  }): void;
-}
-
-export interface SystemJobHandlerContext {
-  readonly taskId: string;
-  readonly jobRunId: string;
-  readonly attempt: number;
-  readonly params: import("@zhixing-ai/core/contracts").JsonValue | undefined;
-}
-
-export type SystemJobHandler = (
-  context: SystemJobHandlerContext,
-) => Promise<{ readonly summary?: string }>;
-
-export interface JobIngressAuthorizer {
-  authorize(
-    context: AuthorityCallContext,
-    action: "user-trigger" | "user-cancel" | "system-trigger" | "system-cancel",
-    definition: TaskDefinition,
-  ): void;
-}
-
-export interface JobJournalOptions {
-  readonly taskId: string;
-  readonly anchorEpoch: number;
-  readonly log: AuthorityCommitLog;
-  readonly artifacts: ArtifactStore;
-  readonly signer: ProtocolSigner;
-  readonly verifier: ProtocolSignatureVerifier;
-  readonly snapshotFor: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
-  readonly submission: AssignmentSubmissionAuthorizer;
-  readonly ingress: JobIngressAuthorizer;
-  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
-  readonly delivery: JobDeliveryParticipant;
-  readonly commitParticipant?: JobCommitParticipant;
-  readonly resources?: AssignmentResourceCoordinator;
-  readonly systemResources?: SystemJobResourceCoordinator;
-  readonly systemHandlers?: ReadonlyMap<SystemHandlerId, SystemJobHandler>;
-  readonly clock?: () => string;
-  readonly schedulerFailureThreshold?: number;
-  readonly schedulerNotices?: SchedulerUserNoticeJournal;
-  readonly localExecutorId?: string;
-  /** 镜像批次里的信任沉淀交给规则权威接纳；不装配时沉淀条目只进日志、无效果。 */
-  readonly trustSediments?: JobTrustSedimentPort;
-  /** 镜像批次里的规则命中交给规则权威累计；不装配时命中条目只进日志、无效果。 */
-  readonly trustRuleHits?: TrustRuleHitPort;
-}
 
 /**
  * 指派的镜像是否已不会再接纳新批次（与 assertJobMirrorReplayContract 同一条件）：指派不存在；
@@ -1339,84 +616,6 @@ function jobMirrorClosed(state: JobProjection, assignmentId: string): boolean {
     !((current === "cancel-requested" || current === "uncertain") && state.cancelFences.has(assignmentId));
 }
 
-/**
- * job 信任沉淀的接纳端口（规则权威所在宿主实现），与对话侧同一语义：`prepare` 在镜像
- * 批次提交前校验并写待生效记录，写失败上抛使本批不接纳、由执行端按既有镜像义务重试；
- * 校验不过的条目不上抛、只是没有效果。`accept` 在批次提交后（含重放）调用，幂等、不上抛。
- */
-export interface JobTrustSedimentPort {
-  prepare(input: {
-    readonly taskId: string;
-    readonly assignmentId: string;
-    readonly executorId: string;
-    readonly environment: import("@zhixing-ai/core/contracts").EnvironmentRequirement;
-    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
-    /** 用户贡献引用的确认请求是否是本指派已答复的交互（同批或更早的镜像）。 */
-    readonly answered: (requestId: string) => Promise<boolean>;
-  }): Promise<void>;
-  accept(input: {
-    readonly taskId: string;
-    readonly assignmentId: string;
-    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
-  }): Promise<void>;
-}
-
-/** Pure assignment metadata checked before the authority is allowed to issue credentials. */
-export interface JobAssignmentPlan {
-  readonly taskId: string;
-  readonly jobRunId: string;
-  readonly anchorEpoch: number;
-  readonly assignmentId: string;
-  readonly executorId: string;
-  readonly manifest: UnsignedJobEnvelope["manifest"];
-  readonly materialize: () => UnsignedJobEnvelope;
-}
-
-export interface JobChannelRelayAdoption {
-  readonly checkpoint: StreamVerifierCheckpoint;
-  readonly prepared?: JobChannelChallengePreparedRecord;
-  readonly closed?: Extract<
-    ChannelInteractionRelayRecord,
-    { readonly t: "channel-challenge-closed" }
-  >;
-}
-
-export type JobChannelChallengePreparation =
-  | {
-      readonly kind: "prepared";
-      readonly prepared: JobChannelChallengePreparedRecord;
-    }
-  | {
-      readonly kind: "no-interactive-surface";
-    };
-
-/** Durable interaction route derived from the admitted occurrence. */
-export type JobInteractionRoute =
-  | { readonly kind: "surface-ticket"; readonly ingress: IngressContext }
-  | { readonly kind: "channel-grant" }
-  | { readonly kind: "no-interactive-surface" };
-
-export type JobCancelResult =
-  | { readonly state: "cancelled"; readonly assignmentId?: string }
-  | {
-      readonly state: "cancel-requested";
-      readonly assignmentId: string;
-      readonly fence: { readonly fenceSeq: number; readonly requestId: string };
-    }
-  | { readonly state: Exclude<JobRunState, "cancelled" | "cancel-requested"> };
-
-/** Anchor-owned durable authority for one task and all of its immutable occurrences. */
-export interface JobReductionOptions {
-  readonly taskId: string;
-  readonly anchorEpoch: number;
-  readonly artifacts: ArtifactStore;
-  readonly verifier: ProtocolSignatureVerifier;
-  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
-  readonly delivery: JobDeliveryParticipant;
-  readonly resources?: AssignmentResourceCoordinator;
-  readonly systemResources?: SystemJobResourceCoordinator;
-  readonly localExecutorId?: string;
-}
 
 /**
  * 作业日志的归约规则：作业日志自身、按键持久投影与对照用例共用这一份。

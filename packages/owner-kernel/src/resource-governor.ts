@@ -72,7 +72,7 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing-ai/core/protocol";
-import type { SystemJobResourceCoordinator } from "./job-assignment.js";
+import type { SystemJobResourceCoordinator } from "./job-journal/contracts.js";
 
 const GOVERNOR_STREAM = "governor";
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;

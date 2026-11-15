@@ -2,7 +2,7 @@ import {
   ChannelInteractionCoordinator,
   JobRelayObligationDirectory,
 } from "./channel-interaction-coordinator.js";
-import type { ConversationLosslessDataPlanePort } from "./conversation-protocol-runtime.js";
+import type { ConversationLosslessDataPlanePort } from "./conversation-protocol/contracts.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import {

@@ -5,7 +5,8 @@ import {foldConversationBaseBindings,conversationViewAt,preserveBaseDeletions,re
 import {isConversationSourceEvidenceError} from './conversation-base-source.js';
 import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
 import type { AdvancementControlEvent, AdvancementSession, AdvancementReviewAttempt } from '@zhixing-ai/core/advancement';
-import { loadCommittedBundleBinding, type ConversationFactGroup } from './conversation-assignment.js';
+import type { ConversationFactGroup } from './conversation-journal/contracts.js';
+import { loadCommittedBundleBinding } from './conversation-assignment.js';
 import type { TranscriptRunRecord } from '@zhixing-ai/core/contracts';
 import { hasPendingWorksceneTask } from '@zhixing-ai/core/workscene/application';
 import { conversationStateKeyHash as hash } from './conversation-state-key.js';

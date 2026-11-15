@@ -1,6 +1,6 @@
-import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts, type ConversationBaseLocation } from './conversation-base-source.js';
+import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts } from './conversation-base-source.js';
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing-ai/core/protocol";
-import { projectionCheckpointKey, type DurableLogCheckpoint } from "@zhixing-ai/core/authority";
+import { type DurableLogCheckpoint } from "@zhixing-ai/core/authority";
 import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from "./conversation-publish-obligations.js";
 import { conversationRecoveryPage, prepareConversationEffects, conversationRecoveryVersion, CONVERSATION_RECOVERY_PROJECTION_ID, type ConversationEffectSelection } from "./conversation-recovery-index.js";
 export { conversationRecoveryPage, conversationRecoveryPending } from "./conversation-recovery-index.js";
@@ -39,9 +39,8 @@ import { userMessageFromTurnInput, userTurnInputFromMessages, type Message } fro
 import type { RunInputPort } from "@zhixing-ai/core/loop";
 import type { ConversationMessageStatus } from "@zhixing-ai/core/conversation/application";
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing-ai/core/workscene/application";
-import { defineDurableRuntimeContract } from "@zhixing-ai/core/contracts";
 import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage, ConversationRunOutcomesPage } from '@zhixing-ai/core/contracts';
-import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
+import { projectStatusEntry, conversationStatusNotice } from './conversation-status-projection.js';
 import { ConversationReadIndex, openRunState, sourceOrder, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
 import { createConversationProjectionDraft } from './conversation-projection-draft.js';
@@ -60,7 +59,6 @@ import {
   freezeAdvancementSessions,
   isAdvancementControlEvent,
   type AdvancementControlEvent,
-  type AdvancementFoldMap,
   type AdvancementSession,
 } from "@zhixing-ai/core/advancement";
 import {
@@ -101,7 +99,6 @@ import type {
   GlobalStagedMutation,
   GovernorRecord,
   DispatchResult,
-  DispatchConflictProof,
   DispatchRejectionProof,
   ExplicitEnvironmentSelection,
   IngressContext,
@@ -122,7 +119,6 @@ import type {
   SessionControlMutation,
   SessionMeta,
   SessionStagedMutation,
-  SegmentRecord,
   TaskListState,
   TranscriptCursor,
   TranscriptPage,
@@ -199,7 +195,6 @@ import {
   validateAuthorityError as validateAuthorityErrorContract,
   validatePublishDecisionForBatch,
   type ConversationInteractionMirrorBatch,
-  type DataPlaneTicketKind,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
@@ -297,11 +292,9 @@ import type { RootResourceWorkload } from "@zhixing-ai/core/contracts";
 import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
 import {
   advanceChannelInteractionJournal,
-  createChannelInteractionJournalState,
   validateConversationChannelChallengeRecord,
   type ConversationChannelChallengePreparedRecord,
   type ConversationChannelChallengeRecord,
-  type ChannelInteractionJournalState,
 } from "./channel-interaction-records.js";
 
 export type {
@@ -311,705 +304,129 @@ export type {
 export {
   assertConversationRunInternalRecord,
 } from "./conversation-run-contracts.js";
-type ConversationUncertainResolutionFact = Extract<
-  UncertainResolutionFact,
-  { subject: { execution: "conversation" } }
->;
-
-export type ConversationCommitLogRecord =
-  | ConversationRunJournalRecord
-  | ConversationRunInternalRecord
-  | GovernorRecord
-  | PublishRecord
-  | FinalOutboxRecord;
-
-type ConversationProjectionRecord = Extract<
-  ConversationRunInternalRecord,
-  { kind: "conversation-commit-projection" }
->;
-
-interface PublishProjection {
-  readonly decisions: Map<
-    string,
-    Extract<PublishRecord, { t: "publish-decision" }>
-  >;
-  readonly batches: Map<string, MutationBatch>;
-  readonly commitRevisions: Map<string, number>;
-  readonly progress: Map<
-    string,
-    Extract<PublishRecord, { t: "publish-progress" }>
-  >;
-  readonly domainPlans: Map<string, PublishDomainPlan>;
-  readonly conversationByAssignment: Map<string, string>;
-  readonly pendingAssignmentsByConversation: Map<string, Set<string>>;
-  readonly completedAssignments: Set<string>;
-  readonly conflictsByAssignment: Map<
-    string,
-    PublishConflictNotice["conflicts"]
-  >;
-}
-
-interface PublishDomainPlan {
-  readonly grantedSeqs: number[];
-  readonly grantedIndexBySeq: Map<number, number>;
-  readonly terminalSeq: number;
-}
-
-interface FinalOutboxProjectionEntry {
-  readonly record: FinalOutboxRecord;
-  readonly at: IsoTime;
-}
-
-interface FinalOutboxProjection {
-  readonly entries: Map<string, FinalOutboxProjectionEntry>;
-  readonly activeKeyByConversationRevision: Map<string, string>;
-  readonly pendingByConversation: Map<string, Map<string, FinalOutboxProjectionEntry>>;
-  readonly publishedByConversation: Map<string, Map<string, FinalOutboxProjectionEntry>>;
-  readonly lastPendingRevisionByConversation: Map<string, number>;
-}
-
-
-const FINAL_OUTBOX_RETENTION_MS = 24 * 60 * 60 * 1_000;
-
-export type AssignmentSubmissionMethod =
-  | "submission.reportStarted"
-  | "submission.mirrorInteractions"
-  | "submission.completeInteractionSettlement"
-  | "submission.submitBundle"
-  | "submission.submitCancelProof";
-
-export interface AssignmentSubmissionIdentity {
-  readonly method: AssignmentSubmissionMethod;
-  readonly assignmentId: string;
-}
-
-export type AssignmentBundleSubmissionResult =
-  | { readonly committed: true; readonly commitRevision: number }
-  | { readonly committed: false; readonly error: AuthorityError };
-
-export type AssignmentSubmissionPreflightResult =
-  | { readonly kind: "continue" }
-  | { readonly kind: "return"; readonly result: AssignmentBundleSubmissionResult };
-
-export type AssignmentSubmissionAuthorization =
-  | {
-      readonly mode: "active";
-      readonly method: AssignmentSubmissionMethod;
-      readonly assignmentId: string;
-    }
-  | {
-      /** A validated terminal payload may only narrow the current attempt. */
-      readonly mode: "settlement";
-      readonly method:
-        | "submission.mirrorInteractions"
-        | "submission.completeInteractionSettlement"
-        | "submission.submitBundle"
-        | "submission.submitCancelProof";
-      readonly assignmentId: string;
-    }
-  | {
-      /** The request is already subsumed by durable authority state and will append nothing. */
-      readonly mode: "durable-replay";
-      readonly method:
-      | "submission.reportStarted"
-      | "submission.mirrorInteractions"
-      | "submission.completeInteractionSettlement"
-      | "submission.submitBundle"
-        | "submission.submitCancelProof";
-      readonly assignmentId: string;
-    }
-  | {
-      /** A durable fence determines a zero-write rejection before payload processing. */
-      readonly mode: "durable-rejection";
-      readonly method: "submission.submitBundle";
-      readonly assignmentId: string;
-    };
-
-export interface AssignmentSubmissionAuthorizer {
-  authenticate(
-    context: AuthorityCallContext,
-    identity: AssignmentSubmissionIdentity,
-  ): void;
-  authorize(
-    context: AuthorityCallContext,
-    authorization: AssignmentSubmissionAuthorization,
-  ): void;
-}
-
-export interface AssignmentSubmissionPreflightPort {
-  preflightSubmission(
-    context: AuthorityCallContext,
-    identity: AssignmentSubmissionIdentity,
-  ): Promise<AssignmentSubmissionPreflightResult>;
-}
-
-export interface ConversationRunJournalOptions {
-  readonly conversationId: string;
-  readonly ownerEpoch: number;
-  readonly log: AuthorityCommitLog;
-  readonly artifacts: ArtifactStore;
-  readonly signer: ProtocolSigner;
-  readonly verifier: ProtocolSignatureVerifier;
-  readonly submission: AssignmentSubmissionAuthorizer;
-  readonly authority: ConversationCommitAuthority;
-  readonly projection: ConversationCommitProjection;
-  readonly publisher?: ConversationMutationPublisher;
-  readonly delivery?: ConversationDeliveryParticipant;
-  readonly resources?: AssignmentResourceCoordinator;
-  readonly clock?: () => string;
-  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
-  readonly currentAuthority?: {
-    readonly deviceId: string;
-    readonly executorId?: string;
-  };
-  /** 镜像批次里的信任沉淀交给规则权威接纳；不装配时沉淀条目只进日志、无效果。 */
-  readonly trustSediments?: ConversationTrustSedimentPort;
-  /** 镜像批次里的规则命中交给规则权威累计；不装配时命中条目只进日志、无效果。 */
-  readonly trustRuleHits?: TrustRuleHitPort;
-}
-
-/**
- * 信任沉淀的接纳端口（规则权威所在宿主实现）。`prepare` 在镜像批次提交前调用：校验
- * 并写待生效记录，写失败上抛使本批不接纳、由执行端按既有义务重试；校验不过的条目
- * 不上抛（不堵镜像通道），只是没有效果。`accept` 在批次提交后（含重放）调用，幂等、
- * 不上抛。
- */
-export interface ConversationTrustSedimentPort {
-  prepare(input: {
-    readonly conversationId: string;
-    readonly assignmentId: string;
-    readonly executorId: string;
-    readonly environment: import("@zhixing-ai/core/contracts").EnvironmentRequirement;
-    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
-    /** 用户贡献引用的确认请求是否是本对话已答复的交互（同批或更早的镜像）。 */
-    readonly answered: (requestId: string) => Promise<boolean>;
-  }): Promise<void>;
-  accept(input: {
-    readonly conversationId: string;
-    readonly assignmentId: string;
-    readonly entry: import("@zhixing-ai/core/contracts").TrustSedimentMirrorEntry;
-  }): Promise<void>;
-}
-
-export interface ConversationAbortTicketAuthorizer {
-  authorize(input: {
-    readonly assignmentId: string;
-    readonly executorId: string;
-    readonly ticketDigest: string;
-    readonly surfacePrincipal: string;
-  }): void;
-}
-
-export interface ConversationCommitDecisionInput {
-  readonly assignmentId: string;
-  readonly authorityPrefixLsn: number;
-  readonly conversationId: string;
-  readonly ownerEpoch: number;
-  readonly baseRevision: number;
-  readonly runRecord: TranscriptRunRecord;
-  readonly sessionMutations: ReadonlyArray<{
-    readonly seq: number;
-    readonly mutation: SessionStagedMutation;
-    readonly requestId: string;
-  }>;
-}
-
-export interface ConversationCommitAuthority {
-  /**
-   * 在同一 AuthorityCommitLog 前缀上裁决当前 epoch、revision、transcript 序号
-   * 与 session staged 写，并为本次提交保留唯一 commitRevision。
-   */
-  decideAtPrefix(
-    input: ConversationCommitDecisionInput,
-  ):
-    | { readonly committed: true; readonly commitRevision: number }
-    | {
-        readonly committed: false;
-        readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
-      };
-}
-
-export interface ConversationCommitProjectionInput {
-  readonly assignmentId: string;
-  readonly conversationId: string;
-  readonly commitRevision: number;
-  readonly digest: string;
-  readonly runRecord: TranscriptRunRecord;
-  readonly windowCompact?: import("@zhixing-ai/core/contracts").WindowCompactInstruction;
-  readonly contentAssets: readonly import("@zhixing-ai/core/contracts").ContentAssetRef[];
-  readonly sessionMutations: ReadonlyArray<{
-    readonly seq: number;
-    readonly mutation: SessionStagedMutation;
-    readonly requestId: string;
-  }>;
-}
-
-export interface ConversationCommitProjection {
-  /** 幂等物化权威提交；重复调用必须返回成功且不得产生第二份派生事实。 */
-  project(input: ConversationCommitProjectionInput): Promise<void>;
-}
-
-export interface ConversationLifecycleProjectionInput {
-  readonly conversationId: string;
-  readonly mutation: "clear" | "delete";
-  readonly domainRevision: number;
-  readonly requestId: string;
-}
-
-export type ConversationLifecycleProjection = (
-  input: ConversationLifecycleProjectionInput,
-) => Promise<void>;
-
-export type ConversationGlobalMutationDecision = ReadonlyArray<{
-  readonly seq: number;
-  readonly outcome:
-    | {
-        readonly t: "granted";
-        readonly targetRevision: number;
-        readonly appliedResult?: import("@zhixing-ai/core/contracts").WorksceneAppliedResult;
-      }
-    | {
-        readonly t: "conflicted";
-        readonly error: import("@zhixing-ai/core/contracts").AuthorityError;
-      };
-}>;
-
-export interface ConversationMutationPublisher {
-  readonly readProjectionIds?: readonly string[];
-  collectStagedReferences?(records: readonly {
-    readonly seq: number;
-    readonly requestId: string;
-    readonly mutation: GlobalStagedMutation;
-  }[]): Promise<readonly ArtifactRef[]>;
-  decideGlobalBatchAtPrefix(input: {
-    readonly assignmentId: string;
-    readonly authorityPrefixLsn: number;
-    readonly authorityContext: ProjectionTransactionContext;
-    readonly records: ReadonlyArray<{
-      readonly seq: number;
-      readonly mutation: GlobalStagedMutation;
-      readonly requestId: string;
-      readonly expected: { readonly anchorEpoch: number };
-    }>;
-  }): ConversationGlobalMutationDecision | Promise<ConversationGlobalMutationDecision>;
-  prepareGlobalBatchAtPrefix?(input: {
-    readonly assignmentId: string;
-    readonly authorityPrefixLsn: number;
-    readonly authorityContext: ProjectionTransactionContext;
-    readonly records: ReadonlyArray<{
-      readonly seq: number;
-      readonly mutation: GlobalStagedMutation;
-      readonly requestId: string;
-      readonly expected: { readonly anchorEpoch: number };
-    }>;
-  }): {
-    readonly outcomes: ConversationGlobalMutationDecision;
-    readonly records: readonly LogicalRecord<unknown>[];
-  } | Promise<{
-    readonly outcomes: ConversationGlobalMutationDecision;
-    readonly records: readonly LogicalRecord<unknown>[];
-  }>;
-  /**
-   * 父运行提交事务成功之后、在事务之外调用；只含这次实际追加且已授予的全局记录，重放、拒绝、冲突都不调用。
-   * 用于及时观察已提交的结果；失败不改变已提交的结论，物化与补偿仍由 apply 与恢复路径承担。
-   */
-  afterGlobalCommit?(input: {
-    readonly conversationId: string;
-    readonly assignmentId: string;
-    readonly records: ReadonlyArray<{
-      readonly seq: number;
-      readonly requestId: string;
-      readonly mutation: GlobalStagedMutation;
-    }>;
-  }): Promise<void>;
-  /** Granted decisions are final; replaying the same assignment/seq must not duplicate effects. */
-  apply(input: {
-    readonly assignmentId: string;
-    readonly seq: number;
-    readonly domain: "session" | "global";
-    readonly mutation: SessionStagedMutation | GlobalStagedMutation;
-    readonly requestId: string;
-    readonly targetRevision: number;
-    readonly appliedResult?: import("@zhixing-ai/core/contracts").WorksceneAppliedResult;
-  }): Promise<void>;
-}
-
-export interface CommittedConversationResult {
-  readonly frame: FinalFrame;
-  readonly bundle: SealedBundle & { readonly body: { readonly t: "conversation" } };
-  readonly publishResults: readonly PublishResultNotice[];
-}
-
-export interface PendingConversationDispatch {
-  readonly assignmentId: string;
-  readonly envelope: Extract<
-    import("@zhixing-ai/core/contracts").DispatchEnvelope,
-    { execution: "conversation" }
-  >;
-  readonly activation: AssignmentActivationProof<"conversation">;
-}
-
-export interface PendingConversationInput {
-  readonly runId: string;
-  readonly input: UserTurnInput;
-  readonly attachments: readonly ContentAssetRef[];
-  readonly ingress: IngressContext;
-  readonly invocation: ConversationInvocation;
-  readonly environment?: ExplicitEnvironmentSelection;
-  readonly queuedPosition: number;
-}
-
-export interface ConversationRunControlDescriptor {
-  readonly runId: string;
-  readonly state: ConversationRunState;
-  readonly source: ConversationInvocation["source"];
-  /** Stable ingress identity used to bind source-specific projections. */
-  readonly ingressId: string;
-}
-
-export interface PendingConversationFence {
-  readonly assignmentId: string;
-  readonly fence: { readonly fenceSeq: number; readonly requestId: string };
-}
-
-export interface ConversationDispatchPort {
-  dispatch(
-    envelope: PendingConversationDispatch["envelope"],
-    activation: AssignmentActivationProof<"conversation">,
-    ctx: AuthorityCallContext,
-  ): Promise<DispatchResult>;
-  queryLedger(
-    assignmentId: string,
-    ctx: AuthorityCallContext,
-    range?: { fromSeq: number; limit: number },
-  ): Promise<import("@zhixing-ai/core/contracts").LedgerSnapshot | import("@zhixing-ai/core/contracts").LedgerEvidencePage>;
-  cancel(
-    assignmentId: string,
-    fence: { fenceSeq: number; requestId: string },
-    ctx: AuthorityCallContext,
-  ): Promise<void>;
-  supersede(
-    assignmentId: string,
-    fence: { fenceSeq: number; requestId: string },
-    ctx: AuthorityCallContext,
-  ): Promise<SupersedeProof>;
-}
-
-export interface AdmittedProjection {
-  readonly domainRevision?: number;
-  readonly lsn: number;
-  readonly record: Omit<Extract<ConversationRunJournalRecord, { t: "admitted" }>, "input">;
-  readonly input?: UserTurnInput;
-  readonly inputDigest?: string;
-  readonly inputRef?: ArtifactRef;
-}
-
-type RetainedConversationEnvelope = Omit<PendingConversationDispatch["envelope"], "work"> & {
-  readonly work: Omit<PendingConversationDispatch["envelope"]["work"], "windowInput">;
+import {
+  buildSemanticProjectionCheckpointPrefix,
+  dispatchConflictKey,
+  rejectedNotStartedKey,
+  type AssignmentBundleSubmissionResult,
+  type AssignmentSubmissionAuthorization,
+  type AssignmentSubmissionAuthorizer,
+  type AssignmentSubmissionIdentity,
+  type AssignmentSubmissionMethod,
+  type AssignmentSubmissionPreflightPort,
+  type AssignmentSubmissionPreflightResult,
+  type DataPlaneTicketFacts,
+  type DataPlaneTicketIssueRequest,
+  type InProcessBundleSubmission,
+  type InProcessCancellationSubmission,
+  type InProcessDispatchContextFactory,
+} from "./shared-protocol/contracts.js";
+import {
+  ADVANCEMENT_DURABLE_CONTRACT,
+  AdvancementWriteRejectedError,
+  ConversationAssignmentCancelledError,
+  ConversationPendingCancellationError,
+  FINAL_OUTBOX_RETENTION_MS,
+  SESSION_ACTIVITY_DURABLE_CONTRACT,
+  SessionActivityRejectedError,
+  assertAssignedMatchesDispatch,
+  emptyConversationRunProjection,
+  emptyConversationRunProjection as emptyProjection,
+  emptySubmissionGuardProjection,
+  type AdmittedProjection,
+  type AssignedProjection,
+  type CommittedConversationResult,
+  type ConversationAbortTicketAuthorizer,
+  type ConversationCancelRequest,
+  type ConversationCancelResult,
+  type ConversationChannelFrameAdoption,
+  type ConversationCommitAuthority,
+  type ConversationCommitDecisionInput,
+  type ConversationCommitLogRecord,
+  type ConversationCommitProjection,
+  type ConversationCommitProjectionInput,
+  type ConversationDispatchPort,
+  type ConversationFactGroup,
+  type ConversationGlobalMutationDecision,
+  type ConversationLifecycleProjection,
+  type ConversationLifecycleProjectionInput,
+  type ConversationMutationPublisher,
+  type ConversationProjectionRecord,
+  type ConversationRunControlDescriptor,
+  type ConversationRunJournalOptions,
+  type ConversationRunReductionContext,
+  type ConversationSubmissionGuardContext,
+  type ConversationTrustSedimentPort,
+  type ConversationUncertainResolutionFact,
+  type FinalOutboxProjection,
+  type FinalOutboxProjectionEntry,
+  type PendingConversationDispatch,
+  type PendingConversationFence,
+  type PendingConversationInput,
+  type PendingLifecycleProjection,
+  type PublishProjection,
+  type RetainedConversationEnvelope,
+  type RunProjection,
+  type SubmissionCommitSidecars,
+  type SubmissionGuardProjection,
+} from "./conversation-journal/contracts.js";
+export type { PublishDomainPlan } from "./conversation-journal/contracts.js";
+export {
+  ADVANCEMENT_DURABLE_CONTRACT,
+  AdvancementWriteRejectedError,
+  ConversationAssignmentCancelledError,
+  ConversationPendingCancellationError,
+  SESSION_ACTIVITY_DURABLE_CONTRACT,
+  SessionActivityRejectedError,
+  assertAssignedMatchesDispatch,
+  dispatchConflictKey,
+  emptyConversationRunProjection,
+  emptySubmissionGuardProjection,
+  rejectedNotStartedKey,
+  type AdmittedProjection,
+  type AssignedProjection,
+  type AssignmentBundleSubmissionResult,
+  type AssignmentSubmissionAuthorization,
+  type AssignmentSubmissionAuthorizer,
+  type AssignmentSubmissionIdentity,
+  type AssignmentSubmissionMethod,
+  type AssignmentSubmissionPreflightPort,
+  type AssignmentSubmissionPreflightResult,
+  type CommittedConversationResult,
+  type ConversationAbortTicketAuthorizer,
+  type ConversationCancelRequest,
+  type ConversationCancelResult,
+  type ConversationChannelFrameAdoption,
+  type ConversationCommitAuthority,
+  type ConversationCommitDecisionInput,
+  type ConversationCommitLogRecord,
+  type ConversationCommitProjection,
+  type ConversationCommitProjectionInput,
+  type ConversationDispatchPort,
+  type ConversationFactGroup,
+  type ConversationGlobalMutationDecision,
+  type ConversationLifecycleProjection,
+  type ConversationLifecycleProjectionInput,
+  type ConversationMutationPublisher,
+  type ConversationRunControlDescriptor,
+  type ConversationRunJournalOptions,
+  type ConversationRunReductionContext,
+  type ConversationSubmissionGuardContext,
+  type ConversationTrustSedimentPort,
+  type DataPlaneTicketFacts,
+  type DataPlaneTicketIssueRequest,
+  type InProcessBundleSubmission,
+  type InProcessCancellationSubmission,
+  type InProcessDispatchContextFactory,
+  type PendingConversationDispatch,
+  type PendingConversationFence,
+  type PendingConversationInput,
+  type RunProjection,
+  type SubmissionGuardProjection,
 };
 
-export interface AssignedProjection {
-  readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
-  readonly envelope?: RetainedConversationEnvelope;
-  readonly commit?: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string };
-  readonly origin?: ConversationBaseLocation;
-  acked: boolean;
-}
-
-export const SESSION_ACTIVITY_DURABLE_CONTRACT = defineDurableRuntimeContract({
-  recordFamily: "session-activity",
-  producer: "ConversationRunJournal",
-  recoveryOwner: "anchor-workscene-owner",
-  resourceIdentity: "session-activity:<conversationId>",
-  recoveryClass: "authority-replay",
-  cases: [
-    ...["upsert", "delete"].map((key) => ({ kind: "variant" as const, key })),
-    ...["conversation-scene-mismatch", "external-construction"].map((key) => ({ kind: "rejection" as const, key, reasonCode: "SESSION_ACTIVITY_REJECTED" })),
-    { kind: "rejection", key: "non-monotonic-revision", reasonCode: "AUTHORITY_RECORD_INVALID" },
-    ...["wrong-stream", "invalid-time", "identity-rebinding"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "AUTHORITY_RECORD_INVALID" })),
-  ],
-} as const);
-
-export const ADVANCEMENT_DURABLE_CONTRACT = defineDurableRuntimeContract({
-  recordFamily: "advancement-event",
-  producer: "ConversationRunJournal",
-  recoveryOwner: "anchor-conversation-owner",
-  resourceIdentity: "run:<conversationId>",
-  recoveryClass: "authority-replay",
-  cases: [
-    ...["single-event", "composite-batch", "artifact-stored"].map((key) => ({
-      kind: "variant" as const,
-      key,
-    })),
-    ...["conflicting-payload", "illegal-batch"].map((key) => ({
-      kind: "rejection" as const,
-      key,
-      reasonCode: "ADVANCEMENT_WRITE_REJECTED",
-    })),
-    ...["invalid-event", "non-monotonic-revision", "conflicting-durable-payload"].map(
-      (key) => ({
-        kind: "corruption" as const,
-        key,
-        reasonCode: "AUTHORITY_RECORD_INVALID",
-      }),
-    ),
-  ],
-} as const);
-
-export class AdvancementWriteRejectedError extends TypeError {
-  readonly reasonCode = "ADVANCEMENT_WRITE_REJECTED";
-
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "AdvancementWriteRejectedError";
-  }
-}
-
-export class SessionActivityRejectedError extends TypeError {
-  readonly reasonCode = "SESSION_ACTIVITY_REJECTED";
-
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "SessionActivityRejectedError";
-  }
-}
-
-interface PendingLifecycleProjection {
-  readonly mutation: "clear" | "delete";
-  readonly domainRevision: number;
-  readonly requestId: string;
-}
-
-// 会话运行日志的投影随该会话历史增长；检查点让每次冷启动后的首次使用只续算尾部。
 type JournalProjectionKind = "run" | "submission";
-/** 各类会话投影检查点键的前缀（名称、版本、归约指纹），进程内只算一次。 */
 const journalCheckpointPrefixes = new Map<JournalProjectionKind, string>();
-
-export interface RunProjection {
-  readonly conversationId: string;
-  domainRevision: number;
-  deleted: boolean;
-  hasDurableIdentity?: boolean;
-  activeAdvancementSessionId?: string;
-  advancementStatuses?: Map<string, AdvancementSession['status']>;
-  pendingLifecycleCount?: number;
-  readonly advancementSessions: AdvancementFoldMap;
-  readonly advancementWrites: Map<
-    string,
-    { readonly domainRevision: number; readonly eventsDigest: string; readonly receipt?: AdvancementSubmissionReceipt }
-  >;
-  readonly sessionMutationDigests: Map<
-    string,
-    { readonly digest: string; readonly domainRevision: number }
-  >;
-  readonly taskListRequestIds: Set<string>;
-  taskList: TaskListState;
-  readonly segments: Pick<SegmentRecord, "segmentId" | "timestamp">[];
-  readonly worksceneControls: Map<string, { readonly record: TranscriptRunRecord; readonly advancementSessionId?: string }>;
-  clearedThroughLsn: number;
-  clearedThroughRevision?: number;
-  sessionName?: string;
-  lastActiveAt?: string;
-  sessionMeta?: Extract<
-    ConversationRunJournalRecord,
-    { t: "session-meta" }
-  >;
-  readonly sessionMetaByRequest: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "session-meta" }>
-  >;
-  readonly lifecycleByRequest: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "session-lifecycle" }>
-  >;
-  readonly pendingLifecycleProjections: Map<
-    number,
-    PendingLifecycleProjection
-  >;
-  readonly projectedLifecycleRevisions: Set<number>;
-  readonly admittedByRun: Map<string, AdmittedProjection>;
-  readonly appendedInputs: Map<string, { readonly record: Omit<Extract<ConversationRunJournalRecord, { t: "run-input-appended" }>, "input">; readonly input?: UserTurnInput; readonly lsn: number }>;
-  readonly appendedInputKeysByRun: Map<string, Set<string>>;
-  readonly openInputAssignments: Map<string, string>;
-  readonly closedInputAssignments: Set<string>;
-  readonly inputConsumptions: Map<string, Extract<ConversationRunJournalRecord, { t: "run-input-consumed" }>>;
-  readonly runByIngress: Map<string, string>;
-  readonly assignedById: Map<string, AssignedProjection>;
-  readonly assignmentByRun: Map<string, string>;
-  readonly assignmentAttemptByRun?: Map<string, number>;
-  readonly stateByRun: Map<
-    string,
-    { readonly state: ConversationRunState; readonly statusRevision: number }
-  >;
-  readonly queuedRunByPosition: Map<number, string>;
-  readonly queuedPositionHeap: number[];
-  readonly queuedPositionHeapIndex: Map<number, number>;
-  activeRunId?: string;
-  readonly mirrorStateByAssignment: Map<
-    string,
-    {
-      ordinal: number;
-      mirrorDigest: string;
-      mirroredUpTo: number;
-      readonly requestIds: Set<string>;
-    }
-  >;
-  readonly mirrorBatches: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "interaction-mirror" }>
-  >;
-  readonly committedByAssignment: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "committed" }>
-  >;
-  readonly bundleAcknowledgements: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "bundle-ack-observed" }>
-  >;
-  readonly recoveryAssignments: Set<string>;
-  readonly bundleAcknowledgementOutbox: Set<string>;
-  readonly commits: Array<Extract<ConversationRunJournalRecord, { t: "committed" }>>;
-  readonly assignmentByCommitRevision: Map<number, string>;
-  readonly contentByRevision: Map<number, readonly import("@zhixing-ai/core/contracts").ContentAssetRef[]>;
-  readonly projectedByAssignment: Map<string, ConversationProjectionRecord>;
-  readonly pendingCommitProjections: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "committed" }>
-  >;
-  readonly conflicts: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "dispatch-conflict" }>
-  >;
-  readonly conflictByAssignment: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "dispatch-conflict" }>
-  >;
-  readonly containedFacts: Set<string>;
-  readonly containmentByAssignment: Map<
-    string,
-    | Extract<ConversationRunJournalRecord, { t: "dispatch-conflict-contained" }>
-    | Extract<ConversationRunJournalRecord, { t: "cancel-contained" }>
-  >;
-  readonly superseded: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "assignment-superseded" }>
-  >;
-  readonly supersedeRequests: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "supersede-requested" }>
-  >;
-  readonly supersedeStartedObservations: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "supersede-started-observed" }>
-  >;
-  readonly cancelFences: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "cancel-fence" }>
-  >;
-  readonly cancelOrigins: Map<string, "dispatched" | "running">;
-  readonly acceptedCancellations: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "cancel-proof-accepted" }>
-  >;
-  readonly rejectedNotStarted: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "not-started-rejected" }>
-  >;
-  readonly uncertainOrigins: Map<
-    string,
-    "dispatched" | "running" | "cancel-requested"
-  >;
-  readonly revokedCapabilities: Set<string>;
-  readonly ticketsById: Map<string, DataPlaneTicket>;
-  readonly ticketIdsByAssignment: Map<string, Set<string>>;
-  readonly ticketReplacementsById: Map<string, string>;
-  readonly revokedTickets: Set<string>;
-  ticketSyncFrontier: string | undefined;
-  readonly resolutionsByRun: Map<string, ConversationUncertainResolutionFact>;
-  readonly statusHistoryByRun: Map<string, StatusHistoryEntry[]>;
-  readonly closedAssignments: Set<string>;
-  channelInteractions: ChannelInteractionJournalState;
-}
-
-export interface SubmissionGuardProjection {
-  readonly assignmentAttemptByRun?: Map<string, number>;
-  readonly admittedByRun: Map<
-    string,
-    {
-      readonly ingressKey: string;
-      readonly queuedPosition: number;
-      readonly ingress: IngressContext;
-    }
-  >;
-  readonly runByIngress: Map<string, string>;
-  readonly queuedRunByPosition: Map<number, string>;
-  readonly queuedPositionHeap: number[];
-  readonly queuedPositionHeapIndex: Map<number, number>;
-  readonly assignedById: Map<
-    string,
-    {
-      readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
-      readonly origin?: ConversationBaseLocation;
-      readonly commit?: {
-        readonly lsn: number;
-        readonly envelopeDigest: string;
-        readonly at: string;
-      };
-      readonly capIds: ReadonlySet<string>;
-      acked: boolean;
-    }
-  >;
-  readonly assignmentByRun: Map<string, string>;
-  readonly stateByRun: Map<
-    string,
-    { readonly state: ConversationRunState; readonly statusRevision: number }
-  >;
-  readonly conflictAssignments: Set<string>;
-  readonly openConflictAssignments: Set<string>;
-  readonly supersedeRequests: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "supersede-requested" }>
-  >;
-  readonly supersedeStartedAssignments: Set<string>;
-  readonly cancelFences: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "cancel-fence" }>
-  >;
-  readonly acceptedCancellations: Set<string>;
-  readonly durableStartedAssignments: Set<string>;
-  readonly resolutionsByRun: Map<string, ConversationUncertainResolutionFact>;
-  readonly committedByAssignment: Map<
-    string,
-    {
-      readonly bundle: { readonly ref: ArtifactRef };
-      readonly commitRevision: number;
-      readonly sidecars: SubmissionCommitSidecars;
-    }
-  >;
-  readonly bundleAcknowledgements: Map<
-    string,
-    Extract<ConversationRunJournalRecord, { t: "bundle-ack-observed" }>
-  >;
-  readonly closedAssignments: Set<string>;
-  readonly revokedCapabilities: Set<string>;
-  readonly ticketsById: Map<string, DataPlaneTicket>;
-  readonly ticketIdsByAssignment: Map<string, Set<string>>;
-  readonly ticketReplacementsById: Map<string, string>;
-  readonly revokedTickets: Set<string>;
-  ticketSyncFrontier: string | undefined;
-  activeRunId: string | undefined;
-}
-
-interface SubmissionCommitSidecars {
-  readonly contentAssetsDigest: string;
-  readonly finalDigest: string;
-  readonly publish?: {
-    readonly batch: { readonly ref: ArtifactRef };
-    readonly sessionCount: number;
-    readonly globalCount: number;
-    readonly pendingDomains: ReadonlySet<"session" | "global">;
-  };
-}
 
 interface PreparedStored<T> {
   readonly stored: Stored<T>;
@@ -1022,20 +439,6 @@ interface AssignDecision {
   readonly appended?: true;
 }
 
-export interface InProcessDispatchContextFactory {
-  create(
-    assignmentId: string,
-    method:
-      | "executor.dispatch"
-      | "executor.cancel"
-      | "executor.supersede"
-      | "executor.queryLedger",
-    request: {
-      readonly requestId: string;
-      readonly body: unknown;
-    },
-  ): AuthorityCallContext;
-}
 
 interface InProcessConversationDispatcherBaseOptions {
   readonly journal: ConversationRunJournal;
@@ -1045,16 +448,6 @@ interface InProcessConversationDispatcherBaseOptions {
   readonly cancellationContinuationPending?: (assignmentId: string) => boolean;
 }
 
-export interface InProcessCancellationSubmission {
-  submitCancellation(assignmentId: string): Promise<boolean>;
-}
-
-export interface InProcessBundleSubmission {
-  submitSealedBundle(assignmentId: string): Promise<
-    | { readonly committed: true; readonly commitRevision: number }
-    | { readonly committed: false; readonly error: AuthorityError }
-  >;
-}
 
 export type InProcessConversationDispatcherOptions =
   InProcessConversationDispatcherBaseOptions &
@@ -1071,41 +464,6 @@ export type InProcessConversationDispatcherOptions =
         }
     );
 
-export interface ConversationCancelRequest {
-  readonly runId: string;
-  readonly requestId: string;
-}
-
-export interface DataPlaneTicketIssueRequest {
-  readonly ticketId: string;
-  readonly assignmentId: string;
-  readonly surfacePrincipal: string;
-  readonly kind: DataPlaneTicketKind;
-  readonly ttlMs: number;
-  readonly replacesTicketId?: string;
-}
-
-export interface DataPlaneTicketFacts {
-  readonly issued: readonly DataPlaneTicket[];
-  readonly revokedTicketIds: readonly string[];
-}
-
-export type ConversationCancelResult =
-  | { readonly state: "cancelled"; readonly assignmentId?: string }
-  | {
-      readonly state: "cancel-requested";
-      readonly assignmentId: string;
-      readonly fence: { readonly fenceSeq: number; readonly requestId: string };
-    }
-  | { readonly state: Exclude<ConversationRunState, "cancelled" | "cancel-requested"> };
-
-export interface ConversationChannelFrameAdoption {
-  readonly prepared?: ConversationChannelChallengePreparedRecord;
-  readonly closed?: Extract<
-    ConversationChannelChallengeRecord,
-    { readonly t: "channel-challenge-closed" }
-  >;
-}
 
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
 class ConversationWorkingSetChanged extends StorageMaintenanceAdmissionError {
@@ -1636,7 +994,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     let restored = await this.#log.loadProjectionCheckpoint<never>(key);
     let migrated = false;
     if (!restored && kind === "run") {
-      const legacy = `${projectionCheckpointKey("conversation-run-projection", 1, this.#reduce)}:${this.#conversationId}:${this.#ownerEpoch}`;
+      const legacy = `${buildSemanticProjectionCheckpointPrefix("conversation-run-projection", 1, [this.#reduce, reduceConversationRunState, emptyConversationRunProjection])}:${this.#conversationId}:${this.#ownerEpoch}`;
       restored = await this.#log.loadProjectionCheckpoint<never>(legacy);
       migrated = restored !== undefined;
       if (restored) restored = { ...restored, state: compactLegacyRunProjection(restored.state as RunProjection) as never };
@@ -1655,7 +1013,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const key = this.#projectionCheckpointKey(kind);
       if (key) void this.#log.deleteProjectionCheckpoint?.(key);
       if (kind === "run") void this.#log.deleteProjectionCheckpoint?.(
-        `${projectionCheckpointKey("conversation-run-projection", 1, this.#reduce)}:${this.#conversationId}:${this.#ownerEpoch}`,
+        `${buildSemanticProjectionCheckpointPrefix("conversation-run-projection", 1, [this.#reduce, reduceConversationRunState, emptyConversationRunProjection])}:${this.#conversationId}:${this.#ownerEpoch}`,
       );
     }
   }
@@ -1674,10 +1032,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     let prefix = journalCheckpointPrefixes.get(kind);
     if (!prefix) {
       const reducers = {
-        run: [this.#reduce], submission: [this.#reduceSubmissionGuard],
-        publish: [reducePublishRecord, reducePublishBody], final: [applyFinalRecord],
+        run: [this.#reduce, reduceConversationRunState, emptyConversationRunProjection],
+        submission: [this.#reduceSubmissionGuard, reduceConversationSubmissionGuard, emptySubmissionGuardProjection],
       }[kind];
-      prefix = projectionCheckpointKey(`conversation-${kind}-projection`, kind === "run" ? 2 : 1, ...reducers);
+      prefix = buildSemanticProjectionCheckpointPrefix(`conversation-${kind}-projection`, kind === "run" ? 2 : 1, reducers);
       journalCheckpointPrefixes.set(kind, prefix);
     }
     return `${prefix}:${this.#conversationId}:${this.#ownerEpoch}`;
@@ -7724,21 +7082,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 }
 
-/** An exact assignment lost the atomic preparation decision to a durable cancellation. */
-export class ConversationAssignmentCancelledError extends Error {
-  constructor(readonly runId: string, readonly assignmentId: string) {
-    super("Conversation assignment was durably cancelled before execution");
-    this.name = "ConversationAssignmentCancelledError";
-  }
-}
-
-/** No dispatch decision may overtake this target's already received control. */
-export class ConversationPendingCancellationError extends Error {
-  constructor(readonly runId: string) {
-    super("Conversation dispatch is waiting for its received cancellation decision");
-    this.name = "ConversationPendingCancellationError";
-  }
-}
 
 /** Explicitly gated single-process transport; disabled means zero dispatch side effects. */
 export class InProcessConversationDispatcher {
@@ -8140,73 +7483,6 @@ function expectedRunInputMessages(state: RunProjection, runId: string, assignmen
   ];
 }
 
-function emptyProjection(conversationId: string): RunProjection {
-  return {
-    conversationId,
-    domainRevision: 0,
-    deleted: false,
-    advancementSessions: new Map(),
-    advancementWrites: new Map(),
-    sessionMutationDigests: new Map(),
-    taskListRequestIds: new Set(),
-    taskList: { items: [] },
-    segments: [],
-    worksceneControls: new Map(),
-    clearedThroughLsn: 0,
-    sessionMeta: undefined,
-    sessionMetaByRequest: new Map(),
-    lifecycleByRequest: new Map(),
-    pendingLifecycleProjections: new Map(),
-    projectedLifecycleRevisions: new Set(),
-    admittedByRun: new Map(),
-    appendedInputs: new Map(),
-    appendedInputKeysByRun: new Map(),
-    openInputAssignments: new Map(),
-    closedInputAssignments: new Set(),
-    inputConsumptions: new Map(),
-    runByIngress: new Map(),
-    assignedById: new Map(),
-    assignmentByRun: new Map(),
-    assignmentAttemptByRun: new Map(),
-    stateByRun: new Map(),
-    queuedRunByPosition: new Map(),
-    queuedPositionHeap: [],
-    queuedPositionHeapIndex: new Map(),
-    mirrorStateByAssignment: new Map(),
-    mirrorBatches: new Map(),
-    committedByAssignment: new Map(),
-    bundleAcknowledgements: new Map(),
-    recoveryAssignments: new Set(),
-    bundleAcknowledgementOutbox: new Set(),
-    commits: [],
-    assignmentByCommitRevision: new Map(),
-    contentByRevision: new Map(),
-    projectedByAssignment: new Map(),
-    pendingCommitProjections: new Map(),
-    conflicts: new Map(),
-    conflictByAssignment: new Map(),
-    containedFacts: new Set(),
-    containmentByAssignment: new Map(),
-    superseded: new Map(),
-    supersedeRequests: new Map(),
-    supersedeStartedObservations: new Map(),
-    cancelFences: new Map(),
-    cancelOrigins: new Map(),
-    acceptedCancellations: new Map(),
-    rejectedNotStarted: new Map(),
-    uncertainOrigins: new Map(),
-    revokedCapabilities: new Set(),
-    ticketsById: new Map(),
-    ticketIdsByAssignment: new Map(),
-    ticketReplacementsById: new Map(),
-    revokedTickets: new Set(),
-    ticketSyncFrontier: undefined,
-    resolutionsByRun: new Map(),
-    statusHistoryByRun: new Map(),
-    closedAssignments: new Set(),
-    channelInteractions: createChannelInteractionJournalState("conversation"),
-  };
-}
 
 function applyProjectedSessionMutation(
   state: RunProjection,
@@ -8243,37 +7519,6 @@ function applyProjectedSessionMutation(
   }
 }
 
-export function emptySubmissionGuardProjection(): SubmissionGuardProjection {
-  return {
-    admittedByRun: new Map(),
-    runByIngress: new Map(),
-    queuedRunByPosition: new Map(),
-    queuedPositionHeap: [],
-    queuedPositionHeapIndex: new Map(),
-    assignedById: new Map(),
-    assignmentByRun: new Map(),
-    assignmentAttemptByRun: new Map(),
-    stateByRun: new Map(),
-    conflictAssignments: new Set(),
-    openConflictAssignments: new Set(),
-    supersedeRequests: new Map(),
-    supersedeStartedAssignments: new Set(),
-    cancelFences: new Map(),
-    acceptedCancellations: new Set(),
-    durableStartedAssignments: new Set(),
-    resolutionsByRun: new Map(),
-    committedByAssignment: new Map(),
-    bundleAcknowledgements: new Map(),
-    closedAssignments: new Set(),
-    revokedCapabilities: new Set(),
-    ticketsById: new Map(),
-    ticketIdsByAssignment: new Map(),
-    ticketReplacementsById: new Map(),
-    revokedTickets: new Set(),
-    ticketSyncFrontier: undefined,
-    activeRunId: undefined,
-  };
-}
 
 /**
  * 用户取消控制面的候选枚举——投影查询与 cancel-batch 权威决定共用的
@@ -8682,16 +7927,6 @@ function closeResolution(
   );
 }
 
-export function dispatchConflictKey(proof: DispatchConflictProof): string {
-  return `${proof.assignmentId}\0${proof.conflictingActivationDigest}`;
-}
-
-export function rejectedNotStartedKey(
-  assignmentId: string,
-  kind: AssignmentTerminationProofKind,
-): string {
-  return `${assignmentId}\0${kind}`;
-}
 
 function hasRejectedNotStarted(
   state: RunProjection,
@@ -9756,33 +8991,6 @@ function isStoredReference<T>(value: Stored<T>): value is { readonly ref: Artifa
   );
 }
 
-export function assertAssignedMatchesDispatch(
-  assigned: Extract<ConversationRunJournalRecord, { t: "assigned" }>,
-  dispatch: PendingConversationDispatch["envelope"],
-  ingress: IngressContext,
-  conversationId: string,
-): void {
-  const artifact = dispatchEnvelopeArtifact(dispatch);
-  if (
-    assigned.runId !== dispatch.work.runId ||
-    dispatch.work.conversationId !== conversationId ||
-    assigned.assignmentId !== dispatch.assignmentId ||
-    assigned.executorId !== dispatch.executorId ||
-    assigned.ownerEpoch !== dispatch.work.ownerEpoch ||
-    assigned.baseRevision !== dispatch.work.baseRevision ||
-    assigned.dispatchDigest !== dispatchEnvelopeDigest(dispatch) ||
-    assigned.manifestDigest !== dispatch.manifest.digest ||
-    canonicalize(assigned.dispatchRef) !== canonicalize(artifact.ref) ||
-    assigned.permissionLeaseDigest !== permissionSnapshotLeaseDigest(dispatch) ||
-    assigned.capIds.join("\u0000") !==
-      dispatch.capabilities.map((capability) => capability.capId).join("\u0000") ||
-    assigned.reservation.reservationId !== dispatch.resourceLease.reservationId ||
-    assigned.reservation.attempt !== dispatch.resourceLease.workload.attempt ||
-    canonicalize(ingress) !== canonicalize(dispatch.work.ingress)
-  ) {
-    throw corruptRunJournal("Assigned record does not match its dispatch artifact");
-  }
-}
 
 function assertCapabilityMatchesAssignedEnvelope(
   capability: import("@zhixing-ai/core/contracts").AuthorityCapability,
@@ -10581,15 +9789,6 @@ async function recoveryCandidatesOf(
   return result;
 }
 
-export interface ConversationSubmissionGuardContext {
-  readonly conversationId: string;
-  readonly verifier: ProtocolSignatureVerifier;
-  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
-  readonly assertResourceUsageFinal: (assigned: { assignmentId: string; executorId: string; reservation: { reservationId: string } }, usage: { reportDigest: string; upToUsageSeq: number }) => void;
-  readonly assertResourceTerminalRecords: (assigned: { assignmentId: string; reservation: { reservationId: string } }, mode: 'settle-release' | 'release' | 'reclaim', records: readonly LogicalRecord<unknown>[]) => void;
-}
-
-export type ConversationFactGroup<Body = ConversationCommitLogRecord> = { readonly entries: readonly LogicalRecord<Body>[]; readonly at: string };
 type ConversationDomainSource = { readonly kind: 'local'; readonly envelope: CommitEnvelope<ConversationCommitLogRecord>; readonly context: ConversationSubmissionGuardContext }
   | { readonly kind: 'imported'; readonly group: AuthenticatedConversationFacts };
 export async function reduceConversationSubmissionGuard(context: ConversationSubmissionGuardContext, state: SubmissionGuardProjection,
@@ -11514,7 +10713,6 @@ async function reduceConversationDomainGuard(context: Pick<ConversationSubmissio
     }
   }
 
-export { emptyProjection as emptyConversationRunProjection };
 
 function requireAssignedEnvelope(assigned: AssignedProjection): RetainedConversationEnvelope {
   if (!assigned.envelope) throw corruptRunJournal("Active assignment envelope was not prepared");
@@ -11710,12 +10908,6 @@ export function reduceConversationContainment(
   }
 }
 
-export interface ConversationRunReductionContext extends ConversationSubmissionGuardContext {
-  readonly artifacts: ArtifactStore;
-  readonly resources?: Pick<AssignmentResourceCoordinator, 'assertActivationRecords'>;
-  readonly delivery?: Pick<ConversationDeliveryParticipant, 'assertConversationCommit' | 'assertConversationStatuses'>;
-  readonly currentAuthority?: ConversationRunJournalOptions['currentAuthority'];
-}
 /** One canonical semantic reducer for live writes and indexed recovery. */
 export async function reduceConversationRunState(context: ConversationRunReductionContext, state: RunProjection,
   record: LogicalRecord<unknown>, rawEnvelope: CommitEnvelope<unknown>, checks?: Array<() => void>): Promise<RunProjection> {

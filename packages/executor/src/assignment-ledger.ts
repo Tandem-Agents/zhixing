@@ -31,7 +31,6 @@ import {
 } from "@zhixing-ai/core/authority";
 import type {
   ArtifactRef,
-  AssignmentActivationPayload,
   AssignmentActivationProof,
   AssignmentEntry,
   AssignmentRecord,
@@ -42,7 +41,6 @@ import type {
   AuthorityEpochRef,
   AuthorityError,
   CancelProofBody,
-  ControlLease,
   CommitEnvelope,
   DispatchConflictProof,
   DispatchRejectionProof,
@@ -57,14 +55,7 @@ import type {
   PermissionSnapshotLease,
   SealedBundle,
   SupersedeProof,
-  SessionStagedMutation,
-  GlobalStagedMutation,
   TranscriptRunRecord,
-  WindowCompactInstruction,
-  ContentAssetRef,
-  JobCommitFence,
-  JobGlobalStagedMutation,
-  InteractionDisplay,
   InteractionMirrorBatch,
   InteractionMirrorEntry,
   InteractionSettlementStreamProof,
@@ -74,13 +65,12 @@ import type {
   RunDispatchArguments,
   RunExecutorPort,
   StreamConsumerAuth,
-  StreamFrame,
 } from "@zhixing-ai/core/contracts";
 import {
   MAX_LEDGER_EVIDENCE_PAGE_BYTES,
   MAX_LEDGER_EVIDENCE_PAGE_ENTRIES,
 } from "@zhixing-ai/core/contracts";
-import type { PermissionRule, TrustRuleSnapshot } from "@zhixing-ai/core/security";
+import type { PermissionRule } from "@zhixing-ai/core/security";
 import {
   assertActivePermissionSnapshotLease,
   acceptedRemoteIntervalRemainingMs,
@@ -150,470 +140,107 @@ import {
   validateJobSealedBundle,
   validateInteractionDisplay,
   validateCancelProof,
-  type ConversationInteractionMirrorEntry,
   type AssignmentInteractionOutcome,
   type ConversationInteractionOutcome,
-  type AssignmentLedgerValidationState,
-  type ExecutorCapabilitySnapshot,
   type FirstPartyInteractionDecision,
   type DataPlaneTicketUse,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-  type StreamDataFramePayload,
-  type StreamVerifierCheckpoint,
 } from "@zhixing-ai/core/protocol";
 import type { ExecutorAssignmentResourceCoordinator, ExecutorCoordinationOptions, ExecutorExecutionScope } from "./resource-governor.js";
-import type { DataPlaneAssignmentBinding, DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
 import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 
-type ConversationEnvelope = Extract<
-  import("@zhixing-ai/core/contracts").DispatchEnvelope,
-  { execution: "conversation" }
->;
-type JobEnvelope = Extract<
-  import("@zhixing-ai/core/contracts").DispatchEnvelope,
-  { execution: "job" }
->;
-type AssignmentEnvelope = ConversationEnvelope | JobEnvelope;
-type AnyAssignmentActivationProof =
-  | AssignmentActivationProof<"conversation">
-  | AssignmentActivationProof<"job">;
-type AnyAssignmentActivationPayload =
-  | AssignmentActivationPayload<"conversation">
-  | AssignmentActivationPayload<"job">;
-
-export type ConversationDispatchPort = {
-  dispatch(
-    envelope: ConversationEnvelope,
-    activation: AssignmentActivationProof<"conversation">,
-    ctx: AuthorityCallContext,
-  ): Promise<DispatchResult>;
-  queryLedger(
-    assignmentId: string,
-    ctx: AuthorityCallContext,
-    range?: { fromSeq: number; limit: number },
-  ): Promise<LedgerSnapshot | LedgerEvidencePage>;
-  cancel(
-    assignmentId: string,
-    fence: { fenceSeq: number; requestId: string },
-    ctx: AuthorityCallContext,
-  ): Promise<void>;
-  supersede(
-    assignmentId: string,
-    fence: { fenceSeq: number; requestId: string },
-    ctx: AuthorityCallContext,
-  ): Promise<SupersedeProof>;
-};
-
-export interface OwnerControlRequest {
-  readonly method:
-    | "executor.dispatch"
-    | "executor.cancel"
-    | "executor.supersede"
-    | "executor.queryLedger";
-  readonly assignmentId: string;
-  readonly authority?: AuthorityEpochRef;
-  readonly requestId: string;
-  readonly body: unknown;
-  readonly expectedOwnerDeviceId?: string;
-  readonly anchorEpoch?: number;
-}
-
-export interface OwnerControlAuthorizer {
-  readonly readProjectionIds?: readonly string[];
-  prepare?(context: AuthorityCallContext, request: OwnerControlRequest, authenticatedCallerDeviceId: string):
-    Promise<((prefix: ProjectionTransactionContext) => Promise<void>) | undefined>;
-  prepareExecution?(control: { readonly authority: AuthorityEpochRef; readonly ownerDeviceId: string; readonly lease: ControlLease }):
-    Promise<((prefix: ProjectionTransactionContext) => Promise<void>) | undefined>;
-  authorize(
-    context: AuthorityCallContext,
-    request: OwnerControlRequest,
-    authenticatedCallerDeviceId: string,
-  ): {
-    readonly authority: AuthorityEpochRef;
-    readonly ownerDeviceId: string;
-    readonly controlLease: ControlLease;
-  };
-}
-
-export interface OwnerControlPreflightPort {
-  preflightOwnerControl(
-    context: AuthorityCallContext,
-    request: OwnerControlRequest,
-    authenticatedCallerDeviceId: string,
-  ): Promise<void>;
-}
-
-export interface AssignmentLedgerOptions {
-  readonly log: AuthorityCommitLog;
-  readonly artifacts: ArtifactStore;
-  readonly executorId: string;
-  readonly signer: ProtocolSigner;
-  readonly verifier: ProtocolSignatureVerifier;
-  readonly ownerControl: OwnerControlAuthorizer;
-  readonly snapshotFor: (
-    executorId: string,
-  ) => ExecutorCapabilitySnapshot | undefined;
-  /** 按 digest 取权限快照：账本在进事务前预读，事务内照原顺序判定；取到不等于授权。 */
-  readonly permissionSnapshotFor: (
-    digest: string,
-  ) => TrustRuleSnapshot | undefined | Promise<TrustRuleSnapshot | undefined>;
-  readonly runtimeBindingGuard?: (input: {
-    readonly assignmentId: string;
-    readonly manifest: ExecutionManifest<"conversation">;
-  }) => AuthorityError | undefined | Promise<AuthorityError | undefined>;
-  readonly clock?: () => string;
-  readonly monotonicClock?: () => number;
-  readonly usageFinal?: (
-    assignmentId: string,
-  ) =>
-    | { readonly reportDigest: string; readonly upToUsageSeq: number }
-    | Promise<{ readonly reportDigest: string; readonly upToUsageSeq: number }>;
-  readonly resources?: ExecutorAssignmentResourceCoordinator;
-  readonly surfaceAbort?: {
-    authorize(assignmentId: string, input: SurfaceAbortInput): void;
-  };
-  readonly dataPlaneTickets?: Pick<DataPlaneTicketRegistry, "authorize">;
-  readonly maxPendingInteractions?: number;
-  readonly maxCachedAssignments?: number;
-  /**
-   * Enables production creation of assignment v2 facts. Compatibility
-   * readers leave this disabled and may only continue an already-cut-over log.
-   */
-  readonly assignmentRecordV2Writes?: boolean;
-}
-
-export interface AssignmentSubmissionPort {
-  reportStarted(assignmentId: string, ctx: AuthorityCallContext): Promise<void>;
-  mirrorInteractions(
-    assignmentId: string,
-    batch: InteractionMirrorBatch,
-    ctx: AuthorityCallContext,
-  ): Promise<InteractionMirrorReceipt>;
-  submitBundle(
-    bundle: SealedBundle,
-    ctx: AuthorityCallContext,
-  ): Promise<
-    | { readonly committed: true; readonly commitRevision: number }
-    | { readonly committed: false; readonly error: AuthorityError }
-  >;
-  submitCancelProof(
-    assignmentId: string,
-    proof: CancelProofBody,
-    ctx: AuthorityCallContext,
-  ): Promise<void>;
-}
-
-export type ConversationSubmissionPort = AssignmentSubmissionPort;
+import {
+  AssignmentExecutionResourceRetiredError,
+  AssignmentStartCancelledError,
+  BINDING_RECOVERY_CHUNK,
+  buildLedgerProjectionCheckpointPrefix,
+  DATA_PLANE_BINDING_BATCH_LIMIT,
+  DECISION_STATE_SAVE_DELAY_MS,
+  DEFAULT_MAX_CACHED_ASSIGNMENTS,
+  DEFAULT_MAX_PENDING_INTERACTIONS,
+  LEDGER_DECISION_STATE_VERSION,
+  LEGACY_HISTORY_PAGE_KEYS,
+  type AnyAssignmentActivationPayload,
+  type AnyAssignmentActivationProof,
+  type AssignmentEnvelope,
+  type AssignmentLedgerOptions,
+  type AssignmentSubmissionPort,
+  type ChannelInteractionAnswerPreparation,
+  type ConversationDispatchPort,
+  type ConversationEnvelope,
+  type ConversationSealInput,
+  type ConversationSubmissionPort,
+  type DurableInteractionStreamEvent,
+  type FinishedInteraction,
+  type InteractionMirrorReceipt,
+  type InteractionOutcome,
+  type InteractionRecoveryResult,
+  type InteractionRequestDisposition,
+  type InteractionRequestInput,
+  type InteractionStreamProjectionReceipt,
+  type JobEnvelope,
+  type JobRecoveryIndexValue,
+  type JobRecoveryObligation,
+  type JobRecoveryObligationPage,
+  type JobSealInput,
+  type LedgerProjection,
+  type LegacyHistory,
+  type LegacyHistoryCategory,
+  type LegacyHistoryPage,
+  type LegacyHistoryPages,
+  type MirrorChainItem,
+  type OwnerControlAuthorizer,
+  type OwnerControlPreflightPort,
+  type OwnerControlRequest,
+  type PendingAssignmentInteraction,
+  type ReceiptWaiter,
+  type RecordedTrustRuleHit,
+  type RecordedTrustSediment,
+  type RequestedInteraction,
+  type SideEffectInput,
+  type StagedConversationMutationInput,
+  type StagedJobMutationInput,
+  type StoredDataPlaneBinding,
+  type SurfaceAbortDisposition,
+  type SurfaceAbortInput,
+  type SurfaceInteractionAnswerPreparation,
+} from "./ledger/contracts.js";
+export {
+  AssignmentExecutionResourceRetiredError,
+  AssignmentStartCancelledError,
+  DATA_PLANE_BINDING_BATCH_LIMIT,
+  type AssignmentLedgerOptions,
+  type AssignmentSubmissionPort,
+  type ChannelInteractionAnswerPreparation,
+  type ConversationDispatchPort,
+  type ConversationSealInput,
+  type ConversationSubmissionPort,
+  type DurableInteractionStreamEvent,
+  type InteractionMirrorReceipt,
+  type InteractionOutcome,
+  type InteractionRecoveryResult,
+  type InteractionRequestDisposition,
+  type InteractionRequestInput,
+  type InteractionStreamProjectionReceipt,
+  type JobRecoveryObligation,
+  type JobRecoveryObligationPage,
+  type JobSealInput,
+  type OwnerControlAuthorizer,
+  type OwnerControlPreflightPort,
+  type OwnerControlRequest,
+  type PendingAssignmentInteraction,
+  type SideEffectInput,
+  type StagedConversationMutationInput,
+  type StagedJobMutationInput,
+  type SurfaceAbortDisposition,
+  type SurfaceAbortInput,
+  type SurfaceInteractionAnswerPreparation,
+} from "./ledger/contracts.js";
 
 export interface InProcessAssignmentSubmissionOptions {
   readonly ledger: ConversationAssignmentLedger;
   readonly owner: AssignmentSubmissionPort;
-}
-
-export interface InteractionRequestInput {
-  readonly requestId: string;
-  readonly toolName: string;
-  readonly display: { readonly title: string; readonly lines: readonly string[] };
-  readonly issuedAt: string;
-  readonly ttlMs: number;
-  readonly expiresAt: string;
-}
-
-export interface InteractionRequestDisposition {
-  readonly recordSeq: number;
-  readonly accepted: boolean;
-  readonly display: InteractionDisplay;
-}
-
-export interface InteractionMirrorReceipt {
-  readonly mirroredUpTo: number;
-  readonly ordinal: number;
-  readonly mirrorDigest: string;
-}
-
-export type InteractionOutcome = AssignmentInteractionOutcome;
-
-export type StagedConversationMutationInput =
-  | {
-      readonly domain: "session";
-      readonly mutation: SessionStagedMutation;
-      readonly requestId: string;
-      readonly expected?: never;
-    }
-  | {
-      readonly domain: "global";
-      readonly mutation: GlobalStagedMutation;
-      readonly requestId: string;
-      readonly expected: { readonly anchorEpoch: number };
-    };
-
-export interface ConversationSealInput {
-  readonly runRecord: TranscriptRunRecord | { readonly ref: ArtifactRef };
-  readonly windowCompact?: WindowCompactInstruction;
-  readonly contentAssets: readonly ContentAssetRef[];
-  readonly streamFinal: { readonly finalSeq: number; readonly streamDigest: string };
-  readonly usage: {
-    readonly inputTokens: number;
-    readonly outputTokens: number;
-    readonly toolCalls: number;
-  };
-  readonly usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number };
-}
-
-export interface JobSealInput {
-  readonly fence: JobCommitFence;
-  readonly outcome: { readonly status: "completed" | "failed"; readonly summary: string };
-  readonly contentAssets: readonly ContentAssetRef[];
-  readonly streamFinal: { readonly finalSeq: number; readonly streamDigest: string };
-  readonly usage: {
-    readonly inputTokens: number;
-    readonly outputTokens: number;
-    readonly toolCalls: number;
-  };
-  readonly usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number };
-}
-
-export interface StagedJobMutationInput {
-  readonly domain: "global";
-  readonly mutation: JobGlobalStagedMutation;
-  readonly requestId: string;
-  readonly expected: { readonly anchorEpoch: number };
-}
-
-export interface InteractionRecoveryResult {
-  readonly pending: ReadonlyArray<
-    Extract<AssignmentRecord, { t: "interaction-requested" }>
-  >;
-  readonly resolved: readonly InteractionMirrorEntry[];
-}
-
-export interface DurableInteractionStreamEvent {
-  readonly recordSeq: number;
-  readonly payload: Extract<
-    StreamDataFramePayload,
-    { readonly kind: "interaction" }
-  >;
-}
-
-export interface SideEffectInput {
-  readonly kind: "tool-mutation" | "external-call";
-  readonly toolName: string;
-  readonly summary: string;
-  readonly target: "workspace-file" | "external-service" | "device-system";
-}
-
-export interface SurfaceAbortInput {
-  readonly ticketDigest: string;
-  readonly surfacePrincipal: string;
-}
-
-export type SurfaceInteractionAnswerPreparation =
-  | {
-      readonly kind: "authorized";
-      readonly decision: FirstPartyInteractionDecision;
-      readonly ticketId: string;
-      readonly surfacePrincipal: string;
-    }
-  | {
-      readonly kind: "replayed";
-      readonly result: ConversationInteractionMirrorEntry;
-    };
-
-export type ChannelInteractionAnswerPreparation =
-  | {
-      readonly kind: "authorized";
-      readonly grant: ChannelInteractionGrant;
-      readonly outcome: Extract<InteractionOutcome, { readonly t: "answered" }>;
-    }
-  | {
-      readonly kind: "replayed";
-      readonly result: InteractionMirrorEntry;
-    };
-
-export type SurfaceAbortDisposition =
-  | { readonly kind: "accepted" }
-  | { readonly kind: "terminal" };
-
-export interface InteractionStreamProjectionReceipt {
-  readonly sourceId: string;
-  readonly frame: StreamFrame;
-  readonly checkpoint: StreamVerifierCheckpoint;
-}
-
-export interface PendingAssignmentInteraction {
-  readonly assignmentId: string;
-  readonly request: Extract<AssignmentRecord, { readonly t: "interaction-requested" }>;
-}
-
-interface FinishedInteraction {
-  readonly body: Extract<AssignmentRecord, { t: "interaction-finished" }>;
-  readonly recordSeq: number;
-  readonly at: string;
-  readonly ordinal: number;
-  readonly mirrorDigest: string;
-}
-
-/** 信任沉淀事实：与交互结果共用镜像顺序与摘要链，但不是交互。 */
-interface RecordedTrustSediment {
-  readonly body: Extract<AssignmentRecord, { t: "trust-sediment" }>;
-  readonly recordSeq: number;
-  readonly at: string;
-  readonly ordinal: number;
-  readonly mirrorDigest: string;
-}
-
-/** 规则命中事实：同样搭交互镜像链回到 owner，不是交互。 */
-interface RecordedTrustRuleHit {
-  readonly body: Extract<AssignmentRecord, { t: "trust-rule-hit" }>;
-  readonly recordSeq: number;
-  readonly at: string;
-  readonly ordinal: number;
-  readonly mirrorDigest: string;
-}
-
-type MirrorChainItem = FinishedInteraction | RecordedTrustSediment | RecordedTrustRuleHit;
-
-interface RequestedInteraction {
-  readonly body: Extract<AssignmentRecord, { t: "interaction-requested" }>;
-  readonly recordSeq: number;
-}
-
-interface LedgerProjection {
-  readonly assignmentId: string;
-  leaseTimeFrontier: number;
-  leaseAcceptanceFloor: number;
-  leaseClockActivated: boolean;
-  readonly validation: AssignmentLedgerValidationState;
-  lastSeq: number;
-  chainDigest: string;
-  phase: LedgerSnapshot["phase"];
-  control?: {
-    readonly authority: AuthorityEpochRef;
-    readonly ownerDeviceId: string;
-    readonly lease: ControlLease;
-    readonly validForMs: number;
-    readonly acceptedAt: string;
-  };
-  sealed?: Extract<AssignmentRecord, { t: "bundle_sealed" }>;
-  received?: {
-    readonly body: Extract<AssignmentRecord, { t: "received" }>;
-    readonly recordSeq: number;
-    readonly ledgerDigest: string;
-    resourceLease?: AssignmentResourceLease;
-    permission?: {
-      readonly controlLeaseId: string;
-      readonly validForMs: number;
-      readonly acceptedAt: string;
-    };
-  };
-  rejection?: {
-    readonly body: Extract<AssignmentRecord, { t: "dispatch-rejected" }>;
-    readonly recordSeq: number;
-    readonly ledgerDigest: string;
-  };
-  started?: { readonly recordSeq: number; readonly ledgerDigest: string };
-  supersedeFence?: {
-    readonly body: Extract<AssignmentRecord, { t: "supersede-fenced" }>;
-    readonly recordSeq: number;
-    readonly ledgerDigest: string;
-  };
-  aborts: Array<Extract<AssignmentRecord, { t: "abort-requested" }>>;
-  halted?: CancelProofBody;
-  readonly sideEffects: Map<
-    number,
-    {
-      readonly started: Extract<AssignmentRecord, { t: "side-effect-started" }>;
-      completed?: Extract<AssignmentRecord, { t: "side-effect-completed" }>;
-    }
-  >;
-  readonly entries: AssignmentEntry[];
-  readonly ledgerBySeq: string[];
-  readonly requested: Map<string, RequestedInteraction>;
-  readonly pendingRequests: Map<string, RequestedInteraction>;
-  readonly finished: Map<string, FinishedInteraction>;
-  readonly finishedOrder: MirrorChainItem[];
-  readonly finishedIndexBySeq: Map<number, number>;
-  readonly stagedMutations: Array<Extract<AssignmentRecord, { t: "staged-mutation" }>>;
-  readonly mutationRequestIds: Set<string>;
-  readonly stagedMutationByRequestId: Map<
-    string,
-    Extract<AssignmentRecord, { t: "staged-mutation" }>
-  >;
-  failure?: Extract<AssignmentRecord, { t: "execution-failed" }>;
-  mirroredUpTo: number;
-  mirroredFinishedCount: number;
-  mirroredInteractionOrdinal: number;
-  mirroredInteractionDigest: string;
-  streamProjectionEnabledAfter?: number;
-  streamProjectedUpTo: number;
-  lastInteractionStreamSeq: number;
-  interactionStreamDigest?: string;
-  lastStreamProjectionRecordSeq?: number;
-  /** lastStreamProjectionRecordSeq 那条记录的账本链摘要：流投影续链只需要它，不必保留整份 ledgerBySeq */
-  lastStreamProjectionDigest?: string;
-  acknowledgedCommitRevision?: number;
-  /**
-   * 从决定状态检查点恢复时，entries 与 ledgerBySeq 只含此序号之后的记录（0 表示完整历史）。需要更早历史的
-   * 证据查询另行完整重放。
-   */
-  historyBase?: number;
-  /** 已完成历史在领域索引里按键可取：此时 historyBase 之前已了结的请求、结果与副作用不在内存，按需补入 */
-  keyed?: boolean;
-  /** 镜像链省去的前缀项数（均已镜像）：finishedOrder[0] 的全局下标 */
-  finishedBase?: number;
-  /** 被省去的交互记录的最大序号：交互流事件需要更早的位置时另行完整重放 */
-  historyInteractionUpTo?: number;
-  /** 本内存状态已按键核过的请求 ID（含查无此键的）；不保存 */
-  historyChecked?: Set<string>;
-  /** 按键补入的已镜像镜像链项（按记录序号）；不保存 */
-  historicMirror?: Map<number, MirrorChainItem>;
-  /** 旧格式分派：序号不超过它的历史事实在旧前缀历史检查点里（领域索引没有这些键） */
-  legacyHistoryUpTo?: number;
-  /** 公布时核对过已落盘的那份旧前缀历史的代次 */
-  legacyHistoryGeneration?: string;
-  /** 旧前缀历史各类别的页数 */
-  legacyHistoryPages?: LegacyHistoryPages;
-}
-
-interface JobRecoveryIndexValue {
-  readonly v: 5;
-  readonly assignmentId: string;
-  readonly envelopeRef: ArtifactRef;
-  readonly phase: LedgerSnapshot["phase"];
-  readonly pendingInteractions: number;
-  readonly hasInteractionFacts: boolean;
-  /** 镜像义务水位：交互结果与信任沉淀都算 */
-  readonly maxFinishedSeq: number;
-  /** 流投影义务水位：只算交互结果，沉淀不进流 */
-  readonly maxFinishedInteractionSeq: number;
-  readonly mirroredUpTo: number;
-  readonly streamProjectionEnabledAfter?: number;
-  readonly streamProjectedUpTo: number;
-  readonly hasAbort: boolean;
-  readonly hasAbortTicket: boolean;
-  readonly cancelProofOwnerAccepted: boolean;
-  readonly interactionSettlementOwnerAccepted: boolean;
-}
-
-export interface JobRecoveryObligation {
-  readonly envelope: Extract<
-    import("@zhixing-ai/core/contracts").DispatchEnvelope,
-    { execution: "job" }
-  >;
-  readonly execution: boolean;
-  readonly cancellation: boolean;
-  readonly interaction: boolean;
-}
-
-export interface JobRecoveryObligationPage {
-  readonly entries: readonly JobRecoveryObligation[];
-  /**
-   * Stable assignment identity used as an exclusive lower bound. Recovery is
-   * idempotent, so a later page may observe newly appended obligations without
-   * holding an expiring projection read view.
-   */
-  readonly continuation?: string;
 }
 
 type DispatchDecision =
@@ -642,73 +269,12 @@ type AbortCause =
       readonly surfacePrincipal: string;
     };
 
-const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
-const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
-/**
- * 分派决定状态检查点的规则版本：分派协议、记录校验或归约规则任一改变就递增，旧检查点随之失效、改为完整重放。
- * 键里另有归约与校验函数的源码指纹，但被它们调用的函数改变时不会自动反映，所以这个常量必须随规则一起维护。
- */
-const LEDGER_DECISION_STATE_VERSION = 2;
-/** 决定状态合并落盘的间隔。 */
-const DECISION_STATE_SAVE_DELAY_MS = 5_000;
-/**
- * 一个分派经严格完整校验到 coveredLsn 的当前状态：计数、续链摘要与仍未了结的义务；已完成的交互、副作用与已镜像的
- * 镜像链项在领域索引里按键取（本格式之前创建的分派没有按键行，仍保存完整集合）。
- */
 type DecisionState = { readonly coveredLsn: number; readonly state: LedgerProjection };
-
-/**
- * 旧格式分派（本格式之前创建、领域索引里没有按键行的前缀）省去的已完成历史：在一次完整严格重放后写成一份检查点，
- * 覆盖到 upToSeq；之后的记录由领域索引写按键行，所以它不再增长。
- */
-type LegacyHistory = {
-  /** 这份旧前缀历史的代次：决定状态记下它，读取时核对，旧代或缺失都不当作可用 */
-  readonly generation: string;
-  readonly upToSeq: number;
-  readonly requests: Map<string, { readonly seq: number; readonly body: JsonValue }>;
-  readonly finished: Map<string, JsonValue>;
-  /** 副作用的内存状态不带记录序号：旧前缀里的开始与结束按业务键（effectSeq）记，序号以覆盖边界为界 */
-  readonly effectStarts: Map<number, { readonly body: JsonValue }>;
-  readonly effectEnds: Map<number, { readonly body: JsonValue }>;
-  readonly mirror: Map<number, JsonValue>;
-};
-
-/** 旧前缀历史的分页（类别 → 页数）：每类按业务键哈希分页，单页平均 LEGACY_HISTORY_PAGE_KEYS 个键，读一个键只读它所在的页 */
-type LegacyHistoryPages = { readonly requests: number; readonly effects: number; readonly mirror: number };
-type LegacyHistoryCategory = keyof LegacyHistoryPages;
-/** 旧前缀历史的一页：只含该类别落在本页的事实（其余类别为空）；页存在且代次与页号相符时，本页即这些哈希上的完整集合 */
-type LegacyHistoryPage = LegacyHistory & { readonly category: LegacyHistoryCategory; readonly page: number; readonly pages: number };
-const LEGACY_HISTORY_PAGE_KEYS = 8;
-
-/**
- * 省略态的状态遇到尚未按键核过的交互请求 ID（他方写入的尾部），或旧前缀历史缺失、与决定状态不符：丢弃缓存
- * （后者连同决定状态），经冷恢复路径重做。缺键不当作首次使用。
- */
 class HistoryLookupRequired extends Error {}
-/** 一次绑定查询的分派数上限（票据恢复一次查询全部有效票据）。 */
-export const DATA_PLANE_BINDING_BATCH_LIMIT = 4096;
-/** 冷恢复绑定时每次在领域索引上读取的分派数，单次持锁的读取量因此有界。 */
-const BINDING_RECOVERY_CHUNK = 64;
-
-/** 票据恢复保存的分派绑定：观察用与主动使用（中止等）各一份。 */
-interface StoredDataPlaneBinding {
-  readonly observe?: DataPlaneAssignmentBinding;
-  readonly active?: DataPlaneAssignmentBinding;
-  /** 受执行端资源治理的分配：根预留编号。宿主模式下 active 用途还须根仍为 active。 */
-  readonly resourceReservationId?: string;
-}
 
 const NO_EXECUTION_SCOPE: ExecutorExecutionScope = Object.freeze({ close() {} });
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 const RECEIPT_URGENCY_RANK: Record<StorageMaintenanceUrgency, number> = { background: 0, recovery: 1, foreground: 2 };
-
-/** 等一轮回执对账的请求：发起时的准入紧急度与交付回调（只交付一次）。 */
-interface ReceiptWaiter {
-  readonly urgency: StorageMaintenanceUrgency;
-  settled: boolean;
-  readonly resolve: (value: number) => void;
-  readonly reject: (error: unknown) => void;
-}
 
 function strongestReceiptUrgency(waiters: readonly ReceiptWaiter[]): StorageMaintenanceUrgency {
   let strongest: StorageMaintenanceUrgency = "background";
@@ -2096,7 +1662,7 @@ export class ConversationAssignmentLedger implements
 
   /** 绑定检查点的键带归约与绑定规则的指纹：规则改变后旧绑定不再被沿用。 */
   #bindingCheckpointKey(): string {
-    return `${projectionCheckpointKey("executor-data-plane-bindings", 2, this.#reduce, this.#dataPlaneBinding)}:${this.#executorId}`;
+    return `${buildLedgerProjectionCheckpointPrefix("executor-data-plane-bindings", 2, [this.#reduce, this.#dataPlaneBinding, applyEntry])}:${this.#executorId}`;
   }
 
   #dataPlaneBinding(state: LedgerProjection, use?: DataPlaneTicketUse) {
@@ -4365,8 +3931,8 @@ export class ConversationAssignmentLedger implements
   }
 
   #decisionStateKey(assignmentId: string): string {
-    return `${projectionCheckpointKey("executor-assignment-decision", LEDGER_DECISION_STATE_VERSION,
-      this.#reduce, validateAssignmentEntry, applyValidatedAssignmentEntry, emptyProjection)}:${this.#executorId}:${assignmentId}`;
+    return `${buildLedgerProjectionCheckpointPrefix("executor-assignment-decision", LEDGER_DECISION_STATE_VERSION,
+      [this.#reduce, validateAssignmentEntry, applyValidatedAssignmentEntry, applyEntry, emptyProjection])}:${this.#executorId}:${assignmentId}`;
   }
 
   /**
@@ -5872,25 +5438,6 @@ function applyEntry(
       return;
     default:
       throw corruptLedger("Unsupported assignment record in this protocol stage");
-  }
-}
-
-/**
- * 执行端资源已因租约终止被回收（lease 全等且根为 reclaimed）：这次执行不能再写任何执行端终局。
- * 属于明确的本地拒绝（TypeError），持久义务的重试据此停止，业务结论留给所属方对账。
- */
-export class AssignmentExecutionResourceRetiredError extends TypeError {
-  constructor(readonly assignmentId: string) {
-    super("Assignment execution resource was reclaimed after its lease ended; no executor terminal can be written");
-    this.name = "AssignmentExecutionResourceRetiredError";
-  }
-}
-
-/** A durable abort fence won before the executor's atomic start. */
-export class AssignmentStartCancelledError extends Error {
-  constructor(readonly assignmentId: string) {
-    super("Assignment is cancelled and cannot start");
-    this.name = "AssignmentStartCancelledError";
   }
 }
 

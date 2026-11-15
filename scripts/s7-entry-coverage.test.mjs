@@ -1209,6 +1209,7 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
     "packages/cli/src/serve/lossless-data-plane-composition.ts",
     "packages/cli/src/serve/channel-interaction-coordinator.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/conversation-protocol/contracts.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
@@ -1240,6 +1241,13 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
   assert.match(
     inspectAssignmentDataPlaneBoundary(mutate(
       "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => `${text}\ntype ConcreteLeak = LosslessDataPlaneRuntime;\n`,
+    )).join("\n"),
+    /upper consumers depend on a concrete runtime/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol/contracts.ts",
       (text) => `${text}\ntype ConcreteLeak = LosslessDataPlaneRuntime;\n`,
     )).join("\n"),
     /upper consumers depend on a concrete runtime/u,
@@ -5353,6 +5361,7 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     "packages/cli/src/serve/lossless-data-plane-runtime.ts",
     "packages/cli/src/serve/channel-interaction-coordinator.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/conversation-protocol/contracts.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/setup-delivery.ts",
   ];
@@ -5456,6 +5465,13 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/lossless-data-plane-runtime.ts",
+      (text) => `${text}\ntype ChannelAdapter = unknown;\n`,
+    )).join("\n"),
+    /concrete Channel registry or adapter escaped/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol/contracts.ts",
       (text) => `${text}\ntype ChannelAdapter = unknown;\n`,
     )).join("\n"),
     /concrete Channel registry or adapter escaped/u,
@@ -5615,6 +5631,16 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
       (text) => text.replace(
         "readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology;",
         "readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology | undefined;",
+      ),
+    )).join("\n"),
+    /Conversation lossless data-plane required static assembly drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol/contracts.ts",
+      (text) => text.replace(
+        'readonly reason: "executor-only";',
+        'readonly reason: "optional";',
       ),
     )).join("\n"),
     /Conversation lossless data-plane required static assembly drifted/u,
@@ -7613,6 +7639,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/conversation-protocol/contracts.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/advancement-original-task-application.ts",
     "packages/cli/src/serve/advancement-controller.ts",
@@ -7633,6 +7660,8 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
       "export class AdvancementConversationLifecycleService"]], advancementFailure],
     [[["packages/owner-services/src/advancement/recovery-maintenance.ts", "this.options.reviews.reconcileConversation(",
       "this.options.reconcileConversation("]], advancementFailure],
+    [[["packages/cli/src/serve/conversation-protocol/contracts.ts", "createConversationAuxiliaryRecoveryAssemblyHandle()",
+      "createConversationAuxiliaryRecoveryHandle()"]], advancementFailure],
   ], [
     [[advancementApplication, "    ADVANCEMENT_ACTIVE_STATE_QUERY,\n    ADVANCEMENT_DETAIL_QUERY,\n",
       "    ADVANCEMENT_DETAIL_QUERY,\n    ADVANCEMENT_ACTIVE_STATE_QUERY,\n"]],

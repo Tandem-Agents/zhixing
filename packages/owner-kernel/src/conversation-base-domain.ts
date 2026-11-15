@@ -5,8 +5,9 @@ import { canonicalize, validateConversationEnvelope, validateNonEmptyUserTurnInp
   validateIntentStreamRecord, reduceDeferredGlobalIntent, validateConversationSealedBundle, validateTranscriptRunRecord } from '@zhixing-ai/core/protocol';
 import { freezeAdvancementSessions } from '@zhixing-ai/core/advancement';
 import { parseConversationId } from '@zhixing-ai/core/conversation';
-import { reduceImportedConversationGuard, reduceConversationSessionFact, validateImportedConversationCommit, assertAssignedMatchesDispatch,
-  type ConversationCommitLogRecord, type RunProjection, type ConversationFactGroup } from './conversation-assignment.js';
+import { assertAssignedMatchesDispatch,
+  type ConversationCommitLogRecord, type RunProjection, type ConversationFactGroup } from './conversation-journal/contracts.js';
+import { reduceImportedConversationGuard, reduceConversationSessionFact, validateImportedConversationCommit } from './conversation-assignment.js';
 import { validateImportedConversationControl } from './control-admission.js';
 import { ConversationDirectoryReducer, type ReadMeta } from './conversation-read-index.js';
 import { readConversationRunRoot, foldConversationRunExtras } from './conversation-run-state-extras.js';

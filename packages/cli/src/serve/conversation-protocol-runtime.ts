@@ -8,7 +8,6 @@ import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from 
 import { randomUUID } from "node:crypto";
 import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext } from "@zhixing-ai/core/workscene/application";
 import { advancementExecutionContextBlock, type AdvancementExecutionMaterial } from "@zhixing-ai/core/advancement/execution-context";
-import type { TurnOriginAdvancementExecution } from "@zhixing-ai/core/types";
 import { executionTurnContext, withoutRecoveredSurfaceCapabilities } from "./execution-turn-context.js";
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing-ai/core";
 import { parseConversationId, parseLocalConversationId } from "@zhixing-ai/core/conversation";
@@ -89,7 +88,6 @@ import {
 import {
   type ConversationManager,
   type ManagedSession,
-  type TurnCommittedInfo,
 } from "@zhixing-ai/owner-kernel/conversation-manager";
 import { type SessionRuntime } from "@zhixing-ai/owner-kernel/types";
 import {
@@ -126,9 +124,7 @@ import {
   createAssignmentGlobalQueryPort,
 } from "./assignment-global-state-ports.js";
 import type {
-  ConversationChannelSessionInput,
   FirstPartySurfaceSession,
-  FirstPartySurfaceSessionInput,
   LosslessDataPlaneSession,
 } from "./lossless-data-plane-runtime.js";
 import type {
@@ -143,6 +139,22 @@ import type {
 } from "./conversation-executor-dispatch.js";
 
 export { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
+import {
+  type AppliedConversationAdmission,
+  type CommittedConversationTransferPort,
+  type ConversationAdvancementExecutionPort,
+  type ConversationLosslessDataPlaneTopology,
+  type PreparedConversationAdmission,
+} from "./conversation-protocol/contracts.js";
+export {
+  createConversationAuxiliaryRecoveryAssemblyHandle,
+  createConversationCommittedTurnListenerAssemblyHandle,
+  createConversationManagerAssemblyHandle,
+  type CommittedConversationTransferPort,
+  type ConversationAdvancementExecutionPort,
+  type ConversationLosslessDataPlanePort,
+  type ConversationLosslessDataPlaneTopology,
+} from "./conversation-protocol/contracts.js";
 
 const CONTEXT_TTL_MS = MAX_CONTROL_LEASE_TTL_MS;
 const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(CONTEXT_TTL_MS / 3);
@@ -212,142 +224,8 @@ export interface ConversationProtocolRuntimeOptions {
   readonly foreground?: ForegroundActivityPort;
 }
 
-export interface ConversationAdvancementExecutionPort {
-  prepare(input: Readonly<{
-    conversationId: string;
-    turnId: string;
-    binding: TurnOriginAdvancementExecution;
-  }>): Promise<AdvancementExecutionMaterial>;
-}
-
-interface AppliedConversationAdmission {
-  readonly runId: string;
-  readonly ingress: IngressContext;
-  readonly attachments: PendingConversationInput["attachments"];
-  readonly environment?: import("@zhixing-ai/core/contracts").ExplicitEnvironmentSelection;
-  readonly replayed: boolean;
-}
-
-interface PreparedConversationAdmission {
-  readonly conversationId: string;
-  readonly surfacePrincipal: string;
-  readonly admission: AppliedConversationAdmission;
-  readonly input: PendingConversationInput["input"];
-  readonly attachments: PendingConversationInput["attachments"];
-  readonly invocation: ConversationInvocation;
-  readonly environment?: import("@zhixing-ai/core/contracts").ExplicitEnvironmentSelection;
-  /** 立即可调度时接纳起登记的前台义务；接管这份准备的 run() 取走，未被接管就随准备的清除关闭。 */
-  readonly foreground?: ForegroundObligation;
-  /** 这份接纳的序号：调度任务结束时凭它认出自己的准备，不误收同一运行后来的接纳。 */
-  readonly admissionId: string;
-}
-
-export interface ConversationLosslessDataPlanePort {
-  openConversationChannel(
-    input: ConversationChannelSessionInput,
-  ): Promise<LosslessDataPlaneSession>;
-  openFirstPartySurfaceSession(
-    input: FirstPartySurfaceSessionInput,
-  ): Promise<FirstPartySurfaceSession>;
-  recoverConversationChannels(journal: ConversationRunJournal): Promise<number>;
-}
-
-export type ConversationLosslessDataPlaneTopology =
-  | Readonly<{
-      readonly kind: "available";
-      readonly port: ConversationLosslessDataPlanePort;
-    }>
-  | Readonly<{
-      readonly kind: "absent";
-      readonly reason: "executor-only";
-    }>;
-
-/** Private one-shot seam for the protocol/manager construction cycle. */
-export function createConversationManagerAssemblyHandle(): Readonly<{
-  readonly resolve: () => ConversationManager;
-  complete(manager: ConversationManager): void;
-}> {
-  let manager: ConversationManager | undefined;
-  let completed = false;
-  const resolve = (): ConversationManager => {
-    if (!completed || !manager) {
-      throw new Error("Conversation protocol manager is not assembled");
-    }
-    return manager;
-  };
-  return Object.freeze({
-    resolve,
-    complete(candidate: ConversationManager) {
-      if (completed) {
-        throw new Error("Conversation protocol manager is already assembled");
-      }
-      manager = candidate;
-      completed = true;
-    },
-  });
-}
-
-/** Private one-shot seam for the protocol/auxiliary-recovery construction cycle. */
-export function createConversationAuxiliaryRecoveryAssemblyHandle(): Readonly<{
-  readonly resolve: (conversationId: string) => Promise<void>;
-  complete(recover: (conversationId: string) => Promise<void>): void;
-}> {
-  let recovery: ((conversationId: string) => Promise<void>) | undefined;
-  let completed = false;
-  const resolve = (conversationId: string): Promise<void> => {
-    if (!completed || !recovery) {
-      throw new Error("Conversation auxiliary recovery is not assembled");
-    }
-    return recovery(conversationId);
-  };
-  return Object.freeze({
-    resolve,
-    complete(candidate: (conversationId: string) => Promise<void>) {
-      if (completed) {
-        throw new Error("Conversation auxiliary recovery is already assembled");
-      }
-      recovery = candidate;
-      completed = true;
-    },
-  });
-}
-
-/** Private one-shot seam for the committed-turn consumer construction cycle. */
-export function createConversationCommittedTurnListenerAssemblyHandle(): Readonly<{
-  readonly notify: (info: TurnCommittedInfo) => void;
-  complete(listener: (info: TurnCommittedInfo) => void): void;
-}> {
-  let listener: ((info: TurnCommittedInfo) => void) | undefined;
-  let completed = false;
-  const notify = (info: TurnCommittedInfo): void => {
-    if (!completed || !listener) {
-      throw new Error("Conversation committed-turn listener is not assembled");
-    }
-    listener(info);
-  };
-  return Object.freeze({
-    notify,
-    complete(candidate: (info: TurnCommittedInfo) => void) {
-      if (completed) {
-        throw new Error("Conversation committed-turn listener is already assembled");
-      }
-      listener = candidate;
-      completed = true;
-    },
-  });
-}
-
 class RetryableRunEndPreparation extends Error {
   constructor(error: unknown) { super("Run end preparation remains pending", { cause: error }); }
-}
-
-/** 本 Anchor 已提交收编的迁移：按会话精确定位，在首次触及该会话时装入，启动不遍历全部收编。 */
-export interface CommittedConversationTransferPort {
-  /** 该会话已提交（含已转出）的迁移编号，按编号排序。 */
-  readonly committedFor: (conversationId: string) => Promise<readonly string[]>;
-  /** 全部已提交收编的会话，供目录类列举。 */
-  readonly conversations: () => Promise<readonly string[]>;
-  readonly load: (transferId: string) => Promise<ConversationTransferPublication>;
 }
 
 /** Single-process production composition for the durable conversation protocol. */
@@ -3102,6 +2980,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!provenance) return undefined;
     return Object.freeze({
       ...provenance,
+      assignmentId,
       assignmentItemId: `${
         provenance.executorId === this.#authority.executorId ? "local" : "relay"
       }:${assignmentId}`,
