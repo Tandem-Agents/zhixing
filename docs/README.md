@@ -23,7 +23,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [仓库组织与包边界](engineering/repository-structure.md)
 - [状态、重放与合同一致性的工程经验](engineering/state-replay-contract-lessons.md)
 - [Antigravity + Gemini 4 Carbon (High) 工作方法](engineering/antigravity-gemini-4-carbon-high-efficiency.md)
-- [架构概览 / Architecture overview](../research/design/architecture/overview.md)
+- [架构概览 / Architecture overview](architecture/overview.md)
 - [架构演进记录索引](../research/design/architecture/evolutions/README.md)
 
 项目进度与工作记录 / Project progress and work records:
@@ -39,6 +39,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 ## 架构与研究 / Architecture and research
 
 - [架构演进方向](architecture/evolution-direction.md)
+- [架构概览 / Architecture overview](architecture/overview.md)
 - [知行架构与实现综合评估（对比 DeepSeek Harness 与 OpenClaw）](research/zhixing-architecture-and-implementation-evaluation.md)
 - [多智能体机制梳理](research/agent-concepts-and-multi-agent-direction.md)
 - [Codex 跨会话协作能力调研](research/codex-cross-thread-collaboration.md)
@@ -102,7 +103,6 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [消息 Outbox 与因果排序](modules/delivery/outbox.md)
 - [飞书通道架构与能力边界](modules/feishu/architecture.md)
 - [IM 通道接入选型研究](research/channel-platforms.md)
-- [架构概览 / Architecture overview](../research/design/architecture/overview.md)
 - [架构演进 / Architecture evolutions](../research/design/architecture/evolutions/README.md)
 
 研究和历史演进文档用于解释背景与决策，不替代当前 README、CLI 说明或维护指南中的可执行用户合同。

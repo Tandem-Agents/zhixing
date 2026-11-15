@@ -84,7 +84,7 @@ Read the [security policy](SECURITY.md) for details. Report security vulnerabili
 
 - If something goes wrong, run `zz doctor` first. It checks your local configuration and runtime state and suggests the next step.
 - If that does not solve it, [open an issue](https://github.com/Tandem-Agents/zhixing/issues). Include the output of `zz --version` and a sanitized description of what happened. Do not include credentials or unreviewed full logs.
-- To contribute, read the [contributing guide](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). For the overall design, see the [architecture overview](research/design/architecture/overview.md) (in Chinese). The [release notes](docs/delivery/releases/0.1.0.md) describe what each version contains and changes.
+- To contribute, read the [contributing guide](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). For the overall design, see the [architecture overview](docs/architecture/overview.md) (in Chinese). The [release notes](docs/delivery/releases/0.1.0.md) describe what each version contains and changes.
 
 ---
 

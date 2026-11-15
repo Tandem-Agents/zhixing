@@ -26,7 +26,7 @@
 
 ### 3.1 一套观测合同，一个设备本地存储
 
-沿[核心架构](../../research/design/architecture/overview.md)与 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)的职责和依赖方向，**各运行责任者记录自己实际观察到的过程，日志模块统一保存、关联、读取和治理这些记录。** 业务结果与恢复仍以各自 Authority 为准；日志记录“已提交”必须发生在真实提交之后。
+沿[核心架构](../architecture/overview.md)与 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)的职责和依赖方向，**各运行责任者记录自己实际观察到的过程，日志模块统一保存、关联、读取和治理这些记录。** 业务结果与恢复仍以各自 Authority 为准；日志记录“已提交”必须发生在真实提交之后。
 
 ```text
 领域 / Kernel / 工具与平台适配 / Host

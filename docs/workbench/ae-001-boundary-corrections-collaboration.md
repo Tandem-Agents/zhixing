@@ -21,7 +21,7 @@
 
 三个单元共同交付一个完整产品：共用扩展管理与 Channel 迁移、发布后自主准备/接入/接续，以及共用换版/回退/自主修复/恢复。整体目标是用户只表达意图并完成确实无法代办的本人操作，知行承担获取或准备适配、配置接入、真实收发验证、长期维护、故障修复和结果接续；不得因为减少开发维护而牺牲体验，接入和维护体验应得到提升。用户不负责找包、修包、重装或判断系统内部正确性。只交付 Channel 类型，不新增其他能力家族、插件市场或维护智能体；既有收发、确认、取消、身份、会话、任务与恢复体验不得退化。
 
-先读取：①任务全文，区分整体目标与单元 3 义务；②[核心架构](../../research/design/architecture/overview.md)及 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)的领域所有权、薄内核、封闭核心和 Host 边界；③[验证耗时复盘](../postmortems/2026-08-06-final-validation-overrun.md)。沿源码和真实调用链审查，不能以测试数量、命名或执行者自述证明正确性。
+先读取：①任务全文，区分整体目标与单元 3 义务；②[核心架构](../architecture/overview.md)及 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)的领域所有权、薄内核、封闭核心和 Host 边界；③[验证耗时复盘](../postmortems/2026-08-06-final-validation-overrun.md)。沿源码和真实调用链审查，不能以测试数量、命名或执行者自述证明正确性。
 
 ## 协作顺序与结束条件
 

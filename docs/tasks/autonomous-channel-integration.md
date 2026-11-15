@@ -27,7 +27,7 @@
 
 ### 3.1 封闭核心，共用扩展底座
 
-沿用[核心架构](../../research/design/architecture/overview.md)及 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)的领域所有权、薄内核与唯一组合根。**核心固定装配扩展管理、受管运行组件和能力类型绑定；外部实现通过这些稳定入口动态接入。共用的是扩展生命周期，不是所有能力的业务语义。**
+沿用[核心架构](../architecture/overview.md)及 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)的领域所有权、薄内核与唯一组合根。**核心固定装配扩展管理、受管运行组件和能力类型绑定；外部实现通过这些稳定入口动态接入。共用的是扩展生命周期，不是所有能力的业务语义。**
 
 扩展管理决定接入与换版，运行组件执行已提交决定，能力类型定义怎样工作、交接和验证；外部实现承接具体平台差异。核心的事实、权限、资源、恢复与终态不可被扩展替换，Host 不成为运行期服务定位器，Kernel 不增加渠道或插件管理分支。
 

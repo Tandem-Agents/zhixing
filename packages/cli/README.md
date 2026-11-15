@@ -244,7 +244,7 @@ zz logs policy
 - [公开配置架构](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/configuration/architecture.md)
 - [秘密存储架构](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/secrets/architecture.md)
 - [命令系统](https://github.com/Tandem-Agents/zhixing/blob/main/docs/modules/cli/command-system.md)
-- [架构总览](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/architecture/overview.md)
+- [架构总览](https://github.com/Tandem-Agents/zhixing/blob/main/docs/architecture/overview.md)
 - [问题反馈](https://github.com/Tandem-Agents/zhixing/issues)
 
 ## 许可

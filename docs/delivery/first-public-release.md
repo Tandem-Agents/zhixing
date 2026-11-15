@@ -104,7 +104,7 @@ R05 的首次配置、真实工具效果、恢复与取消等验收在同一次�
 
 本文只定义首发边界、验收和推进顺序，不重开架构设计、不替代模块需求、不直接授权发布。依次依据：
 
-- [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md) 与[当前生产架构概述](../../research/design/architecture/overview.md)：继承已形成的产品和架构基线。
+- [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md) 与[当前生产架构概述](../architecture/overview.md)：继承已形成的产品和架构基线。
 - [分发与维护策略](../../research/design/modules/distributed-runtime/software-distribution-trust-and-target-strategy.md)、[安装、维护与发布](../../research/design/modules/distributed-runtime/release-and-maintenance-guide.md)：唯一正式分发路径与维护合同，不另建发布系统。
 - [验证运行手册](../../research/design/workbench/verification-runbook.md)：验证方式、证据复用和资源纪律。
 - 项目文档维护技能：新文档按职责归属，旧目录按需渐进迁移，不整体搬家。

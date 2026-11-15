@@ -4,7 +4,7 @@
 
 评估基线与证据边界：
 
-- **知行（Zhixing）**：基于当前仓库 `0.1.0` 开发基线的 18 个包真实生产源码（`packages/` 下排除测试与 `test-utils` 共 1,270 个 `.ts`/`.tsx`/`.c` 文件、约 40.5 万行代码）、构建与门禁脚本，以及[架构概述](../../research/design/architecture/overview.md)、[AE-001 伴身智能架构演进](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)和[首发推进方案](../delivery/first-public-release.md)核实；未参考正在改写中的根入口文档。
+- **知行（Zhixing）**：基于当前仓库 `0.1.0` 开发基线的 18 个包真实生产源码（`packages/` 下排除测试与 `test-utils` 共 1,270 个 `.ts`/`.tsx`/`.c` 文件、约 40.5 万行代码）、构建与门禁脚本，以及[架构概述](../architecture/overview.md)、[AE-001 伴身智能架构演进](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)和[首发推进方案](../delivery/first-public-release.md)核实；未参考正在改写中的根入口文档。
 - **DeepSeek Harness（`dsh`）**：基于 `v0.1.0-rc.7`（提交 `99f6f02`）的[架构调研基线](../../research/knowledge-base/deepseek-harness-architecture-research.md)核对。
 - **OpenClaw**：基于 `2026.8.1`（提交 `5e3e524`）的[架构调研基线](../../research/knowledge-base/openclaw-architecture-research.md)与提交 `6be1a9675da0` 的[通用自主性研究](./openclaw-autonomy.md)核对。
 

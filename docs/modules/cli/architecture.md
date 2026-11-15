@@ -1,6 +1,6 @@
 # CLI 总体架构
 
-CLI 是知行的终端接入面，负责启动、交互和呈现；会话、运行提交、权限与持久化仍由共同产品内核拥有。[迁移设计](../../workbench/terminal-architecture-migration.md)定义完整合同，[核心架构](../../../research/design/architecture/overview.md)定义权威边界。
+CLI 是知行的终端接入面，负责启动、交互和呈现；会话、运行提交、权限与持久化仍由共同产品内核拥有。[迁移设计](../../workbench/terminal-architecture-migration.md)定义完整合同，[核心架构](../../architecture/overview.md)定义权威边界。
 
 ## 默认入口与职责
 

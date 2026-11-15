@@ -2,7 +2,7 @@
 
 更新：2026-10-29。状态：**包0～6按各自工程范围已验收；本节27项G/C机制已按独审和有效规模证据回填。包7固定10次冷启、2次热入的功能链通过，冷热性能仍未达标，整个启动专项及终端迁移未完成最终交付。** 执行顺序和整体验收门仍以[终端迁移收尾方案与执行计划](../tasks/terminal-migration-delivery-plan.md)为准；工程机制成立与最终体验通过分别判断。
 
-本文是[启动性能专项](../tasks/terminal-startup-performance.md)的架构增补，唯一维护累计状态机制清单、目标结构和实施边界。耗时账与原始证据归[执行记录](../tasks/terminal-startup-performance-record.md)。母架构以[架构概述](../../research/design/architecture/overview.md)、[AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)和[分布式规格§4.1](../../research/design/modules/distributed-runtime/specification.md)为基础，不另造产品语义或事实权威。
+本文是[启动性能专项](../tasks/terminal-startup-performance.md)的架构增补，唯一维护累计状态机制清单、目标结构和实施边界。耗时账与原始证据归[执行记录](../tasks/terminal-startup-performance-record.md)。母架构以[架构概述](./overview.md)、[AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)和[分布式规格§4.1](../../research/design/modules/distributed-runtime/specification.md)为基础，不另造产品语义或事实权威。
 
 ## 1. 目标和边界
 

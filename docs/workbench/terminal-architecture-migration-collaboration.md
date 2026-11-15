@@ -17,7 +17,7 @@
 
 **本次只交付已有功能迁移、债务清理与问题修复，以及使这些目标和架构质量成立的必要底座。** 新架构的未来能力不是本次功能清单：OpenCode 的点击等能力只作为调研材料，不自动要求照搬；已有鼠标交互仍须保留并修好。未来扩展只检查是否会穿透无关层、复制状态或迫使重做底座，不提前实现尚无需求的能力；范围约束不限制必要重构的深度。
 
-核心边界依据[架构概述](../../research/design/architecture/overview.md)；现状从 [CLI 总体架构](../modules/cli/architecture.md)、[屏幕能力](../modules/cli/screen-rendering.md)、[首次引导](../modules/secrets/onboarding.md)及生产入口双向核实。文档与实现冲突必须查证，不把现有实现自动当成需求。
+核心边界依据[架构概述](../architecture/overview.md)；现状从 [CLI 总体架构](../modules/cli/architecture.md)、[屏幕能力](../modules/cli/screen-rendering.md)、[首次引导](../modules/secrets/onboarding.md)及生产入口双向核实。文档与实现冲突必须查证，不把现有实现自动当成需求。
 
 ## 二、六个角色与决策权
 

@@ -74,7 +74,7 @@ DeepSeek Harness 具备完整的本机智能体能力，包括工作区读写、
 ### A. 权威文档与当前工作台
 
 - [x] 同步[需求文档](./always-online-and-local-execution-requirements.md)、[架构总纲](./distributed-runtime-charter.md)、[执行规格](./specification.md)、[发布维护指南](./release-and-maintenance-guide.md)和[Node 边界](./node-runtime-boundaries.md)：删除原生一体化安装、私有 Node、自有 stable feed、自动检查/下载/切版/回滚、签名 manifest/index、固定五目标原生发布门；写入 npm 交付、显式维护、失败行动和上述保留能力不变量。
-- [x] 更新[架构总览](../../architecture/overview.md)、根 [README](../../../../README.md)和 [CLI README](../../../../packages/cli/README.md)：给出唯一正式安装、同版修复、前向升级、停用与卸载命令，明确不支持已运行新版本后的降级，并写清 Node 前置、支持范围、数据保留和托管服务处理顺序；全局目录不可写时只引导使用用户级 Node 安装或其官方修复方式，不建议 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置；不得继续把仓库运行方式当作用户安装说明。
+- [x] 更新[架构总览](../../../../docs/architecture/overview.md)、根 [README](../../../../README.md)和 [CLI README](../../../../packages/cli/README.md)：给出唯一正式安装、同版修复、前向升级、停用与卸载命令，明确不支持已运行新版本后的降级，并写清 Node 前置、支持范围、数据保留和托管服务处理顺序；全局目录不可写时只引导使用用户级 Node 安装或其官方修复方式，不建议 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置；不得继续把仓库运行方式当作用户安装说明。
 - [x] 在 [0.1 发布准备旧稿](../../drafts/release-0.1-readiness-issues.md)的原生安装章节顶部标记“已被本文裁决取代”并链接本文；保留历史讨论，不让旧稿继续充当当前方案。
 - [x] 重定稿[模块独立审查工作台](../../workbench/module-submit-review.md)中的 MIR-01～MIR-03、MIR-12、MIR-14～MIR-18、MIR-20，作废旧证据并转为 `[~]`；开箱与装配、供应链信任、维护资源、安装移除、公开反馈、兼容故障和交付闭包全部改按 npm 路径判定。本任务不得把实现或验证结果直接写成 `[x]`，后续另行执行模块独立复审。
 - [x] 第 38 单元封版记录只保留历史事实：在 `research/design/workbench/unit-review-ledgers/unit-38.gen-1.md` 标明其合同已由本文取代，并将 `unit-38-final-acceptance-ledger.json`移入该历史目录后由 ledger 引用。`unit-development-workbench.md`和`unit-submit-review.md`不得继续把第 38 单元内容呈现为当前待办或当前规范。

@@ -8,7 +8,7 @@
 
 终端是知行的一个接入面。用户应能完整使用原有功能、页面和输入方式，在长对话中可靠阅读、编辑、选择、确认与往返；调整窗口大小后历史仍能按新尺寸阅读，滚轮、右键粘贴和选择复制可以共存。新底座须证明实质改善，并达到工作方案规定的 OpenCode 架构质量目标。
 
-业务事实、运行提交、权限和持久化的归属遵循[核心架构概述](../../research/design/architecture/overview.md)。关闭、重建或替换终端不能改变飞书、后台任务及同一会话的产品含义；终端不建立第二套业务权威。
+业务事实、运行提交、权限和持久化的归属遵循[核心架构概述](../architecture/overview.md)。关闭、重建或替换终端不能改变飞书、后台任务及同一会话的产品含义；终端不建立第二套业务权威。
 
 当前范围包括全部既有功能与页面迁移、明确故障和旧底座债务清理、完成这些目标所必需的底座。独立管理命令也要保持入口、交互和错误语义，但不要求把它们改成 REPL 新页面。未来客户端、竞品点击功能、通用插件/选择工具、额外费用系统等不自动进入本次。
 
@@ -141,7 +141,7 @@
 
 ### 1. 采用方案与责任
 
-采用固定 OpenTUI 0.5.14 / Solid 1.9.12、自足 Bun 1.4.2、Node ≥24 入口及 S/N/U/R 责任。遵循[核心架构概述](../../research/design/architecture/overview.md)及 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)，终端不拥有第二套领域事实、授权或运行状态机；具体采用与阶段验收记录不替代下述稳定责任。
+采用固定 OpenTUI 0.5.14 / Solid 1.9.12、自足 Bun 1.4.2、Node ≥24 入口及 S/N/U/R 责任。遵循[核心架构概述](../architecture/overview.md)及 [AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)，终端不拥有第二套领域事实、授权或运行状态机；具体采用与阶段验收记录不替代下述稳定责任。
 
 采用路线为 **Node 应用接入 + 自足 OpenTUI/Solid UI + 有限原生恢复**。用户继续通过 Node ≥24、npm 全局安装和 `zz` / `zhixing` 使用产品，不需另装 Bun 或在运行时补下载依赖。两条 bin 保持同一 Node JS 入口及原生 npm shim；交互入口采用下述 S/N/U/R，纯帮助、版本、非交互文本和隐藏 `serve` 沿原分派，不创建交互实例。
 

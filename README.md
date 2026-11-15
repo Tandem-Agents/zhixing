@@ -82,7 +82,7 @@ zz
 
 - 使用中遇到问题，先运行 `zz doctor`：它会检查本机的配置和运行状态，并给出下一步做法。
 - 仍未解决的话，请[提交 Issue](https://github.com/Tandem-Agents/zhixing/issues)，附上 `zz --version` 的输出和脱敏后的现象。不要附凭据或未经检查的完整日志。
-- 想参与开发，请阅读[开发与贡献指南](CONTRIBUTING.md)和[行为准则](CODE_OF_CONDUCT.md)。想了解整体设计，请阅读[架构概述](research/design/architecture/overview.md)。各版本的内容与变化见[版本说明](docs/delivery/releases/0.1.0.md)。
+- 想参与开发，请阅读[开发与贡献指南](CONTRIBUTING.md)和[行为准则](CODE_OF_CONDUCT.md)。想了解整体设计，请阅读[架构概述](docs/architecture/overview.md)。各版本的内容与变化见[版本说明](docs/delivery/releases/0.1.0.md)。
 
 ---
 
