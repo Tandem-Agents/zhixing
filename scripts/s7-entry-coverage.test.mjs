@@ -8578,6 +8578,9 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/conversation-journal/submission/prepared-submission.ts",
     "packages/owner-kernel/src/conversation-journal/journal.ts",
     "packages/owner-kernel/src/job-assignment.ts",
+    "packages/owner-kernel/src/job-journal/transaction/coordinator.ts",
+    "packages/owner-kernel/src/job-journal/submission/prepared-submission.ts",
+    "packages/owner-kernel/src/job-journal/operations/task-schedule.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
     "packages/owner-kernel/src/scheduler-global-state.ts",
     "packages/owner-kernel/src/scheduler-authority.ts",
@@ -8635,8 +8638,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       'import type { ProjectionTransactionContext as LockedTransaction } from "../authority/index.js";')
       .replaceAll("transaction: ProjectionTransactionContext", "transaction: LockedTransaction")]],
     [[deliveryAuthoritySource, '"Delivery lifecycle admission projection"', "'Delivery lifecycle admission projection'"]],
-    [["packages/owner-kernel/src/job-assignment.ts", "  scheduleFailurePolicyForCount,\n", "  scheduleFailurePolicyForCount as countBasedFailurePolicy,\n"],
-      ["packages/owner-kernel/src/job-assignment.ts", "policy = scheduleFailurePolicyForCount({", "policy = countBasedFailurePolicy({"]],
+    [["packages/owner-kernel/src/job-journal/transaction/coordinator.ts", "  scheduleFailurePolicyForCount,\n", "  scheduleFailurePolicyForCount as countBasedFailurePolicy,\n"],
+      ["packages/owner-kernel/src/job-journal/transaction/coordinator.ts", "policy = scheduleFailurePolicyForCount({", "policy = countBasedFailurePolicy({"]],
   ]);
 
   const mutate = (relative, transform) => records.map((record) =>
@@ -9530,17 +9533,24 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/owner-kernel/src/job-assignment.ts",
+      "packages/owner-kernel/src/job-journal/transaction/coordinator.ts",
       (text) => `${text}\nfunction frozenFailureNextFire() { return undefined; }`,
     )).join("\n"),
     /Schedule timing, offline and failure policy escaped its domain owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/owner-kernel/src/job-assignment.ts",
+      "packages/owner-kernel/src/job-journal/transaction/coordinator.ts",
       (text) => replaceOnce(text, "policy = scheduleFailurePolicyForCount({", "policy = localFailurePolicy({"),
     )).join("\n"),
     /Schedule timing, offline and failure policy escaped its domain owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/job-journal/submission/prepared-submission.ts",
+      (text) => replaceOnce(text, "prepareJobCommit(", "bypassPrepareJobCommit("),
+    )).join("\n"),
+    /Delivery producer bypasses the obligation participant/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

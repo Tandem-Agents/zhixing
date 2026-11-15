@@ -351,7 +351,7 @@ export function decideInputControl(input: {
       },
     };
   }
-  if (session.listPendingLifecycleProjections().length > 0) {
+  if (session.pendingLifecycleProjectionSize > 0) {
     return {
       result: rejectedInputControl(
         "fence-rejected",
@@ -531,29 +531,10 @@ export function decideReceiveRunInput(input: {
   ) {
     return { kind: "return", value: [] };
   }
-  const consumed = new Set(
-    queueInput
-      .listInputConsumptionsForAssignment(input.assignmentId)
-      .flatMap((value) => [...value.ingressKeys]),
+  const keys = queueInput.collectUnconsumedInputKeys(
+    input.runId,
+    input.assignmentId,
   );
-  const candidateEntries: Array<{
-    readonly key: string;
-    readonly position: number;
-  }> = [];
-  for (const appended of queueInput.listAppendedInputs()) {
-    if (
-      appended.record.runId === input.runId &&
-      !consumed.has(appended.record.ingressKey)
-    ) {
-      candidateEntries.push({
-        key: appended.record.ingressKey,
-        position: appended.record.position,
-      });
-    }
-  }
-  const keys = candidateEntries
-    .sort((a, b) => a.position - b.position)
-    .map((entry) => entry.key);
   if (keys.length === 0) {
     if (input.closing) {
       return {
@@ -702,7 +683,7 @@ export function decideSessionWriteControl(input: {
       ),
     };
   }
-  if (session.listPendingLifecycleProjections().length > 0) {
+  if (session.pendingLifecycleProjectionSize > 0) {
     return {
       result: rejectedInputControl(
         "busy",
@@ -724,14 +705,16 @@ export function decideSessionWriteControl(input: {
       : body.mutation.kind === "conversation-delete"
         ? "delete"
         : undefined;
-  const hasOpenRun = assignment.listRunStates().some(
-    ({ state: runState }) =>
-      runState === "queued" ||
-      runState === "dispatched" ||
-      runState === "running" ||
-      runState === "cancel-requested" ||
-      runState === "uncertain",
-  );
+  const hasOpenRun =
+    lifecycleMutation !== undefined &&
+    assignment.hasRunStateMatching(
+      (runState) =>
+        runState === "queued" ||
+        runState === "dispatched" ||
+        runState === "running" ||
+        runState === "cancel-requested" ||
+        runState === "uncertain",
+    );
   if (lifecycleMutation !== undefined && hasOpenRun) {
     return {
       result: rejectedInputControl(

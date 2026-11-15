@@ -14,7 +14,6 @@ import {
   assertChannelChallengeActiveAt,
   canonicalize,
   createSignedChannelChallengeToken,
-  createSignedDataPlaneTicket,
   interactionDisplayDigest,
   protocolDigest,
   type ConversationInteractionMirrorBatch,
@@ -30,15 +29,21 @@ import {
   corruptRunJournal,
   type ConversationRunJournalRecord,
 } from "../../conversation-run-contracts.js";
-import {
-  dataPlaneTicketIssueMatches,
-  nextDataPlaneTicketSyncFrontier,
-  ticketPrecedesSyncFrontier,
-} from "../../data-plane-ticket-lifecycle.js";
 import type {
   DataPlaneTicketFacts,
   DataPlaneTicketIssueRequest,
 } from "../../shared-protocol/contracts.js";
+import {
+  computeDataPlaneTicketSyncFacts,
+  createSignedDomainDataPlaneTicket,
+  decideDataPlaneTicketReplayOrConflict,
+  decideDataPlaneTicketRevocationState,
+  validateDataPlaneTicketSurfaceAndRenewal,
+} from "../../shared-protocol/data-plane-ticket-authority.js";
+import {
+  batchRepeatsDurableRequestId,
+  extendsDurableMirrorCursor,
+} from "../../shared-protocol/interaction-mirror-preparation.js";
 import type { TrustRuleHitBatchState } from "../../trust-rule-hits.js";
 import {
   ConversationAssignmentCancelledError,
@@ -60,20 +65,15 @@ export function decideIssueDataPlaneTicket(input: {
 }): ProjectionTransactionDecision<ConversationCommitLogRecord, DataPlaneTicket> {
   const { queueInput, assignment, tickets } = input.facts;
   const { request } = input;
-  const existing = tickets.getTicket(request.ticketId);
-  if (existing) {
-    if (
-      !dataPlaneTicketIssueMatches(
-        existing,
-        tickets.getTicketReplacement(request.ticketId),
-        request,
-      )
-    ) {
-      throw new Error("Ticket id already belongs to a different grant");
-    }
+  const replayed = decideDataPlaneTicketReplayOrConflict({
+    existing: tickets.getTicket(request.ticketId),
+    existingReplacementId: tickets.getTicketReplacement(request.ticketId),
+    request,
+  });
+  if (replayed) {
     return {
       kind: "return",
-      value: snapshot(existing, "Issued data-plane ticket"),
+      value: snapshot(replayed, "Issued data-plane ticket"),
     };
   }
   const assigned = assignment.getAssigned(request.assignmentId);
@@ -92,31 +92,16 @@ export function decideIssueDataPlaneTicket(input: {
   }
   const admitted = queueInput.getAdmitted(assigned.record.runId);
   if (!admitted) throw corruptRunJournal("Ticket assignment has no admission");
-  if (
-    request.kind !== "run-observe" &&
-    request.surfacePrincipal !== admitted.record.ingress.surfacePrincipal
-  ) {
-    throw new Error("Interactive tickets are restricted to the original surface");
-  }
-  const replaced = request.replacesTicketId
-    ? tickets.getTicket(request.replacesTicketId)
-    : undefined;
-  if (request.kind === "abort" && request.replacesTicketId !== undefined) {
-    throw new Error("Abort tickets are not renewable");
-  }
-  if (
-    request.replacesTicketId !== undefined &&
-    (!replaced ||
-      tickets.isTicketRevoked(request.replacesTicketId) ||
-      !replaced.renewable ||
-      replaced.assignmentId !== request.assignmentId ||
-      replaced.surfacePrincipal !== request.surfacePrincipal ||
-      replaced.kind !== request.kind)
-  ) {
-    throw new Error(
-      "Ticket renewal does not continue an active renewable grant",
-    );
-  }
+  validateDataPlaneTicketSurfaceAndRenewal({
+    request,
+    expectedSurfacePrincipal: admitted.record.ingress.surfacePrincipal,
+    replacedTicket: request.replacesTicketId
+      ? tickets.getTicket(request.replacesTicketId)
+      : undefined,
+    isReplacedTicketRevoked:
+      request.replacesTicketId !== undefined &&
+      tickets.isTicketRevoked(request.replacesTicketId),
+  });
   if (
     (runState === "cancel-requested" || runState === "cancelled") &&
     assignment.getCancelFence(request.assignmentId) !== undefined
@@ -132,26 +117,18 @@ export function decideIssueDataPlaneTicket(input: {
   ) {
     throw new Error("Ticket requires a current acknowledged assignment");
   }
-  const ticket = createSignedDataPlaneTicket(
-    {
-      v: 1,
-      ticketId: request.ticketId,
-      ref: {
-        execution: "conversation",
-        runId: assigned.record.runId,
-        conversationId: input.conversationId,
-        ownerEpoch: assigned.record.ownerEpoch,
-      },
-      assignmentId: request.assignmentId,
-      surfacePrincipal: request.surfacePrincipal,
-      executorId: assigned.record.executorId,
-      issuedAt: input.issuedAt,
-      expiry: new Date(Date.parse(input.issuedAt) + request.ttlMs).toISOString(),
-      kind: request.kind,
-      renewable: request.kind !== "abort",
-    } as Parameters<typeof createSignedDataPlaneTicket>[0],
-    input.signer,
-  );
+  const ticket = createSignedDomainDataPlaneTicket({
+    request,
+    ref: {
+      execution: "conversation",
+      runId: assigned.record.runId,
+      conversationId: input.conversationId,
+      ownerEpoch: assigned.record.ownerEpoch,
+    },
+    executorId: assigned.record.executorId,
+    issuedAt: input.issuedAt,
+    signer: input.signer,
+  });
   return {
     kind: "append",
     entries: [
@@ -181,10 +158,11 @@ export function decideRevokeDataPlaneTicket(input: {
   readonly facts: Pick<ConversationDecisionFacts, "tickets">;
 }): ProjectionTransactionDecision<ConversationCommitLogRecord, boolean> {
   const { tickets } = input.facts;
-  if (!tickets.hasTicket(input.ticketId)) {
-    throw new Error("Cannot revoke an unknown data-plane ticket");
-  }
-  if (tickets.isTicketRevoked(input.ticketId)) {
+  const shouldRevoke = decideDataPlaneTicketRevocationState({
+    hasTicket: tickets.hasTicket(input.ticketId),
+    isRevoked: tickets.isTicketRevoked(input.ticketId),
+  });
+  if (!shouldRevoke) {
     return { kind: "return", value: false };
   }
   return {
@@ -208,24 +186,13 @@ export function decideDataPlaneTicketFacts(input: {
   DataPlaneTicketFacts
 > {
   const { tickets } = input.facts;
-  const nextFrontier = nextDataPlaneTicketSyncFrontier(
-    tickets.listTickets(),
-    tickets.ticketSyncFrontier,
-    input.at,
-  );
-  const frontier = nextFrontier ?? tickets.ticketSyncFrontier;
-  const issued = [...tickets.listTickets()]
-    .filter((ticket) => !ticketPrecedesSyncFrontier(ticket, frontier))
-    .sort((left, right) => left.ticketId.localeCompare(right.ticketId))
-    .map((ticket) => snapshot(ticket, "Issued data-plane ticket"));
-  const retainedIds = new Set(issued.map((ticket) => ticket.ticketId));
-  const revokedTicketIds = [...retainedIds]
-    .filter((ticketId) => tickets.isTicketRevoked(ticketId))
-    .sort();
-  const value = {
-    issued,
-    revokedTicketIds,
-  };
+  const { nextFrontier, facts: value } = computeDataPlaneTicketSyncFacts({
+    candidateForAdvance: tickets.ticketsIterable(),
+    candidateForRetained: tickets.ticketsIterable(),
+    currentFrontier: tickets.ticketSyncFrontier,
+    at: input.at,
+    isTicketRevoked: (ticketId) => tickets.isTicketRevoked(ticketId),
+  });
   return nextFrontier === undefined
     ? { kind: "return", value }
     : {
@@ -510,28 +477,22 @@ export function decideInteractionMirror(input: {
   if (!mirrorState) {
     throw new Error("Interaction mirror projection is missing its assignment");
   }
-  const first = batch.entries[0]!;
   const last = batch.entries.at(-1)!;
   if (
-    batch.previousDigest !== mirrorState.mirrorDigest ||
-    first.ordinal !== mirrorState.ordinal + 1 ||
-    first.seq <= mirrorState.mirroredUpTo
+    !extendsDurableMirrorCursor(batch, {
+      upTo: mirrorState.mirroredUpTo,
+      ordinal: mirrorState.ordinal,
+      digest: mirrorState.mirrorDigest,
+    })
   ) {
     throw new Error(
       "Interaction mirror batch does not continue the durable audit prefix",
     );
   }
-  const batchRequestIds = new Set<string>();
-  for (const entry of batch.entries) {
-    if (
-      mirrorState.requestIds.has(entry.requestId) ||
-      batchRequestIds.has(entry.requestId)
-    ) {
-      throw new Error(
-        "Interaction mirror batch repeats a durable request identity",
-      );
-    }
-    batchRequestIds.add(entry.requestId);
+  if (batchRepeatsDurableRequestId(batch, mirrorState.requestIds)) {
+    throw new Error(
+      "Interaction mirror batch repeats a durable request identity",
+    );
   }
   const current = assignment.getRunState(assigned.record.runId)?.state;
   if (

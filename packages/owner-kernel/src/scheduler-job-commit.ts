@@ -21,7 +21,7 @@ import {
   validatePublishDecisionForBatch,
   validatePublishDecisionRecord,
 } from "@zhixing-ai/core/protocol";
-import type { JobCommitParticipant } from "./job-assignment.js";
+import type { JobCommitParticipant } from "./job-journal/contracts.js";
 import type { GlobalMutationCommitCoordinator } from "./global-mutation-commit-coordinator.js";
 
 const JOB_PUBLISH_PENDING_PROJECTION_ID = "job-publish-pending-v1";

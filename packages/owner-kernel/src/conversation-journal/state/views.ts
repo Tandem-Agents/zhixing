@@ -53,6 +53,7 @@ import {
   selectActiveAssignment,
   type GuardAssignedEntry,
 } from "./assignment-control.js";
+import { firstCommitIndexAfter } from "./commit-publish.js";
 import { snapshot, type DeepReadonly } from "./common.js";
 export type { DeepReadonly };
 import {
@@ -105,6 +106,16 @@ function freezeGuardAssignedFact(
   return Object.freeze({ ...entry }) as ReadonlyGuardAssignedFact;
 }
 
+function freezeTicketFact(
+  entry: DataPlaneTicket,
+): DeepReadonly<DataPlaneTicket> {
+  return Object.freeze({
+    ...entry,
+    ref: Object.freeze({ ...entry.ref }),
+    signature: Object.freeze({ ...entry.signature }),
+  }) as DeepReadonly<DataPlaneTicket>;
+}
+
 export interface SessionDomainFacts {
   readonly domainRevision: number;
   readonly deleted: boolean;
@@ -154,6 +165,7 @@ export interface SessionDomainFacts {
   getPendingLifecycleProjection(
     domainRevision: number,
   ): Readonly<PendingLifecycleProjection> | undefined;
+  readonly pendingLifecycleProjectionSize: number;
   listPendingLifecycleProjections(): readonly Readonly<PendingLifecycleProjection>[];
   hasProjectedLifecycleRevision(domainRevision: number): boolean;
   getWorksceneControl(
@@ -171,6 +183,11 @@ export interface RunQueueInputFacts {
   hasAdmitted(runId: string): boolean;
   hasAnyAdmitted(): boolean;
   listAdmitted(): readonly ReadonlyAdmittedFact[];
+  listAdmittedForRuns(selectedRunIds: ReadonlySet<string>): readonly ReadonlyAdmittedFact[];
+  listAdmittedForIngress(
+    ingressId: string,
+    source: AdmittedProjection["record"]["invocation"]["source"],
+  ): readonly ReadonlyAdmittedFact[];
   getRunIdByIngress(ingressKey: string): string | undefined;
   hasQueuedPosition(position: number): boolean;
   peekEarliestQueued(): QueuedRunEntry | undefined;
@@ -181,6 +198,7 @@ export interface RunQueueInputFacts {
   isInputAssignmentClosed(assignmentId: string): boolean;
   getAppendedInput(ingressKey: string): ReadonlyAppendedInputFact | undefined;
   listAppendedInputs(): readonly ReadonlyAppendedInputFact[];
+  collectUnconsumedInputKeys(runId: string, assignmentId: string): readonly string[];
   hasInputConsumption(key: string): boolean;
   getInputConsumption(
     key: string,
@@ -218,9 +236,11 @@ export interface AssignmentControlFacts {
     readonly state: ConversationRunState;
     readonly statusRevision: number;
   }[];
+  hasRunStateMatching(predicate: (state: ConversationRunState) => boolean): boolean;
   getAssignmentIdForRun(runId: string): string | undefined;
   getAssigned(assignmentId: string): ReadonlyAssignedFact | undefined;
   listAssigned(): readonly ReadonlyAssignedFact[];
+  hasReservationId(reservationId: string): boolean;
   hasAssigned(assignmentId: string): boolean;
   isAssignmentClosed(assignmentId: string): boolean;
   listRecoveryAssignmentIds(): readonly string[];
@@ -380,6 +400,7 @@ export interface ChannelTicketFacts {
   getTicket(ticketId: string): DeepReadonly<DataPlaneTicket> | undefined;
   hasTicket(ticketId: string): boolean;
   listTickets(): readonly DeepReadonly<DataPlaneTicket>[];
+  ticketsIterable(): Iterable<DeepReadonly<DataPlaneTicket>>;
   getTicketIdsForAssignment(assignmentId: string): ReadonlySet<string>;
   getTicketReplacement(ticketId: string): string | undefined;
   isTicketRevoked(ticketId: string): boolean;
@@ -395,12 +416,25 @@ export interface GuardChannelTicketFacts {
 }
 
 export interface CommitPublishFacts {
-  readonly commits: readonly DeepReadonly<
-    Extract<ConversationRunJournalRecord, { t: "committed" }>
-  >[];
   readonly latestCommit?: DeepReadonly<
     Extract<ConversationRunJournalRecord, { t: "committed" }>
   >;
+  commitsAfter(
+    afterCommitRevision: number,
+  ): readonly DeepReadonly<
+    Extract<ConversationRunJournalRecord, { t: "committed" }>
+  >[];
+  findCommittedByRunId(
+    runId: string,
+  ):
+    | DeepReadonly<Extract<ConversationRunJournalRecord, { t: "committed" }>>
+    | undefined;
+  findAllowOnceInteractionOutcome(
+    requestId: string,
+  ):
+    | { readonly t: "answered"; readonly decisionDigest: string }
+    | { readonly t: "closed" }
+    | undefined;
   getMirrorState(assignmentId: string): ReadonlyMirrorStateFact | undefined;
   getMirrorBatch(
     batchDigest: string,
@@ -574,6 +608,9 @@ export function readSessionDomainFacts(state: RunProjection): SessionDomainFacts
       const entry = state.pendingLifecycleProjections.get(domainRevision);
       return entry ? Object.freeze({ ...entry }) : undefined;
     },
+    get pendingLifecycleProjectionSize() {
+      return state.pendingLifecycleProjections.size;
+    },
     listPendingLifecycleProjections: () =>
       [...state.pendingLifecycleProjections.values()].map((entry) =>
         Object.freeze({ ...entry }),
@@ -598,6 +635,27 @@ export function readRunQueueInputFacts(state: RunProjection): RunQueueInputFacts
     hasAdmitted: (runId) => state.admittedByRun.has(runId),
     hasAnyAdmitted: () => state.admittedByRun.size > 0,
     listAdmitted: () => [...state.admittedByRun.values()].map(freezeAdmittedFact),
+    listAdmittedForRuns: (selectedRunIds) => {
+      const matched: ReadonlyAdmittedFact[] = [];
+      for (const entry of state.admittedByRun.values()) {
+        if (selectedRunIds.has(entry.record.runId)) {
+          matched.push(freezeAdmittedFact(entry));
+        }
+      }
+      return matched;
+    },
+    listAdmittedForIngress: (ingressId, source) => {
+      const matched: ReadonlyAdmittedFact[] = [];
+      for (const entry of state.admittedByRun.values()) {
+        if (
+          entry.record.ingress.ingressId === ingressId &&
+          entry.record.invocation.source === source
+        ) {
+          matched.push(freezeAdmittedFact(entry));
+        }
+      }
+      return matched;
+    },
     getRunIdByIngress: (ingressKey) => state.runByIngress.get(ingressKey),
     hasQueuedPosition: (position) => hasQueuedPositionUsed(state, position),
     peekEarliestQueued: () => peekEarliestQueuedEntry(state),
@@ -614,6 +672,28 @@ export function readRunQueueInputFacts(state: RunProjection): RunQueueInputFacts
     },
     listAppendedInputs: () =>
       [...state.appendedInputs.values()].map(freezeAppendedFact),
+    collectUnconsumedInputKeys: (runId, assignmentId) => {
+      const consumed = new Set<string>();
+      for (const entry of state.inputConsumptions.values()) {
+        if (entry.assignmentId === assignmentId) {
+          for (const key of entry.ingressKeys) consumed.add(key);
+        }
+      }
+      const candidates: Array<{ readonly key: string; readonly position: number }> = [];
+      for (const appended of state.appendedInputs.values()) {
+        if (
+          appended.record.runId === runId &&
+          !consumed.has(appended.record.ingressKey)
+        ) {
+          candidates.push({
+            key: appended.record.ingressKey,
+            position: appended.record.position,
+          });
+        }
+      }
+      candidates.sort((a, b) => a.position - b.position);
+      return candidates.map((entry) => entry.key);
+    },
     hasInputConsumption: (key) => state.inputConsumptions.has(key),
     getInputConsumption: (key) => {
       const entry = state.inputConsumptions.get(key);
@@ -669,6 +749,12 @@ export function readAssignmentControlFacts(
           statusRevision: entry.statusRevision,
         }),
       ),
+    hasRunStateMatching: (predicate) => {
+      for (const entry of state.stateByRun.values()) {
+        if (predicate(entry.state)) return true;
+      }
+      return false;
+    },
     getAssignmentIdForRun: (runId) => state.assignmentByRun.get(runId),
     getAssigned: (assignmentId) => {
       const entry = state.assignedById.get(assignmentId);
@@ -676,6 +762,14 @@ export function readAssignmentControlFacts(
     },
     listAssigned: () =>
       [...state.assignedById.values()].map(freezeAssignedFact),
+    hasReservationId: (reservationId) => {
+      for (const assigned of state.assignedById.values()) {
+        if (assigned.record.reservation.reservationId === reservationId) {
+          return true;
+        }
+      }
+      return false;
+    },
     hasAssigned: (assignmentId) => state.assignedById.has(assignmentId),
     isAssignmentClosed: (assignmentId) =>
       state.closedAssignments.has(assignmentId),
@@ -850,15 +944,17 @@ export function readChannelTicketFacts(state: RunProjection): ChannelTicketFacts
     },
     getTicket: (ticketId) => {
       const entry = state.ticketsById.get(ticketId);
-      return entry
-        ? (Object.freeze({ ...entry }) as DeepReadonly<DataPlaneTicket>)
-        : undefined;
+      return entry ? freezeTicketFact(entry) : undefined;
     },
     hasTicket: (ticketId) => state.ticketsById.has(ticketId),
-    listTickets: () =>
-      [...state.ticketsById.values()].map(
-        (entry) => Object.freeze({ ...entry }) as DeepReadonly<DataPlaneTicket>,
-      ),
+    listTickets: () => [...state.ticketsById.values()].map(freezeTicketFact),
+    ticketsIterable: () => ({
+      *[Symbol.iterator]() {
+        for (const entry of state.ticketsById.values()) {
+          yield freezeTicketFact(entry);
+        }
+      },
+    }),
     getTicketIdsForAssignment: (assignmentId) =>
       new Set(state.ticketIdsByAssignment.get(assignmentId) ?? []),
     getTicketReplacement: (ticketId) => state.ticketReplacementsById.get(ticketId),
@@ -879,9 +975,7 @@ export function readGuardChannelTicketFacts(
     },
     getTicket: (ticketId) => {
       const entry = guard.ticketsById.get(ticketId);
-      return entry
-        ? (Object.freeze({ ...entry }) as DeepReadonly<DataPlaneTicket>)
-        : undefined;
+      return entry ? freezeTicketFact(entry) : undefined;
     },
     isTicketRevoked: (ticketId) => guard.revokedTickets.has(ticketId),
     getTicketReplacement: (ticketId) => guard.ticketReplacementsById.get(ticketId),
@@ -894,14 +988,41 @@ export function readCommitPublishFacts(
   state: RunProjection,
 ): CommitPublishFacts {
   return {
-    get commits() {
-      return [...state.commits];
-    },
     get latestCommit() {
       const entry = state.commits.at(-1);
       return entry
         ? (Object.freeze({ ...entry }) as DeepReadonly<typeof entry>)
         : undefined;
+    },
+    commitsAfter: (afterCommitRevision) => {
+      const start = firstCommitIndexAfter(state.commits, afterCommitRevision);
+      return state.commits
+        .slice(start)
+        .map(
+          (entry) => Object.freeze({ ...entry }) as DeepReadonly<typeof entry>,
+        );
+    },
+    findCommittedByRunId: (runId) => {
+      const entry = state.commits.find((candidate) => candidate.runId === runId);
+      return entry
+        ? (Object.freeze({ ...entry }) as DeepReadonly<typeof entry>)
+        : undefined;
+    },
+    findAllowOnceInteractionOutcome: (requestId) => {
+      for (const batch of state.mirrorBatches.values()) {
+        for (const entry of batch.batch.entries) {
+          if (entry.kind !== "allow-once" || entry.requestId !== requestId) {
+            continue;
+          }
+          return entry.outcome.t === "answered"
+            ? {
+                t: "answered" as const,
+                decisionDigest: entry.outcome.decisionDigest,
+              }
+            : { t: "closed" as const };
+        }
+      }
+      return undefined;
     },
     getMirrorState: (assignmentId) => {
       const mirror = state.mirrorStateByAssignment.get(assignmentId);

@@ -1,6 +1,5 @@
 import type { ProjectionTransactionDecision } from "@zhixing-ai/core/authority";
 import type {
-  AssignmentTerminationProof,
   CancelProofBody,
   ControlResult,
   ControlResultBody,
@@ -19,6 +18,10 @@ import {
   corruptRunJournal,
   isOpenResolutionFact,
 } from "../../conversation-run-contracts.js";
+import {
+  classifyNotStartedTermination,
+  decideTerminationReplayOrCurrentness,
+} from "../../shared-protocol/not-started-termination.js";
 import type { AssignmentResourceCoordinator } from "../../resource-governor.js";
 import type {
   ConversationAbortTicketAuthorizer,
@@ -512,65 +515,95 @@ export function decideAcceptNotStartedTermination(input: {
   ) {
     throw new Error("Termination proof does not bind a durable assignment");
   }
-  const prior = assignment.getSuperseded(proof.assignmentId);
-  if (prior) {
-    if (
-      canonicalize(withoutSignature(prior.proof)) !==
-      canonicalize(withoutSignature(proof))
-    ) {
-      throw new Error("Assignment already has a different termination proof");
-    }
+  const current = assignment.getRunState(assigned.record.runId);
+  const replay = decideTerminationReplayOrCurrentness({
+    domain: "conversation",
+    entrypoint:
+      assignmentTerminationProofKind(proof) === "dispatch-rejection"
+        ? "dispatch-rejection"
+        : "supersede",
+    proof,
+    durablePriorProofs: [assignment.getSuperseded(proof.assignmentId)?.proof],
+    assignmentIsCurrent:
+      assignment.getAssignmentIdForRun(assigned.record.runId) ===
+      proof.assignmentId,
+    currentRunState: current?.state,
+  });
+  if (replay.kind === "same-proof-replay") {
     return { kind: "return", value: undefined };
   }
-  const current = assignment.getRunState(assigned.record.runId);
+  if (replay.kind === "conflicting-prior-proof") {
+    throw new Error("Assignment already has a different termination proof");
+  }
   if (!current) {
     throw corruptRunJournal("Terminated assignment has no run state");
   }
-  if (
-    assignment.getAssignmentIdForRun(assigned.record.runId) !==
-    proof.assignmentId
-  ) {
+  if (replay.kind === "historical-assignment") {
     throw new Error("Termination proof belongs to a historical assignment");
   }
   const open = assignment.getResolution(assigned.record.runId);
   const kind = assignmentTerminationProofKind(proof);
-  const conflictsWithReceived =
-    kind === "dispatch-rejection" && open?.cause === "dispatch-conflict";
-  if (
-    assignment.hasDurableStarted(proof.assignmentId) ||
-    conflictsWithReceived
-  ) {
-    const existing = assignment.getRejectedNotStarted(proof.assignmentId, kind);
-    if (existing) {
-      if (
-        canonicalize(withoutSignature(existing.proof)) !==
-        canonicalize(withoutSignature(proof))
-      ) {
-        throw new Error(
-          "Assignment already rejected a different not-started proof",
-        );
-      }
-      return { kind: "return", value: undefined };
-    }
+  const decision = classifyNotStartedTermination({
+    domain: "conversation",
+    entrypoint:
+      kind === "dispatch-rejection" ? "dispatch-rejection" : "supersede",
+    proof,
+    proofKind: kind,
+    currentRunState: current.state,
+    existingRejectedNotStarted: assignment.getRejectedNotStarted(
+      proof.assignmentId,
+      kind,
+    )?.proof,
+    rejectionAlreadyCheckedInPriorProofs: false,
+    hasDurableStartedObservation: assignment.hasDurableStarted(
+      proof.assignmentId,
+    ),
+    openResolution: open
+      ? {
+          cause: open.cause,
+          isOpen: open.resolution === undefined,
+          conflictReceivedRecordSeq: assignment.getConflictByAssignment(
+            proof.assignmentId,
+          )?.proof.receivedRecordSeq,
+        }
+      : undefined,
+  });
+  if (decision.kind === "same-proof-replay") {
+    return { kind: "return", value: undefined };
+  }
+  if (decision.kind === "conflicting-prior-proof") {
+    throw new Error("Assignment already rejected a different not-started proof");
+  }
+  if (decision.kind === "missing-open-resolution") {
+    throw corruptRunJournal("Uncertain run has no open resolution fact");
+  }
+  if (decision.kind === "late-for-state") {
+    throw new Error("Termination proof is late for the current run state");
+  }
+  if (decision.kind === "dispatch-rejection-cannot-close-conflict") {
+    throw new Error(
+      "Dispatch rejection cannot resolve a received dispatch conflict",
+    );
+  }
+  if (decision.kind === "conflict-seq-invalid") {
+    throw new Error(
+      "Conflict containment proof does not follow the received prefix",
+    );
+  }
+  if (decision.kind === "contradictory-not-started") {
     const rejection = runRecord(input.conversationId, {
       t: "not-started-rejected",
       assignmentId: proof.assignmentId,
       proof,
     });
-    if (current.state === "uncertain") {
-      if (!open || open.resolution) {
-        throw corruptRunJournal("Uncertain run has no open resolution fact");
-      }
+    if (!decision.opensUncertain) {
       return { kind: "append", entries: [rejection], value: undefined };
     }
-    if (
-      current.state !== "dispatched" &&
-      current.state !== "running" &&
-      current.state !== "cancel-requested"
-    ) {
-      throw new Error("Termination proof is late for the current run state");
-    }
-    const fact = createOpenResolutionFact(assigned, "ledger-unknown", input.at);
+    const fact = createOpenResolutionFact(
+      assigned,
+      decision.uncertainCause as "ledger-unknown" | "cancel-unproven",
+      input.at,
+    );
     return {
       kind: "append",
       entries: [
@@ -592,45 +625,20 @@ export function decideAcceptNotStartedTermination(input: {
       value: undefined,
     };
   }
-  if (
-    current.state !== "dispatched" &&
-    current.state !== "uncertain" &&
-    current.state !== "cancel-requested"
-  ) {
-    throw new Error("Termination proof is late for the current run state");
+  if (decision.kind !== "accepted-not-started") {
+    throw corruptRunJournal("Unexpected not-started classification outcome");
   }
-  if (current.state === "uncertain" && (!open || open.resolution)) {
-    throw corruptRunJournal("Uncertain run has no open resolution fact");
-  }
-  let containment: LogicalRecord<ConversationCommitLogRecord> | undefined;
-  if (open?.cause === "dispatch-conflict") {
-    if (kind !== "supersede") {
-      throw new Error(
-        "Dispatch rejection cannot resolve a received dispatch conflict",
-      );
-    }
-    const containmentProof = proof as Extract<
-      SupersedeProof,
-      { decision: "not-started-fenced" }
-    >;
-    const conflict = assignment.getConflictByAssignment(
-      containmentProof.assignmentId,
-    );
-    if (
-      !conflict ||
-      containmentProof.lastRecordSeq <= conflict.proof.receivedRecordSeq
-    ) {
-      throw new Error(
-        "Conflict containment proof does not follow the received prefix",
-      );
-    }
-    containment = runRecord(input.conversationId, {
-      t: "dispatch-conflict-contained",
-      assignmentId: containmentProof.assignmentId,
-      openFactDigest: open.openFactDigest,
-      proof: containmentProof,
-    });
-  }
+  const containment = decision.closesDispatchConflict
+    ? runRecord(input.conversationId, {
+        t: "dispatch-conflict-contained",
+        assignmentId: proof.assignmentId,
+        openFactDigest: open!.openFactDigest,
+        proof: proof as Extract<
+          SupersedeProof,
+          { decision: "not-started-fenced" }
+        >,
+      })
+    : undefined;
   const entries: LogicalRecord<ConversationCommitLogRecord>[] = [
     ...(containment ? [containment] : []),
     runRecord(input.conversationId, {
@@ -640,7 +648,7 @@ export function decideAcceptNotStartedTermination(input: {
     }),
     ...assignment.capabilityRevocationsFor(input.conversationId, assigned),
   ];
-  if (open && !open.resolution) {
+  if (decision.closesOpenResolution && open && !open.resolution) {
     entries.push(
       runRecord(input.conversationId, {
         t: "resolution",
@@ -706,89 +714,187 @@ export function decideSubmitCancelProof(input: {
   }
   const current = assignment.getRunState(assigned.record.runId);
   if (!current) throw corruptRunJournal("Cancelled assignment has no run state");
-  const accepted = assignment.getAcceptedCancellation(assignmentId);
-  const prior = assignment.getSuperseded(assignmentId);
-  const containment = assignment.getContainmentByAssignment(assignmentId);
   const rejectedNotStarted = assignment.getRejectedNotStarted(
     assignmentId,
     "cancel",
   );
-  const durableProofs = [
-    accepted?.proof,
-    prior?.proof,
-    containment?.proof,
-    rejectedNotStarted?.proof,
-  ].filter(
-    (candidate): candidate is AssignmentTerminationProof | CancelProofBody =>
-      candidate !== undefined,
-  );
-  if (durableProofs.length > 0) {
-    if (
-      durableProofs.some(
-        (candidate) =>
-          canonicalize(withoutSignature(candidate)) !==
-          canonicalize(withoutSignature(proof)),
-      )
-    ) {
-      throw new Error(
-        "Assignment already has a different durable termination proof",
-      );
-    }
+  const replay = decideTerminationReplayOrCurrentness({
+    domain: "conversation",
+    entrypoint: "cancel-proof",
+    proof,
+    durablePriorProofs: [
+      assignment.getAcceptedCancellation(assignmentId)?.proof,
+      assignment.getSuperseded(assignmentId)?.proof,
+      assignment.getContainmentByAssignment(assignmentId)?.proof,
+      rejectedNotStarted?.proof,
+    ],
+    assignmentIsCurrent:
+      assignment.getAssignmentIdForRun(assigned.record.runId) === assignmentId,
+    currentRunState: current.state,
+  });
+  if (replay.kind === "conflicting-prior-proof") {
+    throw new Error(
+      "Assignment already has a different durable termination proof",
+    );
+  }
+  if (replay.kind === "same-proof-replay") {
     input.authorizeReplay();
     return { kind: "return", value: undefined };
   }
-  if (assignment.getAssignmentIdForRun(assigned.record.runId) !== assignmentId) {
+  if (replay.kind === "historical-assignment") {
     throw new Error("Cancel proof belongs to a historical assignment");
   }
-  if (current.state === "cancelled" || current.state === "committed") {
+  if (replay.kind === "terminal-without-durable-fact") {
     throw new Error("Cancel proof has no matching durable terminal fact");
   }
   input.authorizeSettlement();
 
   const open = assignment.getResolution(assigned.record.runId);
-  const contradictoryNotStarted =
-    proof.decision === "not-started" &&
-    assignment.hasDurableStarted(assignmentId);
-  if (contradictoryNotStarted) {
-    const existingRejection = assignment.getRejectedNotStarted(
-      assignmentId,
-      "cancel",
-    );
-    if (existingRejection) {
+  if (proof.decision === "not-started") {
+    const decision = classifyNotStartedTermination({
+      domain: "conversation",
+      entrypoint: "cancel-proof",
+      proof,
+      proofKind: "cancel",
+      currentRunState: current.state,
+      existingRejectedNotStarted: rejectedNotStarted?.proof,
+      rejectionAlreadyCheckedInPriorProofs: true,
+      hasDurableStartedObservation: assignment.hasDurableStarted(assignmentId),
+      openResolution: open
+        ? {
+            cause: open.cause,
+            isOpen: open.resolution === undefined,
+            alreadyContained: assignment.hasContainedFact(open.openFactDigest),
+            conflictReceivedRecordSeq: assignment.getConflictByAssignment(
+              assignmentId,
+            )?.proof.receivedRecordSeq,
+          }
+        : undefined,
+    });
+    if (decision.kind === "unexpected-unreplayed-rejection") {
+      throw corruptRunJournal("Rejected not-started proof was not replayed durably");
+    }
+    if (decision.kind === "missing-open-resolution") {
       throw corruptRunJournal(
-        "Rejected not-started proof was not replayed durably",
+        "Uncertain cancellation has no open resolution fact",
       );
     }
-    const rejection = runRecord(input.conversationId, {
-      t: "not-started-rejected",
-      assignmentId,
-      proof,
-    });
-    if (current.state === "uncertain") {
-      return { kind: "append", entries: [rejection], value: undefined };
+    if (decision.kind === "conflict-seq-invalid") {
+      throw new Error(
+        "Conflict containment proof does not follow the received prefix",
+      );
     }
-    const fact = createOpenResolutionFact(assigned, "cancel-unproven", input.at);
+    if (decision.kind === "unexpected-contained-fact") {
+      throw corruptRunJournal("Contained cancel proof was not replayed durably");
+    }
+    if (decision.kind === "late-for-state") {
+      throw new Error("Cancel proof is late for the current run state");
+    }
+    if (decision.kind === "contradictory-not-started") {
+      const rejection = runRecord(input.conversationId, {
+        t: "not-started-rejected",
+        assignmentId,
+        proof,
+      });
+      if (!decision.opensUncertain) {
+        return { kind: "append", entries: [rejection], value: undefined };
+      }
+      const fact = createOpenResolutionFact(
+        assigned,
+        decision.uncertainCause as "ledger-unknown" | "cancel-unproven",
+        input.at,
+      );
+      return {
+        kind: "append",
+        entries: [
+          rejection,
+          runRecord(input.conversationId, {
+            t: "resolution",
+            runId: assigned.record.runId,
+            fact,
+          }),
+          ...assignment.capabilityRevocationsFor(input.conversationId, assigned),
+          runRecord(input.conversationId, {
+            t: "state",
+            runId: assigned.record.runId,
+            assignmentId,
+            state: "uncertain",
+            statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: undefined,
+      };
+    }
+    if (decision.kind !== "accepted-not-started") {
+      throw corruptRunJournal("Unexpected cancel not-started classification");
+    }
+    input.assertResourceUsageFinal(assigned.record, proof.usageFinal);
+    if (
+      decision.settlementRecord === "assignment-superseded" &&
+      decision.closesOpenResolution &&
+      open
+    ) {
+      const containmentRecord = decision.closesDispatchConflict
+        ? runRecord(input.conversationId, {
+            t: "dispatch-conflict-contained",
+            assignmentId,
+            openFactDigest: open.openFactDigest,
+            proof,
+          })
+        : undefined;
+      const resolved = closeResolution(
+        open,
+        "proven-not-started-redispatched",
+        proof.executorId,
+        input.at,
+      );
+      return {
+        kind: "append",
+        entries: [
+          ...(containmentRecord ? [containmentRecord] : []),
+          runRecord(input.conversationId, {
+            t: "assignment-superseded",
+            assignmentId,
+            proof,
+          }),
+          runRecord(input.conversationId, {
+            t: "resolution",
+            runId: assigned.record.runId,
+            fact: resolved,
+          }),
+          ...assignment.capabilityRevocationsFor(input.conversationId, assigned),
+          runRecord(input.conversationId, {
+            t: "state",
+            runId: assigned.record.runId,
+            assignmentId,
+            state: "queued",
+            statusRevision: current.statusRevision + 1,
+          }),
+        ],
+        value: undefined,
+      };
+    }
     return {
       kind: "append",
       entries: [
-        rejection,
         runRecord(input.conversationId, {
-          t: "resolution",
-          runId: assigned.record.runId,
-          fact,
+          t: "cancel-proof-accepted",
+          assignmentId,
+          proof,
         }),
         ...assignment.capabilityRevocationsFor(input.conversationId, assigned),
         runRecord(input.conversationId, {
           t: "state",
           runId: assigned.record.runId,
           assignmentId,
-          state: "uncertain",
+          state: "cancelled",
           statusRevision: current.statusRevision + 1,
         }),
       ],
       value: undefined,
     };
   }
+
   if (current.state === "uncertain") {
     if (!open || open.resolution) {
       throw corruptRunJournal(
@@ -807,49 +913,17 @@ export function decideSubmitCancelProof(input: {
         );
       }
     }
-    const requiresContainment = conflict || proof.decision === "halted";
-    if (requiresContainment && assignment.hasContainedFact(open.openFactDigest)) {
+    if (assignment.hasContainedFact(open.openFactDigest)) {
       throw corruptRunJournal("Contained cancel proof was not replayed durably");
     }
-    const containmentRecord = requiresContainment
-      ? runRecord(input.conversationId, {
+    return {
+      kind: "append",
+      entries: [
+        runRecord(input.conversationId, {
           t: conflict ? "dispatch-conflict-contained" : "cancel-contained",
           assignmentId,
           openFactDigest: open.openFactDigest,
           proof,
-        })
-      : undefined;
-    if (proof.decision === "halted") {
-      return { kind: "append", entries: [containmentRecord!], value: undefined };
-    }
-    input.assertResourceUsageFinal(assigned.record, proof.usageFinal);
-    const resolved = closeResolution(
-      open,
-      "proven-not-started-redispatched",
-      proof.executorId,
-      input.at,
-    );
-    return {
-      kind: "append",
-      entries: [
-        ...(containmentRecord ? [containmentRecord] : []),
-        runRecord(input.conversationId, {
-          t: "assignment-superseded",
-          assignmentId,
-          proof,
-        }),
-        runRecord(input.conversationId, {
-          t: "resolution",
-          runId: assigned.record.runId,
-          fact: resolved,
-        }),
-        ...assignment.capabilityRevocationsFor(input.conversationId, assigned),
-        runRecord(input.conversationId, {
-          t: "state",
-          runId: assigned.record.runId,
-          assignmentId,
-          state: "queued",
-          statusRevision: current.statusRevision + 1,
         }),
       ],
       value: undefined,

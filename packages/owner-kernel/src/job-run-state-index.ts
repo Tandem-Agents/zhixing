@@ -15,7 +15,7 @@ import {
   preloadFailureSummaryPaths,
   preloadJobScope,
 } from "./job-journal/contracts.js";
-import type { JobReduction } from "./job-assignment.js";
+import type { JobReduction } from "./job-journal/replay/reduction.js";
 import {
   JobStateBinding,
   jobStateSubject,

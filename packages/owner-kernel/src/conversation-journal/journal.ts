@@ -82,7 +82,6 @@ import { registerDeliveryAuthorityProjection } from "@zhixing-ai/core/delivery";
 import type { RunInputPort } from "@zhixing-ai/core/loop";
 import {
   applyValidatedAssignmentEntry,
-  assertActivatedAssignmentCapability,
   assignmentActivationDigest,
   buildConversationActivationPayload,
   byteDigest,
@@ -233,6 +232,13 @@ import {
   type DataPlaneTicketIssueRequest,
 } from "../shared-protocol/contracts.js";
 import {
+  assertSubmissionContextIdentity,
+  assertSubmissionGuardActivatedCapability,
+  authenticateAssignmentSubmission,
+  authorizeAssignmentSubmissionCapability,
+  hasCurrentSubmissionAuthority,
+} from "../shared-protocol/submission-authorization.js";
+import {
   AssignmentSerialQueue,
   type TrustRuleHitBatchState,
   type TrustRuleHitPort,
@@ -326,7 +332,6 @@ import {
   validateConversationBundleClosure,
 } from "./replay/bundle-binding.js";
 import {
-  assertCapabilityMatchesAssignedEnvelope,
   requireAssignedEnvelope,
   requireLocalAssignedCommit,
 } from "./state/assignment-control.js";
@@ -341,7 +346,6 @@ import {
 import {
   assertLedgerAcknowledgesCommittedConversationBundle,
   finalFrame,
-  firstCommitIndexAfter,
   rejected,
 } from "./state/commit-publish.js";
 import {
@@ -355,7 +359,6 @@ import {
   readConversationGuardDecisionFacts,
   type ConversationDecisionFacts,
   type ConversationGuardDecisionFacts,
-  type DeepReadonly,
   type ReadonlyAssignedFact,
 } from "./state/views.js";
 import {
@@ -928,7 +931,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             facts.session.hasAnyLifecycleRequests()),
         pendingLifecycleProjections:
           facts.session.pendingLifecycleCount ??
-          facts.session.listPendingLifecycleProjections().length,
+          facts.session.pendingLifecycleProjectionSize,
       }),
       conversationDecisionScope({}),
     );
@@ -2373,9 +2376,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   ): Promise<Pick<PendingConversationDispatch, "envelope"> | undefined> {
     assertIdentifier(runId, "Run id");
     const assigned = await this.#coordinator.select((facts) => {
-      const committed = facts.commitPublish.commits.find(
-        (candidate) => candidate.runId === runId,
-      );
+      const committed = facts.commitPublish.findCommittedByRunId(runId);
       if (!committed) return undefined;
       const projection = facts.assignment.getAssigned(committed.assignmentId);
       if (!projection) {
@@ -2551,14 +2552,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       ? reservationId.slice("reservation:".length)
       : undefined;
     return this.#coordinator.select(
-      (facts) => {
-        for (const assigned of facts.assignment.listAssigned()) {
-          if (assigned.record.reservation.reservationId === reservationId) {
-            return true;
-          }
-        }
-        return false;
-      },
+      (facts) => facts.assignment.hasReservationId(reservationId),
       conversationDecisionScope(
         candidateAssignmentId && candidateAssignmentId.length > 0
           ? { assignmentId: candidateAssignmentId }
@@ -2599,22 +2593,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         requestId,
       );
     }
-    return this.#coordinator.select((facts) => {
-      for (const batch of facts.commitPublish.listMirrorBatches()) {
-        for (const entry of batch.batch.entries) {
-          if (entry.kind !== "allow-once" || entry.requestId !== requestId) {
-            continue;
-          }
-          return entry.outcome.t === "answered"
-            ? {
-                t: "answered" as const,
-                decisionDigest: entry.outcome.decisionDigest,
-              }
-            : { t: "closed" as const };
-        }
-      }
-      return undefined;
-    }, conversationDecisionScope({ requestId }));
+    return this.#coordinator.select(
+      (facts) => facts.commitPublish.findAllowOnceInteractionOutcome(requestId),
+      conversationDecisionScope({ requestId }),
+    );
   }
 
   async assignmentSecurityFacts(assignmentId: string): Promise<
@@ -2710,14 +2692,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       let match:
         | { readonly runId: string; readonly state: ConversationRunState }
         | undefined;
-      for (const admitted of facts.queueInput.listAdmitted()) {
+      for (const admitted of facts.queueInput.listAdmittedForIngress(
+        ingressId,
+        source,
+      )) {
         const runId = admitted.record.runId;
-        if (
-          admitted.record.ingress.ingressId !== ingressId ||
-          admitted.record.invocation.source !== source
-        ) {
-          continue;
-        }
         const current = facts.assignment.getRunState(runId)?.state;
         if (!current) {
           throw corruptRunJournal("Ingress-bound run has no durable state");
@@ -4722,8 +4701,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const sources = await this.#coordinator.select(
       (facts) =>
         facts.queueInput
-          .listAdmitted()
-          .filter((value) => selected.has(value.record.runId))
+          .listAdmittedForRuns(selected)
           .flatMap(({ record: admitted, lsn, domainRevision }) => {
             const control = facts.session.getWorksceneControl(admitted.runId);
             const record = control?.record;
@@ -5146,15 +5124,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       afterCommitRevision,
       "Last-seen commit revision",
     );
-    const commits = await this.#coordinator.select((facts) => {
-      const start = firstCommitIndexAfter(
-        facts.commitPublish.commits,
-        afterCommitRevision,
-      );
-      return facts.commitPublish.commits
-        .slice(start)
-        .map((committed) => snapshot(committed, "Final history commit"));
-    }, conversationDecisionScope({ afterCommitRevision }, { historyAfter: afterCommitRevision }));
+    const commits = await this.#coordinator.select(
+      (facts) =>
+        facts.commitPublish
+          .commitsAfter(afterCommitRevision)
+          .map((committed) => snapshot(committed, "Final history commit")),
+      conversationDecisionScope(
+        { afterCommitRevision },
+        { historyAfter: afterCommitRevision },
+      ),
+    );
     const publishSources = await this.#coordinator.selectPublish(
       (publishFacts) =>
         new Map(
@@ -5227,9 +5206,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   ): Promise<ConversationCommitProjectionInput | undefined> {
     assertIdentifier(runId, "Run id");
     const committed = await this.#coordinator.select((facts) => {
-      const record = facts.commitPublish.commits.find(
-        (candidate) => candidate.runId === runId,
-      );
+      const record = facts.commitPublish.findCommittedByRunId(runId);
       return record ? snapshot(record, "Committed run replay") : undefined;
     }, conversationDecisionScope({ runId }));
     if (!committed) return undefined;
@@ -5453,7 +5430,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
   ): Promise<ConversationGuardDecisionFacts> {
-    this.#assertSubmissionContextIdentity(context, identity);
+    assertSubmissionContextIdentity(context, identity, "conversation");
     const snapshotValue = await readConversationSubmissionState(
       this.#log,
       this.#artifacts,
@@ -5464,64 +5441,49 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     );
     const guard = readConversationGuardDecisionFacts(snapshotValue.value.state);
     if (context.principal.kind !== "assignment") return guard;
-    const capability = context.principal.capability;
     const assigned = guard.assignment.getAssigned(identity.assignmentId);
     await verifyProtocolStep(() =>
-      assertActivatedAssignmentCapability({
-        capability,
-        activation: assigned
+      assertSubmissionGuardActivatedCapability({
+        target: {
+          domain: "conversation",
+          conversationId: this.#conversationId,
+          currentOwnerEpoch: this.#ownerEpoch,
+        },
+        context,
+        identity,
+        assigned: assigned
           ? {
-              capIds: assigned.record.capIds,
               assignmentId: assigned.record.assignmentId,
               executorId: assigned.record.executorId,
-              authority: {
-                execution: "conversation",
-                conversationId: this.#conversationId,
-                ownerEpoch: assigned.record.ownerEpoch,
-              },
+              capIds: assigned.record.capIds,
+              epoch: assigned.record.ownerEpoch,
             }
           : undefined,
         verifier: this.#verifier,
-        method: identity.method,
-        resource: `conversation:${this.#conversationId}`,
-        mode: "durable-replay",
-        revoked: false,
         now: this.#clock(),
-        deadlineAt: context.deadlineAt,
       }),
     );
     return guard;
   }
 
   #hasCurrentSubmissionAuthorityEpoch(context: AuthorityCallContext): boolean {
-    if (context.principal.kind !== "assignment") return false;
-    const capability = context.principal.capability;
-    return (
-      capability.scope.execution === "conversation" &&
-      "ownerEpoch" in capability &&
-      capability.ownerEpoch === this.#ownerEpoch
-    );
+    return hasCurrentSubmissionAuthority(context, {
+      domain: "conversation",
+      conversationId: this.#conversationId,
+      currentOwnerEpoch: this.#ownerEpoch,
+    });
   }
 
   #authenticateSubmission(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
   ): void {
-    this.#submission.authenticate(context, identity);
-    this.#assertSubmissionContextIdentity(context, identity);
-  }
-
-  #assertSubmissionContextIdentity(
-    context: AuthorityCallContext,
-    identity: AssignmentSubmissionIdentity,
-  ): void {
-    if (
-      context.principal.kind !== "assignment" ||
-      context.principal.capability.assignmentId !== identity.assignmentId ||
-      !context.principal.capability.methods.includes(identity.method)
-    ) {
-      throw new Error("Assignment submission identity does not bind the call");
-    }
+    authenticateAssignmentSubmission(
+      this.#submission,
+      context,
+      identity,
+      "conversation",
+    );
   }
 
   #assertActivatedSubmissionCapability(
@@ -5529,38 +5491,32 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
   ): void {
-    this.#assertSubmissionContextIdentity(context, identity);
-    if (context.principal.kind !== "assignment") return;
-    const capability = context.principal.capability;
     const assigned = facts.assignment.getAssigned(identity.assignmentId);
-    assertActivatedAssignmentCapability({
-      capability,
-      activation: assigned
+    assertSubmissionGuardActivatedCapability({
+      target: {
+        domain: "conversation",
+        conversationId: this.#conversationId,
+        currentOwnerEpoch: this.#ownerEpoch,
+      },
+      context,
+      identity,
+      assigned: assigned
         ? {
-            capIds: assigned.record.capIds,
             assignmentId: assigned.record.assignmentId,
             executorId: assigned.record.executorId,
-            authority: {
-              execution: "conversation",
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-            },
+            capIds: assigned.record.capIds,
+            epoch: assigned.record.ownerEpoch,
+            ...(assigned.envelope
+              ? {
+                  envelope: requireAssignedEnvelope(assigned),
+                }
+              : {}),
           }
         : undefined,
       verifier: this.#verifier,
-      method: identity.method,
-      resource: `conversation:${this.#conversationId}`,
-      mode: "durable-replay",
-      revoked: false,
       now: this.#clock(),
-      deadlineAt: context.deadlineAt,
+      checkEnvelopeMatch: true,
     });
-    if (assigned?.envelope) {
-      assertCapabilityMatchesAssignedEnvelope(
-        capability,
-        requireAssignedEnvelope(assigned),
-      );
-    }
   }
 
   #authorizeSubmission(
@@ -5568,15 +5524,35 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     context: AuthorityCallContext,
     authorization: AssignmentSubmissionAuthorization,
   ): void {
-    this.#authorizeAuthenticatedSubmission(context, authorization);
     const assigned = facts.assignment.getAssigned(authorization.assignmentId);
-    this.#assertDurableSubmissionCapability(
-      assigned,
-      (capId) =>
-        facts.assignment.isCapabilityRevoked(authorization.assignmentId, capId),
+    authorizeAssignmentSubmissionCapability({
+      submission: this.#submission,
+      target: {
+        domain: "conversation",
+        conversationId: this.#conversationId,
+        currentOwnerEpoch: this.#ownerEpoch,
+      },
       context,
       authorization,
-    );
+      assigned: assigned
+        ? {
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            capIds: assigned.record.capIds,
+            epoch: assigned.record.ownerEpoch,
+            ...(assigned.envelope
+              ? {
+                  envelope: assigned.envelope,
+                }
+              : {}),
+          }
+        : undefined,
+      isCapabilityRevoked: (capId) =>
+        facts.assignment.isCapabilityRevoked(authorization.assignmentId, capId),
+      verifier: this.#verifier,
+      now: this.#clock(),
+      checkEnvelopeMatch: true,
+    });
   }
 
   #authorizeGuardSubmission(
@@ -5584,80 +5560,30 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     context: AuthorityCallContext,
     authorization: AssignmentSubmissionAuthorization,
   ): void {
-    this.#authorizeAuthenticatedSubmission(context, authorization);
     const assigned = guard.assignment.getAssigned(authorization.assignmentId);
-    this.#assertDurableSubmissionCapability(
-      assigned,
-      (capId) =>
-        guard.assignment.isCapabilityRevoked(authorization.assignmentId, capId),
+    authorizeAssignmentSubmissionCapability({
+      submission: this.#submission,
+      target: {
+        domain: "conversation",
+        conversationId: this.#conversationId,
+        currentOwnerEpoch: this.#ownerEpoch,
+      },
       context,
       authorization,
-    );
-  }
-
-  #assertDurableSubmissionCapability(
-    assigned:
-      | {
-          readonly record: DeepReadonly<
-            Extract<ConversationRunJournalRecord, { t: "assigned" }>
-          >;
-          readonly envelope?: DeepReadonly<
-            Pick<PendingConversationDispatch["envelope"], "capabilities">
-          >;
-        }
-      | undefined,
-    isRevoked: (capId: string) => boolean,
-    context: AuthorityCallContext,
-    authorization: AssignmentSubmissionAuthorization,
-  ): void {
-    if (context.principal.kind !== "assignment") return;
-    const capability = context.principal.capability;
-    assertActivatedAssignmentCapability({
-      capability,
-      activation: assigned
+      assigned: assigned
         ? {
-            capIds: assigned.record.capIds,
             assignmentId: assigned.record.assignmentId,
             executorId: assigned.record.executorId,
-            authority: {
-              execution: "conversation",
-              conversationId: this.#conversationId,
-              ownerEpoch: assigned.record.ownerEpoch,
-            },
+            capIds: assigned.record.capIds,
+            epoch: assigned.record.ownerEpoch,
           }
         : undefined,
+      isCapabilityRevoked: (capId) =>
+        guard.assignment.isCapabilityRevoked(authorization.assignmentId, capId),
       verifier: this.#verifier,
-      method: authorization.method,
-      resource: `conversation:${this.#conversationId}`,
-      mode: authorization.mode,
-      revoked: isRevoked(capability.capId),
       now: this.#clock(),
-      deadlineAt: context.deadlineAt,
+      checkEnvelopeMatch: false,
     });
-    if (assigned?.envelope) {
-      assertCapabilityMatchesAssignedEnvelope(
-        capability,
-        assigned.envelope as Pick<
-          PendingConversationDispatch["envelope"],
-          "capabilities"
-        >,
-      );
-    }
-  }
-
-  #authorizeAuthenticatedSubmission(
-    context: AuthorityCallContext,
-    authorization: AssignmentSubmissionAuthorization,
-  ): void {
-    this.#submission.authorize(context, authorization);
-    this.#assertSubmissionContextIdentity(context, authorization);
-    if (
-      (authorization.mode === "active" ||
-        authorization.mode === "settlement") &&
-      !this.#hasCurrentSubmissionAuthorityEpoch(context)
-    ) {
-      throw new Error("Assignment capability belongs to a stale owner epoch");
-    }
   }
 
   #publishStatusNotices(notices: readonly ConversationStatusNotice[]): void {

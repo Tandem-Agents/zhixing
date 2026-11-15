@@ -8885,6 +8885,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/owner-kernel/src/conversation-journal/journal.ts",
   );
   const jobAssignment = required("packages/owner-kernel/src/job-assignment.ts");
+  const jobTransactionCoordinator = required(
+    "packages/owner-kernel/src/job-journal/transaction/coordinator.ts",
+  );
+  const jobPreparedSubmission = required(
+    "packages/owner-kernel/src/job-journal/submission/prepared-submission.ts",
+  );
+  const jobTaskScheduleOps = required(
+    "packages/owner-kernel/src/job-journal/operations/task-schedule.ts",
+  );
   const schedulerUserNotices = required(
     "packages/owner-kernel/src/scheduler-user-notices.ts",
   );
@@ -9342,12 +9351,19 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     // 66f8a540 起失败计数由可合并摘要合成：只核两处按导入绑定调用领域的判定与下次运行推导
     !callsImported(scheduleAuthority, "deriveScheduleNextRun") ||
     !scheduleAuthority.includes("scheduleAutoDisableOperationId({") ||
-    !callsImported(jobAssignment, "scheduleFailurePolicyForCount") ||
-    !/options\.schedulerFailureThreshold\s*\?\?\s*DEFAULT_SCHEDULE_FAILURE_THRESHOLD/u.test(jobAssignment) ||
-    !jobAssignment.includes("error instanceof ScheduleRuntimePolicyError") ||
-    /function (?:consecutiveSchedulerFailures|frozenFailureNextFire)\(/u.test(jobAssignment) ||
-    /pendingAutoDisable:\s*\[\.\.\.state\.failurePolicyByRun\.values\(\)\]/u.test(
-      jobAssignment,
+    !callsImported(jobTransactionCoordinator, "scheduleFailurePolicyForCount") ||
+    !/options\.schedulerFailureThreshold\s*\?\?\s*DEFAULT_SCHEDULE_FAILURE_THRESHOLD/u.test(
+      jobTransactionCoordinator,
+    ) ||
+    !jobTransactionCoordinator.includes("error instanceof ScheduleRuntimePolicyError") ||
+    [jobAssignment, jobTransactionCoordinator, jobTaskScheduleOps].some(
+      (text) =>
+        /function (?:consecutiveSchedulerFailures|frozenFailureNextFire)\(/u.test(
+          text,
+        ) ||
+        /pendingAutoDisable:\s*\[\.\.\.state\.failurePolicyByRun\.values\(\)\]/u.test(
+          text,
+        ),
     ) ||
     /function (?:deriveNextRun|countConsecutiveFailures|scheduledJobRunId)\(/u.test(scheduleAuthority) ||
     /const offlineMiss\s*=/u.test(scheduleAuthority)
@@ -10727,8 +10743,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "prepareConversationCommit(",
     ],
     [
-      "packages/owner-kernel/src/job-assignment.ts",
-      jobAssignment,
+      "packages/owner-kernel/src/job-journal/submission/prepared-submission.ts",
+      jobPreparedSubmission,
       "prepareJobCommit(",
     ],
     [

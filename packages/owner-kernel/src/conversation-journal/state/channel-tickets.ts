@@ -4,7 +4,6 @@ import type {
   LogicalRecord,
 } from "@zhixing-ai/core/contracts";
 import {
-  assertDataPlaneTicketTtlMs,
   canonicalize,
   rethrowUnloadedProtocolIdentity,
   validateDataPlaneTicket,
@@ -24,10 +23,8 @@ import {
   nextDataPlaneTicketSyncFrontier,
   ticketPrecedesSyncFrontier,
 } from "../../data-plane-ticket-lifecycle.js";
-import type {
-  ConversationCommitLogRecord,
-  DataPlaneTicketIssueRequest,
-} from "../contracts.js";
+import { validateDataPlaneTicketIssueRequest } from "../../shared-protocol/data-plane-ticket-authority.js";
+import type { ConversationCommitLogRecord } from "../contracts.js";
 import { runRecord, type DeepReadonly } from "./common.js";
 
 export interface TicketLedgerSlice {
@@ -63,21 +60,7 @@ export function dataPlaneTicketRevocations(
     );
 }
 
-export function validateTicketIssueRequest(input: DataPlaneTicketIssueRequest): void {
-  assertIdentifier(input.ticketId, "Data-plane ticket id");
-  assertIdentifier(input.assignmentId, "Data-plane ticket assignment id");
-  assertIdentifier(
-    input.surfacePrincipal,
-    "Data-plane ticket surface principal",
-  );
-  assertDataPlaneTicketTtlMs(input.ttlMs);
-  if (input.replacesTicketId !== undefined) {
-    assertIdentifier(input.replacesTicketId, "Replaced data-plane ticket id");
-    if (input.replacesTicketId === input.ticketId) {
-      throw new TypeError("Ticket renewal requires a new ticket id");
-    }
-  }
-}
+export const validateTicketIssueRequest = validateDataPlaneTicketIssueRequest;
 
 export async function applyConversationTicketRecord(input: {
   readonly state: TicketLedgerSlice;

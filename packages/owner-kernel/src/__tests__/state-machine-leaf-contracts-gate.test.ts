@@ -37,10 +37,30 @@ import {
 import {
   JOB_JOURNAL_RECORD_SHAPES,
   JOB_RECORD_FAMILY_OWNERS,
+  createJobGuardState,
+  jobSubmissionGuardView,
 } from "../job-journal/contracts.js";
+import {
+  decideIssueDataPlaneTicket as decideJobIssueDataPlaneTicket,
+} from "../job-journal/operations/channel-tickets-mirror.js";
+import { JobReduction } from "../job-journal/replay/reduction.js";
+import { jobMirrorClosed } from "../job-journal/state/channel-tickets-mirror.js";
+import { readJobDecisionFacts } from "../job-journal/state/views.js";
+import { JobStateBinding } from "../job-run-state.js";
+import {
+  decideIssueDataPlaneTicket as decideConversationIssueDataPlaneTicket,
+} from "../conversation-journal/operations/channel-tickets.js";
 import {
   buildSemanticProjectionCheckpointPrefix,
 } from "../shared-protocol/contracts.js";
+import {
+  decideDataPlaneTicketReplayOrConflict,
+  validateDataPlaneTicketIssueRequest,
+  validateDataPlaneTicketSurfaceAndRenewal,
+} from "../shared-protocol/data-plane-ticket-authority.js";
+import {
+  classifyNotStartedTermination,
+} from "../shared-protocol/not-started-termination.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 
@@ -210,7 +230,7 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
       ),
     ).toEqual([]);
 
-    // 4. Same-package non-facade production modules in owner-kernel must not import conversation-assignment facade
+    // 4. Same-package non-facade production modules in owner-kernel must not import conversation-assignment or job-assignment facades
     const ownerSrcRoot = path.join(REPO_ROOT, "packages/owner-kernel/src");
     const ownerRootProdFiles = fs
       .readdirSync(ownerSrcRoot, { withFileTypes: true })
@@ -219,7 +239,8 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
           entry.isFile() &&
           entry.name.endsWith(".ts") &&
           !entry.name.endsWith(".test.ts") &&
-          entry.name !== "conversation-assignment.ts",
+          entry.name !== "conversation-assignment.ts" &&
+          entry.name !== "job-assignment.ts",
       )
       .map((entry) => {
         const filePath = path.join(ownerSrcRoot, entry.name);
@@ -228,8 +249,14 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
     expect(
       collectFacadeViolations(
         ownerRootProdFiles,
-        new Set([path.resolve(REPO_ROOT, "packages/owner-kernel/src/conversation-assignment")]),
-        new Set(["@zhixing-ai/owner-kernel/conversation-assignment"]),
+        new Set([
+          path.resolve(REPO_ROOT, "packages/owner-kernel/src/conversation-assignment"),
+          path.resolve(REPO_ROOT, "packages/owner-kernel/src/job-assignment"),
+        ]),
+        new Set([
+          "@zhixing-ai/owner-kernel/conversation-assignment",
+          "@zhixing-ai/owner-kernel/job-assignment",
+        ]),
       ),
     ).toEqual([]);
 
@@ -726,5 +753,663 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
     expect(() => buildLedgerProjectionCheckpointPrefix("executor-assignment-decision", 1, [])).toThrow(
       /requires at least one leaf reducer function/,
     );
+  });
+
+  it("preserves exact baseline public export surface on job-assignment.ts (16 values, 23 types)", () => {
+    const facadePath = path.join(
+      REPO_ROOT,
+      "packages/owner-kernel/src/job-assignment.ts",
+    );
+    const exported = extractExplicitExportsViaAst(facadePath);
+    expect(exported.values).toEqual([
+      "InProcessJobDispatcher",
+      "JOB_JOURNAL_RECORD_SHAPES",
+      "JobJournal",
+      "JobReduction",
+      "createJobGuardState",
+      "createJobMainState",
+      "jobGuardStatePrefix",
+      "jobMainStatePrefix",
+      "jobProjectionView",
+      "jobScopeOf",
+      "jobSubmissionGuardView",
+      "occurrenceOrderKey",
+      "occurrenceSortKey",
+      "preloadFailureSummaryPaths",
+      "preloadJobScope",
+      "registerJobJournalProjection",
+    ]);
+    expect(exported.types).toEqual([
+      "InProcessJobBundleSubmission",
+      "InProcessJobCancellationSubmission",
+      "InProcessJobDispatcherOptions",
+      "JobAssignmentPlan",
+      "JobCancelResult",
+      "JobChannelChallengePreparation",
+      "JobChannelRelayAdoption",
+      "JobCommitParticipant",
+      "JobIngressAuthorizer",
+      "JobInteractionRoute",
+      "JobJournalOptions",
+      "JobJournalRecordType",
+      "JobLifecycleEvent",
+      "JobRecoveryCandidate",
+      "JobReductionOptions",
+      "JobSchedulerReadView",
+      "JobScope",
+      "JobTrustSedimentPort",
+      "PendingJobDispatch",
+      "PendingJobFence",
+      "SystemJobHandler",
+      "SystemJobHandlerContext",
+      "SystemJobResourceCoordinator",
+    ]);
+  });
+
+  it("enforces Slice C narrow state-family & decider encapsulation in job-journal", () => {
+    const jjRoot = path.join(
+      REPO_ROOT,
+      "packages/owner-kernel/src/job-journal",
+    );
+    const familyModules = new Set([
+      "state/common.ts",
+      "state/task-schedule.ts",
+      "state/assignment-control.ts",
+      "state/channel-tickets-mirror.ts",
+    ]);
+    const fullCarrierLeaks: string[] = [];
+    for (const file of collectTypeScriptFiles(jjRoot)) {
+      const rel = path.relative(jjRoot, file).replace(/\\/g, "/");
+      const text = fs.readFileSync(file, "utf8");
+      if (
+        (rel.startsWith("operations/") ||
+          rel.startsWith("submission/") ||
+          familyModules.has(rel)) &&
+        /\b(?:JobProjection|JobSubmissionGuardProjection)\b/.test(text)
+      ) {
+        fullCarrierLeaks.push(rel);
+      }
+    }
+    expect(fullCarrierLeaks).toEqual([]);
+  });
+
+  it("enforces bounded O(log N) commitsAfter / O(1)-hit findCommittedByRunId and lazy frozen ticketsIterable()", () => {
+    const raw = emptyConversationRunProjection("conv-cost-probe");
+    const total = 16_384;
+    const underlying = Array.from({ length: total }, (_, idx) => ({
+      t: "committed" as const,
+      runId: `run-${idx + 1}`,
+      assignmentId: `assign-${idx + 1}`,
+      bundle: {
+        ref: { digest: `sha256:${"a".repeat(64)}`, bytes: 16 },
+        manifestDigest: `sha256:${"b".repeat(64)}`,
+        resultDigest: `sha256:${"c".repeat(64)}`,
+      },
+      commitRevision: idx + 1,
+      sidecars: {
+        transcriptCount: 0,
+        contentCount: 0,
+        globalMutationCount: 0,
+      },
+    })) as unknown as typeof raw.commits;
+
+    let indexReads = 0;
+    raw.commits = new Proxy(underlying, {
+      get(target, prop, receiver) {
+        if (typeof prop === "string" && /^\d+$/.test(prop)) {
+          indexReads += 1;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const facts = readConversationDecisionFacts(raw);
+    indexReads = 0;
+    expect(facts.commitPublish.commitsAfter(total)).toEqual([]);
+    expect(indexReads).toBeLessThanOrEqual(15);
+
+    indexReads = 0;
+    const first = facts.commitPublish.findCommittedByRunId("run-1");
+    expect(first?.commitRevision).toBe(1);
+    expect(indexReads).toBe(1);
+    expect(() => {
+      (first as unknown as { commitRevision: number }).commitRevision = 999;
+    }).toThrow(TypeError);
+
+    // Lazy per-item frozen ticketsIterable()
+    let tailTicketRefReads = 0;
+    const ticket1 = {
+      $schema: "zhixing.DataPlaneTicket",
+      v: 1 as const,
+      ticketId: "tok-1",
+      ref: {
+        execution: "conversation" as const,
+        runId: "run-1",
+        conversationId: "conv-cost-probe",
+        ownerEpoch: 1,
+      },
+      assignmentId: "assign-1",
+      surfacePrincipal: "user:local",
+      executorId: "exec-1",
+      issuedAt: "2026-11-16T00:00:00.000Z",
+      expiry: "2026-11-16T00:05:00.000Z",
+      kind: "run-observe" as const,
+      renewable: true as const,
+      signature: {
+        alg: "ed25519",
+        keyId: "owner-1",
+        sig: `sha256:${"1".repeat(64)}`,
+      },
+    } as unknown as DataPlaneTicket;
+    const ticket2 = new Proxy(
+      { ...ticket1, ticketId: "tok-2" } as DataPlaneTicket,
+      {
+        get(target, prop, receiver) {
+          if (prop === "ref") tailTicketRefReads += 1;
+          return Reflect.get(target, prop, receiver);
+        },
+      },
+    );
+    raw.ticketsById.set("tok-1", ticket1);
+    raw.ticketsById.set("tok-2", ticket2);
+
+    const iterable = facts.tickets.ticketsIterable();
+    const seenFirstPass: string[] = [];
+    for (const item of iterable) {
+      seenFirstPass.push(item.ticketId);
+      expect(() => {
+        (item as unknown as { expiry: string }).expiry = "2099-01-01T00:00:00.000Z";
+      }).toThrow(TypeError);
+      expect(() => {
+        (item.ref as unknown as { runId: string }).runId = "mutated";
+      }).toThrow(TypeError);
+      expect(() => {
+        (item.signature as unknown as { sig: string }).sig = "mutated";
+      }).toThrow(TypeError);
+      break;
+    }
+    expect(seenFirstPass).toEqual(["tok-1"]);
+    // Breaking after tok-1 must not have frozen/touched tok-2
+    expect(tailTicketRefReads).toBe(0);
+    // Re-iterable on a second pass over the same Iterable object
+    expect([...iterable].map((t) => t.ticketId)).toEqual(["tok-1", "tok-2"]);
+    expect(tailTicketRefReads).toBeGreaterThan(0);
+    expect(raw.ticketsById.get("tok-1")?.expiry).toBe("2026-11-16T00:05:00.000Z");
+  });
+
+  it("verifies Slice C Gate 3 shared protocol invariants across all 6 not-started entrypoints, ticket authority, settlement fences, and guard reduction", async () => {
+    const testSigner: import("@zhixing-ai/core/protocol").ProtocolSigner = {
+      sign: (schemaId, version, payload) => ({
+        alg: "test-sha256",
+        keyId: "exec-1",
+        sig: protocolDigest(schemaId, version, payload),
+      }),
+    };
+    const cancelNotStartedProof = signCancelProof(
+      {
+        v: 1,
+        assignmentId: "assign-1",
+        executorId: "exec-1",
+        authority: {
+          execution: "conversation",
+          conversationId: "conv-1",
+          ownerEpoch: 1,
+        },
+        cause: "owner-fence",
+        fence: { fenceSeq: 1, requestId: "req-1" },
+        decision: "not-started",
+        lastRecordSeq: 5,
+        ledgerDigest: `sha256:${"4".repeat(64)}`,
+        usageFinal: { reportDigest: `sha256:${"2".repeat(64)}`, upToUsageSeq: 0 },
+        issuedAt: "2026-11-16T00:01:00.000Z",
+      },
+      testSigner,
+    );
+    const dispatchRejectionProof = {
+      $schema: "zhixing.AssignmentTerminationProof",
+      v: 1 as const,
+      assignmentId: "assign-1",
+      executorId: "exec-1",
+      authority: {
+        execution: "job" as const,
+        taskId: "task-1",
+        anchorEpoch: 1,
+      },
+      decision: "rejected-before-received" as const,
+      dispatchDigest: `sha256:${"7".repeat(64)}`,
+      lastRecordSeq: 0,
+      lastEffectSeq: 0,
+      ledgerDigest: `sha256:${"8".repeat(64)}`,
+      issuedAt: "2026-11-16T00:01:00.000Z",
+      signature: {
+        alg: "test-sha256",
+        keyId: "exec-1",
+        sig: `sha256:${"9".repeat(64)}`,
+      },
+    } as unknown as import("@zhixing-ai/core/contracts").AssignmentTerminationProof;
+    const supersedeProof = {
+      $schema: "zhixing.AssignmentTerminationProof",
+      v: 1 as const,
+      assignmentId: "assign-1",
+      executorId: "exec-1",
+      authority: {
+        execution: "job" as const,
+        taskId: "task-1",
+        anchorEpoch: 1,
+      },
+      decision: "not-started-fenced" as const,
+      requestDigest: `sha256:${"a".repeat(64)}`,
+      lastRecordSeq: 5,
+      lastEffectSeq: 0,
+      ledgerDigest: `sha256:${"b".repeat(64)}`,
+      issuedAt: "2026-11-16T00:01:00.000Z",
+      signature: {
+        alg: "test-sha256",
+        keyId: "exec-1",
+        sig: `sha256:${"c".repeat(64)}`,
+      },
+    } as unknown as import("@zhixing-ai/core/contracts").AssignmentTerminationProof;
+
+    // 1. 6-entrypoint matrix: contradictory-not-started after durable started across all 6 (domain x entrypoint) pairs
+    const sixEntrypoints = [
+      ["conversation", "dispatch-rejection", dispatchRejectionProof, "dispatch-rejection", "ledger-unknown"],
+      ["conversation", "supersede", supersedeProof, "supersede", "ledger-unknown"],
+      ["conversation", "cancel-proof", cancelNotStartedProof, "cancel-owner-fence", "cancel-unproven"],
+      ["job", "dispatch-rejection", dispatchRejectionProof, "dispatch-rejection", "ledger-unknown"],
+      ["job", "supersede", supersedeProof, "supersede", "ledger-unknown"],
+      ["job", "cancel-proof", cancelNotStartedProof, "cancel-owner-fence", "job-cancel-unknown"],
+    ] as const;
+
+    for (const [domain, entrypoint, proof, proofKind, expectedCause] of sixEntrypoints) {
+      const contradictory = classifyNotStartedTermination({
+        domain,
+        entrypoint,
+        proof,
+        proofKind,
+        currentRunState: "cancel-requested",
+        rejectionAlreadyCheckedInPriorProofs: false,
+        hasDurableStartedObservation: true,
+      });
+      expect(contradictory).toEqual({
+        kind: "contradictory-not-started",
+        opensUncertain: true,
+        uncertainCause: expectedCause,
+      });
+
+      const accepted = classifyNotStartedTermination({
+        domain,
+        entrypoint,
+        proof,
+        proofKind,
+        currentRunState:
+          entrypoint === "cancel-proof" ? "cancel-requested" : "dispatched",
+        rejectionAlreadyCheckedInPriorProofs: false,
+        hasDurableStartedObservation: false,
+      });
+      expect(accepted).toEqual({
+        kind: "accepted-not-started",
+        settlementRecord:
+          entrypoint === "cancel-proof"
+            ? "cancel-proof-accepted"
+            : "assignment-superseded",
+        closesOpenResolution: false,
+        closesDispatchConflict: false,
+      });
+    }
+
+    // Dispatch-conflict resolution rules: dispatch-rejection contradicts received, supersede with seq > received closes conflict
+    expect(
+      classifyNotStartedTermination({
+        domain: "job",
+        entrypoint: "dispatch-rejection",
+        proof: dispatchRejectionProof,
+        proofKind: "dispatch-rejection",
+        currentRunState: "uncertain",
+        rejectionAlreadyCheckedInPriorProofs: false,
+        hasDurableStartedObservation: false,
+        openResolution: {
+          cause: "dispatch-conflict",
+          isOpen: true,
+          conflictReceivedRecordSeq: 2,
+        },
+      }),
+    ).toEqual({
+      kind: "contradictory-not-started",
+      opensUncertain: false,
+    });
+    expect(
+      classifyNotStartedTermination({
+        domain: "job",
+        entrypoint: "supersede",
+        proof: supersedeProof,
+        proofKind: "supersede",
+        currentRunState: "uncertain",
+        rejectionAlreadyCheckedInPriorProofs: false,
+        hasDurableStartedObservation: false,
+        openResolution: {
+          cause: "dispatch-conflict",
+          isOpen: true,
+          conflictReceivedRecordSeq: 2,
+        },
+      }),
+    ).toEqual({
+      kind: "accepted-not-started",
+      settlementRecord: "assignment-superseded",
+      closesOpenResolution: true,
+      closesDispatchConflict: true,
+    });
+    expect(
+      classifyNotStartedTermination({
+        domain: "job",
+        entrypoint: "cancel-proof",
+        proof: cancelNotStartedProof,
+        proofKind: "cancel-owner-fence",
+        currentRunState: "uncertain",
+        rejectionAlreadyCheckedInPriorProofs: false,
+        hasDurableStartedObservation: false,
+        openResolution: {
+          cause: "job-cancel-unknown",
+          isOpen: true,
+        },
+      }),
+    ).toEqual({
+      kind: "accepted-not-started",
+      settlementRecord: "assignment-superseded",
+      closesOpenResolution: true,
+      closesDispatchConflict: false,
+    });
+
+    // 2. Shared data-plane ticket authority across conversation & job
+    expect(() =>
+      validateDataPlaneTicketIssueRequest({
+        ticketId: "tok-renew-same",
+        assignmentId: "assign-1",
+        surfacePrincipal: "user:local",
+        kind: "run-observe",
+        ttlMs: 30_000,
+        replacesTicketId: "tok-renew-same",
+      }),
+    ).toThrow(/requires a new ticket id/);
+
+    const baseTicket = {
+      $schema: "zhixing.DataPlaneTicket",
+      v: 1 as const,
+      ticketId: "tok-shared-1",
+      ref: {
+        execution: "job" as const,
+        jobRunId: "jr-1",
+        taskId: "task-1",
+        anchorEpoch: 1,
+      },
+      assignmentId: "assign-1",
+      surfacePrincipal: "user:local",
+      executorId: "exec-1",
+      issuedAt: "2026-11-16T00:00:00.000Z",
+      expiry: "2026-11-16T00:00:30.000Z",
+      kind: "run-interact" as const,
+      renewable: true as const,
+      signature: {
+        alg: "test-sha256",
+        keyId: "owner-1",
+        sig: `sha256:${"f".repeat(64)}`,
+      },
+    } as unknown as DataPlaneTicket;
+
+    expect(
+      decideDataPlaneTicketReplayOrConflict({
+        existing: Object.freeze({ ...baseTicket }),
+        existingReplacementId: undefined,
+        request: {
+          ticketId: "tok-shared-1",
+          assignmentId: "assign-1",
+          surfacePrincipal: "user:local",
+          kind: "run-interact",
+          ttlMs: 30_000,
+        },
+      })?.ticketId,
+    ).toBe("tok-shared-1");
+
+    expect(() =>
+      decideDataPlaneTicketReplayOrConflict({
+        existing: baseTicket,
+        existingReplacementId: undefined,
+        request: {
+          ticketId: "tok-shared-1",
+          assignmentId: "assign-1",
+          surfacePrincipal: "user:other",
+          kind: "run-interact",
+          ttlMs: 30_000,
+        },
+      }),
+    ).toThrow(/Ticket id already belongs to a different grant/);
+
+    expect(() =>
+      validateDataPlaneTicketSurfaceAndRenewal({
+        request: {
+          ticketId: "tok-shared-2",
+          assignmentId: "assign-1",
+          surfacePrincipal: "user:intruder",
+          kind: "run-interact",
+          ttlMs: 30_000,
+        },
+        expectedSurfacePrincipal: "user:local",
+        replacedTicket: undefined,
+        isReplacedTicketRevoked: false,
+      }),
+    ).toThrow(/Interactive tickets are restricted to the original surface/);
+
+    // Cancelled assignment ticket rejection in conversation vs job
+    const convCancelled = emptyConversationRunProjection("conv-ticket-cancel");
+    convCancelled.admittedByRun.set("run-1", {
+      record: {
+        ingressKey: "ing-1",
+        runId: "run-1",
+        ingress: {
+          surfacePrincipal: "user:local",
+          surfaceKind: "cli",
+          receivedAt: "2026-11-16T00:00:00.000Z",
+        },
+        invocation: { kind: "user-turn" },
+        queuedPosition: 1,
+      } as unknown as import("../conversation-journal/contracts.js").AdmittedProjection["record"],
+      lsn: 1,
+    });
+    convCancelled.assignedById.set("assign-1", {
+      record: {
+        t: "assigned",
+        runId: "run-1",
+        assignmentId: "assign-1",
+        executorId: "exec-1",
+        ownerEpoch: 1,
+        baseRevision: 0,
+        dispatchDigest: "d1",
+        manifestDigest: "m1",
+        dispatchRef: { digest: "r1", bytes: 10 },
+        permissionLeaseDigest: "p1",
+        capIds: ["cap-1"],
+        reservation: { reservationId: "res-1", attempt: 1 },
+      } as unknown as import("../conversation-journal/contracts.js").AssignedProjection["record"],
+      acked: true,
+      lsn: 2,
+    });
+    convCancelled.assignmentByRun.set("run-1", "assign-1");
+    convCancelled.stateByRun.set("run-1", {
+      state: "cancel-requested",
+      statusRevision: 3,
+    });
+    convCancelled.cancelFences.set("assign-1", {
+      t: "cancel-fence",
+      assignmentId: "assign-1",
+    } as unknown as Extract<import("../conversation-run-contracts.js").ConversationRunJournalRecord, { t: "cancel-fence" }>);
+
+    expect(() =>
+      decideConversationIssueDataPlaneTicket({
+        conversationId: "conv-ticket-cancel",
+        request: {
+          ticketId: "tok-cancel-1",
+          assignmentId: "assign-1",
+          surfacePrincipal: "user:local",
+          kind: "run-observe",
+          ttlMs: 30_000,
+        },
+        issuedAt: "2026-11-16T00:01:00.000Z",
+        signer: testSigner,
+        facts: readConversationDecisionFacts(convCancelled),
+      }),
+    ).toThrow(/cancelled/i);
+
+    const jobMainFull = (await import("../job-journal/contracts.js")).createJobMainState(
+      "task-cancel",
+      true,
+    );
+    const jobMainView = (await import("../job-journal/contracts.js")).jobProjectionView(
+      new JobStateBinding(jobMainFull),
+    );
+    jobMainView.assignedById.set("assign-1", {
+      record: {
+        t: "assigned",
+        taskId: "task-cancel",
+        jobRunId: "jr-1",
+        assignmentId: "assign-1",
+        executorId: "exec-1",
+        anchorEpoch: 1,
+        taskRevision: 1,
+        dispatchDigest: "d1",
+        manifestDigest: "m1",
+        dispatchRef: { digest: "r1", bytes: 10 },
+        permissionLeaseDigest: "p1",
+        capIds: ["cap-1"],
+        reservation: { reservationId: "res-1", attempt: 1 },
+      },
+      envelope: {} as unknown as import("../job-journal/contracts.js").JobEnvelope,
+      commit: { lsn: 2, envelopeDigest: "e1", at: "2026-11-16T00:00:00.000Z" },
+      acked: true,
+    });
+    jobMainView.assignmentByJob.set("jr-1", "assign-1");
+    jobMainView.states.set("jr-1", { state: "cancel-requested", statusRevision: 3 });
+    jobMainView.cancelFences.set("assign-1", {
+      t: "cancel-fence",
+      assignmentId: "assign-1",
+      fence: {} as never,
+    });
+    expect(() =>
+      decideJobIssueDataPlaneTicket({
+        taskId: "task-cancel",
+        request: {
+          ticketId: "tok-cancel-job-1",
+          assignmentId: "assign-1",
+          surfacePrincipal: "user:local",
+          kind: "run-observe",
+          ttlMs: 30_000,
+        },
+        issuedAt: "2026-11-16T00:01:00.000Z",
+        signer: testSigner,
+        facts: readJobDecisionFacts(jobMainView),
+      }),
+    ).toThrow(/Ticket requires a current acknowledged assignment/);
+
+    // 3. Job interactionSettlementFences window keeps mirror open until completedInteractionSettlements
+    const settlementFences = new Map<string, unknown>([["assign-1", {}]]);
+    const completedSettlements = new Map<string, unknown>();
+    const mirrorSlice = {
+      assignedById: new Map([["assign-1", { record: { jobRunId: "jr-1" } }]]),
+      states: new Map([["jr-1", { state: "cancelled" }]]),
+      assignmentByJob: new Map<string, string>(),
+      cancelFences: new Map<string, unknown>(),
+      interactionSettlementFences: settlementFences,
+      completedInteractionSettlements: completedSettlements,
+    };
+    expect(jobMirrorClosed(mirrorSlice, "assign-1", true)).toBe(false);
+    completedSettlements.set("assign-1", {});
+    expect(jobMirrorClosed(mirrorSlice, "assign-1", true)).toBe(true);
+
+    // 4. JobReduction.reduceSubmissionGuard never touches main-only fields
+    const guardSet = createJobGuardState("task-guard-1", true);
+    const guardView = jobSubmissionGuardView(new JobStateBinding(guardSet));
+    const reduction = new JobReduction({
+      taskId: "task-guard-1",
+      anchorEpoch: 1,
+      artifacts: {
+        get: async () => new Uint8Array(),
+        has: async () => false,
+        put: async () => ({ digest: `sha256:${"0".repeat(64)}`, bytes: 0 }),
+      } as unknown as import("@zhixing-ai/core/authority").ArtifactStore,
+      verifier: { verify: () => undefined },
+      delivery: {} as never,
+    });
+    const startedEnvelope = {
+      lsn: 10,
+      envelopeDigest: `sha256:${"e".repeat(64)}`,
+      at: "2026-11-16T00:02:00.000Z",
+      entries: [
+        {
+          stream: "job:task-guard-1",
+          body: {
+            t: "dispatch-acked" as const,
+            assignmentId: "assign-guard-1",
+          },
+        },
+        {
+          stream: "job:task-guard-1",
+          body: {
+            t: "state" as const,
+            jobRunId: "jr-guard-1",
+            assignmentId: "assign-guard-1",
+            state: "running" as const,
+            statusRevision: 2,
+          },
+        },
+      ],
+    };
+    guardView.latestDefinitionRevision = 1;
+    guardView.latestDefinitionState = "enabled";
+    guardView.definitionKinds.set(1, "user");
+    guardView.occurrences.set("jr-guard-1", {
+      scheduledFor: "2026-11-16T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlanDigest: `sha256:${"1".repeat(64)}`,
+      deliveryRequired: false,
+    });
+    guardView.admittedJobs.add("jr-guard-1");
+    guardView.states.set("jr-guard-1", { state: "dispatched", statusRevision: 1 });
+    guardView.activeJobRunId = "jr-guard-1";
+    guardView.assignmentByJob.set("jr-guard-1", "assign-guard-1");
+    guardView.assignedById.set("assign-guard-1", {
+      record: {
+        t: "assigned",
+        taskId: "task-guard-1",
+        jobRunId: "jr-guard-1",
+        assignmentId: "assign-guard-1",
+        executorId: "exec-1",
+        anchorEpoch: 1,
+        taskRevision: 1,
+        deliveryPlanDigest: `sha256:${"1".repeat(64)}`,
+        dispatchDigest: `sha256:${"2".repeat(64)}`,
+        manifestDigest: `sha256:${"3".repeat(64)}`,
+        dispatchRef: { digest: `sha256:${"4".repeat(64)}`, bytes: 16 },
+        permissionLeaseDigest: `sha256:${"5".repeat(64)}`,
+        capIds: ["cap-1"],
+        reservation: { reservationId: "res-1", attempt: 1 },
+      },
+      commit: {
+        lsn: 9,
+        envelopeDigest: `sha256:${"6".repeat(64)}`,
+        at: "2026-11-16T00:01:00.000Z",
+      },
+      capIds: new Set(["cap-1"]),
+      acked: false,
+    });
+    await reduction.reduceSubmissionGuard(
+      guardView,
+      startedEnvelope.entries[0]!,
+      startedEnvelope,
+    );
+    await reduction.reduceSubmissionGuard(
+      guardView,
+      startedEnvelope.entries[1]!,
+      startedEnvelope,
+    );
+    expect(guardView.durableStarted.has("assign-guard-1")).toBe(true);
+    expect(guardView.states.get("jr-guard-1")?.state).toBe("running");
   });
 });

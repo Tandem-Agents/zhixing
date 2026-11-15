@@ -1,6 +1,12 @@
 import type { DataPlaneTicket } from "@zhixing-ai/core/contracts";
 import { MAX_CLOCK_SKEW_MS } from "@zhixing-ai/core/protocol";
 
+type DeepReadonlyTicket<T> = T extends object
+  ? { readonly [K in keyof T]: DeepReadonlyTicket<T[K]> }
+  : T;
+
+export type ReadonlyDataPlaneTicket = DeepReadonlyTicket<DataPlaneTicket>;
+
 export interface DataPlaneTicketIssueIdentity {
   readonly ticketId: string;
   readonly assignmentId: string;
@@ -11,7 +17,7 @@ export interface DataPlaneTicketIssueIdentity {
 }
 
 export function dataPlaneTicketIssueMatches(
-  ticket: DataPlaneTicket,
+  ticket: ReadonlyDataPlaneTicket,
   replacesTicketId: string | undefined,
   request: DataPlaneTicketIssueIdentity,
 ): boolean {
@@ -26,7 +32,7 @@ export function dataPlaneTicketIssueMatches(
 }
 
 export function dataPlaneTicketSyncBoundary(
-  ticket: DataPlaneTicket,
+  ticket: ReadonlyDataPlaneTicket,
 ): string {
   return new Date(
     Date.parse(ticket.expiry) + MAX_CLOCK_SKEW_MS,
@@ -34,7 +40,7 @@ export function dataPlaneTicketSyncBoundary(
 }
 
 export function nextDataPlaneTicketSyncFrontier(
-  tickets: Iterable<DataPlaneTicket>,
+  tickets: Iterable<ReadonlyDataPlaneTicket>,
   current: string | undefined,
   observedAt: string,
 ): string | undefined {
@@ -54,7 +60,7 @@ export function nextDataPlaneTicketSyncFrontier(
 }
 
 export function ticketPrecedesSyncFrontier(
-  ticket: DataPlaneTicket,
+  ticket: ReadonlyDataPlaneTicket,
   frontier: string | undefined,
 ): boolean {
   return (

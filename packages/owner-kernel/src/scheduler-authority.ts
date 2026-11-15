@@ -31,7 +31,8 @@ import type {
 import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { createJobControlEnvelope } from "./control-admission.js";
 import type { ControlAdmissionJournal, TrustedControlSource } from "./control-admission.js";
-import type { JobJournal, JobLifecycleEvent } from "./job-assignment.js";
+import type { JobLifecycleEvent } from "./job-journal/contracts.js";
+import type { JobJournal } from "./job-journal/journal.js";
 import type { SchedulerUserNoticeJournal } from "./scheduler-user-notices.js";
 
 const TERMINAL_STATES = new Set([

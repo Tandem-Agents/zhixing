@@ -33,6 +33,10 @@ import type {
   ConversationDeliveryParticipant,
 } from "../../delivery-participant.js";
 import type { AssignmentBundleSubmissionResult } from "../../shared-protocol/contracts.js";
+import {
+  prepareSharedTrustRuleHitMirrorSession,
+  prepareSharedTrustSediments,
+} from "../../shared-protocol/interaction-mirror-preparation.js";
 import type {
   TrustRuleHitBatchInput,
   TrustRuleHitBatchState,
@@ -531,50 +535,14 @@ export async function prepareTrustRuleHitMirrorSession(input: {
   >;
   readonly selectBatchCommitted: () => Promise<boolean>;
 }): Promise<TrustRuleHitMirrorSession> {
-  if (!input.trustRuleHits || input.hits.length === 0) {
-    return Object.freeze({
-      prepared: false,
-      settleAfterError: async () => undefined,
-      acceptCommitted: async () => undefined,
-    });
-  }
-  const checked = await input.selectPrecheck();
-  if (!checked) {
-    return Object.freeze({
-      prepared: false,
-      settleAfterError: async () => undefined,
-      acceptCommitted: async () => undefined,
-    });
-  }
-  const target: TrustRuleHitBatchInput = {
+  return prepareSharedTrustRuleHitMirrorSession({
     origin: { conversationId: input.conversationId },
     assignmentId: input.assignmentId,
-    environment: checked.environment,
     batchDigest: input.batchDigest,
-    entries: input.hits,
-  };
-  if (checked.prepare) {
-    await input.trustRuleHits.prepare(target);
-  }
-  let settled = false;
-  return Object.freeze({
-    target,
-    prepared: checked.prepare,
-    settleAfterError: async () => {
-      if (settled || !checked.prepare) return;
-      settled = true;
-      const committed = await input.selectBatchCommitted().catch(() => undefined);
-      if (committed === true) {
-        await input.trustRuleHits!.accept(target).catch(() => undefined);
-      } else if (committed === false) {
-        await input.trustRuleHits!.discard(target).catch(() => undefined);
-      }
-    },
-    acceptCommitted: async () => {
-      if (settled) return;
-      settled = true;
-      await input.trustRuleHits!.accept(target).catch(() => undefined);
-    },
+    hits: input.hits,
+    trustRuleHits: input.trustRuleHits,
+    selectPrecheck: input.selectPrecheck,
+    selectBatchCommitted: input.selectBatchCommitted,
   });
 }
 
@@ -614,8 +582,6 @@ export async function prepareTrustSedimentsForMirrorBatch(input: {
   ) => Promise<{ t: "answered"; decisionDigest: string } | { t: "closed" } | undefined>;
 }): Promise<void> {
   if (!input.trustSediments || input.sediments.length === 0) return;
-  const assigned = await input.selectAssigned();
-  if (!assigned) return;
   const answeredInBatch = new Set(
     input.batch.entries.flatMap((entry) =>
       entry.kind === "allow-once" && entry.outcome.t === "answered"
@@ -623,17 +589,17 @@ export async function prepareTrustSedimentsForMirrorBatch(input: {
         : [],
     ),
   );
-  const answered = async (requestId: string) =>
-    answeredInBatch.has(requestId) ||
-    (await input.interactionOutcome(requestId))?.t === "answered";
-  for (const entry of input.sediments) {
-    await input.trustSediments.prepare({
-      conversationId: input.conversationId,
-      assignmentId: input.assignmentId,
-      executorId: assigned.executorId,
-      environment: assigned.environment,
-      entry,
-      answered,
-    });
-  }
+  await prepareSharedTrustSediments({
+    assignmentId: input.assignmentId,
+    sediments: input.sediments,
+    selectAssigned: input.selectAssigned,
+    isAnswered: async (requestId: string) =>
+      answeredInBatch.has(requestId) ||
+      (await input.interactionOutcome(requestId))?.t === "answered",
+    prepareOne: (item) =>
+      input.trustSediments!.prepare({
+        conversationId: input.conversationId,
+        ...item,
+      }),
+  });
 }

@@ -22,6 +22,7 @@ import {
   type ConversationRunJournalRecord,
 } from "../../conversation-run-contracts.js";
 import type { AssignmentBundleSubmissionResult } from "../../shared-protocol/contracts.js";
+import { decideSubmissionBundleGuardRejection } from "../../shared-protocol/submission-authorization.js";
 import type {
   ConversationCommitLogRecord,
   ConversationProjectionRecord,
@@ -49,19 +50,15 @@ export function decideGuardBundleRejection(input: {
   readonly guard: Pick<ConversationGuardDecisionFacts, "assignment">;
 }): string | undefined {
   const { assignment } = input.guard;
-  const state = assignment.getRunState(input.runId)?.state;
-  return !input.hasCurrentEpoch
-    ? "Bundle capability belongs to a stale owner epoch"
-    : assignment.getAssignmentIdForRun(input.runId) !== input.assignmentId
-      ? "Bundle belongs to a historical assignment"
-      : assignment.hasOpenConflict(input.assignmentId)
-        ? "Bundle is blocked by an open dispatch conflict"
-        : state !== "dispatched" &&
-            state !== "running" &&
-            state !== "cancel-requested" &&
-            state !== "uncertain"
-          ? "Bundle is late for the current run state"
-          : undefined;
+  return decideSubmissionBundleGuardRejection({
+    domain: "conversation",
+    hasCurrentAuthority: input.hasCurrentEpoch,
+    assignmentIsCurrent:
+      assignment.getAssignmentIdForRun(input.runId) === input.assignmentId,
+    assignmentClosed: assignment.isAssignmentClosed(input.assignmentId),
+    hasOpenDispatchConflict: assignment.hasOpenConflict(input.assignmentId),
+    currentState: assignment.getRunState(input.runId)?.state,
+  });
 }
 
 export function decideSubmitBundleGuardCommittedFastPath(input: {
