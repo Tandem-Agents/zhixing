@@ -34,7 +34,7 @@ import type { ConfirmationHub } from "./confirmation-hub.js";
 import type {
   ConversationCommitProjection,
   ConversationCommitProjectionInput,
-} from "./conversation-assignment.js";
+} from "./conversation-journal/contracts.js";
 import type {
   DurableConversationAdmissionInput,
   DurableConversationCancelInput,

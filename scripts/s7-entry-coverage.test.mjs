@@ -8575,6 +8575,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
     "packages/owner-kernel/src/conversation-control.ts",
     "packages/owner-kernel/src/conversation-assignment.ts",
+    "packages/owner-kernel/src/conversation-journal/submission/prepared-submission.ts",
+    "packages/owner-kernel/src/conversation-journal/journal.ts",
     "packages/owner-kernel/src/job-assignment.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
     "packages/owner-kernel/src/scheduler-global-state.ts",
@@ -9932,7 +9934,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     ), "管理提交前就观察"],
     [skillAuthoritySource, (text) => replaceOnce(
       text, 'if (input.mutation.kind !== "skill-usage") await this.#observeCatalog();', ""), "物化确认不再补偿观察"],
-    ["packages/owner-kernel/src/conversation-assignment.ts", (text) => replaceOnce(
+    ["packages/owner-kernel/src/conversation-journal/journal.ts", (text) => replaceOnce(
       text, "await this.#publisher?.afterGlobalCommit?.({", "void ({"), "运行提交后不通知目录拥有者"],
     ["packages/cli/src/serve/conversation-protocol-runtime.ts", (text) => replaceOnce(
       text, "await this.#requiredMutationPublisher().afterGlobalCommit?.(input);", "void input;"), "代理不转发"],
@@ -10192,6 +10194,16 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => `${text}\nvoid deliveryAuthority.prepareEnqueues([]);`,
     )).join("\n"),
     /one domain decision and one narrow Correctness adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/conversation-journal/submission/prepared-submission.ts",
+      (text) => text.replace(
+        "prepareConversationCommit(",
+        "prepareEnqueues(",
+      ),
+    )).join("\n"),
+    /Delivery producer bypasses the obligation participant/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

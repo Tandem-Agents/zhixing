@@ -6,7 +6,7 @@ import {isConversationSourceEvidenceError} from './conversation-base-source.js';
 import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
 import type { AdvancementControlEvent, AdvancementSession, AdvancementReviewAttempt } from '@zhixing-ai/core/advancement';
 import type { ConversationFactGroup } from './conversation-journal/contracts.js';
-import { loadCommittedBundleBinding } from './conversation-assignment.js';
+import { loadCommittedBundleBinding } from './conversation-journal/replay/bundle-binding.js';
 import type { TranscriptRunRecord } from '@zhixing-ai/core/contracts';
 import { hasPendingWorksceneTask } from '@zhixing-ai/core/workscene/application';
 import { conversationStateKeyHash as hash } from './conversation-state-key.js';

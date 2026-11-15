@@ -1,7 +1,7 @@
 import {
   ADVANCEMENT_DURABLE_CONTRACT,
   SESSION_ACTIVITY_DURABLE_CONTRACT,
-} from "../conversation-assignment.js";
+} from "../conversation-journal/contracts.js";
 import { defineS7DurableScenarios, type S7ExecutableScenarioObservation } from "@zhixing-ai/core/test-support/s7-durable-harness";
 import {
   executeAdvancementEventCase,

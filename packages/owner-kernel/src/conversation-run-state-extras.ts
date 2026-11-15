@@ -6,7 +6,8 @@ import { canonicalize, protocolDigest, interactionMirrorSeed, interactionMirrorB
   type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { dispatchConflictKey, rejectedNotStartedKey, emptyConversationRunProjection,
   type RunProjection, type SubmissionGuardProjection, type ConversationFactGroup, type ConversationSubmissionGuardContext } from './conversation-journal/contracts.js';
-import { loadCommittedBundleBinding, reduceConversationContainment } from './conversation-assignment.js';
+import { loadCommittedBundleBinding } from './conversation-journal/replay/bundle-binding.js';
+import { reduceConversationContainment } from './conversation-journal/replay/run-reducer.js';
 import { assignmentTerminationProofKind, assertHistoricalBundleFence, type ConversationRunJournalRecord, type ConversationRunInternalRecord, type Stored } from './conversation-run-contracts.js';
 import { conversationCommitSummary } from './conversation-commit-summary.js';
 import { projectStatusEntry } from './conversation-status-projection.js';

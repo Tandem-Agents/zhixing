@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import type { AssignmentRecord, DataPlaneTicket } from "@zhixing-ai/core/contracts";
+import { protocolDigest, signCancelProof } from "@zhixing-ai/core/protocol";
 import {
   CONVERSATION_PROTOCOL_OBLIGATION_OWNERS,
 } from "../../../cli/src/serve/conversation-protocol/contracts.js";
@@ -11,7 +14,22 @@ import {
 import {
   CONVERSATION_INTERNAL_RECORD_FAMILY_OWNERS,
   CONVERSATION_RECORD_FAMILY_OWNERS,
+  emptyConversationRunProjection,
+  emptySubmissionGuardProjection,
 } from "../conversation-journal/contracts.js";
+import {
+  CONVERSATION_GUARD_FINGERPRINT_FNS,
+  reduceConversationSubmissionGuard,
+} from "../conversation-journal/replay/guard-reducer.js";
+import {
+  CONVERSATION_RUN_FINGERPRINT_FNS,
+} from "../conversation-journal/replay/run-reducer.js";
+import {
+  readConversationDecisionFacts,
+} from "../conversation-journal/state/views.js";
+import {
+  prepareTrustRuleHitMirrorSession,
+} from "../conversation-journal/submission/prepared-submission.js";
 import {
   CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
   CONVERSATION_RUN_RECORD_SHAPES,
@@ -23,7 +41,6 @@ import {
 import {
   buildSemanticProjectionCheckpointPrefix,
 } from "../shared-protocol/contracts.js";
-import type { AssignmentRecord } from "@zhixing-ai/core/contracts";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 
@@ -41,42 +58,579 @@ function collectTypeScriptFiles(dir: string): string[] {
   return results;
 }
 
-describe("Slice A leaf contracts, facade zero-reverse-import & semantic checkpoint fingerprint gate", () => {
-  it("enforces zero reverse imports from internal sub-modules to the 4 public facades", () => {
-    const internalDirs = [
-      path.join(REPO_ROOT, "packages/owner-kernel/src/shared-protocol"),
-      path.join(REPO_ROOT, "packages/owner-kernel/src/conversation-journal"),
-      path.join(REPO_ROOT, "packages/owner-kernel/src/job-journal"),
-      path.join(REPO_ROOT, "packages/executor/src/ledger"),
-      path.join(REPO_ROOT, "packages/cli/src/serve/conversation-protocol"),
-    ];
-    const forbiddenFacadeBasenames = [
-      "conversation-assignment.js",
-      "conversation-assignment.ts",
-      "job-assignment.js",
-      "job-assignment.ts",
-      "assignment-ledger.js",
-      "assignment-ledger.ts",
-      "conversation-protocol-runtime.js",
-      "conversation-protocol-runtime.ts",
-    ];
+function extractModuleSpecifiersViaAst(fileName: string, sourceText: string): string[] {
+  const sf = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
+  const specifiers: string[] = [];
+  function visit(node: ts.Node): void {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteral(node.arguments[0]!)
+    ) {
+      specifiers.push(node.arguments[0]!.text);
+    } else if (ts.isImportTypeNode(node)) {
+      if (
+        ts.isLiteralTypeNode(node.argument) &&
+        ts.isStringLiteral(node.argument.literal)
+      ) {
+        specifiers.push(node.argument.literal.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sf);
+  return specifiers;
+}
 
-    const violations: string[] = [];
-    for (const dir of internalDirs) {
-      for (const file of collectTypeScriptFiles(dir)) {
-        const text = fs.readFileSync(file, "utf8");
-        const importMatches = text.matchAll(
-          /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/g,
-        );
-        for (const match of importMatches) {
-          const specifier = match[1]!;
-          if (forbiddenFacadeBasenames.some((name) => specifier.endsWith(`/${name}`) || specifier === `./${name}` || specifier === `../${name}`)) {
-            violations.push(`${path.relative(REPO_ROOT, file)} -> ${specifier}`);
-          }
+function collectFacadeViolations(
+  files: readonly { readonly filePath: string; readonly sourceText: string }[],
+  forbiddenTargets: ReadonlySet<string>,
+  forbiddenSpecifiers: ReadonlySet<string> = new Set(),
+): string[] {
+  const violations: string[] = [];
+  for (const { filePath, sourceText } of files) {
+    for (const specifier of extractModuleSpecifiersViaAst(filePath, sourceText)) {
+      if (specifier.startsWith(".")) {
+        const resolvedNoExt = path
+          .resolve(path.dirname(filePath), specifier)
+          .replace(/\.(?:js|ts)$/, "");
+        if (forbiddenTargets.has(resolvedNoExt)) {
+          violations.push(`${path.relative(REPO_ROOT, filePath)} -> ${specifier}`);
+        }
+      } else if (forbiddenSpecifiers.has(specifier)) {
+        violations.push(`${path.relative(REPO_ROOT, filePath)} -> ${specifier}`);
+      }
+    }
+  }
+  return violations;
+}
+
+function extractExplicitExportsViaAst(filePath: string): {
+  readonly values: string[];
+  readonly types: string[];
+} {
+  const src = fs.readFileSync(filePath, "utf8");
+  const sf = ts.createSourceFile(filePath, src, ts.ScriptTarget.Latest, true);
+  const values: string[] = [];
+  const types: string[] = [];
+  for (const st of sf.statements) {
+    const isExported = st.modifiers?.some(
+      (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+    );
+    if (
+      ts.isExportDeclaration(st) &&
+      st.exportClause &&
+      ts.isNamedExports(st.exportClause)
+    ) {
+      for (const el of st.exportClause.elements) {
+        (st.isTypeOnly || el.isTypeOnly ? types : values).push(el.name.text);
+      }
+    } else if (isExported) {
+      if (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st)) {
+        types.push(st.name.text);
+      } else if (
+        ts.isClassDeclaration(st) ||
+        ts.isFunctionDeclaration(st) ||
+        ts.isEnumDeclaration(st)
+      ) {
+        if (st.name) values.push(st.name.text);
+      } else if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) {
+          if (ts.isIdentifier(d.name)) values.push(d.name.text);
         }
       }
     }
-    expect(violations).toEqual([]);
+  }
+  return {
+    values: [...new Set(values)].sort(),
+    types: [...new Set(types)].sort(),
+  };
+}
+
+describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & semantic fingerprint gate", () => {
+  it("enforces zero reverse imports (including TS ImportTypeNode) from internal clusters to the 4 public facades, with negative proof", () => {
+    const allFourFacades = new Set(
+      [
+        "packages/owner-kernel/src/conversation-assignment",
+        "packages/owner-kernel/src/job-assignment",
+        "packages/executor/src/assignment-ledger",
+        "packages/cli/src/serve/conversation-protocol-runtime",
+      ].map((rel) => path.resolve(REPO_ROOT, rel)),
+    );
+    const loadDir = (relDir: string) =>
+      collectTypeScriptFiles(path.join(REPO_ROOT, relDir)).map((filePath) => ({
+        filePath,
+        sourceText: fs.readFileSync(filePath, "utf8"),
+      }));
+
+    // 1. owner-kernel internal clusters + test-support must not reverse-import owner-kernel facades
+    const ownerInternalFiles = [
+      ...loadDir("packages/owner-kernel/src/shared-protocol"),
+      ...loadDir("packages/owner-kernel/src/conversation-journal"),
+      ...loadDir("packages/owner-kernel/src/job-journal"),
+      ...loadDir("packages/owner-kernel/src/test-support"),
+    ];
+    expect(
+      collectFacadeViolations(
+        ownerInternalFiles,
+        allFourFacades,
+        new Set([
+          "@zhixing-ai/owner-kernel/conversation-assignment",
+          "@zhixing-ai/owner-kernel/job-assignment",
+        ]),
+      ),
+    ).toEqual([]);
+
+    // 2. executor internal cluster must not reverse-import assignment-ledger facade
+    expect(
+      collectFacadeViolations(
+        loadDir("packages/executor/src/ledger"),
+        allFourFacades,
+        new Set(["@zhixing-ai/executor/assignment-ledger"]),
+      ),
+    ).toEqual([]);
+
+    // 3. cli internal cluster must not reverse-import conversation-protocol-runtime facade
+    expect(
+      collectFacadeViolations(
+        loadDir("packages/cli/src/serve/conversation-protocol"),
+        allFourFacades,
+      ),
+    ).toEqual([]);
+
+    // 4. Same-package non-facade production modules in owner-kernel must not import conversation-assignment facade
+    const ownerSrcRoot = path.join(REPO_ROOT, "packages/owner-kernel/src");
+    const ownerRootProdFiles = fs
+      .readdirSync(ownerSrcRoot, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          entry.name.endsWith(".ts") &&
+          !entry.name.endsWith(".test.ts") &&
+          entry.name !== "conversation-assignment.ts",
+      )
+      .map((entry) => {
+        const filePath = path.join(ownerSrcRoot, entry.name);
+        return { filePath, sourceText: fs.readFileSync(filePath, "utf8") };
+      });
+    expect(
+      collectFacadeViolations(
+        ownerRootProdFiles,
+        new Set([path.resolve(REPO_ROOT, "packages/owner-kernel/src/conversation-assignment")]),
+        new Set(["@zhixing-ai/owner-kernel/conversation-assignment"]),
+      ),
+    ).toEqual([]);
+
+    // Negative test: relative ImportTypeNode (`import("../conversation-assignment.js").RunProjection`) MUST fail
+    const syntheticLeakFile = path.join(
+      REPO_ROOT,
+      "packages/owner-kernel/src/conversation-journal/leak-probe.ts",
+    );
+    const syntheticViolations = collectFacadeViolations(
+      [
+        {
+          filePath: syntheticLeakFile,
+          sourceText:
+            'export type Leaked = import("../conversation-assignment.js").RunProjection;\n',
+        },
+      ],
+      allFourFacades,
+    );
+    expect(syntheticViolations.length).toBe(1);
+    expect(syntheticViolations[0]).toContain("../conversation-assignment.js");
+  });
+
+  it("preserves exact baseline public export surface on conversation-assignment.ts (34 values, 48 types, zero extra PublishDomainPlan)", () => {
+    const facadePath = path.join(
+      REPO_ROOT,
+      "packages/owner-kernel/src/conversation-assignment.ts",
+    );
+    const exported = extractExplicitExportsViaAst(facadePath);
+    expect(exported.types).not.toContain("PublishDomainPlan");
+    expect(exported.values).toEqual([
+      "ADVANCEMENT_DURABLE_CONTRACT",
+      "AdvancementWriteRejectedError",
+      "CONVERSATION_RUN_INTERNAL_RECORD_TYPES",
+      "CONVERSATION_RUN_RECORD_SHAPES",
+      "ConversationAssignmentCancelledError",
+      "ConversationPendingCancellationError",
+      "ConversationRunJournal",
+      "InProcessConversationDispatcher",
+      "SESSION_ACTIVITY_DURABLE_CONTRACT",
+      "SessionActivityRejectedError",
+      "assertAssignedMatchesDispatch",
+      "assertConversationRunInternalRecord",
+      "conversationDecisionMigrationStatus",
+      "conversationDecisionPending",
+      "conversationDecisionReady",
+      "conversationRecoveryPage",
+      "conversationRecoveryPending",
+      "discoverConversationRecoveryCandidates",
+      "discoverConversationRecoveryCandidatesFromLog",
+      "dispatchConflictKey",
+      "emptyConversationRunProjection",
+      "emptySubmissionGuardProjection",
+      "loadCommittedBundleBinding",
+      "pendingAdvancementConversations",
+      "prioritizeConversationDecisionMigration",
+      "reduceConversationContainment",
+      "reduceConversationRunState",
+      "reduceConversationSessionFact",
+      "reduceConversationSubmissionGuard",
+      "reduceImportedConversationGuard",
+      "rejectedNotStartedKey",
+      "startConversationDecisionMigration",
+      "stopConversationDecisionMigration",
+      "validateImportedConversationCommit",
+    ]);
+    expect(exported.types).toEqual([
+      "AdmittedProjection",
+      "AssignedProjection",
+      "AssignmentBundleSubmissionResult",
+      "AssignmentSubmissionAuthorization",
+      "AssignmentSubmissionAuthorizer",
+      "AssignmentSubmissionIdentity",
+      "AssignmentSubmissionMethod",
+      "AssignmentSubmissionPreflightPort",
+      "AssignmentSubmissionPreflightResult",
+      "CommittedConversationResult",
+      "ConversationAbortTicketAuthorizer",
+      "ConversationCancelRequest",
+      "ConversationCancelResult",
+      "ConversationChannelFrameAdoption",
+      "ConversationCommitAuthority",
+      "ConversationCommitDecisionInput",
+      "ConversationCommitLogRecord",
+      "ConversationCommitProjection",
+      "ConversationCommitProjectionInput",
+      "ConversationDispatchPort",
+      "ConversationFactGroup",
+      "ConversationGlobalMutationDecision",
+      "ConversationLifecycleProjection",
+      "ConversationLifecycleProjectionInput",
+      "ConversationMutationPublisher",
+      "ConversationRunControlDescriptor",
+      "ConversationRunInternalRecord",
+      "ConversationRunJournalOptions",
+      "ConversationRunJournalRecord",
+      "ConversationRunRecordType",
+      "ConversationRunReductionContext",
+      "ConversationSubmissionGuardContext",
+      "ConversationTrustSedimentPort",
+      "DataPlaneTicketFacts",
+      "DataPlaneTicketIssueRequest",
+      "InProcessBundleSubmission",
+      "InProcessCancellationSubmission",
+      "InProcessConversationDispatcherOptions",
+      "InProcessDispatchContextFactory",
+      "PendingConversationDispatch",
+      "PendingConversationFence",
+      "PendingConversationInput",
+      "RunProjection",
+      "SubmissionGuardProjection",
+      "TrustRuleHitBatchInput",
+      "TrustRuleHitBatchState",
+      "TrustRuleHitOrigin",
+      "TrustRuleHitPort",
+    ]);
+  });
+
+  it("enforces Slice B narrow state-family & decider encapsulation (zero RunProjection/SubmissionGuardProjection in operations/* and family state modules, private heap, zero approvedForWrite)", () => {
+    const cjRoot = path.join(
+      REPO_ROOT,
+      "packages/owner-kernel/src/conversation-journal",
+    );
+    const familyModules = new Set([
+      "state/run-queue-input.ts",
+      "state/session-domain.ts",
+      "state/channel-tickets.ts",
+      "state/assignment-control.ts",
+      "state/commit-publish.ts",
+    ]);
+    const fullCarrierLeaks: string[] = [];
+    const heapLeaks: string[] = [];
+    const approvedBooleanLeaks: string[] = [];
+
+    for (const file of collectTypeScriptFiles(cjRoot)) {
+      const rel = path.relative(cjRoot, file).replace(/\\/g, "/");
+      const text = fs.readFileSync(file, "utf8");
+      if (text.includes("approvedForWrite")) {
+        approvedBooleanLeaks.push(rel);
+      }
+      if (
+        text.includes("queuedPositionHeap") &&
+        rel !== "contracts.ts" &&
+        rel !== "state/run-queue-input.ts"
+      ) {
+        heapLeaks.push(rel);
+      }
+      if (
+        (rel.startsWith("operations/") || familyModules.has(rel)) &&
+        /\b(?:RunProjection|SubmissionGuardProjection)\b/.test(text)
+      ) {
+        fullCarrierLeaks.push(rel);
+      }
+    }
+
+    expect(fullCarrierLeaks).toEqual([]);
+    expect(heapLeaks).toEqual([]);
+    expect(approvedBooleanLeaks).toEqual([]);
+  });
+
+  it("prevents write-through mutation via ConversationDecisionFacts readonly views", () => {
+    const raw = emptyConversationRunProjection("conv-encap-1");
+    raw.admittedByRun.set("run-1", {
+      record: {
+        ingressKey: "ing-1",
+        runId: "run-1",
+        ingress: {
+          surfacePrincipal: "user:local",
+          surfaceKind: "cli",
+          receivedAt: "2026-11-16T00:00:00.000Z",
+        },
+        invocation: { kind: "user-turn" },
+        queuedPosition: 1,
+      },
+      input: { text: "hello" },
+      lsn: 1,
+    });
+    raw.assignedById.set("assign-1", {
+      record: {
+        t: "assigned",
+        runId: "run-1",
+        assignmentId: "assign-1",
+        executorId: "exec-1",
+        ownerEpoch: 1,
+        baseRevision: 0,
+        dispatchDigest: "d1",
+        manifestDigest: "m1",
+        dispatchRef: { digest: "r1", byteLength: 10 },
+        permissionLeaseDigest: "p1",
+        capIds: ["cap-1"],
+        reservation: { reservationId: "res-1", attempt: 1 },
+      },
+      acked: false,
+      lsn: 2,
+    });
+    raw.mirrorStateByAssignment.set("assign-1", {
+      ordinal: 3,
+      mirroredUpTo: 5,
+      mirrorDigest: "md-1",
+      requestIds: new Set(["req-1"]),
+    });
+
+    const facts = readConversationDecisionFacts(raw);
+    const admittedView = facts.queueInput.getAdmitted("run-1")!;
+    const assignedView = facts.assignment.getAssigned("assign-1")!;
+    const mirrorView = facts.commitPublish.getMirrorState("assign-1")!;
+
+    expect(() => {
+      (admittedView as unknown as { input: unknown }).input = undefined;
+    }).toThrow(TypeError);
+    expect(() => {
+      (assignedView as unknown as { acked: boolean }).acked = true;
+    }).toThrow(TypeError);
+    expect(() => {
+      (mirrorView as unknown as { ordinal: number }).ordinal = 99;
+    }).toThrow(TypeError);
+    expect(
+      "add" in (mirrorView.requestIds as unknown as Record<string, unknown>),
+    ).toBe(false);
+    expect(raw.admittedByRun.get("run-1")?.input).toEqual({ text: "hello" });
+    expect(raw.assignedById.get("assign-1")?.acked).toBe(false);
+    expect(raw.mirrorStateByAssignment.get("assign-1")?.ordinal).toBe(3);
+  });
+
+  it("captures exact pre-state for deferred checks across multi-record batch reductions and prepares trust rule hits at most once across retries", async () => {
+    const guard = emptySubmissionGuardProjection();
+    guard.admittedByRun.set("run-1", {
+      ingressKey: "ing-1",
+      queuedPosition: 1,
+      ingress: {
+        surfacePrincipal: "user:local",
+        surfaceKind: "cli",
+        receivedAt: "2026-11-16T00:00:00.000Z",
+      },
+    });
+    guard.queuedRunByPosition.set(1, "run-1");
+    guard.queuedPositionHeap.push(1);
+    guard.queuedPositionHeapIndex.set(1, 0);
+    guard.stateByRun.set("run-1", { state: "dispatched", statusRevision: 2 });
+    guard.assignmentByRun.set("run-1", "assign-1");
+    guard.activeRunId = "run-1";
+    guard.assignedById.set("assign-1", {
+      record: {
+        t: "assigned",
+        runId: "run-1",
+        assignmentId: "assign-1",
+        executorId: "exec-1",
+        ownerEpoch: 1,
+        baseRevision: 0,
+        dispatchDigest: `sha256:${"a".repeat(64)}`,
+        manifestDigest: `sha256:${"b".repeat(64)}`,
+        dispatchRef: { digest: `sha256:${"c".repeat(64)}`, bytes: 32 },
+        permissionLeaseDigest: `sha256:${"d".repeat(64)}`,
+        capIds: ["cap-1"],
+        reservation: { reservationId: "res-1", attempt: 1 },
+      } as unknown as import("../conversation-journal/contracts.js").AssignedProjection["record"],
+      capIds: new Set(["cap-1"]),
+      acked: true,
+    });
+    const testSigner: import("@zhixing-ai/core/protocol").ProtocolSigner = {
+      sign: (schemaId, version, payload) => ({
+        alg: "test-sha256",
+        keyId: "exec-1",
+        sig: protocolDigest(schemaId, version, payload),
+      }),
+    };
+    const testVerifier: import("@zhixing-ai/core/protocol").ProtocolSignatureVerifier = {
+      verify: () => undefined,
+    };
+    guard.ticketsById.set("tok-abort-1", {
+      v: 1,
+      ticketId: "tok-abort-1",
+      assignmentId: "assign-1",
+      executorId: "exec-1",
+      surfacePrincipal: "user:local",
+      kind: "abort",
+      issuedAt: "2026-11-16T00:00:00.000Z",
+      expiry: "2026-11-16T00:05:00.000Z",
+      signature: {
+        alg: "test-sha256",
+        keyId: "owner-1",
+        sig: `sha256:${"e".repeat(64)}`,
+      },
+    } as unknown as DataPlaneTicket);
+
+    // Verify legacyAbortTickets deferred check captures ticketIds snapshot BEFORE a subsequent ticket-issued mutates ticketIdsByAssignment
+    let legacyCalls = 0;
+    const checks: Array<() => void> = [];
+    const fakeAbortProof = signCancelProof(
+      {
+        v: 1,
+        assignmentId: "assign-1",
+        executorId: "exec-1",
+        authority: {
+          execution: "conversation",
+          conversationId: "conv-1",
+          ownerEpoch: 1,
+        },
+        cause: "abort-ticket",
+        surfacePrincipal: "user:local",
+        ticketDigest: `sha256:${"1".repeat(64)}`,
+        decision: "halted",
+        lastRecordSeq: 3,
+        lastEffectSeq: 0,
+        ledgerDigest: `sha256:${"6".repeat(64)}`,
+        usageFinal: { reportDigest: `sha256:${"2".repeat(64)}`, upToUsageSeq: 0 },
+        issuedAt: "2026-11-16T00:01:00.000Z",
+      },
+      testSigner,
+    );
+    const envelope = {
+      lsn: 3,
+      envelopeDigest: `sha256:${"5".repeat(64)}`,
+      at: "2026-11-16T00:01:00.000Z",
+      entries: [
+        {
+          stream: "run:conv-1",
+          body: {
+            t: "cancel-proof-accepted" as const,
+            assignmentId: "assign-1",
+            proof: fakeAbortProof,
+          },
+        },
+        {
+          stream: "run:conv-1",
+          body: {
+            t: "capability-revoked" as const,
+            assignmentId: "assign-1",
+            capId: "cap-1",
+          },
+        },
+        {
+          stream: "run:conv-1",
+          body: {
+            t: "state" as const,
+            runId: "run-1",
+            assignmentId: "assign-1",
+            state: "cancelled" as const,
+            statusRevision: 3,
+          },
+        },
+      ],
+    };
+
+    await reduceConversationSubmissionGuard(
+      {
+        conversationId: "conv-1",
+        verifier: testVerifier,
+        legacyAbortTickets: {
+          authorize: () => {
+            legacyCalls += 1;
+          },
+        },
+        assertResourceUsageFinal: () => undefined,
+        assertResourceTerminalRecords: () => undefined,
+      },
+      guard,
+      envelope.entries[0]!,
+      envelope,
+      checks,
+    );
+    // Simulate a later mutation in the same batch adding a ticket id before checks flush
+    guard.ticketIdsByAssignment.set("assign-1", new Set(["tok-abort-1"]));
+    for (const check of checks) check();
+    // Because pre-state had 0 ticketIds for assign-1, legacyAbortTickets.authorize MUST still be invoked!
+    expect(legacyCalls).toBe(1);
+
+    // Verify prepareTrustRuleHitMirrorSession prepares once and settles at most once
+    let prepareCount = 0;
+    let discardCount = 0;
+    let acceptCount = 0;
+    const session = await prepareTrustRuleHitMirrorSession({
+      conversationId: "conv-1",
+      assignmentId: "assign-1",
+      batch: { entries: [] } as unknown as import("@zhixing-ai/core/protocol").ConversationInteractionMirrorBatch,
+      batchDigest: "bd-1",
+      hits: [{ ruleId: "rule-1" } as unknown as import("@zhixing-ai/core/contracts").TrustRuleHitMirrorEntry],
+      trustRuleHits: {
+        prepare: async () => {
+          prepareCount += 1;
+        },
+        accept: async () => {
+          acceptCount += 1;
+        },
+        discard: async () => {
+          discardCount += 1;
+        },
+      },
+      selectPrecheck: async () => ({
+        prepare: true,
+        environment: {},
+      }),
+      selectBatchCommitted: async () => false,
+    });
+    expect(session.prepared).toBe(true);
+    expect(prepareCount).toBe(1);
+    // Simulate retry loop reusing `session` without re-calling prepareTrustRuleHitMirrorSession, then failing
+    await session.settleAfterError();
+    await session.settleAfterError();
+    expect(prepareCount).toBe(1);
+    expect(discardCount).toBe(1);
+    expect(acceptCount).toBe(0);
   });
 
   it("covers 100% of durable record discriminants across conversation, job, and executor ownership maps", () => {
@@ -119,14 +673,48 @@ describe("Slice A leaf contracts, facade zero-reverse-import & semantic checkpoi
     expect(Object.keys(CONVERSATION_PROTOCOL_OBLIGATION_OWNERS).length).toBeGreaterThanOrEqual(6);
   });
 
-  it("invalidates projection checkpoint prefixes when any leaf semantic function changes and rejects empty leaf sets", () => {
+  it("invalidates projection checkpoint prefixes when any leaf semantic function changes and verifies real Slice B leaf sets", () => {
+    expect(CONVERSATION_RUN_FINGERPRINT_FNS.length).toBeGreaterThanOrEqual(10);
+    expect(CONVERSATION_GUARD_FINGERPRINT_FNS.length).toBeGreaterThanOrEqual(10);
+
+    const runPrefixReal = buildSemanticProjectionCheckpointPrefix(
+      "conversation-run-projection",
+      2,
+      CONVERSATION_RUN_FINGERPRINT_FNS,
+    );
+    const mutatedRunFns = [
+      ...CONVERSATION_RUN_FINGERPRINT_FNS.slice(0, -1),
+      function mutatedLeafSemanticFn() {
+        return "changed";
+      },
+    ];
+    const runPrefixMutated = buildSemanticProjectionCheckpointPrefix(
+      "conversation-run-projection",
+      2,
+      mutatedRunFns,
+    );
+    expect(runPrefixReal).not.toBe(runPrefixMutated);
+
+    const guardPrefixReal = buildSemanticProjectionCheckpointPrefix(
+      "conversation-submission-projection",
+      1,
+      CONVERSATION_GUARD_FINGERPRINT_FNS,
+    );
+    const guardPrefixMutated = buildSemanticProjectionCheckpointPrefix(
+      "conversation-submission-projection",
+      1,
+      [
+        ...CONVERSATION_GUARD_FINGERPRINT_FNS.slice(0, -1),
+        function mutatedGuardLeafFn() {
+          return "changed";
+        },
+      ],
+    );
+    expect(guardPrefixReal).not.toBe(guardPrefixMutated);
+
     const leafAlphaV1 = function reduceLeafAlpha(x: number) { return x + 1; };
     const leafAlphaV2 = function reduceLeafAlpha(x: number) { return x + 2; };
     const leafBeta = function extractLeafBeta(x: number) { return x * 3; };
-
-    const keyV1 = buildSemanticProjectionCheckpointPrefix("test-proj", 1, [leafAlphaV1, leafBeta]);
-    const keyV2 = buildSemanticProjectionCheckpointPrefix("test-proj", 1, [leafAlphaV2, leafBeta]);
-    expect(keyV1).not.toBe(keyV2);
 
     const ledgerV1 = buildLedgerProjectionCheckpointPrefix("executor-assignment-decision", 1, [leafAlphaV1, leafBeta]);
     const ledgerV2 = buildLedgerProjectionCheckpointPrefix("executor-assignment-decision", 1, [leafAlphaV2, leafBeta]);

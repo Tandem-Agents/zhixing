@@ -103,6 +103,16 @@ export type ConversationProjectionRecord = Extract<
   { kind: "conversation-commit-projection" }
 >;
 
+export type ConversationLifecycleProjectionRecord = Extract<
+  ConversationRunInternalRecord,
+  { kind: "conversation-lifecycle-projection" }
+>;
+
+export interface PreparedStored<T> {
+  readonly stored: Stored<T>;
+  readonly references: ArtifactRef[];
+}
+
 export interface PublishDomainPlan {
   readonly grantedSeqs: number[];
   readonly grantedIndexBySeq: Map<number, number>;

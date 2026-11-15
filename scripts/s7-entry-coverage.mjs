@@ -8878,6 +8878,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationAssignment = required(
     "packages/owner-kernel/src/conversation-assignment.ts",
   );
+  const conversationPreparedSubmission = required(
+    "packages/owner-kernel/src/conversation-journal/submission/prepared-submission.ts",
+  );
+  const conversationJournal = required(
+    "packages/owner-kernel/src/conversation-journal/journal.ts",
+  );
   const jobAssignment = required("packages/owner-kernel/src/job-assignment.ts");
   const schedulerUserNotices = required(
     "packages/owner-kernel/src/scheduler-user-notices.ts",
@@ -10716,8 +10722,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   for (const [relative, text, method] of [
     [
-      "packages/owner-kernel/src/conversation-assignment.ts",
-      conversationAssignment,
+      "packages/owner-kernel/src/conversation-journal/submission/prepared-submission.ts",
+      conversationPreparedSubmission,
       "prepareConversationCommit(",
     ],
     [
@@ -11101,7 +11107,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     text.includes(first) && text.indexOf(second, text.indexOf(first) + first.length) >= 0;
   const managementCommit = between(skillAuthority, "  async mutate(", "  async #observeCatalog(");
   const stagedConfirmation = between(skillAuthority, "  async applyStagedMutation(", "  async observeCommittedMutations(");
-  const runCommit = between(conversationAssignment, "  async submitBundle(", "  async resumeCommittedProjections(");
+  const runCommit = between(conversationJournal, "  async submitBundle(", "  async resumeCommittedProjections(");
   const skillWire = between(scheduleEventBridge, "function wireSkillCatalogEvents(", "\n}");
   if (
     handler.includes("broadcastChanged") ||

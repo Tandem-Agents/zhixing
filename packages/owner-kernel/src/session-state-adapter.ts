@@ -15,7 +15,7 @@ import {
   assertProtocolIdentifier,
 } from "@zhixing-ai/core/protocol";
 import { advancementSubmissionRequestId } from "@zhixing-ai/core/advancement";
-import type { ConversationRunJournal } from "./conversation-assignment.js";
+import type { ConversationRunJournal } from "./conversation-journal/journal.js";
 
 export interface ConversationSessionStateAdapterOptions {
   readonly journalFor: (conversationId: string) => ConversationRunJournal | Promise<ConversationRunJournal>;

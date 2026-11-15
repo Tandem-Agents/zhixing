@@ -7,7 +7,9 @@ import { freezeAdvancementSessions } from '@zhixing-ai/core/advancement';
 import { parseConversationId } from '@zhixing-ai/core/conversation';
 import { assertAssignedMatchesDispatch,
   type ConversationCommitLogRecord, type RunProjection, type ConversationFactGroup } from './conversation-journal/contracts.js';
-import { reduceImportedConversationGuard, reduceConversationSessionFact, validateImportedConversationCommit } from './conversation-assignment.js';
+import { reduceImportedConversationGuard } from './conversation-journal/replay/guard-reducer.js';
+import { reduceConversationSessionFact } from './conversation-journal/state/session-domain.js';
+import { loadCommittedBundleBinding, validateImportedConversationCommit } from './conversation-journal/replay/bundle-binding.js';
 import { validateImportedConversationControl } from './control-admission.js';
 import { ConversationDirectoryReducer, type ReadMeta } from './conversation-read-index.js';
 import { readConversationRunRoot, foldConversationRunExtras } from './conversation-run-state-extras.js';
@@ -18,7 +20,6 @@ import { reduceConversationRecoveryFacts } from './conversation-recovery-index.j
 import type { ConversationBaseSource, ConversationBaseHeader, ConversationBaseLocation, AuthenticatedConversationFacts } from './conversation-base-source.js';
 import { corruptRunJournal } from './conversation-run-contracts.js';
 import { advancementRecoveryRoot, foldAdvancementRecovery } from './advancement-recovery-index.js';
-import { loadCommittedBundleBinding } from './conversation-assignment.js';
 
 const ordinal = (value: number) => String(value).padStart(16, '0');
 const controlKey = (id: string) => 'source/control/' + hash(id);

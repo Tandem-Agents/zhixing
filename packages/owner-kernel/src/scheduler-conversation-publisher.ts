@@ -1,5 +1,5 @@
 import type { AuthorityError, GlobalStagedMutation } from "@zhixing-ai/core/contracts";
-import type { ConversationMutationPublisher } from "./conversation-assignment.js";
+import type { ConversationMutationPublisher } from "./conversation-journal/contracts.js";
 import type { GlobalMutationCommitCoordinator } from "./global-mutation-commit-coordinator.js";
 import type { ScheduleDefinitionSource } from "./scheduler-mutation-commit.js";
 

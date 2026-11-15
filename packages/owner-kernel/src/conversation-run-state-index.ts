@@ -6,7 +6,8 @@ import { canonicalize, validateGovernorRecord, requiresFormalResourceCoordinatio
 import { emptySubmissionGuardProjection,
   type RunProjection, type ConversationRunReductionContext, type SubmissionGuardProjection, type ConversationCommitLogRecord, type ConversationAbortTicketAuthorizer,
   type ConversationSubmissionGuardContext } from './conversation-journal/contracts.js';
-import { reduceConversationSubmissionGuard, reduceConversationRunState } from './conversation-assignment.js';
+import { reduceConversationSubmissionGuard } from './conversation-journal/replay/guard-reducer.js';
+import { reduceConversationRunState } from './conversation-journal/replay/run-reducer.js';
 import { assertAssignmentActivationEvidence, assertAssignmentTerminalEvidence, assertAssignmentUsageEvidence } from './conversation-resource-witness.js';
 import { conversationDecisionScope, readConversationRunViewMetadata, materializeConversationRunView, materializedDispatchEnvelope } from './conversation-run-state-view.js';
 import { dataPlaneTicketSyncBoundary } from './data-plane-ticket-lifecycle.js';

@@ -16,7 +16,7 @@ import {
 import { advancementExecutionTurnId, type AdvancementControlEvent } from "@zhixing-ai/core/advancement";
 import {
   ConversationRunJournal,
-} from "../conversation-assignment.js";
+} from "../conversation-journal/journal.js";
 import { createOwnerDeliveryParticipant } from "../delivery-obligation-correctness.js";
 import {
   assert,
