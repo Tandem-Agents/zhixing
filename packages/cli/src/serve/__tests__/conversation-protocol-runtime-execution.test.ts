@@ -1039,6 +1039,96 @@ describe("ConversationProtocolRuntime", () => {
     expect(errors).toContain("surface close failed");
     expect(disposed).toBe(1);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("closes the first-party surface session in background tail drain even when finality close throws", async () => {
+    const home = await createTempDir("conversation-tail-drain-close-isolation");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-tail-drain-close-isolation",
+      async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+        return {
+          agentResult: { reason: "completed", message: assistant, usage: { inputTokens: 1, outputTokens: 1 } },
+          runRecord: { timestamp: "2026-09-24T00:00:00.000Z", messages: [messages.at(-1)!, assistant], usage: { inputTokens: 1, outputTokens: 1 } },
+          newMessages: [assistant],
+          durationMs: 1,
+        };
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    let finalityCloses = 0;
+    let surfaceCloses = 0;
+    const observedFailures: Array<{ readonly error: unknown; readonly phase: string }> = [];
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      onFailure: (error, context) => {
+        observedFailures.push({ error, phase: context.phase });
+      },
+      createFirstPartyFinality: () => ({
+        start: async () => {},
+        acceptProvisionalFinal: async () => {},
+        confirmConversationFinal: async () => {},
+        close: () => {
+          finalityCloses += 1;
+          throw new Error("synthetic unsubscribe failure");
+        },
+      }),
+      losslessDataPlane: {
+        kind: "available",
+        port: {
+          ...TEST_ANCHOR_LOSSLESS_DATA_PLANE.port,
+          openFirstPartySurfaceSession: async (...args) => {
+            const base = await TEST_ANCHOR_LOSSLESS_DATA_PLANE.port.openFirstPartySurfaceSession(...args);
+            return {
+              ...base,
+              close: async () => {
+                surfaceCloses += 1;
+                await base.close();
+              },
+            };
+          },
+        },
+      },
+    });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "durable", appended: true }),
+    });
+    const conversationId = "conversation-tail-drain-close-isolation";
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    try {
+      const execution = protocol.run({
+        conversationId,
+        input: "check tail drain",
+        messages: [{ role: "user", content: [{ type: "text", text: "check tail drain" }] }],
+        baseRevision: 0,
+        runtime,
+        invocation: { kind: "agent", source: "interactive" },
+        options: { turnContext: { turnId: "rpc:tail-drain-close-isolation" }, source: "interactive" },
+      });
+      let step = await execution.next();
+      while (!step.done) step = await execution.next();
+      expect(step.value.agentResult.reason).toBe("completed");
+      await vi.waitFor(() => {
+        expect(finalityCloses).toBe(1);
+        expect(surfaceCloses).toBe(1);
+        expect(
+          observedFailures.some(
+            item => item.phase === "run" && (item.error as Error)?.message === "synthetic unsubscribe failure",
+          ),
+        ).toBe(true);
+      }, { timeout: 5_000 });
+    } finally {
+      await protocol.stopRecoveryLoop();
+      await manager.disposeAll();
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("closes the executor iterator and control heartbeat before releasing a returned run", async () => {
     const home = await createTempDir("conversation-protocol-return-cleanup");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });

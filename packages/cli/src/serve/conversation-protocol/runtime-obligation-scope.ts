@@ -208,18 +208,31 @@ export class RuntimeObligationScope {
   ): AuthorityScopeState {
     const oldScope = this.#current;
     oldScope.scope.retired = true;
+    const nextScope = createAuthorityScopeState(oldScope.scope.scopeId + 1);
+    this.#current = nextScope;
+    const errors: unknown[] = [];
+    const isolate = (step: () => void) => {
+      try {
+        step();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
     for (const assignmentId of [...oldScope.assignmentRoutes.keys()]) {
       oldScope.assignmentRoutes.delete(assignmentId);
       oldScope.assignmentIngress.delete(assignmentId);
-      artifactAuthority.remove(assignmentId);
-      interactions.releaseAssignment(assignmentId);
+      isolate(() => artifactAuthority.remove(assignmentId));
+      isolate(() => interactions.releaseAssignment(assignmentId));
     }
-    for (const prepared of oldScope.preparedAdmissions.values()) {
-      prepared.foreground?.close();
-    }
+    const preparedList = [...oldScope.preparedAdmissions.values()];
     oldScope.preparedAdmissions.clear();
-    const nextScope = createAuthorityScopeState(oldScope.scope.scopeId + 1);
-    this.#current = nextScope;
+    for (const prepared of preparedList) {
+      isolate(() => prepared.foreground?.close());
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "Authority scope retirement encountered release errors");
+    }
     return nextScope;
   }
 
@@ -269,11 +282,20 @@ export class RuntimeObligationScope {
       scopeState.scheduledRuns.delete(runId);
     }
     this.closeFirstSendWindowInScope(scopeState, runId, expectedToken);
-    for (const [key, prepared] of scopeState.preparedAdmissions) {
+    const errors: unknown[] = [];
+    for (const [key, prepared] of [...scopeState.preparedAdmissions.entries()]) {
       if (prepared.admission.runId !== runId) continue;
       if (expectedToken !== undefined && prepared.claimToken !== expectedToken) continue;
-      prepared.foreground?.close();
       scopeState.preparedAdmissions.delete(key);
+      try {
+        prepared.foreground?.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "Failed to close prepared admission foreground handles");
     }
   }
 
@@ -338,8 +360,26 @@ export class RuntimeObligationScope {
     scopeState.assignmentRoutes.delete(assignmentId);
     scopeState.assignmentIngress.delete(assignmentId);
     if (this.isCurrent(scopeState)) {
-      artifactAuthority.remove(assignmentId);
-      interactions.releaseAssignment(assignmentId);
+      let removeError: unknown;
+      let hasRemoveError = false;
+      try {
+        artifactAuthority.remove(assignmentId);
+      } catch (error) {
+        removeError = error;
+        hasRemoveError = true;
+      }
+      try {
+        interactions.releaseAssignment(assignmentId);
+      } catch (releaseError) {
+        if (hasRemoveError) {
+          throw new AggregateError(
+            [removeError, releaseError],
+            `Assignment retirement failed for ${assignmentId}`,
+          );
+        }
+        throw releaseError;
+      }
+      if (hasRemoveError) throw removeError;
     }
   }
 
@@ -383,27 +423,42 @@ export class RuntimeObligationScope {
   ): void {
     if (!this.isCurrent(scopeState)) return;
     scopeState.pendingConversationRetirements.delete(conversationId);
-    scopeState.journals.get(conversationId)?.discardProjectionCheckpoints();
+    const journal = scopeState.journals.get(conversationId);
     scopeState.journals.delete(conversationId);
     scopeState.recoveryConversations.delete(conversationId);
     scopeState.recoveryMarkLedger.delete(conversationId);
     scopeState.firstSendWindows.delete(conversationId);
     scopeState.recoveryDeferredRounds.delete(conversationId);
     scopeState.recoveryAttempted.delete(conversationId);
+    const errors: unknown[] = [];
+    const isolate = (step: () => void) => {
+      try {
+        step();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    isolate(() => journal?.discardProjectionCheckpoints());
     for (const [assignmentId, route] of [...scopeState.assignmentRoutes.entries()]) {
       if (route.conversationId === conversationId) {
-        this.forgetAssignmentInScope(
-          scopeState,
-          assignmentId,
-          artifactAuthority,
-          interactions,
+        isolate(() =>
+          this.forgetAssignmentInScope(
+            scopeState,
+            assignmentId,
+            artifactAuthority,
+            interactions,
+          ),
         );
       }
     }
     for (const prepared of [...scopeState.preparedAdmissions.values()]) {
       if (prepared.conversationId === conversationId) {
-        this.clearRunClaimsInScope(scopeState, prepared.admission.runId);
+        isolate(() => this.clearRunClaimsInScope(scopeState, prepared.admission.runId));
       }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, `Conversation retirement failed for ${conversationId}`);
     }
   }
 }
@@ -438,12 +493,19 @@ export function holdObservedForeground(
       yielded = undefined;
     },
     close() {
-      obligation.close();
-      if (closed) return;
-      closed = true;
-      yielded?.finish();
-      yielded = undefined;
-      held.finish();
+      try {
+        obligation.close();
+      } finally {
+        if (!closed) {
+          closed = true;
+          try {
+            yielded?.finish();
+          } finally {
+            yielded = undefined;
+            held.finish();
+          }
+        }
+      }
     },
   };
 }

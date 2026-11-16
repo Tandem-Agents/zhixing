@@ -243,7 +243,13 @@ export class RecoveryScheduler {
     // First-send windows do not cross loop stop; AuthorityScope itself is NEVER replaced here.
     this.#scope.current.firstSendWindows.clear();
     const unfinished = [...this.#afterUsableUnfinished];
-    for (const preparation of unfinished) preparation.abort.abort();
+    for (const preparation of unfinished) {
+      try {
+        preparation.abort.abort();
+      } catch {
+        // Isolate abort listener failures so every unfinished preparation settles.
+      }
+    }
     await Promise.allSettled(unfinished.map((preparation) => preparation.done));
     await Promise.all(
       [this.#recoveryRunning, this.#recoveryLoopRound].map((round) =>

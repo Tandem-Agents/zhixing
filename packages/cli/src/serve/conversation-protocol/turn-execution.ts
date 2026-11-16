@@ -285,8 +285,11 @@ export class TurnExecution {
       if (appliedAdmission.replayed) {
         const committed = await journal.committedRun(runId);
         if (committed) {
-          attemptForeground.close();
-          this.#scope.clearRunClaimsInScope(capturedScope, runId, claimToken);
+          try {
+            attemptForeground.close();
+          } finally {
+            this.#scope.clearRunClaimsInScope(capturedScope, runId, claimToken);
+          }
           return replayCommittedRun(committed.runRecord, committed.windowCompact);
         }
         const replayedState = await journal.runState(runId);
@@ -305,9 +308,12 @@ export class TurnExecution {
       }
       attempt = await journal.nextAssignmentAttempt(runId);
     } catch (error) {
-      attemptForeground.close();
-      this.#scope.clearRunClaimsInScope(capturedScope, runId, claimToken);
-      this.#scope.markRecoveryInScope(capturedScope, input.conversationId);
+      try {
+        attemptForeground.close();
+      } finally {
+        this.#scope.clearRunClaimsInScope(capturedScope, runId, claimToken);
+        this.#scope.markRecoveryInScope(capturedScope, input.conversationId);
+      }
       throw error;
     }
 
@@ -344,38 +350,15 @@ export class TurnExecution {
       if (!surface) return;
       firstPartySurfaceSession = undefined;
       firstPartyFinalitySession = undefined;
-      const deadline = new AbortController();
-      const timer = setTimeout(
-        () => deadline.abort(new Error("Conversation stream tail drain timed out")),
-        5_000,
-      );
-      timer.unref?.();
-      const close = async () => {
-        clearTimeout(timer);
-        if (finalIdentity) {
-          capturedScope.pendingFirstPartyFinals.delete(finalIdentity);
-          capturedScope.ownerPublishedFirstPartyFinals.delete(finalIdentity);
-        }
-        finality?.close();
-        await surface.close();
-      };
-      void surface
-        .waitForSeq(finalSeq, deadline.signal)
-        .then(close, async (error) => {
-          this.#observeFailure(error, {
-            phase: "run",
-            conversationId: input.conversationId,
-            runId,
-          });
-          await close();
-        })
-        .catch((error) =>
-          this.#observeFailure(error, {
-            phase: "run",
-            conversationId: input.conversationId,
-            runId,
-          }),
-        );
+      void this.#settlement.drainFirstPartyProjection({
+        capturedScope,
+        conversationId: input.conversationId,
+        runId,
+        finalSeq,
+        ...(finalIdentity !== undefined ? { finalIdentity } : {}),
+        finality,
+        surface,
+      });
     };
 
     let executorPlan: ConversationExecutorDispatchPlan | undefined;

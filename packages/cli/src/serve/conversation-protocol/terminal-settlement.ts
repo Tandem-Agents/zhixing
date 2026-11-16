@@ -84,6 +84,16 @@ export interface TerminalSettlementOptions {
   ) => void;
 }
 
+export interface FirstPartyTailDrainInput {
+  readonly capturedScope: AuthorityScopeState;
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly finalSeq: number;
+  readonly finalIdentity?: string;
+  readonly finality: FirstPartyFinalitySession | undefined;
+  readonly surface: FirstPartySurfaceSession;
+}
+
 export interface RunAttemptCleanupResources {
   readonly attempt: CapturedRunAttemptHandle;
   readonly assignmentId: string;
@@ -761,6 +771,71 @@ export class TerminalSettlement {
         this.#interactions,
       );
     }
+  }
+
+  /**
+   * Drains the verified first-party surface stream up to `finalSeq` under a 5s deadline,
+   * then closes `finality` and `surface` with strict per-handle error isolation so a
+   * throwing `finality.close()` (e.g. unsubscribe failure) never skips `surface.close()`.
+   */
+  drainFirstPartyProjection(input: FirstPartyTailDrainInput): Promise<void> {
+    const {
+      capturedScope,
+      conversationId,
+      runId,
+      finalSeq,
+      finalIdentity,
+      finality,
+      surface,
+    } = input;
+    const deadline = new AbortController();
+    const timer = setTimeout(
+      () => deadline.abort(new Error("Conversation stream tail drain timed out")),
+      5_000,
+    );
+    timer.unref?.();
+    const close = async () => {
+      clearTimeout(timer);
+      if (finalIdentity) {
+        capturedScope.pendingFirstPartyFinals.delete(finalIdentity);
+        capturedScope.ownerPublishedFirstPartyFinals.delete(finalIdentity);
+      }
+      const closeErrors: unknown[] = [];
+      try {
+        finality?.close();
+      } catch (error) {
+        closeErrors.push(error);
+      }
+      try {
+        await surface.close();
+      } catch (error) {
+        closeErrors.push(error);
+      }
+      for (const error of closeErrors) {
+        this.#observeFailure(error, {
+          phase: "run",
+          conversationId,
+          runId,
+        });
+      }
+    };
+    return surface
+      .waitForSeq(finalSeq, deadline.signal)
+      .then(close, async (error) => {
+        this.#observeFailure(error, {
+          phase: "run",
+          conversationId,
+          runId,
+        });
+        await close();
+      })
+      .catch((error) =>
+        this.#observeFailure(error, {
+          phase: "run",
+          conversationId,
+          runId,
+        }),
+      );
   }
 
   /**

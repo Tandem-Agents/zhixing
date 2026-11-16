@@ -326,7 +326,7 @@ export interface InteractionStreamProjectionReceipt {
 
 export interface AssignmentInteractionStreamSourcePort {
   interactionStreamEvents(assignmentId: string, afterRecordSeq?: number): Promise<readonly DurableInteractionStreamEvent[]>;
-  interactionStreamProjectedUpTo(assignmentId: string): Promise<number>;
+  interactionStreamProjectedUpTo(assignmentId: string): Promise<number | undefined>;
 }
 
 export interface PendingAssignmentInteraction {

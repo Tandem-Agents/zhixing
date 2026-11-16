@@ -2345,5 +2345,105 @@ export function illegalMutations(
       revDuringAwait,
     );
     expect(removedArtifacts.length).toBe(removedCountBeforeResolve);
+
+    // 7. Background first-party tail drain isolates finality.close() throw so surface.close() always runs and errors are observed
+    const tailObservedErrors: string[] = [];
+    const tailSettlement = new TerminalSettlement({
+      authority: {} as never,
+      scope,
+      access: {
+        createDefaultDispatchContexts: () => ({}),
+        journal: () => ({ assignmentsAwaitingRecovery: async () => [] }),
+      } as never,
+      admission: {} as never,
+      host: { scheduleResolvedRetry: async () => {} },
+      requiredManager: () => ({}) as never,
+      clock: () => "2026-11-16T00:00:00.000Z",
+      executorDispatch: {} as never,
+      assignmentArtifactAuthority: artifactAuthority,
+      interactions,
+      observeFailure: (err) => {
+        tailObservedErrors.push((err as Error).message);
+      },
+    });
+    let tailFinalityCloses = 0;
+    let tailSurfaceCloses = 0;
+    newScope.pendingFirstPartyFinals.add("final-id-1");
+    newScope.ownerPublishedFirstPartyFinals.add("final-id-1");
+    await tailSettlement.drainFirstPartyProjection({
+      capturedScope: newScope,
+      conversationId: "conv-tail",
+      runId: "run-tail",
+      finalSeq: 7,
+      finalIdentity: "final-id-1",
+      finality: {
+        close() {
+          tailFinalityCloses += 1;
+          throw new Error("finality-unsubscribe-boom");
+        },
+      } as never,
+      surface: {
+        async waitForSeq() {},
+        async close() {
+          tailSurfaceCloses += 1;
+        },
+      } as never,
+    });
+    expect(tailFinalityCloses).toBe(1);
+    expect(tailSurfaceCloses).toBe(1);
+    expect(newScope.pendingFirstPartyFinals.has("final-id-1")).toBe(false);
+    expect(newScope.ownerPublishedFirstPartyFinals.has("final-id-1")).toBe(false);
+    expect(tailObservedErrors).toEqual(["finality-unsubscribe-boom"]);
+
+    // Also when waitForSeq rejects AND finality.close() throws AND surface.close() throws, all 3 run & report
+    const tripleObservedErrors: string[] = [];
+    const tripleSettlement = new TerminalSettlement({
+      authority: {} as never,
+      scope,
+      access: {
+        createDefaultDispatchContexts: () => ({}),
+        journal: () => ({ assignmentsAwaitingRecovery: async () => [] }),
+      } as never,
+      admission: {} as never,
+      host: { scheduleResolvedRetry: async () => {} },
+      requiredManager: () => ({}) as never,
+      clock: () => "2026-11-16T00:00:00.000Z",
+      executorDispatch: {} as never,
+      assignmentArtifactAuthority: artifactAuthority,
+      interactions,
+      observeFailure: (err) => {
+        tripleObservedErrors.push((err as Error).message);
+      },
+    });
+    let tripleFinalityCloses = 0;
+    let tripleSurfaceCloses = 0;
+    await tripleSettlement.drainFirstPartyProjection({
+      capturedScope: newScope,
+      conversationId: "conv-tail-2",
+      runId: "run-tail-2",
+      finalSeq: 8,
+      finality: {
+        close() {
+          tripleFinalityCloses += 1;
+          throw new Error("finality-close-boom");
+        },
+      } as never,
+      surface: {
+        async waitForSeq() {
+          throw new Error("wait-seq-timeout");
+        },
+        async close() {
+          tripleSurfaceCloses += 1;
+          throw new Error("surface-close-boom");
+        },
+      } as never,
+    });
+    expect(tripleFinalityCloses).toBe(1);
+    expect(tripleSurfaceCloses).toBe(1);
+    expect(tripleObservedErrors).toEqual([
+      "wait-seq-timeout",
+      "finality-close-boom",
+      "surface-close-boom",
+    ]);
   });
 });
