@@ -1,4 +1,9 @@
-import { projectionCheckpointKey } from "@zhixing-ai/core/authority";
+import { Buffer } from "node:buffer";
+import {
+  AuthorityStorageError,
+  DurableProjectionStorageError,
+  projectionCheckpointKey,
+} from "@zhixing-ai/core/authority";
 import type {
   ArtifactStore,
   AuthorityCommitLog,
@@ -30,6 +35,7 @@ import type {
   JsonValue,
   LedgerEvidencePage,
   LedgerSnapshot,
+  LogicalRecord,
   SealedBundle,
   SessionStagedMutation,
   StreamFrame,
@@ -39,16 +45,19 @@ import type {
 } from "@zhixing-ai/core/contracts";
 import type { StorageMaintenanceUrgency } from "@zhixing-ai/core/resources";
 import type { TrustRuleSnapshot } from "@zhixing-ai/core/security";
-import type {
-  AssignmentInteractionOutcome,
-  AssignmentLedgerValidationState,
-  ConversationInteractionMirrorEntry,
-  ExecutorCapabilitySnapshot,
-  FirstPartyInteractionDecision,
-  ProtocolSignatureVerifier,
-  ProtocolSigner,
-  StreamDataFramePayload,
-  StreamVerifierCheckpoint,
+import {
+  assertProtocolIdentifier as assertIdentifier,
+  canonicalize,
+  requiresFormalResourceCoordination,
+  type AssignmentInteractionOutcome,
+  type AssignmentLedgerValidationState,
+  type ConversationInteractionMirrorEntry,
+  type ExecutorCapabilitySnapshot,
+  type FirstPartyInteractionDecision,
+  type ProtocolSignatureVerifier,
+  type ProtocolSigner,
+  type StreamDataFramePayload,
+  type StreamVerifierCheckpoint,
 } from "@zhixing-ai/core/protocol";
 import type {
   DataPlaneAssignmentBinding,
@@ -253,12 +262,12 @@ export interface JobSealInput {
   readonly usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number };
 }
 
-export interface StagedJobMutationInput {
+export type StagedJobMutationInput = {
   readonly domain: "global";
   readonly mutation: JobGlobalStagedMutation;
   readonly requestId: string;
   readonly expected: { readonly anchorEpoch: number };
-}
+};
 
 export interface InteractionRecoveryResult {
   readonly pending: ReadonlyArray<
@@ -379,6 +388,43 @@ export type LegacyHistoryPage = LegacyHistory & {
   readonly pages: number;
 };
 
+export interface LedgerControlState {
+  readonly authority: AuthorityEpochRef;
+  readonly ownerDeviceId: string;
+  readonly lease: ControlLease;
+  readonly validForMs: number;
+  readonly acceptedAt: string;
+}
+
+export interface LedgerReceivedState {
+  readonly body: Extract<AssignmentRecord, { t: "received" }>;
+  readonly recordSeq: number;
+  readonly ledgerDigest: string;
+  resourceLease?: AssignmentResourceLease;
+  permission?: {
+    readonly controlLeaseId: string;
+    readonly validForMs: number;
+    readonly acceptedAt: string;
+  };
+}
+
+export interface LedgerRejectionState {
+  readonly body: Extract<AssignmentRecord, { t: "dispatch-rejected" }>;
+  readonly recordSeq: number;
+  readonly ledgerDigest: string;
+}
+
+export interface LedgerSupersedeFenceState {
+  readonly body: Extract<AssignmentRecord, { t: "supersede-fenced" }>;
+  readonly recordSeq: number;
+  readonly ledgerDigest: string;
+}
+
+export interface LedgerStartedState {
+  readonly recordSeq: number;
+  readonly ledgerDigest: string;
+}
+
 export interface LedgerProjection {
   readonly assignmentId: string;
   leaseTimeFrontier: number;
@@ -388,36 +434,12 @@ export interface LedgerProjection {
   lastSeq: number;
   chainDigest: string;
   phase: LedgerSnapshot["phase"];
-  control?: {
-    readonly authority: AuthorityEpochRef;
-    readonly ownerDeviceId: string;
-    readonly lease: ControlLease;
-    readonly validForMs: number;
-    readonly acceptedAt: string;
-  };
+  control?: LedgerControlState;
   sealed?: Extract<AssignmentRecord, { t: "bundle_sealed" }>;
-  received?: {
-    readonly body: Extract<AssignmentRecord, { t: "received" }>;
-    readonly recordSeq: number;
-    readonly ledgerDigest: string;
-    resourceLease?: AssignmentResourceLease;
-    permission?: {
-      readonly controlLeaseId: string;
-      readonly validForMs: number;
-      readonly acceptedAt: string;
-    };
-  };
-  rejection?: {
-    readonly body: Extract<AssignmentRecord, { t: "dispatch-rejected" }>;
-    readonly recordSeq: number;
-    readonly ledgerDigest: string;
-  };
-  started?: { readonly recordSeq: number; readonly ledgerDigest: string };
-  supersedeFence?: {
-    readonly body: Extract<AssignmentRecord, { t: "supersede-fenced" }>;
-    readonly recordSeq: number;
-    readonly ledgerDigest: string;
-  };
+  received?: LedgerReceivedState;
+  rejection?: LedgerRejectionState;
+  started?: LedgerStartedState;
+  supersedeFence?: LedgerSupersedeFenceState;
   aborts: Array<Extract<AssignmentRecord, { t: "abort-requested" }>>;
   halted?: CancelProofBody;
   readonly sideEffects: Map<
@@ -463,6 +485,178 @@ export interface LedgerProjection {
   legacyHistoryPages?: LegacyHistoryPages;
 }
 
+export type DecisionState = {
+  readonly coveredLsn: number;
+  readonly state: LedgerProjection;
+};
+
+export interface ReadonlyLedgerReceivedState {
+  readonly body: Extract<AssignmentRecord, { t: "received" }>;
+  readonly recordSeq: number;
+  readonly ledgerDigest: string;
+  readonly resourceLease?: AssignmentResourceLease;
+  readonly permission?: Readonly<{
+    readonly controlLeaseId: string;
+    readonly validForMs: number;
+    readonly acceptedAt: string;
+  }>;
+}
+
+export interface ValidationTicketAbortFact {
+  readonly refId: string;
+  readonly recordSeq: number;
+  readonly ledgerDigest: string;
+}
+
+export type DispatchDecision =
+  | { readonly kind: "accepted" }
+  | {
+      readonly kind: "rejected";
+      readonly dispatchDigest: string;
+      readonly error: AuthorityError;
+      readonly recordSeq: number;
+      readonly ledgerDigest: string;
+    }
+  | {
+      readonly kind: "conflict";
+      readonly received: ReadonlyLedgerReceivedState;
+    };
+
+export type AbortCause =
+  | {
+      readonly cause: "owner-fence";
+      readonly fence: { readonly fenceSeq: number; readonly requestId: string };
+      readonly authority: AuthorityEpochRef;
+    }
+  | {
+      readonly cause: "abort-ticket";
+      readonly ticketDigest: string;
+      readonly surfacePrincipal: string;
+    };
+
+export interface ExecutionControlFacts {
+  readonly assignmentId: string;
+  readonly lastSeq: number;
+  readonly chainDigest: string;
+  readonly phase: LedgerSnapshot["phase"];
+  readonly leaseTimeFrontier: number;
+  readonly leaseAcceptanceFloor: number;
+  readonly control: Readonly<LedgerControlState> | undefined;
+  readonly received: ReadonlyLedgerReceivedState | undefined;
+  readonly rejection: Readonly<LedgerRejectionState> | undefined;
+  readonly started: Readonly<LedgerStartedState> | undefined;
+  readonly supersedeFence: Readonly<LedgerSupersedeFenceState> | undefined;
+  readonly halted: CancelProofBody | undefined;
+  readonly hasAborts: boolean;
+  hasAbortMatching(
+    predicate: (abort: Extract<AssignmentRecord, { t: "abort-requested" }>) => boolean,
+  ): boolean;
+  pendingRequestsSnapshot(): readonly RequestedInteraction[];
+  readonly sideEffectCount: number;
+  readonly hasOpenSideEffects: boolean;
+  readonly hasPendingInteractionObligations: boolean;
+}
+
+export interface InteractionEffectFacts {
+  readonly assignmentId: string;
+  readonly lastSeq: number;
+  readonly phase: LedgerSnapshot["phase"];
+  readonly control: Readonly<LedgerControlState> | undefined;
+  readonly received: ReadonlyLedgerReceivedState | undefined;
+  readonly supersedeFence: Readonly<LedgerSupersedeFenceState> | undefined;
+  readonly hasAborts: boolean;
+  latestAbort(
+    via?: "owner-fence" | "abort-ticket",
+  ): Extract<AssignmentRecord, { t: "abort-requested" }> | undefined;
+  firstValidationTicketAbort(): ValidationTicketAbortFact | undefined;
+  readonly sideEffectCount: number;
+  readonly hasOpenSideEffects: boolean;
+  sideEffectBySeq(effectSeq: number):
+    | Readonly<{
+        readonly started: Extract<AssignmentRecord, { t: "side-effect-started" }>;
+        readonly completed?: Extract<AssignmentRecord, { t: "side-effect-completed" }>;
+      }>
+    | undefined;
+  readonly trustSedimentCount: number;
+  readonly trustRuleHitCount: number;
+  readonly interactionMirrorDigest: string;
+  readonly lastFinishedInteractionRecordSeq: number;
+  readonly needsStreamProof: boolean;
+  hasRequested(requestId: string): boolean;
+  requestedById(requestId: string): Readonly<RequestedInteraction> | undefined;
+  readonly pendingRequestCount: number;
+  pendingRequestsSnapshot(): readonly RequestedInteraction[];
+  finishedById(requestId: string): Readonly<FinishedInteraction> | undefined;
+  readonly finishedCount: number;
+  interactionProjectionSourceIdsBetween(
+    afterRecordSeq: number,
+    upToRecordSeq: number,
+  ): readonly string[];
+  readonly streamProjectionEnabledAfter: number | undefined;
+  readonly streamProjectedUpTo: number;
+  readonly lastInteractionStreamSeq: number;
+  readonly interactionStreamDigest: string | undefined;
+  readonly lastStreamProjectionRecordSeq: number | undefined;
+  readonly lastStreamProjectionDigest: string | undefined;
+  readonly historyInteractionUpTo: number | undefined;
+}
+
+export interface SealingEvidenceFacts {
+  readonly assignmentId: string;
+  readonly lastSeq: number;
+  readonly phase: LedgerSnapshot["phase"];
+  readonly received: ReadonlyLedgerReceivedState | undefined;
+  readonly sealed: Extract<AssignmentRecord, { t: "bundle_sealed" }> | undefined;
+  readonly halted: CancelProofBody | undefined;
+  readonly failure: Extract<AssignmentRecord, { t: "execution-failed" }> | undefined;
+  readonly hasAborts: boolean;
+  readonly stagedMutationCount: number;
+  hasMutationRequestId(requestId: string): boolean;
+  stagedMutationForRequestId(
+    requestId: string,
+  ): Extract<AssignmentRecord, { t: "staged-mutation" }> | undefined;
+  stagedMutationsSnapshot(): readonly Extract<AssignmentRecord, { t: "staged-mutation" }>[];
+  readonly hasOpenSideEffects: boolean;
+  readonly hasPendingInteractionObligations: boolean;
+}
+
+export interface ReceiptRecoveryFacts {
+  readonly assignmentId: string;
+  readonly lastSeq: number;
+  readonly phase: LedgerSnapshot["phase"];
+  readonly received: ReadonlyLedgerReceivedState | undefined;
+  readonly started: Readonly<LedgerStartedState> | undefined;
+  readonly supersedeFence: Readonly<LedgerSupersedeFenceState> | undefined;
+  readonly halted: CancelProofBody | undefined;
+  readonly hasAborts: boolean;
+  hasAbortMatching(
+    predicate: (abort: Extract<AssignmentRecord, { t: "abort-requested" }>) => boolean,
+  ): boolean;
+  latestAbort(
+    via?: "owner-fence" | "abort-ticket",
+  ): Extract<AssignmentRecord, { t: "abort-requested" }> | undefined;
+  firstValidationTicketAbort(): ValidationTicketAbortFact | undefined;
+  readonly acknowledgedCommitRevision: number | undefined;
+  readonly streamProjectionEnabledAfter: number | undefined;
+  readonly cancelProofOwnerAccepted: boolean;
+  readonly interactionSettlementOwnerAccepted: AssignmentLedgerValidationState["interactionSettlementOwnerAccepted"];
+  readonly mirroredInteractionOrdinal: number;
+  readonly mirroredInteractionDigest: string;
+  readonly mirroredFinishedCount: number;
+  readonly finishedCount: number;
+  finishedIndexAtSeq(seq: number): number | undefined;
+  historicMirrorAt(seq: number): MirrorChainItem | undefined;
+  finishedAt(index: number): MirrorChainItem | undefined;
+}
+
+export type PreparedExecutionAuthorityCheck = (
+  facts: {
+    readonly phase: LedgerSnapshot["phase"];
+    readonly control: Readonly<LedgerControlState> | undefined;
+  },
+  prefix: ProjectionTransactionContext,
+) => Promise<void>;
+
 export interface JobRecoveryIndexValue {
   readonly v: 5;
   readonly assignmentId: string;
@@ -500,6 +694,7 @@ export const DECISION_STATE_SAVE_DELAY_MS = 5_000;
 export const LEGACY_HISTORY_PAGE_KEYS = 8;
 export const DATA_PLANE_BINDING_BATCH_LIMIT = 4096;
 export const BINDING_RECOVERY_CHUNK = 64;
+export const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 
 export interface StoredDataPlaneBinding {
   readonly observe?: DataPlaneAssignmentBinding;
@@ -512,6 +707,15 @@ export interface ReceiptWaiter {
   settled: boolean;
   readonly resolve: (value: number) => void;
   readonly reject: (error: unknown) => void;
+}
+
+export class HistoryLookupRequired extends Error {}
+
+export class JobRecoveryProjectionValueError extends DurableProjectionStorageError {
+  constructor(message: string) {
+    super(message);
+    this.name = "JobRecoveryProjectionValueError";
+  }
 }
 
 export class AssignmentExecutionResourceRetiredError extends TypeError {
@@ -571,4 +775,139 @@ export function buildLedgerProjectionCheckpointPrefix(
     );
   }
   return projectionCheckpointKey(projectionName, version, ...leafFns);
+}
+
+export const requiresExecutorResourceReceipt = requiresFormalResourceCoordination;
+
+export function nextEntryFromSeq(
+  lastSeq: number,
+  body: AssignmentRecord,
+): AssignmentEntry {
+  return { recordSeq: lastSeq + 1, body: snapshot(body, "Assignment record") };
+}
+
+export function assignmentRecord(
+  assignmentId: string,
+  entry: AssignmentEntry,
+): LogicalRecord<AssignmentEntry> {
+  return { stream: assignmentStream(assignmentId), body: entry };
+}
+
+export function assignmentStream(assignmentId: string): string {
+  return `assignment:${assignmentId}`;
+}
+
+export function authorityForExecutionRef(
+  ref: AssignmentActivationProof["ref"],
+): AuthorityEpochRef {
+  return ref.execution === "conversation"
+    ? {
+        execution: "conversation",
+        conversationId: ref.conversationId,
+        ownerEpoch: ref.ownerEpoch,
+      }
+    : {
+        execution: "job",
+        taskId: ref.taskId,
+        anchorEpoch: ref.anchorEpoch,
+      };
+}
+
+export function withoutSignature<T extends { readonly signature: unknown }>(
+  proof: T,
+): Omit<T, "signature"> {
+  const { signature: _, ...payload } = proof;
+  return snapshot(payload, "Assignment activation payload");
+}
+
+export function canonicalTime(value: string, label: string): number {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
+    throw new TypeError(`${label} must be a canonical ISO timestamp`);
+  }
+  return timestamp;
+}
+
+export function assertBoundedText(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.length > 4_096) {
+    throw new TypeError(`${label} must be a bounded string`);
+  }
+}
+
+export function assertDigest(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError(`${label} must be a canonical SHA-256 digest`);
+  }
+}
+
+export function assertPositiveSafeInteger(value: unknown, label: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+}
+
+export function assertNonNegativeSafeInteger(
+  value: unknown,
+  label: string,
+): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new TypeError(`${label} must be a non-negative safe integer`);
+  }
+}
+
+export function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
+export function assertFence(
+  value: { readonly fenceSeq: number; readonly requestId: string },
+  label: string,
+): void {
+  if (Object.keys(value).sort().join("\0") !== "fenceSeq\0requestId") {
+    throw new TypeError(`${label} fields are incomplete or unknown`);
+  }
+  assertPositiveSafeInteger(value.fenceSeq, `${label} sequence`);
+  assertIdentifier(value.requestId, `${label} requestId`);
+}
+
+export function assertPlainObject(
+  value: unknown,
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+}
+
+export function assertExactKeys(
+  value: object,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (canonicalize(actual) !== canonicalize(wanted)) {
+    throw new TypeError(`${label} fields are incomplete or unknown`);
+  }
+}
+
+export function corruptLedger(message: string): AuthorityStorageError {
+  return new AuthorityStorageError("invalid-authority-record", message);
+}
+
+export function snapshot<T>(value: T, label: string): T {
+  try {
+    return JSON.parse(canonicalize(value)) as T;
+  } catch (error) {
+    throw new TypeError(`${label} is not canonical protocol data`, { cause: error });
+  }
 }

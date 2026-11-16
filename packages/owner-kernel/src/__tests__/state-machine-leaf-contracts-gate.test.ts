@@ -12,6 +12,17 @@ import {
   buildLedgerProjectionCheckpointPrefix,
 } from "../../../executor/src/ledger/contracts.js";
 import {
+  toExecutionControlFacts,
+  toInteractionEffectFacts,
+  toReceiptRecoveryFacts,
+  toSealingEvidenceFacts,
+} from "../../../executor/src/ledger/projection-history-store.js";
+import {
+  LEDGER_BINDING_FINGERPRINT_FNS,
+  LEDGER_DECISION_FINGERPRINT_FNS,
+  emptyProjection,
+} from "../../../executor/src/ledger/state-replay.js";
+import {
   CONVERSATION_INTERNAL_RECORD_FAMILY_OWNERS,
   CONVERSATION_RECORD_FAMILY_OWNERS,
   emptyConversationRunProjection,
@@ -257,6 +268,30 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
           "@zhixing-ai/owner-kernel/conversation-assignment",
           "@zhixing-ai/owner-kernel/job-assignment",
         ]),
+      ),
+    ).toEqual([]);
+
+    // 5. Same-package non-index non-facade production modules in executor must not import assignment-ledger facade
+    const executorSrcRoot = path.join(REPO_ROOT, "packages/executor/src");
+    const executorRootProdFiles = fs
+      .readdirSync(executorSrcRoot, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          entry.name.endsWith(".ts") &&
+          !entry.name.endsWith(".test.ts") &&
+          entry.name !== "index.ts" &&
+          entry.name !== "assignment-ledger.ts",
+      )
+      .map((entry) => {
+        const filePath = path.join(executorSrcRoot, entry.name);
+        return { filePath, sourceText: fs.readFileSync(filePath, "utf8") };
+      });
+    expect(
+      collectFacadeViolations(
+        executorRootProdFiles,
+        new Set([path.resolve(REPO_ROOT, "packages/executor/src/assignment-ledger")]),
+        new Set(["@zhixing-ai/executor/assignment-ledger"]),
       ),
     ).toEqual([]);
 
@@ -1411,5 +1446,346 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
     );
     expect(guardView.durableStarted.has("assign-guard-1")).toBe(true);
     expect(guardView.states.get("jr-guard-1")?.state).toBe("running");
+  });
+
+  it("preserves exact baseline public export surface on assignment-ledger.ts (7 values, 27 types)", () => {
+    const facadePath = path.join(
+      REPO_ROOT,
+      "packages/executor/src/assignment-ledger.ts",
+    );
+    const exported = extractExplicitExportsViaAst(facadePath);
+    expect(exported.values).toEqual([
+      "AssignmentExecutionResourceRetiredError",
+      "AssignmentLedger",
+      "AssignmentStartCancelledError",
+      "ConversationAssignmentLedger",
+      "DATA_PLANE_BINDING_BATCH_LIMIT",
+      "InProcessAssignmentSubmission",
+      "registerExecutorJobRecoveryProjection",
+    ]);
+    expect(exported.types).toEqual([
+      "AssignmentLedgerOptions",
+      "AssignmentSubmissionPort",
+      "ChannelInteractionAnswerPreparation",
+      "ConversationDispatchPort",
+      "ConversationSealInput",
+      "ConversationSubmissionPort",
+      "DurableInteractionStreamEvent",
+      "InProcessAssignmentSubmissionOptions",
+      "InteractionMirrorReceipt",
+      "InteractionOutcome",
+      "InteractionRecoveryResult",
+      "InteractionRequestDisposition",
+      "InteractionRequestInput",
+      "InteractionStreamProjectionReceipt",
+      "JobRecoveryObligation",
+      "JobRecoveryObligationPage",
+      "JobSealInput",
+      "OwnerControlAuthorizer",
+      "OwnerControlPreflightPort",
+      "OwnerControlRequest",
+      "PendingAssignmentInteraction",
+      "SideEffectInput",
+      "StagedConversationMutationInput",
+      "StagedJobMutationInput",
+      "SurfaceAbortDisposition",
+      "SurfaceAbortInput",
+      "SurfaceInteractionAnswerPreparation",
+    ]);
+  });
+
+  it("enforces Slice D narrow readonly fact encapsulation (zero LedgerProjection in 4 operation units) and single protocol phase source in state-replay.ts", () => {
+    const countIdentifier = (fileName: string, sourceText: string, ident: string): number => {
+      const sf = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
+      let hits = 0;
+      const visit = (node: ts.Node): void => {
+        if (ts.isIdentifier(node) && node.text === ident) hits++;
+        ts.forEachChild(node, visit);
+      };
+      visit(sf);
+      return hits;
+    };
+
+    const unitFiles = [
+      "packages/executor/src/ledger/execution-control.ts",
+      "packages/executor/src/ledger/interaction-effect.ts",
+      "packages/executor/src/ledger/sealing-evidence.ts",
+      "packages/executor/src/ledger/receipt-recovery.ts",
+    ];
+    for (const rel of unitFiles) {
+      const fullPath = path.join(REPO_ROOT, rel);
+      const src = fs.readFileSync(fullPath, "utf8");
+      expect(countIdentifier(fullPath, src, "LedgerProjection"), rel).toBe(0);
+    }
+
+    // Negative proof: an accidental LedgerProjection reference is caught by AST identifier scan
+    expect(
+      countIdentifier(
+        "synthetic-unit.ts",
+        'import type { LedgerProjection } from "./contracts.js";\nexport type Bad = LedgerProjection;\n',
+        "LedgerProjection",
+      ),
+    ).toBe(2);
+
+    // Single protocol stage source: state-replay.ts derives state.phase from state.validation.phase (zero string-literal assignments to state.phase)
+    const stateReplayPath = path.join(
+      REPO_ROOT,
+      "packages/executor/src/ledger/state-replay.ts",
+    );
+    const stateReplaySrc = fs.readFileSync(stateReplayPath, "utf8");
+    const stateReplaySf = ts.createSourceFile(
+      stateReplayPath,
+      stateReplaySrc,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    let validationPhaseAssignments = 0;
+    const literalStatePhaseAssignments: string[] = [];
+    const visitReplay = (node: ts.Node): void => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(node.left) &&
+        ts.isIdentifier(node.left.expression) &&
+        node.left.expression.text === "state" &&
+        node.left.name.text === "phase"
+      ) {
+        if (ts.isStringLiteral(node.right)) {
+          literalStatePhaseAssignments.push(node.right.text);
+        } else if (
+          ts.isPropertyAccessExpression(node.right) &&
+          ts.isPropertyAccessExpression(node.right.expression) &&
+          ts.isIdentifier(node.right.expression.expression) &&
+          node.right.expression.expression.text === "state" &&
+          node.right.expression.name.text === "validation" &&
+          node.right.name.text === "phase"
+        ) {
+          validationPhaseAssignments++;
+        }
+      }
+      ts.forEachChild(node, visitReplay);
+    };
+    visitReplay(stateReplaySf);
+    expect(literalStatePhaseAssignments).toEqual([]);
+    expect(validationPhaseAssignments).toBeGreaterThanOrEqual(1);
+  });
+
+  it("binds Slice D ledger decision & binding checkpoint prefixes to real leaf reducer functions (sensitive to leaf body edits)", () => {
+    expect(LEDGER_DECISION_FINGERPRINT_FNS.length).toBeGreaterThanOrEqual(5);
+    expect(LEDGER_BINDING_FINGERPRINT_FNS.length).toBeGreaterThanOrEqual(4);
+
+    const decisionPrefixA = buildLedgerProjectionCheckpointPrefix(
+      "executor-assignment-ledger-decision",
+      2,
+      LEDGER_DECISION_FINGERPRINT_FNS,
+    );
+    const mutatedDecisionLeaf = [
+      ...LEDGER_DECISION_FINGERPRINT_FNS.slice(0, -1),
+      function restoreDecisionStateMutated() {
+        return "mutated-decision-leaf";
+      },
+    ];
+    const decisionPrefixB = buildLedgerProjectionCheckpointPrefix(
+      "executor-assignment-ledger-decision",
+      2,
+      mutatedDecisionLeaf,
+    );
+    expect(decisionPrefixB).not.toBe(decisionPrefixA);
+
+    const bindingPrefixA = buildLedgerProjectionCheckpointPrefix(
+      "executor-assignment-ledger-binding",
+      1,
+      LEDGER_BINDING_FINGERPRINT_FNS,
+    );
+    const mutatedBindingLeaf = [
+      ...LEDGER_BINDING_FINGERPRINT_FNS.slice(0, -1),
+      function emptyProjectionMutated() {
+        return "mutated-binding-leaf";
+      },
+    ];
+    const bindingPrefixB = buildLedgerProjectionCheckpointPrefix(
+      "executor-assignment-ledger-binding",
+      1,
+      mutatedBindingLeaf,
+    );
+    expect(bindingPrefixB).not.toBe(bindingPrefixA);
+  });
+
+  it("seals Slice D fact views against live collection exposure and uncast state mutation", () => {
+    const contractsPath = path.join(
+      REPO_ROOT,
+      "packages/executor/src/ledger/contracts.ts",
+    );
+    const contractsSrc = fs.readFileSync(contractsPath, "utf8");
+    const contractsSf = ts.createSourceFile(
+      contractsPath,
+      contractsSrc,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const factInterfaceNames = new Set([
+      "ExecutionControlFacts",
+      "InteractionEffectFacts",
+      "SealingEvidenceFacts",
+      "ReceiptRecoveryFacts",
+    ]);
+    const forbiddenTypeRefs = new Set(["Map", "ReadonlyMap", "Set", "ReadonlySet"]);
+    const exposedCollections: string[] = [];
+    for (const stmt of contractsSf.statements) {
+      if (ts.isInterfaceDeclaration(stmt) && factInterfaceNames.has(stmt.name.text)) {
+        const ifaceName = stmt.name.text;
+        const walk = (node: ts.Node): void => {
+          if (
+            ts.isTypeReferenceNode(node) &&
+            ts.isIdentifier(node.typeName) &&
+            forbiddenTypeRefs.has(node.typeName.text)
+          ) {
+            exposedCollections.push(`${ifaceName}:${node.typeName.text}`);
+          }
+          if (
+            ts.isIndexedAccessTypeNode(node) &&
+            node.getText(contractsSf).includes('["aborts"]')
+          ) {
+            exposedCollections.push(`${ifaceName}:${node.getText(contractsSf)}`);
+          }
+          ts.forEachChild(node, walk);
+        };
+        walk(stmt);
+      }
+    }
+    expect(exposedCollections).toEqual([]);
+
+    const state = emptyProjection("assign-facts-probe");
+    const ticketDigest = `sha256:${"7".repeat(64)}`;
+    state.validation.aborts.set(`abort-ticket:${ticketDigest}`, {
+      via: "abort-ticket",
+      refId: ticketDigest,
+      surfacePrincipal: "surface:user-1",
+      recordSeq: 4,
+      ledgerDigest: `sha256:${"8".repeat(64)}`,
+    });
+    state.aborts.push({
+      v: 1,
+      t: "abort-requested",
+      via: "abort-ticket",
+      refId: ticketDigest,
+      surfacePrincipal: "surface:user-1",
+    });
+    state.received = {
+      body: {
+        v: 1,
+        t: "received",
+        envelope: { ref: { digest: `sha256:${"1".repeat(64)}`, byteLength: 64 } },
+        activation: {
+          v: 1,
+          ref: {
+            execution: "conversation",
+            runId: "run-1",
+            conversationId: "conv-1",
+            ownerEpoch: 1,
+          },
+          dispatchDigest: `sha256:${"2".repeat(64)}`,
+          manifestDigest: `sha256:${"3".repeat(64)}`,
+          permissionLeaseDigest: `sha256:${"4".repeat(64)}`,
+          commit: { lsn: 1, envelopeDigest: `sha256:${"5".repeat(64)}` },
+          issuedAt: "2026-11-16T00:00:00.000Z",
+          signature: { alg: "test", keyId: "owner-1", sig: "sig" },
+        },
+      },
+      recordSeq: 1,
+      ledgerDigest: `sha256:${"6".repeat(64)}`,
+      permission: {
+        controlLeaseId: "ctl-1",
+        validForMs: 60_000,
+        acceptedAt: "2026-11-16T00:00:00.000Z",
+      },
+    };
+    const reqRecord: Extract<AssignmentRecord, { t: "interaction-requested" }> = {
+      v: 1,
+      t: "interaction-requested",
+      requestId: "req-1",
+      kind: "allow-once",
+      toolName: "bash",
+      display: { title: "Allow?", lines: ["ls"] },
+      issuedAt: "2026-11-16T00:00:00.000Z",
+      ttlMs: 30_000,
+      expiresAt: "2026-11-16T00:00:30.000Z",
+    };
+    state.requested.set("req-1", { body: reqRecord, recordSeq: 2 });
+    state.pendingRequests.set("req-1", { body: reqRecord, recordSeq: 2 });
+    state.sideEffects.set(1, {
+      started: {
+        v: 1,
+        t: "side-effect-started",
+        effectSeq: 1,
+        kind: "tool-mutation",
+        toolName: "write_file",
+        summary: "write",
+        target: "workspace-file",
+      },
+    });
+    const stagedRecord: Extract<AssignmentRecord, { t: "staged-mutation" }> = {
+      v: 1,
+      t: "staged-mutation",
+      seq: 1,
+      domain: "session",
+      requestId: "mut-1",
+      mutation: { kind: "session-title", title: "Title" } as unknown as Extract<
+        AssignmentRecord,
+        { t: "staged-mutation" }
+      >["mutation"],
+    };
+    state.stagedMutations.push(stagedRecord);
+    state.mutationRequestIds.add("mut-1");
+    state.stagedMutationByRequestId.set("mut-1", stagedRecord);
+
+    const execFacts = toExecutionControlFacts(state);
+    const intFacts = toInteractionEffectFacts(state);
+    const sealFacts = toSealingEvidenceFacts(state);
+    const recFacts = toReceiptRecoveryFacts(state);
+
+    if (false) {
+      // @ts-expect-error ReadonlyLedgerReceivedState forbids mutating permission
+      execFacts.received!.permission = undefined;
+      // @ts-expect-error nested permission is readonly
+      execFacts.received!.permission!.validForMs = 0;
+      // @ts-expect-error snapshot array is readonly
+      intFacts.pendingRequestsSnapshot().push({ body: reqRecord, recordSeq: 9 });
+      // @ts-expect-error snapshot array is readonly
+      sealFacts.stagedMutationsSnapshot().push(stagedRecord);
+    }
+
+    expect(Object.isFrozen(execFacts)).toBe(true);
+    expect(Object.isFrozen(intFacts)).toBe(true);
+    expect(Object.isFrozen(sealFacts)).toBe(true);
+    expect(Object.isFrozen(recFacts)).toBe(true);
+    expect(Object.isFrozen(intFacts.received)).toBe(true);
+    expect(Object.isFrozen(intFacts.received?.permission)).toBe(true);
+    expect("validationAborts" in (intFacts as Record<string, unknown>)).toBe(false);
+    expect("validationAborts" in (recFacts as Record<string, unknown>)).toBe(false);
+
+    const ticketAbort = intFacts.firstValidationTicketAbort();
+    expect(ticketAbort).toEqual({
+      refId: ticketDigest,
+      recordSeq: 4,
+      ledgerDigest: `sha256:${"8".repeat(64)}`,
+    });
+    expect(Object.isFrozen(ticketAbort)).toBe(true);
+    expect(() => {
+      (ticketAbort as { refId: string }).refId = "tampered";
+    }).toThrow(TypeError);
+    expect(() => {
+      (intFacts.sideEffectBySeq(1) as { completed?: unknown }).completed = {};
+    }).toThrow(TypeError);
+    expect(() => {
+      (intFacts.pendingRequestsSnapshot() as unknown[]).pop();
+    }).toThrow(TypeError);
+    expect(() => {
+      (sealFacts.stagedMutationsSnapshot() as unknown[]).pop();
+    }).toThrow(TypeError);
+
+    expect(state.validation.aborts.size).toBe(1);
+    expect(state.pendingRequests.size).toBe(1);
+    expect(state.stagedMutations.length).toBe(1);
   });
 });
