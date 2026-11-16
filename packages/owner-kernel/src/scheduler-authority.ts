@@ -143,6 +143,7 @@ export class AnchorScheduler {
   /** 全部尚未结束的激活恢复回合（含已关闭的旧代）：停止与迁居暂停都要等它们确实退出 */
   readonly #activationRecoveries = new Set<Promise<void>>();
   readonly #recoveringTaskIds = new Set<string>();
+  readonly #activatingJobRuns = new Map<string, Promise<void>>();
   #tickRunning = false;
   #queuedWakeRequested = false;
   #missedSummaryPending = false;
@@ -602,35 +603,42 @@ export class AnchorScheduler {
       },
     );
     if (applied?.replayed) return;
-    const cancellationFailures: unknown[] = [];
-    for (const occurrence of await journal.openOccurrences()) {
-      if (TERMINAL_STATES.has(occurrence.state as never)) continue;
-      try {
-        const cancelRequestId = `schedule-delete-cancel:${protocolDigest(
-          "TaskDeleteCancellationIdentity",
-          1,
-          {
-            taskId,
-            taskRevision: deleted.taskRevision,
-            jobRunId: occurrence.jobRunId,
-          },
-        )}`;
-        if (this.#options.cancelUserJob) {
-          await this.#options.cancelUserJob({
-            journal,
-            jobRunId: occurrence.jobRunId,
-            requestId: cancelRequestId,
-            context: this.#hostContext(cancelRequestId),
-          });
-        } else {
-          await journal.cancel({
-            jobRunId: occurrence.jobRunId,
-            requestId: cancelRequestId,
-            context: this.#hostContext(cancelRequestId),
-          });
+    let cancellationFailures: unknown[] = [];
+    if (this.#options.recoverUserJobs) {
+      await this.#options.recoverUserJobs(journal);
+    } else {
+      const durableFenceByRun = await this.#pendingCancellationRequestIdByRun(journal);
+      for (const occurrence of await journal.openOccurrences()) {
+        if (TERMINAL_STATES.has(occurrence.state as never)) continue;
+        try {
+          const cancelRequestId =
+            durableFenceByRun.get(occurrence.jobRunId) ??
+            `schedule-delete-cancel:${protocolDigest(
+              "TaskDeleteCancellationIdentity",
+              1,
+              {
+                taskId,
+                taskRevision: deleted.taskRevision,
+                jobRunId: occurrence.jobRunId,
+              },
+            )}`;
+          if (this.#options.cancelUserJob) {
+            await this.#options.cancelUserJob({
+              journal,
+              jobRunId: occurrence.jobRunId,
+              requestId: cancelRequestId,
+              context: this.#hostContext(cancelRequestId),
+            });
+          } else {
+            await journal.cancel({
+              jobRunId: occurrence.jobRunId,
+              requestId: cancelRequestId,
+              context: this.#hostContext(cancelRequestId),
+            });
+          }
+        } catch (error) {
+          cancellationFailures.push(error);
         }
-      } catch (error) {
-        cancellationFailures.push(error);
       }
     }
     await this.#refreshTask(taskId);
@@ -786,6 +794,7 @@ export class AnchorScheduler {
     const startedAt = this.#now().getTime();
     if (occurrence.state === "queued") {
       await this.#startDecision(generation, () => this.#activateUser(definition, occurrence));
+      await this.#refreshTask(taskId);
     }
     return await this.#waitForResult(taskId, occurrence.jobRunId, startedAt);
   }
@@ -822,15 +831,25 @@ export class AnchorScheduler {
       if (outcome.kind === "rejected" || outcome.result.status !== "ok") {
         return false;
       }
-      const context = this.#controlContext(requestId, controlSource);
+      if (this.#options.recoverUserJobs) {
+        await this.#options.recoverUserJobs(journal, new Set([jobRunId]));
+        await this.#refreshTask(taskId);
+        const state =
+          outcome.result.body.t === "job-cancel"
+            ? outcome.result.body.runState
+            : undefined;
+        return state === "cancelled" || state === "cancel-requested";
+      }
+      const cancelRequestId = outcome.canonicalRequestId;
+      const context = this.#controlContext(cancelRequestId, controlSource);
       const result = this.#options.cancelUserJob
         ? await this.#options.cancelUserJob({
             journal,
             jobRunId,
-            requestId,
+            requestId: cancelRequestId,
             context,
           })
-        : await journal.cancel({ jobRunId, requestId, context });
+        : await journal.cancel({ jobRunId, requestId: cancelRequestId, context });
       await this.#refreshTask(taskId);
       return result.state === "cancelled" || result.state === "cancel-requested";
     });
@@ -881,6 +900,12 @@ export class AnchorScheduler {
       left.localeCompare(right, "en-US"),
     )) {
       await this.#refreshTask(taskId);
+      if (
+        this.#options.recoverUserJobs &&
+        this.#definitions.get(taskId)?.state === "deleted"
+      ) {
+        await this.#options.recoverUserJobs(this.#journal(taskId));
+      }
     }
     this.#arm();
   }
@@ -960,6 +985,7 @@ export class AnchorScheduler {
       scheduledFor,
       definition,
       ...(this.#onlineSince !== undefined ? { onlineSince: this.#onlineSince } : {}),
+      now: this.#now(),
       missedGraceMs: this.#missedGraceMs,
     });
     const trigger = this.#startDecision(generation, () => journal.trigger({
@@ -1014,17 +1040,30 @@ export class AnchorScheduler {
     },
     occurrence: JobOccurrence,
   ): Promise<void> {
-    this.#trackCompletion(definition.taskId, occurrence.jobRunId);
-    await this.#options.activateUserJob({
-      journal: this.#journal(definition.taskId),
-      definition,
-      occurrence,
+    const inFlight = this.#activatingJobRuns.get(occurrence.jobRunId);
+    if (inFlight) return inFlight;
+    const activation = (async () => {
+      const journal = this.#journal(definition.taskId);
+      const currentState = await journal.currentState(occurrence.jobRunId);
+      if (currentState !== undefined && currentState !== "queued") return;
+      this.#trackCompletion(definition.taskId, occurrence.jobRunId);
+      await this.#options.activateUserJob({
+        journal,
+        definition,
+        occurrence,
+      });
+      await this.#options.eventBus.emit("scheduler:task-started", {
+        taskId: definition.taskId,
+        name: definition.definition.spec.name,
+        actionKind: definition.definition.spec.action.kind,
+      });
+    })().finally(() => {
+      if (this.#activatingJobRuns.get(occurrence.jobRunId) === activation) {
+        this.#activatingJobRuns.delete(occurrence.jobRunId);
+      }
     });
-    await this.#options.eventBus.emit("scheduler:task-started", {
-      taskId: definition.taskId,
-      name: definition.definition.spec.name,
-      actionKind: definition.definition.spec.action.kind,
-    });
+    this.#activatingJobRuns.set(occurrence.jobRunId, activation);
+    return activation;
   }
 
   async #resumeQueuedUserJobs(generation: number): Promise<void> {
@@ -1116,7 +1155,8 @@ export class AnchorScheduler {
     const state = await this.#waitForTerminalState(taskId, jobRunId);
     if (!state) return;
     await this.#refreshTask(taskId);
-    const view = this.#requiredView(taskId);
+    const view = this.#views.get(taskId);
+    if (!view) return;
     const occurrence = await this.#journal(taskId).scheduleOccurrence(jobRunId);
     if (state === "committed" && !isScheduleFailure({ state, outcome: occurrence?.outcome })) {
       await this.#options.eventBus.emit("scheduler:task-completed", {
@@ -1357,6 +1397,34 @@ export class AnchorScheduler {
       return journal.taskMutationRevision(operationId, operationDigest);
     }
     return undefined;
+  }
+
+  async #pendingCancellationRequestIdByRun(
+    journal: JobJournal,
+  ): Promise<ReadonlyMap<string, string>> {
+    if (
+      typeof journal.pendingCancellations !== "function" ||
+      typeof journal.assignmentsAwaitingRecovery !== "function"
+    ) {
+      return new Map();
+    }
+    const [pending, candidates] = await Promise.all([
+      journal.pendingCancellations(),
+      journal.assignmentsAwaitingRecovery(),
+    ]);
+    if (pending.length === 0 || candidates.length === 0) return new Map();
+    const runByAssignment = new Map(
+      candidates.map((entry) => [
+        entry.assignmentId,
+        entry.dispatch.envelope.work.jobRunId,
+      ]),
+    );
+    const result = new Map<string, string>();
+    for (const item of pending) {
+      const jobRunId = runByAssignment.get(item.assignmentId);
+      if (jobRunId) result.set(jobRunId, item.fence.requestId);
+    }
+    return result;
   }
 
   async #userDefinition(

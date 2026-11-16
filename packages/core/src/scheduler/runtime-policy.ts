@@ -85,11 +85,15 @@ export function decideScheduleTrigger(input: {
   readonly scheduledFor: string;
   readonly definition: TaskDefinition;
   readonly onlineSince?: number;
+  readonly now?: Date;
   readonly missedGraceMs: number;
 }): ScheduleTriggerDecision {
   const scheduledAt = Date.parse(input.scheduledFor);
   if (!Number.isFinite(scheduledAt)) {
     throw new TypeError("Schedule trigger time must be a valid ISO timestamp");
+  }
+  if (input.now !== undefined && !Number.isFinite(input.now.getTime())) {
+    throw new TypeError("Schedule evaluation time must be a valid date");
   }
   const offlineMiss =
     input.onlineSince !== undefined &&
@@ -98,20 +102,25 @@ export function decideScheduleTrigger(input: {
     offlineMiss && input.definition.definition.kind === "system"
       ? new Date(input.onlineSince!).toISOString()
       : input.scheduledFor;
+  const userMissedBoundaryMs = offlineMiss
+    ? input.onlineSince!
+    : Math.max(scheduledAt, input.now ? input.now.getTime() : scheduledAt);
   const decision = {
     effectiveScheduledFor,
     jobRunId: scheduleJobRunId(input.taskId, effectiveScheduledFor),
     ...(offlineMiss && input.definition.definition.kind === "user"
+      ? { disposition: "missed-offline" as const }
+      : {}),
+    ...(input.definition.definition.kind === "user"
       ? {
-          disposition: "missed-offline" as const,
           missedNextFire: {
-            readyBoundary: new Date(input.onlineSince!).toISOString(),
+            readyBoundary: new Date(userMissedBoundaryMs).toISOString(),
             ...(input.definition.definition.spec.schedule.kind === "once"
               ? {}
               : {
                   nextFire: nextScheduleTime(
                     input.definition.definition.spec.schedule,
-                    new Date(input.onlineSince!),
+                    new Date(userMissedBoundaryMs),
                   ),
                 }),
           },

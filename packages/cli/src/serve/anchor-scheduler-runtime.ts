@@ -88,7 +88,10 @@ import {
   PostAdoptionReviewCoordinator,
   type PostAdoptionReviewPort,
 } from "./post-adoption-review.js";
-import { createAssignmentSubmissionAuthorizer } from "./assignment-worker-obligations.js";
+import {
+  assignmentSubmissionContext,
+  createAssignmentSubmissionAuthorizer,
+} from "./assignment-worker-obligations.js";
 
 const OWNER_CONTEXT_RENEWAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
 const TERMINAL_JOB_STATES = new Set([
@@ -103,6 +106,14 @@ export interface AnchorSchedulerRuntimeOptions {
   readonly authority: AuthorityRuntimeStack;
   readonly protocol: ConversationProtocolRuntime;
   readonly localExecutor?: RunExecutorPort;
+  readonly createLocalCancellationSubmission?: (
+    journal: JobJournal,
+  ) => {
+    submitCancellation(
+      assignmentId: string,
+      ctx: AuthorityCallContext,
+    ): Promise<boolean>;
+  };
   readonly eventBus: IEventBus<SchedulerEventMap>;
   readonly jobStatus: JobStatusDirectory;
   readonly jobRelays: JobRelayObligationDirectory;
@@ -895,6 +906,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     await this.#rememberPending(input.journal, pending);
     const dispatcher = this.#dispatcher(input.journal, pending);
     await dispatcher.dispatchPending();
+    await this.#registerManualSurface(input.journal, pending);
     // 与启动恢复的指派一样由恢复驱动负责：丢失的取消与终态通知都在有界时间内收敛。
     // 指派若已在派发等待期间退役（调度器已移除），不再为它起驱动
     if (this.#dispatchers.get(pending.assignmentId) === dispatcher) dispatcher.startRecoveryLoop();
@@ -911,7 +923,36 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     );
     if (!candidate) return input.journal.cancel(input);
     await this.#rememberPending(input.journal, candidate.dispatch);
-    return this.#dispatcher(input.journal, candidate.dispatch).cancel(input);
+    const dispatcher = this.#dispatcher(input.journal, candidate.dispatch);
+    const pendingFence = (await input.journal.pendingCancellations()).find(
+      (item) => item.assignmentId === candidate.assignmentId,
+    );
+    if (pendingFence && pendingFence.fence.requestId === input.requestId) {
+      await dispatcher.recoverCancellations();
+      if (
+        this.#dispatchers.get(candidate.assignmentId) === dispatcher &&
+        !this.#retirementTasks.has(candidate.assignmentId)
+      ) {
+        dispatcher.startRecoveryLoop();
+      }
+      const state = await input.journal.currentState(input.jobRunId);
+      return state === "cancel-requested"
+        ? {
+            state: "cancel-requested" as const,
+            assignmentId: candidate.assignmentId,
+            fence: pendingFence.fence,
+          }
+        : { state: state ?? candidate.state };
+    }
+    const result = await dispatcher.cancel(input);
+    if (
+      result.state === "cancel-requested" &&
+      this.#dispatchers.get(candidate.assignmentId) === dispatcher &&
+      !this.#retirementTasks.has(candidate.assignmentId)
+    ) {
+      dispatcher.startRecoveryLoop();
+    }
+    return result;
   }
 
   async #recoverJournal(
@@ -930,11 +971,17 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         await this.#rememberPending(journal, candidate.dispatch);
         const dispatcher = this.#dispatcher(journal, candidate.dispatch);
         await dispatcher.dispatchPending();
+        await this.#registerManualSurface(journal, candidate.dispatch);
         await dispatcher.recoverStarted();
         // 执行端已到终态的指派在这里收尾，随后由生命周期事件退役，不再起恢复循环
         if (await dispatcher.reconcileExecutorTerminal(candidate.dispatch.assignmentId)) continue;
         await dispatcher.recoverCancellations();
-        dispatcher.startRecoveryLoop();
+        if (
+          this.#dispatchers.get(candidate.dispatch.assignmentId) === dispatcher &&
+          !this.#retirementTasks.has(candidate.dispatch.assignmentId)
+        ) {
+          dispatcher.startRecoveryLoop();
+        }
       } catch (error) {
         this.#options.onError?.(
           error instanceof Error ? error : new Error(String(error)),
@@ -967,18 +1014,6 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         this.#ownerDisposers.set(pending.assignmentId,
           this.#options.jobRelays.registerSubmission(pending.assignmentId, journal));
       }
-      const state = await journal.currentState(pending.envelope.work.jobRunId);
-      if (state && TERMINAL_JOB_STATES.has(state as never)) {
-        await this.#manualSurfaces.markJobTerminal(
-          pending.envelope.work.jobRunId,
-        );
-        return;
-      }
-      this.#manualSurfaces.register({
-        assignmentId: pending.assignmentId,
-        jobRunId: pending.envelope.work.jobRunId,
-        open: () => this.#openManualSurface(journal, pending),
-      });
       return;
     }
     if (!this.#ownerDisposers.has(pending.assignmentId)) {
@@ -1001,6 +1036,26 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         this.#options.jobRelays.register(opening),
       );
     }
+  }
+
+  async #registerManualSurface(
+    journal: JobJournal,
+    pending: PendingJobDispatch,
+  ): Promise<void> {
+    const route = await journal.interactionRoute(pending.assignmentId);
+    if (route.kind !== "surface-ticket") return;
+    const state = await journal.currentState(pending.envelope.work.jobRunId);
+    if (state && TERMINAL_JOB_STATES.has(state as never)) {
+      await this.#manualSurfaces.markJobTerminal(
+        pending.envelope.work.jobRunId,
+      );
+      return;
+    }
+    this.#manualSurfaces.register({
+      assignmentId: pending.assignmentId,
+      jobRunId: pending.envelope.work.jobRunId,
+      open: () => this.#openManualSurface(journal, pending),
+    });
   }
 
   async #openManualSurface(
@@ -1076,22 +1131,60 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
           (assignmentId) => this.#artifactAuthority(assignmentId),
         );
     if (!executor) throw new Error("Local executor role is not enabled on this device");
+    const contexts = jobDispatchContexts({
+      signer: this.#options.authority.signer,
+      ownerDeviceId: this.#options.authority.deviceId,
+      pending,
+      controlLease: () => this.#issuer.controlLeaseFor({
+        assignmentId: pending.assignmentId,
+        taskId: pending.envelope.work.taskId,
+        anchorEpoch: this.#options.authority.anchorEpoch,
+        at: this.#clock(),
+      }),
+    });
+    const localCancellation =
+      local && this.#options.createLocalCancellationSubmission
+        ? this.#options.createLocalCancellationSubmission(journal)
+        : undefined;
+    const submissionContext = () =>
+      assignmentSubmissionContext(
+        pending.envelope,
+        "Job assignment has no submission capability",
+      );
     const dispatcher = new InProcessJobDispatcher({
       enabled: true,
       journal,
       executor,
-      contexts: jobDispatchContexts({
-        signer: this.#options.authority.signer,
-        ownerDeviceId: this.#options.authority.deviceId,
-        pending,
-        controlLease: () => this.#issuer.controlLeaseFor({
-          assignmentId: pending.assignmentId,
-          taskId: pending.envelope.work.taskId,
-          anchorEpoch: this.#options.authority.anchorEpoch,
-          at: this.#clock(),
-        }),
-      }),
-      cancellationSubmission: { submitCancellation: async () => false },
+      contexts,
+      cancellationSubmission: {
+        submitCancellation: async (assignmentId) => {
+          if (assignmentId !== pending.assignmentId) {
+            throw new Error(
+              `Dispatcher cancellation targeted unexpected job assignment ${assignmentId}`,
+            );
+          }
+          if (localCancellation) {
+            return localCancellation.submitCancellation(
+              assignmentId,
+              submissionContext(),
+            );
+          }
+          const snapshot = await executor.queryLedger(
+            assignmentId,
+            contexts.create(assignmentId, "executor.queryLedger", {
+              requestId: `ledger:${assignmentId}:cancel-proof`,
+              body: { range: null },
+            }),
+          );
+          if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
+          await journal.submitCancelProof(
+            assignmentId,
+            snapshot.cancelProof,
+            submissionContext(),
+          );
+          return true;
+        },
+      },
       bundleSubmission: {
         submitSealedBundle: async () => {
           throw new Error("Executor job owner retains sealed-bundle recovery");
@@ -1275,6 +1368,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     const dispatcher = this.#dispatchers.get(assignmentId);
     if (!dispatcher) return;
     try {
+      await dispatcher.recoverCancellations();
       await dispatcher.reconcileExecutorTerminal(assignmentId);
     } catch (error) {
       this.#options.onError?.(

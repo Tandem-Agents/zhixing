@@ -1741,10 +1741,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
 
   async recordDispatchConflict(
     sent: PendingJobDispatch,
-    rawResult: Extract<
-      DispatchResult,
-      { accepted: false; outcome: "conflicting-redelivery" }
-    >,
+    rawResult: DispatchResult,
   ): Promise<"acked-original" | "opened-uncertain"> {
     const result = await verifyProtocolStep(() =>
       validateDispatchResult(rawResult, this.#verifier),

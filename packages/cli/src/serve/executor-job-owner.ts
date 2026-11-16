@@ -94,7 +94,7 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
   }
 
   async cancelAccepted(assignmentId: string): Promise<void> {
-    this.#requireReady();
+    this.#requireReadyOrPaused();
     await this.#worker.cancelAccepted(assignmentId);
   }
 
@@ -190,6 +190,14 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
 
   #requireReady(): void {
     if (!this.ready) {
+      throw new JobInteractionRuntimeUnavailableError(
+        "Executor job owner has not completed durable recovery",
+      );
+    }
+  }
+
+  #requireReadyOrPaused(): void {
+    if (this.#state !== "ready" && this.#state !== "paused") {
       throw new JobInteractionRuntimeUnavailableError(
         "Executor job owner has not completed durable recovery",
       );

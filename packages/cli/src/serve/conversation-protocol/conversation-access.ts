@@ -1081,7 +1081,10 @@ export class ConversationAccess {
         }
       }),
     );
-    return { notices: notices.flat(), next };
+    return Object.freeze({
+      notices: Object.freeze(notices.flat()),
+      next: Object.freeze(next),
+    });
   }
 
   taskListBeforeMutation(conversationId: string, requestId: string) {

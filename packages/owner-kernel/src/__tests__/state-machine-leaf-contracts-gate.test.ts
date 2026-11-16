@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AssignmentRecord, DataPlaneTicket } from "@zhixing-ai/core/contracts";
 import { protocolDigest, signCancelProof } from "@zhixing-ai/core/protocol";
 import {
@@ -2445,5 +2445,65 @@ export function illegalMutations(
       "finality-close-boom",
       "surface-close-boom",
     ]);
+  });
+
+  it("advances ConversationRunJournal.statusHistoryBatch watermark across >64 multi-page, <=64 final, filtered committed-only, and empty slices", async () => {
+    const { createConversationBaseHarness } = await import("./conversation-base-harness.js");
+    const { ConversationReadIndex } = await import("../conversation-read-index.js");
+    const h = await createConversationBaseHarness();
+    const entries = Array.from({ length: 68 }, (_, idx) => {
+      const rev = idx + 1;
+      const state =
+        rev === 1
+          ? ("queued" as const)
+          : rev === 68
+            ? ("committed" as const)
+            : rev % 2 === 0
+              ? ("dispatched" as const)
+              : ("running" as const);
+      return {
+        state,
+        statusRevision: rev,
+        at: "2026-11-16T00:00:00.000Z",
+        ...(state === "dispatched" || state === "running"
+          ? { assignmentId: "asg-mp-1" }
+          : {}),
+      };
+    });
+    const spy = vi
+      .spyOn(ConversationReadIndex.prototype, "statusHistory")
+      .mockImplementation(async (_convId, runId, afterRevision) => {
+        if (runId !== "run-mp") return [];
+        return entries
+          .filter((e) => e.statusRevision > afterRevision)
+          .slice(0, 65);
+      });
+    try {
+      const [page1] = await h.sourceJournal.statusHistoryBatch([
+        { runId: "run-mp", afterStatusRevision: 0 },
+      ]);
+      expect(page1!.notices).toHaveLength(64);
+      expect(page1!.nextAfterStatusRevision).toBe(64);
+
+      const [page2] = await h.sourceJournal.statusHistoryBatch([
+        { runId: "run-mp", afterStatusRevision: page1!.nextAfterStatusRevision! },
+      ]);
+      expect(page2!.notices.map((n) => n.statusRevision)).toEqual([65, 66, 67]);
+      expect(page2!.nextAfterStatusRevision).toBe(68);
+
+      const [committedOnly] = await h.sourceJournal.statusHistoryBatch([
+        { runId: "run-mp", afterStatusRevision: 67 },
+      ]);
+      expect(committedOnly!.notices).toEqual([]);
+      expect(committedOnly!.nextAfterStatusRevision).toBe(68);
+
+      const [page3] = await h.sourceJournal.statusHistoryBatch([
+        { runId: "run-mp", afterStatusRevision: page2!.nextAfterStatusRevision! },
+      ]);
+      expect(page3!.notices).toEqual([]);
+      expect(page3!.nextAfterStatusRevision).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

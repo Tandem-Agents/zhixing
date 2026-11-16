@@ -4649,7 +4649,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           );
         return {
           notices,
-          ...(page.length > selected.length && selected.length > 0
+          ...(selected.length > 0
             ? { nextAfterStatusRevision: selected.at(-1)!.statusRevision }
             : {}),
         };

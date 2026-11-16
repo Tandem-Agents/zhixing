@@ -102,16 +102,32 @@ class MemoryJobJournal {
     this.triggerCalls.push(structuredClone(input));
     const existing = this.runs.find((run) => run.jobRunId === input.jobRunId);
     if (existing) return structuredClone(existing);
+    let occurrenceState: JobRunState =
+      input.disposition === "missed-offline" && input.source === "user"
+        ? "missed"
+        : "queued";
+    const active = this.runs.find((run) => !TERMINAL.has(run.state));
+    if (active && occurrenceState !== "missed") {
+      if (active.state === "queued" && input.source === "user") {
+        active.state = "expired";
+        this.emitState(active);
+      } else {
+        occurrenceState = "missed";
+      }
+    }
+    if (occurrenceState === "missed" && input.source === "user" && !input.missedNextFire) {
+      throw new TypeError("Missed user occurrence requires a frozen next-fire policy");
+    }
     const occurrence: JobOccurrence = {
       taskId: this.definition!.taskId,
       jobRunId: input.jobRunId,
       scheduledFor: input.scheduledFor,
       taskRevision: this.definition!.taskRevision,
       deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
-      state: input.disposition === "missed-offline" ? "missed" : "queued",
+      state: occurrenceState,
     };
     this.runs.push(occurrence);
-    if (input.missedNextFire) {
+    if (occurrence.state === "missed" && input.missedNextFire) {
       this.missedNextFireByRun.set(input.jobRunId, {
         t: "missed-next-fire",
         jobRunId: input.jobRunId,
@@ -224,6 +240,7 @@ function fixture(input: {
   schedulerNotices?: ConstructorParameters<typeof AnchorScheduler>[0]["schedulerNotices"];
   recoverUserJobs?: ConstructorParameters<typeof AnchorScheduler>[0]["recoverUserJobs"];
   onError?: (error: Error) => void;
+  now?: () => Date;
 } = {}) {
   const journals = input.journals ?? new Map<string, MemoryJobJournal>();
   const eventBus = createEventBus<SchedulerEventMap>();
@@ -247,7 +264,7 @@ function fixture(input: {
     ...(input.schedulerNotices ? { schedulerNotices: input.schedulerNotices } : {}),
     ...(input.onError ? { onError: input.onError } : {}),
     pollMs: 60_000,
-    now: () => new Date("2026-08-02T00:00:00.000Z"),
+    now: input.now ?? (() => new Date("2026-08-02T00:00:00.000Z")),
   });
   return { scheduler, journals, eventBus };
 }
@@ -1209,6 +1226,149 @@ describe("AnchorScheduler authority", () => {
     scheduler.wakeQueuedUserJobs();
     await vi.waitFor(() => expect(activate).toHaveBeenCalledOnce());
     expect(activate.mock.calls[0]?.[0].occurrence.jobRunId).toBe("queued-ready");
+    await scheduler.stop();
+  });
+
+  it("records online due collisions as missed with frozen policy and never backfills after in-flight completion", async () => {
+    let clockMs = Date.parse("2026-08-02T00:00:00.000Z");
+    const journalOnce = new MemoryJobJournal();
+    journalOnce.definition = {
+      taskId: "task-once",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "once-overlap",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "once", at: "2026-08-02T00:00:10.000Z" },
+          action: { kind: "agent-turn", prompt: "once" },
+        },
+      },
+    };
+    const journalInterval = new MemoryJobJournal();
+    journalInterval.definition = {
+      taskId: "task-interval",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "interval-overlap",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "interval" },
+        },
+      },
+    };
+    const journals = new Map([
+      ["task-once", journalOnce],
+      ["task-interval", journalInterval],
+    ]);
+    const activated: string[] = [];
+    const onError = vi.fn();
+    const { scheduler } = fixture({
+      journals,
+      now: () => new Date(clockMs),
+      onError,
+      activateUserJob: (async ({ occurrence }: { occurrence: JobOccurrence }) => {
+        activated.push(`${occurrence.taskId}:${occurrence.jobRunId}`);
+      }) as never,
+    });
+
+    await scheduler.start();
+    // Put manual/active runs in "running" before due time while online
+    journalOnce.runs.push({
+      taskId: "task-once",
+      jobRunId: "manual-once",
+      scheduledFor: "2026-08-02T00:00:02.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "running",
+    });
+    journalInterval.runs.push({
+      taskId: "task-interval",
+      jobRunId: "manual-interval",
+      scheduledFor: "2026-08-02T00:00:02.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "running",
+    });
+    await scheduler.refreshCommittedDefinitions(["task-once", "task-interval"]);
+
+    // Advance online past both due times (10s for once, 60s for interval)
+    clockMs = Date.parse("2026-08-02T00:01:01.000Z");
+    await scheduler.tick();
+    expect(onError).not.toHaveBeenCalled();
+    expect(activated).toEqual([]);
+    expect(journalOnce.runs.filter((r) => r.state === "missed")).toHaveLength(1);
+    expect(journalInterval.runs.filter((r) => r.state === "missed")).toHaveLength(1);
+    expect(scheduler.getTask("task-once")?.state.nextRunAt).toBeUndefined();
+    expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+      "2026-08-02T00:02:01.000Z",
+    );
+
+    // Finish both manual runs and tick again: neither task may backfill the missed due slot!
+    journalOnce.setState("manual-once", "committed");
+    journalInterval.setState("manual-interval", "committed");
+    await new Promise((r) => setTimeout(r, 10));
+    clockMs = Date.parse("2026-08-02T00:01:05.000Z");
+    await scheduler.tick();
+    expect(activated).toEqual([]);
+    expect(scheduler.getTask("task-once")?.state.runCount).toBe(1);
+    expect(scheduler.getTask("task-once")?.state.nextRunAt).toBeUndefined();
+    expect(scheduler.getTask("task-interval")?.state.runCount).toBe(1);
+    expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+      "2026-08-02T00:02:01.000Z",
+    );
+    await scheduler.stop();
+  });
+
+  it("drives recoverUserJobs on deleteTask and abortRun without issuing a second conflicting cancel command", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-del",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "delete-active",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "work" },
+        },
+      },
+    };
+    journal.runs.push({
+      taskId: "task-del",
+      jobRunId: "run-active",
+      scheduledFor: "2026-08-02T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "cancel-requested",
+    });
+    const recoverUserJobs = vi.fn(async () => {
+      expect(journal.definition?.state).toBe("deleted");
+    });
+    const cancelUserJob = vi.fn(async () => {
+      throw new Error("Assignment already has a different cancellation fence");
+    });
+    const { scheduler } = fixture({
+      journals: new Map([["task-del", journal]]),
+      recoverUserJobs: recoverUserJobs as never,
+      cancelUserJob: cancelUserJob as never,
+    });
+    await scheduler.start();
+    recoverUserJobs.mockClear();
+
+    await expect(scheduler.deleteTask("task-del", "delete-req-1")).resolves.toBeUndefined();
+    expect(recoverUserJobs).toHaveBeenCalledOnce();
+    expect(cancelUserJob).not.toHaveBeenCalled();
+    expect(scheduler.getTask("task-del")).toBeUndefined();
     await scheduler.stop();
   });
 });

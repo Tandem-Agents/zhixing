@@ -1614,7 +1614,24 @@ async function runServerProcess(
       authority: boundAuthorityRuntime!,
       protocol: boundConversationProtocol!,
       ...(boundEnabledRoles.includes("executor") && boundConversationExecutorLedger
-        ? { localExecutor: boundConversationExecutorLedger }
+        ? {
+            localExecutor: boundConversationExecutorLedger,
+            ...(executor
+              ? {
+                  createLocalCancellationSubmission: (journal) => {
+                    const submission =
+                      new executor.InProcessAssignmentSubmission({
+                        ledger: boundConversationExecutorLedger,
+                        owner: journal,
+                      });
+                    return {
+                      submitCancellation: (assignmentId, ctx) =>
+                        submission.submitCancellation(assignmentId, ctx),
+                    };
+                  },
+                }
+              : {}),
+          }
         : {}),
       eventBus: schedulerEventBus,
       jobStatus: boundJobStatus!,
