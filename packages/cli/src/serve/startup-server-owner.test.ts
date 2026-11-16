@@ -188,11 +188,25 @@ describe("production startup server ownership", () => {
     const source = await readSource("command.ts");
     const surfaces = await readSource("access-surfaces.ts");
     const mesh = await readSource("mesh-runtime-assembly.ts");
-    const conversationProtocol = await readSource("conversation-protocol-runtime.ts");
+    const conversationProtocolFiles = await Promise.all([
+      readSource("conversation-protocol-runtime.ts"),
+      readSource("conversation-protocol/contracts.ts"),
+      readSource("conversation-protocol/runtime.ts"),
+      readSource("conversation-protocol/runtime-obligation-scope.ts"),
+      readSource("conversation-protocol/conversation-access.ts"),
+      readSource("conversation-protocol/admission-lifecycle.ts"),
+      readSource("conversation-protocol/terminal-settlement.ts"),
+      readSource("conversation-protocol/turn-execution.ts"),
+      readSource("conversation-protocol/recovery-scheduler.ts"),
+    ]);
+    const conversationProtocolCluster = conversationProtocolFiles.join("\n");
+    const conversationProtocolRuntimeImpl = conversationProtocolFiles[2]!;
+    const conversationProtocolAccess = conversationProtocolFiles[4]!;
     const schedulerGenerationOwner = await readSource("anchor-scheduler-runtime.ts");
     expect(source).not.toContain("beginInstalledAuthorityGeneration");
-    expect(conversationProtocol).not.toContain("beginInstalledAuthorityGeneration");
-    expect(conversationProtocol.match(/bindMutationPublisher\(/gu)).toHaveLength(1);
+    expect(conversationProtocolCluster).not.toContain("beginInstalledAuthorityGeneration");
+    expect(conversationProtocolAccess.match(/bindMutationPublisher\(/gu)).toHaveLength(1);
+    expect(conversationProtocolRuntimeImpl.match(/bindMutationPublisher\(/gu)).toHaveLength(2);
     expect(schedulerGenerationOwner.match(/bindMutationPublisher\(/gu)).toHaveLength(1);
     expect(source).not.toContain("conversationProtocol.bindMutationPublisher(");
     expect(

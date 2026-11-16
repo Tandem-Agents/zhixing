@@ -1,12 +1,76 @@
 import { AuthorityStorageError } from "@zhixing-ai/core/authority";
-import type { AuthorityCallContext, SealedBundle } from "@zhixing-ai/core/contracts";
+import type {
+  AuthorityCallContext,
+  DispatchEnvelope,
+  SealedBundle,
+} from "@zhixing-ai/core/contracts";
+import {
+  assertPrincipalAllowsAuthorityMethod,
+  validateAuthorityCapability,
+  type ProtocolSignatureVerifier,
+} from "@zhixing-ai/core/protocol";
+import type { AssignmentSubmissionAuthorizer } from "@zhixing-ai/owner-kernel/conversation-assignment";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 
 /**
- * conversation/job 两个 assignment worker 共享的底层耐久义务原语。
- * 这里只有与执行域无关的重试、提交与恢复骨架;输入、终态与提交策略
- * 属于各域 worker,不进入本文件。
+ * conversation/job 两个 assignment worker 与 owner runtime 共享的底层耐久义务与能力上下文原语。
+ * 这里只有与执行域无关的重试、提交、恢复与提交能力鉴权骨架;输入、终态与取消退避策略
+ * 属于各域 worker/runtime,不进入本文件。
  */
+
+export function assignmentSubmissionContext(
+  envelope: Pick<DispatchEnvelope, "assignmentId" | "capabilities">,
+  missingLabel = "Conversation assignment has no submission capability",
+): AuthorityCallContext {
+  const capability = envelope.capabilities[0];
+  if (!capability) throw new Error(missingLabel);
+  return {
+    principal: { kind: "assignment", capability },
+    requestId: `submission:${envelope.assignmentId}`,
+    deadlineAt: capability.expiry,
+  };
+}
+
+export function createAssignmentSubmissionAuthorizer(options: {
+  readonly executorIdFor: (assignmentId: string) => string | undefined;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly missingPrincipalMessage?: string;
+  readonly unauthorizedMessage?: string;
+}): AssignmentSubmissionAuthorizer {
+  const missingPrincipalMessage =
+    options.missingPrincipalMessage ??
+    "Assignment submission requires an assignment capability";
+  const unauthorizedMessage =
+    options.unauthorizedMessage ??
+    "Assignment capability does not authorize this submission";
+  const authenticate: AssignmentSubmissionAuthorizer["authenticate"] = (
+    context,
+    identity,
+  ) => {
+    if (context.principal.kind !== "assignment") {
+      throw new Error(missingPrincipalMessage);
+    }
+    assertPrincipalAllowsAuthorityMethod("assignment", identity.method);
+    const capability = validateAuthorityCapability(
+      context.principal.capability,
+      options.verifier,
+    );
+    if (
+      capability.assignmentId !== identity.assignmentId ||
+      capability.executorId !== options.executorIdFor(identity.assignmentId) ||
+      !capability.methods.includes(identity.method) ||
+      Date.parse(context.deadlineAt) > Date.parse(capability.expiry)
+    ) {
+      throw new Error(unauthorizedMessage);
+    }
+  };
+  return {
+    authenticate,
+    authorize(context, authorization) {
+      authenticate(context, authorization);
+    },
+  };
+}
 
 /** owner 权威给出的不可重试拒绝——重试无意义,必须上抛终止提交义务。 */
 export class StableAuthorityRejection extends Error {

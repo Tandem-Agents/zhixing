@@ -7,6 +7,9 @@ import { protocolDigest, signCancelProof } from "@zhixing-ai/core/protocol";
 import {
   CONVERSATION_PROTOCOL_OBLIGATION_OWNERS,
 } from "../../../cli/src/serve/conversation-protocol/contracts.js";
+import { RecoveryScheduler } from "../../../cli/src/serve/conversation-protocol/recovery-scheduler.js";
+import { RuntimeObligationScope } from "../../../cli/src/serve/conversation-protocol/runtime-obligation-scope.js";
+import { TerminalSettlement } from "../../../cli/src/serve/conversation-protocol/terminal-settlement.js";
 import {
   EXECUTOR_RECORD_UNIT_OWNERS,
   buildLedgerProjectionCheckpointPrefix,
@@ -191,7 +194,10 @@ function extractExplicitExportsViaAst(filePath: string): {
 }
 
 describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & semantic fingerprint gate", () => {
-  it("enforces zero reverse imports (including TS ImportTypeNode) from internal clusters to the 4 public facades, with negative proof", () => {
+  it(
+    "enforces zero reverse imports (including TS ImportTypeNode) from internal clusters to the 4 public facades, with negative proof",
+    { timeout: 30_000 },
+    () => {
     const allFourFacades = new Set(
       [
         "packages/owner-kernel/src/conversation-assignment",
@@ -1787,5 +1793,557 @@ describe("Slice A & B leaf contracts, AST facade gate, state encapsulation & sem
     expect(state.validation.aborts.size).toBe(1);
     expect(state.pendingRequests.size).toBe(1);
     expect(state.stagedMutations.length).toBe(1);
+  });
+
+  it(
+    "enforces Slice D DeepReadonly compile-time TS2540 diagnostics via ts.createProgram and runtime O(1) non-aliasing detach",
+    { timeout: 30_000 },
+    () => {
+      const executorTsconfigPath = path.join(REPO_ROOT, "packages/executor/tsconfig.json");
+      const readResult = ts.readConfigFile(executorTsconfigPath, ts.sys.readFile);
+      expect(readResult.error).toBeUndefined();
+      const parsedConfig = ts.parseJsonConfigFileContent(
+        readResult.config,
+        ts.sys,
+        path.dirname(executorTsconfigPath),
+      );
+      const probeFilePath = path
+        .join(REPO_ROOT, "packages/executor/src/ledger/__deep_readonly_probe__.ts")
+        .replaceAll("\\", "/");
+
+      const probeBody = `import type {
+  ExecutionControlFacts,
+  InteractionEffectFacts,
+  ReceiptRecoveryFacts,
+  SealingEvidenceFacts,
+} from "./contracts.js";
+
+export function validReads(
+  exec: ExecutionControlFacts,
+  int: InteractionEffectFacts,
+  seal: SealingEvidenceFacts,
+  rec: ReceiptRecoveryFacts,
+): unknown[] {
+  const display = int.requestedById("r1")?.body.display;
+  const firstLine = display && "lines" in display ? display.lines[0] : undefined;
+  return [
+    int.latestAbort()?.refId,
+    exec.hasAbortMatching((r) => r.via === "abort-ticket"),
+    int.requestedById("r1")?.body.requestId,
+    firstLine,
+    exec.received?.body.envelope.ref.digest,
+    seal.stagedMutationForRequestId("m1")?.requestId,
+    seal.sealed?.t,
+    rec.firstValidationTicketAbort()?.refId,
+    rec.finishedAt(0)?.recordSeq,
+  ];
+}
+
+export function mutableControl(plain: { latestAbort(): { refId: string } | undefined }): void {
+  plain.latestAbort()!.refId = "mutated";
+}
+
+export function illegalMutations(
+  exec: ExecutionControlFacts,
+  int: InteractionEffectFacts,
+  seal: SealingEvidenceFacts,
+  rec: ReceiptRecoveryFacts,
+): void {
+  int.latestAbort()!.refId = "x"; // MUT_1
+  exec.hasAbortMatching((r) => { r.refId = "x"; return false; }); // MUT_2
+  int.requestedById("r1")!.body.requestId = "x"; // MUT_3
+  exec.received!.body.envelope.ref.digest = "x"; // MUT_4
+  seal.stagedMutationForRequestId("m1")!.requestId = "x"; // MUT_5
+  rec.firstValidationTicketAbort()!.refId = "x"; // MUT_6
+  rec.finishedAt(0)!.recordSeq = 99; // MUT_7
+}
+`;
+
+      const baseHost = ts.createCompilerHost(parsedConfig.options, true);
+      const sourceFile = ts.createSourceFile(
+        probeFilePath,
+        probeBody,
+        parsedConfig.options.target ?? ts.ScriptTarget.ES2022,
+        true,
+      );
+      const customHost: ts.CompilerHost = {
+        ...baseHost,
+        fileExists: (fileName) =>
+          fileName.replaceAll("\\", "/") === probeFilePath || baseHost.fileExists(fileName),
+        readFile: (fileName) =>
+          fileName.replaceAll("\\", "/") === probeFilePath
+            ? probeBody
+            : baseHost.readFile(fileName),
+        getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) =>
+          fileName.replaceAll("\\", "/") === probeFilePath
+            ? sourceFile
+            : baseHost.getSourceFile(
+                fileName,
+                languageVersion,
+                onError,
+                shouldCreateNewSourceFile,
+              ),
+      };
+      const program = ts.createProgram(
+        [...parsedConfig.fileNames, probeFilePath],
+        { ...parsedConfig.options, noEmit: true },
+        customHost,
+      );
+      const diagnostics = [
+        ...program.getSyntacticDiagnostics(sourceFile),
+        ...program.getSemanticDiagnostics(sourceFile),
+      ];
+      const probeLines = probeBody.split("\n");
+      const diagSummary = diagnostics.map((d) => ({
+        code: d.code,
+        line:
+          d.start !== undefined
+            ? sourceFile.getLineAndCharacterOfPosition(d.start).line + 1
+            : -1,
+      }));
+
+      // Valid reads and mutable control lines must produce 0 diagnostics
+      const mutStartLine = probeLines.findIndex((l) => l.includes("function illegalMutations")) + 1;
+      expect(diagSummary.filter((d) => d.line < mutStartLine)).toEqual([]);
+
+      // Every single MUT_1..MUT_7 line must produce TS2540 (read-only property)
+      for (const marker of ["MUT_1", "MUT_2", "MUT_3", "MUT_4", "MUT_5", "MUT_6", "MUT_7"]) {
+        const expectedLine = probeLines.findIndex((l) => l.includes(marker)) + 1;
+        expect(expectedLine, marker).toBeGreaterThan(0);
+        expect(
+          diagSummary.some((d) => d.line === expectedLine && d.code === 2540),
+          `${marker} at line ${expectedLine} -> ${JSON.stringify(diagSummary)}`,
+        ).toBe(true);
+      }
+
+      // 4. Runtime deep freeze detach + non-freezing of underlying LedgerProjection + O(1) Map lookup
+      const state = emptyProjection("assign-o1-probe");
+      state.aborts.push({
+        v: 1,
+        t: "abort-requested",
+        via: "abort-ticket",
+        refId: "ref-orig",
+        surfacePrincipal: "surface:1",
+      });
+      state.received = {
+        body: {
+          v: 1,
+          t: "received",
+          envelope: { ref: { digest: `sha256:${"a".repeat(64)}`, byteLength: 64 } },
+          activation: {
+            v: 1,
+            ref: {
+              execution: "conversation",
+              runId: "run-1",
+              conversationId: "conv-1",
+              ownerEpoch: 1,
+            },
+            dispatchDigest: `sha256:${"b".repeat(64)}`,
+            manifestDigest: `sha256:${"c".repeat(64)}`,
+            permissionLeaseDigest: `sha256:${"d".repeat(64)}`,
+            commit: { lsn: 1, envelopeDigest: `sha256:${"e".repeat(64)}` },
+            issuedAt: "2026-11-16T00:00:00.000Z",
+            signature: { alg: "test", keyId: "owner-1", sig: "sig" },
+          },
+        },
+        recordSeq: 1,
+        ledgerDigest: `sha256:${"f".repeat(64)}`,
+      };
+      for (let i = 0; i < 1_000; i++) {
+        const reqId = `req-${i}`;
+        const reqBody: Extract<AssignmentRecord, { t: "interaction-requested" }> = {
+          v: 1,
+          t: "interaction-requested",
+          requestId: reqId,
+          kind: "allow-once",
+          toolName: "bash",
+          display: { title: `Allow ${i}`, lines: [`cmd-${i}`] },
+          issuedAt: "2026-11-16T00:00:00.000Z",
+          ttlMs: 30_000,
+          expiresAt: "2026-11-16T00:00:30.000Z",
+        };
+        state.requested.set(reqId, { body: reqBody, recordSeq: i + 2 });
+        state.sideEffects.set(i + 1, {
+          started: {
+            v: 1,
+            t: "side-effect-started",
+            effectSeq: i + 1,
+            kind: "tool-mutation",
+            toolName: "write_file",
+            summary: `write-${i}`,
+            target: "workspace-file",
+          },
+        });
+        const mutRecord: Extract<AssignmentRecord, { t: "staged-mutation" }> = {
+          v: 1,
+          t: "staged-mutation",
+          seq: i + 1,
+          domain: "session",
+          requestId: `mut-${i}`,
+          mutation: { kind: "session-title", title: `Title-${i}` } as unknown as Extract<
+            AssignmentRecord,
+            { t: "staged-mutation" }
+          >["mutation"],
+        };
+        state.stagedMutationByRequestId.set(`mut-${i}`, mutRecord);
+      }
+
+      const execFacts = toExecutionControlFacts(state);
+      const intFacts = toInteractionEffectFacts(state);
+      const sealFacts = toSealingEvidenceFacts(state);
+
+      let requestedGets = 0;
+      const origRequestedGet = state.requested.get.bind(state.requested);
+      state.requested.get = ((key: string) => {
+        requestedGets += 1;
+        return origRequestedGet(key);
+      }) as typeof state.requested.get;
+
+      let sideEffectGets = 0;
+      const origSideEffectGet = state.sideEffects.get.bind(state.sideEffects);
+      state.sideEffects.get = ((key: number) => {
+        sideEffectGets += 1;
+        return origSideEffectGet(key);
+      }) as typeof state.sideEffects.get;
+
+      let stagedMutationGets = 0;
+      const origStagedGet = state.stagedMutationByRequestId.get.bind(
+        state.stagedMutationByRequestId,
+      );
+      state.stagedMutationByRequestId.get = ((key: string) => {
+        stagedMutationGets += 1;
+        return origStagedGet(key);
+      }) as typeof state.stagedMutationByRequestId.get;
+
+      const req500 = intFacts.requestedById("req-500");
+      const se500 = intFacts.sideEffectBySeq(500);
+      const mut500 = sealFacts.stagedMutationForRequestId("mut-500");
+      expect(requestedGets).toBe(1);
+      expect(sideEffectGets).toBe(1);
+      expect(stagedMutationGets).toBe(1);
+
+      expect(() => {
+        (intFacts.latestAbort() as { refId: string }).refId = "tampered";
+      }).toThrow(TypeError);
+      expect(() => {
+        execFacts.hasAbortMatching((r) => {
+          (r as { refId: string }).refId = "tampered";
+          return false;
+        });
+      }).toThrow(TypeError);
+      expect(() => {
+        (req500 as { body: { requestId: string } }).body.requestId = "tampered";
+      }).toThrow(TypeError);
+      expect(() => {
+        (req500 as { body: { display: { lines: string[] } } }).body.display.lines.push("x");
+      }).toThrow(TypeError);
+      expect(() => {
+        (se500 as { started: { summary: string } }).started.summary = "tampered";
+      }).toThrow(TypeError);
+      expect(() => {
+        (execFacts.received as { body: { envelope: { ref: { digest: string } } } }).body
+          .envelope.ref.digest = "tampered";
+      }).toThrow(TypeError);
+      expect(() => {
+        (mut500 as { requestId: string }).requestId = "tampered";
+      }).toThrow(TypeError);
+
+      // Underlying LedgerProjection records remain mutable for state-replay / append
+      expect(Object.isFrozen(state.aborts[0])).toBe(false);
+      expect(Object.isFrozen(state.received.body.envelope.ref)).toBe(false);
+      expect(Object.isFrozen(origRequestedGet("req-500")!.body)).toBe(false);
+      expect(state.aborts[0]!.refId).toBe("ref-orig");
+    },
+  );
+
+  it(
+    "enforces Slice E thin facade parity, 8-obligation owner table, and Gate 5 multi-lifetime isolation invariants",
+    { timeout: 30_000 },
+    async () => {
+      const cliFacadePath = path.join(
+        REPO_ROOT,
+        "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      );
+      const cliFacadeSrc = fs.readFileSync(cliFacadePath, "utf8");
+      expect(cliFacadeSrc.trim().split("\n").length).toBeLessThanOrEqual(30);
+      const cliExported = extractExplicitExportsViaAst(cliFacadePath);
+      expect(cliExported.values).toEqual([
+        "ConversationProtocolRuntime",
+        "DurableConversationInteractionObserver",
+        "createConversationAuxiliaryRecoveryAssemblyHandle",
+        "createConversationCommittedTurnListenerAssemblyHandle",
+        "createConversationManagerAssemblyHandle",
+      ]);
+      expect(cliExported.types).toEqual([
+        "CommittedConversationTransferPort",
+        "ConversationAdvancementExecutionPort",
+        "ConversationLosslessDataPlanePort",
+        "ConversationLosslessDataPlaneTopology",
+        "ConversationProtocolRuntimeOptions",
+      ]);
+
+      expect(Object.keys(CONVERSATION_PROTOCOL_OBLIGATION_OWNERS).sort()).toEqual([
+        "activeRunClaimRegistry",
+        "authorityScopeGeneration",
+        "deferFirstSendRecovery",
+        "executorPlanAndForegroundLease",
+        "firstTouchAdoptionInstall",
+        "monotonicRecoveryMarkSeq",
+        "preparedAdmissionMap",
+        "settledRouteRevisions",
+      ]);
+      for (const ownerUnit of Object.values(CONVERSATION_PROTOCOL_OBLIGATION_OWNERS)) {
+        expect(
+          fs.existsSync(
+            path.join(
+              REPO_ROOT,
+              "packages/cli/src/serve/conversation-protocol",
+              `${ownerUnit}.ts`,
+            ),
+          ),
+          ownerUnit,
+        ).toBe(true);
+      }
+
+    const removedArtifacts: string[] = [];
+    const releasedInteractions: string[] = [];
+    const artifactAuthority = {
+      install() {},
+      remove(id: string) {
+        removedArtifacts.push(id);
+      },
+    } as never;
+    const interactions = {
+      releaseAssignment(id: string) {
+        releasedInteractions.push(id);
+      },
+    } as never;
+
+    const scope = new RuntimeObligationScope();
+    const initialScope = scope.current;
+    expect(initialScope.scope.scopeId).toBe(1);
+
+    // 1. releaseConversationCache drops ONLY journals & sessionIdentities for target conversation, never incrementing scopeId
+    initialScope.journals.set("conv-1", {} as never);
+    initialScope.journals.set("conv-2", {} as never);
+    initialScope.sessionIdentities.set("conv-1", Promise.resolve());
+    const token1 = Symbol("run-1");
+    initialScope.scheduledRuns.set("run-1", token1);
+    const seqBeforeRelease = scope.markRecoveryInScope(initialScope, "conv-1");
+    scope.releaseConversationCache("conv-1");
+    expect(scope.current).toBe(initialScope);
+    expect(scope.current.scope.scopeId).toBe(1);
+    expect(initialScope.journals.has("conv-1")).toBe(false);
+    expect(initialScope.sessionIdentities.has("conv-1")).toBe(false);
+    expect(initialScope.journals.has("conv-2")).toBe(true);
+    expect(initialScope.scheduledRuns.get("run-1")).toBe(token1);
+    expect(initialScope.recoveryConversations.get("conv-1")).toBe(seqBeforeRelease);
+
+    // 2. stopRecoveryLoop clears firstSendWindows without replacing AuthorityScope or incrementing scopeId
+    initialScope.firstSendWindows.set("conv-1", {
+      runId: "run-1",
+      claimToken: token1,
+      deferred: false,
+    });
+    const settlement = new TerminalSettlement({
+      authority: {} as never,
+      scope,
+      access: {
+        createDefaultDispatchContexts: () => ({}),
+        journal: () => ({ assignmentsAwaitingRecovery: async () => [] }),
+      } as never,
+      admission: {} as never,
+      host: { scheduleResolvedRetry: async () => {} },
+      requiredManager: () => ({}) as never,
+      clock: () => "2026-11-16T00:00:00.000Z",
+      executorDispatch: {} as never,
+      assignmentArtifactAuthority: artifactAuthority,
+      interactions,
+      observeFailure: () => {},
+    });
+    const recovery = new RecoveryScheduler({
+      authority: {} as never,
+      scope,
+      access: { createDefaultDispatchContexts: () => ({}) } as never,
+      admission: {} as never,
+      settlement,
+      host: {
+        recover: async () => 0,
+        publishPendingFinals: async () => 0,
+        listSessions: async () => [],
+        isWorksceneContinuationCurrent: async () => false,
+        run: (async function* () {
+          return {} as never;
+        }) as never,
+        installCommittedConversationTransfer: async () => {},
+      },
+      requiredManager: () => ({}) as never,
+      executorDispatch: {} as never,
+      assignmentArtifactAuthority: artifactAuthority,
+      interactions,
+      losslessDataPlane: { kind: "absent", reason: "executor-only" },
+      recoverAuxiliary: async () => {},
+      observeFailure: () => {},
+    });
+    await recovery.stopRecoveryLoop();
+    expect(initialScope.firstSendWindows.size).toBe(0);
+    expect(scope.current).toBe(initialScope);
+    expect(scope.current.scope.scopeId).toBe(1);
+    expect(initialScope.scope.retired).toBe(false);
+
+    // 3 & 4. swapAuthorityScope + cross-generation cleanupRunAttempt with throwing handle close
+    let unadoptedForegroundClosed = 0;
+    let inFlightForegroundClosed = 0;
+    let planDisposed = 0;
+    let executionScopeClosed = 0;
+    initialScope.preparedAdmissions.set("adm-unadopted", {
+      admissionId: "adm-unadopted",
+      conversationId: "conv-1",
+      admission: { runId: "run-unadopted" } as never,
+      claimToken: Symbol("unadopted"),
+      foreground: {
+        pause() {},
+        resume() {},
+        close() {
+          unadoptedForegroundClosed += 1;
+        },
+      },
+    });
+
+    const staleToken = Symbol("stale-attempt");
+    initialScope.schedulingRuns.set("run-dup", staleToken);
+    initialScope.scheduledRuns.set("run-dup", staleToken);
+    scope.claimAssignmentInScope(initialScope, "assign-dup", "run-dup", staleToken);
+    initialScope.assignmentRoutes.set("assign-dup", {
+      conversationId: "conv-1",
+      routeRevision: 1,
+    });
+
+    const newScope = scope.swapAuthorityScope(artifactAuthority, interactions);
+    expect(initialScope.scope.retired).toBe(true);
+    expect(newScope.scope.scopeId).toBe(2);
+    expect(unadoptedForegroundClosed).toBe(1);
+    expect(inFlightForegroundClosed).toBe(0);
+    expect(removedArtifacts).toContain("assign-dup");
+    expect(releasedInteractions).toContain("assign-dup");
+
+    // Register identical runId and assignmentId in newScope
+    const freshToken = Symbol("fresh-attempt");
+    newScope.schedulingRuns.set("run-dup", freshToken);
+    newScope.scheduledRuns.set("run-dup", freshToken);
+    scope.claimAssignmentInScope(newScope, "assign-dup", "run-dup", freshToken);
+    newScope.assignmentRoutes.set("assign-dup", {
+      conversationId: "conv-1",
+      routeRevision: 2,
+    });
+
+    await expect(
+      settlement.cleanupRunAttempt({
+        attempt: {
+          scope: initialScope.scope,
+          scopeState: initialScope,
+          conversationId: "conv-1",
+          runId: "run-dup",
+          claimToken: staleToken,
+          capturedJournal: {
+            assignmentsAwaitingRecovery: async () => [],
+          } as never,
+          attemptForeground: {
+            pause() {},
+            resume() {},
+            close() {
+              inFlightForegroundClosed += 1;
+            },
+          },
+        },
+        assignmentId: "assign-dup",
+        getChannelSession: () =>
+          ({
+            close() {
+              throw new Error("channel-close-boom");
+            },
+          }) as never,
+        getFirstPartyStreamFinalSeq: () => undefined,
+        drainFirstPartyProjection: () => {},
+        getFirstPartyFinalitySession: () => undefined,
+        getFirstPartySurfaceSession: () => undefined,
+        getExecutorPlan: () =>
+          ({
+            dispose() {
+              planDisposed += 1;
+            },
+          }) as never,
+        getExecutionScope: () => ({
+          close() {
+            executionScopeClosed += 1;
+          },
+        }),
+        runFailed: false,
+        runError: undefined,
+      }),
+    ).rejects.toThrow("channel-close-boom");
+
+    // Subsequent handle closes still executed despite channelSession.close() throwing!
+    expect(planDisposed).toBe(1);
+    expect(inFlightForegroundClosed).toBe(1);
+    expect(executionScopeClosed).toBe(1);
+    // Stale scope claims cleared, newScope claims & routes 100% untouched!
+    expect(initialScope.schedulingRuns.has("run-dup")).toBe(false);
+    expect(initialScope.activeAssignmentClaims.has("assign-dup")).toBe(false);
+    expect(newScope.schedulingRuns.get("run-dup")).toBe(freshToken);
+    expect(newScope.scheduledRuns.get("run-dup")).toBe(freshToken);
+    expect(newScope.activeAssignmentClaims.get("assign-dup")?.claimToken).toBe(freshToken);
+    expect(newScope.assignmentRoutes.get("assign-dup")?.routeRevision).toBe(2);
+
+    // 5. markSeq compare-and-clear preserves newer concurrent mark during recovery await
+    const claimedMarkSeq = scope.markRecoveryInScope(newScope, "conv-race", "run-a");
+    const concurrentMarkSeq = scope.markRecoveryInScope(newScope, "conv-race", "run-b");
+    expect(concurrentMarkSeq).toBeGreaterThan(claimedMarkSeq);
+    if (newScope.recoveryConversations.get("conv-race") === claimedMarkSeq) {
+      newScope.recoveryConversations.delete("conv-race");
+      newScope.recoveryMarkLedger.delete("conv-race");
+    }
+    expect(newScope.recoveryConversations.get("conv-race")).toBe(concurrentMarkSeq);
+    expect(newScope.recoveryMarkLedger.has("conv-race")).toBe(true);
+
+    // 6. routeRevision prevents stale retireSettledAssignments from forgetting a concurrently rebound route
+    const revBeforeAwait = scope.rememberAssignmentInScope(
+      newScope,
+      {
+        assignmentId: "assign-rebound",
+        capabilities: [{ id: "cap-1" }],
+        work: { conversationId: "conv-rebound", ingress: {} },
+      } as never,
+      {} as never,
+      artifactAuthority,
+    )!;
+    let releaseAwaiting!: (items: readonly { assignmentId: string }[]) => void;
+    const awaitingPromise = new Promise<readonly { assignmentId: string }[]>((resolve) => {
+      releaseAwaiting = resolve;
+    });
+    const retirePromise = settlement.retireSettledAssignments(
+      "conv-rebound",
+      { assignmentsAwaitingRecovery: () => awaitingPromise } as never,
+      newScope,
+    );
+    // Rebind while assignmentsAwaitingRecovery() is suspended
+    const revDuringAwait = scope.rememberAssignmentInScope(
+      newScope,
+      {
+        assignmentId: "assign-rebound",
+        capabilities: [{ id: "cap-2" }],
+        work: { conversationId: "conv-rebound", ingress: {} },
+      } as never,
+      {} as never,
+      artifactAuthority,
+    )!;
+    expect(revDuringAwait).toBeGreaterThan(revBeforeAwait);
+    const removedCountBeforeResolve = removedArtifacts.length;
+    releaseAwaiting([]);
+    await retirePromise;
+    expect(newScope.assignmentRoutes.get("assign-rebound")?.routeRevision).toBe(
+      revDuringAwait,
+    );
+    expect(removedArtifacts.length).toBe(removedCountBeforeResolve);
   });
 });

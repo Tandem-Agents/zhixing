@@ -73,6 +73,17 @@ const retiredProductionTokens = [
   "AnchorSessionStateAdapter",
 ];
 const forbiddenWriteOwners = new Set(["SkillStore", "AnchorWorksceneRegistry"]);
+export const CONVERSATION_PROTOCOL_CLUSTER_PATHS = Object.freeze([
+  "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  "packages/cli/src/serve/conversation-protocol/contracts.ts",
+  "packages/cli/src/serve/conversation-protocol/runtime.ts",
+  "packages/cli/src/serve/conversation-protocol/runtime-obligation-scope.ts",
+  "packages/cli/src/serve/conversation-protocol/conversation-access.ts",
+  "packages/cli/src/serve/conversation-protocol/admission-lifecycle.ts",
+  "packages/cli/src/serve/conversation-protocol/terminal-settlement.ts",
+  "packages/cli/src/serve/conversation-protocol/turn-execution.ts",
+  "packages/cli/src/serve/conversation-protocol/recovery-scheduler.ts",
+]);
 const guardedRoots = [
   "packages/server/",
   "packages/executor/",
@@ -2377,7 +2388,8 @@ export function inspectChannelRuntimeBoundary(records) {
   const delivery = byPath.get("packages/core/src/delivery/channel-effect.ts");
   const lossless = byPath.get("packages/cli/src/serve/lossless-data-plane-runtime.ts");
   const coordinator = byPath.get("packages/cli/src/serve/channel-interaction-coordinator.ts");
-  const protocol = byPath.get("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const protocolClusterRecords = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map((p) => byPath.get(p));
+  const protocol = protocolClusterRecords.every(Boolean) ? protocolClusterRecords.join("\n") : undefined;
   const protocolContracts = byPath.get("packages/cli/src/serve/conversation-protocol/contracts.ts");
   const localOwner = byPath.get("packages/cli/src/serve/local-conversation-owner.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
@@ -3065,9 +3077,7 @@ export function inspectKernelRunEnvelopeOwnership(records) {
   const conversationWorker = required(
     "packages/cli/src/serve/conversation-assignment-worker.ts",
   );
-  const conversationProtocol = required(
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
-  );
+  const conversationProtocol = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map(required).join("\n");
   const conversationDispatch = required(
     "packages/cli/src/serve/conversation-executor-dispatch.ts",
   );
@@ -7944,9 +7954,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const conversationManager = required(
     "packages/owner-kernel/src/conversation-manager.ts",
   );
-  const conversationProtocol = required(
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
-  );
+  const conversationProtocol = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map(required).join("\n");
   const conversationProtocolContracts = required(
     "packages/cli/src/serve/conversation-protocol/contracts.ts",
   );
@@ -8927,8 +8935,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationResumeBinding = required(
     "packages/cli/src/serve/conversation-resume-binding.ts",
   );
-  const conversationProtocolRuntime = required(
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  const conversationProtocolRuntime = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map(required).join("\n");
+  const conversationProtocolAccess = required(
+    "packages/cli/src/serve/conversation-protocol/conversation-access.ts",
+  );
+  const conversationProtocolFacadeClass = required(
+    "packages/cli/src/serve/conversation-protocol/runtime.ts",
   );
   const conversationPerspectivesCorrectness = required(
     "packages/cli/src/serve/conversation-perspectives-correctness.ts",
@@ -9537,7 +9549,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !scheduleRuntimeMechanism.includes("this.#options.protocol.bindMutationPublisher(this.#mutationPublisher)") ||
     scheduleRuntimeMechanism.split("bindMutationPublisher(").length - 1 !== 1 ||
     conversationProtocolRuntime.includes("beginInstalledAuthorityGeneration") ||
-    conversationProtocolRuntime.split("bindMutationPublisher(").length - 1 !== 1 ||
+    conversationProtocolAccess.split("bindMutationPublisher(").length - 1 !== 1 ||
+    conversationProtocolFacadeClass.split("bindMutationPublisher(").length - 1 !== 2 ||
+    conversationProtocolRuntime.split("bindMutationPublisher(").length - 1 !== 3 ||
     conversationProtocolRuntime.split("this.#mutationPublisher = undefined;").length - 1 !== 1 ||
     composition.includes("conversationProtocol.bindMutationPublisher(") ||
     !/await input\.prepare\(input\.mechanism\);[\s\S]*?const productBoundary = input\.mechanism\.createProductBoundary\(\);[\s\S]*?bindingRelease = input\.bind\(input\.mechanism\);[\s\S]*?this\.application\.install\(input\.mechanism\);[\s\S]*?publicationRelease = input\.publish\([\s\S]*?productBoundary\.globalState[\s\S]*?this\.#product = productBoundary\.product;[\s\S]*?this\.#current = input\.mechanism;[\s\S]*?input\.activate\(input\.mechanism\);[\s\S]*?await input\.resume\(input\.mechanism\)/u.test(
@@ -13392,7 +13406,12 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const setup = byPath.get("packages/cli/src/setup-delivery.ts");
   const channels = byPath.get("packages/cli/src/serve/channels.ts");
   const inboundRouter = byPath.get("packages/server/src/channels/inbound-router.ts");
-  const conversationProtocol = byPath.get("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const conversationProtocolRecords = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map((p) => byPath.get(p));
+  const conversationProtocol = conversationProtocolRecords.every(Boolean)
+    ? conversationProtocolRecords.join("\n")
+    : undefined;
+  const conversationProtocolRuntime = byPath.get("packages/cli/src/serve/conversation-protocol/runtime.ts");
+  const conversationProtocolRecovery = byPath.get("packages/cli/src/serve/conversation-protocol/recovery-scheduler.ts");
   const deliveryPipeline = byPath.get("packages/core/src/delivery/authority-pipeline.ts");
   const surfaceAssetAuthority = byPath.get("packages/cli/src/serve/surface-asset-authority.ts");
   const surfaceAssets = byPath.get("packages/core/src/authority/surface-assets.ts");
@@ -13811,7 +13830,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(command, "await boundDeliveryStack?.lifecycle.resume()") !== 3 ||
     count(command, "await conversationProtocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 3 ||
-    count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
+    count(conversationProtocolRuntime ?? "", "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
+    count(conversationProtocolRecovery ?? "", "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
     count(deliveryPipeline, "async quiesceForAuthorityTransfer(): Promise<void>") !== 1 ||
     count(deliveryPipeline, "async resumeAfterAuthorityTransfer(): Promise<void>") !== 1 ||
     postInstallReadBack < 0 || postInstallFinish < postInstallReadBack ||
@@ -13952,7 +13972,7 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     return text ?? "";
   };
   const dispatchPath = "packages/cli/src/serve/conversation-executor-dispatch.ts";
-  const protocolPath = "packages/cli/src/serve/conversation-protocol-runtime.ts";
+  const protocolPath = "packages/cli/src/serve/conversation-protocol/runtime.ts";
   const accessPath = "packages/cli/src/serve/access-surfaces.ts";
   const executorPath = "packages/cli/src/serve/executor-role-runtime.ts";
   const localOwnerPath = "packages/cli/src/serve/local-conversation-owner.ts";
@@ -13960,7 +13980,8 @@ export function inspectConversationExecutorDispatchBoundary(records) {
   const commandPath = "packages/cli/src/serve/command.ts";
   const schedulerPath = "packages/cli/src/serve/anchor-scheduler-runtime.ts";
   const dispatch = required(dispatchPath);
-  const protocol = required(protocolPath);
+  const protocolRuntime = required(protocolPath);
+  const protocol = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map(required).join("\n");
   const access = required(accessPath);
   const executor = required(executorPath);
   const localOwner = required(localOwnerPath);
@@ -13989,7 +14010,7 @@ export function inspectConversationExecutorDispatchBoundary(records) {
   };
   requiredPort(
     protocolPath,
-    protocol,
+    protocolRuntime,
     "ConversationProtocolRuntimeOptions",
     "executorDispatch",
     "ConversationExecutorDispatchApplication",
@@ -14332,7 +14353,7 @@ export function inspectAssignmentDataPlaneBoundary(records) {
   const lossless = required("packages/cli/src/serve/lossless-data-plane-runtime.ts");
   const composition = required("packages/cli/src/serve/lossless-data-plane-composition.ts");
   const coordinator = required("packages/cli/src/serve/channel-interaction-coordinator.ts");
-  const protocol = required("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const protocol = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map(required).join("\n");
   const protocolContracts = required("packages/cli/src/serve/conversation-protocol/contracts.ts");
   const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const access = required("packages/cli/src/serve/access-surfaces.ts");
@@ -14552,7 +14573,7 @@ export function inspectAssignmentResourcePortBoundary(records) {
     return source ?? "";
   };
   const owner = required("packages/cli/src/serve/conversation-owner-runtime.ts");
-  const protocol = required("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const protocol = CONVERSATION_PROTOCOL_CLUSTER_PATHS.map(required).join("\n");
   const dispatch = required("packages/cli/src/serve/conversation-executor-dispatch.ts");
   const ledger = required("packages/cli/src/serve/conversation-executor-ledger.ts");
   const conversationWorker = required(
@@ -15932,11 +15953,16 @@ export function inspectLocalConversationOwnerIsolation(records) {
     }
   }
 
+  for (const clusterPath of CONVERSATION_PROTOCOL_CLUSTER_PATHS) {
+    if (!records.some(({ relative }) => relative === clusterPath)) {
+      failures.push(`${clusterPath}: intent authority adapter cluster source is missing`);
+    }
+  }
   const protocolIntentRecord = records.find(
-    ({ relative }) => relative === "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ({ relative }) => relative === "packages/cli/src/serve/conversation-protocol/runtime.ts",
   );
   if (!protocolIntentRecord) {
-    failures.push("packages/cli/src/serve/conversation-protocol-runtime.ts: intent authority adapter source is missing");
+    failures.push("packages/cli/src/serve/conversation-protocol/runtime.ts: intent authority adapter source is missing");
   } else {
     const source = sourceFile(protocolIntentRecord.relative, protocolIntentRecord.text);
     let adapterCount = 0;
@@ -15966,7 +15992,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
   const internalIntentFiles = new Set([
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
   ]);
   const publicIntentTokens = new Set([
     "deferSchedule",
@@ -16779,8 +16805,13 @@ export function inspectConversationAdoptionAssembly(records) {
   }
   // 首次触及装入：生产装配经 disposers 绑定按键的已提交收编端口；协议在首次触及时按 committedFor → prepare → publish
   // 装入，与原先启动时逐个安装的校验相同（重启首触的行为证据：conversation-protocol-runtime-continuation.test.ts）。
-  const protocolRecord = records.find((record) => record.relative === "packages/cli/src/serve/conversation-protocol-runtime.ts");
-  if (!protocolRecord || !committedTransferBinding(meshSource) || !firstTouchInstallation(stepSource(protocolRecord.text))) {
+  const protocolClusterPresent = CONVERSATION_PROTOCOL_CLUSTER_PATHS.every((clusterPath) =>
+    records.some((record) => record.relative === clusterPath),
+  );
+  const protocolRecord = records.find(
+    (record) => record.relative === "packages/cli/src/serve/conversation-protocol/conversation-access.ts",
+  );
+  if (!protocolClusterPresent || !protocolRecord || !committedTransferBinding(meshSource) || !firstTouchInstallation(stepSource(protocolRecord.text))) {
     failures.push(`${mesh.relative}: committed adoptions must install on first touch through the bound committed-transfer port`);
   }
 

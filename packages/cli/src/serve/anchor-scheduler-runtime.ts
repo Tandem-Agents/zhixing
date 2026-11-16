@@ -27,11 +27,9 @@ import type {
 } from "@zhixing-ai/core/contracts";
 import {
   MAX_CONTROL_LEASE_TTL_MS,
-  assertPrincipalAllowsAuthorityMethod,
   dispatchEnvelopeDigest,
   ownerControlRequestDigest,
   protocolDigest,
-  validateAuthorityCapability,
 } from "@zhixing-ai/core/protocol";
 import {
   AnchorScheduler,
@@ -90,6 +88,7 @@ import {
   PostAdoptionReviewCoordinator,
   type PostAdoptionReviewPort,
 } from "./post-adoption-review.js";
+import { createAssignmentSubmissionAuthorizer } from "./assignment-worker-obligations.js";
 
 const OWNER_CONTEXT_RENEWAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
 const TERMINAL_JOB_STATES = new Set([
@@ -1320,33 +1319,12 @@ function submissionAuthorizer(
   executorByAssignment: ReadonlyMap<string, string>,
   verifier: AnchorSchedulerRuntimeOptions["authority"]["verifier"],
 ): AssignmentSubmissionAuthorizer {
-  const authenticate: AssignmentSubmissionAuthorizer["authenticate"] = (
-    context,
-    identity,
-  ) => {
-    if (context.principal.kind !== "assignment") {
-      throw new Error("Job submission requires an assignment capability");
-    }
-    assertPrincipalAllowsAuthorityMethod("assignment", identity.method);
-    const capability = validateAuthorityCapability(
-      context.principal.capability,
-      verifier,
-    );
-    if (
-      capability.assignmentId !== identity.assignmentId ||
-      capability.executorId !== executorByAssignment.get(identity.assignmentId) ||
-      !capability.methods.includes(identity.method) ||
-      Date.parse(context.deadlineAt) > Date.parse(capability.expiry)
-    ) {
-      throw new Error("Assignment capability does not authorize this job submission");
-    }
-  };
-  return {
-    authenticate,
-    authorize(context, authorization) {
-      authenticate(context, authorization);
-    },
-  };
+  return createAssignmentSubmissionAuthorizer({
+    executorIdFor: (assignmentId) => executorByAssignment.get(assignmentId),
+    verifier,
+    missingPrincipalMessage: "Job submission requires an assignment capability",
+    unauthorizedMessage: "Assignment capability does not authorize this job submission",
+  });
 }
 
 function schedulerIngressAuthorizer(): JobIngressAuthorizer {

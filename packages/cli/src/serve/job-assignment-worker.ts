@@ -28,6 +28,7 @@ import type {
 } from "@zhixing-ai/executor";
 import {
   asError,
+  assignmentSubmissionContext,
   resumeSealedSubmission,
   retryRemoteObligation,
   submitBundleUntilAcknowledged,
@@ -1117,13 +1118,7 @@ function jobStreamRef(envelope: JobEnvelope): {
 }
 
 function jobAssignmentContext(envelope: JobEnvelope): AuthorityCallContext {
-  const capability = envelope.capabilities[0];
-  if (!capability) throw new Error("Job assignment has no submission capability");
-  return {
-    principal: { kind: "assignment", capability },
-    requestId: `submission:${envelope.assignmentId}`,
-    deadlineAt: capability.expiry,
-  };
+  return assignmentSubmissionContext(envelope, "Job assignment has no submission capability");
 }
 
 class BoundedTaskQueue {

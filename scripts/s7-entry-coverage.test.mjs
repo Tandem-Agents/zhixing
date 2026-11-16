@@ -10,6 +10,7 @@ async function readFile(file, encoding) {
 }
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import {
+  CONVERSATION_PROTOCOL_CLUSTER_PATHS,
   buildWorkspaceOwnerExposure,
   inspectBehaviorEvidence,
   buildWorkspaceSymbolExposure,
@@ -570,7 +571,7 @@ test("lazy named RPC bindings retain ownership, namespace and escape restriction
 test("local conversation owner remains isolated from anchor capabilities by construction", async () => {
   const paths = [
     "packages/cli/src/serve/conversation-owner-runtime.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/access-surfaces.ts",
@@ -828,7 +829,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   );
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "protocol.#journal(input.conversationId).transactDeferredIntent(input)",
         "driftedJournal.transactDeferredIntent(input)",
@@ -918,7 +919,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
 test("conversation dispatch application stays separate from the Host topology mechanism", async () => {
   const paths = [
     "packages/cli/src/serve/conversation-executor-dispatch.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
@@ -936,7 +937,7 @@ test("conversation dispatch application stays separate from the Host topology me
   assert.deepEqual(inspectConversationExecutorDispatchBoundary(records), []);
   assert.match(
     inspectConversationExecutorDispatchBoundary(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "readonly executorDispatch: ConversationExecutorDispatchApplication;",
         "readonly executorDispatch?: ConversationExecutorDispatchApplication;",
@@ -1208,8 +1209,7 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
     "packages/cli/src/serve/lossless-data-plane-runtime.ts",
     "packages/cli/src/serve/lossless-data-plane-composition.ts",
     "packages/cli/src/serve/channel-interaction-coordinator.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
-    "packages/cli/src/serve/conversation-protocol/contracts.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
@@ -1452,7 +1452,7 @@ test("Advancement evidence selects local or Mesh only through one finite Host di
 test("Assignment resources cross Conversation and Job through finite Correctness roles", async () => {
   const paths = [
     "packages/cli/src/serve/conversation-owner-runtime.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/conversation-executor-dispatch.ts",
     "packages/cli/src/serve/conversation-executor-ledger.ts",
     "packages/cli/src/serve/conversation-assignment-worker.ts",
@@ -1490,7 +1490,7 @@ test("Assignment resources cross Conversation and Job through finite Correctness
   );
   assert.match(
     inspectAssignmentResourcePortBoundary(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/turn-execution.ts",
       (text) => text.replace(
         "this.#authority.executionResources",
         "this.#authority.executorResourceGovernor",
@@ -2142,7 +2142,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/serve/device-removal-cleanup.ts",
     "packages/cli/src/serve/conversation-evidence-authority.ts",
     // 已提交收编在首次触及时按键装入
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/conversation-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
@@ -2575,11 +2575,11 @@ test("conversation adoption stays bound to the two production roots and ordered 
       "await listPendingDeferredIntentConversations(this.options.authority.authorityLog)",
       "await listCommittedConversationIds(this.options.authority.authorityLog, this.options.authority.verifier)"]],
       /startup must review only pending adoptions before admission/],
-    [[["packages/cli/src/serve/conversation-protocol-runtime.ts",
-      "!this.#unavailableTransfers.has(conversationId)) continue;\n      prepared.publish();\n",
-      "!this.#unavailableTransfers.has(conversationId)) continue;\n"]],
+    [[["packages/cli/src/serve/conversation-protocol/conversation-access.ts",
+      "!scopeState.unavailableTransfers.has(conversationId)\n      ) continue;\n      prepared.publish();\n",
+      "!scopeState.unavailableTransfers.has(conversationId)\n      ) continue;\n"]],
       /committed adoptions must install on first touch/],
-    [[["packages/cli/src/serve/conversation-protocol-runtime.ts",
+    [[["packages/cli/src/serve/conversation-protocol/conversation-access.ts",
       "if (!this.#needsAdoption(conversationId)) return Promise.resolve();", "return Promise.resolve();"]],
       /committed adoptions must install on first touch/],
     [[["packages/cli/src/serve/mesh-runtime-assembly.ts",
@@ -2596,7 +2596,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
   ]);
   // 写法无关性回归（第 3 组返修）：按方法、绑定与真实调用判定首触装入与待决复核——局部改名、插入注释不误报；
   // 注释掉 publish、注释掉守卫或复核调用必须拒绝。
-  const protocolRuntime = "packages/cli/src/serve/conversation-protocol-runtime.ts";
+  const protocolRuntime = "packages/cli/src/serve/conversation-protocol/conversation-access.ts";
   const meshAssembly = "packages/cli/src/serve/mesh-runtime-assembly.ts";
   const firstTouchFailure = /committed adoptions must install on first touch/;
   assertMutationTable(inspectConversationAdoptionAssembly, records, [
@@ -3512,7 +3512,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/planned-anchor-transfer-staging-infrastructure.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/channels.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/surface-asset-authority.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/core/src/delivery/authority-pipeline.ts",
@@ -5360,8 +5360,7 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     "packages/core/src/delivery/channel-effect.ts",
     "packages/cli/src/serve/lossless-data-plane-runtime.ts",
     "packages/cli/src/serve/channel-interaction-coordinator.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
-    "packages/cli/src/serve/conversation-protocol/contracts.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/setup-delivery.ts",
   ];
@@ -5627,7 +5626,7 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology;",
         "readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology | undefined;",
@@ -5647,7 +5646,7 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "  readonly deferredIntentAuthority: DeferredIntentConversationAuthority;",
         "  bindLosslessDataPlane(): void {}\n  readonly deferredIntentAuthority: DeferredIntentConversationAuthority;",
@@ -5697,7 +5696,7 @@ test("Kernel run input has one finite Envelope owner and three production bindin
     "packages/cli/src/serve/ephemeral-executor.ts",
     "packages/cli/src/serve/agent-job-runtime.ts",
     "packages/cli/src/serve/conversation-assignment-worker.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/conversation-executor-dispatch.ts",
     "packages/cli/src/serve/job-assignment-worker.ts",
     "packages/cli/src/serve/execution-scheduler-facade.ts",
@@ -5789,7 +5788,7 @@ test("Kernel run input has one finite Envelope owner and three production bindin
   );
   assert.match(
     inspectKernelRunEnvelopeOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/turn-execution.ts",
       (text) => text.replace(
         "allowGlobal: this.#authority.globalPublishing",
         "allowGlobal: true",
@@ -7638,8 +7637,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
-    "packages/cli/src/serve/conversation-protocol/contracts.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/advancement-original-task-application.ts",
     "packages/cli/src/serve/advancement-controller.ts",
@@ -7837,7 +7835,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "readonly manager: () => ConversationManager;",
         "readonly manager?: () => ConversationManager;",
@@ -7847,7 +7845,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "  bindMutationPublisher(",
         "  bindManager(manager: ConversationManager) { void manager; }\n\n  bindMutationPublisher(",
@@ -7857,7 +7855,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "readonly recoverAuxiliary: (conversationId: string) => Promise<void>;",
         "readonly recoverAuxiliary?: (conversationId: string) => Promise<void>;",
@@ -7867,7 +7865,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/recovery-scheduler.ts",
       (text) => text.replace(
         "await this.#recoverAuxiliary(conversationId);",
         "await this.#recoverAuxiliary?.(conversationId);",
@@ -7877,7 +7875,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/runtime.ts",
       (text) => text.replace(
         "  bindMutationPublisher(",
         "  bindAuxiliaryRecovery(recover: (conversationId: string) => Promise<void>) { void recover; }\n\n  bindMutationPublisher(",
@@ -8532,7 +8530,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/server/src/lifecycle.ts",
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
-    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    ...CONVERSATION_PROTOCOL_CLUSTER_PATHS,
     "packages/cli/src/serve/conversation-perspectives-correctness.ts",
     "packages/cli/src/serve/conversation-clear-binding.ts",
     "packages/cli/src/serve/conversation-resume-binding.ts",
@@ -9399,7 +9397,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      "packages/cli/src/serve/conversation-protocol/conversation-access.ts",
       (text) => text.replace(
         "  /** Installs a committed immutable source prefix before exposing the adopted session. */",
         "  beginInstalledAuthorityGeneration(): void {\n    this.#mutationPublisher = undefined;\n  }\n\n  /** Installs a committed immutable source prefix before exposing the adopted session. */",
@@ -9946,7 +9944,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       text, 'if (input.mutation.kind !== "skill-usage") await this.#observeCatalog();', ""), "物化确认不再补偿观察"],
     ["packages/owner-kernel/src/conversation-journal/journal.ts", (text) => replaceOnce(
       text, "await this.#publisher?.afterGlobalCommit?.({", "void ({"), "运行提交后不通知目录拥有者"],
-    ["packages/cli/src/serve/conversation-protocol-runtime.ts", (text) => replaceOnce(
+    ["packages/cli/src/serve/conversation-protocol/conversation-access.ts", (text) => replaceOnce(
       text, "await this.#requiredMutationPublisher().afterGlobalCommit?.(input);", "void input;"), "代理不转发"],
     // 两处构造（首次与换代）各注入一次；只去掉首次那一处
     ["packages/cli/src/setup-delivery.ts", (text) => text.replace(

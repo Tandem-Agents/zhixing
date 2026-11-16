@@ -21,12 +21,12 @@ const GOVERNED_CALL_SITES: ReadonlyArray<{
   readonly governance: string;
 }> = [
   {
-    file: "cli/src/serve/conversation-protocol-runtime.ts",
+    file: "cli/src/serve/conversation-protocol/turn-execution.ts",
     marker: "modelCallResourceMeter: {",
     governance: "assignment 根租约 meter——正常 durable run（reserveUsage/consume，失败先 flush）",
   },
   {
-    file: "cli/src/serve/conversation-protocol-runtime.ts",
+    file: "cli/src/serve/conversation-protocol/recovery-scheduler.ts",
     marker: "sessionId: `recovered-perspectives:${conversationId}`",
     governance: "assignment meter 经恢复 synthetic runtime 透传（modelCallMetering 共享序列）",
   },
@@ -104,6 +104,12 @@ describe("provider call governance registry", () => {
     for (const site of DEFERRED_CALL_SITES) {
       const source = readFileSync(path.join(WORKSPACE_SRC, site.file), "utf8");
       expect(source, `${site.file} 后置依据失效`).toContain(site.marker);
+    }
+    // 负例：若移除任一已登记治理标记，核对必须检出缺失
+    for (const site of GOVERNED_CALL_SITES.slice(0, 2)) {
+      const source = readFileSync(path.join(WORKSPACE_SRC, site.file), "utf8");
+      const mutated = source.replaceAll(site.marker, "/* removed-governance-marker */");
+      expect(mutated).not.toContain(site.marker);
     }
   });
 
