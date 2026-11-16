@@ -14,6 +14,7 @@ import {
   decideScheduleTrigger,
   deriveScheduleNextRun,
   scheduleAutoDisableOperationId,
+  scheduleJobRunId,
   scheduleTimerDelay,
   selectDueScheduleEntries,
   schedulerNoticeGroupKey,
@@ -107,6 +108,34 @@ interface JobStateWaiter {
   readonly reject: (error: unknown) => void;
 }
 
+interface SystemTaskViewSpec {
+  readonly name: string;
+  readonly schedule: TaskSchedule;
+  readonly priority: TaskPriority;
+  readonly description?: string;
+}
+
+interface ConsumedDueMark {
+  readonly authorityEpoch: number;
+  readonly taskRevision: number;
+  readonly scheduledFor: string;
+}
+
+interface TaskRefreshWaiter {
+  readonly targetGen: number;
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+}
+
+interface TaskRefreshSlot {
+  readonly epoch: number;
+  nextGen: number;
+  settledGen: number;
+  systemView?: SystemTaskViewSpec;
+  runner?: Promise<void>;
+  readonly waiters: Set<TaskRefreshWaiter>;
+}
+
 /**
  * Anchor-owned scheduler product service.
  *
@@ -144,6 +173,10 @@ export class AnchorScheduler {
   readonly #activationRecoveries = new Set<Promise<void>>();
   readonly #recoveringTaskIds = new Set<string>();
   readonly #activatingJobRuns = new Map<string, Promise<void>>();
+  /** 仅在权威基底替换清表（recoverInstalledAuthority）时换代；普通关准入不换代 */
+  #authorityEpoch = 0;
+  readonly #refreshSlotsByTask = new Map<string, TaskRefreshSlot>();
+  readonly #consumedDueByTask = new Map<string, ConsumedDueMark>();
   #tickRunning = false;
   #queuedWakeRequested = false;
   #missedSummaryPending = false;
@@ -336,6 +369,7 @@ export class AnchorScheduler {
     await Promise.allSettled(this.#completionTrackers.values());
     for (const unsubscribe of this.#lifecycleUnsubscribers.values()) unsubscribe();
     this.#lifecycleUnsubscribers.clear();
+    await this.#settleRefreshes();
     this.#prepared = false;
   }
 
@@ -427,6 +461,7 @@ export class AnchorScheduler {
     // 本进程已开始的物理工作在本进程收尾：在飞的系统处理器跑完，追踪中的用户运行到终态
     await Promise.allSettled([...this.#systemRuns.values()]);
     await Promise.allSettled(this.#completionTrackers.values());
+    await this.#settleRefreshes();
   }
 
   /** Reopens the same owner only after the source has durably aborted before commit. */
@@ -438,8 +473,15 @@ export class AnchorScheduler {
   /** Rebuilds every disposable scheduler projection after an authority base install. */
   async recoverInstalledAuthority(): Promise<void> {
     await this.pauseForAuthorityTransfer();
+    this.#authorityEpoch += 1;
     for (const unsubscribe of this.#lifecycleUnsubscribers.values()) unsubscribe();
     this.#lifecycleUnsubscribers.clear();
+    await this.#settleRefreshes();
+    for (const slot of this.#refreshSlotsByTask.values()) {
+      this.#resolveRefreshWaitersUpTo(slot, Number.POSITIVE_INFINITY);
+    }
+    this.#refreshSlotsByTask.clear();
+    this.#consumedDueByTask.clear();
     this.#journals.clear();
     this.#views.clear();
     this.#definitions.clear();
@@ -974,6 +1016,7 @@ export class AnchorScheduler {
   }
 
   async #triggerScheduled(taskId: string, scheduledFor: string, generation: number): Promise<void> {
+    const epoch = this.#authorityEpoch;
     const definition = this.#definitions.get(taskId);
     if (!definition || definition.state !== "enabled") {
       this.#nextRunByTask.delete(taskId);
@@ -998,6 +1041,10 @@ export class AnchorScheduler {
     }));
     if (!trigger) return;
     const occurrence = await trigger;
+    // Bind consumed due identity to the local authority epoch and the actual
+    // durable occurrence's taskRevision + triggered due instant, never tearing
+    // #nextRunByTask or clobbering a concurrent newer revision.
+    this.#recordConsumedDue(taskId, epoch, occurrence.taskRevision, scheduledFor);
     if (occurrence.state === "missed") {
       this.#missedSummaryPending = true;
     }
@@ -1027,10 +1074,7 @@ export class AnchorScheduler {
         }
       }
     }
-    // Consume the due projection before rebuilding it from the durable
-    // occurrence. This prevents a status refresh from preserving the already
-    // fired timestamp and makes deterministic backoff restart-safe.
-    this.#nextRunByTask.delete(taskId);
+    if (this.#authorityEpoch !== epoch) return;
     await this.#refreshTask(taskId);
   }
 
@@ -1281,32 +1325,160 @@ export class AnchorScheduler {
   async #refreshTask(
     taskId: string,
     options: {
-      readonly systemView?: {
-        readonly name: string;
-        readonly schedule: TaskSchedule;
-        readonly priority: TaskPriority;
-        readonly description?: string;
-      };
+      readonly systemView?: SystemTaskViewSpec;
     } = {},
   ): Promise<void> {
+    const epoch = this.#authorityEpoch;
+    let slot = this.#refreshSlotsByTask.get(taskId);
+    if (!slot || slot.epoch !== epoch) {
+      slot = {
+        epoch,
+        nextGen: 0,
+        settledGen: 0,
+        waiters: new Set(),
+      };
+      this.#refreshSlotsByTask.set(taskId, slot);
+    }
+    if (options.systemView) {
+      slot.systemView = {
+        name: options.systemView.name,
+        schedule: structuredClone(options.systemView.schedule),
+        priority: options.systemView.priority,
+        ...(options.systemView.description !== undefined
+          ? { description: options.systemView.description }
+          : {}),
+      };
+    }
+    const targetGen = ++slot.nextGen;
     const journal = this.#journal(taskId);
-    // 调度视图只含当前事实：未结束的 occurrence、运行次数、连续失败与最近一次
-    const { definition, open, runCount, consecutiveFailures, last } = await journal.schedulerReadView();
-    if (!definition) return;
-    this.#activeRunCountByTask.set(
-      taskId,
-      open.filter((item) => !TERMINAL_STATES.has(item.state as never)).length,
-    );
-    this.#queuedRunsByTask.set(
-      taskId,
-      open.filter((item) => item.state === "queued"),
-    );
+    const completed = new Promise<void>((resolve, reject) => {
+      slot!.waiters.add({ targetGen, resolve, reject });
+    });
+    this.#ensureRefreshRunner(taskId, journal, slot);
+    return completed;
+  }
+
+  #ensureRefreshRunner(
+    taskId: string,
+    journal: JobJournal,
+    slot: TaskRefreshSlot,
+  ): void {
+    if (slot.runner) return;
+    if (this.#authorityEpoch !== slot.epoch) {
+      this.#resolveRefreshWaitersUpTo(slot, Number.POSITIVE_INFINITY);
+      return;
+    }
+    let finished = false;
+    let run: Promise<void> | undefined;
+    run = (async () => {
+      let skippedStaleOnce = false;
+      while (slot.settledGen < slot.nextGen) {
+        if (this.#authorityEpoch !== slot.epoch) {
+          this.#resolveRefreshWaitersUpTo(slot, Number.POSITIVE_INFINITY);
+          return;
+        }
+        const passGen = slot.nextGen;
+        const passSystemView = slot.systemView;
+        try {
+          // 调度视图只含当前事实：未结束的 occurrence、运行次数、连续失败与最近一次
+          const { definition, open, runCount, consecutiveFailures, last } =
+            await journal.schedulerReadView();
+          if (this.#authorityEpoch !== slot.epoch) {
+            this.#resolveRefreshWaitersUpTo(slot, Number.POSITIVE_INFINITY);
+            return;
+          }
+          if (!definition) {
+            if (slot.nextGen > passGen && !skippedStaleOnce) {
+              skippedStaleOnce = true;
+              continue;
+            }
+            skippedStaleOnce = false;
+            slot.settledGen = passGen;
+            this.#resolveRefreshWaitersUpTo(slot, passGen);
+            continue;
+          }
+          const policy =
+            definition.state === "deleted"
+              ? undefined
+              : await this.#schedulerPolicyFor(
+                  journal,
+                  last ? [last.jobRunId] : [],
+                );
+          if (this.#authorityEpoch !== slot.epoch) {
+            this.#resolveRefreshWaitersUpTo(slot, Number.POSITIVE_INFINITY);
+            return;
+          }
+          if (slot.nextGen > passGen && !skippedStaleOnce) {
+            skippedStaleOnce = true;
+            continue;
+          }
+          skippedStaleOnce = false;
+          this.#commitTaskProjection(taskId, journal, {
+            epoch: slot.epoch,
+            definition,
+            open,
+            runCount,
+            consecutiveFailures,
+            ...(last ? { last } : {}),
+            ...(policy ? { policy } : {}),
+            ...(passSystemView ? { systemView: passSystemView } : {}),
+          });
+          slot.settledGen = passGen;
+          this.#resolveRefreshWaitersUpTo(slot, passGen);
+        } catch (error) {
+          skippedStaleOnce = false;
+          slot.settledGen = Math.max(slot.settledGen, passGen);
+          this.#rejectRefreshWaitersUpTo(slot, passGen, error);
+        }
+      }
+    })().finally(() => {
+      finished = true;
+      if (slot.runner === run) {
+        slot.runner = undefined;
+      }
+      if (this.#authorityEpoch !== slot.epoch) {
+        this.#resolveRefreshWaitersUpTo(slot, Number.POSITIVE_INFINITY);
+      } else if (
+        this.#refreshSlotsByTask.get(taskId) === slot &&
+        slot.settledGen < slot.nextGen
+      ) {
+        this.#ensureRefreshRunner(taskId, journal, slot);
+      }
+    });
+    if (!finished) {
+      slot.runner = run;
+    }
+  }
+
+  #commitTaskProjection(
+    taskId: string,
+    journal: JobJournal,
+    input: {
+      readonly epoch: number;
+      readonly definition: TaskDefinition;
+      readonly open: readonly ScheduleOccurrence[];
+      readonly runCount: number;
+      readonly consecutiveFailures: number;
+      readonly last?: ScheduleOccurrence;
+      readonly policy?: Awaited<ReturnType<JobJournal["schedulerPolicy"]>>;
+      readonly systemView?: SystemTaskViewSpec;
+    },
+  ): void {
+    if (this.#authorityEpoch !== input.epoch) return;
+    const { definition, open, runCount, consecutiveFailures, last, policy } =
+      input;
+    const previousDefinition = this.#definitions.get(taskId);
+    if (
+      previousDefinition &&
+      (previousDefinition.state === "deleted" ||
+        definition.taskRevision < previousDefinition.taskRevision)
+    ) {
+      return;
+    }
     // 本进程见过的 run 一直可按 run 找到所属任务；更早的由持久投影精确查
     for (const occurrence of open) {
       this.#taskByRun.set(occurrence.jobRunId, taskId);
     }
-    const previousDefinition = this.#definitions.get(taskId);
-    this.#definitions.set(taskId, definition);
     if (!this.#lifecycleUnsubscribers.has(taskId)) {
       this.#lifecycleUnsubscribers.set(
         taskId,
@@ -1316,13 +1488,40 @@ export class AnchorScheduler {
       );
     }
     if (definition.state === "deleted") {
+      this.#definitions.set(taskId, definition);
+      this.#consumedDueByTask.delete(taskId);
       this.#views.delete(taskId);
       this.#nextRunByTask.delete(taskId);
       this.#activeRunCountByTask.delete(taskId);
       this.#queuedRunsByTask.delete(taskId);
       return;
     }
+    const activeRunCount = open.filter(
+      (item) => !TERMINAL_STATES.has(item.state as never),
+    ).length;
+    const queuedRuns = open.filter((item) => item.state === "queued");
     const previous = this.#views.get(taskId);
+    if (
+      definition.definition.kind === "system" &&
+      !input.systemView &&
+      !previous
+    ) {
+      this.#definitions.set(taskId, definition);
+      this.#activeRunCountByTask.set(taskId, activeRunCount);
+      this.#queuedRunsByTask.set(taskId, queuedRuns);
+      this.#nextRunByTask.delete(taskId);
+      return;
+    }
+    const existingMark = this.#consumedDueByTask.get(taskId);
+    if (
+      existingMark &&
+      (existingMark.authorityEpoch !== input.epoch ||
+        existingMark.taskRevision < definition.taskRevision ||
+        definition.state !== "enabled")
+    ) {
+      this.#consumedDueByTask.delete(taskId);
+    }
+    const activeMark = this.#consumedDueByTask.get(taskId);
     const now = this.#now().toISOString();
     const projection: TaskRuntimeProjection = {
       definition,
@@ -1332,39 +1531,160 @@ export class AnchorScheduler {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     };
-    if (
-      definition.definition.kind === "system" &&
-      !options.systemView &&
-      !previous
-    ) {
-      this.#nextRunByTask.delete(taskId);
-      return;
-    }
-    const view = definition.definition.kind === "user"
-      ? projectUserTask(projection)
-      : projectSystemTask(projection, options.systemView, previous);
-    this.#views.set(taskId, view);
-    const policy = await this.#schedulerPolicyFor(journal, last ? [last.jobRunId] : []);
-    const frozen = last?.state === "missed"
-      ? policy.missedNextFireByRun.get(last.jobRunId)?.nextFire
-      : last && isScheduleFailure(last)
-        ? policy.failurePolicyByRun.get(last.jobRunId)?.nextFire
+    const view =
+      definition.definition.kind === "user"
+        ? projectUserTask(projection)
+        : projectSystemTask(projection, input.systemView, previous);
+    const missedPolicy =
+      last?.state === "missed"
+        ? policy?.missedNextFireByRun.get(last.jobRunId)
         : undefined;
-    const pendingAutoDisable = policy.pendingAutoDisable.length > 0;
-    const legacyNext = !last && policy.legacyNextFire?.taskRevision === definition.taskRevision
-      ? policy.legacyNextFire.nextFire
-      : undefined;
+    const failurePolicy =
+      last && isScheduleFailure(last)
+        ? policy?.failurePolicyByRun.get(last.jobRunId)
+        : undefined;
+    const frozen =
+      missedPolicy !== undefined
+        ? missedPolicy.nextFire
+        : failurePolicy && failurePolicy.taskRevision <= definition.taskRevision
+          ? failurePolicy.nextFire
+          : undefined;
+    const pendingAutoDisable =
+      policy?.pendingAutoDisable.some(
+        (item) => item.taskRevision <= definition.taskRevision,
+      ) ?? false;
+    const legacyNext =
+      !last && policy?.legacyNextFire?.taskRevision === definition.taskRevision
+        ? policy.legacyNextFire.nextFire
+        : undefined;
     const unchangedDefinition =
       previousDefinition?.taskRevision === definition.taskRevision &&
       previousDefinition.state === definition.state;
+    const cachedNext = unchangedDefinition
+      ? this.#nextRunByTask.get(taskId)
+      : undefined;
+    const expectedCachedRunId =
+      cachedNext !== undefined
+        ? scheduleJobRunId(taskId, cachedNext)
+        : undefined;
+    const consumedDurablyForRevision =
+      expectedCachedRunId !== undefined &&
+      ((last?.taskRevision === definition.taskRevision &&
+        last.jobRunId === expectedCachedRunId) ||
+        open.some(
+          (item) =>
+            item.taskRevision === definition.taskRevision &&
+            item.jobRunId === expectedCachedRunId,
+        ));
+    const consumedByCurrentRevision =
+      consumedDurablyForRevision ||
+      (activeMark !== undefined &&
+        activeMark.authorityEpoch === input.epoch &&
+        activeMark.taskRevision === definition.taskRevision &&
+        cachedNext === activeMark.scheduledFor);
+    const reusableCachedNext =
+      cachedNext !== undefined && !consumedByCurrentRevision
+        ? cachedNext
+        : undefined;
     const next = pendingAutoDisable
       ? undefined
-      : frozen ?? legacyNext ??
-        (unchangedDefinition ? this.#nextRunByTask.get(taskId) : undefined) ??
-        deriveScheduleNextRun(view.schedule, last ? [last] : [], new Date(projection.updatedAt));
-    if (definition.state === "enabled" && next) this.#nextRunByTask.set(taskId, next);
-    else this.#nextRunByTask.delete(taskId);
-    view.state.nextRunAt = this.#nextRunByTask.get(taskId);
+      : frozen ??
+        legacyNext ??
+        reusableCachedNext ??
+        deriveScheduleNextRun(
+          view.schedule,
+          last ? [last] : [],
+          new Date(projection.updatedAt),
+        );
+    const publishedNextRunAt =
+      definition.state === "enabled" && next ? next : undefined;
+    if (publishedNextRunAt !== undefined) {
+      view.state.nextRunAt = publishedNextRunAt;
+    }
+    if (
+      activeMark &&
+      activeMark.authorityEpoch === input.epoch &&
+      activeMark.taskRevision === definition.taskRevision &&
+      publishedNextRunAt !== activeMark.scheduledFor
+    ) {
+      this.#consumedDueByTask.delete(taskId);
+    }
+    this.#definitions.set(taskId, definition);
+    this.#activeRunCountByTask.set(taskId, activeRunCount);
+    this.#queuedRunsByTask.set(taskId, queuedRuns);
+    if (publishedNextRunAt !== undefined) {
+      this.#nextRunByTask.set(taskId, publishedNextRunAt);
+    } else {
+      this.#nextRunByTask.delete(taskId);
+    }
+    this.#views.set(taskId, view);
+  }
+
+  #recordConsumedDue(
+    taskId: string,
+    epoch: number,
+    taskRevision: number,
+    scheduledFor: string,
+  ): void {
+    if (this.#authorityEpoch !== epoch) return;
+    const currentDefinition = this.#definitions.get(taskId);
+    if (
+      currentDefinition &&
+      (currentDefinition.state !== "enabled" ||
+        currentDefinition.taskRevision !== taskRevision)
+    ) {
+      return;
+    }
+    if (this.#nextRunByTask.get(taskId) !== scheduledFor) {
+      return;
+    }
+    const existing = this.#consumedDueByTask.get(taskId);
+    if (existing && existing.authorityEpoch === epoch) {
+      if (existing.taskRevision > taskRevision) return;
+      if (
+        existing.taskRevision === taskRevision &&
+        Date.parse(existing.scheduledFor) >= Date.parse(scheduledFor)
+      ) {
+        return;
+      }
+    }
+    this.#consumedDueByTask.set(taskId, {
+      authorityEpoch: epoch,
+      taskRevision,
+      scheduledFor,
+    });
+  }
+
+  async #settleRefreshes(): Promise<void> {
+    for (;;) {
+      const active = [...this.#refreshSlotsByTask.values()]
+        .map((slot) => slot.runner)
+        .filter((runner): runner is Promise<void> => runner !== undefined);
+      if (active.length === 0) return;
+      await Promise.allSettled(active);
+    }
+  }
+
+  #resolveRefreshWaitersUpTo(slot: TaskRefreshSlot, maxGen: number): void {
+    for (const waiter of [...slot.waiters]) {
+      if (waiter.targetGen <= maxGen) {
+        slot.waiters.delete(waiter);
+        waiter.resolve();
+      }
+    }
+  }
+
+  #rejectRefreshWaitersUpTo(
+    slot: TaskRefreshSlot,
+    maxGen: number,
+    error: unknown,
+  ): void {
+    for (const waiter of [...slot.waiters]) {
+      if (waiter.targetGen <= maxGen) {
+        slot.waiters.delete(waiter);
+        waiter.reject(error);
+      }
+    }
   }
 
   async #handleLifecycleEvent(event: JobLifecycleEvent): Promise<void> {
@@ -1375,6 +1695,7 @@ export class AnchorScheduler {
         waiter.resolve(event.state);
       }
     }
+    if (!this.#lifecycleUnsubscribers.has(event.ref.taskId)) return;
     await this.#refreshTask(event.ref.taskId);
   }
 

@@ -1,5 +1,10 @@
 import type { SchedulerEventMap } from "@zhixing-ai/core/scheduler";
-import { countScheduleConsecutiveFailures, type ScheduleOccurrence } from "@zhixing-ai/core/scheduler/application";
+import {
+  countScheduleConsecutiveFailures,
+  scheduleJobRunId,
+  ScheduleRuntimeApplicationService,
+  type ScheduleOccurrence,
+} from "@zhixing-ai/core/scheduler/application";
 import { createEventBus } from "@zhixing-ai/core";
 import { currentDeviceCapacityStep, currentMaintenanceAbortSignal, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
   isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceAdmissionError, withDeviceCapacityStep } from "@zhixing-ai/core/resources";
@@ -1369,6 +1374,477 @@ describe("AnchorScheduler authority", () => {
     expect(recoverUserJobs).toHaveBeenCalledOnce();
     expect(cancelUserJob).not.toHaveBeenCalled();
     expect(scheduler.getTask("task-del")).toBeUndefined();
+    await scheduler.stop();
+  });
+
+  it("keeps complete nextRunAt snapshot across async policy reads, read-retry order inversion, concurrent delete/update, and transient errors", async () => {
+    let clockMs = Date.parse("2026-08-02T00:00:00.000Z");
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-interval",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "interval-continuity",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "ping" },
+        },
+      },
+    };
+    const journalDel = new MemoryJobJournal();
+    journalDel.definition = {
+      taskId: "task-del-race",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "delete-race",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "del" },
+        },
+      },
+    };
+    const { scheduler } = fixture({
+      journals: new Map([
+        ["task-interval", journal],
+        ["task-del-race", journalDel],
+      ]),
+      now: () => new Date(clockMs),
+    });
+    const runtimeApp = new ScheduleRuntimeApplicationService(
+      {
+        snapshot: () => ({
+          tasks: scheduler.listTaskProjections(),
+          activeRunCount: scheduler.activeTaskCount,
+        }),
+        onSignal: () => () => {},
+      },
+      () => new Date(clockMs),
+    );
+
+    await scheduler.start();
+
+    // 1. Reproduce the exact fresh-a.jsonl overlap + manual completion sequence with a controlled policy gate
+    journal.runs.push({
+      taskId: "task-interval",
+      jobRunId: "manual-1",
+      scheduledFor: "2026-08-02T00:00:02.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "running",
+    });
+    await scheduler.refreshCommittedDefinitions(["task-interval"]);
+    clockMs = Date.parse("2026-08-02T00:01:01.000Z");
+    await scheduler.tick();
+    expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+      "2026-08-02T00:02:01.000Z",
+    );
+
+    let releasePolicyGate!: () => void;
+    let enteredPolicyGate!: () => void;
+    const insidePolicyGate = new Promise<void>((resolve) => {
+      enteredPolicyGate = resolve;
+    });
+    const policyGate = new Promise<void>((resolve) => {
+      releasePolicyGate = resolve;
+    });
+    const rawPolicy = journal.schedulerPolicy.bind(journal);
+    let gateNextPolicy = true;
+    journal.schedulerPolicy = (async () => {
+      if (gateNextPolicy) {
+        gateNextPolicy = false;
+        enteredPolicyGate();
+        await policyGate;
+      }
+      return rawPolicy();
+    }) as typeof journal.schedulerPolicy;
+
+    // Manual run commits while latest occurrence by scheduledFor is still missed
+    const manualRun = journal.runs.find((r) => r.jobRunId === "manual-1")!;
+    manualRun.outcome = { status: "completed", summary: "MANUAL-OK" };
+    journal.setState("manual-1", "committed");
+    await insidePolicyGate;
+
+    // Public read surfaces MUST retain the complete previous snapshot during the policy await window
+    expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+      "2026-08-02T00:02:01.000Z",
+    );
+    expect(
+      scheduler.listTasks().find((t) => t.id === "task-interval")?.state
+        .nextRunAt,
+    ).toBe("2026-08-02T00:02:01.000Z");
+    const midStatus = runtimeApp.readStatus();
+    expect(midStatus.enabledUserTaskCount).toBe(2);
+    expect(
+      midStatus.turnContext.active.find((t) => t.name === "interval-continuity")
+        ?.nextRunAt,
+    ).toBe("2026-08-02T00:02:01.000Z");
+
+    releasePolicyGate();
+    await vi.waitFor(() =>
+      expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+        "2026-08-02T00:02:01.000Z",
+      ),
+    );
+
+    // 2. Read-stage exit & re-entry order-inversion counterexample (simulating repeatState backoff)
+    let releaseReadBackoff!: () => void;
+    let enteredReadBackoff!: () => void;
+    const insideReadBackoff = new Promise<void>((resolve) => {
+      enteredReadBackoff = resolve;
+    });
+    const readBackoff = new Promise<void>((resolve) => {
+      releaseReadBackoff = resolve;
+    });
+    const rawReadView = journal.schedulerReadView.bind(journal);
+    let delayFirstRead = true;
+    journal.schedulerReadView = (async () => {
+      if (delayFirstRead) {
+        delayFirstRead = false;
+        enteredReadBackoff();
+        await readBackoff;
+      }
+      return rawReadView();
+    }) as typeof journal.schedulerReadView;
+
+    const due2RunId = scheduleJobRunId(
+      "task-interval",
+      "2026-08-02T00:02:01.000Z",
+    );
+    journal.runs.push({
+      taskId: "task-interval",
+      jobRunId: due2RunId,
+      scheduledFor: "2026-08-02T00:02:01.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "running",
+    });
+    const refresh1 = scheduler.refreshCommittedDefinitions(["task-interval"]);
+    await insideReadBackoff;
+
+    // A second refresh arrives while the task is still in "running" (before commit),
+    // then the run commits BEFORE refresh1's backed-off read re-enters.
+    const refresh2 = scheduler.refreshCommittedDefinitions(["task-interval"]);
+    const run2 = journal.runs.find((r) => r.jobRunId === due2RunId)!;
+    run2.outcome = { status: "completed", summary: "FINAL-AFTER-RETRY" };
+    run2.state = "committed";
+
+    // Snapshot remains complete while backed off
+    expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+      "2026-08-02T00:02:01.000Z",
+    );
+    releaseReadBackoff();
+    await Promise.all([refresh1, refresh2]);
+
+    expect(scheduler.getTask("task-interval")?.state).toMatchObject({
+      lastStatus: "ok",
+      lastSummary: "FINAL-AFTER-RETRY",
+      runCount: 2,
+      nextRunAt: "2026-08-02T00:03:01.000Z",
+    });
+
+    // 3. Transient error during refresh preserves previous complete snapshot and settles caller
+    let failOnce = true;
+    journal.schedulerPolicy = (async () => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("transient-policy-failure");
+      }
+      return rawPolicy();
+    }) as typeof journal.schedulerPolicy;
+    await expect(
+      scheduler.refreshCommittedDefinitions(["task-interval"]),
+    ).rejects.toThrow("transient-policy-failure");
+    expect(scheduler.getTask("task-interval")?.state).toMatchObject({
+      lastStatus: "ok",
+      lastSummary: "FINAL-AFTER-RETRY",
+      nextRunAt: "2026-08-02T00:03:01.000Z",
+    });
+    await expect(
+      scheduler.refreshCommittedDefinitions(["task-interval"]),
+    ).resolves.toBeUndefined();
+
+    // 3b. Cross-read revision guard: a pendingAutoDisable record from a newer taskRevision (> definition.taskRevision)
+    // observed only in the second async schedulerPolicy read must NOT clear nextRunAt of the older definition
+    let injectFutureRevisionPolicy = true;
+    journal.schedulerPolicy = (async () => {
+      const base = await rawPolicy();
+      if (!injectFutureRevisionPolicy) return base;
+      injectFutureRevisionPolicy = false;
+      return {
+        ...base,
+        pendingAutoDisable: [
+          {
+            t: "failure-policy" as const,
+            jobRunId: "future-rev-fail",
+            taskRevision: 2,
+            statusRevision: 1,
+            failureCount: 5,
+            threshold: 5,
+            autoDisableRequired: true,
+          },
+        ],
+      };
+    }) as typeof journal.schedulerPolicy;
+    await scheduler.refreshCommittedDefinitions(["task-interval"]);
+    expect(scheduler.getTask("task-interval")?.taskRevision).toBe(1);
+    expect(scheduler.getTask("task-interval")?.state.nextRunAt).toBe(
+      "2026-08-02T00:03:01.000Z",
+    );
+    journal.schedulerPolicy = rawPolicy;
+
+    // 4. Concurrent deleteTask while an earlier refresh is paused in schedulerPolicy never resurrects deleted task
+    let releaseDelPolicy!: () => void;
+    let enteredDelPolicy!: () => void;
+    const insideDelPolicy = new Promise<void>((resolve) => {
+      enteredDelPolicy = resolve;
+    });
+    const delPolicyGate = new Promise<void>((resolve) => {
+      releaseDelPolicy = resolve;
+    });
+    const rawDelPolicy = journalDel.schedulerPolicy.bind(journalDel);
+    let gateDelOnce = true;
+    journalDel.schedulerPolicy = (async () => {
+      if (gateDelOnce) {
+        gateDelOnce = false;
+        enteredDelPolicy();
+        await delPolicyGate;
+      }
+      return rawDelPolicy();
+    }) as typeof journalDel.schedulerPolicy;
+
+    const staleRefresh = scheduler.refreshCommittedDefinitions(["task-del-race"]);
+    await insideDelPolicy;
+    const deleting = scheduler.deleteTask("task-del-race", "del-race-req", 1);
+    // Task view stays intact until delete commits & refreshes, then disappears permanently with zero resurrection
+    releaseDelPolicy();
+    await Promise.all([staleRefresh, deleting]);
+    expect(scheduler.getTask("task-del-race")).toBeUndefined();
+    expect(runtimeApp.readStatus().enabledUserTaskCount).toBe(1);
+
+    await scheduler.stop();
+  });
+
+  it("binds consumed due timestamp to (authorityEpoch, taskRevision) and isolates authority replacement without treating closeAdmission as epoch change", async () => {
+    let clockMs = Date.parse("2026-08-02T00:00:00.000Z");
+    const dueIso = "2026-08-02T00:02:00.000Z";
+    const journalV1 = new MemoryJobJournal();
+    journalV1.definition = {
+      taskId: "task-same-due",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "same-due",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "once", at: dueIso },
+          action: { kind: "agent-turn", prompt: "v1" },
+        },
+      },
+    };
+    const journalEpoch2 = new MemoryJobJournal();
+    journalEpoch2.definition = {
+      taskId: "task-epoch-2",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "epoch-2-only",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "v2" },
+        },
+      },
+    };
+
+    let activeAuthority = 1;
+    let releaseTriggerGate!: () => void;
+    let enteredTriggerGate!: () => void;
+    const insideTriggerGate = new Promise<void>((resolve) => {
+      enteredTriggerGate = resolve;
+    });
+    const triggerGate = new Promise<void>((resolve) => {
+      releaseTriggerGate = resolve;
+    });
+    const rawTrigger = journalV1.trigger.bind(journalV1);
+    let gateFirstTrigger = true;
+    journalV1.trigger = (async (input) => {
+      if (gateFirstTrigger) {
+        gateFirstTrigger = false;
+        const snapshotRevision = journalV1.definition!.taskRevision;
+        enteredTriggerGate();
+        await triggerGate;
+        // Simulate trigger having committed under revision 1 before updateTask advanced to revision 2
+        const saved = journalV1.definition;
+        journalV1.definition = { ...saved!, taskRevision: snapshotRevision };
+        try {
+          return await rawTrigger(input);
+        } finally {
+          journalV1.definition = saved;
+        }
+      }
+      return rawTrigger(input);
+    }) as typeof journalV1.trigger;
+
+    let releaseActivation!: () => void;
+    let enteredActivation!: () => void;
+    const insideActivation = new Promise<void>((resolve) => {
+      enteredActivation = resolve;
+    });
+    const activationGate = new Promise<void>((resolve) => {
+      releaseActivation = resolve;
+    });
+    let gateFirstActivation = true;
+
+    const scheduler = new AnchorScheduler({
+      anchorEpoch: 1,
+      deviceId: "anchor-device",
+      admission: {
+        applyControlTransaction: async ({
+          envelope,
+          decide,
+        }: {
+          envelope: { requestId: string; body: { t: string; jobRunId?: string } };
+          decide: () => unknown;
+        }) => {
+          decide();
+          return {
+            kind: "accepted",
+            canonicalRequestId: envelope.requestId,
+            result: {
+              status: "ok",
+              body: {
+                t: "job-cancel",
+                jobRunId: envelope.body.jobRunId,
+                runState: "cancelled",
+              },
+            },
+          };
+        },
+      } as unknown as ControlAdmissionJournal,
+      eventBus: createEventBus<SchedulerEventMap>(),
+      listTaskIds: async () =>
+        activeAuthority === 1 ? ["task-same-due"] : ["task-epoch-2"],
+      journalFor: (taskId) =>
+        (activeAuthority === 1
+          ? journalV1
+          : taskId === "task-epoch-2"
+            ? journalEpoch2
+            : journalV1) as unknown as JobJournal,
+      activateUserJob: async () => {
+        if (gateFirstActivation) {
+          gateFirstActivation = false;
+          enteredActivation();
+          await activationGate;
+        }
+      },
+      pollMs: 60_000,
+      now: () => new Date(clockMs),
+    });
+
+    await scheduler.start();
+    expect(scheduler.getTask("task-same-due")?.state.nextRunAt).toBe(dueIso);
+
+    // 1. Fire revision 1 at dueIso and hold inside journal.trigger while updateTask moves to revision 2 with the SAME timestamp
+    clockMs = Date.parse(dueIso);
+    const ticking = scheduler.tick();
+    await insideTriggerGate;
+
+    clockMs = Date.parse("2026-08-02T00:01:00.000Z");
+    const updatedSameDue = await scheduler.updateTask(
+      "task-same-due",
+      {
+        schedule: { kind: "interval", everyMs: 60_000 },
+        action: { kind: "agent-turn", prompt: "v2-same-due" },
+        enabled: true,
+      },
+      "update-same-due",
+      1,
+    );
+    // updatedAt=00:01:00 + everyMs=60_000 produces the EXACT SAME nextRunAt = 00:02:00.000Z (dueIso)!
+    expect(updatedSameDue.taskRevision).toBe(2);
+    expect(updatedSameDue.state.nextRunAt).toBe(dueIso);
+
+    // Release revision-1 trigger -> holds at activateUserJob; revision-1 consumed mark must NOT suppress revision-2's identical dueIso
+    releaseTriggerGate();
+    await insideActivation;
+    releaseActivation();
+    await ticking;
+    expect(scheduler.getTask("task-same-due")?.taskRevision).toBe(2);
+    // Because revision-1's occurrence had taskRevision=1 (< 2), revision-2's cached dueIso (00:01:00.000Z) is preserved!
+    expect(scheduler.getTask("task-same-due")?.state.nextRunAt).toBe(dueIso);
+
+    // 2. Ordinary closeAdmissionForLifecycle is NOT an authority epoch change: completion refresh still publishes
+    const firstRunId = journalV1.runs[0]!.jobRunId;
+    scheduler.closeAdmissionForLifecycle();
+    journalV1.setState(firstRunId, "cancelled");
+    await vi.waitFor(() =>
+      expect(scheduler.getTask("task-same-due")?.state.lastStatus).toBe("error"),
+    );
+    expect(scheduler.getTask("task-same-due")?.state.nextRunAt).toBe(dueIso);
+
+    // 3. Authority replacement drains an in-flight gated refresh, settles the old request, and leaves only new-epoch projections
+    let releaseOldEpochPolicy!: () => void;
+    let enteredOldEpochPolicy!: () => void;
+    const insideOldEpochPolicy = new Promise<void>((resolve) => {
+      enteredOldEpochPolicy = resolve;
+    });
+    const oldEpochPolicyGate = new Promise<void>((resolve) => {
+      releaseOldEpochPolicy = resolve;
+    });
+    const rawV1Policy = journalV1.schedulerPolicy.bind(journalV1);
+    let gateOldPolicyOnce = true;
+    journalV1.schedulerPolicy = (async () => {
+      if (gateOldPolicyOnce) {
+        gateOldPolicyOnce = false;
+        enteredOldEpochPolicy();
+        await oldEpochPolicyGate;
+      }
+      return rawV1Policy();
+    }) as typeof journalV1.schedulerPolicy;
+
+    let oldRefreshSettled = false;
+    const oldRefresh = scheduler
+      .refreshCommittedDefinitions(["task-same-due"])
+      .then(() => {
+        oldRefreshSettled = true;
+      });
+    await insideOldEpochPolicy;
+
+    activeAuthority = 2;
+    clockMs = Date.parse("2026-08-02T00:01:00.000Z");
+    let authorityReplaced = false;
+    const replacing = scheduler.recoverInstalledAuthority().then(() => {
+      authorityReplaced = true;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(authorityReplaced).toBe(false);
+    expect(oldRefreshSettled).toBe(false);
+
+    releaseOldEpochPolicy();
+    await Promise.all([oldRefresh, replacing]);
+    expect(oldRefreshSettled).toBe(true);
+    expect(authorityReplaced).toBe(true);
+
+    // Late state mutation on old journalV1 after unsubscribe + epoch advance must have zero effect on new authority
+    journalV1.setState(firstRunId, "committed");
+    await new Promise((r) => setTimeout(r, 15));
+    expect(scheduler.getTask("task-same-due")).toBeUndefined();
+    expect(scheduler.getTask("task-epoch-2")?.state.nextRunAt).toBe(
+      "2026-08-02T00:02:00.000Z",
+    );
+
     await scheduler.stop();
   });
 });
