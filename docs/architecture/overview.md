@@ -1,6 +1,6 @@
 # 知行架构概述
 
-本文是知行当前整体生产架构现状的唯一核心概述，只陈述已落地的系统结构、责任边界与运行机制，并作为进入各模块详细设计的总入口。产品愿景与长期架构演进方向分别以[愿景](../vision.md)和[架构演进方向](./evolution-direction.md)为准。
+本文是知行当前整体生产架构现状的唯一核心概述，只陈述已落地的系统结构、责任边界与运行机制，并作为进入各模块详细设计的总入口；凡改变系统结构、责任边界、运行闭环、物理形态与能力边界或详细设计入口的变更落地，均须同步更新本文，使其始终反映最新生产现状。产品愿景与长期架构演进方向分别以[愿景](../vision.md)和[架构演进方向](./evolution-direction.md)为准。
 
 ## 架构中心与正交边界
 
@@ -94,7 +94,7 @@ flowchart TB
 围绕状态与副作用恢复，全局遵循两条硬边界：
 
 - **事实事件与进展事件严格二分**：事实事件（`Fact Event`）只表达已完成耐久提交的产品事实；进展事件（`Progress Event`）只表达带运行身份与顺序号的瞬时执行进展，不能作为状态恢复或事实查询依据。
-- **未知副作用诚实定格**：当崩溃、断连或超时导致会话执行或外部通道投递的真实结果无法确认时，系统将其显式定格为待消歧状态（`uncertain`），要求带版本栅栏的明确消歧，既不静默吞错也不盲目重放外部副作用。
+- **未知副作用诚实定格**：会话执行、用户定时任务执行或外部通道投递因故无法确认结果，且不能按既定合同安全自动重试时，由所属权威记录为待消歧状态（`uncertain`）。消歧须按各自的授权与版本栅栏绑定当前未决事实，以经校验的证据或明确裁决收束，不把未知结果当作普通失败而盲目重放外部副作用。
 
 ## 生产运行与协同机制
 
@@ -150,7 +150,7 @@ flowchart TB
 | Conversation（对话与跨对话通信） | `@zhixing-ai/core/conversation/application`、`conversation` | `@zhixing-ai/owner-kernel` 承载会话 `owner` 权威、运行提交与分派；RPC、终端与通道只做表面绑定 |
 | Workspace Administration（工作区管理） | `@zhixing-ai/core/environment/workspace-administration` | Core 持久绑定端口与 CLI 本机工作区管理宿主通道（目录授权、探测及重置适配，不经远端 Product API 暴露） |
 | Workscene（工作场景） | `@zhixing-ai/core/workscene/application` | 维护场景与工作区/会话绑定关系，在主控组合边界生成运行与工具投影 |
-| Schedule（日程与定时调度） | `@zhixing-ai/core/scheduler/application` | `@zhixing-ai/owner-kernel` 承载全局调度权威与耐久任务提交，CLI 提供触发效果适配 |
+| Schedule（日程与定时调度） | `@zhixing-ai/core/scheduler/application` | `@zhixing-ai/owner-kernel` 承载全局调度权威与耐久任务（作业）账本，CLI 提供触发效果适配 |
 | Advancement（契约推进与独立审查） | `@zhixing-ai/core/advancement/application` | `@zhixing-ai/owner-services` 承载完成判据管理、代理续推、独立审查调度与恢复服务 |
 | Delivery（结果投递） | `@zhixing-ai/core/delivery/application` | 拥有耐久投递义务、重试与消歧终态，并经进程内 `Outbox` 协调同目标发送尝试顺序；`@zhixing-ai/owner-kernel/delivery` 与通道适配执行发送效果 |
 | Extension Management（受管扩展管理） | `@zhixing-ai/core/extensions/application`、`extensions/contracts` | Core 扩展运行时管理制品、子进程、协议与接入核验；CLI 提供通道类型与本机配置绑定 |
@@ -171,12 +171,12 @@ flowchart TB
 | `@zhixing-ai/core` | 公开 | Agent Loop、上下文窗口与切段压缩（`context`）、模型调用容错重试（`resilience`）、对话转录（`transcript`）等共享原语，各领域窄子路径合同与应用服务，以及权威提交、持久投影、安全、确认、资源与运行日志等底座子路径 |
 | `@zhixing-ai/orchestrator` | 公开 | 通过 `runtime`、`subagent`、`orchestration`、`tools`、`security`、`confirmation`、`profile`、`advancement` 等子路径提供智能执行内核、运行合同、工具执行管线、子 Agent 与声明式文件编排实现 |
 | `@zhixing-ai/runtime-host` | 公开 | 通用 `AgentRuntime` 装配、冻结运行投影与内核/会话适配器；不承载业务领域规则 |
-| `@zhixing-ai/owner-kernel` | 公开 | 会话单写 `owner` 权威、运行与跨设备分派提交，以及日程调度、结果投递所需的耐久正确性机制 |
+| `@zhixing-ai/owner-kernel` | 公开 | 会话单写 `owner` 权威、定时作业权威、运行与跨设备分派提交，以及日程调度、结果投递所需的耐久正确性机制 |
 | `@zhixing-ai/owner-services` | 公开 | 契约推进（Advancement）的执行控制、独立审查调度、外部协作机制与恢复服务 |
 | `@zhixing-ai/rpc` | 公开 | Product API 客户端绑定、会话流式事件投影（`session-wire`）与确认桥接（`confirmation-bridge`）；不拥有业务规则 |
 | `@zhixing-ai/server` | 公开 | HTTP/REST、WebSocket、JSON-RPC 2.0 认证、连接与订阅网关，消费构造期注入的 `ProductApiDispatcher` 及会话、确认、通道与宿主状态窄绑定 |
 | `zhixing` | 公开 | `packages/cli`：`zz`/`zhixing` 进程入口、终端 S/N 适配、唯一 `PersistentApplicationHost` 组合根及主控/执行拓扑物理装配；不拥有领域规则 |
-| `@zhixing-ai/executor` | 公开 | 远端执行角色、分派任务执行、执行账本（ledger）、流式缓冲与数据面票据机制 |
+| `@zhixing-ai/executor` | 公开 | 执行角色支撑、分派任务执行、执行账本（ledger）、流式缓冲与数据面票据机制 |
 | `@zhixing-ai/mesh` | 公开 | 设备配对引导、双向认证隧道、跨机传输及加密检查点/灾备恢复物理机制（含原生检查点桥接件） |
 | `@zhixing-ai/providers` | 公开 | 多模型 Provider 协议适配、模型元信息/角色预设与公开配置解析 |
 | `@zhixing-ai/tools-builtin` | 公开 | 文件读写编辑、目录检索、内容搜索、命令执行与网页抓取等内置工具实现及薄绑定 |
@@ -195,7 +195,7 @@ flowchart TB
 
 1. **单一组合根**：每个持久运行进程只有一个 `PersistentApplicationHost`，不存在第二角色组合器或运行期全局服务定位器。
 2. **依赖先就绪，入口后开放**：组件取得资源即登记失败回滚补偿，正常关闭复用同一幂等清理链；公开服务端点只在全部权威持有者、消费者与关闭责任成立后才激活。
-3. **拒新后排空**：RPC 停止命令、系统信号、空闲回收、信任代际切换与设备移除共用同一耐久停止边界，排空在途工作并确认网关终态后才逆序释放外层宿主资源。
+3. **拒新排空与换代隔离**：RPC 停止命令、系统信号、空闲回收、信任代际切换与设备移除共用同一耐久停止边界——拒绝新准入的同时保持在途取消与终态结算畅通，排空在途工作并确认网关终态后才逆序释放外层宿主资源。宿主在线接管或恢复安装新权威基线时切换独立的进程内运行态作用域：旧作用域清理未接管的前台预留，其在途操作不得污染新运行态但仍须隔离释放自身持有的流、执行计划与资源句柄；已提交的耐久事实保持不变并由恢复流程重建派生视图与未完义务，仅真实结果未知的在途效果按既有授权与版本栅栏消歧。
 4. **单一事实单一写入权威**：全局域状态归当前值班 `Anchor`，每个对话的会话域状态归其唯一当前 `owner`；转录读视图、注意力窗口、缓存、索引、流式缓冲、检查点与界面状态均只是后置派生投影或恢复材料，网关、终端、通道与跨机传输不得形成第二写入口。
 5. **状态与观察各守其职**：进程发现标记（PID/端口/就绪文件）、持久凭据、恢复检查点与运行诊断日志严格分离生命周期，互不混用或冒充。
 6. **单机完整且拓扑透明**：单设备本身是完整一等产品形态；接入多台设备只替换底层基础设施绑定，不改变上层产品合同、智能内核输入或交互表面语义。
@@ -208,6 +208,7 @@ flowchart TB
 - **智能内核“强推理、薄责任”，将认知执行与事实裁决分离**：让模型在受控运行信封内专注开放推理、工具调用与子执行循环，避免内核耦合具体产品业务分支；同时禁止模型直写持久状态，由所属领域裁决业务事实，并通过正确性底座端口刚性约束权限确认、资源预算与未知副作用消歧。
 - **核心静态装配 + 外围受管子进程扩展，而非无边界全盘插件化**：全盘动态插件化会瓦解核心状态所有权、启动确定性与故障恢复保证；因此固定核心生产装配图以守住底座确定性，仅让已开放类型的外部实现按受控协议在独立子进程中接入（不授予 `Product API` 注册权与核心服务查找权），并配齐摘要校验、真实验证与失败回滚。
 - **不同边缘家族保持窄端口，而非抽象万能 `Capability`**：模型、工具、通道与跨机执行器承担的信任、生命周期和故障语义截然不同；允许底层复用实现代码，但对外必须分别履行各自的窄端口契约，防止责任边界随代码复用而滑坡。
+- **单写原子提交域内拆分状态族与窄事实裁决，而非共享可变巨型状态机或拆成多笔事务**：会话权威、定时作业权威与执行账本均要求业务主决定同资源、投递或调度等伴随记录在单笔事务内原子落盘；若拆成多笔独立写入会破坏崩溃恢复一致性，若让所有分支直接读写同一全量可变投影并混杂外部准备与事务协调，又会使局部规则改动穿透整套账本、相近协议重复漂移。因此各账本对外保留稳定门面与单点原子提交协调，对内按状态职责封装更新并让业务裁决只消费所需的窄只读事实切片；将可预先完成的载荷验签与冷历史补齐前置，而把必要的当前前缀核对、尾部记录归约验证与原子提交留在事务内；同时将对话与定时作业同构的分派提交鉴权、未启动终止证明与数据面票据等公共子协议收敛为共享协议核，显式保留各自的业务分叉（执行账本同样直接复用共享协议的阶段校验规则，不维护平行状态机），避免硬凑万能状态机。
 
 ## 当前物理形态与能力边界
 
@@ -215,7 +216,7 @@ flowchart TB
 
 1. **逻辑职责与物理包非一对一映射，核心与内置能力随构建静态发布**：逻辑边界按垂直领域与受控端口划分，但物理上多数领域合同、共享原语与正确性子路径集中于 `@zhixing-ai/core`，宿主装配集中在 `packages/cli/src/serve/`；编译期边缘实现包按依赖倒置引用 `@zhixing-ai/core` 的窄端口，而 `@zhixing-ai/server`、`@zhixing-ai/rpc`、`@zhixing-ai/runtime-host` 与 `@zhixing-ai/executor` 直接静态依赖 `@zhixing-ai/owner-kernel`（`server` 亦依赖 `@zhixing-ai/owner-services`）的会话、确认或推进窄接口。核心主循环、各垂直领域、内置工具、Provider 适配与终端界面均随产品构建静态装配发布——运行期虽经合同注入与配置切换协作，但不支持任意核心、工具或界面代码的运行期热替换；评估改动影响时须同时核对逻辑端口与实际包依赖。
 2. **动态接入机制分立，受管扩展、通道消费与第一方表面范围有限**：运行期动态接入按专门机制分立——外部聊天平台经受管子进程扩展接入（当前仅开放 `Channel` 一种类型并内置飞书种子；模型驱动的候选适配生成、接入与修复流程已打通，但仅经受控样例验证，不承诺任意外部平台无人辅助接通），外部工具服务经 MCP 协议接入，技能资产经 `Skill Catalog` 创作准入管理。通道 IPC v1 协议支持消息收发、签名互动确认挑战/回调与 HTTP 回调路由转发（不含流式消息编辑方法）；尽管通道数据类型保留可选 `media` 字段，但宿主入站主链当前仅将纯文本送入会话立项（未接通会话富媒体材料输入），飞书种子当前亦仅启用文本/卡片收发与互动确认。第一方交互表面当前仅有命令行与受管终端（TUI / 文本），尚未提供桌面、Web 或移动端图形界面。
-3. **本机应用层保护边界与未内置的独立能力**：经用户或信任规则授权放行的本地命令执行依赖宿主操作系统用户权限边界，未接入操作系统内核级进程与文件系统沙箱（受管扩展子进程同样用于生命周期隔离而非安全沙箱）。此外，旧 Memory 模块已退出生产基线——未来是否及如何以解耦形态构建长期记忆属独立产品决策，现行架构未内置或预设记忆抽象；内置网络工具当前提供指定 URL 抓取（`WebFetch`），未内置通用联网搜索引擎。
+3. **本机应用层保护边界与未内置的独立能力**：经用户或信任规则授权放行的本地命令执行依赖宿主操作系统用户权限边界，未接入操作系统内核级进程与文件系统沙箱（受管扩展子进程同样用于生命周期隔离而非安全沙箱）。此外，现行架构未内置长期记忆模块或预设记忆抽象；内置网络工具当前提供指定 URL 抓取（`WebFetch`），未内置通用联网搜索引擎。
 
 ## 技术基线与模块设计入口
 
@@ -246,5 +247,5 @@ flowchart TB
 - **交互表面、客户端接入、受管扩展与结果投递**：
   - 第一方表面与网关接入合同：[CLI 总体架构](../modules/cli/architecture.md) · [终端架构迁移合同](../workbench/terminal-architecture-migration.md)（S/N/U/R 进程职责与客户端消费边界；远端/进程内协议公开接口以 `@zhixing-ai/rpc`、`@zhixing-ai/server` 与 `@zhixing-ai/core/product-api` 导出为准） · [终端启动累计状态与恢复](./terminal-startup-state.md) · [视觉设计语言](../modules/cli/visual-language.md) · [输入区视觉](../modules/cli/input-visual.md) · [屏幕渲染与能力边界](../modules/cli/screen-rendering.md) · [Markdown 流式渲染](../modules/cli/markdown-rendering.md) · [命令系统](../modules/cli/command-system.md) · [输入补全](../modules/cli/input-completion.md) · [选择模块](../modules/cli/selection.md) · [文本粘贴](../modules/cli/text-paste.md) · [CLI 材料输入](../modules/cli/material-input.md) · [代码编辑差异展示](../modules/cli/edit-diff.md) · [子任务展示](../modules/cli/subagents.md) · [用量与上下文展示](../modules/cli/usage-display.md)
   - 受管扩展、外部通道与投递：[外部 APP 自主接入](../tasks/autonomous-channel-integration.md)（受管扩展底座与 Channel 类型现行设计及验收边界） · [外部连接适配编写与接入](../modules/extensions/authoring.md) · [飞书通道架构与能力边界](../modules/feishu/architecture.md) · [消息 Outbox 与因果排序](../modules/delivery/outbox.md)
-- **分布式运行时、日程调度与契约推进规格**（以下规格尚未迁入 `docs/modules/`，按注明的现行部分作为有效设计依据）：[分布式运行时架构总纲](../../research/design/modules/distributed-runtime/distributed-runtime-charter.md) · [分布式运行时可执行规格](../../research/design/modules/distributed-runtime/specification.md) · [安装、维护与发布指南](../../research/design/modules/distributed-runtime/release-and-maintenance-guide.md) · [调度器架构](../../research/design/drafts/scheduler-architecture.md)（以首节“当前生产架构”为准） · [任务推进与契约评议架构](../../research/design/drafts/task-advancement-rubric-architecture.md)（以首节取证边界与需求契约为准） · [对话模型参考](../../research/design/specifications/conversation-model.md)（Turn 与消息语义参考；网关与持久化边界以本文及[对话持久化与注意力窗口](../modules/conversation/persistence.md)为准）
+- **分布式运行时、权威账本、日程调度与契约推进**（以下现行设计与规格尚未归入 `docs/modules/`，按注明的有效部分为准）：[核心状态机架构与实现优化](../tasks/state-machine-architecture-optimization.md)（会话/作业账本、共享子协议、执行器账本与宿主会话协调的现行内部模块边界，以“优化范围与结束边界”和“具体架构设计”两节为准） · [分布式运行时架构总纲](../../research/design/modules/distributed-runtime/distributed-runtime-charter.md) · [分布式运行时可执行规格](../../research/design/modules/distributed-runtime/specification.md) · [安装、维护与发布指南](../../research/design/modules/distributed-runtime/release-and-maintenance-guide.md) · [调度器架构](../../research/design/drafts/scheduler-architecture.md)（以首节“当前生产架构”为准） · [任务推进与契约评议架构](../../research/design/drafts/task-advancement-rubric-architecture.md)（以首节取证边界与需求契约为准） · [对话模型参考](../../research/design/specifications/conversation-model.md)（Turn 与消息语义参考；网关与持久化边界以本文及[对话持久化与注意力窗口](../modules/conversation/persistence.md)为准）
 - **历史演进档案与早期方案参考**（仅用于追溯现行骨架由来与历史取舍，**不作为现行接口或实现依据**）：[AE-001：伴身智能架构演进](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md) · [AE-001 迁移任务](../tasks/ae-001-companion-intelligence-architecture-migration.md) · [早期服务端网关设计稿](../../research/design/specifications/server-gateway.md)（含已替代的旧 RPC 表与通道流式设想） · [早期常驻服务设计稿](../../research/design/specifications/persistent-service.md) · [历史架构决策索引](../../research/design/architecture/decisions/_index.md) · [架构与实现综合评估](../research/zhixing-architecture-and-implementation-evaluation.md)
