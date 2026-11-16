@@ -82,6 +82,7 @@ import {
   type AssignmentEnvelope,
   type ConversationEnvelope,
   type DecisionState,
+  type DeepReadonly,
   type DurableInteractionStreamEvent,
   type ExecutionControlFacts,
   type FinishedInteraction,
@@ -1566,59 +1567,87 @@ export class LedgerProjectionHistoryStore {
   }
 }
 
+function freezeInPlaceRecursive<T>(value: T): DeepReadonly<T> {
+  if (typeof value !== "object" || value === null) {
+    return value as DeepReadonly<T>;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      freezeInPlaceRecursive(value[index]);
+    }
+    return Object.freeze(value) as DeepReadonly<T>;
+  }
+  for (const key of Object.keys(value)) {
+    freezeInPlaceRecursive((value as Record<string, unknown>)[key]);
+  }
+  return Object.freeze(value) as DeepReadonly<T>;
+}
+
+function detachDeepReadonly<T>(value: T): DeepReadonly<T> {
+  if (typeof value !== "object" || value === null) {
+    return value as DeepReadonly<T>;
+  }
+  return freezeInPlaceRecursive(structuredClone(value));
+}
+
 function freezeReceivedState(
   received: LedgerReceivedState | undefined,
 ): ReadonlyLedgerReceivedState | undefined {
-  if (!received) return undefined;
-  return Object.freeze({
-    body: received.body,
-    recordSeq: received.recordSeq,
-    ledgerDigest: received.ledgerDigest,
-    ...(received.resourceLease ? { resourceLease: received.resourceLease } : {}),
-    ...(received.permission
-      ? { permission: Object.freeze({ ...received.permission }) }
-      : {}),
-  });
+  return received ? detachDeepReadonly(received) : undefined;
 }
 
 function freezeControlState(
   control: LedgerControlState | undefined,
-): Readonly<LedgerControlState> | undefined {
-  return control ? Object.freeze({ ...control }) : undefined;
+): DeepReadonly<LedgerControlState> | undefined {
+  return control ? detachDeepReadonly(control) : undefined;
 }
 
 function freezeRejectionState(
   rejection: LedgerRejectionState | undefined,
-): Readonly<LedgerRejectionState> | undefined {
-  return rejection ? Object.freeze({ ...rejection }) : undefined;
+): DeepReadonly<LedgerRejectionState> | undefined {
+  return rejection ? detachDeepReadonly(rejection) : undefined;
 }
 
 function freezeStartedState(
   started: LedgerStartedState | undefined,
-): Readonly<LedgerStartedState> | undefined {
-  return started ? Object.freeze({ ...started }) : undefined;
+): DeepReadonly<LedgerStartedState> | undefined {
+  return started ? detachDeepReadonly(started) : undefined;
 }
 
 function freezeSupersedeFenceState(
   supersedeFence: LedgerSupersedeFenceState | undefined,
-): Readonly<LedgerSupersedeFenceState> | undefined {
-  return supersedeFence ? Object.freeze({ ...supersedeFence }) : undefined;
+): DeepReadonly<LedgerSupersedeFenceState> | undefined {
+  return supersedeFence ? detachDeepReadonly(supersedeFence) : undefined;
 }
 
 function findLatestAbort(
   state: LedgerProjection,
   via?: "owner-fence" | "abort-ticket",
-): Extract<AssignmentRecord, { t: "abort-requested" }> | undefined {
+): DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>> | undefined {
   for (let index = state.aborts.length - 1; index >= 0; index -= 1) {
     const abort = state.aborts[index]!;
-    if (via === undefined || abort.via === via) return abort;
+    if (via === undefined || abort.via === via) {
+      return detachDeepReadonly(abort);
+    }
   }
   return undefined;
 }
 
+function hasMatchingAbort(
+  state: LedgerProjection,
+  predicate: (
+    abort: DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>>,
+  ) => boolean,
+): boolean {
+  for (const abort of state.aborts) {
+    if (predicate(detachDeepReadonly(abort))) return true;
+  }
+  return false;
+}
+
 function findFirstValidationTicketAbort(
   state: LedgerProjection,
-): ValidationTicketAbortFact | undefined {
+): DeepReadonly<ValidationTicketAbortFact> | undefined {
   for (const candidate of state.validation.aborts.values()) {
     if (candidate.via === "abort-ticket") {
       return Object.freeze({
@@ -1633,10 +1662,10 @@ function findFirstValidationTicketAbort(
 
 function snapshotPendingRequests(
   state: LedgerProjection,
-): readonly RequestedInteraction[] {
+): readonly DeepReadonly<RequestedInteraction>[] {
   return Object.freeze(
     [...state.pendingRequests.values()].map((request) =>
-      Object.freeze({ body: request.body, recordSeq: request.recordSeq }),
+      detachDeepReadonly({ body: request.body, recordSeq: request.recordSeq }),
     ),
   );
 }
@@ -1684,15 +1713,17 @@ export function toExecutionControlFacts(state: LedgerProjection): ExecutionContr
       return freezeSupersedeFenceState(state.supersedeFence);
     },
     get halted() {
-      return state.halted;
+      return state.halted ? detachDeepReadonly(state.halted) : undefined;
     },
     get hasAborts() {
       return state.aborts.length > 0;
     },
     hasAbortMatching(
-      predicate: (abort: Extract<AssignmentRecord, { t: "abort-requested" }>) => boolean,
+      predicate: (
+        abort: DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>>,
+      ) => boolean,
     ) {
-      return state.aborts.some(predicate);
+      return hasMatchingAbort(state, predicate);
     },
     pendingRequestsSnapshot() {
       return snapshotPendingRequests(state);
@@ -1747,7 +1778,7 @@ export function toInteractionEffectFacts(state: LedgerProjection): InteractionEf
     sideEffectBySeq(effectSeq: number) {
       const effect = state.sideEffects.get(effectSeq);
       if (!effect) return undefined;
-      return Object.freeze({
+      return detachDeepReadonly({
         started: effect.started,
         ...(effect.completed ? { completed: effect.completed } : {}),
       });
@@ -1773,7 +1804,7 @@ export function toInteractionEffectFacts(state: LedgerProjection): InteractionEf
     requestedById(requestId: string) {
       const item = state.requested.get(requestId);
       return item
-        ? Object.freeze({ body: item.body, recordSeq: item.recordSeq })
+        ? detachDeepReadonly({ body: item.body, recordSeq: item.recordSeq })
         : undefined;
     },
     get pendingRequestCount() {
@@ -1784,7 +1815,7 @@ export function toInteractionEffectFacts(state: LedgerProjection): InteractionEf
     },
     finishedById(requestId: string) {
       const item = state.finished.get(requestId);
-      return item ? Object.freeze({ ...item }) : undefined;
+      return item ? detachDeepReadonly(item) : undefined;
     },
     get finishedCount() {
       return finishedCount(state);
@@ -1846,13 +1877,13 @@ export function toSealingEvidenceFacts(state: LedgerProjection): SealingEvidence
       return freezeReceivedState(state.received);
     },
     get sealed() {
-      return state.sealed;
+      return state.sealed ? detachDeepReadonly(state.sealed) : undefined;
     },
     get halted() {
-      return state.halted;
+      return state.halted ? detachDeepReadonly(state.halted) : undefined;
     },
     get failure() {
-      return state.failure;
+      return state.failure ? detachDeepReadonly(state.failure) : undefined;
     },
     get hasAborts() {
       return state.aborts.length > 0;
@@ -1864,10 +1895,13 @@ export function toSealingEvidenceFacts(state: LedgerProjection): SealingEvidence
       return state.mutationRequestIds.has(requestId);
     },
     stagedMutationForRequestId(requestId: string) {
-      return state.stagedMutationByRequestId.get(requestId);
+      const item = state.stagedMutationByRequestId.get(requestId);
+      return item ? detachDeepReadonly(item) : undefined;
     },
     stagedMutationsSnapshot() {
-      return Object.freeze([...state.stagedMutations]);
+      return Object.freeze(
+        state.stagedMutations.map((item) => detachDeepReadonly(item)),
+      );
     },
     get hasOpenSideEffects() {
       return hasOpenSideEffectEntries(state);
@@ -1899,15 +1933,17 @@ export function toReceiptRecoveryFacts(state: LedgerProjection): ReceiptRecovery
       return freezeSupersedeFenceState(state.supersedeFence);
     },
     get halted() {
-      return state.halted;
+      return state.halted ? detachDeepReadonly(state.halted) : undefined;
     },
     get hasAborts() {
       return state.aborts.length > 0;
     },
     hasAbortMatching(
-      predicate: (abort: Extract<AssignmentRecord, { t: "abort-requested" }>) => boolean,
+      predicate: (
+        abort: DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>>,
+      ) => boolean,
     ) {
-      return state.aborts.some(predicate);
+      return hasMatchingAbort(state, predicate);
     },
     latestAbort(via?: "owner-fence" | "abort-ticket") {
       return findLatestAbort(state, via);
@@ -1925,7 +1961,7 @@ export function toReceiptRecoveryFacts(state: LedgerProjection): ReceiptRecovery
       return state.validation.cancelProofOwnerAccepted;
     },
     get interactionSettlementOwnerAccepted() {
-      return state.validation.interactionSettlementOwnerAccepted;
+      return detachDeepReadonly(state.validation.interactionSettlementOwnerAccepted);
     },
     get mirroredInteractionOrdinal() {
       return state.mirroredInteractionOrdinal;
@@ -1943,10 +1979,12 @@ export function toReceiptRecoveryFacts(state: LedgerProjection): ReceiptRecovery
       return state.finishedIndexBySeq.get(seq);
     },
     historicMirrorAt(seq: number) {
-      return state.historicMirror?.get(seq);
+      const item = state.historicMirror?.get(seq);
+      return item ? detachDeepReadonly(item) : undefined;
     },
     finishedAt(index: number) {
-      return finishedAt(state, index);
+      const item = finishedAt(state, index);
+      return item ? detachDeepReadonly(item) : undefined;
     },
   });
 }

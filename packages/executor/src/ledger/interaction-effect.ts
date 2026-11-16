@@ -53,10 +53,12 @@ import {
   assignmentRecord,
   canonicalTime,
   MAX_WIDTH_CANONICAL_TIME,
+  mutableSnapshot,
   nextEntryFromSeq,
   snapshot,
   type AssignmentLedgerOptions,
   type ChannelInteractionAnswerPreparation,
+  type DeepReadonly,
   type DurableInteractionStreamEvent,
   type FinishedInteraction,
   type InteractionOutcome,
@@ -1059,14 +1061,18 @@ export class LedgerInteractionEffect {
   }
 }
 
-export function mirrorEntry(finished: MirrorChainItem): InteractionMirrorEntry {
+export function mirrorEntry(
+  finished: MirrorChainItem | DeepReadonly<MirrorChainItem>,
+): InteractionMirrorEntry {
   if (finished.body.t === "trust-sediment") {
     return {
       ordinal: finished.ordinal,
       seq: finished.recordSeq,
       requestId: finished.body.requestId,
       kind: "trust-sediment",
-      sediment: snapshot(finished.body.sediment, "Trust sediment"),
+      sediment: mutableSnapshot<
+        Extract<AssignmentRecord, { t: "trust-sediment" }>["sediment"]
+      >(finished.body.sediment, "Trust sediment"),
       at: finished.at,
     };
   }
@@ -1076,7 +1082,9 @@ export function mirrorEntry(finished: MirrorChainItem): InteractionMirrorEntry {
       seq: finished.recordSeq,
       requestId: finished.body.requestId,
       kind: "trust-rule-hit",
-      hit: snapshot(finished.body.hit, "Trust rule hit"),
+      hit: mutableSnapshot<
+        Extract<AssignmentRecord, { t: "trust-rule-hit" }>["hit"]
+      >(finished.body.hit, "Trust rule hit"),
       at: finished.at,
     };
   }
@@ -1085,7 +1093,9 @@ export function mirrorEntry(finished: MirrorChainItem): InteractionMirrorEntry {
     seq: finished.recordSeq,
     requestId: finished.body.requestId,
     kind: "allow-once",
-    outcome: snapshot(finished.body.outcome, "Interaction outcome"),
+    outcome: mutableSnapshot<
+      Extract<AssignmentRecord, { t: "interaction-finished" }>["outcome"]
+    >(finished.body.outcome, "Interaction outcome"),
     at: finished.at,
   };
 }

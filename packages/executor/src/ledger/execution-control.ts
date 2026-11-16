@@ -88,10 +88,10 @@ import {
   type DispatchDecision,
   type ExecutionControlFacts,
   type LedgerControlState,
-  type LedgerReceivedState,
   type OwnerControlAuthorizer,
   type OwnerControlRequest,
   type PreparedExecutionAuthorityCheck,
+  type ReadonlyLedgerReceivedState,
   type SurfaceAbortDisposition,
   type SurfaceAbortInput,
 } from "./contracts.js";
@@ -1582,7 +1582,7 @@ export class LedgerExecutionControl {
     assignmentId: string,
     conflictingDispatchRef: ArtifactRef,
     conflictingPayload: AnyAssignmentActivationPayload,
-    received: Readonly<LedgerReceivedState>,
+    received: ReadonlyLedgerReceivedState,
   ): DispatchResult {
     const acceptedPayload = withoutSignature(received.body.activation);
     const payload = {

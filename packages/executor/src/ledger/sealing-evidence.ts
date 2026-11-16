@@ -48,6 +48,7 @@ import {
   assertNonNegativeSafeInteger,
   assignmentRecord,
   corruptLedger,
+  mutableSnapshot,
   nextEntryFromSeq,
   snapshot,
   truncateUtf8,
@@ -149,7 +150,11 @@ export class LedgerSealingEvidence {
                 kind: "assignment-mutation-staged",
                 requestId: existing.requestId,
                 recordSeq: existing.seq,
-                mutationDigest: stagedMutationDigest(existing),
+                mutationDigest: stagedMutationDigest(
+                  mutableSnapshot<
+                    Extract<AssignmentRecord, { t: "staged-mutation" }>
+                  >(existing, "Staged mutation"),
+                ),
               },
             };
           }
@@ -196,13 +201,18 @@ export class LedgerSealingEvidence {
     assignmentId: string,
   ): Promise<readonly AssignmentMutationOverlayRecord[]> {
     return this.#store.selectSealingEvidence(assignmentId, (facts) =>
-      facts.stagedMutationsSnapshot().map((record) => ({
-        recordSeq: record.seq,
-        domain: record.domain,
-        mutation: snapshot(record.mutation, "Staged overlay mutation"),
-        requestId: record.requestId,
-        mutationDigest: stagedMutationDigest(record),
-      })),
+      facts.stagedMutationsSnapshot().map((record) => {
+        const item = mutableSnapshot<
+          Extract<AssignmentRecord, { t: "staged-mutation" }>
+        >(record, "Staged overlay mutation");
+        return {
+          recordSeq: item.seq,
+          domain: item.domain,
+          mutation: item.mutation,
+          requestId: item.requestId,
+          mutationDigest: stagedMutationDigest(item),
+        };
+      }),
     );
   }
 
@@ -218,7 +228,10 @@ export class LedgerSealingEvidence {
           ? snapshot(current.received, "Received seal projection")
           : undefined,
         stagedMutations: current.stagedMutationsSnapshot().map((record) =>
-          snapshot(record, "Staged seal mutation"),
+          mutableSnapshot<Extract<AssignmentRecord, { t: "staged-mutation" }>>(
+            record,
+            "Staged seal mutation",
+          ),
         ),
       }),
     );
@@ -341,7 +354,10 @@ export class LedgerSealingEvidence {
           ? snapshot(current.received, "Received seal projection")
           : undefined,
         stagedMutations: current.stagedMutationsSnapshot().map((record) =>
-          snapshot(record, "Staged seal mutation"),
+          mutableSnapshot<Extract<AssignmentRecord, { t: "staged-mutation" }>>(
+            record,
+            "Staged seal mutation",
+          ),
         ),
       }),
     );
@@ -717,7 +733,11 @@ export class LedgerSealingEvidence {
           }
           const expected = createMutationBatch(
             assignmentId,
-            [...facts.stagedMutationsSnapshot()],
+            facts.stagedMutationsSnapshot().map((record) =>
+              mutableSnapshot<
+                Extract<AssignmentRecord, { t: "staged-mutation" }>
+              >(record, "Staged seal mutation"),
+            ),
           );
           if (
             canonicalize(expected) !== canonicalize(mutationBatch) ||

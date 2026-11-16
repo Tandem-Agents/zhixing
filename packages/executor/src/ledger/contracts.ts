@@ -490,17 +490,19 @@ export type DecisionState = {
   readonly state: LedgerProjection;
 };
 
-export interface ReadonlyLedgerReceivedState {
-  readonly body: Extract<AssignmentRecord, { t: "received" }>;
-  readonly recordSeq: number;
-  readonly ledgerDigest: string;
-  readonly resourceLease?: AssignmentResourceLease;
-  readonly permission?: Readonly<{
-    readonly controlLeaseId: string;
-    readonly validForMs: number;
-    readonly acceptedAt: string;
-  }>;
-}
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends ReadonlyArray<infer U>
+    ? readonly DeepReadonly<U>[]
+    : T extends ReadonlyMap<infer K, infer V>
+      ? ReadonlyMap<DeepReadonly<K>, DeepReadonly<V>>
+      : T extends ReadonlySet<infer U>
+        ? ReadonlySet<DeepReadonly<U>>
+        : T extends object
+          ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+          : T;
+
+export type ReadonlyLedgerReceivedState = DeepReadonly<LedgerReceivedState>;
 
 export interface ValidationTicketAbortFact {
   readonly refId: string;
@@ -541,17 +543,19 @@ export interface ExecutionControlFacts {
   readonly phase: LedgerSnapshot["phase"];
   readonly leaseTimeFrontier: number;
   readonly leaseAcceptanceFloor: number;
-  readonly control: Readonly<LedgerControlState> | undefined;
+  readonly control: DeepReadonly<LedgerControlState> | undefined;
   readonly received: ReadonlyLedgerReceivedState | undefined;
-  readonly rejection: Readonly<LedgerRejectionState> | undefined;
-  readonly started: Readonly<LedgerStartedState> | undefined;
-  readonly supersedeFence: Readonly<LedgerSupersedeFenceState> | undefined;
-  readonly halted: CancelProofBody | undefined;
+  readonly rejection: DeepReadonly<LedgerRejectionState> | undefined;
+  readonly started: DeepReadonly<LedgerStartedState> | undefined;
+  readonly supersedeFence: DeepReadonly<LedgerSupersedeFenceState> | undefined;
+  readonly halted: DeepReadonly<CancelProofBody> | undefined;
   readonly hasAborts: boolean;
   hasAbortMatching(
-    predicate: (abort: Extract<AssignmentRecord, { t: "abort-requested" }>) => boolean,
+    predicate: (
+      abort: DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>>,
+    ) => boolean,
   ): boolean;
-  pendingRequestsSnapshot(): readonly RequestedInteraction[];
+  pendingRequestsSnapshot(): readonly DeepReadonly<RequestedInteraction>[];
   readonly sideEffectCount: number;
   readonly hasOpenSideEffects: boolean;
   readonly hasPendingInteractionObligations: boolean;
@@ -561,18 +565,18 @@ export interface InteractionEffectFacts {
   readonly assignmentId: string;
   readonly lastSeq: number;
   readonly phase: LedgerSnapshot["phase"];
-  readonly control: Readonly<LedgerControlState> | undefined;
+  readonly control: DeepReadonly<LedgerControlState> | undefined;
   readonly received: ReadonlyLedgerReceivedState | undefined;
-  readonly supersedeFence: Readonly<LedgerSupersedeFenceState> | undefined;
+  readonly supersedeFence: DeepReadonly<LedgerSupersedeFenceState> | undefined;
   readonly hasAborts: boolean;
   latestAbort(
     via?: "owner-fence" | "abort-ticket",
-  ): Extract<AssignmentRecord, { t: "abort-requested" }> | undefined;
-  firstValidationTicketAbort(): ValidationTicketAbortFact | undefined;
+  ): DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>> | undefined;
+  firstValidationTicketAbort(): DeepReadonly<ValidationTicketAbortFact> | undefined;
   readonly sideEffectCount: number;
   readonly hasOpenSideEffects: boolean;
   sideEffectBySeq(effectSeq: number):
-    | Readonly<{
+    | DeepReadonly<{
         readonly started: Extract<AssignmentRecord, { t: "side-effect-started" }>;
         readonly completed?: Extract<AssignmentRecord, { t: "side-effect-completed" }>;
       }>
@@ -583,10 +587,10 @@ export interface InteractionEffectFacts {
   readonly lastFinishedInteractionRecordSeq: number;
   readonly needsStreamProof: boolean;
   hasRequested(requestId: string): boolean;
-  requestedById(requestId: string): Readonly<RequestedInteraction> | undefined;
+  requestedById(requestId: string): DeepReadonly<RequestedInteraction> | undefined;
   readonly pendingRequestCount: number;
-  pendingRequestsSnapshot(): readonly RequestedInteraction[];
-  finishedById(requestId: string): Readonly<FinishedInteraction> | undefined;
+  pendingRequestsSnapshot(): readonly DeepReadonly<RequestedInteraction>[];
+  finishedById(requestId: string): DeepReadonly<FinishedInteraction> | undefined;
   readonly finishedCount: number;
   interactionProjectionSourceIdsBetween(
     afterRecordSeq: number,
@@ -606,16 +610,18 @@ export interface SealingEvidenceFacts {
   readonly lastSeq: number;
   readonly phase: LedgerSnapshot["phase"];
   readonly received: ReadonlyLedgerReceivedState | undefined;
-  readonly sealed: Extract<AssignmentRecord, { t: "bundle_sealed" }> | undefined;
-  readonly halted: CancelProofBody | undefined;
-  readonly failure: Extract<AssignmentRecord, { t: "execution-failed" }> | undefined;
+  readonly sealed: DeepReadonly<Extract<AssignmentRecord, { t: "bundle_sealed" }>> | undefined;
+  readonly halted: DeepReadonly<CancelProofBody> | undefined;
+  readonly failure: DeepReadonly<Extract<AssignmentRecord, { t: "execution-failed" }>> | undefined;
   readonly hasAborts: boolean;
   readonly stagedMutationCount: number;
   hasMutationRequestId(requestId: string): boolean;
   stagedMutationForRequestId(
     requestId: string,
-  ): Extract<AssignmentRecord, { t: "staged-mutation" }> | undefined;
-  stagedMutationsSnapshot(): readonly Extract<AssignmentRecord, { t: "staged-mutation" }>[];
+  ): DeepReadonly<Extract<AssignmentRecord, { t: "staged-mutation" }>> | undefined;
+  stagedMutationsSnapshot(): readonly DeepReadonly<
+    Extract<AssignmentRecord, { t: "staged-mutation" }>
+  >[];
   readonly hasOpenSideEffects: boolean;
   readonly hasPendingInteractionObligations: boolean;
 }
@@ -625,34 +631,38 @@ export interface ReceiptRecoveryFacts {
   readonly lastSeq: number;
   readonly phase: LedgerSnapshot["phase"];
   readonly received: ReadonlyLedgerReceivedState | undefined;
-  readonly started: Readonly<LedgerStartedState> | undefined;
-  readonly supersedeFence: Readonly<LedgerSupersedeFenceState> | undefined;
-  readonly halted: CancelProofBody | undefined;
+  readonly started: DeepReadonly<LedgerStartedState> | undefined;
+  readonly supersedeFence: DeepReadonly<LedgerSupersedeFenceState> | undefined;
+  readonly halted: DeepReadonly<CancelProofBody> | undefined;
   readonly hasAborts: boolean;
   hasAbortMatching(
-    predicate: (abort: Extract<AssignmentRecord, { t: "abort-requested" }>) => boolean,
+    predicate: (
+      abort: DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>>,
+    ) => boolean,
   ): boolean;
   latestAbort(
     via?: "owner-fence" | "abort-ticket",
-  ): Extract<AssignmentRecord, { t: "abort-requested" }> | undefined;
-  firstValidationTicketAbort(): ValidationTicketAbortFact | undefined;
+  ): DeepReadonly<Extract<AssignmentRecord, { t: "abort-requested" }>> | undefined;
+  firstValidationTicketAbort(): DeepReadonly<ValidationTicketAbortFact> | undefined;
   readonly acknowledgedCommitRevision: number | undefined;
   readonly streamProjectionEnabledAfter: number | undefined;
   readonly cancelProofOwnerAccepted: boolean;
-  readonly interactionSettlementOwnerAccepted: AssignmentLedgerValidationState["interactionSettlementOwnerAccepted"];
+  readonly interactionSettlementOwnerAccepted: DeepReadonly<
+    AssignmentLedgerValidationState["interactionSettlementOwnerAccepted"]
+  >;
   readonly mirroredInteractionOrdinal: number;
   readonly mirroredInteractionDigest: string;
   readonly mirroredFinishedCount: number;
   readonly finishedCount: number;
   finishedIndexAtSeq(seq: number): number | undefined;
-  historicMirrorAt(seq: number): MirrorChainItem | undefined;
-  finishedAt(index: number): MirrorChainItem | undefined;
+  historicMirrorAt(seq: number): DeepReadonly<MirrorChainItem> | undefined;
+  finishedAt(index: number): DeepReadonly<MirrorChainItem> | undefined;
 }
 
 export type PreparedExecutionAuthorityCheck = (
   facts: {
     readonly phase: LedgerSnapshot["phase"];
-    readonly control: Readonly<LedgerControlState> | undefined;
+    readonly control: DeepReadonly<LedgerControlState> | undefined;
   },
   prefix: ProjectionTransactionContext,
 ) => Promise<void>;
@@ -798,7 +808,7 @@ export function assignmentStream(assignmentId: string): string {
 }
 
 export function authorityForExecutionRef(
-  ref: AssignmentActivationProof["ref"],
+  ref: DeepReadonly<AssignmentActivationProof["ref"]> | AssignmentActivationProof["ref"],
 ): AuthorityEpochRef {
   return ref.execution === "conversation"
     ? {
@@ -910,4 +920,8 @@ export function snapshot<T>(value: T, label: string): T {
   } catch (error) {
     throw new TypeError(`${label} is not canonical protocol data`, { cause: error });
   }
+}
+
+export function mutableSnapshot<T>(value: DeepReadonly<T> | T, label: string): T {
+  return snapshot(value, label) as T;
 }
