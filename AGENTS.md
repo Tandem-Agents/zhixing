@@ -137,4 +137,4 @@
 
 随后，双方分别亲自对照原始需求和完成条件审查成果，先独立记录达成依据或具体缺口，再交换验收意见。任一方判定未达标，就围绕缺口继续求解、质询、复核，直到双方均有依据确认达标；不得以意见一致或流程走完代替完成，也不得为迁就结果缩减目标。只重做受缺口影响的工作，确实受阻就如实报告未达项。
 
-执行细则见[协作目标与达标核验](docs/workbench/cross-session-collaboration.md#35-状态与推进)。
+协作分工见[入口与项目 Worker](docs/workbench/cross-session-collaboration.md#入口与项目-worker)，执行细则见[协作目标与达标核验](docs/workbench/cross-session-collaboration.md#35-状态与推进)。
