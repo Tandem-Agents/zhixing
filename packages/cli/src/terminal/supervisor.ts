@@ -1042,7 +1042,7 @@ class TerminalSupervisor {
       await this.#phase('mode-permit', () => this.#nativeCommand('permit-modes', event => event.event === 'modes-permitted', Math.max(0, end - Date.now())));
       this.#live();
       if (Date.now() >= end) throw Error('terminal-mode-admission-deadline');
-      await item.channel!.send({ type: 'grant' }); return;
+      await item.channel!.send({ type: 'grant', surface: this.options.args.length ? 'command' : 'conversation' }); return;
     }
     if (item.role === 'ui' && message.type === 'ready') {
       if (!this.#modeAdmission || this.#uiReady || !Number.isSafeInteger(message.frameId)) throw Error('terminal-first-frame-order');

@@ -2224,5 +2224,41 @@ try {
     } finally { probeArea.destroy(); }
     checks.push('host default foreground: message pages, skills empty state, focused conversation input, prefilled inline field and secret mask take the host default foreground; explicit brand/dim and the fixed recovery pair are kept; explicit colours cleared to undefined return to the host default (text, textarea and its focused colour) and getters keep reading the current colour');
   }
+  {
+    const beforeExits = exits, beforeActions = actions.length;
+    await show({ kind: 'command', title: '知行 · zz pair', message: '正在执行命令…', busy: true });
+    const commandFrame = text();
+    assert.ok(commandFrame.includes('知行 · zz pair'), 'command view displays controlled command title');
+    assert.ok(!commandFrame.includes('当前对话'), 'command view never displays conversation identity');
+    assert.ok(!commandFrame.includes('输入消息或 / 查看命令'), 'command view never displays conversation input prompt');
+    assert.ok(!commandFrame.includes('Enter 确认'), 'command view never displays fake selection confirmation hint');
+    assert.ok(!commandFrame.includes('Esc 返回'), 'command view never displays fake Esc return hint');
+    assert.ok(commandFrame.includes('Ctrl+C 退出'), 'command view displays truthful Ctrl+C exit hint');
+    test.mockInput.pressEnter(); await flush();
+    test.mockInput.pressEscape(); await flush();
+    assert.equal(actions.length, beforeActions, 'Enter and Esc do not dispatch bogus actions on non-interactive command page');
+    test.mockInput.pressKey('\x03'); await flush();
+    assert.equal(exits, beforeExits + 1, 'Ctrl+C exits command page through existing exit path');
+
+    const cmdTest = await createTestRenderer({ width: 80, height: 24, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
+    const cmdTick = setInterval(() => { void cmdTest.renderOnce(); }, 15);
+    let cmdRoot: Awaited<ReturnType<typeof createTerminalRoot>> | undefined;
+    try {
+      cmdRoot = await createTerminalRoot({ signal: new AbortController().signal, surface: 'command', exit: async () => {}, inputReady() {},
+        request: async () => ({ accepted: true }) }, async () => cmdTest.renderer);
+      clearInterval(cmdTick);
+      for (let frame = 0; frame < 4; frame++) await cmdTest.renderOnce();
+      const firstCmdFrame = cmdTest.captureCharFrame();
+      assert.ok(firstCmdFrame.includes('知行 · 命令'), 'command surface first frame shows command header');
+      assert.ok(firstCmdFrame.includes('正在准备命令…'), 'command surface first frame shows command preparation status');
+      assert.ok(!firstCmdFrame.includes('正在启动…'), 'command surface first frame never flashes conversation starting header');
+      assert.ok(!firstCmdFrame.includes('当前对话'), 'command surface first frame never shows conversation label');
+      assert.ok(!firstCmdFrame.includes('可先输入'), 'command surface first frame never invites early conversation typing');
+      assert.ok(firstCmdFrame.includes('Ctrl+C 退出'), 'command surface first frame shows Ctrl+C exit hint');
+    } finally { clearInterval(cmdTick); if (cmdRoot) await cmdRoot.dispose(); else cmdTest.renderer.destroy(); }
+
+    await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
+    checks.push('standalone command surface: first frame and executing frame show command identity and Ctrl+C exit without conversation chrome, early-input box or bogus Enter/Esc hints');
+  }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

@@ -13,8 +13,9 @@ const body = parsed.statements.filter(node => !ts.isImportDeclaration(node)).map
   .replace("await import('./root.js')", 'await Promise.resolve({ createTerminalRoot: ports.createRoot })');
 const code = ts.transpile(body, { target: ts.ScriptTarget.ES2022 });
 const cleanups: (() => void)[] = [];
-function fixture() {
+function fixture(grantMessage: TerminalMessage = { type: 'grant' }) {
   const sent: TerminalMessage[] = [], failures: string[] = [];
+  let rootSurface: string | undefined;
   const instance = '11111111-1111-4111-8111-111111111111';
   const transport = Object.assign(new EventEmitter(), { connected: true,
     send(packet: TerminalEnvelope, done: (error?: Error) => void) { queueMicrotask(() => { supervisor.accept(packet); done(); }); },
@@ -25,12 +26,13 @@ function fixture() {
   }, message => {
     sent.push(message);
     if (message.type === 'hello') void supervisor.send({ type: 'hello', role: 'ui' }).catch(() => {});
-    if (message.type === 'modes') void supervisor.send({ type: 'grant' }).catch(() => {});
+    if (message.type === 'modes') void supervisor.send(grantMessage).catch(() => {});
     if (message.type === 'request') void supervisor.send({ type: 'reply', id: message.id, value: { accepted: true } }).catch(() => {});
   }, reason => failures.push(reason));
   let request!: (action: TerminalAction) => Promise<unknown>;
   const dispose = vi.fn(async () => {});
-  const ports = { async createRoot(options: { request: typeof request }) {
+  const ports = { async createRoot(options: { request: typeof request; surface?: string }) {
+    rootSurface = options.surface;
     request = options.request;
     void request({ kind: 'input-candidates', revision: 1, text: '', cursor: 0 }).catch(() => {});
     return { firstFrameId: 1, dispose, receive() {} };
@@ -45,6 +47,7 @@ function fixture() {
   ) as { close(reason: string, code: number, notify?: boolean): Promise<void> };
   cleanups.push(() => supervisor.close());
   return { sent, failures, supervisor, transport, dispose, processPort,
+    rootSurface: () => rootSurface,
     request: (action: TerminalAction) => request(action), close: loaded.close,
     flush: () => vi.advanceTimersByTimeAsync(0) };
 }
@@ -103,5 +106,15 @@ describe('UI waits for application readiness outside the delivery window', () =>
     await f.close('supervisor-close', 0, false);
     expect(f.sent.filter(message => message.type === 'request')).toEqual([]);
     expect(f.dispose).toHaveBeenCalledOnce(); expect(f.transport.connected).toBe(false);
+  });
+  it('forwards the grant surface mode to createTerminalRoot before the first frame', async () => {
+    const cmd = fixture({ type: 'grant', surface: 'command' }); await cmd.flush();
+    expect(cmd.rootSurface()).toBe('command');
+    expect(cmd.sent.some(message => message.type === 'ready')).toBe(true);
+    await cmd.close('user-exit', 0);
+
+    const conv = fixture({ type: 'grant', surface: 'conversation' }); await conv.flush();
+    expect(conv.rootSurface()).toBe('conversation');
+    await conv.close('user-exit', 0);
   });
 });

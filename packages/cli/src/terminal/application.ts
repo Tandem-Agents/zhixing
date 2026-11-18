@@ -941,12 +941,20 @@ class TerminalApplication {
   async #independentCommand(): Promise<void> {
     let code = 1;
     try {
-      await this.#publish({ kind: 'unavailable', title: '知行 · 执行命令', message: '正在执行命令…', busy: true });
+      const { independentCommandTitle, runIndependentCommand } = await import('./independent-command.js');
       this.#abort.signal.throwIfAborted();
-      const { runIndependentCommand } = await import('./independent-command.js');
+      const title = independentCommandTitle(this.args);
+      const publishExecuting = async () => {
+        if (!this.#abort.signal.aborted && !this.#recovery.active && !this.#editor && !this.#selection) {
+          await this.#publish({ kind: 'command', title, message: '正在执行命令…', busy: true });
+        }
+      };
+      await publishExecuting();
+      this.#abort.signal.throwIfAborted();
       code = await runIndependentCommand(this.args, {
         home: this.home, signal: this.#abort.signal, logging: this.#logging, secretStore: this.#secretStore,
         management: this.#management, recovery: this.#recovery,
+        resumeExecuting: publishExecuting,
         ensureManagement: async () => { this.#abort.signal.throwIfAborted(); await this.#connection.ensure(); this.#abort.signal.throwIfAborted(); },
         choose: view => this.#choosePage(view), send: message => this.#channel.send(message, 'body'),
         completeConfiguration: async () => {
@@ -964,7 +972,7 @@ class TerminalApplication {
         },
       });
     } catch {
-      if (!this.#abort.signal.aborted) await this.#channel.send({ type: 'command-output', stream: 'stderr', text: '命令未能完成；已接受的操作请按原继续命令查询。\n' }, 'body');
+      if (!this.#abort.signal.aborted) await this.#channel.send({ type: 'command-output', stream: 'stderr', text: '命令未能完成；已接受的操作请按原继续命令查询。\n' }, 'body').catch(() => {});
     } finally {
       this.#recovery.close();
       void this.#close(code, code === 0 ? 'command-completed' : 'command-failed');

@@ -18,6 +18,44 @@ export interface IndependentCommandPorts {
   completeConfiguration(): Promise<'ready' | 'cancelled'>;
   choose(view: Omit<TerminalView, 'generation'>): Promise<TerminalSelectionResponse | undefined>;
   send(message: TerminalMessage): Promise<void>;
+  resumeExecuting?(): Promise<void>;
+}
+
+type CommandTitleTree = Readonly<Record<string, string | CommandTitleNode>>;
+interface CommandTitleNode { readonly [subcommand: string]: string | CommandTitleNode }
+
+/** 受控的独立终端命令标题映射：仅匹配固定子命令词，绝不拼接任何位置参数、选项值或用户输入。 */
+const INDEPENDENT_COMMAND_TITLES: CommandTitleTree = {
+  pair: '知行 · zz pair',
+  device: {
+    remove: '知行 · zz device remove',
+    continue: '知行 · zz device continue',
+  },
+  duty: {
+    migrate: '知行 · zz duty migrate',
+  },
+  backup: {
+    setup: '知行 · zz backup setup',
+    verify: '知行 · zz backup verify',
+    recover: '知行 · zz backup recover',
+    root: {
+      rotate: '知行 · zz backup root rotate',
+      invalidate: '知行 · zz backup root invalidate',
+      'approve-reset': '知行 · zz backup root approve-reset',
+      reset: '知行 · zz backup root reset',
+    },
+  },
+};
+
+export function independentCommandTitle(args: readonly string[]): string {
+  let node: string | CommandTitleNode | undefined = INDEPENDENT_COMMAND_TITLES;
+  for (const token of args) {
+    if (token === '--log') continue;
+    if (!node || typeof node === 'string' || !Object.hasOwn(node, token)) break;
+    node = node[token];
+    if (typeof node === 'string') return node;
+  }
+  return '知行 · 命令';
 }
 
 /** N supplies interaction and ownership; Commander still invokes each original action. */
@@ -30,9 +68,17 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
     output.push({ stream, text });
   };
   const writeLine = (line: string) => write('stdout', line + '\n');
-  const choose = async (view: Omit<TerminalView, 'generation'>) => {
+  const resumeExecuting = async () => {
+    if (!ports.signal.aborted && !ports.recovery.active) await ports.resumeExecuting?.();
+  };
+  const chooseRaw = async (view: Omit<TerminalView, 'generation'>) => {
     ports.signal.throwIfAborted();
     const answer = await ports.choose(view); ports.signal.throwIfAborted(); return answer?.cancelCause ? undefined : answer;
+  };
+  const choose = async (view: Omit<TerminalView, 'generation'>) => {
+    const answer = await chooseRaw(view);
+    if (answer) await resumeExecuting();
+    return answer;
   };
   const confirm = async (message: string) => (await choose({ kind: 'selection', title: '确认操作', message,
     choices: [{ id: 'cancel', label: '取消' }, { id: 'confirm', label: '确认', danger: true }] }))?.itemId === 'confirm';
@@ -40,7 +86,7 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
     let page = 0;
     for (;;) {
       const start = page * 24;
-      const answer = await choose({ kind: 'selection', title, message: '请选择目标设备。', choices: [
+      const answer = await chooseRaw({ kind: 'selection', title, message: '请选择目标设备。', choices: [
         ...items.slice(start, start + 24).map((item, i) => ({ id: String(start + i), label: item.displayName })),
         ...(page ? [{ id: 'previous', label: '上一页' }] : []), ...(start + 24 < items.length ? [{ id: 'next', label: '下一页' }] : []),
         { id: 'cancel', label: '取消' },
@@ -49,8 +95,16 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
       if (answer.itemId === 'previous') { page--; continue; }
       if (answer.itemId === 'next') { page++; continue; }
       const index = Number(answer.itemId);
-      if (Number.isSafeInteger(index) && index >= start && index < Math.min(items.length, start + 24)) return index;
+      if (Number.isSafeInteger(index) && index >= start && index < Math.min(items.length, start + 24)) {
+        await resumeExecuting();
+        return index;
+      }
     }
+  };
+  const readRecoveryPackage = async () => {
+    const value = await ports.recovery.read();
+    await resumeExecuting();
+    return value;
   };
   const common = { zhixingHome: ports.home, logging: ports.logging, secretStore: ports.secretStore, writeLine };
   const duty = { management: ports.management, signal: ports.signal, writeLine,
@@ -69,23 +123,30 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
     uninstallIO: { interactive: true, confirm,
       readRecoveryPackage: async () => {
         const { decodeRecoveryPackage, requireCurrentRecoveryPackage, encodeRecoveryPackage } = await import('@zhixing-ai/mesh/recovery-package');
-        return encodeRecoveryPackage(requireCurrentRecoveryPackage(decodeRecoveryPackage(await ports.recovery.read())).root);
+        return encodeRecoveryPackage(requireCurrentRecoveryPackage(decodeRecoveryPackage(await readRecoveryPackage())).root);
       },
       choosePath: async preflight => {
         const targets = preflight.migrationTargets.filter(item => item.ready);
-        const answer = await choose({ kind: 'selection', title: '选择卸载前的安全路径', choices: [
+        const answer = await chooseRaw({ kind: 'selection', title: '选择卸载前的安全路径', choices: [
           ...(targets.length ? [{ id: 'migration', label: '先转移值班职责' }] : []),
           ...(preflight.recoveryBackupReady ? [{ id: 'recovery-backup', label: '使用已验证的恢复备份' }] : []),
           { id: 'cancel', label: '取消' },
         ] });
-        if (answer?.itemId === 'recovery-backup') return { path: 'recovery-backup' };
+        if (answer?.itemId === 'recovery-backup') {
+          await resumeExecuting();
+          return { path: 'recovery-backup' };
+        }
         if (answer?.itemId !== 'migration') throw Error('操作已取消。');
         return { path: 'migration', targetName: targets[await selectIndex(targets, '选择接班设备')]!.displayName };
       } },
-    backup: { ...common, readRecoveryPackage: () => ports.recovery.read(),
+    backup: { ...common, readRecoveryPackage,
       showRecoveryPackage: value => ports.recovery.show(value), showResetApproval: value => ports.recovery.show(value, '请保存重置确认码', true) },
-    recovery: { ...common, signal: ports.signal, readRecoveryPackage: () => ports.recovery.read() },
-    pair: { ...common, signal: ports.signal, composition: 'production', completeDeviceConfiguration: ports.completeConfiguration,
+    recovery: { ...common, signal: ports.signal, readRecoveryPackage },
+    pair: { ...common, signal: ports.signal, composition: 'production', completeDeviceConfiguration: async () => {
+        const outcome = await ports.completeConfiguration();
+        if (outcome === 'ready') await resumeExecuting();
+        return outcome;
+      },
       promptExecutorAutoStart: async () => {
         const answer = await choose({ kind: 'selection', title: '设备自动上线', message: '是否在开机后自动上线？',
           choices: [{ id: 'yes', label: '开机自动上线' }, { id: 'no', label: '手动启动' }] });
@@ -114,7 +175,7 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
         }
         await ports.recovery.show(lines.join('\n') + '\n\n' + invitation, '配对邀请 · 扫码或复制邀请');
       },
-      confirmRecoveryPackage: async value => { if (value) await ports.recovery.show(value); else ports.recovery.close(); return ports.recovery.read(); },
+      confirmRecoveryPackage: async value => { if (value) await ports.recovery.show(value); else ports.recovery.close(); return readRecoveryPackage(); },
     },
   };
   let code = 1;

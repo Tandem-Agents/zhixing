@@ -1,7 +1,7 @@
 import { batch, createEffect, createMemo, createSignal, For, Show, ErrorBoundary, onCleanup, untrack } from 'solid-js';
 import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalReading, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalCandidates } from './protocol.js';
+import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalSurfaceMode, type TerminalView, type TerminalDisplayPage, type TerminalReading, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalCandidates } from './protocol.js';
 import { ProcessView } from './process-view.js';
 import { processViewRows } from './process-model.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
@@ -40,6 +40,8 @@ export interface TerminalRootOptions {
   readonly inputReady: (renderer: CliRenderer) => void;
   readonly usableFrame?: (frameId: number) => void;
   readonly exit: () => Promise<void>;
+  /** 启动前由 S 的 grant 帧声明的表面身份：独立命令从首帧起即使用命令视图，不渲染主对话输入框或启动提示。 */
+  readonly surface?: TerminalSurfaceMode;
   /** 入口在经典控制台实测当前字体缺 ❯ 字形时改用 ASCII 提示符；其余情况保持 ❯。 */
   readonly promptGlyph?: 'ascii';
   /** 选中纹理的宿主判定（与提示符分开）：经典控制台或 Windows 上宿主不明时为 ascii，选中纹理改用“:”。 */
@@ -49,7 +51,10 @@ export interface TerminalRootOptions {
 export async function createTerminalRoot(options: TerminalRootOptions, createRenderer = createCliRenderer) {
   let usableReported = false, usableScheduled = false;
   options.signal.throwIfAborted();
-  const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
+  const initialView: TerminalView = options.surface === 'command'
+    ? { generation: 0, kind: 'command', title: '知行 · 命令', message: '正在准备命令…', busy: true }
+    : { generation: 0, kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true };
+  const [view, setView] = createSignal<TerminalView>(initialView);
   // 显示上下文与交互目标分开：view() 是当前交互（输入框、信息行、键位、提交）；surface() 是屏上的显示上下文
   // （正文、欢迎区、阅读身份与位置、过程区、阅读导航、翻页）。就地字段（如就地改名）期间 surface 仍是底层会话的
   // 最近一次会话视图快照，只有输入区换成字段；没有同一会话的会话视图可依托时，字段按整页显示
@@ -666,6 +671,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : candidate?.items.length || candidate?.mode ? hint('↑↓ 选择 · Tab/Enter 接纳 · Esc 返回', '↑↓ 选择 · Enter 接纳 · Esc 返回')
       : current.kind === 'skills' ? '' // The skill surface owns its two contextual hint rows.
       : current.kind === 'recovery' ? (current.recovery?.input ? 'Enter 回读 · Esc 取消' : 'Esc 返回')
+      : (current.kind === 'command' || current.kind === 'unavailable') ? 'Ctrl+C 退出'
       : current.selectionLayer === 'details' ? hint('↑↓ 阅读 · ←/Enter/Esc 返回 · PgUp/PgDn 翻阅', '↑↓ 阅读 · Esc 返回')
       // 提交锁里只写真实可用的操作：阅读与 Ctrl+C 的中止/退出（Enter、Esc 此时不生效）
       : current.field && fieldLocked() ? hint('PgUp/PgDn 阅读 · Ctrl+C 中止/退出', 'Ctrl+C 中止/退出')
@@ -1057,7 +1063,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       consume();
       // 页面上的 Ctrl+C 只作用于当时的页面，不算主对话双击退出的首击
       if (view().kind === 'confirmation' || view().kind === 'selection') { ctrlC = 0; void cancelPage('ctrl-c'); return; }
-      if (view().kind === 'unavailable' || view().kind === 'history' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
+      if (view().kind === 'command' || view().kind === 'unavailable' || view().kind === 'history' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
       if (view().editId) { releaseSecret(); void action({ kind: 'configuration-action', editId: view().editId!, action: 'cancel' }); ctrlC = 0; return; }
       if (view().kind !== 'conversation') { void cancelPage(); ctrlC = 0; return; }
       const now = performance.now();

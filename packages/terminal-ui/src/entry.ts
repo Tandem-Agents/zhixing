@@ -72,11 +72,13 @@ function receive(message: TerminalMessage): void {
       void initializing.catch(error => close(modeQueryFailureReason(error), 71)); return;
     }
     case 'grant': {
-      if (phase !== 'ready') throw Error('terminal-grant-order');
+      if (phase !== 'ready' || (message.surface !== undefined && message.surface !== 'conversation' && message.surface !== 'command')) throw Error('terminal-grant-order');
+      const surface = message.surface;
       initializing = (async () => {
         const { createTerminalRoot } = await import('./root.js');
         abort.signal.throwIfAborted();
         root = await createTerminalRoot({ signal: abort.signal, request,
+          ...(surface ? { surface } : {}),
           // The pinned lifecycle patch defers this private hook until the one
           // query reader relinquishes stdin. Keep that dependency at this edge.
           inputReady: renderer => input.handoff(renderer as unknown as { setupInput(): void }),

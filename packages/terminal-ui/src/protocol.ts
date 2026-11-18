@@ -35,6 +35,7 @@ export const TERMINAL_LIMITS = Object.freeze({
 });
 
 export type TerminalRole = "application" | "ui";
+export type TerminalSurfaceMode = "conversation" | "command";
 export type TerminalTraffic = "body" | "control";
 export interface TerminalEnvelope {
   readonly protocol: typeof TERMINAL_PROTOCOL;
@@ -48,7 +49,7 @@ export type TerminalMessage =
   | { readonly type: 'usable-frame'; readonly frameId: number }
   | { readonly type: "hello"; readonly role: TerminalRole }
   | { readonly type: "modes"; readonly originalMask: number; readonly mutableMask: number }
-  | { readonly type: "grant" }
+  | { readonly type: "grant"; readonly surface?: TerminalSurfaceMode }
   | { readonly type: "ready"; readonly frameId: number }
   | { readonly type: "application-ready" }
   | { readonly type: "close"; readonly deadline: number }
@@ -244,7 +245,7 @@ export interface TerminalView {
   readonly historyHasMore?: boolean;
   readonly reading?: TerminalReading;
   readonly generation: number;
-  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills' | 'recovery';
+  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "command" | "unavailable" | 'skills' | 'recovery';
   readonly title: string;
   readonly conversationId?: string;
   readonly message?: string;

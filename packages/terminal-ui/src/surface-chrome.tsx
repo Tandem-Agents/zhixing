@@ -9,7 +9,7 @@ const cells = (text: string) => { let width = 0; for (const { segment } of graph
 /** Shared identity, frame and environment geometry. Pages supply only content. */
 /** bottomGap=false：正文页自己管理欢迎框下的那一行（间隔或“对话从这里开始”），这里不再加下边距。 */
 export function SurfaceChrome(props: { view: TerminalView; width: number; height: number; bottomGap?: boolean }) {
-  const main = () => ['conversation', 'history', 'unavailable'].includes(props.view.kind);
+  const main = () => ['conversation', 'history'].includes(props.view.kind);
   const branded = () => main() || props.view.configurationHome;
   // Page identity and real window size select this variant, never query results.
   const compact = () => props.height < 20 || props.width < 24;
