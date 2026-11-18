@@ -96,13 +96,14 @@ export class TerminalCandidatesOwner {
       if (trust) this.#trust?.retain(revision, query.items);
       query.command = command;
       // 就地操作按 provider 本次声明（随模式变化）；底部只列此刻可用的操作，空列表不列针对条目的操作
-      const actions = command ? provider.computeInlineActions?.(match) ?? {} : {};
-      query.actions = actions;
+      const actions = (trust || command) ? provider.computeInlineActions?.(match) ?? {} : {};
+      query.actions = command ? actions : undefined;
       const listed = query.items.length > 0;
+      const trustHint = ['Esc 返回', ...(listed ? ['↑↓ 选择', ...(actions.delete ? ['两次 Ctrl+D 撤销'] : [])] : []), 'Ctrl+R 刷新'];
       const pickerHint = ['Esc 返回', ...(listed ? [command === 'work' ? 'Enter 进入' : 'Enter 切换'] : []),
-        ...(listed && actions.delete ? [command === 'work' ? 'Ctrl+D 删除' : '两次 Ctrl+D 删除'] : []),
+        ...(listed && actions.delete ? ['两次 Ctrl+D 删除'] : []),
         ...(listed && actions.rename ? ['Ctrl+R 改名'] : []), ...(actions.create ? ['Ctrl+N 新建'] : [])];
-      return { ...range, ...(query.ghost ? { ghost: { fullValue: query.ghost } } : {}), ...(argumentHint ? { argumentHint } : {}), ...(trust ? { mode: 'management' as const, canDelete: true, hint: ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'] }
+      return { ...range, ...(query.ghost ? { ghost: { fullValue: query.ghost } } : {}), ...(argumentHint ? { argumentHint } : {}), ...(trust ? { mode: 'management' as const, canDelete: listed && !!actions.delete, hint: trustHint }
         : command ? { mode: 'picker' as const, canDelete: !!actions.delete, canRename: !!actions.rename, canCreate: !!actions.create, hint: pickerHint } : {}),
         items: query.items.map(item => ({ id: item.id, label: item.displayText, detail: item.description })) };
     }

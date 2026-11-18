@@ -53,12 +53,12 @@ describe('common information row', () => {
 });
 
 describe('panel keys laid out by whole items', () => {
-  const work = ['Esc 返回', 'Enter 进入', 'Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'];
+  const work = ['Esc 返回', 'Enter 进入', '两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'];
   it('keeps the longest prefix that fits on the information row and hands the rest to the panel, never cutting a key', () => {
     const fits = (room: number) => (text: string) => width(text) <= room;
     expect(splitKeys(work, fits(200))).toEqual({ info: work.join(' · '), rest: [] });
-    // 45 列：信息行可用 41 列，放得下前三项，改名与新建交给面板底行
-    expect(splitKeys(work, fits(41))).toEqual({ info: 'Esc 返回 · Enter 进入 · Ctrl+D 删除', rest: ['Ctrl+R 改名', 'Ctrl+N 新建'] });
+    // 45 列：信息行可用 41 列，放得下前三项（40 列），改名与新建交给面板底行
+    expect(splitKeys(work, fits(41))).toEqual({ info: 'Esc 返回 · Enter 进入 · 两次 Ctrl+D 删除', rest: ['Ctrl+R 改名', 'Ctrl+N 新建'] });
     // 再窄也至少留第一项
     expect(splitKeys(work, fits(3))).toEqual({ info: 'Esc 返回', rest: work.slice(1) });
     const trust = ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'];
@@ -73,11 +73,11 @@ describe('panel keys laid out by whole items', () => {
     // 45 列时面板底行可用 37 列：箭头缩成“↓”，两个键位完整
     expect(candidateFooter(true, ['Ctrl+R 改名', 'Ctrl+N 新建'], 37, width)).toBe('↓ · Ctrl+R 改名 · Ctrl+N 新建');
     // 窄于面板管理可用宽度时按整项截取，以“…”收尾，不截半
-    expect(candidateFooter(true, ['Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], 22, width)).toBe('↓ · Ctrl+D 删除 · …');
+    expect(candidateFooter(true, ['两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], 27, width)).toBe('↓ · 两次 Ctrl+D 删除 · …');
     for (const room of [10, 16, 22, 30, 37]) {
-      const text = candidateFooter(true, ['Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], room, width);
+      const text = candidateFooter(true, ['两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], room, width);
       expect(width(text)).toBeLessThanOrEqual(room);
-      for (const item of text.split(' · ')) expect(['↓', '↓ 更多候选', 'PgUp/PgDn 翻阅', 'Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建', '…']).toContain(item);
+      for (const item of text.split(' · ')) expect(['↓', '↓ 更多候选', 'PgUp/PgDn 翻阅', '两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建', '…']).toContain(item);
     }
   });
 });

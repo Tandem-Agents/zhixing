@@ -54,7 +54,7 @@ enter/exit 是切换控制，不是登记写入工具的替代通道。当前 CL
 
 ## CLI 管理与智能创建
 
-`/work` 是场景浏览和进入入口，面板保留 Ctrl+N 创建、Ctrl+R 改名、Ctrl+D 删除。旧 `/enter`、旧子命令和 archive 概念不再作为另一套管理入口。候选交互与 Esc 分层由[输入补全](../cli/input-completion.md)负责。
+`/work` 是场景浏览和进入入口，面板保留 Ctrl+N 创建、Ctrl+R 改名、两次 Ctrl+D 删除。旧 `/enter`、旧子命令和 archive 概念不再作为另一套管理入口。候选交互与 Esc 分层由[输入补全](../cli/input-completion.md)负责。
 
 Ctrl+N 调用 `runWorksceneCreateAssist`：
 

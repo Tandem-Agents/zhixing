@@ -84,7 +84,7 @@ describe('terminal session navigation', () => {
     const source = new TerminalCandidatesOwner(() => ({ cwd: process.cwd(), target: 'cli', features: { chrome: true }, now: 0, workspaceId: null, sessionBusy: false }));
     source.bindCommands(f.owner.commands);
     expect(await source.query(1, '/work ', 6)).toMatchObject({ canDelete: true, canRename: true, canCreate: true,
-      hint: ['Esc 返回', 'Enter 进入', 'Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], items: [{ label: '场景' }, { label: '另一场景' }] });
+      hint: ['Esc 返回', 'Enter 进入', '两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'], items: [{ label: '场景' }, { label: '另一场景' }] });
     // 空列表只列此刻可用的操作，空提示在列表里
     f.workscene.list.mockResolvedValueOnce([]);
     expect(await source.query(2, '/work ', 6)).toMatchObject({ items: [], argumentHint: '暂无工作场景，Ctrl+N 新建', hint: ['Esc 返回', 'Ctrl+N 新建'] });

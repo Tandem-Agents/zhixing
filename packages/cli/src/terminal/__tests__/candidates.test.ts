@@ -3,6 +3,7 @@ import { mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { TerminalAction, TerminalCandidates } from '../../../../terminal-ui/src/protocol.js';
 import { TerminalCandidatesOwner } from '../candidates.js';
+import { TerminalTrustCandidates } from '../trust-candidates.js';
 import { TerminalInputSession } from '../../../../terminal-ui/src/input-session.js';
 import { TerminalCandidateSession } from '../../../../terminal-ui/src/candidate-session.js';
 import { chooseTerminalSelection } from '../selection.js';
@@ -176,4 +177,32 @@ it('owns an alias trust management page while loading, without sending it as a t
   expect(surface.value?.mode).toBe('management'); expect(await surface.accept()).toBe(false);
   expect(actions[0]).toMatchObject({ kind: 'input-candidates', atStart: true, text: '\u3001trust ' });
   surface.dismiss(); settle({ revision: 1, start: 7, end: 7, items: [] }); await Promise.resolve();
+});
+
+it('limits /trust management hints to return and refresh when empty or filtered to zero, and restores entry actions when rules exist', async () => {
+  const source = owner();
+  const rules = [{ id: 'rule-1', pattern: { tool: 'bash', argument: 'npm test' }, decision: 'allow' as const,
+    scope: 'context' as const, contextId: { kind: 'main' as const }, createdAt: 0, lastMatchedAt: 0, matchCount: 0 }];
+  let currentRules = [] as typeof rules;
+  const controller = { current: { conversationId: 'conv-1' } };
+  const trust = new TerminalTrustCandidates({
+    controller: () => controller,
+    management: { trustList: vi.fn(async () => currentRules), trustRevoke: vi.fn(async () => true), trustOtherScopes: vi.fn(async () => ({ groups: [] })) },
+    signal: new AbortController().signal,
+  });
+  source.bindTrust(trust);
+
+  const empty = await source.query(1, '/trust ', 7);
+  expect(empty).toMatchObject({ mode: 'management', canDelete: false, items: [],
+    argumentHint: '暂无信任规则，可在操作确认时选择“始终允许”建立。', hint: ['Esc 返回', 'Ctrl+R 刷新'] });
+
+  currentRules = rules;
+  const filled = await source.query(2, '/trust ', 7);
+  expect(filled).toMatchObject({ mode: 'management', canDelete: true,
+    hint: ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'] });
+  expect(filled.items).toHaveLength(1);
+
+  const filteredEmpty = await source.query(3, '/trust zzq', 10);
+  expect(filteredEmpty).toMatchObject({ mode: 'management', canDelete: false, items: [],
+    argumentHint: '没有匹配项', hint: ['Esc 返回', 'Ctrl+R 刷新'] });
 });

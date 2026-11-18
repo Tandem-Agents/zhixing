@@ -2142,16 +2142,18 @@ try {
         for (const key of (reply.hint as string[] | undefined) ?? []) assert.ok(info.includes(key) || footer.includes(key), `${columns} ${text}: ${key} stays visible`);
         test.mockInput.pressEscape(); await flush(); editor().setText(''); await flush();
       };
-      const workKeys = ['Esc 返回', 'Enter 进入', 'Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'];
+      const workKeys = ['Esc 返回', 'Enter 进入', '两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'];
       const scene = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `s${index}`, label: `场景${index}`, detail: 'D:/work' }));
       const picker = { mode: 'picker', canDelete: true, canRename: true, canCreate: true, hint: workKeys };
       await keyCase(131, '/work ', { ...picker, items: scene(2) }, workKeys.join(' · '), '');
-      await keyCase(45, '/work ', { ...picker, items: scene(2) }, 'Esc 返回 · Enter 进入 · Ctrl+D 删除', 'Ctrl+R 改名 · Ctrl+N 新建');
-      await keyCase(45, '/work ', { ...picker, items: scene(30) }, 'Esc 返回 · Enter 进入 · Ctrl+D 删除', '↓ · Ctrl+R 改名 · Ctrl+N 新建');
+      await keyCase(45, '/work ', { ...picker, items: scene(2) }, 'Esc 返回 · Enter 进入 · 两次 Ctrl+D 删除', 'Ctrl+R 改名 · Ctrl+N 新建');
+      await keyCase(45, '/work ', { ...picker, items: scene(30) }, 'Esc 返回 · Enter 进入 · 两次 Ctrl+D 删除', '↓ · Ctrl+R 改名 · Ctrl+N 新建');
       await keyCase(131, '/work ', { ...picker, items: scene(30) }, workKeys.join(' · '), '↓ 更多候选 · PgUp/PgDn 翻阅');
       const trustKeys = ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'];
       await keyCase(45, '/trust ', { mode: 'management', canDelete: true, hint: trustKeys, items: [{ id: 'r1', label: 'bash npm test', detail: '当前范围' }] },
         'Esc 返回 · ↑↓ 选择 · 两次 Ctrl+D 撤销', 'Ctrl+R 刷新');
+      await keyCase(45, '/trust ', { mode: 'management', canDelete: false, hint: ['Esc 返回', 'Ctrl+R 刷新'],
+        argumentHint: '暂无信任规则，可在操作确认时选择“始终允许”建立。', items: [] }, 'Esc 返回 · Ctrl+R 刷新', '');
       await keyCase(45, '/resume ', { mode: 'picker', canDelete: true, hint: ['Esc 返回', 'Enter 切换', '两次 Ctrl+D 删除'], items: scene(2) },
         'Esc 返回 · Enter 切换 · 两次 Ctrl+D 删除', '');
       // 普通斜杠候选沿用原有的长短两版键位，45 列时也不截半
