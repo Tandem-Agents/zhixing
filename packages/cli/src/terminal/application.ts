@@ -21,7 +21,7 @@ import type { TerminalPreloadRelease } from './application-preload.js';
 import { CheckpointDirectoryHandle } from '@zhixing-ai/mesh/filesystem';
 import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing-ai/terminal-ui/protocol';
 import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
-import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing-ai/providers/configuration';
+import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE, type ZhixingConfig } from '@zhixing-ai/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
 import { LocalLogStore } from '@zhixing-ai/core/logging/storage';
@@ -2315,8 +2315,14 @@ class TerminalApplication {
     void settled.catch(() => this.#close(70, 'terminal-outcome-undelivered'));
   }
 
-  #configurationHeaderDetails(): readonly string[] {
-    return [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? this.#resolvedLocalView?.workspaceLabel ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'];
+  #configurationHeaderDetails(purpose: 'setup' | 'edit' = 'edit', config?: ZhixingConfig): readonly string[] {
+    const local = purpose === 'edit' ? this.#resolvedLocalView : undefined;
+    const runtimeWorkspace = local
+      ? (local.workspaceRoot ?? local.workspaceLabel ?? (local.hostInfo ? '未绑定工作目录' : undefined))
+      : undefined;
+    const workspace = runtimeWorkspace
+      ?? (config ? (config.workspace?.root ?? '未绑定工作目录') : '正在读取…');
+    return [`工作目录    ${workspace}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'];
   }
 
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], purpose: 'setup' | 'edit', runtime?: ConfigEditorRuntime) {
@@ -2325,7 +2331,7 @@ class TerminalApplication {
     this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
     const editor = new TerminalConfigurationEditor({ session, title, sections, purpose, runtime,
-      headerDetails: this.#configurationHeaderDetails(),
+      headerDetails: this.#configurationHeaderDetails(purpose, session.initialConfig),
       publish: view => this.#publish(view) });
     this.#editor = editor;
     try { return await editor.run(); }
@@ -2334,7 +2340,7 @@ class TerminalApplication {
 
   async #configuration(kind: 'config' | 'mcp'): Promise<void> {
     await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP 管理', configurationHome: true,
-      chromeDetails: this.#configurationHeaderDetails(), message: '正在读取本机配置…', busy: true });
+      chromeDetails: this.#configurationHeaderDetails('edit'), message: '正在读取本机配置…', busy: true });
     this.#abort.signal.throwIfAborted();
     const { editRuntimeConfiguration, prepareMcpConfiguration } = await import('../runtime/configuration-application.js');
     this.#abort.signal.throwIfAborted();
