@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { TerminalDisplayReplay, runOutcomeText } from '../display-replay.js';
+import { TerminalDisplayReplay, fileMaterialSegment, runOutcomeText } from '../display-replay.js';
 import { HistoryBodyRangeCache } from '../body-projection.js';
 
 it('rebuilds a run outcome line from its locator and states each outcome in user terms', async () => {
@@ -54,4 +54,45 @@ it('reconstructs cold Markdown fragments with their original source, styles and 
       expect(restored.body?.context.nodes).toEqual(item.body.context.nodes);
     }
   } finally { cache.close(); replay.close(); }
+});
+
+it('rebuilds cold user file material segments from authoritative facts and rejects retired sources after clear/delete', async () => {
+  let cleared = false;
+  const replay = new TerminalDisplayReplay(
+    async () => { throw Error('material blocks never stream raw <file> text'); },
+    undefined,
+    async source => {
+      if (cleared) throw Error(source.via === 'owner' ? 'terminal-history-generation-changed' : 'transcript-byte-generation-changed');
+      return { kind: 'file', name: 'chip-sample.txt', byteSize: 50 };
+    },
+  );
+  const expected = fileMaterialSegment({ blockId: 'owner-log:r:1:0:1', groupId: 'r:0:user' }, { kind: 'file', name: 'chip-sample.txt', byteSize: 50 });
+  expect(expected.text).toBe('[File · chip-sample.txt · 50B]');
+  expect(expected.role).toBe('user');
+
+  const ownerRecord = {
+    replay: {
+      kind: 'material' as const,
+      via: 'owner' as const,
+      conversationId: 'c',
+      runId: 'r',
+      cursor: { conversationId: 'c', ownerEpoch: 1, revision: 1, message: 0, block: 1, offset: 0 },
+      length: 0,
+      markdown: false,
+    },
+    blockId: 'owner-log:r:1:0:1',
+    groupId: 'r:0:user',
+    role: 'user',
+    contentOffset: 0,
+    length: expected.text.length,
+    final: true,
+    digest: '',
+  };
+  try {
+    expect(await replay.read(ownerRecord)).toEqual(expected);
+    cleared = true;
+    await expect(replay.read(ownerRecord)).rejects.toThrow('generation-changed');
+  } finally {
+    replay.close();
+  }
 });

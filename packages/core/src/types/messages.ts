@@ -19,9 +19,69 @@ export type Role = "user" | "assistant";
 
 // ─── 内容块 ───
 
+/**
+ * 文本块来自本地文件材料时的有界结构化描述：只供历史与观察表面渲染紧凑材料标记，
+ * 不进入模型提示或 Provider 出站请求；旧记录缺省时按原文本诚实展示，不从 text 原文反推。
+ */
+export interface TextFileMaterial {
+  readonly kind: "file";
+  readonly name: string;
+  readonly byteSize: number;
+}
+
+const MAX_TEXT_FILE_MATERIAL_NAME_UNITS = 256;
+const INVALID_MATERIAL_NAME_RE =
+  /[\p{Cc}\u2028\u2029\[\]]|(?<![\ud800-\udbff])[\udc00-\udfff]|[\ud800-\udbff](?![\udc00-\udfff])/u;
+const LONE_SURROGATE_RE =
+  /(?<![\ud800-\udbff])[\udc00-\udfff]|[\ud800-\udbff](?![\udc00-\udfff])/gu;
+const MATERIAL_NAME_STRIP_RE = /[\p{Cc}\u2028\u2029\[\]]+/gu;
+
+/** 持久文本材料元数据的严格形状校验：只接受封闭字段与单行有界名称。 */
+export function isTextFileMaterial(value: unknown): value is TextFileMaterial {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).sort().join(",") === "byteSize,kind,name" &&
+    record.kind === "file" &&
+    typeof record.name === "string" &&
+    record.name.length > 0 &&
+    record.name.length <= MAX_TEXT_FILE_MATERIAL_NAME_UNITS &&
+    !INVALID_MATERIAL_NAME_RE.test(record.name) &&
+    typeof record.byteSize === "number" &&
+    Number.isSafeInteger(record.byteSize) &&
+    record.byteSize >= 0
+  );
+}
+
+/** 同源构造有界文件材料描述：清洗控制字符、方括号与孤立代理项，截断时不切半个代理对。 */
+export function createTextFileMaterial(
+  rawName: string,
+  byteSize: number,
+): TextFileMaterial {
+  if (!Number.isSafeInteger(byteSize) || byteSize < 0) {
+    throw new TypeError("Text file material byteSize must be a non-negative safe integer");
+  }
+  const cleaned =
+    rawName
+      .replace(LONE_SURROGATE_RE, "\ufffd")
+      .replace(MATERIAL_NAME_STRIP_RE, " ")
+      .trim() || "unnamed";
+  let name = cleaned;
+  if (name.length > MAX_TEXT_FILE_MATERIAL_NAME_UNITS) {
+    let end = MAX_TEXT_FILE_MATERIAL_NAME_UNITS;
+    const last = name.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+    name = name.slice(0, end).trimEnd() || "unnamed";
+  }
+  return { kind: "file", name, byteSize };
+}
+
 export interface TextBlock {
   type: "text";
   text: string;
+  material?: TextFileMaterial;
 }
 
 export interface ImageBlock {
@@ -167,6 +227,43 @@ export function extractText(message: Message): string {
     .filter((block): block is TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("");
+}
+
+/**
+ * 面向模型/Provider 出站转换合并含文件材料的连续文本段：
+ * 仅当一段连续的 TextBlock 中至少有一块携带 `material` 时，按原顺序无分隔拼接为一个纯 `TextBlock`（剥离 `material`），
+ * 使独立成块的文件材料与相邻散文保持改前完全一致的出站文本与块结构，同时不改变不含 `material` 的普通多 TextBlock 语义。
+ */
+export function coalesceUserMaterialTextBlocks<T extends ContentBlock>(
+  blocks: readonly T[],
+): T[] {
+  if (!blocks.some((block) => block.type === "text" && block.material !== undefined)) {
+    return [...blocks];
+  }
+  const result: T[] = [];
+  for (let i = 0; i < blocks.length; ) {
+    const current = blocks[i]!;
+    if (current.type !== "text") {
+      result.push(current);
+      i += 1;
+      continue;
+    }
+    let end = i + 1;
+    let hasMaterial = current.material !== undefined;
+    while (end < blocks.length && blocks[end]!.type === "text") {
+      if ((blocks[end] as TextBlock).material !== undefined) hasMaterial = true;
+      end += 1;
+    }
+    if (!hasMaterial) {
+      for (let k = i; k < end; k++) result.push(blocks[k]!);
+    } else {
+      let merged = "";
+      for (let k = i; k < end; k++) merged += (blocks[k] as TextBlock).text;
+      result.push({ type: "text", text: merged } as T);
+    }
+    i = end;
+  }
+  return result;
 }
 
 /** 提取消息中第一个 TextBlock 的文本（找不到返回空串） */

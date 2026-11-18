@@ -195,6 +195,61 @@ describe("prepareUserTurnInput", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("真实 @file: 与材料登记文件在提交时按实际读取字节数产出独立 material 文本块，不信任过期 stat", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-user-input-"));
+    try {
+      const chipFile = path.join(root, "chip.txt");
+      const refFile = path.join(root, "inline-ref.txt");
+      await fs.writeFile(chipFile, "old", "utf-8");
+      await fs.writeFile(refFile, "内联内容</file>保留", "utf-8");
+
+      const registry = new InputMaterialRegistry();
+      const id = registry.registerLocalFile({
+        kind: "file",
+        filePath: chipFile,
+        name: "chip.txt",
+        mimeType: "text/plain",
+        byteSize: 3, // 旧登记大小
+      });
+      const chip = registry.format(id);
+      // 登记后文件增长，提交时 byteSize 必须取实际读到的字节数
+      const updated = "updated实际内容";
+      await fs.writeFile(chipFile, updated, "utf-8");
+
+      const result = await prepareUserTurnInput(
+        `前 ${chip} 中 @file:inline-ref.txt 后`,
+        { workspaceRoot: root, materialRegistry: registry },
+      );
+
+      expect(result?.errors).toEqual([]);
+      expect(result?.input.parts).toEqual([
+        { type: "text", text: "前 " },
+        {
+          type: "text",
+          text: `<file path="${chipFile.replace(/\\/g, "/")}">\n${updated}\n</file>`,
+          material: {
+            kind: "file",
+            name: "chip.txt",
+            byteSize: Buffer.byteLength(updated, "utf-8"),
+          },
+        },
+        { type: "text", text: " 中 " },
+        {
+          type: "text",
+          text: `<file path="${refFile.replace(/\\/g, "/")}">\n内联内容</file>保留\n</file>`,
+          material: {
+            kind: "file",
+            name: "inline-ref.txt",
+            byteSize: Buffer.byteLength("内联内容</file>保留", "utf-8"),
+          },
+        },
+        { type: "text", text: " 后" },
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 function minimalPng(width: number, height: number): Buffer {

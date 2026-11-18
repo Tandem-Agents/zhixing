@@ -800,4 +800,86 @@ describe("createOpenAICompatibleProvider · 思考控制发送侧", () => {
     const callArgs = mockCreate.mock.calls[0]?.[0];
     expect(callArgs.thinking).toBeUndefined();
   });
+
+  it("文件材料拆块在出站时按原顺序无换行增删合并，同时保留普通多 text 块原有换行语义", async () => {
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    const f1 = '<file path="E:/repo/a.txt">\nalpha\n</file>';
+    const f2 = '<file path="E:/repo/b.txt">\nbeta\n</file>';
+    const m1 = { kind: "file" as const, name: "a.txt", byteSize: 5 };
+    const m2 = { kind: "file" as const, name: "b.txt", byteSize: 4 };
+    const img = { type: "base64" as const, mediaType: "image/png", data: "AAAA" };
+
+    const outboundOf = async (messages: ChatRequest["messages"]) => {
+      mockCreate.mockResolvedValueOnce(mockStream([finishChunk("stop")]));
+      await collectEvents(provider.chat({ model: "test-model", messages }));
+      return mockCreate.mock.calls.at(-1)?.[0]?.messages;
+    };
+
+    // 1. 普通多 text（无 material）保持原有 join("\n")
+    expect(
+      await outboundOf([{ role: "user", content: [{ type: "text", text: "甲" }, { type: "text", text: "乙" }] }]),
+    ).toEqual([{ role: "user", content: "甲\n乙" }]);
+
+    // 2. 前缀 + 文件 + 后缀：与改前合并单块完全一致（无多余换行、不泄漏 material 字段）
+    expect(
+      await outboundOf([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "前缀 " },
+            { type: "text", text: f1, material: m1 },
+            { type: "text", text: " 后缀" },
+          ],
+        },
+      ]),
+    ).toEqual(
+      await outboundOf([{ role: "user", content: [{ type: "text", text: `前缀 ${f1} 后缀` }] }]),
+    );
+
+    // 3. 连续文件（紧邻与夹换行）
+    expect(
+      await outboundOf([
+        { role: "user", content: [{ type: "text", text: f1, material: m1 }, { type: "text", text: f2, material: m2 }] },
+      ]),
+    ).toEqual(await outboundOf([{ role: "user", content: [{ type: "text", text: `${f1}${f2}` }] }]));
+    expect(
+      await outboundOf([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: f1, material: m1 },
+            { type: "text", text: "\n" },
+            { type: "text", text: f2, material: m2 },
+          ],
+        },
+      ]),
+    ).toEqual(await outboundOf([{ role: "user", content: [{ type: "text", text: `${f1}\n${f2}` }] }]));
+
+    // 4. 图文与文件混排 + 普通双 text 分段隔离
+    expect(
+      await outboundOf([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "独立A" },
+            { type: "text", text: "独立B" },
+            { type: "image", source: img },
+            { type: "text", text: "看文件 " },
+            { type: "text", text: f1, material: m1 },
+            { type: "text", text: " 结束" },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "独立A" },
+          { type: "text", text: "独立B" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+          { type: "text", text: `看文件 ${f1} 结束` },
+        ],
+      },
+    ]);
+  });
 });

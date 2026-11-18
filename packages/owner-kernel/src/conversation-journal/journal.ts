@@ -1781,12 +1781,24 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         contentOffset: piece.final ? 0 : contentOffset + piece.text.length,
       };
       const page: ConversationInputPage = {
-        input: {
-          identity: structuredClone(selected.pointer.identity),
-          text: piece.text,
-          contentOffset,
-          final: piece.final,
-        },
+        ...(piece.emittedPart !== undefined || piece.final
+          ? {
+              input: {
+                identity: structuredClone(selected.pointer.identity),
+                text: piece.text,
+                contentOffset,
+                final: piece.final,
+                ...(piece.emittedPart !== undefined
+                  ? {
+                      part: piece.emittedPart,
+                      partOffset: piece.partOffset!,
+                      partFinal: piece.partFinal!,
+                      ...(piece.material ? { material: piece.material } : {}),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         cursor: next,
         hasMore: true,
         reset,

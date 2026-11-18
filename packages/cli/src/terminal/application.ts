@@ -11,6 +11,7 @@ import { createPlatformSecretStore } from '@zhixing-ai/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
+import type { TextFileMaterial } from '@zhixing-ai/core';
 import type { ConversationBodyCursor, ConversationBodyPage, TranscriptToolFacts } from '@zhixing-ai/core/contracts';
 import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing-ai/core/transcript';
 import { isAbsolute, join as joinPath } from 'node:path';
@@ -60,7 +61,7 @@ import type { AgentYield } from '@zhixing-ai/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore, type InitialHistoryDisplaySegment } from './display-store.js';
-import { TerminalDisplayReplay, runOutcomeSegment, runOutcomeText, toolCardSegment, type DisplayReplaySource, type RunOutcomeState, type ToolReplaySource } from './display-replay.js';
+import { TerminalDisplayReplay, fileMaterialSegment, runOutcomeSegment, runOutcomeText, toolCardSegment, type DisplayReplaySource, type MaterialReplaySource, type RunOutcomeState, type ToolReplaySource } from './display-replay.js';
 import { TOOL_HISTORY_CARD_FORMAT } from '../tool-card-format.js';
 import { encodeBodyPage, type BodyPageRevision } from '@zhixing-ai/terminal-ui/body-model';
 import { textFragments } from './history-segments.js';
@@ -266,7 +267,7 @@ class TerminalApplication {
   #history?: TerminalHistoryState;
   readonly #historyParser = new HistoryBodyRangeCache();
   readonly #displayReplay = new TerminalDisplayReplay((source, offset) => this.#readDisplaySource(source, offset),
-    source => this.#readToolFacts(source));
+    source => this.#readToolFacts(source), source => this.#readMaterialFacts(source));
   #displayReplayReader?: { conversationId: string; reader: TranscriptByteReader };
   #displayStart?: number;
   #displayRevision = 0;
@@ -1078,7 +1079,23 @@ class TerminalApplication {
           if (this.#history?.offline) throw Error('terminal-recovery-offline');
           if (this.#displayUnavailable || this.#display.paused) { await this.#displayGap(); return; }
           const identity = createHash('sha256').update(JSON.stringify([input.conversationId, input.runId, input.identity])).digest('hex');
-          try { await this.#display.append({ blockId: `received:${identity}`, role: 'user', text: input.text, contentOffset: input.contentOffset, final: input.final }); }
+          const groupId = `received:${identity}`;
+          try {
+            if (input.material) {
+              await this.#display.append(fileMaterialSegment({ blockId: `${groupId}:${input.part ?? 0}`, groupId }, input.material));
+            } else if (input.part !== undefined) {
+              await this.#display.append({
+                blockId: `${groupId}:${input.part}`,
+                groupId,
+                role: 'user',
+                text: input.text,
+                contentOffset: input.partOffset ?? 0,
+                final: input.partFinal ?? input.final,
+              });
+            } else if (input.text.length > 0 || input.contentOffset > 0) {
+              await this.#display.append({ blockId: groupId, groupId, role: 'user', text: input.text, contentOffset: input.contentOffset, final: input.final });
+            }
+          }
           catch { await this.#displayGap(); return; }
           // Display acknowledgement is the completed store append. Refresh
           // failure cannot make this source fragment appear unconsumed.
@@ -1411,6 +1428,11 @@ class TerminalApplication {
           conversationId: history.conversationId, cursor: source.cursor, length: 0, markdown: false, format: TOOL_HISTORY_CARD_FORMAT,
           ...(call ? { call: { message: call.message, block: call.block } } : {}) });
         state.cursor = { ...source.cursor, offset: 0 }; projected++;
+      } else if (source.material) {
+        await this.#display.append(fileMaterialSegment({ blockId, groupId }, source.material), true, undefined, true, {
+          kind: 'material', via: 'shard', conversationId: history.conversationId, cursor: source.cursor, length: 0, markdown: false,
+        });
+        state.cursor = { ...source.cursor, offset: 0 }; projected++;
       } else if (source.type === 'text' && source.role === 'assistant') {
         const before = state.cursor?.shard === source.cursor.shard && state.cursor.from === source.cursor.from && state.cursor.message === source.message && state.cursor.block === source.block
           ? Math.min(state.cursor.offset, source.length) : source.length;
@@ -1541,6 +1563,10 @@ class TerminalApplication {
         await append(toolCardSegment({ blockId, groupId }, source.tool), { kind: 'tool', via: 'owner', conversationId: history.conversationId,
           runId: source.runId, cursor: source.cursor, length: 0, markdown: false, format: TOOL_HISTORY_CARD_FORMAT,
           ...(call ? { call: { message: call.message, block: call.block } } : {}) }, { ...source.cursor, offset: 0 }); projected++;
+      } else if (source.material) {
+        await append(fileMaterialSegment({ blockId, groupId }, source.material), {
+          kind: 'material', via: 'owner', conversationId: history.conversationId, runId: source.runId, cursor: source.cursor, length: 0, markdown: false,
+        }, { ...source.cursor, offset: 0 }); projected++;
       } else if (source.type === 'text' && source.role === 'assistant') {
         const before = history.bodyCursor?.revision === source.cursor.revision && history.bodyCursor.message === source.message && history.bodyCursor.block === source.block
           ? Math.min(history.bodyCursor.offset, source.length) : source.length;
@@ -1647,6 +1673,28 @@ class TerminalApplication {
         if (!fragment?.tool || fragment.message !== source.cursor.message || fragment.block !== source.cursor.block)
           throw Error('terminal-display-replay-source-range');
         return fragment.tool;
+      }
+      await new Promise<void>(setImmediate);
+    }
+  }
+
+  /** 重读用户文件材料块：正序读该块即走读取器的可见性复核（清空、删除、换代后报失效），不凭缓存绕过可见性。 */
+  async #readMaterialFacts(source: MaterialReplaySource): Promise<TextFileMaterial> {
+    for (;;) {
+      this.#abort.signal.throwIfAborted();
+      let page: { readonly reset?: boolean; readonly preparing?: unknown; readonly fragments: readonly { readonly message: number; readonly block: number; readonly material?: TextFileMaterial }[] };
+      if (source.via === 'owner') {
+        page = await this.#conversation.bodyPage(source.conversationId, { ...source.cursor, offset: 0 }, { direction: 'forward', runId: source.runId });
+      } else {
+        const cursor = source.cursor as import('@zhixing-ai/core/transcript').TranscriptBodyCursor;
+        page = await (await this.#displayReplayBodyReader(source.conversationId)).page({ cursor: { ...cursor, offset: 0 }, forward: true, signal: this.#abort.signal });
+      }
+      if (page.reset) throw Error('terminal-history-generation-changed');
+      if (!page.preparing) {
+        const fragment = page.fragments[0];
+        if (!fragment?.material || fragment.message !== source.cursor.message || fragment.block !== source.cursor.block)
+          throw Error('terminal-display-replay-source-range');
+        return fragment.material;
       }
       await new Promise<void>(setImmediate);
     }

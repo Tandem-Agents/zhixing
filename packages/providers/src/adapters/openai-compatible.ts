@@ -26,7 +26,12 @@ import type {
   StreamEvent,
   TokenUsage,
 } from "@zhixing-ai/core";
-import type { Message, ContentBlock, ToolSpec } from "@zhixing-ai/core";
+import {
+  coalesceUserMaterialTextBlocks,
+  type ContentBlock,
+  type Message,
+  type ToolSpec,
+} from "@zhixing-ai/core";
 import type { ResolvedProvider } from "../types.js";
 import { markRequestUndelivered } from "@zhixing-ai/core/resilience";
 import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
@@ -284,11 +289,12 @@ function convertMessages(messages: Message[]): OpenAI.ChatCompletionMessageParam
     if (msg.role === "assistant") {
       result.push(convertAssistantMessage(msg));
     } else {
-      // user 消息可能包含 tool_result 和/或普通用户内容
-      const toolResults = msg.content.filter(
+      // user 消息可能包含 tool_result 和/或普通用户内容；含文件材料描述的连续文本块按原拼接语义折叠
+      const normalizedBlocks = coalesceUserMaterialTextBlocks(msg.content);
+      const toolResults = normalizedBlocks.filter(
         (b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result",
       );
-      const userContentBlocks = msg.content.filter(
+      const userContentBlocks = normalizedBlocks.filter(
         (
           b,
         ): b is Extract<ContentBlock, { type: "text" | "image" }> =>

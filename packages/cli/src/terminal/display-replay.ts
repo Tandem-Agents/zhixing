@@ -1,7 +1,9 @@
+import type { TextFileMaterial } from '@zhixing-ai/core';
 import type { ConversationBodyCursor, ConversationRunOutcomesPage, TranscriptToolFacts } from '@zhixing-ai/core/contracts';
 import type { TranscriptBodyCursor } from '@zhixing-ai/core/transcript';
 import type { TerminalDisplaySegment } from '@zhixing-ai/terminal-ui/protocol';
 import { sliceBodyNodes } from '@zhixing-ai/terminal-ui/body-model';
+import { formatPersistedFileMaterial } from '../input-material-registry.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
 import { formatHistoryToolCard } from '../tool-card-format.js';
 import { modelFailureText } from './model-failure.js';
@@ -15,9 +17,14 @@ export type DisplayReplaySource = { readonly conversationId: string; readonly le
   ({ readonly kind: 'tool'; readonly format: number; readonly call?: { readonly message: number; readonly block: number } } & (
     { readonly via: 'owner'; readonly cursor: ConversationBodyCursor; readonly runId: string } |
     { readonly via: 'shard'; readonly cursor: TranscriptBodyCursor })) |
+  /** 用户文件材料文本块：冷层只存块坐标（不缓存材料元数据），回放时经原读面复核可见性并重取有界描述 */
+  ({ readonly kind: 'material' } & (
+    { readonly via: 'owner'; readonly cursor: ConversationBodyCursor; readonly runId: string } |
+    { readonly via: 'shard'; readonly cursor: TranscriptBodyCursor })) |
   /** 运行末尾的结果行：由读到的运行状态确定性生成，定位里只存状态与有界原因 */
   { readonly kind: 'outcome'; readonly runId: string; readonly state: RunOutcomeState; readonly reason?: string });
 export type ToolReplaySource = Extract<DisplayReplaySource, { kind: 'tool' }>;
+export type MaterialReplaySource = Extract<DisplayReplaySource, { kind: 'material' }>;
 export type RunOutcomeState = ConversationRunOutcomesPage['entries'][number]['state'];
 
 // 存储维护未放行写入：运行记录里是内部原文，给用户说清是本机存储繁忙
@@ -62,12 +69,21 @@ export function toolCardSegment(base: { readonly blockId: string; readonly group
       anchor: true, runs: [{ from: 0, to: text.length, text, style: 0 }] }] } } };
 }
 
+/** 历史与恢复中的用户文件材料紧凑显示段：纯文本、整段一次给出，不铺开文件全文。 */
+export function fileMaterialSegment(base: { readonly blockId: string; readonly groupId?: string }, material: TextFileMaterial): TerminalDisplaySegment {
+  const text = formatPersistedFileMaterial(material);
+  return { ...base, role: 'user', text, contentOffset: 0, final: true,
+    body: { version: 1, revision: 1, kind: 'plain', end: true, context: { nodes: [{ kind: 'paragraph', origin: 0, from: 0, to: text.length,
+      anchor: false, runs: [{ from: 0, to: text.length, text, style: 0 }] }] } } };
+}
+
 /** Independent parser owner: a cold page read must not contend with the parser
  * which is currently producing an append inside the display queue. */
 export class TerminalDisplayReplay {
   readonly #parser = new HistoryBodyRangeCache();
   constructor(readonly source: (source: DisplayReplaySource, offset: number) => Promise<string>,
-    readonly tool?: (source: ToolReplaySource) => Promise<TranscriptToolFacts>) {}
+    readonly tool?: (source: ToolReplaySource) => Promise<TranscriptToolFacts>,
+    readonly material?: (source: MaterialReplaySource) => Promise<TextFileMaterial>) {}
   close(): void { this.#parser.close(); }
   async read(record: DisplayReplayRecord): Promise<TerminalDisplaySegment> {
     const { replay, blockId, groupId, role, contentOffset, length, final } = record;
@@ -84,6 +100,10 @@ export class TerminalDisplayReplay {
       if ((replay.call?.message ?? -1) !== (call?.message ?? -1) || (replay.call?.block ?? -1) !== (call?.block ?? -1))
         throw Error('terminal-display-replay-source-changed');
       return toolCardSegment({ blockId, ...(groupId ? { groupId } : {}) }, facts);
+    }
+    if (replay.kind === 'material') {
+      if (!this.material) throw Error('terminal-display-replay-material-unavailable');
+      return fileMaterialSegment({ blockId, ...(groupId ? { groupId } : {}) }, await this.material(replay));
     }
     const end = contentOffset + length;
     // Even a fully cached parser range must revalidate source visibility. A

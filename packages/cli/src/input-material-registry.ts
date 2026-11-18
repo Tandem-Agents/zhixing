@@ -1,3 +1,4 @@
+import type { TextFileMaterial } from "@zhixing-ai/core";
 import { stringWidth } from "./tui/text-metrics.js";
 
 export const MATERIAL_TOKEN_PATTERN =
@@ -198,8 +199,12 @@ function formatImageDetails(entry: InputMaterialEntry): string {
   return parts.join(" · ");
 }
 
+export function formatPersistedFileMaterial(material: TextFileMaterial): string {
+  return `[File · ${sanitizeTokenText(material.name)} · ${formatByteSize(material.byteSize)}]`;
+}
+
 function sanitizeTokenText(input: string): string {
-  return input.replace(/[\]\r\n]+/g, " ").trim() || "unnamed";
+  return input.replace(/[\p{Cc}\u2028\u2029\[\]]+/gu, " ").trim() || "unnamed";
 }
 
 function elideMiddle(input: string, maxWidth: number): string {

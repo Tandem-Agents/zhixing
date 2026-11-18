@@ -3,6 +3,7 @@ import { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { ArtifactJsonIndex, type ArtifactJsonIndexOptions } from '../../authority/artifact-json-index.js';
 import type { ArtifactRef, TranscriptToolFacts } from '../../contracts/index.js';
+import { isTextFileMaterial, type TextFileMaterial } from '../../types/messages.js';
 import { readTranscriptToolFacts } from '../tool-block-facts.js';
 import { publishedShardSize, readDirectoryView, strictOffsetOf } from './directory-view.js';
 import type { TranscriptView } from './types.js';
@@ -21,6 +22,7 @@ export interface TranscriptBodyFragment {
   readonly text: string; readonly offset: number; readonly length: number; readonly final: boolean;
   readonly toolId?: string; readonly isError?: boolean;
   readonly tool?: TranscriptToolFacts;
+  readonly material?: TextFileMaterial;
 }
 export interface TranscriptBodyPage {
   readonly fragments: readonly TranscriptBodyFragment[]; readonly cursor?: TranscriptBodyCursor;
@@ -286,6 +288,20 @@ export class TranscriptByteReader {
       if (block >= content.units) return { fragments: [], cursor, hasMore: false };
       const keys = ['messages', message, 'content', block], kind = await value([...keys, 'type']), role = await value(['messages', message, 'role']);
       if (typeof kind !== 'string' || typeof role !== 'string') throw Error('transcript-byte-kind');
+      if (kind === 'text' && role === 'user') {
+        const material = await value([...keys, 'material'], 1024);
+        if (isTextFileMaterial(material)) {
+          const runIndex = await value(['runIndex']), runId = await value(['runId']);
+          if (!Number.isSafeInteger(runIndex)) throw Error('transcript-byte-run-index');
+          const due = input.forward ? cursor.offset === 0 : cursor.offset !== 0;
+          const fragmentCursor = { ...cursor, message, block, offset: 0 };
+          cursor = { ...cursor, message, ...(input.forward ? { block: block + 1, offset: 0 } : { block: block - 1, offset: MAX }) };
+          if (!due) continue;
+          return { fragments: [{ cursor: fragmentCursor, runIndex: runIndex as number, ...(typeof runId === 'string' ? { runId } : {}),
+            message, block, type: kind, role, text: '', offset: 0, length: 0, final: true, material }],
+            cursor, hasMore: input.forward ? cursor.block < content.units : true };
+        }
+      }
       if (kind === 'tool_use' || kind === 'tool_result') {
         // 工具块按整块给出有界事实：倒序时偏移 0 表示该块已消费，正序只在偏移 0 处给出
         const runIndex = await value(['runIndex']), runId = await value(['runId']);

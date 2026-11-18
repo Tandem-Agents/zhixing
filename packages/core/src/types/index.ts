@@ -7,6 +7,7 @@ export type {
   MessageInputIdentity,
   Role,
   TextBlock,
+  TextFileMaterial,
   ThinkingBlock,
   ToolResultBlock,
   ToolResultDisposition,
@@ -15,6 +16,8 @@ export type {
 } from "./messages.js";
 export {
   assistantMessage,
+  coalesceUserMaterialTextBlocks,
+  createTextFileMaterial,
   emptyAssistantMessage,
   extractFirstText,
   extractText,
@@ -22,6 +25,7 @@ export {
   findLastAssistantMessage,
   findLastUserIndex,
   hasToolCalls,
+  isTextFileMaterial,
   replaceFirstText,
   isToolResultDisposition,
   toolResultDisposition,

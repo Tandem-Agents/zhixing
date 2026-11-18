@@ -129,6 +129,63 @@ describe("projectHistoryTail", () => {
     const tail = projectHistoryTail(newestFirst(...runs));
     expect(tail.entries).toHaveLength(DEFAULT_TAIL_RUNS);
   });
+
+  it("普通多 text 块零额外空格拼接，文件材料块仅替换自身且保留前后源空白", () => {
+    const multiTextRun = {
+      type: "run",
+      runIndex: seq++,
+      timestamp: new Date(Date.UTC(2026, 0, 1, 0, 1, 0)).toISOString(),
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "https://example." },
+            { type: "text", text: "com/path" },
+          ],
+        },
+        assistantMsg("ok"),
+      ],
+    } as RunRecord;
+    const materialRun = {
+      type: "run",
+      runIndex: seq++,
+      timestamp: new Date(Date.UTC(2026, 0, 1, 0, 1, 1)).toISOString(),
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "请看 " },
+            {
+              type: "text",
+              text: '<file path="a.ts">\nconst secret = 1;\n</file>',
+              material: { kind: "file", name: "a.ts", byteSize: 45 },
+            },
+            { type: "text", text: " 的实现" },
+          ],
+          inputIdentity: { id: "u1", source: { kind: "user" } },
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "code:" },
+            { type: "text", text: "42" },
+          ],
+          inputIdentity: {
+            id: "u2",
+            source: { kind: "conversation", conversationId: "peer-1" },
+          },
+        },
+        assistantMsg("done"),
+      ],
+    } as RunRecord;
+
+    const tail = projectHistoryTail(newestFirst(multiTextRun, materialRun));
+    expect(tail.entries[0]!.userText).toBe("https://example.com/path");
+    expect(tail.entries[1]!.userText).toBe("请看 [File · a.ts · 45B] 的实现");
+    expect(tail.entries[1]!.inputs).toEqual([
+      { text: "code:42", sourceConversationId: "peer-1" },
+    ]);
+  });
 });
 
 // ─── renderHistoryTailLines ───

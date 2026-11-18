@@ -18,7 +18,7 @@
  *   - 工具轮渲染为可读文本、不伪装协议消息；用户与助手内容保持原文。
  */
 
-import type { Message } from "../../types/messages.js";
+import { coalesceUserMaterialTextBlocks, type Message } from "../../types/messages.js";
 import {
   readRunsReverse,
   type TranscriptReadSource,
@@ -266,7 +266,11 @@ function clampTextToBudget(text: string, maxTokens: number): string {
 /** 单条协议消息 → 可读行：用户 / 助手原话保留，工具轮降为标注文本 */
 function renderMessage(message: Message): string {
   const lines: string[] = [];
-  for (const block of message.content) {
+  const blocks =
+    message.role === "user"
+      ? coalesceUserMaterialTextBlocks(message.content)
+      : message.content;
+  for (const block of blocks) {
     if (block.type === "text") {
       if (block.text.trim() === "") continue;
       lines.push(
@@ -300,7 +304,11 @@ function toolResultText(content: unknown): string {
 }
 
 function textOf(message: Message): string {
-  return message.content
+  const blocks =
+    message.role === "user"
+      ? coalesceUserMaterialTextBlocks(message.content)
+      : message.content;
+  return blocks
     .filter((b): b is { type: "text"; text: string } => b.type === "text")
     .map((b) => b.text)
     .join("\n");

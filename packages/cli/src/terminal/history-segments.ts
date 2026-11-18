@@ -2,6 +2,7 @@ import type { RunRecordWithRef } from '@zhixing-ai/core/transcript';
 import type { ContentBlock } from '@zhixing-ai/core/types';
 import type { BodyFragmentMetadata } from '@zhixing-ai/terminal-ui/body-model';
 import type { TerminalDisplaySegment } from '@zhixing-ai/terminal-ui/protocol';
+import { formatPersistedFileMaterial } from '../input-material-registry.js';
 import { projectBodyHistory } from './body-projection.js';
 
 export interface TerminalHistorySegment {
@@ -55,7 +56,8 @@ export function* projectHistorySegments(runsNewestFirst: readonly RunRecordWithR
         const block = message.content[blockIndex]!;
         const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
         const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
-        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
+        const text = block.type === 'text' ? (message.role === 'user' && block.material ? formatPersistedFileMaterial(block.material) : block.text) :
+          block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? block.name : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
         for (const part of textFragments(text)) yield { blockId, ...historyIdentity(block, message.role, `${shardId}:${record.runIndex}`, messageIndex), text: part.text, contentOffset: (tail?.offset ?? 0) + part.offset, final: part.final };
@@ -75,7 +77,8 @@ export function* projectHistorySegmentsReverse(runsNewestFirst: readonly RunReco
         const block = message.content[blockIndex]!;
         const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
         const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
-        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
+        const text = block.type === 'text' ? (message.role === 'user' && block.material ? formatPersistedFileMaterial(block.material) : block.text) :
+          block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? block.name : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
         for (let end = text.length; end > 0;) {
@@ -108,7 +111,8 @@ export async function* projectRenderedHistoryReverse(runsNewestFirst: readonly R
           if (before!.contentOffset === 0) continue;
         }
         const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
-        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
+        const text = block.type === 'text' ? (message.role === 'user' && block.material ? formatPersistedFileMaterial(block.material) : block.text) :
+          block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? block.name : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
         const kind = block.type === 'text' && message.role === 'assistant' ? 'markdown' : 'plain';

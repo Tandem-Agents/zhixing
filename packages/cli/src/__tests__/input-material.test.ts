@@ -715,6 +715,11 @@ describe("input materials", () => {
       {
         type: "text",
         text: `<file path="${filePath.replace(/\\/g, "/")}">\nalpha\nbeta\n</file>`,
+        material: {
+          kind: "file",
+          name: "notes.txt",
+          byteSize: Buffer.byteLength("alpha\nbeta", "utf-8"),
+        },
       },
     ]);
   });
@@ -793,11 +798,42 @@ describe("input materials", () => {
     expect(resolved.input.parts).toEqual([
       {
         type: "text",
-        text:
-          `<file path="${dotPath.replace(/\\/g, "/")}">\n${dotContent}\n</file>\n` +
-          `<file path="${barePath.replace(/\\/g, "/")}">\nall:\n\techo ok\n\n</file>\n` +
-          `<file path="${emptyPath.replace(/\\/g, "/")}">\n\n</file>\n` +
-          `<file path="${cross64kPath.replace(/\\/g, "/")}">\n${cross64kContent}\n</file>`,
+        text: `<file path="${dotPath.replace(/\\/g, "/")}">\n${dotContent}\n</file>`,
+        material: {
+          kind: "file",
+          name: ".hidden-b4",
+          byteSize: Buffer.byteLength(dotContent, "utf-8"),
+        },
+      },
+      { type: "text", text: "\n" },
+      {
+        type: "text",
+        text: `<file path="${barePath.replace(/\\/g, "/")}">\nall:\n\techo ok\n\n</file>`,
+        material: {
+          kind: "file",
+          name: "Makefile",
+          byteSize: Buffer.byteLength("all:\n\techo ok\n", "utf-8"),
+        },
+      },
+      { type: "text", text: "\n" },
+      {
+        type: "text",
+        text: `<file path="${emptyPath.replace(/\\/g, "/")}">\n\n</file>`,
+        material: {
+          kind: "file",
+          name: ".empty-note",
+          byteSize: 0,
+        },
+      },
+      { type: "text", text: "\n" },
+      {
+        type: "text",
+        text: `<file path="${cross64kPath.replace(/\\/g, "/")}">\n${cross64kContent}\n</file>`,
+        material: {
+          kind: "file",
+          name: "README",
+          byteSize: Buffer.byteLength(cross64kContent, "utf-8"),
+        },
       },
     ]);
   });

@@ -1,3 +1,4 @@
+import { isTextFileMaterial } from '@zhixing-ai/core';
 import { artifactJsonIndex, assertArtifactRef, type ArtifactStore } from '@zhixing-ai/core/authority';
 import { readTranscriptToolFacts } from '@zhixing-ai/core/transcript';
 import type { ArtifactRef, ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, ConversationCommitSummary } from '@zhixing-ai/core/contracts';
@@ -146,6 +147,19 @@ export class ConversationBodyReader {
       const keys = [...messagePath, 'content', block], read = (field: string) => this.json.value(source.ref, [...keys, field], 4096);
       const type = await read('type'), role = await this.json.value(source.ref, [...messagePath, 'role'], 128);
       if (typeof type !== 'string' || typeof role !== 'string') throw Error('conversation-body-kind');
+      if (type === 'text' && role === 'user') {
+        const material = await this.json.value(source.ref, [...keys, 'material'], 1024);
+        if (isTextFileMaterial(material)) {
+          const runIndex = await this.json.value(source.ref, [...source.keys, 'runIndex'], 128);
+          if (!Number.isSafeInteger(runIndex)) throw Error('conversation-body-run-index');
+          const due = reverse ? offset !== 0 : offset === 0;
+          if (due) {
+            fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type, text: '', offset: 0, length: 0, final: true, material });
+          }
+          if (!reverse) { block++; offset = 0; if (due) return { fragments, hasMore: block < contents.units, reset: false, cursor: position() }; continue; }
+          block--; offset = MAX; continue;
+        }
+      }
       if (type === 'tool_use' || type === 'tool_result') {
         // 工具块按整块给出有界事实：倒序时偏移 0 表示该块已消费，正序只在偏移 0 处给出
         const runIndex = await this.json.value(source.ref, [...source.keys, 'runIndex'], 128);

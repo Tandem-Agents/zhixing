@@ -1,5 +1,6 @@
 import { normalizeLeadingSlashAlias } from '@zhixing-ai/terminal-ui/protocol';
 import * as path from 'node:path';
+import { createTextFileMaterial, type TextFileMaterial } from '@zhixing-ai/core';
 import { expandUserHome } from '@zhixing-ai/core/paths';
 import type { InputMaterialRegistry } from '../input-material-registry.js';
 import { detectMimeType } from '../input-material-ingest.js';
@@ -27,10 +28,12 @@ export interface PrepareSessionSendOptions {
   /** Alias position proven against the unexpanded immutable draft by N. */
   readonly commandAliasOffset?: number;
 }
-type SnapshotValue = { readonly kind: 'text'; readonly text: string } | {
-  readonly kind: 'image'; readonly data: string; readonly mediaType: string;
-  readonly name: string; readonly size: number;
-};
+type SnapshotValue =
+  | { readonly kind: 'file-text'; readonly text: string; readonly material: TextFileMaterial }
+  | {
+      readonly kind: 'image'; readonly data: string; readonly mediaType: string;
+      readonly name: string; readonly size: number;
+    };
 type Range = readonly [start: number, end: number];
 
 /** Only this terminal session.send preparation uses this fixed-schema encoder.
@@ -71,6 +74,7 @@ export async function prepareSessionSendSnapshot(
     await writer.literal(',"engage":{"kind":"perspectives","question":"');
     await scanInput(question, {
       text: text => writer.stringContent(text),
+      fileText: value => writer.stringContent(value.text),
       image: async () => { throw Error(ENGAGE_IMAGE_ERROR); },
     }, materials);
     await writer.literal('"}');
@@ -82,6 +86,7 @@ export async function prepareSessionSendSnapshot(
 
 interface PartsSink {
   text(value: string): Promise<void>;
+  fileText(value: Extract<SnapshotValue, { kind: 'file-text' }>): Promise<void>;
   image(value: Extract<SnapshotValue, { kind: 'image' }>): Promise<void>;
 }
 class InputPartsWriter implements PartsSink {
@@ -94,6 +99,14 @@ class InputPartsWriter implements PartsSink {
       await this.writer.literal('{"type":"text","text":"'); this.#text = true;
     }
     await this.writer.stringContent(value);
+  }
+  async fileText(value: Extract<SnapshotValue, { kind: 'file-text' }>): Promise<void> {
+    await this.finish(); await this.#separator();
+    await this.writer.literal('{"type":"text","text":');
+    await this.writer.string(value.text);
+    await this.writer.literal(',"material":{"kind":"file","name":');
+    await this.writer.string(value.material.name);
+    await this.writer.literal(`,"byteSize":${value.material.byteSize}}}`);
   }
   async image(value: Extract<SnapshotValue, { kind: 'image' }>): Promise<void> {
     await this.finish(); await this.#separator();
@@ -276,14 +289,18 @@ class MaterialSnapshots {
       if (!mediaType.startsWith('image/')) throw Error('文件内容不是可识别图片；草稿已保留。');
       value = { kind: 'image', data: bytes.toString('base64'), mediaType, name: entry.name, size: bytes.length };
     } else if (isSupportedTextMaterialMime(entry.mimeType)) {
-      value = await this.#textFile(entry.filePath);
+      value = await this.#textFile(entry.filePath, entry.name);
     } else if (isUnclassifiedExtensionlessMaterial(entry)) {
       const bytes = await readMaterialFile(entry.name, () => readBoundedInputFile(entry.filePath, 100 * 1024, this.options.signal));
       const text = decodeUnclassifiedPlainUtf8Material(entry.filePath, bytes);
       if (text === null) {
         throw Error('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
       }
-      value = { kind: 'text', text: `<file path="${entry.filePath.replace(/\\/g, '/')}">\n${text}\n</file>` };
+      value = {
+        kind: 'file-text',
+        text: `<file path="${entry.filePath.replace(/\\/g, '/')}">\n${text}\n</file>`,
+        material: createTextFileMaterial(entry.name, bytes.byteLength),
+      };
     } else {
       throw Error('当前版本尚不能直接发送此类型文件；请先转成文本或图片。');
     }
@@ -302,13 +319,17 @@ class MaterialSnapshots {
     const expanded = expandUserHome(raw);
     if (!path.isAbsolute(expanded) && !this.options.workspaceRoot) throw Error("当前工作目录不在本机或暂不可用；请使用本机绝对路径添加材料。");
     const absolute = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(this.options.workspaceRoot!, expanded);
-    const value = await this.#textFile(absolute);
+    const value = await this.#textFile(absolute, path.basename(absolute));
     await emitValue(value, sink);
     this.#values.set(key, value);
   }
-  async #textFile(absolute: string): Promise<SnapshotValue> {
-    const bytes = await readMaterialFile(path.basename(absolute), () => readBoundedInputFile(absolute, 100 * 1024, this.options.signal));
-    return { kind: 'text', text: `<file path="${absolute.replace(/\\/g, '/')}">\n${bytes.toString('utf8')}\n</file>` };
+  async #textFile(absolute: string, displayName: string): Promise<SnapshotValue> {
+    const bytes = await readMaterialFile(displayName, () => readBoundedInputFile(absolute, 100 * 1024, this.options.signal));
+    return {
+      kind: 'file-text',
+      text: `<file path="${absolute.replace(/\\/g, '/')}">\n${bytes.toString('utf8')}\n</file>`,
+      material: createTextFileMaterial(displayName, bytes.byteLength),
+    };
   }
   #charge(bytes: number): void {
     if (this.#metadata + bytes > 8 * MiB) throw Error(CAPACITY_ERROR);
@@ -332,7 +353,7 @@ async function readMaterialFile<T>(name: string, read: () => Promise<T>): Promis
 }
 
 async function emitValue(value: SnapshotValue, sink: PartsSink): Promise<void> {
-  if (value.kind === 'text') await sink.text(value.text); else await sink.image(value);
+  if (value.kind === 'file-text') await sink.fileText(value); else await sink.image(value);
 }
 function space(char: string): boolean { return char.length > 0 && WHITESPACE.test(char); }
 function high(char: string): boolean { const code = char.charCodeAt(0); return code >= 0xd800 && code <= 0xdbff; }

@@ -52,9 +52,15 @@ export async function prepareUserTurnInput(
 
   if (!options.materialRegistry) {
     const refResult = await resolveTextSegment(input, options);
+    const fallbackParts: UserInputPart[] = [];
+    if (refResult.parts) {
+      pushParts(fallbackParts, refResult.parts);
+    } else {
+      pushTextPart(fallbackParts, refResult.text);
+    }
     return {
       text: refResult.text,
-      input: { parts: [{ type: "text", text: refResult.text }] },
+      input: { parts: fallbackParts },
       resolvedFiles: refResult.resolvedFiles,
       errors: refResult.errors,
     };
@@ -71,7 +77,11 @@ export async function prepareUserTurnInput(
       text += refResult.text;
       resolvedFiles.push(...refResult.resolvedFiles);
       errors.push(...refResult.errors);
-      pushTextPart(parts, refResult.text);
+      if (refResult.parts) {
+        pushParts(parts, refResult.parts);
+      } else {
+        pushTextPart(parts, refResult.text);
+      }
       continue;
     }
 
@@ -132,7 +142,7 @@ function splitInputSegments(input: string): InputSegment[] {
 
 function pushParts(parts: UserInputPart[], nextParts: readonly UserInputPart[]): void {
   for (const part of nextParts) {
-    if (part.type === "text") {
+    if (part.type === "text" && !part.material) {
       pushTextPart(parts, part.text);
     } else {
       parts.push(part);
@@ -143,7 +153,7 @@ function pushParts(parts: UserInputPart[], nextParts: readonly UserInputPart[]):
 function pushTextPart(parts: UserInputPart[], text: string): void {
   if (text.length === 0) return;
   const last = parts[parts.length - 1];
-  if (last?.type === "text") {
+  if (last?.type === "text" && !last.material) {
     parts[parts.length - 1] = { type: "text", text: last.text + text };
     return;
   }

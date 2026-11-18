@@ -120,4 +120,56 @@ describe('byte history', () => {
     const reader = new TranscriptByteReader(dir);
     try { expect((await reader.page()).fragments).toEqual([]); } finally { await reader.close(); }
   });
+  it('projects user file material blocks as bounded facts without reading wrapped text, while keeping literal <file> user text intact', async () => {
+    const home = await createTempDir('byte-history-material');
+    const store = new ShardedTranscriptStore(home);
+    const dir = path.join(home, 'c', 'transcript');
+    const wrapped = `<file path="E:/repo/large.txt">\n${'文件内容</file>'.repeat(8000)}\n</file>`;
+    const literal = '普通文本 <file path="E:/repo/literal.txt">\n原样保留\n</file> 结尾';
+    await store.appendRunRecord('c', run([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '前缀 ' },
+          { type: 'text', text: wrapped, material: { kind: 'file', name: 'large.txt', byteSize: Buffer.byteLength(wrapped) } },
+          { type: 'text', text: literal },
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: '收到' }] },
+    ]));
+    const reader = new TranscriptByteReader(dir, path.join(home, '.read-index'));
+    try {
+      const reverse: Array<{ text: string; material?: unknown; block: number }> = [];
+      let cursor: TranscriptBodyCursor | undefined;
+      for (;;) {
+        const page = await reader.page({ cursor });
+        if (page.preparing) continue;
+        reverse.push(...page.fragments.map(f => ({ text: f.text, material: f.material, block: f.block })));
+        cursor = page.cursor;
+        if (!page.hasMore) break;
+      }
+      expect(reverse).toEqual([
+        { text: '收到', material: undefined, block: 0 },
+        { text: literal, material: undefined, block: 2 },
+        { text: '', material: { kind: 'file', name: 'large.txt', byteSize: Buffer.byteLength(wrapped) }, block: 1 },
+        { text: '前缀 ', material: undefined, block: 0 },
+      ]);
+
+      // 正序回读该材料块（offset=0）只给有界描述，再正序推进到 block 2 原样给出 literal
+      const materialPage = await reader.page({ cursor: { ...(await reader.page()).fragments[0]!.cursor, message: 0, block: 1, offset: 0 }, forward: true });
+      expect(materialPage.fragments).toHaveLength(1);
+      expect(materialPage.fragments[0]).toMatchObject({
+        block: 1,
+        text: '',
+        offset: 0,
+        length: 0,
+        final: true,
+        material: { kind: 'file', name: 'large.txt', byteSize: Buffer.byteLength(wrapped) },
+      });
+      const nextPage = await reader.page({ cursor: materialPage.cursor, forward: true });
+      expect(nextPage.fragments[0]?.text).toBe(literal);
+    } finally {
+      await reader.close();
+    }
+  });
 });

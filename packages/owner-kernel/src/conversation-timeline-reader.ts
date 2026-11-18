@@ -1,3 +1,4 @@
+import { isTextFileMaterial } from '@zhixing-ai/core';
 import { artifactJsonIndex, type ArtifactStore } from '@zhixing-ai/core/authority';
 import type { ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, UserTurnInput } from '@zhixing-ai/core/contracts';
 import { ConversationBodyReader } from './conversation-body-reader.js';
@@ -69,6 +70,19 @@ export class ConversationTimelineReader {
     for (let scanned = 0; block >= 0 && block < count && scanned < 64 && fragments.length < limit; scanned++) {
       const inline = ref ? undefined : (input as UserTurnInput).parts[block];
       const type = ref ? await json.value(ref, ['parts', block, 'type'], 128) : inline?.type;
+      if (type === 'text') {
+        const material = ref ? await json.value(ref, ['parts', block, 'material'], 1024) : inline?.type === 'text' ? inline.material : undefined;
+        if (isTextFileMaterial(material)) {
+          if (forward && offset > 0) throw Error('conversation-history-input-offset');
+          const due = forward ? offset === 0 : offset !== 0;
+          if (due) {
+            fragments.push({ cursor: { ...position(), offset: 0 }, runId: entry.input.runId, runIndex: entry.input.position,
+              message: entry.input.position, block, role: 'user', type: 'text', text: '', offset: 0, length: 0, final: true, material });
+          }
+          if (forward) { block++; offset = 0; if (due) return { fragments, cursor: position(), hasMore: block < count, reset: false }; continue; }
+          block--; offset = MAX; continue;
+        }
+      }
       const node = ref && type === 'text' ? await json.node(ref, ['parts', block, 'text']) : undefined;
       if (ref && type === 'text' && node?.kind !== 'string') throw Error('conversation-history-input-text');
       const value = type === 'text' ? inline?.type === 'text' ? inline.text : '' : '[图像材料]';

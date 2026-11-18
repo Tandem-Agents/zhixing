@@ -18,6 +18,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import { createTextFileMaterial, type UserInputPart } from "@zhixing-ai/core";
 import { expandUserHome } from "@zhixing-ai/core/paths";
 
 // ─── @file:path 匹配正则 ───
@@ -41,6 +42,8 @@ export interface ResolveFileRefsOptions {
 export interface ResolveResult {
   /** 处理后的文本 */
   readonly text: string;
+  /** 结构化输入分段（成功读取的文件引用作为独立带 material 的文本 part，不与普通文本合并） */
+  readonly parts?: readonly UserInputPart[];
   /** 成功解析的文件路径（绝对路径） */
   readonly resolvedFiles: readonly string[];
   /** 解析失败的引用（文件不存在等） */
@@ -63,7 +66,6 @@ export async function resolveFileRefs(
   // 收集所有 @file:path 引用
   const refs: Array<{ full: string; filePath: string; start: number; end: number }> = [];
   let m: RegExpExecArray | null;
-  // Reset regex lastIndex
   FILE_REF_RE.lastIndex = 0;
   while ((m = FILE_REF_RE.exec(input)) !== null) {
     refs.push({
@@ -75,15 +77,28 @@ export async function resolveFileRefs(
   }
 
   if (refs.length === 0) {
-    return { text: input, resolvedFiles: [], errors: [] };
+    return {
+      text: input,
+      parts: input.length > 0 ? [{ type: "text", text: input }] : [],
+      resolvedFiles: [],
+      errors: [],
+    };
   }
 
-  // 从后往前替换，避免偏移量错乱
-  let result = input;
-  for (let i = refs.length - 1; i >= 0; i--) {
-    const ref = refs[i]!;
+  const parts: UserInputPart[] = [];
+  let text = "";
+  let offset = 0;
+
+  for (const ref of refs) {
+    if (ref.start > offset) {
+      const slice = input.slice(offset, ref.start);
+      text += slice;
+      pushPlainText(parts, slice);
+    }
+
     const absPath = resolveToAbsolute(ref.filePath, options.workspaceRoot);
     let replacement: string;
+    let fileMaterial: ReturnType<typeof createTextFileMaterial> | undefined;
 
     try {
       const stat = await fs.stat(absPath);
@@ -94,23 +109,88 @@ export async function resolveFileRefs(
         replacement = `[文件过大: ${absPath} (${(stat.size / 1024).toFixed(0)}KB > ${(maxSize / 1024).toFixed(0)}KB)]`;
         errors.push(`${ref.full} → 文件过大`);
       } else {
-        const content = await fs.readFile(absPath, "utf-8");
-        const fwdPath = absPath.replace(/\\/g, "/");
-        replacement = `<file path="${fwdPath}">\n${content}\n</file>`;
-        resolvedFiles.push(absPath);
+        const bytes = await readBoundedBytes(absPath, maxSize);
+        if ("tooLarge" in bytes) {
+          replacement = `[文件过大: ${absPath} (${(bytes.tooLarge / 1024).toFixed(0)}KB > ${(maxSize / 1024).toFixed(0)}KB)]`;
+          errors.push(`${ref.full} → 文件过大`);
+        } else {
+          const content = bytes.buffer.toString("utf-8");
+          const fwdPath = absPath.replace(/\\/g, "/");
+          replacement = `<file path="${fwdPath}">\n${content}\n</file>`;
+          fileMaterial = createTextFileMaterial(path.basename(absPath), bytes.buffer.byteLength);
+          resolvedFiles.push(absPath);
+        }
       }
     } catch {
       replacement = `[文件未找到: ${absPath}]`;
       errors.push(`${ref.full} → 文件不存在`);
     }
 
-    result = result.slice(0, ref.start) + replacement + result.slice(ref.end);
+    text += replacement;
+    if (fileMaterial) {
+      parts.push({ type: "text", text: replacement, material: fileMaterial });
+    } else {
+      pushPlainText(parts, replacement);
+    }
+    offset = ref.end;
   }
 
-  return { text: result, resolvedFiles, errors };
+  if (offset < input.length) {
+    const tail = input.slice(offset);
+    text += tail;
+    pushPlainText(parts, tail);
+  }
+
+  return { text, parts, resolvedFiles, errors };
 }
 
 // ─── 内部辅助 ───
+
+async function readBoundedBytes(
+  absPath: string,
+  maxBytes: number,
+): Promise<{ readonly buffer: Buffer } | { readonly tooLarge: number }> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(absPath, "r");
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error("not a file");
+    }
+    if (stat.size > maxBytes) {
+      return { tooLarge: stat.size };
+    }
+    let buffer = Buffer.allocUnsafe(Math.min(stat.size + 1, maxBytes + 1));
+    let length = 0;
+    while (length <= maxBytes) {
+      if (length === buffer.length) {
+        const grown = Buffer.allocUnsafe(Math.min(buffer.length * 2, maxBytes + 1));
+        buffer.copy(grown, 0, 0, length);
+        buffer = grown;
+      }
+      const read = await handle.read(buffer, length, buffer.length - length, length);
+      if (read.bytesRead === 0) {
+        return { buffer: buffer.subarray(0, length) };
+      }
+      length += read.bytesRead;
+    }
+    return { tooLarge: length };
+  } finally {
+    if (handle) {
+      await handle.close().catch(() => {});
+    }
+  }
+}
+
+function pushPlainText(parts: UserInputPart[], text: string): void {
+  if (text.length === 0) return;
+  const last = parts[parts.length - 1];
+  if (last?.type === "text" && !last.material) {
+    parts[parts.length - 1] = { type: "text", text: last.text + text };
+    return;
+  }
+  parts.push({ type: "text", text });
+}
 
 function resolveToAbsolute(filePath: string, root: string): string {
   const expanded = expandUserHome(filePath);

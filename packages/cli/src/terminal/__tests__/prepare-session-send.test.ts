@@ -166,7 +166,12 @@ it('prepares unclassified extensionless/dot plain UTF-8 materials once per snaps
   });
   const payload = JSON.parse(Buffer.concat(pages).toString());
   const expectedWrapped = `<file path="${dotFile.replace(/\\/g, '/')}">\n${dotContent}\n</file>`;
-  expect(payload.input.parts[0].text).toContain(expectedWrapped);
+  expect(payload.input.parts[0]).toEqual({ type: 'text', text: '前缀 ' });
+  expect(payload.input.parts[1]).toEqual({
+    type: 'text',
+    text: expectedWrapped,
+    material: { kind: 'file', name: '.hidden-b4', byteSize: Buffer.byteLength(dotContent, 'utf8') },
+  });
   expect(payload.engage.question).toContain(expectedWrapped);
 
   // Subsequent new submission sees the mutated binary bytes and rejects cleanly

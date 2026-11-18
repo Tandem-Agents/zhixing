@@ -1,6 +1,10 @@
 import * as fs from "node:fs/promises";
 
-import type { UserInputPart, UserTurnInput } from "@zhixing-ai/core";
+import {
+  createTextFileMaterial,
+  type UserInputPart,
+  type UserTurnInput,
+} from "@zhixing-ai/core";
 
 import { detectMimeType } from "./input-material-ingest.js";
 import {
@@ -142,12 +146,19 @@ async function pushMaterial(
       return;
     }
 
-    const content = await readLocalTextFile(entry, errors);
-    if (content === null) return;
-    pushText(
-      parts,
-      `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`,
+    const bytes = await readBoundedTextFallbackBytes(
+      entry,
+      stat.size,
+      maxTextFileSize,
+      errors,
     );
+    if (!bytes) return;
+    const content = bytes.toString("utf-8");
+    parts.push({
+      type: "text",
+      text: `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`,
+      material: createTextFileMaterial(entry.name, bytes.byteLength),
+    });
     return;
   }
 
@@ -181,10 +192,11 @@ async function pushMaterial(
     return;
   }
 
-  pushText(
-    parts,
-    `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`,
-  );
+  parts.push({
+    type: "text",
+    text: `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`,
+    material: createTextFileMaterial(entry.name, bytes.byteLength),
+  });
 }
 
 function tokenLabelForKind(kind: InputMaterialKind): InputMaterialTokenLabel {
@@ -214,18 +226,6 @@ async function readLocalFile(
 ): Promise<Buffer | null> {
   try {
     return await fs.readFile(entry.filePath);
-  } catch (err) {
-    errors.push(`${entry.name} -> 文件不可读取 (${errorMessage(err)})`);
-    return null;
-  }
-}
-
-async function readLocalTextFile(
-  entry: InputMaterialEntry,
-  errors: string[],
-): Promise<string | null> {
-  try {
-    return await fs.readFile(entry.filePath, "utf-8");
   } catch (err) {
     errors.push(`${entry.name} -> 文件不可读取 (${errorMessage(err)})`);
     return null;
@@ -294,7 +294,7 @@ async function readBoundedTextFallbackBytes(
 function pushText(parts: UserInputPart[], text: string): void {
   if (text.length === 0) return;
   const last = parts[parts.length - 1];
-  if (last?.type === "text") {
+  if (last?.type === "text" && !last.material) {
     parts[parts.length - 1] = { type: "text", text: last.text + text };
     return;
   }
@@ -306,7 +306,7 @@ function pushParts(
   nextParts: readonly UserInputPart[],
 ): void {
   for (const part of nextParts) {
-    if (part.type === "text") {
+    if (part.type === "text" && !part.material) {
       pushText(parts, part.text);
     } else {
       parts.push(part);

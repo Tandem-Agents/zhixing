@@ -1,5 +1,6 @@
 import type { EnvironmentRequirement } from "../contracts/protocol.js";
 import {
+  isTextFileMaterial,
   isToolResultDisposition,
   type ContentBlock,
   type ImageSource,
@@ -27,8 +28,19 @@ export function validateUserTurnInput(value: unknown): UserTurnInput {
   for (const part of value.parts) {
     assertPlainRecord(part, "User input part");
     if (part.type === "text") {
-      assertExactKeys(part, ["text", "type"], "User input text part");
+      assertAllowedKeys(part, ["material", "text", "type"], "User input text part");
+      if (!("text" in part)) {
+        throw new TypeError("User input text part is incomplete");
+      }
       assertString(part.text, "User input text");
+      if (part.material !== undefined) {
+        if (!isTextFileMaterial(part.material)) {
+          throw new TypeError("User input text material is invalid");
+        }
+        if ((part.text as string).length === 0) {
+          throw new TypeError("User input file material text must be non-empty");
+        }
+      }
       continue;
     }
     if (part.type !== "image") {
@@ -93,6 +105,14 @@ export function validateMessage(value: unknown, label = "Message"): Message {
   }
   assertDenseArray(value.content, `${label} content`);
   for (const block of value.content) validateContentBlock(block, `${label} content block`);
+  if (
+    value.role !== "user" &&
+    (value.content as ContentBlock[]).some(
+      (block) => block.type === "text" && block.material !== undefined,
+    )
+  ) {
+    throw new TypeError(`${label} assistant text cannot carry file material`);
+  }
   if (value.inputIdentity !== undefined) {
     if (value.role !== "user" || value.content.some((block) => (block as { type?: string }).type === "tool_result")) {
       throw new TypeError(`${label} input identity requires a user input`);
@@ -199,8 +219,19 @@ function validateContentBlock(value: unknown, label: string): ContentBlock {
   assertPlainRecord(value, label);
   switch (value.type) {
     case "text":
-      assertExactKeys(value, ["text", "type"], label);
+      assertAllowedKeys(value, ["material", "text", "type"], label);
+      if (!("text" in value)) {
+        throw new TypeError(`${label} is incomplete`);
+      }
       assertString(value.text, `${label} text`);
+      if (value.material !== undefined) {
+        if (!isTextFileMaterial(value.material)) {
+          throw new TypeError(`${label} material is invalid`);
+        }
+        if ((value.text as string).length === 0) {
+          throw new TypeError(`${label} file material text must be non-empty`);
+        }
+      }
       return value as unknown as ContentBlock;
     case "image":
       assertExactKeys(value, ["source", "type"], label);

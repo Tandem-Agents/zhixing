@@ -669,3 +669,177 @@ function readerFixtureWriter(h: { log: FileAuthorityCommitLog; artifacts: FileAr
   if (!writer) { writer = trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir, h.artifacts, { clock: () => NOW })); readerFixtureWriters.set(h.log, writer); }
   return writer;
 }
+
+it('projects committed and uncovered file material blocks as bounded facts while keeping context() O(1) bounded and full-text', async () => {
+  const h = await harness();
+  await admit(h.journal, 'seed-init');
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'seed-cancel' });
+  const seed = (await h.log.readAll()).flatMap(envelope => envelope.entries).find(entry => (entry.body as any).t === 'admitted')!;
+
+  const addInput = async (id: string, parts: import('@zhixing-ai/core/contracts').UserInputPart[], position: number, asArtifact = false) => {
+    const body = structuredClone(seed.body) as any;
+    body.runId = id; body.ingressKey = id; body.ingress.ingressId = id;
+    body.ingress.turnOrigin.messageIdentity.id = id; body.queuedPosition = position;
+    const raw = Buffer.from(canonicalize({ parts }));
+    body.input = asArtifact || raw.byteLength > 16384 ? { ref: await h.artifacts.put(raw) } : { parts };
+    await readerFixtureWriter(h).append([{ stream: seed.stream, body }]);
+  };
+  const addCommit = async (id: string, content: import('@zhixing-ai/core').ContentBlock[], revision: number) => {
+    const bundle = await h.artifacts.put(Buffer.from(canonicalize(createConversationSealedBundle({
+      assignmentId: 'assignment-' + id, executorId: 'executor-test',
+      streamFinal: { finalSeq: 1, streamDigest: 'sha256:' + '0'.repeat(64) }, usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+      usageFinal: { reportDigest: 'sha256:' + '0'.repeat(64), upToUsageSeq: 0 }, dependencyArtifacts: [],
+      body: { t: 'conversation', ownerEpoch: 1, runId: id, conversationId: 'recovery-conversation', baseRevision: revision - 1,
+        runRecord: { type: 'run', timestamp: NOW, runId: id, runIndex: revision - 1, messages: [
+          { role: 'user', content },
+          { role: 'assistant', content: [{ type: 'text', text: '已审阅-' + id }] },
+        ] }, contentAssets: [] },
+    }))));
+    await readerFixtureWriter(h).append([{ stream: seed.stream, body: { t: 'committed', runId: id, assignmentId: 'assignment-' + id, bundle: { ref: bundle }, commitRevision: revision } }]);
+  };
+
+  const longWrapped = `<file path="E:/repo/one.txt">\n${'一</file>'.repeat(9000)}\n</file>`;
+  const wrapped2 = `<file path="E:/repo/two.txt">\n${'二'.repeat(9000)}\n</file>`;
+  const m1 = { kind: 'file' as const, name: 'one.txt', byteSize: 9000 };
+  const m2 = { kind: 'file' as const, name: 'two.txt', byteSize: 18000 };
+  const literal = ' 后缀含字面量 <file path="E:/repo/raw.txt">keep</file>';
+  const manyTrailingBlocks: import('@zhixing-ai/core').ContentBlock[] = [
+    { type: 'text', text: '首块已超预算'.repeat(40) },
+    ...Array.from({ length: 400 }, (_, i) => ({ type: 'text' as const, text: `后块-${i}` })),
+  ];
+
+  await addInput('many-plain', manyTrailingBlocks as any, 1, true);
+  await addCommit('many-plain', manyTrailingBlocks, 1);
+  await addInput('mat-run-1', [{ type: 'text', text: '前缀 ' }, { type: 'text', text: longWrapped, material: m1 }, { type: 'text', text: literal }], 2, true);
+  await addCommit('mat-run-1', [{ type: 'text', text: '前缀 ' }, { type: 'text', text: longWrapped, material: m1 }, { type: 'text', text: literal }], 2);
+  await addInput('mat-run-2', [{ type: 'text', text: '未提交前 ' }, { type: 'text', text: wrapped2, material: m2 }, { type: 'text', text: ' 未提交后' }], 3, true);
+  await addInput('mat-inline', [{ type: 'text', text: '<file path="E:/repo/in.txt">\nin\n</file>', material: { kind: 'file', name: 'in.txt', byteSize: 2 } }], 4, false);
+
+  const cold = h.journalAt();
+  // 先准备索引，再对正式 context() 查询监测读取范围：首块满 200 字后绝不扫描后续 400 个无关块
+  let ctx = await cold.recoveryPage({ mode: 'context', conversationId: 'recovery-conversation' }) as import('@zhixing-ai/core/contracts').ConversationContextPage;
+  while (ctx.preparing) ctx = await cold.recoveryPage({ mode: 'context', conversationId: 'recovery-conversation' }) as import('@zhixing-ai/core/contracts').ConversationContextPage;
+  expect(ctx.text).toContain('<file path="E:/repo/one.txt">');
+  expect(ctx.text).not.toContain('[File ·');
+  expect(ctx.text).not.toContain('后块-1');
+
+  const ranges = vi.spyOn(h.artifacts, 'readRange');
+  try {
+    const again = await cold.recoveryPage({ mode: 'context', conversationId: 'recovery-conversation' }) as import('@zhixing-ai/core/contracts').ConversationContextPage;
+    expect(again.text).toBe(ctx.text);
+    // 3 个已提交 run（6 条消息），每条消息至多读首块满足 200 字即停：readRange 调用次数远小于 400 个后块
+    expect(ranges.mock.calls.length).toBeLessThan(40);
+  } finally {
+    ranges.mockRestore();
+  }
+
+  const items = await timelinePages(cold, true);
+  expect(items.filter(f => f.runId === 'mat-run-1' || f.runId === 'mat-run-2' || f.runId === 'mat-inline').map(f => ({ runId: f.runId, block: f.block, text: f.text, material: f.material })).reverse()).toEqual([
+    { runId: 'mat-run-1', block: 0, text: '前缀 ', material: undefined },
+    { runId: 'mat-run-1', block: 1, text: '', material: m1 },
+    { runId: 'mat-run-1', block: 2, text: literal, material: undefined },
+    { runId: 'mat-run-1', block: 0, text: '已审阅-mat-run-1', material: undefined },
+    { runId: 'mat-run-2', block: 0, text: '未提交前 ', material: undefined },
+    { runId: 'mat-run-2', block: 1, text: '', material: m2 },
+    { runId: 'mat-run-2', block: 2, text: ' 未提交后', material: undefined },
+    { runId: 'mat-inline', block: 0, text: '', material: { kind: 'file', name: 'in.txt', byteSize: 2 } },
+  ]);
+
+  // 正序冷回放两类材料块（已提交、artifact 未覆盖输入与 inline 未覆盖输入），并在 clear 后按可见性拒绝
+  for (const target of items.filter(f => f.material)) {
+    const forward = await cold.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', cursor: { ...target.cursor, offset: 0 }, runId: target.runId, direction: 'forward' }) as BodyPage;
+    expect(forward.reset).toBe(false);
+    expect(forward.fragments[0]).toMatchObject({ block: target.block, text: '', offset: 0, length: 0, final: true, material: target.material });
+  }
+  await readerFixtureWriter(h).append([{ stream: 'run:recovery-conversation', body: { t: 'session-lifecycle', mutation: 'clear', domainRevision: 1, requestId: 'clear-mat' } }]);
+  for (const target of items.filter(f => f.material)) {
+    const retired = await cold.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', cursor: { ...target.cursor, offset: 0 }, runId: target.runId, direction: 'forward' }) as BodyPage;
+    expect(retired).toMatchObject({ reset: true, fragments: [] });
+  }
+}, 20000);
+
+it('pages input-page with per-part offsets/finals across multi-page prefixes/suffixes, edge files, consecutive files, and cursor retries', async () => {
+  const h = await harness();
+  const longPrefix = '前'.repeat(10_000);
+  const longSuffix = '后'.repeat(10_000);
+  const f1 = `<file path="E:/repo/f1.txt">\n${'x'.repeat(20_000)}\n</file>`;
+  const f2 = '<file path="E:/repo/empty.txt">\n\n</file>';
+  const m1 = { kind: 'file' as const, name: 'f1.txt', byteSize: 20_000 };
+  const m2 = { kind: 'file' as const, name: 'empty.txt', byteSize: 0 };
+
+  const collectInputFragments = async (runId: string, parts: import('@zhixing-ai/core/contracts').UserInputPart[], position: number) => {
+    await h.journal.admit({
+      ingressKey: runId, runId, queuedPosition: position,
+      userInput: { parts },
+      invocation: { kind: 'agent', source: 'interactive' },
+      ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: runId, receivedAt: NOW },
+    });
+    const out: NonNullable<ConversationInputPage['input']>[] = [];
+    let cursor: ConversationInputCursor | undefined;
+    for (let guard = 0; guard < 32; guard++) {
+      const page = await h.journal.recoveryPage({ mode: 'input-page', conversationId: 'recovery-conversation', runId, cursor }) as ConversationInputPage;
+      expect(page.reset).toBe(false);
+      if (!page.input && !page.hasMore) break;
+      if (!page.input) continue;
+      // 同游标重试必须幂等给出完全一致的片段，不跳偏或丢段
+      const retried = await h.journal.recoveryPage({ mode: 'input-page', conversationId: 'recovery-conversation', runId, cursor }) as ConversationInputPage;
+      expect(retried.input).toEqual(page.input);
+      expect(retried.cursor).toEqual(page.cursor);
+      out.push(page.input);
+      cursor = page.cursor;
+      if (page.input.final) break;
+    }
+    return out;
+  };
+
+  // 1. 长前缀跨2页 -> 文件 -> 长后缀跨2页
+  const mixed = await collectInputFragments('in-mixed', [
+    { type: 'text', text: longPrefix },
+    { type: 'text', text: f1, material: m1 },
+    { type: 'text', text: longSuffix },
+  ], 0);
+  expect(mixed.map(item => ({
+    part: item.part,
+    partOffset: item.partOffset,
+    len: item.text.length,
+    partFinal: item.partFinal,
+    final: item.final,
+    material: item.material,
+  }))).toEqual([
+    { part: 0, partOffset: 0, len: 8192, partFinal: false, final: false, material: undefined },
+    { part: 0, partOffset: 8192, len: 1808, partFinal: true, final: false, material: undefined },
+    { part: 1, partOffset: 0, len: 0, partFinal: true, final: false, material: m1 },
+    { part: 2, partOffset: 0, len: 8192, partFinal: false, final: false, material: undefined },
+    { part: 2, partOffset: 8192, len: 1808, partFinal: true, final: true, material: undefined },
+  ]);
+  expect(mixed.filter(i => i.part === 0).map(i => i.text).join('')).toBe(longPrefix);
+  expect(mixed.filter(i => i.part === 2).map(i => i.text).join('')).toBe(longSuffix);
+
+  // 2. 文件在首、文件在尾、连续文件（含 0B 空文件）
+  const headFile = await collectInputFragments('in-head', [
+    { type: 'text', text: f2, material: m2 },
+    { type: 'text', text: '尾随说明' },
+  ], 1);
+  expect(headFile.map(i => ({ part: i.part, partOffset: i.partOffset, text: i.text, partFinal: i.partFinal, final: i.final, material: i.material }))).toEqual([
+    { part: 0, partOffset: 0, text: '', partFinal: true, final: false, material: m2 },
+    { part: 1, partOffset: 0, text: '尾随说明', partFinal: true, final: true, material: undefined },
+  ]);
+
+  const tailFile = await collectInputFragments('in-tail', [
+    { type: 'text', text: '前置说明' },
+    { type: 'text', text: f1, material: m1 },
+  ], 2);
+  expect(tailFile.map(i => ({ part: i.part, partOffset: i.partOffset, text: i.text, partFinal: i.partFinal, final: i.final, material: i.material }))).toEqual([
+    { part: 0, partOffset: 0, text: '前置说明', partFinal: true, final: false, material: undefined },
+    { part: 1, partOffset: 0, text: '', partFinal: true, final: true, material: m1 },
+  ]);
+
+  const consecutive = await collectInputFragments('in-consecutive', [
+    { type: 'text', text: f1, material: m1 },
+    { type: 'text', text: f2, material: m2 },
+  ], 3);
+  expect(consecutive.map(i => ({ part: i.part, partOffset: i.partOffset, text: i.text, partFinal: i.partFinal, final: i.final, material: i.material }))).toEqual([
+    { part: 0, partOffset: 0, text: '', partFinal: true, final: false, material: m1 },
+    { part: 1, partOffset: 0, text: '', partFinal: true, final: true, material: m2 },
+  ]);
+}, 20000);

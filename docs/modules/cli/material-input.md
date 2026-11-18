@@ -53,7 +53,7 @@ U 对一次提交保留冻结输入身份和草稿版本，N 经 createUserSubmi
 | T05 取消控制已提交 | 结清该取消输入并显示真实取消结果 |
 | T06 keep-awaiting，仅返回旧 session／draft | 明确旧任务仍待确认、本次输入未保存，保留本次输入 |
 
-结果中的 submission disposition 区分 original-saved、revision-saved、not-saved；同名 awaiting、旧 turnId 和 RPC 正常返回不能证明本次已保存。未知结果保留输入并引导核对，不能补写成功或自动重发。输入历史保留原始输入及材料引用；材料回显不铺开文件全文或图片编码，也不等于模型已消费。
+结果中的 submission disposition 区分 original-saved、revision-saved、not-saved；同名 awaiting、旧 turnId 和 RPC 正常返回不能证明本次已保存。未知结果保留输入并引导核对，不能补写成功或自动重发。输入历史保留原始输入及材料引用；材料回显不铺开文件全文或图片编码，也不等于模型已消费。已接纳的文本文件材料（chip 与 `@file:`）在持久输入与用户消息块上保留有界 `material` 描述，重启、翻页与恢复时由表面渲染为无会话局部编号的 `[File · 名称 · 大小]` 紧凑块（不重读原路径；历史无描述旧记录保持原文）。
 
 ## 范围与维护验证
 

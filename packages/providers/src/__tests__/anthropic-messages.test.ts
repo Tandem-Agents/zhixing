@@ -872,4 +872,81 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
       text: "DeepSeek 的推理",
     });
   });
+
+  it("出站：含文件材料的连续用户文本段按原序折叠为单 text 块且剥离 material，普通双 text 块保持原样", async () => {
+    const provider = createAnthropicProvider(makeProvider());
+    const f1 = '<file path="E:/repo/a.txt">\nalpha\n</file>';
+    const f2 = '<file path="E:/repo/b.txt">\nbeta\n</file>';
+    const m1 = { kind: "file" as const, name: "a.txt", byteSize: 5 };
+    const m2 = { kind: "file" as const, name: "b.txt", byteSize: 4 };
+    const img = { type: "base64" as const, mediaType: "image/png", data: "AAAA" };
+
+    const outboundOf = async (messages: ChatRequest["messages"]) => {
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+          textBlockStart(0),
+          textDelta(0, "ok"),
+          contentBlockStop(0),
+          messageDelta("end_turn", 1),
+          messageStop(),
+        ]),
+      );
+      await collectEvents(provider.chat({ model: "claude-sonnet-4-20250514", messages }));
+      return mockCreate.mock.calls.at(-1)?.[0]?.messages;
+    };
+
+    expect(
+      await outboundOf([{ role: "user", content: [{ type: "text", text: "甲" }, { type: "text", text: "乙" }] }]),
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "甲" },
+          { type: "text", text: "乙", cache_control: { type: "ephemeral" } },
+        ],
+      },
+    ]);
+
+    expect(
+      await outboundOf([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "前缀 " },
+            { type: "text", text: f1, material: m1 },
+            { type: "text", text: " 后缀" },
+          ],
+        },
+      ]),
+    ).toEqual(
+      await outboundOf([{ role: "user", content: [{ type: "text", text: `前缀 ${f1} 后缀` }] }]),
+    );
+
+    expect(
+      await outboundOf([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "前 " },
+            { type: "text", text: f1, material: m1 },
+            { type: "image", source: img },
+            { type: "text", text: f2, material: m2 },
+            { type: "text", text: " 后" },
+          ],
+        },
+      ]),
+    ).toEqual(
+      await outboundOf([
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `前 ${f1}` },
+            { type: "image", source: img },
+            { type: "text", text: `${f2} 后` },
+          ],
+        },
+      ]),
+    );
+  });
 });

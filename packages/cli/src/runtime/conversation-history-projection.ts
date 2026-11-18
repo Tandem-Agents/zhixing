@@ -2,6 +2,7 @@
 import { extractText, type Message } from "@zhixing-ai/core/types";
 import type { RunRecord } from "@zhixing-ai/core/transcript";
 import type { ConversationMessageStatus } from "@zhixing-ai/core/conversation/application";
+import { formatPersistedFileMaterial } from "../input-material-registry.js";
 import { formatToolResult } from "../tool-card-format.js";
 
 /** 默认渲染的最近 run 数 —— 尾巴要短：唤起上下文即可，不是回放全史 */
@@ -46,7 +47,7 @@ export function projectHistoryTail(
 }
 
 function projectEntry(record: RunRecord): HistoryTailEntry {
-  const userText = collapseToLine(extractText(record.messages[0]!));
+  const userText = collapseToLine(extractUserDisplayText(record.messages[0]!));
   const lastAssistant = findLastAssistantText(record.messages);
   const source = record.messages[0]?.inputIdentity?.source;
   const appended = record.messages.slice(1).filter(message => message.inputIdentity);
@@ -55,7 +56,7 @@ function projectEntry(record: RunRecord): HistoryTailEntry {
   return {
     userText,
     ...(source?.kind === "conversation" ? { sourceConversationId: source.conversationId } : {}),
-    ...(appended.length ? { inputs: appended.map(message => ({ text: collapseToLine(extractText(message)), ...(message.inputIdentity?.source.kind === "conversation" ? { sourceConversationId: message.inputIdentity.source.conversationId } : {}) })) } : {}),
+    ...(appended.length ? { inputs: appended.map(message => ({ text: collapseToLine(extractUserDisplayText(message)), ...(message.inputIdentity?.source.kind === "conversation" ? { sourceConversationId: message.inputIdentity.source.conversationId } : {}) })) } : {}),
     ...(calls.length ? { sent: calls.map(call => {
       if (call.type !== "tool_use") throw new Error("Expected communication tool call");
       const result = results.find(block => block.toolUseId === call.id);
@@ -67,6 +68,16 @@ function projectEntry(record: RunRecord): HistoryTailEntry {
       ? { perspectiveCount: record.perspectives.perspectiveCount }
       : {}),
   };
+}
+
+function extractUserDisplayText(message: Message): string {
+  return message.content
+    .flatMap((block) =>
+      block.type === "text"
+        ? [block.material ? formatPersistedFileMaterial(block.material) : block.text]
+        : [],
+    )
+    .join("");
 }
 
 function findLastAssistantText(

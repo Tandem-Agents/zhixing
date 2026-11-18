@@ -1,5 +1,5 @@
 import type { DurableLogCheckpoint } from '../authority/interfaces.js';
-import type { MessageInputIdentity } from '../types/messages.js';
+import type { MessageInputIdentity, TextFileMaterial } from '../types/messages.js';
 import type { ConversationStatusNotice, FinalFrame } from './protocol.js';
 import type { ConversationRunState } from './foundation.js';
 import type { TokenUsage } from '../types/llm.js';
@@ -63,6 +63,8 @@ export interface ConversationBodyFragment {
   readonly final: boolean;
   /** 工具块只给有界事实（text 为空串），不给原文；格式化留在接入面。 */
   readonly tool?: TranscriptToolFacts;
+  /** 文件材料文本块只给有界结构描述（text 为空串），不给包装全文；格式化留在接入面。 */
+  readonly material?: TextFileMaterial;
 }
 
 /**
@@ -155,6 +157,11 @@ export interface ConversationInputFragment {
   readonly text: string;
   readonly contentOffset: number;
   readonly final: boolean;
+  /** 当前片段所属输入 part 序号及其在 part 内的偏移与收尾标志；材料块给有界描述（text 为空串）。 */
+  readonly part?: number;
+  readonly partOffset?: number;
+  readonly partFinal?: boolean;
+  readonly material?: TextFileMaterial;
 }
 export interface ConversationInputPage {
   readonly input?: ConversationInputFragment;

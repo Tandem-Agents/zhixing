@@ -402,4 +402,43 @@ describe("buildStartupBootstrap", () => {
       expect(text).not.toContain("进行中".repeat(300)); // active 被截
     });
   });
+
+  it("用户文件材料分块按紧邻拼接，普通多段 text 块保持换行分隔", async () => {
+    await store.appendRunRecord("c1", {
+      timestamp: new Date(clock + 1000).toISOString(),
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "请看" },
+            {
+              type: "text",
+              text: '<file path="a.txt">\n正文\n</file>',
+              material: { kind: "file", name: "a.txt", byteSize: 6 },
+            },
+            { type: "text", text: "并总结" },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "收到" }],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "第一段" },
+            { type: "text", text: "第二段" },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "好的" }],
+        },
+      ],
+    });
+    const pair = await buildStartupBootstrap(deps(100_000));
+    const text = bootstrapText(pair!);
+    expect(text).toContain('用户：请看<file path="a.txt">\n正文\n</file>并总结');
+    expect(text).toContain("用户：第一段\n用户：第二段");
+  });
 });

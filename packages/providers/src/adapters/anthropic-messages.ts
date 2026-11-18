@@ -18,7 +18,12 @@ import type {
   StreamEvent,
   TokenUsage,
 } from "@zhixing-ai/core";
-import type { Message, ContentBlock, ToolSpec } from "@zhixing-ai/core";
+import {
+  coalesceUserMaterialTextBlocks,
+  type ContentBlock,
+  type Message,
+  type ToolSpec,
+} from "@zhixing-ai/core";
 import type { ResolvedProvider } from "../types.js";
 import { markRequestUndelivered } from "@zhixing-ai/core/resilience";
 import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
@@ -241,7 +246,11 @@ function convertMessages(
 ): Anthropic.Messages.MessageParam[] {
   return messages.map((msg) => ({
     role: msg.role,
-    content: msg.content.map(convertContentBlock),
+    content: (
+      msg.role === "user"
+        ? coalesceUserMaterialTextBlocks(msg.content)
+        : msg.content
+    ).map(convertContentBlock),
   }));
 }
 

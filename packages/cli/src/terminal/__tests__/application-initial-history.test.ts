@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
-import { runOutcomeSegment, runOutcomeText } from '../display-replay.js';
+import { fileMaterialSegment, runOutcomeSegment, runOutcomeText } from '../display-replay.js';
 
 // Exercise the production history owner. Only its RPC and confirmed display
 // ports are replaced; parsing, page progression and publication order are real.
@@ -17,7 +18,7 @@ const moduleText = (match: (node: ts.Statement) => boolean) => source.statements
 const remember = moduleText(node => ts.isVariableStatement(node) && node.getText(source).includes('HISTORY_OUTCOME_RUNS =')) + '\n' +
   moduleText(node => ts.isFunctionDeclaration(node) && node.name?.text === 'rememberOutcomeRun') + '\n' +
   moduleText(node => ts.isFunctionDeclaration(node) && node.name?.text === 'withOutcomeShown');
-const Fixture = new Function('observeStartupPhase', 'runOutcomeText', 'runOutcomeSegment', ts.transpile(`${remember}
+const Fixture = new Function('observeStartupPhase', 'runOutcomeText', 'runOutcomeSegment', 'fileMaterialSegment', ts.transpile(`${remember}
 class Fixture {
   abort = new AbortController(); mainView = { readyForInput: false }; logging = { records: undefined };
   historyParser = { close() {} }; bodyWork = { run: work => work() };
@@ -26,7 +27,7 @@ class Fixture {
   async displayPage() { this.displayed++; }
   async publishHistoryView() { this.published++; }
   ${methods.replace(/#/gu, '')}
-} return Fixture;`, { target: ts.ScriptTarget.ES2022 }))((_records: unknown, _phase: string, work: () => Promise<unknown>) => work(), runOutcomeText, runOutcomeSegment);
+} return Fixture;`, { target: ts.ScriptTarget.ES2022 }))((_records: unknown, _phase: string, work: () => Promise<unknown>) => work(), runOutcomeText, runOutcomeSegment, fileMaterialSegment);
 
 function fixture() {
   const target = new Fixture(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
@@ -287,5 +288,101 @@ describe('earlier page for the reading window (display-earlier)', () => {
     expect(h.target.conversation.bodyPage).toHaveBeenCalledTimes(1);
     expect(reply.page).toBeUndefined(); expect(reply.hasEarlier).toBe(true);
     expect(h.target.mainView.message).toBe('已恢复最近对话。'); expect(h.target.published).toBe(0);
+  });
+
+  it('projects online history file material facts as compact [File · ...] segments with material replay locators', async () => {
+    const h = fixture();
+    const stagedItems: Array<{ segment: { text: string; role: string; groupId?: string }; replay: { kind: string } }> = [];
+    h.target.display.appendInitialHistory.mockImplementation(async (items: typeof stagedItems, _current: () => boolean, committed: (i: number) => void) => {
+      stagedItems.push(...items);
+      items.forEach((_, i) => committed(i));
+      return true;
+    });
+    h.target.conversation.bodyPage.mockResolvedValueOnce({
+      fragments: [
+        { runId: 'run-mat', message: 0, block: 2, role: 'user', type: 'text', text: ' 后缀第 3 轮', length: 7, offset: 0, final: true,
+          cursor: { conversationId: 'current', ownerEpoch: 1, revision: 1, message: 0, block: 2, offset: 0 } },
+        { runId: 'run-mat', message: 0, block: 1, role: 'user', type: 'text', text: '', length: 0, offset: 0, final: true,
+          material: { kind: 'file', name: 'chip-sample.txt', byteSize: 50 },
+          cursor: { conversationId: 'current', ownerEpoch: 1, revision: 1, message: 0, block: 1, offset: 0 } },
+        { runId: 'run-mat', message: 0, block: 0, role: 'user', type: 'text', text: '前缀说明 ', length: 5, offset: 0, final: true,
+          cursor: { conversationId: 'current', ownerEpoch: 1, revision: 1, message: 0, block: 0, offset: 0 } },
+      ],
+      hasMore: false,
+    });
+    await h.target.onlineHistoryPage(h.history);
+    expect(stagedItems.map(i => ({ text: i.segment.text, role: i.segment.role, groupId: i.segment.groupId, replayKind: i.replay.kind }))).toEqual([
+      { text: ' 后缀第 3 轮', role: 'user', groupId: 'run-mat:0:user', replayKind: 'owner' },
+      { text: '[File · chip-sample.txt · 50B]', role: 'user', groupId: 'run-mat:0:user', replayKind: 'material' },
+      { text: '前缀说明 ', role: 'user', groupId: 'run-mat:0:user', replayKind: 'owner' },
+    ]);
+  });
+
+  it('executes production onObservedInputFragment across multi-page prefix/file/suffix, edge/consecutive files, retries, and legacy plain pages', async () => {
+    // 直接从生产 application.ts AST 提取真实的 onObservedInputFragment 属性实现
+    let observedProp: ts.PropertyAssignment | undefined;
+    const visit = (node: ts.Node) => {
+      if (ts.isPropertyAssignment(node) && node.name.getText(source) === 'onObservedInputFragment') observedProp = node;
+      else ts.forEachChild(node, visit);
+    };
+    visit(owner);
+    expect(observedProp).toBeDefined();
+    const fnCode = observedProp!.initializer.getText(source).replace(/#/gu, '');
+    const MakeObserved = new Function('createHash', 'fileMaterialSegment', ts.transpile(`
+      class ObservedHarness {
+        abort = new AbortController();
+        history = { offline: false };
+        displayUnavailable = false;
+        appended = [];
+        gaps = 0;
+        display = { paused: false, append: async seg => { this.appended.push(seg); } };
+        async displayGap() { this.gaps++; }
+        async displayPage() {}
+        close() {}
+        onObservedInputFragment = ${fnCode};
+      }
+      return ObservedHarness;
+    `, { target: ts.ScriptTarget.ES2022 }))(createHash, fileMaterialSegment);
+
+    const h = new MakeObserved();
+    const id = { id: 'msg-1', source: { kind: 'conversation' as const, conversationId: 'origin' } };
+    const prefix1 = '甲'.repeat(8192), prefix2 = '甲'.repeat(1808);
+    const suffix1 = '乙'.repeat(8192), suffix2 = '乙'.repeat(1808);
+    // 长前缀跨2页 -> 文件 -> 长后缀跨2页
+    for (const frag of [
+      { conversationId: 'c1', runId: 'r1', identity: id, text: prefix1, contentOffset: 0, final: false, part: 0, partOffset: 0, partFinal: false },
+      { conversationId: 'c1', runId: 'r1', identity: id, text: prefix2, contentOffset: 8192, final: false, part: 0, partOffset: 8192, partFinal: true },
+      { conversationId: 'c1', runId: 'r1', identity: id, text: '', contentOffset: 10000, final: false, part: 1, partOffset: 0, partFinal: true, material: { kind: 'file', name: 'doc.md', byteSize: 2048 } },
+      { conversationId: 'c1', runId: 'r1', identity: id, text: suffix1, contentOffset: 10000, final: false, part: 2, partOffset: 0, partFinal: false },
+      { conversationId: 'c1', runId: 'r1', identity: id, text: suffix2, contentOffset: 18192, final: true, part: 2, partOffset: 8192, partFinal: true },
+    ]) {
+      await h.onObservedInputFragment(frag);
+    }
+    expect(h.gaps).toBe(0);
+    const expectedGroup = `received:${createHash('sha256').update(JSON.stringify(['c1', 'r1', id])).digest('hex')}`;
+    expect(h.appended.map((s: { blockId: string; groupId: string; contentOffset: number; final: boolean; text: string }) => ({
+      blockId: s.blockId,
+      groupId: s.groupId,
+      offset: s.contentOffset,
+      len: s.text.length,
+      final: s.final,
+      sample: s.text.length <= 40 ? s.text : s.text.slice(0, 4),
+    }))).toEqual([
+      { blockId: `${expectedGroup}:0`, groupId: expectedGroup, offset: 0, len: 8192, final: false, sample: '甲甲甲甲' },
+      { blockId: `${expectedGroup}:0`, groupId: expectedGroup, offset: 8192, len: 1808, final: true, sample: '甲甲甲甲' },
+      { blockId: `${expectedGroup}:1`, groupId: expectedGroup, offset: 0, len: '[File · doc.md · 2.0KB]'.length, final: true, sample: '[File · doc.md · 2.0KB]' },
+      { blockId: `${expectedGroup}:2`, groupId: expectedGroup, offset: 0, len: 8192, final: false, sample: '乙乙乙乙' },
+      { blockId: `${expectedGroup}:2`, groupId: expectedGroup, offset: 8192, len: 1808, final: true, sample: '乙乙乙乙' },
+    ]);
+
+    // 兼容旧无 part 字段的 plain 页
+    const legacy = new MakeObserved();
+    await legacy.onObservedInputFragment({ conversationId: 'c1', runId: 'r2', identity: id, text: 'legacy-one', contentOffset: 0, final: false });
+    await legacy.onObservedInputFragment({ conversationId: 'c1', runId: 'r2', identity: id, text: 'legacy-two', contentOffset: 10, final: true });
+    const legacyGroup = `received:${createHash('sha256').update(JSON.stringify(['c1', 'r2', id])).digest('hex')}`;
+    expect(legacy.appended).toEqual([
+      { blockId: legacyGroup, groupId: legacyGroup, role: 'user', text: 'legacy-one', contentOffset: 0, final: false },
+      { blockId: legacyGroup, groupId: legacyGroup, role: 'user', text: 'legacy-two', contentOffset: 10, final: true },
+    ]);
   });
 });

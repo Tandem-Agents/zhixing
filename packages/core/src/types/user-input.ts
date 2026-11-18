@@ -1,10 +1,17 @@
 import { AgentError } from "./errors.js";
 import type { ModelInfo } from "./llm.js";
-import type { ContentBlock, ImageSource, Message } from "./messages.js";
+import {
+  isTextFileMaterial,
+  type ContentBlock,
+  type ImageSource,
+  type Message,
+  type TextFileMaterial,
+} from "./messages.js";
 
 export interface UserInputTextPart {
   readonly type: "text";
   readonly text: string;
+  readonly material?: TextFileMaterial;
 }
 
 export interface UserInputImagePart {
@@ -85,7 +92,11 @@ export function userMessageFromTurnInput(input: UserTurnInputLike): Message {
     switch (part.type) {
       case "text":
         if (part.text.length > 0) {
-          content.push({ type: "text", text: part.text });
+          content.push({
+            type: "text",
+            text: part.text,
+            ...(part.material ? { material: part.material } : {}),
+          });
         }
         break;
       case "image":
@@ -107,8 +118,13 @@ export function userTurnInputFromMessages(messages: readonly Message[]): UserTur
     if (message.role !== "user") continue;
     const parts: UserInputPart[] = [];
     for (const block of message.content) {
-      if (block.type === "text" && block.text.length > 0) parts.push({ type: "text", text: block.text });
-      else if (block.type === "image") parts.push({ type: "image", source: block.source });
+      if (block.type === "text" && block.text.length > 0) {
+        parts.push({
+          type: "text",
+          text: block.text,
+          ...(block.material ? { material: block.material } : {}),
+        });
+      } else if (block.type === "image") parts.push({ type: "image", source: block.source });
     }
     if (parts.length > 0) return { parts };
   }
@@ -143,7 +159,11 @@ export function messageContainsImage(message: Message): boolean {
 function isUserInputPart(value: unknown): value is UserInputPart {
   if (!value || typeof value !== "object") return false;
   const part = value as Record<string, unknown>;
-  if (part.type === "text") return typeof part.text === "string";
+  if (part.type === "text") {
+    if (typeof part.text !== "string") return false;
+    if (part.material === undefined) return true;
+    return part.text.length > 0 && isTextFileMaterial(part.material);
+  }
   if (part.type !== "image") return false;
   const source = part.source;
   if (!source || typeof source !== "object") return false;
