@@ -136,6 +136,18 @@ class PairingPublicFacingError extends Error {
   override readonly name = "PairingPublicFacingError";
 }
 
+export type PairingInvitationErrorReason = "malformed" | "expired" | "unsupported";
+
+export class PairingInvitationError extends Error {
+  override readonly name = "PairingInvitationError";
+  constructor(
+    readonly reason: PairingInvitationErrorReason,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export interface PairCommandOptions {
   readonly signal?: AbortSignal;
   readonly logging?: RuntimeLogContext;
@@ -391,6 +403,16 @@ export async function renderPairingInvitation(
 /** Converts internal pairing failures into one safe, actionable public message. */
 export function pairingPublicError(error: unknown): Error {
   if (error instanceof PairingPublicFacingError) return error;
+  if (error instanceof PairingInvitationError) {
+    if (error.reason === "expired") {
+      return new Error(
+        "这份配对邀请已经失效或不能再次使用。请回到出码设备重新运行 zz pair，再扫描或复制新的邀请内容。",
+      );
+    }
+    return new Error(
+      "配对邀请内容无效或不完整。请核对复制的邀请内容是否完整，或回到出码设备重新运行 zz pair 获取新的邀请后再试。",
+    );
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (/recovery|恢复码|root activation/iu.test(message)) {
     return new Error(
@@ -2188,37 +2210,84 @@ function encodeInvitation(invitation: PairingInvitation): string {
   return Buffer.from(canonicalize(invitation), "utf8").toString("base64url");
 }
 
-function decodeInvitation(
+export function decodeInvitation(
   encoded: string,
   options: { readonly allowExpired?: boolean } = {},
 ): PairingInvitation {
+  if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > 64 * 1024) {
+    throw new PairingInvitationError("malformed", "Pairing invitation encoding is invalid");
+  }
   const bytes = Buffer.from(encoded, "base64url");
-  if (bytes.toString("base64url") !== encoded) throw new Error("Pairing invitation encoding is invalid");
-  const text = bytes.toString("utf8");
-  const value = JSON.parse(text) as unknown;
-  if (canonicalize(value) !== text || !isRecord(value) || value.v !== 1) {
-    throw new Error("Pairing invitation is invalid");
+  if (bytes.byteLength === 0 || bytes.toString("base64url") !== encoded) {
+    throw new PairingInvitationError("malformed", "Pairing invitation encoding is invalid");
   }
-  assertExactKeys(value, ["issuer", "offer", "qrSecret", "rendezvousKey", "transports", "v"]);
+  let text: string;
+  let value: unknown;
+  let canonical: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    value = JSON.parse(text) as unknown;
+    canonical = canonicalize(value);
+  } catch {
+    throw new PairingInvitationError("malformed", "Pairing invitation payload is invalid");
+  }
+  if (canonical !== text || !isRecord(value) || value.v !== 1) {
+    throw new PairingInvitationError("malformed", "Pairing invitation is invalid");
+  }
+  try {
+    assertExactKeys(value, ["issuer", "offer", "qrSecret", "rendezvousKey", "transports", "v"]);
+  } catch {
+    throw new PairingInvitationError("malformed", "Pairing invitation contains unknown fields");
+  }
   if (!Array.isArray(value.transports) || value.transports.length === 0) {
-    throw new Error("Pairing invitation has no rendezvous transport");
+    throw new PairingInvitationError("malformed", "Pairing invitation has no rendezvous transport");
   }
-  validateRendezvousKey(value.rendezvousKey);
-  const descriptor = validateMeshEndpointDescriptor({
-    v: 1,
-    deviceId: (value.issuer as DeviceIdentity).deviceId,
-    transports: value.transports,
-    revision: 1,
-    at: new Date(0).toISOString(),
-  });
+  try {
+    validateRendezvousKey(value.rendezvousKey);
+  } catch {
+    throw new PairingInvitationError("malformed", "Pairing invitation rendezvous key is invalid");
+  }
+  if (!isRecord(value.issuer) || typeof value.issuer.deviceId !== "string" || value.issuer.deviceId.length === 0) {
+    throw new PairingInvitationError("malformed", "Pairing invitation issuer is invalid");
+  }
+  let descriptor: MeshEndpointDescriptor;
+  try {
+    descriptor = validateMeshEndpointDescriptor({
+      v: 1,
+      deviceId: value.issuer.deviceId,
+      transports: value.transports,
+      revision: 1,
+      at: new Date(0).toISOString(),
+    });
+  } catch {
+    throw new PairingInvitationError("malformed", "Pairing invitation transport descriptor is invalid");
+  }
+  if (
+    !isRecord(value.offer) ||
+    !isRecord(value.offer.issuer) ||
+    typeof value.offer.issuer.deviceId !== "string" ||
+    typeof value.offer.offerId !== "string" ||
+    typeof value.offer.homeId !== "string" ||
+    typeof value.offer.expiresAt !== "string" ||
+    !isRecord(value.offer.method) ||
+    typeof value.offer.method.kind !== "string" ||
+    (value.qrSecret !== undefined && (typeof value.qrSecret !== "string" || value.qrSecret.length === 0))
+  ) {
+    throw new PairingInvitationError("malformed", "Pairing invitation offer is invalid");
+  }
+  const expiresAtMs = Date.parse(value.offer.expiresAt);
   const invitation = value as unknown as PairingInvitation;
   if (
+    !Number.isFinite(expiresAtMs) ||
     invitation.offer.issuer.deviceId !== invitation.issuer.deviceId ||
-    (!options.allowExpired && Date.parse(invitation.offer.expiresAt) <= Date.now()) ||
+    (invitation.offer.method.kind !== "qr-secret" && invitation.offer.method.kind !== "short-pake") ||
     (invitation.offer.method.kind === "qr-secret" && !invitation.qrSecret) ||
     (invitation.offer.method.kind === "short-pake" && invitation.qrSecret !== undefined)
   ) {
-    throw new Error("Pairing invitation offer is invalid");
+    throw new PairingInvitationError("malformed", "Pairing invitation offer is invalid");
+  }
+  if (!options.allowExpired && expiresAtMs <= Date.now()) {
+    throw new PairingInvitationError("expired", "Pairing invitation offer is expired");
   }
   return { ...invitation, transports: descriptor.transports };
 }
@@ -2445,9 +2514,14 @@ function assertProductionPairingOffer(offer: PairingOffer): asserts offer is Pai
 }
 
 function assertProductionPairingInvitation(invitation: PairingInvitation): void {
-  assertProductionPairingOffer(invitation.offer);
+  if (invitation.offer.method.kind !== "qr-secret") {
+    throw new PairingInvitationError(
+      "unsupported",
+      "This release only accepts audited high-entropy pairing invitations",
+    );
+  }
   if (!invitation.qrSecret) {
-    throw new Error("High-entropy pairing invitation has no secret");
+    throw new PairingInvitationError("malformed", "High-entropy pairing invitation has no secret");
   }
 }
 
