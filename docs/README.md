@@ -28,6 +28,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 项目进度与工作记录 / Project progress and work records:
 
+- [产品待办](./workbench/product-backlog.md)
 - [首个公开版本交付计划](./delivery/first-public-release.md)
 - [首次公开发布当前工作安排](./tasks/first-public-release-execution.md)
 - [终端迁移收尾方案与执行计划](./tasks/terminal-migration-delivery-plan.md)
@@ -38,6 +39,8 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 ## 架构与研究 / Architecture and research
 
+- [愿景](vision.md)
+- [产品方向](product/direction.md)
 - [架构演进方向](architecture/evolution-direction.md)
 - [架构概览 / Architecture overview](architecture/overview.md)
 - [知行架构与实现综合评估（对比 DeepSeek Harness 与 OpenClaw）](research/zhixing-architecture-and-implementation-evaluation.md)

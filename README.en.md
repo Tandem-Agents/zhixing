@@ -7,7 +7,7 @@
   <a href="#getting-started">Getting started</a> · <a href="packages/cli/README.md">User guide</a> · <a href="#data-and-permissions">Data and permissions</a> · <a href="#help-and-contributing">Help and contributing</a> ｜ <a href="README.md">中文</a>
 </p>
 
-**Zhixing** (知行) is a general-purpose personal agent that runs on your own devices and serves both your life and your work. You talk to it in the terminal or a connected message channel, and it takes real action within the scope you authorize. Your own devices hold its state, and you choose the model. Our long-term direction is companion intelligence that goes wherever you are; see the [product philosophy](docs/philosophy.md) (in Chinese).
+**Zhixing** (知行) is a general-purpose personal agent that runs on your own devices and serves both your life and your work. You talk to it in the terminal or a connected message channel, and it takes real action within the scope you authorize. Your own devices hold its state, and you choose the model. Our long-term direction is companion intelligence that goes wherever you are; see the [product direction](docs/product/direction.md) (in Chinese).
 
 The interface and command help are currently in Chinese.
 
