@@ -1,6 +1,19 @@
 import { logFailureEvidence, type LogRecordPort } from '@zhixing-ai/core/logging';
 import { failureSourceFrames } from '../logging/failure-location.js';
 
+export function isCommittedLifecyclePendingRpcData(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false;
+  const record = data as Record<string, unknown>;
+  return (
+    record.lifecycleStage === 'committed-projection-pending' &&
+    (record.mutation === 'clear' || record.mutation === 'delete') &&
+    typeof record.conversationId === 'string' &&
+    record.conversationId.length > 0 &&
+    typeof record.operationId === 'string' &&
+    record.operationId.length > 0
+  );
+}
+
 /** 终端实例存储账户的确定错误码：S 记录、回给 N，N 以它拒绝并据此呈现。 */
 export const TERMINAL_ASSET_FAILURE_CODES: readonly string[] = [
   'terminal-assets-unavailable', 'terminal-assets-result-unknown', 'terminal-assets-request-capacity', 'terminal-assets-no-reservation',

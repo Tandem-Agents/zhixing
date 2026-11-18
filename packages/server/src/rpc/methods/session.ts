@@ -69,10 +69,12 @@ import {
   CONVERSATION_USAGE_QUERY,
   CONVERSATION_INPUT_RECEIPT_QUERY,
   ConversationApplicationError,
+  ConversationCommittedLifecyclePendingError,
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
   type PerspectivesTurnResult,
 } from "@zhixing-ai/core/conversation/application";
+import { failureDiagnostic } from "@zhixing-ai/core/logging";
 import { createConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import {
   ADVANCEMENT_ACTIVE_STATE_QUERY,
@@ -3374,12 +3376,30 @@ function mapConversationClearApplicationError(
   error: unknown,
   conversationId: string,
 ): unknown {
+  if (error instanceof ConversationCommittedLifecyclePendingError) {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "清空对话请求已记录，尚未完成同步；完成前暂不接纳新消息，可稍后核对状态。",
+      {
+        lifecycleStage: error.pending.stage,
+        mutation: error.pending.mutation,
+        conversationId: error.pending.conversationId,
+        operationId: error.pending.operationId,
+        diagnostic: failureDiagnostic(error.cause ?? error),
+      },
+    );
+  }
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
     return RpcErrors.notFound(`Session not found: ${conversationId}`);
   }
   if (error.code === "busy") {
-    return new RpcAppError(RPC_ERROR_CODES.BUSY, error.message);
+    return new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      error.reason === "active-turn"
+        ? "当前对话仍有运行中的工作，请先中止或等待完成后再清空。"
+        : "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再清空。",
+    );
   }
   return RpcErrors.invalidParams(
     error.message.includes("stable operation")
@@ -3392,12 +3412,30 @@ function mapConversationDeleteApplicationError(
   error: unknown,
   conversationId: string,
 ): unknown {
+  if (error instanceof ConversationCommittedLifecyclePendingError) {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "删除对话请求已记录，尚未完成同步；可稍后核对状态。",
+      {
+        lifecycleStage: error.pending.stage,
+        mutation: error.pending.mutation,
+        conversationId: error.pending.conversationId,
+        operationId: error.pending.operationId,
+        diagnostic: failureDiagnostic(error.cause ?? error),
+      },
+    );
+  }
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
     return RpcErrors.notFound(`Session not found: ${conversationId}`);
   }
   if (error.code === "busy") {
-    return new RpcAppError(RPC_ERROR_CODES.BUSY, error.message);
+    return new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      error.reason === "active-turn"
+        ? "当前对话仍有运行中的工作，请先中止或等待完成后再删除。"
+        : "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再删除。",
+    );
   }
   return RpcErrors.invalidParams(
     error.message.includes("stable operation")

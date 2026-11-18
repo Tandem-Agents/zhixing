@@ -98,6 +98,7 @@ import {
   createConversationDirectoryProductApiContribution,
   projectConversationClear,
   projectConversationDelete,
+  runCommittedConversationLifecycleProjection,
   type ConversationClearProjectionPort,
   type ConversationCompactPort,
   type ConversationDeleteProjectionPort,
@@ -771,12 +772,20 @@ function createConversationProductApi(input: {
             return { status: "busy", reason: "pending-lifecycle" } as const;
           }
           if (write.status === "not-found") return write;
-          await input.conversations.projectDurableSession({
-            conversationId,
-            requestId: operationId,
-            mutation: "clear",
-            domainRevision: write.domainRevision,
-          });
+          await runCommittedConversationLifecycleProjection(
+            {
+              mutation: "clear",
+              conversationId,
+              operationId,
+            },
+            () =>
+              input.conversations.projectDurableSession({
+                conversationId,
+                requestId: operationId,
+                mutation: "clear",
+                domainRevision: write.domainRevision,
+              }),
+          );
           return { status: "cleared" } as const;
         }
         await projectConversationClear({
@@ -812,12 +821,20 @@ function createConversationProductApi(input: {
             return { status: "busy", reason: "pending-lifecycle" } as const;
           }
           if (write.status === "not-found") return write;
-          await input.conversations.projectDurableSession({
-            conversationId,
-            requestId: operationId,
-            mutation: "delete",
-            domainRevision: write.domainRevision,
-          });
+          await runCommittedConversationLifecycleProjection(
+            {
+              mutation: "delete",
+              conversationId,
+              operationId,
+            },
+            () =>
+              input.conversations.projectDurableSession({
+                conversationId,
+                requestId: operationId,
+                mutation: "delete",
+                domainRevision: write.domainRevision,
+              }),
+          );
           return { status: "deleted" } as const;
         }
         const projection: ConversationDeleteProjectionPort = {

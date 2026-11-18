@@ -89,7 +89,7 @@ import { TerminalCandidatesOwner, opensManagedCandidates } from './candidates.js
 import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtime/stop-selection.js';
 import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
-import { recordTerminalFailure, terminalStorageFullMessage } from './failure.js';
+import { isCommittedLifecyclePendingRpcData, recordTerminalFailure, terminalStorageFullMessage } from './failure.js';
 
 type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
@@ -400,7 +400,7 @@ class TerminalApplication {
         this.#processSession.reset();
         this.#invalidateAuxiliary(); this.#taskNotices?.resume();
         void this.#tasks?.refresh();
-        this.#showResult({ ...this.#mainView, message: '对话内容已清空。' });
+        this.#showResult({ ...this.#mainView, message: '对话历史已清空。' });
       }
       if (reaction.kind === 'deleted') {
         if (this.#localDeletions.has(payload.conversationId)) return;
@@ -843,9 +843,11 @@ class TerminalApplication {
       recordTerminalFailure(this.#logging.records, error, 'terminal-operation-failed');
       this.#mainView = { ...this.#mainView, busy: false, message: error instanceof ConfigurationEditPendingError
         ? error.message
-        // 本机终端存储真实不足：按哪一层满了如实说明，草稿仍保留
-        : terminalStorageFullMessage(error instanceof Error ? error.message : undefined)
-        ?? `操作未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`,
+        : error instanceof RpcClientError && isCommittedLifecyclePendingRpcData(error.data)
+          ? error.message
+          // 本机终端存储真实不足：按哪一层满了如实说明，草稿仍保留
+          : terminalStorageFullMessage(error instanceof Error ? error.message : undefined)
+          ?? `操作未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`,
         ...(error instanceof ConfigurationEditPendingError ? { choices: [{ id: 'config', label: '重新打开配置并核对状态' }, { id: 'exit', label: '退出终端' }] } : {}) };
       // 操作已结束：先交还准入门，再发布结果视图
       release();

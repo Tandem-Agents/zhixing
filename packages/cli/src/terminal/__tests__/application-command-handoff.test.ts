@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { terminalStorageFullMessage } from '../failure.js';
+import { RpcClientError } from '@zhixing-ai/server/client';
+import { isCommittedLifecyclePendingRpcData, terminalStorageFullMessage } from '../failure.js';
 
 // 命令的进页交接：生产的 #command、#background、#publish、#dropHandoff、#toUi、#ownsPage 与模块级 CommandHandoff 原样运行，
 // 只替换传输（可挡住发送）与命令分派（由用例给出操作）。command 请求在本命令首帧真正写出、判定无效、或操作无可见结果时返回。
@@ -27,7 +28,7 @@ findDisconnect(owner);
 if (!disconnectBody) throw Error('Missing production disconnect callback');
 const failures: unknown[] = [];
 const make = (waitMs: number) => new Function('AsyncLocalStorage', 'terminalEnvironment', 'recordTerminalFailure', 'ConfigurationEditPendingError',
-  'terminalStorageFullMessage', 'COMMAND_HANDOFF_WAIT_MS', ts.transpile(`${handoffClass.getText(source)}
+  'RpcClientError', 'isCommittedLifecyclePendingRpcData', 'terminalStorageFullMessage', 'COMMAND_HANDOFF_WAIT_MS', ts.transpile(`${handoffClass.getText(source)}
 class Fixture {
   abort = new AbortController(); generation = 0; logging = { records: undefined }; commandScope = new AsyncLocalStorage();
   uiOpen = true; uiReady = Promise.resolve(); closed = [];
@@ -37,7 +38,7 @@ class Fixture {
   disconnect() ${disconnectBody}
   ${methods}
 } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(AsyncLocalStorage, () => undefined, (_records: unknown, error: unknown) => { failures.push(error); },
-  class extends Error {}, terminalStorageFullMessage, waitMs);
+  class extends Error {}, RpcClientError, isCommittedLifecyclePendingRpcData, terminalStorageFullMessage, waitMs);
 const Fixture = make(60_000);
 
 const turns = async (count = 10) => { for (let i = 0; i < count; i++) await new Promise<void>(resolve => setImmediate(resolve)); };
@@ -213,5 +214,31 @@ describe('command handoff settles on the delivered first frame', () => {
       await expect(invalid.target.command('resolve', '', token)).rejects.toThrow('terminal-command-handoff');
       expect(invalid.sent).toHaveLength(0);
     }
+  });
+
+  it('presents committed-projection-pending RpcClientError directly without 操作未完成： prefix, while keeping prefix for incomplete or pre-commit errors', async () => {
+    const pendingClear = fixture();
+    await pendingClear.run(async () => {
+      throw new RpcClientError(-32603, '清空对话请求已记录，尚未完成同步；完成前暂不接纳新消息，可稍后核对状态。', {
+        lifecycleStage: 'committed-projection-pending',
+        mutation: 'clear',
+        conversationId: 'conv-b501',
+        operationId: 'session.clear:op-1',
+      });
+    }, { accepted: true }, '11').done;
+    await turns();
+    expect(pendingClear.sent.at(-1)?.message).toBe('清空对话请求已记录，尚未完成同步；完成前暂不接纳新消息，可稍后核对状态。');
+
+    const malformed = fixture();
+    await malformed.run(async () => {
+      throw new RpcClientError(-32603, '不完整的待同步结构', {
+        lifecycleStage: 'committed-projection-pending',
+        mutation: 'clear',
+        conversationId: '',
+        operationId: 'session.clear:op-1',
+      });
+    }, { accepted: true }, '12').done;
+    await turns();
+    expect(malformed.sent.at(-1)?.message).toBe('操作未完成：不完整的待同步结构');
   });
 });

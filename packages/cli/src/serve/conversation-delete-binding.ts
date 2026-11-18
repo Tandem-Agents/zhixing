@@ -1,6 +1,7 @@
 import { generateTurnId } from "@zhixing-ai/core";
 import {
   projectConversationDelete,
+  runCommittedConversationLifecycleProjection,
   type ConversationDeleteCommitPort,
   type ConversationDeletedFact,
   type ConversationDeleteProjectionPort,
@@ -111,12 +112,20 @@ export function createAnchorConversationDeleteCommitPort(input: Readonly<{
           return { status: "busy", reason: "pending-lifecycle" } as const;
         }
         if (write.status === "not-found") return write;
-        await input.conversations.projectDurableSession({
-          conversationId,
-          requestId: operationId,
-          mutation: "delete",
-          domainRevision: write.domainRevision,
-        });
+        await runCommittedConversationLifecycleProjection(
+          {
+            mutation: "delete",
+            conversationId,
+            operationId,
+          },
+          () =>
+            input.conversations.projectDurableSession({
+              conversationId,
+              requestId: operationId,
+              mutation: "delete",
+              domainRevision: write.domainRevision,
+            }),
+        );
         return { status: "deleted" } as const;
       }
 

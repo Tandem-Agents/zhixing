@@ -1,6 +1,7 @@
 import { generateTurnId } from "@zhixing-ai/core";
 import {
   projectConversationClear,
+  runCommittedConversationLifecycleProjection,
   type ConversationClearCommitPort,
   type ConversationClearedFact,
 } from "@zhixing-ai/core/conversation/application";
@@ -42,12 +43,20 @@ export function createAnchorConversationClearCommitPort(input: Readonly<{
           return { status: "busy", reason: "pending-lifecycle" } as const;
         }
         if (write.status === "not-found") return write;
-        await input.conversations.projectDurableSession({
-          conversationId,
-          requestId: operationId,
-          mutation: "clear",
-          domainRevision: write.domainRevision,
-        });
+        await runCommittedConversationLifecycleProjection(
+          {
+            mutation: "clear",
+            conversationId,
+            operationId,
+          },
+          () =>
+            input.conversations.projectDurableSession({
+              conversationId,
+              requestId: operationId,
+              mutation: "clear",
+              domainRevision: write.domainRevision,
+            }),
+        );
         return { status: "cleared" } as const;
       }
 

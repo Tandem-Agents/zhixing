@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { normalizeUserTurnInput } from "@zhixing-ai/core";
+import { ConversationApplicationError } from "@zhixing-ai/core/conversation/application";
 import type { SurfaceAssetCoordinator } from "@zhixing-ai/core/authority";
 import type { LogRecordPort } from "@zhixing-ai/core/logging";
 import { canonicalize } from "@zhixing-ai/core/protocol";
@@ -577,10 +578,25 @@ export class AdmissionAndLifecycle {
     try {
       await retryControlAdmission(
         async () => {
+          if (!this.#scope.isCurrent(scopeState)) {
+            throw new Error(
+              "Conversation authority scope changed before lifecycle projection completed",
+            );
+          }
           await this.#access.adopt(input.conversationId);
+          if (!this.#scope.isCurrent(scopeState)) {
+            throw new Error(
+              "Conversation authority scope changed before lifecycle projection completed",
+            );
+          }
           const journal = this.#access.journal(input.conversationId, scopeState);
           if (!verified) {
             const fact = await journal.lifecycleRequest(input.requestId);
+            if (!this.#scope.isCurrent(scopeState)) {
+              throw new Error(
+                "Conversation authority scope changed before lifecycle projection completed",
+              );
+            }
             if (
               !fact ||
               fact.conversationId !== input.conversationId ||
@@ -598,8 +614,32 @@ export class AdmissionAndLifecycle {
             journal,
             scopeState,
           );
+          if (!this.#scope.isCurrent(scopeState)) {
+            throw new Error(
+              "Conversation authority scope changed before lifecycle projection completed",
+            );
+          }
         },
         () => this.#host.prepareConversationBasis(input.conversationId, scopeState),
+        undefined,
+        async (error, abort) => {
+          if (
+            !verified ||
+            !this.#scope.isCurrent(scopeState) ||
+            !(error instanceof ConversationApplicationError) ||
+            error.code !== "busy" ||
+            error.reason !== "pending-lifecycle"
+          ) {
+            return false;
+          }
+          await this.#manager().waitForSessionIdle(input.conversationId, abort);
+          if (!this.#scope.isCurrent(scopeState)) {
+            throw new Error(
+              "Conversation authority scope changed before lifecycle projection completed",
+            );
+          }
+          return true;
+        },
       );
     } catch (error) {
       if (verified) {
@@ -624,6 +664,7 @@ export class AdmissionAndLifecycle {
     journal: ConversationRunJournal,
     scopeState: AuthorityScopeState = this.#scope.current,
   ): Promise<number> {
+    if (!this.#scope.isCurrent(scopeState)) return 0;
     const existing = this.#scope.lifecycleProjectionClaims.get(conversationId);
     if (existing) return existing;
     const projection = this.#runLifecycleProjections(
@@ -644,10 +685,13 @@ export class AdmissionAndLifecycle {
     journal: ConversationRunJournal,
     scopeState: AuthorityScopeState,
   ): Promise<number> {
+    if (!this.#scope.isCurrent(scopeState)) return 0;
     const state = await journal.authorityState();
+    if (!this.#scope.isCurrent(scopeState)) return 0;
     if (state.pendingLifecycleProjections === 0) {
       if (state.deleted) {
         await this.#recoverAuxiliary(conversationId);
+        if (!this.#scope.isCurrent(scopeState)) return 0;
         this.#scope.retireConversationInScope(
           scopeState,
           conversationId,
@@ -661,14 +705,30 @@ export class AdmissionAndLifecycle {
       throw new Error("Durable conversation lifecycle projection is not configured");
     }
     const projected = await journal.resumeLifecycleProjections(async (input) => {
+      if (!this.#scope.isCurrent(scopeState)) {
+        throw new Error(
+          "Conversation authority scope changed before lifecycle projection completed",
+        );
+      }
       if (input.mutation === "delete") {
         await this.#authority.surfaceAssets?.revokeConversation(input.conversationId);
+        if (!this.#scope.isCurrent(scopeState)) {
+          throw new Error(
+            "Conversation authority scope changed before lifecycle projection completed",
+          );
+        }
       }
       await this.#projectLifecycle!(input);
     });
+    if (!this.#scope.isCurrent(scopeState)) return projected;
     const after = await journal.authorityState();
+    if (!this.#scope.isCurrent(scopeState)) return projected;
     await this.#recoverAuxiliary(conversationId);
-    if (after.deleted && after.pendingLifecycleProjections === 0) {
+    if (
+      this.#scope.isCurrent(scopeState) &&
+      after.deleted &&
+      after.pendingLifecycleProjections === 0
+    ) {
       this.#scope.retireConversationInScope(
         scopeState,
         conversationId,

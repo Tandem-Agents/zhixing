@@ -27,6 +27,7 @@ import {
 import {
   projectConversationClear,
   projectConversationDelete,
+  runCommittedConversationLifecycleProjection,
   type ConversationClearCommitPort,
   type ConversationDeleteCommitPort,
   type ConversationAgentTurnAdmissionPort,
@@ -534,19 +535,13 @@ export class LocalConversationOwnerAssembly {
           if (!(await this.#isConversationCurrent(conversationId))) {
             return { status: "not-found" } as const;
           }
+          let write: { readonly revision: number };
           try {
-            const write = await sessionState.mutate(
+            write = await sessionState.mutate(
               conversationId,
               { kind: "window-op", op: "clear" },
               hostRequestContext("local-conversation-clear", operationId),
             );
-            await this.#protocol.projectSession({
-              conversationId,
-              requestId: operationId,
-              mutation: "clear",
-              domainRevision: write.revision,
-            });
-            return { status: "cleared" } as const;
           } catch (error) {
             if (isAuthorityErrorCode(error, "not-found")) {
               return { status: "not-found" } as const;
@@ -559,6 +554,21 @@ export class LocalConversationOwnerAssembly {
             }
             throw error;
           }
+          await runCommittedConversationLifecycleProjection(
+            {
+              mutation: "clear",
+              conversationId,
+              operationId,
+            },
+            () =>
+              this.#protocol.projectSession({
+                conversationId,
+                requestId: operationId,
+                mutation: "clear",
+                domainRevision: write.revision,
+              }),
+          );
+          return { status: "cleared" } as const;
         });
       },
       commitConversationDelete: async ({ conversationId, operationId }) => {
@@ -566,19 +576,13 @@ export class LocalConversationOwnerAssembly {
           if (!(await this.#isConversationCurrent(conversationId))) {
             return { status: "not-found" } as const;
           }
+          let write: { readonly revision: number };
           try {
-            const write = await sessionState.mutate(
+            write = await sessionState.mutate(
               conversationId,
               { kind: "conversation-delete" },
               hostRequestContext("local-conversation-delete", operationId),
             );
-            await this.#protocol.projectSession({
-              conversationId,
-              requestId: operationId,
-              mutation: "delete",
-              domainRevision: write.revision,
-            });
-            return { status: "deleted" } as const;
           } catch (error) {
             if (isAuthorityErrorCode(error, "not-found")) {
               return { status: "not-found" } as const;
@@ -591,6 +595,21 @@ export class LocalConversationOwnerAssembly {
             }
             throw error;
           }
+          await runCommittedConversationLifecycleProjection(
+            {
+              mutation: "delete",
+              conversationId,
+              operationId,
+            },
+            () =>
+              this.#protocol.projectSession({
+                conversationId,
+                requestId: operationId,
+                mutation: "delete",
+                domainRevision: write.revision,
+              }),
+          );
+          return { status: "deleted" } as const;
         });
       },
       subscribeConversationFacts: (listener) => {

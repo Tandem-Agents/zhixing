@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
 import { TERMINAL_LIMITS } from '../../../../terminal-ui/src/protocol.js';
 import { terminalCloseDeadline } from '../close-budget.js';
-import { terminalStorageFullMessage } from '../failure.js';
+import { isCommittedLifecyclePendingRpcData, terminalStorageFullMessage } from '../failure.js';
+import { RpcClientError } from '@zhixing-ai/server/client';
 
 // 生产的接收校验、回执、动作分派、后台操作、视图发布、U 就绪门与早启入口原样运行，启动尝试的开头（含“启动中”视图）也取自
 // 生产源码；只把连接、选会话、首屏这段业务链换成可控的等待。对端是真实的 TerminalChannel：门只能由经过握手与校验的请求打开。
@@ -23,6 +24,7 @@ if (headStart < 0 || headEnd < 0) throw Error('Startup head not found');
 const head = startup.slice(headStart, headEnd).replace(/#/gu, '');
 const failures: { error: unknown; code: string }[] = [];
 const Fixture = new Function('TERMINAL_LIMITS', 'terminalCloseDeadline', 'TerminalChannelRetiredError', 'recordTerminalFailure', 'ConfigurationEditPendingError',
+  'RpcClientError', 'isCommittedLifecyclePendingRpcData',
   'terminalStorageFullMessage', 'terminalEnvironment', 'AsyncLocalStorage', ts.transpile(`class Fixture {
   args = []; abort = new AbortController(); generation = 0; logging = { records: undefined }; commandScope = new AsyncLocalStorage();
   mainView = { kind: 'conversation', title: '知行', message: '', connected: false };
@@ -44,7 +46,7 @@ const Fixture = new Function('TERMINAL_LIMITS', 'terminalCloseDeadline', 'Termin
   }
   ${methods}
 } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(TERMINAL_LIMITS, terminalCloseDeadline, TerminalChannelRetiredError,
-  (_records: unknown, error: unknown, code: string) => { failures.push({ error, code }); }, class extends Error {}, terminalStorageFullMessage, () => undefined, AsyncLocalStorage);
+  (_records: unknown, error: unknown, code: string) => { failures.push({ error, code }); }, class extends Error {}, RpcClientError, isCommittedLifecyclePendingRpcData, terminalStorageFullMessage, () => undefined, AsyncLocalStorage);
 
 const INSTANCE = '00000000-0000-4000-8000-000000000071';
 const turns = async (count = 20) => { for (let i = 0; i < count; i++) await new Promise<void>(resolve => setImmediate(resolve)); };

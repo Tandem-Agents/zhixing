@@ -400,6 +400,7 @@ export class ConversationManager implements ConversationCommitProjection {
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingQueues = new Map<string, PendingTask[]>();
   private readonly activeTasks = new Map<string, PendingTask>();
+  private readonly idleWaiters = new Map<string, Set<() => void>>();
   private readonly quiescingPrefixes = new Set<string>();
   /**
    * 正在执行删除终结的 conversationId。
@@ -1300,6 +1301,9 @@ export class ConversationManager implements ConversationCommitProjection {
       } else if (this.getObserverCount(conversationId) === 0) {
         this.startGraceTimer(conversationId);
       }
+      if (!this.sessions.get(conversationId)?.busy) {
+        this.notifySessionIdle(conversationId);
+      }
       // event-driven drain:从 busy 到 idle 的下降沿,若 abortAllAndWait 在等且
       // 全部 session idle 则 resolve(关停期间 dequeueNext 不会再 setBusy(true) ——
       // pending queue 已被 abortAll 清空)。
@@ -1308,6 +1312,56 @@ export class ConversationManager implements ConversationCommitProjection {
         this.drainResolver = null;
         resolve();
       }
+    }
+  }
+
+  async waitForSessionIdle(
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    const session = this.sessions.get(conversationId);
+    if (!session || !session.busy) {
+      return;
+    }
+    return new Promise<void>((resolve, reject) => {
+      let waiters = this.idleWaiters.get(conversationId);
+      if (!waiters) {
+        waiters = new Set();
+        this.idleWaiters.set(conversationId, waiters);
+      }
+      const cleanup = () => {
+        signal?.removeEventListener("abort", onAbort);
+        const current = this.idleWaiters.get(conversationId);
+        if (current) {
+          current.delete(onIdle);
+          if (current.size === 0) {
+            this.idleWaiters.delete(conversationId);
+          }
+        }
+      };
+      const onIdle = () => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+      };
+      waiters.add(onIdle);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+      }
+    });
+  }
+
+  private notifySessionIdle(conversationId: string): void {
+    const waiters = this.idleWaiters.get(conversationId);
+    if (!waiters) return;
+    this.idleWaiters.delete(conversationId);
+    for (const wake of waiters) {
+      wake();
     }
   }
 
@@ -1411,6 +1465,7 @@ export class ConversationManager implements ConversationCommitProjection {
       );
     }
     this.sessions.delete(conversationId);
+    this.notifySessionIdle(conversationId);
     this.maybeDropEmptyObserverSet(conversationId);
   }
 
@@ -2517,6 +2572,7 @@ export class ConversationManager implements ConversationCommitProjection {
             console.error("[ConversationManager.delete] runtime.dispose failed:", err);
           }
           this.sessions.delete(conversationId);
+          this.notifySessionIdle(conversationId);
           // 终结态与维护态(clear/compact)的释放语义不同:维护态 setBusy(false)
           // 把排队 send dequeue 到新窗口继续;删除态会话已不存在,排队 send 必须
           // 取消——cancel 钩子向发起端发 complete(error),不留 sendTurn 挂死。
@@ -2572,6 +2628,13 @@ export class ConversationManager implements ConversationCommitProjection {
       }
     }
     this.sessions.clear();
+    const pendingIdleWaiters = [...this.idleWaiters.values()];
+    this.idleWaiters.clear();
+    for (const waiters of pendingIdleWaiters) {
+      for (const wake of waiters) {
+        wake();
+      }
+    }
     this.attachedBrokers.clear();
     this.observers.clear();
   }
@@ -2615,6 +2678,7 @@ export class ConversationManager implements ConversationCommitProjection {
       );
     }
     this.sessions.delete(conversationId);
+    this.notifySessionIdle(conversationId);
     this.maybeDropEmptyObserverSet(conversationId);
     this.onRelease?.(conversationId, reason);
   }
@@ -2656,6 +2720,7 @@ export class ConversationManager implements ConversationCommitProjection {
           );
         }
         this.sessions.delete(id);
+        this.notifySessionIdle(id);
         this.maybeDropEmptyObserverSet(id);
         this.onRelease?.(id, "idle");
       }

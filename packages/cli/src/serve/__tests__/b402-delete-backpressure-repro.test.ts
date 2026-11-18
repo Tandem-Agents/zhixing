@@ -5,6 +5,7 @@ import {
   parseConversationId,
 } from "@zhixing-ai/core/conversation";
 import {
+  ConversationCommittedLifecyclePendingError,
   ConversationDirectoryApplicationService,
   projectConversationDelete,
 } from "@zhixing-ai/core/conversation/application";
@@ -494,8 +495,9 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
           return revoke(id);
         });
       try {
-        await expect(
-          runWithMaintenanceUrgency(
+        let caughtCancel: unknown;
+        try {
+          await runWithMaintenanceUrgency(
             () => "foreground",
             parentAbort.signal,
             () =>
@@ -509,8 +511,14 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
                   connectionId: "conn-b402",
                 },
               }),
-          ),
-        ).rejects.toBeInstanceOf(StorageMaintenanceCancelledError);
+          );
+        } catch (err) {
+          caughtCancel = err;
+        }
+        expect(caughtCancel).toBeInstanceOf(ConversationCommittedLifecyclePendingError);
+        expect((caughtCancel as ConversationCommittedLifecyclePendingError).cause).toBeInstanceOf(
+          StorageMaintenanceCancelledError,
+        );
         expect(cancelCalls).toBe(1);
       } finally {
         revokeCancelSpy.mockRestore();
@@ -539,8 +547,9 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
           return revoke(id);
         });
       try {
-        await expect(
-          harness.application.delete({
+        let caughtGap: unknown;
+        try {
+          await harness.application.delete({
             kind: "delete",
             conversationId: gapConv.conversationId,
             operationId: "delete:b402-capacity-gap",
@@ -549,8 +558,12 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
               surfacePrincipal: "rpc:owner",
               connectionId: "conn-b402",
             },
-          }),
-        ).rejects.toBe(gapError);
+          });
+        } catch (err) {
+          caughtGap = err;
+        }
+        expect(caughtGap).toBeInstanceOf(ConversationCommittedLifecyclePendingError);
+        expect((caughtGap as ConversationCommittedLifecyclePendingError).cause).toBe(gapError);
         expect(gapCalls).toBe(1);
       } finally {
         revokeGapSpy.mockRestore();
@@ -569,8 +582,9 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
           throw permFault;
         });
       try {
-        await expect(
-          harness.application.delete({
+        let caughtPerm: unknown;
+        try {
+          await harness.application.delete({
             kind: "delete",
             conversationId: permConv.conversationId,
             operationId: "delete:b402-perm-fault",
@@ -579,8 +593,18 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
               surfacePrincipal: "rpc:owner",
               connectionId: "conn-b402",
             },
-          }),
-        ).rejects.toBe(permFault);
+          });
+        } catch (err) {
+          caughtPerm = err;
+        }
+        expect(caughtPerm).toBeInstanceOf(ConversationCommittedLifecyclePendingError);
+        expect((caughtPerm as ConversationCommittedLifecyclePendingError).cause).toBe(permFault);
+        expect((caughtPerm as ConversationCommittedLifecyclePendingError).pending).toEqual({
+          stage: "committed-projection-pending",
+          mutation: "delete",
+          conversationId: permConv.conversationId,
+          operationId: "delete:b402-perm-fault",
+        });
         expect(permCalls).toBe(1);
         expect(await harness.directory.exists(permConv.conversationId)).toBe(true);
       } finally {
@@ -637,7 +661,16 @@ describe("B4-02 minimal real-assembly delete backpressure reproduction", () => {
         projectSpy.mockRestore();
       }
 
-      expect(exhaustedError).toBeInstanceOf(StorageMaintenanceAdmissionError);
+      expect(exhaustedError).toBeInstanceOf(ConversationCommittedLifecyclePendingError);
+      expect((exhaustedError as ConversationCommittedLifecyclePendingError).cause).toBeInstanceOf(
+        StorageMaintenanceAdmissionError,
+      );
+      expect((exhaustedError as ConversationCommittedLifecyclePendingError).pending).toEqual({
+        stage: "committed-projection-pending",
+        mutation: "delete",
+        conversationId: created.conversationId,
+        operationId: "delete:b402-sustained-pressure",
+      });
       const rpcError = toJsonRpcError(exhaustedError);
       expect(rpcError.code).not.toBe(RPC_ERROR_CODES.BUSY);
       expect(rpcError.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);

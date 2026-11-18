@@ -9,6 +9,7 @@ export async function retryControlAdmission<T>(
   operation: () => Promise<T>,
   recover: () => Promise<void>,
   signal?: AbortSignal,
+  waitTransient?: (error: unknown, abort: AbortSignal) => Promise<boolean>,
 ): Promise<T> {
   const parent = currentMaintenanceAbortSignal();
   const external = signal ? AbortSignal.any([parent, signal]) : parent;
@@ -35,8 +36,23 @@ export async function retryControlAdmission<T>(
       } catch (error) {
         if (external.aborted) throw new StorageMaintenanceCancelledError();
         if (deadline.signal.aborted) throw lastPressure ?? error;
+        if (isHoldingMaintenanceExclusion()) throw error;
         const delay = maintenanceRetryDelayMs(error);
-        if (delay === undefined || isHoldingMaintenanceExclusion()) throw error;
+        if (delay === undefined) {
+          if (!waitTransient) throw error;
+          lastPressure = error;
+          timer ??= setTimeout(() => deadline.abort(), 5_000);
+          try {
+            const handled = await waitTransient(error, abort);
+            if (!handled) throw error;
+          } catch (waitError) {
+            if (external.aborted) throw new StorageMaintenanceCancelledError();
+            if (deadline.signal.aborted) throw lastPressure;
+            throw waitError;
+          }
+          recovering = true;
+          continue;
+        }
         if (await awaitAuthorityPreparation(error)) continue;
         lastPressure = error;
         timer ??= setTimeout(() => deadline.abort(), 5_000);

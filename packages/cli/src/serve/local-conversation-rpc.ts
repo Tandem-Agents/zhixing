@@ -3,10 +3,12 @@ import { createLocalConversationCommunicationBinding } from "./conversation-comm
 import { isNonEmptyUserTurnInput, userTurnInputFromText, type UserTurnInput } from "@zhixing-ai/core";
 import {
   ConversationApplicationError,
+  ConversationCommittedLifecyclePendingError,
   mergeConversationDirectoryEntries,
   type ConversationDirectoryApplication,
   type ConversationDirectoryEntry,
 } from "@zhixing-ai/core/conversation/application";
+import { failureDiagnostic } from "@zhixing-ai/core/logging";
 import { createConversationResolutionFence } from "@zhixing-ai/owner-kernel/conversation-control";
 import { createControlSessionEventEnvelope } from "@zhixing-ai/rpc/session-events";
 import { notifySessionObserver } from '@zhixing-ai/rpc/session-broadcast';
@@ -866,6 +868,21 @@ function mapLocalConversationApplicationError(
     | "usage"
     | "security",
 ): unknown {
+  if (error instanceof ConversationCommittedLifecyclePendingError) {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      error.pending.mutation === "clear"
+        ? "清空对话请求已记录，尚未完成同步；完成前暂不接纳新消息，可稍后核对状态。"
+        : "删除对话请求已记录，尚未完成同步；可稍后核对状态。",
+      {
+        lifecycleStage: error.pending.stage,
+        mutation: error.pending.mutation,
+        conversationId: error.pending.conversationId,
+        operationId: error.pending.operationId,
+        diagnostic: failureDiagnostic(error.cause ?? error),
+      },
+    );
+  }
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
     return RpcErrors.notFound(
@@ -882,7 +899,15 @@ function mapLocalConversationApplicationError(
         ? "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。"
         : operation === "send" && error.reason === "turn-queue-full"
           ? "Conversation has too many pending messages"
-          : "这个对话正在处理其他操作，请稍后重试。",
+          : operation === "clear" && error.reason === "active-turn"
+            ? "当前对话仍有运行中的工作，请先中止或等待完成后再清空。"
+            : operation === "delete" && error.reason === "active-turn"
+              ? "当前对话仍有运行中的工作，请先中止或等待完成后再删除。"
+              : operation === "clear"
+                ? "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再清空。"
+                : operation === "delete"
+                  ? "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再删除。"
+                  : "这个对话正在处理其他操作，请稍后重试。",
     );
   }
   return RpcErrors.invalidParams(

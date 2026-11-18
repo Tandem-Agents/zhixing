@@ -1139,6 +1139,61 @@ export type ConversationLifecycleFact =
   | ConversationClearedFact
   | ConversationDeletedFact;
 
+export interface CommittedConversationLifecyclePendingInfo {
+  readonly stage: "committed-projection-pending";
+  readonly mutation: "clear" | "delete";
+  readonly conversationId: string;
+  readonly operationId: string;
+}
+
+export class ConversationCommittedLifecyclePendingError extends Error {
+  readonly pending: CommittedConversationLifecyclePendingInfo;
+
+  constructor(
+    pending: CommittedConversationLifecyclePendingInfo,
+    cause: unknown,
+  ) {
+    const baseMessage =
+      cause instanceof Error && cause.message
+        ? cause.message
+        : String(cause ?? "Conversation lifecycle projection is pending");
+    super(baseMessage, { cause });
+    this.name = "ConversationCommittedLifecyclePendingError";
+    this.pending = Object.freeze({
+      stage: "committed-projection-pending",
+      mutation: pending.mutation,
+      conversationId: pending.conversationId,
+      operationId: pending.operationId,
+    });
+  }
+}
+
+export async function runCommittedConversationLifecycleProjection<T>(
+  pending: Readonly<{
+    mutation: "clear" | "delete";
+    conversationId: string;
+    operationId: string;
+  }>,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof ConversationCommittedLifecyclePendingError) {
+      throw error;
+    }
+    throw new ConversationCommittedLifecyclePendingError(
+      {
+        stage: "committed-projection-pending",
+        mutation: pending.mutation,
+        conversationId: pending.conversationId,
+        operationId: pending.operationId,
+      },
+      error,
+    );
+  }
+}
+
 export class ConversationApplicationError extends Error {
   constructor(
     readonly code: "invalid-input" | "not-found" | "busy" | "unsupported",
