@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "upstream": "tuf-js",
+  "version": "5.0.1",
+  "updaterOriginalSha256": "f5c5629525cc20c27b0ca22ff8e5dfd5ab97eb0423b347817d8a87fd6c070929",
+  "updaterPatchedSha256": "426da3211bc965a1522e69d57b34c973c9358bc1c5c44a53f2930df2d4353543",
+  "bundleSha256": "adc647bc99cb124834df0ddf2d39b53a0fa181719d31517b65585a47188bb486",
+  "noticesSha256": "23a71e8a95a9be68065bb021882cc2efde98a73f58e17bd73c3d3ec80ff43b50",
+  "externalImports": [
+    "crypto",
+    "fs",
+    "fs/promises",
+    "os",
+    "path",
+    "tty",
+    "url",
+    "util"
+  ],
+  "patchDescription": "Inject optional async options.metadataStore { read(fileName), write(metaDataName, bytesData) } into tuf-js@5.0.1 dist/updater.js and await all 4 persistMetadata calls (root/timestamp/snapshot/targets) so raw bytes persist atomically via writeBytesAtomic.",
+  "packages": [
+    {
+      "name": "@gar/promise-retry",
+      "version": "1.0.3",
+      "license": "MIT",
+      "integrity": "sha512-GmzA9ckNokPypTg10pgpeHNQe7ph+iIKKmhKu3Ob9ANkswreCx7R3cKmY781K8QK3AqVL3xVh9A42JvIAbkkSA==",
+      "licenseFile": "LICENSE"
+    },
+    {
+      "name": "@tufjs/canonical-json",
+      "version": "2.0.0",
+      "license": "MIT",
+      "integrity": "sha512-yVtV8zsdo8qFHe+/3kw81dSLyF7D576A5cCFCi4X7B39tWT7SekaEFUnvnWJHz+9qO7qJTah1JbrDjWKqFtdWA==",
+      "licenseFile": "LICENSE"
+    },
+    {
+      "name": "@tufjs/models",
+      "version": "4.1.1",
+      "license": "MIT",
+      "integrity": "sha512-EEiiP25qQPmQpR/2Jvb4++NCHGsG76FJRLRGRccYUi6bg6SdZyXabkikv/OGlyS7ChFBBEStajJ6jxKSUT+Dbw==",
+      "licenseFile": "LICENSE"
+    },
+    {
+      "name": "balanced-match",
+      "version": "4.0.4",
+      "license": "MIT",
+      "integrity": "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==",
+      "licenseFile": "LICENSE.md"
+    },
+    {
+      "name": "brace-expansion",
+      "version": "5.0.13",
+      "license": "MIT",
+      "integrity": "sha512-Vh3dmFbc4wZeox7M9I/0L9GfFd83Su4+yCck/OF9Gi/P/dAHn0RT7X4K9R7gMNMhDck3DvhR6QXsnQdjjgwNvQ==",
+      "licenseFile": "LICENSE"
+    },
+    {
+      "name": "debug",
+      "version": "4.4.3",
+      "license": "MIT",
+      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+      "licenseFile": "LICENSE"
+    },
+    {
+      "name": "minimatch",
+      "version": "10.2.6",
+      "license": "BlueOak-1.0.0",
+      "integrity": "sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==",
+      "licenseFile": "LICENSE.md"
+    },
+    {
+      "name": "ms",
+      "version": "2.1.3",
+      "license": "MIT",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+      "licenseFile": "license.md"
+    },
+    {
+      "name": "tuf-js",
+      "version": "5.0.1",
+      "license": "MIT",
+      "integrity": "sha512-ZjElOrQLu8Wv5bcpAb/tW2NbchK85DvHy2nJffRmp5zd1VJIQM1IqgbE+EehwgmqY+ayJD5WCGgbs2ZZkYthPQ==",
+      "licenseFile": "LICENSE"
+    }
+  ]
+}
