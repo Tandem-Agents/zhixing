@@ -24,6 +24,25 @@ export {
   resolveProxy,
 } from "./proxy.js";
 
+// 受控单跳传输原语（供模型适配、发现与可信目录抓取复用）
+export {
+  ALWAYS_BLOCKED_NETWORKS,
+  createControlledSingleHopTransport,
+  isLocalOrPrivateHostname,
+  isNoProxyMatch,
+  redactTargetUrl,
+  resolveSingleHopRoute,
+  validateSingleHopHeaderName,
+} from "./single-hop.js";
+export type {
+  ConnectionProxyPolicy,
+  ControlledSingleHopOptions,
+  ControlledSingleHopTransport,
+  SingleHopResponse,
+  SingleHopRoute,
+  SingleHopSecurityError,
+} from "./single-hop.js";
+
 // 类型契约
 export type {
   FetchError,

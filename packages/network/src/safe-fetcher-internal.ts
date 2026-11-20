@@ -73,23 +73,73 @@ const SSRF_MESSAGE_PREFIX = "SSRF blocked";
 export function makeSecureLookup(blockedNetworks: readonly IpRange[]) {
   return function secureLookup(
     hostname: string,
-    _options: unknown,
+    options: unknown,
     callback: LookupCallback,
   ): void {
+    const parsedOpts =
+      typeof options === "number"
+        ? { family: options, all: false }
+        : options && typeof options === "object"
+          ? {
+              family:
+                (options as { family?: number }).family === 4 ||
+                (options as { family?: number }).family === 6
+                  ? (options as { family: number }).family
+                  : 0,
+              all: (options as { all?: boolean }).all === true,
+            }
+          : { family: 0, all: false };
+
+    const validateAddress = (address: string): SsrfError | null => {
+      const cls = classifyIp(address, blockedNetworks);
+      if (!cls) return null;
+      const err = new Error(
+        `${SSRF_MESSAGE_PREFIX}: ${hostname} resolved to ${address} (in ${cls.range})`,
+      ) as SsrfError;
+      err.code = "ESSRFBLOCKED";
+      err.ssrf = { hostname, ip: address, range: cls.range };
+      return err;
+    };
+
+    if (parsedOpts.all) {
+      dnsPromises
+        .lookup(hostname, { family: parsedOpts.family, all: true })
+        .then((result) => {
+          const addresses = Array.isArray(result) ? result : [result];
+          for (const entry of addresses) {
+            const blocked = validateAddress(entry.address);
+            if (blocked) {
+              (callback as unknown as (err: NodeJS.ErrnoException | null, addresses: unknown) => void)(
+                blocked,
+                [],
+              );
+              return;
+            }
+          }
+          (callback as unknown as (err: NodeJS.ErrnoException | null, addresses: unknown) => void)(
+            null,
+            addresses,
+          );
+        })
+        .catch((err: unknown) => {
+          (callback as unknown as (err: NodeJS.ErrnoException | null, addresses: unknown) => void)(
+            err as NodeJS.ErrnoException,
+            [],
+          );
+        });
+      return;
+    }
+
     dnsPromises
-      .lookup(hostname, { family: 0 })
-      .then(({ address, family }) => {
-        const cls = classifyIp(address, blockedNetworks);
-        if (cls) {
-          const err = new Error(
-            `${SSRF_MESSAGE_PREFIX}: ${hostname} resolved to ${address} (in ${cls.range})`,
-          ) as SsrfError;
-          err.code = "ESSRFBLOCKED";
-          err.ssrf = { hostname, ip: address, range: cls.range };
-          callback(err, "", 0);
+      .lookup(hostname, { family: parsedOpts.family })
+      .then((result) => {
+        const entry = Array.isArray(result) ? result[0]! : result;
+        const blocked = validateAddress(entry.address);
+        if (blocked) {
+          callback(blocked, "", 0);
           return;
         }
-        callback(null, address, family);
+        callback(null, entry.address, entry.family);
       })
       .catch((err: unknown) => {
         callback(err as NodeJS.ErrnoException, "", 0);
