@@ -1,0 +1,265 @@
+name: Model catalog validation, TUF renewal and release
+
+# 官方模型目录 v1 通道维护与 TUF 1.0.37 周期续签工作流（设计 §4.1、§4.2）：
+# - PR / push：校验单一策展源同步、Schema、旧端兼容与 TUF 安全单测；
+# - 每 6 小时定时：仅用在线三角色密钥（CATALOG_TUF_ONLINE_KEYS_JSON，离线 root 私钥绝不上云）
+#   对 catalog-v1 分支执行到期前续签，严禁修改 targets/catalog-v1.json 或任何模型 verifiedAt；
+# - 人工审批 workflow_dispatch (action=publish)：核对 review_digest 后签发新目录并做本机 HTTP 验签冒烟再推送。
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - 'catalog/v1/**'
+      - 'packages/providers/src/catalog/**'
+      - 'scripts/catalog-maintenance.mjs'
+      - '.github/workflows/catalog-maintenance.yml'
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'catalog/v1/**'
+      - 'packages/providers/src/catalog/**'
+      - 'scripts/catalog-maintenance.mjs'
+      - '.github/workflows/catalog-maintenance.yml'
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Operation mode (validate | renew | publish)
+        required: true
+        default: validate
+        type: choice
+        options:
+          - validate
+          - renew
+          - publish
+      review_digest:
+        description: Required content-bound approvalDigest from catalog-maintenance.mjs review when action=publish
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-v1-maintenance
+  cancel-in-progress: false
+
+jobs:
+  validate-catalog:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.0.0'
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Restore or prepare isolated npm cache for locked TUF vendor verification
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: tuf-vendor-npm-${{ runner.os }}-${{ hashFiles('scripts/tuf-vendor/tuf-lock.json') }}
+      - name: Build @zhixing-ai/providers
+        run: pnpm --filter @zhixing-ai/providers... run build
+      - name: Verify locked TUF vendor reproducibility, single-source catalog sync and reader compatibility
+        run: |
+          node scripts/build-tuf-vendor.mjs --check
+          node scripts/catalog-maintenance.mjs check-sync catalog/v1/curated-catalog.json
+          node scripts/catalog-maintenance.mjs validate catalog/v1/curated-catalog.json
+      - name: Run TUF & catalog unit tests
+        run: pnpm --filter @zhixing-ai/providers exec vitest run src/__tests__/unit3-tuf-trusted-updates.test.ts src/__tests__/unit3-catalog-synthesis-discovery.test.ts
+
+  renew-tuf-metadata:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'renew')
+    needs: [validate-catalog]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.0.0'
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build @zhixing-ai/providers
+        run: pnpm --filter @zhixing-ai/providers... run build
+      - name: Check catalog-v1 branch and online signing secret readiness
+        id: readiness
+        env:
+          HAS_ONLINE_KEYS: ${{ secrets.CATALOG_TUF_ONLINE_KEYS_JSON != '' }}
+        run: |
+          if [ "$HAS_ONLINE_KEYS" != "true" ]; then
+            echo "CATALOG_TUF_ONLINE_KEYS_JSON secret is not provisioned yet. See docs/modules/providers/catalog-maintenance-runbook.md."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git ls-remote --exit-code --heads origin catalog-v1 >/dev/null 2>&1; then
+            echo "origin/catalog-v1 branch has not been initialized by offline root ceremony yet. See docs/modules/providers/catalog-maintenance-runbook.md."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Checkout catalog-v1 static repository branch
+        if: steps.readiness.outputs.ready == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: catalog-v1
+          path: catalog-repo
+      - name: Renew TUF online metadata if due (targets/catalog-v1.json bytes strictly unchanged)
+        if: steps.readiness.outputs.ready == 'true'
+        env:
+          CATALOG_TUF_ONLINE_KEYS_JSON: ${{ secrets.CATALOG_TUF_ONLINE_KEYS_JSON }}
+        run: |
+          BEFORE_HASH=$(sha256sum catalog-repo/targets/catalog-v1.json | awk '{print $1}')
+          node scripts/catalog-maintenance.mjs renew-local catalog-repo --keys-env CATALOG_TUF_ONLINE_KEYS_JSON --if-due
+          AFTER_HASH=$(sha256sum catalog-repo/targets/catalog-v1.json | awk '{print $1}')
+          if [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
+            echo "ERROR: target catalog bytes changed during metadata renewal" >&2
+            exit 1
+          fi
+      - name: Commit and push renewed metadata to catalog-v1
+        if: steps.readiness.outputs.ready == 'true'
+        working-directory: catalog-repo
+        run: |
+          if git diff --quiet metadata/timestamp.json metadata/snapshot.json metadata/targets.json; then
+            echo "Metadata not due for renewal; nothing to commit."
+            exit 0
+          fi
+          git config user.name "zhixing-catalog-bot"
+          git config user.email "catalog-bot@users.noreply.github.com"
+          git add metadata/timestamp.json metadata/snapshot.json metadata/targets.json
+          git commit -m "chore(catalog-v1): periodic TUF online metadata renewal"
+          git push origin HEAD:catalog-v1
+
+  publish-approved-catalog:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'publish'
+    needs: [validate-catalog]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.0.0'
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build @zhixing-ai/providers
+        run: pnpm --filter @zhixing-ai/providers... run build
+      - name: Checkout catalog-v1 static repository branch
+        uses: actions/checkout@v4
+        with:
+          ref: catalog-v1
+          path: catalog-repo
+      - name: Verify content-bound human-approved review digest and sign catalog update with online keys only
+        env:
+          CATALOG_TUF_ONLINE_KEYS_JSON: ${{ secrets.CATALOG_TUF_ONLINE_KEYS_JSON }}
+          REVIEW_DIGEST: ${{ inputs.review_digest }}
+        run: |
+          if [ -z "$REVIEW_DIGEST" ]; then
+            echo "ERROR: review_digest is required for human-approved catalog publish" >&2
+            exit 1
+          fi
+          # 统一内容绑定合同：publish-local 自行以实际基线（catalog-repo/targets/catalog-v1.json）与
+          # 实际候选（catalog/v1/curated-catalog.json）重算 {baseCanonicalSha256, candidateCanonicalSha256, diffMarkdownSha256}
+          # 并核对 approvalDigest === REVIEW_DIGEST，任何基线漂移或单字段篡改立即拒绝签发。
+          node scripts/catalog-maintenance.mjs publish-local catalog/v1/curated-catalog.json catalog-repo \
+            --keys-env CATALOG_TUF_ONLINE_KEYS_JSON \
+            --approved-review "$REVIEW_DIGEST"
+      - name: Verify signed catalog-repo via real local HTTP ModelCatalogManager smoke
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs/promises';
+          import http from 'node:http';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { ModelCatalogManager } from './packages/providers/dist/index.js';
+
+          const repoDir = path.resolve('catalog-repo');
+          const expectedRevision = JSON.parse(
+            await fs.readFile(path.resolve('catalog/v1/curated-catalog.json'), 'utf8'),
+          ).catalogRevision;
+          const rootBytes = await fs.readFile(path.join(repoDir, 'metadata/1.root.json'));
+          const server = http.createServer(async (req, res) => {
+            const rel = (req.url ?? '/').split('?')[0].replace(/^\/+/u, '');
+            try {
+              const bytes = await fs.readFile(path.join(repoDir, rel));
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(bytes);
+            } catch {
+              res.writeHead(404);
+              res.end('Not Found');
+            }
+          });
+          await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+          const origin = `http://127.0.0.1:${server.address().port}`;
+          const tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'zhixing-ci-catalog-'));
+          try {
+            const mgr = new ModelCatalogManager({
+              homeDir: tmpHome,
+              repository: {
+                metadataBaseUrl: `${origin}/metadata`,
+                targetsBaseUrl: `${origin}/targets`,
+                targetPath: 'catalog-v1.json',
+                bootstrapRootBytes: rootBytes,
+                network: { proxy: 'direct', allowPrivateOrigin: true },
+              },
+            });
+            await mgr.initialize();
+            const res = await mgr.refresh({ force: true, timeoutMs: 5000 });
+            const mgrStatus = mgr.status();
+            const okStatus = res.status === 'updated' || res.status === 'up-to-date';
+            const okSource = mgrStatus.source === 'trusted-remote';
+            const okRevision =
+              typeof expectedRevision === 'string' &&
+              expectedRevision.length > 0 &&
+              res.activeRevision === expectedRevision &&
+              mgrStatus.activeRevision === expectedRevision;
+            const okRoot = typeof res.rootVersion === 'number' && res.rootVersion >= 1;
+            if (!okStatus || !okSource || !okRevision || !okRoot) {
+              throw new Error(
+                `Catalog verification failed: ${JSON.stringify({
+                  status: res.status,
+                  source: mgrStatus.source,
+                  activeRevision: res.activeRevision,
+                  statusRevision: mgrStatus.activeRevision,
+                  expectedRevision,
+                  rootVersion: res.rootVersion,
+                  error: res.error,
+                })}`,
+              );
+            }
+            console.log(
+              JSON.stringify({
+                verified: true,
+                status: res.status,
+                source: mgrStatus.source,
+                revision: res.activeRevision,
+                rootVersion: res.rootVersion,
+              }),
+            );
+          } finally {
+            await new Promise((resolve) => server.close(() => resolve()));
+            await fs.rm(tmpHome, { recursive: true, force: true });
+          }
+          JS
+      - name: Commit and push published catalog-v1 release
+        working-directory: catalog-repo
+        run: |
+          git config user.name "zhixing-catalog-bot"
+          git config user.email "catalog-bot@users.noreply.github.com"
+          git add targets/catalog-v1.json metadata/targets.json metadata/snapshot.json metadata/timestamp.json
+          git commit -m "chore(catalog-v1): publish human-reviewed curated catalog"
+          git push origin HEAD:catalog-v1

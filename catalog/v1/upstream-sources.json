@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "description": "Declarative official upstream catalog collection manifest (zero secrets; read-only tokens supplied via optional env vars at collection time).",
+  "sources": [
+    {
+      "presetId": "openrouter",
+      "collectionMode": "public-api",
+      "adapter": "openai-compatible",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "auth": { "mode": "none" },
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://openrouter.ai/api/v1/models"
+    },
+    {
+      "presetId": "deepseek",
+      "collectionMode": "authenticated-api",
+      "adapter": "openai-compatible",
+      "endpoint": "https://api.deepseek.com",
+      "auth": { "mode": "api-key", "secretRef": "collector-deepseek" },
+      "authEnvVar": "ZHIXING_CATALOG_DEEPSEEK_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://api-docs.deepseek.com/api/list-models"
+    },
+    {
+      "presetId": "qwen",
+      "collectionMode": "authenticated-api",
+      "adapter": "openai-compatible",
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "auth": { "mode": "api-key", "secretRef": "collector-qwen" },
+      "authEnvVar": "ZHIXING_CATALOG_QWEN_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://help.aliyun.com/zh/model-studio/developer-reference/list-models"
+    },
+    {
+      "presetId": "kimi",
+      "collectionMode": "authenticated-api",
+      "adapter": "openai-compatible",
+      "endpoint": "https://api.moonshot.cn/v1",
+      "auth": { "mode": "api-key", "secretRef": "collector-kimi" },
+      "authEnvVar": "ZHIXING_CATALOG_KIMI_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://platform.kimi.ai/docs/api/list-models"
+    },
+    {
+      "presetId": "openai",
+      "collectionMode": "authenticated-api",
+      "adapter": "openai-responses",
+      "endpoint": "https://api.openai.com/v1",
+      "auth": { "mode": "api-key", "secretRef": "collector-openai" },
+      "authEnvVar": "ZHIXING_CATALOG_OPENAI_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://platform.openai.com/docs/api-reference/models/list"
+    },
+    {
+      "presetId": "anthropic",
+      "collectionMode": "authenticated-api",
+      "adapter": "anthropic-messages",
+      "endpoint": "https://api.anthropic.com",
+      "auth": { "mode": "api-key", "secretRef": "collector-anthropic" },
+      "authEnvVar": "ZHIXING_CATALOG_ANTHROPIC_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://docs.anthropic.com/en/api/models-list"
+    },
+    {
+      "presetId": "siliconflow",
+      "collectionMode": "authenticated-api",
+      "adapter": "openai-compatible",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "auth": { "mode": "api-key", "secretRef": "collector-siliconflow" },
+      "authEnvVar": "ZHIXING_CATALOG_SILICONFLOW_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://docs.siliconflow.cn/api-reference/models/get-model-list"
+    },
+    {
+      "presetId": "google",
+      "collectionMode": "authenticated-api",
+      "adapter": "google-interactions",
+      "endpoint": "https://generativelanguage.googleapis.com",
+      "auth": { "mode": "api-key", "secretRef": "collector-google" },
+      "authEnvVar": "ZHIXING_CATALOG_GOOGLE_API_KEY",
+      "network": { "proxy": "inherit" },
+      "evidenceSource": "https://ai.google.dev/api/models#method:-models.list"
+    },
+    {
+      "presetId": "glm",
+      "collectionMode": "manual-only",
+      "adapter": "openai-compatible",
+      "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+      "auth": { "mode": "api-key", "secretRef": "collector-glm" },
+      "evidenceSource": "https://docs.bigmodel.cn/"
+    },
+    {
+      "presetId": "minimax",
+      "collectionMode": "manual-only",
+      "adapter": "openai-compatible",
+      "endpoint": "https://api.minimax.chat/v1",
+      "auth": { "mode": "api-key", "secretRef": "collector-minimax" },
+      "evidenceSource": "https://platform.minimaxi.com/document/"
+    },
+    {
+      "presetId": "ollama",
+      "collectionMode": "local-only",
+      "adapter": "openai-compatible",
+      "endpoint": "http://127.0.0.1:11434",
+      "auth": { "mode": "none" },
+      "evidenceSource": "https://docs.ollama.com/api/tags"
+    }
+  ]
+}
