@@ -1,0 +1,930 @@
+{
+  "schemaVersion": 1,
+  "catalogRevision": "2026.11.20-builtin-r1",
+  "publishedAt": "2026-11-20T00:00:00Z",
+  "minCapabilities": [
+    "adapter:openai-compatible",
+    "adapter:anthropic-messages"
+  ],
+  "presets": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://api.deepseek.com",
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "supportsThinking": true,
+        "usageDialect": "deepseek",
+        "thinkingDialect": "deepseek"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "openai-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://api-docs.deepseek.com/api/list-models/"
+      },
+      "ui": {
+        "label": "DeepSeek 官方",
+        "description": "OpenAI 兼容协议 · deepseek 方言 · 官方直连",
+        "apiKeyHint": "用于调用 DeepSeek 官方 API。",
+        "apiKeyExample": "sk-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://platform.deepseek.com/api_keys",
+        "modelListDocUrl": "https://api-docs.deepseek.com/api/list-models/",
+        "modelExample": "deepseek-v4-pro"
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "通义千问",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "alternateBaseUrls": [
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+      ],
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "supportsThinking": true,
+        "usageDialect": "openai-standard",
+        "thinkingDialect": "qwen"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "dashscope-native",
+        "urlBase": "origin",
+        "path": "/api/v1/models",
+        "verifiedOrigins": [
+          "https://dashscope.aliyuncs.com",
+          "https://dashscope-intl.aliyuncs.com",
+          "https://dashscope-us.aliyuncs.com"
+        ],
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://help.aliyun.com/zh/model-studio/list-models"
+      },
+      "ui": {
+        "label": "通义千问（百炼）",
+        "description": "OpenAI 兼容协议 · qwen 思考方言 · 阿里云百炼",
+        "apiKeyHint": "用于调用阿里云百炼（DashScope）API；请与对应地域端点配套。",
+        "apiKeyExample": "sk-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://bailian.console.aliyun.com/",
+        "modelListDocUrl": "https://help.aliyun.com/zh/model-studio/list-models",
+        "modelExample": "qwen-max"
+      }
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "alternateBaseUrls": [
+        "https://api.moonshot.ai/v1"
+      ],
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "supportsThinking": true,
+        "usageDialect": "openai-standard",
+        "thinkingDialect": "kimi"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "openai-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://platform.kimi.ai/docs/api/list-models"
+      },
+      "ui": {
+        "label": "Kimi（Moonshot）",
+        "description": "OpenAI 兼容协议 · kimi 思考方言",
+        "apiKeyHint": "用于调用 Moonshot Kimi API（国内 api.moonshot.cn / 国际 api.moonshot.ai）。",
+        "apiKeyExample": "sk-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://platform.moonshot.cn/console/api-keys",
+        "modelListDocUrl": "https://platform.kimi.ai/docs/api/list-models",
+        "modelExample": "kimi-k2-thinking"
+      }
+    },
+    {
+      "id": "glm",
+      "name": "智谱 GLM",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "alternateBaseUrls": [
+        "https://api.z.ai/api/paas/v4"
+      ],
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "supportsThinking": true,
+        "usageDialect": "openai-standard",
+        "thinkingDialect": "glm"
+      },
+      "discovery": {
+        "mode": "optional-compat",
+        "kind": "openai-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": false
+      },
+      "ui": {
+        "label": "智谱 GLM",
+        "description": "OpenAI 兼容协议 · glm 思考方言",
+        "apiKeyHint": "用于调用智谱开放平台 API（国内 open.bigmodel.cn / 国际 api.z.ai）。",
+        "apiKeyExample": "xxxxxxxxxxxxxxxx.xxxxxxxx",
+        "docUrl": "https://open.bigmodel.cn/usercenter/apikeys",
+        "modelListDocUrl": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+        "modelExample": "glm-4.7"
+      }
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://api.minimax.chat/v1",
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true
+      },
+      "discovery": {
+        "mode": "optional-compat",
+        "kind": "openai-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": false,
+        "docUrl": "https://platform.minimax.io/docs/api-reference/text-openai-api"
+      },
+      "ui": {
+        "label": "MiniMax",
+        "description": "OpenAI 兼容协议 · 保守方言",
+        "apiKeyHint": "用于调用 MiniMax 开放平台对话 API。",
+        "apiKeyExample": "eyJhbGciOi...",
+        "docUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+        "modelListDocUrl": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+        "modelExample": "MiniMax-M2.5"
+      }
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://api.openai.com/v1",
+      "protocol": "openai-responses",
+      "allowedProtocols": [
+        "openai-responses",
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "maxTokensField": "max_completion_tokens",
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "supportsThinking": true,
+        "usageDialect": "openai-standard",
+        "thinkingDialect": "openai-responses"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "openai-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://platform.openai.com/docs/api-reference/models/list"
+      },
+      "ui": {
+        "label": "OpenAI",
+        "description": "OpenAI Responses 协议 · 官方直连",
+        "apiKeyHint": "用于调用 OpenAI Responses / Chat API。",
+        "apiKeyExample": "sk-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://platform.openai.com/api-keys",
+        "modelListDocUrl": "https://developers.openai.com/api/docs/models",
+        "modelExample": "gpt-6.2-astra"
+      },
+      "requiredCapabilities": [
+        "adapter:openai-responses"
+      ]
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://api.anthropic.com",
+      "protocol": "anthropic-messages",
+      "allowedProtocols": [
+        "anthropic-messages"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsThinking": true,
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "thinkingDialect": "anthropic"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "anthropic-models",
+        "urlBase": "origin",
+        "path": "/v1/models",
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://platform.claude.com/docs/en/api/models/list"
+      },
+      "ui": {
+        "label": "Anthropic",
+        "description": "Anthropic Messages 协议 · 官方直连",
+        "apiKeyHint": "用于调用 Anthropic Claude Messages API。",
+        "apiKeyExample": "sk-ant-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://console.anthropic.com/settings/keys",
+        "modelListDocUrl": "https://platform.claude.com/docs/en/about-claude/models/overview",
+        "modelExample": "claude-opus-4-7"
+      }
+    },
+    {
+      "id": "siliconflow",
+      "name": "硅基流动",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://api.siliconflow.cn/v1",
+      "alternateBaseUrls": [
+        "https://api.siliconflow.com/v1"
+      ],
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "siliconflow-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": false,
+        "docUrl": "https://docs.siliconflow.cn"
+      },
+      "ui": {
+        "label": "硅基流动",
+        "description": "OpenAI 兼容协议 · 多模型托管 · 国内可用",
+        "apiKeyHint": "用于调用硅基流动对话 API。",
+        "apiKeyExample": "sk-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://cloud.siliconflow.cn/account/ak",
+        "modelListDocUrl": "https://cloud.siliconflow.cn/models",
+        "modelExample": "deepseek-ai/DeepSeek-V4-Flash"
+      }
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "usageDialect": "auto",
+        "thinkingDialect": "none"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "openrouter-models",
+        "urlBase": "baseUrl",
+        "path": "/models",
+        "authoritativeNativeFacts": false,
+        "docUrl": "https://openrouter.ai/docs"
+      },
+      "ui": {
+        "label": "OpenRouter",
+        "description": "OpenAI 兼容协议 · 多厂商聚合（保守方言）",
+        "apiKeyHint": "用于调用 OpenRouter 聚合 API。",
+        "apiKeyExample": "sk-or-v1-xxxxxxxxxxxxxxxx",
+        "docUrl": "https://openrouter.ai/settings/keys",
+        "modelListDocUrl": "https://openrouter.ai/models",
+        "modelExample": "openai/gpt-6.2-astra"
+      }
+    },
+    {
+      "id": "google",
+      "name": "Google Gemini",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "https://generativelanguage.googleapis.com",
+      "protocol": "google-interactions",
+      "allowedProtocols": [
+        "google-interactions"
+      ],
+      "defaultAuthMode": "api-key",
+      "defaultNetwork": {
+        "proxy": "inherit"
+      },
+      "quirks": {
+        "supportsThinking": true,
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "thinkingDialect": "google-interactions"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "google-models",
+        "urlBase": "origin",
+        "path": "/v1beta/models",
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://ai.google.dev/api/models"
+      },
+      "ui": {
+        "label": "Google Gemini",
+        "description": "Google Interactions 协议 · 官方直连",
+        "apiKeyHint": "用于调用 Google Gemini Interactions API。",
+        "apiKeyExample": "AIzaSyxxxxxxxxxxxxxxxx",
+        "docUrl": "https://aistudio.google.com/apikey",
+        "modelListDocUrl": "https://ai.google.dev/gemini-api/docs/models",
+        "modelExample": "gemini-3.5-pro"
+      },
+      "requiredCapabilities": [
+        "adapter:google-interactions"
+      ]
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama（本机）",
+      "presetRevision": "2026.11.20-r1",
+      "baseUrl": "http://127.0.0.1:11434",
+      "protocol": "openai-compatible",
+      "allowedProtocols": [
+        "openai-compatible"
+      ],
+      "defaultAuthMode": "none",
+      "defaultNetwork": {
+        "proxy": "direct",
+        "allowPrivateOrigin": true
+      },
+      "quirks": {
+        "supportsTools": true,
+        "supportsStreamUsage": true,
+        "usageDialect": "openai-standard",
+        "thinkingDialect": "none"
+      },
+      "discovery": {
+        "mode": "native",
+        "kind": "ollama-tags",
+        "urlBase": "origin",
+        "path": "/api/tags",
+        "authoritativeNativeFacts": true,
+        "docUrl": "https://docs.ollama.com/api/tags"
+      },
+      "ui": {
+        "label": "Ollama（本机免密）",
+        "description": "本机 OpenAI 兼容推理 · 默认免密直连 · 自动探测已拉取模型",
+        "apiKeyHint": "本机 Ollama 默认免密，无需 API Key；如经鉴权网关暴露可在连接页切换认证方式。",
+        "apiKeyExample": "",
+        "docUrl": "https://docs.ollama.com/api/openai-compatibility",
+        "modelListDocUrl": "https://docs.ollama.com/api/tags",
+        "modelExample": "qwen3:8b"
+      }
+    }
+  ],
+  "models": [
+    {
+      "presetId": "deepseek",
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 384000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "high",
+          "max"
+        ],
+        "default": "high"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "pricing": {
+        "currency": "CNY",
+        "inputPerMillion": 3,
+        "outputPerMillion": 6
+      },
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "DeepSeek official API docs & pricing"
+    },
+    {
+      "presetId": "deepseek",
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 384000,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "supportsThinking": false,
+      "paramSemantics": [
+        "output.maxTokensPreference"
+      ],
+      "pricing": {
+        "currency": "CNY",
+        "inputPerMillion": 1,
+        "outputPerMillion": 2
+      },
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "DeepSeek official API docs & pricing"
+    },
+    {
+      "presetId": "qwen",
+      "id": "qwen-max",
+      "name": "Qwen Max",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 256000,
+      "maxOutputTokens": 32768,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "toggle"
+      },
+      "paramSemantics": [
+        "thinking.toggle",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Alibaba Cloud Model Studio docs"
+    },
+    {
+      "presetId": "qwen",
+      "id": "qwen-plus",
+      "name": "Qwen Plus",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 32768,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "budget",
+        "range": [
+          1024,
+          38912
+        ]
+      },
+      "paramSemantics": [
+        "thinking.budget",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Alibaba Cloud Model Studio docs"
+    },
+    {
+      "presetId": "kimi",
+      "id": "kimi-k2-thinking",
+      "name": "Kimi K2 Thinking",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 256000,
+      "maxOutputTokens": 32768,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "toggle"
+      },
+      "paramSemantics": [
+        "thinking.toggle",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Moonshot Kimi API docs"
+    },
+    {
+      "presetId": "glm",
+      "id": "glm-4.7",
+      "name": "GLM-4.7",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 200000,
+      "maxOutputTokens": 16384,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "toggle"
+      },
+      "paramSemantics": [
+        "thinking.toggle",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Zhipu Open Platform docs"
+    },
+    {
+      "presetId": "minimax",
+      "id": "MiniMax-M2.5",
+      "name": "MiniMax M2.5",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 32768,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "paramSemantics": [
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "MiniMax OpenAI-compatible API docs"
+    },
+    {
+      "presetId": "openai",
+      "id": "gpt-6.2-astra",
+      "name": "GPT-6.2 Astra",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 400000,
+      "maxOutputTokens": 128000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default": "medium"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "OpenAI latest model & Responses guide"
+    },
+    {
+      "presetId": "openai",
+      "id": "gpt-6.2-sol",
+      "name": "GPT-6.2 Sol",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 400000,
+      "maxOutputTokens": 128000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": "medium"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "OpenAI latest model & Responses guide"
+    },
+    {
+      "presetId": "anthropic",
+      "id": "claude-opus-4-7",
+      "name": "Claude Opus 4.7",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "default": "high"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Anthropic Claude 4.7 extended thinking docs"
+    },
+    {
+      "presetId": "anthropic",
+      "id": "claude-sonnet-4-7",
+      "name": "Claude Sonnet 4.7",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": "medium"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Anthropic Claude 4.7 extended thinking docs"
+    },
+    {
+      "presetId": "anthropic",
+      "id": "claude-sonnet-4-5-20250929",
+      "name": "Claude Sonnet 4.5",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 200000,
+      "maxOutputTokens": 16384,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "budget",
+        "range": [
+          1024,
+          65536
+        ]
+      },
+      "paramSemantics": [
+        "thinking.budget",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Anthropic Claude 4.5 docs"
+    },
+    {
+      "presetId": "siliconflow",
+      "id": "deepseek-ai/DeepSeek-V4-Flash",
+      "name": "DeepSeek V4 Flash",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 384000,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "paramSemantics": [
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "SiliconFlow hosted model catalog"
+    },
+    {
+      "presetId": "siliconflow",
+      "id": "Pro/MiniMaxAI/MiniMax-M2.5",
+      "name": "MiniMax M2.5 Pro",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 384000,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "paramSemantics": [
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "SiliconFlow hosted model catalog"
+    },
+    {
+      "presetId": "openrouter",
+      "id": "openai/gpt-6.2-astra",
+      "name": "GPT-6.2 Astra (via OpenRouter)",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 400000,
+      "maxOutputTokens": 128000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "paramSemantics": [
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "OpenRouter public model directory"
+    },
+    {
+      "presetId": "openrouter",
+      "id": "anthropic/claude-sonnet-4-7",
+      "name": "Claude Sonnet 4.7 (via OpenRouter)",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "paramSemantics": [
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "OpenRouter public model directory"
+    },
+    {
+      "presetId": "google",
+      "id": "gemini-3.5-pro",
+      "name": "Gemini 3.5 Pro",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 65536,
+      "recommendedMaxOutputTokens": 16384,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": "medium"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Google Gemini Interactions GA docs"
+    },
+    {
+      "presetId": "google",
+      "id": "gemini-3.5-flash",
+      "name": "Gemini 3.5 Flash",
+      "purpose": "chat",
+      "lifecycle": "active",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 65536,
+      "recommendedMaxOutputTokens": 8192,
+      "supportsTools": true,
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingControl": {
+        "type": "effort",
+        "efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": "low"
+      },
+      "paramSemantics": [
+        "thinking.effort",
+        "output.maxTokensPreference"
+      ],
+      "verifiedAt": "2026-11-20T00:00:00Z",
+      "evidenceSource": "Google Gemini Interactions GA docs"
+    }
+  ],
+  "recommendations": [
+    {
+      "role": "main",
+      "presetId": "deepseek",
+      "modelId": "deepseek-v4-pro",
+      "rationale": "综合推理、代码与稳定工具调用表现均衡，且支持原生思考档位控制。",
+      "evidenceSource": "Zhixing curated benchmark & tool-calling verification",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    },
+    {
+      "role": "light",
+      "presetId": "deepseek",
+      "modelId": "deepseek-v4-flash",
+      "rationale": "适合压缩摘要与轻辅助任务，单 Key 复用且成本约为 Pro 的 1/3。",
+      "evidenceSource": "Zhixing curated summarization & pricing review",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    },
+    {
+      "role": "power",
+      "presetId": "openai",
+      "modelId": "gpt-6.2-astra",
+      "rationale": "适合复杂工作场景与深度多步工具规划，原生支持 Responses 无状态加密推理与视觉输入。",
+      "evidenceSource": "OpenAI Responses flagship evaluation",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    }
+  ],
+  "attentionThresholds": {
+    "deepseek-v4-pro": {
+      "modelKey": "deepseek-v4-pro",
+      "optimalMaxTokens": 128000,
+      "riskMaxTokens": 256000,
+      "source": "Official MRCR 8-needle retrieval curve (<=256K >0.82 accuracy)",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    },
+    "deepseek-v4-flash": {
+      "modelKey": "deepseek-v4-flash",
+      "optimalMaxTokens": 32000,
+      "riskMaxTokens": 64000,
+      "source": "NoLiMa 32K 50% decay conservative baseline",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    },
+    "gpt-6.2-astra": {
+      "modelKey": "gpt-6.2-astra",
+      "optimalMaxTokens": 128000,
+      "riskMaxTokens": 256000,
+      "source": "Curated long-context attention threshold baseline",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    },
+    "claude-opus-4-7": {
+      "modelKey": "claude-opus-4-7",
+      "optimalMaxTokens": 100000,
+      "riskMaxTokens": 160000,
+      "source": "Curated 200K window attention threshold baseline",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    },
+    "gemini-3.5-pro": {
+      "modelKey": "gemini-3.5-pro",
+      "optimalMaxTokens": 128000,
+      "riskMaxTokens": 256000,
+      "source": "Curated 1M window attention threshold baseline",
+      "verifiedAt": "2026-11-20T00:00:00Z"
+    }
+  }
+}

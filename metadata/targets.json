@@ -1,0 +1,26 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.31",
+    "version": 1,
+    "expires": "2026-12-20T10:17:21Z",
+    "targets": {
+      "catalog-v1.json": {
+        "length": 28359,
+        "hashes": {
+          "sha256": "00d31e25235ba2dcafdf3e7a9b6c3ab86487b5395ac8cb5241f21308274da977"
+        },
+        "custom": {
+          "catalogRevision": "2026.11.20-builtin-r1",
+          "schemaVersion": 1
+        }
+      }
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "eae263d0e7f0cc3c339a4e35be542581fc6551aef23f670e8c975008c5ef5bbc",
+      "sig": "b714de74e2966df679d92c225bcbcb29bb63d212ce352d5396252d95fb30d63dfd8e2aabb5ecf2298020a3b19c2da027c2de8a2bcb972f03f2250a257e66f80a"
+    }
+  ]
+}
