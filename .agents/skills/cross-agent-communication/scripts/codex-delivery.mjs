@@ -29,8 +29,95 @@ function queueIdle(exe, threadId, message) {
   });
 }
 
-/** Append to the existing desktop owner's active turn. Queue only after an explicit idle rejection. */
-export async function deliverCodex({ threadId, message, cwd, queueExe, deliveryId,
+/** Use the current desktop's native follow-up tool. Explicit pipePath retains the legacy protocol. */
+export async function deliverCodex(options = {}) {
+  if (!options.threadId || !options.message || !options.cwd) return { phase: 'failed', code: 'missing-delivery-input' };
+  if (options.pipePath) return deliverLegacyCodex(options);
+  let pipePath = options.appToolsPipePath;
+  if (!pipePath && process.platform === 'win32') {
+    let names;
+    try { names = fs.readdirSync('\\\\.\\pipe\\').filter(name => /^codex-app-tools-[a-f0-9-]+$/i.test(name)); }
+    catch (error) { return { phase: 'failed', code: error.code || 'desktop-pipe-discovery-failed' }; }
+    // Never choose a different desktop instance by recency or by an arbitrary first match.
+    if (names.length > 1) return { phase: 'failed', code: 'multiple-app-tools-instances' };
+    if (names.length === 1) pipePath = '\\\\.\\pipe\\' + names[0];
+  }
+  return pipePath ? deliverAppToolsCodex({ ...options, pipePath }) : deliverLegacyCodex(options);
+}
+
+/** Protocol comes from the installed codex-app-tools MCP, without extracting host credentials. */
+export async function deliverAppToolsCodex({ threadId, message, cwd, deliveryId,
+  pipePath, timeoutMs = 10000 } = {}) {
+  const id = deliveryId || createHash('sha256').update(`${threadId}\0${message}`).digest('hex');
+  const socket = net.createConnection(pipePath);
+  let buffer = Buffer.alloc(0), pending, sequence = 0, sendWritten = false;
+  const fail = error => pending?.reject(error);
+  socket.on('error', fail);
+  socket.on('close', () => fail(new Error('app-tools-connection-closed')));
+  socket.on('data', chunk => {
+    buffer = Buffer.concat([buffer, chunk]);
+    try {
+      while (buffer.length >= 4) {
+        const size = buffer.readUInt32LE();
+        if (!size || size > 8388608) throw new Error('invalid-app-tools-frame');
+        if (buffer.length < size + 4) break;
+        const reply = JSON.parse(buffer.subarray(4, size + 4));
+        buffer = buffer.subarray(size + 4);
+        if (reply.jsonrpc !== '2.0') throw new Error('invalid-app-tools-response');
+        if (reply.id === pending?.id) pending.resolve(reply);
+      }
+    } catch (error) { fail(error); socket.destroy(); }
+  });
+  const request = (method, params, isSend = false) => new Promise((resolve, reject) => {
+    const requestId = ++sequence;
+    const finish = (fn, value) => { clearTimeout(timer); pending = undefined; fn(value); };
+    const timer = setTimeout(() => finish(reject, new Error('app-tools-request-timeout')), timeoutMs);
+    pending = { id: requestId, resolve: r => finish(resolve, r), reject: e => finish(reject, e) };
+    if (isSend) sendWritten = true;
+    socket.write(frame({ jsonrpc: '2.0', id: requestId, method, params }));
+  });
+  const contents = result => {
+    if (result?.success !== true || !Array.isArray(result.contentItems)) return null;
+    for (const item of result.contentItems) {
+      if (item.type !== 'inputText') continue;
+      try { return JSON.parse(item.text); } catch { /* Require a structured receipt. */ }
+    }
+    return null;
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { socket.destroy(); reject(new Error('app-tools-connect-timeout')); }, timeoutMs);
+      socket.once('connect', () => { clearTimeout(timer); resolve(); });
+      socket.once('error', e => { clearTimeout(timer); reject(e); });
+    });
+    const listed = await request('tools/list', { threadStartKind: 'all' });
+    const tools = listed.result?.tools;
+    const read = tools?.find(t => t.name === 'read_thread');
+    const send = tools?.find(t => t.name === 'send_message_to_thread');
+    if (!read?.namespace || !send?.namespace) return { phase: 'failed', code: 'app-tools-protocol-unavailable' };
+    const call = (tool, args, isSend = false) => request('tools/call', {
+      arguments: args, callerSource: 'codex', hostId: 'local', namespace: tool.namespace,
+      // This is an authorized ingress into the target context, not a new executor.
+      // The original message retains its external sender identity and has no new authority.
+      threadId, tool: tool.name, callId: id + ':' + tool.name, turnId: 'mcp-turn-' + id,
+    }, isSend);
+    const readReply = await call(read, { threadId, hostId: 'local', includeTurns: false });
+    const target = contents(readReply.result)?.thread;
+    const normalize = value => typeof value === 'string' ? path.resolve(value).toLowerCase() : null;
+    if (!target || target.id !== threadId || target.hostId !== 'local' || target.kind !== 'codex' || normalize(target.cwd) !== normalize(cwd)) {
+      return { phase: 'failed', code: 'app-tools-target-mismatch' };
+    }
+    const sent = await call(send, { threadId, hostId: 'local', prompt: message }, true);
+    if (sent.error) return { phase: 'failed', code: 'app-tools-send-rejected' };
+    if (contents(sent.result)?.threadId !== threadId) return { phase: 'unknown', code: 'app-tools-send-not-confirmed' };
+    return { phase: 'submitted', mode: 'native-follow-up', clientUserMessageId: id };
+  } catch (error) {
+    return { phase: sendWritten ? 'unknown' : 'failed', code: error.code || error.message || 'app-tools-error' };
+  } finally { socket.destroy(); }
+}
+
+/** Legacy desktop IPC: queue only after an explicit idle rejection. */
+export async function deliverLegacyCodex({ threadId, message, cwd, queueExe, deliveryId,
   pipePath = process.platform === 'win32' ? '\\\\.\\pipe\\codex-ipc' : null,
   timeoutMs = 6000, queueMessage = queueIdle } = {}) {
   if (!threadId || !message || !cwd) return { phase: 'failed', code: 'missing-delivery-input' };

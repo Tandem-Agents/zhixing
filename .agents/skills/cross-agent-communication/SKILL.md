@@ -17,7 +17,7 @@ description: 查找、使用或维护智能体的会话接收入口时使用；�
 | DeepSeek Honeycomb | — | 待登记 |
 | ZCode | 桌面 UI 注入并排队；桌面完全退出后才允许 CLI 兜底 | [接收说明](references/zcode.md) |
 | OpenCode | 已安装插件通过现有 server 的 `client.session.promptAsync` 投递 | [接收说明](references/opencode.md) |
-| Codex | Windows 桌面原生 IPC：忙时 steer，宿主明确空闲时 queue | [接收说明](references/codex.md) |
+| Codex | Windows桌面原生后续消息入口；旧版兼容steer/queue | [接收说明](references/codex.md) |
 | Antigravity | 宿主 Sidecar 调用原生 `agentapi send-message`，投递到已有会话 | [接收说明](references/antigravity.md) |
 
 ## 选择与调用

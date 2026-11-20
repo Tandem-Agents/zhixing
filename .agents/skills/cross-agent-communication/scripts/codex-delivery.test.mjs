@@ -69,3 +69,60 @@ test('accepted reply without a turn identity does not claim verified steering',a
   const result=await deliverCodex({...inputs,pipePath:h.pipePath});
   assert.equal(result.phase,'unknown');assert.equal(result.code,'steer-reply-missing-turn-id');
 });
+
+async function appHost(t, { target = {}, send, malformedLength = false } = {}) {
+  const pipePath = `\\\\.\\pipe\\zhixing-app-tools-test-${randomUUID()}`;
+  const seen = [], sockets = new Set();
+  const server = net.createServer(socket => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket)); socket.on('error', () => {});
+    let bytes = Buffer.alloc(0);
+    socket.on('data', chunk => {
+      bytes = Buffer.concat([bytes,chunk]);
+      while (bytes.length >= 4) {
+        const size = bytes.readUInt32LE(); if (bytes.length < size + 4) return;
+        const msg = JSON.parse(bytes.subarray(4,size+4)); bytes = bytes.subarray(size+4); seen.push(msg);
+        const reply = result => {
+          const b = Buffer.from(JSON.stringify({jsonrpc:'2.0',id:msg.id,result})),h=Buffer.alloc(4);
+          h.writeUInt32LE(malformedLength ? 8388609 : b.length);socket.write(h.subarray(0,2));
+          setImmediate(()=>{if(!socket.destroyed)socket.write(Buffer.concat([h.subarray(2),b]));});
+        };
+        const content = value => ({success:true,contentItems:[{type:'inputText',text:JSON.stringify(value)}]});
+        if(msg.method==='tools/list') reply({tools:['read_thread','send_message_to_thread'].map(name=>({name,namespace:'codex_app'}))});
+        else if(msg.params.tool==='read_thread') reply(content({thread:{id:inputs.threadId,hostId:'local',kind:'codex',cwd:inputs.cwd,...target}}));
+        else if(msg.params.tool==='send_message_to_thread') {
+          if(send) send(msg,reply,socket); else reply(content({threadId:inputs.threadId}));
+        } else assert.fail('unexpected app tool');
+      }
+    });
+  });
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(pipePath,resolve);});
+  t.after(async()=>{for(const s of sockets)s.destroy();await new Promise(r=>server.close(r));});
+  return {pipePath,seen};
+}
+
+test('current desktop discovers tools and verifies exact thread and cwd before one native follow-up',async t=>{
+  const h=await appHost(t); let queued=false;
+  const result=await deliverCodex({...inputs,appToolsPipePath:h.pipePath,deliveryId:'stable-id',queueMessage:async()=>{queued=true;}});
+  assert.equal(result.phase,'submitted');assert.equal(result.mode,'native-follow-up');assert.equal(queued,false);
+  const sent=h.seen.filter(m=>m.params?.tool==='send_message_to_thread');assert.equal(sent.length,1);
+  assert.deepEqual(sent[0].params.arguments,{threadId:inputs.threadId,hostId:'local',prompt:inputs.message});
+  assert.equal(sent[0].params.callId,'stable-id:send_message_to_thread');
+  assert.equal(h.seen[1].params.arguments.includeTurns,false);
+  assert.ok(!h.seen.some(m=>/start|resume|interrupt/.test(m.params?.tool??'')));
+});
+for(const target of [{id:'other-thread'},{hostId:'other-host'},{cwd:'E:/other-work'},{kind:'chatgpt'}]) {
+  test('wrong target metadata never receives a message '+JSON.stringify(target),async t=>{
+    const h=await appHost(t,{target});const result=await deliverCodex({...inputs,appToolsPipePath:h.pipePath});
+    assert.equal(result.phase,'failed');assert.equal(result.code,'app-tools-target-mismatch');
+    assert.ok(!h.seen.some(m=>m.params?.tool==='send_message_to_thread'));
+  });
+}
+test('lost native follow-up receipt is unknown and never falls back to legacy queue',async t=>{
+  const h=await appHost(t,{send:(_m,_r,s)=>s.destroy()});let queued=false;
+  const result=await deliverCodex({...inputs,appToolsPipePath:h.pipePath,queueMessage:async()=>{queued=true;}});
+  assert.equal(result.phase,'unknown');assert.equal(queued,false);
+});
+test('oversize native frame fails before any send',async t=>{
+  const h=await appHost(t,{malformedLength:true});const result=await deliverCodex({...inputs,appToolsPipePath:h.pipePath});
+  assert.equal(result.phase,'failed');assert.equal(result.code,'invalid-app-tools-frame');
+});
