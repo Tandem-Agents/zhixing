@@ -37,11 +37,19 @@ import { assembleSafeMessage } from "../interrupt/assemble.js";
 import type { IEventBus } from "../events/types.js";
 import { wrapStreamWithWatchdog } from "../interrupt/watchdog.js";
 import type { WatchdogPolicy } from "../interrupt/types.js";
+import { sanitizeProviderErrorMessage } from "../resilience/classify.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import { AgentError } from "../types/errors.js";
 import type { ChatRequest, StopReason, ThinkingConfig, TokenUsage } from "../types/llm.js";
 import { emptyUsage } from "../types/llm.js";
-import type { ContentBlock, Message } from "../types/messages.js";
+import type {
+  ContentBlock,
+  Message,
+  TextBlock,
+  TextProtocolState,
+  ThinkingBlock,
+  ThinkingProtocolState,
+} from "../types/messages.js";
 import type { ToolSpec } from "../types/tools.js";
 import type { AgentLoopDeps, AgentYield, LLMCallResult } from "./types.js";
 
@@ -53,6 +61,8 @@ interface StreamLLMCallParams {
   thinking?: ThinkingConfig;
   systemPrompt?: string;
   toolSpecs: ToolSpec[];
+  /** 前缀代际边界提示（索引基于 messages），由追加式前缀投影透传。 */
+  invalidatedPrefixBeforeIndex?: number;
   /**
    * 中断控制器 —— loop 内部子生成器例外接受 controller (生产路径由 agent-loop 持有)，
    * 下游 ChatRequest 仍接 controller.signal，Provider 抽象不变。
@@ -79,7 +89,18 @@ interface StreamLLMCallParams {
 export async function* streamLLMCall(
   params: StreamLLMCallParams,
 ): AsyncGenerator<AgentYield, LLMCallResult> {
-  const { deps, messages, model, thinking, systemPrompt, toolSpecs, controller, watchdog, eventBus } = params;
+  const {
+    deps,
+    messages,
+    model,
+    thinking,
+    systemPrompt,
+    toolSpecs,
+    invalidatedPrefixBeforeIndex,
+    controller,
+    watchdog,
+    eventBus,
+  } = params;
 
   const request: ChatRequest = {
     model,
@@ -87,6 +108,9 @@ export async function* streamLLMCall(
     messages: messages as Message[],
     tools: toolSpecs.length > 0 ? toolSpecs : undefined,
     thinking,
+    ...(invalidatedPrefixBeforeIndex !== undefined
+      ? { invalidatedPrefixBeforeIndex }
+      : {}),
     abortSignal: controller.signal,
   };
 
@@ -102,15 +126,60 @@ export async function* streamLLMCall(
   const startTime = Date.now();
   const contentBlocks: ContentBlock[] = [];
 
-  // 用于积累流式文本/思考
+  // 用于积累当前进行中的流式文本/思考块，并按真实块到达顺序落入 contentBlocks：
+  // - 支持多 thinking 块（Google Interactions 多 thought / Anthropic 交错思考 / Responses 多推理项）
+  // - 支持空摘要纯签名/加密推理块（thinking === "" 但携带 protocolState 或 signature）
+  // - 支持 OpenAI Responses 多文本块与 assistant phase 元状态原样保真
   let pendingText = "";
+  let pendingTextBlockId: string | undefined;
+  let pendingTextProtocolState: TextProtocolState | undefined;
   let pendingThinking = "";
-  // Anthropic extended thinking 加密签名 —— 随 thinking_block_end 到达,
-  // 组装进 ThinkingBlock 以支持多轮原样回传(缺失=非 Anthropic 思考块)。
-  let pendingThinkingSignature: string | undefined;
+  let inThinkingBlock = false;
+  // partial 汇总（用于 abort/error 时的安全部分文本展示）
+  let allSeenText = "";
+  let allSeenThinking = "";
 
-  // 用于解析流式工具调用 (abort 路径丢弃)
-  const pendingToolCalls = new Map<string, { id: string; name: string; argsJson: string }>();
+  // 用于解析流式工具调用 (abort 路径丢弃)；保留每项在 contentBlocks 中的真实占位顺序
+  const pendingToolCalls = new Map<
+    string,
+    { id: string; name: string; argsJson: string; blockSlotIndex: number }
+  >();
+
+  const flushPendingText = (): void => {
+    if (pendingText.length > 0) {
+      const block: TextBlock = {
+        type: "text",
+        text: pendingText,
+        ...(pendingTextProtocolState ? { protocolState: pendingTextProtocolState } : {}),
+      };
+      contentBlocks.push(block);
+    }
+    pendingText = "";
+    pendingTextBlockId = undefined;
+    pendingTextProtocolState = undefined;
+  };
+
+  const flushPendingThinking = (
+    signature?: string,
+    protocolState?: ThinkingProtocolState,
+  ): void => {
+    const resolvedSignature = signature ?? protocolState?.signature;
+    if (
+      pendingThinking.length > 0 ||
+      resolvedSignature !== undefined ||
+      protocolState !== undefined
+    ) {
+      const block: ThinkingBlock = {
+        type: "thinking",
+        thinking: pendingThinking,
+        ...(resolvedSignature !== undefined ? { signature: resolvedSignature } : {}),
+        ...(protocolState !== undefined ? { protocolState } : {}),
+      };
+      contentBlocks.push(block);
+    }
+    pendingThinking = "";
+    inThinkingBlock = false;
+  };
 
   let stopReason: StopReason = "end_turn";
   let usage: TokenUsage = emptyUsage();
@@ -132,12 +201,46 @@ export async function* streamLLMCall(
 
       // **先处理 event 累积 partial**：保证 abort 瞬间收到的最后一个 chunk 已进 pending 区
       switch (event.type) {
-        case "text_delta":
-          pendingText += event.text;
-          yield { type: "text_delta", text: event.text };
+        case "text_delta": {
+          // 块身份切换时先提交上一文本块，保留 commentary / final_answer 等多段真实顺序
+          if (
+            event.blockId !== undefined &&
+            pendingTextBlockId !== undefined &&
+            event.blockId !== pendingTextBlockId
+          ) {
+            flushPendingText();
+          }
+          if (event.blockId !== undefined) {
+            pendingTextBlockId = event.blockId;
+          }
+          if (event.protocolState !== undefined) {
+            // 若该 blockId 已经落块（例如 phase 仅在 output_item.done 晚到），就地补写到最后一块；
+            // 否则记录在当前 pendingText 上。
+            if (pendingText.length === 0 && event.text.length === 0) {
+              const last = contentBlocks.at(-1);
+              if (last?.type === "text") {
+                last.protocolState = event.protocolState;
+              } else {
+                pendingTextProtocolState = event.protocolState;
+              }
+            } else {
+              pendingTextProtocolState = event.protocolState;
+            }
+          }
+          if (event.text.length > 0) {
+            pendingText += event.text;
+            allSeenText += event.text;
+            yield { type: "text_delta", text: event.text };
+          }
           break;
+        }
 
         case "thinking_block_start":
+          flushPendingText();
+          if (inThinkingBlock || pendingThinking.length > 0) {
+            flushPendingThinking();
+          }
+          inThinkingBlock = true;
           // 透传 thinking 块开始边界给 AgentYield 流 —— 与 StreamEvent 对称,
           // 让 cli output-renderer 等下游消费方据此开 thinking 显示区(segment /
           // 状态机),不依赖从首个 thinking_delta 推断
@@ -146,19 +249,37 @@ export async function* streamLLMCall(
 
         case "thinking_delta":
           pendingThinking += event.thinking;
+          allSeenThinking += event.thinking;
           yield { type: "thinking_delta", thinking: event.thinking };
           break;
 
         case "thinking_block_end":
-          // 捕获 signature 供消息组装(Anthropic 多轮回传必需);消费方仅需边界
-          // 语义,故向 AgentYield 透传时不带 signature(签名属持久化/回传维度)。
-          if (event.signature) pendingThinkingSignature = event.signature;
+          // 立即落块：保留多 thinking 块顺序、空摘要纯签名/加密状态块以及 protocolState。
+          // 消费方仅需边界语义，故向 AgentYield 透传时不带 signature/protocolState。
+          flushPendingThinking(event.signature, event.protocolState);
           yield { type: "thinking_block_end" };
           break;
 
-        case "tool_call_start":
-          pendingToolCalls.set(event.id, { id: event.id, name: event.name, argsJson: "" });
+        case "tool_call_start": {
+          flushPendingText();
+          if (inThinkingBlock || pendingThinking.length > 0) {
+            flushPendingThinking();
+          }
+          const blockSlotIndex = contentBlocks.length;
+          contentBlocks.push({
+            type: "tool_use",
+            id: event.id,
+            name: event.name,
+            input: {},
+          });
+          pendingToolCalls.set(event.id, {
+            id: event.id,
+            name: event.name,
+            argsJson: "",
+            blockSlotIndex,
+          });
           break;
+        }
 
         case "tool_call_delta": {
           const pending = pendingToolCalls.get(event.id);
@@ -169,7 +290,7 @@ export async function* streamLLMCall(
         }
 
         case "tool_call_end":
-          // tool_call_end 不需要额外处理，参数在 message_end 后统一解析
+          // tool_call_end 不需要额外处理，参数在 message_end 后统一解析回填原槽位
           break;
 
         case "message_end":
@@ -181,12 +302,15 @@ export async function* streamLLMCall(
         case "error":
           // provider error 与 abort 分离：abort 走 aborted variant，error 走 success variant
           // 携带 error 字段；这里记 providerError 让循环结束后统一返回
-          providerError = new AgentError(
-            event.error.message,
-            "provider_error",
-            true,
-            event.error,
-          );
+          providerError =
+            event.error instanceof AgentError
+              ? event.error
+              : new AgentError(
+                  sanitizeProviderErrorMessage(event.error.message),
+                  "provider_error",
+                  true,
+                  event.error,
+                );
           break;
 
         case "message_start":
@@ -224,13 +348,13 @@ export async function* streamLLMCall(
       const agentError = err instanceof AgentError
         ? err
         : new AgentError(
-            err instanceof Error ? err.message : String(err),
+            sanitizeProviderErrorMessage(err instanceof Error ? err.message : String(err)),
             "provider_error",
             true,
             err,
           );
 
-      const safePartial = assembleSafeMessage(pendingText, pendingThinking);
+      const safePartial = assembleSafeMessage(allSeenText, allSeenThinking);
       if (safePartial) {
         yield { type: "assistant_message", message: safePartial };
       }
@@ -260,7 +384,7 @@ export async function* streamLLMCall(
     });
     return {
       aborted: true,
-      partial: { text: pendingText, thinking: pendingThinking },
+      partial: { text: allSeenText, thinking: allSeenThinking },
       usage,
     };
   }
@@ -281,7 +405,7 @@ export async function* streamLLMCall(
   });
 
   if (providerError) {
-    const safePartial = assembleSafeMessage(pendingText, pendingThinking);
+    const safePartial = assembleSafeMessage(allSeenText, allSeenThinking);
     if (safePartial) {
       yield { type: "assistant_message", message: safePartial };
     }
@@ -294,13 +418,23 @@ export async function* streamLLMCall(
     };
   }
 
-  const message = assembleMessage(
-    contentBlocks,
-    pendingText,
-    pendingThinking,
-    pendingThinkingSignature,
-    pendingToolCalls,
-  );
+  // 收尾刷出任何尚未闭合的 thinking / text（兼容无显式 thinking_block_end 的测试桩）
+  if (pendingThinking.length > 0) {
+    flushPendingThinking();
+  }
+  flushPendingText();
+
+  // 将累积的工具参数 JSON 回填到各自原到达顺序的 tool_use 槽位
+  for (const tc of pendingToolCalls.values()) {
+    contentBlocks[tc.blockSlotIndex] = {
+      type: "tool_use",
+      id: tc.id,
+      name: tc.name,
+      input: parseToolCallArgs(tc.argsJson),
+    };
+  }
+
+  const message: Message = { role: "assistant", content: contentBlocks };
   yield { type: "assistant_message", message };
 
   return {
@@ -312,45 +446,6 @@ export async function* streamLLMCall(
 }
 
 // ─── 内部辅助 ───
-
-/**
- * 将积累的流式内容组装为完整的 assistant Message。
- * 顺序：ThinkingBlock → TextBlock → ToolUseBlock[]
- */
-function assembleMessage(
-  existingBlocks: ContentBlock[],
-  pendingText: string,
-  pendingThinking: string,
-  pendingThinkingSignature: string | undefined,
-  pendingToolCalls: Map<string, { id: string; name: string; argsJson: string }>,
-): Message {
-  const content: ContentBlock[] = [...existingBlocks];
-
-  if (pendingThinking) {
-    content.push(
-      pendingThinkingSignature
-        ? {
-            type: "thinking",
-            thinking: pendingThinking,
-            signature: pendingThinkingSignature,
-          }
-        : { type: "thinking", thinking: pendingThinking },
-    );
-  }
-  if (pendingText) {
-    content.push({ type: "text", text: pendingText });
-  }
-  for (const tc of pendingToolCalls.values()) {
-    content.push({
-      type: "tool_use",
-      id: tc.id,
-      name: tc.name,
-      input: parseToolCallArgs(tc.argsJson),
-    });
-  }
-
-  return { role: "assistant", content };
-}
 
 /**
  * 安全解析工具调用参数 JSON。

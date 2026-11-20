@@ -19,6 +19,8 @@ import type { ToolSpec } from "../types/tools.js";
 export interface TokenAnchor {
   readonly totalInputTokens: number;
   readonly baselineMessageCount: number;
+  /** 可选前缀代际号：与调用方当前代际不一致时视为锚点失效，回落完整发送视图重算。 */
+  readonly prefixGeneration?: number;
 }
 
 export interface ContextTokensInput {
@@ -28,13 +30,21 @@ export interface ContextTokensInput {
   readonly providerMessages: readonly Message[];
   readonly tools: readonly ToolSpec[];
   readonly anchor?: TokenAnchor;
+  /** 当前发送视图的前缀代际号（若与 anchor.prefixGeneration 不一致则放弃锚点走完整重算）。 */
+  readonly prefixGeneration?: number;
+  /**
+   * 仅在 `anchor.baselineMessageCount` 之后新追加的临时上下文消息（如 Responses 追加式 `user(C_k)`）。
+   * 绝不包含已计入 `anchor.totalInputTokens` 的旧 `C_0` 锚定块，避免重复计费/高估。
+   */
+  readonly ephemeralMessagesAfterAnchor?: readonly Message[];
 }
 
 /**
  * Estimate the next provider request size.
  *
  * Anchor path:
- *   provider truth for the already-sent state lineage + estimated state delta.
+ *   provider truth for the already-sent state lineage + estimated state delta
+ *   + estimated newly appended ephemeral context after the anchor.
  *
  * Fallback path:
  *   full request view = system prompt + provider messages + tools.
@@ -47,11 +57,30 @@ export function computeContextTokens(input: ContextTokensInput): number {
     providerMessages,
     tools,
     anchor,
+    prefixGeneration,
+    ephemeralMessagesAfterAnchor,
   } = input;
 
-  if (anchor && stateMessages.length >= anchor.baselineMessageCount) {
+  const generationMatches =
+    anchor?.prefixGeneration === undefined ||
+    prefixGeneration === undefined ||
+    anchor.prefixGeneration === prefixGeneration;
+
+  if (
+    anchor &&
+    generationMatches &&
+    stateMessages.length >= anchor.baselineMessageCount
+  ) {
     const delta = stateMessages.slice(anchor.baselineMessageCount);
-    return anchor.totalInputTokens + estimator.estimateMessages(delta);
+    const ephemeralDeltaTokens =
+      ephemeralMessagesAfterAnchor && ephemeralMessagesAfterAnchor.length > 0
+        ? estimator.estimateMessages(ephemeralMessagesAfterAnchor)
+        : 0;
+    return (
+      anchor.totalInputTokens +
+      estimator.estimateMessages(delta) +
+      ephemeralDeltaTokens
+    );
   }
 
   return (

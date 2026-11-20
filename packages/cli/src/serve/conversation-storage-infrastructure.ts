@@ -79,7 +79,7 @@ interface ScopeStorage {
  */
 export function createConversationStorageInfrastructure(input: Readonly<{
   zhixingHome: string;
-  optimalMaxTokens: number;
+  optimalMaxTokens: number | (() => number);
   worksceneConversationStorageRemoval: WorksceneConversationStorageRemovalPort;
   clearTaskListCache?: (conversationId: string) => void;
 }>): ConversationStorageInfrastructure {
@@ -134,6 +134,10 @@ export function createConversationStorageInfrastructure(input: Readonly<{
       if (turnCount === undefined) throw new Error("Prepared transcript view has no published run watermark");
     }
     if (!turnCount) return undefined;
+    const optimalMaxTokens =
+      typeof input.optimalMaxTokens === "function"
+        ? input.optimalMaxTokens()
+        : input.optimalMaxTokens;
     const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
       path.join(zhixingHome, 'cache', 'transcript-read-index'), { acquireFileLock });
     try {
@@ -141,7 +145,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
         conversationId: storage.localId,
         store: storage.transcript,
         snapshots: storage.snapshots,
-        capability: { optimalMaxTokens: input.optimalMaxTokens },
+        capability: { optimalMaxTokens },
         estimator: createTokenEstimator(),
         runs: readBootstrapRunViews(reader),
         clearBoundary: { lastClearAt: view?.lastClearAt },

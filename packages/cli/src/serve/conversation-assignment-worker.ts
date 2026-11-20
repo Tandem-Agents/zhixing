@@ -318,11 +318,18 @@ export class ConversationAssignmentWorker {
       );
       runtime = await this.options.runtimeFactory.create(
         envelope.work.conversationId,
-        { workspaceRoot: environment.workspaceRoot, executionProfile: {
-          tools: envelope.manifest.tools,
-          mcpServers: envelope.manifest.mcpServers,
-          providerIds: [],
-        }, workspaceBinding: envelope.manifest.environment.workspace ?? null },
+        {
+          workspaceRoot: environment.workspaceRoot,
+          executionProfile: {
+            tools: envelope.manifest.tools,
+            mcpServers: envelope.manifest.mcpServers,
+            providerIds: [],
+          },
+          workspaceBinding: envelope.manifest.environment.workspace ?? null,
+          ...(envelope.manifest.modelSelection
+            ? { modelSelection: envelope.manifest.modelSelection }
+            : {}),
+        },
       );
       const runtimeProfile = runtime.executionProfile?.();
       if (

@@ -226,6 +226,8 @@ export interface ConversationManagerCallbacks {
   onTurnCommitted?: (info: TurnCommittedInfo) => void;
   /** Enables the durable owner protocol for every turn admitted by this manager. */
   durableTurnExecutor?: DurableConversationTurnExecutor;
+  /** 可选：每轮准入前检查本机配置/凭据修订差，按需触发模型窄生效与空闲投影失效。 */
+  beforeTurnAdmission?: () => Promise<void>;
 }
 
 /** onTurnCommitted 的入参——本次 turn 落定后的会话事实快照 */
@@ -351,6 +353,7 @@ export class ConversationManager implements ConversationCommitProjection {
 
   /** Called by the turn owner after acquiring its slot, before issuing an assignment. */
   async prepareRuntimeProjectionForTurn(conversationId: string): Promise<void> {
+    await this.beforeTurnAdmissionCb?.();
     await this.refreshRuntimeProjection(conversationId, true);
     await this.rebuildStaleView(conversationId);
   }
@@ -439,6 +442,7 @@ export class ConversationManager implements ConversationCommitProjection {
   private readonly confirmationHub?: ConfirmationHub;
   private readonly onTurnCommitted?: (info: TurnCommittedInfo) => void;
   private readonly durableTurnExecutorCb?: DurableConversationTurnExecutor;
+  private readonly beforeTurnAdmissionCb?: () => Promise<void>;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
   /**
@@ -479,6 +483,7 @@ export class ConversationManager implements ConversationCommitProjection {
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
       this.onTurnCommitted = callbacksOrOnRelease.onTurnCommitted;
       this.durableTurnExecutorCb = callbacksOrOnRelease.durableTurnExecutor;
+      this.beforeTurnAdmissionCb = callbacksOrOnRelease.beforeTurnAdmission;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
     }

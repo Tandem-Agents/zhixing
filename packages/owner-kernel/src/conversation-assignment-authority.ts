@@ -84,6 +84,7 @@ export interface ConversationAssignmentCredentialPolicy {
       readonly bindingId: string;
       readonly revision: number;
     }[];
+    readonly modelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent;
   };
   readonly permissionSnapshot: TrustRuleSnapshot;
   readonly budget: {
@@ -152,6 +153,9 @@ export class ConversationAssignmentAuthority
       credentialBindings: policy.manifestCapabilities.credentialBindings.map(
         (binding) => ({ ...binding }),
       ),
+      ...(policy.manifestCapabilities.modelSelection !== undefined
+        ? { modelSelection: structuredClone(policy.manifestCapabilities.modelSelection) }
+        : {}),
     });
     const compatibility = matchManifest(
       manifest,

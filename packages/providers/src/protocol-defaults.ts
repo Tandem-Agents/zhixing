@@ -32,8 +32,16 @@ export const PROTOCOL_BUDGET_DEFAULTS: Record<Protocol, ModelBudgetInfo> = {
     contextWindow: 128_000,
     maxOutputTokens: 4_096,
   },
+  "openai-responses": {
+    contextWindow: 400_000,
+    maxOutputTokens: 16_384,
+  },
   "anthropic-messages": {
     contextWindow: 200_000,
+    maxOutputTokens: 8_192,
+  },
+  "google-interactions": {
+    contextWindow: 1_000_000,
     maxOutputTokens: 8_192,
   },
 };

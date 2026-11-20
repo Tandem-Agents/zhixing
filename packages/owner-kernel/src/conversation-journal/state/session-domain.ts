@@ -65,6 +65,7 @@ export interface SessionDomainMutableSlice {
   clearedThroughLsn: number;
   clearedThroughRevision?: number;
   sessionName?: string;
+  modelSelection?: import("@zhixing-ai/core/contracts").SessionModelSelection;
   lastActiveAt?: string;
   sessionMeta?: Extract<ConversationRunJournalRecord, { t: "session-meta" }>;
   readonly sessionMetaByRequest: Map<
@@ -109,7 +110,7 @@ export function assertLegalAdvancementEvents(
 }
 
 export function applyProjectedSessionMutation(
-  state: Pick<SessionDomainMutableSlice, "taskList" | "segments" | "sessionName">,
+  state: Pick<SessionDomainMutableSlice, "taskList" | "segments" | "sessionName" | "modelSelection">,
   mutation:
     | Exclude<SessionControlMutation, { readonly kind: "advancement-event" }>
     | SessionStagedMutation,
@@ -136,6 +137,9 @@ export function applyProjectedSessionMutation(
     }
     case "session-meta":
       if (mutation.patch.name !== undefined) state.sessionName = mutation.patch.name;
+      if (mutation.patch.modelSelection !== undefined) {
+        state.modelSelection = snapshot(mutation.patch.modelSelection, "Session model selection");
+      }
       return;
     case "window-op":
       if (mutation.op !== "compact") {
@@ -158,6 +162,7 @@ export function applyCommittedSessionMutations(
     | "taskList"
     | "segments"
     | "sessionName"
+    | "modelSelection"
   >,
   records: readonly MutationBatch["records"][number][],
   throughRevision = Infinity,

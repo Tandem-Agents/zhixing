@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createInitialState } from "../state.js";
+import { createInitialState, readModelRole, readProviderEntry } from "../state.js";
 import {
   handleAddModelPanelKey,
   handleInputPanelKey,
@@ -65,13 +65,16 @@ describe("handleInputPanelKey · provider-apikey 字段路由", () => {
     fieldId: "provider-apikey:main:siliconflow",
   } as Extract<PanelDescriptor, { kind: "input" }>;
 
-  it("Enter 提交时写到 credentials.providers.<id>.apiKey + pop", () => {
+  it("Enter 提交时写到 v2 modelSecrets + pop", () => {
     let state = createInitialState({}, {});
     state = { ...state, inputBuffer: "sk-test" };
     const action = handleInputPanelKey(state, descriptor, { type: "enter" });
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
-      expect(action.state.credentials.providers?.siliconflow?.apiKey).toBe(
+      expect(readProviderEntry(action.state, "siliconflow")?.apiKey).toBe(
+        "sk-test",
+      );
+      expect(action.state.credentials.modelSecrets?.siliconflow?.value).toBe(
         "sk-test",
       );
       expect(action.state.inputBuffer).toBe("");
@@ -181,11 +184,11 @@ describe("handleAddModelPanelKey", () => {
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
       // 模型加入用户自定义列表
-      expect(action.state.credentials.providers?.siliconflow?.models).toEqual([
+      expect(readProviderEntry(action.state, "siliconflow")?.models).toEqual([
         "Pro/MyCustom",
       ]);
       // 当前 role 切换到新模型
-      expect(action.state.config.llm?.main?.model).toBe("Pro/MyCustom");
+      expect(readModelRole(action.state, "main")?.model).toBe("Pro/MyCustom");
       // 输入 buffer 清空
       expect(action.state.inputBuffer).toBe("");
     }
@@ -237,16 +240,16 @@ describe("handleAddModelPanelKey", () => {
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
       // 新模型加入 B 的 models 列表（不污染 X）
-      expect(action.state.credentials.providers?.["b-provider"]?.models).toEqual(
+      expect(readProviderEntry(action.state, "b-provider")?.models).toEqual(
         ["b-new-model"],
       );
-      expect(action.state.credentials.providers?.["x-provider"]?.models).toBeUndefined();
+      expect(readProviderEntry(action.state, "x-provider")?.models).toBeUndefined();
       // light 完整切到 (B, b-new-model)——而不是 (X, b-new-model)
-      expect(action.state.config.llm?.light?.provider).toBe("b-provider");
-      expect(action.state.config.llm?.light?.model).toBe("b-new-model");
+      expect(readModelRole(action.state, "light")?.provider).toBe("b-provider");
+      expect(readModelRole(action.state, "light")?.model).toBe("b-new-model");
       // main 不受影响
-      expect(action.state.config.llm?.main?.provider).toBe("x-provider");
-      expect(action.state.config.llm?.main?.model).toBe("x-model");
+      expect(readModelRole(action.state, "main")?.provider).toBe("x-provider");
+      expect(readModelRole(action.state, "main")?.model).toBe("x-model");
     }
   });
 });

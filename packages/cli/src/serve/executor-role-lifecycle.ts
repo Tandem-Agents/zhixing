@@ -18,6 +18,7 @@ export const EXECUTOR_ROLE_LIFECYCLE_DESCRIPTORS = [
   { owner: "executor-role", id: "executorJobOwnerLifecycle.close" },
   { owner: "executor-role", id: "executorDataPlane.close" },
   { owner: "executor-role", id: "authorityRuntime.stopStorageMaintenance" },
+  { owner: "executor-role", id: "modelRuntimePort.dispose" },
   { owner: "executor-role", id: "mcpRuntime.close" },
   { owner: "executor-role", id: "logAccess.close" },
 ] as const;

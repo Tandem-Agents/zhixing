@@ -5,6 +5,8 @@ import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 import type { McpRuntimeServerStatus } from "../runtime/mcp-runtime-ports.js";
 import {
   createProvider,
+  isLLMConfigV2,
+  resolveConnection,
   resolveProvider,
   type ProviderCredentialProjection,
 } from "@zhixing-ai/providers";
@@ -119,8 +121,15 @@ function currentCredentialBindings(
   options: CredentialRotationPublicationOptions,
 ): CurrentCredentialBinding[] {
   const bindings: CurrentCredentialBinding[] = [];
+  const seenProviderIds = new Set<string>();
+  const revoked = new Set(options.credentials.revokedModelSecretRefs ?? []);
+  for (const [id, entry] of Object.entries(options.credentials.modelSecrets ?? {})) {
+    if (revoked.has(id) || entry.value.trim().length === 0) continue;
+    seenProviderIds.add(id);
+    bindings.push(binding("provider", id, `provider-${id}`, entry, options.deviceId));
+  }
   for (const [id, entry] of Object.entries(options.credentials.providers ?? {})) {
-    if (entry.apiKey.trim().length === 0) continue;
+    if (seenProviderIds.has(id) || entry.apiKey.trim().length === 0) continue;
     bindings.push(binding("provider", id, `provider-${id}`, entry, options.deviceId));
   }
   for (const [id, entry] of Object.entries(options.credentials.mcp ?? {})) {
@@ -168,7 +177,7 @@ function credentialValue(
 ): unknown {
   switch (binding.kind) {
     case "provider":
-      return credentials.providers?.[binding.id];
+      return credentials.modelSecrets?.[binding.id] ?? credentials.providers?.[binding.id];
     case "channel":
       return credentials.channels?.[binding.id];
     case "mcp":
@@ -187,6 +196,14 @@ function readinessFor(
       let verified = false;
       return {
         verify: async () => {
+          const providerCreds: ProviderCredentialProjection = {
+            ...(options.credentials.version !== undefined ? { version: options.credentials.version } : {}),
+            ...(options.credentials.providers ? { providers: options.credentials.providers } : {}),
+            ...(options.credentials.modelSecrets ? { modelSecrets: options.credentials.modelSecrets } : {}),
+            ...(options.credentials.revokedModelSecretRefs
+              ? { revokedModelSecretRefs: options.credentials.revokedModelSecretRefs }
+              : {}),
+          };
           const principal = await (options.probeProvider ?? ((input) => {
             if (!options.governProvider) {
               throw new Error("Credential provider verification governor is not configured");
@@ -196,9 +213,7 @@ function readinessFor(
             providerId: binding.id,
             model,
             configuration: options.configuration,
-            credentials: options.credentials.providers
-              ? { providers: options.credentials.providers }
-              : {},
+            credentials: providerCreds,
           });
           verified = true;
           return principal;
@@ -253,14 +268,28 @@ function readinessFor(
 
 function providerModel(
   configuration: RuntimeCredentialRotationConfigurationProjection,
-  providerId: string,
+  providerOrSecretId: string,
 ): string | undefined {
-  for (const role of [
-    configuration.llm?.main,
-    configuration.llm?.light,
-    configuration.llm?.power,
-  ]) {
-    if (role?.provider === providerId) return role.model;
+  const llm = configuration.llm;
+  if (!llm) return undefined;
+  if (isLLMConfigV2(llm)) {
+    const matchingConnections = new Set(
+      Object.entries(llm.connections)
+        .filter(
+          ([connectionId, conn]) =>
+            connectionId === providerOrSecretId ||
+            ((conn.auth.mode === "api-key" || conn.auth.mode === "header") &&
+              conn.auth.secretRef === providerOrSecretId),
+        )
+        .map(([connectionId]) => connectionId),
+    );
+    for (const role of [llm.main, llm.light, llm.power]) {
+      if (role && matchingConnections.has(role.connectionId)) return role.model;
+    }
+    return undefined;
+  }
+  for (const role of [llm.main, llm.light, llm.power]) {
+    if (role?.provider === providerOrSecretId) return role.model;
   }
   return undefined;
 }
@@ -271,12 +300,32 @@ async function probeProviderCredential(input: {
   readonly configuration: RuntimeCredentialRotationConfigurationProjection;
   readonly credentials: ProviderCredentialProjection;
 }, governProvider: (provider: LLMProvider) => LLMProvider): Promise<string> {
-  const credentials = input.credentials.providers
-    ? { providers: input.credentials.providers }
-    : {};
-  const resolved = resolveProvider(input.providerId, credentials);
+  let targetId = input.providerId;
+  let resolvedEndpoint: string;
+  if (isLLMConfigV2(input.configuration.llm)) {
+    const match = Object.entries(input.configuration.llm.connections).find(
+      ([connId, conn]) =>
+        connId === input.providerId ||
+        ((conn.auth.mode === "api-key" || conn.auth.mode === "header") &&
+          conn.auth.secretRef === input.providerId),
+    );
+    if (!match) {
+      throw new Error(`Credential rotation v2 connection not found: ${input.providerId}`);
+    }
+    targetId = match[0];
+    const resolved = resolveConnection(
+      targetId,
+      match[1],
+      input.credentials,
+      input.configuration.network,
+    );
+    resolvedEndpoint = resolved.baseUrl;
+  } else {
+    const resolved = resolveProvider(input.providerId, input.credentials);
+    resolvedEndpoint = resolved.baseUrl;
+  }
   const provider = governProvider(
-    createProvider(input.configuration, credentials, input.providerId),
+    createProvider(input.configuration, input.credentials, targetId),
   );
   const abort = new AbortController();
   const timer = setTimeout(
@@ -301,7 +350,8 @@ async function probeProviderCredential(input: {
     }
   } finally {
     clearTimeout(timer);
+    await provider.close?.().catch(() => {});
   }
   if (!completed) throw new Error("Credential provider verification did not complete");
-  return `provider:${resolved.id}:${resolved.baseUrl}`;
+  return `provider:${targetId}:${resolvedEndpoint}`;
 }

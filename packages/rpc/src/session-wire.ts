@@ -19,6 +19,7 @@ import type {
   AgentResult,
   AgentYield,
 } from "@zhixing-ai/core/loop";
+import { stripOpaqueProtocolStateFromMessage } from "./session-presentation.js";
 export * from "./session-presentation.js";
 import type {
   AdvancementClosureFacts,
@@ -73,8 +74,14 @@ export type WireAgentResult =
       usage: TokenUsage;
     };
 
-/** 发射端唯一投影点——complete 通知的 result 一律经此上 wire */
+/** 发射端唯一投影点——complete 通知的 result 一律经此上 wire（completed 分支复用同一公开投影剥离私有协议状态） */
 export function toWireAgentResult(result: AgentResult): WireAgentResult {
+  if (result.reason === "completed") {
+    const projectedMessage = stripOpaqueProtocolStateFromMessage(result.message);
+    return projectedMessage === result.message
+      ? result
+      : { ...result, message: projectedMessage };
+  }
   if (result.reason !== "error") return result;
   return {
     reason: "error",
@@ -132,7 +139,17 @@ export type SessionChangedPayload =
    * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空),
    * 投影层不依赖该包、以透传形声明,发射端与消费端同源同包类型。
    */
-  | { conversationId: string; change: "taskList"; taskList: TaskListState | null };
+  | { conversationId: string; change: "taskList"; taskList: TaskListState | null }
+  | {
+      conversationId: string;
+      change: "modelSelection";
+      modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection;
+    };
+
+export interface SessionModelSelectionResult {
+  conversationId: string;
+  modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection;
+}
 
 export interface SessionPostTurnControlIntentPayload {
   conversationId: string;

@@ -4,7 +4,16 @@ import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex }
 import type { CredentialExposureRecord, SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
 import { createTempDir } from "@zhixing-ai/test-utils";
 import { createCredentialExposureRecord } from "@zhixing-ai/mesh/credential-exposure";
-import type { ZhixingConfig } from "@zhixing-ai/providers";
+import {
+  editConfiguration,
+  loadConfigurationSnapshot,
+  type LLMConfigV2,
+  type ZhixingConfig,
+  type ZhixingCredentials,
+} from "@zhixing-ai/providers/configuration";
+import { createPlatformSecretStore } from "@zhixing-ai/secrets";
+import { ModelRuntimePort } from "../runtime/model-runtime-port.js";
+import { projectRuntimeSecrets } from "../runtime/runtime-secret-projections.js";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
 import { projectRuntimeConfiguration } from "../runtime/runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
@@ -187,6 +196,134 @@ describe("credential rotation publication", { timeout: 30_000 }, () => {
 
     expect((await fixture.authority.projection()).rotationRequired).toHaveLength(1);
     expect(await fixture.log.readStream("exposure")).toHaveLength(2);
+  });
+
+  it("F2 v2 compromised main rotation: unblocks compromised secretRef (!== connectionId) before exposure-guarded reload so ModelRuntimePort applies without deadlock", async () => {
+    const root = await createTempDir("v2-compromised-authority");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts);
+    onTestFinished(() => log.stopStorageMaintenance());
+    const authoritySecretStore = new MemorySecretStore();
+    const authority = new CredentialExposureAuthority({
+      deviceId: "current-device",
+      log,
+      secretStore: authoritySecretStore,
+      now: () => "2026-08-10T00:02:00.000Z",
+    });
+    // Mark current-device's own local binding as compromised so assertConfigurationRoute blocks it before rotation
+    const ownActive = await authority.publishActiveBindings({
+      bindings: [{
+        bindingId: "user-alias:current-device:credential-provider-shared_secret",
+        service: "provider-shared_secret",
+        verification: "service-verified",
+        principalFingerprint: `sha256:${"9".repeat(64)}`,
+        revision: 1,
+      }],
+      markedAt: "2026-08-10T00:00:30.000Z",
+    });
+    const ownRecord = ownActive.records.find(
+      (r) => r.deviceId === "current-device" && r.service === "provider-shared_secret",
+    )!;
+    await log.append([{
+      stream: "exposure",
+      body: {
+        ...ownRecord,
+        state: "compromised",
+        markedAt: "2026-08-10T00:01:30.000Z",
+      },
+    }]);
+    const homeDir = await createTempDir("v2-compromised-unblock");
+    const configPath = path.join(homeDir, "config.jsonc");
+    const store = createPlatformSecretStore({ homeDir, env: {} });
+    const llmV2: LLMConfigV2 = {
+      schemaVersion: 2,
+      connections: {
+        conn_main: {
+          name: "Main",
+          adapter: "openai-compatible",
+          endpoint: "https://api.deepseek.com/v1",
+          auth: { mode: "api-key", secretRef: "shared_secret" },
+          network: { proxy: "inherit" },
+        },
+      },
+      main: { connectionId: "conn_main", model: "deepseek-chat" },
+    };
+    const cfg: ZhixingConfig = { llm: llmV2 };
+    const creds: ZhixingCredentials = {
+      version: 2,
+      modelSecrets: {
+        shared_secret: { v: 2, kind: "api-key", value: "sk-rotated-fresh-key" },
+      },
+    };
+    await editConfiguration(
+      { config: {}, credentials: {} },
+      { config: cfg, credentials: creds },
+      { configPath, store, forceModelConfigVersion2: true },
+    );
+
+    const authorizeCredentialRead = async ({ kind, id }: { kind: "provider" | "channel" | "mcp"; id: string }) => {
+      try {
+        await authority.assertConfigurationRoute(kind, id);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // 1. Before rotation publication, exposure-guarded snapshot filters out compromised main secret
+    const blockedSnap = await loadConfigurationSnapshot({
+      configPath,
+      store,
+      authorizeCredentialRead,
+    });
+    expect(blockedSnap.credentials.modelSecrets?.shared_secret).toBeUndefined();
+    expect(blockedSnap.credentials.compromisedModelSecretTokens?.shared_secret).toBeTruthy();
+
+    // 2. publishRequiredCredentialRotations reads unfiltered SecretStore, verifies new key, and unblocks exposure authority
+    const unfilteredCreds = projectRuntimeSecrets(
+      (await loadConfigurationSnapshot({ configPath, store })).credentials,
+    ).credentialRotationCredentials;
+    const probed: string[] = [];
+    await publishRequiredCredentialRotations({
+      authority,
+      deviceId: "current-device",
+      configuration: projectRuntimeConfiguration(createRuntimeConfigurationSnapshot(blockedSnap.config)).credentialRotation,
+      credentials: unfilteredCreds,
+      credentialGeneration: blockedSnap.generation,
+      readCredentials: async () => unfilteredCreds,
+      mcpStatuses: () => [],
+      channelStatuses: () => [],
+      now: () => "2026-08-10T00:02:00.000Z",
+      probeProvider: async ({ providerId, model }) => {
+        probed.push(`${providerId}:${model}`);
+        return `provider:conn_main:https://api.deepseek.com/v1`;
+      },
+    });
+    expect(probed).toEqual(["shared_secret:deepseek-chat"]);
+    expect((await authority.projection()).rotationRequired).toEqual([]);
+
+    // 3. Re-reading exposure-guarded snapshot now surfaces the rotated key and ModelRuntimePort applies cleanly!
+    const unblockedSnap = await loadConfigurationSnapshot({
+      configPath,
+      store,
+      authorizeCredentialRead,
+    });
+    expect(unblockedSnap.credentials.modelSecrets?.shared_secret?.value).toBe("sk-rotated-fresh-key");
+    const port = new ModelRuntimePort({
+      modelConfiguration: projectRuntimeConfiguration(unblockedSnap.config).model,
+      providerCredentials: {},
+      exposureCredentials: {},
+      credentialGeneration: "gen-old",
+    });
+    const upd = await port.applyUpdate({
+      operationId: "op-unblock-rotated",
+      modelConfiguration: projectRuntimeConfiguration(unblockedSnap.config).model,
+      providerCredentials: projectRuntimeSecrets(unblockedSnap.credentials).providerCredentials,
+      exposureCredentials: projectRuntimeSecrets(unblockedSnap.credentials).credentialExposureCredentials,
+      credentialGeneration: unblockedSnap.generation,
+    });
+    expect(upd.applied).toBe(true);
+    expect(port.readiness().modelConnections[0]?.ready).toBe(true);
   });
 });
 

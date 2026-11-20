@@ -34,6 +34,7 @@ export interface FinalPointer { readonly commitRevision: number; readonly digest
 
 export interface ReadMeta {
   count: number; clearedThrough: number; baseRevision: number; name?: string;
+  modelSelection?: import('@zhixing-ai/core/contracts').SessionModelSelection;
   activity: string; sessionActivity?: string; clearId?: string; clearedLsn?: number; deleted?: boolean;
 }
 export interface ControlRead { readonly entry?: StatusHistoryEntry; readonly communication: boolean; readonly continuation: boolean; readonly commit?: CommitPointer }
@@ -542,6 +543,11 @@ export class ConversationReadIndex {
     return { ...base, ...local, count: local.count + (local.clearId ? 0 : base.count),
       clearedThrough: Math.max(base.clearedThrough, local.clearedThrough, local.clearId ? base.baseRevision : 0),
       baseRevision: Math.max(base.baseRevision, local.baseRevision), name: local.name ?? base.name,
+      ...(local.modelSelection !== undefined
+        ? { modelSelection: local.modelSelection }
+        : base.modelSelection !== undefined
+          ? { modelSelection: base.modelSelection }
+          : {}),
       clearId: local.clearId ?? base.clearId, clearedLsn: local.clearId ? local.clearedLsn : base.clearedLsn, deleted: local.deleted || base.deleted,
       activity: local.activity > base.activity ? local.activity : base.activity };
   }
@@ -657,6 +663,7 @@ export class ConversationReadIndex {
     const scope = parseConversationId(conversationId).scope;
     return { conversationId, ownerEpoch, baseRevision: value?.baseRevision ?? 0, turnCount: value?.count ?? 0,
       ...(value?.name ? { name: value.name } : {}), ...(scope.kind === 'workscene' ? { sceneId: scope.sceneId } : {}),
+      ...(value?.modelSelection ? { modelSelection: structuredClone(value.modelSelection) } : {}),
       lastActiveAt: value?.sessionActivity ?? value?.activity ?? '1970-01-01T00:00:00.000Z' };
   }
 }
@@ -993,6 +1000,9 @@ export class ConversationDirectoryReducer {
           } else if (body.t === 'session-meta') { meta.sessionActivity = body.lastActiveAt; if (body.operation === 'delete') meta.deleted = true; }
           else if (body.t === 'session-control') {
             if (body.mutation.kind === 'session-meta' && body.mutation.patch.name !== undefined) meta.name = body.mutation.patch.name;
+            if (body.mutation.kind === 'session-meta' && body.mutation.patch.modelSelection !== undefined) {
+              meta.modelSelection = structuredClone(body.mutation.patch.modelSelection);
+            }
             meta.activity = at;
           } else if (body.t === 'session-lifecycle') {
             if (body.mutation === 'clear') { meta.count = 0; meta.clearedThrough = meta.baseRevision; meta.clearId = body.requestId; meta.clearedLsn = lsn; }

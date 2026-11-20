@@ -655,19 +655,35 @@ describe("createOpenAICompatibleProvider", () => {
     expect(events.filter((e) => e.type === "text_delta")).toHaveLength(2);
   });
 
-  it("出站: ThinkingBlock 应拼回 assistant.reasoning_content 字段供 replay 回传", async () => {
+  it("出站: 同来源且匹配方言的 ThinkingBlock 应拼回 assistant.reasoning_content；跨源/保守端不盲发", async () => {
     mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
 
-    const provider = createOpenAICompatibleProvider(makeProvider());
+    const provider = createOpenAICompatibleProvider(
+      makeProvider({
+        id: "deepseek",
+        baseUrl: "https://api.deepseek.com",
+        quirks: { ...DEFAULT_QUIRKS, thinkingDialect: "deepseek" },
+      }),
+    );
     await collectEvents(
       provider.chat({
-        model: "test-model",
+        model: "deepseek-v4-pro",
         messages: [
           userMessage("Read my file"),
           {
             role: "assistant",
             content: [
-              { type: "thinking", thinking: "我需要先读文件再回答" },
+              {
+                type: "thinking",
+                thinking: "我需要先读文件再回答",
+                protocolState: {
+                  protocol: "openai-compatible",
+                  sourceConnectionId: "deepseek",
+                  sourceOriginKey: "openai-compatible@https://api.deepseek.com",
+                  sourceModel: "deepseek-v4-pro",
+                  payloadVersion: 1,
+                },
+              },
               {
                 type: "tool_use",
                 id: "call_1",
@@ -699,6 +715,48 @@ describe("createOpenAICompatibleProvider", () => {
     // 同 message 内 reasoning_content 与 tool_calls 共存(thinking 模式产生工具调用的场景)
     expect(assistantMsg.tool_calls).toHaveLength(1);
     expect(assistantMsg.tool_calls[0].id).toBe("call_1");
+
+    // 同一消息切到保守端（thinkingDialect: "none"）或不同连接 → 绝不转发 reasoning_content
+    mockCreate.mockReset();
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+    const proxyProvider = createOpenAICompatibleProvider(
+      makeProvider({
+        id: "openrouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        quirks: { ...DEFAULT_QUIRKS, thinkingDialect: "none" },
+      }),
+    );
+    await collectEvents(
+      proxyProvider.chat({
+        model: "deepseek-v4-pro",
+        messages: [
+          userMessage("Hi"),
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: "不应转发给保守代理",
+                protocolState: {
+                  protocol: "openai-compatible",
+                  sourceConnectionId: "deepseek",
+                  sourceOriginKey: "openai-compatible@https://api.deepseek.com",
+                  sourceModel: "deepseek-v4-pro",
+                  payloadVersion: 1,
+                },
+              },
+              { type: "text", text: "你好" },
+            ],
+          },
+          userMessage("继续"),
+        ],
+      }),
+    );
+    const proxyAssistant = mockCreate.mock.calls[0]?.[0].messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect("reasoning_content" in proxyAssistant).toBe(false);
+    expect(proxyAssistant.content).toBe("你好");
   });
 
   it("回归: 无 ThinkingBlock 时 outbound 不写 reasoning_content 字段(非 thinking 模型路径)", async () => {

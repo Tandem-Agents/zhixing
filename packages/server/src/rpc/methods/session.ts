@@ -2087,6 +2087,121 @@ export function buildSessionRenameMethod(): MethodEntry {
   };
 }
 
+// ─── session.getModelSelection / session.setModelSelection ───
+
+function parseSessionModelSelectionParam(
+  raw: unknown,
+): import("@zhixing-ai/core/contracts").SessionModelSelection {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw RpcErrors.invalidParams("session.setModelSelection requires valid 'modelSelection'");
+  }
+  const obj = raw as Record<string, unknown>;
+  if (obj.mode === "follow-default") {
+    const extra = Object.keys(obj).filter((k) => k !== "mode");
+    if (extra.length > 0) {
+      throw RpcErrors.invalidParams(`follow-default modelSelection forbids extra fields: ${extra.join(", ")}`);
+    }
+    return { mode: "follow-default" };
+  }
+  if (obj.mode === "override") {
+    const allowed = new Set(["mode", "connectionId", "model", "params", "maxOutputPreference"]);
+    for (const key of Object.keys(obj)) {
+      if (!allowed.has(key)) {
+        throw RpcErrors.invalidParams(`Unsupported modelSelection field: ${key}`);
+      }
+    }
+    if (typeof obj.connectionId !== "string" || obj.connectionId.trim().length === 0) {
+      throw RpcErrors.invalidParams("override modelSelection requires non-empty 'connectionId'");
+    }
+    if (typeof obj.model !== "string" || obj.model.trim().length === 0) {
+      throw RpcErrors.invalidParams("override modelSelection requires non-empty 'model'");
+    }
+    if (
+      obj.maxOutputPreference !== undefined &&
+      (typeof obj.maxOutputPreference !== "number" ||
+        !Number.isSafeInteger(obj.maxOutputPreference) ||
+        obj.maxOutputPreference <= 0)
+    ) {
+      throw RpcErrors.invalidParams("maxOutputPreference must be a positive safe integer");
+    }
+    if (obj.params !== undefined) {
+      if (!obj.params || typeof obj.params !== "object" || Array.isArray(obj.params)) {
+        throw RpcErrors.invalidParams("modelSelection.params must be an object");
+      }
+      const p = obj.params as Record<string, unknown>;
+      for (const key of Object.keys(p)) {
+        if (key !== "thinking") {
+          throw RpcErrors.invalidParams(`Unsupported modelSelection.params field: ${key}`);
+        }
+      }
+    }
+    return {
+      mode: "override",
+      connectionId: obj.connectionId.trim(),
+      model: obj.model.trim(),
+      ...(obj.params !== undefined
+        ? { params: structuredClone(obj.params) as import("@zhixing-ai/core/contracts").ModelSelectionParams }
+        : {}),
+      ...(obj.maxOutputPreference !== undefined
+        ? { maxOutputPreference: obj.maxOutputPreference as number }
+        : {}),
+    };
+  }
+  throw RpcErrors.invalidParams("modelSelection.mode must be 'follow-default' or 'override'");
+}
+
+export function buildSessionGetModelSelectionMethod(): MethodEntry {
+  return {
+    name: "session.getModelSelection",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as { conversationId?: unknown };
+      if (typeof params.conversationId !== "string" || params.conversationId.trim().length === 0) {
+        throw RpcErrors.invalidParams("session.getModelSelection requires 'conversationId'");
+      }
+      if (!ctx.server.sessionModelSelection) {
+        throw RpcErrors.internal("会话模型选择接口当前不可用");
+      }
+      const modelSelection = await ctx.server.sessionModelSelection.get(params.conversationId);
+      return {
+        conversationId: params.conversationId,
+        modelSelection,
+      };
+    },
+  };
+}
+
+export function buildSessionSetModelSelectionMethod(): MethodEntry {
+  return {
+    name: "session.setModelSelection",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as { conversationId?: unknown; modelSelection?: unknown };
+      if (typeof params.conversationId !== "string" || params.conversationId.trim().length === 0) {
+        throw RpcErrors.invalidParams("session.setModelSelection requires 'conversationId'");
+      }
+      if (!ctx.server.sessionModelSelection) {
+        throw RpcErrors.internal("会话模型选择接口当前不可用");
+      }
+      const parsed = parseSessionModelSelectionParam(params.modelSelection);
+      const saved = await ctx.server.sessionModelSelection.set(params.conversationId, parsed);
+      ctx.server.sessionBroadcast?.(
+        params.conversationId,
+        SESSION_NOTIFICATIONS.changed,
+        {
+          conversationId: params.conversationId,
+          change: "modelSelection",
+          modelSelection: saved,
+        } satisfies SessionChangedPayload,
+      );
+      return {
+        conversationId: params.conversationId,
+        modelSelection: saved,
+      };
+    },
+  };
+}
+
 // ─── session.abort ───
 
 interface SessionAbortParams {

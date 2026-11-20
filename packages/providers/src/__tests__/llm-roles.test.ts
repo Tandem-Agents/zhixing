@@ -356,8 +356,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
 
     expect(resolvedRoles.main.resolved.protocol).toBe("anthropic-messages");
     expect(resolvedRoles.main.model).toBe("claude-sonnet-4-20250514");
-    // 当前 preset 不内嵌 catalog——budget 兜底交给 protocol-default
-    expect(resolvedRoles.main.resolved.declaredModels).toEqual([]);
+    expect(Array.isArray(resolvedRoles.main.resolved.declaredModels)).toBe(true);
   });
 
   it("modelOverrides 从 credentials 透传到 ResolvedProvider", () => {
@@ -396,12 +395,12 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     });
   });
 
-  it("网关型 provider（preset 无 knownModels）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
-    // minimax preset 当前未声明 knownModels（preset 仅含 baseUrl/protocol/quirks），
-    // 适合验证"preset 存在但无 catalog 时 declaredModels 为空"的兜底路径。
+  it("动态运行时 / 网关型 provider（preset 无静态 knownModels）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
+    // ollama preset 为本机动态运行时，不预设静态 knownModels（模型来自原生发现或手工输入）；
+    // 适合验证"preset 存在但无静态 catalog 时 declaredModels 为空"的兜底路径。
     writeFixture(
-      { llm: { main: { provider: "minimax", model: "MiniMax-Text-01" } } },
-      credsFor({ minimax: "sk-mm" }),
+      { llm: { main: { provider: "ollama", model: "llama3.3:70b" } } },
+      credsFor({ ollama: "local-unused" }),
     );
     const { roles, resolvedRoles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 

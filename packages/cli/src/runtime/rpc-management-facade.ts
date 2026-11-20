@@ -374,6 +374,48 @@ export class RpcManagementFacade {
     });
   }
 
+  /** 请求宿主对模型域配置/凭据执行窄生效（不重启、不断开未受影响通道）。 */
+  async applyModelConfiguration(input?: {
+    readonly operationId?: string;
+    readonly revokedSecretRefs?: readonly string[];
+    readonly abortConnectionIds?: readonly string[];
+    readonly revokeOnly?: boolean;
+  }): Promise<{
+    readonly applied: boolean;
+    readonly revision: string;
+    readonly reason?: string;
+    readonly deduplicated?: true;
+    readonly abortedCalls?: number;
+  }> {
+    const client = await this.link.getClient();
+    return await client.request("server.apply-model-configuration", input ?? {});
+  }
+
+  /** 本机宿主单写模型目录协调入口（查询状态 / 手动或按需刷新 / 自动检查开关）。 */
+  async modelCatalog(input?: {
+    readonly action: "status" | "refresh" | "set-auto-check";
+    readonly force?: boolean;
+    readonly autoCheckEnabled?: boolean;
+  }): Promise<{
+    readonly source: "bundled" | "trusted-remote" | "recovered-previous";
+    readonly activeRevision: string;
+    readonly publishedAt: string;
+    readonly autoCheckEnabled: boolean;
+    readonly repositoryConfigured: boolean;
+    readonly repositoryMetadataUrl?: string;
+    readonly lastCheckedAt?: string;
+    readonly lastStatus: "idle" | "up-to-date" | "updated" | "offline" | "failed" | "disabled";
+    readonly lastError?: string;
+    readonly rootVersion?: number;
+    readonly upgradeNotice?: import("@zhixing-ai/providers/configuration").CatalogUpgradeNotice;
+    readonly runtimeRevision?: string;
+    readonly changed?: boolean;
+    readonly message?: string;
+  }> {
+    const client = await this.link.getClient();
+    return await client.request("server.model-catalog", input ?? { action: "status" });
+  }
+
   // ─── llm(可信面轻推理通道) ───
 
   /** 单发文本调用(无对话历史)——管理流程(/mcp 接入向导等)的小段推理。 */

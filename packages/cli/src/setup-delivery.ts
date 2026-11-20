@@ -35,6 +35,7 @@ import type {
   AuthorityError,
   CapabilityDescriptor,
   CredentialBindingDescriptor,
+  CrossDeviceModelSelectionIntent,
   DeviceIdentity,
   EnvironmentPort,
   EnvironmentRequirement,
@@ -59,6 +60,7 @@ import {
   EXECUTION_PROTOCOL_VERSION,
   ExecutorCapabilityDirectory,
   matchManifest,
+  MODEL_EXECUTION_PROTOCOL_VERSION,
   normalizeTrustRulesForSnapshot,
   protocolDigest,
   type ExecutorCapabilitySnapshot,
@@ -345,6 +347,8 @@ export interface AuthorityRuntimeStack {
     readonly executionProfile: RuntimeExecutionProfile;
     readonly permissionRules: readonly PermissionRule[];
     readonly environment?: ExplicitEnvironmentSelection;
+    readonly modelSelection?: CrossDeviceModelSelectionIntent;
+    readonly allowLegacyV1FollowRole?: boolean;
     readonly recentExecutorId?: string;
     readonly targets?: readonly {
       readonly executorId: string;
@@ -360,6 +364,8 @@ export interface AuthorityRuntimeStack {
     readonly executionProfile: RuntimeExecutionProfile;
     readonly permissionRules: readonly PermissionRule[];
     readonly environment?: ExplicitEnvironmentSelection;
+    readonly modelSelection?: CrossDeviceModelSelectionIntent;
+    readonly allowLegacyV1FollowRole?: boolean;
   }) => Promise<PreparedConversationAssignmentAuthority>;
   readonly prepareJobAssignment: (input: {
     readonly instruction: JobExecutionInstruction;
@@ -367,6 +373,8 @@ export interface AuthorityRuntimeStack {
       readonly tools: readonly string[];
       readonly mcpServers: readonly string[];
     };
+    readonly modelSelection?: CrossDeviceModelSelectionIntent;
+    readonly allowLegacyV1FollowRole?: boolean;
     /**
      * 按本次清单将写入的工作区要求与签发的工具集合给出冻结快照规则（范围推导见
      * jobRunTrustScopeInput，内置规则随工具集合）；不给时快照为空。
@@ -509,6 +517,10 @@ export interface ExecutorReadiness {
   readonly deviceScopedCredentialBindingIds: readonly string[];
   /** Opaque SecretStore commit generation; never published on protocol surfaces. */
   readonly credentialGeneration: string | null;
+  /** 可选 v2 按连接发布的模型就绪描述（含免密连接，绝不为免密连接造假 credentialBindings）。 */
+  readonly modelConnections?: readonly import("@zhixing-ai/core").ModelConnectionReadinessDescriptor[];
+  /** 可选 v2 就绪用途角色列表。 */
+  readonly readyRoles?: readonly import("@zhixing-ai/core").ModelRoleId[];
 }
 
 export interface SetupAuthorityRuntimeOptions {
@@ -913,6 +925,10 @@ export async function setupAuthorityRuntime(
           ({ revision: _revision, ...binding }) => binding,
         ),
         credentialGeneration: null,
+        ...(published.modelConnections?.length
+          ? { modelConnections: published.modelConnections.map((entry) => ({ ...entry })) }
+          : {}),
+        ...(published.readyRoles?.length ? { readyRoles: [...published.readyRoles] } : {}),
       } satisfies NormalizedExecutorReadiness;
     };
     const deviceDigestFor = (
@@ -928,6 +944,10 @@ export async function setupAuthorityRuntime(
           credentialBindings: readiness.credentialBindings,
           credentialGeneration: readiness.credentialGeneration,
           evidenceCapabilities: ["artifact", "file-diff", "log"],
+          ...(readiness.modelConnections?.length
+            ? { modelConnections: readiness.modelConnections }
+            : {}),
+          ...(readiness.readyRoles?.length ? { readyRoles: readiness.readyRoles } : {}),
         },
         workspaceCatalog: {
           catalogGeneration: workspaceCatalog.catalogGeneration,
@@ -981,11 +1001,17 @@ export async function setupAuthorityRuntime(
         {
           executorId,
           revision: capabilityRevision,
-          protocolVersion: EXECUTION_PROTOCOL_VERSION,
+          protocolVersion: readiness.modelConnections?.length
+            ? MODEL_EXECUTION_PROTOCOL_VERSION
+            : EXECUTION_PROTOCOL_VERSION,
           workspaces: workspaces.map((workspace) => ({ ...workspace })),
           tools: [...readiness.tools],
           mcpServers: [...readiness.mcpServers],
           credentialBindings: versionedCredentialBindings,
+          ...(readiness.modelConnections?.length
+            ? { modelConnections: readiness.modelConnections.map((entry) => ({ ...entry })) }
+            : {}),
+          ...(readiness.readyRoles?.length ? { readyRoles: [...readiness.readyRoles] } : {}),
           evidenceCapabilities: ["artifact", "file-diff", "log"],
           at: versionResolution.deviceGeneratedAt,
         },
@@ -1303,6 +1329,8 @@ export async function setupAuthorityRuntime(
       readonly executionProfile: RuntimeExecutionProfile;
       readonly permissionRules: readonly PermissionRule[];
       readonly environment?: ExplicitEnvironmentSelection;
+      readonly modelSelection?: CrossDeviceModelSelectionIntent;
+      readonly allowLegacyV1FollowRole?: boolean;
       readonly recentExecutorId?: string;
       readonly targets?: readonly {
         readonly executorId: string;
@@ -1380,10 +1408,24 @@ export async function setupAuthorityRuntime(
         deviceDigest: string,
         environment: EnvironmentRequirement,
       ): PreparedConversationAssignmentAuthority => {
+        const effectiveSelection = resolveEffectiveTargetModelSelection(
+          target,
+          input.modelSelection,
+          input.allowLegacyV1FollowRole,
+        );
+        const modelSelectionError = validateTargetModelSelection(
+          target,
+          effectiveSelection,
+        );
+        if (modelSelectionError) {
+          throw new Error(modelSelectionError);
+        }
         const executionProfile = profileForTarget(target);
         const requiredCredentialBindings = requiredBindingsForRuntime(
           executionProfile,
           target.descriptor.credentialBindings,
+          target.descriptor.modelConnections,
+          effectiveSelection,
         );
         assertRuntimeAvailable(executionProfile, {
           tools: target.descriptor.tools,
@@ -1406,10 +1448,15 @@ export async function setupAuthorityRuntime(
               ...target.inventory.assetVersions,
             },
             manifestCapabilities: {
-              protocolVersion: target.descriptor.protocolVersion,
+              protocolVersion: effectiveSelection
+                ? MODEL_EXECUTION_PROTOCOL_VERSION
+                : target.descriptor.protocolVersion,
               tools: executionProfile.tools,
               mcpServers: executionProfile.mcpServers,
               credentialBindings: requiredCredentialBindings,
+              ...(effectiveSelection
+                ? { modelSelection: structuredClone(effectiveSelection) }
+                : {}),
             },
             permissionSnapshot: permissionPublication.snapshot,
             budget: { maxCalls: 64, maxTokens: 256_000 },
@@ -1447,6 +1494,18 @@ export async function setupAuthorityRuntime(
             throw new Error(
               "Target executor capability snapshot is unavailable",
             );
+          const effectiveSelection = resolveEffectiveTargetModelSelection(
+            target,
+            input.modelSelection,
+            input.allowLegacyV1FollowRole,
+          );
+          const modelSelectionError = validateTargetModelSelection(
+            target,
+            effectiveSelection,
+          );
+          if (modelSelectionError) {
+            throw new Error(modelSelectionError);
+          }
           assertRuntimeAvailable(profileForTarget(target), {
             tools: target.descriptor.tools,
             mcpServers: target.descriptor.mcpServers,
@@ -1473,11 +1532,24 @@ export async function setupAuthorityRuntime(
           permissionPublication.highWater,
         ));
         const target = publication.snapshot;
-        candidates.push({
-          snapshot: target,
-          deviceId: key.deviceId,
-          deviceDigest: publication.deviceDigest,
-        });
+        const effectiveSelection = resolveEffectiveTargetModelSelection(
+          target,
+          input.modelSelection,
+          input.allowLegacyV1FollowRole,
+        );
+        const modelSelectionError = validateTargetModelSelection(
+          target,
+          effectiveSelection,
+        );
+        if (modelSelectionError) {
+          candidateErrors.push(new Error(modelSelectionError));
+        } else {
+          candidates.push({
+            snapshot: target,
+            deviceId: key.deviceId,
+            deviceDigest: publication.deviceDigest,
+          });
+        }
       }
       const selection = selectExecutorForEnvironment(
         environmentRequirement,
@@ -1549,6 +1621,21 @@ export async function setupAuthorityRuntime(
         );
         const publication = await phase("local-executor", () => refreshLocalExecutorSnapshot());
         const target = publication.snapshot;
+        const effectiveSelection = resolveEffectiveTargetModelSelection(
+          target,
+          input.modelSelection,
+          input.allowLegacyV1FollowRole,
+        );
+        const modelSelectionError = validateTargetModelSelection(
+          target,
+          effectiveSelection,
+        );
+        if (modelSelectionError) {
+          throw new SchedulerCapabilityGapError(
+            modelSelectionError,
+            permissionSnapshot.snapshotVersion,
+          );
+        }
         assertRuntimeAvailable(executionProfile, {
           tools: target.descriptor.tools,
           mcpServers: target.descriptor.mcpServers,
@@ -1558,6 +1645,8 @@ export async function setupAuthorityRuntime(
         const credentialBindings = requiredBindingsForRuntime(
           executionProfile,
           target.descriptor.credentialBindings,
+          target.descriptor.modelConnections,
+          effectiveSelection,
         );
         const frozenWorkspace = environment.workspace
           ? target.descriptor.workspaces.find(
@@ -1602,10 +1691,15 @@ export async function setupAuthorityRuntime(
               ...target.inventory.assetVersions,
             },
             manifestCapabilities: {
-              protocolVersion: target.descriptor.protocolVersion,
+              protocolVersion: effectiveSelection
+                ? MODEL_EXECUTION_PROTOCOL_VERSION
+                : target.descriptor.protocolVersion,
               tools: executionProfile.tools,
               mcpServers: executionProfile.mcpServers,
               credentialBindings,
+              ...(effectiveSelection
+                ? { modelSelection: structuredClone(effectiveSelection) }
+                : {}),
             },
             permissionSnapshot,
             budget: { maxCalls: 64, maxTokens: 256_000 },
@@ -1661,13 +1755,21 @@ export async function setupAuthorityRuntime(
         );
       }
       const selected = candidates
-        .filter((candidate) =>
-          requestedTools.every((tool) => input.capabilities.tools.includes(tool)) &&
-          requestedTools.every((tool) => candidate.descriptor.tools.includes(tool)) &&
-          requestedMcpServers.every((server) =>
-            candidate.descriptor.mcpServers.includes(server),
-          ),
-        )
+        .filter((candidate) => {
+          const effectiveSelection = resolveEffectiveTargetModelSelection(
+            candidate,
+            input.modelSelection,
+            input.allowLegacyV1FollowRole,
+          );
+          return (
+            requestedTools.every((tool) => input.capabilities.tools.includes(tool)) &&
+            requestedTools.every((tool) => candidate.descriptor.tools.includes(tool)) &&
+            requestedMcpServers.every((server) =>
+              candidate.descriptor.mcpServers.includes(server),
+            ) &&
+            validateTargetModelSelection(candidate, effectiveSelection) === undefined
+          );
+        })
         .sort((left, right) =>
           Number(right.descriptor.executorId === executorId) -
             Number(left.descriptor.executorId === executorId) ||
@@ -1682,16 +1784,33 @@ export async function setupAuthorityRuntime(
           ),
         );
       }
-      const credentialBindings = selected.descriptor.credentialBindings
-        .map((binding) => ({
-          service: binding.service,
-          bindingId: binding.bindingId,
-          revision: binding.revision,
-        }))
-        .sort((left, right) =>
-          left.service.localeCompare(right.service) ||
-          left.bindingId.localeCompare(right.bindingId),
-        );
+      const effectiveSelection = resolveEffectiveTargetModelSelection(
+        selected,
+        input.modelSelection,
+        input.allowLegacyV1FollowRole,
+      );
+      const credentialBindings =
+        effectiveSelection !== undefined && selected.descriptor.modelConnections !== undefined
+          ? requiredBindingsForRuntime(
+              {
+                tools: requestedTools,
+                mcpServers: requestedMcpServers,
+                providerIds: [],
+              },
+              selected.descriptor.credentialBindings,
+              selected.descriptor.modelConnections,
+              effectiveSelection,
+            )
+          : selected.descriptor.credentialBindings
+              .map((binding) => ({
+                service: binding.service,
+                bindingId: binding.bindingId,
+                revision: binding.revision,
+              }))
+              .sort((left, right) =>
+                left.service.localeCompare(right.service) ||
+                left.bindingId.localeCompare(right.bindingId),
+              );
       return {
         executorId: selected.descriptor.executorId,
         policy: {
@@ -1701,10 +1820,15 @@ export async function setupAuthorityRuntime(
             ...selected.inventory.assetVersions,
           },
           manifestCapabilities: {
-            protocolVersion: selected.descriptor.protocolVersion,
+            protocolVersion: effectiveSelection
+              ? MODEL_EXECUTION_PROTOCOL_VERSION
+              : selected.descriptor.protocolVersion,
             tools: requestedTools,
             mcpServers: requestedMcpServers,
             credentialBindings,
+            ...(effectiveSelection
+              ? { modelSelection: structuredClone(effectiveSelection) }
+              : {}),
           },
           permissionSnapshot: permissionPublication.snapshot,
           budget: { maxCalls: 64, maxTokens: 256_000 },
@@ -1893,6 +2017,8 @@ export async function setupAuthorityRuntime(
         const expectedBindings = requiredBindingsForRuntime(
           profile,
           versionedBindings,
+          readiness.modelConnections,
+          input.manifest.modelSelection,
         );
         if (
           canonicalize(input.manifest.tools) !== canonicalize(profile.tools) ||
@@ -2295,6 +2421,7 @@ export async function setupAuthorityRuntime(
       prepareConversationAssignment,
       prepareLocalConversationAssignment,
       prepareJobAssignment,
+      refreshLocalExecutorSnapshot,
       validateConversationRuntimeBinding,
       preflightLocalConversationEnvironment,
       takeLocalConversationEnvironmentPreflight,
@@ -2326,6 +2453,7 @@ function plannedAnchorCapabilities(input: unknown): {
   const providers = ["main", "light", "power"]
     .flatMap((role) => {
       const value = isPlainRecord(llm[role]) ? llm[role] : undefined;
+      if (typeof value?.connectionId === "string") return [value.connectionId];
       return typeof value?.provider === "string" ? [value.provider] : [];
     });
   const mcp = isPlainRecord(config.mcp) ? config.mcp : {};
@@ -2361,6 +2489,8 @@ interface NormalizedExecutorReadiness {
     "revision"
   >[];
   readonly credentialGeneration: string | null;
+  readonly modelConnections?: readonly import("@zhixing-ai/core").ModelConnectionReadinessDescriptor[];
+  readonly readyRoles?: readonly import("@zhixing-ai/core").ModelRoleId[];
 }
 
 function createGlobalStateRouter(
@@ -2428,6 +2558,7 @@ function normalizeExecutorReadiness(
     input.deviceScopedCredentialBindingIds,
   );
   const logicalBindingIds = new Set<string>();
+  const scopedBindingIdMap = new Map<string, string>();
   const credentialBindings = input.credentialBindings
     .map((binding) => {
       requireIdentifier(binding.bindingId, "Executor credential binding id");
@@ -2442,10 +2573,14 @@ function normalizeExecutorReadiness(
           "Only user-alias credential bindings can be device-scoped",
         );
       }
+      const publishedBindingId = deviceScoped
+        ? deviceScopedUserAliasBindingId(deviceId, binding.bindingId)
+        : binding.bindingId;
+      if (deviceScoped) {
+        scopedBindingIdMap.set(binding.bindingId, publishedBindingId);
+      }
       return {
-        bindingId: deviceScoped
-          ? deviceScopedUserAliasBindingId(deviceId, binding.bindingId)
-          : binding.bindingId,
+        bindingId: publishedBindingId,
         service: binding.service,
         verification: binding.verification,
         ...(binding.resource === undefined
@@ -2480,6 +2615,19 @@ function normalizeExecutorReadiness(
     mcpServers,
     credentialBindings,
     credentialGeneration: input.credentialGeneration,
+    ...(input.modelConnections?.length
+      ? {
+          modelConnections: input.modelConnections.map((entry) => ({
+            ...entry,
+            ...(entry.credentialBindingId && scopedBindingIdMap.has(entry.credentialBindingId)
+              ? { credentialBindingId: scopedBindingIdMap.get(entry.credentialBindingId)! }
+              : {}),
+          })),
+        }
+      : {}),
+    ...(input.readyRoles?.length
+      ? { readyRoles: [...input.readyRoles].sort(compareCanonicalStrings) }
+      : {}),
   };
 }
 
@@ -2507,15 +2655,104 @@ function assertRuntimeAvailable(
   }
 }
 
+function resolveEffectiveTargetModelSelection(
+  target: ExecutorCapabilitySnapshot,
+  selection: CrossDeviceModelSelectionIntent | undefined,
+  allowLegacyV1FollowRole?: boolean,
+): CrossDeviceModelSelectionIntent | undefined {
+  if (!selection) return undefined;
+  const supportsV2 =
+    BigInt(target.descriptor.protocolVersion) >= BigInt(MODEL_EXECUTION_PROTOCOL_VERSION) &&
+    target.descriptor.modelConnections !== undefined;
+  if (supportsV2) return selection;
+  if (
+    allowLegacyV1FollowRole === true &&
+    selection.mode === "follow-role" &&
+    selection.params === undefined &&
+    selection.maxOutputPreference === undefined
+  ) {
+    return undefined;
+  }
+  return selection;
+}
+
+function validateTargetModelSelection(
+  target: ExecutorCapabilitySnapshot,
+  selection: CrossDeviceModelSelectionIntent | undefined,
+): string | undefined {
+  if (!selection) return undefined;
+  if (BigInt(target.descriptor.protocolVersion) < BigInt(MODEL_EXECUTION_PROTOCOL_VERSION)) {
+    return "Target executor protocol version is incompatible with structured modelSelection (requires v2)";
+  }
+  const connections = target.descriptor.modelConnections;
+  if (!connections) {
+    return "Target executor does not advertise model connection readiness";
+  }
+  if (selection.mode === "follow-role") {
+    const readyRoles = target.descriptor.readyRoles;
+    if (readyRoles && !readyRoles.includes(selection.role)) {
+      return `Target executor does not have ready model binding for role "${selection.role}"`;
+    }
+    const hasBoundRoles = connections.some((entry) => entry.boundRoles !== undefined);
+    const matchedConnections = hasBoundRoles
+      ? connections.filter(
+          (entry) => entry.ready && entry.boundRoles?.includes(selection.role),
+        )
+      : connections.filter((entry) => entry.ready);
+    if (matchedConnections.length === 0) {
+      return `Target executor has no ready model connection for role "${selection.role}"`;
+    }
+    for (const matched of matchedConnections) {
+      if (matched.authMode !== "none") {
+        const hasBinding =
+          (matched.credentialBindingId !== undefined &&
+            target.descriptor.credentialBindings.some(
+              (binding) => binding.bindingId === matched.credentialBindingId,
+            )) ||
+          target.descriptor.credentialBindings.some(
+            (binding) => binding.service === `provider-${matched.connectionId}`,
+          );
+        if (!hasBinding) {
+          return `Target executor connection "${matched.connectionId}" for role "${selection.role}" lacks its required credential binding`;
+        }
+      }
+    }
+    return undefined;
+  }
+  const matched = connections.find(
+    (entry) => entry.connectionId === selection.connectionId,
+  );
+  if (!matched || !matched.ready) {
+    return `Target executor does not have ready model connection "${selection.connectionId}"`;
+  }
+  if (selection.adapter !== undefined && matched.adapter !== selection.adapter) {
+    return `Target executor connection "${selection.connectionId}" uses adapter "${matched.adapter}", not "${selection.adapter}"`;
+  }
+  if (matched.authMode !== "none") {
+    if (
+      !matched.credentialBindingId ||
+      !target.descriptor.credentialBindings.some(
+        (binding) => binding.bindingId === matched.credentialBindingId,
+      )
+    ) {
+      return `Target executor connection "${selection.connectionId}" lacks its required credential binding`;
+    }
+  }
+  return undefined;
+}
+
 function requiredBindingsForRuntime(
   profile: RuntimeExecutionProfile,
   available: readonly CredentialBindingDescriptor[],
+  modelConnections?: readonly import("@zhixing-ai/core").ModelConnectionReadinessDescriptor[],
+  modelSelection?: CrossDeviceModelSelectionIntent,
 ): Array<{
   readonly service: string;
   readonly bindingId: string;
   readonly revision: number;
 }> {
   const byService = new Map<string, CredentialBindingDescriptor>();
+  const byBindingId = new Map<string, CredentialBindingDescriptor>();
   for (const binding of available) {
     if (byService.has(binding.service)) {
       throw new TypeError(
@@ -2523,20 +2760,97 @@ function requiredBindingsForRuntime(
       );
     }
     byService.set(binding.service, binding);
+    byBindingId.set(binding.bindingId, binding);
   }
+  const connectionsById = new Map(
+    (modelConnections ?? []).map((entry) => [entry.connectionId, entry]),
+  );
   const required: CredentialBindingDescriptor[] = [];
-  for (const providerId of profile.providerIds) {
-    const binding = byService.get(`provider-${providerId}`);
-    if (binding === undefined) {
-      throw new Error(
-        `Resolved provider credential is not ready: ${providerId}`,
-      );
+  const seenBindingIds = new Set<string>();
+  if (modelSelection !== undefined && modelConnections !== undefined) {
+    // R2-C：存在结构化 modelSelection 时，模型凭据绑定严格按目标执行端自身连接与角色声明派生，
+    // 不再用源设备的 profile.providerIds 要求目标具备源端同名连接。
+    const selectedConnections: import("@zhixing-ai/core").ModelConnectionReadinessDescriptor[] = [];
+    if (modelSelection.mode === "connection") {
+      const matched = connectionsById.get(modelSelection.connectionId);
+      if (!matched || !matched.ready) {
+        throw new Error(`Resolved model connection is not ready: ${modelSelection.connectionId}`);
+      }
+      selectedConnections.push(matched);
+    } else {
+      const hasBoundRoles = modelConnections.some((entry) => entry.boundRoles !== undefined);
+      const roleMatched = hasBoundRoles
+        ? modelConnections.filter(
+            (entry) => entry.ready && entry.boundRoles?.includes(modelSelection.role),
+          )
+        : modelConnections.filter((entry) => entry.ready);
+      if (roleMatched.length === 0) {
+        throw new Error(
+          `Target executor has no ready model connection for role: ${modelSelection.role}`,
+        );
+      }
+      selectedConnections.push(...roleMatched);
     }
-    required.push(binding);
+    for (const conn of selectedConnections) {
+      if (conn.authMode === "none") {
+        // 免密连接（本地 Ollama/vLLM/自建无鉴权端点）无需也禁止造假 credentialBindings
+        continue;
+      }
+      const bound =
+        (conn.credentialBindingId ? byBindingId.get(conn.credentialBindingId) : undefined) ??
+        byService.get(`provider-${conn.connectionId}`);
+      if (bound === undefined) {
+        throw new Error(
+          `Resolved provider credential is not ready: ${conn.connectionId}`,
+        );
+      }
+      if (!seenBindingIds.has(bound.bindingId)) {
+        seenBindingIds.add(bound.bindingId);
+        required.push(bound);
+      }
+    }
+  } else {
+    for (const providerId of profile.providerIds) {
+      const conn = connectionsById.get(providerId);
+      if (conn) {
+        if (!conn.ready) {
+          throw new Error(`Resolved model connection is not ready: ${providerId}`);
+        }
+        if (conn.authMode === "none") {
+          continue;
+        }
+        const bound =
+          (conn.credentialBindingId ? byBindingId.get(conn.credentialBindingId) : undefined) ??
+          byService.get(`provider-${providerId}`);
+        if (bound === undefined) {
+          throw new Error(
+            `Resolved provider credential is not ready: ${providerId}`,
+          );
+        }
+        if (!seenBindingIds.has(bound.bindingId)) {
+          seenBindingIds.add(bound.bindingId);
+          required.push(bound);
+        }
+        continue;
+      }
+      const binding = byService.get(`provider-${providerId}`);
+      if (binding === undefined) {
+        throw new Error(
+          `Resolved provider credential is not ready: ${providerId}`,
+        );
+      }
+      if (!seenBindingIds.has(binding.bindingId)) {
+        seenBindingIds.add(binding.bindingId);
+        required.push(binding);
+      }
+    }
   }
   for (const serverId of profile.mcpServers) {
     const binding = byService.get(`mcp-${serverId}`);
-    if (binding !== undefined) required.push(binding);
+    if (binding !== undefined && !seenBindingIds.has(binding.bindingId)) {
+      seenBindingIds.add(binding.bindingId);
+      required.push(binding);
+    }
   }
   return required
     .map(({ service, bindingId, revision }) => ({

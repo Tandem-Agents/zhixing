@@ -11,6 +11,7 @@ import type {
 } from "../contracts/index.js";
 import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateJobCommitFence } from "./job.js";
+import { validateCrossDeviceModelSelection } from "./manifest.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
 
@@ -690,13 +691,14 @@ function validateScheduleSpec(spec: unknown): void {
   assertPlainObject(spec.action, "Schedule action");
   assertExactKeys(
     spec.action,
-    ["kind", "model", "prompt", "tools"],
+    ["kind", "model", "modelSelection", "prompt", "tools"],
     "Schedule action",
     true,
   );
   if (spec.action.kind !== "agent-turn") throw new TypeError("Schedule action is invalid");
   assertString(spec.action.prompt, "Schedule prompt");
   if (spec.action.model !== undefined) assertString(spec.action.model, "Schedule model");
+  if (spec.action.modelSelection !== undefined) validateCrossDeviceModelSelection(spec.action.modelSelection);
   if (spec.action.tools !== undefined) assertStringArray(spec.action.tools, "Schedule tools");
   if (spec.delivery !== undefined) validateTaskDelivery(spec.delivery);
 }

@@ -40,8 +40,47 @@ describe('bounded conversation replay validation', () => {
         { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'write', input: {} }] },
         { role: 'user', content: [{ type: 'tool_result', toolUseId: 'a', content: 'x', isError: true, disposition }] }] })));
       await expect(readConversationReplayRecord(store, accepted, 'run-1', [])).resolves.toBeDefined();
+      // 协议私有状态是有界可选封闭字段：合法 ThinkingBlock/TextBlock.protocolState 接受，未知键或越界拒绝
+      const validProtocolRecord = await store.put(Buffer.from(canonicalize({
+        ...record,
+        messages: [
+          record.messages[0],
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'thinking',
+                thinking: '',
+                protocolState: {
+                  protocol: 'openai-responses',
+                  sourceConnectionId: 'openai',
+                  sourceOriginKey: 'https://api.openai.com/v1',
+                  sourceModel: 'gpt-6.2-astra',
+                  payloadVersion: 1,
+                  encryptedContent: 'enc_valid_blob',
+                },
+              },
+              {
+                type: 'text',
+                text: 'done',
+                protocolState: {
+                  protocol: 'openai-responses',
+                  sourceConnectionId: 'openai',
+                  sourceOriginKey: 'https://api.openai.com/v1',
+                  sourceModel: 'gpt-6.2-astra',
+                  phase: 'final_answer',
+                  itemId: 'msg_1',
+                },
+              },
+            ],
+          },
+        ],
+      })));
+      await expect(readConversationReplayRecord(store, validProtocolRecord, 'run-1', [])).resolves.toBeDefined();
       for (const content of [[{ type: 'text', text: 3 }], [{ type: 'tool_use', name: 'Read', id: 'a', input: [] }], [{ type: 'text', text: 'hi', extra: true }],
-        [{ type: 'tool_result', toolUseId: 'a', content: 'x', disposition: { ...disposition, kind: 'failed' } }]]) {
+        [{ type: 'tool_result', toolUseId: 'a', content: 'x', disposition: { ...disposition, kind: 'failed' } }],
+        [{ type: 'thinking', thinking: 'x', protocolState: { protocol: 'openai-responses', extra: 1 } }],
+        [{ type: 'text', text: 'x', protocolState: { protocol: 'openai-responses', sourceConnectionId: 'o', sourceOriginKey: 'https://a', sourceModel: 'm', phase: 'unknown' } }]]) {
         const ref = await store.put(Buffer.from(canonicalize({ ...record, messages: [{ role: 'user', content }] })));
         await expect(readConversationReplayRecord(store, ref, 'run-1', [])).rejects.toThrow();
       }

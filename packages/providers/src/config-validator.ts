@@ -11,7 +11,8 @@
  * 注册自带的字段约束，无需修改本文件。
  */
 
-import type { ZhixingConfig } from "./types.js";
+import { validateSingleHopHeaderName } from "@zhixing-ai/network";
+import { isLLMConfigV2, type ZhixingConfig } from "./types.js";
 
 // ─── 错误结构 ───
 
@@ -133,6 +134,172 @@ const validateNoMessagingCredentials: ConfigValidator = (config) => {
   return issues;
 };
 
+const FORBIDDEN_PUBLIC_SECRET_KEYS = new Set([
+  "apikey",
+  "api_key",
+  "secret",
+  "token",
+  "password",
+  "passwd",
+  "authorization",
+  "credentials",
+]);
+
+const SENSITIVE_ENDPOINT_QUERY_KEYS = new Set([
+  "key",
+  "api_key",
+  "apikey",
+  "access_token",
+  "token",
+  "auth",
+  "authorization",
+  "secret",
+  "client_secret",
+  "password",
+  "passwd",
+  "sig",
+  "signature",
+]);
+
+const RESERVED_SECRET_REF_PREFIXES = ["configuration/", "credentials/"] as const;
+
+export function hasExplicitUrlCredentialsOrQueryAuth(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.username !== "" || parsed.password !== "") return true;
+    for (const [key] of parsed.searchParams) {
+      if (SENSITIVE_ENDPOINT_QUERY_KEYS.has(key.toLowerCase())) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function isReservedModelSecretRef(secretRef: string): boolean {
+  return RESERVED_SECRET_REF_PREFIXES.some((prefix) => secretRef.startsWith(prefix));
+}
+
+/** 校验公开配置 llm v2 段不含秘密、非法 URL、保留管理凭据引用或非法认证头。 */
+const validatePublicLlmV2: ConfigValidator = (config) => {
+  const rawLlm = config.llm as unknown;
+  if (rawLlm === undefined || !isLLMConfigV2(rawLlm)) return [];
+  const issues: ConfigSemanticIssue[] = [];
+
+  for (const [connId, conn] of Object.entries(rawLlm.connections)) {
+    const connObj = conn as unknown as Record<string, unknown>;
+    for (const key of Object.keys(connObj)) {
+      if (FORBIDDEN_PUBLIC_SECRET_KEYS.has(key.toLowerCase())) {
+        issues.push({
+          field: `llm.connections.${connId}.${key}`,
+          reason: "连接明文凭据必须保存在设备本地 SecretStore，禁止出现在公开 config.jsonc 中",
+          fix: `删除 llm.connections.${connId}.${key}，改用 auth.secretRef 经配置入口录入凭据`,
+        });
+      }
+    }
+
+    if (typeof conn.endpoint === "string" && conn.endpoint.trim()) {
+      try {
+        const parsed = new URL(conn.endpoint);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+          issues.push({
+            field: `llm.connections.${connId}.endpoint`,
+            reason: `连接端点仅允许 HTTP(S) 协议，当前为 ${parsed.protocol}`,
+            fix: "改填合法的 https:// 或经确认的本地/私网 http:// 地址",
+          });
+        }
+        if (parsed.username !== "" || parsed.password !== "") {
+          issues.push({
+            field: `llm.connections.${connId}.endpoint`,
+            reason: "公开连接端点不允许包含 URL userinfo 凭据",
+            fix: "从端点 URL 移除用户名与密码，改通过设备本地 SecretStore 配置认证",
+          });
+        }
+        for (const [queryKey] of parsed.searchParams) {
+          if (SENSITIVE_ENDPOINT_QUERY_KEYS.has(queryKey.toLowerCase())) {
+            issues.push({
+              field: `llm.connections.${connId}.endpoint`,
+              reason: `公开连接端点不允许携带敏感查询认证参数 "${queryKey}"`,
+              fix: "移除端点查询参数中的密钥/令牌，改由 SecretStore 注入认证头",
+            });
+          }
+        }
+      } catch {
+        issues.push({
+          field: `llm.connections.${connId}.endpoint`,
+          reason: "连接端点不是合法的 URL",
+          fix: "填写完整的 HTTP(S) 端点地址",
+        });
+      }
+    }
+
+    const auth = conn.auth as unknown as Record<string, unknown> | undefined;
+    if (auth && typeof auth === "object") {
+      for (const key of Object.keys(auth)) {
+        if (FORBIDDEN_PUBLIC_SECRET_KEYS.has(key.toLowerCase()) || key === "value") {
+          issues.push({
+            field: `llm.connections.${connId}.auth.${key}`,
+            reason: "公开配置 auth 段只允许存逻辑引用 secretRef，禁止存明文秘密",
+            fix: "移除明文字段并通过配置入口写入 SecretStore",
+          });
+        }
+      }
+      if (auth.mode === "api-key" || auth.mode === "header") {
+        const ref = auth.secretRef;
+        if (typeof ref !== "string" || !ref.trim() || ref.trim() !== ref || isReservedModelSecretRef(ref)) {
+          issues.push({
+            field: `llm.connections.${connId}.auth.secretRef`,
+            reason: "逻辑凭据引用无效或指向受保护的系统管理记录路径",
+            fix: "使用普通逻辑凭据标识，禁止引用 configuration/* 或 credentials/* 管理路径",
+          });
+        }
+      }
+      if (auth.mode === "header") {
+        const headerErr =
+          typeof auth.headerName === "string"
+            ? validateSingleHopHeaderName(auth.headerName)
+            : "自定义认证头名称缺失";
+        if (headerErr) {
+          issues.push({
+            field: `llm.connections.${connId}.auth.headerName`,
+            reason: headerErr,
+            fix: "改用合法且非路由/非逐跳控制的认证头名称（如 X-Api-Key）",
+          });
+        }
+      }
+    }
+  }
+
+  for (const item of rawLlm.migrationPending ?? []) {
+    const record = item as unknown as Record<string, unknown>;
+    if (record.kind !== "unattributed-override" && record.kind !== "protected-legacy-roles") {
+      issues.push({
+        field: "llm.migrationPending",
+        reason: "migrationPending 仅允许记录未归属的非秘密旧覆盖项或受保护旧端点的非秘密用途意图，禁止存放秘密或未确认自定义 URL",
+        fix: "通过迁移修复入口处置受保护旧记录",
+      });
+    }
+    const serialized = JSON.stringify({
+      legacyFields: record.legacyFields ?? {},
+      legacyRoles: record.legacyRoles ?? {},
+    }).toLowerCase();
+    if (
+      serialized.includes('"apikey"') ||
+      serialized.includes('"baseurl"') ||
+      serialized.includes('"endpoint"') ||
+      serialized.includes('"authorization"')
+    ) {
+      issues.push({
+        field: "llm.migrationPending",
+        reason: "migrationPending 检测到疑似敏感或未确认端点字段，禁止写入公开配置",
+        fix: "保留原受保护 SecretStore 记录并经迁移修复入口确认",
+      });
+    }
+  }
+
+  return issues;
+};
+
 /**
  * 内置校验器集合。
  *
@@ -142,6 +309,7 @@ export const BUILTIN_VALIDATORS: readonly ConfigValidator[] = [
   validateNoConfigProviders,
   validateNoConfigChannels,
   validateNoMessagingCredentials,
+  validatePublicLlmV2,
 ];
 
 // ─── 主入口 ───

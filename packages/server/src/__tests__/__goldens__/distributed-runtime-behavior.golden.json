@@ -645,6 +645,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "server.apply-model-configuration",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "server.info",
       "outcome": {
         "kind": "result",
@@ -692,6 +705,19 @@
           "startedAt": "string",
           "uptimeSec": "number",
           "version": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.model-catalog",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
         }
       },
       "requiresAuth": true
@@ -906,6 +932,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "session.getModelSelection",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "session.history",
       "outcome": {
         "code": -32602,
@@ -1024,6 +1063,19 @@
     {
       "emptyRequest": {},
       "method": "session.send",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.setModelSelection",
       "outcome": {
         "code": -32602,
         "kind": "error",

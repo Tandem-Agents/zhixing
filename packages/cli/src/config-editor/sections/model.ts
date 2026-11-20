@@ -1,102 +1,214 @@
 /**
- * 主模型 / 辅助模型 section 定义。
+ * 对话模型 section 定义（v2 服务商连接 + 用途默认 + 模型资料与更新三块统一组织，设计 §3.1、§3.2、§3.4）。
  *
- * L1 主面板的"对话模型"分组——含两个入口项（主必选 / 辅建议）。
- * 进入后统一走 provider-list 让用户选服务商——保留"选服务商"上下文。
- *
- * 字段级 issues 直接复用 `checkModel`——**单一规则源**。
- * EntryState 用 discriminated union 三态（ready/disabled/blocked）— issues 仅
- * blocked 态可声明，类型层面强制 caller 不能写矛盾。
+ * L1 主面板"对话模型"分组：
+ *   1. 服务商连接（管理已配连接、新增预设/自定义/本地免密连接、删除与轮换）
+ *   2. 条件修复/建议入口：迁移待修复项、预设更新建议（有项时顶部显式提醒）
+ *   3. 用途默认（主模型必填；轻量/强力可选，缺配沿用主模型）
+ *   4. 模型资料与更新（来源、修订、检查状态、立即刷新与自动检查开关）
  */
 
 import type {
+  ConfigEditorRuntime,
   EntryState,
   ModelRole,
   Section,
   SectionEntry,
   WorkingState,
 } from "../types.js";
-import { ROLE_SPECS } from "@zhixing-ai/providers/configuration";
-import { readModelRole } from "../state.js";
-import { checkModel, hasApiKey, type ModelIssue } from "../checks/model.js";
+import {
+  DEFAULT_MODEL_CATALOG_PORT,
+  ROLE_SPECS,
+} from "@zhixing-ai/providers/configuration";
+import {
+  countMigrationRepairItems,
+  listPresetUpdateSuggestions,
+  readConnection,
+  readConnections,
+  readModelMaxOutputPreference,
+  readModelRole,
+} from "../state.js";
+import {
+  checkModel,
+  connectionCredentialStatus,
+  hasApiKey,
+  isConnectionReady,
+  type ModelIssue,
+} from "../checks/model.js";
+
+function formatCatalogSourceZh(
+  source: "bundled" | "trusted-remote" | "recovered-previous",
+): string {
+  switch (source) {
+    case "trusted-remote":
+      return "官方可信目录";
+    case "recovered-previous":
+      return "已恢复上一版";
+    case "bundled":
+      return "随包基线";
+  }
+}
+
+function formatCatalogLastStatusZh(
+  status: "idle" | "up-to-date" | "updated" | "offline" | "failed" | "disabled",
+): string {
+  switch (status) {
+    case "up-to-date":
+      return "已是最新";
+    case "updated":
+      return "已更新";
+    case "offline":
+      return "离线保底";
+    case "failed":
+      return "刷新失败（已保底）";
+    case "disabled":
+      return "已关自动检查";
+    case "idle":
+      return "待检查";
+  }
+}
 
 export const modelSection: Section = {
   id: "model",
   title: "对话模型",
-  description: "主模型必填；辅助角色（轻量 / 强力）可选，未配则沿用主模型",
-  entries: (state) => {
-    // 一次 audit，按 role 分发——避免 buildEntry 内重复遍历
-    const allIssues = checkModel(state.config, { providers: state.credentials.providers });
-    // 遍历 ROLE_SPECS（角色集单一事实源）生成入口——新增角色零改动。
-    // 标签后带中文括号说明（spec.parenZh：必填/轻量/更强等），让首次用户
-    // 一眼看懂每个角色干嘛。
-    return ROLE_SPECS.map((spec) =>
-      buildEntry(state, spec.id, allIssues, {
-        label: `${spec.labelZh}（${spec.parenZh}）`,
-        missingStatusText: spec.missingStatusZh,
-        isOptional: !spec.required,
-      }),
-    );
+  description: "三块统一组织：服务商连接、用途默认（主模型必填；轻/强力缺省沿用主模型）、模型资料与更新",
+  entries: (state, runtime?: ConfigEditorRuntime) => {
+    const catalog = runtime?.modelCatalog?.() ?? DEFAULT_MODEL_CATALOG_PORT;
+    const allIssues = checkModel(state.config, state.credentials);
+    const connections = readConnections(state);
+    const connEntries = Object.entries(connections);
+    const compromisedCount = connEntries.filter(
+      ([, c]) => connectionCredentialStatus(c, state.credentials) === "compromised",
+    ).length;
+    const readyCount = connEntries.filter(([, c]) =>
+      isConnectionReady(c, state.credentials),
+    ).length;
+    const presetSuggestions = listPresetUpdateSuggestions(state, catalog);
+
+    const entries: SectionEntry[] = [
+      {
+        label: "服务商连接",
+        state:
+          connEntries.length === 0
+            ? { kind: "disabled", statusText: "未配置连接（按 Enter 新增预设或自定义/本地连接）" }
+            : compromisedCount > 0
+              ? {
+                  kind: "disabled",
+                  statusText: `已配 ${connEntries.length} 个连接（${compromisedCount} 个凭据已封禁需替换）`,
+                }
+              : {
+                  kind: "ready",
+                  statusText: `已配 ${connEntries.length} 个连接（${readyCount} 个就绪${presetSuggestions.length > 0 ? ` · ${presetSuggestions.length} 项预设建议` : ""}）`,
+                },
+        enterTarget: { kind: "connection-list" },
+      },
+    ];
+
+    const repairCount = countMigrationRepairItems(state);
+    if (repairCount > 0) {
+      entries.push({
+        label: "迁移待修复项",
+        state: {
+          kind: "disabled",
+          statusText: `${repairCount} 项旧自定义端点或未归属覆盖待确认`,
+        },
+        enterTarget: { kind: "migration-repair" },
+      });
+    }
+
+    if (presetSuggestions.length > 0) {
+      entries.push({
+        label: "预设更新建议",
+        state: {
+          kind: "disabled",
+          statusText: `${presetSuggestions.length} 个连接有新的官方地址或协议建议（按 Enter 并排对比）`,
+        },
+        enterTarget: { kind: "preset-update-list" },
+      });
+    }
+
+    for (const spec of ROLE_SPECS) {
+      entries.push(
+        buildRoleEntry(state, spec.id, allIssues, {
+          label: `${spec.labelZh}（${spec.parenZh}）`,
+          missingStatusText: spec.missingStatusZh,
+          isOptional: !spec.required,
+        }),
+      );
+    }
+
+    const catStatus = runtime?.catalogStatus?.();
+    const catSource = catStatus ? formatCatalogSourceZh(catStatus.source) : "随包基线";
+    const catRevision = catStatus?.activeRevision ?? catalog.revision;
+    const catStatusText = catStatus
+      ? `${catSource} · ${catRevision} · ${formatCatalogLastStatusZh(catStatus.lastStatus)}${catStatus.upgradeNotice ? " · 建议升级知行" : ""}`
+      : `${catSource} · ${catRevision}（按 Enter 查看状态与刷新）`;
+    entries.push({
+      label: "模型资料与更新",
+      state:
+        catStatus && (catStatus.lastStatus === "failed" || catStatus.upgradeNotice)
+          ? { kind: "disabled", statusText: catStatusText }
+          : { kind: "ready", statusText: catStatusText },
+      enterTarget: { kind: "catalog-config" },
+    });
+
+    return entries;
   },
 };
 
-function buildEntry(
+function buildRoleEntry(
   state: WorkingState,
   role: ModelRole,
   allIssues: ModelIssue[],
   display: { label: string; missingStatusText: string; isOptional: boolean },
 ): SectionEntry {
-  const config = readModelRole(state, role);
-  const isConfigured = Boolean(config?.provider && config?.model);
+  const roleCfg = readModelRole(state, role);
+  const isConfigured = Boolean(roleCfg?.provider && roleCfg?.model);
   const myIssues = allIssues.filter((i) => i.role === role);
-  // 该角色 provider 是否真有 key —— 就绪态的真值依据。可选角色永不进
-  // checkModel 阻断清单（选填不阻断），其"是否就绪"只能由此真值谓词判定，
-  // 不能用"myIssues 为空"代替（可选角色 myIssues 恒空 ≠ 就绪）。
-  const providerHasKey = config?.provider
-    ? hasApiKey({ providers: state.credentials.providers }, config.provider)
-    : false;
-  // main 的 provider —— 用于区分"与主模型同 provider（补 main 那把 key 即
-  // 一并就绪）"与"独立 provider（缺则运行时回退 main）"两种引导文案。
-  const mainProvider = state.config.llm?.main?.provider;
+  const conn = roleCfg?.provider ? readConnection(state, roleCfg.provider) : undefined;
+  const connLabel = conn?.name ?? roleCfg?.provider ?? "";
+  const credStatus = conn ? connectionCredentialStatus(conn, state.credentials) : undefined;
+  const isReady = conn
+    ? isConnectionReady(conn, state.credentials)
+    : roleCfg?.provider
+      ? hasApiKey(state.credentials, roleCfg.provider)
+      : false;
+  const mainConnectionId = readModelRole(state, "main")?.provider;
+  const maxOutputPreference = readModelMaxOutputPreference(state, role);
 
   return {
     label: display.label,
     state: buildEntryState(
-      config,
+      roleCfg,
+      conn,
+      connLabel,
+      credStatus,
       isConfigured,
       myIssues,
-      providerHasKey,
-      mainProvider,
+      isReady,
+      mainConnectionId,
+      maxOutputPreference,
       display,
     ),
-    // 始终走 provider-list——即使当前只有一家 provider，也保留"选服务商"上下文。
-    // 一致的导航路径 > 节省 1 次按键；多 provider 阶段无需重新设计跳转逻辑。
     enterTarget: { kind: "provider-list", role },
   };
 }
 
-/**
- * 把 (config, issues, display) 折叠成 EntryState 三态——本地决策"该 entry 处于
- * 哪种状态"，把状态意图与 statusText 内容一同声明。
- *
- * 命名约定 + 为何"故意不抽公共"详见 entry.ts 顶部文档。
- *
- * statusText 中"待补 X / Y"的字段名取自 issue.fieldLabel——sections 不再硬编码
- * 字段名（如旧版的"待填 API Key"），未来 ModelIssue 加新字段时此处自动跟上。
- */
 function buildEntryState(
   config: ReturnType<typeof readModelRole>,
+  conn: ReturnType<typeof readConnection>,
+  connLabel: string,
+  credStatus: ReturnType<typeof connectionCredentialStatus> | undefined,
   isConfigured: boolean,
   myIssues: ModelIssue[],
-  providerHasKey: boolean,
-  mainProvider: string | undefined,
+  isReady: boolean,
+  mainConnectionId: string | undefined,
+  maxOutputPreference: number | undefined,
   display: { missingStatusText: string; isOptional: boolean },
 ): EntryState {
-  // 未配置 + 可选 → disabled（fallback 到 main，不阻塞完成）
   if (!isConfigured && display.isOptional) {
     return { kind: "disabled", statusText: display.missingStatusText };
   }
-  // 未配置 + 必填 → blocked（issues 来自 checkModel）
   if (!isConfigured) {
     return {
       kind: "blocked",
@@ -104,34 +216,48 @@ function buildEntryState(
       issues: myIssues.map((i) => i.label),
     };
   }
-  // 已配置 + 本行有可执行 issue（自己 provider 的 key 未填，或必填 main 缺项）
-  // → blocked，statusText 含字段名提示，计入"待补充 N 项"。
   if (myIssues.length > 0) {
+    if (credStatus === "compromised") {
+      return {
+        kind: "blocked",
+        statusText: `${connLabel} · ${config!.model}（已封禁 · 存在但不可读取，需替换凭据）`,
+        issues: myIssues.map((i) => i.label),
+      };
+    }
+    if (credStatus === "revoked") {
+      return {
+        kind: "blocked",
+        statusText: `${connLabel} · ${config!.model}（凭据已撤销，需重填）`,
+        issues: myIssues.map((i) => i.label),
+      };
+    }
     const fields = myIssues.map((i) => i.fieldLabel).join(" / ");
     return {
       kind: "blocked",
-      statusText: `${config!.provider} · ${config!.model}（待补 ${fields}）`,
+      statusText: `${connLabel} · ${config!.model}（待补 ${fields}）`,
       issues: myIssues.map((i) => i.label),
     };
   }
-  // 已配置、无阻断 issue，但该 provider 没有 key。只有可选角色会走到这——
-  // required(main) 缺 key 必有 checkModel issue，上面已 blocked。可选角色
-  // 【永不阻断流程】→ 归 disabled（暗色、不计 issue、不卡完成/启动），仅按
-  // "是否与 main 同 provider"给两种引导文案：
-  //   - 同 provider：补 main 那把 key 即一并就绪
-  //   - 异 provider：该 provider 自己的 key，运行时缺则回退主模型（咨询）
-  if (!providerHasKey) {
-    const sameAsMain = config!.provider === mainProvider;
+  if (!isReady) {
+    const sameAsMain = config!.provider === mainConnectionId;
+    const secretNoun = conn?.auth.mode === "header" ? "认证头凭据" : "API Key";
     return {
       kind: "disabled",
       statusText: sameAsMain
-        ? `${config!.provider} · ${config!.model}（随主模型补 API Key）`
-        : `${config!.provider} · ${config!.model}（待补 API Key，缺则回退主模型）`,
+        ? `${connLabel} · ${config!.model}（随主模型补 ${secretNoun}）`
+        : credStatus === "compromised"
+          ? `${connLabel} · ${config!.model}（已封禁 · 缺则回退主模型）`
+          : `${connLabel} · ${config!.model}（待补 ${secretNoun}，缺则回退主模型）`,
     };
   }
-  // 全配齐且 provider 有 key → ready
+  const readyTags: string[] = [];
+  if (credStatus === "none") readyTags.push("免密");
+  if (maxOutputPreference !== undefined) readyTags.push(`输出偏好 ${maxOutputPreference}`);
   return {
     kind: "ready",
-    statusText: `${config!.provider} · ${config!.model}`,
+    statusText:
+      readyTags.length > 0
+        ? `${connLabel} · ${config!.model}（${readyTags.join(" · ")}）`
+        : `${connLabel} · ${config!.model}`,
   };
 }

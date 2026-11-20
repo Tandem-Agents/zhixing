@@ -319,13 +319,20 @@ export async function runTurnEnd(
   // 缺失同模式）；订阅方应能容忍事件不到达。
   if (params.tokenEstimator && params.eventBus) {
     const sendView = params.prepareSendView(messages);
+    const activeAnchor = anchorInvalidated ? undefined : params.anchor;
+    const ephemeralMessagesAfterAnchor =
+      activeAnchor && sendView.ephemeralMessagesAfterAnchor
+        ? sendView.ephemeralMessagesAfterAnchor(activeAnchor.baselineMessageCount)
+        : undefined;
     const totalTokens = computeContextTokens({
       estimator: params.tokenEstimator,
       systemPrompt: sendView.systemPrompt,
       stateMessages: messages,
       providerMessages: sendView.providerMessages,
       tools: sendView.tools,
-      anchor: anchorInvalidated ? undefined : params.anchor,
+      anchor: activeAnchor,
+      prefixGeneration: sendView.prefixGeneration,
+      ephemeralMessagesAfterAnchor,
     });
     await params.eventBus.emit("context:tokens_snapshot", {
       totalTokens,

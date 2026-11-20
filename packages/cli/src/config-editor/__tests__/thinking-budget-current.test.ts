@@ -19,7 +19,7 @@ vi.mock("@zhixing-ai/providers/configuration", async (importOriginal) => {
   return { ...actual, getPreset: (id: string) => (id === "budget-fixture" ? fixture : actual.getPreset(id)) };
 });
 
-const { createInitialState } = await import("../state.js");
+const { createInitialState, readModelThinking } = await import("../state.js");
 const { buildThinkingConfigMeta, handleListPanelKey } = await import("../model/list.js");
 
 describe("budget 形态的当前值", () => {
@@ -36,6 +36,6 @@ describe("budget 形态的当前值", () => {
     expect(buildThinkingConfigMeta(selected.state, thinking).items.filter((item) => item.current).map((item) => item.label))
       .toEqual(["自定义预算…"]);
     const back = handleListPanelKey(selected.state, thinking, { index: 0 }, { type: "escape" }).action;
-    expect(back.type === "pop" && back.state.config.llm?.main?.thinking).toEqual({ mode: "budget", budget: 4096 });
+    expect(back.type === "pop" && readModelThinking(back.state, "main")).toEqual({ mode: "budget", budget: 4096 });
   });
 });

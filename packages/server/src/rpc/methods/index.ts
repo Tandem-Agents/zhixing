@@ -30,6 +30,8 @@ import {
   buildSessionSubscribeMethod,
   buildSessionUnsubscribeMethod,
   buildSessionRenameMethod,
+  buildSessionGetModelSelectionMethod,
+  buildSessionSetModelSelectionMethod,
   buildSessionPrepareAfterUsableMethod,
   buildSessionClearMethod,
   buildSessionCompactMethod,
@@ -78,6 +80,8 @@ import {
   buildAnchorUninstallCancelMethod,
   buildAnchorUninstallStatusMethod,
   buildLlmCompleteMethod,
+  buildServerApplyModelConfigurationMethod,
+  buildServerModelCatalogMethod,
 } from "./server.js";
 import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
 import {
@@ -126,6 +130,8 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionSubscribeMethod(),
     buildSessionUnsubscribeMethod(),
     buildSessionRenameMethod(),
+    buildSessionGetModelSelectionMethod(),
+    buildSessionSetModelSelectionMethod(),
     buildSessionPrepareAfterUsableMethod(),
     // session 命令执行体(cli 命令 handler 变薄后的宿主侧执行)
     buildSessionClearMethod(),
@@ -172,6 +178,8 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildAnchorUninstallCancelMethod(),
     buildAnchorUninstallStatusMethod(),
     buildLlmCompleteMethod(),
+    buildServerApplyModelConfigurationMethod(),
+    buildServerModelCatalogMethod(),
     // trust.*（信任规则管理面）
     buildTrustListMethod(),
     buildTrustRevokeMethod(),
@@ -207,6 +215,8 @@ export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
   "extensions.refresh",
   "extensions.apply-configuration",
   "server.shutdown",
+  "server.apply-model-configuration",
+  "server.model-catalog",
   "server.uninstall.preflight",
   "server.uninstall.begin",
   "server.uninstall.continue",

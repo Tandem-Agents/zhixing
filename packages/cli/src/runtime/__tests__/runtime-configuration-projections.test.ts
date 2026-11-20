@@ -57,6 +57,7 @@ describe("runtime configuration purpose projections", () => {
     expect(Object.keys(projections.model).sort()).toEqual([
       "llm",
       "modelCapabilityOverrides",
+      "network",
     ]);
     expect(Object.keys(projections.kernelEnvironment).sort()).toEqual([
       "agent",
@@ -67,6 +68,7 @@ describe("runtime configuration purpose projections", () => {
       "advancement",
       "llm",
       "modelCapabilityOverrides",
+      "network",
       "workspace",
     ]);
     expect(Object.keys(projections.mcp).sort()).toEqual(["mcp", "network"]);
@@ -78,6 +80,7 @@ describe("runtime configuration purpose projections", () => {
     expect(Object.keys(projections.credentialRotation).sort()).toEqual([
       "llm",
       "messaging",
+      "network",
     ]);
     expect(projections.authority).toEqual(snapshot);
 

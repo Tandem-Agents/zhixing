@@ -8,6 +8,7 @@ import type {
 } from "../contracts/index.js";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import { validateReservableResourceLease } from "./resource-governor.js";
+import { validateCrossDeviceModelSelection } from "./manifest.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -328,10 +329,11 @@ function assertScheduleSpec(value: unknown): void {
     throw new TypeError("Task schedule kind is invalid");
   }
   assertPlainObject(value.action, "Schedule action");
-  assertExactKeys(value.action, ["kind", "model", "prompt", "tools"], "Schedule action", true);
+  assertExactKeys(value.action, ["kind", "model", "modelSelection", "prompt", "tools"], "Schedule action", true);
   if (value.action.kind !== "agent-turn") throw new TypeError("Schedule action kind is invalid");
   assertString(value.action.prompt, "Schedule prompt", true);
   if (value.action.model !== undefined) assertIdentifier(value.action.model, "Schedule model");
+  if (value.action.modelSelection !== undefined) validateCrossDeviceModelSelection(value.action.modelSelection);
   if (value.action.tools !== undefined) assertUniqueIdentifiers(value.action.tools, "Schedule tools");
   if (value.delivery !== undefined) validateTaskDelivery(value.delivery);
 }

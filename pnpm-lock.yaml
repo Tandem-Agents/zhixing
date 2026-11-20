@@ -330,6 +330,9 @@ importers:
       '@zhixing-ai/core':
         specifier: workspace:*
         version: link:../core
+      '@zhixing-ai/network':
+        specifier: workspace:*
+        version: link:../network
       jsonc-parser:
         specifier: 3.3.1
         version: 3.3.1

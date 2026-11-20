@@ -19,11 +19,53 @@
  * 这样"缺什么字段"只在此处定义一次——避免 sections/entity/checks 三处漂移。
  */
 
-import type {
-  ProviderCredentialProjection,
-  ZhixingConfig,
+import {
+  hasExplicitUrlCredentialsOrQueryAuth,
+  isAdapterImplemented,
+  isLLMConfigV2,
+  type ModelConnectionConfig,
+  type ProviderCredentialProjection,
+  type RoleId as ModelRole,
+  type ZhixingConfig,
 } from "@zhixing-ai/providers";
-import type { RoleId as ModelRole } from "@zhixing-ai/providers";
+
+export type ConnectionCredentialStatus =
+  | "none"
+  | "ready"
+  | "missing"
+  | "revoked"
+  | "compromised";
+
+/**
+ * 判定单条 v2 连接的凭据就绪态（唯一规则源）：
+ * - auth.mode === "none" → "none"（免密连接天然就绪，永不要求 API Key）；
+ * - compromisedModelSecretTokens 命中 → "compromised"（已封禁，存在但不可读取，需替换）；
+ * - revokedModelSecretRefs 命中 → "revoked"（已撤销，需重新录入）；
+ * - modelSecrets[secretRef] 非空且类型匹配 → "ready"；否则 "missing"。
+ */
+export function connectionCredentialStatus(
+  connection: ModelConnectionConfig,
+  credentials: ProviderCredentialProjection,
+): ConnectionCredentialStatus {
+  if (connection.auth.mode === "none") return "none";
+  const secretRef = connection.auth.secretRef;
+  if (credentials.compromisedModelSecretTokens?.[secretRef]) return "compromised";
+  if (credentials.revokedModelSecretRefs?.includes(secretRef)) return "revoked";
+  const entry = credentials.modelSecrets?.[secretRef];
+  if (entry && entry.kind === connection.auth.mode && entry.value.trim().length > 0) {
+    return "ready";
+  }
+  return "missing";
+}
+
+export function isConnectionReady(
+  connection: ModelConnectionConfig,
+  credentials: ProviderCredentialProjection,
+): boolean {
+  if (!isAdapterImplemented(connection.adapter)) return false;
+  const status = connectionCredentialStatus(connection, credentials);
+  return status === "none" || status === "ready";
+}
 
 /**
  * 模型字段缺失记录——field-based discriminated union。
@@ -66,7 +108,86 @@ export function checkModel(
   credentials: ProviderCredentialProjection,
 ): ModelIssue[] {
   const issues: ModelIssue[] = [];
+  const rawLlm = config.llm as unknown;
 
+  if (isLLMConfigV2(rawLlm)) {
+    const main = rawLlm.main;
+    const connectionId = main?.connectionId;
+    const model = main?.model;
+
+    if (!connectionId) {
+      issues.push({
+        role: "main",
+        field: "provider",
+        path: "config.llm.main.connectionId",
+        label: "主模型 - 服务商连接",
+        fieldLabel: "服务商连接",
+      });
+    }
+    if (!model) {
+      issues.push({
+        role: "main",
+        field: "model",
+        path: "config.llm.main.model",
+        label: "主模型 - 模型",
+        fieldLabel: "模型",
+      });
+    }
+    if (connectionId) {
+      const conn = rawLlm.connections[connectionId];
+      if (!conn) {
+        issues.push({
+          role: "main",
+          field: "provider",
+          path: `config.llm.connections.${connectionId}`,
+          label: `主模型 - 服务商连接（${connectionId} 不存在）`,
+          fieldLabel: "服务商连接",
+        });
+      } else if (!isAdapterImplemented(conn.adapter)) {
+        issues.push({
+          role: "main",
+          field: "provider",
+          path: `config.llm.connections.${connectionId}.adapter`,
+          label: `主模型 - ${conn.name} 所用协议（${conn.adapter}）暂不支持`,
+          fieldLabel: "受控协议",
+        });
+      } else if (conn.auth.mode !== "none") {
+        const status = connectionCredentialStatus(conn, credentials);
+        const secretLabel = conn.auth.mode === "header" ? "认证头凭据" : "API Key";
+        if (status === "compromised") {
+          issues.push({
+            role: "main",
+            field: "apiKey",
+            providerId: connectionId,
+            path: `credentials.modelSecrets.${conn.auth.secretRef}`,
+            label: `主模型 - ${conn.name} 的凭据已封禁（需替换）`,
+            fieldLabel: "替换凭据",
+          });
+        } else if (status === "revoked") {
+          issues.push({
+            role: "main",
+            field: "apiKey",
+            providerId: connectionId,
+            path: `credentials.modelSecrets.${conn.auth.secretRef}`,
+            label: `主模型 - ${conn.name} 的凭据已撤销（需重填）`,
+            fieldLabel: secretLabel,
+          });
+        } else if (status === "missing") {
+          issues.push({
+            role: "main",
+            field: "apiKey",
+            providerId: connectionId,
+            path: `credentials.modelSecrets.${conn.auth.secretRef}`,
+            label: `主模型 - ${conn.name} 的 ${secretLabel}`,
+            fieldLabel: secretLabel,
+          });
+        }
+      }
+    }
+    return issues;
+  }
+
+  // Legacy v1 兼容检测
   const mainProvider = config.llm?.main?.provider;
   const mainModel = config.llm?.main?.model;
 
@@ -89,7 +210,6 @@ export function checkModel(
     });
   }
 
-  // mainProvider 缺失时不查 apiKey——不知道该查哪个 provider
   if (mainProvider && !hasApiKey(credentials, mainProvider)) {
     issues.push({
       role: "main",
@@ -101,21 +221,36 @@ export function checkModel(
     });
   }
 
-  // 可选角色（light/power）不进阻断清单——它们永不阻断流程，缺配时回退
-  // main（见 resolve.ts 降级记录 + 边缘层告警）。其配置完善度是咨询性信息，
-  // 由 section 层就地派生暗色显示，不在此产出 issue。
+  // 旧配置含 URL 内嵌凭据或敏感查询参数被自动迁移阻断时，必须经迁移修复替换后再启动
+  for (const [providerId, entry] of Object.entries(credentials.providers ?? {})) {
+    if (entry.baseUrl !== undefined && hasExplicitUrlCredentialsOrQueryAuth(entry.baseUrl)) {
+      issues.push({
+        role: "main",
+        field: "provider",
+        path: `credentials.providers.${providerId}.baseUrl`,
+        label: `旧服务商 ${providerId} 的自定义端点含内嵌凭据或敏感查询参数（需迁移修复）`,
+        fieldLabel: "迁移修复端点",
+      });
+    }
+  }
 
   return issues;
 }
 
 /**
- * 某 provider 是否已有 API Key —— "该 provider 能否真正发起请求"的**单一真值
- * 谓词**。checkModel（生成可执行 issue 清单，对同 provider 去重）与 sections
- * 的每行就绪态派生共用此谓词，杜绝两处各自判断 key 而漂移。
+ * 某服务商/逻辑凭据引用是否已有可用密钥（兼容 v2 modelSecrets 与 v1 providers）。
  */
 export function hasApiKey(
   credentials: ProviderCredentialProjection,
-  providerId: string,
+  providerOrSecretId: string,
 ): boolean {
-  return Boolean(credentials.providers?.[providerId]?.apiKey);
+  if (
+    credentials.revokedModelSecretRefs?.includes(providerOrSecretId) ||
+    Boolean(credentials.compromisedModelSecretTokens?.[providerOrSecretId])
+  ) {
+    return false;
+  }
+  const v2Entry = credentials.modelSecrets?.[providerOrSecretId];
+  if (v2Entry && v2Entry.value.trim().length > 0) return true;
+  return Boolean(credentials.providers?.[providerOrSecretId]?.apiKey);
 }

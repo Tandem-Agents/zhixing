@@ -26,7 +26,25 @@ import type { ThinkingDialect } from "../types.js";
 /**
  * OpenAI 兼容协议下的思考方言（anthropic 走自有协议，不经此路径）。
  */
-type OpenAICompatibleThinkingDialect = Exclude<ThinkingDialect, "anthropic">;
+type OpenAICompatibleThinkingDialect = Exclude<
+  ThinkingDialect,
+  "anthropic" | "openai-responses" | "google-interactions"
+>;
+
+/**
+ * 判断 OpenAI 兼容连接的思考方言是否支持在出站 assistant 消息上携带 `reasoning_content`。
+ * 聚合器与保守兼容端（`"none"`）绝不盲目发送该厂商私有字段（设计 §2.3）。
+ */
+export function supportsOpenAICompatibleReasoningContentReplay(
+  dialect: ThinkingDialect,
+): boolean {
+  return (
+    dialect === "deepseek" ||
+    dialect === "qwen" ||
+    dialect === "glm" ||
+    dialect === "kimi"
+  );
+}
 
 /**
  * 把 ThinkingConfig 写成 OpenAI 兼容请求体的思考参数片段，调用方直接展开
@@ -91,15 +109,19 @@ export function buildOpenAICompatibleThinkingParams(
 }
 
 /**
- * Anthropic extended thinking 请求参数。官方：thinking{type:"enabled",
- * budget_tokens:int}，budget_tokens 必填。
- *
- * 返回 undefined = 不进入 extended thinking（Anthropic 无 disabled 概念，
- * 不传该参数即标准模式）：
- *   - off / effort：不适用 → 标准模式
- *   - on：Anthropic 强制要求 budget_tokens，无法在不臆造数值的前提下表达
- *     "开但不指定预算" → 退回标准模式（"不发"安全，优于发非法请求）
- *   - budget：→ { type:"enabled", budget_tokens }
+ * 判断 Claude 型号是否属于 4.7+ 自适应思考代际（弃用旧式 `enabled + budget_tokens`，
+ * 采用 `thinking: { type: "adaptive" }` + 可选 `output_config: { effort }`）。
+ */
+export function isAnthropicAdaptiveThinkingModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  // 匹配 claude-(opus|sonnet|haiku)?-4-7 / 4.7 / 4-8 / 4-9 / 4-1x / 5+，排除 4-20250514 类四位年份后缀
+  return /(?:^|[/-])claude-(?:(?:opus|sonnet|haiku)-)?(?:4[.-](?:[7-9]|1\d)(?=$|[.-])|[5-9](?=$|[.-]))/u.test(
+    normalized,
+  );
+}
+
+/**
+ * Anthropic extended thinking 旧式预算参数（保留向后兼容签名）。
  */
 export function buildAnthropicThinkingParam(
   thinking: ThinkingConfig | undefined,
@@ -109,4 +131,114 @@ export function buildAnthropicThinkingParam(
     return { type: "enabled", budget_tokens: thinking.budget };
   }
   return undefined;
+}
+
+export interface AnthropicThinkingRequestFields {
+  readonly thinking?:
+    | { readonly type: "enabled"; readonly budget_tokens: number }
+    | { readonly type: "adaptive" };
+  readonly output_config?: { readonly effort: string };
+}
+
+/**
+ * 面向全代际 Anthropic Messages 的思考请求字段构造：
+ * - Claude 4.7+：使用 `thinking: { type: "adaptive" }`，支持 `on` 与 `effort`（`output_config.effort`）；
+ *   不再向 4.7+ 发送官方已弃用/拒绝的 `enabled + budget_tokens`（设计 §1.1）。
+ * - 较早 Claude 型号：保留 `thinking: { type: "enabled", budget_tokens }`，同样放行显式 `effort`
+ *   给支持 adaptive 的网关/新别名时不造假 budget。
+ */
+export function buildAnthropicThinkingRequestFields(
+  thinking: ThinkingConfig | undefined,
+  model: string,
+): AnthropicThinkingRequestFields {
+  if (thinking === undefined || thinking.mode === "off") return {};
+
+  const adaptiveModel = isAnthropicAdaptiveThinkingModel(model);
+  if (thinking.mode === "effort") {
+    return {
+      thinking: { type: "adaptive" },
+      output_config: { effort: thinking.effort },
+    };
+  }
+  if (thinking.mode === "on") {
+    return adaptiveModel ? { thinking: { type: "adaptive" } } : {};
+  }
+  if (thinking.mode === "budget") {
+    // Claude 4.7+ 明确拒绝旧式 enabled + budget_tokens，回落为 adaptive 避免 400
+    return adaptiveModel
+      ? { thinking: { type: "adaptive" } }
+      : { thinking: { type: "enabled", budget_tokens: thinking.budget } };
+  }
+  return {};
+}
+
+export interface OpenAIResponsesReasoningParam {
+  readonly effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  readonly summary?: "auto" | "concise" | "detailed";
+}
+
+const VALID_OPENAI_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
+
+/**
+ * OpenAI Responses 思考参数映射（`reasoning: { effort?, summary? }`）。
+ */
+export function buildOpenAIResponsesThinkingParam(
+  thinking: ThinkingConfig | undefined,
+): OpenAIResponsesReasoningParam | undefined {
+  if (thinking === undefined) return undefined;
+  switch (thinking.mode) {
+    case "off":
+      return { effort: "none" };
+    case "on":
+      return { summary: "auto" };
+    case "effort": {
+      const normalized = thinking.effort.trim().toLowerCase();
+      if (!VALID_OPENAI_EFFORTS.has(normalized)) return undefined;
+      return {
+        effort: normalized as OpenAIResponsesReasoningParam["effort"],
+        summary: "auto",
+      };
+    }
+    case "budget":
+      return undefined;
+  }
+}
+
+export interface GoogleInteractionsThinkingConfig {
+  readonly thinking_level?: "minimal" | "low" | "medium" | "high";
+  readonly thinking_summaries?: "auto" | "none";
+}
+
+const VALID_GOOGLE_LEVELS = new Set(["minimal", "low", "medium", "high"]);
+
+/**
+ * Google Interactions 思考参数映射（写入 `generation_config`）。
+ */
+export function buildGoogleInteractionsThinkingParams(
+  thinking: ThinkingConfig | undefined,
+): GoogleInteractionsThinkingConfig {
+  if (thinking === undefined) return {};
+  switch (thinking.mode) {
+    case "off":
+      return { thinking_level: "minimal", thinking_summaries: "none" };
+    case "on":
+      return { thinking_summaries: "auto" };
+    case "effort": {
+      const normalized = thinking.effort.trim().toLowerCase();
+      if (!VALID_GOOGLE_LEVELS.has(normalized)) return {};
+      return {
+        thinking_level: normalized as GoogleInteractionsThinkingConfig["thinking_level"],
+        thinking_summaries: "auto",
+      };
+    }
+    case "budget":
+      return {};
+  }
 }

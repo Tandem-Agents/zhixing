@@ -104,8 +104,16 @@ describe("Host Advancement model provider projection", () => {
         light: { provider: lightProvider, model: "light-model" },
       },
       resolvedRoles: {
-        main: { resolved: { protocol: "main-protocol" } },
-        light: { resolved: { protocol: "light-protocol" } },
+        main: {
+          resolved: { protocol: "main-protocol" },
+          model: "main-model",
+          params: { thinking: { mode: "effort", effort: "high" } },
+        },
+        light: {
+          resolved: { protocol: "light-protocol" },
+          model: "light-model",
+          params: { thinking: { mode: "on" } },
+        },
       },
       config: resolvedConfig,
     });
@@ -128,7 +136,10 @@ describe("Host Advancement model provider projection", () => {
         light: undefined,
       },
       meter: resourceMeter,
-      defaultMaxOutputTokens: 1_111,
+      defaultMaxOutputTokens: {
+        main: 4_000,
+        light: 2_000,
+      },
     });
     expect(doubles.createAdvancementRuntime).toHaveBeenCalledWith(expect.objectContaining({
       provider: mainProvider,
@@ -138,7 +149,8 @@ describe("Host Advancement model provider projection", () => {
       lightModel: "light-model",
       lightThinking: undefined,
       resourceMeter,
-      defaultMaxOutputTokens: 2_222,
+      defaultMaxOutputTokens: 4_000,
+      lightDefaultMaxOutputTokens: 2_000,
       workingDirectory: "C:\\workspace",
       contextWindow: {
         capability: {

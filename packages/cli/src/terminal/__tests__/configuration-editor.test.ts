@@ -153,7 +153,11 @@ describe('single-root Node configuration transaction', () => {
       expect(h.current().title).toBe('deepseek-v4-pro · 思考控制');
       await home(h); await h.action('complete');
       expect((await h.result).kind).toBe('completed');
-      expect(h.save.mock.calls[0]![0].config.llm?.main).toEqual(configured.llm!.main);
+      expect(h.save.mock.calls[0]![0].config.llm?.main).toMatchObject({
+        connectionId: 'deepseek',
+        model: 'deepseek-v4-pro',
+        params: { thinking: { mode: 'effort', effort: 'max' } },
+      });
     });
 
     it('returns to the row the user entered from rather than the current value', async () => {
@@ -221,7 +225,7 @@ describe('single-root Node configuration transaction', () => {
     await h.action('back'); await h.choose('完成'); await h.action('complete');
     expect((await h.result).kind).toBe('completed');
     expect(h.save.mock.calls[0]![0].config.llm?.main).toMatchObject({
-      provider: 'deepseek', model: 'deepseek-v4-pro', thinking: { mode: 'effort', effort: 'max' },
+      connectionId: 'deepseek', model: 'deepseek-v4-pro', params: { thinking: { mode: 'effort', effort: 'max' } },
     });
   });
 
@@ -295,7 +299,9 @@ describe('single-root Node configuration transaction', () => {
     await h.action('complete');
     expect((await h.result).kind).toBe('completed');
     expect(h.save).toHaveBeenCalledOnce();
-    expect(h.save.mock.calls[0]![0]).toMatchObject({ credentials: { providers: { deepseek: { apiKey: 'synthetic-replacement-secret' } } } });
+    expect(h.save.mock.calls[0]![0]).toMatchObject({
+      credentials: { version: 2, modelSecrets: { deepseek: { v: 2, kind: 'api-key', value: 'synthetic-replacement-secret' } } },
+    });
     expect(JSON.stringify(h.views)).not.toContain('synthetic-replacement-secret');
   });
 

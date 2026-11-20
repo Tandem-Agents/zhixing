@@ -62,6 +62,7 @@ export {
   type KernelModelProviderBinding,
   type KernelModelProviderFactory,
   type KernelPrimaryModelRole,
+  type KernelPrimaryRoleOverrides,
 } from "./kernel-model-provider.js";
 export {
   assertKernelRuntimeEnvironment,

@@ -154,7 +154,7 @@ describe("loadConfig", () => {
     ).toThrow(ConfigSchemaError);
   });
 
-  it("自动创建全局配置模板：含 llm.main 默认 + workspace 实际路径 + messaging 空对象", () => {
+  it("自动创建全局配置模板：v2 未配置态空壳（不预写任何服务商连接或 main）+ workspace 实际路径 + messaging 空对象", () => {
     const configPath = path.join(tempHome, ".zhixing", "config.jsonc");
 
     const config = loadConfig({
@@ -162,16 +162,11 @@ describe("loadConfig", () => {
     });
 
     expect(fs.existsSync(configPath)).toBe(true);
-    // 断言"派生关系"而非"字面值"：模板从 ROLE_RECOMMENDATIONS.main 派生。
-    // 未来改主推荐只需改 role-recommendations.ts 一处，本测试自动跟上 —— 既
-    // 守护"单一事实源"的真值传递（loadConfig autoCreate → 写盘 → 读回），又
-    // 不在本处冻结字面值（避免成为第三份事实源）。
-    expect(config.llm?.main?.provider).toBe(ROLE_RECOMMENDATIONS.main?.provider);
-    expect(config.llm?.main?.model).toBe(ROLE_RECOMMENDATIONS.main?.model);
-    // light 同理单一事实源派生（已定义推荐 → 模板生效条目，loader 解析得出）。
-    // 守护"模板不再硬编码 vendor、与推荐表零漂移"——双源回归会在此失败。
-    expect(config.llm?.light?.provider).toBe(ROLE_RECOMMENDATIONS.light?.provider);
-    expect(config.llm?.light?.model).toBe(ROLE_RECOMMENDATIONS.light?.model);
+    // 设计 §3.1：全新配置模板保持中性未配置 v2 状态，不预写厂商连接或任何用途默认。
+    expect(config.llm).toEqual({
+      schemaVersion: 2,
+      connections: {},
+    });
     // 模板不含 providers 字段（provider 凭据由 SecretStore 管理）。
     expect((config as Record<string, unknown>).providers).toBeUndefined();
     // messaging 空对象（启用列表，用户用时手添）
@@ -189,7 +184,9 @@ describe("loadConfig", () => {
 
     const rawContent = fs.readFileSync(configPath, "utf-8");
     expect(rawContent).toContain("//");
-    expect(rawContent).toContain("main（必填）");
+    expect(rawContent).toContain("schemaVersion");
+    expect(rawContent).toContain("connections");
+    expect(rawContent).toContain("main");
     expect(rawContent).toContain("light");
     expect(rawContent).toContain("workspace");
     expect(rawContent).toContain("messaging");

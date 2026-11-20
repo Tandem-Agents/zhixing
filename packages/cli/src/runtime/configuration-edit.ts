@@ -1,8 +1,16 @@
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing-ai/providers";
+import type { PendingModelSecretRetirement, ZhixingConfig, ZhixingCredentials } from "@zhixing-ai/providers";
 import type { SupportedChannel } from "../registries/channels.js";
 
 export type ConfigurationEditResult =
-  | { kind: "completed"; config: ZhixingConfig; credentials: ZhixingCredentials; channelIntents?: Readonly<Record<string, boolean>> }
+  | {
+      kind: "completed";
+      config: ZhixingConfig;
+      credentials: ZhixingCredentials;
+      channelIntents?: Readonly<Record<string, boolean>>;
+      modelRetirements?: readonly PendingModelSecretRetirement[];
+      abortConnectionIds?: readonly string[];
+      removeLegacyModelCapabilityOverrides?: boolean;
+    }
   | { kind: "cancelled" }
   | { kind: "non-tty" };
 

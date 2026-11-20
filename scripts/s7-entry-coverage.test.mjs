@@ -3486,7 +3486,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     [[[configurationRead, "} finally { await owner.stopStorageMaintenance(); }", "} finally { await otherOwner.stopStorageMaintenance(); }"]],
       exposureFailure],
   ], [
-    [[configurationRead, withinSegment("    async read() {", "\n    },\n",
+    [[configurationRead, withinSegment("    async read(", "\n    },\n",
       renameAll(["owner", "bootstrapOwner"], ["exposure", "routeGuard"], ["guarded", "eligible"]))]],
     [[configurationRead, "        return await loadConfigurationSnapshot({\n", "        const loadOptions = {\n"],
       [configurationRead, "          } } : {}),\n        });\n      } finally",
@@ -6366,8 +6366,8 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
     inspectKernelProviderDependencyInversion(mutate(
       "packages/cli/src/serve/executor-role-runtime.ts",
       (text) => text.replace(
-        "modelProvider: this.#modelProvider.create({ primaryRole }),",
-        "modelProvider: {} as never,",
+        "      modelProvider: this.#modelProvider.create({\n        primaryRole,\n        ...(sessionOverride ? { sessionOverride } : {}),\n        ...(primaryRoleOverrides ? { primaryRoleOverrides } : {}),\n      }),",
+        "      modelProvider: {} as never,",
       ),
     )).join("\n"),
     /Executor production issuance/,
@@ -6650,6 +6650,7 @@ test("validated configuration crosses composition roots as finite frozen project
     "packages/cli/src/serve/host-default-workspace.ts",
     "packages/cli/src/serve/trust-administration-adapter.ts",
     "packages/cli/src/serve/credential-rotation-publication.ts",
+    "packages/cli/src/serve/local-configuration-application.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -6979,16 +6980,16 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     /ExecutorRuntimeSubstrate/,
   );
   // job 投影只经唯一 owner，实参按 create 回调参数的职责位置：第 0 位 instruction、第 2 位 capabilities、
-  // 可选第 3 位 workspaceBinding（?? null）；结果须展开进 createJobRuntime。局部名与参数名不是义务。
-  const jobProjection = "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null)";
+  // 可选第 3 位 workspaceBinding（?? null）、可选第 4 位 modelSelection；结果须展开进 createJobRuntime。局部名与参数名不是义务。
+  const jobProjection = "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null, modelSelection)";
   const projectionFailure = /Anchor production graph does not use the one Workscene projection owner/;
   for (const [from, to] of [
     [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null, extra)"],
-    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, otherBinding)"],
-    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? defaultBinding)"],
+    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, otherBinding, modelSelection)"],
+    [jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? defaultBinding, modelSelection)"],
     [jobProjection, `${jobProjection};\n          const second = anchorRuntimeProjections.job(instruction, capabilities)`],
-    [jobProjection, "anchorRuntimeProjections.job(capabilities, instruction, workspaceBinding ?? null)"],
-    [jobProjection, "anchorRuntimeProjections.job(instruction, confirmationBroker, workspaceBinding ?? null)"],
+    [jobProjection, "anchorRuntimeProjections.job(capabilities, instruction, workspaceBinding ?? null, modelSelection)"],
+    [jobProjection, "anchorRuntimeProjections.job(instruction, confirmationBroker, workspaceBinding ?? null, modelSelection)"],
     ["            ...projection,\n", "            ...otherProjection,\n"],
   ]) {
     assert.match(
@@ -7000,7 +7001,8 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     );
   }
   const jobCallbackHead =
-    "        create: (instruction, confirmationBroker, capabilities, workspaceBinding) => {\n" +
+    "        create: async (instruction, confirmationBroker, capabilities, workspaceBinding, modelSelection) => {\n" +
+    "          await modelRuntimePort.ensureFreshBeforeAdmission();\n" +
     `          const projection = ${jobProjection};\n` +
     "          return runtimeHost.createJobRuntime({\n            confirmationBroker,\n            ...projection,\n";
   for (const transform of [
@@ -7008,8 +7010,8 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     (text) => replaceOnce(text, jobProjection, "anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding)"),
     (text) => replaceOnce(text, jobCallbackHead, jobCallbackHead.replaceAll(/\bprojection\b/gu, "runtimeProjection")),
     (text) => replaceOnce(text, jobCallbackHead, jobCallbackHead
-      .replace("(instruction, confirmationBroker, capabilities, workspaceBinding) =>", "(jobInstruction, broker, jobCapabilities, binding) =>")
-      .replace(jobProjection, "anchorRuntimeProjections.job(jobInstruction, jobCapabilities, binding ?? null)")
+      .replace("(instruction, confirmationBroker, capabilities, workspaceBinding, modelSelection) =>", "(jobInstruction, broker, jobCapabilities, binding, selection) =>")
+      .replace(jobProjection, "anchorRuntimeProjections.job(jobInstruction, jobCapabilities, binding ?? null, selection)")
       .replace("            confirmationBroker,\n", "            confirmationBroker: broker,\n")),
   ]) {
     assert.deepEqual(

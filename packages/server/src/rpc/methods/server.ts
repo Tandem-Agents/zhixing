@@ -1336,3 +1336,142 @@ export function buildLlmCompleteMethod(): MethodEntry {
     },
   };
 }
+
+/**
+ * server.apply-model-configuration — 仅本机可信回环触发的模型域窄生效入口。
+ *
+ * 参数只传递非秘密操作标识与显式撤权/中止目标；宿主自行从本地权威配置与 SecretStore
+ * 重读并原子换代 ModelRuntimePort，绝不通过 RPC 传输明文凭据。
+ */
+export function buildServerApplyModelConfigurationMethod(): MethodEntry {
+  return {
+    name: "server.apply-model-configuration",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      if (!(ctx.connection.authenticated && ctx.connection.loopback)) {
+        throw RpcErrors.invalidParams(
+          "server.apply-model-configuration 只能在当前设备本机执行",
+        );
+      }
+      const p = rawParams === undefined ? {} : asRecord(rawParams, "server.apply-model-configuration");
+      const allowedKeys = Object.keys(p).filter(
+        (key) =>
+          key === "operationId" ||
+          key === "revokedSecretRefs" ||
+          key === "abortConnectionIds" ||
+          key === "revokeOnly",
+      );
+      if (allowedKeys.length !== Object.keys(p).length) {
+        throw RpcErrors.invalidParams(
+          "server.apply-model-configuration contains unsupported fields",
+        );
+      }
+      let operationId: string | undefined;
+      if (p.operationId !== undefined) {
+        if (typeof p.operationId !== "string" || p.operationId.trim().length === 0) {
+          throw RpcErrors.invalidParams(
+            "server.apply-model-configuration 'operationId' must be non-empty text",
+          );
+        }
+        operationId = p.operationId;
+      }
+      let revokeOnly: boolean | undefined;
+      if (p.revokeOnly !== undefined) {
+        if (typeof p.revokeOnly !== "boolean") {
+          throw RpcErrors.invalidParams(
+            "server.apply-model-configuration 'revokeOnly' must be a boolean",
+          );
+        }
+        revokeOnly = p.revokeOnly;
+      }
+      const parseStringArray = (value: unknown, field: string): readonly string[] | undefined => {
+        if (value === undefined) return undefined;
+        if (
+          !Array.isArray(value) ||
+          value.some((item) => typeof item !== "string" || item.trim().length === 0)
+        ) {
+          throw RpcErrors.invalidParams(
+            `server.apply-model-configuration '${field}' must be an array of non-empty strings`,
+          );
+        }
+        return value as string[];
+      };
+      const revokedSecretRefs = parseStringArray(p.revokedSecretRefs, "revokedSecretRefs");
+      const abortConnectionIds = parseStringArray(p.abortConnectionIds, "abortConnectionIds");
+      const apply = ctx.server.applyModelConfiguration;
+      if (!apply) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Model configuration narrow activation is not configured on server",
+        );
+      }
+      return await apply({
+        ...(operationId ? { operationId } : {}),
+        ...(revokedSecretRefs ? { revokedSecretRefs } : {}),
+        ...(abortConnectionIds ? { abortConnectionIds } : {}),
+        ...(revokeOnly !== undefined ? { revokeOnly } : {}),
+      });
+    },
+  };
+}
+
+/**
+ * server.model-catalog — 本机宿主单写模型目录管理入口（状态查询 / 手动或按需刷新 / 自动检查开关）。
+ *
+ * 关闭前端页面不会中断宿主已接纳的刷新操作；刷新完成自动推进 ModelRuntimePort 修订并退役空闲实例。
+ */
+export function buildServerModelCatalogMethod(): MethodEntry {
+  return {
+    name: "server.model-catalog",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      if (!(ctx.connection.authenticated && ctx.connection.loopback)) {
+        throw RpcErrors.invalidParams("server.model-catalog 只能在当前设备本机执行");
+      }
+      const p = rawParams === undefined ? { action: "status" } : asRecord(rawParams, "server.model-catalog");
+      const allowedKeys = Object.keys(p).filter(
+        (key) => key === "action" || key === "force" || key === "autoCheckEnabled",
+      );
+      if (allowedKeys.length !== Object.keys(p).length) {
+        throw RpcErrors.invalidParams("server.model-catalog contains unsupported fields");
+      }
+      const action = p.action ?? "status";
+      if (action !== "status" && action !== "refresh" && action !== "set-auto-check") {
+        throw RpcErrors.invalidParams(
+          'server.model-catalog \'action\' must be "status" | "refresh" | "set-auto-check"',
+        );
+      }
+      let force: boolean | undefined;
+      if (p.force !== undefined) {
+        if (typeof p.force !== "boolean") {
+          throw RpcErrors.invalidParams("server.model-catalog 'force' must be a boolean");
+        }
+        force = p.force;
+      }
+      let autoCheckEnabled: boolean | undefined;
+      if (p.autoCheckEnabled !== undefined) {
+        if (typeof p.autoCheckEnabled !== "boolean") {
+          throw RpcErrors.invalidParams("server.model-catalog 'autoCheckEnabled' must be a boolean");
+        }
+        autoCheckEnabled = p.autoCheckEnabled;
+      }
+      if (action === "set-auto-check" && autoCheckEnabled === undefined) {
+        throw RpcErrors.invalidParams(
+          "server.model-catalog action 'set-auto-check' requires boolean 'autoCheckEnabled'",
+        );
+      }
+      const handler = ctx.server.modelCatalog;
+      if (!handler) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Model catalog coordinator is not configured on server",
+        );
+      }
+      return await handler({
+        action,
+        ...(force !== undefined ? { force } : {}),
+        ...(autoCheckEnabled !== undefined ? { autoCheckEnabled } : {}),
+      });
+    },
+  };
+}

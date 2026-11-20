@@ -340,6 +340,10 @@ export function localConversationOwnerRuntime(
         executionProfile: input.executionProfile,
         permissionRules: input.permissionRules,
         ...(input.environment ? { environment: input.environment } : {}),
+        ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+        ...(input.allowLegacyV1FollowRole !== undefined
+          ? { allowLegacyV1FollowRole: input.allowLegacyV1FollowRole }
+          : {}),
       }),
     validateConversationRuntimeBinding: deps.validateConversationRuntimeBinding,
     preflightLocalConversationEnvironment:

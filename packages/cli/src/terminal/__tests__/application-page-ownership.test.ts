@@ -98,6 +98,92 @@ describe('foreground terminal page ownership', () => {
     delivery.resolve(); await pending;
     expect(views).toHaveLength(1);
   });
+  it('clears active selection ownership and invalidates the UI request when choosePage signal aborts', async () => {
+    const { target } = fixture();
+    const sent: any[] = [];
+    target.channel.send = async (message: any) => { sent.push(message); };
+    const abort = new AbortController();
+    const waitPromise = target.choosePage(
+      { kind: 'selection', title: '刷新模型目录', busy: true, choices: [{ id: 'back-list', label: '返回模型列表' }] },
+      abort.signal,
+    );
+    await target.publishing;
+    const publishedRequestId = sent.find((m) => m.type === 'view')?.view?.requestId;
+    expect(typeof publishedRequestId).toBe('string');
+    expect(target.selection?.id).toBe(publishedRequestId);
+    abort.abort();
+    await expect(waitPromise).resolves.toEqual({ itemId: 'cancelled', cancelCause: 'aborted' });
+    expect(target.selection).toBeUndefined();
+    expect(sent.some((m) => m.type === 'invalidate' && m.requestId === publishedRequestId)).toBe(true);
+    // Subsequent selection page can be opened cleanly without hitting terminal-selection-capacity
+    const nextAbort = new AbortController();
+    const nextPromise = target.choosePage(
+      { kind: 'selection', title: '切换模型', choices: [{ id: 'close', label: '返回' }] },
+      nextAbort.signal,
+    );
+    await target.publishing;
+    nextAbort.abort();
+    await expect(nextPromise).resolves.toEqual({ itemId: 'cancelled', cancelCause: 'aborted' });
+  });
+  it('updates an active selection page in place under the same requestId and drops late updates after settlement', async () => {
+    const { target } = fixture();
+    const sent: any[] = [];
+    target.channel.send = async (message: any) => { sent.push(message); };
+    let liveHandle: { isActive(): boolean; update(view: any): Promise<boolean> } | undefined;
+    const responsePromise = target.choosePage(
+      {
+        kind: 'selection',
+        title: '模型管理（/model）',
+        message: '⏳ 目录刷新仍在后台进行中',
+        choices: [
+          { id: 'option:action:refresh-progress', label: '查看目录刷新进度' },
+          { id: 'option:model:a', label: 'model-a' },
+        ],
+      },
+      { onActive: (handle: any) => { liveHandle = handle; } },
+    );
+    await target.publishing;
+    const firstView = sent.at(-1)?.view;
+    expect(typeof firstView?.requestId).toBe('string');
+    expect(liveHandle?.isActive()).toBe(true);
+
+    // 原地更新：保持同一 requestId（U 侧 sameInteraction 保留实时焦点）、无 invalidate、同步切换 allowed 集合
+    const updated = await liveHandle!.update({
+      kind: 'selection',
+      title: '模型管理（/model）',
+      message: '✓ 目录已更新至修订 ui-review-catalog-1',
+      choices: [
+        { id: 'option:action:refresh-catalog', label: '刷新模型目录' },
+        { id: 'option:model:a', label: 'model-a' },
+        { id: 'option:model:b', label: 'model-b' },
+      ],
+    });
+    expect(updated).toBe(true);
+    const secondView = sent.at(-1)?.view;
+    expect(secondView.requestId).toBe(firstView.requestId);
+    expect(secondView.message).toContain('ui-review-catalog-1');
+    expect(sent.some((m) => m.type === 'invalidate')).toBe(false);
+    expect(target.selection.allowed.has('option:action:refresh-catalog')).toBe(true);
+    expect(target.selection.allowed.has('option:model:b')).toBe(true);
+    expect(target.selection.allowed.has('option:action:refresh-progress')).toBe(false);
+
+    // 用户结束选择后，迟到的原地更新必须被丢弃且不再写出视图
+    const selection = target.selection;
+    target.selection = undefined;
+    selection.resolve({ itemId: 'option:model:b' });
+    await expect(responsePromise).resolves.toEqual({ itemId: 'option:model:b' });
+    const countBeforeLate = sent.length;
+    expect(liveHandle!.isActive()).toBe(false);
+    await expect(
+      liveHandle!.update({
+        kind: 'selection',
+        title: '模型管理（/model）',
+        message: 'stale',
+        choices: [{ id: 'option:action:close', label: '返回输入' }],
+      }),
+    ).resolves.toBe(false);
+    expect(sent.length).toBe(countBeforeLate);
+  });
 });
 
 it.each([false,true])('finishes the offline history loading notice after the real reader page settles (content=%s)', async content => {

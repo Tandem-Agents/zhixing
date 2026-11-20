@@ -174,6 +174,36 @@ export function createLocalConversationDirectoryApplication(input: {
   });
 }
 
+export interface LocalSessionModelSelectionPort {
+  get(conversationId: string): Promise<import("@zhixing-ai/core/contracts").SessionModelSelection>;
+  set(
+    conversationId: string,
+    modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection,
+  ): Promise<import("@zhixing-ai/core/contracts").SessionModelSelection>;
+}
+
+export function createLocalSessionModelSelectionPort(
+  owner: LocalConversationOwnerPort,
+): LocalSessionModelSelectionPort {
+  return {
+    async get(conversationId) {
+      const meta = await owner.sessionState.readSessionMeta(
+        conversationId,
+        context(`model-selection-get:${conversationId}`),
+      );
+      return meta.modelSelection ?? { mode: "follow-default" as const };
+    },
+    async set(conversationId, modelSelection) {
+      await owner.mutateSession(
+        conversationId,
+        { kind: "session-meta", patch: { modelSelection } },
+        context(localStableRequest("model-selection-set", { conversationId, modelSelection, at: Date.now() })),
+      );
+      return modelSelection;
+    },
+  };
+}
+
 function context(requestId: string): AuthorityCallContext {
   return {
     principal: { kind: "host", component: "local-conversation-product-api" },

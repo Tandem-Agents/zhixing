@@ -9,10 +9,19 @@ export { CircuitBreaker } from "./circuit-breaker.js";
 
 export {
   classifyProviderError,
+  classifyProviderErrorDetail,
+  formatProviderErrorForUser,
   getRecoveryStrategy,
   isConnectPhaseFailure,
+  isResponseStreamInterrupted,
   markRequestUndelivered,
+  markResponseStreamInterrupted,
   providerRequestNeverSent,
+  sanitizeProviderErrorMessage,
+} from "./classify.js";
+export type {
+  ClassifiedProviderError,
+  ProviderErrorSubcode,
 } from "./classify.js";
 
 export {

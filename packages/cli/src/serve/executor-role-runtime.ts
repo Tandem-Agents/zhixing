@@ -27,7 +27,12 @@ import { ADVANCEMENT_PROPOSAL_TOOL } from "@zhixing-ai/core/advancement/proposal
 import { isLocalConversationId, parseConversationId } from "@zhixing-ai/core/conversation";
 import { jobRunTrustScopeInput } from "@zhixing-ai/core/trust-administration";
 import type { ProviderCredentialProjection } from "@zhixing-ai/providers";
-import { mcpConfigurationRevision } from "@zhixing-ai/providers";
+import { getGlobalConfigPath, mcpConfigurationRevision, ModelCatalogManager, ModelDiscoveryCache } from "@zhixing-ai/providers";
+import { ModelRuntimePort } from "../runtime/model-runtime-port.js";
+import {
+  createHostModelDiskReconciler,
+  settleHostPendingModelRetirements,
+} from "./local-configuration-application.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
 import { MCP_LOG_SOURCE } from "../runtime/mcp-runtime-adapter.js";
@@ -326,6 +331,55 @@ async function runExecutorProcess(
     // 规则命中同样记入指派台账，随镜像回到 owner 由规则权威累计
     permissionStorage.addTrustRuleHitRecorder((hit) => interactions.recordTrustRuleHit(hit));
     let authority: AuthorityRuntimeStack | undefined;
+    const modelDiscoveryCache = new ModelDiscoveryCache({ homeDir: zhixingHome });
+    const modelCatalogManager = new ModelCatalogManager({
+      homeDir: zhixingHome,
+      networkProxy: modelConfiguration.network?.proxy,
+    });
+    await modelCatalogManager.initialize();
+    const modelRuntimePort = new ModelRuntimePort({
+      modelConfiguration,
+      advancementConfiguration,
+      providerCredentials,
+      exposureCredentials: bootstrap.credentialExposureCredentials,
+      credentialGeneration: bootstrap.credentialGeneration,
+      catalog: modelCatalogManager.port(),
+      discoveryCache: modelDiscoveryCache,
+    });
+    await modelRuntimePort.refreshDiscoveryCacheFromDisk();
+    const unsubscribeCatalog = modelCatalogManager.onUpdate((port) => {
+      modelRuntimePort.setCatalogPort(port);
+    });
+    modelCatalogManager.startAutoCheck();
+    executorRoleLifecycle.acquire("modelRuntimePort.dispose", async () => {
+      modelCatalogManager.stopAutoCheck();
+      unsubscribeCatalog();
+      await modelRuntimePort.dispose();
+    });
+    modelRuntimePort.onConnectionRetiredIdle(async () => {
+      await settleHostPendingModelRetirements({
+        configPath: getGlobalConfigPath({}, zhixingHome),
+        store: bootstrap.secretStore,
+        modelRuntimePort,
+      }).catch(() => {});
+    });
+    const modelDiskReconciler = createHostModelDiskReconciler({
+      homeDir: zhixingHome,
+      configPath: getGlobalConfigPath({}, zhixingHome),
+      store: bootstrap.secretStore,
+      modelRuntimePort,
+      initialAuthorityConfiguration: authorityConfiguration,
+      initialMcpCredentials: bootstrap.mcpCredentials,
+      onApplied: async () => {
+        await authority?.refreshLocalExecutorSnapshot().catch(() => {});
+      },
+      onSecurityRevoked: async () => {
+        await authority?.refreshLocalExecutorSnapshot().catch(() => {});
+      },
+    });
+    await modelDiskReconciler.captureBaseline();
+    modelRuntimePort.setDiskReconciler(() => modelDiskReconciler.reconcileFromDisk());
+    let localConversationOwnerRef: LocalConversationOwnerAssembly | undefined;
     const communicationHandle = createConversationCommunicationAssemblyHandle();
     const extensionHandle = createExtensionManagementHandle();
     const runtime = new ExecutorRuntimeSubstrate({
@@ -337,6 +391,19 @@ async function runExecutorProcess(
       modelConfiguration,
       kernelEnvironmentConfiguration,
       credentials: providerCredentials,
+      modelRuntimePort,
+      readLocalSessionModelSelection: async (sessionId) => {
+        if (!localConversationOwnerRef) return undefined;
+        const meta = await localConversationOwnerRef.port().sessionState.readSessionMeta(
+          sessionId,
+          {
+            principal: { kind: "host", component: "executor-model-selection" },
+            requestId: `executor-model-selection:${Date.now()}`,
+            deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+          },
+        );
+        return meta.modelSelection;
+      },
       createToolImplementation: bootstrap.createToolImplementation,
       permissionStorage: permissionStorage.runtime,
       mcpTools: mcpRuntime.tools,
@@ -370,6 +437,7 @@ async function runExecutorProcess(
         runtime,
         credentials: bootstrap.credentialExposureCredentials,
         credentialGeneration: bootstrap.credentialGeneration,
+        modelRuntimePort,
       }),
       enableAnchor: false,
       enableLocalExecutor: true,
@@ -378,6 +446,7 @@ async function runExecutorProcess(
       startupRollback: executorRoleLifecycle.authorityStartupRollback(),
     });
     executorRoleLifecycle.adoptAuthority(authority.startupCleanup);
+    await modelRuntimePort.ensureFreshBeforeAdmission();
     if (startupStopOperation) {
       if ((startupStopSnapshot?.owners.delivery.length ?? 0) !== 0) {
         throw new Error("Executor-only lifecycle cannot restore Anchor Delivery accepted work");
@@ -514,6 +583,7 @@ async function runExecutorProcess(
           sessionId,
           environment?.executionProfile,
           environment?.workspaceBinding ?? null,
+          environment?.modelSelection,
         ),
     });
     const runtimeFactory =
@@ -544,10 +614,13 @@ async function runExecutorProcess(
       advancementModelProvider: createHostAdvancementModelProviderFactory({
         configuration: advancementConfiguration,
         credentials: providerCredentials,
+        modelRuntimePort,
       }),
       evidence: evidenceHandler,
       currentAnchorDeviceId,
+      beforeTurnAdmission: () => modelRuntimePort.ensureFreshBeforeAdmission(),
     });
+    localConversationOwnerRef = localConversationOwner;
     executorRoleLifecycle.acquire(
       "localConversationOwner.close",
       () => localConversationOwner.close(),
@@ -555,8 +628,14 @@ async function runExecutorProcess(
     const jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker, capabilities, workspaceBinding) =>
-          runtime.createJobRuntime(instruction, confirmationBroker, capabilities, workspaceBinding ?? null),
+        create: (instruction, confirmationBroker, capabilities, workspaceBinding, modelSelection) =>
+          runtime.createJobRuntime(
+            instruction,
+            confirmationBroker,
+            capabilities,
+            workspaceBinding ?? null,
+            modelSelection,
+          ),
       }),
       submissionFor: () => {
         if (!mesh) throw new Error("Executor submission transport is not ready");
@@ -977,6 +1056,19 @@ async function runExecutorProcess(
       deviceId: authority.deviceId,
       owner: localConversationOwner.port(),
       remoteFor: (deviceId) => mesh!.firstPartyConversationFor(deviceId),
+      validateModelSelection: async (conversationId, modelSelection) =>
+        modelRuntimePort.validateSessionModelSelection({
+          conversationId,
+          modelSelection,
+          activeWindowMessages:
+            await localConversationOwner.activeWindowMessages(conversationId),
+        }),
+      onModelSelectionUpdated: () => {
+        localConversationOwner.invalidateRuntimeProjections();
+      },
+    });
+    modelRuntimePort.onUpdate(() => {
+      localConversationOwner.invalidateRuntimeProjections();
     });
     const conversationRpc = new ExecutorFirstPartyRpcRouter({
       local: localConversationRpc,
@@ -987,6 +1079,44 @@ async function runExecutorProcess(
         remoteFor: (deviceId) => mesh!.firstPartyConversationFor(deviceId),
       }),
     });
+    const applyModelConfiguration = async (input: {
+      readonly operationId?: string;
+      readonly revokedSecretRefs?: readonly string[];
+      readonly abortConnectionIds?: readonly string[];
+      readonly revokeOnly?: boolean;
+    }) => {
+      const result = await modelDiskReconciler.applyExplicitActivation(input);
+      if (!result.applied && (input.revokedSecretRefs?.length || input.abortConnectionIds?.length)) {
+        await authority?.refreshLocalExecutorSnapshot().catch(() => {});
+      }
+      return result;
+    };
+    const modelCatalog = async (input: {
+      readonly action: "status" | "refresh" | "set-auto-check";
+      readonly force?: boolean;
+      readonly autoCheckEnabled?: boolean;
+    }) => {
+      if (input.action === "set-auto-check" && input.autoCheckEnabled !== undefined) {
+        await modelCatalogManager.setAutoCheckEnabled(input.autoCheckEnabled);
+        return {
+          ...modelCatalogManager.status(),
+          runtimeRevision: modelRuntimePort.snapshot().revision,
+        };
+      }
+      if (input.action === "refresh") {
+        const res = await modelCatalogManager.refresh({ force: input.force ?? true });
+        return {
+          ...modelCatalogManager.status(),
+          runtimeRevision: modelRuntimePort.snapshot().revision,
+          changed: res.changed,
+          message: res.message,
+        };
+      }
+      return {
+        ...modelCatalogManager.status(),
+        runtimeRevision: modelRuntimePort.snapshot().revision,
+      };
+    };
     const serverContext = createServerContext({
       productApi: logApi,
       config: {
@@ -997,6 +1127,8 @@ async function runExecutorProcess(
       version: ZHIXING_CLI_VERSION,
       token: token.token,
       conversationRpc,
+      applyModelConfiguration,
+      modelCatalog,
       lifecycleShutdown: stopCoordinator,
       serverInfoRuntime: {
         conversationStatus: (after) =>
@@ -1138,6 +1270,10 @@ export class ExecutorRuntimeSubstrate {
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
+    readonly modelRuntimePort?: ModelRuntimePort;
+    readonly readLocalSessionModelSelection?: (
+      sessionId: string,
+    ) => Promise<import("@zhixing-ai/core/types").SessionModelSelection | undefined>;
     readonly createToolImplementation: HostKernelToolImplementationFactory;
     readonly permissionStorage: RuntimeSecurityExecutionInfrastructure;
     readonly mcpTools: McpRuntimeToolProjectionPort;
@@ -1154,6 +1290,7 @@ export class ExecutorRuntimeSubstrate {
     this.#modelProvider = createHostKernelModelProviderFactory({
       configuration: options.modelConfiguration,
       credentials: options.credentials,
+      ...(options.modelRuntimePort ? { modelRuntimePort: options.modelRuntimePort } : {}),
     });
     this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory({
       zhixingHome: options.zhixingHome,
@@ -1161,12 +1298,14 @@ export class ExecutorRuntimeSubstrate {
     });
   }
 
-  createConversationRuntime(
+  async createConversationRuntime(
     workspaceRoot?: string | null,
     sessionId?: string,
     executionProfile?: import("@zhixing-ai/core/types").RuntimeExecutionProfile,
     workspaceBinding: import("@zhixing-ai/core/contracts").EnvironmentRequirement["workspace"] | null = null,
+    modelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent,
   ): Promise<AgentRuntime> {
+    await this.options.modelRuntimePort?.ensureFreshBeforeAdmission();
     const mcp = this.options.mcpTools.snapshot();
     const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
     const runtimeEnvironment = this.#runtimeEnvironment.create({
@@ -1184,14 +1323,48 @@ export class ExecutorRuntimeSubstrate {
             }, { agentIdentity: runtimeEnvironment.agentIdentity }),
           }
         : undefined;
-    const primaryRole = workscene ? "power" : "main";
+    const primaryRole =
+      modelSelection?.mode === "follow-role"
+        ? modelSelection.role
+        : (workscene ? "power" : "main");
+    const primaryRoleOverrides: import("@zhixing-ai/orchestrator/runtime").KernelPrimaryRoleOverrides | undefined =
+      modelSelection?.mode === "follow-role" &&
+      (modelSelection.params !== undefined ||
+        modelSelection.maxOutputPreference !== undefined)
+        ? {
+            ...(modelSelection.params ? { params: modelSelection.params } : {}),
+            ...(modelSelection.maxOutputPreference !== undefined
+              ? { maxOutputPreference: modelSelection.maxOutputPreference }
+              : {}),
+          }
+        : undefined;
+    const sessionOverride: import("@zhixing-ai/core/types").SessionModelSelection | undefined =
+      modelSelection !== undefined
+        ? modelSelection.mode === "connection"
+          ? {
+              mode: "override",
+              connectionId: modelSelection.connectionId,
+              model: modelSelection.model,
+              ...(modelSelection.params ? { params: modelSelection.params } : {}),
+              ...(modelSelection.maxOutputPreference !== undefined
+                ? { maxOutputPreference: modelSelection.maxOutputPreference }
+                : {}),
+            }
+          : { mode: "follow-default" }
+        : sessionId && this.options.readLocalSessionModelSelection
+          ? await this.options.readLocalSessionModelSelection(sessionId).catch(() => undefined)
+          : undefined;
     const artifacts = this.options.artifactStore();
     const profile = workscene?.profile ?? zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null });
     return createAgentRuntime({
       deviceCapacity: this.options.deviceCapacity.interactive,
       createLogRecords: this.options.createLogRecords,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
-      modelProvider: this.#modelProvider.create({ primaryRole }),
+      modelProvider: this.#modelProvider.create({
+        primaryRole,
+        ...(sessionOverride ? { sessionOverride } : {}),
+        ...(primaryRoleOverrides ? { primaryRoleOverrides } : {}),
+      }),
       runtimeEnvironment,
       toolImplementation: this.options.createToolImplementation(Object.freeze({
         kind: "assignment",
@@ -1229,7 +1402,7 @@ export class ExecutorRuntimeSubstrate {
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
-      ...(workscene
+      ...(primaryRole !== "main"
         ? {
             primaryRole,
           }
@@ -1242,6 +1415,7 @@ export class ExecutorRuntimeSubstrate {
     confirmationBroker: import("@zhixing-ai/core/confirmation").IConfirmationBroker,
     capabilities: JobRuntimeCapabilities,
     workspaceBinding: import("@zhixing-ai/core/contracts").EnvironmentRequirement["workspace"] | null = null,
+    modelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const runtimeEnvironment = this.#runtimeEnvironment.create({});
@@ -1258,29 +1432,62 @@ export class ExecutorRuntimeSubstrate {
         artifacts: this.options.artifactStore(),
       })),
     });
-    return createAgentRuntime({
-      deviceCapacity: this.options.deviceCapacity.scheduler,
-      createLogRecords: this.options.createLogRecords,
-      orchestrationCapacity: this.options.deviceCapacity.orchestration,
-      modelProvider: this.#modelProvider.create({
-        primaryRole: "main",
-        ...(selection.modelOverride === undefined
-          ? {}
-          : { mainModelOverride: selection.modelOverride }),
-      }),
-      runtimeEnvironment,
-      toolImplementation: selection.runtimeTools.implementation,
-      windowPrompt: createSkillCatalogWindowPromptProjection("main"),
-      securityExecution: this.options.permissionStorage.bind(
-        jobRunTrustScopeInput({ workspace: workspaceBinding }),
-      ),
-      profile: selection.profile,
-      extraTools: [...selection.runtimeTools.extraTools],
-      executionMcpServers: selection.runtimeTools.executionMcpServers,
-      confirmationBroker,
-      systemProtectedPaths: this.options.systemProtectedPaths,
-      runtimeKind: "ephemeral",
-    });
+    const effectiveSelection = modelSelection ?? instruction.modelSelection;
+    const primaryRole = effectiveSelection?.mode === "follow-role" ? effectiveSelection.role : "main";
+    const primaryRoleOverrides: import("@zhixing-ai/orchestrator/runtime").KernelPrimaryRoleOverrides | undefined =
+      effectiveSelection?.mode === "follow-role" &&
+      (effectiveSelection.params !== undefined ||
+        effectiveSelection.maxOutputPreference !== undefined)
+        ? {
+            ...(effectiveSelection.params ? { params: effectiveSelection.params } : {}),
+            ...(effectiveSelection.maxOutputPreference !== undefined
+              ? { maxOutputPreference: effectiveSelection.maxOutputPreference }
+              : {}),
+          }
+        : undefined;
+    const sessionOverride: import("@zhixing-ai/core/types").SessionModelSelection | undefined =
+      effectiveSelection?.mode === "connection"
+        ? {
+            mode: "override",
+            connectionId: effectiveSelection.connectionId,
+            model: effectiveSelection.model,
+            ...(effectiveSelection.params ? { params: effectiveSelection.params } : {}),
+            ...(effectiveSelection.maxOutputPreference !== undefined
+              ? { maxOutputPreference: effectiveSelection.maxOutputPreference }
+              : {}),
+          }
+        : effectiveSelection?.mode === "follow-role"
+          ? { mode: "follow-default" }
+          : undefined;
+    return (async () => {
+      await this.options.modelRuntimePort?.ensureFreshBeforeAdmission();
+      return createAgentRuntime({
+        deviceCapacity: this.options.deviceCapacity.scheduler,
+        createLogRecords: this.options.createLogRecords,
+        orchestrationCapacity: this.options.deviceCapacity.orchestration,
+        modelProvider: this.#modelProvider.create({
+          primaryRole,
+          ...(sessionOverride ? { sessionOverride } : {}),
+          ...(primaryRoleOverrides ? { primaryRoleOverrides } : {}),
+          ...(effectiveSelection?.mode !== "connection" && selection.modelOverride !== undefined
+            ? { mainModelOverride: selection.modelOverride }
+            : {}),
+        }),
+        runtimeEnvironment,
+        toolImplementation: selection.runtimeTools.implementation,
+        windowPrompt: createSkillCatalogWindowPromptProjection("main"),
+        securityExecution: this.options.permissionStorage.bind(
+          jobRunTrustScopeInput({ workspace: workspaceBinding }),
+        ),
+        profile: selection.profile,
+        extraTools: [...selection.runtimeTools.extraTools],
+        executionMcpServers: selection.runtimeTools.executionMcpServers,
+        confirmationBroker,
+        systemProtectedPaths: this.options.systemProtectedPaths,
+        runtimeKind: "ephemeral",
+        ...(primaryRole !== "main" ? { primaryRole } : {}),
+      });
+    })();
   }
 
   capabilityCatalog(): {

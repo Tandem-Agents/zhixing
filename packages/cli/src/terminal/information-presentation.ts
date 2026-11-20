@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from 'node:util';
 import type { SessionCompactResult, SessionUsageResult } from '@zhixing-ai/rpc/session-wire';
 import type { RuntimePrimaryModelDisplayProjection } from '../runtime/runtime-configuration-provider.js';
+import { formatRoleBrief } from '../runtime/model-display-projection.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { DEFAULT_THRESHOLDS } from '@zhixing-ai/core/context';
 import type { TerminalSummary, TerminalSummarySection, TerminalSummaryText } from '@zhixing-ai/terminal-ui/protocol';
@@ -27,7 +28,38 @@ export function informationText(text: string): string {
 
 export function informationModelLines(model: RuntimePrimaryModelDisplayProjection): readonly string[] {
   boundedControlProjection(model, PROJECTION_BYTES);
-  return finish([`模型：${model.model || '(未配置)'}`, `服务商：${model.providerId || '(未配置)'}`]);
+  const providerDisplay = model.connectionName && model.connectionName !== model.providerId
+    ? `${model.connectionName} (${model.providerId})`
+    : (model.connectionName || model.providerId || '(未配置)');
+  const lines: string[] = [
+    `模型：${model.model || '(未配置)'}`,
+    `服务商：${providerDisplay}`,
+  ];
+  const hasRichDetails = Boolean(
+    model.sourceLabel ||
+    model.paramsSummary ||
+    model.unavailableReason ||
+    model.warning ||
+    model.roles,
+  );
+  if (hasRichDetails) {
+    if (model.sourceLabel) lines.push(`生效来源：${model.sourceLabel}`);
+    if (model.paramsSummary) lines.push(`当前参数：${model.paramsSummary}`);
+    if (model.available === false && model.unavailableReason) {
+      lines.push(`⚠ 状态警示：${model.unavailableReason}`);
+    }
+    if (model.warning) {
+      lines.push(`⚠ 回退警示：${model.warning}`);
+    }
+    if (model.roles) {
+      lines.push('用途默认：');
+      lines.push(`  主模型（main）：${formatRoleBrief(model.roles.main)}`);
+      lines.push(`  轻量模型（light）：${formatRoleBrief(model.roles.light)}`);
+      lines.push(`  强力模型（power）：${formatRoleBrief(model.roles.power)}`);
+    }
+    lines.push('提示：请在交互终端输入 /model 搜索、切换模型与原位调参，或输入 /config 管理服务商连接与目录更新。');
+  }
+  return finish(lines);
 }
 
 /** 用量页：容量估算与子任务拆分分区；口径句紧跟数值，原文保留；未知值仍写“未知” */

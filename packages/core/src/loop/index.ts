@@ -1,6 +1,11 @@
 // Agent Loop — 核心循环模块的公开 API
 export { runAgentLoop, drainAgentLoop } from "./agent-loop.js";
 export { streamLLMCall } from "./llm-call.js";
+export {
+  AppendOnlyTurnContextState,
+  createAppendOnlyTurnContextState,
+} from "./prefix-projection.js";
+export type { AppendOnlyProjectionResult } from "./prefix-projection.js";
 export { executeToolCalls, COMMITMENT_SIGNAL } from "./tool-executor.js";
 export { stripPresentationFromAgentYield } from "./presentation.js";
 export { MockLLMProvider, mockTextProvider, mockSequenceProvider } from "./mock-provider.js";

@@ -10,7 +10,19 @@
  * 编辑器自身不感知调用上下文。
  */
 
-import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing-ai/providers";
+import type {
+  CatalogManagerStatus,
+  CatalogRefreshResult,
+  DiscoverConnectionModelsInput,
+  DiscoverConnectionModelsResult,
+  ModelCatalogPort,
+  PendingModelSecretRetirement,
+  RoleId,
+  VerifyModelGenerationInput,
+  VerifyModelGenerationResult,
+  ZhixingConfig,
+  ZhixingCredentials,
+} from "@zhixing-ai/providers";
 import type { McpSetupCandidate, McpResolveResult } from "@zhixing-ai/core/mcp-management";
 import type { McpDiscoveryChoice } from "@zhixing-ai/core/mcp-management";
 import type {
@@ -33,7 +45,47 @@ export type SectionId = "model" | "messaging" | "mcp";
 export type PanelDescriptor =
   /** L1：sections 列表 + 操作按钮 */
   | { kind: "main" }
-  /** L2：选服务商（model role） */
+  /** L2 (v2)：服务商连接管理列表（已配连接 + 新增连接 + 迁移修复入口） */
+  | { kind: "connection-list" }
+  /** L2b (v2)：选择新增预设连接或自定义连接（含本地免密 / 自定义认证头） */
+  | { kind: "connection-add" }
+  /** L3 (v2)：单条服务商连接编辑页（名称 / 端点 / 协议 / 认证模式 / 凭据 / 代理 / 私网许可 / 发现与可选验证 / 首次默认模型 / 删除） */
+  | { kind: "connection-config"; connectionId: string; isNew?: boolean; initialModel?: string }
+  /** L4 (v2)：可选生成式验证确认页（显式告知发送内容、可能费用、合法参数与取消入口） */
+  | { kind: "model-verify-confirm"; connectionId: string; modelId: string }
+  /** L4 (v2)：连接删除影响预览、用途重绑与在途策略选择 */
+  | {
+      kind: "connection-delete";
+      connectionId: string;
+      rebindMainConnectionId?: string;
+      rebindMainModel?: string;
+      inFlightMode?: "retire" | "revoke";
+    }
+  /** L2 (v2)：迁移待修复列表（protectedLegacyProviders + migrationPending） */
+  | { kind: "migration-repair" }
+  /** L3 (v2)：单条受保护旧服务商自定义端点修复确认页 */
+  | { kind: "migration-repair-provider"; providerId: string; allowPrivateOrigin?: boolean; overrideEndpoint?: string }
+  /** L2 (v2)：模型资料与更新状态页（来源 / 修订 / 检查时间 / 立即刷新 / 自动检查开关） */
+  | { kind: "catalog-config"; notice?: string }
+  /** L2 (v2)：预设更新建议列表 */
+  | { kind: "preset-update-list" }
+  /** L3 (v2)：单条预设更新建议并排对比（当前连接固定值 vs 预设建议值） */
+  | { kind: "preset-update-review"; connectionId: string }
+  /** L4 (v2)：单连接的自定义型号管理列表（增改删） */
+  | { kind: "connection-custom-models"; connectionId: string }
+  /** L5 (v2)：单条自定义型号详情（重命名 / 规格覆盖 / 删除） */
+  | { kind: "connection-custom-model-detail"; connectionId: string; modelId: string }
+  /** L4 (v2)：单连接的模型规格覆盖列表 */
+  | { kind: "connection-model-overrides"; connectionId: string }
+  /** L5 (v2)：单条模型规格覆盖编辑页 */
+  | { kind: "model-override-edit"; connectionId: string; modelId: string }
+  /** L6 (v2)：删除规格覆盖前的上游恢复预览与确认页 */
+  | { kind: "model-override-delete-confirm"; connectionId: string; modelId: string }
+  /** L4 (v2)：单连接的已隐藏供应方型号列表（一键恢复显示 + 新增隐藏） */
+  | { kind: "connection-hidden-models"; connectionId: string }
+  /** L5 (v2)：选择要隐藏的供应方型号 */
+  | { kind: "connection-hide-picker"; connectionId: string }
+  /** L2：选服务商连接（用途默认 main/light/power） */
   | { kind: "provider-list"; role: ModelRole }
   /** L3：服务商配置（API Key + 选模型 + 确认按钮） */
   | { kind: "provider-config"; role: ModelRole; providerId: string }
@@ -47,7 +99,7 @@ export type PanelDescriptor =
    * L5：model 选定后的思考控制步骤——由所选 model 的 ThinkingControl
    * 元数据驱动渲染（toggle/effort/budget），写 config.llm.<role>.thinking。
    */
-  | { kind: "thinking-config"; role: ModelRole; providerId: string; model: string }
+  | { kind: "thinking-config"; role: ModelRole; providerId: string; model: string; notice?: string }
   /** L6：自定义思考预算（输入 token 数，budget 形态用） */
   | { kind: "thinking-budget"; role: ModelRole; providerId: string; model: string }
   /** L3 (messaging)：channel 配置（appId + appSecret + 启用按钮） */
@@ -111,6 +163,26 @@ export interface WorkingState {
   channelIntents?: Readonly<Record<string, boolean>>;
   config: ZhixingConfig;
   credentials: ZhixingCredentials;
+  /** 编辑期累积的待清退/撤权条目（随同次原子保存写入 configuration/model-retirements/v1） */
+  modelRetirements?: PendingModelSecretRetirement[];
+  /** 删除连接选择立即中止时记录的连接 ID（供宿主窄生效立即中止在途调用） */
+  abortConnectionIds?: string[];
+  /** 编辑期触发了根级 modelCapabilityOverrides 清理时置 true */
+  removeLegacyModelCapabilityOverrides?: boolean;
+  /** 迁移修复中用户在当前会话显式输入的新端点（仅 UI 暂存，不写回原受保护记录） */
+  confirmedRepairEndpoints?: Record<string, string>;
+  /** 当前编辑会话唯一 ID（每次重新打开配置编辑器重新生成，使 `draftRevision` 严格限定在当前会话内，不阻断新开会话刷新缓存） */
+  draftSessionId?: string;
+  /** 编辑期草稿单调修订号（端点/协议/认证/密钥变更时递增，用于丢弃过时异步发现/验证结果） */
+  draftRevision?: number;
+  /** 编辑期瞬态原生发现结果（按 connectionId 索引；仅驻留编辑进程内存，绝不写入 config.jsonc 或 SecretStore） */
+  draftDiscoveryByConnection?: Readonly<Record<string, DiscoverConnectionModelsResult>>;
+  /** 编辑期瞬态可选生成验证结果（按 connectionId -> modelId 索引；绝不写入公开配置） */
+  draftVerificationByConnection?: Readonly<
+    Record<string, Readonly<Record<string, VerifyModelGenerationResult>>>
+  >;
+  /** 401 鉴权失败后用户显式二次确认“先存待修”的草稿指纹（按 connectionId 索引） */
+  draftAuthRejectedConfirmed?: Readonly<Record<string, string>>;
   /**
    * 输入面板的当前 buffer——由 input/add-model panel 累积字符；保存时写入对应字段。
    *
@@ -182,6 +254,22 @@ export interface ConfigEditorRuntime {
    * 会被当关键词重新搜索；故由候选选择面板在选中时调此入口。
    */
   mcpExtract?: (packageName: string, signal?: AbortSignal) => Promise<McpResolveResult>;
+  /** 当前模型目录只读窄读口（宿主或无宿主 N 进程注入；缺省使用随包单一基线）。 */
+  modelCatalog?: () => ModelCatalogPort;
+  /** 在编辑进程 N 本地执行只读原生发现/可选兼容探测（草稿秘密绝不跨普通 RPC）。 */
+  discoverModels?: (
+    input: DiscoverConnectionModelsInput,
+  ) => Promise<DiscoverConnectionModelsResult>;
+  /** 在编辑进程 N 本地执行自愿确认的可选生成式验证（草稿秘密绝不跨普通 RPC）。 */
+  verifyModelGeneration?: (
+    input: VerifyModelGenerationInput,
+  ) => Promise<VerifyModelGenerationResult>;
+  /** 刷新可信模型目录（宿主协调器或无宿主 N 进程持跨进程锁单写）。 */
+  refreshModelCatalog?: (signal?: AbortSignal) => Promise<CatalogRefreshResult>;
+  /** 读取当前模型目录状态快照（来源 / 修订 / 最近检查 / 错误 / 升级提示 / 自动检查开关）。 */
+  catalogStatus?: () => CatalogManagerStatus;
+  /** 切换可信模型目录后台自动检查开关（委托宿主单写协调器或无宿主 N 本地持久化）。 */
+  setCatalogAutoCheck?: (enabled: boolean) => Promise<CatalogManagerStatus>;
 }
 
 /**
@@ -276,7 +364,7 @@ export interface SectionEntry {
  * - exit：退出整个编辑器（completed / cancelled）
  */
 export type PanelAction =
-  | { type: "stay"; state: WorkingState }
+  | { type: "stay"; state: WorkingState; errorMessage?: string }
   | { type: "navigate"; state: WorkingState; panel: PanelDescriptor }
   | { type: "pop"; state: WorkingState }
   /** 替换栈顶面板（不 push）——原地更新当前面板（如把 mcp-add 换成带 error 的同款）。 */

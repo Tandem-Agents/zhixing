@@ -46,15 +46,18 @@
 import { buildCleanup } from "../interrupt/cleanup.js";
 import { createInterruptController, getAbortReason } from "../interrupt/controller.js";
 import { AgentError, toAgentError } from "../types/errors.js";
-import { emptyUsage, getTotalInputTokens, mergeUsage } from "../types/llm.js";
+import {
+  emptyUsage,
+  getTotalInputTokens,
+  mergeUsage,
+  validatePreSendCompatibility,
+} from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import type { Message } from "../types/messages.js";
-import {
-  resolveModelInputCapabilities,
-  validateMessagesAgainstInputCapabilities,
-} from "../types/user-input.js";
+import { resolveModelInputCapabilities } from "../types/user-input.js";
 import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
+import { createAppendOnlyTurnContextState } from "./prefix-projection.js";
 import { executeToolCalls } from "./tool-executor.js";
 import { runTurnBegin, runTurnEnd } from "./turn-end.js";
 import { createSegmentLedger } from "../context/segment/coverage.js";
@@ -108,12 +111,44 @@ export async function* runAgentLoop(
       model,
       providerModels: params.provider.models,
     });
+  const appendOnlyState =
+    params.provider.appendOnlyTurnContext === true
+      ? (params.prefixProjectionState ?? createAppendOnlyTurnContextState(params.messages))
+      : undefined;
+
   const prepareSendView = (messages: readonly Message[]): PreparedSendView => {
     const stateMessages = messages;
+    const messagePrefix = getMessagePrefix();
+    if (appendOnlyState) {
+      const liveTurnContext = params.turnContextInjector
+        ? params.turnContextInjector.build()
+        : null;
+      const projected = appendOnlyState.project(stateMessages, liveTurnContext);
+      const messagesForLLM = projected.messagesForLLM;
+      const providerMessages =
+        messagePrefix.length === 0
+          ? messagesForLLM
+          : [...messagePrefix, ...messagesForLLM];
+      const invalidatedPrefixBeforeIndex = projected.invalidatedPrefixBeforeIndex(
+        messagePrefix.length,
+      );
+      return {
+        systemPrompt: getSystemPrompt(),
+        tools: toolSpecs,
+        stateMessages,
+        messagesForLLM,
+        providerMessages,
+        ephemeralTailText: projected.ephemeralTailText,
+        prefixGeneration: appendOnlyState.generation,
+        ephemeralMessagesAfterAnchor: projected.ephemeralMessagesAfterAnchor,
+        ...(invalidatedPrefixBeforeIndex !== undefined
+          ? { invalidatedPrefixBeforeIndex }
+          : {}),
+      };
+    }
     const messagesForLLM = params.turnContextInjector
       ? params.turnContextInjector.inject(stateMessages)
       : stateMessages;
-    const messagePrefix = getMessagePrefix();
     const providerMessages =
       messagePrefix.length === 0
         ? messagesForLLM
@@ -299,6 +334,9 @@ export async function* runAgentLoop(
       windowLifecycle,
       segmentLedger: state.segmentLedger,
     });
+    if (begin.anchorInvalidated && appendOnlyState) {
+      appendOnlyState.reset(begin.messages.length);
+    }
     state = {
       ...state,
       messages: begin.messages,
@@ -338,14 +376,26 @@ export async function* runAgentLoop(
       // call 之前重做发送视图，让请求、校准、快照和段阈值使用同一口径。
       const sendView = prepareSendView(state.messages);
 
-      const inputCapabilityError = validateMessagesAgainstInputCapabilities(
-        sendView.messagesForLLM,
+      // 未完工具往返按权威历史（sendView.stateMessages）判定，材料兼容按实际发送视图（sendView.providerMessages）核对，
+      // 防止追加式 <turn-context> 尾部改变坐标绕过未完回合预检。
+      const preSendCompatibilityError = validatePreSendCompatibility({
+        messages: sendView.stateMessages,
+        materialMessages: sendView.providerMessages,
         inputCapabilities,
-      );
-      if (inputCapabilityError) {
+        target: {
+          protocol: params.provider.protocol,
+          sourceConnectionId: params.provider.sourceConnectionId,
+          sourceOriginKey: params.provider.sourceOriginKey,
+          model,
+          thinking,
+          requiresThinkingReplayInToolRoundtrip:
+            params.provider.requiresThinkingReplayInToolRoundtrip,
+        },
+      });
+      if (preSendCompatibilityError) {
         return await finalizeRun({
           reason: "error",
-          error: inputCapabilityError,
+          error: preSendCompatibilityError,
           usage: state.totalUsage,
         });
       }
@@ -362,6 +412,7 @@ export async function* runAgentLoop(
         thinking,
         systemPrompt: sendView.systemPrompt,
         toolSpecs: [...sendView.tools],
+        invalidatedPrefixBeforeIndex: sendView.invalidatedPrefixBeforeIndex,
         controller,
         watchdog: params.watchdog,
         eventBus,
@@ -412,15 +463,26 @@ export async function* runAgentLoop(
           getTotalInputTokens(llmResult.usage),
         );
       }
+      // 提交时锚定：仅当本次模型调用真正产出助手消息进入 state.messages 时，
+      // 才将当次实际送出的尾段 `<turn-context>`（C_k）锚定到该助手消息之前的槽位（设计 §5.6）。
+      if (!llmResult.aborted && !llmResult.error && appendOnlyState) {
+        appendOnlyState.commitTurnContext(
+          state.messages.length,
+          sendView.ephemeralTailText ?? null,
+        );
+      }
       if (llmCallSuccess) {
         // baselineMessageCount 用 state.messages.length 而非 providerMessages.length：
         // anchor 的真值已包含 system/prefix/turn-context/tools 的固定成本，后续 delta
-        // 只应从事实链 state.messages 切片，避免把发送前缀重复估算。
+        // 只应从事实链 state.messages 切片（加锚点后新增临时上下文），避免把旧 C0 重复估算。
         state = {
           ...state,
           anchor: {
             totalInputTokens: getTotalInputTokens(llmResult.usage),
             baselineMessageCount: state.messages.length,
+            ...(sendView.prefixGeneration !== undefined
+              ? { prefixGeneration: sendView.prefixGeneration }
+              : {}),
           },
         };
       }
@@ -502,6 +564,9 @@ export async function* runAgentLoop(
         const incoming = !controller.signal.aborted && state.turnCount + 1 < maxTurns
           ? await params.inputPort?.receive({ boundary: state.turnCount + 1, closing: true }) ?? []
           : [];
+        if (turnEnd.anchorInvalidated && appendOnlyState) {
+          appendOnlyState.reset(turnEnd.messages.length);
+        }
         if (incoming.length > 0) {
           // 追加输入接在运行部分末尾：台账的运行起点不变，覆盖规划把它们当作钉住的输入
           state = {
@@ -645,6 +710,9 @@ export async function* runAgentLoop(
       const incoming = !controller.signal.aborted && newTurnCount < maxTurns
         ? await params.inputPort?.receive({ boundary: newTurnCount, closing: false }) ?? []
         : [];
+      if (turnEnd.anchorInvalidated && appendOnlyState) {
+        appendOnlyState.reset(turnEnd.messages.length);
+      }
       // tool 路径 state 重建 —— 保留 anchor（同 run 内 anchor 跨 turn 有效，
       // 下一次 LLM call 成功后写入新 anchor 自然覆盖）。
       state = {

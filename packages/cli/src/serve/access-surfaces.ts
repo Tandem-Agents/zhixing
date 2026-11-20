@@ -545,6 +545,8 @@ export interface CreateConversationServicesInput {
   };
   readonly conversationCommittedViewStorage: ConversationCommittedViewStorage;
   readonly taskListService: TaskListService;
+  /** 可选：每轮准入前检查本机配置/凭据修订差，补应用纯模型域更新。 */
+  readonly beforeTurnAdmission?: () => Promise<void>;
 }
 
 export async function createConversationServices(
@@ -835,6 +837,7 @@ export async function createConversationServices(
   });
   manager = new ConversationManager(input.runtimeFactory, undefined, {
     onRelease: (conversationId) => protocol.releaseConversation(conversationId),
+    ...(input.beforeTurnAdmission ? { beforeTurnAdmission: input.beforeTurnAdmission } : {}),
     ...input.conversationRuntimeStorage,
     loadHistory: async (conversationId) => {
       const meta = await protocol.sessionState.readSessionMeta(conversationId, {
@@ -1056,6 +1059,7 @@ export interface CreateLocalConversationOwnerInput {
   readonly trustRuleHits?: import("@zhixing-ai/owner-kernel/conversation-assignment").TrustRuleHitPort;
   readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;
   readonly providerCredentials?: ProviderCredentialProjection;
+  readonly modelRuntimePort?: import("../runtime/model-runtime-port.js").ModelRuntimePort;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly executorDataPlane: ExecutorDataPlaneRuntime;
   readonly meshBootstrap: MeshRuntimeBootstrap;
@@ -1151,12 +1155,16 @@ export async function createLocalConversationOwner(
     advancementModelProvider: createHostAdvancementModelProviderFactory({
       configuration: input.advancementConfiguration,
       credentials: input.providerCredentials ?? {},
+      ...(input.modelRuntimePort ? { modelRuntimePort: input.modelRuntimePort } : {}),
     }),
     evidence: input.evidenceHandler,
     currentAnchorDeviceId: () =>
       inputMeshBootstrap.mode === "trusted-home"
         ? inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()
         : inputAuthorityRuntime!.deviceId,
+    ...(input.modelRuntimePort
+      ? { beforeTurnAdmission: () => input.modelRuntimePort!.ensureFreshBeforeAdmission() }
+      : {}),
   });
   input.lifecycleContributions.acquire("localConversationOwner.close", () =>
     assembly.close()

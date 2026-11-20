@@ -15,7 +15,7 @@ export type RuntimeTopologyConfigurationProjection = RuntimeConfigurationProject
 >;
 
 export type RuntimeModelConfigurationProjection = RuntimeConfigurationProjection<
-  "llm" | "modelCapabilityOverrides",
+  "llm" | "network" | "modelCapabilityOverrides",
   "model"
 >;
 
@@ -27,7 +27,7 @@ export type RuntimeKernelEnvironmentConfigurationProjection =
 
 export type RuntimeAdvancementConfigurationProjection =
   RuntimeConfigurationProjection<
-    "llm" | "workspace" | "advancement" | "modelCapabilityOverrides",
+    "llm" | "workspace" | "advancement" | "network" | "modelCapabilityOverrides",
     "advancement"
   >;
 
@@ -47,7 +47,7 @@ export type RuntimeWorkspaceConfigurationProjection = RuntimeConfigurationProjec
 >;
 
 export type RuntimeCredentialRotationConfigurationProjection =
-  RuntimeConfigurationProjection<"llm" | "messaging", "credential-rotation">;
+  RuntimeConfigurationProjection<"llm" | "messaging" | "network", "credential-rotation">;
 
 /**
  * Durable executor/readiness identity currently hashes the complete validated
@@ -72,18 +72,19 @@ export interface RuntimeConfigurationProjections {
 }
 
 const TOPOLOGY_KEYS = ["mesh"] as const;
-const MODEL_KEYS = ["llm", "modelCapabilityOverrides"] as const;
+const MODEL_KEYS = ["llm", "network", "modelCapabilityOverrides"] as const;
 const KERNEL_ENVIRONMENT_KEYS = ["agent", "workspace", "network"] as const;
 const ADVANCEMENT_KEYS = [
   "llm",
   "workspace",
   "advancement",
+  "network",
   "modelCapabilityOverrides",
 ] as const;
 const MCP_KEYS = ["mcp", "network"] as const;
 const CHANNEL_KEYS = ["messaging", "intent"] as const;
 const WORKSPACE_KEYS = ["workspace"] as const;
-const CREDENTIAL_ROTATION_KEYS = ["llm", "messaging"] as const;
+const CREDENTIAL_ROTATION_KEYS = ["llm", "messaging", "network"] as const;
 const AUTHORITY_KEYS = [
   "mesh",
   "llm",

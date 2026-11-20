@@ -328,6 +328,48 @@ export interface ServerContext {
     readonly frame: FinalFrame;
     readonly publishResults: readonly PublishResultNotice[];
   }[]>;
+  /** 宿主模型窄生效回调：仅本机回环管理面触发，宿主从本地配置与 SecretStore 重读并原子换代。 */
+  applyModelConfiguration?: (input: {
+    readonly operationId?: string;
+    readonly revokedSecretRefs?: readonly string[];
+    readonly abortConnectionIds?: readonly string[];
+    readonly revokeOnly?: boolean;
+  }) => Promise<{
+    readonly applied: boolean;
+    readonly revision: string;
+    readonly reason?: string;
+    readonly deduplicated?: true;
+    readonly abortedCalls?: number;
+    readonly rotationWarning?: string;
+  }>;
+  /** 宿主单写模型目录管理入口（仅本机回环可信面调用：查询状态 / 刷新可信源 / 切换自动检查）。 */
+  modelCatalog?: (input: {
+    readonly action: "status" | "refresh" | "set-auto-check";
+    readonly force?: boolean;
+    readonly autoCheckEnabled?: boolean;
+  }) => Promise<{
+    readonly source: "bundled" | "trusted-remote" | "recovered-previous";
+    readonly activeRevision: string;
+    readonly publishedAt: string;
+    readonly autoCheckEnabled: boolean;
+    readonly repositoryConfigured: boolean;
+    readonly repositoryMetadataUrl?: string;
+    readonly lastCheckedAt?: string;
+    readonly lastStatus: "idle" | "up-to-date" | "updated" | "offline" | "failed" | "disabled";
+    readonly lastError?: string;
+    readonly rootVersion?: number;
+    readonly runtimeRevision?: string;
+    readonly changed?: boolean;
+    readonly message?: string;
+  }>;
+  /** Session owner 持久化选模读写口（跟随默认 / 结构化会话覆盖）。 */
+  sessionModelSelection?: {
+    get(conversationId: string): Promise<import("@zhixing-ai/core/contracts").SessionModelSelection>;
+    set(
+      conversationId: string,
+      modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection,
+    ): Promise<import("@zhixing-ai/core/contracts").SessionModelSelection>;
+  };
   /** 耐久停机收束点。所有外部停机入口必须先取得 ready-to-stop。 */
   lifecycleShutdown?: LifecycleShutdownAdapter;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
@@ -369,6 +411,9 @@ export interface CreateContextOptions {
   confirmation?: ServerConfirmationBinding;
   readonly serverInfoRuntime?: ServerInfoRuntimeBinding;
   readonly conversationFinalHistory?: ServerContext["conversationFinalHistory"];
+  applyModelConfiguration?: ServerContext["applyModelConfiguration"];
+  modelCatalog?: ServerContext["modelCatalog"];
+  sessionModelSelection?: ServerContext["sessionModelSelection"];
   lifecycleShutdown?: LifecycleShutdownAdapter;
   conversationRpc?: FirstPartyConversationRpcRouter;
   foregroundActivity?: ForegroundActivityPort;
@@ -392,6 +437,9 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     confirmation: opts.confirmation,
     serverInfoRuntime: opts.serverInfoRuntime,
     conversationFinalHistory: opts.conversationFinalHistory,
+    applyModelConfiguration: opts.applyModelConfiguration,
+    modelCatalog: opts.modelCatalog,
+    sessionModelSelection: opts.sessionModelSelection,
     lifecycleShutdown: opts.lifecycleShutdown,
     conversationRpc: opts.conversationRpc,
     foregroundActivity: opts.foregroundActivity,

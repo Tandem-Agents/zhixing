@@ -236,6 +236,8 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly currentAnchorDeviceId: () => string | undefined;
   /** 关闭时 drain 的判定预算;默认 30s,只在无法证明收束时决定失败收场时机。 */
   readonly closeDrainBudgetMs?: number;
+  /** 可选：每轮准入前检查本机配置/凭据修订差，补应用纯模型域更新。 */
+  readonly beforeTurnAdmission?: () => Promise<void>;
 }
 
 /**
@@ -935,6 +937,7 @@ export class LocalConversationOwnerAssembly {
 
     manager = new ConversationManager(options.runtimeFactory, undefined, {
       onRelease: (conversationId) => protocol.releaseConversation(conversationId),
+      ...(options.beforeTurnAdmission ? { beforeTurnAdmission: options.beforeTurnAdmission } : {}),
       loadHistory: async (conversationId) => {
         for (;;) {
           const context = await protocol.recoveryPage({ mode: 'context', conversationId }) as import('@zhixing-ai/core/contracts').ConversationContextPage;
@@ -1177,6 +1180,37 @@ export class LocalConversationOwnerAssembly {
       }
     });
     return starting;
+  }
+
+  /** 使空闲会话运行时投影失效，下次准入按最新模型修订/会话覆盖重建，不打断在途执行。 */
+  invalidateRuntimeProjections(): void {
+    this.#manager.invalidateRuntimeProjections();
+  }
+
+  /** 读取当前活动窗口消息（合并已耐久提交但尚未投影入窗口的尾段，消除 session.final 后竞态），供正式选模保存前预检使用。 */
+  async activeWindowMessages(
+    conversationId: string,
+  ): Promise<readonly import("@zhixing-ai/core").Message[]> {
+    const activeSession = this.#manager.getSession(conversationId);
+    if (!activeSession) return [];
+    const baseMessages = activeSession.window.getMessages();
+    const tail = await this.#protocol.sessionState
+      .readTranscriptTail(
+        conversationId,
+        hostRequestContext("local-model-selection-window", `model-selection-window:${Date.now()}`),
+        undefined,
+        8,
+      )
+      .catch(() => undefined);
+    if (!tail || tail.records.length === 0) return baseMessages;
+    const unprojected = tail.records.filter(
+      (record) => record.runIndex >= activeSession.turnCount,
+    );
+    if (unprojected.length === 0) return baseMessages;
+    return [
+      ...baseMessages,
+      ...unprojected.flatMap((record) => record.messages),
+    ];
   }
 
   /** Read-only activity probe used by the Executor-only on-demand Host. */

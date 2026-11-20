@@ -28,15 +28,32 @@ import type {
 } from "@zhixing-ai/core";
 import {
   coalesceUserMaterialTextBlocks,
+  isSameTrustedThinkingSource,
   type ContentBlock,
   type Message,
   type ToolSpec,
 } from "@zhixing-ai/core";
 import type { ResolvedProvider } from "../types.js";
-import { markRequestUndelivered } from "@zhixing-ai/core/resilience";
-import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
+import {
+  createConnectionDeliveryFetch,
+  deliveryFetch,
+  newDelivery,
+  withDelivery,
+  type ConnectionDeliveryTransport,
+} from "./delivery-transport.js";
 import { parseOpenAICompatibleUsage } from "./openai-usage.js";
-import { buildOpenAICompatibleThinkingParams } from "./thinking-params.js";
+import { markResponseStreamInterrupted } from "@zhixing-ai/core/resilience";
+import {
+  buildThinkingProtocolState,
+  collectBoundSecrets,
+  normalizeAdapterError,
+  resolveAdapterProvenance,
+  type AdapterProvenance,
+} from "./protocol-helpers.js";
+import {
+  buildOpenAICompatibleThinkingParams,
+  supportsOpenAICompatibleReasoningContentReplay,
+} from "./thinking-params.js";
 
 // ─── Vendor Protocol Extensions ───
 //
@@ -81,23 +98,63 @@ type DeepSeekAssistantMessage = OpenAI.ChatCompletionAssistantMessageParam & {
  * 的 model 由 core/resolveModelInfo 走协议族默认（PROTOCOL_BUDGET_DEFAULTS["openai-compatible"]）兜底。
  */
 export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMProvider {
+  const connectionTransport: ConnectionDeliveryTransport | undefined =
+    provider.network !== undefined || provider.networkProxy !== undefined
+      ? createConnectionDeliveryFetch({
+          proxyPolicy: provider.network?.proxy ?? "inherit",
+          networkProxy: provider.networkProxy,
+          allowPrivateOrigin: provider.network?.allowPrivateOrigin,
+          confirmedOrigin: provider.baseUrl,
+        })
+      : undefined;
+  const boundFetch = connectionTransport?.fetch ?? deliveryFetch;
+
   // SDK 在首次真正调用模型时才加载并构造，不进入宿主启动的模块图；加载失败下次重试。
   let client: Promise<OpenAI> | undefined;
   const connect = (): Promise<OpenAI> => {
-    client ??= import("openai").then(({ default: OpenAI }) => new OpenAI({
-      baseURL: provider.baseUrl,
-      apiKey: provider.apiKey,
-      // 重试只在 core 的 withRetry 一层：一次调用只发一次请求，界面显示的重试次数也是真实次数
-      maxRetries: 0,
-      // 受控传输按调用记账，只有整次调用都没送达才给错误打未送达标记（计量据此按 0 token 结算）
-      fetch: deliveryFetch,
-    }));
+    client ??= import("openai").then(({ default: OpenAI }) => {
+      const authMode = provider.authMode ?? "api-key";
+      const customHeaders: Record<string, string | null> | undefined =
+        authMode === "none"
+          ? { Authorization: null }
+          : authMode === "header" && provider.authHeaderName
+            ? { Authorization: null, [provider.authHeaderName]: provider.apiKey }
+            : undefined;
+      return new OpenAI({
+        baseURL: provider.baseUrl,
+        // 免密或自定义头模式不发送假 Bearer Key（通过 defaultHeaders 移除 Authorization）
+        apiKey: authMode === "api-key" ? provider.apiKey : "not-used",
+        ...(customHeaders ? { defaultHeaders: customHeaders } : {}),
+        // 重试只在 core 的 withRetry 一层：一次调用只发一次请求，界面显示的重试次数也是真实次数
+        maxRetries: 0,
+        // 受控传输按调用记账，只有整次调用都没送达才给错误打未送达标记（计量据此按 0 token 结算）
+        fetch: boundFetch,
+      });
+    });
     client.catch(() => { client = undefined; });
     return client;
   };
 
+  const provenance = resolveAdapterProvenance(provider, "openai-compatible");
+  const boundSecrets = collectBoundSecrets(provider);
+  const thinkingDialect =
+    provider.quirks.thinkingDialect === "anthropic" ||
+    provider.quirks.thinkingDialect === "openai-responses" ||
+    provider.quirks.thinkingDialect === "google-interactions"
+      ? "none"
+      : provider.quirks.thinkingDialect;
+  const allowReasoningReplay =
+    supportsOpenAICompatibleReasoningContentReplay(thinkingDialect);
+
   return {
     id: provider.id,
+    protocol: "openai-compatible",
+    sourceConnectionId: provenance.sourceConnectionId,
+    sourceOriginKey: provenance.sourceOriginKey,
+    appendOnlyTurnContext: false,
+    async close(): Promise<void> {
+      await connectionTransport?.close();
+    },
     models: provider.declaredModels,
 
     async prepare(): Promise<void> {
@@ -105,7 +162,11 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
     },
 
     async *chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
-      const openaiMessages = convertMessages(request.messages);
+      const openaiMessages = convertMessages(
+        request.messages,
+        provenance,
+        allowReasoningReplay,
+      );
       const tools = request.tools ? convertTools(request.tools) : undefined;
 
       const maxTokensParam = buildMaxTokensParam(
@@ -113,12 +174,6 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
         request.maxTokens ?? 4096,
       );
 
-      // 思考参数按 provider 思考方言写成原生形态（anthropic 走自有协议，
-      // 不应出现在 OpenAI 兼容路径；防御性归一为 none = 不发思考参数）。
-      const thinkingDialect =
-        provider.quirks.thinkingDialect === "anthropic"
-          ? "none"
-          : provider.quirks.thinkingDialect;
       const thinkingParams = buildOpenAICompatibleThinkingParams(
         thinkingDialect,
         request.thinking,
@@ -165,12 +220,14 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
       //     (与 tool_call_end finish_reason 兜底同模式,防 LLM 只 think 不 content
       //     的极端场景 thinking 段悬挂)
       let inThinking = false;
+      let responseStreamStarted = false;
 
       const delivery = newDelivery();
       try {
         const stream = await withDelivery(delivery, async () => (await connect()).chat.completions.create(params, {
           signal: request.abortSignal ?? undefined,
         }));
+        responseStreamStarted = true;
 
         for await (const chunk of stream) {
           const choice = chunk.choices?.[0];
@@ -206,7 +263,10 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
           // 文本输出 —— content 到达即标志 thinking 流结束(若曾进入)
           if (delta?.content) {
             if (inThinking) {
-              yield { type: "thinking_block_end" };
+              yield {
+                type: "thinking_block_end",
+                protocolState: buildThinkingProtocolState(provenance, request.model),
+              };
               inThinking = false;
             }
             yield { type: "text_delta", text: delta.content };
@@ -215,7 +275,10 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
           // 工具调用（流式）—— tool_calls 同 content 一样标志 thinking 流结束
           if (delta?.tool_calls) {
             if (inThinking) {
-              yield { type: "thinking_block_end" };
+              yield {
+                type: "thinking_block_end",
+                protocolState: buildThinkingProtocolState(provenance, request.model),
+              };
               inThinking = false;
             }
             for (const tc of delta.tool_calls) {
@@ -250,7 +313,10 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
             // 极端场景兜底:LLM 只 think 不输出 content(纯 reasoning),
             // finish_reason 触发但 inThinking 仍为 true → 关闭 thinking 边界
             if (inThinking) {
-              yield { type: "thinking_block_end" };
+              yield {
+                type: "thinking_block_end",
+                protocolState: buildThinkingProtocolState(provenance, request.model),
+              };
               inThinking = false;
             }
             // 发射所有未结束的工具调用的 end 事件
@@ -262,10 +328,26 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
             stopReason = mapFinishReason(choice.finish_reason);
           }
         }
+        if (request.abortSignal?.aborted) {
+          yield {
+            type: "error",
+            error: normalizeAdapterError(
+              new DOMException("The operation was aborted.", "AbortError"),
+              delivery,
+              boundSecrets,
+            ),
+          };
+          return;
+        }
       } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        if (provenUndelivered(delivery)) markRequestUndelivered(error);
-        yield { type: "error", error };
+        const normalized = normalizeAdapterError(err, delivery, boundSecrets);
+        if (responseStreamStarted && !request.abortSignal?.aborted) {
+          markResponseStreamInterrupted(normalized);
+        }
+        yield {
+          type: "error",
+          error: normalized,
+        };
         return;
       }
 
@@ -282,12 +364,16 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
  * 关键差异：我们的 tool_result 在 user 消息的 content 中，
  * OpenAI 格式需要独立的 { role: "tool" } 消息。
  */
-function convertMessages(messages: Message[]): OpenAI.ChatCompletionMessageParam[] {
+function convertMessages(
+  messages: Message[],
+  provenance: AdapterProvenance,
+  allowReasoningReplay: boolean,
+): OpenAI.ChatCompletionMessageParam[] {
   const result: OpenAI.ChatCompletionMessageParam[] = [];
 
   for (const msg of messages) {
     if (msg.role === "assistant") {
-      result.push(convertAssistantMessage(msg));
+      result.push(convertAssistantMessage(msg, provenance, allowReasoningReplay));
     } else {
       // user 消息可能包含 tool_result 和/或普通用户内容；含文件材料描述的连续文本块按原拼接语义折叠
       const normalizedBlocks = coalesceUserMaterialTextBlocks(msg.content);
@@ -366,7 +452,11 @@ function convertUserContent(
   return parts;
 }
 
-function convertAssistantMessage(msg: Message): DeepSeekAssistantMessage {
+function convertAssistantMessage(
+  msg: Message,
+  provenance: AdapterProvenance,
+  allowReasoningReplay: boolean,
+): DeepSeekAssistantMessage {
   const content = msg.content;
 
   const textParts = content
@@ -374,10 +464,18 @@ function convertAssistantMessage(msg: Message): DeepSeekAssistantMessage {
     .map((b) => b.text)
     .join("");
 
-  const thinkingParts = content
-    .filter((b): b is Extract<ContentBlock, { type: "thinking" }> => b.type === "thinking")
-    .map((b) => b.thinking)
-    .join("");
+  // 设计 §2.3：仅当目标连接方言支持 reasoning_content 且思考块经非秘密来源身份核对为同来源时才发送；
+  // 跨连接、同连接改址、跨协议、来源不明旧记录或保守聚合端一律省略该私有字段，不盲目外传。
+  const thinkingParts = allowReasoningReplay
+    ? content
+        .filter(
+          (b): b is Extract<ContentBlock, { type: "thinking" }> =>
+            b.type === "thinking" &&
+            isSameTrustedThinkingSource(b.protocolState, provenance),
+        )
+        .map((b) => b.thinking)
+        .join("")
+    : "";
 
   const toolUses = content.filter(
     (b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use",
@@ -388,10 +486,6 @@ function convertAssistantMessage(msg: Message): DeepSeekAssistantMessage {
     content: textParts || null,
   };
 
-  // Reasoning 内容(vendor 协议扩展,详见顶部 Vendor Protocol Extensions section)。
-  // DeepSeek thinking 模式要求 multi-turn replay 时原样回传 reasoning_content,
-  // 否则 400 拒绝;Qwen-QwQ / Kimi-thinking 等沿用同一约定。
-  // 缺失 ThinkingBlock(非 thinking 模型) → 不写字段,出站 payload 与历史完全一致。
   if (thinkingParts) {
     result.reasoning_content = thinkingParts;
   }

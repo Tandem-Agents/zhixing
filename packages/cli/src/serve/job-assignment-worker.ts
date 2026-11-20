@@ -108,6 +108,8 @@ export interface JobRuntimePort {
     readonly capabilities: JobRuntimeCapabilities;
     /** 清单里的工作区绑定：运行的授权范围由它决定（没有则主范围）。 */
     readonly workspaceBinding?: NonNullable<JobEnvelope["manifest"]["environment"]["workspace"]>;
+    /** 清单冻结的跨设备结构化模型选择意图（目标用途默认或显式目标连接/型号）。 */
+    readonly modelSelection?: JobEnvelope["manifest"]["modelSelection"];
   }): Promise<JobRuntimeHandle>;
 }
 
@@ -513,6 +515,9 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         },
         ...(envelope.manifest.environment.workspace
           ? { workspaceBinding: envelope.manifest.environment.workspace }
+          : {}),
+        ...(envelope.manifest.modelSelection
+          ? { modelSelection: envelope.manifest.modelSelection }
           : {}),
       });
       const generator = runtime.run(envelope.work.instruction, {

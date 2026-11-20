@@ -21,7 +21,7 @@ import type { TerminalPreloadRelease } from './application-preload.js';
 import { CheckpointDirectoryHandle } from '@zhixing-ai/mesh/filesystem';
 import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus, type TerminalStopTarget, type TerminalEarlierReply } from '@zhixing-ai/terminal-ui/protocol';
 import type { SessionEventEnvelope } from '@zhixing-ai/rpc/session-events';
-import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE, type ZhixingConfig } from '@zhixing-ai/providers/configuration';
+import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing-ai/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
 import { LocalLogStore } from '@zhixing-ai/core/logging/storage';
@@ -45,6 +45,7 @@ import type { TerminalTasks } from './tasks.js';
 import type { TerminalTaskNotices } from './task-notices.js';
 import type { TerminalSchedulerNotices } from './scheduler-notices.js';
 import type { TerminalInformationCommands } from './information-commands.js';
+import type { TerminalModelCommand } from './model-command.js';
 import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
 import { formatRelativeTimeText } from '../commands/format.js';
 import { advancementProposalStalledMessage } from '@zhixing-ai/core/advancement/proposal-messages';
@@ -76,7 +77,7 @@ import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-mate
 import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
 import { createUserSubmission } from '../runtime/user-submission.js';
 import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
-import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionResponse } from './selection.js';
+import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionLiveHandle, type TerminalSelectionOptions, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
 import { TerminalProcessSession } from './process-session.js';
 import { presentRunActivity } from './run-activity.js';
@@ -309,6 +310,8 @@ class TerminalApplication {
   #tasksBinding?: Promise<void>;
   #information?: TerminalInformationCommands;
   #informationBinding?: Promise<void>;
+  #modelCommand?: TerminalModelCommand;
+  #modelBinding?: Promise<void>;
   #taskStatus: TerminalTaskStatus = {};
   #taskStatusDirty = false;
   #taskStatusSending?: Promise<void>;
@@ -393,6 +396,15 @@ class TerminalApplication {
     this.#conversation = new RpcConversationFacade(this.#connection);
     this.#conversation.onChanged(payload => {
       this.#tasks?.apply(payload);
+      if (payload.change === 'modelSelection' && payload.conversationId === this.#controller?.current.conversationId) {
+        void (async () => {
+          await this.#localView.refresh();
+          if (!this.#editor && !this.#selection && !this.#abort.signal.aborted) {
+            await this.#publish(this.#mainView);
+          }
+        })().catch(() => {});
+        return;
+      }
       const reaction = this.#controller?.applySessionChanged(payload);
       if (!reaction || reaction.kind === 'ignored') return;
       if (reaction.kind === 'renamed') this.#mainView = { ...this.#mainView, title: reaction.name };
@@ -549,6 +561,30 @@ class TerminalApplication {
   get #localView(): ReplLocalView {
     return this.#resolvedLocalView ??= new ReplLocalView({ management: this.#management,
       currentSceneId: () => { const mode = this.#controller?.current.mode; return mode?.kind === 'workscene' ? mode.sceneId : undefined; },
+      currentConversationId: () => this.#controller?.current.conversationId,
+      currentSessionMode: () => this.#controller?.current.mode.kind === 'workscene' ? 'workscene' : 'normal',
+      resolveSessionModelSelection: async conversationId =>
+        (await this.#conversation.getModelSelection(conversationId)).modelSelection,
+      readModelCredentials: async () => {
+        const [{ createLocalConfigurationApplication }, { projectRuntimeSecrets }] = await Promise.all([
+          import('../serve/local-configuration-application.js'),
+          import('../runtime/runtime-secret-projections.js'),
+        ]);
+        const localCfg = createLocalConfigurationApplication({
+          homeDir: this.home,
+          configPath: this.#configPath,
+          store: this.#secretStore,
+          records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
+          processIdentityResolver: this.#secretPlatform.processIdentityResolver,
+        });
+        return projectRuntimeSecrets((await localCfg.read({ autoMigrate: false })).credentials).providerCredentials;
+      },
+      resolveModelCatalog: async () => {
+        const { ModelCatalogManager } = await import('@zhixing-ai/providers/configuration');
+        const manager = new ModelCatalogManager({ homeDir: this.home });
+        await manager.initialize();
+        return manager.port();
+      },
       resolveSceneWorkspace: async sceneId => {
         const scene = (await this.#workscene.list()).find(item => item.sceneId === sceneId);
         if (!scene?.workspace) return { root: null, label: '未设置工作目录' };
@@ -956,7 +992,7 @@ class TerminalApplication {
         management: this.#management, recovery: this.#recovery,
         resumeExecuting: publishExecuting,
         ensureManagement: async () => { this.#abort.signal.throwIfAborted(); await this.#connection.ensure(); this.#abort.signal.throwIfAborted(); },
-        choose: view => this.#choosePage(view), send: message => this.#channel.send(message, 'body'),
+        choose: (view, options) => this.#choosePage(view, options), send: message => this.#channel.send(message, 'body'),
         completeConfiguration: async () => {
           this.#abort.signal.throwIfAborted();
           const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
@@ -1225,12 +1261,62 @@ class TerminalApplication {
     return response?.cancelCause ? undefined : response?.itemId;
   }
 
-  async #choosePage(view: View): Promise<TerminalSelectionResponse | undefined> {
+  async #choosePage(
+    view: View,
+    signalOrOptions?: AbortSignal | TerminalSelectionOptions,
+  ): Promise<TerminalSelectionResponse | undefined> {
     if (this.#selection) throw Error('terminal-selection-capacity');
+    const options =
+      signalOrOptions && 'aborted' in signalOrOptions
+        ? { signal: signalOrOptions }
+        : signalOrOptions;
+    const signal = options?.signal;
+    if (signal?.aborted) return { itemId: 'cancelled', cancelCause: 'aborted' };
     const id = randomUUID();
+    const kind = view.kind === 'confirmation' ? 'confirmation' : 'selection';
     const allowed = terminalSelectionActions(view);
-    const response = new Promise<TerminalSelectionResponse | undefined>(resolve => { this.#selection = { id, resolve, field: !!view.field, allowed }; });
-    await this.#publish({ ...view, kind: view.kind === 'confirmation' ? 'confirmation' : 'selection', requestId: id });
+    let cleanupSignal: (() => void) | undefined;
+    let entry!: {
+      id: string;
+      allowed: ReadonlySet<string>;
+      field: boolean;
+      resolve(selected?: TerminalSelectionResponse): void;
+    };
+    const response = new Promise<TerminalSelectionResponse | undefined>(resolve => {
+      const finish = (result: TerminalSelectionResponse | undefined) => {
+        cleanupSignal?.();
+        cleanupSignal = undefined;
+        resolve(result);
+      };
+      entry = { id, resolve: finish, field: !!view.field, allowed };
+      this.#selection = entry;
+      if (signal) {
+        const onAbort = () => {
+          if (this.#selection !== entry) return;
+          this.#selection = undefined;
+          finish({ itemId: 'cancelled', cancelCause: 'aborted' });
+          void this.#toUi({ type: 'invalidate', requestId: id }).catch(() => {});
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        cleanupSignal = () => signal.removeEventListener('abort', onAbort);
+      }
+    });
+    const isActive = () => this.#selection === entry && !this.#abort.signal.aborted;
+    const liveHandle: TerminalSelectionLiveHandle = {
+      isActive,
+      update: async nextView => {
+        if (!isActive()) return false;
+        const nextAllowed = terminalSelectionActions(nextView);
+        entry.allowed = nextAllowed;
+        entry.field = !!nextView.field;
+        await this.#publish({ ...nextView, kind, requestId: id }, isActive);
+        return isActive();
+      },
+    };
+    await this.#publish({ ...view, kind, requestId: id }, isActive);
+    if (isActive()) {
+      options?.onActive?.(liveHandle);
+    }
     return response;
   }
 
@@ -2323,7 +2409,10 @@ class TerminalApplication {
     void settled.catch(() => this.#close(70, 'terminal-outcome-undelivered'));
   }
 
-  #configurationHeaderDetails(purpose: 'setup' | 'edit' = 'edit', config?: ZhixingConfig): readonly string[] {
+  #configurationHeaderDetails(
+    purpose: 'setup' | 'edit' = 'edit',
+    config?: { readonly workspace?: { readonly root?: string } },
+  ): readonly string[] {
     const local = purpose === 'edit' ? this.#resolvedLocalView : undefined;
     const runtimeWorkspace = local
       ? (local.workspaceRoot ?? local.workspaceLabel ?? (local.hostInfo ? '未绑定工作目录' : undefined))
@@ -2335,15 +2424,94 @@ class TerminalApplication {
 
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], purpose: 'setup' | 'edit', runtime?: ConfigEditorRuntime) {
     this.#abort.signal.throwIfAborted();
-    const { TerminalConfigurationEditor } = await import('./configuration-editor.js');
+    const [{ TerminalConfigurationEditor }, { ModelCatalogManager, ModelDiscoveryCache, discoverConnectionModels }] = await Promise.all([
+      import('./configuration-editor.js'),
+      import('@zhixing-ai/providers/configuration'),
+    ]);
     this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
-    const editor = new TerminalConfigurationEditor({ session, title, sections, purpose, runtime,
+    const catalogManager = new ModelCatalogManager({
+      homeDir: this.home,
+      networkProxy: session.initialConfig.network?.proxy,
+    });
+    await catalogManager.initialize();
+    const discoveryCache = new ModelDiscoveryCache({ homeDir: this.home });
+    const isHostConnected = () => this.#connection.getStatus().kind === 'connected';
+    let latestCatalogStatus = catalogManager.status();
+    if (isHostConnected()) {
+      const hostStatus = await this.#management.modelCatalog({ action: 'status' }).catch(() => undefined);
+      if (hostStatus) {
+        latestCatalogStatus = hostStatus;
+      }
+    }
+    const editorAbort = new AbortController();
+    const onParentAbort = () => editorAbort.abort();
+    this.#abort.signal.addEventListener('abort', onParentAbort, { once: true });
+    // 打开配置页时触发非阻塞周期到期检查：连宿主时委托宿主单写协调器（关页不中断），无宿主首配由 N 本地执行（退页取消释放锁）
+    if (isHostConnected()) {
+      void this.#management
+        .modelCatalog({ action: 'refresh', force: false })
+        .then(async res => {
+          latestCatalogStatus = res;
+          if (res.changed) await catalogManager.initialize();
+        })
+        .catch(() => {});
+    } else if (catalogManager.isRefreshDue()) {
+      void catalogManager.checkIfDue({ signal: editorAbort.signal }).then(() => {
+        latestCatalogStatus = catalogManager.status();
+      }).catch(() => {});
+    }
+    const mergedRuntime: ConfigEditorRuntime = {
+      ...runtime,
+      modelCatalog: runtime?.modelCatalog ?? (() => catalogManager.port()),
+      catalogStatus: runtime?.catalogStatus ?? (() => latestCatalogStatus),
+      setCatalogAutoCheck: runtime?.setCatalogAutoCheck ?? (async enabled => {
+        if (isHostConnected()) {
+          const remote = await this.#management.modelCatalog({ action: 'set-auto-check', autoCheckEnabled: enabled });
+          latestCatalogStatus = remote;
+          return remote;
+        }
+        await catalogManager.setAutoCheckEnabled(enabled);
+        latestCatalogStatus = catalogManager.status();
+        return latestCatalogStatus;
+      }),
+      discoverModels: runtime?.discoverModels ?? (input => discoverConnectionModels({ ...input, cache: discoveryCache })),
+      verifyModelGeneration: runtime?.verifyModelGeneration ?? (async input => {
+        const { verifyModelGeneration } = await import('@zhixing-ai/providers');
+        return verifyModelGeneration({ ...input, cache: discoveryCache });
+      }),
+      refreshModelCatalog: runtime?.refreshModelCatalog ?? (async signal => {
+        if (isHostConnected()) {
+          const remote = await this.#management.modelCatalog({ action: 'refresh', force: true });
+          latestCatalogStatus = remote;
+          await catalogManager.initialize();
+          return {
+            status: remote.lastStatus,
+            changed: Boolean(remote.changed),
+            activeRevision: remote.activeRevision,
+            ...(remote.rootVersion !== undefined ? { rootVersion: remote.rootVersion } : {}),
+            port: catalogManager.port(),
+            ...(remote.lastError ? { error: remote.lastError } : {}),
+            message: remote.message ?? `模型目录修订 ${remote.activeRevision}。`,
+          };
+        }
+        const localRes = await catalogManager.refresh({ force: true, signal: signal ?? editorAbort.signal });
+        latestCatalogStatus = catalogManager.status();
+        return localRes;
+      }),
+    };
+    const editor = new TerminalConfigurationEditor({ session, title, sections, purpose, runtime: mergedRuntime,
       headerDetails: this.#configurationHeaderDetails(purpose, session.initialConfig),
       publish: view => this.#publish(view) });
     this.#editor = editor;
     try { return await editor.run(); }
-    finally { editor.dispose(); if (this.#editor === editor) this.#editor = undefined; }
+    finally {
+      editorAbort.abort();
+      this.#abort.signal.removeEventListener('abort', onParentAbort);
+      catalogManager.stopAutoCheck();
+      editor.dispose();
+      if (this.#editor === editor) this.#editor = undefined;
+    }
   }
 
   async #configuration(kind: 'config' | 'mcp'): Promise<void> {
@@ -2373,7 +2541,11 @@ class TerminalApplication {
       processIdentityResolver: this.#secretPlatform.processIdentityResolver,
       configurationRecords: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }), state: this.#state,
       ...(connected ? { readExtensions: () => this.#management.extensions(), readExtensionLocalSetup: () => this.#management.extensionLocalSetup(),
-        applyExtensionConfiguration: (ids: readonly string[]) => { this.#abort.signal.throwIfAborted(); return this.#management.applyExtensionConfiguration(ids); } } : {}),
+        applyExtensionConfiguration: (ids: readonly string[]) => { this.#abort.signal.throwIfAborted(); return this.#management.applyExtensionConfiguration(ids); },
+        applyModelConfiguration: (input?: { readonly operationId?: string; readonly revokedSecretRefs?: readonly string[]; readonly abortConnectionIds?: readonly string[] }) => {
+          this.#abort.signal.throwIfAborted();
+          return this.#management.applyModelConfiguration(input);
+        } } : {}),
       requestHostReload: options => this.#reload(options),
     }, { kind, edit: session => this.#edit(session, kind === 'config' ? '配置' : 'MCP 管理', kind === 'config' ? ['model', 'messaging'] : ['mcp'], 'edit', mcp?.runtime),
       mcpApplication: mcp?.mcpApplication });
@@ -2382,8 +2554,14 @@ class TerminalApplication {
       ? (result.recoveredEdit ? '上次接纳的配置修改已保存完成；本次编辑未保存新的内容。' : '已取消本次配置编辑。')
       : result.kind === 'non-tty' ? '配置编辑未完成。'
       : result.kind === 'mcp' ? result.result.message
-      : result.kind === 'saved-pending' ? '配置已保存，但消息通道尚未确认应用；重新打开配置可重试。'
-      : result.kind === 'local-applied' ? '配置已保存，本机变更已应用。'
+      : result.kind === 'saved-pending'
+        ? (result.stage === 'model'
+            ? `配置已保存、待应用（已保留旧可用模型运行态）${result.reason ? `：${result.reason}` : '。'}`
+            : `配置已保存，但消息通道尚未确认应用；重新打开配置可重试。${result.reason ? `（模型轮换提示：${result.reason}）` : ''}`)
+      : result.kind === 'local-applied'
+        ? (result.warning
+            ? `配置已保存，本机变更已应用（轮换/解封提示：${result.warning}）。`
+            : '配置已保存，本机变更已应用。')
       : '配置已保存并完成服务重载。';
     if (result.kind === 'reloaded' && (result.effects.reload.status === 'failed' || result.effects.reconcile.status === 'failed')) message = '配置已接纳，应用尚未完成；请重试连接，不要恢复旧快照。';
     if (result.kind === 'reloaded' && result.pendingChannels) message += '\n消息通道尚未确认应用；重新打开配置可重试。';
@@ -2481,7 +2659,7 @@ class TerminalApplication {
 
   #invalidateAuxiliary(): void {
     this.#startupWatch = undefined;
-    this.#information?.invalidate(); this.#tasks?.invalidate(); this.#taskNotices?.invalidate();
+    this.#information?.invalidate(); this.#modelCommand?.invalidate(); this.#tasks?.invalidate(); this.#taskNotices?.invalidate();
     this.#resumeNoticeDisplay();
   }
 
@@ -2575,7 +2753,7 @@ class TerminalApplication {
       this.#tasks = new TerminalTasks({
         controller: () => this.#mainView.connected ? this.#controller : undefined,
         conversation: this.#conversation, scheduler, signal: this.#abort.signal,
-        choose: view => this.#choosePage(view),
+        choose: (view, options) => this.#choosePage(view, options),
         publish: async result => {
           const controller = this.#controller, id = controller?.current.conversationId, epoch = this.#conversationEpoch;
           const current = () => this.#controller === controller && controller?.current.conversationId === id &&
@@ -2622,7 +2800,7 @@ class TerminalApplication {
         controller: () => this.#mainView.connected ? this.#controller : undefined,
         getPrimaryModel: () => this.#localView.primaryModel,
         logs: this.#management.logs(), signal: this.#abort.signal,
-        choose: view => this.#choosePage(view),
+        choose: (view, options) => this.#choosePage(view, options),
         publish: async (result, scope) => {
           scope.assertCurrent();
           const view = { ...this.#mainView, message: result.message, ...(result.busy === undefined ? {} : { busy: result.busy }) };
@@ -2646,6 +2824,168 @@ class TerminalApplication {
     });
   }
 
+  #ensureModelBinding(): Promise<void> {
+    return this.#modelBinding ??= (async () => {
+      this.#abort.signal.throwIfAborted();
+      const [
+        { TerminalModelCommand },
+        { createLocalConfigurationApplication },
+        { editRuntimeConfiguration },
+        { projectRuntimeSecrets },
+        {
+          ModelCatalogManager,
+          ModelDiscoveryCache,
+          computeCredentialRevisionToken,
+        },
+      ] = await Promise.all([
+        import('./model-command.js'),
+        import('../serve/local-configuration-application.js'),
+        import('../runtime/configuration-application.js'),
+        import('../runtime/runtime-secret-projections.js'),
+        import('@zhixing-ai/providers/configuration'),
+      ]);
+      this.#abort.signal.throwIfAborted();
+      const discoveryCache = new ModelDiscoveryCache({ homeDir: this.home });
+      const readConfiguration = async () => {
+        const localCfg = createLocalConfigurationApplication({
+          homeDir: this.home,
+          configPath: this.#configPath,
+          store: this.#secretStore,
+          records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
+          processIdentityResolver: this.#secretPlatform.processIdentityResolver,
+        });
+        const { config, credentials } = await localCfg.read({ autoMigrate: true });
+        return { config, credentials: projectRuntimeSecrets(credentials).providerCredentials };
+      };
+      this.#modelCommand = new TerminalModelCommand({
+        controller: () => this.#mainView.connected ? this.#controller : undefined,
+        conversation: this.#conversation,
+        readConfiguration,
+        saveModelConfiguration: async mutate => {
+          const connected = this.#connection.getStatus().kind === 'connected';
+          return editRuntimeConfiguration(
+            {
+              zhixingHome: this.home,
+              configPath: this.#configPath,
+              secretStore: this.#secretStore,
+              processIdentityResolver: this.#secretPlatform.processIdentityResolver,
+              configurationRecords: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
+              state: this.#state,
+              ...(connected
+                ? {
+                    applyModelConfiguration: (input?: {
+                      readonly operationId?: string;
+                      readonly revokedSecretRefs?: readonly string[];
+                      readonly abortConnectionIds?: readonly string[];
+                      readonly revokeOnly?: boolean;
+                    }) => {
+                      this.#abort.signal.throwIfAborted();
+                      return this.#management.applyModelConfiguration(input);
+                    },
+                  }
+                : {}),
+              requestHostReload: options => this.#reload(options),
+            },
+            {
+              kind: 'config',
+              edit: async session => {
+                const nextConfig = mutate(session.initialConfig);
+                const result = { kind: 'completed' as const, config: nextConfig, credentials: session.initialCredentials };
+                await session.writers.save(result);
+                return result;
+              },
+            },
+          );
+        },
+        readCatalog: async () => {
+          const { config } = await readConfiguration();
+          const manager = new ModelCatalogManager({
+            homeDir: this.home,
+            ...(config.network?.proxy ? { networkProxy: config.network.proxy } : {}),
+          });
+          await manager.initialize();
+          return manager.port();
+        },
+        isHostConnected: () => this.#connection.getStatus().kind === 'connected',
+        refreshCatalog: async (offlineSignal?: AbortSignal) => {
+          if (this.#connection.getStatus().kind === 'connected') {
+            // 宿主已接纳的目录刷新不因关页取消，由宿主在后台继续完成
+            const remote = await this.#management.modelCatalog({ action: 'refresh', force: true });
+            return {
+              status: remote.lastStatus,
+              changed: Boolean(remote.changed),
+              activeRevision: remote.activeRevision,
+              ...(remote.message ? { message: remote.message } : {}),
+              ...(remote.lastError ? { error: remote.lastError } : {}),
+            };
+          }
+          const { config } = await readConfiguration();
+          const manager = new ModelCatalogManager({
+            homeDir: this.home,
+            ...(config.network?.proxy ? { networkProxy: config.network.proxy } : {}),
+          });
+          await manager.initialize();
+          const combinedSignal = offlineSignal
+            ? AbortSignal.any([this.#abort.signal, offlineSignal])
+            : this.#abort.signal;
+          const res = await manager.refresh({ force: true, signal: combinedSignal });
+          return {
+            status: res.status,
+            changed: res.changed,
+            activeRevision: res.activeRevision,
+            ...(res.message ? { message: res.message } : {}),
+            ...(res.error ? { error: res.error } : {}),
+          };
+        },
+        readDiscoveryRecords: async (connectionId, connection, credentials) => {
+          const secretValue =
+            connection.auth.mode === 'api-key' || connection.auth.mode === 'header'
+              ? credentials.modelSecrets?.[connection.auth.secretRef]?.value
+              : undefined;
+          const credRev = computeCredentialRevisionToken({
+            authMode: connection.auth.mode,
+            headerName: connection.auth.mode === 'header' ? connection.auth.headerName : undefined,
+            secretValue,
+          });
+          const read = await discoveryCache.read({
+            connectionId,
+            endpoint: connection.endpoint,
+            adapter: connection.adapter,
+            credentialRevision: credRev,
+          });
+          if (!read || read.entry.status !== 'discovered') return undefined;
+          return {
+            models: read.entry.models,
+            authoritativeNativeFacts: read.entry.authoritativeNativeFacts,
+          };
+        },
+        choose: (view, options) => this.#choosePage(view, options),
+        publishNotice: async (message, isError) => {
+          const view = { ...this.#mainView, message };
+          if (isError) this.#mainView = view; else this.#showResult(view);
+          await this.#publish(this.#mainView);
+        },
+        onChanged: async () => {
+          await this.#localView.refresh();
+        },
+        signal: this.#abort.signal,
+      });
+    })().catch(error => { this.#modelBinding = undefined; throw error; });
+  }
+
+  async #runModelCommand(argument: string): Promise<void> {
+    await this.#ensureModelBinding();
+    await this.#selectionFlow(async () => {
+      try { await this.#modelCommand!.run(argument); }
+      finally {
+        if (!this.#abort.signal.aborted) {
+          await this.#localView.refresh().catch(() => {});
+          await this.#publish(this.#mainView);
+        }
+      }
+    });
+  }
+
   #ensureDecisionBinding(): Promise<void> {
     return this.#decisionBinding ??= (async () => {
       this.#abort.signal.throwIfAborted();
@@ -2657,7 +2997,7 @@ class TerminalApplication {
       this.#trustCandidates = new TerminalTrustCandidates({ controller, management: this.#management, signal: this.#abort.signal });
       this.#candidates.bindTrust(this.#trustCandidates);
       this.#decisionCommands = new TerminalDecisionCommands({ controller, management: this.#management, signal: this.#abort.signal,
-        choose: view => this.#choosePage(view),
+        choose: (view, options) => this.#choosePage(view, options),
         publish: async result => {
           // 已结束的处理结果持有凭据；读取或操作失败照常保留
           const view = { ...this.#mainView, message: result.message };
@@ -2868,7 +3208,10 @@ class TerminalApplication {
     }
     if (['new', 'name', 'clear', 'resume', 'work'].includes(name)) { this.#background(() => this.#sessionCommand(name, argument)); return { accepted: true }; }
     if (['tasklist', 'task', 'tasks'].includes(name)) { this.#background(() => this.#taskCommand(name, argument)); return { accepted: true }; }
-    if (['model', 'usage', 'context', 'compact'].includes(name) || (name === 'config' && argument.trim())) {
+    if (name === 'model') {
+      this.#background(() => this.#runModelCommand(argument)); return { accepted: true };
+    }
+    if (['usage', 'context', 'compact'].includes(name) || (name === 'config' && argument.trim())) {
       this.#background(() => this.#informationCommand(name, argument)); return { accepted: true };
     }
     if (name === 'config' || name === 'mcp') { this.#background(() => this.#configuration(name)); return { accepted: true }; }
@@ -3083,7 +3426,7 @@ class TerminalApplication {
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
     this.#channel.beginClose();
     this.#closeDeadline = terminalCloseDeadline(this.#closeDeadline);
-    this.#taskNotices?.dispose(); this.#tasks?.dispose(); this.#information?.dispose();
+    this.#taskNotices?.dispose(); this.#tasks?.dispose(); this.#information?.dispose(); this.#modelCommand?.dispose();
     void this.#schedulerNotices?.then(notices => notices.dispose(), () => {});
     this.#resumeNoticeDisplay();
     this.#abort.abort(); this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#skills?.close(); this.#skillCommands?.dispose(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); this.#selection = undefined;

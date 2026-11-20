@@ -131,6 +131,7 @@ type TestCreateAgentRuntimeOptions = Omit<
   Parameters<typeof createAgentRuntimeImpl>[0],
   "modelProvider" | "runtimeEnvironment" | "securityExecution" | "windowPrompt"
 > & {
+  readonly modelProvider?: Parameters<typeof createAgentRuntimeImpl>[0]["modelProvider"];
   readonly workspace?: string | null;
   readonly agentIdentity?: { readonly displayName: string };
   readonly securityExecution?: KernelSecurityExecutionFactory;
@@ -286,12 +287,12 @@ function createTestSecurityExecution(
 }
 
 const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
-  const { workspace, agentIdentity, securityExecution, windowPrompt, ...runtimeOptions } = options;
+  const { modelProvider, workspace, agentIdentity, securityExecution, windowPrompt, ...runtimeOptions } = options;
   const primaryRole = runtimeOptions.primaryRole ?? "main";
   return createAgentRuntimeImpl({
     ...runtimeOptions,
     primaryRole,
-    modelProvider: createTestModelProvider(primaryRole),
+    modelProvider: modelProvider ?? createTestModelProvider(primaryRole),
     runtimeEnvironment: createTestRuntimeEnvironment(workspace, agentIdentity),
     toolImplementation: testToolImplementation,
     windowPrompt: windowPrompt ?? windowPromptPort(),
@@ -929,6 +930,71 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     expect(result.modified).toBe(false);
     expect(result.windowCompact).toBeUndefined();
     expect(providerRef.current!.calls.length).toBe(0);
+  });
+
+  it("跨连接隔离回归：main 与 light 分属不同 provider 时，forceCompact 与自动段切换均发往 roles.light.provider 而非 primaryRole.provider", async () => {
+    const mainProvider = new MockLLMProvider([{ text: "main-reply" }]);
+    const lightProvider = new MockLLMProvider([
+      { text: SUMMARY_XML },
+      { text: SUMMARY_XML },
+      { text: SUMMARY_XML },
+    ]);
+    const mkRole = (provider: MockLLMProvider, model: string) => ({
+      provider,
+      model,
+      chat: (req: Parameters<MockLLMProvider["chat"]>[0]) => provider.chat({ ...req, model }),
+    });
+    const binding = createKernelModelProviderBinding({
+      primaryRole: "main",
+      roles: {
+        main: mkRole(mainProvider, "main-model"),
+        light: mkRole(lightProvider, "light-model"),
+        power: mkRole(mainProvider, "main-model"),
+      },
+      roleThinking: { main: undefined, light: undefined, power: undefined },
+      defaultMaxOutputTokens: { main: 4096, light: 1024, power: 4096 },
+      primary: {
+        budget: { contextWindow: 128_000, maxOutputTokens: 4096 },
+        inputCapabilities: { images: false },
+        attention: { optimalMaxTokens: 1, riskMaxTokens: 96_000 },
+      },
+    });
+
+    const runtime = await createAgentRuntime({
+      modelProvider: binding,
+      segmentDeps: {
+        persistence: { async appendSegment() {} },
+        taskListReader: { hasInProgress: () => false },
+      },
+    });
+
+    // 1. forceCompact 必须走 lightProvider（零主 provider 调用）
+    const compactResult = await runtime.forceCompact(sixMessages(), 10);
+    expect(compactResult.modified).toBe(true);
+    expect(mainProvider.calls.length).toBe(0);
+    expect(lightProvider.calls.length).toBe(1);
+    expect(lightProvider.calls[0]!.model).toBe("light-model");
+    expect(lightProvider.calls[0]!.maxTokens).toBe(1024);
+
+    // 2. 自动段切换在 run() 期间触发：主循环走 mainProvider，段摘要全部走 lightProvider
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [...sixMessages(), userMessage("trigger-auto-segment")],
+      },
+      identity: {
+        turnIndex: 10,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+    expect(mainProvider.calls.length).toBe(1);
+    expect(mainProvider.calls[0]!.model).toBe("main-model");
+    expect(lightProvider.calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of lightProvider.calls) {
+      expect(call.model).toBe("light-model");
+      expect(call.maxTokens).toBe(1024);
+    }
   });
 });
 

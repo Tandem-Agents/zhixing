@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createInitialState, setInputBuffer, writeModelRole } from "../state.js";
+import { createInitialState, readModelRole, readModelThinking, setInputBuffer, writeModelRole } from "../state.js";
 import { buildModelListMeta, buildThinkingConfigMeta, handleListPanelKey } from "../model/list.js";
 import { handleAddModelPanelKey, handleThinkingBudgetPanelKey } from "../model/input.js";
 import { handleEntityPanelKey } from "../model/entity.js";
@@ -43,7 +43,7 @@ describe("model-list 选定后导航", () => {
         providerId: "deepseek",
         model: "deepseek-v4-pro",
       });
-      expect(action.state.config.llm?.main).toEqual({
+      expect(readModelRole(action.state, "main")).toEqual({
         provider: "deepseek",
         model: "deepseek-v4-pro",
       });
@@ -56,34 +56,28 @@ describe("model-list 选定后导航", () => {
 
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
-      expect(action.state.config.llm?.main?.model).toBe("deepseek-v4-flash");
-      expect(action.state.config.llm?.main?.thinking).toBeUndefined();
+      expect(readModelRole(action.state, "main")?.model).toBe("deepseek-v4-flash");
+      expect(readModelThinking(action.state, "main")).toBeUndefined();
     }
   });
 });
 
 describe("model-list 选定 · provider 取 descriptor 权威上下文（回归）", () => {
   it("角色已配旧 provider，在另一 provider 列表选 model → 切换到 descriptor.providerId", () => {
-    // 复现：模板默认 main=deepseek；用户改选 siliconflow 后进 siliconflow
-    // 列表选 model。旧实现 `currentRole?.provider ?? descriptor.providerId`
-    // 会把 model 错写到陈旧的 deepseek 下，导致 siliconflow 侧永远「待选」。
-    // 这里反向布置（已配 siliconflow，进 deepseek 列表选）等价验证同一根因。
     const stale = writeModelRole(
       createInitialState({}, {}),
       "main",
       "siliconflow",
       "deepseek-ai/DeepSeek-V4-Flash",
     );
-    const { action } = enterAt(stale, modelListDesc, 0); // modelListDesc.providerId = deepseek
+    const { action } = enterAt(stale, modelListDesc, 0);
 
     const main =
       action.type === "navigate"
-        ? action.state.config.llm?.main
+        ? readModelRole(action.state, "main")
         : action.type === "pop"
-          ? action.state.config.llm?.main
+          ? readModelRole(action.state, "main")
           : undefined;
-    // provider 必须切到用户当前浏览的 deepseek（descriptor.providerId），
-    // 不得停留在陈旧的 siliconflow；model 为所选项。
     expect(main).toEqual({ provider: "deepseek", model: "deepseek-v4-pro" });
   });
 });
@@ -96,13 +90,12 @@ describe("thinking-config 渲染与写入（deepseek-v4-pro = effort 形态）",
     model: "deepseek-v4-pro",
   } as Extract<PanelDescriptor, { kind: "thinking-config" }>;
 
-  // effort 形态选项序：关闭思考(0) / 开启默认强度(1) / 强度 high(2) / 强度 max(3)
   it("选『关闭思考』→ pop 并写 {mode:off}", () => {
     const state = createInitialState({}, {});
     const { action } = enterAt(state, thinkingDesc, 0);
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
-      expect(action.state.config.llm?.main?.thinking).toEqual({ mode: "off" });
+      expect(readModelThinking(action.state, "main")).toEqual({ mode: "off" });
     }
   });
 
@@ -110,7 +103,7 @@ describe("thinking-config 渲染与写入（deepseek-v4-pro = effort 形态）",
     const state = createInitialState({}, {});
     const { action } = enterAt(state, thinkingDesc, 1);
     if (action.type === "pop") {
-      expect(action.state.config.llm?.main?.thinking).toEqual({ mode: "on" });
+      expect(readModelThinking(action.state, "main")).toEqual({ mode: "on" });
     }
   });
 
@@ -118,7 +111,7 @@ describe("thinking-config 渲染与写入（deepseek-v4-pro = effort 形态）",
     const state = createInitialState({}, {});
     const { action } = enterAt(state, thinkingDesc, 3);
     if (action.type === "pop") {
-      expect(action.state.config.llm?.main?.thinking).toEqual({
+      expect(readModelThinking(action.state, "main")).toEqual({
         mode: "effort",
         effort: "max",
       });
@@ -142,7 +135,7 @@ describe("handleThinkingBudgetPanelKey", () => {
     });
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
-      expect(action.state.config.llm?.main?.thinking).toEqual({
+      expect(readModelThinking(action.state, "main")).toEqual({
         mode: "budget",
         budget: 8000,
       });
@@ -158,7 +151,7 @@ describe("handleThinkingBudgetPanelKey", () => {
     });
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
-      expect(action.state.config.llm?.main?.thinking).toBeUndefined();
+      expect(readModelThinking(action.state, "main")).toBeUndefined();
     }
   });
 
@@ -189,11 +182,13 @@ describe("服务商页完成后的模型设置", () => {
     const completed = handleEntityPanelKey(thinking.state, provider, { index: 2 }, { type: "enter" }).action;
     expect(completed.type).toBe("pop");
     if (completed.type !== "pop") throw Error("provider did not complete");
-    expect(completed.state.config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-v4-pro", thinking: { mode: "effort", effort: "max" } });
+    expect(readModelRole(completed.state, "main")).toEqual({ provider: "deepseek", model: "deepseek-v4-pro" });
+    expect(readModelThinking(completed.state, "main")).toEqual({ mode: "effort", effort: "max" });
     const changed = enterAt(completed.state, modelListDesc, 1).action;
     expect(changed.type).toBe("pop");
     if (changed.type !== "pop") throw Error("model change did not complete");
-    expect(changed.state.config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-v4-flash" });
+    expect(readModelRole(changed.state, "main")).toEqual({ provider: "deepseek", model: "deepseek-v4-flash" });
+    expect(readModelThinking(changed.state, "main")).toBeUndefined();
   });
 
   it("保留当前选择不绕过缺失API Key校验", () => {
@@ -202,7 +197,7 @@ describe("服务商页完成后的模型设置", () => {
     expect(completed.action.type).toBe("stay");
     if (completed.action.type !== "stay") throw Error("missing credential must keep the panel open");
     expect(completed.errorMessage).toContain("API Key");
-    expect(completed.action.state.config.llm?.main?.thinking).toEqual({ mode: "off" });
+    expect(readModelThinking(completed.action.state, "main")).toEqual({ mode: "off" });
   });
 });
 
@@ -222,12 +217,12 @@ describe("重新确认当前模型", () => {
     const back = handleListPanelKey(selected.state, thinkingDesc, { index: 0 }, { type: "escape" }).action;
     expect(back.type).toBe("pop");
     if (back.type !== "pop") throw Error("escape did not return");
-    expect(back.state.config.llm?.main?.thinking).toEqual({ mode: "effort", effort: "max" });
+    expect(readModelThinking(back.state, "main")).toEqual({ mode: "effort", effort: "max" });
     const provider = { kind: "provider-config", role: "main", providerId: "deepseek" } as const;
     const completed = handleEntityPanelKey(back.state, provider, { index: 2 }, { type: "enter" }).action;
     expect(completed.type).toBe("pop");
     if (completed.type !== "pop") throw Error("provider did not complete");
-    expect(completed.state.config.llm?.main?.thinking).toEqual({ mode: "effort", effort: "max" });
+    expect(readModelThinking(completed.state, "main")).toEqual({ mode: "effort", effort: "max" });
   });
 
   it("添加与当前模型同名的自定义模型：保留思考档", () => {
@@ -235,7 +230,7 @@ describe("重新确认当前模型", () => {
     const action = handleAddModelPanelKey(state, { kind: "add-model", role: "main", providerId: "deepseek" }, { type: "enter" });
     expect(action.type).toBe("pop");
     if (action.type !== "pop") throw Error("add-model did not return");
-    expect(action.state.config.llm?.main?.thinking).toEqual({ mode: "effort", effort: "max" });
+    expect(readModelThinking(action.state, "main")).toEqual({ mode: "effort", effort: "max" });
   });
 
   it("手填、目录里没有的当前模型：只在本服务商列表中并入并标为当前，不写入目录", () => {
@@ -251,6 +246,6 @@ describe("重新确认当前模型", () => {
     // 在它上面回车：没有思考形态，直接返回且角色值不变
     const action = enterAt(state, modelListDesc, items.findIndex((item) => item.current)).action;
     expect(action.type).toBe("pop");
-    if (action.type === "pop") expect(action.state.config.llm?.main).toEqual({ provider: "deepseek", model: "manual-config-model" });
+    if (action.type === "pop") expect(readModelRole(action.state, "main")).toEqual({ provider: "deepseek", model: "manual-config-model" });
   });
 });

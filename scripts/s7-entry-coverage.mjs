@@ -107,8 +107,8 @@ const coverageGroups = [
   ["trust-manage", ["rpc:trust.list", "rpc:trust.revoke", "slash:trust:repl"]],
   ["conversation-manage", ["rpc:session.new", "rpc:session.list", "rpc:session.resume", "slash:new:repl", "slash:resume:repl"]],
   ["conversation-window", ["rpc:session.clear", "rpc:session.compact", "slash:clear:repl", "slash:compact:repl"]],
-  ["conversation-metadata", ["rpc:session.rename", "rpc:session.delete", "slash:name:repl"]],
-  ["conversation-read", ["rpc:session.history", "rpc:session.inputReceipt", "rpc:session.statusHistory", "rpc:session.usage", "rpc:session.security", "rpc:session.contextBudget", "slash:usage:repl", "slash:context:repl", "slash:security:repl"]],
+  ["conversation-metadata", ["rpc:session.rename", "rpc:session.setModelSelection", "rpc:session.delete", "slash:name:repl"]],
+  ["conversation-read", ["rpc:session.history", "rpc:session.inputReceipt", "rpc:session.statusHistory", "rpc:session.usage", "rpc:session.security", "rpc:session.contextBudget", "rpc:session.getModelSelection", "slash:usage:repl", "slash:context:repl", "slash:security:repl"]],
   ["task-list", ["rpc:session.taskList", "rpc:session.taskListUpdate", "slash:task:repl", "slash:tasklist:repl", "tool:extra:task-list"]],
   ["advancement", ["rpc:session.advancementCancel", "rpc:session.advancementConfirm", "rpc:session.advancementDetail", "rpc:session.advancementRedraft", "rpc:session.advancementRevise", "slash:advancement:repl", "tool:extra:advancement:propose"]],
   ["workscene-manage", ["rpc:workscene.create", "rpc:workscene.delete", "rpc:workscene.rename", "rpc:workscene.setWorkdir", "tool:extra:workscene:change-approve", "tool:extra:workscene:rename-current", "tool:extra:workscene:set-workdir-current", "tool:extra:workscene:clear-workdir-current"]],
@@ -146,7 +146,7 @@ const coverageGroups = [
     "cli:zhixing device continue",
     "slash:stop:repl",
   ]],
-  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration", "rpc:extensions.local-setup"]],
+  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration", "rpc:extensions.local-setup", "rpc:server.apply-model-configuration", "rpc:server.model-catalog"]],
   ["device-trust", [
     "cli:zhixing pair",
     "cli:zhixing duty targets",
@@ -1582,8 +1582,8 @@ function referencesConfigurationLoader(text) {
 }
 /**
  * job 投影只经唯一的投影 owner，实参按 `createAgentJobRuntimePort({ create })` 回调参数的职责位置判定，名字不限：
- * job(第 0 位 instruction, 第 2 位 capabilities[, 第 3 位 workspaceBinding 或 `它 ?? null`])（90e804bc：授权范围由
- * job 清单的工作区绑定决定）。结果绑定到任意名字的 const，且必须展开进同一回调里的 `runtimeHost.createJobRuntime(`。
+ * job(第 0 位 instruction, 第 2 位 capabilities[, 第 3 位 workspaceBinding 或 `它 ?? null`[, 第 4 位 modelSelection]])（90e804bc：授权范围由
+ * job 清单的工作区绑定决定；模型选择意图随第 4 位透传）。结果绑定到任意名字的 const，且必须展开进同一回调里的 `runtimeHost.createJobRuntime(`。
  */
 function jobProjectionBound(text) {
   const source = stepSource(text);
@@ -1597,21 +1597,25 @@ function jobProjectionBound(text) {
     !ts.isPropertyAssignment(create.parent) || propertyNameText(create.parent.name) !== "create" ||
     !ts.isObjectLiteralExpression(create.parent.parent) || !ts.isCallExpression(create.parent.parent.parent) ||
     create.parent.parent.parent.expression.getText(source) !== "createAgentJobRuntimePort" ||
-    create.parameters.length !== 4 || !create.parameters.every((parameter) => ts.isIdentifier(parameter.name))
+    (create.parameters.length !== 4 && create.parameters.length !== 5) ||
+    !create.parameters.every((parameter) => ts.isIdentifier(parameter.name))
   ) {
     return false;
   }
   const parameter = (index) => create.parameters[index].name.text;
   const isParameter = (node, index) => ts.isIdentifier(node) && node.text === parameter(index);
   const args = call.arguments;
-  if (args.length < 2 || args.length > 3 || !isParameter(args[0], 0) || !isParameter(args[1], 2)) return false;
-  if (args.length === 3) {
+  if (args.length < 2 || args.length > 4 || !isParameter(args[0], 0) || !isParameter(args[1], 2)) return false;
+  if (args.length >= 3) {
     const third = args[2];
     const binding = ts.isBinaryExpression(third) && third.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken &&
         third.right.kind === ts.SyntaxKind.NullKeyword
       ? third.left
       : third;
     if (!isParameter(binding, 3)) return false;
+  }
+  if (args.length === 4) {
+    if (create.parameters.length !== 5 || !isParameter(args[3], 4)) return false;
   }
   const declaration = call.parent;
   if (
@@ -5322,7 +5326,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     }
   };
   exactProjectionKeys("TOPOLOGY_KEYS", ["mesh"]);
-  exactProjectionKeys("MODEL_KEYS", ["llm", "modelCapabilityOverrides"]);
+  exactProjectionKeys("MODEL_KEYS", ["llm", "network", "modelCapabilityOverrides"]);
   exactProjectionKeys("KERNEL_ENVIRONMENT_KEYS", [
     "agent",
     "workspace",
@@ -5332,12 +5336,13 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     "llm",
     "workspace",
     "advancement",
+    "network",
     "modelCapabilityOverrides",
   ]);
   exactProjectionKeys("MCP_KEYS", ["mcp", "network"]);
   exactProjectionKeys("CHANNEL_KEYS", ["messaging", "intent"]);
   exactProjectionKeys("WORKSPACE_KEYS", ["workspace"]);
-  exactProjectionKeys("CREDENTIAL_ROTATION_KEYS", ["llm", "messaging"]);
+  exactProjectionKeys("CREDENTIAL_ROTATION_KEYS", ["llm", "messaging", "network"]);
   exactProjectionKeys("AUTHORITY_KEYS", [
     "mesh",
     "llm",
@@ -5508,7 +5513,11 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     !surfaces.includes("readonly channelConfiguration: RuntimeChannelConfigurationProjection;") ||
     /readonly (?:modelConfiguration|authorityConfiguration):/u.test(surfaces) ||
     !anchor.includes("config: authorityConfiguration") ||
-    !anchor.includes("optimalMaxTokens: resolveModelCapability(") ||
+    !(
+      anchor.includes("optimalMaxTokens: resolveModelCapability(") ||
+      (anchor.includes("optimalMaxTokens: () => currentOptimalMaxTokens()") &&
+        anchor.includes("modelRuntimePort.optimalMaxTokens()"))
+    ) ||
     !anchor.includes("modelConfiguration.llm?.main?.model") ||
     surfaces.includes("modelConfiguration.llm?.main?.model") ||
     !surfaces.includes("configuration: input.advancementConfiguration") ||
@@ -5564,6 +5573,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     "packages/cli/src/runtime/runtime-configuration-provider.ts",
     "packages/cli/src/runtime/workspace-command.ts",
     "packages/cli/src/serve/application-host.ts",
+    "packages/cli/src/serve/local-configuration-application.ts",
   ]);
   if (
     projectionCallers.length !== expectedProjectionCallers.size ||
@@ -11378,6 +11388,7 @@ export function inspectManagedHostAssembly(records) {
     "assetMaintenance.stop",
     "executorJobOwner.close",
     "losslessDataPlane.close",
+    "modelRuntimePort.dispose",
     "ephemeralRuntime.dispose",
     "sessionProcess.dispose",
     // 按会话准备的推进恢复与决定状态后台迁移（terminal-migration-remaining-work.md 包1b R1 路线）
@@ -11581,6 +11592,7 @@ export function inspectManagedHostAssembly(records) {
     "executorJobOwnerLifecycle.close",
     "executorDataPlane.close",
     "authorityRuntime.stopStorageMaintenance",
+    "modelRuntimePort.dispose",
     "mcpRuntime.close",
     "logAccess.close",
   ];
@@ -11621,7 +11633,7 @@ export function inspectManagedHostAssembly(records) {
     executorLifecyclePositions.some((position, index) =>
       index > 0 && position <= executorLifecyclePositions[index - 1]) ||
     count(executorRoot, "new ExecutorRoleLifecycle()") !== 1 ||
-    count(executorRoot, "executorRoleLifecycle.acquire(") !== 7 ||
+    count(executorRoot, "executorRoleLifecycle.acquire(") !== 8 ||
     executorRoleLifecycleIds
       .filter((identity) => identity !== "authorityRuntime.stopStorageMaintenance")
       .some((identity) => count(executorRoot, `"${identity}"`) !== 1) ||
@@ -16152,6 +16164,8 @@ export function inspectLocalConversationOwnerIsolation(records) {
     // 规则权威宿主接纳本地对话镜像带回的权限沉淀，非权威宿主不给
     // （依据：docs/modules/security/trust.md 的“现状边界”）
     "trustSediments",
+    // 新模型准入前检查本机配置/凭据修订差，补应用纯模型域更新（设计 §5.2）
+    "beforeTurnAdmission",
   ]);
   // 必需依赖不得条件传入，与装配合同是否把它写成可选无关。
   const requiredCreateProperties = [
@@ -16852,7 +16866,7 @@ export function inspectConversationAdoptionAssembly(records) {
   const router = required.get("packages/cli/src/serve/local-conversation-rpc.ts");
   if (
     !/params\.acceptLimitedCapabilities\s*!==\s*true/u.test(router.text) ||
-    count(router.text, /requireContinuationConsent\(params\);/gu) !== 9 ||
+    count(router.text, /requireContinuationConsent\(params\);/gu) !== 10 ||
     !/assertLocalConversationIdForDevice\s*\(/u.test(router.text) ||
     /continueLocally|requireLocalConsent/u.test(router.text)
   ) {
@@ -16899,7 +16913,7 @@ export function inspectConversationAdoptionAssembly(records) {
     count(
       conversationFacade.text,
       /\.\.\.this\.#continuationConsent\(\)/gu,
-    ) !== 10 ||
+    ) !== 11 ||
     !/pendingContinuationConfirmation\(\):\s*readonly\s+string\[\]\s*\|\s*null/u.test(
       conversationFacade.text,
     ) ||

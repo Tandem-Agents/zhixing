@@ -767,13 +767,21 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
     );
 
     const endEvent = events.find((e) => e.type === "thinking_block_end");
-    expect(endEvent).toEqual({
+    expect(endEvent).toMatchObject({
       type: "thinking_block_end",
       signature: "sig-part-1sig-part-2",
+      protocolState: {
+        protocol: "anthropic-messages",
+        sourceConnectionId: "anthropic",
+        sourceOriginKey: "anthropic-messages@https://api.anthropic.com",
+        sourceModel: "claude-sonnet-4-20250514",
+        payloadVersion: 1,
+        signature: "sig-part-1sig-part-2",
+      },
     });
   });
 
-  it("无 signature 的 thinking 块 → thinking_block_end signature 为 undefined", async () => {
+  it("无 signature 的 thinking 块 → thinking_block_end signature 为 undefined 且携带来源 protocolState", async () => {
     mockCreate.mockResolvedValue(
       mockStream([
         messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
@@ -794,10 +802,20 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
     );
 
     const endEvent = events.find((e) => e.type === "thinking_block_end");
-    expect(endEvent).toEqual({ type: "thinking_block_end", signature: undefined });
+    expect(endEvent).toMatchObject({
+      type: "thinking_block_end",
+      signature: undefined,
+      protocolState: {
+        protocol: "anthropic-messages",
+        sourceConnectionId: "anthropic",
+        sourceOriginKey: "anthropic-messages@https://api.anthropic.com",
+        sourceModel: "claude-sonnet-4-20250514",
+        payloadVersion: 1,
+      },
+    });
   });
 
-  it("出站：含 signature 的思考块原样回传为原生 thinking 块", async () => {
+  it("出站：同来源含 signature 的思考块原样回传为原生 thinking 块，来源不明或跨源绝不转发", async () => {
     mockCreate.mockResolvedValue(
       mockStream([
         messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
@@ -817,7 +835,19 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
           {
             role: "assistant",
             content: [
-              { type: "thinking", thinking: "我的推理", signature: "sig-xyz" },
+              {
+                type: "thinking",
+                thinking: "我的推理",
+                signature: "sig-xyz",
+                protocolState: {
+                  protocol: "anthropic-messages",
+                  sourceConnectionId: "anthropic",
+                  sourceOriginKey: "anthropic-messages@https://api.anthropic.com",
+                  sourceModel: "claude-sonnet-4-20250514",
+                  payloadVersion: 1,
+                  signature: "sig-xyz",
+                },
+              },
               { type: "text", text: "答案" },
             ],
           },
@@ -837,7 +867,7 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
     });
   });
 
-  it("出站：无 signature 的跨 provider 思考块降级为 text", async () => {
+  it("出站：跨来源或来源不明旧记录的思考块安全省略（不伪造签名、不转普通文本），保留已提交可见文本", async () => {
     mockCreate.mockResolvedValue(
       mockStream([
         messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
@@ -856,7 +886,11 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
         messages: [
           {
             role: "assistant",
-            content: [{ type: "thinking", thinking: "DeepSeek 的推理" }],
+            content: [
+              { type: "thinking", thinking: "DeepSeek 的推理" },
+              { type: "thinking", thinking: "旧签名来源不明", signature: "sig-legacy" },
+              { type: "text", text: "已提交答案" },
+            ],
           },
           userMessage("继续"),
         ],
@@ -867,10 +901,12 @@ describe("createAnthropicProvider · extended thinking 发送 + signature replay
     const assistantMsg = callArgs.messages.find(
       (m: { role: string }) => m.role === "assistant",
     );
-    expect(assistantMsg.content[0]).toEqual({
-      type: "text",
-      text: "DeepSeek 的推理",
-    });
+    expect(assistantMsg.content).toEqual([
+      {
+        type: "text",
+        text: "已提交答案",
+      },
+    ]);
   });
 
   it("出站：含文件材料的连续用户文本段按原序折叠为单 text 块且剥离 material，普通双 text 块保持原样", async () => {

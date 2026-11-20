@@ -36,7 +36,11 @@ import {
   isCurrentAnchorRelayMethod,
   type FirstPartyIngressConnection,
 } from "./first-party-conversation-mesh.js";
-import { createLocalConversationDirectoryApplication } from "./local-conversation-directory-application.js";
+import {
+  createLocalConversationDirectoryApplication,
+  createLocalSessionModelSelectionPort,
+  type LocalSessionModelSelectionPort,
+} from "./local-conversation-directory-application.js";
 
 export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.abort",
@@ -54,6 +58,8 @@ export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.list",
   "session.new",
   "session.rename",
+  "session.getModelSelection",
+  "session.setModelSelection",
   "session.resolve",
   "session.resume",
   "session.security",
@@ -78,12 +84,18 @@ export class LocalConversationRpcRouter
   readonly #connections = new Map<number, () => void>();
   readonly #remote = new Map<string, FirstPartyConversationMeshClient>();
   readonly #application: ConversationDirectoryApplication;
+  readonly #modelSelection: LocalSessionModelSelectionPort;
 
   constructor(
     private readonly input: {
       readonly deviceId: string;
       readonly owner: LocalConversationOwnerPort;
       readonly remoteFor: (deviceId: string) => FirstPartyConversationMeshClient;
+      readonly validateModelSelection?: (
+        conversationId: string,
+        modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection,
+      ) => Promise<string | null>;
+      readonly onModelSelectionUpdated?: () => void;
     },
   ) {
     this.#application = createLocalConversationDirectoryApplication({
@@ -91,6 +103,7 @@ export class LocalConversationRpcRouter
       observerCount: (conversationId) =>
         this.#observers.get(conversationId)?.size ?? 0,
     });
+    this.#modelSelection = createLocalSessionModelSelectionPort(input.owner);
     input.owner.subscribeConversationFacts((fact) => {
       this.#notify(fact.conversationId, "session.changed", {
         conversationId: fact.conversationId,
@@ -463,6 +476,64 @@ export class LocalConversationRpcRouter
         } catch (error) {
           throw mapLocalConversationApplicationError(error, "rename");
         }
+      }
+      case "session.getModelSelection": {
+        const conversationId = this.#conversationId(params, method);
+        const modelSelection = await this.#modelSelection.get(conversationId);
+        return {
+          conversationId,
+          modelSelection,
+        };
+      }
+      case "session.setModelSelection": {
+        requireContinuationConsent(params);
+        const conversationId = this.#conversationId(params, method);
+        const raw = params.modelSelection as Record<string, unknown> | undefined;
+        if (
+          !raw ||
+          typeof raw !== "object" ||
+          Array.isArray(raw) ||
+          (raw.mode !== "follow-default" && raw.mode !== "override")
+        ) {
+          throw RpcErrors.invalidParams("模型选择参数无效。");
+        }
+        const modelSelection =
+          raw.mode === "follow-default"
+            ? ({ mode: "follow-default" } as const)
+            : ({
+                mode: "override" as const,
+                connectionId: String(raw.connectionId ?? "").trim(),
+                model: String(raw.model ?? "").trim(),
+                ...(raw.params !== undefined
+                  ? { params: structuredClone(raw.params) as import("@zhixing-ai/core/contracts").ModelSelectionParams }
+                  : {}),
+                ...(typeof raw.maxOutputPreference === "number"
+                  ? { maxOutputPreference: raw.maxOutputPreference }
+                  : {}),
+              });
+        if (
+          modelSelection.mode === "override" &&
+          (!modelSelection.connectionId || !modelSelection.model)
+        ) {
+          throw RpcErrors.invalidParams("覆盖模型选择需要非空的 connectionId 与 model。");
+        }
+        if (this.input.validateModelSelection) {
+          const rejection = await this.input.validateModelSelection(
+            conversationId,
+            modelSelection,
+          );
+          if (rejection) {
+            throw RpcErrors.invalidParams(rejection);
+          }
+        }
+        await this.#modelSelection.set(conversationId, modelSelection);
+        this.input.onModelSelectionUpdated?.();
+        this.#notify(conversationId, "session.changed", {
+          conversationId,
+          change: "modelSelection",
+          modelSelection,
+        });
+        return { conversationId, modelSelection };
       }
       case "session.clear": {
         requireContinuationConsent(params);

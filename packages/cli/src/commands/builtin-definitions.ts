@@ -47,7 +47,7 @@ export const BUILTIN_COMMANDS = {
   "model:repl": {
     id: "model:repl",
     name: "model",
-    description: "显示当前模型信息",
+    description: "查看、搜索、切换当前模型与原位调参",
     category: "info",
     execution: "local",
     tag: "builtin"

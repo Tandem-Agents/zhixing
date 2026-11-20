@@ -1,5 +1,6 @@
 import type { ServerInfoResult } from './rpc-management-facade.js';
 import type { RuntimeNetworkProxyDisplayProjection, RuntimePrimaryModelDisplayProjection } from './runtime-configuration-provider.js';
+import { formatRoleBrief } from './model-display-projection.js';
 import type { TerminalSummary, TerminalSummaryRow, TerminalSummarySection, TerminalSummaryText } from '@zhixing-ai/terminal-ui/protocol';
 import { activeWork, countWork, formatWorkItems, liveChannels, otherRpcConnections } from './stop-selection.js';
 import { paginateSummary, summaryLines, summaryText } from '../summary-projection.js';
@@ -15,11 +16,31 @@ export function serverStatusSummary(name: string, model: RuntimePrimaryModelDisp
   proxy: RuntimeNetworkProxyDisplayProjection, info: ServerInfoResult | null): TerminalSummary[] {
   const lead: TerminalSummaryText[][] = [[{ text: summaryText(name), tone: 'accent' }]];
   if (!info) lead.push([{ text: '宿主状态暂不可用。', tone: 'warn' }]);
-  const sections: TerminalSummarySection[] = [{ title: '模型与网络', rows: [
-    { label: '模型', value: summaryText(model.model || '(未配置)') },
-    { label: '服务商', value: summaryText(model.providerId || '(未配置)') },
+  const providerDisplay = model.connectionName && model.connectionName !== model.providerId
+    ? `${model.connectionName} (${model.providerId})`
+    : (model.connectionName || model.providerId || '(未配置)');
+  const modelRows: TerminalSummaryRow[] = [
+    {
+      label: '模型',
+      value: summaryText(model.model || '(未配置)'),
+      ...(model.available === false || model.warning ? { tone: 'warn' as const } : {}),
+      ...(model.unavailableReason || model.warning
+        ? { note: summaryText(model.unavailableReason ?? model.warning!) }
+        : {}),
+    },
+    { label: '服务商', value: summaryText(providerDisplay) },
+    ...(model.sourceLabel ? [{ label: '生效来源', value: summaryText(model.sourceLabel) }] : []),
+    ...(model.paramsSummary ? [{ label: '当前参数', value: summaryText(model.paramsSummary) }] : []),
+    ...(model.roles
+      ? [{
+          label: '用途默认',
+          value: summaryText(`main=${formatRoleBrief(model.roles.main)}`),
+          note: summaryText(`light=${formatRoleBrief(model.roles.light)} ｜ power=${formatRoleBrief(model.roles.power)}`),
+        }]
+      : []),
     { label: '网络代理', value: summaryText(proxy.display) },
-  ] }];
+  ];
+  const sections: TerminalSummarySection[] = [{ title: '模型与网络', rows: modelRows }];
   if (info) {
     const work = activeWork(info), other = otherRpcConnections(info), live = liveChannels(info);
     const channels: TerminalSummaryRow[] = (info.channels ?? []).map(channel => ({

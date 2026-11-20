@@ -91,7 +91,8 @@
         "@zhixing-ai/core"
       ],
       "@zhixing-ai/providers": [
-        "@zhixing-ai/core"
+        "@zhixing-ai/core",
+        "@zhixing-ai/network"
       ],
       "@zhixing-ai/rpc": [
         "@zhixing-ai/core",
@@ -757,7 +758,7 @@
       "name": "SessionCancelledRubricResult"
     },
     {
-      "definition": "| { conversationId: string; change: \"renamed\"; name: string } | { conversationId: string; change: \"deleted\" } | { conversationId: string; change: \"cleared\" } /** * task_list 视图层状态变更(meta 变更的一种)——接入面屏底任务区据此实时 * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空), * 投影层不依赖该包、以透传形声明,发射端与消费端同源同包类型。 */ | { conversationId: string; change: \"taskList\"; taskList: TaskListState | null }",
+      "definition": "| { conversationId: string; change: \"renamed\"; name: string } | { conversationId: string; change: \"deleted\" } | { conversationId: string; change: \"cleared\" } /** * task_list 视图层状态变更(meta 变更的一种)——接入面屏底任务区据此实时 * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空), * 投影层不依赖该包、以透传形声明,发射端与消费端同源同包类型。 */ | { conversationId: string; change: \"taskList\"; taskList: TaskListState | null } | { conversationId: string; change: \"modelSelection\"; modelSelection: import(\"@zhixing-ai/core/contracts\").SessionModelSelection; }",
       "kind": "type",
       "name": "SessionChangedPayload"
     },
@@ -922,6 +923,14 @@
       ],
       "kind": "interface",
       "name": "SessionListResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "modelSelection: import(\"@zhixing-ai/core/contracts\").SessionModelSelection;"
+      ],
+      "kind": "interface",
+      "name": "SessionModelSelectionResult"
     },
     {
       "definition": [
@@ -1240,7 +1249,7 @@
     },
     {
       "kind": "import",
-      "references": 63,
+      "references": 67,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/core"
     },
@@ -1270,7 +1279,7 @@
     },
     {
       "kind": "import",
-      "references": 8,
+      "references": 11,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/providers"
     },
@@ -1318,7 +1327,7 @@
     },
     {
       "kind": "type-import",
-      "references": 55,
+      "references": 58,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/core"
     },
@@ -1342,7 +1351,7 @@
     },
     {
       "kind": "type-import",
-      "references": 8,
+      "references": 6,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing-ai/providers"
     },
@@ -1396,7 +1405,7 @@
     },
     {
       "kind": "import",
-      "references": 37,
+      "references": 42,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
@@ -1408,7 +1417,7 @@
     },
     {
       "kind": "import",
-      "references": 345,
+      "references": 350,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/core"
     },
@@ -1486,13 +1495,13 @@
     },
     {
       "kind": "type-import",
-      "references": 15,
+      "references": 16,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
     {
       "kind": "type-import",
-      "references": 273,
+      "references": 272,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing-ai/core"
     },
@@ -1720,7 +1729,7 @@
     },
     {
       "kind": "import",
-      "references": 204,
+      "references": 207,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing-ai/core"
     },
@@ -1756,7 +1765,7 @@
     },
     {
       "kind": "type-import",
-      "references": 17,
+      "references": 16,
       "sourceZone": "rpc",
       "target": "package:@zhixing-ai/core"
     },
@@ -1780,7 +1789,7 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 4,
       "sourceZone": "runtime-host",
       "target": "package:@zhixing-ai/core"
     },
@@ -1846,7 +1855,7 @@
     },
     {
       "kind": "import",
-      "references": 27,
+      "references": 28,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing-ai/core"
     },

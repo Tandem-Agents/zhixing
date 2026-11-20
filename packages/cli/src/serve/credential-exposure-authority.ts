@@ -296,8 +296,13 @@ function credentialRoute(ref: SecretRef): {
     const match = /^credentials\/v1\/generations\/[A-Za-z0-9_-]{16,64}\/([^/]+)$/u
       .exec(ref.bindingId);
     if (!match) {
-      if (ref.bindingId === "credentials/v1/manifest" ||
-        ref.bindingId.startsWith("credentials/v1/generation-markers/")) return undefined;
+      if (
+        ref.bindingId === "credentials/v1/manifest" ||
+        ref.bindingId.startsWith("credentials/v1/generation-markers/") ||
+        ref.bindingId.startsWith("configuration/")
+      ) {
+        return undefined;
+      }
       return { ref, service: ref.kind };
     }
     let id: string;
@@ -306,8 +311,12 @@ function credentialRoute(ref: SecretRef): {
     } catch {
       throw new TypeError("Credential binding identity is invalid");
     }
+    const routeId =
+      ref.kind === "provider" && id.startsWith("legacy-protected:")
+        ? id.slice("legacy-protected:".length)
+        : id;
     return {
-      ref: { kind: ref.kind, bindingId: `credential-${ref.kind}-${id}` },
+      ref: { kind: ref.kind, bindingId: `credential-${ref.kind}-${routeId}` },
       service: ref.kind,
     };
   }

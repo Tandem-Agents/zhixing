@@ -59,6 +59,7 @@ export type TaskAction =
       kind: "agent-turn";
       prompt: string;
       model?: string;
+      modelSelection?: import("../types/llm.js").CrossDeviceModelSelectionIntent;
       tools?: string[];
     }
   | { kind: "system"; handler: string; params?: Record<string, unknown> };

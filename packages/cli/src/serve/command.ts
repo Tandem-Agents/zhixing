@@ -146,7 +146,7 @@ import {
 } from "@zhixing-ai/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
-import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath, prepareProviderRoles } from "@zhixing-ai/providers";
+import { loadCredentials, ModelCatalogManager, ModelDiscoveryCache, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath } from "@zhixing-ai/providers";
 import chalk from "chalk";
 import { ExecutionStatusHub, FirstPartyFinalitySession } from "./first-party-finality-session.js";
 import { isProcessAlive } from "@zhixing-ai/server";
@@ -180,6 +180,11 @@ import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,
 } from "../runtime/kernel-runtime-bindings.js";
+import { ModelRuntimePort } from "../runtime/model-runtime-port.js";
+import {
+  createHostModelDiskReconciler,
+  settleHostPendingModelRetirements,
+} from "./local-configuration-application.js";
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
 import { AdvancementEvidenceHostBinding } from "./advancement-evidence-topology.js";
@@ -632,11 +637,11 @@ async function runServerProcess(
     zhixingHome,
     storageMaintenance: deviceCapacity.storage,
   });
+  let currentOptimalMaxTokens = () =>
+    resolveModelCapability(modelConfiguration.llm?.main?.model ?? "").optimalMaxTokens;
   const conversationStorage = createConversationStorageInfrastructure({
     zhixingHome,
-    optimalMaxTokens: resolveModelCapability(
-      modelConfiguration.llm?.main?.model ?? "",
-    ).optimalMaxTokens,
+    optimalMaxTokens: () => currentOptimalMaxTokens(),
     worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
     clearTaskListCache: (conversationId) =>
       builtinExtraTools.taskListService.clear(conversationId),
@@ -768,10 +773,44 @@ async function runServerProcess(
     mcpTools: mcpRuntime.tools,
     scheduler: schedulerFacade,
   });
+  const modelDiscoveryCache = new ModelDiscoveryCache({ homeDir: zhixingHome });
+  const modelCatalogManager = new ModelCatalogManager({
+    homeDir: zhixingHome,
+    networkProxy: modelConfiguration.network?.proxy,
+  });
+  await modelCatalogManager.initialize();
+  const modelRuntimePort = new ModelRuntimePort({
+    modelConfiguration,
+    advancementConfiguration,
+    providerCredentials,
+    exposureCredentials: credentialExposureCredentials,
+    credentialGeneration,
+    catalog: modelCatalogManager.port(),
+    discoveryCache: modelDiscoveryCache,
+  });
+  await modelRuntimePort.refreshDiscoveryCacheFromDisk();
+  const unsubscribeCatalog = modelCatalogManager.onUpdate((port) => {
+    modelRuntimePort.setCatalogPort(port);
+  });
+  modelCatalogManager.startAutoCheck();
+  currentOptimalMaxTokens = () => modelRuntimePort.optimalMaxTokens();
+  lifecycleContributions.acquire("modelRuntimePort.dispose", async () => {
+    modelCatalogManager.stopAutoCheck();
+    unsubscribeCatalog();
+    await modelRuntimePort.dispose();
+  });
+  modelRuntimePort.onConnectionRetiredIdle(async () => {
+    await settleHostPendingModelRetirements({
+      configPath: getGlobalConfigPath({}, zhixingHome),
+      store: bootstrap.secretStore,
+      modelRuntimePort,
+    }).catch(() => {});
+  });
   const executorReadiness = createExecutorReadinessSource({
     runtime: anchorRuntimeCapabilities,
     credentials: credentialExposureCredentials,
     credentialGeneration,
+    modelRuntimePort,
   });
   const authorityRuntime = await observeLogPhase(startupRecords, "prepare-authority", () => setupAuthorityRuntime({
     records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
@@ -877,6 +916,7 @@ async function runServerProcess(
           modelProvider: createHostAdvancementModelProviderFactory({
             configuration: advancementConfiguration,
             credentials: providerCredentials,
+            modelRuntimePort,
           }),
           // Authority is complete here; the existing generation-aware governor
           // projection remains intentionally dynamic and is outside this seam.
@@ -952,6 +992,14 @@ async function runServerProcess(
     resolveWorkspaceRoot: resolveWorksceneWorkspaceRoot,
     prepareWorkspaceRoot: (sceneId, absolutePath) =>
       worksceneAuthority.prepareWorkspaceRoot(sceneId, absolutePath),
+    readSessionModelSelection: async (conversationId) => {
+      const meta = await boundConversationProtocol.sessionState.readSessionMeta(conversationId, {
+        principal: { kind: "host", component: "model-selection-projection" },
+        requestId: `model-selection-read:${randomUUID()}`,
+        deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+      });
+      return meta.modelSelection;
+    },
   });
 
   // RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
@@ -974,8 +1022,9 @@ async function runServerProcess(
     : runtimeFactory;
   const jobRuntime = executor
     ? createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker, capabilities, workspaceBinding) => {
-          const projection = anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null);
+        create: async (instruction, confirmationBroker, capabilities, workspaceBinding, modelSelection) => {
+          await modelRuntimePort.ensureFreshBeforeAdmission();
+          const projection = anchorRuntimeProjections.job(instruction, capabilities, workspaceBinding ?? null, modelSelection);
           return runtimeHost.createJobRuntime({
             confirmationBroker,
             ...projection,
@@ -1036,6 +1085,7 @@ async function runServerProcess(
     ...(permissionStorage.trustSediments ? { trustSediments: permissionStorage.trustSediments } : {}),
     ...(permissionStorage.trustRuleHits ? { trustRuleHits: permissionStorage.trustRuleHits } : {}),
     runtimeFactory,
+    beforeTurnAdmission: () => modelRuntimePort.ensureFreshBeforeAdmission(),
     conversationRuntimeStorage: conversationStorage.runtime,
     confirmationHub,
     createConversationPerspectives,
@@ -1100,11 +1150,9 @@ async function runServerProcess(
 
   // 表面可用之后的 SDK 模块预导入（主模型 provider；不发请求）。同一宿主只做一次，失败下次可用时再触发。
   // 首发照原路径创建自己的 provider 实例与客户端，复用的只是进程内已装好的 SDK 模块
-  let modelProviderPreparation: Promise<void> | undefined;
   const prepareModelProviderAfterUsable = () => {
-    modelProviderPreparation ??= observeLogPhase(startupRecords, "after-usable-model-provider", () =>
-      prepareProviderRoles({ config: modelConfiguration, credentials: providerCredentials }))
-      .catch(() => { modelProviderPreparation = undefined; });
+    void observeLogPhase(startupRecords, "after-usable-model-provider", () =>
+      modelRuntimePort.prepareAfterUsable());
   };
 
   // Runtime factories are dormant during Conversation construction. Close the
@@ -1114,6 +1162,7 @@ async function runServerProcess(
     modelProvider: createHostKernelModelProviderFactory({
       configuration: modelConfiguration,
       credentials: providerCredentials,
+      modelRuntimePort,
     }),
     runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
       zhixingHome,
@@ -1158,6 +1207,7 @@ async function runServerProcess(
       ...(permissionStorage.trustRuleHits ? { trustRuleHits: permissionStorage.trustRuleHits } : {}),
       advancementConfiguration,
       providerCredentials,
+      modelRuntimePort,
       lifecycleContributions,
       executorDataPlane: dataPlane,
       meshBootstrap: bootstrap.mesh,
@@ -1502,14 +1552,54 @@ async function runServerProcess(
   // 定时任务路径 runtime.run 不传 conversationId——schedule origin 派生为 null
   // （任务 AI 自创建子任务非用户发起），TaskListProvider 闭包内 ALS 取不到
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
-  const ephemeralRuntime = await observeLogPhase(startupRecords, "create-ephemeral-runtime", () => runtimeHost.createEphemeralRuntime(
-    anchorRuntimeProjections.ephemeral(),
-  ));
+  const createHostEphemeralRuntime = () =>
+    runtimeHost.createEphemeralRuntime(anchorRuntimeProjections.ephemeral());
+  let ephemeralRuntime = await observeLogPhase(startupRecords, "create-ephemeral-runtime", createHostEphemeralRuntime);
+  type EphemeralRuntimeSlot = {
+    runtime: typeof ephemeralRuntime;
+    inFlight: number;
+    retireOnIdle: boolean;
+  };
+  let activeEphemeralSlot: EphemeralRuntimeSlot | null = {
+    runtime: ephemeralRuntime,
+    inFlight: 0,
+    retireOnIdle: false,
+  };
+  modelRuntimePort.onUpdate(async () => {
+    boundConversations?.invalidateRuntimeProjections();
+    const previousSlot = activeEphemeralSlot;
+    try {
+      const next = await createHostEphemeralRuntime();
+      ephemeralRuntime = next;
+      activeEphemeralSlot = { runtime: next, inFlight: 0, retireOnIdle: false };
+    } catch {
+      // 密钥撤销后若暂无可用 main 凭据，ephemeral runtime 暂不阻断撤销通知；
+      // 置空活动槽位并退役旧槽位，后续 llm.complete 按最新快照重建或直接 fail-closed。
+      activeEphemeralSlot = null;
+    }
+    if (previousSlot) {
+      previousSlot.retireOnIdle = true;
+      if (previousSlot.inFlight === 0) {
+        await previousSlot.runtime.dispose("session-dispose").catch(() => {});
+      }
+    }
+  });
   lifecycleContributions.acquire("ephemeralRuntime.dispose", () =>
     ephemeralRuntime.dispose("session-dispose"),
   );
 
-  if (boundAuthorityRuntime) {
+  async function runCredentialRotationPublication(input: {
+    readonly configuration: typeof credentialRotationConfiguration;
+    readonly credentials?: typeof credentialRotationCredentials;
+    readonly generation: string | null;
+    readonly waitForChannels?: boolean;
+  }): Promise<void> {
+    if (!boundAuthorityRuntime) return;
+    const latestCredentials =
+      input.credentials ??
+      projectRuntimeSecrets(
+        await loadCredentials({ store: bootstrap.secretStore }),
+      ).credentialRotationCredentials;
     await publishRequiredCredentialRotations({
       authority: new CredentialExposureAuthority({
         deviceId: boundAuthorityRuntime.deviceId,
@@ -1517,9 +1607,9 @@ async function runServerProcess(
         secretStore: boundSecretStore,
       }),
       deviceId: boundAuthorityRuntime.deviceId,
-      configuration: credentialRotationConfiguration,
-      credentials: credentialRotationCredentials,
-      credentialGeneration,
+      configuration: input.configuration,
+      credentials: latestCredentials,
+      credentialGeneration: input.generation,
       readCredentials: async () =>
         projectRuntimeSecrets(
           await loadCredentials({ store: bootstrap.secretStore }),
@@ -1537,9 +1627,42 @@ async function runServerProcess(
         ),
       mcpStatuses: () => boundMcpStatus.snapshot(),
       channelStatuses: () => boundChannelStatuses?.() ?? [],
-      ...(boundChannelConnections
+      ...(input.waitForChannels && boundChannelConnections
         ? { waitForChannels: () => boundChannelConnections!.ready }
         : {}),
+    });
+  }
+
+  const modelDiskReconciler = createHostModelDiskReconciler({
+    homeDir: zhixingHome,
+    configPath: getGlobalConfigPath({}, zhixingHome),
+    store: bootstrap.secretStore,
+    modelRuntimePort,
+    initialAuthorityConfiguration: authorityConfiguration,
+    initialMcpCredentials: mcpCredentials,
+    publishRotations: async (ctx) => {
+      await runCredentialRotationPublication({
+        configuration: ctx.credentialRotationConfiguration,
+        generation: ctx.credentialGeneration,
+      });
+    },
+    onApplied: async () => {
+      await authorityRuntime.refreshLocalExecutorSnapshot().catch(() => {});
+    },
+    onSecurityRevoked: async () => {
+      await authorityRuntime.refreshLocalExecutorSnapshot().catch(() => {});
+    },
+  });
+  await modelDiskReconciler.captureBaseline();
+  modelRuntimePort.setDiskReconciler(() => modelDiskReconciler.reconcileFromDisk());
+  await modelRuntimePort.ensureFreshBeforeAdmission();
+
+  if (boundAuthorityRuntime) {
+    await runCredentialRotationPublication({
+      configuration: credentialRotationConfiguration,
+      credentials: credentialRotationCredentials,
+      generation: credentialGeneration,
+      waitForChannels: true,
     });
   }
 
@@ -3339,6 +3462,98 @@ async function runServerProcess(
       : { state: "not-configured" as const, fullBackupReady: false }),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => [...mcpRuntime.status.snapshot()],
+    sessionModelSelection: {
+      get: async (conversationId) => {
+        const meta = await boundConversationProtocol.sessionState.readSessionMeta(
+          conversationId,
+          {
+            principal: { kind: "host", component: "session-model-selection" },
+            requestId: `model-selection-get:${randomUUID()}`,
+            deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+          },
+        );
+        return meta.modelSelection ?? { mode: "follow-default" as const };
+      },
+      set: async (conversationId, modelSelection) => {
+        const activeSession = boundConversations?.getSession(conversationId);
+        let activeWindowMessages: readonly import("@zhixing-ai/core").Message[] =
+          activeSession?.window.getMessages() ?? [];
+        if (activeSession) {
+          // 消除 session.final 已耐久提交但内存窗口投影尚未完成 acceptRun 的微秒竞态：补齐 runIndex >= turnCount 的已提交尾段
+          const tail = await boundConversationProtocol.sessionState
+            .readTranscriptTail(
+              conversationId,
+              {
+                principal: { kind: "host", component: "session-model-selection" },
+                requestId: `model-selection-window:${randomUUID()}`,
+                deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+              },
+              undefined,
+              8,
+            )
+            .catch(() => undefined);
+          if (tail && tail.records.length > 0) {
+            const unprojected = tail.records.filter(
+              (record) => record.runIndex >= activeSession.turnCount,
+            );
+            if (unprojected.length > 0) {
+              activeWindowMessages = [
+                ...activeWindowMessages,
+                ...unprojected.flatMap((record) => record.messages),
+              ];
+            }
+          }
+        }
+        const rejection = await modelRuntimePort.validateSessionModelSelection({
+          conversationId,
+          modelSelection,
+          activeWindowMessages,
+        });
+        if (rejection) {
+          throw new RpcAppError(RPC_ERROR_CODES.INVALID_PARAMS, rejection);
+        }
+        await boundConversationProtocol.sessionState.mutate(
+          conversationId,
+          { kind: "session-meta", patch: { modelSelection } },
+          {
+            principal: { kind: "host", component: "session-model-selection" },
+            requestId: `model-selection-set:${randomUUID()}`,
+            deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+          },
+        );
+        boundConversations?.invalidateRuntimeProjections();
+        return modelSelection;
+      },
+    },
+    applyModelConfiguration: async (input) => {
+      const result = await modelDiskReconciler.applyExplicitActivation(input);
+      if (!result.applied && (input.revokedSecretRefs?.length || input.abortConnectionIds?.length)) {
+        await authorityRuntime.refreshLocalExecutorSnapshot().catch(() => {});
+      }
+      return result;
+    },
+    modelCatalog: async (input) => {
+      if (input.action === "set-auto-check" && input.autoCheckEnabled !== undefined) {
+        await modelCatalogManager.setAutoCheckEnabled(input.autoCheckEnabled);
+        return {
+          ...modelCatalogManager.status(),
+          runtimeRevision: modelRuntimePort.snapshot().revision,
+        };
+      }
+      if (input.action === "refresh") {
+        const res = await modelCatalogManager.refresh({ force: input.force ?? true });
+        return {
+          ...modelCatalogManager.status(),
+          runtimeRevision: modelRuntimePort.snapshot().revision,
+          changed: res.changed,
+          message: res.message,
+        };
+      }
+      return {
+        ...modelCatalogManager.status(),
+        runtimeRevision: modelRuntimePort.snapshot().revision,
+      };
+    },
     // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；
     // 经 control 治理边界准入计量(用户同步操作,interactive 类)。
     // 生产装配恒有 authorityRuntime(pre-server surface 已断言)——缺失即 fail-closed,不静默绕过治理
@@ -3347,8 +3562,25 @@ async function runServerProcess(
       if (!authority) {
         throw new Error("llm.complete requires the durable authority runtime");
       }
-      const raw: GovernedTextCall = (prompt, role, opts) =>
-        ephemeralRuntime.callText(prompt, role, opts);
+      const raw: GovernedTextCall = async (prompt, role, opts) => {
+        await modelRuntimePort.ensureFreshBeforeAdmission();
+        let slot = activeEphemeralSlot;
+        if (!slot) {
+          const next = await createHostEphemeralRuntime();
+          ephemeralRuntime = next;
+          slot = { runtime: next, inFlight: 0, retireOnIdle: false };
+          activeEphemeralSlot = slot;
+        }
+        slot.inFlight += 1;
+        try {
+          return await slot.runtime.callText(prompt, role, opts);
+        } finally {
+          slot.inFlight = Math.max(0, slot.inFlight - 1);
+          if (slot.retireOnIdle && slot.inFlight === 0) {
+            void slot.runtime.dispose("session-dispose").catch(() => {});
+          }
+        }
+      };
       const call: GovernedTextCall = (prompt, role, opts) => governControlTextCall(
         {
           governor: authority.resourceGovernor,

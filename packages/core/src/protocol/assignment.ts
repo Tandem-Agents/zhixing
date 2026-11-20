@@ -50,7 +50,12 @@ import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateStagedMutationRecord } from "./commit.js";
 import { validateJobCommitFence } from "./job.js";
 import { validateInteractionDisplay } from "./interaction-display.js";
-import { validateExecutionManifest } from "./manifest.js";
+import {
+  MODEL_EXECUTION_PROTOCOL_VERSION,
+  validateCrossDeviceModelSelection,
+  validateExecutionManifest,
+} from "./manifest.js";
+import { hasProtocolStateInMessages } from "../types/messages.js";
 import { validateReservableResourceLease } from "./resource-governor.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages, validateMessageInputIdentity } from "./values.js";
@@ -2768,7 +2773,7 @@ function assertConversationEnvelope(
   assertIdentifier(envelope.executorId, "Dispatch executorId");
   assertCanonicalTime(envelope.issuedAt, "Dispatch issuedAt");
   validateExecutionManifest(envelope.manifest);
-  assertConversationWork(envelope.work);
+  assertConversationWork(envelope.work, envelope.manifest.protocolVersion);
   const authenticatedControl = verifyEnvelopeSignature
     ? validateDispatchControlBinding(envelope as ConversationEnvelope, verifier)
     : undefined;
@@ -2963,7 +2968,7 @@ function assertJobWork(work: JobEnvelope["work"]): void {
   validateJobCommitFence(work.fence);
   assertExactKeys(
     work.instruction,
-    ["kind", "model", "prompt", "tools"],
+    ["kind", "model", "modelSelection", "prompt", "tools"],
     "Job execution instruction",
     true,
   );
@@ -2979,6 +2984,9 @@ function assertJobWork(work: JobEnvelope["work"]): void {
   }
   if (work.instruction.model !== undefined) {
     assertIdentifier(work.instruction.model, "Job execution model");
+  }
+  if (work.instruction.modelSelection !== undefined) {
+    validateCrossDeviceModelSelection(work.instruction.modelSelection);
   }
   if (work.instruction.tools !== undefined) {
     assertUniqueIdentifiers(work.instruction.tools, "Job execution tools");
@@ -3210,7 +3218,10 @@ function assertTurnOrigin(value: unknown): void {
   }
 }
 
-function assertConversationWork(work: ConversationEnvelope["work"]): void {
+function assertConversationWork(
+  work: ConversationEnvelope["work"],
+  protocolVersion: string,
+): void {
   assertExactKeys(
     work,
     [
@@ -3240,6 +3251,14 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
     assertNonNegativeInteger(work.windowInput.windowEpoch, "Window epoch");
     if (Array.isArray(work.windowInput.messages)) {
       validateMessages(work.windowInput.messages, "Full window messages");
+      if (
+        hasProtocolStateInMessages(work.windowInput.messages) &&
+        BigInt(protocolVersion) < BigInt(MODEL_EXECUTION_PROTOCOL_VERSION)
+      ) {
+        throw new TypeError(
+          "Conversation messages carrying protocolState require execution protocolVersion >= 2",
+        );
+      }
     } else {
       assertExactKeys(work.windowInput.messages, ["ref"], "Window artifact container");
       assertArtifactRef(work.windowInput.messages.ref, "Window artifact");
@@ -3255,6 +3274,14 @@ function assertConversationWork(work: ConversationEnvelope["work"]): void {
     assertDigest(work.windowInput.baseDigest, "Window base digest");
     assertDigest(work.windowInput.targetDigest, "Window target digest");
     validateMessages(work.windowInput.appended, "Delta window messages");
+    if (
+      hasProtocolStateInMessages(work.windowInput.appended) &&
+      BigInt(protocolVersion) < BigInt(MODEL_EXECUTION_PROTOCOL_VERSION)
+    ) {
+      throw new TypeError(
+        "Delta window messages carrying protocolState require execution protocolVersion >= 2",
+      );
+    }
   } else {
     throw new TypeError("Window input kind is invalid");
   }

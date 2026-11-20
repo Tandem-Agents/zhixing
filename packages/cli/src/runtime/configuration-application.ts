@@ -1,6 +1,7 @@
 /** Node 配置保存/应用编排，复用 Configuration、Secret、Channel 与 MCP owners。 */
+import { randomUUID } from "node:crypto";
 import type { ChannelStatus } from "@zhixing-ai/core/channels";
-import { loadConfig } from "@zhixing-ai/providers/configuration";
+import { isLLMConfigV2, loadConfig } from "@zhixing-ai/providers/configuration";
 import { createLocalConfigurationApplication } from "../serve/local-configuration-application.js";
 import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import { canonicalize } from "@zhixing-ai/core/protocol";
@@ -18,6 +19,20 @@ export interface ConfigurationApplicationDeps {
   readonly readExtensions?: () => Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionPublicSnapshot>;
   readonly readExtensionLocalSetup?: () => Promise<Readonly<Record<string, string>>>;
   readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing-ai/core/extensions/contracts").ExtensionPublicSnapshot>;
+  /** 仅模型域变更的本机窄生效（不断开未受影响通道、不重启宿主）；返回 applied=false 时保持旧运行态并提示待应用。 */
+  readonly applyModelConfiguration?: (input?: {
+    readonly operationId?: string;
+    readonly revokedSecretRefs?: readonly string[];
+    readonly abortConnectionIds?: readonly string[];
+    readonly revokeOnly?: boolean;
+  }) => Promise<{
+    readonly applied: boolean;
+    readonly revision: string;
+    readonly reason?: string;
+    readonly deduplicated?: true;
+    readonly abortedCalls?: number;
+    readonly rotationWarning?: string;
+  }>;
   readonly zhixingHome: string;
   readonly configPath: string;
   readonly state: { activeTurnPromise: Promise<unknown> | null };
@@ -29,8 +44,12 @@ export interface ConfigurationInteractionOptions {
   readonly mcpApplication?: (editor: McpManagementEditorPort) => McpManagementApplication;
 }
 export type ConfigurationApplicationResult =
-  | { readonly kind: "cancelled" | "non-tty" | "local-applied"; readonly recoveredEdit?: true }
-  | { readonly kind: "saved-pending"; readonly stage: "channels" }
+  | {
+      readonly kind: "cancelled" | "non-tty" | "local-applied";
+      readonly recoveredEdit?: true;
+      readonly warning?: string;
+    }
+  | { readonly kind: "saved-pending"; readonly stage: "channels" | "model"; readonly reason?: string }
   | { readonly kind: "reloaded"; readonly effects: ConfigPostCommitEffects; readonly pendingChannels?: true }
   | { readonly kind: "mcp"; readonly result: Awaited<ReturnType<McpManagementApplication["edit"]>> };
 
@@ -128,7 +147,7 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
   const localConfiguration = createLocalConfigurationApplication({ homeDir, configPath, store: secretStore,
     records: deps.configurationRecords, processIdentityResolver: deps.processIdentityResolver });
-  const { config, credentials, recoveredEdit } = await localConfiguration.read();
+  const { config, credentials, recoveredEdit } = await localConfiguration.read({ autoMigrate: true });
   const managed = opts.kind === "config" && deps.readExtensions ? await deps.readExtensions() : undefined;
   const channelCatalog = managed ? listSupportedChannels(managed) : undefined;
   const channelSetup = managed && deps.readExtensionLocalSetup ? await deps.readExtensionLocalSetup() : undefined;
@@ -174,6 +193,13 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
         await localConfiguration.edit({ config, credentials }, result, {
           prepare: channelStates ? (store, source) => configuration.preparePublications(store, ids,
             source.config, { channels: source.credentials.channels }, channelStates, result.channelIntents, retryIds) : undefined,
+          ...(result.modelRetirements && result.modelRetirements.length > 0
+            ? { modelRetirements: result.modelRetirements }
+            : {}),
+          ...(result.removeLegacyModelCapabilityOverrides
+            ? { removeLegacyModelCapabilityOverrides: true }
+            : {}),
+          ...(isLLMConfigV2(result.config.llm) ? { forceModelConfigVersion2: true } : {}),
         });
       },
     },
@@ -209,6 +235,98 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   if (canonicalize(oldConfig) === canonicalize(newConfig) && canonicalize(oldCredentials) === canonicalize(newCredentials)) {
     return pendingChannels ? { kind: "saved-pending", stage: "channels" } : { kind: "local-applied" };
   }
+
+  // 单一保存后裁决（设计 §5.3）：
+  // - 仅模型域变更（llm / modelCapabilityOverrides / modelSecrets / providers / protectedLegacyProviders / revokedModelSecretRefs）
+  //   且未改动 network / workspace / mesh / mcp / agent / intent / advancement 时，走本机窄生效（不断开通道、不重启宿主）；
+  // - 混合变更（例如同时改 network.proxy 与模型配置）只做一次完整宿主换代，绝不先窄生效再重启。
+  const {
+    llm: _oldLlm,
+    modelCapabilityOverrides: _oldCapOverrides,
+    ...oldNonModelConfig
+  } = oldConfig;
+  const {
+    llm: _newLlm,
+    modelCapabilityOverrides: _newCapOverrides,
+    ...newNonModelConfig
+  } = newConfig;
+  const {
+    version: _oldCredVersion,
+    providers: _oldProviders,
+    modelSecrets: _oldModelSecrets,
+    protectedLegacyProviders: _oldProtectedLegacy,
+    revokedModelSecretRefs: _oldRevoked,
+    compromisedModelSecretTokens: _oldCompromised,
+    ...oldNonModelCredentials
+  } = oldCredentials;
+  const {
+    version: _newCredVersion,
+    providers: _newProviders,
+    modelSecrets: _newModelSecrets,
+    protectedLegacyProviders: _newProtectedLegacy,
+    revokedModelSecretRefs: _newRevoked,
+    compromisedModelSecretTokens: _newCompromised,
+    ...newNonModelCredentials
+  } = newCredentials;
+
+  const isPureModelChange =
+    canonicalize(oldNonModelConfig) === canonicalize(newNonModelConfig) &&
+    canonicalize(oldNonModelCredentials) === canonicalize(newNonModelCredentials);
+
+  const prevRevoked = new Set(credentials.revokedModelSecretRefs ?? []);
+  const nextRevoked = new Set(editorResult.credentials.revokedModelSecretRefs ?? []);
+  const newlyRevoked = [...nextRevoked].filter((ref) => !prevRevoked.has(ref));
+  const abortConnections = (editorResult as { readonly abortConnectionIds?: readonly string[] }).abortConnectionIds;
+
+  if (isPureModelChange && deps.applyModelConfiguration) {
+    try {
+      const applied = await deps.applyModelConfiguration({
+        operationId: randomUUID(),
+        ...(newlyRevoked.length > 0 ? { revokedSecretRefs: newlyRevoked } : {}),
+        ...(abortConnections && abortConnections.length > 0 ? { abortConnectionIds: abortConnections } : {}),
+      });
+      if (!applied.applied) {
+        return {
+          kind: "saved-pending",
+          stage: "model",
+          ...(applied.reason ? { reason: applied.reason } : {}),
+        };
+      }
+      return pendingChannels
+        ? {
+            kind: "saved-pending",
+            stage: "channels",
+            ...(applied.rotationWarning ? { reason: applied.rotationWarning } : {}),
+          }
+        : {
+            kind: "local-applied",
+            ...(applied.rotationWarning ? { warning: applied.rotationWarning } : {}),
+          };
+    } catch (error) {
+      return {
+        kind: "saved-pending",
+        stage: "model",
+        reason: error instanceof Error ? error.message : "模型运行时窄生效未确认，旧运行实例已保留",
+      };
+    }
+  }
+
+  // R2-A1：混合编辑（将触发整机换代）若包含已接纳的撤权/强制停用，须先于等待 activeTurnPromise
+  // 与整机换代立即执行安全止血（revokeOnly=true，绝不半应用模型候选配置），避免旧凭据在换代前继续发请求。
+  if (
+    deps.applyModelConfiguration &&
+    (newlyRevoked.length > 0 || (abortConnections && abortConnections.length > 0))
+  ) {
+    await deps.applyModelConfiguration({
+      operationId: randomUUID(),
+      revokeOnly: true,
+      ...(newlyRevoked.length > 0 ? { revokedSecretRefs: newlyRevoked } : {}),
+      ...(abortConnections && abortConnections.length > 0 ? { abortConnectionIds: abortConnections } : {}),
+    }).catch(() => {
+      // 安全撤权回执异常不阻断后续整机换代，磁盘对账会在准入前继续兜底
+    });
+  }
+
   const launchSelectionChanged = canonicalize({
     enabledRoles: config.mesh?.enabledRoles ?? [],
     executorAutoStart: config.mesh?.executorAutoStart ?? false,

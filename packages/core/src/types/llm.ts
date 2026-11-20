@@ -11,8 +11,18 @@
  * 我们的抽象更薄 — Provider 只管 LLM 通信，其他职责上移。
  */
 
-import type { Message } from "./messages.js";
+import { AgentError } from "./errors.js";
+import type {
+  Message,
+  TextProtocolState,
+  ThinkingBlock,
+  ThinkingProtocolState,
+} from "./messages.js";
 import type { ToolSpec } from "./tools.js";
+import {
+  validateMessagesAgainstInputCapabilities,
+  type ModelInputCapabilities,
+} from "./user-input.js";
 
 // ─── 停止原因 ───
 
@@ -246,6 +256,12 @@ export interface ChatRequest {
    * adapter 按本 provider 思考方言写成原生参数。缺省 = 不发送思考参数。
    */
   thinking?: ThinkingConfig;
+  /**
+   * 前缀代际边界提示（索引基于本次 `request.messages`）：
+   * 发生压缩、窗口重建、冷重启或切换后，索引小于本值的已结算旧轮次推理载荷已知与当前前缀失配，
+   * 对前缀敏感协议（如 `openai-responses`）在出站投影中诚实省略，不伪造保真也不空耗输入 token。
+   */
+  invalidatedPrefixBeforeIndex?: number;
 }
 
 // ─── 流式事件（判别联合） ───
@@ -292,6 +308,10 @@ export interface StreamMessageStart {
 export interface StreamTextDelta {
   type: "text_delta";
   text: string;
+  /** 可选块身份，用于在同一响应内区分多个独立文本输出项（如 commentary 与 final_answer）。 */
+  blockId?: string;
+  /** 可选协议文本元状态（如 OpenAI Responses assistant `phase` / `itemId`）。 */
+  protocolState?: TextProtocolState;
 }
 
 /**
@@ -328,6 +348,8 @@ export interface StreamThinkingDelta {
 export interface StreamThinkingBlockEnd {
   type: "thinking_block_end";
   signature?: string;
+  /** 有界协议私有推理状态（来源身份、协议、型号与加密/签名/步骤载荷）。 */
+  protocolState?: ThinkingProtocolState;
 }
 
 export interface StreamToolCallStart {
@@ -364,6 +386,16 @@ export interface StreamError {
 export interface LLMProvider {
   /** 提供商标识符，如 'anthropic'、'openai' */
   readonly id: string;
+  /** 受控协议标识（供前缀敏感策略与兼容检查使用）。 */
+  readonly protocol?: ModelAdapterId;
+  /** 非秘密连接来源身份（供同源推理状态校验与兼容预检使用）。 */
+  readonly sourceConnectionId?: string;
+  /** 非秘密端点来源指纹（origin + basePath）。 */
+  readonly sourceOriginKey?: string;
+  /** 声明该协议对前序消息改写敏感，要求 `<turn-context>` 采用追加式发送视图投影（如 `openai-responses`）。 */
+  readonly appendOnlyTurnContext?: boolean;
+  /** 目标连接/协议在未完成工具往返中是否强制要求思考签名/推理载荷连贯（默认按协议规则推导）。 */
+  readonly requiresThinkingReplayInToolRoundtrip?: boolean;
 
   /**
    * Provider 实例上 declared 的 model catalog（已知模型元信息列表）。
@@ -405,6 +437,12 @@ export interface LLMProvider {
    * 失败不影响之后的调用照常重试。供宿主在真正可用之后、首次发送之前于后台触发。
    */
   prepare?(): Promise<void>;
+
+  /**
+   * 连接退役或实例回收时显式关闭该 Provider 独占的网络 dispatcher 资源。
+   * 共享连接池不得被单个连接提前关闭。
+   */
+  close?(): Promise<void>;
 }
 
 // ─── LLM 角色（会话级 capability） ───
@@ -517,4 +555,381 @@ export type TextCallLLMWithUsageFn = (
 export interface ModelProviderPhases {
   entered(): void;
   settled(): void;
+}
+
+// ─── 受控协议标识、结构化选模意图与输出上限解析 ───
+
+/** 本轮受控模型协议族标识（新协议语义只经受控适配交付）。 */
+export type ModelAdapterId =
+  | "openai-compatible"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "google-interactions";
+
+/** 模型用途角色标识（供给层与用途层单向分层）。 */
+export type ModelRoleId = "main" | "light" | "power";
+
+/** 受注册语义约束的模型可选参数集合（禁止任意请求字段路径）。 */
+export interface ModelSelectionParams {
+  readonly thinking?: ThinkingConfig;
+}
+
+/** 会话级持久化选模状态：跟随当前场景用途默认，或本会话结构化覆盖。 */
+export type SessionModelSelection =
+  | { readonly mode: "follow-default" }
+  | {
+      readonly mode: "override";
+      readonly connectionId: string;
+      readonly model: string;
+      readonly params?: ModelSelectionParams;
+      readonly maxOutputPreference?: number;
+    };
+
+/** 跨设备派发的完整非秘密选模意图（秘密永留执行设备）。 */
+export type CrossDeviceModelSelectionIntent =
+  | {
+      readonly mode: "follow-role";
+      readonly role: ModelRoleId;
+      readonly params?: ModelSelectionParams;
+      readonly maxOutputPreference?: number;
+    }
+  | {
+      readonly mode: "connection";
+      readonly connectionId: string;
+      readonly model: string;
+      readonly adapter?: ModelAdapterId;
+      readonly params?: ModelSelectionParams;
+      readonly maxOutputPreference?: number;
+    };
+
+/** 按连接发布的执行器模型就绪描述（免密连接无需造假凭据）。 */
+export interface ModelConnectionReadinessDescriptor {
+  readonly connectionId: string;
+  readonly revision: string;
+  readonly adapter: ModelAdapterId;
+  readonly authMode: "none" | "api-key" | "header";
+  readonly credentialBindingId?: string;
+  readonly ready: boolean;
+  /** 该连接在本机有效承担的用途集合（供跨设备 follow-role 精准计算目标凭据依赖，排序去重）。 */
+  readonly boundRoles?: readonly ModelRoleId[];
+}
+
+export type MaxOutputSource =
+  | "explicit-request"
+  | "user-preference"
+  | "model-catalog"
+  | "protocol-default";
+
+export interface MaxOutputResolutionInput {
+  readonly explicitRequest?: number;
+  readonly userPreference?: number;
+  readonly modelCatalogMaxOutput?: number;
+  readonly protocolDefault: number;
+  readonly hardCap?: number;
+  readonly remainingWindow?: number;
+  readonly resourceLimit?: number;
+  readonly thinkingBudget?: number;
+}
+
+export interface MaxOutputResolutionResult {
+  readonly maxTokens: number;
+  readonly source: MaxOutputSource;
+  readonly requestedCandidate: number;
+  readonly adjusted: boolean;
+  readonly adjustmentReasons: readonly string[];
+}
+
+/**
+ * 输出上限统一解析（设计 §5.1）：
+ * 候选依次取 `显式请求 → 用户用途偏好 → 型号策展建议 → 协议兜底（标明来源）`，
+ * 再受有效型号硬上限、剩余窗口与资源许可裁剪；与原生思考预算冲突时明示调整项，绝不放大用户限制。
+ */
+export function resolveMaxOutputTokens(
+  input: MaxOutputResolutionInput,
+): MaxOutputResolutionResult {
+  let source: MaxOutputSource = "protocol-default";
+  let candidate = input.protocolDefault;
+  if (isPositiveInt(input.explicitRequest)) {
+    source = "explicit-request";
+    candidate = input.explicitRequest;
+  } else if (isPositiveInt(input.userPreference)) {
+    source = "user-preference";
+    candidate = input.userPreference;
+  } else if (isPositiveInt(input.modelCatalogMaxOutput)) {
+    source = "model-catalog";
+    candidate = input.modelCatalogMaxOutput;
+  }
+
+  let effective = Math.max(1, Math.floor(candidate));
+  const adjustmentReasons: string[] = [];
+
+  if (isPositiveInt(input.hardCap) && effective > input.hardCap) {
+    effective = input.hardCap;
+    adjustmentReasons.push(`受型号硬上限裁剪至 ${input.hardCap}`);
+  }
+  if (isPositiveInt(input.remainingWindow) && effective > input.remainingWindow) {
+    effective = input.remainingWindow;
+    adjustmentReasons.push(`受当前剩余上下文窗口裁剪至 ${input.remainingWindow}`);
+  }
+  if (isPositiveInt(input.resourceLimit) && effective > input.resourceLimit) {
+    effective = input.resourceLimit;
+    adjustmentReasons.push(`受资源许可上限裁剪至 ${input.resourceLimit}`);
+  }
+  if (isPositiveInt(input.thinkingBudget) && input.thinkingBudget >= effective) {
+    adjustmentReasons.push(
+      `思考预算（${input.thinkingBudget}）不小于有效输出上限（${effective}），保持上限不放大并需下调或关闭思考预算`,
+    );
+  }
+
+  return {
+    maxTokens: effective,
+    source,
+    requestedCandidate: candidate,
+    adjusted: effective !== candidate || adjustmentReasons.length > 0,
+    adjustmentReasons,
+  };
+}
+
+function isPositiveInt(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+// ─── Provider 元数据透传与发送/切模兼容预检（设计 §2.3） ───
+
+export type LLMProviderMetadata = Pick<
+  LLMProvider,
+  | "protocol"
+  | "sourceConnectionId"
+  | "sourceOriginKey"
+  | "appendOnlyTurnContext"
+  | "requiresThinkingReplayInToolRoundtrip"
+>;
+
+/** 供所有 LLMProvider 代理包装层一次性透传只读元数据，避免包装丢协议或来源身份。 */
+export function copyProviderMetadata(provider: LLMProvider): LLMProviderMetadata {
+  return {
+    ...(provider.protocol !== undefined ? { protocol: provider.protocol } : {}),
+    ...(provider.sourceConnectionId !== undefined
+      ? { sourceConnectionId: provider.sourceConnectionId }
+      : {}),
+    ...(provider.sourceOriginKey !== undefined
+      ? { sourceOriginKey: provider.sourceOriginKey }
+      : {}),
+    ...(provider.appendOnlyTurnContext !== undefined
+      ? { appendOnlyTurnContext: provider.appendOnlyTurnContext }
+      : {}),
+    ...(provider.requiresThinkingReplayInToolRoundtrip !== undefined
+      ? {
+          requiresThinkingReplayInToolRoundtrip:
+            provider.requiresThinkingReplayInToolRoundtrip,
+        }
+      : {}),
+  };
+}
+
+export interface ThinkingSourceTarget {
+  readonly protocol?: ModelAdapterId;
+  readonly sourceConnectionId?: string;
+  readonly sourceOriginKey?: string;
+  readonly model?: string;
+}
+
+/**
+ * 核对思考块是否来自同一可信来源与协议（设计 §2.3）：
+ * 来源不明的旧记录（缺失 `protocolState`）一律返回 false，绝不冒充同来源。
+ */
+export function isSameTrustedThinkingSource(
+  state: ThinkingProtocolState | undefined,
+  target: ThinkingSourceTarget,
+): boolean {
+  if (!state) return false;
+  if (!target.protocol || state.protocol !== target.protocol) return false;
+  if (!target.sourceConnectionId || state.sourceConnectionId !== target.sourceConnectionId) {
+    return false;
+  }
+  if (!target.sourceOriginKey || state.sourceOriginKey !== target.sourceOriginKey) {
+    return false;
+  }
+  return true;
+}
+
+export interface UnfinishedToolRoundtripInfo {
+  readonly assistantIndex: number;
+  readonly toolResultIndex: number;
+  readonly assistantThinkingBlocks: readonly ThinkingBlock[];
+}
+
+/**
+ * 检查消息尾部是否处于“工具结果待回传给模型”的未完成工具往返中。
+ * 扫描最后一条 assistant 之后连续的全部 user 尾段（既支持权威历史，也不因追加式 `<turn-context>` 或跟进 user 文本绕过）。
+ */
+export function inspectUnfinishedToolRoundtrip(
+  messages: readonly Message[],
+): UnfinishedToolRoundtripInfo | null {
+  if (messages.length < 2) return null;
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+  if (lastAssistantIdx < 0 || lastAssistantIdx === messages.length - 1) {
+    return null;
+  }
+
+  const toolResultIds = new Set<string>();
+  let toolResultIndex = -1;
+  for (let i = lastAssistantIdx + 1; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== "user") continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_result") {
+        toolResultIds.add(block.toolUseId);
+        toolResultIndex = i;
+      }
+    }
+  }
+  if (toolResultIds.size === 0 || toolResultIndex < 0) return null;
+
+  const candidate = messages[lastAssistantIdx]!;
+  const matchesToolCall = candidate.content.some(
+    (block) => block.type === "tool_use" && toolResultIds.has(block.id),
+  );
+  if (!matchesToolCall) return null;
+  const assistantThinkingBlocks = candidate.content.filter(
+    (block): block is ThinkingBlock => block.type === "thinking",
+  );
+  return {
+    assistantIndex: lastAssistantIdx,
+    toolResultIndex,
+    assistantThinkingBlocks,
+  };
+}
+
+export interface PreSendCompatibilityInput {
+  /** 权威对话历史（用于准确识别未完成工具往返；不含临时尾段 `<turn-context>`）。 */
+  readonly messages: readonly Message[];
+  /** 可选实际发送视图（如含 `messagePrefix` 或追加上下文时的材料检查，缺省回退 `messages`）。 */
+  readonly materialMessages?: readonly Message[];
+  readonly inputCapabilities?: ModelInputCapabilities;
+  readonly target?: ThinkingSourceTarget & {
+    readonly thinking?: ThinkingConfig;
+    readonly requiresThinkingReplayInToolRoundtrip?: boolean;
+  };
+}
+
+function targetRequiresStrictToolRoundtripSignature(
+  target: NonNullable<PreSendCompatibilityInput["target"]>,
+  thinkingBlocks: readonly ThinkingBlock[],
+): boolean {
+  if (target.requiresThinkingReplayInToolRoundtrip !== undefined) {
+    return target.requiresThinkingReplayInToolRoundtrip;
+  }
+  const thinkingExplicitlyOff = target.thinking?.mode === "off";
+  if (thinkingExplicitlyOff) return false;
+
+  switch (target.protocol) {
+    case "anthropic-messages":
+      // Anthropic 开启思考模式下，未完成工具往返的 assistant 回合要求合法签名 thinking 块
+      return (
+        target.thinking !== undefined ||
+        thinkingBlocks.some((b) => Boolean(b.signature || b.protocolState?.signature))
+      );
+    case "google-interactions":
+      // Google Interactions 开启思考/带 thought signature 的未完工具往返要求原样回传 thought step
+      return (
+        target.thinking !== undefined ||
+        thinkingBlocks.some(
+          (b) => Boolean(b.protocolState?.signature || b.protocolState?.opaqueStep),
+        )
+      );
+    case "openai-responses":
+      return (
+        target.thinking !== undefined ||
+        thinkingBlocks.some((b) => Boolean(b.protocolState?.encryptedContent))
+      );
+    case "openai-compatible":
+      // OpenAI 兼容端点仅当显式启用思考控制时才需要严格检查
+      return target.thinking !== undefined;
+    default:
+      return false;
+  }
+}
+
+function hasValidReplayableStateForTarget(
+  block: ThinkingBlock,
+  target: NonNullable<PreSendCompatibilityInput["target"]>,
+): boolean {
+  if (!isSameTrustedThinkingSource(block.protocolState, target)) {
+    return false;
+  }
+  const state = block.protocolState!;
+  switch (target.protocol) {
+    case "anthropic-messages": {
+      const hasSig = Boolean(state.signature || block.signature);
+      const hasRedacted = Boolean(state.opaqueStep);
+      return hasSig || hasRedacted;
+    }
+    case "openai-responses":
+      return Boolean(state.encryptedContent);
+    case "google-interactions":
+      return Boolean(state.signature || state.opaqueStep);
+    case "openai-compatible":
+      return block.thinking.length > 0;
+    default:
+      return false;
+  }
+}
+
+/**
+ * 发送前 / 切换模型前的统一兼容性预检（设计 §2.3 单一规则源）：
+ * 1. 用户输入材料不兼容（例如历史或草稿包含图片但目标模型不支持图片）→ 阻断并明示原因，绝不静默删材料；
+ * 2. 未完成工具往返内存在强制推理签名/状态冲突（跨连接、改地址、跨协议或来源不明导致无法合法回放）→
+ *    阻断发送/切换，保留原选择与草稿，提示完成当前工具回合、切回原连接/型号或开启新对话。
+ *
+ * 已结算普通轮次的跨源/跨协议切换完全放行（由适配器出站投影安全省略私有载荷）。
+ */
+export function validatePreSendCompatibility(
+  input: PreSendCompatibilityInput,
+): AgentError | null {
+  if (input.inputCapabilities) {
+    const materialError = validateMessagesAgainstInputCapabilities(
+      input.materialMessages ?? input.messages,
+      input.inputCapabilities,
+    );
+    if (materialError) return materialError;
+  }
+
+  const target = input.target;
+  if (!target?.protocol || !target.sourceConnectionId || !target.sourceOriginKey) {
+    return null;
+  }
+
+  const unfinished = inspectUnfinishedToolRoundtrip(input.messages);
+  if (!unfinished || unfinished.assistantThinkingBlocks.length === 0) {
+    return null;
+  }
+
+  if (
+    !targetRequiresStrictToolRoundtripSignature(
+      target,
+      unfinished.assistantThinkingBlocks,
+    )
+  ) {
+    return null;
+  }
+
+  const hasIncompatibleBlock = unfinished.assistantThinkingBlocks.some(
+    (block) => !hasValidReplayableStateForTarget(block, target),
+  );
+  if (!hasIncompatibleBlock) {
+    return null;
+  }
+
+  return new AgentError(
+    "当前对话正处于未完成的工具调用往返，目标连接或模型无法合法继承原来源的思考签名/推理状态；已保留原选择与草稿。请先完成当前工具回合、切回原连接/型号，或开启新对话。",
+    "invalid_request",
+    false,
+  );
 }

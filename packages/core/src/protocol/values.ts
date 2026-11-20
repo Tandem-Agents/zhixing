@@ -1,6 +1,8 @@
 import type { EnvironmentRequirement } from "../contracts/protocol.js";
 import {
   isTextFileMaterial,
+  isTextProtocolState,
+  isThinkingProtocolState,
   isToolResultDisposition,
   type ContentBlock,
   type ImageSource,
@@ -219,7 +221,7 @@ function validateContentBlock(value: unknown, label: string): ContentBlock {
   assertPlainRecord(value, label);
   switch (value.type) {
     case "text":
-      assertAllowedKeys(value, ["material", "text", "type"], label);
+      assertAllowedKeys(value, ["material", "protocolState", "text", "type"], label);
       if (!("text" in value)) {
         throw new TypeError(`${label} is incomplete`);
       }
@@ -231,6 +233,9 @@ function validateContentBlock(value: unknown, label: string): ContentBlock {
         if ((value.text as string).length === 0) {
           throw new TypeError(`${label} file material text must be non-empty`);
         }
+      }
+      if (value.protocolState !== undefined && !isTextProtocolState(value.protocolState)) {
+        throw new TypeError(`${label} protocolState is invalid`);
       }
       return value as unknown as ContentBlock;
     case "image":
@@ -263,11 +268,17 @@ function validateContentBlock(value: unknown, label: string): ContentBlock {
       }
       return value as unknown as ContentBlock;
     case "thinking":
-      assertAllowedKeys(value, ["signature", "thinking", "type"], label);
+      assertAllowedKeys(value, ["protocolState", "signature", "thinking", "type"], label);
       if (!("thinking" in value)) throw new TypeError(`${label} is incomplete`);
       assertString(value.thinking, `${label} thinking`);
       if (value.signature !== undefined) {
         assertString(value.signature, `${label} signature`);
+      }
+      if (
+        value.protocolState !== undefined &&
+        !isThinkingProtocolState(value.protocolState)
+      ) {
+        throw new TypeError(`${label} protocolState is invalid`);
       }
       return value as unknown as ContentBlock;
     default:

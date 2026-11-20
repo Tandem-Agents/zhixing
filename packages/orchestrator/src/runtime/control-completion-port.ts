@@ -17,8 +17,13 @@ export interface ControlCompletionPortOptions {
   };
   /** 租约计量面（reserveUsage / consume）——由组合根注入治理端口。 */
   readonly meter: Pick<ResourceReservationPort, "reserveUsage" | "consume">;
-  /** 单次调用输出 token 上界（预占口径）。 */
-  readonly defaultMaxOutputTokens: number;
+  /** 单次调用输出 token 上界（预占与请求同源口径，可按用途分别指定）。 */
+  readonly defaultMaxOutputTokens:
+    | number
+    | {
+        readonly main: number;
+        readonly light: number;
+      };
 }
 
 /**
@@ -33,6 +38,12 @@ export function createControlCompletionPort(
   return {
     async complete(request) {
       const role = request.role === "light" ? options.roles.light : options.roles.main;
+      const roleMaxOutputTokens =
+        typeof options.defaultMaxOutputTokens === "number"
+          ? options.defaultMaxOutputTokens
+          : request.role === "light"
+            ? options.defaultMaxOutputTokens.light
+            : options.defaultMaxOutputTokens.main;
       const ctx: AuthorityCallContext = {
         principal: { kind: "host", component: "control-completion" },
         requestId: `control-completion:${randomUUID()}`,
@@ -68,7 +79,7 @@ export function createControlCompletionPort(
           call: (providerRequest) => role.chat(providerRequest),
           meter,
           nextCallIndex,
-          defaultMaxOutputTokens: options.defaultMaxOutputTokens,
+          defaultMaxOutputTokens: roleMaxOutputTokens,
         });
         const chunks: string[] = [];
         let usage: { inputTokens: number; outputTokens: number } | undefined;
@@ -87,13 +98,19 @@ export function createControlCompletionPort(
           model: role.model,
           messages: request.messages,
           tools,
+          maxTokens: roleMaxOutputTokens,
           thinking:
             request.role === "light"
               ? options.thinking?.light
               : options.thinking?.main,
           abortSignal: request.abort,
         })) {
-          if (event.type === "text_delta") {
+          if (event.type === "error") {
+            return {
+              ok: false,
+              error: toAuthorityError(event.error),
+            };
+          } else if (event.type === "text_delta") {
             chunks.push(event.text);
           } else if (event.type === "message_end") {
             usage = event.usage;

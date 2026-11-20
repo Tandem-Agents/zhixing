@@ -1,5 +1,14 @@
 import type { AgentYield } from "@zhixing-ai/core/loop";
-import { isToolResultDisposition, type ContentBlock, type Message, type TokenUsage, type ToolResult } from "@zhixing-ai/core/types";
+import {
+  isTextFileMaterial,
+  isTextProtocolState,
+  isThinkingProtocolState,
+  isToolResultDisposition,
+  type ContentBlock,
+  type Message,
+  type TokenUsage,
+  type ToolResult,
+} from "@zhixing-ai/core/types";
 
 /**
  * The finite event stream emitted by one Intelligence Kernel run.
@@ -80,7 +89,12 @@ function isContentBlock(value: unknown): value is ContentBlock {
   if (!isRecord(value) || typeof value.type !== "string") return false;
   switch (value.type) {
     case "text":
-      return hasExactKeys(value, ["type", "text"]) && typeof value.text === "string";
+      return (
+        hasExactKeys(value, ["type", "text"], ["material", "protocolState"]) &&
+        typeof value.text === "string" &&
+        (value.material === undefined || isTextFileMaterial(value.material)) &&
+        (value.protocolState === undefined || isTextProtocolState(value.protocolState))
+      );
     case "image":
       if (!hasExactKeys(value, ["type", "source"]) || !isRecord(value.source)) {
         return false;
@@ -114,9 +128,11 @@ function isContentBlock(value: unknown): value is ContentBlock {
       );
     case "thinking":
       return (
-        hasExactKeys(value, ["type", "thinking"], ["signature"]) &&
+        hasExactKeys(value, ["type", "thinking"], ["signature", "protocolState"]) &&
         typeof value.thinking === "string" &&
-        (value.signature === undefined || typeof value.signature === "string")
+        (value.signature === undefined || typeof value.signature === "string") &&
+        (value.protocolState === undefined ||
+          isThinkingProtocolState(value.protocolState))
       );
     default:
       return false;

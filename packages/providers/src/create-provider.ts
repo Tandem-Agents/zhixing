@@ -9,14 +9,25 @@
  * - createProviderDirect()— 指定 provider ID + 显式 ProviderCredentialEntry，单角色 LLMProvider
  */
 
-import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing-ai/core";
+import type {
+  ChatRequest,
+  LLMProvider,
+  LLMRole,
+  LLMRoles,
+  SessionModelSelection,
+} from "@zhixing-ai/core";
 import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
+import { createGoogleInteractionsProvider } from "./adapters/google-interactions.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
+import { createOpenAIResponsesProvider } from "./adapters/openai-responses.js";
+import type { ModelCatalogPort } from "./catalog-port.js";
 import { loadConfig } from "./config-loader.js";
 import {
   resolveFromConfig,
   resolveLLMRoles,
   resolveProvider,
+  resolveSessionOverride,
+  type ConnectionDiscoveryFacts,
   type ResolvedLLMRole,
   type ResolvedLLMRoles,
 } from "./resolve.js";
@@ -30,12 +41,16 @@ import type {
 /**
  * 根据协议类型选择适配器，创建 LLMProvider。
  */
-function createFromResolved(resolved: ResolvedProvider): LLMProvider {
+export function createProviderFromResolved(resolved: ResolvedProvider): LLMProvider {
   switch (resolved.protocol) {
     case "openai-compatible":
       return createOpenAICompatibleProvider(resolved);
+    case "openai-responses":
+      return createOpenAIResponsesProvider(resolved);
     case "anthropic-messages":
       return createAnthropicProvider(resolved);
+    case "google-interactions":
+      return createGoogleInteractionsProvider(resolved);
     default:
       throw new Error(`未知的 protocol: ${resolved.protocol as string}`);
   }
@@ -71,9 +86,10 @@ export function createProvider(
   config: ZhixingConfig,
   credentials: ProviderCredentialProjection,
   providerId?: string,
+  catalog?: ModelCatalogPort,
 ): LLMProvider {
-  const resolved = resolveFromConfig(config, credentials, providerId);
-  return createFromResolved(resolved);
+  const resolved = resolveFromConfig(config, credentials, providerId, catalog);
+  return createProviderFromResolved(resolved);
 }
 
 /**
@@ -87,7 +103,7 @@ export function createProviderDirect(
 ): LLMProvider {
   const credentials: ProviderCredentialProjection = { providers: { [providerId]: override } };
   const resolved = resolveProvider(providerId, credentials);
-  return createFromResolved(resolved);
+  return createProviderFromResolved(resolved);
 }
 
 // ─── 多角色工厂（main + light + power） ───
@@ -96,58 +112,84 @@ export interface ProviderRolesOptions {
   env?: Record<string, string | undefined>;
   config?: ZhixingConfig;
   credentials: ProviderCredentialProjection;
+  catalog?: ModelCatalogPort;
+  /** 按 connectionId 索引的最新已验证发现事实（来自隔离缓存，统一进入三层合成与运行硬约束）。 */
+  discoveryByConnection?: Readonly<Record<string, ConnectionDiscoveryFacts>>;
+  /** 可选本地已实现能力集合。 */
+  localCapabilities?: readonly string[];
+  /** 会话级结构化选模覆盖（仅作用于当前会话主循环角色，绝不改绑 light）。 */
+  sessionOverride?: SessionModelSelection;
+  /** 本会话覆盖生效的目标主角色（普通对话 main / 工作场景 power / 调度轻量 light）。 */
+  primaryRole?: "main" | "light" | "power";
 }
 
-/**
- * `createProviderRoles` 返回结果。
- *
- * `resolvedRoles` 暴露配置层中间产物（含 protocol/baseUrl/quirks/declaredModels
- * 等元信息），消费者据此完成 budget 解析等需要 protocol-aware 的工作——
- * 这些信息原本被埋在 LLMProvider 实例里不可见。
- */
 export interface ProviderRolesResult {
+  /** 纯用途默认角色绑定（main / light / power 始终严格对应配置用途，不被 sessionOverride 覆盖）。 */
   roles: LLMRoles;
   config: ZhixingConfig;
   resolvedRoles: ResolvedLLMRoles;
+  /** 若会话级结构化覆盖已生效，返回其解析结果（供思考参数与预算解析）。 */
+  effectivePrimary?: ResolvedLLMRole;
+  /** 若会话级结构化覆盖已生效，返回独立绑定的会话主循环 LLMRole（不污染 roles.main / roles.power）。 */
+  sessionPrimary?: LLMRole;
+  /** 关闭本次构造出的全部连接独占网络 dispatcher。 */
+  closeAll: () => Promise<void>;
 }
 
-/**
- * 一站式创建会话级 LLMRoles：从配置文件加载 → 双角色配置解析 →
- * 实例化 LLMProvider（同 provider id 共享实例）→ 绑定 model 成 LLMRole。
- *
- * provider/model 完全由配置文件 llm.* 决定，无任何命令行覆盖入口。
- *
- * 用户没显式配 llm.light / llm.power 时，该辅助角色自动用 main 实例 + main.model
- * 兜底（仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
- * 不打印任何提示——/status 命令未来可主动展示当前角色配置供用户决策是否专门化。
- *
- * options.env 只用于非秘密 config 路径覆盖；凭据必须由组合根显式传入，工厂不
- * 具备任何持久化秘密读取能力。
- */
 export function createProviderRoles(
   options: ProviderRolesOptions,
 ): ProviderRolesResult {
   const env = options.env ?? process.env;
   const config = options.config ?? loadConfig({ env });
   const credentials = options.credentials;
-  const resolved = resolveLLMRoles(config, credentials);
+  const resolveOpts = {
+    ...(options.catalog ? { catalog: options.catalog } : {}),
+    ...(options.discoveryByConnection
+      ? { discoveryByConnection: options.discoveryByConnection }
+      : {}),
+    ...(options.localCapabilities ? { localCapabilities: options.localCapabilities } : {}),
+  };
+  const resolved = resolveLLMRoles(config, credentials, resolveOpts);
+  const sessionOverrideResolved = resolveSessionOverride(
+    config,
+    credentials,
+    options.sessionOverride,
+    resolveOpts,
+  );
 
-  const mainProvider = createFromResolved(resolved.main.resolved);
+  const byConnection = new Map<string, LLMProvider>();
+  const instanceFor = (role: ResolvedLLMRole): LLMProvider => {
+    const key = role.resolved.id;
+    const existing = byConnection.get(key);
+    if (existing) return existing;
+    const created = createProviderFromResolved(role.resolved);
+    byConnection.set(key, created);
+    return created;
+  };
 
-  // 同 provider id 复用 LLMProvider 实例：连接池/限速/cache 共用。
-  // 辅助角色未配置走兜底时 resolved 与 main.resolved 是同一对象，必然命中。
-  const instanceFor = (role: ResolvedLLMRole): LLMProvider =>
-    role.resolved.id === resolved.main.resolved.id
-      ? mainProvider
-      : createFromResolved(role.resolved);
+  // 设计 §5.1 硬不变量：roles.main / roles.light / roles.power 始终严格保持用途默认纯度；
+  // sessionOverride 仅作用于会话主循环与未指定角色的子执行，经 sessionPrimary 独立交付，绝不覆盖 roles.main。
+  const mainProvider = instanceFor(resolved.main);
+  const lightProvider = instanceFor(resolved.light);
+  const powerProvider = instanceFor(resolved.power);
+  const sessionPrimary = sessionOverrideResolved
+    ? bindRole(instanceFor(sessionOverrideResolved), sessionOverrideResolved.model)
+    : undefined;
 
   return {
     config,
     resolvedRoles: resolved,
+    ...(sessionOverrideResolved ? { effectivePrimary: sessionOverrideResolved } : {}),
+    ...(sessionPrimary ? { sessionPrimary } : {}),
     roles: {
       main: bindRole(mainProvider, resolved.main.model),
-      light: bindRole(instanceFor(resolved.light), resolved.light.model),
-      power: bindRole(instanceFor(resolved.power), resolved.power.model),
+      light: bindRole(lightProvider, resolved.light.model),
+      power: bindRole(powerProvider, resolved.power.model),
+    },
+    async closeAll(): Promise<void> {
+      const providers = [...byConnection.values()];
+      byConnection.clear();
+      await Promise.allSettled(providers.map((provider) => provider.close?.()));
     },
   };
 }

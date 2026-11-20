@@ -1,1 +1,8 @@
-export { checkModel, hasApiKey, type ModelIssue } from "../../runtime/model-configuration-check.js";
+export {
+  checkModel,
+  connectionCredentialStatus,
+  hasApiKey,
+  isConnectionReady,
+  type ConnectionCredentialStatus,
+  type ModelIssue,
+} from "../../runtime/model-configuration-check.js";

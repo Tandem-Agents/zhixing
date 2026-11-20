@@ -30,6 +30,7 @@ describe("typed pre-server lifecycle contributions", () => {
       { owner: "anchor-host", role: "runtime", id: "assetMaintenance.stop", stage: "runtime" },
       { owner: "anchor-local-executor", role: "runtime", id: "executorJobOwner.close", stage: "runtime" },
       { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close", stage: "runtime" },
+      { owner: "anchor-host", role: "runtime", id: "modelRuntimePort.dispose", stage: "runtime" },
       { owner: "anchor-host", role: "runtime", id: "ephemeralRuntime.dispose", stage: "runtime" },
       { owner: "anchor-host", role: "surface", id: "sessionProcess.dispose", stage: "runtime" },
       { owner: 'anchor-host', role: 'runtime', id: 'advancementRecovery.stop', stage: 'runtime' },

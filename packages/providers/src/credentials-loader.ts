@@ -2,13 +2,20 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, open, readFile, readdir, rm, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing-ai/core/contracts";
-import { canonicalize } from "@zhixing-ai/core/protocol/canonical";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol/canonical";
 import { mergeIdMap } from "./internal/io.js";
-import type { ZhixingCredentials } from "./types.js";
+import { isReservedModelSecretRef } from "./config-validator.js";
+import type {
+  ModelSecretEntryV2,
+  PendingModelSecretRetirement,
+  ProviderCredentialEntry,
+  ZhixingCredentials,
+} from "./types.js";
 
 const CREDENTIAL_NAMESPACE = "credentials/v1/";
 const GENERATION_NAMESPACE = `${CREDENTIAL_NAMESPACE}generations/`;
 const GENERATION_MARKER_NAMESPACE = `${CREDENTIAL_NAMESPACE}generation-markers/`;
+const PROTECTED_LEGACY_PREFIX = "legacy-protected:";
 const MANIFEST_REF: SecretRef = {
   kind: "provider",
   bindingId: `${CREDENTIAL_NAMESPACE}manifest`,
@@ -16,6 +23,19 @@ const MANIFEST_REF: SecretRef = {
 const CREDENTIAL_KINDS = ["provider", "channel", "mcp"] as const;
 /** Encrypted recovery material for the single local configuration save in progress. */
 export const CONFIGURATION_EDIT_REF: SecretRef = { kind: "provider", bindingId: "configuration/edit-v1" };
+/** 固定管理记录：连接删除/显式撤权的待清退逻辑凭据集合（设计 §2.2.2 / §5.3）。 */
+export const MODEL_RETIREMENTS_REF: SecretRef = {
+  kind: "provider",
+  bindingId: "configuration/model-retirements/v1",
+};
+export function isModelManagementSecretRef(bindingId: string): boolean {
+  return (
+    bindingId === CONFIGURATION_EDIT_REF.bindingId ||
+    bindingId === MODEL_RETIREMENTS_REF.bindingId ||
+    bindingId.startsWith(CREDENTIAL_NAMESPACE) ||
+    isReservedModelSecretRef(bindingId)
+  );
+}
 export async function assertNoConfigurationEdit(store: SecretStorePort): Promise<void> {
   if (await store.get(CONFIGURATION_EDIT_REF)) throw new Error("配置保存尚未收束，请重新打开配置入口完成恢复");
 }
@@ -46,7 +66,18 @@ interface CredentialGeneration {
 interface CredentialManifest extends CredentialGeneration {
   readonly v: 1;
   readonly credentialSchemaVersion?: number;
+  /** 存在且等于 2 时阻止旧程序（parseManifest 拒绝未知字段）误读或抹除 v2 配置。 */
+  readonly modelConfigVersion?: 2;
+  /** 显式撤销的逻辑凭据集合（单机与多机持久生效，重启不得复活）。 */
+  readonly revokedModelSecretRefs?: readonly string[];
   readonly retired?: readonly CredentialGeneration[];
+}
+
+export interface CredentialManifestMetadata {
+  readonly generation: string;
+  readonly modelConfigVersion: 1 | 2;
+  readonly revokedModelSecretRefs: readonly string[];
+  readonly entryCount: number;
 }
 
 interface LegacySourceSnapshot {
@@ -309,10 +340,28 @@ export async function loadCredentialsUnlocked(
   if (manifest.credentialSchemaVersion !== undefined) {
     credentials.version = manifest.credentialSchemaVersion;
   }
+  if (manifest.revokedModelSecretRefs && manifest.revokedModelSecretRefs.length > 0) {
+    credentials.revokedModelSecretRefs = [...manifest.revokedModelSecretRefs];
+  }
   for (const { kind, id } of manifest.entries) {
     const ref = credentialSecretRef(kind, manifest.generation, id);
-    if (options.authorizeCredentialRead &&
-      !(await options.authorizeCredentialRead({ kind, id, ref }))) continue;
+    if (options.authorizeCredentialRead) {
+      const routeId =
+        kind === "provider" && id.startsWith(PROTECTED_LEGACY_PREFIX)
+          ? id.slice(PROTECTED_LEGACY_PREFIX.length)
+          : id;
+      const allowed = await options.authorizeCredentialRead({ kind, id: routeId, ref });
+      if (!allowed) {
+        if (kind === "provider" && !id.startsWith(PROTECTED_LEGACY_PREFIX)) {
+          credentials.compromisedModelSecretTokens ??= {};
+          credentials.compromisedModelSecretTokens[id] = compromisedSecretToken(
+            manifest.generation,
+            id,
+          );
+        }
+        continue;
+      }
+    }
     const encoded = await options.store.get(ref);
     if (encoded === null) throw new Error("SecretStore active credential generation is incomplete");
     const entry = parseStoredEntry(encoded, kind, id);
@@ -325,6 +374,99 @@ export async function loadCredentialsUnlocked(
     throw new CredentialRetirementError(error);
   }
   return credentials;
+}
+
+export function compromisedSecretToken(generation: string, secretRef: string): string {
+  return protocolDigest("CompromisedModelSecret", 1, { generation, secretRef });
+}
+
+export async function readManifestMetadataUnlocked(
+  store: SecretStorePort,
+): Promise<CredentialManifestMetadata | null> {
+  const encoded = await store.get(MANIFEST_REF);
+  if (encoded === null) return null;
+  const manifest = parseManifest(encoded);
+  return {
+    generation: manifest.generation,
+    modelConfigVersion: manifest.modelConfigVersion === 2 ? 2 : 1,
+    revokedModelSecretRefs: manifest.revokedModelSecretRefs ?? [],
+    entryCount: manifest.entries.length,
+  };
+}
+
+export async function readPendingModelRetirementsUnlocked(
+  store: SecretStorePort,
+): Promise<readonly PendingModelSecretRetirement[]> {
+  const encoded = await store.get(MODEL_RETIREMENTS_REF);
+  if (encoded === null) return [];
+  return parsePendingModelRetirements(encoded);
+}
+
+export async function writePendingModelRetirementsUnlocked(
+  store: SecretStorePort,
+  items: readonly PendingModelSecretRetirement[],
+): Promise<void> {
+  if (items.length === 0) {
+    await store.delete(MODEL_RETIREMENTS_REF);
+    return;
+  }
+  const normalized = normalizePendingModelRetirements(items);
+  await store.put(MODEL_RETIREMENTS_REF, JSON.stringify({ v: 1, items: normalized }));
+}
+
+export function parsePendingModelRetirements(
+  encoded: string,
+): readonly PendingModelSecretRetirement[] {
+  const parsed = JSON.parse(encoded) as Record<string, unknown>;
+  if (
+    !isPlainObject(parsed) ||
+    parsed.v !== 1 ||
+    !Array.isArray(parsed.items) ||
+    Object.keys(parsed).some((key) => key !== "v" && key !== "items")
+  ) {
+    throw new TypeError("Pending model retirements record is invalid");
+  }
+  return normalizePendingModelRetirements(parsed.items as PendingModelSecretRetirement[]);
+}
+
+export function normalizePendingModelRetirements(
+  items: readonly PendingModelSecretRetirement[],
+): PendingModelSecretRetirement[] {
+  const result: PendingModelSecretRetirement[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (
+      !isPlainObject(item) ||
+      typeof item.operationId !== "string" || !item.operationId.trim() ||
+      typeof item.connectionId !== "string" || !item.connectionId.trim() ||
+      typeof item.secretRef !== "string" || !item.secretRef.trim() ||
+      isModelManagementSecretRef(item.secretRef) ||
+      (item.mode !== "retire" && item.mode !== "revoke") ||
+      typeof item.sourceRevision !== "string" || !item.sourceRevision.trim() ||
+      typeof item.createdAt !== "string" || !item.createdAt.trim()
+    ) {
+      throw new TypeError("Pending model retirement entry is invalid");
+    }
+    if (
+      item.secretHash !== undefined &&
+      (typeof item.secretHash !== "string" || !/^[0-9a-f]{64}$/u.test(item.secretHash))
+    ) {
+      throw new TypeError("Pending model retirement entry is invalid");
+    }
+    const dedupKey = `${item.operationId}\0${item.connectionId}\0${item.secretRef}\0${item.mode}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    result.push({
+      operationId: item.operationId,
+      connectionId: item.connectionId,
+      secretRef: item.secretRef,
+      mode: item.mode,
+      sourceRevision: item.sourceRevision,
+      createdAt: item.createdAt,
+      ...(item.secretHash ? { secretHash: item.secretHash } : {}),
+    });
+  }
+  return result;
 }
 
 export async function writeCredentials(
@@ -344,30 +486,174 @@ export async function writeCredentials(
 }
 
 /** Internal: compute editor changes without replacing unread or unedited bindings. */
-export function applyCredentialEdits(current: ZhixingCredentials, expected: ZhixingCredentials, next: ZhixingCredentials): ZhixingCredentials {
+export function applyCredentialEdits(
+  current: ZhixingCredentials,
+  expected: ZhixingCredentials,
+  next: ZhixingCredentials,
+  options?: { readonly currentGeneration?: string | null },
+): ZhixingCredentials {
   validateCredentials(expected, "Credential edit baseline");
   validateCredentials(next, "Credential edit input");
-    const merged: ZhixingCredentials = { ...current };
-    const providers = mergeCredentialEdits(current.providers, expected.providers, next.providers);
-    const channels = mergeCredentialEdits(current.channels, expected.channels, next.channels);
-    const mcp = mergeCredentialEdits(current.mcp, expected.mcp, next.mcp);
-    if (providers) merged.providers = providers;
-    if (channels) merged.channels = channels;
-    if (mcp) merged.mcp = mcp;
-    if (expected.version !== next.version) {
-      if (current.version !== expected.version) throw credentialEditConflict();
-      if (next.version === undefined) delete merged.version;
-      else merged.version = next.version;
+  const merged: ZhixingCredentials = { ...current };
+  const providers = mergeCredentialEdits(current.providers, expected.providers, next.providers);
+  const modelSecrets = mergeModelSecretEdits(
+    current.modelSecrets,
+    expected.modelSecrets,
+    next.modelSecrets,
+    expected.compromisedModelSecretTokens,
+    next.compromisedModelSecretTokens,
+    options?.currentGeneration ?? null,
+  );
+  const protectedLegacyProviders = mergeCredentialEdits(
+    current.protectedLegacyProviders,
+    expected.protectedLegacyProviders,
+    next.protectedLegacyProviders,
+  );
+  const channels = mergeCredentialEdits(current.channels, expected.channels, next.channels);
+  const mcp = mergeCredentialEdits(current.mcp, expected.mcp, next.mcp);
+  if (providers) merged.providers = providers;
+  else delete merged.providers;
+  if (modelSecrets) merged.modelSecrets = modelSecrets;
+  else delete merged.modelSecrets;
+  if (protectedLegacyProviders) merged.protectedLegacyProviders = protectedLegacyProviders;
+  else delete merged.protectedLegacyProviders;
+  if (channels) merged.channels = channels;
+  if (mcp) merged.mcp = mcp;
+
+  const revokedSet = new Set(current.revokedModelSecretRefs ?? []);
+  const expectedRevoked = new Set(expected.revokedModelSecretRefs ?? []);
+  const nextRevoked = new Set(next.revokedModelSecretRefs ?? []);
+  for (const id of new Set([...expectedRevoked, ...nextRevoked])) {
+    const wasRevoked = expectedRevoked.has(id);
+    const willRevoke = nextRevoked.has(id);
+    if (wasRevoked === willRevoke) continue;
+    if (revokedSet.has(id) !== wasRevoked) throw credentialEditConflict();
+    if (willRevoke) {
+      revokedSet.add(id);
+      if (merged.modelSecrets) delete merged.modelSecrets[id];
+    } else {
+      revokedSet.delete(id);
     }
-    validateCredentials(merged, "Credential edit result");
-    return merged;
+  }
+  // 显式写入全新替代秘密时，自动解除该逻辑凭据的撤销集合（防止用户轮换后永远无法恢复）
+  for (const [id, entry] of Object.entries(next.modelSecrets ?? {})) {
+    if (
+      revokedSet.has(id) &&
+      canonicalize(expected.modelSecrets?.[id] ?? null) !== canonicalize(entry)
+    ) {
+      revokedSet.delete(id);
+    }
+  }
+  // 处于撤销态的逻辑凭据禁止回填进活动 manifest
+  for (const revokedId of revokedSet) {
+    if (merged.modelSecrets && revokedId in merged.modelSecrets) {
+      delete merged.modelSecrets[revokedId];
+    }
+  }
+  if (revokedSet.size > 0) {
+    merged.revokedModelSecretRefs = [...revokedSet].sort();
+  } else {
+    delete merged.revokedModelSecretRefs;
+  }
+  delete merged.compromisedModelSecretTokens;
+
+  if (expected.version !== next.version) {
+    if (current.version !== expected.version) throw credentialEditConflict();
+    if (next.version === undefined) delete merged.version;
+    else merged.version = next.version;
+  }
+  validateCredentials(merged, "Credential edit result");
+  return merged;
 }
 
 /** Internal: the configuration owner already holds the mutation lock. */
-export async function commitCredentialsUnlocked(store: SecretStorePort, credentials: ZhixingCredentials): Promise<void> {
+export async function commitCredentialsUnlocked(
+  store: SecretStorePort,
+  credentials: ZhixingCredentials,
+  options?: {
+    readonly modelConfigVersion?: 2;
+    readonly forceWriteManifest?: boolean;
+  },
+): Promise<void> {
   validateCredentials(credentials, "Configuration credentials");
+  const existingManifestEncoded = await store.get(MANIFEST_REF);
+  const existingManifest = existingManifestEncoded ? parseManifest(existingManifestEncoded) : null;
+  const targetModelVersion: 2 | undefined =
+    options?.modelConfigVersion === 2 || existingManifest?.modelConfigVersion === 2
+      ? 2
+      : undefined;
   const current = await loadCredentialsUnlocked({ store }, true);
-  if (canonicalize(current) !== canonicalize(credentials)) await replaceCredentialSet(store, credentialEntries(credentials), credentials.version);
+  const needsManifestUpgrade =
+    targetModelVersion === 2 && existingManifest?.modelConfigVersion !== 2;
+  const cleanCredentials: ZhixingCredentials = { ...credentials };
+  delete cleanCredentials.compromisedModelSecretTokens;
+  if (
+    options?.forceWriteManifest ||
+    needsManifestUpgrade ||
+    canonicalize(current) !== canonicalize(cleanCredentials)
+  ) {
+    await replaceCredentialSet(
+      store,
+      credentialEntries(cleanCredentials),
+      cleanCredentials.version,
+      undefined,
+      {
+        ...(targetModelVersion === 2 ? { modelConfigVersion: 2 as const } : {}),
+        revokedModelSecretRefs: cleanCredentials.revokedModelSecretRefs ?? [],
+      },
+    );
+  }
+}
+
+function mergeModelSecretEdits(
+  current: Record<string, ModelSecretEntryV2> | undefined,
+  expected: Record<string, ModelSecretEntryV2> | undefined,
+  next: Record<string, ModelSecretEntryV2> | undefined,
+  expectedTokens: Record<string, string> | undefined,
+  nextTokens: Record<string, string> | undefined,
+  currentGeneration: string | null,
+): Record<string, ModelSecretEntryV2> | undefined {
+  const merged = { ...current };
+  let changed = false;
+  const ids = new Set([
+    ...Object.keys(expected ?? {}),
+    ...Object.keys(next ?? {}),
+    ...Object.keys(expectedTokens ?? {}),
+    ...Object.keys(nextTokens ?? {}),
+  ]);
+  for (const id of ids) {
+    const expectedToken = expectedTokens?.[id];
+    const nextToken = nextTokens?.[id];
+    const before = expected?.[id];
+    const after = next?.[id];
+
+    if (expectedToken !== undefined) {
+      // 封禁凭据的不透明基线令牌核对：当前代际确实存在该凭据且令牌一致
+      const validToken =
+        currentGeneration !== null &&
+        current?.[id] !== undefined &&
+        compromisedSecretToken(currentGeneration, id) === expectedToken;
+      if (!validToken) throw credentialEditConflict();
+      if (after !== undefined) {
+        merged[id] = after;
+        changed = true;
+      } else if (nextToken === undefined) {
+        delete merged[id];
+        changed = true;
+      }
+      // 若 after === undefined 且 nextToken 保留，则原封禁凭据保持不变
+      continue;
+    }
+
+    if (canonicalize(before ?? null) === canonicalize(after ?? null)) continue;
+    if (canonicalize(current?.[id] ?? null) !== canonicalize(before ?? null)) {
+      throw credentialEditConflict();
+    }
+    if (after === undefined) delete merged[id];
+    else merged[id] = after;
+    changed = true;
+  }
+  return changed ? merged : current;
 }
 
 function credentialEditConflict(): Error {
@@ -445,6 +731,21 @@ export function applyCredentialsPatch(
   const result: ZhixingCredentials = { ...current };
   if (patch.version !== undefined) result.version = patch.version;
 
+  if (patch.modelSecrets !== undefined) {
+    result.modelSecrets =
+      idMapMode === "replace"
+        ? patch.modelSecrets
+        : mergeIdMap(current.modelSecrets, patch.modelSecrets);
+  }
+  if (patch.protectedLegacyProviders !== undefined) {
+    result.protectedLegacyProviders =
+      idMapMode === "replace"
+        ? patch.protectedLegacyProviders
+        : mergeIdMap(current.protectedLegacyProviders, patch.protectedLegacyProviders);
+  }
+  if (patch.revokedModelSecretRefs !== undefined) {
+    result.revokedModelSecretRefs = [...patch.revokedModelSecretRefs];
+  }
   if (patch.providers !== undefined) {
     result.providers =
       idMapMode === "replace"
@@ -470,6 +771,10 @@ async function replaceCredentialSet(
   target: ReadonlyMap<string, { kind: CredentialKind; id: string; value: string }>,
   credentialSchemaVersion?: number,
   afterApply?: () => Promise<void>,
+  manifestOptions?: {
+    readonly modelConfigVersion?: 2;
+    readonly revokedModelSecretRefs?: readonly string[];
+  },
 ): Promise<void> {
   if ((await store.unlockState()) !== "unlocked") {
     throw new Error("SecretStore is not unlocked");
@@ -484,10 +789,22 @@ async function replaceCredentialSet(
     ref: credentialSecretRef(kind, generation, id),
     value,
   }));
+  const modelConfigVersion: 2 | undefined =
+    manifestOptions?.modelConfigVersion === 2 || previous?.modelConfigVersion === 2
+      ? 2
+      : undefined;
+  const revokedModelSecretRefs =
+    manifestOptions?.revokedModelSecretRefs !== undefined
+      ? [...new Set(manifestOptions.revokedModelSecretRefs)].sort()
+      : previous?.revokedModelSecretRefs;
   const manifest: CredentialManifest = {
     v: 1,
     generation,
     ...(credentialSchemaVersion !== undefined ? { credentialSchemaVersion } : {}),
+    ...(modelConfigVersion === 2 ? { modelConfigVersion: 2 } : {}),
+    ...(revokedModelSecretRefs && revokedModelSecretRefs.length > 0
+      ? { revokedModelSecretRefs }
+      : {}),
     entries: [...target.values()]
       .map(({ kind, id }) => ({ kind, id }))
       .sort((left, right) => `${left.kind}/${left.id}`.localeCompare(`${right.kind}/${right.id}`)),
@@ -597,7 +914,29 @@ function credentialEntries(
   credentials: ZhixingCredentials,
 ): Map<string, { kind: CredentialKind; id: string; value: string }> {
   const result = new Map<string, { kind: CredentialKind; id: string; value: string }>();
+  const revoked = new Set(credentials.revokedModelSecretRefs ?? []);
   addEntries(result, "provider", credentials.providers);
+  for (const [id, entry] of Object.entries(credentials.modelSecrets ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    if (revoked.has(id)) continue;
+    validateBindingId("provider", id);
+    if (isModelManagementSecretRef(id) || id.startsWith(PROTECTED_LEGACY_PREFIX)) {
+      throw new CredentialsSchemaError("逻辑凭据标识不能使用保留前缀。", "SecretStore");
+    }
+    result.set(`provider/${id}`, { kind: "provider", id, value: JSON.stringify(entry) });
+  }
+  for (const [legacyId, entry] of Object.entries(credentials.protectedLegacyProviders ?? {}).sort(
+    ([a], [b]) => a.localeCompare(b),
+  )) {
+    const id = `${PROTECTED_LEGACY_PREFIX}${legacyId}`;
+    validateBindingId("provider", id);
+    result.set(`provider/${id}`, {
+      kind: "provider",
+      id,
+      value: JSON.stringify({ v: 1, legacyProtected: true, entry }),
+    });
+  }
   addEntries(result, "channel", credentials.channels);
   addEntries(result, "mcp", credentials.mcp);
   return result;
@@ -621,6 +960,19 @@ function assignCredential(
   entry: unknown,
 ): void {
   if (kind === "provider") {
+    if (id.startsWith(PROTECTED_LEGACY_PREFIX)) {
+      const legacyId = id.slice(PROTECTED_LEGACY_PREFIX.length);
+      credentials.protectedLegacyProviders ??= {};
+      credentials.protectedLegacyProviders[legacyId] = (
+        entry as { entry: ProviderCredentialEntry }
+      ).entry;
+      return;
+    }
+    if (isPlainObject(entry) && entry.v === 2) {
+      credentials.modelSecrets ??= {};
+      credentials.modelSecrets[id] = entry as unknown as ModelSecretEntryV2;
+      return;
+    }
     credentials.providers ??= {};
     credentials.providers[id] = entry as NonNullable<ZhixingCredentials["providers"]>[string];
   } else if (kind === "channel") {
@@ -635,6 +987,22 @@ function assignCredential(
 function parseStoredEntry(value: string, kind: CredentialKind, id: string): unknown {
   try {
     const entry = JSON.parse(value) as unknown;
+    if (kind === "provider" && id.startsWith(PROTECTED_LEGACY_PREFIX)) {
+      if (
+        !isPlainObject(entry) ||
+        entry.v !== 1 ||
+        entry.legacyProtected !== true ||
+        Object.keys(entry).some((key) => !["v", "legacyProtected", "entry"].includes(key))
+      ) {
+        throw new CredentialsSchemaError("受保护旧自定义记录格式无效。", "SecretStore");
+      }
+      validateEntry("provider", id.slice(PROTECTED_LEGACY_PREFIX.length), entry.entry, "SecretStore");
+      return entry;
+    }
+    if (kind === "provider" && isPlainObject(entry) && entry.v === 2) {
+      validateModelSecretEntryV2(id, entry, "SecretStore");
+      return entry;
+    }
     validateEntry(kind, id, entry, "SecretStore");
     return entry;
   } catch (error) {
@@ -642,9 +1010,33 @@ function parseStoredEntry(value: string, kind: CredentialKind, id: string): unkn
   }
 }
 
+function validateModelSecretEntryV2(id: string, entry: Record<string, unknown>, source: string): void {
+  validateBindingId("provider", id);
+  if (isModelManagementSecretRef(id) || id.startsWith(PROTECTED_LEGACY_PREFIX)) {
+    throw new CredentialsSchemaError("逻辑凭据标识不能指向系统管理路径。", source);
+  }
+  if (
+    entry.v !== 2 ||
+    (entry.kind !== "api-key" && entry.kind !== "header") ||
+    typeof entry.value !== "string" ||
+    Object.keys(entry).some((field) => !["v", "kind", "value"].includes(field))
+  ) {
+    throw new CredentialsSchemaError("v2 模型凭据必须为封闭形状 { v: 2, kind, value }。", source);
+  }
+}
+
 function validateCredentials(value: ZhixingCredentials, source: string): void {
   if (!isPlainObject(value)) throw new CredentialsSchemaError("凭据根结构必须是对象。", source);
-  const allowed = new Set(["version", "providers", "channels", "mcp"]);
+  const allowed = new Set([
+    "version",
+    "modelSecrets",
+    "compromisedModelSecretTokens",
+    "revokedModelSecretRefs",
+    "protectedLegacyProviders",
+    "providers",
+    "channels",
+    "mcp",
+  ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new CredentialsSchemaError("凭据文件包含未知顶层字段。", source);
   }
@@ -655,6 +1047,40 @@ function validateCredentials(value: ZhixingCredentials, source: string): void {
   ) {
     throw new CredentialsSchemaError("凭据版本无效。", source);
   }
+  if (value.modelSecrets !== undefined) {
+    if (!isPlainObject(value.modelSecrets)) {
+      throw new CredentialsSchemaError("modelSecrets 凭据表必须是对象。", source);
+    }
+    for (const [id, entry] of Object.entries(value.modelSecrets)) {
+      if (!isPlainObject(entry)) {
+        throw new CredentialsSchemaError("v2 模型凭据条目必须是对象。", source);
+      }
+      validateModelSecretEntryV2(id, entry, source);
+    }
+  }
+  if (value.compromisedModelSecretTokens !== undefined) {
+    if (!isPlainObject(value.compromisedModelSecretTokens)) {
+      throw new CredentialsSchemaError("compromisedModelSecretTokens 必须是对象。", source);
+    }
+    for (const [id, token] of Object.entries(value.compromisedModelSecretTokens)) {
+      validateBindingId("provider", id);
+      if (typeof token !== "string" || !token) {
+        throw new CredentialsSchemaError("封禁凭据不透明令牌必须是字符串。", source);
+      }
+    }
+  }
+  if (value.revokedModelSecretRefs !== undefined) {
+    if (!Array.isArray(value.revokedModelSecretRefs)) {
+      throw new CredentialsSchemaError("revokedModelSecretRefs 必须是数组。", source);
+    }
+    for (const id of value.revokedModelSecretRefs) {
+      if (typeof id !== "string" || isModelManagementSecretRef(id)) {
+        throw new CredentialsSchemaError("撤销凭据引用无效。", source);
+      }
+      validateBindingId("provider", id);
+    }
+  }
+  validateTable("provider", value.protectedLegacyProviders, source);
   validateTable("provider", value.providers, source);
   validateTable("channel", value.channels, source);
   validateTable("mcp", value.mcp, source);
@@ -687,7 +1113,9 @@ function validateEntry(kind: CredentialKind, id: string, entry: unknown, source:
   if (
     entry.protocol !== undefined &&
     entry.protocol !== "openai-compatible" &&
-    entry.protocol !== "anthropic-messages"
+    entry.protocol !== "openai-responses" &&
+    entry.protocol !== "anthropic-messages" &&
+    entry.protocol !== "google-interactions"
   ) {
     throw new CredentialsSchemaError("provider protocol 无效。", source);
   }
@@ -722,9 +1150,16 @@ function validateQuirks(value: unknown, source: string): void {
   }
   if (
     value.thinkingDialect !== undefined &&
-    !["none", "deepseek", "qwen", "glm", "kimi", "anthropic"].includes(
-      value.thinkingDialect as string,
-    )
+    ![
+      "none",
+      "deepseek",
+      "qwen",
+      "glm",
+      "kimi",
+      "anthropic",
+      "openai-responses",
+      "google-interactions",
+    ].includes(value.thinkingDialect as string)
   ) {
     throw new CredentialsSchemaError("provider thinkingDialect 无效。", source);
   }
@@ -805,15 +1240,28 @@ function parseManifest(encoded: string): CredentialManifest {
       value.v !== 1 ||
       Object.keys(value).some(
         (field) =>
-          !["v", "generation", "credentialSchemaVersion", "entries", "retired"].includes(field),
+          ![
+            "v",
+            "generation",
+            "credentialSchemaVersion",
+            "modelConfigVersion",
+            "revokedModelSecretRefs",
+            "entries",
+            "retired",
+          ].includes(field),
       ) ||
       (value.credentialSchemaVersion !== undefined &&
         (!Number.isSafeInteger(value.credentialSchemaVersion) ||
           (value.credentialSchemaVersion as number) < 1)) ||
+      (value.modelConfigVersion !== undefined && value.modelConfigVersion !== 2) ||
+      (value.revokedModelSecretRefs !== undefined && !Array.isArray(value.revokedModelSecretRefs)) ||
       (value.retired !== undefined && !Array.isArray(value.retired))
     ) {
       throw new TypeError("Credential manifest schema is invalid");
     }
+    const revokedModelSecretRefs = value.revokedModelSecretRefs
+      ? parseRevokedSecretRefs(value.revokedModelSecretRefs as unknown[])
+      : undefined;
     const active = parseCredentialGeneration({
       generation: value.generation,
       entries: value.entries,
@@ -832,11 +1280,30 @@ function parseManifest(encoded: string): CredentialManifest {
       ...(value.credentialSchemaVersion !== undefined
         ? { credentialSchemaVersion: value.credentialSchemaVersion as number }
         : {}),
+      ...(value.modelConfigVersion === 2 ? { modelConfigVersion: 2 as const } : {}),
+      ...(revokedModelSecretRefs && revokedModelSecretRefs.length > 0
+        ? { revokedModelSecretRefs }
+        : {}),
       ...(retired.length > 0 ? { retired } : {}),
     };
   } catch (error) {
     throw new Error("SecretStore credential manifest is invalid", { cause: error });
   }
+}
+
+function parseRevokedSecretRefs(values: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of values) {
+    if (typeof item !== "string" || isModelManagementSecretRef(item)) {
+      throw new TypeError("Revoked model secret ref is invalid");
+    }
+    validateBindingId("provider", item);
+    if (seen.has(item)) throw new TypeError("Revoked model secret refs contain duplicates");
+    seen.add(item);
+    result.push(item);
+  }
+  return result.sort();
 }
 
 function parseCredentialGeneration(value: unknown): CredentialGeneration {

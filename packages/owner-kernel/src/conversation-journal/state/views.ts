@@ -124,6 +124,7 @@ export interface SessionDomainFacts {
   readonly hasDurableIdentity?: boolean;
   readonly pendingLifecycleCount?: number;
   readonly sessionName?: string;
+  readonly modelSelection?: DeepReadonly<import("@zhixing-ai/core/contracts").SessionModelSelection>;
   readonly lastActiveAt?: string;
   readonly sessionMeta?: DeepReadonly<
     Extract<ConversationRunJournalRecord, { t: "session-meta" }>
@@ -561,6 +562,11 @@ export function readSessionDomainFacts(state: RunProjection): SessionDomainFacts
     },
     get sessionName() {
       return state.sessionName;
+    },
+    get modelSelection() {
+      return state.modelSelection
+        ? (structuredClone(state.modelSelection) as DeepReadonly<import("@zhixing-ai/core/contracts").SessionModelSelection>)
+        : undefined;
     },
     get lastActiveAt() {
       return state.lastActiveAt;

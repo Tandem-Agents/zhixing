@@ -141,8 +141,11 @@ function selectNodeModel(
     provider: role.provider,
     model: role.model,
     loopThinking:
-      options.roleThinking?.[modelRole] ??
-      (modelRole === "main" ? options.loopThinking : undefined),
+      options.roleThinking !== undefined
+        ? options.roleThinking[modelRole]
+        : modelRole === "main"
+          ? options.loopThinking
+          : undefined,
   };
 }
 

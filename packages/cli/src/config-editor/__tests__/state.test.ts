@@ -74,14 +74,14 @@ describe("readModelRole / writeModelRole", () => {
   it("写 main 角色到空 config", () => {
     const state = createInitialState({}, {});
     const next = writeModelRole(state, "main", "openai", "gpt-4o");
-    expect(next.config.llm?.main).toEqual({ provider: "openai", model: "gpt-4o" });
+    expect(readModelRole(next, "main")).toEqual({ provider: "openai", model: "gpt-4o" });
   });
 
-  it("写 light 时若 main 不存在用占位空 main（保持 schema）", () => {
+  it("写 light 时不强造空 main（v2 支持连接与用途解耦，main 缺项由校验拦阻）", () => {
     const state = createInitialState({}, {});
     const next = writeModelRole(state, "light", "openai", "gpt-4o-mini");
-    expect(next.config.llm?.main).toEqual({ provider: "", model: "" });
-    expect(next.config.llm?.light).toEqual({
+    expect(readModelRole(next, "main")).toBeUndefined();
+    expect(readModelRole(next, "light")).toEqual({
       provider: "openai",
       model: "gpt-4o-mini",
     });
@@ -98,11 +98,11 @@ describe("readModelRole / writeModelRole", () => {
       {},
     );
     const next = writeModelRole(state, "main", "anthropic", "claude-sonnet");
-    expect(next.config.llm?.main).toEqual({
+    expect(readModelRole(next, "main")).toEqual({
       provider: "anthropic",
       model: "claude-sonnet",
     });
-    expect(next.config.llm?.light).toEqual({
+    expect(readModelRole(next, "light")).toEqual({
       provider: "openai",
       model: "gpt-4o-mini",
     });
@@ -110,13 +110,14 @@ describe("readModelRole / writeModelRole", () => {
 });
 
 describe("patchProviderEntry · 合并语义", () => {
-  it("空 credentials 写入新 provider 创建条目", () => {
+  it("空 credentials 写入新 provider 创建 v2 逻辑凭据与连接", () => {
     const state = createInitialState({}, {});
     const next = patchProviderEntry(state, "siliconflow", { apiKey: "sk-test" });
-    expect(next.credentials.providers?.siliconflow?.apiKey).toBe("sk-test");
+    expect(readProviderEntry(next, "siliconflow")?.apiKey).toBe("sk-test");
+    expect(next.credentials.modelSecrets?.siliconflow?.value).toBe("sk-test");
   });
 
-  it("合并而非替换——已有字段不丢", () => {
+  it("合并而非替换——已有连接端点与协议不丢", () => {
     const state = createInitialState(
       {},
       {
@@ -130,11 +131,10 @@ describe("patchProviderEntry · 合并语义", () => {
       },
     );
     const next = patchProviderEntry(state, "siliconflow", { apiKey: "new" });
-    expect(next.credentials.providers?.siliconflow).toEqual({
-      apiKey: "new",
-      baseUrl: "https://x",
-      protocol: "openai-compatible",
-    });
+    expect(readProviderEntry(next, "siliconflow")?.apiKey).toBe("new");
+    const llm = next.config.llm as import("@zhixing-ai/providers").LLMConfigV2;
+    expect(llm.connections.siliconflow?.endpoint).toBe("https://x");
+    expect(llm.connections.siliconflow?.adapter).toBe("openai-compatible");
   });
 
   it("追加新 provider 不影响其他 provider", () => {
@@ -143,8 +143,8 @@ describe("patchProviderEntry · 合并语义", () => {
       { providers: { openai: { apiKey: "sk-oai" } } },
     );
     const next = patchProviderEntry(state, "siliconflow", { apiKey: "sk-sf" });
-    expect(next.credentials.providers?.openai?.apiKey).toBe("sk-oai");
-    expect(next.credentials.providers?.siliconflow?.apiKey).toBe("sk-sf");
+    expect(readProviderEntry(next, "openai")?.apiKey).toBe("sk-oai");
+    expect(readProviderEntry(next, "siliconflow")?.apiKey).toBe("sk-sf");
   });
 });
 
@@ -155,7 +155,7 @@ describe("addProviderModel · 自定义模型列表", () => {
       { providers: { siliconflow: { apiKey: "sk-test" } } },
     );
     const next = addProviderModel(state, "siliconflow", "Pro/MyModel");
-    expect(next.credentials.providers?.siliconflow?.models).toEqual(["Pro/MyModel"]);
+    expect(readProviderEntry(next, "siliconflow")?.models).toEqual(["Pro/MyModel"]);
   });
 
   it("已存在的 model 不重复添加", () => {
@@ -168,7 +168,7 @@ describe("addProviderModel · 自定义模型列表", () => {
       },
     );
     const next = addProviderModel(state, "siliconflow", "Pro/M1");
-    expect(next.credentials.providers?.siliconflow?.models).toEqual([
+    expect(readProviderEntry(next, "siliconflow")?.models).toEqual([
       "Pro/M1",
       "Pro/M2",
     ]);
@@ -184,14 +184,14 @@ describe("addProviderModel · 自定义模型列表", () => {
       },
     );
     const next = addProviderModel(state, "siliconflow", "C");
-    expect(next.credentials.providers?.siliconflow?.models).toEqual(["A", "B", "C"]);
+    expect(readProviderEntry(next, "siliconflow")?.models).toEqual(["A", "B", "C"]);
   });
 
-  it("provider 不存在时创建新条目（apiKey 兜底为空字符串）", () => {
+  it("provider 不存在时创建新连接条目（无密钥默认空字符串视图）", () => {
     const state = createInitialState({}, {});
     const next = addProviderModel(state, "newprovider", "new-model");
-    expect(next.credentials.providers?.newprovider?.apiKey).toBe("");
-    expect(next.credentials.providers?.newprovider?.models).toEqual(["new-model"]);
+    expect(readProviderEntry(next, "newprovider")?.apiKey).toBe("");
+    expect(readProviderEntry(next, "newprovider")?.models).toEqual(["new-model"]);
   });
 });
 
@@ -263,10 +263,9 @@ describe("readModelThinking / writeModelThinking", () => {
     state = writeModelRole(state, "main", "deepseek", "deepseek-v4-pro");
     state = writeModelThinking(state, "main", { mode: "effort", effort: "max" });
 
-    expect(state.config.llm?.main).toEqual({
+    expect(readModelRole(state, "main")).toEqual({
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      thinking: { mode: "effort", effort: "max" },
     });
     expect(readModelThinking(state, "main")).toEqual({
       mode: "effort",
@@ -290,10 +289,13 @@ describe("readModelThinking / writeModelThinking", () => {
     state = writeModelThinking(state, "main", { mode: "effort", effort: "max" });
     const again = writeModelRole(state, "main", "deepseek", "deepseek-v4-pro");
 
-    expect(again.config.llm?.main).toEqual({
+    expect(readModelRole(again, "main")).toEqual({
       provider: "deepseek",
       model: "deepseek-v4-pro",
-      thinking: { mode: "effort", effort: "max" },
+    });
+    expect(readModelThinking(again, "main")).toEqual({
+      mode: "effort",
+      effort: "max",
     });
     expect(again).not.toBe(state);
     expect(again.config).not.toBe(state.config);
@@ -305,7 +307,8 @@ describe("readModelThinking / writeModelThinking", () => {
     state = writeModelThinking(state, "main", { mode: "on" });
     state = writeModelRole(state, "main", "siliconflow", "shared-model");
 
-    expect(state.config.llm?.main).toEqual({ provider: "siliconflow", model: "shared-model" });
+    expect(readModelRole(state, "main")).toEqual({ provider: "siliconflow", model: "shared-model" });
+    expect(readModelThinking(state, "main")).toBeUndefined();
   });
 
   it("未配该角色时 readModelThinking 返回 undefined", () => {

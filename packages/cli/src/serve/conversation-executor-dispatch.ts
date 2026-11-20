@@ -132,6 +132,10 @@ export interface ConversationExecutorApplicationPlanInput {
   readonly environment?: Parameters<
     ConversationOwnerRuntimeStack["prepareConversationAssignment"]
   >[0]["environment"];
+  readonly modelSelection?: Parameters<
+    ConversationOwnerRuntimeStack["prepareConversationAssignment"]
+  >[0]["modelSelection"];
+  readonly allowLegacyV1FollowRole?: boolean;
 }
 
 type PreparedAssignment = Awaited<
@@ -505,6 +509,10 @@ class DefaultConversationExecutorDispatchApplication
       permissionRules: input.permissionRules,
       ...(input.recentExecutorId ? { recentExecutorId: input.recentExecutorId } : {}),
       ...(input.environment ? { environment: input.environment } : {}),
+      ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+      ...(input.allowLegacyV1FollowRole !== undefined
+        ? { allowLegacyV1FollowRole: input.allowLegacyV1FollowRole }
+        : {}),
       targets: candidates.map((target) => ({
         executorId: target.executorId,
         deviceId: target.deviceId,
@@ -930,6 +938,9 @@ function createLocalConversationExecutorMechanism(
               workspaceRoot: preflight.workspaceRoot,
               executionProfile: input.binding.executionProfile,
               workspaceBinding: input.manifest.environment.workspace ?? null,
+              ...(input.manifest.modelSelection
+                ? { modelSelection: input.manifest.modelSelection }
+                : {}),
             },
           ));
           runtime = input.adaptRuntime?.(baseRuntime) ?? baseRuntime;

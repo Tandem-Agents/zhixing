@@ -32,6 +32,7 @@ import type { TokenAnchor as ContextTokenAnchor } from "../context/token-account
 import type { SegmentManager } from "../context/segment/segment-manager.js";
 import type { SegmentLedger } from "../context/segment/coverage.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
+import type { AppendOnlyTurnContextState } from "./prefix-projection.js";
 import type { RunRecordInput } from "../transcript/shard/types.js";
 import type { WindowCompact } from "../context/window/types.js";
 import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
@@ -65,6 +66,16 @@ export interface PreparedSendView {
   readonly stateMessages: readonly Message[];
   readonly messagesForLLM: readonly Message[];
   readonly providerMessages: readonly Message[];
+  /** 追加式发送视图下本次尾段现取的 `<turn-context>` 原文（未追加时为 null）。 */
+  readonly ephemeralTailText?: string | null;
+  /** 追加式发送视图下当前前缀代际号。 */
+  readonly prefixGeneration?: number;
+  /** 返回仅位于给定真值锚点之后的新增临时上下文消息，用于避免重复计量已锚定 C0。 */
+  readonly ephemeralMessagesAfterAnchor?: (
+    anchorBaselineMessageCount: number,
+  ) => readonly Message[];
+  /** 映射到 `providerMessages` 坐标的前缀失效边界索引（小于该索引的旧推理载荷应诚实省略）。 */
+  readonly invalidatedPrefixBeforeIndex?: number;
 }
 
 // ─── Agent Loop 参数 ───
@@ -174,6 +185,11 @@ export interface AgentLoopParams {
    * SchedulerProvider 等），agent-loop 仅按调用约定每次 LLM call 之前调一次 inject。
    */
   turnContextInjector?: TurnContextInjector;
+  /**
+   * 可选共享的追加式临时上下文状态（同一活跃窗口代际跨多次 run 保持前缀稳定；
+   * 缺省时若 provider.appendOnlyTurnContext === true 则由本 run 内部新建）。
+   */
+  prefixProjectionState?: AppendOnlyTurnContextState;
   /**
    * 本运行启用的排他初始控制工具名（见 ToolDefinition.exclusiveInitialControl）。
    * 由产品经 TurnOrigin.enabledControls 决定；缺省时一个都不启用。

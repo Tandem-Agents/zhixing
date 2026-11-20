@@ -63,13 +63,23 @@ export function projectConversationCapabilitiesForDevice(input: {
   readonly profile: RuntimeExecutionProfile;
   readonly ownerDeviceId: string;
   readonly executorDeviceId: string;
-  readonly capabilities: { readonly tools: readonly string[]; readonly mcpServers: readonly string[] };
+  readonly capabilities: {
+    readonly tools: readonly string[];
+    readonly mcpServers: readonly string[];
+    readonly modelConnections?: readonly import("@zhixing-ai/core").ModelConnectionReadinessDescriptor[];
+  };
 }): RuntimeExecutionProfile {
   if (input.ownerDeviceId === input.executorDeviceId) return input.profile;
   const ownerTools = new Set([
     "mcp_connect", "schedule", "task_list", "workscene_change_approve",
     "workscene_rename_current", "workscene_set_workdir_current", "workscene_clear_workdir_current",
   ]);
+  const projectedProviderIds = input.capabilities.modelConnections !== undefined
+    ? input.capabilities.modelConnections
+        .filter((entry) => entry.ready)
+        .map((entry) => entry.connectionId)
+        .sort()
+    : [...input.profile.providerIds];
   return {
     tools: [...new Set([
       ...input.profile.tools.filter(name => !ownerTools.has(name) && !name.startsWith("mcp__")),
@@ -77,7 +87,7 @@ export function projectConversationCapabilitiesForDevice(input: {
       ...(input.profile.tools.includes("mcp_connect") && input.capabilities.tools.includes("mcp_delegate") ? ["mcp_delegate"] : []),
     ])].sort(),
     mcpServers: [...input.capabilities.mcpServers],
-    providerIds: [...input.profile.providerIds],
+    providerIds: projectedProviderIds,
   };
 }
 
@@ -108,11 +118,15 @@ export interface AnchorRuntimeProjectionAssembly {
     instruction: JobExecutionInstruction,
     capabilities: JobRuntimeCapabilities,
     workspaceBinding?: RuntimeWorkspaceBinding | null,
+    modelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent,
   ): {
     readonly profile: ConversationRuntimeProjection["profile"];
     readonly runtimeTools: RuntimeToolProjection;
     readonly windowPrompt: RuntimeProductProjection["windowPrompt"];
     readonly securityExecution: RuntimeProductProjection["securityExecution"];
+    readonly primaryRole?: "main" | "light" | "power";
+    readonly modelSelection?: import("@zhixing-ai/core/types").SessionModelSelection;
+    readonly primaryRoleOverrides?: import("@zhixing-ai/orchestrator/runtime").KernelPrimaryRoleOverrides;
     readonly modelOverride?: string;
   };
   capabilityCatalog(): {
@@ -316,6 +330,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     instruction: JobExecutionInstruction,
     capabilities: JobRuntimeCapabilities,
     workspaceBinding?: RuntimeWorkspaceBinding | null,
+    manifestModelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent,
   ) => {
     const baseProfile = zhixingProfile({ agentIdentity: input.agentIdentity });
     const available = runtimeProduct(
@@ -332,10 +347,43 @@ export function createAnchorRuntimeProjectionAssembly(input: {
       executionMcpServers: available.runtimeTools.executionMcpServers,
       implementation: available.runtimeTools.implementation,
     });
+    const effectiveSelection = manifestModelSelection ?? instruction.modelSelection;
+    const primaryRole: "main" | "light" | "power" =
+      effectiveSelection?.mode === "follow-role" ? effectiveSelection.role : "main";
+    const resolvedModelSelection: import("@zhixing-ai/core/types").SessionModelSelection | undefined =
+      effectiveSelection?.mode === "connection"
+        ? {
+            mode: "override",
+            connectionId: effectiveSelection.connectionId,
+            model: effectiveSelection.model,
+            ...(effectiveSelection.params ? { params: effectiveSelection.params } : {}),
+            ...(effectiveSelection.maxOutputPreference !== undefined
+              ? { maxOutputPreference: effectiveSelection.maxOutputPreference }
+              : {}),
+          }
+        : undefined;
+    const primaryRoleOverrides: import("@zhixing-ai/orchestrator/runtime").KernelPrimaryRoleOverrides | undefined =
+      effectiveSelection?.mode === "follow-role" &&
+      (effectiveSelection.params !== undefined ||
+        effectiveSelection.maxOutputPreference !== undefined)
+        ? Object.freeze({
+            ...(effectiveSelection.params ? { params: effectiveSelection.params } : {}),
+            ...(effectiveSelection.maxOutputPreference !== undefined
+              ? { maxOutputPreference: effectiveSelection.maxOutputPreference }
+              : {}),
+          })
+        : undefined;
+    const modelOverride =
+      resolvedModelSelection ? undefined : selection.modelOverride;
     return Object.freeze({
-      ...selection,
+      profile: selection.profile,
+      runtimeTools: selection.runtimeTools,
       windowPrompt: available.windowPrompt,
       securityExecution: available.securityExecution,
+      primaryRole,
+      ...(resolvedModelSelection ? { modelSelection: resolvedModelSelection } : {}),
+      ...(primaryRoleOverrides ? { primaryRoleOverrides } : {}),
+      ...(modelOverride === undefined ? {} : { modelOverride }),
     });
   };
 
@@ -364,12 +412,71 @@ export function createWorksceneConversationRuntimeFactory(input: {
     sceneId: string,
     absolutePath: string,
   ) => Promise<void>;
+  /** 可选：读取当前会话持久化模型覆盖（空或 follow-default 则沿用场景用途默认）。 */
+  readonly readSessionModelSelection?: (
+    conversationId: string,
+  ) => Promise<import("@zhixing-ai/core/types").SessionModelSelection | undefined>;
 }): (
   sessionId: string,
   environment?: Parameters<import("@zhixing-ai/owner-kernel/types").RuntimeFactory["create"]>[1],
 ) => Promise<AgentRuntime> {
   return async (sessionId, environment) => {
-    const issue = (projection: ConversationRuntimeProjection) => input.issue(selectFrozenRuntimeCapabilities(projection, environment?.executionProfile));
+    const manifestSelection: import("@zhixing-ai/core/types").SessionModelSelection | undefined =
+      environment?.modelSelection === undefined
+        ? undefined
+        : environment.modelSelection.mode === "connection"
+          ? {
+              mode: "override",
+              connectionId: environment.modelSelection.connectionId,
+              model: environment.modelSelection.model,
+              ...(environment.modelSelection.params
+                ? { params: environment.modelSelection.params }
+                : {}),
+              ...(environment.modelSelection.maxOutputPreference !== undefined
+                ? { maxOutputPreference: environment.modelSelection.maxOutputPreference }
+                : {}),
+            }
+          : { mode: "follow-default" };
+    const modelSelection =
+      manifestSelection ??
+      (input.readSessionModelSelection
+        ? await input.readSessionModelSelection(sessionId).catch(() => undefined)
+        : undefined);
+    const manifestRoleOverride =
+      environment?.modelSelection?.mode === "follow-role"
+        ? environment.modelSelection.role
+        : undefined;
+    const manifestPrimaryRoleOverrides: import("@zhixing-ai/orchestrator/runtime").KernelPrimaryRoleOverrides | undefined =
+      environment?.modelSelection?.mode === "follow-role" &&
+      (environment.modelSelection.params !== undefined ||
+        environment.modelSelection.maxOutputPreference !== undefined)
+        ? {
+            ...(environment.modelSelection.params
+              ? { params: environment.modelSelection.params }
+              : {}),
+            ...(environment.modelSelection.maxOutputPreference !== undefined
+              ? { maxOutputPreference: environment.modelSelection.maxOutputPreference }
+              : {}),
+          }
+        : undefined;
+    const issue = (projection: ConversationRuntimeProjection) => {
+      const withModel =
+        modelSelection !== undefined ||
+        manifestRoleOverride !== undefined ||
+        manifestPrimaryRoleOverrides !== undefined
+          ? createConversationRuntimeProjection({
+              ...projection,
+              ...(manifestRoleOverride !== undefined ? { primaryRole: manifestRoleOverride } : {}),
+              ...(modelSelection !== undefined ? { modelSelection } : {}),
+              ...(manifestPrimaryRoleOverrides !== undefined
+                ? { primaryRoleOverrides: manifestPrimaryRoleOverrides }
+                : {}),
+            })
+          : projection;
+      return input.issue(
+        selectFrozenRuntimeCapabilities(withModel, environment?.executionProfile),
+      );
+    };
     const current = await input.projectConversationRuntime({
       conversationId: sessionId,
     });

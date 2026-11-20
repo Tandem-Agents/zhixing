@@ -810,6 +810,9 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       ...(input.definition.definition.spec.action.model
         ? { model: input.definition.definition.spec.action.model }
         : {}),
+      ...(input.definition.definition.spec.action.modelSelection
+        ? { modelSelection: structuredClone(input.definition.definition.spec.action.modelSelection) }
+        : {}),
       ...(input.definition.definition.spec.action.tools
         ? { tools: [...input.definition.definition.spec.action.tools] }
         : {}),
@@ -820,6 +823,8 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       prepared = await this.#options.authority.prepareJobAssignment({
         instruction,
         capabilities: this.#options.capabilities(),
+        modelSelection: instruction.modelSelection ?? { mode: "follow-role", role: "main" },
+        ...(instruction.modelSelection ? {} : { allowLegacyV1FollowRole: true }),
         ...(jobPermissionRules
           ? {
               permissionRulesFor: ({ environment, tools }) =>

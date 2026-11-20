@@ -22,6 +22,7 @@ import {
 } from "@zhixing-ai/core/advancement";
 import { drainAgentLoop } from "@zhixing-ai/core/loop";
 import {
+  copyProviderMetadata,
   extractText,
   extractUserTurnInputText,
   toToolSpec,
@@ -145,6 +146,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     };
     return {
       id: provider.id,
+      ...copyProviderMetadata(provider),
       models: provider.models,
       chat: (request) =>
         meteredProviderCall({
@@ -167,9 +169,19 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     const light = this.options.lightProvider;
     const model = this.options.lightModel;
     if (!light || !model) return undefined;
+    const lightMaxOutput =
+      this.options.lightDefaultMaxOutputTokens ??
+      this.options.defaultMaxOutputTokens ??
+      DEFAULT_MAX_OUTPUT_TOKENS;
     if (!session) {
       return createSegmentSummarizeFn(
-        (request) => light.chat({ ...request, model, thinking: this.options.lightThinking }),
+        (request) =>
+          light.chat({
+            ...request,
+            model,
+            ...(request.maxTokens === undefined ? { maxTokens: lightMaxOutput } : {}),
+            thinking: this.options.lightThinking,
+          }),
         model,
       );
     }
@@ -202,14 +214,14 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       call: (providerRequest) => light.chat(providerRequest),
       meter,
       nextCallIndex,
-      defaultMaxOutputTokens:
-        this.options.defaultMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      defaultMaxOutputTokens: lightMaxOutput,
     });
     return createSegmentSummarizeFn(
       (request) =>
         meteredChat({
           ...request,
           model,
+          ...(request.maxTokens === undefined ? { maxTokens: lightMaxOutput } : {}),
           thinking: this.options.lightThinking,
         }),
       model,
@@ -260,6 +272,9 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         provider: judgeProvider,
         model: this.options.model,
         thinking: this.options.thinking,
+        ...(this.options.defaultMaxOutputTokens !== undefined
+          ? { maxTokens: this.options.defaultMaxOutputTokens }
+          : {}),
         systemPrompt,
         messages: [
           userMessage(buildJudgePrompt(input, evidence, contextWindow.messages)),

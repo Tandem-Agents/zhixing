@@ -31,10 +31,6 @@ import {
   getGlobalConfigPath,
   resolveHomeDir,
 } from "./paths.js";
-import {
-  ROLE_RECOMMENDATIONS,
-  type RoleRecommendation,
-} from "./role-recommendations.js";
 import type { ZhixingConfig } from "./types.js";
 import { isValidMcpServerId } from "@zhixing-ai/core/mcp-management";
 
@@ -78,6 +74,9 @@ export function loadConfig(options: {
   /** 禁止自动创建全局配置（测试用） */
   noAutoCreate?: boolean;
 } = {}): ZhixingConfig {
+  if (typeof options !== "object" || options === null) {
+    throw new TypeError("loadConfig options must be an object (use { configPath } or { homeDir })");
+  }
   const env = options.env ?? process.env;
 
   // 全局配置路径：homeDir 显式 → env.ZHIXING_CONFIG_PATH → 默认 ~/.zhixing/config.jsonc
@@ -121,6 +120,9 @@ export async function writeConfig(
     expected?: ZhixingConfig;
   } = {},
 ): Promise<void> {
+  if (typeof options !== "object" || options === null) {
+    throw new TypeError("writeConfig options must be an object (use { configPath } or { homeDir })");
+  }
   const filePath = options.configPath ?? (options.homeDir
     ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
     : getGlobalConfigPath(options.env ?? process.env));
@@ -172,7 +174,11 @@ export async function addMcpServerConfiguration(
 }
 
 /** Internal: caller owns the configuration file lock. */
-export async function writeConfigUnlocked(config: ZhixingConfig, filePath: string): Promise<void> {
+export async function writeConfigUnlocked(
+  config: ZhixingConfig,
+  filePath: string,
+  options?: { readonly removeLegacyModelCapabilityOverrides?: boolean },
+): Promise<void> {
 
   let current: Partial<ZhixingConfig> = {};
   if (fs.existsSync(filePath)) {
@@ -198,7 +204,7 @@ export async function writeConfigUnlocked(config: ZhixingConfig, filePath: strin
     current = (parsed ?? {}) as Partial<ZhixingConfig>;
   }
 
-  const merged = applyConfigPatch(current, config, "replace");
+  const merged = applyConfigPatch(current, config, "replace", options);
   assertAbsoluteWorkspaceRoot(merged, filePath);
   await writeJsonAtomic(filePath, merged);
 }
@@ -224,6 +230,7 @@ export function applyConfigPatch(
   current: Partial<ZhixingConfig>,
   patch: Partial<ZhixingConfig>,
   idMapMode: "merge" | "replace" = "merge",
+  options?: { readonly removeLegacyModelCapabilityOverrides?: boolean },
 ): ZhixingConfig {
   const result: Partial<ZhixingConfig> = { ...current };
 
@@ -233,6 +240,13 @@ export function applyConfigPatch(
   if (patch.workspace !== undefined) result.workspace = patch.workspace;
   if (patch.network !== undefined) result.network = patch.network;
   if (patch.mesh !== undefined) result.mesh = patch.mesh;
+  if (patch.advancement !== undefined) result.advancement = patch.advancement;
+  if (patch.modelCapabilityOverrides !== undefined) {
+    result.modelCapabilityOverrides = patch.modelCapabilityOverrides;
+  }
+  if (options?.removeLegacyModelCapabilityOverrides) {
+    delete result.modelCapabilityOverrides;
+  }
 
   if (patch.messaging !== undefined) {
     result.messaging =
@@ -292,56 +306,17 @@ function prepareWorkspaceRoot(): string {
 function buildConfigTemplate(workspaceRoot: string): string {
   // Windows 路径反斜杠在 JSON 字符串中需 escape
   const escapedRoot = workspaceRoot.replace(/\\/g, "\\\\");
-  // main 默认从档位推荐表派生——"首次推荐哪一对 provider+model"是档位维度的
-  // 产品决策，单一事实源在 ROLE_RECOMMENDATIONS.main，模板不再硬编码。main
-  // 档恒有推荐（它是必填档）；类型上仍是可选，缺失即推荐表自身被破坏，属
-  // 编程不变量违背，fail-fast 而非静默兜底一个 vendor。
-  const mainRec = ROLE_RECOMMENDATIONS.main;
-  if (!mainRec) {
-    throw new Error(
-      "ROLE_RECOMMENDATIONS.main 缺失：main 是必填档，其首选 provider+model " +
-        "必须有定义，配置模板无法生成。",
-    );
-  }
-  const mainProvider = mainRec.provider;
-  const mainModel = mainRec.model;
-
-  // 辅助档位（light / power）的模板片段全部从档位推荐表派生——单一事实源，
-  // 不在模板里硬编码任何 vendor。某档位有推荐 → 直接写成生效条目（leading
-  // comma 续在 main 之后）；无推荐（本期未做产品决策）→ 诚实的 <provider>/
-  // <model> 注释占位，绝不假冒一个 vendor 误导用户。未来给 power 加一行推荐，
-  // 模板自动生效，无需改本函数。
-  const auxEntry = (
-    role: "light" | "power",
-    rec: RoleRecommendation | undefined,
-  ): string =>
-    rec
-      ? `    ,"${role}": { "provider": "${rec.provider}", "model": "${rec.model}" }`
-      : `    // ,"${role}": { "provider": "<provider>", "model": "<model>" }   // 本期无预设推荐，按需自填启用`;
-  const lightEntry = auxEntry("light", ROLE_RECOMMENDATIONS.light);
-  const powerEntry = auxEntry("power", ROLE_RECOMMENDATIONS.power);
+  // 设计 §3.1：初始 config.jsonc 模板仅含说明与未配置态，不预写生效连接或 main；
+  // 首次引导在用户完成配置并保存时同次写入连接与 main 绑定，取消不提交任何草稿。
   return `{
-  // ─── LLM 角色 ───
+  // ─── LLM 连接与用途（v2 未配置态）───
+  // 首次运行请在终端通过引导向导或 /config 添加服务商连接并绑定用途默认：
+  // - connections：服务商连接定义（端点、受控协议、认证模式与逻辑凭据引用；密钥保存在本机 SecretStore）
+  // - main（生效运行必填）：主对话默认模型
+  // - light / power（可选）：缺省时自动沿用 main
   "llm": {
-    // main（必填）：主对话模型，所有用户面对的输出由它产生
-    "main": {
-      "provider": "${mainProvider}",
-      "model": "${mainModel}"
-    }
-
-    // light：系统侧后台辅助任务（WebFetch 蒸馏 / 工具结果摘要 /
-    // 子 agent 返回压缩 / 通讯通道入站分类等 I/O 边界净化），你不会直接调用。
-    // 注：质量敏感的单发任务（callText role="main"）走 main 不走 light。
-    // 默认即推荐的轻量模型（与 main 同 provider，单 key 即可，价格更低）；
-    // 不需要专门化可整段删除，缺省自动回落 main（隔离价值仍保留）。
-${lightEntry}
-
-    // power：进入工作场景（/enter）后由它接管该场景的主对话循环；模型档位由
-    // 你决定（即便塞弱模型也合法，名字表达"接重活"而非"模型很强"）。
-${powerEntry}
-
-    // 任一辅助角色缺省（无对应行）时用 main 兜底——仍保留调用上下文隔离价值
-    // （防 prompt injection 污染主对话），仅放弃该角色的任务专门化与 cost 优化。
+    "schemaVersion": 2,
+    "connections": {}
   },
 
   // ─── 工作目录 ───
@@ -353,19 +328,6 @@ ${powerEntry}
   // 由目标设备的配置向导写入本地 SecretStore。
   // 例：启用飞书 → "messaging": { "feishu": {} }
   "messaging": {}
-
-  // ─── 模型注意力阈值（罕见手动调整，可选）───
-  // 知行内置每个常见模型的建议阈值；本字段让用户**覆盖指定模型**的阈值。
-  // 阈值绑模型不绑 role：切换主模型后旧覆盖因 key 不匹配自动失效。
-  // key 写法不敏感：带 vendor 前缀 / 不带 / 大小写都行，系统 normalize 后命中。
-  //
-  // 取消注释 + 改数值生效：
-  // ,"modelCapabilityOverrides": {
-  //   "${mainModel}": {
-  //     "optimalMaxTokens": 32000,
-  //     "riskMaxTokens": 64000
-  //   }
-  // }
 }
 `;
 }

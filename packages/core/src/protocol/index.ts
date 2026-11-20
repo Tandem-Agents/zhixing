@@ -167,6 +167,7 @@ export {
   createSignedCapabilityDescriptor,
   createSignedExecutorVersionInventory,
   EXECUTION_PROTOCOL_VERSION,
+  MODEL_EXECUTION_PROTOCOL_VERSION,
   matchManifest,
   validateCapabilityDescriptor,
   validateCredentialBindingDescriptor,

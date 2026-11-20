@@ -1,7 +1,13 @@
 import { stripVTControlCharacters } from 'node:util';
 import { stripPresentationFromAgentYield, type AgentYield } from '@zhixing-ai/core/loop';
-import type { FileDiffPresentationArtifact, NotStartedPresentationArtifact, SubAgentResultPresentationArtifact, SessionEventProjection } from '@zhixing-ai/core/types';
-import type { TurnContext } from '@zhixing-ai/core/types';
+import type {
+  FileDiffPresentationArtifact,
+  Message,
+  NotStartedPresentationArtifact,
+  SessionEventProjection,
+  SubAgentResultPresentationArtifact,
+  TurnContext,
+} from '@zhixing-ai/core/types';
 import { TOOL_TARGET_INPUT_KEYS } from '@zhixing-ai/core/tool-display-names';
 import { validateAgentYield, validateSessionEventProjection } from '@zhixing-ai/core/protocol/stream';
 
@@ -136,6 +142,28 @@ export function projectSessionArtifact(input: unknown, toolCallId: string): Sess
   return boundedProcessValue(result, PROCESS_ARTIFACT_BYTES);
 }
 
+/**
+ * 实时公开观测/完成流统一内容投影：剥离 `ThinkingBlock.protocolState`、`ThinkingBlock.signature`
+ * 与 `TextBlock.protocolState`（保留思考摘要、正文与工具块），绝不修改权威转录或上游消息对象。
+ */
+export function stripOpaqueProtocolStateFromMessage(message: Message): Message {
+  let changed = false;
+  const content = message.content.map((block) => {
+    if (block.type === 'thinking' && (block.protocolState !== undefined || block.signature !== undefined)) {
+      changed = true;
+      const { protocolState: _omitted, signature: _omittedSig, ...rest } = block;
+      return rest;
+    }
+    if (block.type === 'text' && block.protocolState !== undefined) {
+      changed = true;
+      const { protocolState: _omitted, ...rest } = block;
+      return rest;
+    }
+    return block;
+  });
+  return changed ? { ...message, content } : message;
+}
+
 export function projectProcessYield(source: SessionProcessSource, delta: AgentYield): SessionProcessProjection {
   const artifact = delta.type === 'tool_end' ? projectSessionArtifact(delta.result.presentation, delta.id) : undefined;
   let projected = stripPresentationFromAgentYield(delta), truncated = false;
@@ -145,6 +173,10 @@ export function projectProcessYield(source: SessionProcessSource, delta: AgentYi
   // explicit omitted snapshot leaves committed-history recovery responsible
   // for any unseen suffix; it is not an empty authoritative assistant message.
   if (projected.type === 'assistant_message') {
+    projected = {
+      type: 'assistant_message',
+      message: stripOpaqueProtocolStateFromMessage(projected.message),
+    };
     try { boundedProcessValue(projected, 128 * 1024); }
     catch {
       projected = { type: 'assistant_message', message: { role: 'assistant', content: [] } };

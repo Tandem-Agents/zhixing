@@ -26,6 +26,15 @@ import { validateEnvironmentRequirement } from "./values.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 export const EXECUTION_PROTOCOL_VERSION: ProtocolVersion = "1";
+export const MODEL_EXECUTION_PROTOCOL_VERSION: ProtocolVersion = "2";
+const MODEL_ADAPTER_IDS = new Set([
+  "openai-compatible",
+  "openai-responses",
+  "anthropic-messages",
+  "google-interactions",
+]);
+const MODEL_AUTH_MODES = new Set(["none", "api-key", "header"]);
+const MODEL_ROLE_IDS = new Set(["main", "light", "power"]);
 const EVIDENCE_KINDS = new Set([
   "file-diff",
   "test-result",
@@ -631,7 +640,7 @@ export function validateExecutionManifest(
   input: unknown,
 ): ExecutionManifest {
   const manifest = snapshot(input, "Execution manifest") as ExecutionManifest;
-  assertExactKeys(
+  assertAllowedKeys(
     manifest,
     [
       "baseRef",
@@ -639,6 +648,7 @@ export function validateExecutionManifest(
       "digest",
       "environment",
       "mcpServers",
+      "modelSelection",
       "protocolVersion",
       "requires",
       "tools",
@@ -646,6 +656,21 @@ export function validateExecutionManifest(
     ],
     "Execution manifest",
   );
+  for (const requiredKey of [
+    "baseRef",
+    "credentialBindings",
+    "digest",
+    "environment",
+    "mcpServers",
+    "protocolVersion",
+    "requires",
+    "tools",
+    "v",
+  ] as const) {
+    if (!(requiredKey in manifest)) {
+      throw new TypeError("Execution manifest fields are incomplete or unknown");
+    }
+  }
   assertVersion(manifest.v, "Execution manifest");
   assertPlainRecord(manifest.baseRef, "Manifest base reference");
   if (manifest.baseRef.execution === "conversation") {
@@ -695,6 +720,14 @@ export function validateExecutionManifest(
     (binding) => bindingKey(binding.service, binding.bindingId),
     "Manifest credential bindings",
   );
+  if (manifest.modelSelection !== undefined) {
+    if (BigInt(manifest.protocolVersion) < BigInt(MODEL_EXECUTION_PROTOCOL_VERSION)) {
+      throw new TypeError(
+        "Execution manifest modelSelection requires protocolVersion >= 2",
+      );
+    }
+    validateCrossDeviceModelSelection(manifest.modelSelection);
+  }
   assertDigest(manifest.digest, "Execution manifest digest");
   const expected = protocolDigest(
     "ExecutionManifest",
@@ -727,7 +760,7 @@ export function validateCapabilityDescriptor(
   verifier?: ProtocolSignatureVerifier,
 ): CapabilityDescriptor {
   const descriptor = snapshot(input, "Capability descriptor") as CapabilityDescriptor;
-  assertExactKeys(
+  assertAllowedKeys(
     descriptor,
     [
       "at",
@@ -735,7 +768,9 @@ export function validateCapabilityDescriptor(
       "evidenceCapabilities",
       "executorId",
       "mcpServers",
+      "modelConnections",
       "protocolVersion",
+      "readyRoles",
       "revision",
       "signature",
       "tools",
@@ -744,6 +779,23 @@ export function validateCapabilityDescriptor(
     ],
     "Capability descriptor",
   );
+  for (const requiredKey of [
+    "at",
+    "credentialBindings",
+    "evidenceCapabilities",
+    "executorId",
+    "mcpServers",
+    "protocolVersion",
+    "revision",
+    "signature",
+    "tools",
+    "v",
+    "workspaces",
+  ] as const) {
+    if (!(requiredKey in descriptor)) {
+      throw new TypeError("Capability descriptor fields are incomplete or unknown");
+    }
+  }
   assertVersion(descriptor.v, "Capability descriptor");
   assertIdentifier(descriptor.executorId, "Capability executorId");
   assertPositiveInteger(descriptor.revision, "Capability revision");
@@ -798,6 +850,19 @@ export function validateCapabilityDescriptor(
   }
   assertSorted(descriptor.evidenceCapabilities, (kind) => kind, "Capability evidence kinds");
   assertUnique(descriptor.evidenceCapabilities, "Capability evidence kinds");
+  if (descriptor.modelConnections !== undefined) {
+    validateModelConnectionDescriptors(descriptor.modelConnections);
+  }
+  if (descriptor.readyRoles !== undefined) {
+    assertDenseArray(descriptor.readyRoles, "Capability ready roles");
+    for (const role of descriptor.readyRoles) {
+      if (typeof role !== "string" || !MODEL_ROLE_IDS.has(role)) {
+        throw new TypeError("Capability ready role is invalid");
+      }
+    }
+    assertSorted(descriptor.readyRoles, (role) => role, "Capability ready roles");
+    assertUnique(descriptor.readyRoles, "Capability ready roles");
+  }
   verifier?.verify(
     "CapabilityDescriptor",
     1,
@@ -1035,7 +1100,198 @@ export function matchManifest(
       return mismatch("capability-gap", "Required evidence capability is unavailable");
     }
   }
+  if (manifest.modelSelection !== undefined) {
+    const modelSelectionMatch = matchModelSelection(manifest, descriptor);
+    if (modelSelectionMatch !== undefined) return modelSelectionMatch;
+  }
   return { ok: true };
+}
+
+function matchModelSelection(
+  manifest: ExecutionManifest,
+  descriptor: CapabilityDescriptor,
+): Extract<ManifestMatchResult, { readonly ok: false }> | undefined {
+  const selection = manifest.modelSelection;
+  if (!selection) return undefined;
+  const connections = descriptor.modelConnections;
+  if (!connections) {
+    return mismatch(
+      "capability-gap",
+      "Executor does not advertise model connection readiness; cannot infer no-key or connection selection",
+    );
+  }
+  if (selection.mode === "follow-role") {
+    const readyRoles = descriptor.readyRoles;
+    if (readyRoles && !readyRoles.includes(selection.role)) {
+      return mismatch(
+        "capability-gap",
+        `Executor does not have ready model binding for role ${selection.role}`,
+      );
+    }
+    if (!readyRoles && !connections.some((connection) => connection.ready)) {
+      return mismatch(
+        "capability-gap",
+        `Executor has no ready model connection for role ${selection.role}`,
+      );
+    }
+    return undefined;
+  }
+  const matched = connections.find(
+    (connection) => connection.connectionId === selection.connectionId,
+  );
+  if (!matched || !matched.ready) {
+    return mismatch(
+      "capability-gap",
+      `Target executor does not have ready model connection "${selection.connectionId}"`,
+    );
+  }
+  if (selection.adapter !== undefined && matched.adapter !== selection.adapter) {
+    return mismatch(
+      "capability-gap",
+      `Target executor connection "${selection.connectionId}" uses adapter "${matched.adapter}", not "${selection.adapter}"`,
+    );
+  }
+  if (matched.authMode !== "none") {
+    if (
+      !matched.credentialBindingId ||
+      !descriptor.credentialBindings.some(
+        (binding) => binding.bindingId === matched.credentialBindingId,
+      )
+    ) {
+      return mismatch(
+        "capability-gap",
+        `Target executor connection "${selection.connectionId}" lacks its required credential binding`,
+      );
+    }
+  }
+  return undefined;
+}
+
+function validateModelConnectionDescriptors(input: unknown): void {
+  assertDenseArray(input, "Capability model connections");
+  const ids = new Set<string>();
+  const normalized: Array<{ readonly connectionId: string }> = [];
+  for (const item of input) {
+    assertPlainRecord(item, "Capability model connection");
+    assertAllowedKeys(
+      item,
+      ["adapter", "authMode", "boundRoles", "connectionId", "credentialBindingId", "ready", "revision"],
+      "Capability model connection",
+    );
+    for (const key of ["adapter", "authMode", "connectionId", "ready", "revision"] as const) {
+      if (!(key in item)) {
+        throw new TypeError("Capability model connection is incomplete");
+      }
+    }
+    assertIdentifier(item.connectionId, "Capability model connectionId");
+    assertBoundedString(item.revision, "Capability model connection revision");
+    if (typeof item.adapter !== "string" || !MODEL_ADAPTER_IDS.has(item.adapter)) {
+      throw new TypeError("Capability model connection adapter is invalid");
+    }
+    if (typeof item.authMode !== "string" || !MODEL_AUTH_MODES.has(item.authMode)) {
+      throw new TypeError("Capability model connection authMode is invalid");
+    }
+    if (typeof item.ready !== "boolean") {
+      throw new TypeError("Capability model connection ready must be boolean");
+    }
+    if (item.boundRoles !== undefined) {
+      assertDenseArray(item.boundRoles, "Capability model connection boundRoles");
+      const boundRoles: string[] = [];
+      for (const role of item.boundRoles) {
+        if (typeof role !== "string" || !MODEL_ROLE_IDS.has(role)) {
+          throw new TypeError("Capability model connection boundRole is invalid");
+        }
+        boundRoles.push(role);
+      }
+      assertSorted(boundRoles, (role) => role, "Capability model connection boundRoles");
+      assertUnique(boundRoles, "Capability model connection boundRoles");
+    }
+    if (item.authMode === "none" && item.credentialBindingId !== undefined) {
+      throw new TypeError("No-key model connection must not declare credentialBindingId");
+    }
+    if (item.credentialBindingId !== undefined) {
+      assertIdentifier(item.credentialBindingId, "Capability model connection credentialBindingId");
+    }
+    if (ids.has(item.connectionId)) {
+      throw new TypeError("Capability model connection ids must be unique");
+    }
+    ids.add(item.connectionId);
+    normalized.push({ connectionId: item.connectionId });
+  }
+  assertSorted(
+    normalized,
+    (connection) => connection.connectionId,
+    "Capability model connections",
+  );
+}
+
+export function validateCrossDeviceModelSelection(input: unknown): void {
+  assertPlainRecord(input, "Execution manifest modelSelection");
+  if (input.mode === "follow-role") {
+    assertAllowedKeys(
+      input,
+      ["mode", "role", "params", "maxOutputPreference"],
+      "Execution manifest modelSelection",
+    );
+    if (typeof input.role !== "string" || !MODEL_ROLE_IDS.has(input.role)) {
+      throw new TypeError("Execution manifest modelSelection role is invalid");
+    }
+  } else if (input.mode === "connection") {
+    assertAllowedKeys(
+      input,
+      ["mode", "connectionId", "model", "adapter", "params", "maxOutputPreference"],
+      "Execution manifest modelSelection",
+    );
+    assertIdentifier(input.connectionId, "Execution manifest modelSelection connectionId");
+    assertIdentifier(input.model, "Execution manifest modelSelection model");
+    if (
+      input.adapter !== undefined &&
+      (typeof input.adapter !== "string" || !MODEL_ADAPTER_IDS.has(input.adapter))
+    ) {
+      throw new TypeError("Execution manifest modelSelection adapter is invalid");
+    }
+  } else {
+    throw new TypeError("Execution manifest modelSelection mode is invalid");
+  }
+  if (input.maxOutputPreference !== undefined) {
+    assertPositiveInteger(
+      input.maxOutputPreference,
+      "Execution manifest modelSelection maxOutputPreference",
+    );
+  }
+  if (input.params !== undefined) {
+    assertPlainRecord(input.params, "Execution manifest modelSelection params");
+    assertAllowedKeys(input.params, ["thinking"], "Execution manifest modelSelection params");
+    if (input.params.thinking !== undefined) {
+      assertPlainRecord(input.params.thinking, "Execution manifest modelSelection thinking");
+      const mode = input.params.thinking.mode;
+      if (mode === "off" || mode === "on") {
+        assertExactKeys(input.params.thinking, ["mode"], "Execution manifest modelSelection thinking");
+      } else if (mode === "effort") {
+        assertExactKeys(
+          input.params.thinking,
+          ["mode", "effort"],
+          "Execution manifest modelSelection thinking",
+        );
+        assertBoundedString(
+          input.params.thinking.effort,
+          "Execution manifest modelSelection thinking effort",
+        );
+      } else if (mode === "budget") {
+        assertExactKeys(
+          input.params.thinking,
+          ["mode", "budget"],
+          "Execution manifest modelSelection thinking",
+        );
+        assertNonNegativeInteger(
+          input.params.thinking.budget,
+          "Execution manifest modelSelection thinking budget",
+        );
+      } else {
+        throw new TypeError("Execution manifest modelSelection thinking mode is invalid");
+      }
+    }
+  }
 }
 
 /**

@@ -7,7 +7,12 @@ import type {
   ReservationOrigin,
   ResourceLease,
 } from "@zhixing-ai/core/contracts";
-import type { ChatRequest, LLMProvider, StreamEvent } from "@zhixing-ai/core";
+import {
+  copyProviderMetadata,
+  type ChatRequest,
+  type LLMProvider,
+  type StreamEvent,
+} from "@zhixing-ai/core";
 import type { SessionRuntimeTextCallOptions } from "@zhixing-ai/owner-kernel/types";
 import { meteredProviderCall } from "@zhixing-ai/orchestrator/runtime";
 
@@ -189,6 +194,7 @@ export function governControlProvider(
 ): LLMProvider {
   return {
     id: provider.id,
+    ...copyProviderMetadata(provider),
     models: provider.models,
     chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
       async function* governed(): AsyncGenerator<StreamEvent, void, undefined> {

@@ -2551,7 +2551,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     if (payload.conversationId !== this.active.conversationId) {
       return { kind: "ignored" };
     }
-    if (payload.change === "taskList") {
+    if (payload.change === "taskList" || payload.change === "modelSelection") {
       return { kind: "ignored" };
     }
     if (payload.change === "renamed") {

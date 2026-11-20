@@ -141,7 +141,10 @@ export async function readConversationRunViewMetadata(view: import('@zhixing-ai/
     state.hasDurableIdentity = extra.hasDurableIdentity; state.pendingLifecycleCount = extra.pendingLifecycleCount;
     state.activeAdvancementSessionId = extra.activeAdvancementSessionId;
     state.advancementStatuses = new Map();
-    state.sessionName = extra.sessionName; state.lastActiveAt = extra.lastActiveAt; state.sessionMeta = extra.sessionMeta;
+    state.sessionName = extra.sessionName;
+    state.modelSelection = extra.modelSelection ? structuredClone(extra.modelSelection) : undefined;
+    state.lastActiveAt = extra.lastActiveAt;
+    state.sessionMeta = extra.sessionMeta;
     if (extra.taskList) state.taskList = structuredClone(extra.taskList);
     if (extra.latestSegment) state.segments.push(extra.latestSegment);
     const mutable = state as unknown as Record<string, unknown>;

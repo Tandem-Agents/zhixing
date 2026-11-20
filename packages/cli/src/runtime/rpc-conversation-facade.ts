@@ -392,6 +392,33 @@ export class RpcConversationFacade {
     });
   }
 
+  /** 读取本会话持久化的模型选择（默认返回 follow-default）。 */
+  async getModelSelection(
+    conversationId: string,
+  ): Promise<{
+    conversationId: string;
+    modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection;
+  }> {
+    const client = await this.link.getClient();
+    return client.request("session.getModelSelection", { conversationId });
+  }
+
+  /** 持久化更新本会话模型选择（跟随用途默认 / 结构化覆盖）。 */
+  async setModelSelection(
+    conversationId: string,
+    modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection,
+  ): Promise<{
+    conversationId: string;
+    modelSelection: import("@zhixing-ai/core/contracts").SessionModelSelection;
+  }> {
+    const client = await this.link.getClient();
+    return client.request("session.setModelSelection", {
+      conversationId,
+      modelSelection,
+      ...this.#continuationConsent(),
+    });
+  }
+
   /** 删除对话(活跃运行时释放 + 落盘数据删除);断线以同一 requestId 重放。 */
   async delete(conversationId: string): Promise<void> {
     await this.#requestWithReconnect("session.delete", {

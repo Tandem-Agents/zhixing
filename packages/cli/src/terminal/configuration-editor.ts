@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { ConfigurationEditPendingError } from '@zhixing-ai/providers/configuration';
-import { SUPPORTED_PROVIDERS } from '../registries/index.js';
+import { ConfigurationEditPendingError, DEFAULT_MODEL_CATALOG_PORT } from '@zhixing-ai/providers/configuration';
+import { listSupportedProviders } from '../registries/index.js';
 import type { TerminalAction, TerminalChoice, TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 import type { ConfigurationEditResult, NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
 import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, SectionId, WorkingState } from '../config-editor/types.js';
-import { createInitialState, setInputBuffer, isMcpServerEnabled, readMcpServer } from '../config-editor/state.js';
+import { createInitialState, setInputBuffer, isMcpServerEnabled, readConnection, readMcpServer } from '../config-editor/state.js';
 import { buildOptions, collectAllIssues, handleMainPanelKey } from '../config-editor/model/main.js';
 import { resolveListMeta, handleListPanelKey } from '../config-editor/model/list.js';
 import { resolveEntityMeta, handleEntityPanelKey } from '../config-editor/model/entity.js';
@@ -130,13 +130,23 @@ export class TerminalConfigurationEditor {
         const result = handleMainPanelKey(this.#context, this.#state, { index }, key);
         this.#error = result.errorMessage; action = result.action; break;
       }
+      case 'connection-list': case 'connection-add': case 'migration-repair':
+      case 'preset-update-list': case 'connection-custom-models': case 'connection-model-overrides':
+      case 'connection-hidden-models': case 'connection-hide-picker':
       case 'provider-list': case 'model-list': case 'thinking-config':
-        action = handleListPanelKey(this.#state, descriptor, { index }, key).action; break;
+        action = handleListPanelKey(this.#state, descriptor, { index }, key, this.#context.runtime).action; break;
+      case 'connection-config': case 'model-verify-confirm': case 'connection-delete': case 'migration-repair-provider':
+      case 'catalog-config': case 'preset-update-review': case 'connection-custom-model-detail':
+      case 'model-override-edit': case 'model-override-delete-confirm':
       case 'provider-config': case 'channel-config': {
-        const result = handleEntityPanelKey(this.#state, descriptor, { index }, key);
+        const result = handleEntityPanelKey(this.#state, descriptor, { index }, key, this.#context.runtime);
         this.#error = result.errorMessage; action = result.action; break;
       }
-      case 'input': action = handleInputPanelKey(this.#state, descriptor, key); break;
+      case 'input': {
+        action = handleInputPanelKey(this.#state, descriptor, key, this.#context.runtime);
+        if (action.type === 'stay' && action.errorMessage) this.#error = action.errorMessage;
+        break;
+      }
       case 'add-model': action = handleAddModelPanelKey(this.#state, descriptor, key); break;
       case 'thinking-budget': action = handleThinkingBudgetPanelKey(this.#state, descriptor, key); break;
       case 'mcp-server': action = handleMcpServerPanelKey(this.#state, descriptor, { index }, key).action; break;
@@ -204,7 +214,7 @@ export class TerminalConfigurationEditor {
 
   /** 进入列表页时的初始行：当前已选项的序号（列表项与选项一一对应）；没有当前项就不定位 */
   #currentIndex(panel: PanelDescriptor): number | undefined {
-    const index = resolveListMeta(this.#state, panel)?.items.findIndex(item => item.current) ?? -1;
+    const index = resolveListMeta(this.#state, panel, this.#context.runtime)?.items.findIndex(item => item.current) ?? -1;
     return index >= 0 ? index : undefined;
   }
 
@@ -256,27 +266,39 @@ export class TerminalConfigurationEditor {
         if (this.#notice) message = this.#notice;
         break;
       }
+      case 'connection-list': case 'connection-add': case 'migration-repair':
+      case 'preset-update-list': case 'connection-custom-models': case 'connection-model-overrides':
+      case 'connection-hidden-models': case 'connection-hide-picker':
       case 'provider-list': case 'model-list': case 'thinking-config': {
-        const meta = resolveListMeta(this.#state, panel)!;
+        const meta = resolveListMeta(this.#state, panel, this.#context.runtime)!;
         title = meta.title; chromeDescription = meta.description;
         for (const item of meta.items) add(`${item.current ? '● ' : ''}${item.label}`, item.description);
         break;
       }
+      case 'connection-config': case 'model-verify-confirm': case 'connection-delete': case 'migration-repair-provider':
+      case 'catalog-config': case 'preset-update-review': case 'connection-custom-model-detail':
+      case 'model-override-edit': case 'model-override-delete-confirm':
       case 'provider-config': case 'channel-config': {
-        const meta = resolveEntityMeta(this.#state, panel)!;
+        const meta = resolveEntityMeta(this.#state, panel, this.#context.runtime)!;
         title = meta.title; chromeDescription = meta.description;
         for (const row of meta.rows) {
           // Probe the pure transition only; never project masked secret tails.
           const target = row.onEnter(this.#state).action;
-          const input = target.type === 'navigate' && target.panel.kind === 'input' ? resolveInputField(target.panel.fieldId, this.#state) : undefined;
-          add(row.label, input ? (input.currentValue(this.#state) ? '已设置 · 可替换' : '待填写') : row.status.text);
+          const input = target.type === 'navigate' && target.panel.kind === 'input'
+            ? resolveInputField(target.panel.fieldId, this.#state, this.#context.runtime)
+            : undefined;
+          add(row.label, input && input.sensitive
+            ? (row.status.text.includes('已封禁') || row.status.text.includes('已撤销')
+                ? row.status.text
+                : input.currentValue(this.#state) ? '已设置 · 可替换' : '待填写')
+            : row.status.text);
           choices[choices.length - 1] = { ...choices[choices.length - 1]!, status: row.status.level };
         }
         for (const button of meta.buttons) { add(button.label, button.hint); choices[choices.length - 1] = { ...choices[choices.length - 1]!, presentation: 'button', primary: button.primary }; }
         break;
       }
       case 'input': {
-        const meta = resolveInputField(panel.fieldId, this.#state);
+        const meta = resolveInputField(panel.fieldId, this.#state, this.#context.runtime);
         if (!meta) throw Error('未知配置字段。');
         title = meta.title; chromeDescription = meta.hint; message = [meta.example, meta.docUrl].filter(Boolean).join('\n');
         field = { id: panel.fieldId, label: meta.title, secret: meta.sensitive, configured: !!meta.currentValue(this.#state),
@@ -284,11 +306,18 @@ export class TerminalConfigurationEditor {
         break;
       }
       // 页头说明只放进入时就需要、页面别处看不到的信息（对象与稳定引导）；校验错误留在正文，不会顶掉引导
-      case 'add-model':
-        title = '添加自定义模型'; chromeDescription = `为 ${SUPPORTED_PROVIDERS.find(provider => provider.id === panel.providerId)?.label ?? panel.providerId} 添加 · 输入服务商提供的完整 model id。`;
+      case 'add-model': {
+        const catalog = this.#context.runtime?.modelCatalog?.() ?? DEFAULT_MODEL_CATALOG_PORT;
+        const conn = readConnection(this.#state, panel.providerId);
+        const providerLabel =
+          conn?.name ??
+          listSupportedProviders(catalog).find(provider => provider.id === panel.providerId)?.label ??
+          panel.providerId;
+        title = '添加自定义模型'; chromeDescription = `为 ${providerLabel} 添加 · 输入服务商提供的完整 model id。`;
         field = { id: 'model', label: 'Model ID', secret: false, value: this.#state.inputBuffer }; break;
+      }
       case 'thinking-budget': {
-        const range = resolveBudgetRange(panel.providerId, panel.model);
+        const range = resolveBudgetRange(panel.providerId, panel.model, this.#state, this.#context.runtime);
         title = '思考预算'; chromeDescription = `${panel.model} · ${range ? `官方建议区间：${range[0]}–${range[1]} token` : '输入思考 token 预算（整数）。'}`;
         field = { id: 'budget', label: 'Token 预算', secret: false, value: this.#state.inputBuffer }; break;
       }
@@ -360,6 +389,7 @@ export class TerminalConfigurationEditor {
       else if (object && typeof object === 'object') for (const child of Object.values(object)) redact(child);
     };
     for (const provider of Object.values(this.#state.credentials.providers ?? {})) redact(provider.apiKey);
+    for (const secret of Object.values(this.#state.credentials.modelSecrets ?? {})) redact(secret.value);
     for (const [id, credentials] of Object.entries(this.#state.credentials.channels ?? {})) {
       const channel = findSupportedChannel(this.#state.channelCatalog ?? listSupportedChannels(), id,
         this.#state.config.messaging?.[id]?.type ?? this.#state.channelStates?.[id]?.type);

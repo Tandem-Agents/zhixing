@@ -49,6 +49,7 @@ export interface AdvancementRuntimeOptions {
   >;
   readonly hostComponent?: string;
   readonly defaultMaxOutputTokens?: number;
+  readonly lightDefaultMaxOutputTokens?: number;
 }
 
 export interface AdvancementContextWindowOptions {

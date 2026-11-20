@@ -1822,7 +1822,7 @@ function validateSessionMutation(value: unknown): void {
   if (value.kind === "session-meta") {
     assertExactRecordKeys(value, ["kind", "patch"], "Session metadata mutation");
     assertPlainRecord(value.patch, "Session metadata patch");
-    assertRecordKeys(value.patch, [], ["name", "viewLayerState"], "Session metadata patch");
+    assertRecordKeys(value.patch, [], ["name", "viewLayerState", "modelSelection"], "Session metadata patch");
     if (value.patch.name !== undefined &&
       (typeof value.patch.name !== "string" || value.patch.name.trim().length === 0)) {
       throw corruptRunJournal("Session name must be non-empty");
@@ -1830,6 +1830,9 @@ function validateSessionMutation(value: unknown): void {
     if (value.patch.viewLayerState !== undefined &&
       typeof value.patch.viewLayerState !== "string") {
       throw corruptRunJournal("Session view-layer state must be text");
+    }
+    if (value.patch.modelSelection !== undefined) {
+      assertValidSessionModelSelection(value.patch.modelSelection);
     }
     return;
   }
@@ -1841,6 +1844,65 @@ function validateSessionMutation(value: unknown): void {
     return;
   }
   throw corruptRunJournal("Session control mutation kind is invalid");
+}
+
+function assertValidSessionModelSelection(value: unknown): void {
+  assertPlainRecord(value, "Session model selection");
+  if (value.mode === "follow-default") {
+    assertExactRecordKeys(value, ["mode"], "Session model selection");
+    return;
+  }
+  if (value.mode === "override") {
+    assertRecordKeys(
+      value,
+      ["mode", "connectionId", "model"],
+      ["params", "maxOutputPreference"],
+      "Session model selection",
+    );
+    if (typeof value.connectionId !== "string" || value.connectionId.trim().length === 0) {
+      throw corruptRunJournal("Session model selection connectionId must be non-empty");
+    }
+    if (typeof value.model !== "string" || value.model.trim().length === 0) {
+      throw corruptRunJournal("Session model selection model must be non-empty");
+    }
+    if (
+      value.maxOutputPreference !== undefined &&
+      (typeof value.maxOutputPreference !== "number" ||
+        !Number.isSafeInteger(value.maxOutputPreference) ||
+        value.maxOutputPreference <= 0)
+    ) {
+      throw corruptRunJournal("Session model selection maxOutputPreference must be a positive integer");
+    }
+    if (value.params !== undefined) {
+      assertPlainRecord(value.params, "Session model selection params");
+      assertRecordKeys(value.params, [], ["thinking"], "Session model selection params");
+      if (value.params.thinking !== undefined) {
+        assertPlainRecord(value.params.thinking, "Session model selection thinking");
+        const mode = value.params.thinking.mode;
+        if (mode === "off" || mode === "on") {
+          assertExactRecordKeys(value.params.thinking, ["mode"], "Session model selection thinking");
+        } else if (mode === "effort") {
+          assertExactRecordKeys(value.params.thinking, ["mode", "effort"], "Session model selection thinking");
+          if (typeof value.params.thinking.effort !== "string" || value.params.thinking.effort.trim().length === 0) {
+            throw corruptRunJournal("Session model selection thinking effort is invalid");
+          }
+        } else if (mode === "budget") {
+          assertExactRecordKeys(value.params.thinking, ["mode", "budget"], "Session model selection thinking");
+          if (
+            typeof value.params.thinking.budget !== "number" ||
+            !Number.isSafeInteger(value.params.thinking.budget) ||
+            value.params.thinking.budget < 0
+          ) {
+            throw corruptRunJournal("Session model selection thinking budget is invalid");
+          }
+        } else {
+          throw corruptRunJournal("Session model selection thinking mode is invalid");
+        }
+      }
+    }
+    return;
+  }
+  throw corruptRunJournal("Session model selection mode is invalid");
 }
 
 function isStoredReference(value: unknown): value is { readonly ref: ArtifactRef } {

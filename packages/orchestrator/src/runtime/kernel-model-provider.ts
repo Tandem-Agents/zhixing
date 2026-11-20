@@ -1,7 +1,13 @@
-import type { LLMRoles, ModelInputCapabilities, ResolvedRoleThinking } from "@zhixing-ai/core/types";
+import type { LLMRole, LLMRoles, ModelInputCapabilities, ModelSelectionParams, ResolvedRoleThinking, SessionModelSelection, ThinkingConfig } from "@zhixing-ai/core/types";
 import type { ModelBudgetInfo } from "@zhixing-ai/core/context";
 
-export type KernelPrimaryModelRole = "main" | "power";
+export type KernelPrimaryModelRole = "main" | "light" | "power";
+
+/** 跟随目标用途默认（follow-role）时随本次请求/派发携带的非秘密参数与输出偏好覆盖。 */
+export interface KernelPrimaryRoleOverrides {
+  readonly params?: ModelSelectionParams;
+  readonly maxOutputPreference?: number;
+}
 
 export interface KernelModelAttentionCapability {
   readonly optimalMaxTokens: number;
@@ -25,11 +31,21 @@ export interface KernelModelProviderBinding {
     readonly inputCapabilities: Readonly<ModelInputCapabilities>;
     readonly attention: KernelModelAttentionCapability;
   };
+  /** 会话级结构化选模覆盖绑定（仅作用于主循环与未指定角色的子执行，绝不污染 roles.main/light/power）。 */
+  readonly sessionPrimary?: Readonly<LLMRole>;
+  readonly sessionPrimaryThinking?: ThinkingConfig;
+  readonly sessionPrimaryMaxOutputTokens?: number;
+  /** 单次准入运行期租约：运行开始获取，运行结束释放，避免工具往返空窗期过早关闭底层 dispatcher。 */
+  readonly acquireRunLease?: () => () => void;
+  /** 实例销毁时释放宿主侧模型端口追踪条目。 */
+  readonly dispose?: () => void | Promise<void>;
 }
 
 export interface KernelModelProviderFactory {
   create(input: {
     readonly primaryRole: KernelPrimaryModelRole;
+    readonly sessionOverride?: SessionModelSelection;
+    readonly primaryRoleOverrides?: KernelPrimaryRoleOverrides;
     readonly mainModelOverride?: string;
   }): KernelModelProviderBinding;
 }
@@ -70,6 +86,13 @@ export function createKernelModelProviderBinding(
     light: captureThinking(input.roleThinking.light),
     power: captureThinking(input.roleThinking.power),
   });
+  const sessionPrimary = input.sessionPrimary
+    ? captureRole(input.sessionPrimary)
+    : undefined;
+  const sessionPrimaryThinking =
+    input.sessionPrimaryThinking === undefined
+      ? undefined
+      : captureThinking(input.sessionPrimaryThinking);
   const binding: KernelModelProviderBinding = Object.freeze({
     primaryRole: input.primaryRole,
     roles,
@@ -80,6 +103,15 @@ export function createKernelModelProviderBinding(
       inputCapabilities: Object.freeze({ ...input.primary.inputCapabilities }),
       attention: Object.freeze({ ...input.primary.attention }),
     }),
+    ...(sessionPrimary !== undefined ? { sessionPrimary } : {}),
+    ...(sessionPrimaryThinking !== undefined ? { sessionPrimaryThinking } : {}),
+    ...(input.sessionPrimaryMaxOutputTokens !== undefined
+      ? { sessionPrimaryMaxOutputTokens: input.sessionPrimaryMaxOutputTokens }
+      : {}),
+    ...(input.acquireRunLease !== undefined
+      ? { acquireRunLease: input.acquireRunLease }
+      : {}),
+    ...(input.dispose !== undefined ? { dispose: input.dispose } : {}),
   });
   assertKernelModelProviderBinding(binding);
   return binding;
@@ -95,6 +127,39 @@ export function assertKernelModelProviderBinding(
     return actual.length === expected.length &&
       actual.every((key, index) => key === [...expected].sort()[index]);
   };
+  const allowedOptionalBindingKeys = new Set([
+    "acquireRunLease",
+    "dispose",
+    "sessionPrimary",
+    "sessionPrimaryMaxOutputTokens",
+    "sessionPrimaryThinking",
+  ]);
+  const validBindingKeys = (value: object): boolean => {
+    const required = [
+      "defaultMaxOutputTokens",
+      "primary",
+      "primaryRole",
+      "roleThinking",
+      "roles",
+    ];
+    const actual = Object.keys(value);
+    return (
+      required.every((key) => actual.includes(key)) &&
+      actual.every((key) => required.includes(key) || allowedOptionalBindingKeys.has(key))
+    );
+  };
+  const validRole = (role: LLMRoles[keyof LLMRoles]): boolean =>
+    Boolean(role) &&
+    Object.isFrozen(role) &&
+    Boolean(role.provider) &&
+    typeof role.model === "string" &&
+    role.model.length > 0 &&
+    exactKeys(
+      role,
+      role.countTokens === undefined
+        ? ["chat", "model", "provider"]
+        : ["chat", "countTokens", "model", "provider"],
+    );
   const validThinking = (
     thinking: ResolvedRoleThinking[keyof ResolvedRoleThinking],
   ): boolean => {
@@ -120,7 +185,7 @@ export function assertKernelModelProviderBinding(
   };
   if (
     !binding ||
-    (binding.primaryRole !== "main" && binding.primaryRole !== "power") ||
+    !roleIds.includes(binding.primaryRole) ||
     (expectedPrimaryRole !== undefined && binding.primaryRole !== expectedPrimaryRole) ||
     !Object.isFrozen(binding) ||
     !Object.isFrozen(binding.roles) ||
@@ -136,13 +201,7 @@ export function assertKernelModelProviderBinding(
     !Object.isFrozen(binding.primary.budget) ||
     !Object.isFrozen(binding.primary.inputCapabilities) ||
     !Object.isFrozen(binding.primary.attention) ||
-    !exactKeys(binding, [
-      "defaultMaxOutputTokens",
-      "primary",
-      "primaryRole",
-      "roleThinking",
-      "roles",
-    ]) ||
+    !validBindingKeys(binding) ||
     !exactKeys(binding.roles, roleIds) ||
     !exactKeys(binding.roleThinking, roleIds) ||
     !exactKeys(binding.defaultMaxOutputTokens, roleIds) ||
@@ -156,19 +215,22 @@ export function assertKernelModelProviderBinding(
     roleIds.some((roleId) => !validThinking(binding.roleThinking[roleId])) ||
     roleIds.some((roleId) => {
       const role = binding.roles[roleId];
-      return !role ||
-        !role.provider ||
-        typeof role.model !== "string" ||
-        role.model.length === 0 ||
-        !exactKeys(
-          role,
-          role.countTokens === undefined
-            ? ["chat", "model", "provider"]
-            : ["chat", "countTokens", "model", "provider"],
-        ) ||
+      return (
+        !validRole(role) ||
         !Number.isFinite(binding.defaultMaxOutputTokens[roleId]) ||
-        binding.defaultMaxOutputTokens[roleId] <= 0;
+        binding.defaultMaxOutputTokens[roleId] <= 0
+      );
     }) ||
+    (binding.sessionPrimary !== undefined && !validRole(binding.sessionPrimary)) ||
+    (binding.sessionPrimaryThinking !== undefined &&
+      (!Object.isFrozen(binding.sessionPrimaryThinking) ||
+        !validThinking(binding.sessionPrimaryThinking))) ||
+    (binding.sessionPrimaryMaxOutputTokens !== undefined &&
+      (!Number.isFinite(binding.sessionPrimaryMaxOutputTokens) ||
+        binding.sessionPrimaryMaxOutputTokens <= 0)) ||
+    (binding.acquireRunLease !== undefined &&
+      typeof binding.acquireRunLease !== "function") ||
+    (binding.dispose !== undefined && typeof binding.dispose !== "function") ||
     !Number.isFinite(binding.primary.budget.contextWindow) ||
     binding.primary.budget.contextWindow <= 0 ||
     !Number.isFinite(binding.primary.budget.maxOutputTokens) ||

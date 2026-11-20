@@ -22,6 +22,7 @@ export interface AgentJobRuntimeFactory {
     confirmationBroker: IConfirmationBroker,
     capabilities: JobRuntimeCapabilities,
     workspaceBinding?: Parameters<JobRuntimePort["create"]>[0]["workspaceBinding"],
+    modelSelection?: Parameters<JobRuntimePort["create"]>[0]["modelSelection"],
   ): Promise<AgentRuntime>;
 }
 
@@ -122,7 +123,7 @@ export function createAgentJobRuntimePort(
   factory: AgentJobRuntimeFactory,
 ): JobRuntimePort {
   return {
-    async create({ confirmationBroker, capabilities, workspaceBinding }) {
+    async create({ confirmationBroker, capabilities, workspaceBinding, modelSelection }) {
       let runtime: AgentRuntime | undefined;
       let activeJoin: (() => Promise<void>) | undefined;
       let activeUnlinkAbort: (() => void) | undefined;
@@ -146,7 +147,13 @@ export function createAgentJobRuntimePort(
           if (runtime) {
             throw new Error("A job runtime handle may execute only one instruction");
           }
-          runtime = await factory.create(instruction, confirmationBroker, capabilities, workspaceBinding);
+          runtime = await factory.create(
+            instruction,
+            confirmationBroker,
+            capabilities,
+            workspaceBinding,
+            modelSelection,
+          );
           if (handleDisposed) {
             await disposeOnce();
             throw new Error("A disposed job runtime handle cannot execute");

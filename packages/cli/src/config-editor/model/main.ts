@@ -146,8 +146,21 @@ export function completeAction(
   return {
     action: {
       type: "exit",
-      result: { kind: "completed", config: state.config, credentials: state.credentials,
-        ...(state.channelIntents ? { channelIntents: state.channelIntents } : {}) },
+      result: {
+        kind: "completed",
+        config: state.config,
+        credentials: state.credentials,
+        ...(state.channelIntents ? { channelIntents: state.channelIntents } : {}),
+        ...(state.modelRetirements && state.modelRetirements.length > 0
+          ? { modelRetirements: state.modelRetirements }
+          : {}),
+        ...(state.abortConnectionIds && state.abortConnectionIds.length > 0
+          ? { abortConnectionIds: state.abortConnectionIds }
+          : {}),
+        ...(state.removeLegacyModelCapabilityOverrides
+          ? { removeLegacyModelCapabilityOverrides: true }
+          : {}),
+      },
     },
     cursor,
   };

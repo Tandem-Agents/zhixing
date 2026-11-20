@@ -1,4 +1,5 @@
-import { normalizeUserTurnInput } from "@zhixing-ai/core";
+import { hasProtocolStateInMessages, normalizeUserTurnInput } from "@zhixing-ai/core";
+import { parseConversationId } from "@zhixing-ai/core/conversation";
 import {
   advancementExecutionContextBlock,
   type AdvancementExecutionMaterial,
@@ -397,6 +398,29 @@ export class TurnExecution {
         );
       }
       const recentExecutorId = await journal.recentExecutorAffinity();
+      const sessionMeta = await journal.sessionMeta();
+      const parsedConvForRole = parseConversationId(input.conversationId);
+      const primaryRoleForTurn: import("@zhixing-ai/core").ModelRoleId =
+        parsedConvForRole.scope.kind === "workscene" ? "power" : "main";
+      const manifestModelSelection: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent =
+        sessionMeta.modelSelection?.mode === "override"
+          ? {
+              mode: "connection",
+              connectionId: sessionMeta.modelSelection.connectionId,
+              model: sessionMeta.modelSelection.model,
+              ...(sessionMeta.modelSelection.params
+                ? { params: structuredClone(sessionMeta.modelSelection.params) }
+                : {}),
+              ...(sessionMeta.modelSelection.maxOutputPreference !== undefined
+                ? { maxOutputPreference: sessionMeta.modelSelection.maxOutputPreference }
+                : {}),
+            }
+          : {
+              mode: "follow-role",
+              role: primaryRoleForTurn,
+            };
+      const historyRequiresModelProtocolV2 =
+        hasProtocolStateInMessages(executionMessages);
       executorPlan = await this.#phase("executor-plan", () =>
         this.#executorDispatch.plan({
           conversationId: input.conversationId,
@@ -409,6 +433,11 @@ export class TurnExecution {
           ...(recentExecutorId ? { recentExecutorId } : {}),
           ...(appliedAdmission.environment
             ? { environment: appliedAdmission.environment }
+            : {}),
+          modelSelection: manifestModelSelection,
+          ...(manifestModelSelection.mode === "follow-role" &&
+          !historyRequiresModelProtocolV2
+            ? { allowLegacyV1FollowRole: true }
             : {}),
         }),
       );

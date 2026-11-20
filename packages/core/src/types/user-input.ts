@@ -144,7 +144,7 @@ export function validateMessagesAgainstInputCapabilities(
 ): AgentError | null {
   if (!capabilities.images && messages.some(messageContainsImage)) {
     return new AgentError(
-      "当前模型不支持图片输入。请切换到支持图片输入的模型，或移除图片后重试。",
+      "当前模型不支持图片输入，已保留原选择与输入材料。请切换到支持图片输入的模型、移除图片后重试，或开启新对话。",
       "invalid_request",
       false,
     );

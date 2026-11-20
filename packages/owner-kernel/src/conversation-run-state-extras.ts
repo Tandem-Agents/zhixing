@@ -20,7 +20,9 @@ export interface ConversationRunRoot {
   domainRevision: number; deleted: boolean; clearedThroughLsn: number; hasDurableIdentity: boolean;
   clearedThroughRevision?: number;
   pendingLifecycleCount: number;
-  sessionName?: string; lastActiveAt?: string;
+  sessionName?: string;
+  modelSelection?: import('@zhixing-ai/core/contracts').SessionModelSelection;
+  lastActiveAt?: string;
   sessionMeta?: Extract<ConversationRunJournalRecord, { t: 'session-meta' }>;
   latestCommit?: Extract<ConversationRunJournalRecord, { t: 'committed' }>;
   latestSegment?: Pick<SegmentRecord, 'segmentId' | 'timestamp'>;
@@ -77,9 +79,19 @@ export async function foldConversationRunExtras(input: {
     if (revision !== undefined && revision !== root.domainRevision + 1 || root.deleted) throw corruptRunJournal('Session mutation revision or terminal state is invalid');
     root.domainRevision++;
     put('sessionMutationDigests', requestId, { digest, domainRevision: root.domainRevision });
-    const value = mutation as { kind: string; segment?: SegmentRecord; patch?: { name?: string } };
+    const value = mutation as {
+      kind: string;
+      segment?: SegmentRecord;
+      patch?: {
+        name?: string;
+        modelSelection?: import('@zhixing-ai/core/contracts').SessionModelSelection;
+      };
+    };
     if (value.kind === 'task-list-op') put('taskListRequestIds', requestId, true);
     if (value.kind === 'session-meta' && value.patch?.name !== undefined) root.sessionName = value.patch.name;
+    if (value.kind === 'session-meta' && value.patch?.modelSelection !== undefined) {
+      root.modelSelection = structuredClone(value.patch.modelSelection);
+    }
     if (value.kind === 'segment-append') {
       // 只保留本轮清空以来出现过的片段：判重只针对当前窗口，清空时整组删除。
       const segment = value.segment!;

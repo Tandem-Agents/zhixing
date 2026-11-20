@@ -13,22 +13,28 @@
  */
 
 import type {
+  ModelAdapterId,
   ModelInfo,
   ModelInputCapabilityOverride,
+  ModelSelectionParams,
   ThinkingConfig,
+  ThinkingControl,
 } from "@zhixing-ai/core";
 import type { MeshRoleBootConfig } from "@zhixing-ai/core/contracts";
 import type { ModelCapabilityOverride } from "./model-capability.js";
 
+export type { ModelRoleId } from "@zhixing-ai/core";
+export type {
+  ModelAdapterId,
+  ModelSelectionParams,
+} from "@zhixing-ai/core";
+
 // ─── 协议类型 ───
 
 /**
- * 协议族。决定用哪个 SDK 适配器处理 HTTP 请求/响应。
- *
- * openai-compatible 覆盖：DeepSeek、MiniMax、Kimi、千问、GLM、硅基流动、OpenAI 等
- * anthropic-messages 覆盖：Anthropic Claude
+ * 已实现受控协议族（与 core `ModelAdapterId` 完全对齐，覆盖全部四类协议）。
  */
-export type Protocol = "openai-compatible" | "anthropic-messages";
+export type Protocol = ModelAdapterId;
 
 // ─── Provider Quirks ───
 
@@ -65,7 +71,9 @@ export type ThinkingDialect =
   | "qwen"
   | "glm"
   | "kimi"
-  | "anthropic";
+  | "anthropic"
+  | "openai-responses"
+  | "google-interactions";
 
 /**
  * 同协议下不同服务商的行为差异。
@@ -319,52 +327,150 @@ export interface McpConfig {
 }
 
 /**
- * 单个 LLM 角色的 provider+model 选择。
- *
- * - provider：必须是内置预设 ID 或设备本地 provider binding 的 key
- * - model：该 provider 可识别的模型 ID
+ * 旧版（v1）单个 LLM 角色的 provider+model 选择（仅用于旧配置迁移与兼容读取）。
  */
 export interface LLMRoleConfig {
   provider: string;
   model: string;
-  /**
-   * 该角色的思考控制配置 —— 形态由所选 model 的 ThinkingControl 决定。
-   * 缺省 = 不发送思考参数（服务端用其自身默认，安全兜底）。
-   */
   thinking?: ThinkingConfig;
 }
 
-/**
- * 顶层配置结构（对应全局 ~/.zhixing/config.jsonc）。
- *
- * config.jsonc 是**决策层**——只记录"启用什么、用哪个"等上层选择。
- * 资源完整定义（provider 凭证 + 技术配置 / channel 凭证 + 链接信息）属于
- * **内容层**，集中在 ZhixingCredentials。
- *
- * 通过 id 关联两层：
- *   config.llm.main.provider   ──refs──>  credentials.providers.<id>
- *   config.messaging.<id>      ──refs──>  credentials.channels.<id>
- */
+/** 旧版（v1）公开配置 llm 段结构。 */
+export interface LegacyLLMConfigV1 {
+  main?: LLMRoleConfig;
+  light?: LLMRoleConfig;
+  power?: LLMRoleConfig;
+}
+
+/** 连接级认证配置（v2）：秘密只以稳定逻辑凭据 ID 引用，明文永不落公开配置。 */
+export type ConnectionAuthConfig =
+  | { readonly mode: "none" }
+  | { readonly mode: "api-key"; readonly secretRef: string }
+  | { readonly mode: "header"; readonly headerName: string; readonly secretRef: string };
+
+/** 连接级网络代理与私网确认策略（v2）。 */
+export interface ConnectionNetworkConfig {
+  readonly proxy: "inherit" | "direct";
+  readonly allowPrivateOrigin?: boolean;
+}
+
+/** 连接级协议方言配置（v2）。 */
+export interface ConnectionDialectConfig {
+  readonly thinking?: ThinkingDialect;
+  readonly usage?: UsageDialect;
+}
+
+/** 按精确 modelId 存储的物理容量与输入/思考能力覆盖（v2）。 */
+export interface ModelSpecOverride {
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+  readonly supportsImages?: boolean;
+  readonly supportsTools?: boolean;
+  readonly supportsThinking?: boolean;
+  readonly thinkingControl?: ThinkingControl;
+}
+
+/** 单个服务商连接配置（v2 供给层权威，设计 §2.2.1）。 */
+export interface ModelConnectionConfig {
+  readonly name: string;
+  readonly presetId?: string;
+  readonly presetRevision?: string;
+  readonly ignoredPresetRevision?: string;
+  readonly adapter: ModelAdapterId;
+  /** 创建时固定的已确认 HTTP(S) URL；预设更新绝不静默改写。 */
+  readonly endpoint: string;
+  readonly auth: ConnectionAuthConfig;
+  readonly network: ConnectionNetworkConfig;
+  readonly dialect?: ConnectionDialectConfig;
+  readonly customModels?: readonly string[];
+  readonly modelOverrides?: Readonly<Record<string, ModelSpecOverride>>;
+  readonly hiddenModels?: readonly string[];
+}
+
+/** 单个用途角色的选择绑定（v2 用途层权威，单向引用供给层连接）。 */
+export interface RoleSelection {
+  readonly connectionId: string;
+  readonly model: string;
+  readonly params?: ModelSelectionParams;
+  readonly maxOutputPreference?: number;
+}
+
+/** 仅存未归属的非秘密旧覆盖项或受保护旧端点的非秘密用途意图，绝不存秘密或未确认公开性质的旧自定义 URL。 */
+export interface MigrationPendingItem {
+  readonly id: string;
+  readonly kind: "unattributed-override" | "protected-legacy-roles";
+  readonly sourceProviderId?: string;
+  readonly summary: string;
+  readonly legacyRoles?: Readonly<{
+    readonly main?: LLMRoleConfig;
+    readonly light?: LLMRoleConfig;
+    readonly power?: LLMRoleConfig;
+  }>;
+  readonly legacyFields?: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+/** 公开配置 llm 段（v2 权威结构，设计 §2.2.1）。 */
+export interface LLMConfigV2 {
+  readonly schemaVersion: 2;
+  readonly connections: Readonly<Record<string, ModelConnectionConfig>>;
+  readonly main?: RoleSelection;
+  readonly light?: RoleSelection;
+  readonly power?: RoleSelection;
+  readonly attentionPolicies?: Readonly<Record<string, ModelCapabilityOverride>>;
+  readonly migrationPending?: readonly MigrationPendingItem[];
+}
+
+export function isLLMConfigV2(value: unknown): value is LLMConfigV2 {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as { schemaVersion?: unknown }).schemaVersion === 2 &&
+    typeof (value as { connections?: unknown }).connections === "object" &&
+    (value as { connections?: unknown }).connections !== null &&
+    !Array.isArray((value as { connections?: unknown }).connections)
+  );
+}
+
+export function isLegacyLLMConfigV1(value: unknown): value is LegacyLLMConfigV1 {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if ((value as { schemaVersion?: unknown }).schemaVersion === 2) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.main !== undefined ||
+    record.light !== undefined ||
+    record.power !== undefined
+  );
+}
+
+/** 设备本地 SecretStore v2 模型凭据封闭形状（设计 §2.2.2）。 */
+export interface ModelSecretEntryV2 {
+  readonly v: 2;
+  readonly kind: "api-key" | "header";
+  readonly value: string;
+}
+
+/** 存放在 SecretStore 固定管理记录 `configuration/model-retirements/v1` 中的待清退/撤权项。 */
+export interface PendingModelSecretRetirement {
+  readonly operationId: string;
+  readonly connectionId: string;
+  readonly secretRef: string;
+  readonly mode: "retire" | "revoke";
+  readonly sourceRevision: string;
+  readonly createdAt: string;
+  /** 退役登记时原秘密值的 SHA-256 摘要（仅存 SecretStore 管理记录），防止旧清退误删重建/轮换后的新秘密。 */
+  readonly secretHash?: string;
+}
+
+/** 顶层配置结构（对应全局 ~/.zhixing/config.jsonc）。 */
 export interface ZhixingConfig {
   /** Device-local role selection and mesh reachability; trust authorization remains on the trust chain. */
   mesh?: MeshRoleBootConfig;
   /**
-   * LLM 角色配置（角色集单一事实源 = `role-spec.ts` 的 ROLE_SPECS）：
-   * - main 必填——主对话循环、用户面对的最终输出
-    * - light 可缺省——系统侧 I/O 边界净化（WebFetch distill、工具结果摘要等），用户不直接调用；质量敏感单发任务（callText main）走 main 不在 light 范围
-   * - power 可缺省——重活槽（首个消费者：work-mode 工作场景主对话；其余预留按需接入）
-   *   辅助角色缺省时直接用 main 实例 + main.model 兜底（隔离价值仍保留，仅放弃
-   *   任务专门化）。不预设任何 vendor 默认（provider 选择是用户主权范畴）。
-   *
-   * 类型为 optional 是为了反映 loadConfig 的真实输出形状——文件可能缺这一段。
-   * 真正的 fail-fast 校验在 resolveLLMRoles / resolveFromConfig 入口集中处理；
-   * 不消费 LLM 的纯 workspace / messaging 路径不会被这里的缺失误伤。
+   * LLM 连接与三用途配置（v2 权威结构）。
+   * 初始空模板仅含未配置态；旧版 v1 文件经配置 owner 安全迁移为 v2。
    */
-  llm?: {
-    main: LLMRoleConfig;
-    light?: LLMRoleConfig;
-    power?: LLMRoleConfig;
-  };
+  llm?: LLMConfigV2;
   /**
    * 启用的消息通道表（key = channelId，如 "feishu"）。
    *
@@ -457,17 +563,28 @@ export interface NetworkConfig {
  */
 export interface ZhixingCredentials {
   /**
-   * Schema 版本——可选字段，预留未来 schema 升级时探测使用。
-   *
-   * 当前唯一 schema 不写此字段；未来引入新 schema 时按"无字段=v1，version=2=v2"
-   * 探测策略升级，不需要现在主动写入。
+   * Schema 版本——v1 省略，v2 写入 2。
    */
   version?: number;
   /**
-   * Provider 资源池：按 provider id 索引。
-   *
-   * 内置预设 provider（siliconflow / openai 等）：用户只填 apiKey；
-   * 自定义 provider：用户填完整字段（apiKey + baseUrl + protocol + ...）。
+   * v2 逻辑模型凭据池（key = 稳定逻辑凭据 ID / secretRef，值为封闭形状 ModelSecretEntryV2）。
+   */
+  modelSecrets?: Record<string, ModelSecretEntryV2>;
+  /**
+   * v2 封禁凭据（compromised）的不透明版本令牌（key = secretRef）：
+   * 仅表达“存在但不可读取”，解除编辑基线死锁且绝不暴露明文秘密。
+   */
+  compromisedModelSecretTokens?: Record<string, string>;
+  /**
+   * v2 显式撤销的逻辑凭据集合（持久状态，重启不复活为就绪）。
+   */
+  revokedModelSecretRefs?: string[];
+  /**
+   * 无法自动确认公开性质的旧自定义 URL 受保护记录（继续留存 SecretStore，经迁移修复确认后才公开）。
+   */
+  protectedLegacyProviders?: Record<string, ProviderCredentialEntry>;
+  /**
+   * 旧版 v1 Provider 资源池（仅用于兼容读取与迁移）。
    */
   providers?: Record<string, ProviderCredentialEntry>;
   /**
@@ -489,7 +606,13 @@ type CredentialProjection<K extends keyof ZhixingCredentials> = Readonly<
 >;
 
 /** 运行时 provider 工厂所需的最小秘密投影，不携带 channel / MCP 凭据。 */
-export type ProviderCredentialProjection = CredentialProjection<"providers">;
+export type ProviderCredentialProjection = CredentialProjection<
+  | "modelSecrets"
+  | "compromisedModelSecretTokens"
+  | "revokedModelSecretRefs"
+  | "protectedLegacyProviders"
+  | "providers"
+>;
 
 /** channel 接入面所需的最小秘密投影，不携带 provider / MCP 凭据。 */
 export type ChannelCredentialProjection = CredentialProjection<"channels">;
@@ -499,39 +622,56 @@ export type McpCredentialProjection = CredentialProjection<"mcp">;
 
 // ─── 解析后的 Provider ───
 
-/** 合并预设 + 用户凭证条目后的完整 Provider，可直接传给协议适配器 */
+/** 合并连接配置 + 窄目录资料 + 逻辑凭据后的完整 Provider，可直接传给协议适配器 */
 export interface ResolvedProvider {
-  /** Provider 标识符 */
+  /** 连接 / Provider 标识符 */
   id: string;
+  /** 稳定连接 ID（v2 与 id 一致） */
+  connectionId?: string;
   /** 显示名称 */
   name: string;
   /** API 端点 */
   baseUrl: string;
-  /** 解析后的 API Key（明文） */
+  /** 非秘密来源指纹（origin + basePath，供跨连接/改址历史投影隔离） */
+  sourceOriginKey?: string;
+  /** 认证模式（免密 / Bearer api-key / 自定义认证头） */
+  authMode?: "none" | "api-key" | "header";
+  /** 自定义认证头名称（仅 authMode === "header"） */
+  authHeaderName?: string;
+  /** 逻辑凭据引用 ID（不含明文） */
+  secretRef?: string;
+  /** 解析后的明文秘密（免密连接为空字符串） */
   apiKey: string;
-  /** 使用的协议 */
+  /** 使用的受控协议 */
   protocol: Protocol;
   /** 行为差异配置 */
   quirks: ProviderQuirks;
-  /**
-   * 已知 model catalog（来自 preset.knownModels）。
-   *
-   * adapter 会原样写入 LLMProvider.models[]，供预算展示快照的 budget 解析使用。
-   * 不变量：不得包含占位条目（id="unknown" 等）；缺失就返回空数组。
-   */
+  /** 连接级代理与私网确认策略 */
+  network?: ConnectionNetworkConfig;
+  /** 产品级 network.proxy 设置（由模型投影下传） */
+  networkProxy?: NetworkConfig["proxy"];
+  /** 已知 model catalog（由目录与发现经三层合成统一产出） */
   declaredModels: readonly ModelInfo[];
-  /**
-   * 模型预算覆盖表（来自 credentials.providers.<id>.modelOverrides）。
-   *
-   * Consumer（orchestrator）调 resolveModelInfo 时传入；不在 ResolvedProvider 上
-   * 时下游 caller 需自己回查 credentials，破坏配置层封装——故让 ResolvedProvider
-   * 携带，避免下游再触达原始 credentials。
-   */
+  /** 经硬约束钳制后的有效模型预算覆盖表（key = modelId） */
   modelOverrides?: Record<string, ModelBudgetOverride>;
-  /**
-   * 模型输入能力覆盖表（来自 credentials.providers.<id>.modelInputCapabilities）。
-   *
-   * 与 declaredModels 一起用于 runtime 注入 core 的 input capability preflight。
-   */
+  /** 经硬约束钳制后的有效模型输入能力覆盖表（key = modelId） */
   modelInputCapabilities?: Record<string, ModelInputCapabilitiesOverride>;
+  /** 用户规格覆盖与硬约束冲突记录（保留原输入同时钳制运行有效值，key = modelId） */
+  overrideConflicts?: Readonly<
+    Record<
+      string,
+      readonly {
+        readonly field:
+          | "contextWindow"
+          | "maxOutputTokens"
+          | "supportsImages"
+          | "supportsTools"
+          | "supportsThinking";
+        readonly requestedValue: number | boolean;
+        readonly hardLimit: number | boolean;
+        readonly constraintSource: string;
+        readonly message: string;
+      }[]
+    >
+  >;
 }

@@ -123,6 +123,9 @@ export class JobAssignmentAuthority {
       credentialBindings: policy.manifestCapabilities.credentialBindings.map(
         (binding) => ({ ...binding }),
       ),
+      ...(policy.manifestCapabilities.modelSelection !== undefined
+        ? { modelSelection: structuredClone(policy.manifestCapabilities.modelSelection) }
+        : {}),
     });
     const compatibility = matchManifest(
       manifest,

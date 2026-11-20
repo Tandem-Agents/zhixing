@@ -312,6 +312,8 @@ export interface RuntimeFactory {
         readonly executionProfile?: import("@zhixing-ai/core/types").RuntimeExecutionProfile;
         /** 已验签清单里的工作区绑定，授权范围由它推导；清单不带工作区时为 null。 */
         readonly workspaceBinding?: import("@zhixing-ai/core/contracts").EnvironmentRequirement["workspace"] | null;
+        /** 已验签清单里的跨设备/本地结构化选模意图（优先于执行器本地默认）。 */
+        readonly modelSelection?: import("@zhixing-ai/core/contracts").CrossDeviceModelSelectionIntent;
     },
   ): Promise<SessionRuntime>;
 }

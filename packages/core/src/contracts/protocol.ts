@@ -186,6 +186,10 @@ export interface CapabilityDescriptor
   tools: string[];
   mcpServers: string[];
   credentialBindings: CredentialBindingDescriptor[];
+  /** 按连接发布的模型就绪描述；旧版本磁盘快照可能缺省，缺省时不得推断免密或新协议就绪。 */
+  modelConnections?: import("./foundation.js").ModelConnectionReadinessDescriptor[];
+  /** 已就绪的用途默认角色列表；旧版本磁盘快照可能缺省。 */
+  readyRoles?: import("./foundation.js").ModelRoleId[];
   evidenceCapabilities: EvidenceKind[];
   at: IsoTime;
   signature: Signature;
@@ -249,6 +253,8 @@ export interface ExecutionManifest<
     bindingId: string;
     revision: number;
   }>;
+  /** 跨设备派发携带的非秘密结构化选模意图；存在时要求 protocolVersion >= "2"。 */
+  modelSelection?: import("./foundation.js").CrossDeviceModelSelectionIntent;
   digest: Digest;
 }
 
@@ -329,6 +335,7 @@ export interface JobExecutionInstruction {
   kind: "agent-turn";
   prompt: string;
   model?: string;
+  modelSelection?: import("./foundation.js").CrossDeviceModelSelectionIntent;
   tools?: string[];
 }
 

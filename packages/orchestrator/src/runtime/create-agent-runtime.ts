@@ -23,6 +23,7 @@ import {
   type TextCallLLMResult,
   type ToolDefinition,
   type TurnContext,
+  copyProviderMetadata,
   toToolSpec,
   extractText,
   getTotalInputTokens,
@@ -74,7 +75,9 @@ import {
 import { type WatchdogPolicy, DEFAULT_WATCHDOG_POLICY } from "@zhixing-ai/core/interrupt";
 import {
   buildRunRecord,
+  createAppendOnlyTurnContextState,
   runAgentLoop,
+  type AppendOnlyTurnContextState,
   type WindowLifecycle,
   type WindowChangeReason,
   type AgentLoopDeps,
@@ -552,7 +555,7 @@ export interface CreateAgentRuntimeOptions {
    * roleThinking 三角色映射为真实 per-role 不跟随。
    * 工作模式装配 power runtime 时传 "power"。
    */
-  primaryRole?: "main" | "power";
+  primaryRole?: "main" | "light" | "power";
   /** Product-bound finite Security execution for this runtime. */
   securityExecution: KernelSecurityExecutionFactory;
   /** 产品组合根声明的本机秘密路径；所有工具调用都由安全管线旁路免疫地阻断。 */
@@ -603,17 +606,31 @@ export async function createAgentRuntime(
     roleThinking,
     defaultMaxOutputTokens,
     primary: primaryModelRuntime,
+    sessionPrimary: baseSessionPrimary,
+    sessionPrimaryThinking,
+    sessionPrimaryMaxOutputTokens,
+    acquireRunLease,
+    dispose: disposeModelProvider,
   } = options.modelProvider;
 
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
   // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩域按 task 分流
   // （callText main→main / callText 默认档+段切换→light）不跟随、
-  // roleThinking 三角色聚合
-  // 不跟随（见下）。缺省 main，工作模式装配传 power。
+  // roleThinking 三角色聚合与显式 roles.main/light/power 不跟随（设计 §5.1）。
   const runtimeId = randomUUID();
   const runtimeLogs = optionalKernelLogs(options.createLogRecords, { refs: [{ kind: "runtime", id: runtimeId }] });
   const roles = resourceAwareRoles(baseRoles, defaultMaxOutputTokens, runtimeLogs?.provider);
+  const effectivePrimaryRole = baseSessionPrimary
+    ? wrapResourceAwareRole(
+        baseSessionPrimary,
+        sessionPrimaryMaxOutputTokens ?? defaultMaxOutputTokens[primaryRole],
+        runtimeLogs?.provider,
+      )
+    : roles[primaryRole];
+  const effectivePrimaryMaxOutputTokens = baseSessionPrimary
+    ? (sessionPrimaryMaxOutputTokens ?? defaultMaxOutputTokens[primaryRole])
+    : defaultMaxOutputTokens[primaryRole];
 
   const cwd = process.cwd();
 
@@ -739,8 +756,11 @@ export async function createAgentRuntime(
   const primaryModelCapability = primaryModelRuntime.attention;
 
   // 思考控制与单发通道已在装配早期构造（builtinCtx 之前,见上）;此处仅派生
-  // 主对话档与 light 档别名供下游消费。
-  const primaryThinking = roleThinking[primaryRole];
+  // 主对话档与 light 档别名供下游消费。若存在会话覆盖，主循环与未指定角色的子执行用覆盖思考参数；
+  // 显式 roles.main / roles.light / roles.power 仍严格保持各自 roleThinking。
+  const primaryThinking = baseSessionPrimary
+    ? sessionPrimaryThinking
+    : roleThinking[primaryRole];
   const lightThinking = roleThinking.light;
 
   const childToolNameSet = new Set<string>(SUB_AGENT_ENABLED_TOOLS);
@@ -752,10 +772,10 @@ export async function createAgentRuntime(
   let tools: ToolDefinition[] = baseTools;
   if (profile.enabledTools.includes("Task") && childToolNames.length > 0) {
     const taskTool = createTaskTool({
-      // 子 agent 复用父 primaryRole 的 provider+model；其自身 loop 思考 =
-      // primaryThinking（与该 model 配对）；roleThinking 映射供子工具按角色扇出。
-      provider: roles[primaryRole].provider,
-      model: roles[primaryRole].model,
+      // 未指定角色的子 agent 复用父主循环当前生效绑定（含 sessionOverride）；
+      // roleThinking 与 llmRoles 保持纯用途映射供子工具按角色扇出。
+      provider: effectivePrimaryRole.provider,
+      model: effectivePrimaryRole.model,
       loopThinking: primaryThinking,
       roleThinking,
       llmRoles: roles,
@@ -862,8 +882,8 @@ export async function createAgentRuntime(
   }): LifecycleContextBase => ({
     runtimeId,
     runtimeKind,
-    providerId: roles[primaryRole].provider.id,
-    model: roles[primaryRole].model,
+    providerId: effectivePrimaryRole.provider.id,
+    model: effectivePrimaryRole.model,
     async reportLifecycleWarning(event) {
       const payload: AgentEventMap["lifecycle:warning"] = {
         hookId: input.hookId,
@@ -973,10 +993,23 @@ export async function createAgentRuntime(
     if (disposed) return;
     disposed = true;
     const failures = await runCloseHooks(reason, windowCounter - 1);
+    try {
+      await disposeModelProvider?.();
+    } catch (error) {
+      console.error("[orchestrator.dispose.modelProvider] dispose failed:", error);
+    }
     if (failures.length > 0) {
       throw new LifecycleHookError("dispose", failures);
     }
   };
+
+  // 追加式前缀敏感协议（如 openai-responses）的窗口内内存态临时上下文锚点表：
+  // 随 openInstanceWindow（压缩/窗口换代//clear//resume）自动开启新前缀代际；冷重启后天然为空。
+  let activePrefixProjectionState: AppendOnlyTurnContextState | undefined =
+    effectivePrimaryRole.provider.appendOnlyTurnContext === true
+      ? createAppendOnlyTurnContextState()
+      : undefined;
+  let activePrefixHistoryLength = 0;
 
   // run 外注意力窗口换代（/clear · /resume · /compact）—— 旧窗 close → 新窗
   // open、更新实例权威。close + open 失败聚合抛,不阻断换代后续。
@@ -985,6 +1018,8 @@ export async function createAgentRuntime(
   ): Promise<void> => {
     const closeFailures = await runCloseHooks(reason, windowCounter - 1);
     const openFailures = await openInstanceWindow(reason, true);
+    activePrefixProjectionState?.reset(0);
+    activePrefixHistoryLength = 0;
     const failures = [...closeFailures, ...openFailures];
     if (failures.length > 0) {
       throw new LifecycleHookError("onAttentionWindowChange", failures);
@@ -1014,7 +1049,7 @@ export async function createAgentRuntime(
     bus: IEventBus<AgentEventMap>,
     watchdog: WatchdogPolicy,
     callProvider: (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined> =
-      (request) => roles[primaryRole].provider.chat(request),
+      (request) => roles.light.provider.chat(request),
   ): SegmentStreamFactory => {
     const callWithRetry = withRetry(
       callProvider,
@@ -1038,8 +1073,9 @@ export async function createAgentRuntime(
             systemPrompt: req.systemPrompt,
             tools: req.tools,
             messages: req.messages,
-            // 段切换摘要走 roles.light（model 由 createSegmentSummarizeFn
-            // 绑 roles.light.model），思考控制随实际 role 注入 lightThinking。
+            // 段切换摘要恒走 roles.light（model 由 createSegmentSummarizeFn
+            // 绑 roles.light.model，provider 走 roles.light.provider），思考控制与默认输出上限同步跟随 light。
+            maxTokens: defaultMaxOutputTokens.light,
             thinking: lightThinking,
             abortSignal: controller.signal,
           }),
@@ -1069,6 +1105,7 @@ export async function createAgentRuntime(
       roles.main.provider.id,
       roles.light.provider.id,
       roles.power.provider.id,
+      effectivePrimaryRole.provider.id,
     ],
   });
 
@@ -1085,9 +1122,9 @@ export async function createAgentRuntime(
   const recordConfiguration = (logPorts: ReturnType<typeof optionalKernelLogs>, turnIndex?: number): void => {
     logPorts?.kernel.record(() => ({ event: "configured", data: {
         toolSetVersion: createHash("sha256").update(JSON.stringify(tools.map((tool) => tool.name).sort())).digest("hex"),
-        provider: roles[primaryRole].provider.id, model: roles[primaryRole].model,
+        provider: effectivePrimaryRole.provider.id, model: effectivePrimaryRole.model,
         toolCount: tools.length, tools: tools.slice(0, 32).map((tool) => tool.name), toolNamesOmitted: Math.max(0, tools.length - 32), turnIndex: turnIndex,
-        primaryRole, sessionType, thinking: primaryThinking?.mode, contextUnits: primaryModelRuntime.budget.contextWindow, maxOutputUnits: defaultMaxOutputTokens[primaryRole],
+        primaryRole, sessionType, thinking: primaryThinking?.mode, contextUnits: primaryModelRuntime.budget.contextWindow, maxOutputUnits: effectivePrimaryMaxOutputTokens,
       } }));
   };
 
@@ -1139,8 +1176,13 @@ export async function createAgentRuntime(
       // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要等轻量任务）；
       // role="main" 走主档（质量敏感的单发任务，如 MCP
       // 接入标识推断，带 mainThinking）。
-      const caller = role === "main" ? mainCallLLM : lightCallLLM;
-      return runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
+      const releaseModelLease = acquireRunLease?.();
+      try {
+        const caller = role === "main" ? mainCallLLM : lightCallLLM;
+        return await runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
+      } finally {
+        safeDispose("callText.modelLease", () => releaseModelLease?.());
+      }
     },
 
     async callTextWithUsage(
@@ -1148,20 +1190,27 @@ export async function createAgentRuntime(
       role: "main" | "light" = "light",
       opts?: TextCallOptions,
     ): Promise<TextCallLLMResult> {
-      const caller =
-        role === "main" ? mainCallLLMWithUsage : lightCallLLMWithUsage;
-      return runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
+      const releaseModelLease = acquireRunLease?.();
+      try {
+        const caller =
+          role === "main" ? mainCallLLMWithUsage : lightCallLLMWithUsage;
+        return await runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
+      } finally {
+        safeDispose("callTextWithUsage.modelLease", () => releaseModelLease?.());
+      }
     },
 
     async runOrchestrationV1(
       params: RunOrchestrationV1Params,
     ): Promise<OrchestrationRunResultV1> {
-      const nodeExecutor = createAgentNodeExecutorV1({
-        provider: roles[primaryRole].provider,
-        model: roles[primaryRole].model,
-        loopThinking: primaryThinking,
-        roleThinking,
-        llmRoles: roles,
+      const releaseModelLease = acquireRunLease?.();
+      try {
+        const nodeExecutor = createAgentNodeExecutorV1({
+          provider: effectivePrimaryRole.provider,
+          model: effectivePrimaryRole.model,
+          loopThinking: primaryThinking,
+          roleThinking,
+          llmRoles: roles,
         securityPipeline,
         agentIdentity: options.runtimeEnvironment.agentIdentity,
         securityApproval: securityExecution,
@@ -1201,6 +1250,9 @@ export async function createAgentRuntime(
             },
             execute,
           ); } finally { disposeLogging?.(); }
+      } finally {
+        safeDispose("runOrchestrationV1.modelLease", () => releaseModelLease?.());
+      }
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {
@@ -1227,6 +1279,8 @@ export async function createAgentRuntime(
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
+      const releaseModelLease = acquireRunLease?.();
+      try {
       // 手动压缩 = 强制段切换：optimal 置零 → 任何规模都触发；任务清单恒否 →
       // 绕过 in-progress defer（用户明确要求压缩，不该被推迟）。风险线保持主模型
       // 的真实值：摘要失败时只有真正达到风险线才走应急地板，未达风险线则不改
@@ -1295,6 +1349,9 @@ export async function createAgentRuntime(
         emergencyFloor,
         ...(!out.modified && failure ? { failure } : {}),
       };
+      } finally {
+        safeDispose("forceCompact.modelLease", () => releaseModelLease?.());
+      }
     },
 
     async withRunObservation<T>(identity: import("./logging.js").KernelLogIdentity, work: () => Promise<T>): Promise<T> {
@@ -1366,8 +1423,8 @@ export async function createAgentRuntime(
       const callProvider = (request: ChatRequest) => {
         const store = runContextStorage.getStore();
         return providerPhases && store
-          ? runContextStorage.run({ ...store, modelProviderPhases: providerPhases }, () => roles[primaryRole].provider.chat(request))
-          : roles[primaryRole].provider.chat(request);
+          ? runContextStorage.run({ ...store, modelProviderPhases: providerPhases }, () => effectivePrimaryRole.provider.chat(request))
+          : effectivePrimaryRole.provider.chat(request);
       };
       const resilientCallLLM = withRetry(
         callProvider,
@@ -1392,10 +1449,10 @@ export async function createAgentRuntime(
       // （段切换是唯一压缩机制），仅剩测试 / 纯嵌入消费这么用。
       const segmentWatchdog =
         envelope.control.watchdog ?? DEFAULT_WATCHDOG_POLICY;
+      // 自动段切换摘要与手动 forceCompact 一致，恒走 roles.light.provider（绝不借主循环 callProvider 或其阶段回调）。
       const segmentStreamFactory = makeSegmentStreamFactory(
         eventBus,
         segmentWatchdog,
-        callProvider,
       );
       const segmentManager = options.segmentDeps
         ? createSegmentManager({
@@ -1681,6 +1738,7 @@ export async function createAgentRuntime(
       //
       // disposeAll 留在 finally(ALS 包裹外):dispose 不依赖 RunContext,
       // 且 finally 的语义是"无论 ALS 内 throw 与否都执行清理",位置正确。
+      const releaseModelLease = acquireRunLease?.();
       try {
         const result = await runContextStorage.run(
           {
@@ -1729,6 +1787,7 @@ export async function createAgentRuntime(
         }
         return result;
       } finally {
+        safeDispose("run.modelLease", () => releaseModelLease?.());
         disposeAll();
       }
 
@@ -1795,6 +1854,20 @@ export async function createAgentRuntime(
         });
         const governedExecuteTool = secureExecuteTool;
 
+        // 若追加式前缀状态检测到外部历史长度回退或带已有历史冷启动，诚实开启新前缀代际
+        if (activePrefixProjectionState) {
+          const priorAssistantExists = loopMessages.some((m) => m.role === "assistant");
+          if (
+            (activePrefixHistoryLength === 0 && priorAssistantExists) ||
+            loopMessages.length < activePrefixHistoryLength
+          ) {
+            activePrefixProjectionState.reset(
+              priorAssistantExists ? loopMessages.length : 0,
+            );
+          }
+          activePrefixHistoryLength = loopMessages.length;
+        }
+
         const gen = runAgentLoop({
           ...(envelope.correctness.inputPort ? {
             inputPort: {
@@ -1819,9 +1892,9 @@ export async function createAgentRuntime(
               close: () => envelope.correctness.inputPort!.close(),
             },
           } : {}),
-          provider: roles[primaryRole].provider,
-          model: roles[primaryRole].model,
-          // 主对话走 roles[primaryRole]，loop 思考解析同 role（装配期已校验兜底）。
+          provider: effectivePrimaryRole.provider,
+          model: effectivePrimaryRole.model,
+          // 主对话走当前生效主循环绑定（含 sessionOverride）；loop 思考解析同绑定。
           thinking: primaryThinking,
           inputCapabilities: modelInputCapabilities,
           tools,
@@ -1857,6 +1930,9 @@ export async function createAgentRuntime(
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,
+          ...(activePrefixProjectionState
+            ? { prefixProjectionState: activePrefixProjectionState }
+            : {}),
           // 本运行启用的排他初始控制工具由产品经 turnOrigin 决定，Kernel 只按名字放行
           enabledExclusiveControls: new Set(
             envelope.identity.turnContext?.turnOrigin?.enabledControls ?? [],
@@ -1909,51 +1985,61 @@ export async function createAgentRuntime(
   };
 }
 
+function wrapResourceAwareRole(
+  role: LLMRole,
+  fallback: number,
+  records?: import("@zhixing-ai/core/logging").LogRecordPort,
+): LLMRole {
+  const provider: LLMProvider = {
+    id: role.provider.id,
+    ...copyProviderMetadata(role.provider),
+    models: role.provider.models,
+    chat(request) {
+      const store = runContextStorage.getStore();
+      const metering = store?.modelCallMetering;
+      const phases = store?.modelProviderPhases;
+      const call = (providerRequest: ChatRequest) => observeProviderCall(
+        (next) => role.provider.chat(next), providerRequest, role.provider.id, records,
+      );
+      const effectiveRequest: ChatRequest =
+        request.maxTokens !== undefined
+          ? request
+          : { ...request, maxTokens: fallback };
+      if (!metering) return phasedProviderCall(call, phases)(effectiveRequest);
+      return meteredProviderCall({
+        call,
+        meter: metering.meter,
+        nextCallIndex: metering.nextCallIndex,
+        defaultMaxOutputTokens: fallback,
+        ...(phases ? { phases } : {}),
+      })(request);
+    },
+    ...(role.provider.countTokens
+      ? {
+          countTokens: (messages, model) =>
+            role.provider.countTokens!(messages, model),
+        }
+      : {}),
+  };
+  return {
+    provider,
+    model: role.model,
+    chat: (request) => provider.chat({ ...request, model: role.model }),
+    ...(role.countTokens
+      ? { countTokens: (messages) => role.countTokens!(messages) }
+      : {}),
+  };
+}
+
 function resourceAwareRoles(
   roles: LLMRoles,
   defaultMaxOutputTokens: Readonly<Record<keyof LLMRoles, number>>,
   records?: import("@zhixing-ai/core/logging").LogRecordPort,
 ): LLMRoles {
-  const wrap = (role: LLMRole, fallback: number): LLMRole => {
-    const provider: LLMProvider = {
-      id: role.provider.id,
-      models: role.provider.models,
-      chat(request) {
-        const store = runContextStorage.getStore();
-        const metering = store?.modelCallMetering;
-        const phases = store?.modelProviderPhases;
-        const call = (providerRequest: ChatRequest) => observeProviderCall(
-          (next) => role.provider.chat(next), providerRequest, role.provider.id, records,
-        );
-        if (!metering) return phasedProviderCall(call, phases)(request);
-        return meteredProviderCall({
-          call,
-          meter: metering.meter,
-          nextCallIndex: metering.nextCallIndex,
-          defaultMaxOutputTokens: fallback,
-          ...(phases ? { phases } : {}),
-        })(request);
-      },
-      ...(role.provider.countTokens
-        ? {
-            countTokens: (messages, model) =>
-              role.provider.countTokens!(messages, model),
-          }
-        : {}),
-    };
-    return {
-      provider,
-      model: role.model,
-      chat: (request) => provider.chat({ ...request, model: role.model }),
-      ...(role.countTokens
-        ? { countTokens: (messages) => role.countTokens!(messages) }
-        : {}),
-    };
-  };
   return {
-    main: wrap(roles.main, defaultMaxOutputTokens.main),
-    light: wrap(roles.light, defaultMaxOutputTokens.light),
-    power: wrap(roles.power, defaultMaxOutputTokens.power),
+    main: wrapResourceAwareRole(roles.main, defaultMaxOutputTokens.main, records),
+    light: wrapResourceAwareRole(roles.light, defaultMaxOutputTokens.light, records),
+    power: wrapResourceAwareRole(roles.power, defaultMaxOutputTokens.power, records),
   };
 }
 

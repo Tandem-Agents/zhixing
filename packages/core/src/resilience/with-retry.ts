@@ -25,7 +25,12 @@ import type { ChatRequest, StreamEvent } from "../types/llm.js";
 import { resolveDelay, sleep } from "./backoff.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
 import { budgetStopAfterFailure, isResourceBudgetExceeded } from "./budget-stop.js";
-import { classifyProviderError, errorCauseSummary } from "./classify.js";
+import {
+  classifyProviderError,
+  errorCauseSummary,
+  isResponseStreamInterrupted,
+  sanitizeProviderErrorMessage,
+} from "./classify.js";
 import type { RetryConfig } from "./types.js";
 import { DEFAULT_RETRY_CONFIG } from "./types.js";
 
@@ -73,10 +78,12 @@ export function withRetry(
 
 // ─── 内部实现 ───
 
-/** 标记已流出内容的事件类型 */
+/** 标记已流出内容或私有协议状态的事件类型（任一到达后严禁自动重放已发请求） */
 const CONTENT_EVENT_TYPES = new Set([
   "text_delta",
+  "thinking_block_start",
   "thinking_delta",
+  "thinking_block_end",
   "tool_call_start",
   "tool_call_delta",
   "tool_call_end",
@@ -175,8 +182,13 @@ async function* retryableStream(
     const isRetryable = config.retryableTypes.includes(errorType);
     const isLastAttempt = attempt >= config.maxRetries;
 
-    // 三种情况不重试：已有内容流出、不可重试类型、最后一次尝试
-    if (hasStreamedContent || !isRetryable || isLastAttempt) {
+    // 四种情况不重试：已有内容流出、响应流已开始后中途截断（严禁自动重放已发请求）、不可重试类型、最后一次尝试
+    if (
+      hasStreamedContent ||
+      isResponseStreamInterrupted(streamError) ||
+      !isRetryable ||
+      isLastAttempt
+    ) {
       breaker.recordFailure();
 
       if (isLastAttempt && isRetryable && !hasStreamedContent) {
@@ -243,7 +255,9 @@ async function emitRetryExhausted(
   await eventBus?.emit("retry:exhausted", {
     errorType: classifyProviderError(error),
     totalAttempts,
-    lastError: error instanceof Error ? error.message : String(error),
+    lastError: sanitizeProviderErrorMessage(
+      error instanceof Error ? error.message : String(error),
+    ),
     ...(cause ? { cause } : {}),
   });
 }

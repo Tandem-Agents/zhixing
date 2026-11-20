@@ -103,6 +103,12 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
   {
     owner: "anchor-host",
     role: "runtime",
+    id: "modelRuntimePort.dispose",
+    stage: "runtime",
+  },
+  {
+    owner: "anchor-host",
+    role: "runtime",
     id: "ephemeralRuntime.dispose",
     stage: "runtime",
   },

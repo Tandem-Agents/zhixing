@@ -802,6 +802,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.clearedThroughLsn = root.clearedThroughLsn;
         state.taskList = structuredClone(root.taskList ?? { items: [] });
         state.sessionName = root.sessionName;
+        state.modelSelection = root.modelSelection ? structuredClone(root.modelSelection) : undefined;
         state.sessionMeta = root.sessionMeta;
         state.lastActiveAt = root.lastActiveAt;
         if (root.latestSegment) state.segments.push(root.latestSegment);

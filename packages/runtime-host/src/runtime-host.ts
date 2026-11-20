@@ -27,6 +27,7 @@ import {
 import type {
   IConfirmationBroker,
 } from "@zhixing-ai/core/confirmation";
+import type { SessionModelSelection } from "@zhixing-ai/core/types";
 import {
   assertConversationRuntimeProjection,
   assertRuntimeProductProjection,
@@ -54,6 +55,9 @@ export interface JobAgentRuntimeOptions {
   readonly runtimeTools: RuntimeToolProjection;
   readonly windowPrompt: RuntimeProductProjection["windowPrompt"];
   readonly securityExecution: RuntimeProductProjection["securityExecution"];
+  readonly primaryRole?: "main" | "light" | "power";
+  readonly modelSelection?: SessionModelSelection;
+  readonly primaryRoleOverrides?: import("@zhixing-ai/orchestrator/runtime").KernelPrimaryRoleOverrides;
   readonly modelOverride?: string;
 }
 
@@ -147,7 +151,7 @@ export class RuntimeHost {
     }
     const runtimeTools = product.runtimeTools;
     const profile = job?.profile ?? conversation?.profile;
-    const primaryRole = conversation?.primaryRole ?? "main";
+    const primaryRole = job?.primaryRole ?? conversation?.primaryRole ?? "main";
     // 临时运行时按调度类计费,常驻会话按交互类:两者的公平份额不同,且容量
     // 绑定必须在构造时就位——工具执行的注入点在运行时内部,事后包装拿不到。
     const capacityBinding =
@@ -156,8 +160,13 @@ export class RuntimeHost {
         : this.opts.deviceCapacity?.interactive;
     // 先取得完整装配输入；factory 抛错时 createAgentRuntime 尚未开始，绝不发布
     // 缺少部分 provider 的运行体。createAgentRuntime 再同步捕获只读序列。
+    const sessionOverride = job?.modelSelection ?? conversation?.modelSelection;
+    const primaryRoleOverrides =
+      job?.primaryRoleOverrides ?? conversation?.primaryRoleOverrides;
     const modelProvider = this.opts.modelProvider.create({
       primaryRole,
+      ...(sessionOverride === undefined ? {} : { sessionOverride }),
+      ...(primaryRoleOverrides === undefined ? {} : { primaryRoleOverrides }),
       ...(job?.modelOverride === undefined
         ? {}
         : { mainModelOverride: job.modelOverride }),

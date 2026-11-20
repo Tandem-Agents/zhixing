@@ -29,6 +29,7 @@ export interface TerminalInformationOptions {
   /** Undefined while disconnected; invalidate on every connection/context change. */
   readonly controller: () => TerminalInformationController | undefined;
   readonly getPrimaryModel: () => RuntimePrimaryModelDisplayProjection;
+  readonly refreshPrimaryModel?: () => Promise<void>;
   readonly logs: Pick<LogRpcClient, 'status' | 'applyPolicy'>;
   readonly signal: AbortSignal;
   readonly choose: TerminalSelectionPort;
@@ -75,7 +76,13 @@ export class TerminalInformationCommands {
     try {
       let lines: readonly string[] = [], summary: TerminalSummary | readonly TerminalSummary[] | undefined;
       scope.assertCurrent();
-      if (name === 'model') lines = informationModelLines(this.options.getPrimaryModel());
+      if (name === 'model') {
+        if (this.options.refreshPrimaryModel) {
+          await this.options.refreshPrimaryModel().catch(() => {});
+          scope.assertCurrent();
+        }
+        lines = informationModelLines(this.options.getPrimaryModel());
+      }
       else if (name === 'usage') {
         const view = await controller.usage(); scope.assertCurrent(); summary = informationUsageSummary(view);
       } else if (name === 'context') {

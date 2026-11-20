@@ -33,6 +33,7 @@ export interface SessionMeta {
   baseRevision: number;
   name?: string;
   sceneId?: string;
+  modelSelection?: import("./foundation.js").SessionModelSelection;
   turnCount: number;
   lastActiveAt: IsoTime;
 }
@@ -61,7 +62,11 @@ export type SessionControlMutation =
     }
   | {
       kind: "session-meta";
-      patch: { name?: string; viewLayerState?: string };
+      patch: {
+        name?: string;
+        viewLayerState?: string;
+        modelSelection?: import("./foundation.js").SessionModelSelection;
+      };
     }
   | { kind: "window-op"; op: "clear" | "compact" }
   | { kind: "conversation-delete" };

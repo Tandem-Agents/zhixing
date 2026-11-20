@@ -130,8 +130,20 @@ export async function startTextSession(home: string, configPath: string, options
       const workscene = new RpcWorksceneFacade(connection);
       const management = new RpcManagementFacade(connection);
       const scheduler = new RpcSchedulerFacade({ connection });
-      const local = new ReplLocalView({ management,
-        configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath })) });
+      const local = new ReplLocalView({
+        management,
+        currentConversationId: () => controller?.current.conversationId,
+        currentSessionMode: () => controller?.current.mode.kind === 'workscene' ? 'workscene' : 'normal',
+        resolveSessionModelSelection: async conversationId =>
+          (await conversation.getModelSelection(conversationId)).modelSelection,
+        resolveModelCatalog: async () => {
+          const { ModelCatalogManager } = await import('@zhixing-ai/providers/configuration');
+          const manager = new ModelCatalogManager({ homeDir: home });
+          await manager.initialize();
+          return manager.port();
+        },
+        configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath })),
+      });
       const choose = createTextSelection(output);
       const display = createTextSelection(output, { readOnly: true });
       const present = async (value: { title: string; message: string; error?: boolean }): Promise<void> => {
@@ -205,13 +217,19 @@ export async function startTextSession(home: string, configPath: string, options
         createScene: async () => { output.line('新建工作场景需要交互确认，请在交互终端继续。'); return undefined; },
         deleting: () => () => {}, deletedCurrent: requestExit });
       information = new TerminalInformationCommands({ controller: current, signal: lifetime.signal, choose: display,
-        getPrimaryModel: () => local.primaryModel, logs: management.logs(), publish: present });
+        getPrimaryModel: () => local.primaryModel,
+        refreshPrimaryModel: async () => { await local.refresh(); },
+        logs: management.logs(), publish: present });
       decision = new TerminalDecisionCommands({ controller: current, management, signal: lifetime.signal, choose: display,
         publish: present, resumeRubric: async () => output.line('任务保持待确认，请在交互终端继续。') });
       tasks = new TerminalTasks({ controller: current, conversation, scheduler, signal: lifetime.signal, choose: display,
         publish: present, changed: () => {} });
       off.push(conversation.onChanged(change => {
         tasks!.apply(change);
+        if (change.change === 'modelSelection' && change.conversationId === activeController.current.conversationId) {
+          void local.refresh().catch(() => {});
+          return;
+        }
         const reaction = activeController.applySessionChanged(change);
         if (reaction.kind === 'ignored') return;
         if (reaction.kind === 'deleted') {

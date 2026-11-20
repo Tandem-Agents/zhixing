@@ -13,6 +13,15 @@ export type {
 } from "../types/distributed.js";
 
 export type { Message } from "../types/messages.js";
+export type {
+  CrossDeviceModelSelectionIntent,
+  ModelAdapterId,
+  ModelConnectionReadinessDescriptor,
+  ModelRoleId,
+  ModelSelectionParams,
+  SessionModelSelection,
+  ThinkingConfig,
+} from "../types/llm.js";
 export type { UserTurnInput } from "../types/user-input.js";
 export type { AgentYield } from "../loop/types.js";
 export type { TurnOrigin } from "../types/tools.js";

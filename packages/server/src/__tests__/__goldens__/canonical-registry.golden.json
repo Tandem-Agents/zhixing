@@ -123,7 +123,15 @@
         "requiresAuth": true
       },
       {
+        "name": "server.apply-model-configuration",
+        "requiresAuth": true
+      },
+      {
         "name": "server.info",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.model-catalog",
         "requiresAuth": true
       },
       {
@@ -191,6 +199,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.getModelSelection",
+        "requiresAuth": true
+      },
+      {
         "name": "session.history",
         "requiresAuth": true
       },
@@ -228,6 +240,10 @@
       },
       {
         "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.setModelSelection",
         "requiresAuth": true
       },
       {
@@ -433,7 +449,15 @@
         "requiresAuth": true
       },
       {
+        "name": "server.apply-model-configuration",
+        "requiresAuth": true
+      },
+      {
         "name": "server.info",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.model-catalog",
         "requiresAuth": true
       },
       {
@@ -501,6 +525,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.getModelSelection",
+        "requiresAuth": true
+      },
+      {
         "name": "session.history",
         "requiresAuth": true
       },
@@ -538,6 +566,10 @@
       },
       {
         "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.setModelSelection",
         "requiresAuth": true
       },
       {
@@ -743,7 +775,15 @@
         "requiresAuth": true
       },
       {
+        "name": "server.apply-model-configuration",
+        "requiresAuth": true
+      },
+      {
         "name": "server.info",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.model-catalog",
         "requiresAuth": true
       },
       {
@@ -811,6 +851,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.getModelSelection",
+        "requiresAuth": true
+      },
+      {
         "name": "session.history",
         "requiresAuth": true
       },
@@ -848,6 +892,10 @@
       },
       {
         "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.setModelSelection",
         "requiresAuth": true
       },
       {
@@ -1053,7 +1101,15 @@
         "requiresAuth": true
       },
       {
+        "name": "server.apply-model-configuration",
+        "requiresAuth": true
+      },
+      {
         "name": "server.info",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.model-catalog",
         "requiresAuth": true
       },
       {
@@ -1121,6 +1177,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.getModelSelection",
+        "requiresAuth": true
+      },
+      {
         "name": "session.history",
         "requiresAuth": true
       },
@@ -1158,6 +1218,10 @@
       },
       {
         "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.setModelSelection",
         "requiresAuth": true
       },
       {
@@ -1368,6 +1432,7 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
+          "cleanup:anchor-host:runtime:modelRuntimePort.dispose",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
@@ -1462,7 +1527,9 @@
           "rpc:schedule.list",
           "rpc:schedule.run",
           "rpc:schedule.update",
+          "rpc:server.apply-model-configuration",
           "rpc:server.info",
+          "rpc:server.model-catalog",
           "rpc:server.shutdown",
           "rpc:server.uninstall.begin",
           "rpc:server.uninstall.cancel",
@@ -1479,6 +1546,7 @@
           "rpc:session.compact",
           "rpc:session.contextBudget",
           "rpc:session.delete",
+          "rpc:session.getModelSelection",
           "rpc:session.history",
           "rpc:session.inputReceipt",
           "rpc:session.list",
@@ -1489,6 +1557,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.setModelSelection",
           "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
@@ -1581,6 +1650,7 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
+          "cleanup:anchor-host:runtime:modelRuntimePort.dispose",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
@@ -1675,7 +1745,9 @@
           "rpc:schedule.list",
           "rpc:schedule.run",
           "rpc:schedule.update",
+          "rpc:server.apply-model-configuration",
           "rpc:server.info",
+          "rpc:server.model-catalog",
           "rpc:server.shutdown",
           "rpc:server.uninstall.begin",
           "rpc:server.uninstall.cancel",
@@ -1692,6 +1764,7 @@
           "rpc:session.compact",
           "rpc:session.contextBudget",
           "rpc:session.delete",
+          "rpc:session.getModelSelection",
           "rpc:session.history",
           "rpc:session.inputReceipt",
           "rpc:session.list",
@@ -1702,6 +1775,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.setModelSelection",
           "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
@@ -1791,6 +1865,7 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
+          "cleanup:anchor-host:runtime:modelRuntimePort.dispose",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
@@ -1873,7 +1948,9 @@
           "rpc:schedule.list",
           "rpc:schedule.run",
           "rpc:schedule.update",
+          "rpc:server.apply-model-configuration",
           "rpc:server.info",
+          "rpc:server.model-catalog",
           "rpc:server.shutdown",
           "rpc:server.uninstall.begin",
           "rpc:server.uninstall.cancel",
@@ -1890,6 +1967,7 @@
           "rpc:session.compact",
           "rpc:session.contextBudget",
           "rpc:session.delete",
+          "rpc:session.getModelSelection",
           "rpc:session.history",
           "rpc:session.inputReceipt",
           "rpc:session.list",
@@ -1900,6 +1978,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.setModelSelection",
           "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
@@ -1976,6 +2055,7 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
+          "cleanup:anchor-host:runtime:modelRuntimePort.dispose",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:startupHistoryPrefetch.close",
           "cleanup:anchor-host:server:hostShell.stop",
@@ -2058,7 +2138,9 @@
           "rpc:schedule.list",
           "rpc:schedule.run",
           "rpc:schedule.update",
+          "rpc:server.apply-model-configuration",
           "rpc:server.info",
+          "rpc:server.model-catalog",
           "rpc:server.shutdown",
           "rpc:server.uninstall.begin",
           "rpc:server.uninstall.cancel",
@@ -2075,6 +2157,7 @@
           "rpc:session.compact",
           "rpc:session.contextBudget",
           "rpc:session.delete",
+          "rpc:session.getModelSelection",
           "rpc:session.history",
           "rpc:session.inputReceipt",
           "rpc:session.list",
@@ -2085,6 +2168,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.setModelSelection",
           "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
@@ -2694,6 +2778,17 @@
         "id": "meshRuntime.stop",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:meshRuntime.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
+        "id": "modelRuntimePort.dispose",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:modelRuntimePort.dispose",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -3652,12 +3747,30 @@
         }
       },
       {
+        "name": "server.apply-model-configuration",
+        "requiresAuth": true,
+        "key": "rpc:server.apply-model-configuration",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
         "name": "server.info",
         "requiresAuth": true,
         "key": "rpc:server.info",
         "category": "rpc",
         "target": {
           "rowId": "status-read"
+        }
+      },
+      {
+        "name": "server.model-catalog",
+        "requiresAuth": true,
+        "key": "rpc:server.model-catalog",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
         }
       },
       {
@@ -3805,6 +3918,15 @@
         }
       },
       {
+        "name": "session.getModelSelection",
+        "requiresAuth": true,
+        "key": "rpc:session.getModelSelection",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
         "name": "session.history",
         "requiresAuth": true,
         "key": "rpc:session.history",
@@ -3892,6 +4014,15 @@
         "category": "rpc",
         "target": {
           "rowId": "session-send"
+        }
+      },
+      {
+        "name": "session.setModelSelection",
+        "requiresAuth": true,
+        "key": "rpc:session.setModelSelection",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-metadata"
         }
       },
       {

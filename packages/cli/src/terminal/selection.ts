@@ -3,7 +3,23 @@ import type { SelectionRequest, SelectionResult } from '../tui/selection/types.j
 
 export interface TerminalSelectionResponse { readonly itemId: string; readonly input?: string; readonly cancelCause?: TerminalSelectionCancelCause }
 export type TerminalSelectionPage = Omit<TerminalView, 'generation' | 'requestId'>;
-export type TerminalSelectionPort = (page: TerminalSelectionPage) => Promise<TerminalSelectionResponse | undefined>;
+export interface TerminalSelectionLiveHandle {
+  isActive(): boolean;
+  update(page: TerminalSelectionPage): Promise<boolean>;
+}
+export interface TerminalSelectionOptions {
+  readonly signal?: AbortSignal;
+  readonly onActive?: (handle: TerminalSelectionLiveHandle) => void;
+}
+export type TerminalSelectionPort = (
+  page: TerminalSelectionPage,
+  signalOrOptions?: AbortSignal | TerminalSelectionOptions,
+) => Promise<TerminalSelectionResponse | undefined>;
+export interface ChooseTerminalSelectionOptions<T extends string> {
+  readonly subscribe?: (
+    onUpdate: (nextRequest: SelectionRequest<T>, onDisplayed?: () => void) => Promise<boolean>,
+  ) => () => void;
+}
 
 export function isSelectionCancelCause(value: unknown): value is TerminalSelectionCancelCause {
   return value === 'escape' || value === 'ctrl-c' || value === 'ctrl-d' || value === 'aborted';
@@ -64,9 +80,21 @@ function cancellation(response: TerminalSelectionResponse | undefined): Extract<
   return undefined;
 }
 
-/** Undefined remains the noninteractive port's safe dismissal. Inner Escape
- * returns to options; Ctrl+C/D or an invalidated request ends the interaction. */
-export async function chooseTerminalSelection<T extends string>(request: SelectionRequest<T>, choose: TerminalSelectionPort): Promise<SelectionResult<T> | undefined> {
+function buildSelectState<T extends string>(
+  request: SelectionRequest<T>,
+  currentPage: number,
+  currentActive: SelectionRequest<T>['options'][number] | undefined,
+):
+  | {
+      readonly ok: true;
+      readonly summaries: readonly TerminalSummary[];
+      readonly body: readonly string[];
+      readonly pages: number;
+      readonly page: number;
+      readonly active: SelectionRequest<T>['options'][number] | undefined;
+      readonly view: TerminalSelectionPage;
+    }
+  | { readonly ok: false } {
   const allText = [request.title, ...(request.body ?? []), ...(request.details?.body ?? []), ...request.options.flatMap(option =>
     [option.label, option.description ?? '', ...(option.details?.body ?? []), ...(option.confirm?.body ?? [])])];
   // 信息内容可以是一页或多页；正文文字与它二选一
@@ -74,88 +102,192 @@ export async function chooseTerminalSelection<T extends string>(request: Selecti
   if (summaries.length && request.body?.length) throw Error('terminal-selection-summary');
   const summaryBytes = summaries.reduce((bytes, summary) => bytes + Buffer.byteLength(JSON.stringify(summary)), 0);
   if (allText.reduce((bytes, text) => bytes + Buffer.byteLength(text) + 64, summaryBytes) > 2 * 1024 * 1024 || request.options.length > 32) {
-    await choose({ kind: 'selection', title: '无法完整展示此请求', message: '内容超过当前安全展示容量，确认已禁用。可返回并保留待处理请求。', choices: [{ id: 'return', label: '返回' }] });
-    return;
+    return { ok: false };
   }
   if (request.initialValue !== undefined && !request.options.some(option => option.value === request.initialValue && !option.disabled)) throw Error('terminal-selection-initial');
   const body = request.body ?? [];
+  const pages = summaries.length || pageCount(body);
+  const page = Math.min(Math.max(0, currentPage), Math.max(0, pages - 1));
+  const active =
+    (currentActive && request.options.find(option => option.value === currentActive.value && !option.disabled)) ??
+    request.options.find(option => option.value === request.initialValue && !option.disabled) ??
+    request.options.find(option => !option.disabled);
+  const view: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'select', title: summaries.length > 1 ? `${request.title}（${page + 1}/${pages}）` : request.title,
+    ...(active ? { initialItemId: `option:${active.value}` } : {}),
+    ...(request.details ? { detailsActionId: 'request-details' } : {}),
+    // 信息页按页给出结构化内容，与正文文字二选一
+    ...(summaries.length ? { summary: summaries[page] } : { message: pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}）` : '') }),
+    choices: [
+      ...request.options.map(option => ({ id: `option:${option.value}`, label: option.label, detail: option.description, disabled: option.disabled, danger: option.tone === 'danger', hotkey: option.hotkey,
+        ...(option.details || request.details ? { detailsActionId: `details:${option.value}` } : {}) })),
+      ...(page ? [{ id: 'previous', label: summaries.length ? '上一页' : '上一页正文' }] : []),
+      ...(page + 1 < pages ? [{ id: 'next', label: summaries.length ? '下一页' : '下一页正文' }] : []),
+      ...(request.details ? [{ id: 'details', label: request.details.title ?? '查看详情' }] : []),
+    ] };
+  terminalSelectionActions(view);
+  // 整帧核算：视图连同信封不超过通道帧上限；超出时说明无法完整展示，不让超大帧把控制通道关掉
+  if (Buffer.byteLength(JSON.stringify(view)) + TERMINAL_VIEW_ENVELOPE_BYTES > TERMINAL_LIMITS.frameBytes) {
+    return { ok: false };
+  }
+  return { ok: true, summaries, body, pages, page, active, view };
+}
+
+/** Undefined remains the noninteractive port's safe dismissal. Inner Escape
+ * returns to options; Ctrl+C/D or an invalidated request ends the interaction. */
+export async function chooseTerminalSelection<T extends string>(
+  request: SelectionRequest<T>,
+  choose: TerminalSelectionPort,
+  options?: ChooseTerminalSelectionOptions<T>,
+): Promise<SelectionResult<T> | undefined> {
+  let currentRequest = request;
+  let pendingUpdate: { readonly request: SelectionRequest<T>; readonly onDisplayed?: () => void } | undefined;
+  let activeHandle: TerminalSelectionLiveHandle | undefined;
+  let disposed = false;
   let page = 0;
-  let active = request.options.find(option => option.value === request.initialValue && !option.disabled) ?? request.options.find(option => !option.disabled);
-  for (;;) {
-    const pages = summaries.length || pageCount(body);
-    const view: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'select', title: summaries.length > 1 ? `${request.title}（${page + 1}/${pages}）` : request.title,
-      ...(active ? { initialItemId: `option:${active.value}` } : {}),
-      ...(request.details ? { detailsActionId: 'request-details' } : {}),
-      // 信息页按页给出结构化内容，与正文文字二选一
-      ...(summaries.length ? { summary: summaries[page] } : { message: pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}）` : '') }),
-      choices: [
-        ...request.options.map(option => ({ id: `option:${option.value}`, label: option.label, detail: option.description, disabled: option.disabled, danger: option.tone === 'danger', hotkey: option.hotkey,
-          ...(option.details || request.details ? { detailsActionId: `details:${option.value}` } : {}) })),
-        ...(page ? [{ id: 'previous', label: summaries.length ? '上一页' : '上一页正文' }] : []),
-        ...(page + 1 < pages ? [{ id: 'next', label: summaries.length ? '下一页' : '下一页正文' }] : []),
-        ...(request.details ? [{ id: 'details', label: request.details.title ?? '查看详情' }] : []),
-      ] };
-    terminalSelectionActions(view);
-    // 整帧核算：视图连同信封不超过通道帧上限；超出时说明无法完整展示，不让超大帧把控制通道关掉
-    if (Buffer.byteLength(JSON.stringify(view)) + TERMINAL_VIEW_ENVELOPE_BYTES > TERMINAL_LIMITS.frameBytes) {
-      await choose({ kind: 'selection', title: '无法完整展示此请求', message: '内容超过当前安全展示容量，确认已禁用。可返回并保留待处理请求。', choices: [{ id: 'return', label: '返回' }] });
-      return;
-    }
-    const response = await choose(view);
-    if (!response) return;
-    const cancelled = cancellation(response); if (cancelled) return cancelled;
-    // Legacy/noninteractive ports may still represent dismissal with return.
-    if (response.itemId === 'return') return { kind: 'cancelled', cause: 'escape' };
-    if (response.itemId === 'previous' && page > 0) { page--; continue; }
-    if (response.itemId === 'next' && page + 1 < pages) { page++; continue; }
-    const detailOption = request.options.find(option => !option.disabled && `details:${option.value}` === response.itemId);
-    const detail = detailOption ? detailOption.details ?? request.details : ['details', 'request-details'].includes(response.itemId) ? request.details : undefined;
-    if (detail) {
-      if (detailOption) active = detailOption;
-      const outcome = await details(detail.title ?? detailOption?.label ?? '详情', detail.body, choose);
-      if (outcome && outcome.cause !== 'escape') return outcome;
-      continue;
-    }
-    const option = request.options.find(candidate => `option:${candidate.value}` === response.itemId && !candidate.disabled);
-    if (!option) continue;
-    active = option;
-    if (option.confirm) {
-      const confirmed = await choose({ kind: 'selection', selectionLayer: 'confirm', initialItemId: 'confirm', title: option.confirm.title, message: option.confirm.body?.join('\n'),
-        choices: [{ id: 'back', label: option.confirm.cancelLabel ?? '返回' }, { id: 'confirm', label: option.confirm.confirmLabel ?? '确认', danger: true }] });
-      const cancelled = cancellation(confirmed); if (cancelled && cancelled.cause !== 'escape') return cancelled;
-      if (!confirmed) return;
-      if (cancelled || confirmed.itemId !== 'confirm') continue;
-    }
-    if (option.input) {
-      // 单字段页：Enter 提交、Esc 返回选项列表。有正文上下文时保留待决标题与当前页有界摘要；不允许空值时空提交留在输入层说明原因
-      const hasBody = !summaries.length && body.length > 0;
-      const actionLabel = option.label.replace(/(?:\.\.\.|…)+$/u, '').trim();
-      const inputTitle = hasBody && request.title && actionLabel && request.title !== actionLabel
-        ? `${request.title} · ${actionLabel}` : option.label;
-      const bodyContext = hasBody ? pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}，按 Esc 返回可翻页）` : '') : '';
-      const inputMessage = hasBody ? [bodyContext, option.description].filter(Boolean).join('\n\n') : option.description;
-      let value = '', error: string | undefined, entered: TerminalSelectionResponse | undefined;
-      for (;;) {
-        const inputView: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'input', title: inputTitle,
-          ...(inputMessage !== undefined ? { message: inputMessage } : {}),
-          field: { id: 'selection-input', label: option.input.placeholder, value, secret: false, ...(error ? { error } : {}) },
-          fieldSubmit: { id: 'submit', label: request.submitLabel ?? '提交说明' }, cancelLabel: '返回' };
-        terminalSelectionActions(inputView);
-        if (Buffer.byteLength(JSON.stringify(inputView)) + TERMINAL_VIEW_ENVELOPE_BYTES > TERMINAL_LIMITS.frameBytes) {
-          entered = await choose({ kind: 'selection', selectionLayer: 'confirm', initialItemId: 'return', title: '无法完整展示此请求',
-            message: '内容超过当前安全展示容量，补充输入已禁用。可返回选择列表继续处理。', choices: [{ id: 'return', label: '返回' }] });
-          break;
-        }
-        entered = await choose(inputView);
-        if (!entered || cancellation(entered) || entered.itemId !== 'submit') break;
-        if (!option.input.allowEmpty && !entered.input?.trim()) { value = entered.input ?? ''; error = '请填写说明后再提交。'; continue; }
-        return { kind: 'selected', value: option.value, input: entered.input ?? '' };
+  let active: SelectionRequest<T>['options'][number] | undefined;
+
+  const initialBuilt = buildSelectState(currentRequest, page, undefined);
+  if (!initialBuilt.ok) {
+    await choose({ kind: 'selection', title: '无法完整展示此请求', message: '内容超过当前安全展示容量，确认已禁用。可返回并保留待处理请求。', choices: [{ id: 'return', label: '返回' }] });
+    return;
+  }
+  active = initialBuilt.active;
+
+  let updateQueue = Promise.resolve();
+  const applyLiveUpdate = (
+    nextRequest: SelectionRequest<T>,
+    onDisplayed?: () => void,
+  ): Promise<boolean> => {
+    let applied = false;
+    const step = updateQueue.then(async () => {
+      if (disposed) return;
+      const handle = activeHandle;
+      if (!handle) {
+        pendingUpdate = { request: nextRequest, onDisplayed };
+        return;
       }
-      const cancelled = cancellation(entered); if (cancelled && cancelled.cause !== 'escape') return cancelled;
-      if (!entered) return;
-      continue;
+      const built = buildSelectState(nextRequest, page, active);
+      if (!built.ok || !handle.isActive()) return;
+      // 同步原子切换：先校验 handle.isActive()，在同一事件循环轮次内同时更新 currentRequest 与底层 entry.allowed
+      currentRequest = nextRequest;
+      page = built.page;
+      active = built.active;
+      applied = await handle.update(built.view);
+      if (applied) {
+        onDisplayed?.();
+      }
+    });
+    updateQueue = step.catch(() => {});
+    return step.then(() => applied);
+  };
+
+  const unsubscribe = options?.subscribe?.(applyLiveUpdate);
+  try {
+    for (;;) {
+      let pendingDisplayed: (() => void) | undefined;
+      if (pendingUpdate) {
+        const next = pendingUpdate;
+        pendingUpdate = undefined;
+        const checked = buildSelectState(next.request, page, active);
+        if (checked.ok) {
+          currentRequest = next.request;
+          page = checked.page;
+          active = checked.active;
+          pendingDisplayed = next.onDisplayed;
+        }
+      }
+      const built = buildSelectState(currentRequest, page, active);
+      if (!built.ok) {
+        await choose({ kind: 'selection', title: '无法完整展示此请求', message: '内容超过当前安全展示容量，确认已禁用。可返回并保留待处理请求。', choices: [{ id: 'return', label: '返回' }] });
+        return;
+      }
+      page = built.page;
+      active = built.active;
+
+      let response: TerminalSelectionResponse | undefined;
+      try {
+        response = options?.subscribe
+          ? await choose(built.view, {
+              onActive: (handle) => {
+                if (disposed) return;
+                activeHandle = handle;
+                pendingDisplayed?.();
+                pendingDisplayed = undefined;
+                if (pendingUpdate) {
+                  const queued = pendingUpdate;
+                  pendingUpdate = undefined;
+                  void applyLiveUpdate(queued.request, queued.onDisplayed);
+                }
+              },
+            })
+          : await choose(built.view);
+      } finally {
+        activeHandle = undefined;
+      }
+
+      if (!response) return;
+      const cancelled = cancellation(response); if (cancelled) return cancelled;
+      // Legacy/noninteractive ports may still represent dismissal with return.
+      if (response.itemId === 'return') return { kind: 'cancelled', cause: 'escape' };
+      const req = currentRequest;
+      const summaries: readonly TerminalSummary[] = req.summary === undefined ? [] : Array.isArray(req.summary) ? req.summary : [req.summary as TerminalSummary];
+      const body = req.body ?? [];
+      const pages = summaries.length || pageCount(body);
+      if (response.itemId === 'previous' && page > 0) { page--; continue; }
+      if (response.itemId === 'next' && page + 1 < pages) { page++; continue; }
+      const detailOption = req.options.find(option => !option.disabled && `details:${option.value}` === response.itemId);
+      const detail = detailOption ? detailOption.details ?? req.details : ['details', 'request-details'].includes(response.itemId) ? req.details : undefined;
+      if (detail) {
+        if (detailOption) active = detailOption;
+        const outcome = await details(detail.title ?? detailOption?.label ?? '详情', detail.body, choose);
+        if (outcome && outcome.cause !== 'escape') return outcome;
+        continue;
+      }
+      const option = req.options.find(candidate => `option:${candidate.value}` === response.itemId && !candidate.disabled);
+      if (!option) continue;
+      active = option;
+      if (option.confirm) {
+        const confirmed = await choose({ kind: 'selection', selectionLayer: 'confirm', initialItemId: 'confirm', title: option.confirm.title, message: option.confirm.body?.join('\n'),
+          choices: [{ id: 'back', label: option.confirm.cancelLabel ?? '返回' }, { id: 'confirm', label: option.confirm.confirmLabel ?? '确认', danger: true }] });
+        const cancelled = cancellation(confirmed); if (cancelled && cancelled.cause !== 'escape') return cancelled;
+        if (!confirmed) return;
+        if (cancelled || confirmed.itemId !== 'confirm') continue;
+      }
+      if (option.input) {
+        // 单字段页：Enter 提交、Esc 返回选项列表。有正文上下文时保留待决标题与当前页有界摘要；不允许空值时空提交留在输入层说明原因
+        const hasBody = !summaries.length && body.length > 0;
+        const actionLabel = option.label.replace(/(?:\.\.\.|…)+$/u, '').trim();
+        const inputTitle = hasBody && req.title && actionLabel && req.title !== actionLabel
+          ? `${req.title} · ${actionLabel}` : option.label;
+        const bodyContext = hasBody ? pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}，按 Esc 返回可翻页）` : '') : '';
+        const inputMessage = hasBody ? [bodyContext, option.description].filter(Boolean).join('\n\n') : option.description;
+        let value = '', error: string | undefined, entered: TerminalSelectionResponse | undefined;
+        for (;;) {
+          const inputView: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'input', title: inputTitle,
+            ...(inputMessage !== undefined ? { message: inputMessage } : {}),
+            field: { id: 'selection-input', label: option.input.placeholder, value, secret: false, ...(error ? { error } : {}) },
+            fieldSubmit: { id: 'submit', label: req.submitLabel ?? '提交说明' }, cancelLabel: '返回' };
+          terminalSelectionActions(inputView);
+          if (Buffer.byteLength(JSON.stringify(inputView)) + TERMINAL_VIEW_ENVELOPE_BYTES > TERMINAL_LIMITS.frameBytes) {
+            entered = await choose({ kind: 'selection', selectionLayer: 'confirm', initialItemId: 'return', title: '无法完整展示此请求',
+              message: '内容超过当前安全展示容量，补充输入已禁用。可返回选择列表继续处理。', choices: [{ id: 'return', label: '返回' }] });
+            break;
+          }
+          entered = await choose(inputView);
+          if (!entered || cancellation(entered) || entered.itemId !== 'submit') break;
+          if (!option.input.allowEmpty && !entered.input?.trim()) { value = entered.input ?? ''; error = '请填写说明后再提交。'; continue; }
+          return { kind: 'selected', value: option.value, input: entered.input ?? '' };
+        }
+        const cancelled = cancellation(entered); if (cancelled && cancelled.cause !== 'escape') return cancelled;
+        if (!entered) return;
+        continue;
+      }
+      return { kind: 'selected', value: option.value };
     }
-    return { kind: 'selected', value: option.value };
+  } finally {
+    disposed = true;
+    activeHandle = undefined;
+    unsubscribe?.();
   }
 }
 

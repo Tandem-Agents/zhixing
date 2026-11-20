@@ -402,13 +402,20 @@ function validateSessionWriteMutation(value: Record<string, unknown>): void {
   if (value.kind === "session-meta") {
     assertExactKeys(value, ["kind", "patch"], "session metadata mutation");
     assertPlainRecord(value.patch, "session metadata patch");
-    assertAllowedKeys(value.patch, ["name", "viewLayerState"], "session metadata patch");
+    assertAllowedKeys(
+      value.patch,
+      ["name", "viewLayerState", "modelSelection"],
+      "session metadata patch",
+    );
     if (value.patch.name !== undefined) {
       assertNonEmptyString(value.patch.name, "session name");
     }
     if (value.patch.viewLayerState !== undefined &&
       typeof value.patch.viewLayerState !== "string") {
       throw new TypeError("session view-layer state must be text");
+    }
+    if (value.patch.modelSelection !== undefined) {
+      assertSessionModelSelection(value.patch.modelSelection);
     }
     return;
   }
@@ -421,6 +428,52 @@ function validateSessionWriteMutation(value: Record<string, unknown>): void {
     return;
   }
   throw new TypeError("session-write mutation is not supported by conversation authority");
+}
+
+function assertSessionModelSelection(value: unknown): void {
+  assertPlainRecord(value, "session model selection");
+  if (value.mode === "follow-default") {
+    assertExactKeys(value, ["mode"], "session model selection");
+    return;
+  }
+  if (value.mode !== "override") {
+    throw new TypeError("session model selection mode must be follow-default or override");
+  }
+  assertAllowedKeys(
+    value,
+    ["mode", "connectionId", "model", "params", "maxOutputPreference"],
+    "session model selection",
+  );
+  assertIdentifier(value.connectionId, "session model connectionId");
+  assertIdentifier(value.model, "session model id");
+  if (value.maxOutputPreference !== undefined) {
+    if (
+      typeof value.maxOutputPreference !== "number" ||
+      !Number.isSafeInteger(value.maxOutputPreference) ||
+      value.maxOutputPreference <= 0
+    ) {
+      throw new TypeError("session model maxOutputPreference must be a positive safe integer");
+    }
+  }
+  if (value.params !== undefined) {
+    assertPlainRecord(value.params, "session model params");
+    assertAllowedKeys(value.params, ["thinking"], "session model params");
+    if (value.params.thinking !== undefined) {
+      assertPlainRecord(value.params.thinking, "session model thinking");
+      const mode = value.params.thinking.mode;
+      if (mode === "off" || mode === "on") {
+        assertExactKeys(value.params.thinking, ["mode"], "session model thinking");
+      } else if (mode === "effort") {
+        assertExactKeys(value.params.thinking, ["mode", "effort"], "session model thinking");
+        assertNonEmptyString(value.params.thinking.effort, "session model thinking effort");
+      } else if (mode === "budget") {
+        assertExactKeys(value.params.thinking, ["mode", "budget"], "session model thinking");
+        assertNonNegativeInteger(value.params.thinking.budget, "session model thinking budget");
+      } else {
+        throw new TypeError("session model thinking mode is invalid");
+      }
+    }
+  }
 }
 
 function assertPlainRecord(

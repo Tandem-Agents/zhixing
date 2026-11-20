@@ -1,10 +1,13 @@
 import type {
+  ModelSelectionParams,
+  SessionModelSelection,
   ToolDefinition,
 } from "@zhixing-ai/core/types";
 import {
   assertKernelWindowPromptProjectionPort,
   type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
+  type KernelPrimaryRoleOverrides,
   type KernelSecurityExecutionFactory,
   type KernelWindowPromptProjectionPort,
   type KernelToolImplementationPort,
@@ -154,6 +157,8 @@ export function assertRuntimeToolProjection(
 export interface ConversationRuntimeProjection extends RuntimeProductProjection {
   readonly workspace?: string | null;
   readonly primaryRole: RuntimePrimaryRole;
+  readonly modelSelection?: SessionModelSelection;
+  readonly primaryRoleOverrides?: KernelPrimaryRoleOverrides;
   readonly profile: Readonly<RuntimeProfile>;
   readonly lifecycle?: readonly AgentRuntimeLifecycle[];
 }
@@ -161,6 +166,8 @@ export interface ConversationRuntimeProjection extends RuntimeProductProjection 
 export function createConversationRuntimeProjection(input: {
   readonly workspace?: string | null;
   readonly primaryRole: RuntimePrimaryRole;
+  readonly modelSelection?: SessionModelSelection;
+  readonly primaryRoleOverrides?: KernelPrimaryRoleOverrides;
   readonly profile: RuntimeProfile;
   readonly lifecycle?: readonly AgentRuntimeLifecycle[];
   readonly runtimeTools: RuntimeToolProjection;
@@ -178,11 +185,21 @@ export function createConversationRuntimeProjection(input: {
   const lifecycle = input.lifecycle
     ? Object.freeze([...input.lifecycle])
     : undefined;
+  const modelSelection =
+    input.modelSelection === undefined
+      ? undefined
+      : freezeSessionModelSelection(input.modelSelection);
+  const primaryRoleOverrides =
+    input.primaryRoleOverrides === undefined
+      ? undefined
+      : freezePrimaryRoleOverrides(input.primaryRoleOverrides);
   assertRuntimeToolProjection(input.runtimeTools);
   assertKernelWindowPromptProjectionPort(input.windowPrompt);
   return Object.freeze({
     ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
     primaryRole: input.primaryRole,
+    ...(modelSelection ? { modelSelection } : {}),
+    ...(primaryRoleOverrides ? { primaryRoleOverrides } : {}),
     profile,
     ...(lifecycle ? { lifecycle } : {}),
     runtimeTools: input.runtimeTools,
@@ -196,7 +213,9 @@ export function assertConversationRuntimeProjection(
 ): void {
   if (
     !projection ||
-    (projection.primaryRole !== "main" && projection.primaryRole !== "power") ||
+    (projection.primaryRole !== "main" &&
+      projection.primaryRole !== "light" &&
+      projection.primaryRole !== "power") ||
     (projection.workspace !== undefined &&
       projection.workspace !== null &&
       typeof projection.workspace !== "string") ||
@@ -206,8 +225,12 @@ export function assertConversationRuntimeProjection(
     !Object.isFrozen(projection) ||
     !Object.isFrozen(projection.profile) ||
     !Object.isFrozen(projection.profile.constraints) ||
-    !Object.isFrozen(projection.profile.enabledTools)
-    || (projection.lifecycle !== undefined &&
+    !Object.isFrozen(projection.profile.enabledTools) ||
+    (projection.modelSelection !== undefined &&
+      !isFrozenSessionModelSelection(projection.modelSelection)) ||
+    (projection.primaryRoleOverrides !== undefined &&
+      !isFrozenPrimaryRoleOverrides(projection.primaryRoleOverrides)) ||
+    (projection.lifecycle !== undefined &&
       (!Object.isFrozen(projection.lifecycle) ||
         projection.lifecycle.some(
           (entry) =>
@@ -224,4 +247,98 @@ export function assertConversationRuntimeProjection(
   ) {
     throw new TypeError("Conversation Security execution must be immutable");
   }
+}
+
+function freezeModelSelectionParams(
+  params: ModelSelectionParams,
+): ModelSelectionParams {
+  const thinking = params.thinking
+    ? Object.freeze({ ...params.thinking })
+    : undefined;
+  return Object.freeze({
+    ...(thinking ? { thinking } : {}),
+  });
+}
+
+function isFrozenModelSelectionParams(
+  params: ModelSelectionParams,
+): boolean {
+  if (!Object.isFrozen(params)) return false;
+  if (params.thinking !== undefined && !Object.isFrozen(params.thinking)) {
+    return false;
+  }
+  return true;
+}
+
+function freezePrimaryRoleOverrides(
+  overrides: KernelPrimaryRoleOverrides,
+): KernelPrimaryRoleOverrides {
+  const params =
+    overrides.params !== undefined
+      ? freezeModelSelectionParams(overrides.params)
+      : undefined;
+  return Object.freeze({
+    ...(params ? { params } : {}),
+    ...(overrides.maxOutputPreference !== undefined
+      ? { maxOutputPreference: overrides.maxOutputPreference }
+      : {}),
+  });
+}
+
+function isFrozenPrimaryRoleOverrides(
+  overrides: KernelPrimaryRoleOverrides,
+): boolean {
+  if (!overrides || !Object.isFrozen(overrides)) return false;
+  if (overrides.params !== undefined && !isFrozenModelSelectionParams(overrides.params)) {
+    return false;
+  }
+  if (
+    overrides.maxOutputPreference !== undefined &&
+    (!Number.isSafeInteger(overrides.maxOutputPreference) ||
+      overrides.maxOutputPreference <= 0)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function freezeSessionModelSelection(
+  selection: SessionModelSelection,
+): SessionModelSelection {
+  if (selection.mode === "follow-default") {
+    return Object.freeze({ mode: "follow-default" as const });
+  }
+  const params =
+    selection.params !== undefined
+      ? freezeModelSelectionParams(selection.params)
+      : undefined;
+  return Object.freeze({
+    mode: "override" as const,
+    connectionId: selection.connectionId,
+    model: selection.model,
+    ...(params ? { params } : {}),
+    ...(selection.maxOutputPreference !== undefined
+      ? { maxOutputPreference: selection.maxOutputPreference }
+      : {}),
+  });
+}
+
+function isFrozenSessionModelSelection(
+  selection: SessionModelSelection,
+): boolean {
+  if (!selection || !Object.isFrozen(selection)) return false;
+  if (selection.mode === "follow-default") return true;
+  if (selection.mode !== "override") return false;
+  if (
+    typeof selection.connectionId !== "string" ||
+    selection.connectionId.length === 0 ||
+    typeof selection.model !== "string" ||
+    selection.model.length === 0
+  ) {
+    return false;
+  }
+  if (selection.params !== undefined && !isFrozenModelSelectionParams(selection.params)) {
+    return false;
+  }
+  return true;
 }

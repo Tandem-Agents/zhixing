@@ -20,14 +20,29 @@ import type {
 } from "@zhixing-ai/core";
 import {
   coalesceUserMaterialTextBlocks,
+  isSameTrustedThinkingSource,
   type ContentBlock,
   type Message,
   type ToolSpec,
 } from "@zhixing-ai/core";
 import type { ResolvedProvider } from "../types.js";
-import { markRequestUndelivered } from "@zhixing-ai/core/resilience";
-import { deliveryFetch, newDelivery, provenUndelivered, withDelivery } from "./delivery-transport.js";
-import { buildAnthropicThinkingParam } from "./thinking-params.js";
+import {
+  createConnectionDeliveryFetch,
+  deliveryFetch,
+  newDelivery,
+  withDelivery,
+  type ConnectionDeliveryTransport,
+} from "./delivery-transport.js";
+import { markResponseStreamInterrupted } from "@zhixing-ai/core/resilience";
+import {
+  buildThinkingProtocolState,
+  collectBoundSecrets,
+  normalizeAdapterError,
+  resolveAdapterProvenance,
+  validateInboundThinkingProtocolState,
+  type AdapterProvenance,
+} from "./protocol-helpers.js";
+import { buildAnthropicThinkingRequestFields } from "./thinking-params.js";
 
 // ─── 内部类型 ───
 //
@@ -46,40 +61,69 @@ import { buildAnthropicThinkingParam } from "./thinking-params.js";
 type BlockState =
   | { type: "text" }
   | { type: "thinking"; signature: string }
+  | { type: "redacted_thinking"; data: string }
   | { type: "tool_use"; id: string; name: string; argsJson: string };
 
 // ─── 工厂函数 ───
 
 export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider {
+  const connectionTransport: ConnectionDeliveryTransport | undefined =
+    resolved.network !== undefined || resolved.networkProxy !== undefined
+      ? createConnectionDeliveryFetch({
+          proxyPolicy: resolved.network?.proxy ?? "inherit",
+          networkProxy: resolved.networkProxy,
+          allowPrivateOrigin: resolved.network?.allowPrivateOrigin,
+          confirmedOrigin: resolved.baseUrl,
+        })
+      : undefined;
+  const boundFetch = connectionTransport?.fetch ?? deliveryFetch;
+
   // SDK 在首次真正调用模型时才加载并构造，不进入宿主启动的模块图；加载失败下次重试。
   let client: Promise<Anthropic> | undefined;
   const connect = (): Promise<Anthropic> => {
-    client ??= import("@anthropic-ai/sdk").then(({ default: Anthropic }) => new Anthropic({
-      apiKey: resolved.apiKey,
-      baseURL: resolved.baseUrl || undefined,
-      // 重试只在 core 的 withRetry 一层：一次调用只发一次请求，界面显示的重试次数也是真实次数
-      maxRetries: 0,
-      // 受控传输按调用记账，只有整次调用都没送达才给错误打未送达标记（计量据此按 0 token 结算）
-      fetch: deliveryFetch,
-    }));
+    client ??= import("@anthropic-ai/sdk").then(({ default: Anthropic }) => {
+      const authMode = resolved.authMode ?? "api-key";
+      const customHeaders: Record<string, string | null> | undefined =
+        authMode === "none"
+          ? { "x-api-key": null }
+          : authMode === "header" && resolved.authHeaderName
+            ? { "x-api-key": null, [resolved.authHeaderName]: resolved.apiKey }
+            : undefined;
+      return new Anthropic({
+        apiKey: authMode === "api-key" ? resolved.apiKey : "not-used",
+        baseURL: resolved.baseUrl || undefined,
+        ...(customHeaders ? { defaultHeaders: customHeaders } : {}),
+        // 重试只在 core 的 withRetry 一层：一次调用只发一次请求，界面显示的重试次数也是真实次数
+        maxRetries: 0,
+        // 受控传输按调用记账，只有整次调用都没送达才给错误打未送达标记（计量据此按 0 token 结算）
+        fetch: boundFetch,
+      });
+    });
     client.catch(() => { client = undefined; });
     return client;
   };
 
-  // `LLMProvider.models[]` 直接复用 `resolved.declaredModels`——catalog 数据本身就是
-  // `ModelInfo` 形态，无需转换。catalog 之外的 model（如新发布尚未补 preset 的版本）走
-  // core/resolveModelInfo 的协议族默认（PROTOCOL_BUDGET_DEFAULTS["anthropic-messages"]）兜底。
+  const provenance = resolveAdapterProvenance(resolved, "anthropic-messages");
+  const boundSecrets = collectBoundSecrets(resolved);
 
   return {
     id: resolved.id,
+    protocol: "anthropic-messages",
+    sourceConnectionId: provenance.sourceConnectionId,
+    sourceOriginKey: provenance.sourceOriginKey,
+    appendOnlyTurnContext: false,
     models: resolved.declaredModels,
 
     async prepare(): Promise<void> {
       await connect();
     },
 
+    async close(): Promise<void> {
+      await connectionTransport?.close();
+    },
+
     async *chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
-      const messages = convertMessages(request.messages);
+      const messages = convertMessages(request.messages, provenance);
       const tools = request.tools ? convertTools(request.tools) : undefined;
 
       const params: Record<string, unknown> = {
@@ -111,11 +155,18 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
         params.tools = tools;
       }
 
-      // Extended thinking 原生参数（thinking{type:enabled,budget_tokens}）。
-      // 缺省 / 不适用形态 → 不传该参数 = 标准模式（安全兜底）。
-      const thinkingParam = buildAnthropicThinkingParam(request.thinking);
-      if (thinkingParam) {
-        params.thinking = thinkingParam;
+      // Extended thinking 原生参数：
+      // - Claude 4.7+ 使用 adaptive + output_config.effort（不再发送弃用的 enabled + budget_tokens）
+      // - 较早代际保留 thinking{type:enabled, budget_tokens}
+      const thinkingFields = buildAnthropicThinkingRequestFields(
+        request.thinking,
+        request.model,
+      );
+      if (thinkingFields.thinking) {
+        params.thinking = thinkingFields.thinking;
+      }
+      if (thinkingFields.output_config) {
+        params.output_config = thinkingFields.output_config;
       }
 
       applyCacheControlToLastUserMessage(messages);
@@ -124,6 +175,7 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
 
       let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
       let stopReason: StopReason = "end_turn";
+      let responseStreamStarted = false;
       const blocks = new Map<number, BlockState>();
 
       const delivery = newDelivery();
@@ -132,6 +184,7 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
           params as unknown as Anthropic.MessageCreateParamsStreaming,
           request.abortSignal ? { signal: request.abortSignal } : undefined,
         ));
+        responseStreamStarted = true;
 
         for await (const event of stream) {
           switch (event.type) {
@@ -147,6 +200,18 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               } else if (cb.type === "thinking") {
                 blocks.set(event.index, { type: "thinking", signature: "" });
                 yield { type: "thinking_block_start" };
+              } else if (cb.type === "redacted_thinking") {
+                const redactedData =
+                  typeof (cb as { data?: unknown }).data === "string"
+                    ? (cb as { data: string }).data
+                    : "";
+                if (redactedData) {
+                  blocks.set(event.index, {
+                    type: "redacted_thinking",
+                    data: redactedData,
+                  });
+                  yield { type: "thinking_block_start" };
+                }
               } else if (cb.type === "tool_use") {
                 blocks.set(event.index, {
                   type: "tool_use",
@@ -198,9 +263,53 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
             case "content_block_stop": {
               const block = blocks.get(event.index);
               if (block?.type === "thinking") {
+                const sig = block.signature || undefined;
+                const protocolState = buildThinkingProtocolState(provenance, request.model, {
+                  ...(sig ? { signature: sig } : {}),
+                });
+                const boundViolation = validateInboundThinkingProtocolState(protocolState);
+                if (boundViolation) {
+                  yield {
+                    type: "error",
+                    error: markResponseStreamInterrupted(
+                      normalizeAdapterError(
+                        new Error(`Anthropic Messages ${boundViolation}`),
+                        delivery,
+                        boundSecrets,
+                      ),
+                    ),
+                  };
+                  return;
+                }
                 yield {
                   type: "thinking_block_end",
-                  signature: block.signature || undefined,
+                  signature: sig,
+                  protocolState,
+                };
+              } else if (block?.type === "redacted_thinking") {
+                const protocolState = buildThinkingProtocolState(provenance, request.model, {
+                  opaqueStep: JSON.stringify({
+                    type: "redacted_thinking",
+                    data: block.data,
+                  }),
+                });
+                const boundViolation = validateInboundThinkingProtocolState(protocolState);
+                if (boundViolation) {
+                  yield {
+                    type: "error",
+                    error: markResponseStreamInterrupted(
+                      normalizeAdapterError(
+                        new Error(`Anthropic Messages ${boundViolation}`),
+                        delivery,
+                        boundSecrets,
+                      ),
+                    ),
+                  };
+                  return;
+                }
+                yield {
+                  type: "thinking_block_end",
+                  protocolState,
                 };
               } else if (block?.type === "tool_use") {
                 yield { type: "tool_call_end", id: block.id };
@@ -220,10 +329,26 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               break;
           }
         }
+        if (request.abortSignal?.aborted) {
+          yield {
+            type: "error",
+            error: normalizeAdapterError(
+              new DOMException("The operation was aborted.", "AbortError"),
+              delivery,
+              boundSecrets,
+            ),
+          };
+          return;
+        }
       } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        if (provenUndelivered(delivery)) markRequestUndelivered(error);
-        yield { type: "error", error };
+        const normalized = normalizeAdapterError(err, delivery, boundSecrets);
+        if (responseStreamStarted && !request.abortSignal?.aborted) {
+          markResponseStreamInterrupted(normalized);
+        }
+        yield {
+          type: "error",
+          error: normalized,
+        };
         return;
       }
 
@@ -243,20 +368,35 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
  */
 function convertMessages(
   messages: Message[],
+  provenance: AdapterProvenance,
 ): Anthropic.Messages.MessageParam[] {
-  return messages.map((msg) => ({
-    role: msg.role,
-    content: (
+  const converted: Anthropic.Messages.MessageParam[] = [];
+  for (const msg of messages) {
+    const sourceBlocks =
       msg.role === "user"
         ? coalesceUserMaterialTextBlocks(msg.content)
-        : msg.content
-    ).map(convertContentBlock),
-  }));
+        : msg.content;
+    const blocks: Anthropic.Messages.ContentBlockParam[] = [];
+    for (const block of sourceBlocks) {
+      const projected = convertContentBlock(block, provenance);
+      if (projected) {
+        blocks.push(projected);
+      }
+    }
+    if (blocks.length > 0) {
+      converted.push({
+        role: msg.role,
+        content: blocks,
+      });
+    }
+  }
+  return converted;
 }
 
 function convertContentBlock(
   block: ContentBlock,
-): Anthropic.Messages.ContentBlockParam {
+  provenance: AdapterProvenance,
+): Anthropic.Messages.ContentBlockParam | null {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
@@ -295,29 +435,40 @@ function convertContentBlock(
       // URL 图片不被 Anthropic 直接支持，降级为文本描述
       return { type: "text", text: `[Image: ${block.source.url}]` };
 
-    case "thinking":
-      // 含 signature → Anthropic 原生思考块,多轮**原样回传**(thinking +
-      // signature 字段必须与服务端返回逐字节一致,服务端解密校验,改写或缺失
-      // 会 400)。这是 Anthropic extended thinking 多轮对话的协议必要条件。
-      if (block.signature) {
+    case "thinking": {
+      // 设计 §2.3：必须先核对同一可信来源（sourceConnectionId + sourceOriginKey + protocol）；
+      // 跨连接、改地址、跨协议或来源不明旧记录绝不转发私有推理签名/不透明载荷，也不将其转为普通文本。
+      if (!isSameTrustedThinkingSource(block.protocolState, provenance)) {
+        return null;
+      }
+      const state = block.protocolState!;
+      if (state.opaqueStep) {
+        try {
+          const parsed = JSON.parse(state.opaqueStep) as {
+            type?: unknown;
+            data?: unknown;
+          };
+          if (parsed.type === "redacted_thinking" && typeof parsed.data === "string") {
+            return {
+              type: "redacted_thinking",
+              data: parsed.data,
+            };
+          }
+        } catch {
+          return null;
+        }
+      }
+      const sig = state.signature ?? block.signature;
+      if (sig) {
         return {
           type: "thinking",
           thinking: block.thinking,
-          signature: block.signature,
+          signature: sig,
         };
       }
-      // 无 signature → 跨 provider 续聊兜底,非 Anthropic 原生思考块:
-      //
-      // Message.content 是 provider-agnostic 类型,可能携带来自 OpenAI 兼容路径
-      // (DeepSeek v4-pro / Qwen-QwQ / Kimi-thinking 等)的 ThinkingBlock。当用户
-      // 在持久化对话里跨 provider 续聊或 main/light/power 路由分发到 anthropic
-      // 时,这些 block 会流到本 adapter。
-      //
-      // 选择降级为 text 而非抛错:
-      //   - 保留信息(thinking trace 转为普通文本,模型能读到推理痕迹)
-      //   - Anthropic 协议接受任意 text 块,无 signature 的 thinking 块直接传会被拒
-      //   - 与抛错 / 静默丢弃相比,降级是最稳健的内容保真方案
-      return { type: "text", text: block.thinking };
+      // 同来源无签名块（例如老记录）安全省略，不造假签名
+      return null;
+    }
   }
 }
 

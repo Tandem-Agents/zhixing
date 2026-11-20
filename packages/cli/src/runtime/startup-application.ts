@@ -10,11 +10,13 @@ import {
   ConfigSchemaError,
   CredentialsSchemaError,
   getGlobalConfigPath,
+  isLLMConfigV2,
   loadConfig,
 
   validateConfigSemantics,
   type CredentialStoreCoordinator,
   type ConfigSemanticIssue,
+  type PendingModelSecretRetirement,
   type ZhixingConfig,
   type ZhixingCredentials,
 } from "@zhixing-ai/providers/configuration";
@@ -79,7 +81,12 @@ export interface StartupApplicationOptions {
     readonly config: ZhixingConfig;
     readonly credentials: ZhixingCredentials;
     readonly configPath: string;
-    readonly save: (edit: { config: ZhixingConfig; credentials: ZhixingCredentials }) => Promise<unknown>;
+    readonly save: (edit: {
+      config: ZhixingConfig;
+      credentials: ZhixingCredentials;
+      modelRetirements?: readonly PendingModelSecretRetirement[];
+      removeLegacyModelCapabilityOverrides?: boolean;
+    }) => Promise<unknown>;
   }) => Promise<{ kind: "completed" | "cancelled" | "non-tty" }>;
   /** SecretStore 覆盖（测试或受管宿主注入）。 */
   secretStore?: SecretStorePort & CredentialStoreCoordinator;
@@ -156,7 +163,20 @@ export async function checkStartupConfiguration(
       homeDir: credentialsHomeDir, configPath, store: secretStore, records: options.records,
       processIdentityResolver: options.processIdentityResolver,
     });
-    const preparedCredentials = await readContinuing(() => configuration!.read(), options.signal, options.readContinuationMs);
+    const preparedCredentials = await readContinuing(
+      () => configuration!.read({ autoMigrate: true, settleRetirements: true }),
+      options.signal,
+      options.readContinuationMs,
+    );
+    if (preparedCredentials.migration?.status === "mismatch") {
+      return {
+        kind: "schema-error",
+        filePath: configPath,
+        message:
+          preparedCredentials.migration.reason ??
+          "公开配置已为 v2，但设备 SecretStore 清单缺少 modelConfigVersion=2；拒绝自动覆盖，请核对或经迁移修复入口处理。",
+      };
+    }
     credentials = preparedCredentials.credentials;
     config = preparedCredentials.config;
     credentialGeneration = preparedCredentials.generation;
@@ -183,7 +203,7 @@ export async function checkStartupConfiguration(
   // 2. 必要字段检测——按 mode 决定 sections
   const missingLabels: string[] = [];
 
-  const modelIssues = checkModel(config, { providers: credentials.providers });
+  const modelIssues = checkModel(config, projectRuntimeSecrets(credentials).providerCredentials);
   if (modelIssues.length > 0) {
     missingLabels.push(...modelIssues.map((i) => i.label));
   }
@@ -206,12 +226,37 @@ export async function checkStartupConfiguration(
   // 4. 缺失 + TTY → 跑编辑器
   const editorResult = await options.edit({
     config, credentials, configPath,
-    save: (result) => configuration.edit({ config, credentials }, result),
+    save: (result) =>
+      configuration.edit(
+        { config, credentials },
+        result,
+        {
+          ...(result.modelRetirements && result.modelRetirements.length > 0
+            ? { modelRetirements: result.modelRetirements }
+            : {}),
+          ...(result.removeLegacyModelCapabilityOverrides
+            ? { removeLegacyModelCapabilityOverrides: true }
+            : {}),
+          ...(isLLMConfigV2(result.config.llm) ? { forceModelConfigVersion2: true } : {}),
+        },
+      ),
   });
 
   if (editorResult.kind === "completed") {
     // reload 拿到落盘后的最新内容
-    const updatedCredentialSnapshot = await configuration.read();
+    const updatedCredentialSnapshot = await configuration.read({
+      autoMigrate: true,
+      settleRetirements: true,
+    });
+    if (updatedCredentialSnapshot.migration?.status === "mismatch") {
+      return {
+        kind: "schema-error",
+        filePath: configPath,
+        message:
+          updatedCredentialSnapshot.migration.reason ??
+          "公开配置已为 v2，但设备 SecretStore 清单缺少 modelConfigVersion=2；拒绝自动覆盖。",
+      };
+    }
     return {
       kind: "ready",
       configurationCompleted: true,

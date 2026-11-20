@@ -55,13 +55,15 @@ export async function readConversationReplayRecord(artifacts: ArtifactStore, ref
     if (content?.kind !== 'array') throw Error('Transcript message content is invalid');
     for (let b = 0; b < content.units; b++) {
       const blockKeys = [...keys, 'content', b], type = await value([...blockKeys, 'type'], 128);
-      const allowed = type === 'text' ? ['type', 'text'] : type === 'thinking' ? ['type', 'thinking', 'signature'] :
+      const allowed = type === 'text' ? ['type', 'text', 'material', 'protocolState'] : type === 'thinking' ? ['type', 'thinking', 'signature', 'protocolState'] :
         type === 'tool_result' ? ['type', 'content', 'toolUseId', 'isError', 'disposition'] : type === 'tool_use' ? ['type', 'id', 'name', 'input'] :
         type === 'image' ? ['type', 'source'] : [];
       const block: Record<string, unknown> = {};
+      let textNonEmpty = false;
       for (const node of await fields(blockKeys, allowed)) {
         if (['text', 'thinking', 'signature', 'content'].includes(node.field)) {
           if (node.kind !== 'string') throw Error('Transcript content must be a string');
+          if (node.field === 'text' && node.units > 0) textNonEmpty = true;
           block[node.field] = '';
         } else if (type === 'tool_use' && node.field === 'input') {
           if (node.kind !== 'object') throw Error('Transcript tool input must be an object');
@@ -69,7 +71,13 @@ export async function readConversationReplayRecord(artifacts: ArtifactStore, ref
         } else if (type === 'image' && node.field === 'source') {
           const sourceKeys = [...blockKeys, 'source'], sourceType = await value([...sourceKeys, 'type'], 128);
           block.source = { ...await strings(sourceKeys, sourceType === 'base64' ? ['type', 'mediaType', 'data'] : ['type', 'url']), type: sourceType };
+        } else if ((type === 'thinking' || type === 'text') && node.field === 'protocolState') {
+          // 协议私有状态有严格有界上限（单字段 <= 256 KiB），原值读出交由单一权威 validateMessage 校验
+          block.protocolState = await value([...blockKeys, 'protocolState'], 384 * 1024);
         } else block[node.field] = await value([...blockKeys, node.field], 4096);
+      }
+      if (type === 'text' && block.material !== undefined && textNonEmpty) {
+        block.text = 'x';
       }
       validateMessage({ ...base, content: [block] });
       if (b % 64 === 0) await new Promise<void>(setImmediate);

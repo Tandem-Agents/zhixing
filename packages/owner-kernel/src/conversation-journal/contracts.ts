@@ -496,6 +496,7 @@ export interface RunProjection {
   clearedThroughLsn: number;
   clearedThroughRevision?: number;
   sessionName?: string;
+  modelSelection?: import("@zhixing-ai/core/contracts").SessionModelSelection;
   lastActiveAt?: string;
   sessionMeta?: Extract<
     ConversationRunJournalRecord,

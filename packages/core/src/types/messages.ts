@@ -82,6 +82,175 @@ export interface TextBlock {
   type: "text";
   text: string;
   material?: TextFileMaterial;
+  /**
+   * 协议受控文本元状态（例如 OpenAI Responses assistant message 的 `phase` 与 `itemId`）。
+   * 仅由对应受控适配器写入，跨来源或跨协议回放时隔离，绝不猜造。
+   */
+  protocolState?: TextProtocolState;
+}
+
+const VALID_PROTOCOLS = new Set([
+  "openai-compatible",
+  "openai-responses",
+  "anthropic-messages",
+  "google-interactions",
+]);
+const CONTROL_CHAR_RE = /[\p{Cc}\u2028\u2029]/u;
+const MAX_PROVENANCE_ID_CHARS = 256;
+const MAX_SOURCE_ORIGIN_KEY_CHARS = 512;
+const MAX_PROTOCOL_SIGNATURE_CHARS = 65_536;
+export const MAX_PROTOCOL_STATE_OPAQUE_BYTES = 262_144;
+const MAX_PROTOCOL_OPAQUE_CHARS = MAX_PROTOCOL_STATE_OPAQUE_BYTES;
+
+function isPlainBoundedObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isBoundedIdentifierString(value: unknown, maxLen: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLen &&
+    !CONTROL_CHAR_RE.test(value)
+  );
+}
+
+/**
+ * 文本块的受控协议状态（目前用于 OpenAI Responses assistant message 的 `phase` / `itemId`）。
+ */
+export interface TextProtocolState {
+  readonly protocol: "openai-responses";
+  readonly sourceConnectionId: string;
+  readonly sourceOriginKey: string;
+  readonly sourceModel: string;
+  readonly phase?: "commentary" | "final_answer";
+  readonly itemId?: string;
+}
+
+const TEXT_PROTOCOL_STATE_ALLOWED_KEYS = new Set([
+  "protocol",
+  "sourceConnectionId",
+  "sourceOriginKey",
+  "sourceModel",
+  "phase",
+  "itemId",
+]);
+
+/** 文本块协议状态的严格封闭校验。 */
+export function isTextProtocolState(value: unknown): value is TextProtocolState {
+  if (!isPlainBoundedObject(value)) return false;
+  for (const key of Object.keys(value)) {
+    if (!TEXT_PROTOCOL_STATE_ALLOWED_KEYS.has(key)) return false;
+  }
+  if (value.protocol !== "openai-responses") return false;
+  if (!isBoundedIdentifierString(value.sourceConnectionId, MAX_PROVENANCE_ID_CHARS)) return false;
+  if (!isBoundedIdentifierString(value.sourceOriginKey, MAX_SOURCE_ORIGIN_KEY_CHARS)) return false;
+  if (!isBoundedIdentifierString(value.sourceModel, MAX_PROVENANCE_ID_CHARS)) return false;
+  if (
+    value.phase !== undefined &&
+    value.phase !== "commentary" &&
+    value.phase !== "final_answer"
+  ) {
+    return false;
+  }
+  if (
+    value.itemId !== undefined &&
+    !isBoundedIdentifierString(value.itemId, MAX_PROVENANCE_ID_CHARS)
+  ) {
+    return false;
+  }
+  return value.phase !== undefined || value.itemId !== undefined;
+}
+
+/**
+ * 思考块的有界协议私有推理状态（设计 §2.3）。
+ *
+ * 严格记录非秘密来源身份（`sourceConnectionId + sourceOriginKey`）、协议、型号与版本，
+ * 以及按协议保存的签名、加密推理项或不透明步骤载荷。来源不明的旧记录（缺失本字段）
+ * 一律按“来源不同”处理，绝不猜造签名或冒充同来源。
+ */
+export interface ThinkingProtocolState {
+  readonly protocol:
+    | "openai-compatible"
+    | "openai-responses"
+    | "anthropic-messages"
+    | "google-interactions";
+  readonly sourceConnectionId: string;
+  readonly sourceOriginKey: string;
+  readonly sourceModel: string;
+  readonly payloadVersion: number;
+  readonly signature?: string;
+  readonly encryptedContent?: string;
+  readonly opaqueStep?: string;
+}
+
+const THINKING_PROTOCOL_STATE_ALLOWED_KEYS = new Set([
+  "protocol",
+  "sourceConnectionId",
+  "sourceOriginKey",
+  "sourceModel",
+  "payloadVersion",
+  "signature",
+  "encryptedContent",
+  "opaqueStep",
+]);
+
+/** 思考块协议私有推理状态的严格封闭大小与形状校验。 */
+export function isThinkingProtocolState(value: unknown): value is ThinkingProtocolState {
+  if (!isPlainBoundedObject(value)) return false;
+  for (const key of Object.keys(value)) {
+    if (!THINKING_PROTOCOL_STATE_ALLOWED_KEYS.has(key)) return false;
+  }
+  if (typeof value.protocol !== "string" || !VALID_PROTOCOLS.has(value.protocol)) return false;
+  if (!isBoundedIdentifierString(value.sourceConnectionId, MAX_PROVENANCE_ID_CHARS)) return false;
+  if (!isBoundedIdentifierString(value.sourceOriginKey, MAX_SOURCE_ORIGIN_KEY_CHARS)) return false;
+  if (!isBoundedIdentifierString(value.sourceModel, MAX_PROVENANCE_ID_CHARS)) return false;
+  if (
+    typeof value.payloadVersion !== "number" ||
+    !Number.isSafeInteger(value.payloadVersion) ||
+    value.payloadVersion < 1 ||
+    value.payloadVersion > 100
+  ) {
+    return false;
+  }
+  if (
+    value.signature !== undefined &&
+    (typeof value.signature !== "string" ||
+      value.signature.length === 0 ||
+      value.signature.length > MAX_PROTOCOL_SIGNATURE_CHARS)
+  ) {
+    return false;
+  }
+  if (
+    value.encryptedContent !== undefined &&
+    (typeof value.encryptedContent !== "string" ||
+      value.encryptedContent.length === 0 ||
+      value.encryptedContent.length > MAX_PROTOCOL_OPAQUE_CHARS)
+  ) {
+    return false;
+  }
+  if (
+    value.opaqueStep !== undefined &&
+    (typeof value.opaqueStep !== "string" ||
+      value.opaqueStep.length === 0 ||
+      value.opaqueStep.length > MAX_PROTOCOL_OPAQUE_CHARS)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** 判断消息历史中是否包含需要 v2 协议执行器理解的 `protocolState` 块。 */
+export function hasProtocolStateInMessages(messages: readonly Message[]): boolean {
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === "thinking" && block.protocolState !== undefined) return true;
+      if (block.type === "text" && block.protocolState !== undefined) return true;
+    }
+  }
+  return false;
 }
 
 export interface ImageBlock {
@@ -163,6 +332,7 @@ export interface ThinkingBlock {
   type: "thinking";
   thinking: string;
   signature?: string;
+  protocolState?: ThinkingProtocolState;
 }
 
 /**

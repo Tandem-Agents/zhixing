@@ -44,8 +44,16 @@ beforeAll(async () => {
 afterAll(async () => { await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve)))); });
 
 const provider = (kind: 'openai' | 'anthropic', origin: string) => {
-  const resolved: ResolvedProvider = { id: 'loop', name: 'Loop', baseUrl: kind === 'openai' ? `${origin}/v1` : origin, apiKey: 'sk-loop',
-    protocol: kind === 'openai' ? 'openai-compatible' : 'anthropic', quirks: { ...DEFAULT_QUIRKS }, declaredModels: [] } as ResolvedProvider;
+  const resolved: ResolvedProvider = {
+    id: 'loop',
+    name: 'Loop',
+    baseUrl: kind === 'openai' ? `${origin}/v1` : origin,
+    apiKey: 'sk-loop',
+    protocol: kind === 'openai' ? 'openai-compatible' : 'anthropic',
+    quirks: { ...DEFAULT_QUIRKS },
+    declaredModels: [],
+    networkPolicy: { proxy: 'direct', allowPrivateOrigin: true },
+  } as ResolvedProvider;
   return kind === 'openai' ? createOpenAICompatibleProvider(resolved) : createAnthropicProvider(resolved);
 };
 
@@ -54,7 +62,11 @@ async function settle(kind: 'openai' | 'anthropic', origin: string) {
   const meter: ModelCallResourceMeter = { reserve: async () => ({ usageId: 'usage:1' }), consume: async usage => { consumed.push(usage); } };
   const chat = provider(kind, origin);
   const events: StreamEvent[] = [];
-  for await (const event of meteredProviderCall({ call: request => chat.chat(request), meter, nextCallIndex: () => 1, defaultMaxOutputTokens: 64 })(REQUEST)) events.push(event);
+  try {
+    for await (const event of meteredProviderCall({ call: request => chat.chat(request), meter, nextCallIndex: () => 1, defaultMaxOutputTokens: 64 })(REQUEST)) events.push(event);
+  } finally {
+    await chat.close?.();
+  }
   return { consumed, events };
 }
 
@@ -112,27 +124,29 @@ describe.each(['openai', 'anthropic'] as const)('%s adapter · 预占结算', ki
     expect(consumed).toEqual([{ usageId: 'usage:1', tokens: 7 }]);
   });
 
-  it('直接跨源 307：新来源拿不到原来源的认证头', async () => {
+  it('直接跨源 307：在发出跨源请求前立即终止（目标 B 零请求、无正文/认证外泄），且因 A 已响应不按未送达结算', async () => {
     const target = await serve((_req, res) => { stream(res); res.end(success); });
     const first = await serve((req, res) => { res.writeHead(307, { location: `${target.origin}${req.url}` }); res.end(); });
-    await settle(kind, first.origin);
+    const { consumed, events } = await settle(kind, first.origin);
+    expect(first.seen).toHaveLength(1);
     expect(first.seen[0]!.authorization ?? first.seen[0]!.apiKey).toContain('sk-loop');
-    expect(target.seen).toHaveLength(1);
-    expect(target.seen[0]).not.toHaveProperty('authorization');
-    expect(target.seen[0]).not.toHaveProperty('apiKey');
+    // 设计 §5.2：跨源 3xx 绝不自动跟随，目标 B 必须收到 0 请求
+    expect(target.seen).toHaveLength(0);
+    expect(events.at(-1)?.type).toBe('error');
+    expect(consumed).toEqual([]);
   });
 
-  it('先同源跳转、再跨源：每一次来源变化都不带认证头', async () => {
+  it('先同源跳转、再跨源：同源保留认证，跨源前立即终止（目标 B 零请求）且不按未送达结算', async () => {
     const target = await serve((_req, res) => { stream(res); res.end(success); });
     const first = await serve((req, res, seen) => {
       if (seen.length === 1) { res.writeHead(307, { location: `/moved${req.url}` }); res.end(); return; }
       res.writeHead(307, { location: `${target.origin}${req.url}` }); res.end();
     });
-    await settle(kind, first.origin);
+    const { consumed, events } = await settle(kind, first.origin);
     expect(first.seen).toHaveLength(2);
     expect(first.seen[1]!.authorization ?? first.seen[1]!.apiKey).toContain('sk-loop');
-    expect(target.seen).toHaveLength(1);
-    expect(target.seen[0]).not.toHaveProperty('authorization');
-    expect(target.seen[0]).not.toHaveProperty('apiKey');
+    expect(target.seen).toHaveLength(0);
+    expect(events.at(-1)?.type).toBe('error');
+    expect(consumed).toEqual([]);
   });
 });

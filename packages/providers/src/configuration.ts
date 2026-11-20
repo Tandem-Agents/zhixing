@@ -1,5 +1,15 @@
 /** Configuration and model metadata without loading any provider SDK. */
 export * from "./types.js";
+export * from "./catalog-port.js";
+export * from "./catalog/schema.js";
+export * from "./catalog/builtin-catalog.js";
+export * from "./catalog/synthesis.js";
+export * from "./catalog/tuf/restricted-tuf-client.js";
+export * from "./catalog/tuf/default-repository.js";
+export * from "./catalog/catalog-manager.js";
+export * from "./catalog/maintenance.js";
+export * from "./discovery/discovery-cache.js";
+export * from "./discovery/native-discovery.js";
 export * from "./config-loader.js";
 export * from "./credentials-loader.js";
 export * from "./configuration-edit.js";
