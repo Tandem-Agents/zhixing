@@ -2,8 +2,8 @@
   "signed": {
     "_type": "targets",
     "spec_version": "1.0.31",
-    "version": 1,
-    "expires": "2026-12-20T10:17:21Z",
+    "version": 2,
+    "expires": "2026-12-20T15:46:47Z",
     "targets": {
       "catalog-v1.json": {
         "length": 28359,
@@ -20,7 +20,7 @@
   "signatures": [
     {
       "keyid": "eae263d0e7f0cc3c339a4e35be542581fc6551aef23f670e8c975008c5ef5bbc",
-      "sig": "b714de74e2966df679d92c225bcbcb29bb63d212ce352d5396252d95fb30d63dfd8e2aabb5ecf2298020a3b19c2da027c2de8a2bcb972f03f2250a257e66f80a"
+      "sig": "ea82c7de56d9e6409925a76fcfb9e59d6f295821f794cdd09336903a71aaac8a3b967dd88a6c33416552248f086eca8bd1feeb949cff88aaba760d556279de0c"
     }
   ]
 }
