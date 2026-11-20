@@ -1,47 +1,45 @@
-# 模型元信息与预算解析
+# 模型元信息、三层合成与预算解析
 
-模型能否请求、元信息是否已知、适合多长上下文，是三个不同问题。目录未收录不能误报模型不可用，也不能伪造 `unknown` 模型或借目录第一项的预算冒充当前模型。
+模型能否请求、元信息是否已知、哪些限制不可突破、用户偏好如何保留，是四个独立问题。目录未收录不阻止请求，也不会伪造未知型号规格；覆盖不可突破硬约束；目录更新绝不抹除用户偏好。
 
-## 目录与数据归属
+## 单一资料源与隔离发现缓存
 
-`ProviderPreset.knownModels → ResolvedProvider.declaredModels → LLMProvider.models` 共用 `ModelInfo`，适配器直接复用目录。目录允许为空，只声明已知元信息，不穷举服务商支持的模型；请求始终使用实际选择的 model 字符串。
+- **单一策展目录（`CuratedCatalogBundle`）**：内置 11 项预设、型号规格、思考控件、参考价格口径、生命周期状态、用途推荐与经验注意力阈值统一存放在单一策展源中，由 `ModelCatalogManager` 经受限 TUF 客户端验签后原子激活，并通过 `ModelCatalogPort` 供给后端、配置编辑器与 `/model`。`PROVIDER_PRESETS`、`ROLE_RECOMMENDATIONS`、`MODEL_CAPABILITIES` 与终端 `SUPPORTED_PROVIDERS` 均为同一源的派生视图，不再各自手工维护副本。
+- **原生发现与隔离缓存（`ModelDiscoveryCache`）**：各预设按已核实原生发现模板执行只读模型发现（含 Ollama 本地推理与原生路径归一、自定义基路径保留、可选兼容探测），脱敏结构化结果独立存放在 `<ZHIXING_HOME>/cache/model-discovery-cache.json`，按 `connectionId + endpoint + adapter + credentialRevision` 分区隔离，绝不写入 `config.jsonc` 或 `SecretStore`。过期缓存仅标注“上次结果/待刷新”，不充当永久禁用权威；发现结果与可选自愿生成验证严格分态。
 
-目录由预算解析、模型选择界面、输入能力与思考配置共同消费；它提供已知元信息，不限制可请求的模型范围。
+## 硬约束 / 资料 / 偏好三层合成
 
-当前 DeepSeek、硅基流动预设已有目录，其他预设可以没有。只维护会影响真实使用的元信息，不为重复协议兜底或凑齐型号建设无价值目录。推荐不受目录是否收录约束，见[模型角色](model-roles.md)。
+`synthesizeConnectionModels` 对每条连接执行统一三层合成，并为每个关键字段保留来源标注（`user-override` / `native-discovery` / `curated-catalog` / `builtin-baseline` / `unknown`）：
 
-## 预算优先级
+1. **硬约束层（不可突破）**：本地已实现协议与能力门控（`requiresUpgrade`）、已确认权威原生直连上限与否定能力。用户 `modelOverrides` 若试图突破权威硬约束，系统保留用户原输入以便查看与编辑，同时产出结构化 `overrideConflicts` 并在运行侧按硬约束钳制有效值。第三方聚合端（如 OpenRouter）或未核实改址连接的发现字段归入资料层，不作硬约束。
+2. **资料层（按字段独立合成）**：顺序为 `connection.modelOverrides[model]` → 当连接原生发现 → 官方策展目录 → 随包基线 → 未知。缺省字段不抹除已有值，显式 `false` 保留否定语义；无法确认时明示“资料不足/未知”，不瞎编默认值。
+3. **偏好层（不受目录刷新改写）**：
+   - `customModels`：用户自建型号列表，支持在 `/config` 中增、重命名（同步迁移覆盖与用途引用）与删。
+   - `modelOverrides`：按连接内精确 `modelId` 覆盖上下文窗口、最大输出、图片/工具/思考能力与思考控件；编辑页删除覆盖前，经 `previewModelOverrideRestore` 明示删除后每个字段将恢复的上游具体值与来源，绝不误删供应方型号条目。
+   - `hiddenModels`：用户隐藏的供应方型号列表，目录/发现刷新绝不复活；连接详情页与 `/model` 末尾均提供“已隐藏型号（N）”折叠入口支持一键恢复显示。
+
+## 结构化非对话过滤与生命周期
+
+- 仅当存在明确结构化非对话断言（如 `purpose !== "chat"`、`outputModalities`、`nativeType/subType`、`supportedGenerationMethods`）时过滤非对话模型；严禁按模型名称关键字启发式误杀对话型号。
+- 已弃用（`deprecated`）、已停供（`retired`）与需升级（`requiresUpgrade`）条目在列表中清晰标注；当前正在使用的不可用项在 `/model` 与 `/config` 均保留可见并说明原因与修正路径，不静默消失。
+
+## 预算与不同能力的职责边界
 
 `resolveModelInfo` 按以下顺序解析 `contextWindow / maxOutputTokens`：
 
-1. 当前 Provider 的 `modelOverrides[model]`，按字段覆盖其下层基值。
-2. declared catalog 中 model ID 精确匹配的条目。
-3. 调用方注入的协议族默认。
-4. core 防御性默认：32,000 / 4,096，并返回 `USING_FALLBACK` 警告。
-
-协议默认由 providers 持有：OpenAI-compatible 为 128,000 / 4,096，Anthropic Messages 为 200,000 / 8,192。这些是当前工程兜底，不是目录外任意模型的真实能力保证；存在明确元信息时使用目录或覆盖值。
-
-core 只接收预算形状，不依赖 providers 或协议字符串。Host binding 按实际 `primaryRole` 的协议、目录与覆盖值注入；普通 main 与工作场景 power 不能混用预算。主链正常注入协议默认时不会进入最后的防御性分支。
-
-`modelOverrides` 属于 Provider 条目，由当前显式凭证投影携带，不写入公开 config。它与 `config.jsonc` 中的 `modelCapabilityOverrides` 不是同一个配置。
-
-## 不同能力不可混为一谈
+1. 当前连接经三层合成后的 `modelOverrides` / 原生发现 / 策展目录精确匹配值（受硬约束钳制）。
+2. 调用方注入的协议族兜底（`protocol-defaults.ts`）。
+3. core 防御性默认（32,000 / 4,096，带 `USING_FALLBACK` 告警）。
 
 | 数据 | 当前来源与含义 |
 |---|---|
-| 总窗口／输出上限 | 上述预算链；描述容量，不保证长上下文质量 |
-| 注意力阈值 | `modelCapabilityOverrides` → 内置 `MODEL_CAPABILITIES` → UNKNOWN 兜底；表达 optimal/risk，由上下文管理消费 |
-| 图片输入 | 当前 Provider 的 model 输入覆盖 → 精确目录 `supportsImages` → false；不是从协议名称猜测支持 |
-| 思考控制 | 目录 `thinkingControl` 描述可配形态，角色保存选择，适配器按方言发送；见[思考控制](thinking-control.md) |
-
-预算和图片能力按 Provider 内 model ID 精确匹配；注意力阈值解析会归一化模型标识以共享同型号知识，不能把这种归一化用于实际请求改名。
-
-解析出的最大输出与每次调用实际采用的输出限额也不等价。Host 对各角色另给协议级默认输出限额；单发调用、主循环与资源约束按各自路径消费，不能声称整个系统所有请求都自动使用目录最大值。
-
-[上下文架构](../context/architecture.md)负责如何使用窗口和阈值，本文件只负责元信息来源、优先级与交界。远程 catalog、provider 级额外兜底和可插拔模型目录仍不属于当前实现。
+| 总窗口／最大输出 | 三层合成规格 → 协议默认 → core 防御默认；描述物理容量，不等于每次请求输出限额或长上下文质量 |
+| 注意力阈值 | `llm.attentionPolicies`（及旧 `modelCapabilityOverrides`）→ 单一目录 `attentionThresholds` → `UNKNOWN` 兜底；按归一化模型键匹配，供上下文管理消费 |
+| 图片输入能力 | 连接三层合成 `supportsImages`（含用户覆盖与权威否定硬约束）→ `false`；供发送与切模预检 |
+| 思考控制 | 连接三层合成 `thinkingControl` 描述合法形态（`toggle` / `effort` / `budget`），用途默认或会话覆盖保存用户选择，适配器按方言发送；见[思考控制](thinking-control.md) |
 
 ## 实现入口
 
-- [预算解析](../../../packages/core/src/context/model-info-resolver.ts)、[协议默认](../../../packages/providers/src/protocol-defaults.ts)
-- [注意力阈值](../../../packages/providers/src/model-capability.ts)、[输入能力](../../../packages/core/src/types/user-input.ts)
-- [宿主解析与注入](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)
+- [三层合成引擎](../../../packages/providers/src/catalog/synthesis.ts)、[单一策展目录读口](../../../packages/providers/src/catalog-port.ts)、[维护手册](catalog-maintenance-runbook.md)
+- [原生发现与隔离缓存](../../../packages/providers/src/discovery/discovery-cache.ts)、[预算解析](../../../packages/core/src/context/model-info-resolver.ts)、[协议默认](../../../packages/providers/src/protocol-defaults.ts)
+- [覆盖恢复预览与状态编辑](../../../packages/cli/src/config-editor/state.ts)、[宿主解析与注入](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)

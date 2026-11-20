@@ -1,42 +1,39 @@
 # Provider 与模型调用架构
 
-知行需要接入不同服务商、聚合平台和私有部署，同时让智能执行不依赖某一家厂商。协议适配、模型元信息和产品角色各自负责不同问题，不能由一个 Provider 默认模型替用户决定全部用途。
+知行需要接入不同服务商、聚合平台与本地/私有部署，同时让智能执行不依赖某一家厂商。供给层（服务商连接）、协议适配层、模型资料层、产品用途层与会话覆盖层各自负责不同问题，互不越权。
 
 ## 核心边界
 
-- **按协议而非服务商实现适配器。** 当前为 OpenAI-compatible 与 Anthropic Messages；同协议服务商通过预设和声明式 quirks 表达差异。已有协议不能表达的新协议才需要新适配器，不为每个服务商复制传输实现。
-- **保留原生身份与参数语义。** 请求中的 model 是该服务商的标识，不做全局模型名改写；共同事件合同用于内部消费，不意味着把不同厂商的思考档位强行等价化。
-- **连接信息不决定用途。** 预设描述连接、协议、方言和已知模型；角色层决定用哪一对 provider/model。模型目录既不是推荐表，也不是服务商可接受模型的白名单。
-- **协议转换不拥有业务恢复。** 适配器转换请求、消息、工具、流事件和用量，传出错误；重试、看门狗、资源控制及运行终态由外围调用链负责。不能把自动换模型或隐藏失败作为协议适配的默认职责。
-- **秘密只从宿主获得。** 设备本地 SecretStore 由产品组合根解锁，向工厂显式传入凭证投影。旧明文配置、环境变量键值与命令 helper 不是当前凭证来源；Provider 不自行扫描或读取持久化秘密。
+- **按受控协议而非服务商实现适配器。** 当前实现四类受控协议：`openai-compatible`、`openai-responses`、`anthropic-messages` 与 `google-interactions`。同协议服务商通过单一策展目录中的预设与声明式方言（`usageDialect` / `thinkingDialect`）表达差异，不为每个服务商复制传输实现；未实现协议由能力门控显式标为“需升级知行”，不冒充可用。
+- **供给层与用途层单向分层。** v2 公开配置将 `llm.connections`（名称、预设修订、协议、固定端点、认证引用、代理/私网策略、自定义型号、规格覆盖与隐藏列表）与 `llm.main / light / power` 用途默认解耦，用途仅单向引用连接，连接层不自荐用途默认。
+- **保留原生身份、有界协议状态与来源隔离。** 请求中的 `model` 是该连接的原生标识，不做全局模型名改写；有界协议私有推理态与非秘密来源身份（`sourceConnectionId + sourceOriginKey`）贯通消息、转录与执行封套。同来源同协议保真重传（含 OpenAI Responses 窄发送视图前缀稳定与 Google Interactions 无状态重传）；跨连接、同连接改址/换适配、跨协议或来源不明旧记录默认不转发私有推理载荷，避免签名泄露或误发 400。
+- **单源模型资料与可信维护更新。** 内置 11 项预设、型号规格、用途推荐与经验注意力阈值统一派生自单一 `CuratedCatalogBundle`，经 `ModelCatalogPort` 窄读口供给后端与终端；运行时由 `ModelCatalogManager` 通过受限 TUF 客户端原子更新，支持断网/损坏安全回落、跨进程单写与能力门控隔离，且绝不静默改写既有连接固定端点或用户偏好。
+- **受控网络与秘密隔离。** 设备本地 `SecretStore` 按逻辑 `secretRef` 保存 `api-key` / `header` 凭据（免密连接无需密钥），`config.jsonc` 不存明文秘密；草稿凭据仅在编辑进程本地用于只读发现与自愿验证，不跨普通 RPC。网络出口统一经单跳受控传输与明确来源限定的私网许可。
 
 ## 当前装配与消费
 
 ```text
-宿主的配置投影 + 设备本地凭证投影
-  → resolveLLMRoles：解析角色与连接信息
-  → createProviderRoles：选择协议适配器、绑定模型、复用实例
-  → Host model-provider binding：解析预算、输入能力、注意力阈值与思考配置
-  → Kernel / 推进运行体：按产品用途调用，执行资源与恢复规则
-  → LLMProvider.chat → 协议 SDK → StreamEvent
+单一策展目录 (ModelCatalogManager → ModelCatalogPort) + 隔离发现缓存 (ModelDiscoveryCache)
+  + 公开配置 v2 (llm.connections + main/light/power) + 设备本地 SecretStore (modelSecrets)
+  → ModelRuntimePort：统一解析、窄激活（不断开未变通道）、退役清退与显式撤权中止
+  → resolveLLMRoles / createProviderRoles：按四类受控协议装配适配器、方言与三层合成规格
+  → Kernel / 推进 / Executor 宿主装配：叠加 Session owner 持久化的 SessionModelSelection
+  → LLMProvider.chat → 受控协议 SDK / 单跳传输 → StreamEvent + 统一脱敏错误分类
 ```
 
-`resolveProvider` 合并预设与显式凭证条目，`create-provider.ts` 按 protocol 选择适配器。单 Provider 工厂与角色工厂共用此路径；Provider 可被独立使用，不必知道 main/light/power。
+- **保存与生效裁决**：纯模型域修改经 `server.apply-model-configuration` 走 `ModelRuntimePort` 本机窄激活，不中断无关消息通道；混合变更（如同时改动全局 `network.proxy` 或工作区）走单次完整宿主换代，且先执行撤权/强制停用止血；无宿主首配由编辑进程本地完成。
+- **连接删除与凭据清退**：删除前预览受影响用途与共用凭据，主模型改绑同次完成；普通退场登记至 `configuration/model-retirements/v1` 待在途归零/重启幂等清理，显式撤权立即持久解绑、禁止新调用并中止在途调用。
+- **终端与状态面同源**：`/config` 模型页统一组织为“服务商连接 / 用途默认 / 模型资料与更新”三块；交互 `/model` 提供总览、搜索、本会话切模、显式设用途默认、原位调参与已隐藏型号恢复；文本 `/model`、`/status`、`ReplLocalView` 与状态栏消费同一 `projectEffectiveModelDisplay` 生效投影。
 
-当前 CLI 宿主的 `createHostKernelModelProviderFactory` 为普通会话和工作场景投影生效模型信息，`createHostAdvancementModelProviderFactory` 为推进职责提供调用与评议 binding；两者消费同一 Provider 解析层，承担不同的产品用途。orchestrator 消费注入结果，不自行读取配置。
+## 取舍与专题权威
 
-主循环与段摘要的显式重试、流空闲保护在 orchestrator 调用链装配；不同调用点的保护不能仅因共享 Provider 就视为完全相同。适配器本身没有业务重试循环，但 SDK 的内部默认行为也不能据此推断为已关闭。会话提交、恢复与资源终态不是本模块的所有权。
-
-## 取舍与范围
-
-按协议组织保留多服务商接入能力，避免每厂商复制实现；预设降低连接配置成本，用户仍可使用自定义连接与目录外模型。其代价是持续维护协议兼容差异，并分别验证各协议适配器，不能假定同协议服务商的行为完全一致。协议差异集中处理，不引入与个人部署无关的 OAuth 伪装、认证轮换或通用插件平台。
-
-当前已实现 Anthropic 适配、缓存标记、思考传输和预算解析；尚未实现自动跨模型 failover、非流式回退、远程模型发现及自适应缓存断点。
+按协议分层兼顾多厂商接入与协议保真，其代价是需持续维护各协议的流式、工具与推理态边界；通过单一策展目录、可审维护流与 TUF 静态分发将同协议变化与客户端升级解耦，详见[模型目录维护手册](catalog-maintenance-runbook.md)。
 
 专题权威分别为[模型元信息](model-metadata.md)、[模型角色](model-roles.md)、[思考控制](thinking-control.md)和 [Anthropic 适配](anthropic-adapter.md)。[秘密存储](../secrets/architecture.md)、[首次引导](../secrets/onboarding.md)、[容错与模型调用恢复](../resilience/architecture.md)是相邻职责，不由 Provider 协议层重复定义。
 
 ## 实现入口
 
-- [Provider 解析](../../../packages/providers/src/resolve.ts)、[工厂](../../../packages/providers/src/create-provider.ts)、[预设](../../../packages/providers/src/presets.ts)
-- [Kernel 宿主装配](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)、[推进宿主装配](../../../packages/cli/src/runtime/advancement-model-provider.ts)
-- [运行体装配与调用保护](../../../packages/orchestrator/src/runtime/create-agent-runtime.ts)
+- [v2 配置与解析](../../../packages/providers/src/resolve.ts)、[四协议工厂](../../../packages/providers/src/create-provider.ts)、[受控目录读口](../../../packages/providers/src/catalog-port.ts)
+- [目录协调器与 TUF](../../../packages/providers/src/catalog/catalog-manager.ts)、[三层合成引擎](../../../packages/providers/src/catalog/synthesis.ts)、[原生发现与隔离缓存](../../../packages/providers/src/discovery/native-discovery.ts)
+- [模型运行端口与窄激活](../../../packages/cli/src/runtime/model-runtime-port.ts)、[Kernel 宿主装配](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)、[统一生效投影](../../../packages/cli/src/runtime/model-display-projection.ts)
+- [交互 `/model` 控制器](../../../packages/cli/src/terminal/model-command.ts)、[`/config` 模型面板](../../../packages/cli/src/config-editor/sections/model.ts)

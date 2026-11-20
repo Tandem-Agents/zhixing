@@ -1,41 +1,35 @@
 # 模型思考控制
 
-思考控制跟随角色用途配置，模型原生能力决定可选项；不能把不同厂商的离散 effort、开关和 token budget 强行映射成一套强弱档位。未配置就不发送控制参数，避免系统替用户臆造模型参数。
+思考控制按用途默认或本会话覆盖独立保存，由模型原生能力决定合法控件形态；绝不把不同厂商的开关、离散 effort 与 token 预算强行等价映射。未配置就不发送显式覆盖参数，避免系统替用户臆造参数。
 
 ## 职责与传输
 
-`config.llm.<role>.thinking → Host 校验与 roleThinking → 主循环／单发调用／摘要请求 → ChatRequest.thinking → adapter 方言参数`
+`llm.<role>.params.thinking / SessionModelSelection.params.thinking → 宿主校验与 roleThinking → 主循环 / 单发 / 摘要请求 → ChatRequest.thinking → 四协议适配器方言参数`
 
-配置按 main/light/power 分别保存：同一模型用于不同任务时也可能需要不同思考深度，选模型与选思考配置是两个独立维度。`primaryRole` 选择当前主循环角色，不覆盖其他角色的思考设置。main 单发跟 main，默认单发与当前自动／手动段摘要使用 light thinking；旧独立 main 压缩链已退出，取舍差异见[模型角色](model-roles.md)。不能只接主循环漏掉其他请求构造点。
+- 用途默认按 `main / light / power` 分别保存；普通主对话跟随 `main`、工作场景跟随 `power`（缺省沿用 `main`）；`light` 与自动/手动段摘要统一消费 `resolvedLight` 的独立绑定与思考设置，不随主会话覆盖错发端点。
+- 单一策展目录（及用户 `modelOverrides`）经 `ThinkingControl` 声明 `none`、`toggle`、`effort`（保留原值枚举与默认档）或 `budget`（可选区间），共同驱动 `/config`、交互 `/model` 原位调参与宿主 `validateThinkingConfig`。
+- 适配器不读配置文件，按连接解析后的 `thinkingDialect` 与协议适配将已校验的 `ChatRequest.thinking` 转换为原生请求字段。
 
-当前 `ThinkingControl` 由模型目录声明 none、toggle、effort（枚举原值）或 budget（可选范围），驱动配置编辑器和 `validateThinkingConfig`；`ThinkingConfig` 保存 off/on/effort/budget 的具体选择。共同结构只表达形态，不把一个厂商的档位解释成另一厂商的等价档位。
+## 当前四协议与方言发送形态
 
-adapter 不读取配置文件，也不直接读取界面能力描述，而按 `ProviderQuirks.thinkingDialect` 转换已经传入的请求参数。模型元数据负责可配置能力，协议方言负责发送形态。
-
-## 当前发送形态
-
-| 方言转换 | 当前实现 |
+| 协议 / 方言 | 当前实现 |
 |---|---|
-| DeepSeek | off/on 写 thinking.type；effort 额外写 reasoning_effort 原值 |
-| Qwen | off/on 写 enable_thinking；budget 额外写 thinking_budget |
-| GLM / Kimi | off/on 写 thinking.type；effort/budget 不发送 |
-| Anthropic | 仅 budget 写 enabled + budget_tokens；on 不臆造预算，adaptive 未接入 |
-| none 或不匹配形态 | 不生成思考参数 |
+| `openai-compatible` · DeepSeek | `off/on` 写 `thinking.type`；`effort` 额外写 `reasoning_effort` 原值 |
+| `openai-compatible` · Qwen | `off/on` 写 `enable_thinking`；`budget` 额外写 `thinking_budget` |
+| `openai-compatible` · GLM / Kimi | `off/on` 写 `thinking.type`；不支持的形态不臆造发送 |
+| `anthropic-messages` · Anthropic | 按模型声明支持 `effort`（Claude 4.7 自适应/强度）与 `budget`（`enabled + budget_tokens`）及 `off`；带签名历史按来源隔离保真重传，见 [Anthropic 适配](anthropic-adapter.md) |
+| `openai-responses` | `reasoning.effort` + `reasoning.encrypted_content`（同来源同协议窄发送视图前缀保真，跨连接/改址不转发） |
+| `google-interactions` | `thinking_level` / `thinking_budget` 与无状态 `thought` step（同来源重传，跨源隔离） |
+| `none` 或不匹配形态 | 不生成思考参数 |
 
-这是代码转换能力，不等于所有预设型号都已接通。当前只有 DeepSeek V4 Pro 目录明确给出 effort 控制；Anthropic 有发送和签名回传，但尚无逐模型控制目录。Qwen/GLM/Kimi 转换分支存在，其默认预设未声明相应 thinkingDialect，不能宣称默认使用这些预设就有完整控制体验。
+## 终端配置、原位调参与换模重建
 
-## 配置与校验边界
-
-配置编辑器在选择模型后使用目录控制形态提供列表或预算输入；无元数据不凭空展示控制项。onboarding 与 `/config` 复用编辑器能力，显示、校验和写入应保持一致。重新选择角色已在用的同一服务商与模型不算换模型，保留已有思考设置，思考控制页标出并选中它；服务商或模型变化才丢弃旧设置。
-
-宿主对已收录模型按 `validateThinkingConfig` 校验：不相容配置被忽略，Kernel 装配会告警；未收录模型目前直接传递配置，交由方言映射。因而“任何非法模型参数都已被拦截”并不成立。辅助角色回退后按生效模型进行校验，但未知模型的逐型号约束仍不可验证。
-
-配置必须尊重原生形态、不发送已知无效参数、模型切换后不误用旧配置；当前元数据尚不完整，budget 与 max_tokens 的协议联动也没有统一校验。Anthropic 的 on 无预算与部分接口 budget 限制不能由共同形态校验自动证明正确，仍需按具体型号与端点验证。
-
-`supportsThinking` 粗标只说明思考能力信号，不代表用户可调参数；接收 reasoning/thinking 事件也不以该粗标为开关。带签名历史的协议保真见 [Anthropic 适配](anthropic-adapter.md)。
+- **原位调参（`/model`）**：直接从当前生效项进入已注册 `ThinkingControl` 控件（支持关闭、开启默认、合法强度档位或区间内自定义预算），并显式选择生效作用域（**仅本会话**或**写入 `main / light / power` 用途默认**）。
+- **换模重算（`/model` 与 `/config` 共用 `isThinkingCompatible`）**：切换到新型号时，若旧思考参数与新型号合法形态或范围不兼容，明示不兼容原因、清除旧值并按新型号重建合法控件，杜绝旧档位跨型号残留。
+- `supportsThinking` 仅作能力信号，不代替 `ThinkingControl` 合法控件；流式 `thinking` 事件的接收与透传不依赖该粗标。
 
 ## 实现入口
 
-- [类型与校验](../../../packages/core/src/types/llm.ts)、[预设](../../../packages/providers/src/presets.ts)、[方言转换](../../../packages/providers/src/adapters/thinking-params.ts)
-- [Kernel 宿主装配](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)、[推进装配](../../../packages/cli/src/runtime/advancement-model-provider.ts)
-- [配置编辑器](../../../packages/cli/src/terminal/configuration-editor.ts)
+- [类型与校验](../../../packages/core/src/types/llm.ts)、[单一策展目录](../../../packages/providers/src/catalog/builtin-catalog.ts)、[方言转换](../../../packages/providers/src/adapters/thinking-params.ts)
+- [四协议适配](../../../packages/providers/src/create-provider.ts)、[Kernel 宿主装配](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)
+- [交互 `/model` 原位调参](../../../packages/cli/src/terminal/model-command.ts)、[`/config` 思考面板](../../../packages/cli/src/config-editor/model/list.ts)

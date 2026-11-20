@@ -17,9 +17,9 @@
 
 ## 思考与签名
 
-请求侧已经接入 `ThinkingConfig`：当前仅 budget 形态生成 `{ type: enabled, budget_tokens }`，adaptive 尚未接入。仅有 on 而无预算不臆造数值，其他不适用形态不发送。
+请求侧已经接入 `ThinkingConfig`：按模型声明支持 budget（`{ type: "enabled", budget_tokens }`）、adaptive / effort（Claude 4.7 自适应与强度档位）及显式关闭（`off`）；仅有 `on` 而无预算时不臆造数值，不适用形态不发送。
 
-历史思考块带 signature 时，思考文字与签名原样回传，不能改写签名内容；缺 signature 的跨 Provider 思考块降为 text，保留信息而不伪造 Anthropic 原生块。接收思考事件、配置界面是否可选和请求是否启用是三个独立条件，参见[思考控制](thinking-control.md)。
+历史思考块的重传严格受来源身份（`sourceConnectionId + sourceOriginKey`）约束：仅当同来源、同协议且携带合法 `signature` 时按原生思考块保真重传；跨连接、同连接改址/换适配、跨协议或来源不明旧记录默认不转发私有推理载荷，绝不伪造签名，也不把私有推理或加密载荷降级拼接为普通文本。接收思考事件、配置界面是否可选和请求是否启用是三个独立条件，参见[思考控制](thinking-control.md)。
 
 ## 缓存与用量
 
