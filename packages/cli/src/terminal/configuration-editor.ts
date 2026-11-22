@@ -295,7 +295,22 @@ export class TerminalConfigurationEditor {
       this.#stack[this.#stack.length - 1] = action.panel;
       this.#initialIndex = this.#currentIndex(action.panel);
     } else if (action.type === 'pop') {
-      if (this.#stack.length > 1) { this.#stack.pop(); this.#initialIndex = this.#returnIndexes.pop(); } else { this.cancel(); return; }
+      if (this.#stack.length > 1) {
+        this.#stack.pop();
+        this.#initialIndex = this.#returnIndexes.pop();
+        while (this.#stack.length > 1) {
+          const top = this.#stack.at(-1)!;
+          if (top.kind === 'connection-config' && !readConnection(this.#state, top.connectionId)) {
+            this.#stack.pop();
+            this.#initialIndex = this.#returnIndexes.pop();
+            continue;
+          }
+          break;
+        }
+      } else {
+        this.cancel();
+        return;
+      }
     }
     await this.#publish();
   }
@@ -463,8 +478,11 @@ export class TerminalConfigurationEditor {
     }
     const initial = this.#initialIndex;
     this.#initialIndex = undefined;
-    const initialItemId = !targetPaging && initial !== undefined && initial < choices.length ? `select:${initial}` : undefined;
-    if (initialItemId) this.#page = Math.floor(initial! / PAGE_ITEMS);
+    const clampedInitial = !targetPaging && initial !== undefined && choices.length > 0
+      ? Math.min(Math.max(0, initial), choices.length - 1)
+      : undefined;
+    const initialItemId = clampedInitial !== undefined ? `select:${clampedInitial}` : undefined;
+    if (initialItemId) this.#page = Math.floor(clampedInitial! / PAGE_ITEMS);
     if (!targetPaging) this.#page = Math.min(Math.max(0, this.#page), Math.max(0, Math.ceil(choices.length / PAGE_ITEMS) - 1));
     const visible = targetPaging ? choices : choices.slice(this.#page * PAGE_ITEMS, (this.#page + 1) * PAGE_ITEMS);
     if (!targetPaging && this.#page > 0) visible.unshift({ id: 'previous', label: '上一页' });

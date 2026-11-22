@@ -887,4 +887,87 @@ describe('single-root Node configuration transaction', () => {
     missingCred.editor.cancel();
     await missingCred.result;
   });
+
+  it('pops directly back to connection-list when confirming connection deletion while preserving cancel and active-role guards', async () => {
+    const initialConfig: ZhixingConfig = {
+      llm: {
+        schemaVersion: 2,
+        connections: {
+          local: {
+            name: '本机主连接',
+            adapter: 'openai-compatible',
+            endpoint: 'http://127.0.0.1:47982/v1',
+            auth: { mode: 'none' },
+            network: { proxy: 'direct', allowPrivateOrigin: true },
+            customModels: ['model-a'],
+          },
+          spare: {
+            name: '待移除连接',
+            presetId: 'deepseek',
+            adapter: 'openai-compatible',
+            endpoint: 'http://127.0.0.1:47982/v1',
+            auth: { mode: 'none' },
+            network: { proxy: 'direct', allowPrivateOrigin: true },
+          },
+        },
+        main: { connectionId: 'local', model: 'model-a' },
+      },
+    };
+    const views: Omit<TerminalView, 'generation'>[] = [];
+    const save = vi.fn(async (_edit: Extract<ConfigurationEditResult, { kind: 'completed' }>) => {});
+    const editor = new TerminalConfigurationEditor({
+      session: { initialConfig, initialCredentials: { version: 2 }, writers: { save } },
+      title: '配置',
+      sections: ['model'],
+      purpose: 'edit',
+      publish: async view => { views.push(view); },
+    });
+    const result = editor.run();
+    const cur = () => views.at(-1)!;
+    const act = (action: string) => editor.act({ kind: 'configuration-action', editId: editor.editId, action });
+    const pick = async (label: string) => {
+      const choice = cur().choices?.find(item => item.label.includes(label));
+      expect(choice, `Missing ${label} in ${JSON.stringify(cur())}`).toBeDefined();
+      await act(choice!.id);
+    };
+
+    await pick('服务商连接');
+    expect(cur().title).toBe('服务商连接');
+
+    // Cancel on spare connection-delete returns 1 level to connection-config
+    await pick('待移除连接');
+    expect(cur().title).toBe('服务商连接 · 待移除连接');
+    await pick('删除');
+    expect(cur().title).toBe('删除连接 · 待移除连接');
+    await act('back');
+    expect(cur().title).toBe('服务商连接 · 待移除连接');
+
+    // Confirming deletion atomically pops both connection-delete and invalidated connection-config
+    await pick('删除');
+    await pick('删连接');
+    expect(cur().title).toBe('服务商连接');
+    expect(views.some(v => (v.message ?? '').includes('连接不存在'))).toBe(false);
+    expect(cur().choices?.some(item => item.label.includes('待移除连接'))).toBe(false);
+    expect(cur().choices?.some(item => item.id === cur().initialItemId)).toBe(true);
+
+    // Guard: sole remaining active main connection cannot be deleted without a replacement; stays on connection-delete
+    await pick('本机主连接');
+    expect(cur().title).toBe('服务商连接 · 本机主连接');
+    await pick('删除');
+    expect(cur().title).toBe('删除连接 · 本机主连接');
+    await pick('删连接');
+    expect(cur().title).toBe('删除连接 · 本机主连接');
+    await act('back');
+    expect(cur().title).toBe('服务商连接 · 本机主连接');
+    await act('back');
+    expect(cur().title).toBe('服务商连接');
+
+    // Subsequent Esc goes to configuration home rather than reopening an orphaned detail page
+    await act('back');
+    expect(cur().configurationHome).toBe(true);
+    await act('complete');
+    expect((await result).kind).toBe('completed');
+    expect(save.mock.calls[0]![0].config.llm?.connections?.spare).toBeUndefined();
+    expect(save.mock.calls[0]![0].config.llm?.main).toEqual({ connectionId: 'local', model: 'model-a' });
+  });
 });
