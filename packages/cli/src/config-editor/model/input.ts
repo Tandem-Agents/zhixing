@@ -186,6 +186,21 @@ export function resolveInputField(
       // 受保护旧自定义端点可能含路径令牌或内嵌认证信息：设为敏感输入且不回显原值
       sensitive: true,
       currentValue: () => undefined,
+      validate: (value) => {
+        let parsed: URL;
+        try {
+          parsed = new URL(value);
+        } catch {
+          return "请输入以 http:// 或 https:// 开头的完整端点 URL。";
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          return "端点 URL 必须以 http:// 或 https:// 开头。";
+        }
+        if (hasExplicitUrlCredentialsOrQueryAuth(value)) {
+          return "端点 URL 禁止包含用户名密码或敏感查询参数，请输入纯净端点地址。";
+        }
+        return undefined;
+      },
       apply: (s, value) => setConfirmedRepairEndpoint(s, providerId, value),
     };
   }

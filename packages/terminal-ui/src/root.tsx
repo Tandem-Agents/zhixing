@@ -544,6 +544,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       await submit(id);
     }).catch(reportStatus()).finally(() => endEntry(id));
   };
+  const configurationControls = (current: TerminalView) => {
+    if (current.configurationControls) return current.configurationControls;
+    const back = Boolean(current.choices?.some(choice => choice.id === 'back'));
+    if (current.busy) return { canComplete: false, canBack: back, canCancel: back };
+    return { canComplete: Boolean(current.editId && !current.field), canBack: Boolean(current.editId), canCancel: Boolean(current.editId) };
+  };
   const cancelPage = async (cause: TerminalSelectionCancelCause = 'escape') => {
     const current = view();
     // 已提交的单字段请求已经应答：Esc 不再发取消，也不宣称撤销（信息行正写着“正在提交…”）
@@ -676,7 +682,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       // 提交锁里只写真实可用的操作：阅读与 Ctrl+C 的中止/退出（Enter、Esc 此时不生效）
       : current.field && fieldLocked() ? hint('PgUp/PgDn 阅读 · Ctrl+C 中止/退出', 'Ctrl+C 中止/退出')
       : current.field ? current.fieldSubmit ? `Enter ${current.fieldSubmit.label} · Esc ${current.cancelLabel ?? '返回'}` : 'Enter 确认 · Esc 返回'
-      : current.kind === 'configuration' ? hint('↑↓ 选择 · Enter 确认 · Ctrl+S 完成 · Esc 返回', '↑↓ 选择 · Enter 确认 · Esc 返回')
+      : current.kind === 'configuration' ? (() => {
+        const controls = configurationControls(current);
+        if (current.busy) return controls.canBack ? (current.choices?.length ? hint('Enter 确认 · Esc 返回', 'Esc 返回') : 'Esc 返回') : '';
+        return controls.canComplete
+          ? hint('↑↓ 选择 · Enter 确认 · Ctrl+S 完成 · Esc 返回', '↑↓ 选择 · Enter 确认 · Esc 返回')
+          : '↑↓ 选择 · Enter 确认 · Esc 返回';
+      })()
       : current.connectionState === 'starting' ? '可先输入 · Ctrl+C 退出'
       : current.connectionState === 'unavailable' ? hint('Enter 重试 · F2 历史 · F3 配置 · Ctrl+C 退出', 'Enter 重试 · F2 历史 · F3 配置')
       : current.kind === 'conversation' ? conversationKeys()
@@ -1064,6 +1076,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       // 页面上的 Ctrl+C 只作用于当时的页面，不算主对话双击退出的首击
       if (view().kind === 'confirmation' || view().kind === 'selection') { ctrlC = 0; void cancelPage('ctrl-c'); return; }
       if (view().kind === 'command' || view().kind === 'unavailable' || view().kind === 'history' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
+      if (view().kind === 'configuration' && !configurationControls(view()).canCancel) {
+        ctrlC = 0; setStatus(view().editId ? '正在保存配置，请等待结果。' : '正在读取配置，请稍候。'); return;
+      }
       if (view().editId) { releaseSecret(); void action({ kind: 'configuration-action', editId: view().editId!, action: 'cancel' }); ctrlC = 0; return; }
       if (view().kind !== 'conversation') { void cancelPage(); ctrlC = 0; return; }
       const now = performance.now();
@@ -1134,6 +1149,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       // 发送尚未交出时 Esc 取消这次发送而不是清空草稿
       if (view().kind === 'conversation' && input.cancelPreparedSubmit()) return;
       if (view().kind === 'conversation' && draft.text) { input.clear(draft.version); return; }
+      if (view().kind === 'configuration' && !configurationControls(view()).canBack) {
+        setStatus(view().editId ? '正在保存配置，请等待结果。' : '正在读取配置，请稍候。'); return;
+      }
       if (view().kind === 'conversation' && (view().busy || waitingSubject())) { const stop = stopTarget(); void action({ kind: 'abort', ...(stop ? { stop } : {}) }); } else void cancelPage(); return;
     }
     if (view().kind === 'conversation' && candidateValue()?.ghost && event.name === 'tab' && !event.ctrl && !event.shift && !event.meta) {
@@ -1212,10 +1230,16 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       }
     }
     if (event.name === 'return' && !event.shift) { consume(); void submit(); return; }
-    if (event.ctrl && event.name === 's' && view().editId) {
+    if (event.ctrl && event.name === 's' && (view().editId || view().kind === 'configuration')) {
       consume();
       if (fieldPastes.has(statusSource)) setStatus('粘贴仍在处理，请完成后再保存。');
-      else if (!safeAction()) setStatus('请放大窗口后保存；仍可按 Esc 取消。');
+      else if (!configurationControls(view()).canComplete) {
+        setStatus(view().busy
+          ? (configurationControls(view()).canBack ? '正在处理当前步骤，可按 Esc 返回后再保存。' : (view().editId ? '正在保存配置，请等待结果。' : '正在读取配置，请稍候。'))
+          : view().field
+            ? '请先按 Enter 确认当前输入（或按 Esc 返回），再保存配置。'
+            : '请先完成或返回当前步骤，再按 Ctrl+S 保存。');
+      } else if (!safeAction()) setStatus('请放大窗口后保存；仍可按 Esc 取消。');
       else void action({ kind: 'configuration-action', editId: view().editId!, action: 'complete' });
       return;
     }

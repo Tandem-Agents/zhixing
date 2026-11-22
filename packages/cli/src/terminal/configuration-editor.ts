@@ -4,10 +4,10 @@ import { listSupportedProviders } from '../registries/index.js';
 import type { TerminalAction, TerminalChoice, TerminalView } from '@zhixing-ai/terminal-ui/protocol';
 import type { ConfigurationEditResult, NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
 import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, SectionId, WorkingState } from '../config-editor/types.js';
-import { createInitialState, setInputBuffer, isMcpServerEnabled, readConnection, readMcpServer } from '../config-editor/state.js';
+import { createInitialState, setInputBuffer, isMcpServerEnabled, isMessagingEnabled, readConnection, readMcpServer, readModelRole } from '../config-editor/state.js';
 import { buildOptions, collectAllIssues, handleMainPanelKey } from '../config-editor/model/main.js';
 import { resolveListMeta, handleListPanelKey } from '../config-editor/model/list.js';
-import { resolveEntityMeta, handleEntityPanelKey } from '../config-editor/model/entity.js';
+import { commitConnectionConfig, commitProviderConfig, resolveProviderEffectiveModel, resolveEntityMeta, handleEntityPanelKey } from '../config-editor/model/entity.js';
 import { resolveInputField, resolveBudgetRange, handleInputPanelKey, handleAddModelPanelKey, handleThinkingBudgetPanelKey } from '../config-editor/model/input.js';
 import { describeStatus, findStatus, handleMcpServerPanelKey, handleMcpAddPanelKey, handleMcpAddInputPanelKey, handleMcpChoicesPanelKey } from '../config-editor/model/mcp.js';
 import type { KeyEvent } from '../tui/key-event.js';
@@ -21,6 +21,53 @@ const FIELD_BYTES = 8 * 1024;
 const MESSAGE_CHARS = 4096;
 function boundMessage(value: string): string {
   return value.length > MESSAGE_CHARS ? `${value.slice(0, MESSAGE_CHARS)}…` : value;
+}
+
+function panelAllowsStackComplete(
+  panel: PanelDescriptor,
+  state: WorkingState,
+  runtime: ConfigEditorRuntime | undefined,
+  isTop: boolean,
+): boolean {
+  switch (panel.kind) {
+    case 'main':
+    case 'connection-list':
+    case 'connection-config':
+    case 'connection-custom-models':
+    case 'connection-custom-model-detail':
+    case 'connection-model-overrides':
+    case 'model-override-edit':
+    case 'connection-hidden-models':
+    case 'catalog-config':
+    case 'provider-config':
+    case 'thinking-config':
+    case 'mcp-server':
+      return true;
+    case 'provider-list': {
+      if (!isTop) return true;
+      const cur = readModelRole(state, panel.role);
+      return Boolean(cur?.provider && cur.model);
+    }
+    case 'model-list':
+      return !isTop || Boolean(resolveProviderEffectiveModel(state, panel.role, panel.providerId, runtime));
+    case 'channel-config':
+      return isMessagingEnabled(state, panel.channelId);
+    case 'connection-add':
+    case 'connection-hide-picker':
+    case 'model-verify-confirm':
+    case 'connection-delete':
+    case 'migration-repair':
+    case 'migration-repair-provider':
+    case 'preset-update-list':
+    case 'preset-update-review':
+    case 'input':
+    case 'add-model':
+    case 'thinking-budget':
+    case 'mcp-add-input':
+    case 'mcp-add':
+    case 'mcp-choices':
+      return false;
+  }
 }
 
 /** The editor transaction, credentials and asynchronous effects remain in N.
@@ -108,9 +155,50 @@ export class TerminalConfigurationEditor {
     let index = 0;
     if (operation === 'back') key = { type: 'escape' };
     else if (operation === 'complete') {
+      if (!this.#canComplete()) {
+        this.#error = this.#fieldId
+          ? '请先按 Enter 确认当前输入（或按 Esc 返回），再完成保存。'
+          : '请先完成或返回当前步骤，再按 Ctrl+S 保存配置。';
+        await this.#publish(); return;
+      }
+      const connIdx = this.#stack.findLastIndex(
+        (item): item is Extract<PanelDescriptor, { kind: 'connection-config' }> => item.kind === 'connection-config',
+      );
+      if (connIdx >= 0) {
+        const connPanel = this.#stack[connIdx] as Extract<PanelDescriptor, { kind: 'connection-config' }>;
+        const committed = commitConnectionConfig(this.#state, connPanel, this.#context.runtime);
+        if (!committed.ok) {
+          this.#error = committed.errorMessage;
+          this.#stack = this.#stack.slice(0, connIdx + 1);
+          this.#returnIndexes = this.#returnIndexes.slice(0, connIdx);
+          await this.#publish(); return;
+        }
+        this.#state = committed.state;
+        this.#stack[connIdx] = {
+          kind: 'connection-config',
+          connectionId: connPanel.connectionId,
+          ...(connPanel.initialModel ? { initialModel: connPanel.initialModel } : {}),
+        };
+      }
+      const provIdx = this.#stack.findLastIndex(
+        (item): item is Extract<PanelDescriptor, { kind: 'provider-config' }> => item.kind === 'provider-config',
+      );
+      if (provIdx >= 0) {
+        const provPanel = this.#stack[provIdx] as Extract<PanelDescriptor, { kind: 'provider-config' }>;
+        const committed = commitProviderConfig(this.#state, provPanel, this.#context.runtime);
+        if (!committed.ok) {
+          this.#error = committed.errorMessage;
+          this.#stack = this.#stack.slice(0, provIdx + 1);
+          this.#returnIndexes = this.#returnIndexes.slice(0, provIdx);
+          await this.#publish(); return;
+        }
+        this.#state = committed.state;
+      }
       const result = handleMainPanelKey(this.#context, this.#state, { index: 0 }, { type: 'ctrl-s' });
       this.#error = result.errorMessage;
-      if (this.#error) { this.#stack = [{ kind: 'main' }]; this.#returnIndexes = []; }
+      if (this.#error && this.#stack.at(-1)?.kind !== 'connection-config' && this.#stack.at(-1)?.kind !== 'provider-config') {
+        this.#stack = [{ kind: 'main' }]; this.#returnIndexes = [];
+      }
       await this.#apply(result.action); return;
     } else if (operation === 'field') {
       const value = intent.value;
@@ -226,11 +314,22 @@ export class TerminalConfigurationEditor {
     this.#resolve(result);
   }
 
+  #canComplete(hasField = Boolean(this.#fieldId)): boolean {
+    return !this.#loading && !this.#saving && !this.#probeBlocked && !hasField
+      && this.#stack.length > 0
+      && this.#stack.every((panel, idx) =>
+        panelAllowsStackComplete(panel, this.#state, this.#context.runtime, idx === this.#stack.length - 1),
+      );
+  }
+
   async #loadingView(message: string): Promise<void> {
     this.#revision++;
     this.#fieldId = undefined; this.#choices.clear();
     this.#current = { kind: 'configuration', editId: this.editId, title: this.#current?.title ?? this.options.title,
       configurationHome: this.#current?.configurationHome ?? this.#stack.at(-1)?.kind === 'main',
+      configurationControls: this.#saving
+        ? { canComplete: false, canBack: false, canCancel: false }
+        : { canComplete: false, canBack: true, canCancel: true },
       chromeDescription: this.#current?.chromeDescription,
       chromeDetails: this.#current ? this.#current.chromeDetails : this.options.headerDetails,
       message: this.#safe(message), busy: true, choices: this.#saving ? [] : [{ id: 'back', label: '取消当前操作并返回' }] };
@@ -288,7 +387,7 @@ export class TerminalConfigurationEditor {
             ? resolveInputField(target.panel.fieldId, this.#state, this.#context.runtime)
             : undefined;
           add(row.label, input && input.sensitive
-            ? (row.status.text.includes('已封禁') || row.status.text.includes('已撤销')
+            ? (row.preserveRedactedStatus || row.status.text.includes('已封禁') || row.status.text.includes('已撤销')
                 ? row.status.text
                 : input.currentValue(this.#state) ? '已设置 · 可替换' : '待填写')
             : row.status.text);
@@ -373,6 +472,7 @@ export class TerminalConfigurationEditor {
     this.#choices = new Set(visible.map(choice => choice.id));
     this.#fieldId = field?.id; this.#fieldSecret = field?.secret ?? false;
     this.#current = { kind: 'configuration', editId: this.editId, title: this.#safe(title), configurationHome: panel.kind === 'main',
+      configurationControls: { canComplete: this.#canComplete(Boolean(field)), canBack: true, canCancel: true },
       chromeDescription: chromeDescription ? this.#safe(chromeDescription) : undefined,
       chromeDetails: panel.kind === 'main' ? this.options.headerDetails?.map(value => this.#safe(value)) : undefined,
       message: targetPaging ? boundMessage([message, this.#error ? this.#safe(this.#error) : ''].filter(Boolean).join('\n'))
@@ -389,6 +489,7 @@ export class TerminalConfigurationEditor {
       else if (object && typeof object === 'object') for (const child of Object.values(object)) redact(child);
     };
     for (const provider of Object.values(this.#state.credentials.providers ?? {})) redact(provider.apiKey);
+    for (const legacy of Object.values(this.#state.credentials.protectedLegacyProviders ?? {})) redact(legacy.apiKey);
     for (const secret of Object.values(this.#state.credentials.modelSecrets ?? {})) redact(secret.value);
     for (const [id, credentials] of Object.entries(this.#state.credentials.channels ?? {})) {
       const channel = findSupportedChannel(this.#state.channelCatalog ?? listSupportedChannels(), id,

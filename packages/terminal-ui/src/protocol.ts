@@ -259,6 +259,12 @@ export interface TerminalView {
   readonly requestId?: string;
   readonly editId?: string;
   readonly configurationHome?: boolean;
+  /** 配置页此刻真实可用的操作能力：N 依据当前面板、祖先栈与加载/保存状态裁决，U 的底栏提示与按键统一据此判定 */
+  readonly configurationControls?: {
+    readonly canComplete: boolean;
+    readonly canBack: boolean;
+    readonly canCancel: boolean;
+  };
   readonly chromeDescription?: string;
   readonly chromeDetails?: readonly string[];
   readonly choices?: readonly TerminalChoice[];

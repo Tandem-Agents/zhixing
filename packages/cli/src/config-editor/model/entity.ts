@@ -86,7 +86,157 @@ export const stay = (state: WorkingState, errorMessage?: string): OnEnterResult 
 export interface EntityRow {
   label: string;
   status: Status;
+  /** 仅用于已严格脱敏的非密钥摘要行（如旧自定义端点 origin 摘要）：跳过 sensitive 行的泛化“待填写”覆写 */
+  preserveRedactedStatus?: true;
   onEnter: (state: WorkingState) => OnEnterResult;
+}
+
+export function resolveProviderEffectiveModel(
+  state: WorkingState,
+  role: Extract<PanelDescriptor, { kind: "provider-config" }>["role"],
+  providerId: string,
+  runtime?: ConfigEditorRuntime,
+): string | undefined {
+  const current = readModelRole(state, role);
+  if (current?.provider === providerId && current.model) return current.model;
+  const catalog = runtime?.modelCatalog?.() ?? DEFAULT_MODEL_CATALOG_PORT;
+  const conn = readConnection(state, providerId);
+  const presetLookupId = conn?.presetId ?? providerId;
+  const roleRec = catalog.getRoleRecommendation(role);
+  return roleRec?.provider === presetLookupId ? roleRec.model : undefined;
+}
+
+export function commitProviderConfig(
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "provider-config" }>,
+  runtime?: ConfigEditorRuntime,
+): { ok: true; state: WorkingState } | { ok: false; errorMessage: string } {
+  const model = resolveProviderEffectiveModel(state, descriptor.role, descriptor.providerId, runtime);
+  const next = writeModelRole(state, descriptor.role, descriptor.providerId, model ?? "");
+  const issues = checkModel(next.config, next.credentials).filter(
+    (i) => i.role === descriptor.role,
+  );
+  const labels = issues.map((i) => i.fieldLabel);
+  if (!model?.trim() && !labels.includes("模型")) {
+    labels.push("模型");
+  }
+  if (labels.length > 0) {
+    return {
+      ok: false,
+      errorMessage: `请先填${labels.join(" 和 ")}`,
+    };
+  }
+  return { ok: true, state: next };
+}
+
+function validateConnectionFormatOnly(conn: ModelConnectionConfig): string | null {
+  if (!conn.name.trim()) return "请填写连接名称";
+  try {
+    const parsed = new URL(conn.endpoint);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "端点必须以 http:// 或 https:// 开头";
+    }
+    if (parsed.username || parsed.password) {
+      return "端点 URL 禁止内嵌凭据";
+    }
+  } catch {
+    return "端点 URL 格式无效";
+  }
+  if (conn.auth.mode === "header") {
+    const err = validateSingleHopHeaderName(conn.auth.headerName);
+    if (err) return err;
+  }
+  return null;
+}
+
+export function validateConnectionBeforeSave(
+  state: WorkingState,
+  connectionId: string,
+): string | null {
+  const current = readConnection(state, connectionId);
+  if (!current) return "连接不存在";
+  const formatErr = validateConnectionFormatOnly(current);
+  if (formatErr) return formatErr;
+  if (current.auth.mode !== "none") {
+    const st = readConnectionSecretStatus(state, connectionId);
+    if (st === "compromised") return "当前凭据已封禁（存在但不可读取），请录入新密钥替换";
+    if (st === "revoked") return "当前凭据已撤销，请重新录入密钥";
+    if (st !== "ready") return "请先填写连接凭据";
+  }
+  return null;
+}
+
+export function isConnectionAuthRejectedUnconfirmed(
+  state: WorkingState,
+  connectionId: string,
+): boolean {
+  const disc = state.draftDiscoveryByConnection?.[connectionId];
+  if (disc?.status !== "auth-rejected") return false;
+  const fp = computeConnectionDraftFingerprint(state, connectionId);
+  return state.draftAuthRejectedConfirmed?.[connectionId] !== fp;
+}
+
+export interface BlockingConnectionIssue {
+  readonly connectionId: string;
+  readonly summary: string;
+  readonly label: string;
+}
+
+export function collectBlockingConnectionIssues(
+  state: WorkingState,
+): readonly BlockingConnectionIssue[] {
+  const issues: BlockingConnectionIssue[] = [];
+  for (const [connId, conn] of Object.entries(readConnections(state))) {
+    const formatErr = validateConnectionFormatOnly(conn);
+    if (formatErr) {
+      issues.push({
+        connectionId: connId,
+        summary: `${conn.name || connId} · ${formatErr}`,
+        label: `服务商连接（${conn.name || connId}）：${formatErr}`,
+      });
+      continue;
+    }
+    if (isConnectionAuthRejectedUnconfirmed(state, connId)) {
+      const msg = "401 鉴权被拒绝，请修正凭据或在连接页显式选择「先存」";
+      issues.push({
+        connectionId: connId,
+        summary: `${conn.name || connId} · ${msg}`,
+        label: `服务商连接（${conn.name || connId}）：${msg}`,
+      });
+    }
+  }
+  return issues;
+}
+
+export function commitConnectionConfig(
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "connection-config" }>,
+  runtime?: ConfigEditorRuntime,
+): { ok: true; state: WorkingState } | { ok: false; errorMessage: string } {
+  const err = validateConnectionBeforeSave(state, descriptor.connectionId);
+  if (err) return { ok: false, errorMessage: err };
+  if (isConnectionAuthRejectedUnconfirmed(state, descriptor.connectionId)) {
+    return {
+      ok: false,
+      errorMessage:
+        "401 鉴权被拒绝：请重填 API Key / 认证头，或点击「先存」显式二次确认（不会冒充已验证）",
+    };
+  }
+  const catalog = runtime?.modelCatalog?.() ?? DEFAULT_MODEL_CATALOG_PORT;
+  const current = readConnection(state, descriptor.connectionId)!;
+  const disc = state.draftDiscoveryByConnection?.[descriptor.connectionId];
+  const modelForFirstRun =
+    current.customModels?.[0] ??
+    descriptor.initialModel ??
+    (disc?.status === "discovered" ? disc.models[0]?.id : undefined) ??
+    (current.presetId
+      ? (catalog.getPreset(current.presetId)?.preset ?? getPreset(current.presetId))?.knownModels?.[0]?.id
+      : undefined);
+  // 首次配置（尚无 main）自动同次绑定 main；常规新增绝不覆盖既有用途默认
+  const next = upsertConnection(state, descriptor.connectionId, current, {
+    ...(modelForFirstRun ? { autoBindMainModel: modelForFirstRun } : {}),
+  });
+  return { ok: true, state: next };
 }
 
 export interface EntityButton {
@@ -196,7 +346,7 @@ export function buildProviderConfigMeta(
     previewState.config,
     previewState.credentials,
   ).filter((i) => i.role === descriptor.role);
-  const canProceed = myIssues.length === 0;
+  const canProceed = Boolean(previewModel.trim()) && myIssues.length === 0;
 
   const currentMaxOutput =
     currentRole?.provider === descriptor.providerId
@@ -209,22 +359,8 @@ export function buildProviderConfigMeta(
       hint: canProceed ? "保存此服务商配置" : "请先补全必填项",
       primary: canProceed,
       onEnter: (s) => {
-        const current = readModelRole(s, descriptor.role);
-        const model =
-          current?.provider === descriptor.providerId
-            ? current?.model
-            : recommendedModel;
-        const next = writeModelRole(s, descriptor.role, descriptor.providerId, model ?? "");
-        const issues = checkModel(next.config, next.credentials).filter(
-          (i) => i.role === descriptor.role,
-        );
-        if (issues.length > 0) {
-          return stay(
-            s,
-            `请先填${issues.map((i) => i.fieldLabel).join(" 和 ")}`,
-          );
-        }
-        return pop(next);
+        const res = commitProviderConfig(s, descriptor, runtime);
+        return res.ok ? pop(res.state) : stay(s, res.errorMessage);
       },
     },
     ...(displayModel
@@ -601,40 +737,8 @@ export function buildConnectionConfigMeta(
       nav(s, { kind: "connection-hidden-models", connectionId: descriptor.connectionId }),
   });
 
-  const currentDraftFingerprint = computeConnectionDraftFingerprint(state, descriptor.connectionId);
-  const authRejectedUnconfirmed =
-    draftDiscovery?.status === "auth-rejected" &&
-    state.draftAuthRejectedConfirmed?.[descriptor.connectionId] !== currentDraftFingerprint;
-
-  const validateBeforeSave = (s: WorkingState): string | null => {
-    const current = readConnection(s, descriptor.connectionId);
-    if (!current) return "连接不存在";
-    if (!current.name.trim()) return "请填写连接名称";
-    try {
-      const parsed = new URL(current.endpoint);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return "端点必须以 http:// 或 https:// 开头";
-      }
-      if (parsed.username || parsed.password) {
-        return "端点 URL 禁止内嵌凭据";
-      }
-    } catch {
-      return "端点 URL 格式无效";
-    }
-    if (current.auth.mode === "header") {
-      const err = validateSingleHopHeaderName(current.auth.headerName);
-      if (err) return err;
-    }
-    if (current.auth.mode !== "none") {
-      const st = readConnectionSecretStatus(s, descriptor.connectionId);
-      if (st === "compromised") return "当前凭据已封禁（存在但不可读取），请录入新密钥替换";
-      if (st === "revoked") return "当前凭据已撤销，请重新录入密钥";
-      if (st !== "ready") return "请先填写连接凭据";
-    }
-    return null;
-  };
-
-  const validationError = validateBeforeSave(state);
+  const authRejectedUnconfirmed = isConnectionAuthRejectedUnconfirmed(state, descriptor.connectionId);
+  const validationError = validateConnectionBeforeSave(state, descriptor.connectionId);
   const buttons: EntityButton[] = [
     {
       label: "保存",
@@ -647,30 +751,8 @@ export function buildConnectionConfigMeta(
             : "保存此连接（保留现有用途默认不变）",
       primary: validationError === null && !authRejectedUnconfirmed,
       onEnter: (s) => {
-        const err = validateBeforeSave(s);
-        if (err) return stay(s, err);
-        const fp = computeConnectionDraftFingerprint(s, descriptor.connectionId);
-        const disc = s.draftDiscoveryByConnection?.[descriptor.connectionId];
-        if (
-          disc?.status === "auth-rejected" &&
-          s.draftAuthRejectedConfirmed?.[descriptor.connectionId] !== fp
-        ) {
-          return stay(
-            s,
-            "401 鉴权被拒绝：请重填 API Key / 认证头，或点击「先存」显式二次确认（不会冒充已验证）",
-          );
-        }
-        const current = readConnection(s, descriptor.connectionId)!;
-        const modelForFirstRun =
-          current.customModels?.[0] ??
-          descriptor.initialModel ??
-          (disc?.status === "discovered" ? disc.models[0]?.id : undefined) ??
-          (current.presetId ? (catalog.getPreset(current.presetId)?.preset ?? getPreset(current.presetId))?.knownModels?.[0]?.id : undefined);
-        // 首次配置（尚无 main）自动同次绑定 main；常规新增绝不覆盖既有用途默认
-        const next = upsertConnection(s, descriptor.connectionId, current, {
-          ...(modelForFirstRun ? { autoBindMainModel: modelForFirstRun } : {}),
-        });
-        return pop(next);
+        const res = commitConnectionConfig(s, descriptor, runtime);
+        return res.ok ? pop(res.state) : stay(s, res.errorMessage);
       },
     },
   ];
@@ -680,14 +762,11 @@ export function buildConnectionConfigMeta(
       label: "先存",
       hint: "先存待修（确认保留 401 凭据草稿；仍标鉴权失败/待核对，不冒充已验证）",
       onEnter: (s) => {
-        const err = validateBeforeSave(s);
+        const err = validateConnectionBeforeSave(s, descriptor.connectionId);
         if (err) return stay(s, err);
         const confirmed = confirmAuthRejectedSave(s, descriptor.connectionId);
-        const current = readConnection(confirmed, descriptor.connectionId)!;
-        const next = upsertConnection(confirmed, descriptor.connectionId, current, {
-          ...(defaultModelCandidate ? { autoBindMainModel: defaultModelCandidate } : {}),
-        });
-        return pop(next);
+        const res = commitConnectionConfig(confirmed, descriptor, runtime);
+        return res.ok ? pop(res.state) : stay(s, res.errorMessage);
       },
     });
   }
@@ -857,18 +936,27 @@ export function buildMigrationRepairProviderMeta(
   const legacy = found.entry;
   const confirmedOverride =
     descriptor.overrideEndpoint ?? state.confirmedRepairEndpoints?.[descriptor.providerId];
-  const hasCleanOverride = Boolean(
-    confirmedOverride && !hasExplicitUrlCredentialsOrQueryAuth(confirmedOverride),
-  );
+  let hasCleanOverride = false;
+  if (confirmedOverride && !hasExplicitUrlCredentialsOrQueryAuth(confirmedOverride)) {
+    try {
+      const parsed = new URL(confirmedOverride);
+      hasCleanOverride = parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch {
+      hasCleanOverride = false;
+    }
+  }
   const effectiveEndpoint = hasCleanOverride
     ? confirmedOverride!
     : found.blockedV1
       ? ""
       : (legacy.baseUrl ?? "");
 
-  // 绝不在普通界面状态文本中直接回显未确认的受保护原始 URL 路径/查询参数
+  // 绝不在普通界面状态文本中直接回显未确认的受保护原始 URL 或替代地址的路径/查询参数
   const endpointStatus: Status = hasCleanOverride
-    ? { level: "ready", text: confirmedOverride! }
+    ? {
+        level: "ready",
+        text: `已设新端点 · ${redactProtectedLegacyEndpoint(confirmedOverride)}`,
+      }
     : found.blockedV1
       ? {
           level: "pending",
@@ -915,6 +1003,7 @@ export function buildMigrationRepairProviderMeta(
     {
       label: "旧自定义端点",
       status: endpointStatus,
+      preserveRedactedStatus: true,
       onEnter: (s) =>
         nav(s, { kind: "input", fieldId: `repair-endpoint:${descriptor.providerId}` }),
     },
@@ -1738,6 +1827,9 @@ export function handleEntityPanelKey(
     case "ctrl-c":
       return { action: { type: "exit", result: { kind: "cancelled" } }, cursor };
     case "escape":
+      if (descriptor.kind === "connection-config" && descriptor.isNew && descriptor.rollbackState) {
+        return { action: { type: "pop", state: descriptor.rollbackState }, cursor };
+      }
       return { action: { type: "pop", state }, cursor };
     case "enter": {
       const idx = cursor.index;

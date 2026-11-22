@@ -2260,5 +2260,85 @@ try {
     await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
     checks.push('standalone command surface: first frame and executing frame show command identity and Ctrl+C exit without conversation chrome, early-input box or bogus Enter/Esc hints');
   }
+  {
+    // B6-01: configuration footer hints and keypress guards follow configurationControls across ordinary, gate, field, loading and durable-save states
+    const beforeCfgActions = actions.length;
+    await show({
+      kind: 'configuration',
+      title: '服务商连接 · 自定义',
+      editId: 'cfg-completable',
+      configurationControls: { canComplete: true, canBack: true, canCancel: true },
+      choices: [{ id: 'select:0', label: '保存', presentation: 'button', primary: true }],
+    });
+    assert.ok(text().includes('Ctrl+S 完成'), 'completable configuration page advertises Ctrl+S');
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.deepEqual(actions.at(-1), { kind: 'configuration-action', editId: 'cfg-completable', action: 'complete' });
+
+    const beforeGate = actions.length;
+    await show({
+      kind: 'configuration',
+      title: '接入 · demo-mcp',
+      editId: 'cfg-gate',
+      configurationControls: { canComplete: false, canBack: true, canCancel: true },
+      choices: [{ id: 'select:0', label: '验证连接' }],
+    });
+    assert.ok(!text().includes('Ctrl+S 完成'), 'gate configuration page omits Ctrl+S from footer');
+    assert.ok(text().includes('↑↓ 选择 · Enter 确认 · Esc 返回'), 'gate configuration page shows truthful navigation hints');
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.equal(actions.length, beforeGate, 'Ctrl+S on gate configuration page does not dispatch complete');
+    assert.ok(text().includes('请先完成或返回当前步骤'), 'Ctrl+S on gate configuration page explains why completion is unavailable');
+
+    const beforeField = actions.length;
+    await show({
+      kind: 'configuration',
+      title: '端点 URL',
+      editId: 'cfg-field',
+      configurationControls: { canComplete: false, canBack: true, canCancel: true },
+      field: { id: 'conn-endpoint:custom', label: '端点 URL', secret: false, value: 'http://127.0.0.1:11434/v1' },
+    });
+    assert.ok(!text().includes('Ctrl+S 完成'), 'field configuration page omits Ctrl+S');
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.equal(actions.length, beforeField, 'Ctrl+S on field configuration page does not drop uncommitted buffer via complete');
+    assert.ok(text().includes('请先按 Enter 确认当前输入'), 'Ctrl+S on field configuration page guides user to confirm or Esc');
+
+    const beforeLoading = actions.length;
+    await show({
+      kind: 'configuration',
+      title: '接入 MCP',
+      editId: 'cfg-loading',
+      busy: true,
+      message: '正在验证连接…',
+      configurationControls: { canComplete: false, canBack: true, canCancel: true },
+      choices: [{ id: 'back', label: '取消当前操作并返回' }],
+    });
+    assert.ok(!text().includes('Ctrl+S 完成'), 'cancellable loading omits Ctrl+S');
+    assert.ok(text().includes('Enter 确认 · Esc 返回'), 'cancellable loading shows truthful Enter/Esc hints');
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.equal(actions.length, beforeLoading, 'Ctrl+S during loading does not dispatch complete');
+
+    const beforeSaving = actions.length, beforeSavingExits = exits;
+    await show({
+      kind: 'configuration',
+      title: '配置',
+      editId: 'cfg-saving',
+      busy: true,
+      message: '正在保存配置…',
+      configurationControls: { canComplete: false, canBack: false, canCancel: false },
+      choices: [],
+    });
+    assert.ok(!text().includes('Ctrl+S 完成'), 'durable saving omits Ctrl+S');
+    assert.ok(!text().includes('Esc 返回'), 'durable saving omits unavailable Esc');
+    assert.ok(!text().includes('Ctrl+C'), 'durable saving omits unavailable Ctrl+C cancel');
+    test.mockInput.pressEscape(); await flush();
+    test.mockInput.pressKey('\x03'); await flush();
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.equal(actions.length, beforeSaving, 'Esc, Ctrl+C and Ctrl+S do not dispatch actions during durable save');
+    assert.equal(exits, beforeSavingExits, 'Ctrl+C does not exit surface during durable save');
+    assert.ok(text().includes('正在保存配置，请等待结果。'), 'keys during durable save report truthful wait status');
+    void beforeCfgActions;
+
+    await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
+    checks.push('configuration controls align footer hints and Ctrl+S/Esc/Ctrl+C behaviour across completable, gate, field, cancellable-loading and durable-saving states');
+  }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

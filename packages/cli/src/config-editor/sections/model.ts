@@ -35,6 +35,7 @@ import {
   isConnectionReady,
   type ModelIssue,
 } from "../checks/model.js";
+import { collectBlockingConnectionIssues } from "../model/entity.js";
 
 function formatCatalogSourceZh(
   source: "bundled" | "trusted-remote" | "recovered-previous",
@@ -84,22 +85,29 @@ export const modelSection: Section = {
       isConnectionReady(c, state.credentials),
     ).length;
     const presetSuggestions = listPresetUpdateSuggestions(state, catalog);
+    const connBlockingIssues = collectBlockingConnectionIssues(state);
 
     const entries: SectionEntry[] = [
       {
         label: "服务商连接",
         state:
-          connEntries.length === 0
-            ? { kind: "disabled", statusText: "未配置连接（按 Enter 新增预设或自定义/本地连接）" }
-            : compromisedCount > 0
-              ? {
-                  kind: "disabled",
-                  statusText: `已配 ${connEntries.length} 个连接（${compromisedCount} 个凭据已封禁需替换）`,
-                }
-              : {
-                  kind: "ready",
-                  statusText: `已配 ${connEntries.length} 个连接（${readyCount} 个就绪${presetSuggestions.length > 0 ? ` · ${presetSuggestions.length} 项预设建议` : ""}）`,
-                },
+          connBlockingIssues.length > 0
+            ? {
+                kind: "blocked",
+                statusText: connBlockingIssues[0]!.summary,
+                issues: connBlockingIssues.map((item) => item.label),
+              }
+            : connEntries.length === 0
+              ? { kind: "disabled", statusText: "未配置连接（按 Enter 新增预设或自定义/本地连接）" }
+              : compromisedCount > 0
+                ? {
+                    kind: "disabled",
+                    statusText: `已配 ${connEntries.length} 个连接（${compromisedCount} 个凭据已封禁需替换）`,
+                  }
+                : {
+                    kind: "ready",
+                    statusText: `已配 ${connEntries.length} 个连接（${readyCount} 个就绪${presetSuggestions.length > 0 ? ` · ${presetSuggestions.length} 项预设建议` : ""}）`,
+                  },
         enterTarget: { kind: "connection-list" },
       },
     ];

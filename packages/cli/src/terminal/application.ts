@@ -2516,6 +2516,7 @@ class TerminalApplication {
 
   async #configuration(kind: 'config' | 'mcp'): Promise<void> {
     await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP 管理', configurationHome: true,
+      configurationControls: { canComplete: false, canBack: false, canCancel: false },
       chromeDetails: this.#configurationHeaderDetails('edit'), message: '正在读取本机配置…', busy: true });
     this.#abort.signal.throwIfAborted();
     const { editRuntimeConfiguration, prepareMcpConfiguration } = await import('../runtime/configuration-application.js');

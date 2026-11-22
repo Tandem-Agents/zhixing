@@ -359,4 +359,532 @@ describe('single-root Node configuration transaction', () => {
     await expect(h.action('complete')).rejects.toThrow('已更新');
     expect(h.save).toHaveBeenCalledOnce();
   });
+
+  it('completes first-run connection setup directly via Ctrl+S identically to in-page save + home complete, and preserves existing main on regular add', async () => {
+    const discoverModels = vi.fn(async () => ({
+      status: 'discovered' as const,
+      models: [{ id: 'local-chat-alpha', capabilities: {} }],
+      authoritativeNativeFacts: false,
+      fromCache: false,
+    }));
+    const openZeroSetup = () => {
+      const views: Omit<TerminalView, 'generation'>[] = [];
+      const save = vi.fn(async (_edit: Extract<ConfigurationEditResult, { kind: 'completed' }>) => {});
+      const editor = new TerminalConfigurationEditor({
+        session: { initialConfig: {}, initialCredentials: {}, writers: { save } },
+        title: '初始配置',
+        sections: ['model', 'messaging'],
+        purpose: 'setup',
+        runtime: { discoverModels },
+        publish: async view => { views.push(view); },
+      });
+      const result = editor.run();
+      const current = () => views.at(-1)!;
+      const action = (value: string) => editor.act({ kind: 'configuration-action', editId: editor.editId, action: value });
+      const choose = async (label: string) => {
+        const choice = current().choices?.find(item => item.label.includes(label));
+        expect(choice, `Missing ${label} in ${JSON.stringify(current())}`).toBeDefined();
+        await action(choice!.id);
+      };
+      return { views, save, editor, result, current, action, choose };
+    };
+
+    const prepareNewCustomConnection = async (h: ReturnType<typeof openZeroSetup>) => {
+      await h.choose('服务商连接');
+      await h.choose('新增服务商连接');
+      expect(h.current().configurationControls?.canComplete).toBe(false);
+      await h.choose('自定义连接');
+      expect(h.current().configurationControls?.canComplete).toBe(true);
+      await h.choose('接口端点');
+      expect(h.current().configurationControls?.canComplete).toBe(false);
+      await h.editor.act({ kind: 'configuration-action', editId: h.editor.editId, action: 'field', value: 'http://127.0.0.1:18080/v1' });
+      await vi.waitFor(() => expect(h.current().title).toContain('服务商连接 ·'));
+      expect(h.current().choices?.find(c => c.label === '首次默认主模型')?.detail).toContain('local-chat-alpha');
+      expect(h.current().configurationControls?.canComplete).toBe(true);
+    };
+
+    // Path A: Direct Ctrl+S on connection-config
+    const direct = openZeroSetup();
+    await prepareNewCustomConnection(direct);
+    await direct.action('complete');
+    const directRes = await direct.result;
+    expect(directRes.kind).toBe('completed');
+    expect(direct.save).toHaveBeenCalledOnce();
+
+    // Path B: Click in-page "保存" -> Esc back to home -> click "完成"
+    const twoStep = openZeroSetup();
+    await prepareNewCustomConnection(twoStep);
+    await twoStep.choose('保存');
+    while (!twoStep.current().configurationHome) await twoStep.action('back');
+    await twoStep.choose('完成');
+    const twoStepRes = await twoStep.result;
+    expect(twoStepRes.kind).toBe('completed');
+    expect(twoStep.save).toHaveBeenCalledOnce();
+
+    expect(direct.save.mock.calls[0]![0]).toEqual(twoStep.save.mock.calls[0]![0]);
+    expect(direct.save.mock.calls[0]![0].config.llm).toMatchObject({
+      schemaVersion: 2,
+      main: { connectionId: 'custom', model: 'local-chat-alpha' },
+    });
+
+    // Existing main preserved when pressing Ctrl+S directly on a newly added connection
+    const existingSave = vi.fn(async () => {});
+    const existingViews: Omit<TerminalView, 'generation'>[] = [];
+    const existingEditor = new TerminalConfigurationEditor({
+      session: {
+        initialConfig: { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
+        initialCredentials: { providers: { deepseek: { apiKey: 'synthetic-existing-key' } } },
+        writers: { save: existingSave },
+      },
+      title: '配置',
+      sections: ['model'],
+      purpose: 'edit',
+      runtime: { discoverModels },
+      publish: async view => { existingViews.push(view); },
+    });
+    const existingRun = existingEditor.run();
+    const pick = async (label: string) => {
+      const choice = existingViews.at(-1)!.choices?.find(item => item.label.includes(label))!;
+      await existingEditor.act({ kind: 'configuration-action', editId: existingEditor.editId, action: choice.id });
+    };
+    await pick('服务商连接');
+    await pick('新增服务商连接');
+    await pick('自定义连接');
+    await existingEditor.act({ kind: 'configuration-action', editId: existingEditor.editId, action: 'complete' });
+    expect((await existingRun).kind).toBe('completed');
+    expect(existingSave.mock.calls[0]![0].config.llm).toMatchObject({
+      main: { connectionId: 'deepseek', model: 'deepseek-v4-flash' },
+      connections: { custom: { endpoint: 'http://127.0.0.1:11434/v1' } },
+    });
+  });
+
+  it('enforces unconfirmed 401 across both direct Ctrl+S and Esc-to-home completion while allowing draft rollback on uncommitted new connections', async () => {
+    const discoverModels = vi.fn(async () => ({
+      status: 'auth-rejected' as const,
+      models: [],
+      authoritativeNativeFacts: false,
+      fromCache: false,
+      errorMessage: '401 Unauthorized',
+    }));
+
+    // 1. Existing connection rotated to a 401 key: neither direct Ctrl+S nor Esc -> home complete can bypass "先存"
+    const views: Omit<TerminalView, 'generation'>[] = [];
+    const save = vi.fn(async () => {});
+    const editor = new TerminalConfigurationEditor({
+      session: {
+        initialConfig: {
+          llm: {
+            schemaVersion: 2,
+            connections: {
+              deepseek: {
+                name: 'DeepSeek 官方',
+                presetId: 'deepseek',
+                adapter: 'openai-compatible',
+                endpoint: 'https://api.deepseek.com/v1',
+                auth: { mode: 'api-key', secretRef: 'deepseek' },
+                network: { proxy: 'inherit' },
+              },
+            },
+            main: { connectionId: 'deepseek', model: 'deepseek-v4-flash' },
+          },
+        },
+        initialCredentials: { version: 2, modelSecrets: { deepseek: { v: 2, kind: 'api-key', value: 'synthetic-old-key' } } },
+        writers: { save },
+      },
+      title: '配置',
+      sections: ['model'],
+      purpose: 'edit',
+      runtime: { discoverModels },
+      publish: async view => { views.push(view); },
+    });
+    const result = editor.run();
+    const cur = () => views.at(-1)!;
+    const act = (action: string) => editor.act({ kind: 'configuration-action', editId: editor.editId, action });
+    const pick = async (label: string) => {
+      const choice = cur().choices?.find(item => item.label.includes(label));
+      expect(choice).toBeDefined();
+      await act(choice!.id);
+    };
+
+    await pick('服务商连接');
+    await pick('DeepSeek');
+    await pick('API Key');
+    await editor.act({ kind: 'secret-value', editId: editor.editId, fieldId: cur().field!.id, value: 'synthetic-401-key' });
+    await vi.waitFor(() => expect(cur().title).toContain('服务商连接 ·'));
+
+    // Direct Ctrl+S stays on connection-config with 401 message
+    await act('complete');
+    expect(cur().title).toContain('服务商连接 ·');
+    expect(cur().message).toContain('401');
+    expect(save).not.toHaveBeenCalled();
+
+    // Esc back to home -> home also blocks completion with the same 401 requirement
+    while (!cur().configurationHome) await act('back');
+    expect(cur().choices?.find(item => item.label === '服务商连接')?.status).toBe('pending');
+    await act('complete');
+    expect(cur().configurationHome).toBe(true);
+    expect(cur().message).toContain('401');
+    expect(save).not.toHaveBeenCalled();
+
+    // Cancel remains available and discards the unconfirmed draft
+    editor.cancel();
+    expect((await result).kind).toBe('cancelled');
+    expect(save).not.toHaveBeenCalled();
+
+    // 2. Uncommitted new connection encountering 401 and cancelled via Esc rolls back cleanly without blocking unrelated edits
+    const views2: Omit<TerminalView, 'generation'>[] = [];
+    const save2 = vi.fn(async () => {});
+    const editor2 = new TerminalConfigurationEditor({
+      session: {
+        initialConfig: {
+          llm: {
+            schemaVersion: 2,
+            connections: {
+              deepseek: {
+                name: 'DeepSeek 官方',
+                presetId: 'deepseek',
+                adapter: 'openai-compatible',
+                endpoint: 'https://api.deepseek.com/v1',
+                auth: { mode: 'api-key', secretRef: 'deepseek' },
+                network: { proxy: 'inherit' },
+              },
+            },
+            main: { connectionId: 'deepseek', model: 'deepseek-v4-flash' },
+          },
+        },
+        initialCredentials: { version: 2, modelSecrets: { deepseek: { v: 2, kind: 'api-key', value: 'synthetic-good-key' } } },
+        writers: { save: save2 },
+      },
+      title: '配置',
+      sections: ['model'],
+      purpose: 'edit',
+      runtime: { discoverModels },
+      publish: async view => { views2.push(view); },
+    });
+    const run2 = editor2.run();
+    const cur2 = () => views2.at(-1)!;
+    const act2 = (action: string) => editor2.act({ kind: 'configuration-action', editId: editor2.editId, action });
+    const pick2 = async (label: string) => {
+      const choice = cur2().choices?.find(item => item.label.includes(label))!;
+      await act2(choice.id);
+    };
+
+    await pick2('轻量模型');
+    await pick2('DeepSeek');
+    await pick2('完成');
+    await act2('back');
+
+    await pick2('服务商连接');
+    await pick2('新增服务商连接');
+    await pick2('OpenAI');
+    await pick2('API Key');
+    await editor2.act({ kind: 'secret-value', editId: editor2.editId, fieldId: cur2().field!.id, value: 'synthetic-abandoned-401' });
+    await vi.waitFor(() => expect(cur2().title).toContain('OpenAI'));
+
+    // Esc on uncommitted new connection abandons the draft cleanly
+    await act2('back');
+    expect(cur2().title).toBe('服务商连接');
+    expect(JSON.stringify(cur2())).not.toContain('OpenAI');
+    await act2('complete');
+    expect((await run2).kind).toBe('completed');
+    expect(save2).toHaveBeenCalledOnce();
+    const savedPayload = save2.mock.calls[0]![0]!;
+    expect(savedPayload.config.llm?.connections?.openai).toBeUndefined();
+    expect(savedPayload.credentials.modelSecrets?.openai).toBeUndefined();
+    expect(savedPayload.config.llm?.light).toBeDefined();
+    expect(discoverModels).toHaveBeenCalledTimes(2); // Existing untouched deepseek was NOT forced to re-probe
+  });
+
+  it('projects redacted legacy endpoints without contradictory status, blocks Ctrl+S on repair/MCP gates, and distinguishes cancellable loading from durable saving', async () => {
+    const legacyPathToken = 'SYNTHETIC_LEGACY_PATH_TOKEN_771';
+    const legacyApiKey = 'SYNTHETIC_LEGACY_API_KEY_882';
+    const queryLeakToken = 'SYNTHETIC_QUERY_LEAK_993';
+    const replacementPathToken = 'SYNTHETIC_REPLACEMENT_PATH_445';
+    const views: Omit<TerminalView, 'generation'>[] = [];
+    const save = vi.fn(async () => {});
+    const editor = new TerminalConfigurationEditor({
+      session: {
+        initialConfig: { llm: { schemaVersion: 2, connections: {}, main: { connectionId: 'local_ok', model: 'm1' } } },
+        initialCredentials: {
+          version: 2,
+          protectedLegacyProviders: {
+            deepseek: {
+              apiKey: legacyApiKey,
+              baseUrl: `https://gw.corp.example/${legacyPathToken}/v1`,
+              protocol: 'openai-compatible',
+            },
+          },
+        },
+        writers: { save },
+      },
+      title: '配置',
+      sections: ['model'],
+      purpose: 'edit',
+      publish: async view => { views.push(view); },
+    });
+    const run = editor.run();
+    const cur = () => views.at(-1)!;
+    const act = (action: string) => editor.act({ kind: 'configuration-action', editId: editor.editId, action });
+    const pick = async (label: string) => {
+      const choice = cur().choices?.find(item => item.label.includes(label))!;
+      await act(choice.id);
+    };
+
+    await pick('迁移待修复项');
+    expect(cur().configurationControls?.canComplete).toBe(false);
+    await pick('deepseek');
+    expect(cur().title).toContain('迁移修复 · deepseek');
+    expect(cur().configurationControls?.canComplete).toBe(false);
+    const endpointRow = cur().choices?.find(item => item.label === '旧自定义端点')!;
+    expect(endpointRow.status).toBe('ready');
+    expect(endpointRow.detail).toBe('https://gw.corp.example（已隐去受保护路径与参数）');
+    expect(endpointRow.detail).not.toContain('待填写');
+
+    // Ctrl+S on migration-repair-provider does not auto-migrate or jump to home
+    await act('complete');
+    expect(cur().title).toContain('迁移修复 · deepseek');
+    expect(save).not.toHaveBeenCalled();
+
+    // Open repair-endpoint: remains dedicated secret field with no prefilled value
+    await pick('旧自定义端点');
+    expect(cur().field).toEqual({ id: 'repair-endpoint:deepseek', label: '迁移修复 · deepseek 端点', secret: true, configured: false });
+    expect(cur().configurationControls?.canComplete).toBe(false);
+
+    // Reject secret-bearing query URL without echoing the raw secret
+    await editor.act({
+      kind: 'secret-value',
+      editId: editor.editId,
+      fieldId: 'repair-endpoint:deepseek',
+      value: `https://gw.corp.example/v1?api_key=${queryLeakToken}`,
+    });
+    expect(cur().field?.id).toBe('repair-endpoint:deepseek');
+    expect(cur().message).toContain('纯净端点');
+
+    // Submit clean URL with sensitive path -> entity row still redacts unconfirmed path!
+    await editor.act({
+      kind: 'secret-value',
+      editId: editor.editId,
+      fieldId: 'repair-endpoint:deepseek',
+      value: `https://new-gw.corp.example/${replacementPathToken}/v1`,
+    });
+    expect(cur().title).toContain('迁移修复 · deepseek');
+    const updatedRow = cur().choices?.find(item => item.label === '旧自定义端点')!;
+    expect(updatedRow.status).toBe('ready');
+    expect(updatedRow.detail).toBe('已设新端点 · https://new-gw.corp.example（已隐去受保护路径与参数）');
+
+    const serializedViews = JSON.stringify(views);
+    for (const secret of [legacyPathToken, legacyApiKey, queryLeakToken, replacementPathToken]) {
+      expect(serializedViews).not.toContain(secret);
+    }
+    editor.cancel();
+    await run;
+
+    // MCP add gate & loading vs durable saving controls
+    let finishResolve!: (res: { ok: true; candidate: McpSetupCandidate }) => void;
+    let finishSave!: () => void;
+    const candidate: McpSetupCandidate = {
+      serverId: 'demo-mcp',
+      source: 'inferred',
+      entry: { type: 'http', url: 'https://mcp.example.com/sse' },
+      secretFields: [],
+    };
+    const mcpViews: Omit<TerminalView, 'generation'>[] = [];
+    const mcpSave = vi.fn(() => new Promise<void>(resolve => { finishSave = resolve; }));
+    const mcpEditor = new TerminalConfigurationEditor({
+      session: { initialConfig: {}, initialCredentials: {}, writers: { save: mcpSave } },
+      title: 'MCP 管理',
+      sections: ['mcp'],
+      purpose: 'edit',
+      runtime: {
+        mcpResolve: () => new Promise(resolve => { finishResolve = resolve; }),
+        mcpProbe: { probe: async () => ({ ok: true as const, tools: [] }) },
+      },
+      publish: async view => { mcpViews.push(view); },
+    });
+    const mcpRun = mcpEditor.run();
+    const mcpCur = () => mcpViews.at(-1)!;
+    const otherId = mcpCur().choices!.find(item => item.label.includes('其他'))!.id;
+    await mcpEditor.act({ kind: 'configuration-action', editId: mcpEditor.editId, action: otherId });
+    await mcpEditor.act({ kind: 'configuration-action', editId: mcpEditor.editId, action: 'field', value: 'demo' });
+    // Cancellable loading state: canComplete=false, canBack=true, canCancel=true
+    expect(mcpCur().busy).toBe(true);
+    expect(mcpCur().configurationControls).toEqual({ canComplete: false, canBack: true, canCancel: true });
+
+    finishResolve({ ok: true, candidate });
+    await vi.waitFor(() => expect(mcpCur().title).toBe('接入 · demo-mcp'));
+    expect(mcpCur().configurationControls).toEqual({ canComplete: false, canBack: true, canCancel: true });
+
+    // Pressing Ctrl+S before "验证连接" stays on mcp-add and never calls save!
+    await mcpEditor.act({ kind: 'configuration-action', editId: mcpEditor.editId, action: 'complete' });
+    expect(mcpCur().title).toBe('接入 · demo-mcp');
+    expect(mcpSave).not.toHaveBeenCalled();
+
+    // Verify connection -> returns to home -> Ctrl+S enters durable saving (canComplete=false, canBack=false, canCancel=false)
+    const verifyId = mcpCur().choices!.find(item => item.label === '验证连接')!.id;
+    await mcpEditor.act({ kind: 'configuration-action', editId: mcpEditor.editId, action: verifyId });
+    await vi.waitFor(() => expect(mcpCur().configurationHome).toBe(true));
+    expect(mcpCur().configurationControls?.canComplete).toBe(true);
+
+    const savingPromise = mcpEditor.act({ kind: 'configuration-action', editId: mcpEditor.editId, action: 'complete' });
+    await vi.waitFor(() => expect(mcpSave).toHaveBeenCalledOnce());
+    expect(mcpCur().busy).toBe(true);
+    expect(mcpCur().configurationControls).toEqual({ canComplete: false, canBack: false, canCancel: false });
+    finishSave();
+    await savingPromise;
+    expect((await mcpRun).kind).toBe('completed');
+  });
+
+  it('commits ancestor provider-config identically from parent and child pages, gates unchosen model/provider pickers, preserves explicit model/params, and returns to parent on missing credentials', async () => {
+    const dualReadyConfig: ZhixingConfig = {
+      llm: {
+        schemaVersion: 2,
+        connections: {
+          local: {
+            name: '本机测试',
+            adapter: 'openai-compatible',
+            endpoint: 'http://127.0.0.1:47982/v1',
+            auth: { mode: 'none' },
+            network: { proxy: 'direct', allowPrivateOrigin: true },
+            customModels: ['model-a'],
+          },
+          alt: {
+            name: '另一条已配置连接',
+            presetId: 'deepseek',
+            adapter: 'openai-compatible',
+            endpoint: 'http://127.0.0.1:47982/v1',
+            auth: { mode: 'none' },
+            network: { proxy: 'direct', allowPrivateOrigin: true },
+          },
+          custom_blank: {
+            name: '无推荐自定义连接',
+            adapter: 'openai-compatible',
+            endpoint: 'http://127.0.0.1:47982/v1',
+            auth: { mode: 'none' },
+            network: { proxy: 'direct', allowPrivateOrigin: true },
+            customModels: ['cand-1', 'cand-2'],
+          },
+          nokey: {
+            name: '缺密钥预设连接',
+            presetId: 'deepseek',
+            adapter: 'openai-compatible',
+            endpoint: 'https://api.deepseek.com/v1',
+            auth: { mode: 'api-key', secretRef: 'nokey' },
+            network: { proxy: 'inherit' },
+          },
+        },
+        main: { connectionId: 'local', model: 'model-a' },
+      },
+    };
+    const openDual = (initialConfig: ZhixingConfig = dualReadyConfig) => {
+      const views: Omit<TerminalView, 'generation'>[] = [];
+      const save = vi.fn(async (_edit: Extract<ConfigurationEditResult, { kind: 'completed' }>) => {});
+      const editor = new TerminalConfigurationEditor({
+        session: { initialConfig, initialCredentials: { version: 2 }, writers: { save } },
+        title: '配置',
+        sections: ['model'],
+        purpose: 'edit',
+        publish: async view => { views.push(view); },
+      });
+      const result = editor.run();
+      const cur = () => views.at(-1)!;
+      const act = (action: string) => editor.act({ kind: 'configuration-action', editId: editor.editId, action });
+      const pick = async (label: string) => {
+        const choice = cur().choices?.find(item => item.label.includes(label));
+        expect(choice, `Missing ${label} in ${JSON.stringify(cur())}`).toBeDefined();
+        await act(choice!.id);
+      };
+      return { views, save, editor, result, cur, act, pick };
+    };
+
+    // 1. Parent provider-config direct Ctrl+S vs child model-list direct Ctrl+S (without choosing another model)
+    const fromParent = openDual();
+    await fromParent.pick('主模型');
+    // Browsing provider-list when main is already configured keeps canComplete=true without impersonating unconfirmed choices
+    expect(fromParent.cur().configurationControls?.canComplete).toBe(true);
+    await fromParent.pick('另一条已配置连接');
+    expect(fromParent.cur().configurationControls?.canComplete).toBe(true);
+    await fromParent.act('complete');
+    expect((await fromParent.result).kind).toBe('completed');
+
+    const fromChild = openDual();
+    await fromChild.pick('主模型');
+    await fromChild.pick('另一条已配置连接');
+    await fromChild.pick('使用模型');
+    expect(fromChild.cur().title).toContain('选择模型');
+    expect(fromChild.cur().configurationControls?.canComplete).toBe(true);
+    await fromChild.act('complete');
+    expect((await fromChild.result).kind).toBe('completed');
+
+    expect(fromChild.save.mock.calls[0]![0]).toEqual(fromParent.save.mock.calls[0]![0]);
+    expect(fromChild.save.mock.calls[0]![0].config.llm?.main).toEqual({
+      connectionId: 'alt',
+      model: 'deepseek-v4-pro',
+    });
+    expect(fromChild.save.mock.calls[0]![0].config.llm?.light).toBeUndefined();
+
+    // 2. Browsing provider-list without confirming keeps original local/model-a; unconfigured light provider-list & custom no-recommendation model-list gate Ctrl+S
+    const browseOnly = openDual();
+    await browseOnly.pick('轻量模型');
+    expect(browseOnly.cur().configurationControls?.canComplete).toBe(false);
+    await browseOnly.act('complete');
+    expect(browseOnly.cur().title).toContain('轻量模型 · 选择服务商');
+    expect(browseOnly.save).not.toHaveBeenCalled();
+    await browseOnly.act('back');
+    await browseOnly.pick('主模型');
+    await browseOnly.pick('无推荐自定义连接');
+    await browseOnly.pick('使用模型');
+    expect(browseOnly.cur().title).toContain('选择模型');
+    expect(browseOnly.cur().configurationControls?.canComplete).toBe(false);
+    await browseOnly.act('complete');
+    expect(browseOnly.cur().title).toContain('选择模型');
+    expect(browseOnly.save).not.toHaveBeenCalled();
+    await browseOnly.act('back');
+    await browseOnly.act('back');
+    // Back on 主模型 · 选择服务商 without having committed another provider: Ctrl+S preserves local/model-a
+    await browseOnly.act('complete');
+    expect((await browseOnly.result).kind).toBe('completed');
+    expect(browseOnly.save.mock.calls[0]![0].config.llm?.main).toEqual({
+      connectionId: 'local',
+      model: 'model-a',
+    });
+
+    // 3. Explicit model + thinking + maxOutputTokens params preserved when completing from model-list or thinking-config
+    const withParams = openDual({
+      llm: {
+        ...dualReadyConfig.llm!,
+        main: {
+          connectionId: 'alt',
+          model: 'deepseek-v4-flash',
+          params: { thinking: { mode: 'effort', effort: 'max' }, maxOutputTokens: 4096 },
+        },
+      },
+    });
+    await withParams.pick('主模型');
+    await withParams.pick('另一条已配置连接');
+    await withParams.pick('使用模型');
+    expect(withParams.cur().choices?.find(item => item.label.startsWith('● '))?.label).toBe('● deepseek-v4-flash');
+    await withParams.act('complete');
+    expect((await withParams.result).kind).toBe('completed');
+    expect(withParams.save.mock.calls[0]![0].config.llm?.main).toEqual({
+      connectionId: 'alt',
+      model: 'deepseek-v4-flash',
+      params: { thinking: { mode: 'effort', effort: 'max' }, maxOutputTokens: 4096 },
+    });
+
+    // 4. Child page Ctrl+S with missing parent credential returns to parent provider-config while keeping chosen model/thinking draft
+    const missingCred = openDual();
+    await missingCred.pick('主模型');
+    await missingCred.pick('缺密钥预设连接');
+    await missingCred.pick('使用模型');
+    await missingCred.pick('deepseek-v4-pro');
+    await missingCred.pick('强度 max');
+    expect(missingCred.cur().title).toContain('选择模型');
+    await missingCred.act('complete');
+    expect(missingCred.save).not.toHaveBeenCalled();
+    expect(missingCred.cur().title).toContain('主模型 · 缺密钥预设连接');
+    expect(missingCred.cur().message).toContain('API Key');
+    expect(missingCred.cur().choices?.find(item => item.label === '使用模型')?.detail).toBe('deepseek-v4-pro');
+    missingCred.editor.cancel();
+    await missingCred.result;
+  });
 });

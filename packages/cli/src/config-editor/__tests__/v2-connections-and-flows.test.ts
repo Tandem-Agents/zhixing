@@ -399,6 +399,23 @@ describe("Unit 1 Group C: /config v2 connections, defaults, compromised rotation
     expect(JSON.stringify(blockedList)).not.toContain("leak123");
 
     expect(() => confirmProtectedLegacyProvider(blockedState, "blocked_gw")).toThrow(/纯净端点/);
+    const blockedEntity = buildMigrationRepairProviderMeta(blockedState, {
+      kind: "migration-repair-provider",
+      providerId: "blocked_gw",
+    });
+    expect(blockedEntity.rows[0]!.status.level).toBe("pending");
+    expect(JSON.stringify(blockedEntity)).not.toContain("superpass");
+    expect(JSON.stringify(blockedEntity)).not.toContain("leak123");
+
+    blockedState = setConfirmedRepairEndpoint(blockedState, "blocked_gw", "https://gw.example.com/secret-subpath/v1");
+    const overriddenEntity = buildMigrationRepairProviderMeta(blockedState, {
+      kind: "migration-repair-provider",
+      providerId: "blocked_gw",
+    });
+    expect(overriddenEntity.rows[0]!.status.level).toBe("ready");
+    expect(overriddenEntity.rows[0]!.status.text).toContain("https://gw.example.com");
+    expect(JSON.stringify(overriddenEntity)).not.toContain("secret-subpath");
+
     blockedState = setConfirmedRepairEndpoint(blockedState, "blocked_gw", "https://gw.example.com/v1");
     blockedState = confirmProtectedLegacyProvider(blockedState, "blocked_gw");
     const repairedLlm = blockedState.config.llm as LLMConfigV2;

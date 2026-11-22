@@ -178,13 +178,14 @@ export function buildConnectionAddMeta(
           auth: { mode: "api-key", secretRef: connectionId },
           network: { proxy: "inherit" },
         };
+      const preAddState = s;
       const next = upsertConnection(s, connectionId, built);
       // 免密本地预设（如 Ollama）：进入连接页时自动触发一次只读原生发现（可按 Esc 取消，绝不阻塞保存）
       if (built.auth.mode === "none" && runtime?.discoverModels) {
         const draftRev = next.draftRevision ?? 0;
         return {
           type: "loading",
-          state: next,
+          state: preAddState,
           message: `正在自动探测 ${built.name} 本机可用模型（按 Esc 可跳过）…`,
           run: async (signal) => {
             const result = await runtime.discoverModels!({
@@ -214,6 +215,7 @@ export function buildConnectionAddMeta(
                 connectionId,
                 isNew: true,
                 ...(initialModel ? { initialModel } : {}),
+                rollbackState: preAddState,
               },
             };
           },
@@ -227,6 +229,7 @@ export function buildConnectionAddMeta(
           connectionId,
           isNew: true,
           ...(defaultModel ? { initialModel: defaultModel } : {}),
+          rollbackState: preAddState,
         },
       };
     },
@@ -236,6 +239,7 @@ export function buildConnectionAddMeta(
     label: "+ 自定义连接（兼容 / 本地免密 / 自定义认证头）",
     description: "支持 Ollama / vLLM / 企业网关与无 API Key 本地服务",
     onEnter: (s) => {
+      const preAddState = s;
       const connectionId = nextCustomConnectionId(s, "custom");
       const next = upsertConnection(s, connectionId, {
         name: `自定义连接 (${connectionId})`,
@@ -247,7 +251,7 @@ export function buildConnectionAddMeta(
       return {
         type: "replace",
         state: next,
-        panel: { kind: "connection-config", connectionId, isNew: true },
+        panel: { kind: "connection-config", connectionId, isNew: true, rollbackState: preAddState },
       };
     },
   });

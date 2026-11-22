@@ -50,7 +50,14 @@ export type PanelDescriptor =
   /** L2b (v2)：选择新增预设连接或自定义连接（含本地免密 / 自定义认证头） */
   | { kind: "connection-add" }
   /** L3 (v2)：单条服务商连接编辑页（名称 / 端点 / 协议 / 认证模式 / 凭据 / 代理 / 私网许可 / 发现与可选验证 / 首次默认模型 / 删除） */
-  | { kind: "connection-config"; connectionId: string; isNew?: boolean; initialModel?: string }
+  | {
+      kind: "connection-config";
+      connectionId: string;
+      isNew?: boolean;
+      initialModel?: string;
+      /** 新增连接尚未点击保存/先存前按 Esc 返回时恢复进入前快照，放弃未提交的新连接草稿 */
+      rollbackState?: WorkingState;
+    }
   /** L4 (v2)：可选生成式验证确认页（显式告知发送内容、可能费用、合法参数与取消入口） */
   | { kind: "model-verify-confirm"; connectionId: string; modelId: string }
   /** L4 (v2)：连接删除影响预览、用途重绑与在途策略选择 */
