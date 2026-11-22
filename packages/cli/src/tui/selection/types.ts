@@ -38,6 +38,10 @@ export interface SelectionPlainOption<TValue extends string = string>
   extends SelectionBaseOption<TValue> {
   readonly input?: undefined;
   readonly confirm?: undefined;
+  /** 显式声明该项仅用于界面返回/关闭，不包含任何业务决策语义。 */
+  readonly dismiss?: boolean;
+  /** 显式声明该项仅用于列表翻页导航，不包含任何业务决策语义。 */
+  readonly paging?: "previous" | "next";
 }
 
 export interface SelectionInputOption<TValue extends string = string>

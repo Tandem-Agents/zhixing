@@ -83,7 +83,7 @@ export class TerminalTasks {
     };
     const show = async (title: string, lines: readonly string[]) => {
       this.#assert(scope); boundedControlProjection(lines, TEXT_BYTES);
-      await chooseTerminalSelection({ title, body: lines, options: [{ value: 'done', label: '返回输入' }] }, choose);
+      await chooseTerminalSelection({ title, body: lines, options: [{ value: 'done', label: '返回输入', dismiss: true }] }, choose);
     };
     let updateSettled = false;
     try {

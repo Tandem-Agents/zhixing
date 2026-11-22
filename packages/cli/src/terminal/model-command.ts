@@ -738,12 +738,14 @@ export class TerminalModelCommand {
       options.push({
         value: "page:prev",
         label: `上一页模型（当前第 ${clampedPage + 1}/${totalPages} 页）`,
+        paging: "previous",
       });
     }
     if (clampedPage + 1 < totalPages) {
       options.push({
         value: "page:next",
         label: `下一页模型（当前第 ${clampedPage + 1}/${totalPages} 页）`,
+        paging: "next",
       });
     }
 
@@ -758,6 +760,7 @@ export class TerminalModelCommand {
     options.push({
       value: "action:close",
       label: "返回输入",
+      dismiss: true,
     });
 
     const mappedFocus =
@@ -1876,9 +1879,9 @@ export class TerminalModelCommand {
             ? `${entry.displayName} · 按 Enter 立即恢复`
             : "按 Enter 立即恢复到可选列表",
       }));
-      if (page > 0) options.push({ value: "page:prev", label: "上一页" });
-      if (page + 1 < totalPages) options.push({ value: "page:next", label: "下一页" });
-      options.push({ value: "back", label: "返回模型列表" });
+      if (page > 0) options.push({ value: "page:prev", label: "上一页", paging: "previous" });
+      if (page + 1 < totalPages) options.push({ value: "page:next", label: "下一页", paging: "next" });
+      options.push({ value: "back", label: "返回模型列表", dismiss: true });
 
       const chosen = await chooseTerminalSelection(
         {

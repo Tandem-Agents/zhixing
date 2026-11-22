@@ -119,7 +119,7 @@ export class TerminalDecisionCommands {
           return;
         }
         await chooseTerminalSelection({ title,
-          body: collected.lines, options: [{ value: 'done', label: '返回输入' }] }, choose);
+          body: collected.lines, options: [{ value: 'done', label: '返回输入', dismiss: true }] }, choose);
         return;
       }
       if (name === 'advancement') {
@@ -134,7 +134,7 @@ export class TerminalDecisionCommands {
         const selected = await chooseTerminalSelection({
           title: '任务推进', ...(summary ? { summary } : { body: [plainText(renderAdvancementEmptyLine(RESULT_BYTES))] }),
           options: [...(pending ? [{ value: 'resume', label: '继续确认任务', description: '查看、修改、确认、直接执行或取消原任务' }] : []),
-            { value: 'done', label: '返回输入' }],
+            { value: 'done', label: '返回输入', dismiss: true }],
         }, page => choose(conversation ? { ...page, chromeDescription: conversation } : page));
         if (selected?.kind === 'selected' && selected.value === 'resume') {
           scope.assertCurrent(); await this.options.resumeRubric(scope); scope.assertCurrent();
@@ -196,12 +196,12 @@ async function securityPages(options: TerminalDecisionOptions, argument: string,
   for (let page: 'overview' | 'rules' = direct ? 'rules' : 'overview'; ;) {
     if (page === 'rules') {
       const result = await chooseTerminalSelection({ title: '规则说明', summary: rules,
-        options: [{ value: 'back', label: direct ? '返回输入' : '返回安全状态' }] }, choose);
+        options: [{ value: 'back', label: direct ? '返回输入' : '返回安全状态', dismiss: true }] }, choose);
       if (direct || !result || (result.kind === 'cancelled' && result.cause !== 'escape')) return;
       page = 'overview'; continue;
     }
     const result = await chooseTerminalSelection({ title: '安全状态', summary: overview, initialValue: 'done',
-      options: [{ value: 'done', label: '返回输入' }, { value: 'rules', label: '查看规则说明' }] }, choose);
+      options: [{ value: 'done', label: '返回输入', dismiss: true }, { value: 'rules', label: '查看规则说明' }] }, choose);
     if (result?.kind !== 'selected' || result.value !== 'rules') return;
     page = 'rules';
   }

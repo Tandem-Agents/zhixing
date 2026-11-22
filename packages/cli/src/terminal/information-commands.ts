@@ -114,7 +114,7 @@ export class TerminalInformationCommands {
         scope.assertCurrent(); lines = informationLines(collected);
       }
       scope.assertCurrent();
-      await chooseTerminalSelection({ title, ...(summary ? { summary } : { body: lines }), options: [{ value: 'done', label: '返回输入' }] }, choose);
+      await chooseTerminalSelection({ title, ...(summary ? { summary } : { body: lines }), options: [{ value: 'done', label: '返回输入', dismiss: true }] }, choose);
     } catch (error) {
       if (!scope.isCurrent()) return;
       const busyError = !mutationReceipt && name === 'compact' ? readRpcBusyError(error) : undefined;

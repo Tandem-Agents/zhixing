@@ -195,8 +195,8 @@ export class TerminalSessionCommands {
           // 手里是完整场景列表：一个都没有时说暂无并指向新建，有场景而匹配为空才说没有匹配
           message: !matches.length ? (entries.length ? NO_MATCH_PAGE : NO_SCENES_PAGE) : `第 ${page + 1} 页`,
           choices: [...matches.slice(page * 20, page * 20 + 20).map(item => ({ id: item.id, label: item.name, detail: item.description })),
-            ...(page ? [{ id: 'previous', label: '上一页' }] : []), ...(matches.length > (page + 1) * 20 ? [{ id: 'next', label: '下一页' }] : []),
-            ...(name === 'work' ? [{ id: 'create', label: '新建工作场景' }] : []), { id: 'cancel', label: '返回' }] });
+            ...(page ? [{ id: 'previous', label: '上一页', paging: 'previous' as const }] : []), ...(matches.length > (page + 1) * 20 ? [{ id: 'next', label: '下一页', paging: 'next' as const }] : []),
+            ...(name === 'work' ? [{ id: 'create', label: '新建工作场景' }] : []), { id: 'cancel', label: '返回', dismiss: true }] });
         scope.current();
         if (!response || response.cancelCause || response.itemId === 'cancel') return;
         if (response.itemId === 'previous') { page--; continue; }
@@ -218,7 +218,7 @@ export class TerminalSessionCommands {
         const response = await this.options.choose({ kind: 'selection', title: '切换对话',
           message: page.conversations.length ? `第 ${pages.length} 页` : argument.trim() ? NO_MATCH_PAGE : `${NO_CONVERSATIONS}。`,
           choices: [...page.conversations.map(item => ({ id: item.conversationId, label: item.name, detail: item.lastActiveAt })),
-            ...(pages.length > 1 ? [{ id: 'previous', label: '上一页' }] : []), ...(page.next ? [{ id: 'next', label: '下一页' }] : []), { id: 'cancel', label: '返回' }] });
+            ...(pages.length > 1 ? [{ id: 'previous', label: '上一页', paging: 'previous' as const }] : []), ...(page.next ? [{ id: 'next', label: '下一页', paging: 'next' as const }] : []), { id: 'cancel', label: '返回', dismiss: true }] });
         scope.current();
         if (!response || response.cancelCause || response.itemId === 'cancel') return;
         if (response.itemId === 'previous') { pages.pop(); continue; }

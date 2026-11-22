@@ -161,6 +161,10 @@ export interface TerminalChoice {
   readonly primary?: boolean;
   readonly shortcut?: string;
   readonly status?: 'ready' | 'pending' | 'disabled';
+  /** 仅用于离开或返回上一界面的纯导航动作（非业务决策），供非交互文本出口按动作语义跳过打印与交互告警。 */
+  readonly dismiss?: boolean;
+  /** 显式声明列表/正文翻页控制方向（非业务选项），供非交互文本出口隐藏假翻页按钮并给出剩余内容提示。 */
+  readonly paging?: 'previous' | 'next';
 }
 
 /**

@@ -88,8 +88,8 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
       const start = page * 24;
       const answer = await chooseRaw({ kind: 'selection', title, message: '请选择目标设备。', choices: [
         ...items.slice(start, start + 24).map((item, i) => ({ id: String(start + i), label: item.displayName })),
-        ...(page ? [{ id: 'previous', label: '上一页' }] : []), ...(start + 24 < items.length ? [{ id: 'next', label: '下一页' }] : []),
-        { id: 'cancel', label: '取消' },
+        ...(page ? [{ id: 'previous', label: '上一页', paging: 'previous' as const }] : []), ...(start + 24 < items.length ? [{ id: 'next', label: '下一页', paging: 'next' as const }] : []),
+        { id: 'cancel', label: '取消', dismiss: true },
       ] });
       if (!answer || answer.itemId === 'cancel') throw Error('操作已取消。');
       if (answer.itemId === 'previous') { page--; continue; }

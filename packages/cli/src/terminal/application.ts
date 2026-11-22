@@ -1350,11 +1350,11 @@ class TerminalApplication {
         this.#abort.signal.throwIfAborted();
         if (!entries.length && pages.length === 1) { this.#mainView = { ...this.#mainView, message: '本机还没有可查看的对话历史。' }; return; }
         // 与 /resume 同一列：最近活动时间，同名对话才分得开
-        const choices: { id: string; label: string; detail?: string }[] = entries.slice(0, 24)
+        const choices: { id: string; label: string; detail?: string; paging?: 'previous' | 'next'; dismiss?: boolean }[] = entries.slice(0, 24)
           .map(entry => ({ id: entry.conversationId, label: entry.name, detail: formatRelativeTimeText(entry.lastActiveAt) }));
-        if (pages.length > 1) choices.push({ id: 'previous', label: '上一页' });
-        if (result.next) choices.push({ id: 'next', label: '下一页' });
-        choices.push({ id: 'cancel', label: '返回' });
+        if (pages.length > 1) choices.push({ id: 'previous', label: '上一页', paging: 'previous' });
+        if (result.next) choices.push({ id: 'next', label: '下一页', paging: 'next' });
+        choices.push({ id: 'cancel', label: '返回', dismiss: true });
         const selected = await this.#choose({ kind: 'selection', title: '本机历史 · 只读', message: '只读取已保存内容，不会启动或重发任务。', choices });
         if (!selected || selected === 'cancel') return;
         if (selected === 'next' || selected === 'previous') { if (selected === 'next' && result.next) pages.push(result.next); else pages.pop(); continue; }
@@ -3242,7 +3242,7 @@ class TerminalApplication {
           this.#abort.signal.throwIfAborted();
           await chooseTerminalSelection({ title: '命令帮助',
             summary: commandHelpSummary(this.#candidates.registry.list(this.#candidates.runtime())),
-            options: [{ value: 'return', label: '返回输入' }],
+            options: [{ value: 'return', label: '返回输入', dismiss: true }],
           }, view => this.#choosePage(view));
         } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
       }));
@@ -3323,7 +3323,7 @@ class TerminalApplication {
       try {
         await chooseTerminalSelection({ id: 'server-status', title: '运行状态',
           summary: serverStatusSummary(name, this.#localView.primaryModel, this.#localView.networkProxy, status),
-          options: [{ value: 'return', label: '返回输入' }],
+          options: [{ value: 'return', label: '返回输入', dismiss: true }],
         }, view => this.#choosePage(view));
       } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
     });

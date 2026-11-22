@@ -118,10 +118,6 @@ export function createTextSelection(output: TextSessionOutput, options: { readon
     if (page.message) output.line(page.message);
     // 分节信息页（安全状态、用量、上下文、任务推进）按同一份投影的文字出口逐行输出
     else if (page.summary) for (const line of summaryLines(page.summary)) output.line(line);
-    for (const choice of page.choices ?? []) {
-      if (['previous', 'next', 'return'].includes(choice.id)) continue;
-      output.line(`- ${choice.label}${choice.detail ? `：${choice.detail}` : ''}`);
-    }
     // The selection adapter reserves next/previous for bounded body pages and
     // prefixes business options with option:. Read every body page, even when
     // it describes a pending decision, but never select that decision. Generic
@@ -129,10 +125,29 @@ export function createTextSelection(output: TextSessionOutput, options: { readon
     // action next; their interaction layer is not a body-page contract.
     const bodyPage = options.readOnly === true && page.kind === 'selection' && !page.field &&
       (page.selectionLayer === 'select' || page.selectionLayer === 'details') &&
-      page.choices?.every(choice => ['previous', 'next', 'return', 'details'].includes(choice.id) || choice.id.startsWith('option:'));
-    if (bodyPage && page.choices?.some(choice => choice.id === 'next' && !choice.disabled && !choice.danger)) return { itemId: 'next' };
-    if (page.choices?.some(choice => choice.id === 'next')) output.line('还有更多内容，请在交互终端查看。');
-    const actions = page.choices?.filter(choice => !['return', 'option:done', 'previous', 'cancel', 'done'].includes(choice.id));
+      page.choices?.every(choice =>
+        choice.paging !== undefined ||
+        ['previous', 'next', 'return', 'details'].includes(choice.id) ||
+        choice.id.startsWith('option:'));
+    // 同一动作语义判据：仅显式声明 paging / dismiss 的纯界面控制项与受控分页/返回保留 id 视为导航装饰；
+    // 真实业务选择（即便取名 next/done/back/cancel 但未声明导航语义）仍原样输出并触发非交互提示，绝不依赖中文标签匹配。
+    const isPagingNext = (choice: NonNullable<typeof page.choices>[number]): boolean =>
+      !choice.danger && (choice.paging === 'next' || (choice.id === 'next' && (bodyPage || page.selectionLayer === 'details')));
+    const isPagingPrevious = (choice: NonNullable<typeof page.choices>[number]): boolean =>
+      !choice.danger && (choice.paging === 'previous' || (choice.id === 'previous' && (bodyPage || page.selectionLayer === 'details')));
+    const isDismissChoice = (choice: NonNullable<typeof page.choices>[number]): boolean =>
+      !choice.danger && (choice.dismiss === true || choice.id === 'return');
+    const isNavigationChoice = (choice: NonNullable<typeof page.choices>[number]): boolean =>
+      isDismissChoice(choice) || isPagingPrevious(choice) || isPagingNext(choice);
+    for (const choice of page.choices ?? []) {
+      if (isNavigationChoice(choice)) continue;
+      output.line(`- ${choice.label}${choice.detail ? `：${choice.detail}` : ''}`);
+    }
+    if (bodyPage && page.choices?.some(choice => choice.id === 'next' && isPagingNext(choice) && !choice.disabled)) return { itemId: 'next' };
+    if (page.choices?.some(choice => isPagingNext(choice) && !choice.disabled)) {
+      output.line('还有更多内容，请在交互终端查看。');
+    }
+    const actions = page.choices?.filter(choice => !isNavigationChoice(choice));
     if (page.kind === 'confirmation') output.line('当前为非交互文本输入，已拒绝本次操作；请在交互终端确认。');
     else if (page.field || actions?.length) output.line('当前环境不支持选择交互，未提交选择。请在交互终端继续。');
     return undefined;

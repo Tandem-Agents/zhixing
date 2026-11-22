@@ -107,6 +107,88 @@ describe('non-TTY output and decisions', () => {
     for (const summary of [page('第一'), page('第二')]) for (const line of summaryLines(summary)) expect(view.text()).toContain(line);
     expect(view.text()).not.toContain('还有更多内容');
   });
+  it('suppresses explicit dismiss navigation choices and non-interactive warnings on read-only pages while preserving business done/back choices', async () => {
+    const readOnlyView = output(), display = createTextSelection(readOnlyView.writer, { readOnly: true });
+    await chooseTerminalSelection({
+      title: '当前模型',
+      body: ['主模型：deepseek-v4-pro'],
+      options: [{ value: 'done', label: '返回输入', dismiss: true }],
+    }, display);
+    await chooseTerminalSelection({
+      title: '规则说明',
+      body: ['规则一：默认保护工作区外路径'],
+      options: [{ value: 'back', label: '返回输入', dismiss: true }],
+    }, display);
+    expect(readOnlyView.text()).toContain('主模型：deepseek-v4-pro');
+    expect(readOnlyView.text()).toContain('规则一：默认保护工作区外路径');
+    expect(readOnlyView.text()).not.toContain('- 返回输入');
+    expect(readOnlyView.text()).not.toContain('当前环境不支持选择交互');
+
+    const mixedView = output(), mixedDisplay = createTextSelection(mixedView.writer, { readOnly: true });
+    await chooseTerminalSelection({
+      title: '安全状态',
+      body: ['当前保护级别：标准'],
+      options: [
+        { value: 'done', label: '返回输入', dismiss: true },
+        { value: 'rules', label: '查看规则说明' },
+      ],
+    }, mixedDisplay);
+    expect(mixedView.text()).not.toContain('- 返回输入');
+    expect(mixedView.text()).toContain('- 查看规则说明');
+    expect(mixedView.text()).toContain('当前环境不支持选择交互，未提交选择。请在交互终端继续。');
+
+    const businessView = output(), choose = createTextSelection(businessView.writer);
+    await chooseTerminalSelection({
+      title: '选择操作',
+      options: [
+        { value: 'done', label: '完成提交' },
+        { value: 'back', label: '回退上一版' },
+        { value: 'next', label: '下一步发布' },
+        { value: 'cancel', label: '取消排期' },
+      ],
+    }, choose);
+    expect(businessView.text()).toContain('- 完成提交');
+    expect(businessView.text()).toContain('- 回退上一版');
+    expect(businessView.text()).toContain('- 下一步发布');
+    expect(businessView.text()).toContain('- 取消排期');
+    expect(businessView.text()).not.toContain('还有更多内容');
+    expect(businessView.text()).toContain('当前环境不支持选择交互，未提交选择。请在交互终端继续。');
+
+    // Direct native pickers (/resume, /work) without selectionLayer suppress explicit paging/dismiss controls and emit the more-items notice
+    const pickerView = output(), pickerChoose = createTextSelection(pickerView.writer);
+    expect(await pickerChoose({
+      kind: 'selection',
+      title: '切换对话',
+      message: '第 1 页',
+      choices: [
+        { id: 'conv-1', label: '对话甲', detail: '2026-11-22' },
+        { id: 'previous', label: '上一页', paging: 'previous' },
+        { id: 'next', label: 'Next Page', paging: 'next' },
+        { id: 'cancel', label: '返回', dismiss: true },
+      ],
+    })).toBeUndefined();
+    expect(pickerView.text()).toContain('- 对话甲：2026-11-22');
+    expect(pickerView.text()).not.toContain('- 上一页');
+    expect(pickerView.text()).not.toContain('- Next Page');
+    expect(pickerView.text()).not.toContain('- 返回');
+    expect(pickerView.text()).toContain('还有更多内容，请在交互终端查看。');
+    expect(pickerView.text()).toContain('当前环境不支持选择交互，未提交选择。请在交互终端继续。');
+
+    // Raw business choice named id:'next' without paging semantics is neither hidden nor treated as pagination
+    const rawBizView = output(), rawBizChoose = createTextSelection(rawBizView.writer);
+    expect(await rawBizChoose({
+      kind: 'selection',
+      title: '部署步骤',
+      choices: [
+        { id: 'next', label: '执行下一步' },
+        { id: 'cancel', label: '放弃部署' },
+      ],
+    })).toBeUndefined();
+    expect(rawBizView.text()).toContain('- 执行下一步');
+    expect(rawBizView.text()).toContain('- 放弃部署');
+    expect(rawBizView.text()).not.toContain('还有更多内容');
+    expect(rawBizView.text()).toContain('当前环境不支持选择交互，未提交选择。请在交互终端继续。');
+  });
 });
 
 describe('non-TTY process interrupts', () => {

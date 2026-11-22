@@ -33,6 +33,15 @@ export function terminalSelectionActions(page: TerminalSelectionPage): ReadonlyS
   const validId = (id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(id);
   for (const choice of choices) {
     if (!validId(choice.id) || ids.has(choice.id)) throw Error('terminal-selection-choice');
+    if (choice.dismiss !== undefined && (typeof choice.dismiss !== 'boolean' || (choice.dismiss && choice.danger))) {
+      throw Error('terminal-selection-choice');
+    }
+    if (
+      choice.paging !== undefined &&
+      ((choice.paging !== 'previous' && choice.paging !== 'next') || choice.danger || choice.dismiss)
+    ) {
+      throw Error('terminal-selection-choice');
+    }
     ids.add(choice.id);
     if (choice.hotkey !== undefined) {
       if (typeof choice.hotkey !== 'string' || !/^[!-~]$/u.test(choice.hotkey) || keys.has(choice.hotkey.toLowerCase())) throw Error('terminal-selection-hotkey');
@@ -119,9 +128,11 @@ function buildSelectState<T extends string>(
     ...(summaries.length ? { summary: summaries[page] } : { message: pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}）` : '') }),
     choices: [
       ...request.options.map(option => ({ id: `option:${option.value}`, label: option.label, detail: option.description, disabled: option.disabled, danger: option.tone === 'danger', hotkey: option.hotkey,
+        ...('dismiss' in option && option.dismiss ? { dismiss: true } : {}),
+        ...('paging' in option && option.paging ? { paging: option.paging } : {}),
         ...(option.details || request.details ? { detailsActionId: `details:${option.value}` } : {}) })),
-      ...(page ? [{ id: 'previous', label: summaries.length ? '上一页' : '上一页正文' }] : []),
-      ...(page + 1 < pages ? [{ id: 'next', label: summaries.length ? '下一页' : '下一页正文' }] : []),
+      ...(page ? [{ id: 'previous', label: summaries.length ? '上一页' : '上一页正文', paging: 'previous' as const }] : []),
+      ...(page + 1 < pages ? [{ id: 'next', label: summaries.length ? '下一页' : '下一页正文', paging: 'next' as const }] : []),
       ...(request.details ? [{ id: 'details', label: request.details.title ?? '查看详情' }] : []),
     ] };
   terminalSelectionActions(view);
@@ -296,7 +307,7 @@ async function details(title: string, text: readonly string[], choose: TerminalS
   const count = pageCount(text);
   for (;;) {
     const response = await choose({ kind: 'selection', selectionLayer: 'details', initialItemId: 'return', title, message: `${pageText(text, page)}\n（${page + 1}/${count}）`, choices: [
-      ...(page ? [{ id: 'previous', label: '上一页' }] : []), ...(page + 1 < count ? [{ id: 'next', label: '下一页' }] : []), { id: 'return', label: '返回选择' },
+      ...(page ? [{ id: 'previous', label: '上一页', paging: 'previous' }] : []), ...(page + 1 < count ? [{ id: 'next', label: '下一页', paging: 'next' }] : []), { id: 'return', label: '返回选择', dismiss: true },
     ] });
     if (!response || response.itemId === 'return') return;
     const cancelled = cancellation(response); if (cancelled) return cancelled;
