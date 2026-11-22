@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { TaskListState } from '@zhixing-ai/core/conversation';
 import type { TaskView } from '@zhixing-ai/core/scheduler';
 import type { SessionTaskListAction } from '@zhixing-ai/rpc/session-wire';
+import { RPC_ERROR_CODES, RpcClientError } from '@zhixing-ai/server/client';
 import { RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js';
 import { RpcSchedulerFacade } from '../../runtime/rpc-scheduler-facade.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
@@ -127,6 +128,28 @@ describe('terminal task commands and current projection', () => {
     await f.tasks.run('task', 'done 1'); expect(f.conversation.taskListUpdate).toHaveBeenCalledTimes(1);
     expect(f.tasks.summary?.text).toBe('处理当前任务 (1/3)');
     expect(f.publish).toHaveBeenCalledWith(expect.objectContaining({ error: true, message: expect.stringContaining('不会自动重试') }));
+  });
+  it('presents confirmed pre-admission task-list-busy without uncertain-write warning while keeping protection for unknown BUSY', async () => {
+    const f = fixture(); await f.tasks.refresh();
+    f.conversation.taskListUpdate.mockRejectedValueOnce(
+      new RpcClientError(RPC_ERROR_CODES.BUSY, '当前对话仍在收尾或处理其他操作，本次未更新任务列表；请稍后再试。', { reason: 'task-list-busy' }),
+    );
+    await f.tasks.run('task', 'new 待办甲');
+    expect(f.publish).toHaveBeenLastCalledWith({
+      title: '当前对话任务列表',
+      error: true,
+      message: '当前对话仍在收尾或处理其他操作，本次未更新任务列表；请稍后再试。',
+    });
+    expect(f.tasks.summary?.text).toBe('处理当前任务 (1/3)');
+    f.conversation.taskListUpdate.mockRejectedValueOnce(
+      new RpcClientError(RPC_ERROR_CODES.BUSY, 'Conversation has an in-flight turn'),
+    );
+    await f.tasks.run('task', 'new 待办乙');
+    expect(f.publish).toHaveBeenLastCalledWith({
+      title: '任务操作暂未确认',
+      error: true,
+      message: '当前对话暂忙，任务请求结果尚未确认。\n请重新查看当前状态；不会自动重试或撤销已经提交的操作。',
+    });
   });
   it('preserves scheduled-task variants without inventing current running state', async () => {
     const f = fixture(); f.scheduler.list.mockResolvedValueOnce([

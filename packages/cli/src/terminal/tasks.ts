@@ -7,6 +7,7 @@ import { boundedControlProjection } from '../runtime/control-projection.js';
 import { formatRelativeTime } from '../commands/format.js';
 import { stripAnsi } from '../tui/ansi.js';
 import { chooseTerminalSelection, type TerminalSelectionPort } from './selection.js';
+import { readRpcBusyError } from './rpc-busy.js';
 
 export interface TerminalTaskController { readonly current: { readonly conversationId: string } }
 export interface TerminalTaskSummary {
@@ -84,6 +85,7 @@ export class TerminalTasks {
       this.#assert(scope); boundedControlProjection(lines, TEXT_BYTES);
       await chooseTerminalSelection({ title, body: lines, options: [{ value: 'done', label: '返回输入' }] }, choose);
     };
+    let updateSettled = false;
     try {
       if (!scope.conversationId && name !== 'tasks') {
         await show('任务列表', ['任务列表在一次性 run / 定时任务中不可用 —— 仅在持久化对话中工作。']); return;
@@ -108,6 +110,7 @@ export class TerminalTasks {
       // Keep one captured identity throughout the write and any resulting refresh.
       this.#assert(scope);
       const result = await this.options.conversation.taskListUpdate(scope.conversationId, action);
+      updateSettled = true;
       this.#assert(scope); boundedControlProjection(result, STATE_BYTES);
       if (version === this.#version) { ++this.#version; this.#accept(scope, result.taskList); }
       else {
@@ -118,8 +121,14 @@ export class TerminalTasks {
       await this.options.publish({ title: '当前对话任务列表', message: plain(result.message), error: !result.ok });
     } catch (error) {
       if (!this.#current(scope)) return;
+      const busyError = name === 'task' && !updateSettled ? readRpcBusyError(error) : undefined;
+      if (busyError?.reason === 'task-list-busy') {
+        await this.options.publish({ title: '当前对话任务列表', error: true, message: shortError(busyError.message) });
+        return;
+      }
+      const detail = busyError ? '当前对话暂忙，任务请求结果尚未确认。' : shortError(error);
       await this.options.publish({ title: '任务操作暂未确认', error: true,
-        message: `${shortError(error)}\n请重新查看当前状态；不会自动重试或撤销已经提交的操作。` });
+        message: `${detail}\n请重新查看当前状态；不会自动重试或撤销已经提交的操作。` });
     } finally { this.#running = false; }
   }
 

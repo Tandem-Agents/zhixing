@@ -7,6 +7,7 @@ import { chooseTerminalSelection, type TerminalSelectionPort } from './selection
 import type { TerminalSummary } from '@zhixing-ai/terminal-ui/protocol';
 import { INFORMATION_TEXT_BYTES, informationText, informationLines, informationModelLines,
   informationUsageSummary, informationContextSummary, informationCompactLines } from './information-presentation.js';
+import { readRpcBusyError } from './rpc-busy.js';
 
 export type TerminalInformationController = Pick<ConversationController<string>, 'usage' | 'contextBudget' | 'compact'> & {
   readonly current: { readonly conversationId: string };
@@ -116,11 +117,18 @@ export class TerminalInformationCommands {
       await chooseTerminalSelection({ title, ...(summary ? { summary } : { body: lines }), options: [{ value: 'done', label: '返回输入' }] }, choose);
     } catch (error) {
       if (!scope.isCurrent()) return;
-      const prefix = mutationReceipt ? '操作已有回执，但结果显示未完成' : name === 'usage' ? '用量信息不可用' : name === 'context' ? '上下文信息不可用'
-        : name === 'compact' ? '压缩失败' : name === 'model' ? '模型信息不可用' : '日志策略操作未完成';
+      const busyError = !mutationReceipt && name === 'compact' ? readRpcBusyError(error) : undefined;
+      const message = busyError
+        ? busyError.reason === 'compact-busy' || busyError.reason === 'compact-unavailable'
+          ? informationText(busyError.message).slice(0, 1024)
+          : '当前对话暂忙，压缩请求未能完成；请稍后核对状态后再试。'
+        : (() => {
+            const prefix = mutationReceipt ? '操作已有回执，但结果显示未完成' : name === 'usage' ? '用量信息不可用' : name === 'context' ? '上下文信息不可用'
+              : name === 'compact' ? '压缩失败' : name === 'model' ? '模型信息不可用' : '日志策略操作未完成';
+            return `${prefix}：${informationText(error instanceof Error ? error.message : String(error)).slice(0, 1024)}${mutationReceipt ? '\n不会自动重试或回滚，请重新查询核对当前状态。' : ''}`;
+          })();
       try {
-        await publish({ title, error: true, busy: false,
-          message: `${prefix}：${informationText(error instanceof Error ? error.message : String(error)).slice(0, 1024)}${mutationReceipt ? '\n不会自动重试或回滚，请重新查询核对当前状态。' : ''}` });
+        await publish({ title, error: true, busy: false, message });
       } catch (deliveryError) {
         // Invalidation during the error view is still a stale operation, not a new global failure.
         if (scope.isCurrent()) throw deliveryError;

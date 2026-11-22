@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LOG_POLICY } from '@zhixing-ai/core/logging';
 import { LogRpcClient } from '@zhixing-ai/rpc';
 import type { SessionUsageResult, SessionCompactResult } from '@zhixing-ai/rpc/session-wire';
+import { RPC_ERROR_CODES, RpcClientError } from '@zhixing-ai/server/client';
 import { RpcConversationFacade } from '../../runtime/rpc-conversation-facade.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
 import { TerminalInformationCommands, type TerminalInformationController, type TerminalInformationOptions } from '../information-commands.js';
@@ -107,6 +108,40 @@ describe('terminal information commands', () => {
     f.controller.compact.mockResolvedValueOnce({ modified: true }); await f.owner.run('compact'); expect(f.text()).toContain('窗口已折叠');
     f.publish.mockClear(); f.choose.mockClear(); f.controller.compact.mockRejectedValueOnce(Error('no summarizer'));
     await f.owner.run('compact'); expect(f.messages()).toContain('压缩失败：no summarizer'); expect(f.messages()).not.toContain('压缩完成'); expect(f.choose).not.toHaveBeenCalled();
+  });
+  it('presents structured pre-admission compact BUSY without 压缩失败： prefix while keeping neutral or failure framing for other BUSY/errors', async () => {
+    const f = fixture();
+    f.controller.compact.mockRejectedValueOnce(
+      new RpcClientError(RPC_ERROR_CODES.BUSY, '当前对话仍在收尾或处理其他操作，本次未开始压缩；请稍后再试。', { reason: 'compact-busy' }),
+    );
+    await f.owner.run('compact');
+    expect(f.publish).toHaveBeenLastCalledWith(
+      { title: '压缩上下文', error: true, busy: false, message: '当前对话仍在收尾或处理其他操作，本次未开始压缩；请稍后再试。' },
+      expect.anything(),
+    );
+    f.controller.compact.mockRejectedValueOnce(
+      new RpcClientError(RPC_ERROR_CODES.BUSY, '这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。', { reason: 'compact-unavailable' }),
+    );
+    await f.owner.run('compact');
+    expect(f.publish).toHaveBeenLastCalledWith(
+      { title: '压缩上下文', error: true, busy: false, message: '这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。' },
+      expect.anything(),
+    );
+    f.controller.compact.mockRejectedValueOnce(new RpcClientError(RPC_ERROR_CODES.BUSY, 'Conversation has an in-flight turn'));
+    await f.owner.run('compact');
+    expect(f.publish).toHaveBeenLastCalledWith(
+      { title: '压缩上下文', error: true, busy: false, message: '当前对话暂忙，压缩请求未能完成；请稍后核对状态后再试。' },
+      expect.anything(),
+    );
+    f.controller.compact.mockRejectedValueOnce(
+      new RpcClientError(RPC_ERROR_CODES.INTERNAL_ERROR, '当前运行环境不支持手动压缩上下文。', { reason: 'compact-unsupported' }),
+    );
+    await f.owner.run('compact');
+    expect(f.publish).toHaveBeenLastCalledWith(
+      { title: '压缩上下文', error: true, busy: false, message: '压缩失败：当前运行环境不支持手动压缩上下文。' },
+      expect.anything(),
+    );
+    expect(f.choose).not.toHaveBeenCalled();
   });
   it('checks scope again after progress delivery and before starting compression', async () => {
     const f = fixture(), gate = deferred<void>(); f.publish.mockReturnValueOnce(gate.promise);

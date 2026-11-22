@@ -4110,7 +4110,8 @@ describe("session.* RPC (S2.D)", () => {
     if (isErrorResponse(compactResp)) {
       expect(compactResp.error).toMatchObject({
         code: RPC_ERROR_CODES.INTERNAL_ERROR,
-        message: "Runtime does not support manual compaction",
+        message: "当前运行环境不支持手动压缩上下文。",
+        data: { reason: "compact-unsupported" },
       });
     }
 
@@ -4188,7 +4189,8 @@ describe("session.* RPC (S2.D)", () => {
     if (isErrorResponse(compactResp)) {
       expect(compactResp.error).toMatchObject({
         code: RPC_ERROR_CODES.BUSY,
-        message: "Conversation has an in-flight turn; compact after it completes",
+        message: "当前对话仍在收尾或处理其他操作，本次未开始压缩；请稍后再试。",
+        data: { reason: "compact-busy" },
       });
     }
 
@@ -4497,7 +4499,11 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isErrorResponse(compact)).toBe(true);
     if (isErrorResponse(compact)) {
-      expect(compact.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+      expect(compact.error).toMatchObject({
+        code: RPC_ERROR_CODES.NOT_FOUND,
+        message: "当前可用会话中没有这个对话，请从列表中重新选择。",
+        data: { reason: "compact-conversation-not-found" },
+      });
     }
 
     const budget = await client.request("session.contextBudget", {
@@ -4667,7 +4673,11 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isErrorResponse(updated)).toBe(true);
     if (isErrorResponse(updated)) {
-      expect(updated.error.code).toBe(RPC_ERROR_CODES.BUSY);
+      expect(updated.error).toMatchObject({
+        code: RPC_ERROR_CODES.BUSY,
+        message: "当前对话仍在收尾或处理其他操作，本次未更新任务列表；请稍后再试。",
+        data: { reason: "task-list-busy" },
+      });
     }
     expect(updates).toEqual([]);
 

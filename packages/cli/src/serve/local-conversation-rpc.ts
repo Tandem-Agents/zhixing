@@ -955,30 +955,46 @@ function mapLocalConversationApplicationError(
     );
   }
   if (!(error instanceof ConversationApplicationError)) return error;
+  const data = error.reason ? { reason: error.reason } : undefined;
   if (error.code === "not-found") {
-    return RpcErrors.notFound(
+    return new RpcAppError(
+      RPC_ERROR_CODES.NOT_FOUND,
       "当前可用会话中没有这个对话，请从列表中重新选择。",
+      data,
     );
   }
   if (error.code === "busy") {
-    return RpcErrors.busy(
+    return new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
       ((operation === "compact" && error.reason === "compact-unavailable") ||
         (operation === "context-budget" &&
           error.reason === "context-budget-unavailable") ||
         (operation === "usage" && error.reason === "usage-unavailable") ||
         (operation === "security" && error.reason === "security-unavailable"))
         ? "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。"
-        : operation === "send" && error.reason === "turn-queue-full"
-          ? "Conversation has too many pending messages"
-          : operation === "clear" && error.reason === "active-turn"
-            ? "当前对话仍有运行中的工作，请先中止或等待完成后再清空。"
-            : operation === "delete" && error.reason === "active-turn"
-              ? "当前对话仍有运行中的工作，请先中止或等待完成后再删除。"
-              : operation === "clear"
-                ? "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再清空。"
-                : operation === "delete"
-                  ? "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再删除。"
-                  : "这个对话正在处理其他操作，请稍后重试。",
+        : operation === "compact" && error.reason === "compact-busy"
+          ? error.message
+          : operation === "task-list" && error.reason === "task-list-busy"
+            ? error.message
+            : operation === "send" && error.reason === "turn-queue-full"
+              ? "Conversation has too many pending messages"
+              : operation === "clear" && error.reason === "active-turn"
+                ? "当前对话仍有运行中的工作，请先中止或等待完成后再清空。"
+                : operation === "delete" && error.reason === "active-turn"
+                  ? "当前对话仍有运行中的工作，请先中止或等待完成后再删除。"
+                  : operation === "clear"
+                    ? "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再清空。"
+                    : operation === "delete"
+                      ? "当前对话正在处理其他操作或同步状态，请稍后重试，或先停止当前运行后再删除。"
+                      : "这个对话正在处理其他操作，请稍后重试。",
+      data,
+    );
+  }
+  if (operation === "compact" && error.code === "unsupported") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "当前运行环境不支持手动压缩上下文。",
+      data,
     );
   }
   return RpcErrors.invalidParams(
@@ -992,6 +1008,10 @@ function mapLocalConversationApplicationError(
       ? operation === "clear"
         ? "清空请求缺少有效的请求标识。"
         : "删除请求缺少有效的请求标识。"
+      : operation === "compact"
+        ? "压缩请求缺少有效的对话标识。"
+      : operation === "task-list"
+        ? "任务请求缺少有效的操作参数。"
       : operation === "resume"
         ? "对话标识无效，请从列表中重新选择。"
       : operation === "rename"

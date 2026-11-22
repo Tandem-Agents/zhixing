@@ -350,9 +350,13 @@ describe("LocalConversationRpcRouter", () => {
     });
     await expect(update("task-operation-busy")).rejects.toMatchObject({
       code: RPC_ERROR_CODES.BUSY,
+      message: "当前对话仍在收尾或处理其他操作，本次未更新任务列表；请稍后再试。",
+      data: { reason: "task-list-busy" },
     });
     await expect(update("task-operation-missing")).rejects.toMatchObject({
       code: RPC_ERROR_CODES.NOT_FOUND,
+      message: "当前可用会话中没有这个对话，请从列表中重新选择。",
+      data: { reason: "task-list-conversation-not-found" },
     });
     expect(connection.notify).not.toHaveBeenCalled();
     expect(port.mutateSession).not.toHaveBeenCalled();
@@ -378,6 +382,7 @@ describe("LocalConversationRpcRouter", () => {
       (error: unknown) =>
         error instanceof RpcAppError &&
         error.code === RPC_ERROR_CODES.BUSY &&
+        (error.data as { reason?: string } | undefined)?.reason === "compact-unavailable" &&
         error.message ===
           "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。",
     );

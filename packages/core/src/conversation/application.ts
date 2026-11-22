@@ -1983,7 +1983,7 @@ export class ConversationDirectoryApplicationService
     if (maintained.status === "busy") {
       throw new ConversationApplicationError(
         "busy",
-        "Conversation has an in-flight turn or maintenance operation; update tasks after it completes",
+        "当前对话仍在收尾或处理其他操作，本次未更新任务列表；请稍后再试。",
         "task-list-busy",
       );
     }
@@ -2050,19 +2050,19 @@ export class ConversationDirectoryApplicationService
       case "busy":
         throw new ConversationApplicationError(
           "busy",
-          "Conversation has an in-flight turn; compact after it completes",
+          "当前对话仍在收尾或处理其他操作，本次未开始压缩；请稍后再试。",
           "compact-busy",
         );
       case "not-found":
         throw new ConversationApplicationError(
           "not-found",
-          `Conversation not found: ${command.conversationId}`,
+          "当前可用会话中没有这个对话，请从列表中重新选择。",
           "compact-conversation-not-found",
         );
       case "unsupported":
         throw new ConversationApplicationError(
           "unsupported",
-          "Runtime does not support manual compaction",
+          "当前运行环境不支持手动压缩上下文。",
           "compact-unsupported",
         );
       case "unavailable":

@@ -3354,16 +3354,24 @@ function mapConversationApplicationError(
 
 function mapConversationTaskListApplicationError(
   error: unknown,
-  conversationId: string,
+  _conversationId: string,
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
+  const data = error.reason ? { reason: error.reason } : undefined;
   if (error.code === "not-found") {
-    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+    return new RpcAppError(
+      RPC_ERROR_CODES.NOT_FOUND,
+      "当前可用会话中没有这个对话，请从列表中重新选择。",
+      data,
+    );
   }
   if (error.code === "busy") {
     return new RpcAppError(
       RPC_ERROR_CODES.BUSY,
-      "Conversation has an in-flight turn or maintenance operation; update tasks after it completes",
+      error.reason === "task-list-busy"
+        ? error.message
+        : "当前对话仍在收尾或处理其他操作，请稍后再试。",
+      data,
     );
   }
   return RpcErrors.invalidParams(
@@ -3373,22 +3381,31 @@ function mapConversationTaskListApplicationError(
 
 function mapConversationCompactApplicationError(
   error: unknown,
-  conversationId: string,
+  _conversationId: string,
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
+  const data = error.reason ? { reason: error.reason } : undefined;
   if (error.code === "not-found") {
-    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+    return new RpcAppError(
+      RPC_ERROR_CODES.NOT_FOUND,
+      "当前可用会话中没有这个对话，请从列表中重新选择。",
+      data,
+    );
   }
   if (error.code === "busy") {
     return new RpcAppError(
       RPC_ERROR_CODES.BUSY,
-      "Conversation has an in-flight turn; compact after it completes",
+      error.reason === "compact-unavailable" || error.reason === "compact-busy"
+        ? error.message
+        : "当前对话仍在收尾或处理其他操作，请稍后再试。",
+      data,
     );
   }
   if (error.code === "unsupported") {
     return new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
-      "Runtime does not support manual compaction",
+      "当前运行环境不支持手动压缩上下文。",
+      data,
     );
   }
   return RpcErrors.invalidParams("session.compact requires 'conversationId'");
