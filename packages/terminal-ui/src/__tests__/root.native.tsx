@@ -454,14 +454,72 @@ try {
     assert.equal(editor().cursorOffset, 8, 'the token after a CRLF is crossed as one unit');
     assert.equal(await uploaded(), 'x\r\ny[A B]z');
     await clearDraft();
+    // 真实宿主原始 C0 控制字节（Ctrl+Z=0x1A 撤销、Ctrl+Y=0x19 重做，不依赖 otherModifiersMode/Kitty）：
+    // 覆盖单字撤空与重做、重做分支随新编辑清除、普通句点录入、CRLF 原文还原、原子材料 chip 完整性，以及锁态/保密/恢复页隔离
+    const rawCtrlZ = () => { (test.renderer as any).stdin.emit('data', Buffer.from('\x1a')); };
+    const rawCtrlY = () => { (test.renderer as any).stdin.emit('data', Buffer.from('\x19')); };
+    await typeEach('澄'); assert.equal(editor().plainText, '澄');
+    rawCtrlZ(); await flush(); assert.equal(editor().plainText, ''); assert.ok(text().includes('输入消息或 / 查看命令'), 'raw C0 Ctrl+Z undoes single char back to empty placeholder');
+    rawCtrlY(); await flush(); assert.equal(editor().plainText, '澄'); assert.equal(await uploaded(), '澄');
+    rawCtrlZ(); await flush(); assert.equal(editor().plainText, '');
+    await typeEach('新'); rawCtrlY(); await flush();
+    assert.equal(editor().plainText, '新', 'a new edit after undo clears the redo branch');
+    await typeEach('.'); assert.equal(editor().plainText, '新.', 'ordinary period remains literal punctuation');
+    await clearDraft();
+
+    await crlfDraft('A\r\nB'); await at(2);
+    test.mockInput.pressBackspace(); await flush(); assert.equal(editor().plainText, 'AB');
+    rawCtrlZ(); await flush(); assert.equal(await uploaded(), 'A\r\nB', 'raw C0 Ctrl+Z restores original CRLF');
+    rawCtrlY(); await flush(); assert.equal(await uploaded(), 'AB', 'raw C0 Ctrl+Y redoes CRLF deletion');
+    rawCtrlZ(); await flush(); assert.equal(await uploaded(), 'A\r\nB');
+    await clearDraft();
+
+    pasteReply = () => ({ text: '[A B]', paste: true, handles: [{ token: '[A B]', id: '55555555-5555-5555-5555-555555555555' }] });
+    const chipUndoSink = externalPaste?.(); assert.ok(chipUndoSink);
+    chipUndoSink.write(Buffer.from('payload')); chipUndoSink.end(); await flush(); await flush(); pasteReply = undefined;
+    await typeEach('!'); assert.equal(editor().plainText, '[A B]!');
+    rawCtrlZ(); await flush(); assert.equal(editor().plainText, '[A B]', 'raw C0 Ctrl+Z removes suffix while keeping chip intact');
+    await at(0); test.mockInput.pressArrow('right'); await flush();
+    assert.equal(editor().cursorOffset, 5, 'chip remains atomic after Ctrl+Z');
+    rawCtrlY(); await flush(); assert.equal(editor().plainText, '[A B]!', 'raw C0 Ctrl+Y restores suffix after chip');
+    await clearDraft();
+
     // 最后一次“未接纳”的说明随下一次真实编辑清除，后面的用例从默认提示开始
     await typeEach('x'); await clearDraft();
-    checks.push('CR/CRLF drafts: LF projection, no write-back, cursor-anchored inserts, local edits, same-frame delete/undo/redo, refusal of unmatched edits, token ranges');
+    checks.push('CR/CRLF drafts: LF projection, no write-back, cursor-anchored inserts, local edits, same-frame delete/undo/redo, raw C0 Ctrl+Z/Ctrl+Y, refusal of unmatched edits, token ranges');
   }
-  // 字段（改名）共用同一编辑器
+  // 字段（改名）共用同一编辑器；提交锁期间、保密字段与恢复页均不得被 Ctrl+Z / Ctrl+Y 误改
   await show({ kind: 'selection', title: '对话名称', requestId: 'multiline-field', field: { id: 'name', label: '输入新名称', secret: false, value: '' }, choices: [{ id: 'save', label: '保存' }] });
   await typeEach('ab'); await linefeed(); await typeEach('cd');
   assert.equal(editor().plainText, 'ab\ncd', 'a field keeps the typed order after a hard newline');
+  (test.renderer as any).stdin.emit('data', Buffer.from('\x1a')); await flush();
+  assert.equal(editor().plainText, 'ab\nc', 'non-secret field shares Ctrl+Z undo');
+  (test.renderer as any).stdin.emit('data', Buffer.from('\x19')); await flush();
+  assert.equal(editor().plainText, 'ab\ncd', 'non-secret field shares Ctrl+Y redo');
+  {
+    const heldSubmit = pendingRead();
+    entryReply = action => action.kind === 'selection' && action.requestId === 'multiline-field' ? heldSubmit.promise : undefined;
+    test.mockInput.pressEnter(); await flush();
+    (test.renderer as any).stdin.emit('data', Buffer.from('\x1a'));
+    (test.renderer as any).stdin.emit('data', Buffer.from('\x19'));
+    await flush();
+    assert.equal(editor().plainText, 'ab\ncd', 'requestLocked field ignores Ctrl+Z / Ctrl+Y while awaiting submission');
+    heldSubmit.resolve({ accepted: true }); await flush(); entryReply = undefined;
+  }
+  await show({ kind: 'configuration', title: '填写密钥', editId: 'secret-undo-guard', field: { id: 'apiKey', label: 'API Key', secret: true } });
+  await typeEach('sk-12'); await flush();
+  assert.ok(text().includes('•••••'), 'secret field masks 5 chars');
+  (test.renderer as any).stdin.emit('data', Buffer.from('\x1a'));
+  (test.renderer as any).stdin.emit('data', Buffer.from('\x19'));
+  await flush();
+  assert.ok(text().includes('•••••') && !text().includes('••••••'), 'secret field ignores C0 Ctrl+Z / Ctrl+Y without mutating secret length');
+  await show({ kind: 'recovery', title: '恢复包回读', recovery: { requestId: 'rec-undo-guard', pages: 1, input: true } });
+  root.receive({ type: 'recovery-page', requestId: 'rec-undo-guard', page: 0, text: 'RECOVERY-DATA' }); await flush();
+  await typeEach('abc'); await flush(); assert.ok(text().includes('恢复包输入：3 字节'));
+  (test.renderer as any).stdin.emit('data', Buffer.from('\x1a'));
+  (test.renderer as any).stdin.emit('data', Buffer.from('\x19'));
+  await flush();
+  assert.ok(text().includes('恢复包输入：3 字节'), 'recovery input ignores C0 Ctrl+Z / Ctrl+Y without appending control bytes');
   await show({ kind: 'conversation', title: '知行 · 交互验证', conversationId: 'test' });
   editor().setText(''); await flush();
   checks.push('hard newline editing: typed order and cursor kept (ASCII, wide, scrolled draft, selection, paste, token, field)');
@@ -2072,6 +2130,7 @@ try {
 
       const help = only(commandHelpSummary(Object.values(BUILTIN_COMMANDS)));
       test.resize(131, 48); await show(page('命令帮助', help)); await flush();
+      assert.ok(rows().some(line => line.includes('Ctrl+Z 撤销 · Ctrl+Y 重做')), 'help lead states Ctrl+Z / Ctrl+Y editor shortcuts');
       for (const header of ['▎ 对话', '▎ 配置与安全', '▎ 状态与信息', '▎ 工具与任务']) assert.ok(rows().some(line => line.includes(header)), `help shows ${header}`);
       const helpAt = (name: string) => { const line = rows().find(value => value.includes(`${name} `) && !value.includes('▎'))!; return line.slice(line.indexOf(name) + name.length).search(/\S/u) + line.indexOf(name) + name.length; };
       assert.equal(helpAt('/new'), helpAt('/advancement'), 'descriptions line up across long and short command names');

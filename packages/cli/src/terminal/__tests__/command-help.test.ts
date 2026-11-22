@@ -15,7 +15,7 @@ describe('command help summary', () => {
       { name: 'debug', description: '调试', category: 'debug' },
       { name: 'ext', description: '扩展命令', category: 'plugin' },
     ]);
-    expect(summary.lead).toEqual([]);
+    expect(summary.lead).toEqual([[{ text: '输入编辑：Enter 发送 · Ctrl+J 换行 · Ctrl+Z 撤销 · Ctrl+Y 重做 · Esc 清空', tone: 'dim' }]]);
     expect(summary.sections.map(section => section.title)).toEqual(['对话', '配置与安全', '状态与信息', '工具与任务', '调试', '扩展']);
     expect(summary.sections[2]!.rows).toEqual([{ label: '/status', value: '运行状态' }, { label: '/help', value: '命令帮助' }]);
     expect(summary.sections[3]!.rows).toEqual([{ label: '/work', value: '工作场景 ↑↓ 选择 · Enter 进入' }]);

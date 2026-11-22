@@ -6,6 +6,12 @@ import type { TerminalEditStep } from './draft-projection.js';
 const EDIT_ENTRIES = [['insertChar', 'edit'], ['insertText', 'edit'], ['deleteChar', 'edit'], ['deleteCharBackward', 'edit'], ['deleteLine', 'edit'],
   ['deleteRange', 'edit'], ['newLine', 'edit'], ['undo', 'undo'], ['redo', 'redo']] as const;
 
+/** 真实终端（含默认不启用扩展修饰符协议的 Windows Terminal 等）可达的 C0 撤销/重做主键；保留原生库默认绑定共存。 */
+export const TERMINAL_TEXTAREA_KEY_BINDINGS = [
+  { name: 'z', ctrl: true, action: 'undo' },
+  { name: 'y', ctrl: true, action: 'redo' },
+] as const;
+
 /** 取步的接收方：只在它需要时才读取文本，避免无 CR 草稿的每次按键都多读两遍全文。 */
 export interface TerminalEditStepListener { wanted(): boolean; step(step: TerminalEditStep): void }
 
@@ -22,7 +28,12 @@ export class TerminalTextarea extends TextareaRenderable {
 
   constructor(ctx: RenderContext, options: TextareaOptions) {
     const textColor = options.textColor ?? tone.text;
-    super(ctx, { ...options, textColor, focusedTextColor: options.focusedTextColor ?? textColor });
+    super(ctx, {
+      ...options,
+      textColor,
+      focusedTextColor: options.focusedTextColor ?? textColor,
+      keyBindings: [...TERMINAL_TEXTAREA_KEY_BINDINGS, ...(options.keyBindings ?? [])],
+    });
     const buffer = this.editBuffer as unknown as Record<string, (...args: unknown[]) => unknown>;
     for (const [name, kind] of EDIT_ENTRIES) {
       const original = buffer[name]!.bind(this.editBuffer);

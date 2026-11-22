@@ -17,6 +17,6 @@ export function commandHelpSummary(commands: readonly Pick<CommandDef, 'name' | 
     (groups.get(command.category) ?? other).rows.push(row);
   }
   const sections = [...groups.values(), other].filter(group => group.rows.length > 0);
-  // 命令随技能与扩展增长：按页拆分，整体容量内全部可达
-  return paginateSummary([], sections);
+  // 命令随技能与扩展增长：按页拆分，整体容量内全部可达；顶部保留交互编辑主键说明（不挤占常驻底栏）
+  return paginateSummary([[{ text: '输入编辑：Enter 发送 · Ctrl+J 换行 · Ctrl+Z 撤销 · Ctrl+Y 重做 · Esc 清空', tone: 'dim' }]], sections);
 }
