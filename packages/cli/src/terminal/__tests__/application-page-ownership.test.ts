@@ -9,17 +9,22 @@ import { terminalSelectionActions } from '../selection.js';
 // In-flight history and IPC delivery are independently controlled at real awaits.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#publish', '#dropHandoff', '#toUi', '#ownsPage', '#choosePage', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
+const methods = ['#publish', '#dropHandoff', '#toUi', '#ownsPage', '#choosePage', '#chooseModelPage', '#runModelCommand', '#invalidateAuxiliary', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
   const method = owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name);
   if (!method) throw Error(`Missing production method ${name}`);
   return method.getText(source).replace(/#/gu, '');
 }).join('\n');
 const Fixture = new Function('randomUUID', 'terminalSelectionActions', 'terminalEnvironment', 'AsyncLocalStorage', ts.transpile(`class Fixture {
-  abort = new AbortController(); generation = 0; mainView = {kind:'conversation',title:'chat'};
+  abort = new AbortController(); generation = 0; mainView = {kind:'conversation',title:'chat',connected:true};
   uiOpen = true; uiReady = Promise.resolve(); commandScope = new AsyncLocalStorage();
+  selectionDepth = 0;
   drainConfirmations() {};
+  resumeNoticeDisplay() {};
+  ensureModelBinding() { return Promise.resolve(); }
+  localView = { refresh: async () => ({}) };
+  async selectionFlow(operation) { this.selectionDepth++; try { return await operation(); } finally { this.selectionDepth--; this.drainConfirmations(); } }
   ${methods}
-} return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(randomUUID, terminalSelectionActions, () => undefined, AsyncLocalStorage);
+} return Fixture;`, { target: ts.ScriptTarget.ES2022 }))(randomUUID, terminalSelectionActions, (localView: any) => localView?.environment, AsyncLocalStorage);
 function fixture() {
   const target = new Fixture(), views: any[] = [];
   target.channel = { send: async (message: any) => { views.push(message.view); } };
@@ -41,7 +46,7 @@ describe('foreground terminal page ownership', () => {
     await target.publish(target.mainView);
     expect(views.at(-1).kind).toBe('conversation');
   });
-  it.each(['editor','skills','presentingConfirmation'])('keeps background main updates out of an active %s page', async kind => {
+  it.each(['editor','skills','presentingConfirmation','modelSession'])('keeps background main updates out of an active %s page', async kind => {
     const { target, views } = fixture(); target[kind] = true;
     await target.publishHistoryView(); expect(views).toHaveLength(0);
     target[kind] = undefined; await target.publishHistoryView();
@@ -183,6 +188,143 @@ describe('foreground terminal page ownership', () => {
       }),
     ).resolves.toBe(false);
     expect(sent.length).toBe(countBeforeLate);
+  });
+
+  it('holds foreground ownership across /model page transitions while selection is cleared, then publishes updated conversation on exit', async () => {
+    const { target, views } = fixture();
+    target.resolvedLocalView = { environment: { provider: 'local', model: 'model-a' } };
+    target.localView = {
+      refresh: async () => {
+        target.resolvedLocalView.environment = { provider: 'local', model: 'model-b' };
+        return {};
+      },
+    };
+    const transitionGate = Promise.withResolvers<void>();
+    target.modelCommand = {
+      invalidate() {},
+      async run() {
+        const actionReply = await target.chooseModelPage({
+          kind: 'selection',
+          title: '本机测试 · model-b',
+          choices: [{ id: 'option:use-session', label: '仅本会话使用' }],
+        });
+        expect(actionReply).toEqual({ itemId: 'option:use-session' });
+        // Simulate the async gap where #selection is undefined while setModelSelection + #loadView run
+        await transitionGate.promise;
+        const listReply = await target.chooseModelPage({
+          kind: 'selection',
+          title: '模型管理（/model）',
+          message: '✓ 本会话已切换至 本机测试 · model-b（全局默认不变）。',
+          choices: [
+            { id: 'option:action:follow-default', label: '恢复跟随默认' },
+            { id: 'option:action:close', label: '返回输入' },
+          ],
+        });
+        expect(listReply).toEqual({ itemId: 'cancelled', cancelCause: 'escape' });
+      },
+    };
+
+    const runPromise = target.runModelCommand('');
+    await target.publishing;
+    expect(views).toHaveLength(1);
+    expect(views[0].kind).toBe('selection');
+    expect(views[0].title).toBe('本机测试 · model-b');
+
+    // Consume first selection page (mirrors TerminalApplication.#action('selection'))
+    const firstSelection = target.selection;
+    target.selection = undefined;
+    firstSelection.resolve({ itemId: 'option:use-session' });
+    await Promise.resolve();
+
+    // Inject unsolicited mainView updates (modelSelection notification, history update, notice) during the gap
+    target.mainView = { ...target.mainView, message: '后台通知已记录' };
+    await target.publish(target.mainView);
+    await target.publishHistoryView();
+    expect(views.some((v: any) => v.kind === 'conversation')).toBe(false);
+    expect(views).toHaveLength(1);
+
+    // Finish #loadView and present the updated /model list
+    transitionGate.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    await target.publishing;
+    expect(views).toHaveLength(2);
+    expect(views[1].kind).toBe('selection');
+    expect(views[1].title).toBe('模型管理（/model）');
+
+    // Exit /model via Escape -> releases modelSession, refreshes localView, and publishes conversation once
+    const secondSelection = target.selection;
+    target.selection = undefined;
+    secondSelection.resolve({ itemId: 'cancelled', cancelCause: 'escape' });
+    await runPromise;
+
+    expect(views).toHaveLength(3);
+    expect(views[2]).toMatchObject({
+      kind: 'conversation',
+      message: '后台通知已记录',
+      environment: { provider: 'local', model: 'model-b' },
+    });
+  });
+
+  it('drops queued conversation frames when /model claims foreground and blocks late chooseModelPage after invalidation/disconnect', async () => {
+    const { target, views } = fixture();
+    const firstSend = Promise.withResolvers<void>();
+    let blockSend = true;
+    target.channel.send = async (message: any) => {
+      if (message.type === 'view') views.push(message.view);
+      if (blockSend) { blockSend = false; await firstSend.promise; }
+    };
+    const initial = target.publish(target.mainView);
+    // Queue a second conversation update while initial frame is in flight
+    void target.publish({ ...target.mainView, message: 'queued-stale-conversation' });
+
+    const gate = Promise.withResolvers<void>();
+    let secondChooseOutcome: any;
+    target.modelCommand = {
+      invalidate() {},
+      async run() {
+        await target.chooseModelPage({
+          kind: 'selection',
+          title: '模型管理（/model）',
+          choices: [{ id: 'option:model:b', label: 'model-b' }],
+        });
+        await gate.promise;
+        secondChooseOutcome = await target.chooseModelPage({
+          kind: 'selection',
+          title: '不应重开的旧模型页',
+          choices: [{ id: 'option:close', label: '返回' }],
+        });
+      },
+    };
+    const runPromise = target.runModelCommand('');
+    await Promise.resolve();
+    firstSend.resolve();
+    await initial;
+    await target.publishing;
+
+    // The queued conversation frame was dropped at dequeue once /model opened; /model selection page is active
+    expect(views.map((v: any) => v.title)).toEqual(['chat', '模型管理（/model）']);
+    expect(views.some((v: any) => v.message === 'queued-stale-conversation')).toBe(false);
+
+    // Simulate disconnect: invalidateAuxiliary revokes activeModelRun & modelSession and mainView becomes unavailable
+    const activeSel = target.selection;
+    target.selection = undefined;
+    target.invalidateAuxiliary();
+    activeSel.resolve({ itemId: 'cancelled', cancelCause: 'aborted' });
+    target.mainView = { kind: 'conversation', title: 'chat', connected: false, connectionState: 'unavailable', message: '连接已断开' };
+    gate.resolve();
+    await runPromise;
+
+    expect(secondChooseOutcome).toEqual({ itemId: 'cancelled', cancelCause: 'aborted' });
+    expect(views.some((v: any) => v.title === '不应重开的旧模型页')).toBe(false);
+    expect(views.at(-1)).toMatchObject({ kind: 'conversation', connected: false, connectionState: 'unavailable', message: '连接已断开' });
+  });
+
+  it('keeps non-model #selectionFlow commands free to publish mainView intentionally', async () => {
+    const { target, views } = fixture();
+    await target.selectionFlow(async () => {
+      await target.publish({ ...target.mainView, busy: true, message: '正在压缩上下文…' });
+    });
+    expect(views.at(-1)).toMatchObject({ kind: 'conversation', busy: true, message: '正在压缩上下文…' });
   });
 });
 

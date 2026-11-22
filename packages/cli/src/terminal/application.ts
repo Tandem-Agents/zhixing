@@ -77,7 +77,7 @@ import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-mate
 import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
 import { createUserSubmission } from '../runtime/user-submission.js';
 import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
-import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionLiveHandle, type TerminalSelectionOptions, type TerminalSelectionResponse } from './selection.js';
+import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionLiveHandle, type TerminalSelectionOptions, type TerminalSelectionPage, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
 import { TerminalProcessSession } from './process-session.js';
 import { presentRunActivity } from './run-activity.js';
@@ -312,6 +312,8 @@ class TerminalApplication {
   #informationBinding?: Promise<void>;
   #modelCommand?: TerminalModelCommand;
   #modelBinding?: Promise<void>;
+  #activeModelRun?: object;
+  #modelSession?: object;
   #taskStatus: TerminalTaskStatus = {};
   #taskStatusDirty = false;
   #taskStatusSending?: Promise<void>;
@@ -2660,6 +2662,7 @@ class TerminalApplication {
 
   #invalidateAuxiliary(): void {
     this.#startupWatch = undefined;
+    this.#activeModelRun = undefined; this.#modelSession = undefined;
     this.#information?.invalidate(); this.#modelCommand?.invalidate(); this.#tasks?.invalidate(); this.#taskNotices?.invalidate();
     this.#resumeNoticeDisplay();
   }
@@ -2960,7 +2963,7 @@ class TerminalApplication {
             authoritativeNativeFacts: read.entry.authoritativeNativeFacts,
           };
         },
-        choose: (view, options) => this.#choosePage(view, options),
+        choose: (view, options) => this.#chooseModelPage(view, options),
         publishNotice: async (message, isError) => {
           const view = { ...this.#mainView, message };
           if (isError) this.#mainView = view; else this.#showResult(view);
@@ -2974,13 +2977,25 @@ class TerminalApplication {
     })().catch(error => { this.#modelBinding = undefined; throw error; });
   }
 
+  #chooseModelPage(view: TerminalSelectionPage, options?: AbortSignal | TerminalSelectionOptions): Promise<TerminalSelectionResponse | undefined> {
+    const session = this.#activeModelRun;
+    if (!session) return Promise.resolve({ itemId: 'cancelled', cancelCause: 'aborted' });
+    this.#modelSession = session;
+    return this.#choosePage(view, options);
+  }
+
   async #runModelCommand(argument: string): Promise<void> {
     await this.#ensureModelBinding();
+    const session = {};
+    this.#activeModelRun = session;
     await this.#selectionFlow(async () => {
       try { await this.#modelCommand!.run(argument); }
       finally {
-        if (!this.#abort.signal.aborted) {
-          await this.#localView.refresh().catch(() => {});
+        const owned = this.#activeModelRun === session || this.#modelSession === session;
+        if (this.#activeModelRun === session) this.#activeModelRun = undefined;
+        if (this.#modelSession === session) this.#modelSession = undefined;
+        if (!this.#abort.signal.aborted && (owned || (!this.#startupAttempt && !this.#editor && !this.#selection && !this.#skills && !this.#presentingConfirmation && !this.#modelSession))) {
+          if (this.#mainView.connected) await this.#localView.refresh().catch(() => {});
           await this.#publish(this.#mainView);
         }
       }
@@ -3418,7 +3433,9 @@ class TerminalApplication {
     if (this.#selection && view.requestId !== this.#selection.id) return false;
     if (this.#presentingConfirmation && view.kind !== 'confirmation') return false;
     if (this.#editor && view.kind !== 'configuration') return false;
-    return !this.#skills || view.kind === 'skills';
+    if (this.#skills && view.kind !== 'skills') return false;
+    if (this.#modelSession && view.kind !== 'selection' && view.kind !== 'confirmation' && view.kind !== 'recovery') return false;
+    return true;
   }
 
   #close(code: number, reason: string, notify = true): Promise<void> {
@@ -3427,6 +3444,7 @@ class TerminalApplication {
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
     this.#channel.beginClose();
     this.#closeDeadline = terminalCloseDeadline(this.#closeDeadline);
+    this.#activeModelRun = undefined; this.#modelSession = undefined;
     this.#taskNotices?.dispose(); this.#tasks?.dispose(); this.#information?.dispose(); this.#modelCommand?.dispose();
     void this.#schedulerNotices?.then(notices => notices.dispose(), () => {});
     this.#resumeNoticeDisplay();

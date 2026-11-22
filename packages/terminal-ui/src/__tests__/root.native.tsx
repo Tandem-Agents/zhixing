@@ -221,27 +221,58 @@ try {
   const selectionChoices = [{ id: 'disabled', label: '禁用', hotkey: 'x', disabled: true },
     { id: 'first', label: '第一项', hotkey: 'a', detailsActionId: 'detail-first' },
     { id: 'disabled-middle', label: '中间禁用', disabled: true }, { id: 'last', label: '末项', hotkey: 'z' }];
-  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract-1', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
   test.mockInput.pressEnter(); await flush();
   assert.ok(actions.at(-1)?.kind === 'selection' && (actions.at(-1) as any).itemId === 'last');
-  test.mockInput.pressArrow('up'); await flush(); test.mockInput.pressEnter(); await flush();
-  assert.equal((actions.at(-1) as any).itemId, 'first', 'navigation skips disabled item');
+  // 已应答的 requestId 锁定：连续 Enter、快捷键、右箭头、Esc、Ctrl+D 均不重发；同 requestId 刷新不提前解锁；单按 Ctrl+C 不发 interrupt
+  assert.match(text(), /正在处理…/);
+  assert.match(text(), /连按 Ctrl\+C 退出/);
+  const lockedCount = actions.length, interruptsBeforeLock = actions.filter(action => action.kind === 'interrupt').length;
+  test.mockInput.pressEnter(); test.mockInput.pressKey('a'); test.mockInput.pressArrow('right');
+  test.mockInput.pressEscape(); test.mockInput.pressKey('d', { ctrl: true }); await flush();
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract-1', message: '同 id 刷新不提前释放已交出动作', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
+  test.mockInput.pressEnter(); test.mockInput.pressKey('z'); await flush();
+  test.mockInput.pressKey('c', { ctrl: true }); await flush();
+  assert.equal(actions.length, lockedCount, 'answered requestId ignores duplicate Enter, hotkeys, cancel and same-id refresh');
+  assert.equal(actions.filter(action => action.kind === 'interrupt').length, interruptsBeforeLock, 'single Ctrl+C on locked selection does not interrupt idle terminal');
+  await new Promise(resolve => setTimeout(resolve, 800));
+  // 真实请求失败当场解锁，允许重试同一 requestId；未提交时的同 id 刷新保留当前焦点
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract-2', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
+  test.mockInput.pressArrow('up'); await flush();
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract-2', message: '目录原地刷新保焦点', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
+  let failOnce = true;
+  entryReply = action => action.kind === 'selection' && failOnce ? (failOnce = false, Promise.reject(Error('暂时未送达'))) : undefined;
+  test.mockInput.pressEnter(); await flush();
+  entryReply = undefined;
+  assert.match(text(), /暂时未送达/);
+  assert.ok(!text().includes('正在处理…'), 'failed selection unlocks for retry');
+  test.mockInput.pressEnter(); await flush();
+  assert.equal((actions.at(-1) as any).itemId, 'first', 'navigation skips disabled item, survives same-id refresh, and retries after error');
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract-3', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
   const disabledStart = actions.length; test.mockInput.pressKey('x'); await flush();
   assert.equal(actions.length, disabledStart, 'disabled hotkey cannot activate');
   test.mockInput.pressKey('z'); await flush(); assert.equal((actions.at(-1) as any).itemId, 'last');
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract-4', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
   test.mockInput.pressArrow('up'); test.mockInput.pressArrow('right'); await flush();
   assert.equal((actions.at(-1) as any).itemId, 'detail-first', 'Right is a read-only detail intent');
   for (const key of ['c', 'd'] as const) {
+    await show({ kind: 'selection', title: '选择合同', requestId: `selection-contract-cancel-${key}`, selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
     test.mockInput.pressKey(key, { ctrl: true }); await flush();
     assert.equal((actions.at(-1) as any).cancelCause, key === 'c' ? 'ctrl-c' : 'ctrl-d');
   }
-  await show({ kind: 'confirmation', title: '再次确认', requestId: 'confirmation-contract', selectionLayer: 'confirm', initialItemId: 'confirm', choices: [{ id: 'back', label: '返回' }, { id: 'confirm', label: '确认' }] });
+  await show({ kind: 'confirmation', title: '再次确认', requestId: 'confirmation-contract-1', selectionLayer: 'confirm', initialItemId: 'confirm', choices: [{ id: 'back', label: '返回' }, { id: 'confirm', label: '确认' }] });
   test.mockInput.pressEnter(); await flush(); assert.equal((actions.at(-1) as any).action, 'confirm');
+  const confirmLocked = actions.length;
+  test.mockInput.pressEscape(); test.mockInput.pressKey('d', { ctrl: true }); await flush();
+  assert.equal(actions.length, confirmLocked, 'settled confirmation cannot re-emit cancellation');
+  await show({ kind: 'confirmation', title: '再次确认', requestId: 'confirmation-contract-2', selectionLayer: 'confirm', initialItemId: 'confirm', choices: [{ id: 'back', label: '返回' }, { id: 'confirm', label: '确认' }] });
   test.mockInput.pressKey('d', { ctrl: true }); await flush(); assert.equal((actions.at(-1) as any).cancelCause, 'ctrl-d');
-  await show({ kind: 'selection', title: '详情', requestId: 'details-contract', selectionLayer: 'details', initialItemId: 'return', message: '正文\n'.repeat(30), choices: [{ id: 'next', label: '下一页' }, { id: 'return', label: '返回' }] });
+  await show({ kind: 'selection', title: '详情', requestId: 'details-contract-1', selectionLayer: 'details', initialItemId: 'return', message: '正文\n'.repeat(30), choices: [{ id: 'next', label: '下一页' }, { id: 'return', label: '返回' }] });
   test.mockInput.pressArrow('down'); await flush(); test.mockInput.pressEnter(); await flush();
   assert.equal((actions.at(-1) as any).itemId, 'return', 'detail scrolling does not activate business choices');
+  await show({ kind: 'selection', title: '详情', requestId: 'details-contract-2', selectionLayer: 'details', initialItemId: 'return', message: '正文\n'.repeat(30), choices: [{ id: 'next', label: '下一页' }, { id: 'return', label: '返回' }] });
   test.mockInput.pressKey('\x1b[6~'); await flush(); assert.equal((actions.at(-1) as any).itemId, 'next');
+  await show({ kind: 'selection', title: '详情', requestId: 'details-contract-3', selectionLayer: 'details', initialItemId: 'return', message: '正文\n'.repeat(30), choices: [{ id: 'next', label: '下一页' }, { id: 'return', label: '返回' }] });
   test.mockInput.pressArrow('left'); await flush(); assert.equal((actions.at(-1) as any).itemId, 'return');
   checks.push('selection defaults, enabled navigation, hotkeys, detail intents, confirmation Enter, Ctrl+C/D causes');
   await show({ kind: 'conversation', title: '知行 · 交互验证', conversationId: 'test' });

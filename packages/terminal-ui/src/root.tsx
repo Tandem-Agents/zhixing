@@ -64,10 +64,17 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const surface = () => inlineField() ? baseView()! : view();
   // 就地字段进入时会话输入框的行数：字段输入框不小于它，进入与返回时正文区不动
   const [inlineEntryRows, setInlineEntryRows] = createSignal(1);
-  // 已提交、下一视图还没到的单字段请求：期间字段不可编辑、不可再提交，Esc 不宣称撤销；N 重开或结束时清除
-  const [fieldSaving, setFieldSaving] = createSignal<string>();
+  // 已提交、下一视图还没到的单次选择/确认请求：期间不重复提交或重发取消，真实失败当场解锁可重试，新 requestId 或终止视图到达才收口
+  const [requestSaving, setRequestSaving] = createSignal<string>();
+  const requestLocked = () => !!view().requestId && requestSaving() === view().requestId;
   // 字段是否处在提交锁里：所有写入入口（按键、粘贴事件、右键剪贴板、外部粘贴、在途读取的返回）都按它拒绝写入
-  const fieldLocked = () => !!view().requestId && fieldSaving() === view().requestId;
+  const fieldLocked = () => !!view().field && requestLocked();
+  const answerRequest = async (requestId: string, send: () => Promise<unknown>) => {
+    if (requestSaving() === requestId) return;
+    setRequestSaving(requestId);
+    const accepted = await send();
+    if (!accepted && requestSaving() === requestId) setRequestSaving(undefined);
+  };
   const [informationRevision, setInformationRevision] = createSignal(0);
   const information = new InformationBoard(() => setInformationRevision(value => value + 1));
   let statusSource = information.source(interactionKey(view()));
@@ -464,19 +471,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (Buffer.byteLength(value) > 8192) { setStatus('说明过长，请缩短后再提交。'); return; }
       // 单字段页：Enter 以字段声明的提交动作应答；提交后锁住字段，直到 N 给出下一视图（重开、结束或下一步）
       if (current.fieldSubmit && (current.kind === 'selection' || current.kind === 'confirmation')) {
-        if (fieldSaving() === current.requestId) return;
-        setFieldSaving(current.requestId);
-        const accepted = current.kind === 'confirmation'
-          ? await action({ kind: 'confirmation', requestId: current.requestId, action: current.fieldSubmit.id, note: value })
-          : await action({ kind: 'selection', requestId: current.requestId, itemId: current.fieldSubmit.id, input: value });
-        if (!accepted && fieldSaving() === current.requestId) setFieldSaving(undefined);
+        await answerRequest(current.requestId, () => current.kind === 'confirmation'
+          ? action({ kind: 'confirmation', requestId: current.requestId!, action: current.fieldSubmit!.id, note: value })
+          : action({ kind: 'selection', requestId: current.requestId!, itemId: current.fieldSubmit!.id, input: value }));
         return;
       }
       const choice = current.choices?.[selected()];
       if (!choice || choice.disabled) return;
       const itemId = choice.id;
-      if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId, action: itemId, note: value });
-      else await action({ kind: 'selection', requestId: current.requestId, itemId, input: value }); return;
+      await answerRequest(current.requestId, () => current.kind === 'confirmation'
+        ? action({ kind: 'confirmation', requestId: current.requestId!, action: itemId, note: value })
+        : action({ kind: 'selection', requestId: current.requestId!, itemId, input: value }));
+      return;
     }
     if (current.field && current.editId) {
       if (!safeAction()) { setStatus('请放大窗口后提交；仍可按 Esc 取消。'); return; }
@@ -489,8 +495,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const choice = current.kind !== 'conversation' || !editorValue().trim() ? current.choices?.[selected()] : undefined;
     if (choice) {
       if (choice.disabled || (!safeAction() && choice.id !== 'cancel' && choice.id !== 'reject')) { setStatus('请放大窗口以完整阅读后果；仍可取消或退出。'); return; }
-      if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: choice.id });
-      else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, itemId: choice.id });
+      if (current.kind === 'confirmation') await answerRequest(current.requestId!, () => action({ kind: 'confirmation', requestId: current.requestId!, action: choice.id }));
+      else if (current.kind === 'selection') await answerRequest(current.requestId!, () => action({ kind: 'selection', requestId: current.requestId!, itemId: choice.id }));
       else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: choice.id });
       else if (choice.id === 'retry') await action({ kind: 'retry-connection' });
       else if (choice.id === 'exit') await options.exit();
@@ -552,14 +558,14 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const cancelPage = async (cause: TerminalSelectionCancelCause = 'escape') => {
     const current = view();
-    // 已提交的单字段请求已经应答：Esc 不再发取消，也不宣称撤销（信息行正写着“正在提交…”）
-    if (fieldLocked()) return;
+    // 已提交的单次请求已经应答：Esc 不再发取消，也不宣称撤销已受理的动作
+    if (requestLocked()) return;
     releaseSecret();
     if (current.requestId === 'workscene-preparing' && current.busy) { await action({ kind: 'abort' }); return; }
     if (current.kind === 'history') await action({ kind: 'history-close' });
     else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: 'back' });
-    else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'cancelled', cancelCause: cause });
-    else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true, cancelCause: cause });
+    else if (current.kind === 'confirmation') await answerRequest(current.requestId!, () => action({ kind: 'confirmation', requestId: current.requestId!, action: 'cancelled', cancelCause: cause }));
+    else if (current.kind === 'selection') await answerRequest(current.requestId!, () => action({ kind: 'selection', requestId: current.requestId!, cancelled: true, cancelCause: cause }));
   };
   // 复制意图的判定：屏上当前选区按选中叶节点的归属取文字（规则见 copy-selection.ts）。正文仍走源文映射，
   // 编辑器只在选区只落在它身上时用它自己的读取；保密字段没有可选文字。按钮、键位文案与 Ctrl+C 共用这一个判定
@@ -645,14 +651,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (candidate?.error) left.push(candidate.error);
     // 列表为空时提示已显示在列表里，底部不再重复
     else if (candidate?.argumentHint && !(candidateOpen() && !candidate.items.length)) left.push(candidate.argumentHint);
-    // 单字段页：提交后到下一视图前写“正在提交…”；上一次提交未被接受时写明原因，代替字段标签
+    // 单字段页：提交后到下一视图前写“正在提交…”；普通选择/确认应答后写“正在处理…”；上一次提交未被接受时写明原因
     else if (current.field) left.push(fieldLocked() ? '正在提交…'
       : current.field.error ?? current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
+    else if (requestLocked()) left.push('正在处理…');
     else if (current.kind === 'conversation' && editorEmpty() && !left.length) left.push('输入消息或 / 查看命令');
     // 按实际可用宽度组织右侧：左侧是当前操作的结果或失败说明时，先保证它完整可读；
     // 键位提示放不下长版就用短版，还放不下再让出“复制选区”按钮（Ctrl+C 照样复制），最后才截短键位
     const leftText = left.filter(Boolean).join('  '), leftWidth = leftText ? measureInformation(leftText) : 0;
-    const feedback = leftWidth > 0 && (blocks.left.length > 0 || !!operationNotice || !!opening || !!candidate?.error || !!current.field?.error || !!current.inputReceiptPending);
+    const feedback = leftWidth > 0 && (blocks.left.length > 0 || !!operationNotice || !!opening || !!candidate?.error || !!current.field?.error || !!current.inputReceiptPending || requestLocked());
     const copy = copyAvailable() && size().width >= 12 ? '复制选区' : '';
     const copyWidth = copy ? measureInformation(copy) : 0;
     const room = Math.max(0, size().width - 4);
@@ -678,9 +685,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : current.kind === 'skills' ? '' // The skill surface owns its two contextual hint rows.
       : current.kind === 'recovery' ? (current.recovery?.input ? 'Enter 回读 · Esc 取消' : 'Esc 返回')
       : (current.kind === 'command' || current.kind === 'unavailable') ? 'Ctrl+C 退出'
-      : current.selectionLayer === 'details' ? hint('↑↓ 阅读 · ←/Enter/Esc 返回 · PgUp/PgDn 翻阅', '↑↓ 阅读 · Esc 返回')
-      // 提交锁里只写真实可用的操作：阅读与 Ctrl+C 的中止/退出（Enter、Esc 此时不生效）
+      // 提交锁里只写真实可用的操作：阅读与中止/连按退出（Enter、Esc 此时不重复发应答或取消）
       : current.field && fieldLocked() ? hint('PgUp/PgDn 阅读 · Ctrl+C 中止/退出', 'Ctrl+C 中止/退出')
+      : requestLocked() ? hint(`${current.selectionLayer === 'details' ? '↑↓' : 'PgUp/PgDn'} 阅读 · 连按 Ctrl+C 退出`, '连按 Ctrl+C 退出')
+      : current.selectionLayer === 'details' ? hint('↑↓ 阅读 · ←/Enter/Esc 返回 · PgUp/PgDn 翻阅', '↑↓ 阅读 · Esc 返回')
       : current.field ? current.fieldSubmit ? `Enter ${current.fieldSubmit.label} · Esc ${current.cancelLabel ?? '返回'}` : 'Enter 确认 · Esc 返回'
       : current.kind === 'configuration' ? (() => {
         const controls = configurationControls(current);
@@ -700,7 +708,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       : (current.detailsActionId || current.choices?.some(choice => choice.detailsActionId)) ? hint('Enter 确认 · → 详情 · Esc 返回 · PgUp/PgDn 阅读', 'Enter 确认 · → 详情 · Esc 返回')
       : hint('Enter 确认 · Esc 返回 · PgUp/PgDn 阅读', 'Enter 确认 · Esc 返回');
     // 有可复制的选区时 Ctrl+C 就是复制：键位里关于 Ctrl+C 的说法随之改写，与实际按键结果一致
-    const shownKeys = copyAvailable() ? keys.replace(/Ctrl\+C [^·]*?(?=\s*(·|$))/u, 'Ctrl+C 复制') : keys;
+    const shownKeys = copyAvailable() ? keys.replace(/(?:连按\s*)?Ctrl\+C [^·]*?(?=\s*(·|$))/u, 'Ctrl+C 复制') : keys;
     const shownCopy = copy && (!feedback || need(shownKeys, true) <= room) ? copy : '';
     return { ...informationLayout({ left, right: [...blocks.right, shownKeys] }, size().width - (shownCopy ? copyWidth + 2 : 0), measureInformation, feedback),
       copy: shownCopy, copyWidth: shownCopy ? copyWidth : 0, panelKeys };
@@ -1056,15 +1064,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (event.name === 'f3') { consume(); void action({ kind: 'configuration-open' }); return; }
       if (event.ctrl && event.name === 'r') { consume(); void action({ kind: 'retry-connection' }); return; }
     }
-    // 已提交的单字段请求等 N 给出下一视图：保留阅读（翻页、回到底部、上面的复制选区）与 Ctrl+C 的中止/退出；
-    // 编辑、再提交、Esc、Ctrl+D 都不生效——这次请求已经应答，不再发取消，也不宣称撤销已受理的写入
-    if (fieldLocked() && !['pageup', 'pagedown'].includes(event.name) && !(event.ctrl && event.name === 'end')) {
+    // 已提交的单次请求等 N 给出下一视图：保留本地阅读（翻页、回到底部、复制选区）与中止/连按退出；
+    // 编辑、再提交、快捷键、Esc、Ctrl+D 都不生效——这次请求已经应答，不再发第二次应答或补发取消
+    const lockedScroll = (view().selectionLayer === 'details'
+      ? (event.name === 'up' || event.name === 'down') && !event.ctrl && !event.meta && !event.shift
+      : ['pageup', 'pagedown'].includes(event.name)) || (event.ctrl && event.name === 'end');
+    if (requestLocked() && !lockedScroll) {
       consume();
       if (event.ctrl && event.name === 'c') {
-        // 沿用会话的中止/退出：连按退出；单按交 N，有可停的就停，没有就按原约定退出终端
         const now = performance.now();
         if (ctrlC > 0 && now - ctrlC < 750) { void options.exit(); return; }
-        ctrlC = now; void action({ kind: 'interrupt' });
+        ctrlC = now;
+        if (view().field) void action({ kind: 'interrupt' });
       }
       return;
     }
@@ -1197,8 +1208,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (view().selectionLayer === 'details') {
         const current = view(), itemId = direction < 0 ? 'previous' : 'next';
         if (current.choices?.some(choice => choice.id === itemId && !choice.disabled)) {
-          if (current.kind === 'confirmation') void action({ kind: 'confirmation', requestId: current.requestId!, action: itemId });
-          else void action({ kind: 'selection', requestId: current.requestId!, itemId });
+          void answerRequest(current.requestId!, () => current.kind === 'confirmation'
+            ? action({ kind: 'confirmation', requestId: current.requestId!, action: itemId })
+            : action({ kind: 'selection', requestId: current.requestId!, itemId }));
         }
         return;
       }
@@ -1211,9 +1223,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     const selectionView = view();
     if ((selectionView.kind === 'selection' || selectionView.kind === 'confirmation') && !event.ctrl && !event.meta) {
-      const sendChoice = (itemId: string) => selectionView.kind === 'confirmation'
+      const sendChoice = (itemId: string) => answerRequest(selectionView.requestId!, () => selectionView.kind === 'confirmation'
         ? action({ kind: 'confirmation', requestId: selectionView.requestId!, action: itemId })
-        : action({ kind: 'selection', requestId: selectionView.requestId!, itemId });
+        : action({ kind: 'selection', requestId: selectionView.requestId!, itemId }));
       if (selectionView.selectionLayer === 'details' && !event.shift) {
         if (event.name === 'left' || event.name === 'return') { consume(); void sendChoice('return'); return; }
         if (event.name === 'up' || event.name === 'down') { consume(); historyBox?.scrollBy(event.name === 'up' ? -1 : 1); return; }
@@ -1321,7 +1333,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           // 下一视图到达（N 重开、结束或下一步）即解除提交锁
           if (message.view.kind === 'conversation') setBaseView(message.view);
           else if (message.view.inline && message.view.field && previous.kind === 'conversation') setInlineEntryRows(untrack(fieldRows));
-          if (fieldSaving() !== undefined && message.view.requestId !== fieldSaving()) setFieldSaving(undefined);
+          if (requestSaving() !== undefined && message.view.requestId !== requestSaving()) setRequestSaving(undefined);
           if (!sameInteraction) {
             activateInformation(message.view); releaseSecret(); setEditorLines(1); setEditorEmpty(!message.view.field?.value);
           }
@@ -1395,6 +1407,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
             setBodyEarlier(message.hasEarlier);
           });
         } else if (message.type === 'invalidate' && view().requestId === message.requestId) {
+          if (requestSaving() === message.requestId) setRequestSaving(undefined);
           releaseSecret();
           const next: TerminalView = { generation: view().generation, kind: 'conversation', title: '知行', conversationId: view().conversationId, message: '该请求已由其他入口处理或已失效。' };
           activateInformation(next); setView(next);
