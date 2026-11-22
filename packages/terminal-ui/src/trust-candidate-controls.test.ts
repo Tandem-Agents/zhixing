@@ -47,9 +47,11 @@ describe('trust candidate keyboard ownership', () => {
     const control = new TerminalTrustCandidateControls();
     expect(control.key(snapshot(), { name: 'up' })).toEqual({ kind: 'move', direction: -1 });
     expect(control.key(snapshot(), { name: 'pagedown' })).toEqual({ kind: 'move', direction: 1, page: true });
-    expect(control.key(snapshot({ safe: false }), { name: 'up' }).kind).toBe('none');
-    expect(control.key(snapshot({ safe: false }), remove).kind).toBe('none');
-    expect(control.key(snapshot({ items: [] }), remove).kind).toBe('none');
+    expect(control.key(snapshot({ safe: false }), { name: 'up' })).toMatchObject({ kind: 'none', reason: 'window' });
+    expect(control.key(snapshot({ safe: false }), remove)).toMatchObject({ kind: 'none', reason: 'window' });
+    const emptyRemove = control.key(snapshot({ items: [] }), remove);
+    expect(emptyRemove.kind).toBe('none');
+    expect((emptyRemove as { reason?: string }).reason).toBeUndefined();
   });
   it('does not borrow picker ownership or treat modified letters as delete confirmation', () => {
     const control = new TerminalTrustCandidateControls();

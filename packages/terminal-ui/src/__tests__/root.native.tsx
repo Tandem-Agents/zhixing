@@ -2371,5 +2371,202 @@ try {
     await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
     checks.push('configuration controls align footer hints and Ctrl+S/Esc/Ctrl+C behaviour across completable, gate, field, cancellable-loading and durable-saving states');
   }
+  {
+    // B6-03: small-window hints match actual dispatch predicates per selected row/layer/threshold, and scoped window notices clear on resize without wiping business errors
+    const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const bottom = () => text().split('\n').filter(line => line.trim()).at(-1)!;
+    test.resize(78, 20); await flush();
+    await show({
+      kind: 'selection',
+      selectionLayer: 'select',
+      title: '切换模型',
+      requestId: 'b603-model-select',
+      choices: [
+        { id: 'option:params', label: '调整当前模型参数' },
+        { id: 'option:model-b', label: 'model-b', detailsActionId: 'details:model-b' },
+        { id: 'cancel', label: '取消' },
+      ],
+    });
+    assert.ok(bottom().includes('Enter 确认') && !bottom().includes('→ 详情'), `non-detail row never advertises → 详情: ${bottom()}`);
+    test.mockInput.pressArrow('down'); await flush();
+    assert.ok(bottom().includes('Enter 确认') && bottom().includes('→ 详情'), `detail row advertises both Enter and → 详情 at 78x20: ${bottom()}`);
+
+    // Shrink to 45x8: detail row keeps → 详情 & Esc 返回, drops Enter 确认; non-detail row drops both Enter 确认 & → 详情
+    test.resize(45, 8); await flush();
+    assert.ok(text().includes('窗口较小：可取消；放大后继续确认。'), 'selection page with blocked choices shows actionable small-window banner');
+    assert.ok(!bottom().includes('Enter 确认') && bottom().includes('→ 详情') && bottom().includes('Esc 返回'), `45x8 detail row shows truthful → 详情 · Esc 返回: ${bottom()}`);
+    test.mockInput.pressArrow('up'); await flush();
+    assert.ok(!bottom().includes('Enter 确认') && !bottom().includes('→ 详情') && bottom().includes('Esc 返回'), `45x8 non-detail row shows only Esc/read hints: ${bottom()}`);
+    const beforeBlockedSelect = actions.length;
+    test.mockInput.pressArrow('right'); await flush();
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(actions.length, beforeBlockedSelect, 'right arrow on non-detail row and Enter at 45x8 dispatch nothing');
+    assert.ok(bottom().includes('请放大窗口以完整阅读后果'), `45x8 blocked Enter explains why confirmation is deferred: ${bottom()}`);
+
+    // Move to detail row at 45x8: → genuinely opens read-only details, and ← returns
+    test.mockInput.pressArrow('down'); await flush();
+    test.mockInput.pressArrow('right'); await flush();
+    assert.deepEqual(actions.at(-1), { kind: 'selection', requestId: 'b603-model-select', itemId: 'details:model-b' });
+    await show({
+      kind: 'selection',
+      selectionLayer: 'details',
+      title: 'model-b · 详情',
+      requestId: 'b603-model-details',
+      message: '上下文窗口 128k\n输出上限 8k',
+      choices: [{ id: 'return', label: '返回列表' }],
+    });
+    assert.ok(text().includes('窗口较小：放大后可完整显示与操作。') && !text().includes('可取消；放大后继续确认。'), 'read-only details page does not claim blocked confirmation');
+    assert.ok(bottom().includes('↑↓ 阅读') && bottom().includes('Esc 返回'), `45x8 details page preserves read/return hints: ${bottom()}`);
+    test.mockInput.pressArrow('left'); await flush();
+    assert.deepEqual(actions.at(-1), { kind: 'selection', requestId: 'b603-model-details', itemId: 'return' });
+
+    // Explicit cancel choice remains operable and advertised at 45x8
+    await show({
+      kind: 'selection',
+      selectionLayer: 'select',
+      title: '切换模型',
+      requestId: 'b603-model-cancel',
+      initialItemId: 'cancel',
+      choices: [
+        { id: 'option:model-b', label: 'model-b', detailsActionId: 'details:model-b' },
+        { id: 'cancel', label: '取消' },
+      ],
+    });
+    assert.ok(bottom().includes('Enter 确认'), `explicit cancel choice still advertises Enter 确认 at 45x8: ${bottom()}`);
+    test.mockInput.pressEnter(); await flush();
+    assert.deepEqual(actions.at(-1), { kind: 'selection', requestId: 'b603-model-cancel', itemId: 'cancel' });
+
+    // Business error preservation + same-frame resize recovery without any keypress (and no stale resurrection on re-shrink)
+    test.resize(78, 20); await flush();
+    entryReply = action => action.kind === 'confirmation' ? Promise.reject(Error('授权服务暂不可用')) : undefined;
+    await show({
+      kind: 'confirmation',
+      selectionLayer: 'select',
+      title: '工具权限',
+      requestId: 'b603-confirm',
+      choices: [{ id: 'allow', label: '允许' }, { id: 'reject', label: '拒绝' }],
+    });
+    test.mockInput.pressEnter(); await flush();
+    assert.ok(bottom().includes('授权服务暂不可用'), `business failure shown at 78x20: ${bottom()}`);
+    entryReply = undefined;
+    test.resize(45, 8); await flush();
+    const beforeConfirmSmall = actions.length;
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(actions.length, beforeConfirmSmall, 'allow choice blocked at 45x8');
+    assert.ok(bottom().includes('请放大窗口以完整阅读后果'), `window refusal takes priority at 45x8: ${bottom()}`);
+    test.resize(78, 20);
+    await test.renderOnce();
+    assert.ok(!bottom().includes('请放大窗口'), `first rendered frame at 78x20 clears window refusal with zero keypresses: ${bottom()}`);
+    assert.ok(bottom().includes('授权服务暂不可用'), `expanding window never wipes active business error: ${bottom()}`);
+    assert.ok(bottom().includes('Enter 确认'), `expanding window restores Enter 确认 on first frame: ${bottom()}`);
+    test.resize(45, 8); await flush();
+    assert.ok(!bottom().includes('请放大窗口'), `re-shrinking without keypress does not resurrect cleared refusal: ${bottom()}`);
+    test.mockInput.pressArrow('down'); await flush();
+    assert.ok(bottom().includes('Enter 确认'), `explicit reject choice advertises Enter 确认 at 45x8: ${bottom()}`);
+    test.mockInput.pressEnter(); await flush();
+    assert.deepEqual(actions.at(-1), { kind: 'confirmation', requestId: 'b603-confirm', action: 'reject' });
+
+    // Single-field and completable configuration pages clear window refusal on first expanded frame
+    await show({
+      kind: 'selection',
+      title: '重命名对话',
+      requestId: 'b603-field',
+      field: { id: 'name', label: '新名称', value: '草稿名', secret: false },
+      fieldSubmit: { id: 'save', label: '保存' },
+      cancelLabel: '取消',
+    });
+    assert.ok(!bottom().includes('Enter 保存') && bottom().includes('Esc 取消'), `45x8 field omits blocked Enter: ${bottom()}`);
+    const beforeFieldSmall = actions.length;
+    test.mockInput.pressEnter(); await flush();
+    assert.equal(actions.length, beforeFieldSmall);
+    assert.ok(bottom().includes('请放大窗口后提交'), `45x8 field Enter shows window notice: ${bottom()}`);
+    test.resize(78, 20); await test.renderOnce();
+    assert.ok(!bottom().includes('请放大窗口') && bottom().includes('Enter 保存 · Esc 取消'), `expanded field restores Enter 保存 on first frame: ${bottom()}`);
+
+    test.resize(45, 8); await flush();
+    await show({
+      kind: 'configuration',
+      title: '服务商连接 · 自定义',
+      editId: 'b603-cfg',
+      configurationControls: { canComplete: true, canBack: true, canCancel: true },
+      choices: [{ id: 'select:0', label: '端点 URL' }],
+    });
+    assert.ok(!bottom().includes('Enter 确认') && !bottom().includes('Ctrl+S 完成') && bottom().includes('↑↓ 选择 · Esc 返回'), `45x8 config omits Enter & Ctrl+S: ${bottom()}`);
+    const beforeCfgSmall = actions.length;
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.equal(actions.length, beforeCfgSmall);
+    assert.ok(bottom().includes('请放大窗口后保存'), `45x8 Ctrl+S shows window notice: ${bottom()}`);
+    test.resize(78, 20); await test.renderOnce();
+    assert.ok(!bottom().includes('请放大窗口') && bottom().includes('Ctrl+S 完成'), `expanded config clears refusal and restores Ctrl+S on first frame: ${bottom()}`);
+    test.mockInput.pressKey('s', { ctrl: true }); await flush();
+    assert.deepEqual(actions.at(-1), { kind: 'configuration-action', editId: 'b603-cfg', action: 'complete' });
+
+    // Candidate picker (/work ), management (/trust ) and SkillsView across thresholds
+    const pickerHint = ['Esc 返回', 'Enter 进入', '两次 Ctrl+D 删除', 'Ctrl+R 改名', 'Ctrl+N 新建'];
+    candidateReply = async action => action.text.startsWith('/work ')
+      ? { revision: action.revision, active: true, start: 6, end: action.text.length, mode: 'picker', canDelete: true, canRename: true, canCreate: true, hint: pickerHint,
+        items: [{ id: 's1', label: '场景一', detail: 'D:/work' }] }
+      : action.text.startsWith('/trust ')
+        ? { revision: action.revision, active: true, start: 7, end: action.text.length, mode: 'management', canDelete: true,
+          hint: ['Esc 返回', '↑↓ 选择', '两次 Ctrl+D 撤销', 'Ctrl+R 刷新'], items: [{ id: 'r1', label: 'bash test', detail: '当前范围' }] }
+        : { revision: action.revision, active: true, start: 0, end: 0, items: [] };
+    test.resize(45, 8);
+    await show({ kind: 'conversation', title: '知行', conversationId: 'b603-conv', connected: true });
+    editor().setText('/work '); await flush(); await flush();
+    assert.ok(bottom().includes('Esc 返回') && !bottom().includes('Ctrl+D') && !bottom().includes('Enter 进入'), `45x8 unmounted picker shows only Esc 返回: ${bottom()}`);
+    test.mockInput.pressKey('d', { ctrl: true }); await flush();
+    assert.ok(bottom().includes('请放大窗口后管理'), `45x8 picker Ctrl+D shows management window notice: ${bottom()}`);
+    test.resize(45, 14); await flush();
+    assert.ok(bottom().includes('请放大窗口后管理'), `45x14 still below 40x18 keeps management notice: ${bottom()}`);
+    assert.ok(!text().includes('Ctrl+D') && !text().includes('Ctrl+N'), `45x14 visible picker omits management keys`);
+    test.resize(78, 20); await test.renderOnce();
+    assert.ok(!bottom().includes('请放大窗口后管理') && bottom().includes('两次 Ctrl+D 删除'), `78x20 clears picker notice on first frame and restores management hints: ${bottom()}`);
+    test.resize(45, 14); await flush();
+    test.mockInput.pressKey('d', { ctrl: true }); await flush();
+    assert.ok(bottom().includes('请放大窗口后管理'));
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    assert.ok(!bottom().includes('请放大窗口后管理'), `closing candidate panel with Esc clears picker window notice without resize: ${bottom()}`);
+
+    editor().setText('/trust '); await flush(); await flush();
+    assert.ok(bottom().includes('Esc 返回 · Ctrl+R 刷新') && !text().includes('两次 Ctrl+D 撤销'), `45x14 trust management omits revoke/select hints: ${bottom()}`);
+    test.mockInput.pressKey('d', { ctrl: true }); await flush();
+    assert.ok(bottom().includes('请放大窗口后撤销'), `45x14 trust Ctrl+D shows revoke window notice: ${bottom()}`);
+    test.resize(78, 20); await test.renderOnce();
+    assert.ok(!bottom().includes('请放大窗口后撤销') && text().includes('两次 Ctrl+D 撤销'), `78x20 clears trust window notice on first frame: ${bottom()}`);
+    test.mockInput.pressEscape(); await pause(25); await flush();
+    editor().setText(''); await flush();
+    candidateReply = undefined;
+
+    // SkillsView: small window p/d/m/a notice clears on expand while preserving real send failure
+    entryReply = action => action.kind === 'skills-action' && action.action.kind === 'pin' ? Promise.resolve(undefined) : undefined;
+    await show({
+      kind: 'skills',
+      title: '技能管理',
+      skills: {
+        sessionId: 'b603-skills',
+        revision: 1,
+        state: 'ready',
+        busy: false,
+        items: [{ id: 'skill-a', name: 'Skill A', description: 'desc', pinned: false, disabled: false, mode: 'main', source: 'own', hitCount: 1 }],
+        total: 1,
+        offset: 0,
+        pageSize: 8,
+        selectedIndex: 0,
+        selectedId: 'skill-a',
+      },
+    });
+    test.mockInput.pressKey('p'); await flush();
+    assert.ok(bottom().includes('技能操作暂未完成'), `skills business error shown at 78x20: ${bottom()}`);
+    entryReply = undefined;
+    test.resize(45, 9); await flush();
+    test.mockInput.pressKey('p'); await flush();
+    assert.ok(bottom().includes('请放大窗口后操作'), `45x9 skills p shows window notice: ${bottom()}`);
+    test.resize(78, 20); await flush();
+    assert.ok(!bottom().includes('请放大窗口后操作') && bottom().includes('技能操作暂未完成'), `expanding skills clears window notice and preserves business error: ${bottom()}`);
+
+    test.resize(80, 24);
+    await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
+    checks.push('small-window dispatch predicates, detail/cancel row hints, candidate/skills thresholds and same-frame scoped window-notice recovery without wiping business errors');
+  }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

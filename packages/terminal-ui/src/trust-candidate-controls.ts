@@ -16,7 +16,7 @@ export interface TrustCandidateSnapshot {
 export interface TrustCandidateKey { readonly name: string; readonly ctrl?: boolean; readonly meta?: boolean; readonly shift?: boolean }
 export type TrustCandidateIntent =
   | { readonly kind: 'unhandled' }
-  | { readonly kind: 'none'; readonly message?: string }
+  | { readonly kind: 'none'; readonly message?: string; readonly reason?: 'window' }
   | { readonly kind: 'move'; readonly direction: -1 | 1; readonly page?: boolean }
   | { readonly kind: 'dismiss' }
   | { readonly kind: 'armed'; readonly id: string; readonly message: string }
@@ -51,7 +51,7 @@ export class TerminalTrustCandidateControls {
       this.#armed = undefined; return { kind: 'none' };
     }
     if (key.ctrl && !key.meta && !key.shift && name === 'd') {
-      if (!snapshot.safe) { this.#armed = undefined; return { kind: 'none', message: '请放大窗口后撤销；Esc 返回。' }; }
+      if (!snapshot.safe) { this.#armed = undefined; return { kind: 'none', reason: 'window', message: '请放大窗口后撤销；Esc 返回。' }; }
       const item = snapshot.items[snapshot.selected];
       if (snapshot.busy || snapshot.error || !snapshot.canDelete || !item) {
         this.#armed = undefined; return { kind: 'none', message: snapshot.busy ? '正在撤销，请稍候。' : '没有可撤销的已核实规则，请刷新列表。' };
@@ -64,7 +64,7 @@ export class TerminalTrustCandidateControls {
     }
     this.#armed = undefined;
     if (!key.ctrl && !key.meta && !key.shift && ['up', 'down', 'pageup', 'pagedown'].includes(name)) {
-      if (!snapshot.safe) return { kind: 'none', message: '请放大窗口后浏览；Esc 返回。' };
+      if (!snapshot.safe) return { kind: 'none', reason: 'window', message: '请放大窗口后浏览；Esc 返回。' };
       return { kind: 'move', direction: name === 'up' || name === 'pageup' ? -1 : 1,
         ...(name === 'pageup' || name === 'pagedown' ? { page: true } : {}) };
     }

@@ -10,6 +10,8 @@ import {
 const SKILL_MODE_LABEL = { main: '主模式', work: '工作场景' } as const;
 const SKILL_SOURCE_LABEL = { own: '本地', linked: '接入' } as const;
 
+export const skillsSafeSize = (width: number, height: number): boolean => width - 2 * spacing.content >= 30 && height >= 7;
+
 export interface SkillsViewHandle { key(event: SkillsKey): boolean }
 export interface SkillsViewProps {
   readonly view: TerminalSkillsView;
@@ -17,6 +19,7 @@ export interface SkillsViewProps {
   readonly height: number;
   readonly send: (action: TerminalSkillsAction) => Promise<unknown>;
   readonly onError: (message: string) => void;
+  readonly onWindowNotice?: (message: string) => void;
   readonly onReady?: (handle: SkillsViewHandle | undefined) => void;
 }
 
@@ -28,7 +31,7 @@ export function SkillsView(props: SkillsViewProps) {
     if (!validateSkillsView(props.view)) throw Error('terminal-skills-view');
     return props.view;
   });
-  const safe = () => props.width - 2 * spacing.content >= 30 && props.height >= 7;
+  const safe = () => skillsSafeSize(props.width, props.height);
   // These fixed hints contain only ASCII, arrows, separators and Han text.
   // Count Han as two terminal cells; string.length undercounts Chinese labels.
   const hint = (...variants: string[]) => variants.find(text =>
@@ -58,7 +61,7 @@ export function SkillsView(props: SkillsViewProps) {
       if (disposed) return false;
       const action = skillsActionForKey(view(), event, safe());
       if (action) send(action);
-      else if (!safe() && !event.ctrl && !event.meta && /^[pdma]$/iu.test(event.name)) props.onError('请放大窗口后操作；仍可按 Esc 返回。');
+      else if (!safe() && !event.ctrl && !event.meta && /^[pdma]$/iu.test(event.name)) (props.onWindowNotice ?? props.onError)('请放大窗口后操作；仍可按 Esc 返回。');
       // The root gives this page exclusive input ownership. An unknown key must
       // not fall through to global Enter, scroll, draft editing or application exit.
       return true;
