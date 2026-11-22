@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { parseModelBudgetStop } from "../budget-stop.js";
+import { resolveMaxOutputTokens } from "../../types/llm.js";
+import { createLeaseBudgetTracker } from "../../contracts/ports.js";
+import {
+  budgetStopAfterFailure,
+  formatModelBudgetStop,
+  isResourceBudgetExceeded,
+  parseModelBudgetStop,
+  parseResourceBudgetDimension,
+} from "../budget-stop.js";
 import { CAUSE_SUMMARY_CHARS, classifyProviderError, errorCauseSummary, getRecoveryStrategy, isConnectPhaseFailure, markRequestUndelivered, providerRequestNeverSent } from "../classify.js";
 
 const coded = (code: string, message = `connect ${code}`) => Object.assign(new Error(message), { code });
@@ -108,10 +116,58 @@ describe("资源额度停止", () => {
       expect(parseModelBudgetStop(message)).toEqual({});
       expect(classifyProviderError(new TypeError(message))).toBe("invalid_request");
     }
+    expect(parseResourceBudgetDimension("Resource commitments tokens exceeds budget")).toBe("tokens");
+    expect(parseResourceBudgetDimension("Resource usage calls exceeds budget")).toBe("calls");
+    expect(parseResourceBudgetDimension("Delegated resource commitments cost exceeds budget")).toBe("cost");
+
+    for (const reason of [
+      "zero-token-grant",
+      "input-exceeds-grant",
+      "thinking-exceeds-grant",
+      "single-call-exceeds-grant",
+      "cumulative-tokens",
+      "calls-limit",
+      "cost-limit",
+    ] as const) {
+      const structured = formatModelBudgetStop(reason, new TypeError("Resource commitments tokens exceeds budget"));
+      expect(isResourceBudgetExceeded(structured)).toBe(true);
+      expect(parseModelBudgetStop(structured.message)).toEqual({ reason });
+      expect(classifyProviderError(structured)).toBe("invalid_request");
+      const retryCombined = budgetStopAfterFailure(new Error("Connection error."), structured);
+      expect(parseModelBudgetStop(retryCombined.message)).toEqual({ afterFailure: "Connection error." });
+    }
+
     const combined = "Model usage budget exhausted while retrying after: Connection error.";
     expect(parseModelBudgetStop(combined)).toEqual({ afterFailure: "Connection error." });
     expect(classifyProviderError(new Error(combined))).toBe("invalid_request");
     expect(parseModelBudgetStop("Your credit balance exceeds budget")).toBeUndefined();
+  });
+
+  it("resolveMaxOutputTokens 与 createLeaseBudgetTracker 严格区分零额度与未提供上限", () => {
+    const zeroResource = resolveMaxOutputTokens({
+      userPreference: 8192,
+      protocolDefault: 4096,
+      resourceLimit: 0,
+    });
+    expect(zeroResource.maxTokens).toBe(0);
+    expect(zeroResource.adjusted).toBe(true);
+
+    const zeroWindow = resolveMaxOutputTokens({
+      protocolDefault: 4096,
+      remainingWindow: 0,
+    });
+    expect(zeroWindow.maxTokens).toBe(0);
+
+    const omittedTracker = createLeaseBudgetTracker({ maxCalls: 1 });
+    expect(omittedTracker.snapshot()).toEqual({
+      leaseMaxTokens: 0,
+      leaseMaxCalls: 1,
+      leaseMaxCostMinor: 0,
+      committedTokens: 0,
+      committedCalls: 0,
+      maxReservableTokens: 0,
+      maxReservableCalls: 1,
+    });
   });
 });
 

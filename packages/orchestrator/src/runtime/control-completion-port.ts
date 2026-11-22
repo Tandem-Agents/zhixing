@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AuthorityCallContext,
-  AuthorityError,
-  ControlCompletionPort,
-  ResourceReservationPort,
+import {
+  createLeaseBudgetTracker,
+  type AuthorityCallContext,
+  type AuthorityError,
+  type ControlCompletionPort,
+  type ModelCallResourceMeter,
+  type ResourceReservationPort,
 } from "@zhixing-ai/core/contracts";
 import type { LLMRole, ThinkingConfig } from "@zhixing-ai/core/types";
 import { meteredProviderCall } from "./create-agent-runtime.js";
@@ -19,6 +21,13 @@ export interface ControlCompletionPortOptions {
   readonly meter: Pick<ResourceReservationPort, "reserveUsage" | "consume">;
   /** 单次调用输出 token 上界（预占与请求同源口径，可按用途分别指定）。 */
   readonly defaultMaxOutputTokens:
+    | number
+    | {
+        readonly main: number;
+        readonly light: number;
+      };
+  /** 各用途模型的有效上下文窗口（用于按当前请求输入留出安全空间，避免 max_tokens 顶满总窗口）。 */
+  readonly contextWindows?:
     | number
     | {
         readonly main: number;
@@ -44,6 +53,14 @@ export function createControlCompletionPort(
           : request.role === "light"
             ? options.defaultMaxOutputTokens.light
             : options.defaultMaxOutputTokens.main;
+      const roleContextWindow =
+        typeof options.contextWindows === "number"
+          ? options.contextWindows
+          : options.contextWindows
+            ? request.role === "light"
+              ? options.contextWindows.light
+              : options.contextWindows.main
+            : role.provider.models.find((item) => item.id === role.model)?.contextWindow;
       const ctx: AuthorityCallContext = {
         principal: { kind: "host", component: "control-completion" },
         requestId: `control-completion:${randomUUID()}`,
@@ -53,25 +70,26 @@ export function createControlCompletionPort(
         let index = 0;
         return () => ++index;
       })();
-      const meter = {
-        reserve: async ({ callIndex, tokenUpperBound }: {
-          callIndex: number;
-          tokenUpperBound: number;
-        }) => {
+      const tracker = createLeaseBudgetTracker(request.lease.budget);
+      const meter: ModelCallResourceMeter = {
+        budgetSnapshot: () => tracker.snapshot(),
+        reserve: async ({ callIndex, tokenUpperBound }) => {
           const usageId = `usage:${request.lease.reservationId}:control:${callIndex}`;
           await options.meter.reserveUsage(
             request.lease,
             { usageId, tokens: tokenUpperBound, calls: 1 },
             ctx,
           );
+          tracker.recordReserved(usageId, tokenUpperBound);
           return { usageId };
         },
-        consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+        consume: async ({ usageId, tokens }) => {
           await options.meter.consume(
             request.lease,
             { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
             ctx,
           );
+          tracker.recordConsumed(usageId, tokens);
         },
       };
       try {
@@ -80,6 +98,12 @@ export function createControlCompletionPort(
           meter,
           nextCallIndex,
           defaultMaxOutputTokens: roleMaxOutputTokens,
+          ...(role.provider.protocol !== undefined
+            ? { protocol: role.provider.protocol }
+            : {}),
+          ...(roleContextWindow !== undefined
+            ? { contextWindow: roleContextWindow }
+            : {}),
         });
         const chunks: string[] = [];
         let usage: { inputTokens: number; outputTokens: number } | undefined;

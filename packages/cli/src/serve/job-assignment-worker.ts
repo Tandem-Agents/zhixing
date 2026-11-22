@@ -2,18 +2,19 @@ import { ConfirmationBroker, type IConfirmationBroker } from "@zhixing-ai/core/c
 import { type AgentYield } from "@zhixing-ai/core/loop";
 import { type PermissionRule } from "@zhixing-ai/core/security";
 import { type ToolSideEffectObserver } from "@zhixing-ai/core";
-import type {
-  AuthorityCallContext,
-  ChannelInteractionGrant,
-  ContentAssetRef,
-  DispatchEnvelope,
-  ExecutionAbortRequest,
-  JobInteractionSettlementPort,
-  JobExecutionInstruction,
-  ModelCallResourceMeter,
-  ResourceLease,
-  ResourceReservationPort,
-  SessionEventProjection,
+import {
+  createLeaseBudgetTracker,
+  type AuthorityCallContext,
+  type ChannelInteractionGrant,
+  type ContentAssetRef,
+  type DispatchEnvelope,
+  type ExecutionAbortRequest,
+  type JobInteractionSettlementPort,
+  type JobExecutionInstruction,
+  type ModelCallResourceMeter,
+  type ResourceLease,
+  type ResourceReservationPort,
+  type SessionEventProjection,
 } from "@zhixing-ai/core/contracts";
 import { AuthorityStorageError } from "@zhixing-ai/core/authority";
 import { runDetachedDeviceCapacity, runDetachedMaintenanceContext } from "@zhixing-ai/core/resources";
@@ -569,27 +570,35 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
           contextFor: (requestId: string) =>
             jobResourceContext(envelope, requestId),
         },
-        modelCallResourceMeter: {
-          reserve: async ({ callIndex, tokenUpperBound }: {
-            callIndex: number;
-            tokenUpperBound: number;
-          }) => {
-            const usageId = `usage:${assignmentId}:model:${callIndex}`;
-            await retryResourceUsage(() => this.options.resources.reserveUsage(
-              envelope.resourceLease,
-              { usageId, tokens: tokenUpperBound, calls: 1 },
-              jobResourceContext(envelope, usageId),
-            ), abortSignal);
-            return { usageId };
-          },
-          consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
-            await retryResourceUsage(() => this.options.resources.consume(
-              envelope.resourceLease,
-              { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
-              jobResourceContext(envelope, usageId),
-            ), abortSignal);
-          },
-        },
+        modelCallResourceMeter: (() => {
+          const tracker = createLeaseBudgetTracker(
+            envelope.resourceLease.budget,
+          );
+          return {
+            budgetSnapshot: () => tracker.snapshot(),
+            reserve: async ({ callIndex, tokenUpperBound }: {
+              callIndex: number;
+              tokenUpperBound: number;
+            }) => {
+              const usageId = `usage:${assignmentId}:model:${callIndex}`;
+              await retryResourceUsage(() => this.options.resources.reserveUsage(
+                envelope.resourceLease,
+                { usageId, tokens: tokenUpperBound, calls: 1 },
+                jobResourceContext(envelope, usageId),
+              ), abortSignal);
+              tracker.recordReserved(usageId, tokenUpperBound);
+              return { usageId };
+            },
+            consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+              await retryResourceUsage(() => this.options.resources.consume(
+                envelope.resourceLease,
+                { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+                jobResourceContext(envelope, usageId),
+              ), abortSignal);
+              tracker.recordConsumed(usageId, tokens);
+            },
+          };
+        })(),
       });
       while (true) {
         const item = await this.#interactions.withBinding(

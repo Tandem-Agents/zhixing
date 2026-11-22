@@ -3,15 +3,16 @@ import { executionTurnContext } from "./execution-turn-context.js";
 import { type ArtifactStore } from "@zhixing-ai/core/authority";
 import { type Message } from "@zhixing-ai/core";
 import { type RunResult } from "@zhixing-ai/core/loop";
-import type {
-  AuthorityCallContext,
-  DispatchEnvelope,
-  ExecutionAbortRequest,
-  ExecutionRef,
-  ResourceReservationPort,
-  RunSubmissionPort,
-  SealedBundle,
-  TranscriptRunRecord,
+import {
+  createLeaseBudgetTracker,
+  type AuthorityCallContext,
+  type DispatchEnvelope,
+  type ExecutionAbortRequest,
+  type ExecutionRef,
+  type ResourceReservationPort,
+  type RunSubmissionPort,
+  type SealedBundle,
+  type TranscriptRunRecord,
 } from "@zhixing-ai/core/contracts";
 import {
   canonicalize,
@@ -409,27 +410,35 @@ export class ConversationAssignmentWorker {
           contextFor: (requestId: string) =>
             assignmentResourceContext(envelope, requestId),
         },
-        modelCallResourceMeter: {
-          reserve: async ({ callIndex, tokenUpperBound }: {
-            callIndex: number;
-            tokenUpperBound: number;
-          }) => {
-            const usageId = `usage:${assignmentId}:model:${callIndex}`;
-            await retryResourceUsage(() => this.options.resources.reserveUsage(
-              envelope.resourceLease,
-              { usageId, tokens: tokenUpperBound, calls: 1 },
-              assignmentResourceContext(envelope, usageId),
-            ), abortSignal);
-            return { usageId };
-          },
-          consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
-            await retryResourceUsage(() => this.options.resources.consume(
-              envelope.resourceLease,
-              { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
-              assignmentResourceContext(envelope, usageId),
-            ), abortSignal);
-          },
-        },
+        modelCallResourceMeter: (() => {
+          const tracker = createLeaseBudgetTracker(
+            envelope.resourceLease.budget,
+          );
+          return {
+            budgetSnapshot: () => tracker.snapshot(),
+            reserve: async ({ callIndex, tokenUpperBound }: {
+              callIndex: number;
+              tokenUpperBound: number;
+            }) => {
+              const usageId = `usage:${assignmentId}:model:${callIndex}`;
+              await retryResourceUsage(() => this.options.resources.reserveUsage(
+                envelope.resourceLease,
+                { usageId, tokens: tokenUpperBound, calls: 1 },
+                assignmentResourceContext(envelope, usageId),
+              ), abortSignal);
+              tracker.recordReserved(usageId, tokenUpperBound);
+              return { usageId };
+            },
+            consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+              await retryResourceUsage(() => this.options.resources.consume(
+                envelope.resourceLease,
+                { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+                assignmentResourceContext(envelope, usageId),
+              ), abortSignal);
+              tracker.recordConsumed(usageId, tokens);
+            },
+          };
+        })(),
       });
       try {
         while (true) {

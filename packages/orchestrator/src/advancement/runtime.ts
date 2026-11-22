@@ -32,12 +32,18 @@ import {
 } from "@zhixing-ai/core/types";
 import type { AgentResult } from "@zhixing-ai/core/loop";
 import type { TokenUsage } from "@zhixing-ai/core/types";
-import type {
-  AuthorityCallContext,
-  ResourceLease,
+import {
+  createLeaseBudgetTracker,
+  type AuthorityCallContext,
+  type LeaseBudgetTracker,
+  type ModelCallResourceMeter,
+  type ResourceLease,
 } from "@zhixing-ai/core/contracts";
 import type { EvidenceCapabilitySet } from "@zhixing-ai/core/advancement";
-import { meteredProviderCall } from "../runtime/create-agent-runtime.js";
+import {
+  coordinateContextWindowMaxTokens,
+  meteredProviderCall,
+} from "../runtime/create-agent-runtime.js";
 import {
   completeMissingRequiredEvidence,
   summarizeRunRecord,
@@ -94,14 +100,21 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     );
   }
 
-  /** 租约计量会话——裁判与窗口调用共用同一 review 根租约与身份。 */
+  /** 租约计量会话——裁判与窗口调用共用同一 review 根租约、身份与预算状态快照。 */
   #meterSession(
     input: AdvancementReviewRunInput,
     lease: ResourceLease,
-  ): { readonly lease: ResourceLease; readonly ctx: AuthorityCallContext } | undefined {
+  ):
+    | {
+        readonly lease: ResourceLease;
+        readonly ctx: AuthorityCallContext;
+        readonly tracker: LeaseBudgetTracker;
+      }
+    | undefined {
     if (!this.options.resourceMeter) return undefined;
     return {
       lease,
+      tracker: createLeaseBudgetTracker(lease.budget),
       ctx: {
         principal: {
           kind: "host",
@@ -116,32 +129,36 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
   /** 把裸 provider 的 chat 包成对租约计量的通道——真实 provider 调用沿稳定 usageId 预占/消费。 */
   #meteredProvider(
     provider: LLMProvider,
-    session: { readonly lease: ResourceLease; readonly ctx: AuthorityCallContext },
+    session: {
+      readonly lease: ResourceLease;
+      readonly ctx: AuthorityCallContext;
+      readonly tracker: LeaseBudgetTracker;
+    },
     prefix: string,
   ): LLMProvider {
     const nextCallIndex = (() => {
       let index = 0;
       return () => ++index;
     })();
-    const meter = {
-      reserve: async ({ callIndex, tokenUpperBound }: {
-        callIndex: number;
-        tokenUpperBound: number;
-      }) => {
+    const meter: ModelCallResourceMeter = {
+      budgetSnapshot: () => session.tracker.snapshot(),
+      reserve: async ({ callIndex, tokenUpperBound }) => {
         const usageId = `usage:${session.lease.reservationId}:${prefix}:${callIndex}`;
         await this.options.resourceMeter!.reserveUsage(
           session.lease,
           { usageId, tokens: tokenUpperBound, calls: 1 },
           session.ctx,
         );
+        session.tracker.recordReserved(usageId, tokenUpperBound);
         return { usageId };
       },
-      consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+      consume: async ({ usageId, tokens }) => {
         await this.options.resourceMeter!.consume(
           session.lease,
           { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
           session.ctx,
         );
+        session.tracker.recordConsumed(usageId, tokens);
       },
     };
     return {
@@ -155,6 +172,15 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
           nextCallIndex,
           defaultMaxOutputTokens:
             this.options.defaultMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+          ...(provider.protocol !== undefined
+            ? { protocol: provider.protocol }
+            : {}),
+          ...(this.options.modelContextWindow !== undefined
+            ? { contextWindow: this.options.modelContextWindow }
+            : {}),
+          ...(this.options.contextWindow?.estimator
+            ? { tokenEstimator: this.options.contextWindow.estimator }
+            : {}),
         })(request),
       ...(provider.countTokens
         ? { countTokens: provider.countTokens }
@@ -164,7 +190,13 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
 
   /** 推进窗口摘要通道——与裁判同一租约计量；未装配 light 通道时返回 undefined。 */
   #summarizeFn(
-    session: { readonly lease: ResourceLease; readonly ctx: AuthorityCallContext } | undefined,
+    session:
+      | {
+          readonly lease: ResourceLease;
+          readonly ctx: AuthorityCallContext;
+          readonly tracker: LeaseBudgetTracker;
+        }
+      | undefined,
   ): SegmentSummarizeLLMFn | undefined {
     const light = this.options.lightProvider;
     const model = this.options.lightModel;
@@ -173,15 +205,28 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       this.options.lightDefaultMaxOutputTokens ??
       this.options.defaultMaxOutputTokens ??
       DEFAULT_MAX_OUTPUT_TOKENS;
+    const lightContextWindow =
+      this.options.lightContextWindow ??
+      light.models.find((item) => item.id === model)?.contextWindow;
     if (!session) {
       return createSegmentSummarizeFn(
-        (request) =>
-          light.chat({
+        (request) => {
+          const candidateMaxTokens = request.maxTokens ?? lightMaxOutput;
+          const fullRequest = {
             ...request,
             model,
-            ...(request.maxTokens === undefined ? { maxTokens: lightMaxOutput } : {}),
+            maxTokens: candidateMaxTokens,
             thinking: this.options.lightThinking,
-          }),
+          };
+          const maxTokens = coordinateContextWindowMaxTokens({
+            request: fullRequest,
+            requestedMaxTokens: candidateMaxTokens,
+            protocol: light.protocol,
+            contextWindow: lightContextWindow,
+            tokenEstimator: this.options.contextWindow?.estimator,
+          });
+          return light.chat({ ...fullRequest, maxTokens });
+        },
         model,
       );
     }
@@ -189,25 +234,25 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       let index = 0;
       return () => ++index;
     })();
-    const meter = {
-      reserve: async ({ callIndex, tokenUpperBound }: {
-        callIndex: number;
-        tokenUpperBound: number;
-      }) => {
+    const meter: ModelCallResourceMeter = {
+      budgetSnapshot: () => session.tracker.snapshot(),
+      reserve: async ({ callIndex, tokenUpperBound }) => {
         const usageId = `usage:${session.lease.reservationId}:window:${callIndex}`;
         await this.options.resourceMeter!.reserveUsage(
           session.lease,
           { usageId, tokens: tokenUpperBound, calls: 1 },
           session.ctx,
         );
+        session.tracker.recordReserved(usageId, tokenUpperBound);
         return { usageId };
       },
-      consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+      consume: async ({ usageId, tokens }) => {
         await this.options.resourceMeter!.consume(
           session.lease,
           { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
           session.ctx,
         );
+        session.tracker.recordConsumed(usageId, tokens);
       },
     };
     const meteredChat = meteredProviderCall({
@@ -215,6 +260,13 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       meter,
       nextCallIndex,
       defaultMaxOutputTokens: lightMaxOutput,
+      ...(light.protocol !== undefined ? { protocol: light.protocol } : {}),
+      ...(lightContextWindow !== undefined
+        ? { contextWindow: lightContextWindow }
+        : {}),
+      ...(this.options.contextWindow?.estimator
+        ? { tokenEstimator: this.options.contextWindow.estimator }
+        : {}),
     });
     return createSegmentSummarizeFn(
       (request) =>

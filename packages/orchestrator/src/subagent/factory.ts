@@ -42,7 +42,11 @@ import { type SecurityPipeline } from "@zhixing-ai/core/security";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { protocolDigest } from "@zhixing-ai/core/protocol";
 import { failureSourceFrames, logFailureEvidence } from "@zhixing-ai/core/logging";
-import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing-ai/core/contracts";
+import {
+  createLeaseBudgetTracker,
+  type ChildResourceLease,
+  type ModelCallResourceMeter,
+} from "@zhixing-ai/core/contracts";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
 import {
   runContextStorage,
@@ -500,9 +504,11 @@ function childModelMetering(
   binding: NonNullable<import("../runtime/run-context.js").RunContext["resourceReservation"]>,
 ): { readonly meter: ModelCallResourceMeter; readonly nextCallIndex: () => number } {
   let callIndex = 0;
+  const tracker = createLeaseBudgetTracker(lease.budget);
   return {
     nextCallIndex: () => ++callIndex,
     meter: {
+      budgetSnapshot: () => tracker.snapshot(),
       async reserve({ callIndex: index, tokenUpperBound }) {
         const usageId = `usage:${lease.reservationId}:model:${index}`;
         await binding.port.reserveUsage(
@@ -510,6 +516,7 @@ function childModelMetering(
           { usageId, tokens: tokenUpperBound, calls: 1 },
           binding.contextFor(`${usageId}:reserve`),
         );
+        tracker.recordReserved(usageId, tokenUpperBound);
         return { usageId };
       },
       async consume({ usageId, tokens }) {
@@ -518,6 +525,7 @@ function childModelMetering(
           { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
           binding.contextFor(`${usageId}:consume`),
         );
+        tracker.recordConsumed(usageId, tokens);
       },
     },
   };

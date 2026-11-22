@@ -30,6 +30,9 @@ export type * from "./commit-log.js";
 export type * from './conversation-recovery.js';
 export { validateConversationCommitSummary } from '../protocol/conversation-commit-summary.js';
 export type * from "./ports.js";
-export { ImmediateRootReplayTerminalError } from "./ports.js";
+export {
+  ImmediateRootReplayTerminalError,
+  createLeaseBudgetTracker,
+} from "./ports.js";
 export * from "./durable-contract.js";
 export type { WireSchemaId, WireSchemaMap, WireSchemaVersion } from "./schema.js";

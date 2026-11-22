@@ -45,6 +45,7 @@ export {
   createMainCallLLMWithUsage,
 } from "./call-llm.js";
 export {
+  coordinateContextWindowMaxTokens,
   createAgentRuntime,
   meteredProviderCall,
   type AgentRuntime,

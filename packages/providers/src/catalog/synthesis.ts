@@ -455,6 +455,9 @@ export function synthesizeConnectionModels(
         )
       : [];
 
+    const recommendedMaxOutputTokens =
+      curated?.recommendedMaxOutputTokens ?? baseline?.recommendedMaxOutputTokens;
+
     const modelInfo: ModelInfo | undefined =
       contextWindowField.value !== undefined && maxOutputField.value !== undefined
         ? {
@@ -462,6 +465,9 @@ export function synthesizeConnectionModels(
             name: curated?.name ?? discovered?.name ?? baseline?.name ?? modelId,
             contextWindow: contextWindowField.value,
             maxOutputTokens: maxOutputField.value,
+            ...(recommendedMaxOutputTokens !== undefined
+              ? { recommendedMaxOutputTokens }
+              : {}),
             supportsTools: supportsToolsField.value ?? true,
             ...(supportsImagesField.value !== undefined
               ? { supportsImages: supportsImagesField.value }

@@ -5,13 +5,14 @@ import {
   type AdvancementExecutionMaterial,
 } from "@zhixing-ai/core/advancement/execution-context";
 import { AuthorityStorageError } from "@zhixing-ai/core/authority";
-import type {
-  AssignmentResourceLease,
-  AuthorityCallContext,
-  FinalFrame,
-  IngressContext,
-  StreamFrame,
-  TranscriptRunRecord,
+import {
+  createLeaseBudgetTracker,
+  type AssignmentResourceLease,
+  type AuthorityCallContext,
+  type FinalFrame,
+  type IngressContext,
+  type StreamFrame,
+  type TranscriptRunRecord,
 } from "@zhixing-ai/core/contracts";
 import type { LogRecordPort } from "@zhixing-ai/core/logging";
 import type { AgentYield, RunInputPort, RunResult } from "@zhixing-ai/core/loop";
@@ -915,37 +916,45 @@ export class TurnExecution {
                 : {}),
             authorizeToolExecution: () =>
               effect.authorizeToolExecution(dispatch.envelope.permissionLease),
-            modelCallResourceMeter: {
-              reserve: async ({ callIndex, tokenUpperBound }) => {
-                const usageId = `usage:${assignmentId}:model:${callIndex}`;
-                beforeFirstModelCall = false;
-                await this.#phase("model-usage-reserve", () =>
-                  retryResourceUsage(
-                    () =>
-                      this.#requireExecutionResources().reserveUsage(
-                        dispatch.envelope.resourceLease,
-                        { usageId, tokens: tokenUpperBound, calls: 1 },
-                        resourceSubmissionContext,
-                      ),
-                    input.options?.abortSignal,
-                  ),
-                );
-                return { usageId };
-              },
-              consume: async ({ usageId, tokens }) => {
-                await this.#phase("model-usage-consume", () =>
-                  retryResourceUsage(
-                    () =>
-                      this.#requireExecutionResources().consume(
-                        dispatch.envelope.resourceLease,
-                        { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
-                        resourceSubmissionContext,
-                      ),
-                    input.options?.abortSignal,
-                  ),
-                );
-              },
-            },
+            modelCallResourceMeter: (() => {
+              const tracker = createLeaseBudgetTracker(
+                dispatch.envelope.resourceLease.budget,
+              );
+              return {
+                budgetSnapshot: () => tracker.snapshot(),
+                reserve: async ({ callIndex, tokenUpperBound }) => {
+                  const usageId = `usage:${assignmentId}:model:${callIndex}`;
+                  beforeFirstModelCall = false;
+                  await this.#phase("model-usage-reserve", () =>
+                    retryResourceUsage(
+                      () =>
+                        this.#requireExecutionResources().reserveUsage(
+                          dispatch.envelope.resourceLease,
+                          { usageId, tokens: tokenUpperBound, calls: 1 },
+                          resourceSubmissionContext,
+                        ),
+                      input.options?.abortSignal,
+                    ),
+                  );
+                  tracker.recordReserved(usageId, tokenUpperBound);
+                  return { usageId };
+                },
+                consume: async ({ usageId, tokens }) => {
+                  await this.#phase("model-usage-consume", () =>
+                    retryResourceUsage(
+                      () =>
+                        this.#requireExecutionResources().consume(
+                          dispatch.envelope.resourceLease,
+                          { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+                          resourceSubmissionContext,
+                        ),
+                      input.options?.abortSignal,
+                    ),
+                  );
+                  tracker.recordConsumed(usageId, tokens);
+                },
+              };
+            })(),
           });
           try {
             while (true) {

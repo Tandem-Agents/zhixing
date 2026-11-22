@@ -638,8 +638,93 @@ export interface ResourceUsageIntake {
   ): Promise<{ ackedThroughSeq: number }>;
 }
 
+/**
+ * 当前租约在本次调用前已知的资源预算快照（零值精确表示 0 额度，绝不视为缺省）。
+ * 最终准入仍以 ResourceGovernor 的原子 reserveUsage 为唯一权威。
+ */
+export interface ModelCallBudgetSnapshot {
+  readonly leaseMaxTokens: number;
+  readonly leaseMaxCalls: number;
+  readonly leaseMaxCostMinor: number;
+  readonly committedTokens: number;
+  readonly committedCalls: number;
+  readonly maxReservableTokens: number;
+  readonly maxReservableCalls: number;
+}
+
+export interface LeaseBudgetTracker {
+  snapshot(): ModelCallBudgetSnapshot;
+  recordReserved(usageId: string, tokenUpperBound: number): void;
+  recordConsumed(usageId: string, tokens: number): void;
+}
+
+/**
+ * 基于真实分派的 `ResourceLease["budget"]` 跟踪本进程内已知挂起预占与实际结算量，
+ * 与 `ResourceGovernor.budgetAsUsage`（缺省维度即 0 许可）保持同口径。
+ */
+export function createLeaseBudgetTracker(
+  budget: ResourceLease["budget"],
+): LeaseBudgetTracker {
+  const leaseMaxTokens =
+    typeof budget.maxTokens === "number" &&
+    Number.isSafeInteger(budget.maxTokens) &&
+    budget.maxTokens >= 0
+      ? budget.maxTokens
+      : 0;
+  const leaseMaxCalls =
+    typeof budget.maxCalls === "number" &&
+    Number.isSafeInteger(budget.maxCalls) &&
+    budget.maxCalls >= 0
+      ? budget.maxCalls
+      : 0;
+  const leaseMaxCostMinor =
+    typeof budget.maxCostMinor === "number" &&
+    Number.isSafeInteger(budget.maxCostMinor) &&
+    budget.maxCostMinor >= 0
+      ? budget.maxCostMinor
+      : 0;
+  const pendingTokensByUsageId = new Map<string, number>();
+  const consumedUsageIds = new Set<string>();
+  let consumedTokens = 0;
+  let consumedCalls = 0;
+
+  return {
+    snapshot(): ModelCallBudgetSnapshot {
+      let pendingTokens = 0;
+      for (const tokens of pendingTokensByUsageId.values()) {
+        pendingTokens += tokens;
+      }
+      const committedTokens = consumedTokens + pendingTokens;
+      const committedCalls = consumedCalls + pendingTokensByUsageId.size;
+      return {
+        leaseMaxTokens,
+        leaseMaxCalls,
+        leaseMaxCostMinor,
+        committedTokens,
+        committedCalls,
+        maxReservableTokens: Math.max(0, leaseMaxTokens - committedTokens),
+        maxReservableCalls: Math.max(0, leaseMaxCalls - committedCalls),
+      };
+    },
+    recordReserved(usageId: string, tokenUpperBound: number): void {
+      if (consumedUsageIds.has(usageId) || pendingTokensByUsageId.has(usageId)) {
+        return;
+      }
+      pendingTokensByUsageId.set(usageId, tokenUpperBound);
+    },
+    recordConsumed(usageId: string, tokens: number): void {
+      if (consumedUsageIds.has(usageId)) return;
+      consumedUsageIds.add(usageId);
+      pendingTokensByUsageId.delete(usageId);
+      consumedTokens += tokens;
+      consumedCalls += 1;
+    },
+  };
+}
+
 /** Per-run bridge that durably reserves and settles every real provider call. */
 export interface ModelCallResourceMeter {
+  readonly budgetSnapshot?: () => ModelCallBudgetSnapshot;
   reserve(input: {
     readonly callIndex: number;
     readonly tokenUpperBound: number;

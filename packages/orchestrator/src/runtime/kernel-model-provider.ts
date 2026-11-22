@@ -26,6 +26,7 @@ export interface KernelModelProviderBinding {
   readonly roles: Readonly<LLMRoles>;
   readonly roleThinking: Readonly<ResolvedRoleThinking>;
   readonly defaultMaxOutputTokens: Readonly<Record<keyof LLMRoles, number>>;
+  readonly roleContextWindows?: Readonly<Record<keyof LLMRoles, number>>;
   readonly primary: {
     readonly budget: Readonly<ModelBudgetInfo>;
     readonly inputCapabilities: Readonly<ModelInputCapabilities>;
@@ -35,6 +36,7 @@ export interface KernelModelProviderBinding {
   readonly sessionPrimary?: Readonly<LLMRole>;
   readonly sessionPrimaryThinking?: ThinkingConfig;
   readonly sessionPrimaryMaxOutputTokens?: number;
+  readonly sessionPrimaryContextWindow?: number;
   /** 单次准入运行期租约：运行开始获取，运行结束释放，避免工具往返空窗期过早关闭底层 dispatcher。 */
   readonly acquireRunLease?: () => () => void;
   /** 实例销毁时释放宿主侧模型端口追踪条目。 */
@@ -98,6 +100,9 @@ export function createKernelModelProviderBinding(
     roles,
     roleThinking,
     defaultMaxOutputTokens: Object.freeze({ ...input.defaultMaxOutputTokens }),
+    ...(input.roleContextWindows !== undefined
+      ? { roleContextWindows: Object.freeze({ ...input.roleContextWindows }) }
+      : {}),
     primary: Object.freeze({
       budget: Object.freeze({ ...input.primary.budget }),
       inputCapabilities: Object.freeze({ ...input.primary.inputCapabilities }),
@@ -107,6 +112,9 @@ export function createKernelModelProviderBinding(
     ...(sessionPrimaryThinking !== undefined ? { sessionPrimaryThinking } : {}),
     ...(input.sessionPrimaryMaxOutputTokens !== undefined
       ? { sessionPrimaryMaxOutputTokens: input.sessionPrimaryMaxOutputTokens }
+      : {}),
+    ...(input.sessionPrimaryContextWindow !== undefined
+      ? { sessionPrimaryContextWindow: input.sessionPrimaryContextWindow }
       : {}),
     ...(input.acquireRunLease !== undefined
       ? { acquireRunLease: input.acquireRunLease }
@@ -130,7 +138,9 @@ export function assertKernelModelProviderBinding(
   const allowedOptionalBindingKeys = new Set([
     "acquireRunLease",
     "dispose",
+    "roleContextWindows",
     "sessionPrimary",
+    "sessionPrimaryContextWindow",
     "sessionPrimaryMaxOutputTokens",
     "sessionPrimaryThinking",
   ]);
@@ -228,6 +238,17 @@ export function assertKernelModelProviderBinding(
     (binding.sessionPrimaryMaxOutputTokens !== undefined &&
       (!Number.isFinite(binding.sessionPrimaryMaxOutputTokens) ||
         binding.sessionPrimaryMaxOutputTokens <= 0)) ||
+    (binding.sessionPrimaryContextWindow !== undefined &&
+      (!Number.isFinite(binding.sessionPrimaryContextWindow) ||
+        binding.sessionPrimaryContextWindow <= 0)) ||
+    (binding.roleContextWindows !== undefined &&
+      (!Object.isFrozen(binding.roleContextWindows) ||
+        !exactKeys(binding.roleContextWindows, roleIds) ||
+        roleIds.some(
+          (roleId) =>
+            !Number.isFinite(binding.roleContextWindows![roleId]) ||
+            binding.roleContextWindows![roleId] <= 0,
+        ))) ||
     (binding.acquireRunLease !== undefined &&
       typeof binding.acquireRunLease !== "function") ||
     (binding.dispose !== undefined && typeof binding.dispose !== "function") ||

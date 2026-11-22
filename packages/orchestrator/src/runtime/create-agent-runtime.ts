@@ -24,6 +24,7 @@ import {
   type ToolDefinition,
   type TurnContext,
   copyProviderMetadata,
+  resolveManualThinkingBudgetConstraint,
   toToolSpec,
   extractText,
   getTotalInputTokens,
@@ -35,6 +36,7 @@ import { type EventBus, type IEventBus, createEventBus } from "@zhixing-ai/core/
 import {
   type WindowCompact,
   type ContextBudget,
+  type ITokenEstimator,
   type TurnContextProvider,
   type EmergencyFloorPriorContext,
   createSegmentLedger,
@@ -84,9 +86,18 @@ import {
 } from "@zhixing-ai/core/loop";
 import { ConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import { wrapStreamWithWatchdog } from "@zhixing-ai/core/interrupt";
-import { providerRequestNeverSent, withRetry } from "@zhixing-ai/core/resilience";
+import {
+  formatModelBudgetStop,
+  isResourceBudgetExceeded,
+  parseModelBudgetStop,
+  parseResourceBudgetDimension,
+  providerRequestNeverSent,
+  withRetry,
+  type ModelBudgetStopReason,
+} from "@zhixing-ai/core/resilience";
 import type {
   AssignmentGlobalQueryPort,
+  ModelCallBudgetSnapshot,
   ModelCallResourceMeter,
 } from "@zhixing-ai/core/contracts";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
@@ -605,13 +616,19 @@ export async function createAgentRuntime(
     roles: baseRoles,
     roleThinking,
     defaultMaxOutputTokens,
+    roleContextWindows,
     primary: primaryModelRuntime,
     sessionPrimary: baseSessionPrimary,
     sessionPrimaryThinking,
     sessionPrimaryMaxOutputTokens,
+    sessionPrimaryContextWindow,
     acquireRunLease,
     dispose: disposeModelProvider,
   } = options.modelProvider;
+
+  // Host 的具体 Provider adapter 已把配置、catalog 与协议默认解析为有限模型
+  // 合同；estimator 跨 run() 共享以保持自适应校准，并供出站上下文剩余空间计算共用。
+  const estimator = createTokenEstimator();
 
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
@@ -620,11 +637,33 @@ export async function createAgentRuntime(
   // roleThinking 三角色聚合与显式 roles.main/light/power 不跟随（设计 §5.1）。
   const runtimeId = randomUUID();
   const runtimeLogs = optionalKernelLogs(options.createLogRecords, { refs: [{ kind: "runtime", id: runtimeId }] });
-  const roles = resourceAwareRoles(baseRoles, defaultMaxOutputTokens, runtimeLogs?.provider);
+  const resolveRoleBoundWindow = (roleId: keyof LLMRoles, roleObj: LLMRole): number | undefined =>
+    roleContextWindows?.[roleId] ??
+    (!baseSessionPrimary && roleId === primaryRole
+      ? primaryModelRuntime.budget.contextWindow
+      : undefined) ??
+    roleObj.provider.models.find((item) => item.id === roleObj.model)?.contextWindow;
+  const roles = resourceAwareRoles(
+    baseRoles,
+    defaultMaxOutputTokens,
+    {
+      main: resolveRoleBoundWindow("main", baseRoles.main),
+      light: resolveRoleBoundWindow("light", baseRoles.light),
+      power: resolveRoleBoundWindow("power", baseRoles.power),
+    },
+    estimator,
+    runtimeLogs?.provider,
+  );
   const effectivePrimaryRole = baseSessionPrimary
     ? wrapResourceAwareRole(
         baseSessionPrimary,
         sessionPrimaryMaxOutputTokens ?? defaultMaxOutputTokens[primaryRole],
+        sessionPrimaryContextWindow ??
+          primaryModelRuntime.budget.contextWindow ??
+          baseSessionPrimary.provider.models.find(
+            (item) => item.id === baseSessionPrimary.model,
+          )?.contextWindow,
+        estimator,
         runtimeLogs?.provider,
       )
     : roles[primaryRole];
@@ -1036,10 +1075,9 @@ export async function createAgentRuntime(
   }
 
   // Host 的具体 Provider adapter 已把配置、catalog 与协议默认解析为有限模型
-  // 合同；Kernel 只消费生效预算和输入能力。estimator 跨 run() 共享以保持校准。
+  // 合同；Kernel 只消费生效预算和输入能力。
   const modelBudgetInfo = primaryModelRuntime.budget;
   const modelInputCapabilities = primaryModelRuntime.inputCapabilities;
-  const estimator = createTokenEstimator();
 
   // 段切换摘要的流装配工厂 —— run 内评估与手动 forceCompact 共用同一条
   // 保护链（withRetry 重试降级 → watchdog idle 看门狗 → calibration 估算校准），
@@ -1988,6 +2026,8 @@ export async function createAgentRuntime(
 function wrapResourceAwareRole(
   role: LLMRole,
   fallback: number,
+  contextWindow?: number,
+  tokenEstimator?: ITokenEstimator,
   records?: import("@zhixing-ai/core/logging").LogRecordPort,
 ): LLMRole {
   const provider: LLMProvider = {
@@ -2001,16 +2041,38 @@ function wrapResourceAwareRole(
       const call = (providerRequest: ChatRequest) => observeProviderCall(
         (next) => role.provider.chat(next), providerRequest, role.provider.id, records,
       );
-      const effectiveRequest: ChatRequest =
-        request.maxTokens !== undefined
-          ? request
-          : { ...request, maxTokens: fallback };
-      if (!metering) return phasedProviderCall(call, phases)(effectiveRequest);
+      const effectiveContextWindow =
+        contextWindow ??
+        role.provider.models.find((item) => item.id === (request.model || role.model))
+          ?.contextWindow;
+      if (!metering) {
+        return (async function* () {
+          const requestedMaxTokens = request.maxTokens ?? fallback;
+          if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0) {
+            throw new TypeError("Model call output-token limit is invalid");
+          }
+          const maxTokens = coordinateContextWindowMaxTokens({
+            request,
+            requestedMaxTokens,
+            protocol: role.provider.protocol,
+            contextWindow: effectiveContextWindow,
+            tokenEstimator,
+          });
+          yield* phasedProviderCall(call, phases)({ ...request, maxTokens });
+        })();
+      }
       return meteredProviderCall({
         call,
         meter: metering.meter,
         nextCallIndex: metering.nextCallIndex,
         defaultMaxOutputTokens: fallback,
+        ...(role.provider.protocol !== undefined
+          ? { protocol: role.provider.protocol }
+          : {}),
+        ...(effectiveContextWindow !== undefined
+          ? { contextWindow: effectiveContextWindow }
+          : {}),
+        ...(tokenEstimator ? { tokenEstimator } : {}),
         ...(phases ? { phases } : {}),
       })(request);
     },
@@ -2034,12 +2096,32 @@ function wrapResourceAwareRole(
 function resourceAwareRoles(
   roles: LLMRoles,
   defaultMaxOutputTokens: Readonly<Record<keyof LLMRoles, number>>,
+  roleContextWindows?: Readonly<Partial<Record<keyof LLMRoles, number>>>,
+  tokenEstimator?: ITokenEstimator,
   records?: import("@zhixing-ai/core/logging").LogRecordPort,
 ): LLMRoles {
   return {
-    main: wrapResourceAwareRole(roles.main, defaultMaxOutputTokens.main, records),
-    light: wrapResourceAwareRole(roles.light, defaultMaxOutputTokens.light, records),
-    power: wrapResourceAwareRole(roles.power, defaultMaxOutputTokens.power, records),
+    main: wrapResourceAwareRole(
+      roles.main,
+      defaultMaxOutputTokens.main,
+      roleContextWindows?.main,
+      tokenEstimator,
+      records,
+    ),
+    light: wrapResourceAwareRole(
+      roles.light,
+      defaultMaxOutputTokens.light,
+      roleContextWindows?.light,
+      tokenEstimator,
+      records,
+    ),
+    power: wrapResourceAwareRole(
+      roles.power,
+      defaultMaxOutputTokens.power,
+      roleContextWindows?.power,
+      tokenEstimator,
+      records,
+    ),
   };
 }
 
@@ -2069,39 +2151,238 @@ function runMeteredTextCall<Value>(
   );
 }
 
-/** 显式参数化的 provider 流式计量包装——调用前按输入+输出上界预占，message_end 按实际用量收束（导出供组合根治理边界复用，保持计量单源） */
+const DEFAULT_OUTBOUND_TOKEN_ESTIMATOR: ITokenEstimator = createTokenEstimator();
+const REPLY_PRIMING_TOKEN_OVERHEAD = 4;
+
+function resolveMinOutputForThinking(
+  request: ChatRequest,
+  protocol?: string,
+): number {
+  const constrainedBudget = resolveManualThinkingBudgetConstraint(
+    protocol,
+    request.model,
+    request.thinking,
+  );
+  return constrainedBudget !== undefined ? constrainedBudget + 1 : 1;
+}
+
+function assertOutputExceedsManualThinkingBudget(
+  requestedMaxTokens: number,
+  minOutputForThinking: number,
+): void {
+  if (minOutputForThinking > 1 && requestedMaxTokens < minOutputForThinking) {
+    const budget = minOutputForThinking - 1;
+    throw Object.assign(
+      new Error(
+        `手动思考预算（${budget} tokens）必须小于单次有效输出上限（当前上限 ${requestedMaxTokens} tokens）：请在 /model 或 /config 调低思考预算，或调高输出上限偏好／模型规格上限后再试。`,
+      ),
+      { status: 400 },
+    );
+  }
+}
+
+function estimateRequestInputTokens(
+  request: ChatRequest,
+  estimator: ITokenEstimator = DEFAULT_OUTBOUND_TOKEN_ESTIMATOR,
+): number {
+  const systemTokens = request.systemPrompt
+    ? estimator.estimateText(request.systemPrompt)
+    : 0;
+  const messageTokens = estimator.estimateMessages(request.messages);
+  const toolTokens =
+    request.tools && request.tools.length > 0
+      ? estimator.estimateTools(request.tools)
+      : 0;
+  const primingTokens =
+    request.messages.length > 0 || Boolean(request.systemPrompt)
+      ? REPLY_PRIMING_TOKEN_OVERHEAD
+      : 0;
+  return systemTokens + messageTokens + toolTokens + primingTokens;
+}
+
+/**
+ * 在已知模型总上下文窗口与当前请求输入（system + messages + tools）的共有边界上收紧单次可发输出上限。
+ * 使用模型的 TokenEstimator 估算输入 token，绝不把资源治理的 UTF-8 字节上界当作模型 token。
+ */
+export function coordinateContextWindowMaxTokens(input: {
+  readonly request: ChatRequest;
+  readonly requestedMaxTokens: number;
+  readonly protocol?: string;
+  readonly contextWindow?: number;
+  readonly tokenEstimator?: ITokenEstimator;
+}): number {
+  const { request, requestedMaxTokens, protocol, contextWindow, tokenEstimator } = input;
+  const minOutputForThinking = resolveMinOutputForThinking(request, protocol);
+  assertOutputExceedsManualThinkingBudget(
+    requestedMaxTokens,
+    minOutputForThinking,
+  );
+  if (
+    contextWindow === undefined ||
+    !Number.isSafeInteger(contextWindow) ||
+    contextWindow <= 0
+  ) {
+    return requestedMaxTokens;
+  }
+  const estimatedInputTokens = estimateRequestInputTokens(
+    request,
+    tokenEstimator,
+  );
+  const remainingWindow = contextWindow - estimatedInputTokens;
+  if (remainingWindow <= 0) {
+    throw new Error(
+      "Context window overflow: request input leaves no remaining output token capacity",
+    );
+  }
+  if (remainingWindow < minOutputForThinking) {
+    throw Object.assign(
+      new Error(
+        "当前模型剩余上下文窗口不足以容纳已配置的思考预算，请在 /model 或 /config 调低或关闭思考预算，或精简上下文后再试。",
+      ),
+      { status: 400 },
+    );
+  }
+  return Math.min(requestedMaxTokens, remainingWindow);
+}
+
+function serializeMeteredRequest(providerRequest: ChatRequest): string {
+  return JSON.stringify({
+    model: providerRequest.model,
+    systemPrompt: providerRequest.systemPrompt,
+    messages: providerRequest.messages,
+    tools: providerRequest.tools,
+    maxTokens: providerRequest.maxTokens,
+    temperature: providerRequest.temperature,
+    stopSequences: providerRequest.stopSequences,
+    thinking: providerRequest.thinking,
+  });
+}
+
+function classifyMeteredBudgetRejection(input: {
+  readonly error: Error;
+  readonly snapshot: ModelCallBudgetSnapshot;
+  readonly initialInputBytes: number;
+  readonly minOutputForThinking: number;
+  readonly tokenUpperBound: number;
+}): ModelBudgetStopReason {
+  const dimension = parseResourceBudgetDimension(input.error.message);
+  if (dimension === "calls") return "calls-limit";
+  if (dimension === "cost") return "cost-limit";
+  // 1) 先判可证明的单次固有限制（即使在零已用额度的全新运行中也绝无可能装下）
+  if (input.snapshot.leaseMaxTokens <= 0) return "zero-token-grant";
+  if (input.initialInputBytes >= input.snapshot.leaseMaxTokens) {
+    return "input-exceeds-grant";
+  }
+  if (
+    input.minOutputForThinking > 1 &&
+    input.snapshot.leaseMaxTokens - input.initialInputBytes <
+      input.minOutputForThinking
+  ) {
+    return "thinking-exceeds-grant";
+  }
+  // 2) 单次在全新许可下本可容纳，因本轮已有消耗/挂起或同根子租约占用而余量不足
+  if (input.snapshot.committedTokens > 0) return "cumulative-tokens";
+  if (input.tokenUpperBound <= input.snapshot.leaseMaxTokens) {
+    return "cumulative-tokens";
+  }
+  return "single-call-exceeds-grant";
+}
+
+/** 显式参数化的 provider 流式计量包装——调用前依次协调剩余上下文窗口与租约可用额度，并以同一最终请求预占与发送 */
 export function meteredProviderCall(input: {
   readonly call: (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined>;
   readonly meter: ModelCallResourceMeter;
   readonly nextCallIndex: () => number;
   readonly defaultMaxOutputTokens: number;
+  readonly protocol?: string;
+  readonly contextWindow?: number;
+  readonly tokenEstimator?: ITokenEstimator;
   /** 主循环调用的物理阶段：预留完成后 entered，provider 终结或失败后、consume 之前 settled。 */
   readonly phases?: ModelProviderPhases;
 }): (request: ChatRequest) => AsyncGenerator<StreamEvent, void, undefined> {
   return async function* (request) {
-    const maxTokens = request.maxTokens ?? input.defaultMaxOutputTokens;
-    if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
+    const requestedMaxTokens = request.maxTokens ?? input.defaultMaxOutputTokens;
+    if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens <= 0) {
       throw new TypeError("Model call output-token limit is invalid");
     }
-    const providerRequest: ChatRequest = { ...request, maxTokens };
-    const serializedInput = JSON.stringify({
-      model: providerRequest.model,
-      systemPrompt: providerRequest.systemPrompt,
-      messages: providerRequest.messages,
-      tools: providerRequest.tools,
-      maxTokens: providerRequest.maxTokens,
-      temperature: providerRequest.temperature,
-      stopSequences: providerRequest.stopSequences,
-      thinking: providerRequest.thinking,
+    const minOutputForThinking = resolveMinOutputForThinking(
+      request,
+      input.protocol,
+    );
+    const windowClampedMaxTokens = coordinateContextWindowMaxTokens({
+      request,
+      requestedMaxTokens,
+      protocol: input.protocol,
+      contextWindow: input.contextWindow,
+      tokenEstimator: input.tokenEstimator,
     });
-    const tokenUpperBound = Buffer.byteLength(serializedInput, "utf8") + maxTokens;
+    const initialRequest: ChatRequest = {
+      ...request,
+      maxTokens: windowClampedMaxTokens,
+    };
+    const initialInputBytes = Buffer.byteLength(
+      serializeMeteredRequest(initialRequest),
+      "utf8",
+    );
+
+    const snapshot = input.meter.budgetSnapshot?.();
+    let effectiveMaxTokens = windowClampedMaxTokens;
+    if (
+      snapshot !== undefined &&
+      snapshot.maxReservableTokens > 0 &&
+      initialInputBytes + windowClampedMaxTokens > snapshot.maxReservableTokens
+    ) {
+      const availableForOutput =
+        snapshot.maxReservableTokens - initialInputBytes;
+      if (availableForOutput >= minOutputForThinking) {
+        effectiveMaxTokens = Math.min(
+          windowClampedMaxTokens,
+          availableForOutput,
+        );
+      }
+    }
+
+    const providerRequest: ChatRequest =
+      effectiveMaxTokens === windowClampedMaxTokens
+        ? initialRequest
+        : { ...request, maxTokens: effectiveMaxTokens };
+    const finalInputBytes =
+      effectiveMaxTokens === requestedMaxTokens
+        ? initialInputBytes
+        : Buffer.byteLength(serializeMeteredRequest(providerRequest), "utf8");
+    const tokenUpperBound = finalInputBytes + effectiveMaxTokens;
     if (!Number.isSafeInteger(tokenUpperBound) || tokenUpperBound <= 0) {
       throw new TypeError("Model call token upper bound is invalid");
     }
-    const reservation = await input.meter.reserve({
-      callIndex: input.nextCallIndex(),
-      tokenUpperBound,
-    });
+
+    let reservation: { readonly usageId: string };
+    try {
+      reservation = await input.meter.reserve({
+        callIndex: input.nextCallIndex(),
+        tokenUpperBound,
+      });
+    } catch (reserveError) {
+      if (
+        snapshot !== undefined &&
+        reserveError instanceof Error &&
+        isResourceBudgetExceeded(reserveError)
+      ) {
+        const existing = parseModelBudgetStop(reserveError.message);
+        if (!existing?.afterFailure && !existing?.reason) {
+          throw formatModelBudgetStop(
+            classifyMeteredBudgetRejection({
+              error: reserveError,
+              snapshot,
+              initialInputBytes,
+              minOutputForThinking,
+              tokenUpperBound,
+            }),
+            reserveError,
+          );
+        }
+      }
+      throw reserveError;
+    }
     let consumed = false, received = false;
     const phase = providerPhase(input.phases);
     // 连接阶段就失败（拒绝连接、域名解析失败等）且还没收到服务端的任何事件：请求没有发出。按 0 token 收束本次预占，

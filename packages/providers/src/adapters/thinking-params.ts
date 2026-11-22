@@ -20,7 +20,11 @@
  *   - none     ：不发送任何思考参数
  */
 
-import type { ThinkingConfig } from "@zhixing-ai/core";
+import {
+  isAnthropicAdaptiveThinkingModel,
+  type ThinkingConfig,
+} from "@zhixing-ai/core";
+export { isAnthropicAdaptiveThinkingModel };
 import type { ThinkingDialect } from "../types.js";
 
 /**
@@ -106,18 +110,6 @@ export function buildOpenAICompatibleThinkingParams(
   }
 
   return {};
-}
-
-/**
- * 判断 Claude 型号是否属于 4.7+ 自适应思考代际（弃用旧式 `enabled + budget_tokens`，
- * 采用 `thinking: { type: "adaptive" }` + 可选 `output_config: { effort }`）。
- */
-export function isAnthropicAdaptiveThinkingModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase();
-  // 匹配 claude-(opus|sonnet|haiku)?-4-7 / 4.7 / 4-8 / 4-9 / 4-1x / 5+，排除 4-20250514 类四位年份后缀
-  return /(?:^|[/-])claude-(?:(?:opus|sonnet|haiku)-)?(?:4[.-](?:[7-9]|1\d)(?=$|[.-])|[5-9](?=$|[.-]))/u.test(
-    normalized,
-  );
 }
 
 /**

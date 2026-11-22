@@ -629,6 +629,8 @@ export function classifyProviderErrorDetail(error: unknown): ClassifiedProviderE
     // 若已是本地预检产出的清晰中文说明（如图片不支持、未完工具往返思考签名冲突），直接透出脱敏文本
     const isAlreadyActionableZh =
       details.message.includes("当前模型不支持") ||
+      details.message.includes("当前模型剩余上下文窗口") ||
+      details.message.includes("手动思考预算（") ||
       details.message.includes("未完成的工具调用") ||
       details.message.includes("本次运行的模型用量");
     return {

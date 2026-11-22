@@ -1,6 +1,7 @@
 import { resolveAgentIdentity } from "@zhixing-ai/core/identity";
 import { resolveModelInfo } from "@zhixing-ai/core/context";
 import {
+  resolveManualThinkingBudgetConstraint,
   resolveMaxOutputTokens,
   resolveModelInputCapabilities,
   validateThinkingConfig,
@@ -108,12 +109,15 @@ export function createHostKernelModelProviderFactory(input: {
         light: resolveRoleThinking(roles.light, resolvedRoles.light.params?.thinking),
         power: resolveRoleThinking(roles.power, resolvedRoles.power.params?.thinking),
       };
-      const resolveMaxOutput = (
+      const resolveRoleLimits = (
         roleObj: LLMRole,
         resolvedEntry: typeof resolvedRoles.main.resolved,
         prefs: { readonly explicitRequest?: number; readonly userPreference?: number },
         thinking: ThinkingConfig | undefined,
-      ): number => {
+      ): { readonly maxOutputTokens: number; readonly contextWindow: number } => {
+        const declaredModel = roleObj.provider.models.find(
+          (item) => item.id === roleObj.model,
+        );
         const info = resolveModelInfo({
           providerId: roleObj.provider.id,
           model: roleObj.model,
@@ -121,22 +125,46 @@ export function createHostKernelModelProviderFactory(input: {
           overrides: resolvedEntry.modelOverrides,
           protocolDefaults: PROTOCOL_BUDGET_DEFAULTS[resolvedEntry.protocol],
         });
-        return resolveMaxOutputTokens({
-          explicitRequest: prefs.explicitRequest,
-          userPreference: prefs.userPreference,
-          modelCatalogMaxOutput: info.info.maxOutputTokens,
-          protocolDefault: PROTOCOL_BUDGET_DEFAULTS[resolvedEntry.protocol].maxOutputTokens,
-          hardCap: info.info.maxOutputTokens,
-          thinkingBudget: thinking?.mode === "budget" ? thinking.budget : undefined,
-        }).maxTokens;
-      };
-      const resolveRoleMaxOutput = (roleId: "main" | "light" | "power"): number =>
-        resolveMaxOutput(
-          roles[roleId],
-          resolvedRoles[roleId].resolved,
-          { userPreference: resolvedRoles[roleId].maxOutputPreference },
-          roleThinking[roleId],
+        const physicalHardCap = Math.min(
+          info.info.maxOutputTokens,
+          info.info.contextWindow,
         );
+        return {
+          contextWindow: info.info.contextWindow,
+          maxOutputTokens: resolveMaxOutputTokens({
+            explicitRequest: prefs.explicitRequest,
+            userPreference: prefs.userPreference,
+            modelCatalogMaxOutput: declaredModel?.recommendedMaxOutputTokens,
+            protocolDefault: PROTOCOL_BUDGET_DEFAULTS[resolvedEntry.protocol].maxOutputTokens,
+            hardCap: physicalHardCap,
+            thinkingBudget: resolveManualThinkingBudgetConstraint(
+              resolvedEntry.protocol,
+              roleObj.model,
+              thinking,
+            ),
+          }).maxTokens,
+        };
+      };
+      const roleLimits = {
+        main: resolveRoleLimits(
+          roles.main,
+          resolvedRoles.main.resolved,
+          { userPreference: resolvedRoles.main.maxOutputPreference },
+          roleThinking.main,
+        ),
+        light: resolveRoleLimits(
+          roles.light,
+          resolvedRoles.light.resolved,
+          { userPreference: resolvedRoles.light.maxOutputPreference },
+          roleThinking.light,
+        ),
+        power: resolveRoleLimits(
+          roles.power,
+          resolvedRoles.power.resolved,
+          { userPreference: resolvedRoles.power.maxOutputPreference },
+          roleThinking.power,
+        ),
+      };
 
       const hasPrimaryRoleOverrides =
         request.primaryRoleOverrides?.params !== undefined ||
@@ -149,6 +177,7 @@ export function createHostKernelModelProviderFactory(input: {
       let sessionPrimary: LLMRole | undefined;
       let sessionPrimaryThinking: ThinkingConfig | undefined;
       let sessionPrimaryMaxOutputTokens: number | undefined;
+      let sessionPrimaryContextWindow: number | undefined;
       let resolvedPrimary = resolvedRoles[request.primaryRole];
 
       if (trackedSessionPrimary && effectivePrimary && sessionOverride?.mode === "override") {
@@ -158,12 +187,14 @@ export function createHostKernelModelProviderFactory(input: {
           sessionPrimary,
           sessionOverride.params?.thinking,
         );
-        sessionPrimaryMaxOutputTokens = resolveMaxOutput(
+        const limits = resolveRoleLimits(
           sessionPrimary,
           effectivePrimary.resolved,
-          { explicitRequest: sessionOverride.maxOutputPreference },
+          { userPreference: sessionOverride.maxOutputPreference },
           sessionPrimaryThinking,
         );
+        sessionPrimaryMaxOutputTokens = limits.maxOutputTokens;
+        sessionPrimaryContextWindow = limits.contextWindow;
       } else if (useV2MainModelOverride || hasPrimaryRoleOverrides) {
         const baseRole = roles[request.primaryRole];
         const baseResolved = resolvedRoles[request.primaryRole];
@@ -179,7 +210,7 @@ export function createHostKernelModelProviderFactory(input: {
           sessionPrimary,
           effectiveConfiguredThinking,
         );
-        sessionPrimaryMaxOutputTokens = resolveMaxOutput(
+        const limits = resolveRoleLimits(
           sessionPrimary,
           baseResolved.resolved,
           {
@@ -188,6 +219,8 @@ export function createHostKernelModelProviderFactory(input: {
           },
           sessionPrimaryThinking,
         );
+        sessionPrimaryMaxOutputTokens = limits.maxOutputTokens;
+        sessionPrimaryContextWindow = limits.contextWindow;
       }
 
       const primaryRole = sessionPrimary ?? roles[request.primaryRole];
@@ -218,9 +251,14 @@ export function createHostKernelModelProviderFactory(input: {
         roles,
         roleThinking,
         defaultMaxOutputTokens: {
-          main: resolveRoleMaxOutput("main"),
-          light: resolveRoleMaxOutput("light"),
-          power: resolveRoleMaxOutput("power"),
+          main: roleLimits.main.maxOutputTokens,
+          light: roleLimits.light.maxOutputTokens,
+          power: roleLimits.power.maxOutputTokens,
+        },
+        roleContextWindows: {
+          main: roleLimits.main.contextWindow,
+          light: roleLimits.light.contextWindow,
+          power: roleLimits.power.contextWindow,
         },
         primary: {
           budget: resolvedModel.info,
@@ -238,6 +276,9 @@ export function createHostKernelModelProviderFactory(input: {
         ...(sessionPrimaryThinking !== undefined ? { sessionPrimaryThinking } : {}),
         ...(sessionPrimaryMaxOutputTokens !== undefined
           ? { sessionPrimaryMaxOutputTokens }
+          : {}),
+        ...(sessionPrimaryContextWindow !== undefined
+          ? { sessionPrimaryContextWindow }
           : {}),
         ...(trackedBinding ? { acquireRunLease: trackedBinding.acquireRunLease } : {}),
         ...(trackedBinding ? { dispose: trackedBinding.dispose } : {}),

@@ -1,5 +1,6 @@
 import { resolveModelInfo } from "@zhixing-ai/core/context";
 import {
+  resolveManualThinkingBudgetConstraint,
   resolveMaxOutputTokens,
   validateThinkingConfig,
   type LLMRole,
@@ -108,6 +109,12 @@ export function createHostAdvancementModelProviderFactory(input: {
           PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.light.resolved.protocol];
         const mainProtocolDefaults =
           PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol];
+        const lightDeclaredModel = roles.light.provider.models.find(
+          (item) => item.id === roles.light.model,
+        );
+        const mainDeclaredModel = roles.main.provider.models.find(
+          (item) => item.id === roles.main.model,
+        );
         const lightModelInfo = resolveModelInfo({
           providerId: roles.light.provider.id,
           model: roles.light.model,
@@ -124,17 +131,31 @@ export function createHostAdvancementModelProviderFactory(input: {
         });
         const lightMaxOutputTokens = resolveMaxOutputTokens({
           userPreference: resolvedRoles.light.maxOutputPreference,
-          modelCatalogMaxOutput: lightModelInfo.info.maxOutputTokens,
+          modelCatalogMaxOutput: lightDeclaredModel?.recommendedMaxOutputTokens,
           protocolDefault: lightProtocolDefaults.maxOutputTokens,
-          hardCap: lightModelInfo.info.maxOutputTokens,
-          thinkingBudget: lightThinking?.mode === "budget" ? lightThinking.budget : undefined,
+          hardCap: Math.min(
+            lightModelInfo.info.maxOutputTokens,
+            lightModelInfo.info.contextWindow,
+          ),
+          thinkingBudget: resolveManualThinkingBudgetConstraint(
+            resolvedRoles.light.resolved.protocol,
+            roles.light.model,
+            lightThinking,
+          ),
         }).maxTokens;
         const mainMaxOutputTokens = resolveMaxOutputTokens({
           userPreference: resolvedRoles.main.maxOutputPreference,
-          modelCatalogMaxOutput: mainModelInfo.info.maxOutputTokens,
+          modelCatalogMaxOutput: mainDeclaredModel?.recommendedMaxOutputTokens,
           protocolDefault: mainProtocolDefaults.maxOutputTokens,
-          hardCap: mainModelInfo.info.maxOutputTokens,
-          thinkingBudget: mainThinking?.mode === "budget" ? mainThinking.budget : undefined,
+          hardCap: Math.min(
+            mainModelInfo.info.maxOutputTokens,
+            mainModelInfo.info.contextWindow,
+          ),
+          thinkingBudget: resolveManualThinkingBudgetConstraint(
+            resolvedRoles.main.resolved.protocol,
+            roles.main.model,
+            mainThinking,
+          ),
         }).maxTokens;
 
         return {
@@ -147,6 +168,10 @@ export function createHostAdvancementModelProviderFactory(input: {
               main: mainMaxOutputTokens,
               light: lightMaxOutputTokens,
             },
+            contextWindows: {
+              main: mainModelInfo.info.contextWindow,
+              light: lightModelInfo.info.contextWindow,
+            },
           }),
           reviewer: createAdvancementRuntime({
             provider: roles.main.provider,
@@ -158,6 +183,8 @@ export function createHostAdvancementModelProviderFactory(input: {
             resourceMeter: request.resourceMeter,
             defaultMaxOutputTokens: mainMaxOutputTokens,
             lightDefaultMaxOutputTokens: lightMaxOutputTokens,
+            modelContextWindow: mainModelInfo.info.contextWindow,
+            lightContextWindow: lightModelInfo.info.contextWindow,
             workingDirectory: workspace.path ?? undefined,
             ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
             contextWindow: {

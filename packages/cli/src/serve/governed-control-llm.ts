@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AuthorityCallContext,
-  ImmediateRootResourceLease,
-  ImmediateRootWorkload,
-  ModelCallResourceMeter,
-  ReservationOrigin,
-  ResourceLease,
+import {
+  createLeaseBudgetTracker,
+  type AuthorityCallContext,
+  type ImmediateRootResourceLease,
+  type ImmediateRootWorkload,
+  type ModelCallResourceMeter,
+  type ReservationOrigin,
+  type ResourceLease,
 } from "@zhixing-ai/core/contracts";
 import {
   copyProviderMetadata,
@@ -104,7 +105,9 @@ async function openControlWorkSession(
   );
   // 未收束预占——调用中断（结果未知）时按上限保守 consume 计终值
   const pending = new Map<string, number>();
+  const tracker = createLeaseBudgetTracker(lease.budget);
   const meter: ModelCallResourceMeter = {
+    budgetSnapshot: () => tracker.snapshot(),
     reserve: async ({ callIndex, tokenUpperBound }) => {
       const usageId = `usage:${lease.reservationId}:model:${callIndex}`;
       await options.governor.reserveUsage(
@@ -113,6 +116,7 @@ async function openControlWorkSession(
         ctx,
       );
       pending.set(usageId, tokenUpperBound);
+      tracker.recordReserved(usageId, tokenUpperBound);
       return { usageId };
     },
     consume: async ({ usageId, tokens }) => {
@@ -122,6 +126,7 @@ async function openControlWorkSession(
         ctx,
       );
       pending.delete(usageId);
+      tracker.recordConsumed(usageId, tokens);
     },
   };
   let callIndex = 0;
@@ -189,6 +194,7 @@ export function governControlTextCall(
 export function governControlProvider(
   options: GovernControlTextCallOptions & {
     readonly defaultMaxOutputTokens: number;
+    readonly contextWindow?: number;
   },
   provider: LLMProvider,
 ): LLMProvider {
@@ -200,12 +206,21 @@ export function governControlProvider(
       async function* governed(): AsyncGenerator<StreamEvent, void, undefined> {
         const session = await openControlWorkSession(options);
         let hadError = false;
+        const effectiveContextWindow =
+          options.contextWindow ??
+          provider.models.find((item) => item.id === request.model)?.contextWindow;
         try {
           const metered = meteredProviderCall({
             call: (providerRequest) => provider.chat(providerRequest),
             meter: session.metering.meter,
             nextCallIndex: session.metering.nextCallIndex,
             defaultMaxOutputTokens: options.defaultMaxOutputTokens,
+            ...(provider.protocol !== undefined
+              ? { protocol: provider.protocol }
+              : {}),
+            ...(effectiveContextWindow !== undefined
+              ? { contextWindow: effectiveContextWindow }
+              : {}),
           });
           yield* metered(request);
         } catch (error) {

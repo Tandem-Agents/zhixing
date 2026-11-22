@@ -1493,6 +1493,28 @@ describe("Unit 3 · Native discovery, 11 preset plans, 4-state errors, isolated 
     expect(resolvedModel.supportsTools).toBe(false);
     expect(resolvedModel.supportsThinking).toBe(false);
     expect(resolvedModel.thinkingControl).toEqual({ type: "none" });
+    expect(resolvedModel.maxOutputTokens).toBe(384_000);
+    expect(resolvedModel.recommendedMaxOutputTokens).toBe(16_384);
+
+    // Custom connection without presetId never steals recommendedMaxOutputTokens by model name
+    const customNoPreset = resolveConnection(
+      "custom_gw",
+      {
+        name: "Custom Gateway",
+        adapter: "openai-compatible",
+        endpoint: "http://127.0.0.1:18080/v1",
+        auth: { mode: "none" },
+        network: { allowPrivateHosts: true },
+        customModels: ["deepseek-v4-pro"],
+        modelOverrides: {
+          "deepseek-v4-pro": { contextWindow: 128_000, maxOutputTokens: 999_999 },
+        },
+      },
+      {},
+    );
+    const customModelInfo = customNoPreset.declaredModels.find((m) => m.id === "deepseek-v4-pro")!;
+    expect(customModelInfo.maxOutputTokens).toBe(999_999);
+    expect(customModelInfo.recommendedMaxOutputTokens).toBeUndefined();
 
     // Authoritative hard denial cannot be bypassed by user override = true
     const forcedTrueConn = {

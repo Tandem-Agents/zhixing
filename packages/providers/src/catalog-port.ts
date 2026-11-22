@@ -108,6 +108,9 @@ export function curatedModelToModelInfo(entry: CuratedModelEntry): ModelInfo | u
     name: entry.name ?? entry.id,
     contextWindow: entry.contextWindow,
     maxOutputTokens: entry.maxOutputTokens,
+    ...(entry.recommendedMaxOutputTokens !== undefined
+      ? { recommendedMaxOutputTokens: entry.recommendedMaxOutputTokens }
+      : {}),
     supportsTools: entry.supportsTools ?? true,
     ...(entry.supportsImages !== undefined ? { supportsImages: entry.supportsImages } : {}),
     ...(entry.supportsThinking !== undefined ? { supportsThinking: entry.supportsThinking } : {}),

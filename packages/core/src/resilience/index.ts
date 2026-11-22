@@ -26,8 +26,14 @@ export type {
 
 export {
   budgetStopAfterFailure,
+  formatModelBudgetStop,
   isResourceBudgetExceeded,
   parseModelBudgetStop,
+  parseResourceBudgetDimension,
+} from "./budget-stop.js";
+export type {
+  ModelBudgetDimension,
+  ModelBudgetStopReason,
 } from "./budget-stop.js";
 
 export { withRetry } from "./with-retry.js";

@@ -230,11 +230,13 @@ describe('terminal session navigation', () => {
     // 已是中文说明或未知原因的保持原文
     expect(project('当前模型不支持图片输入。请切换到支持图片输入的模型，或移除图片后重试。')).toBe('任务未完成：当前模型不支持图片输入。请切换到支持图片输入的模型，或移除图片后重试。');
   });
-  it('states the real first cause before a budget stop and explains a real budget exhaustion', () => {
+  it('states the real first cause before a budget stop and distinguishes cumulative vs unclassified budget stops', () => {
     const project = (message: string) => projectTerminalTurnOutcome({ result: { reason: 'error', error: { message }, usage: { inputTokens: 0, outputTokens: 0 } } as TurnOutcome['result'] }).message;
     expect(project('Model usage budget exhausted while retrying after: Connection error.'))
       .toBe('任务未完成：无法连接模型服务：请检查网络、代理或服务地址后重试。（重试时本次运行的模型用量已达上限，已停止重试。）');
+    expect(project('Model call resource budget stop: cumulative-tokens'))
+      .toBe('任务未完成：本次运行在连续处理中剩余的模型可用额度已不足以预留下一步请求（本次请求未发出）：发送新消息会按新一次运行额度继续；若对话历史较长，可先用 /compact 整理上下文。');
     expect(project('Resource commitments tokens exceeds budget'))
-      .toBe('任务未完成：本次运行的模型用量已达上限，已停止：发送新消息会按新的额度继续；对话很长时可先用 /compact 整理上下文。');
+      .toBe('任务未完成：本次请求未发出：请求的输入与输出保守预留超出当前运行可用额度。若在多步连续执行中出现，发送新消息可按新一次运行额度继续；若在新对话首轮出现，可在 /model 或 /config 中调低输出上限偏好或精简输入；对话较长时可用 /compact 整理上下文。');
   });
 });

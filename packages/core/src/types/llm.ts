@@ -165,8 +165,13 @@ export interface ModelInfo {
   name: string;
   /** 上下文窗口大小（token 数） */
   contextWindow: number;
-  /** 最大输出 token 数 */
+  /** 模型物理最大输出 token 容量上限（用于裁剪，不充当缺省单次请求输出量） */
   maxOutputTokens: number;
+  /**
+   * 型号策展建议的单次请求默认输出上限（设计 §5.1 `modelCatalogMaxOutput`）。
+   * 未显式指定单次请求或用户偏好时优先采用；未知自定义/纯原生发现型号保持缺省（回退协议兜底）。
+   */
+  recommendedMaxOutputTokens?: number;
   /**
    * 是否支持 thinking 模式（extended thinking / reasoning trace / 思考输出）。
    * UI 语义信号；运行时 reasoning_content 透传不依赖此字段（协议级处理）。
@@ -663,15 +668,28 @@ export function resolveMaxOutputTokens(
   let effective = Math.max(1, Math.floor(candidate));
   const adjustmentReasons: string[] = [];
 
-  if (isPositiveInt(input.hardCap) && effective > input.hardCap) {
+  // 仅当候选来自目录推荐或协议兜底（用户/调用方未显式限定输出上限）时，
+  // 允许为已声明的手动思考预算让出足够的实际输出空间；后续仍受物理硬限、剩余窗口与资源许可严格裁剪。
+  if (
+    (source === "model-catalog" || source === "protocol-default") &&
+    isPositiveInt(input.thinkingBudget) &&
+    effective <= input.thinkingBudget
+  ) {
+    effective = input.thinkingBudget + effective;
+    adjustmentReasons.push(
+      `默认输出上限按手动思考预算（${input.thinkingBudget}）上调至 ${effective}`,
+    );
+  }
+
+  if (isNonNegativeInt(input.hardCap) && effective > input.hardCap) {
     effective = input.hardCap;
     adjustmentReasons.push(`受型号硬上限裁剪至 ${input.hardCap}`);
   }
-  if (isPositiveInt(input.remainingWindow) && effective > input.remainingWindow) {
+  if (isNonNegativeInt(input.remainingWindow) && effective > input.remainingWindow) {
     effective = input.remainingWindow;
     adjustmentReasons.push(`受当前剩余上下文窗口裁剪至 ${input.remainingWindow}`);
   }
-  if (isPositiveInt(input.resourceLimit) && effective > input.resourceLimit) {
+  if (isNonNegativeInt(input.resourceLimit) && effective > input.resourceLimit) {
     effective = input.resourceLimit;
     adjustmentReasons.push(`受资源许可上限裁剪至 ${input.resourceLimit}`);
   }
@@ -690,8 +708,49 @@ export function resolveMaxOutputTokens(
   };
 }
 
+/**
+ * 判断 Claude 型号是否属于 4.7+ 自适应思考代际（采用 `thinking: { type: "adaptive" }`，
+ * 不在线协议发送 `enabled + budget_tokens`）。供适配器线映射与输出上限解析同源共享。
+ */
+export function isAnthropicAdaptiveThinkingModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  // 匹配 claude-(opus|sonnet|haiku)?-4-7 / 4.7 / 4-8 / 4-9 / 4-1x / 5+，排除 4-20250514 类四位年份后缀
+  return /(?:^|[/-])claude-(?:(?:opus|sonnet|haiku)-)?(?:4[.-](?:[7-9]|1\d)(?=$|[.-])|[5-9](?=$|[.-]))/u.test(
+    normalized,
+  );
+}
+
+/**
+ * 解析当前协议与型号下受 `budget_tokens < max_tokens` 线规则约束的手动思考预算值。
+ * - `protocol` 明确时：仅 `anthropic-messages`（或历史别名 `anthropic`）且非 4.7+ adaptive 世代会发出
+ *   手动 `budget_tokens` 并要求 `max_tokens > budget_tokens`；其余协议/世代返回 `undefined`。
+ * - `protocol` 未传时（纯底层计量/解析单点调用）：对正整数 `thinking.budget` 按手动预算约束处理。
+ */
+export function resolveManualThinkingBudgetConstraint(
+  protocol: string | undefined,
+  model: string,
+  thinking: ThinkingConfig | undefined,
+): number | undefined {
+  if (thinking?.mode !== "budget" || !isPositiveInt(thinking.budget)) {
+    return undefined;
+  }
+  if (protocol === undefined) {
+    return thinking.budget;
+  }
+  if (protocol === "anthropic-messages" || protocol === "anthropic") {
+    return isAnthropicAdaptiveThinkingModel(model)
+      ? undefined
+      : thinking.budget;
+  }
+  return undefined;
+}
+
 function isPositiveInt(value: number | undefined): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isNonNegativeInt(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 // ─── Provider 元数据透传与发送/切模兼容预检（设计 §2.3） ───
