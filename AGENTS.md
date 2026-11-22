@@ -48,6 +48,7 @@
 研究与设计在 `research/`(`insights/`、`source-analysis/`、`landscape/`、`design/`)。其中:
 
 - `docs/postmortems/` — 失败复盘与可复用教训:按 README 的问题信号查找适用的诊断、决策与效率经验。
+- [开发完成后的真实使用验收](docs/engineering/user-workflow-acceptance.md) — 整体交付前的成品验收方法。
 - [任务临时资源的收尾](docs/engineering/path-and-resource-isolation.md#任务临时资源的收尾) — 凡是任务产生的临时资料或运行资源，由创建者负责到用完释放或明确交接。
 
 多 agent 协作面板(根级):
