@@ -97,7 +97,7 @@ const segmentLifecyclePhases = [...SEGMENT_TRANSITION_HOOK_PHASES];
 const builtinRpcNames = new Set(captureBuiltinRegistryDescriptor().map((item) => item.name));
 
 const coverageGroups = [
-  ["session-send", ["rpc:session.send", "rpc:session.prepareAfterUsable", "slash:skill:<catalog-id>"]],
+  ["session-send", ["rpc:session.send", "rpc:session.prepareAfterUsable", "rpc:conversation.program.send", "cli:zhixing conversation send", "slash:skill:<catalog-id>"]],
   ["run-cancel", ["rpc:session.abort"]],
   ["uncertain-resolution", ["rpc:session.resolve", "rpc:delivery.resolve", "slash:resolve:repl"]],
   ["confirmation-resolve", ["rpc:confirmation.resolve"]],
@@ -105,10 +105,10 @@ const coverageGroups = [
   ["session-observer", ["rpc:session.subscribe", "rpc:session.unsubscribe"]],
   ["global-list-read", ["rpc:schedule.list", "rpc:workscene.list", "rpc:skill.list", "slash:tasks:repl"]],
   ["trust-manage", ["rpc:trust.list", "rpc:trust.revoke", "slash:trust:repl"]],
-  ["conversation-manage", ["rpc:session.new", "rpc:session.list", "rpc:session.resume", "slash:new:repl", "slash:resume:repl"]],
+  ["conversation-manage", ["rpc:session.new", "rpc:session.list", "rpc:session.resume", "rpc:conversation.program.list", "rpc:conversation.program.new", "cli:zhixing conversation list", "cli:zhixing conversation new", "slash:new:repl", "slash:resume:repl"]],
   ["conversation-window", ["rpc:session.clear", "rpc:session.compact", "slash:clear:repl", "slash:compact:repl"]],
   ["conversation-metadata", ["rpc:session.rename", "rpc:session.setModelSelection", "rpc:session.delete", "slash:name:repl"]],
-  ["conversation-read", ["rpc:session.history", "rpc:session.inputReceipt", "rpc:session.statusHistory", "rpc:session.usage", "rpc:session.security", "rpc:session.contextBudget", "rpc:session.getModelSelection", "slash:usage:repl", "slash:context:repl", "slash:security:repl"]],
+  ["conversation-read", ["rpc:session.history", "rpc:session.inputReceipt", "rpc:session.statusHistory", "rpc:session.usage", "rpc:session.security", "rpc:session.contextBudget", "rpc:session.getModelSelection", "rpc:conversation.program.read", "rpc:conversation.program.result", "cli:zhixing conversation read", "cli:zhixing conversation result", "slash:usage:repl", "slash:context:repl", "slash:security:repl"]],
   ["task-list", ["rpc:session.taskList", "rpc:session.taskListUpdate", "slash:task:repl", "slash:tasklist:repl", "tool:extra:task-list"]],
   ["advancement", ["rpc:session.advancementCancel", "rpc:session.advancementConfirm", "rpc:session.advancementDetail", "rpc:session.advancementRedraft", "rpc:session.advancementRevise", "slash:advancement:repl", "tool:extra:advancement:propose"]],
   ["workscene-manage", ["rpc:workscene.create", "rpc:workscene.delete", "rpc:workscene.rename", "rpc:workscene.setWorkdir", "tool:extra:workscene:change-approve", "tool:extra:workscene:rename-current", "tool:extra:workscene:set-workdir-current", "tool:extra:workscene:clear-workdir-current"]],
@@ -178,6 +178,7 @@ const baseMappingTuples = [
   ["rpc:logs.apply-policy", { exclusion: "logGovernance", reason: exclusions.logGovernance }],
   ["cli:zhixing", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing app", { exclusion: "composition", reason: exclusions.composition }],
+  ["cli:zhixing conversation", { exclusion: "composition", reason: exclusions.composition }],
   [
     "cli:zhixing workspace",
     { exclusion: "composition", reason: exclusions.composition },
@@ -15718,6 +15719,10 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "taskLists",
       "currentAuthority",
       "subscribeConversationFacts",
+      "inspectProgramInputReceipt",
+      "hasOpenAdvancementSession",
+      "conversationAdoptionStatus",
+      "isShuttingDown",
     ]);
     for (const member of ownerPort.members) {
       if (

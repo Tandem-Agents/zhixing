@@ -1,8 +1,61 @@
+const CONVERSATION_VALUE_OPTIONS = new Set([
+  "--query",
+  "--scope",
+  "--limit",
+  "--cursor",
+  "--name",
+  "--scene",
+  "--id",
+  "--before",
+  "--text",
+  "--file",
+  "--wait",
+  "--to",
+]);
+
+function findConversationCommandStart(args: readonly string[]): {
+  readonly commandIndex: number;
+  readonly stripLeadingSeparator: boolean;
+} | null {
+  let idx = 0;
+  let stripLeadingSeparator = false;
+  if (args[idx] === "--") {
+    stripLeadingSeparator = true;
+    idx += 1;
+  }
+  while (args[idx] === "--log") {
+    idx += 1;
+  }
+  return args[idx] === "conversation"
+    ? { commandIndex: idx, stripLeadingSeparator }
+    : null;
+}
+
 /** pnpm forwards one standalone separator; entry, Commander and discovery share this rule. */
 export function normalizeCliArgs(args: readonly string[]): string[] {
-  const normalized = [...args], index = normalized.indexOf("--");
-  if (index !== -1) normalized.splice(index, 1);
-  return normalized;
+  const conv = findConversationCommandStart(args);
+  if (!conv) {
+    const normalized = [...args], index = normalized.indexOf("--");
+    if (index !== -1) normalized.splice(index, 1);
+    return normalized;
+  }
+  const source = conv.stripLeadingSeparator ? args.slice(1) : [...args];
+  const commandOffset = conv.stripLeadingSeparator ? conv.commandIndex - 1 : conv.commandIndex;
+  const result = source.slice(0, commandOffset + 1);
+  for (let i = commandOffset + 1; i < source.length; i += 1) {
+    const token = source[i]!;
+    if (token === "--") {
+      result.push(...source.slice(i));
+      break;
+    }
+    if (CONVERSATION_VALUE_OPTIONS.has(token) && i + 1 < source.length) {
+      result.push(`${token}=${source[i + 1]!}`);
+      i += 1;
+      continue;
+    }
+    result.push(token);
+  }
+  return result;
 }
 
 /** Shared by process discovery and the entry's recorder lifetime. Unknown argv never proves compatibility. */
@@ -16,7 +69,7 @@ export function cliLoggingMode(args: readonly string[]): "recorder" | "host" | "
   if (["backup", "workspace", "pair"].includes(command)) return "recorder";
   if (command === "serve") return args[1] === "logs" ? "none" : "host";
   if (command === "logs") return args.some(arg => arg === "--set" || arg.startsWith("--set=")) ? "policy" : "none";
-  if (["status", "stop", "doctor", "app", "device", "duty", "help", "--help", "-h", "--version", "-V"].includes(command)) return "none";
+  if (["status", "stop", "doctor", "app", "device", "duty", "conversation", "help", "--help", "-h", "--version", "-V"].includes(command)) return "none";
   return "unknown";
 }
 

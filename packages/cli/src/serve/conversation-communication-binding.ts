@@ -20,7 +20,7 @@ export async function routeAddressedConversationCommunication(input: {
   readonly local?: { readonly communication: ConversationCommunicationTransport; readonly owner: Pick<LocalConversationOwnerPort, "currentAuthority"> };
   readonly anchor?: { readonly communication: ConversationCommunicationTransport; readonly owns: (id: string) => Promise<boolean> };
   readonly remote: (deviceId: string) => ConversationCommunicationTransport;
-}, source: string, request: Exclude<Parameters<ConversationCommunicationTransport["invoke"]>[1], { action: "discover" }>): Promise<unknown> {
+}, source: string, request: Exclude<Parameters<ConversationCommunicationTransport["invoke"]>[1], { action: "discover" | "new" }>): Promise<unknown> {
   const anchor = () => input.anchor?.communication ?? input.remote(input.anchorDeviceId);
   if (!isLocalConversationId(request.conversationId)) return anchor().invoke(source, request);
   const device = input.members.find(id => {

@@ -93,6 +93,8 @@ import {
   buildConfirmationListMethod,
   buildConfirmationResolveMethod,
 } from "./confirmation.js";
+import { buildProgramConversationMethods } from "./program-conversation.js";
+export { mapProgramConversationRpcError } from "./program-conversation.js";
 
 export interface BuiltinMethodsOptions {
   /** 后续阶段会注入更多依赖（scheduler 等） */
@@ -190,6 +192,8 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     // confirmation.*（远程权限确认：list / resolve —— RPC 客户端用；pending/resolved 推送由 ConfirmationBridge 处理）
     buildConfirmationListMethod(),
     buildConfirmationResolveMethod(),
+    // conversation.program.*（本机外部程序/智能体窄对话接收口，仅回环连接可调）
+    ...buildProgramConversationMethods(),
   ]);
   return registry;
 }
@@ -222,6 +226,11 @@ export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
   "server.uninstall.continue",
   "server.uninstall.cancel",
   "server.uninstall.status",
+  "conversation.program.list",
+  "conversation.program.new",
+  "conversation.program.read",
+  "conversation.program.send",
+  "conversation.program.result",
 ] as const);
 
 /** Canonical finite authority surface relayed to the current duty device. */

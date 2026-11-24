@@ -383,6 +383,14 @@ async function startServerWithOwner(
   const cleanupActive = async () => {
     if (activeClosed) return;
     activeClosed = true;
+    // Drain the current microtask chain before closing WebSockets so an RPC
+    // handler that scheduled `requestShutdown` via `queueMicrotask` right before
+    // returning (such as `server.shutdown` on a host without `ctx.conversation`)
+    // unwinds `HandlerRegistry.dispatch` -> `RpcDispatcher` -> `sendSuccess`
+    // while its socket is still OPEN.
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+    }
     // Channel connections are owned and closed by the outer Host lifecycle.
     // 1. 释放所有对话运行时（timer 清理 + 资源回收 + 各会话末窗 onWindowClose）
     await ctx.conversation?.disposeAll();

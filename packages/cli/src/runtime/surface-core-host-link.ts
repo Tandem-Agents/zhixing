@@ -1,14 +1,22 @@
 import type { CurrentTrustProjection } from "@zhixing-ai/mesh/trust-chain";
 import { randomUUID } from "node:crypto";
-import type { RpcEncodedJsonSource, RpcRequestDeadline } from '@zhixing-ai/server/client';
+import {
+  RpcClientError,
+  type RpcEncodedJsonSource,
+  type RpcRequestDeadline,
+} from "@zhixing-ai/server/client";
 
 
+import {
+  PROGRAM_MAX_WAIT_SLICE_MS,
+} from "@zhixing-ai/core/conversation/application";
 import { canonicalize } from "@zhixing-ai/core/protocol";
 import { validateMeshRoleBootConfig } from "@zhixing-ai/mesh/bootstrap";
 import { MeshServiceRegistry } from "@zhixing-ai/mesh/service-registry";
 import { createPlatformSecretStore } from "@zhixing-ai/secrets";
 import {
   PROTOCOL_VERSION,
+  RPC_ERROR_CODES,
   RpcAppError,
   RpcClientClosedError,
   type AuthResult,
@@ -20,6 +28,10 @@ import {
   isCurrentAnchorRelayMethod,
   type FirstPartyIngressConnection,
 } from "../serve/first-party-conversation-mesh.js";
+import {
+  ProgramConversationMeshClient,
+  isProgramConversationRpcMethod,
+} from "../serve/program-conversation-mesh.js";
 import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
 import {
   createMeshBootstrapProjectionPorts,
@@ -42,6 +54,7 @@ interface SurfaceBinding {
   readonly ownerIdentity: string;
   readonly connection: FirstPartyIngressConnection;
   readonly remote: FirstPartyConversationMeshClient;
+  readonly programRemote: ProgramConversationMeshClient;
   readonly closeHandlers: Set<() => void>;
   closed: boolean;
 }
@@ -141,6 +154,9 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
 
   maximumRequestSourceBytes(method: string): number {
     const binding = this.#currentBinding(method);
+    if (isProgramConversationRpcMethod(method)) {
+      return binding.programRemote.dispatchParamsByteLimit(method);
+    }
     return binding.remote.dispatchParamsByteLimit(method, binding.connection);
   }
 
@@ -166,9 +182,28 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
   }
 
   async requestEncoded<T>(method: string, source: RpcEncodedJsonSource, options?: Partial<RpcRequestDeadline>): Promise<T> {
+    const requestStartedAt = Date.now();
     await this.drain();
     const binding = this.#currentBinding(method);
-    if (source.byteLength > binding.remote.dispatchParamsByteLimit(method, binding.connection)) throw Error('远端请求超过现有消息容量，草稿已保留。');
+    const maxBytes = isProgramConversationRpcMethod(method)
+      ? binding.programRemote.dispatchParamsByteLimit(method)
+      : binding.remote.dispatchParamsByteLimit(method, binding.connection);
+    if (source.byteLength > maxBytes) {
+      if (isProgramConversationRpcMethod(method)) {
+        throw new RpcClientError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          `跨设备请求超出 1 MiB 单帧净荷上限 (${source.byteLength} bytes > ${maxBytes} bytes)`,
+          {
+            programError: {
+              code: "payload_too_large",
+              retryable: false,
+              exitCode: 1,
+            },
+          },
+        );
+      }
+      throw Error('远端请求超过现有消息容量，草稿已保留。');
+    }
     const abort = new AbortController();
     const deadline = options?.deadline ?? Date.now() + 30_000;
     if (deadline <= Date.now() || options?.signal?.aborted) throw Error('RPC request deadline or cancellation');
@@ -177,7 +212,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     const timer = setTimeout(cancel, deadline - Date.now());
     try {
       const params = await readSmallParams(source, abort.signal);
-      return await this.#dispatch<T>(binding, method, params, abort.signal);
+      return await this.#dispatch<T>(binding, method, params, abort.signal, requestStartedAt);
     } finally { clearTimeout(timer); options?.signal?.removeEventListener('abort', cancel); }
   }
 
@@ -197,8 +232,19 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     };
   }
 
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    return this.#dispatch<T>(this.#currentBinding(method), method, params);
+  async request<T = unknown>(
+    method: string,
+    params?: unknown,
+    options?: Partial<RpcRequestDeadline>,
+  ): Promise<T> {
+    const requestStartedAt = Date.now();
+    return this.#dispatch<T>(
+      this.#currentBinding(method),
+      method,
+      params,
+      options?.signal,
+      requestStartedAt,
+    );
   }
 
   async consumeEncoded<T, R>(method: string, source: RpcEncodedJsonSource, consumer: (result: T) => R | Promise<R>, options?: Partial<RpcRequestDeadline>): Promise<R> {
@@ -209,7 +255,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
 
   #currentBinding(method: string): SurfaceBinding {
     if (this.#closed) throw new CoreHostUnavailableError("远端接入面已经关闭");
-    if (!isCurrentAnchorRelayMethod(method)) {
+    if (!isCurrentAnchorRelayMethod(method) && !isProgramConversationRpcMethod(method)) {
       throw new TypeError("设备本地或未知方法不能通过 current anchor 接入面代理");
     }
     const trust = this.control.currentTrust();
@@ -221,9 +267,86 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     return this.#selectOwner(owner, canonicalize(trust));
   }
 
-  async #dispatch<T>(binding: SurfaceBinding, method: string, params: unknown, signal?: AbortSignal): Promise<T> {
+  async #waitForProgramPeerReady(ownerDeviceId: string, binding: SurfaceBinding, signal?: AbortSignal): Promise<void> {
+    const connections = this.control.connections as { has?: (id: string) => boolean };
+    if (typeof connections.has !== "function" || connections.has(ownerDeviceId)) {
+      return;
+    }
+    const deadline = Date.now() + 2_500;
+    while (!connections.has(ownerDeviceId)) {
+      if (this.#closed || binding.closed || signal?.aborted || Date.now() >= deadline) {
+        break;
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, 25);
+        timer.unref?.();
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+    if (!connections.has(ownerDeviceId)) {
+      throw new CoreHostUnavailableError("值班设备暂时离线，请稍后重试");
+    }
+  }
+
+  async #dispatch<T>(
+    binding: SurfaceBinding,
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    requestStartedAt = Date.now(),
+  ): Promise<T> {
     if (this.#requests.size >= 12) throw Error('远端请求处理中，请稍后重试。');
     this.#drainDeadline = Math.max(this.#drainDeadline, Date.now() + 30_000);
+    if (isProgramConversationRpcMethod(method)) {
+      const work = (async () => {
+        await this.#waitForProgramPeerReady(binding.ownerDeviceId, binding, signal);
+        let forwardedParams = params;
+        if (
+          method === "conversation.program.result" &&
+          forwardedParams !== null &&
+          typeof forwardedParams === "object" &&
+          !Array.isArray(forwardedParams) &&
+          typeof (forwardedParams as { waitMs?: unknown }).waitMs === "number"
+        ) {
+          const originalWaitMs = (forwardedParams as { waitMs: number }).waitMs;
+          const elapsedMs = Math.max(0, Date.now() - requestStartedAt);
+          forwardedParams = {
+            ...(forwardedParams as Record<string, unknown>),
+            waitMs: Math.max(
+              0,
+              Math.min(
+                PROGRAM_MAX_WAIT_SLICE_MS,
+                Math.trunc(originalWaitMs - elapsedMs),
+              ),
+            ),
+          };
+        }
+        return binding.programRemote.dispatchRpc<T>(method, forwardedParams, signal);
+      })();
+      this.#requests.add(work);
+      try {
+        return await work;
+      } catch (error) {
+        if (binding.closed) throw new RpcClientClosedError("远端接入代次已经更换");
+        if (
+          error instanceof RpcClientError ||
+          error instanceof RpcAppError ||
+          error instanceof CoreHostUnavailableError
+        ) {
+          throw error;
+        }
+        throw new CoreHostUnavailableError("值班设备暂时离线，请稍后重试");
+      } finally {
+        this.#requests.delete(work);
+      }
+    }
     const work = binding.remote.dispatch(method, params, binding.connection, signal);
     this.#requests.add(work);
     try {
@@ -325,6 +448,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     binding = {
       ownerDeviceId, ownerIdentity, connection, closeHandlers, closed: false,
       remote: new FirstPartyConversationMeshClient(this.control.connections.client(ownerDeviceId), this.sourceDeviceId),
+      programRemote: new ProgramConversationMeshClient(() => this.control.connections.client(ownerDeviceId)),
     };
     this.#binding = binding;
     if (previous) this.#notifyTurnover();

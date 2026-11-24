@@ -14,6 +14,7 @@ import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import { readLock, releaseLock } from "../process-lock.js";
 import { CleanupRegistry } from "../cleanup-registry.js";
+import { createRpcClient } from "../client.js";
 
 const TEST_TOKEN = "test-token-lc";
 
@@ -405,6 +406,54 @@ describe("runServer lifecycle (S2.F)", () => {
     await Promise.all([p1, p2, runner.waitForShutdown()]);
 
     // 只应 shutdown 一次（幂等）
+    expect(await readLock({ pidPath, portPath })).toBeNull();
+  });
+
+  it("flushes the server.shutdown RPC response over WebSocket before closing connections when ctx.conversation is absent", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      lifecycleShutdown: {
+        prepare: async (input) => ({
+          requestId: input.requestId,
+          phase: "ready-to-stop",
+          strategy: input.strategy,
+        }),
+      },
+    });
+
+    runner = await runServer({
+      context: ctx,
+      lockPaths: { pidPath, portPath },
+      skipSignalHandlers: true,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    const client = createRpcClient({
+      url: `ws://127.0.0.1:${runner.server.port}/ws`,
+      timeout: 5_000,
+    });
+    await client.connect();
+    try {
+      await client.authenticate(TEST_TOKEN);
+      const res = await client.request("server.shutdown", {
+        requestId: "executor-stop-rpc-race",
+        reason: "serve-stop",
+        strategy: "cancel",
+        timeoutMs: 15_000,
+      });
+      expect(res).toMatchObject({
+        accepted: true,
+        requestId: "executor-stop-rpc-race",
+        phase: "ready-to-stop",
+        strategy: "cancel",
+      });
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+
+    await runner.waitForShutdown();
     expect(await readLock({ pidPath, portPath })).toBeNull();
   });
 });

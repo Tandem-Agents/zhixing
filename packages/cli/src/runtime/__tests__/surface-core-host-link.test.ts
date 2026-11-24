@@ -2,6 +2,8 @@ import type { HomeTrustRecord } from "@zhixing-ai/core/contracts";
 import type { MeshServiceClient } from "@zhixing-ai/mesh";
 import { describe, expect, it, vi } from "vitest";
 import { FirstPartyConversationMeshTarget } from "../../serve/first-party-conversation-mesh.js";
+import { PROGRAM_CONVERSATION_MESH_SERVICE } from "../../serve/program-conversation-mesh.js";
+import { RpcProgramConversationFacade } from "../rpc-conversation-facade.js";
 import {
   createCurrentAnchorSurfaceRpcClient,
   CurrentAnchorSurfaceRpcClient,
@@ -164,6 +166,162 @@ describe("current anchor surface core-host link", () => {
     await expect(client.request("session.list", {})).rejects.toThrow(
       "值班设备暂时离线，请稍后重试",
     );
+    await client.close();
+  });
+
+  it("deducts surface client bootstrap and anchor peer-ready wait from conversation.program.result waitMs", async () => {
+    const observedWaitMs: number[] = [];
+    let peerReady = false;
+    const control = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      currentTrust: () => trust("device:anchor"),
+      connections: {
+        has: (id: string) => id === "device:anchor" && peerReady,
+        client: () => ({
+          request: async (serviceId: string, payload: Uint8Array) => {
+            expect(serviceId).toBe(PROGRAM_CONVERSATION_MESH_SERVICE);
+            const cmd = JSON.parse(Buffer.from(payload).toString("utf8")) as {
+              params: { conversationId: string; requestId: string; waitMs?: number };
+            };
+            observedWaitMs.push(cmd.params.waitMs ?? -1);
+            return Buffer.from(
+              JSON.stringify({
+                v: 1,
+                ok: true,
+                result: {
+                  v: 1,
+                  state: "pending",
+                  conversationId: cmd.params.conversationId,
+                  requestId: cmd.params.requestId,
+                  runId: "run-wait-check",
+                  runState: "running",
+                },
+              }),
+            );
+          },
+        }),
+      },
+    };
+    const client = new CurrentAnchorSurfaceRpcClient(
+      "device:surface",
+      control as never,
+      { stopStorageMaintenance: vi.fn() },
+    );
+    await client.connect();
+
+    // Case 1: peer-ready wait (~180ms) exceeds caller waitMs (80ms) -> downstream receives waitMs === 0 immediately on connect
+    setTimeout(() => {
+      peerReady = true;
+    }, 180);
+    const resExhausted = await client.request("conversation.program.result", {
+      conversationId: "default",
+      requestId: "req-wait-exhausted",
+      waitMs: 80,
+    });
+    expect(resExhausted).toMatchObject({ state: "pending", runId: "run-wait-check" });
+    expect(observedWaitMs[0]).toBe(0);
+
+    // Case 2: peer-ready wait (~140ms) + facade getClient bootstrap (~80ms) both deduct from caller waitMs (650ms)
+    peerReady = false;
+    const facade = new RpcProgramConversationFacade({
+      getClient: async () => {
+        await new Promise((r) => setTimeout(r, 80));
+        setTimeout(() => {
+          peerReady = true;
+        }, 140);
+        return client;
+      },
+      onNotification: () => () => {},
+    } as never);
+    const resRemaining = await facade.result({
+      conversationId: "default",
+      requestId: "req-wait-remaining",
+      waitMs: 650,
+    });
+    expect(resRemaining).toMatchObject({ state: "pending", runId: "run-wait-check" });
+    expect(observedWaitMs[1]).toBeGreaterThan(0);
+    expect(observedWaitMs[1]).toBeLessThanOrEqual(460);
+
+    // Case 3: requestEncoded deducts local queue drain wait (behind an in-flight list request) for both exhausted and remaining budgets
+    peerReady = true;
+    for (const [budget, expectZero] of [
+      [120, true],
+      [750, false],
+    ] as const) {
+      const listEntered = Promise.withResolvers<void>();
+      const releaseList = Promise.withResolvers<void>();
+      const encodedObserved: number[] = [];
+      const drainClient = new CurrentAnchorSurfaceRpcClient(
+        "device:surface",
+        {
+          start: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+          currentTrust: () => trust("device:anchor"),
+          connections: {
+            has: () => true,
+            client: () => ({
+              request: async (_serviceId: string, payload: Uint8Array) => {
+                const cmd = JSON.parse(Buffer.from(payload).toString("utf8")) as {
+                  action: string;
+                  params: { conversationId?: string; requestId?: string; waitMs?: number };
+                };
+                if (cmd.action === "list") {
+                  listEntered.resolve();
+                  await releaseList.promise;
+                  return Buffer.from(
+                    JSON.stringify({ v: 1, ok: true, result: { entries: [], partial: false } }),
+                  );
+                }
+                encodedObserved.push(cmd.params.waitMs ?? -1);
+                return Buffer.from(
+                  JSON.stringify({
+                    v: 1,
+                    ok: true,
+                    result: {
+                      v: 1,
+                      state: "pending",
+                      conversationId: cmd.params.conversationId,
+                      requestId: cmd.params.requestId,
+                      runId: "run-encoded",
+                      runState: "running",
+                    },
+                  }),
+                );
+              },
+            }),
+          },
+        } as never,
+        { stopStorageMaintenance: vi.fn() },
+      );
+      await drainClient.connect();
+      const inFlightList = drainClient.request("conversation.program.list", {});
+      await listEntered.promise;
+      const bytes = Buffer.from(
+        JSON.stringify({ conversationId: "default", requestId: "req-enc", waitMs: budget }),
+      );
+      const source = {
+        byteLength: bytes.length,
+        open: () => ({
+          read: async (offset: number, max: number) => bytes.subarray(offset, offset + max),
+          release: () => {},
+        }),
+      };
+      const encodedPromise = drainClient.requestEncoded("conversation.program.result", source);
+      await new Promise((r) => setTimeout(r, 320));
+      releaseList.resolve();
+      await inFlightList;
+      const encodedOut = await encodedPromise;
+      expect(encodedOut).toMatchObject({ state: "pending", runId: "run-encoded" });
+      if (expectZero) {
+        expect(encodedObserved[0]).toBe(0);
+      } else {
+        expect(encodedObserved[0]).toBeGreaterThan(0);
+        expect(encodedObserved[0]).toBeLessThanOrEqual(450);
+      }
+      await drainClient.close();
+    }
+
     await client.close();
   });
 });

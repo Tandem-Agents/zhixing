@@ -117,7 +117,7 @@ flowchart TB
 ### 交互表面、网关绑定与客户端接入边界
 
 - **终端四进程隔离**：默认交互终端拆分为四个进程——**入口监管进程（S）**负责环境准入、子进程拉起与退出收束；**Node 应用适配进程（N）**通过已认证连接消费产品接口与会话流，维护有界显示投影；**终端界面进程（U）**基于 OpenTUI/Solid 只消费精简界面协议负责渲染与输入，不持凭据、不访问业务存储；**原生恢复进程（R）**保存初始终端模式并在全部自有写者退出后兜底还原终端状态。关闭前台终端不会终止独立运行的 `PersistentApplicationHost`。
-- **服务端网关双通路注入**：`@zhixing-ai/server` 不持有业务规则，按宿主角色接收构造期注入的 `ProductApiDispatcher`（主控汇集按宿主拓扑与已装配能力接入的各领域接口及日志查询，如设备关系管理仅在建立多机信任运行时后接入；纯执行宿主的本机服务仅暴露授权日志查询）以及受限专用绑定（主对话流式执行与历史回放、远程确认桥、外部通道回调与入站路由、分流本机与远端主控对话的第一方跨机会话路由，以及宿主/备份只读状态快照）。监听端点在处理器、连接管理与关闭回调全部就绪后才从 `503` 激活服务。
+- **服务端网关双通路注入**：`@zhixing-ai/server` 不持有业务规则，按宿主角色接收构造期注入的 `ProductApiDispatcher`（主控汇集按宿主拓扑与已装配能力接入的各领域接口及日志查询，如设备关系管理仅在建立多机信任运行时后接入；纯执行宿主的本机服务仅暴露授权日志查询）以及受限专用绑定（主对话流式执行与历史回放、面向本机程序与跨智能体协作的窄会话端口 `conversation.program.*`、远程确认桥、外部通道回调与入站路由、分流本机与远端主控对话的第一方跨机会话路由，以及宿主/备份只读状态快照）。监听端点在处理器、连接管理与关闭回调全部就绪后才从 `503` 激活服务。
 - **新表面接入现行合同**：新增第一方客户端表面（如桌面或 Web 界面）应复用 `@zhixing-ai/rpc` 客户端绑定连接 `@zhixing-ai/server`——通用业务查询/命令/事实事件订阅走密封 `ProductApiDispatcher`，交互流与历史回放走 `session-wire` 会话绑定，权限确认走 `confirmation-bridge` 确认桥，断线缺口后重查权威状态；新增外部聊天平台则按 `Channel` 受管扩展协议接入。任何表面均不得自建业务状态机或绕开上述公开绑定直连内部状态。
 
 ### 对话执行闭环、契约推进与执行拓扑透明
@@ -147,7 +147,7 @@ flowchart TB
 
 | 领域与管理责任 | 合同与应用服务入口 | 耐久机制与物理适配落点 |
 |---|---|---|
-| Conversation（对话与跨对话通信） | `@zhixing-ai/core/conversation/application`、`conversation` | `@zhixing-ai/owner-kernel` 承载会话 `owner` 权威、运行提交与分派；RPC、终端与通道只做表面绑定 |
+| Conversation（对话、跨对话与本机程序通信） | `@zhixing-ai/core/conversation/application`、`conversation` | `@zhixing-ai/owner-kernel` 承载会话 `owner` 权威、运行提交与分派；RPC、终端、通道与原生 `zz conversation`（`conversation.program.*`）只做表面绑定 |
 | Workspace Administration（工作区管理） | `@zhixing-ai/core/environment/workspace-administration` | Core 持久绑定端口与 CLI 本机工作区管理宿主通道（目录授权、探测及重置适配，不经远端 Product API 暴露） |
 | Workscene（工作场景） | `@zhixing-ai/core/workscene/application` | 维护场景与工作区/会话绑定关系，在主控组合边界生成运行与工具投影 |
 | Schedule（日程与定时调度） | `@zhixing-ai/core/scheduler/application` | `@zhixing-ai/owner-kernel` 承载全局调度权威与耐久任务（作业）账本，CLI 提供触发效果适配 |

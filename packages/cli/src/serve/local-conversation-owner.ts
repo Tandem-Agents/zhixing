@@ -179,6 +179,10 @@ export interface LocalConversationOwnerPort {
   readonly recoveryPage: ConversationProtocolRuntime['recoveryPage'];
   readonly finalHistory: ConversationProtocolRuntime["finalHistory"];
   readonly pendingInteractions: DurableConversationInteractionObserver["pendingInteractions"];
+  readonly inspectProgramInputReceipt: ConversationProtocolRuntime["inspectProgramInputReceipt"];
+  readonly hasOpenAdvancementSession: ConversationProtocolRuntime["hasOpenAdvancementSession"];
+  readonly conversationAdoptionStatus: ConversationProtocolRuntime["conversationAdoptionStatus"];
+  readonly isShuttingDown: () => boolean;
   readonly rubricCatalog: Readonly<
     Pick<GlobalRubricCatalog, "listForMatching" | "load">
   >;
@@ -679,6 +683,15 @@ export class LocalConversationOwnerAssembly {
       communicationMessages: Object.freeze({
         inspect: (id: string, messageId: string) => this.#protocol.inspectMessage(id, messageId),
         inputsOutsideHistory: (id: string) => this.#protocol.messageInputsOutsideHistory(id),
+        programOriginRuns: async (id: string, runIds: readonly string[]) => {
+          const matched: string[] = [];
+          for (const runId of runIds) {
+            if (await this.#protocol.isProgramOriginRun(id, runId)) {
+              matched.push(runId);
+            }
+          }
+          return matched;
+        },
       }),
       taskLists,
       createAgentTurnExecution: (turn) => {
@@ -823,6 +836,16 @@ export class LocalConversationOwnerAssembly {
         }
         return visible;
       },
+      inspectProgramInputReceipt: (conversationId, receiptInput) =>
+        this.#protocol.inspectProgramInputReceipt(conversationId, receiptInput),
+      hasOpenAdvancementSession: (conversationId) =>
+        this.#protocol.hasOpenAdvancementSession(conversationId),
+      conversationAdoptionStatus: (conversationId) =>
+        this.#protocol.conversationAdoptionStatus(conversationId),
+      isShuttingDown: () =>
+        this.#state !== "ready" ||
+        this.#hostStopOperationId !== undefined ||
+        this.#protocol.isShuttingDown(),
       rubricCatalog: rubricReadPort,
     });
   }
@@ -1049,6 +1072,8 @@ export class LocalConversationOwnerAssembly {
           return items;
         },
         exists: conversationExists,
+        isProgramOriginRun: (conversationId, runId) =>
+          protocol.isProgramOriginRun(conversationId, runId),
         readRunsReverse: async (conversationId, page) => {
           const result = await protocol.sessionState.readTranscriptTail(
             conversationId,
@@ -1078,6 +1103,8 @@ export class LocalConversationOwnerAssembly {
       },
       review: reviews,
       results: reviewResults,
+      isProgramOriginRun: (conversationId, runId) =>
+        protocol.isProgramOriginRun(conversationId, runId),
     });
 
     auxiliaryRecoveryAssembly.complete(async (conversationId) => {
@@ -1223,7 +1250,7 @@ export class LocalConversationOwnerAssembly {
     ) return true;
     const closure = await this.#protocol.pendingClosureWork();
     if (
-      closure.pendingAdmittedRuns > 0 ||
+      closure.continuableAdmittedRuns > 0 ||
       closure.pendingFinals > 0 ||
       closure.pendingAssignments > 0 ||
       closure.recoveryBacklog > 0 ||
@@ -1242,6 +1269,12 @@ export class LocalConversationOwnerAssembly {
       if (intents.some((intent) => intent.status === "pending")) return true;
     }
     return false;
+  }
+
+  async hasSettledUncertainClosureWork(): Promise<boolean> {
+    this.#requireReady();
+    const closure = await this.#protocol.pendingClosureWork();
+    return closure.pendingAdmittedRuns > closure.continuableAdmittedRuns;
   }
 
   /**
@@ -1700,17 +1733,34 @@ export class LocalConversationOwnerAssembly {
     let pendingAssignments = 0;
     let leases = 0;
     let deferredIntents = 0;
+    const closures = await this.#closureByConversation(
+      conversations.map((item) => item.conversationId),
+    );
+    const intentsByConversation = new Map<
+      string,
+      Awaited<ReturnType<DeferredGlobalIntentRepository["list"]>>
+    >();
+    const intentBatchSize = 16;
+    for (let offset = 0; offset < conversations.length; offset += intentBatchSize) {
+      const slice = conversations.slice(offset, offset + intentBatchSize);
+      const batch = await Promise.all(
+        slice.map(async ({ conversationId }) => [
+          conversationId,
+          await this.#intents.list(conversationId, hostContext("device-removal-preflight")),
+        ] as const),
+      );
+      for (const [conversationId, list] of batch) {
+        intentsByConversation.set(conversationId, list);
+      }
+    }
     for (const conversation of conversations) {
       ownerItems.push(Object.freeze({
         owner: "conversation",
         id: conversation.conversationId,
         revision: protocolDigest("ExecutorRemovalConversation", 1, conversation),
       }));
-      const closure = await this.#protocol.pendingClosureWork(conversation.conversationId);
-      const intents = await this.#intents.list(
-        conversation.conversationId,
-        hostContext("device-removal-preflight"),
-      );
+      const closure = closures.get(conversation.conversationId)!;
+      const intents = intentsByConversation.get(conversation.conversationId)!;
       pendingFinals += closure.pendingFinals;
       pendingAssignments += closure.pendingAssignments;
       leases += closure.activeLocalLeases;
@@ -1863,7 +1913,9 @@ export class LocalConversationOwnerAssembly {
     // 恢复循环在跑的一轮会给每个会话记一条积压：整段核对（逐会话与最后的 preflight 读回）都在
     // 不发起新一轮的稳定边界内进行
     await this.#protocol.whileRecoveryPaused(async () => {
-      for (const conversationId of snapshot.conversations.map((item) => item.conversationId)) {
+      const targetIds = snapshot.conversations.map((item) => item.conversationId);
+      const closures = await this.#closureByConversation(targetIds);
+      for (const conversationId of targetIds) {
         const session = await this.#protocol.sessionAuthorityState(conversationId);
         if (mode === "destroy") {
           if (!session.deleted || session.pendingLifecycleProjections !== 0) {
@@ -1875,7 +1927,7 @@ export class LocalConversationOwnerAssembly {
             throw new Error("Device removal still owns a local conversation authority");
           }
         }
-        const closure = await this.#protocol.pendingClosureWork(conversationId);
+        const closure = closures.get(conversationId)!;
         if (
           closure.pendingAdmittedRuns !== 0 ||
           closure.pendingFinals !== 0 ||
@@ -1896,6 +1948,30 @@ export class LocalConversationOwnerAssembly {
         throw new Error("Device removal still owns frozen accepted work");
       }
     });
+  }
+
+  async #closureByConversation(
+    conversationIds: readonly string[],
+  ): Promise<ReadonlyMap<string, Awaited<ReturnType<ConversationProtocolRuntime["pendingClosureWork"]>>>> {
+    if (conversationIds.length === 0) return new Map();
+    const batchFn = (
+      this.#protocol as ConversationProtocolRuntime & {
+        pendingClosureWorkByConversation?: ConversationProtocolRuntime["pendingClosureWorkByConversation"];
+      }
+    ).pendingClosureWorkByConversation;
+    if (typeof batchFn === "function") {
+      return await batchFn.call(this.#protocol, conversationIds, {
+        includeContinuable: false,
+      });
+    }
+    const map = new Map<
+      string,
+      Awaited<ReturnType<ConversationProtocolRuntime["pendingClosureWork"]>>
+    >();
+    for (const id of conversationIds) {
+      map.set(id, await this.#protocol.pendingClosureWork(id));
+    }
+    return map;
   }
 
   #requireRemovalSnapshot(operationId: string): LocalConversationRemovalSnapshot {

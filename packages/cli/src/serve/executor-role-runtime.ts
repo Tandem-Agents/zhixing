@@ -44,6 +44,7 @@ import { createLogAccess, createLocalLogProductApi } from "../logging/access.js"
 import { createRuntimeLogTools } from "../logging/tools.js";
 import { createExtensionStatusObserver } from "./extension-continuation.js";
 import { createLocalConversationCommunicationBinding } from "./conversation-communication-binding.js";
+import { createExecutorProgramConversationApplication } from "./program-conversation-host.js";
 import { McpManagementApplication } from "@zhixing-ai/core/mcp-management";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
@@ -825,6 +826,27 @@ async function runExecutorProcess(
       onTrustApplied,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
+    let executorStopping = false;
+    const executorProgramConversation = createExecutorProgramConversationApplication({
+      deviceId: authority.deviceId,
+      currentAnchorDeviceId,
+      local: {
+        owner: localConversationOwner.port(),
+        isStopping: () =>
+          executorStopping || localConversationOwner!.port().isShuttingDown(),
+      },
+      anchorRemote: () => mesh?.programConversationEntryForAnchor(),
+      isAnchorReachable: () => {
+        const anchorId = currentAnchorDeviceId();
+        return anchorId !== undefined && Boolean(mesh?.connections.has(anchorId));
+      },
+    });
+    mesh.bindProgramConversation({
+      localOwned: executorProgramConversation.localOwned,
+      localProgram: executorProgramConversation,
+      isStopping: () =>
+        executorStopping || localConversationOwner!.port().isShuttingDown(),
+    });
     const localCommunication = createLocalConversationCommunicationBinding(localConversationOwner.port());
     const communication = mesh.routeConversationCommunication(localCommunication);
     communicationHandle.bind(communication);
@@ -1007,6 +1029,7 @@ async function runExecutorProcess(
       },
       runtime: {
         closeAdmission: async (operationId) => {
+          executorStopping = true;
           jobOwnerAssembly!.pauseAccepting();
           await localConversationOwner!.closeHostStopAdmission(operationId);
         },
@@ -1050,6 +1073,7 @@ async function runExecutorProcess(
       jobOwnerAssembly.resumeAccepting();
       mesh.resumeAcceptingAfterLifecycle();
       localConversationOwner.resumeRecoveryAfterLifecycle();
+      executorStopping = false;
     }
     const token = await loadOrCreateToken(getDefaultTokenPath(zhixingHome));
     const localConversationRpc = new LocalConversationRpcRouter({
@@ -1127,6 +1151,7 @@ async function runExecutorProcess(
       version: ZHIXING_CLI_VERSION,
       token: token.token,
       conversationRpc,
+      programConversation: executorProgramConversation,
       applyModelConfiguration,
       modelCatalog,
       lifecycleShutdown: stopCoordinator,

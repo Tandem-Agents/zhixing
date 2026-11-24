@@ -219,6 +219,7 @@ zz logs policy
 - `zz stop`：停止知行；显式维护前使用 `zz stop --maintenance`。
 - `zz doctor`：只读检查本机运行、托管、配置和恢复状态。
 - `zz logs`：查看本机运行日志、占用与保留策略，支持离线查阅。
+- `zz conversation`：列出、新建、读取对话或向指定对话发送消息并取回专属回复。
 - `zz app`：管理应用生命周期；`zz app remove` 安全停用并准备 npm 卸载，保留全部用户数据。
 - `zz pair`：与第二台设备配对；出码与加入都沿同一引导完成。
 - `zz device`：查看或永久移除已配对设备。

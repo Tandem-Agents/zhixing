@@ -1,5 +1,7 @@
+import { rm } from "node:fs/promises";
+import path from "node:path";
 import { localConversationId } from "@zhixing-ai/core/conversation";
-import { FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
+import { durableProjectionDirectoryName, FileAuthorityCommitLog } from '@zhixing-ai/core/authority';
 import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import { DeferredGlobalIntentRepository } from "@zhixing-ai/owner-kernel/deferred-global-intents";
 import { describe, expect, it, vi } from "vitest";
@@ -892,6 +894,52 @@ describe("local conversation owner lifecycle", () => {
         await expect(
           restarted.port.finalHistory(conversationId, 0),
         ).resolves.toEqual([]);
+      } finally {
+        await restarted.assembly.close();
+        await restarted.authority.stopStorageMaintenance();
+      }
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
+    "cold-restarts an executor-only local owner when conversation-run-state-v1 replays local lease activations before any journal opens",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({
+        profile: "executor-only",
+      });
+      const logRoot = fixture.authority.executorLog.rootDir;
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      await fixture.runTurn({
+        conversationId,
+        text: "verify local resource authority on cold start",
+        turnId: "turn-local-activation-cold-boot",
+      });
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+
+      for (const id of ["conversation-run-state-v1", "advancement-recovery-v1"]) {
+        await rm(
+          path.join(logRoot, "projections", durableProjectionDirectoryName(id)),
+          { recursive: true, force: true },
+        );
+      }
+
+      const restarted = await createLocalOwnerAssemblyFixture({
+        profile: "executor-only",
+        home: fixture.home,
+      });
+      try {
+        await expect(restarted.assembly.start()).resolves.toBeUndefined();
+        expect(await restarted.port.listConversations()).toEqual([conversationId]);
+        const tail = await restarted.port.sessionState.readTranscriptTail(
+          conversationId,
+          hostContext("cold-boot-tail"),
+          undefined,
+          10,
+        );
+        expect(tail.records.length).toBe(1);
       } finally {
         await restarted.assembly.close();
         await restarted.authority.stopStorageMaintenance();

@@ -15,6 +15,26 @@
         "requiresAuth": true
       },
       {
+        "name": "conversation.program.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.read",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.result",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.send",
+        "requiresAuth": true
+      },
+      {
         "name": "delivery.resolve",
         "requiresAuth": true
       },
@@ -338,6 +358,26 @@
       },
       {
         "name": "confirmation.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.read",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.result",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.send",
         "requiresAuth": true
       },
       {
@@ -667,6 +707,26 @@
         "requiresAuth": true
       },
       {
+        "name": "conversation.program.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.read",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.result",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.send",
+        "requiresAuth": true
+      },
+      {
         "name": "delivery.resolve",
         "requiresAuth": true
       },
@@ -990,6 +1050,26 @@
       },
       {
         "name": "confirmation.resolve",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.new",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.read",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.result",
+        "requiresAuth": true
+      },
+      {
+        "name": "conversation.program.send",
         "requiresAuth": true
       },
       {
@@ -1459,6 +1539,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -1500,6 +1586,11 @@
           "rpc:auth",
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
+          "rpc:conversation.program.list",
+          "rpc:conversation.program.new",
+          "rpc:conversation.program.read",
+          "rpc:conversation.program.result",
+          "rpc:conversation.program.send",
           "rpc:delivery.resolve",
           "rpc:device.continue",
           "rpc:device.list",
@@ -1677,6 +1768,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -1718,6 +1815,11 @@
           "rpc:auth",
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
+          "rpc:conversation.program.list",
+          "rpc:conversation.program.new",
+          "rpc:conversation.program.read",
+          "rpc:conversation.program.result",
+          "rpc:conversation.program.send",
           "rpc:delivery.resolve",
           "rpc:device.continue",
           "rpc:device.list",
@@ -1887,6 +1989,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -1921,6 +2029,11 @@
           "rpc:auth",
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
+          "rpc:conversation.program.list",
+          "rpc:conversation.program.new",
+          "rpc:conversation.program.read",
+          "rpc:conversation.program.result",
+          "rpc:conversation.program.send",
           "rpc:delivery.resolve",
           "rpc:device.continue",
           "rpc:device.list",
@@ -2077,6 +2190,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -2111,6 +2230,11 @@
           "rpc:auth",
           "rpc:confirmation.list",
           "rpc:confirmation.resolve",
+          "rpc:conversation.program.list",
+          "rpc:conversation.program.new",
+          "rpc:conversation.program.read",
+          "rpc:conversation.program.result",
+          "rpc:conversation.program.send",
           "rpc:delivery.resolve",
           "rpc:device.continue",
           "rpc:device.list",
@@ -2236,6 +2360,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -2336,6 +2466,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -2433,6 +2569,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -2511,6 +2653,12 @@
           "cli:zhixing backup setup",
           "cli:zhixing backup status",
           "cli:zhixing backup verify",
+          "cli:zhixing conversation",
+          "cli:zhixing conversation list",
+          "cli:zhixing conversation new",
+          "cli:zhixing conversation read",
+          "cli:zhixing conversation result",
+          "cli:zhixing conversation send",
           "cli:zhixing device",
           "cli:zhixing device continue",
           "cli:zhixing device list",
@@ -3093,6 +3241,67 @@
         }
       },
       {
+        "path": "zhixing conversation",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing conversation",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing conversation list",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing conversation list",
+        "category": "cli",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "path": "zhixing conversation new",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing conversation new",
+        "category": "cli",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "path": "zhixing conversation read",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing conversation read",
+        "category": "cli",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "path": "zhixing conversation result",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing conversation result",
+        "category": "cli",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "path": "zhixing conversation send",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing conversation send",
+        "category": "cli",
+        "target": {
+          "rowId": "session-send"
+        }
+      },
+      {
         "path": "zhixing device",
         "hidden": false,
         "hasAction": false,
@@ -3496,6 +3705,51 @@
         "category": "rpc",
         "target": {
           "rowId": "confirmation-resolve"
+        }
+      },
+      {
+        "name": "conversation.program.list",
+        "requiresAuth": true,
+        "key": "rpc:conversation.program.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "name": "conversation.program.new",
+        "requiresAuth": true,
+        "key": "rpc:conversation.program.new",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-manage"
+        }
+      },
+      {
+        "name": "conversation.program.read",
+        "requiresAuth": true,
+        "key": "rpc:conversation.program.read",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "conversation.program.result",
+        "requiresAuth": true,
+        "key": "rpc:conversation.program.result",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "conversation.program.send",
+        "requiresAuth": true,
+        "key": "rpc:conversation.program.send",
+        "category": "rpc",
+        "target": {
+          "rowId": "session-send"
         }
       },
       {

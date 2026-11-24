@@ -19,6 +19,7 @@ import type {
   DeliveryStatusNotice,
 } from "@zhixing-ai/core/delivery";
 import type { ProductApiDispatcher } from "@zhixing-ai/core/product-api";
+import type { ProgramConversationApplication } from "@zhixing-ai/core/conversation/application";
 import type { BackupRecoveryPublicStatus } from "@zhixing-ai/core/backup-recovery/application";
 import type {
   ConversationStatusNotice,
@@ -374,6 +375,8 @@ export interface ServerContext {
   lifecycleShutdown?: LifecycleShutdownAdapter;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
+  /** 本机外部程序/智能体窄对话应用端口（仅回环入口可调）。 */
+  programConversation?: ProgramConversationApplication;
   /** 宿主前台活动：请求在途与向接入面推送都计入，后台维护据此让路。未注入时不观察。 */
   foregroundActivity?: ForegroundActivityPort;
   /** 实际监听的地址（startServer 监听就绪后回填） */
@@ -416,6 +419,7 @@ export interface CreateContextOptions {
   sessionModelSelection?: ServerContext["sessionModelSelection"];
   lifecycleShutdown?: LifecycleShutdownAdapter;
   conversationRpc?: FirstPartyConversationRpcRouter;
+  programConversation?: ProgramConversationApplication;
   foregroundActivity?: ForegroundActivityPort;
 }
 
@@ -442,6 +446,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     sessionModelSelection: opts.sessionModelSelection,
     lifecycleShutdown: opts.lifecycleShutdown,
     conversationRpc: opts.conversationRpc,
+    programConversation: opts.programConversation,
     foregroundActivity: opts.foregroundActivity,
   };
 }

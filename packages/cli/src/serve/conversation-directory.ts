@@ -8,7 +8,7 @@
  * main 列表不混场景对话)。场景库句柄惰性建、按 sceneId 缓存。
  */
 
-import { parseConversationId, type Conversation, type ConversationRevealIntent, type IConversationRepository } from "@zhixing-ai/core/conversation";
+import { parseConversationId, worksceneConversationId, type Conversation, type ConversationRevealIntent, type IConversationRepository } from "@zhixing-ai/core/conversation";
 import { readRunsReverse, type RunRecordWithRef, type TranscriptReadSource } from "@zhixing-ai/core/transcript";
 import type {
   ConversationClearProjectionPort,
@@ -45,7 +45,15 @@ export function createConversationDirectory(deps: {
 }): ConversationDirectoryStorage &
   Pick<ConversationIdentityLifecycleMechanism, "exists" | "ensureTranscript"> &
   Pick<ConversationClearProjectionPort, "clearStoredView"> & {
-    ensure(id: string, options?: ConversationShellOptions): Promise<Conversation>;
+    ensure(id: string, options?: ConversationShellOptions & { readonly name?: string }): Promise<Conversation>;
+    getStoredConversation(id: string): Promise<Conversation | null>;
+    listWorksceneConversations(sceneId: string): Promise<readonly {
+      readonly conversationId: string;
+      readonly localId: string;
+      readonly name: string;
+      readonly createdAt: string;
+      readonly lastActiveAt: string;
+    }[]>;
     reveal(id: string): Promise<void>;
     beginReveal(id: string, intent: ConversationRevealIntent): Promise<boolean>;
     abandonReveal(id: string, intent: ConversationRevealIntent): Promise<void>;
@@ -89,7 +97,11 @@ export function createConversationDirectory(deps: {
     },
     ...(deps.user.repo.listPage ? { async listPage(page: import('@zhixing-ai/core/conversation/application').ConversationDirectoryPageRequest) {
       const result = await deps.user.repo.listPage!(page);
-      return { records: result.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })), next: result.next };
+      return {
+        records: result.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })),
+        next: result.next,
+        ...(result.version ? { version: result.version } : {}),
+      };
     } } : {}),
     listForAdvancement() {
       // 恢复是责任型读取：只为失败回执而建的会话同样要看到
@@ -119,9 +131,30 @@ export function createConversationDirectory(deps: {
     async ensure(id, options): Promise<Conversation> {
       const h = handlesFor(id);
       const { scope } = parseConversationId(id);
-      const ensured = await h.repo.ensure(h.localId, { scope, ...(options?.createdFor ? { createdFor: options.createdFor } : {}) });
+      const ensured = await h.repo.ensure(h.localId, {
+        scope,
+        ...(options?.name ? { name: options.name } : {}),
+        ...(options?.createdFor ? { createdFor: options.createdFor } : {}),
+      });
       await h.transcript.init(h.localId);
       return ensured;
+    },
+
+    async getStoredConversation(id): Promise<Conversation | null> {
+      const h = handlesFor(id);
+      return h.repo.get(h.localId);
+    },
+
+    async listWorksceneConversations(sceneId) {
+      const h = handlesFor(worksceneConversationId(sceneId, "primary"));
+      const convs = await h.repo.list();
+      return convs.map((conv) => ({
+        conversationId: worksceneConversationId(sceneId, conv.id),
+        localId: conv.id,
+        name: conv.name,
+        createdAt: conv.createdAt,
+        lastActiveAt: conv.lastActiveAt,
+      }));
     },
 
     async reveal(id): Promise<void> {

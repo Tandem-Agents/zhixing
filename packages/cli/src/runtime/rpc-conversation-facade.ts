@@ -13,10 +13,22 @@
  * 过滤归调用方,facade 对此零知识。
  */
 
-import type {
-  ConversationUncertainResolutionResult,
-  ConversationCommunicationHistory as RunsPage,
-  ConversationHistoryCursor as RunsPageCursor,
+import {
+  PROGRAM_MAX_WAIT_SLICE_MS,
+  type ConversationUncertainResolutionResult,
+  type ConversationCommunicationHistory as RunsPage,
+  type ConversationHistoryCursor as RunsPageCursor,
+  type ProgramConversationApplication,
+  type ProgramConversationListInput,
+  type ProgramConversationListResult,
+  type ProgramConversationNewInput,
+  type ProgramConversationNewResult,
+  type ProgramConversationReadInput,
+  type ProgramConversationReadResult,
+  type ProgramConversationResultInput,
+  type ProgramConversationResultOutput,
+  type ProgramConversationSendInput,
+  type ProgramConversationSendResult,
 } from "@zhixing-ai/core/conversation/application";
 import type {
   SessionInputReceipt,
@@ -816,6 +828,102 @@ export class RpcConversationFacade {
     return this.link.onNotification(
       SESSION_NOTIFICATIONS.postTurnControlIntent,
       (p) => handler(p as SessionPostTurnControlIntentPayload),
+    );
+  }
+}
+
+export class RpcProgramConversationFacade
+  implements ProgramConversationApplication
+{
+  constructor(private readonly link: CoreHostRpcLink) {}
+
+  async ensureConnected(): Promise<void> {
+    await this.link.getClient();
+  }
+
+  async maxSendParamsBytes(): Promise<number | undefined> {
+    const client = await this.link.getClient();
+    return client.maximumRequestSourceBytes?.("conversation.program.send");
+  }
+
+  async list(
+    input: ProgramConversationListInput,
+    signal?: AbortSignal,
+  ): Promise<ProgramConversationListResult> {
+    const client = await this.link.getClient();
+    return client.request<ProgramConversationListResult>(
+      "conversation.program.list",
+      input,
+      signal ? { signal } : undefined,
+    );
+  }
+
+  async create(
+    input: ProgramConversationNewInput,
+    signal?: AbortSignal,
+  ): Promise<ProgramConversationNewResult> {
+    const client = await this.link.getClient();
+    return client.request<ProgramConversationNewResult>(
+      "conversation.program.new",
+      {
+        requestId: input.requestId,
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.sceneId !== undefined ? { sceneId: input.sceneId } : {}),
+      },
+      signal ? { signal } : undefined,
+    );
+  }
+
+  async read(
+    input: ProgramConversationReadInput,
+    signal?: AbortSignal,
+  ): Promise<ProgramConversationReadResult> {
+    const client = await this.link.getClient();
+    return client.request<ProgramConversationReadResult>(
+      "conversation.program.read",
+      input,
+      signal ? { signal } : undefined,
+    );
+  }
+
+  async send(
+    input: ProgramConversationSendInput,
+    signal?: AbortSignal,
+  ): Promise<ProgramConversationSendResult> {
+    const client = await this.link.getClient();
+    return client.request<ProgramConversationSendResult>(
+      "conversation.program.send",
+      input,
+      signal ? { signal } : undefined,
+    );
+  }
+
+  async result(
+    input: ProgramConversationResultInput,
+    signal?: AbortSignal,
+  ): Promise<ProgramConversationResultOutput> {
+    const startedAt = Date.now();
+    const client = await this.link.getClient();
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+    const adjustedInput: ProgramConversationResultInput =
+      typeof input.waitMs === "number"
+        ? {
+            ...input,
+            waitMs: Math.max(
+              0,
+              Math.min(
+                PROGRAM_MAX_WAIT_SLICE_MS,
+                Math.trunc(input.waitMs - elapsedMs),
+              ),
+            ),
+          }
+        : input;
+    const deadline =
+      Date.now() + Math.max(25_000, (adjustedInput.waitMs ?? 0) + 10_000);
+    return client.request<ProgramConversationResultOutput>(
+      "conversation.program.result",
+      adjustedInput,
+      { ...(signal ? { signal } : {}), deadline },
     );
   }
 }

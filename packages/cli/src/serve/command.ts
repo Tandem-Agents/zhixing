@@ -55,6 +55,7 @@ import {
   ConversationDirectoryApplicationService,
   createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
+  isExtendedConversationDiscoverRequest,
 } from "@zhixing-ai/core/conversation/application";
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
@@ -106,6 +107,7 @@ import { createChannelExtensionReadiness } from "../runtime/extensions/channel-r
 import {
   createWorksceneProductApiContribution,
   projectWorksceneConversationRuntime,
+  WORKSCENE_MANAGEMENT_LIST_QUERY,
   WORKSCENE_PRODUCT_API_EXACT_SET,
   WorksceneApplicationError,
   type WorksceneWorkspaceReference,
@@ -219,7 +221,7 @@ import { definePostAdoptionReviewLifecycleContribution } from "./post-adoption-r
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
-import { createIdleExitGate, shouldIdleExit } from "./idle-policy.js";
+import { createAnchorHostIdleCheck } from "./idle-policy.js";
 import type {
   AdvancementConversationComposition,
   PreparedChannelMechanism,
@@ -336,6 +338,7 @@ import {
 import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
 import { FOREGROUND_QUIET_MS } from "./device-capacity-runtime.js";
 import { AuthorityIdleMaintenance } from "./authority-idle-maintenance.js";
+import { createHostProgramConversationApplication } from "./program-conversation-host.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -424,6 +427,7 @@ async function runServerProcess(
   );
   let startupRegistry: CleanupRegistry | undefined;
   let runner: RunningServer | undefined;
+  const activityUnsubscribes: Array<() => void> = [];
   try {
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = bootstrap.zhixingHome;
@@ -840,6 +844,11 @@ async function runServerProcess(
       executableVersion: ZHIXING_CLI_VERSION,
     },
     executorReadiness,
+    defaultConversationPermissionRules: () =>
+      permissionStorage.executionRulesFor(
+        {},
+        hostToolPermissionRuleSets(["web_fetch"]),
+      ),
     projectConversationCapabilities: projectConversationCapabilitiesForDevice,
     enableLocalExecutor: bootstrap.mesh.roles.includes("executor"),
     storageMaintenance: deviceCapacity.storage,
@@ -1065,6 +1074,10 @@ async function runServerProcess(
   // The protocol needs the coordinator before it can recover work; the
   // coordinator in turn needs the completed executor and Channel mechanisms.
   // This one-shot port remains closed until that finite construction cycle ends.
+  let hostConversationActivityGeneration = 0;
+  const bumpHostConversationActivity = () => {
+    hostConversationActivityGeneration += 1;
+  };
   const conversationLosslessDataPlane =
     createConversationLosslessDataPlaneAssemblyHandle();
   const conversationServices = await observeLogPhase(startupRecords, "create-conversation-services", () => createConversationServices({
@@ -1085,7 +1098,10 @@ async function runServerProcess(
     ...(permissionStorage.trustSediments ? { trustSediments: permissionStorage.trustSediments } : {}),
     ...(permissionStorage.trustRuleHits ? { trustRuleHits: permissionStorage.trustRuleHits } : {}),
     runtimeFactory,
-    beforeTurnAdmission: () => modelRuntimePort.ensureFreshBeforeAdmission(),
+    beforeTurnAdmission: async () => {
+      bumpHostConversationActivity();
+      await modelRuntimePort.ensureFreshBeforeAdmission();
+    },
     conversationRuntimeStorage: conversationStorage.runtime,
     confirmationHub,
     createConversationPerspectives,
@@ -1118,6 +1134,11 @@ async function runServerProcess(
     conversationCommittedViewStorage: conversationStorage.committedViews,
     taskListService: builtinExtraTools.taskListService,
   }, conversationLosslessDataPlane));
+  activityUnsubscribes.push(
+    conversationServices.conversationProtocol.onStatus(() => {
+      bumpHostConversationActivity();
+    }),
+  );
   // 启动预读：终端启动会选会话目录第一页里第一个可恢复的主对话。按同一排序与判定，在就绪前的准备间隙
   // 预读它的启动历史；只读、可丢弃，选中的不是它或来源有变化时，装载按原路径进行。任务归装配 owner：
   // 停止与启动回滚都先停下它、等目录页、元信息与历史读取收敛，然后才轮到会话存储与权威关闭。
@@ -1227,6 +1248,13 @@ async function runServerProcess(
     permissionStorage.addTrustRuleHitRecorder((hit) => jobs.owner.recordTrustRuleHit(hit));
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
   }) : undefined;
+  if (localExecutor) {
+    activityUnsubscribes.push(
+      localExecutor.owner.port().subscribeRunNotifications(() => {
+        bumpHostConversationActivity();
+      }),
+    );
+  }
   await observeLogPhase(startupRecords, "start-asset-maintenance", () => startAssetMaintenance({
     authorityRuntime,
     lifecycleContributions,
@@ -3379,17 +3407,170 @@ async function runServerProcess(
     ],
     bootstrap.bindLogs?.(PRODUCT_API_LOG_SOURCE, { scope: "storage" }),
   );
-  const conversationCommunication = createConversationCommunicationBinding({
-    directory: conversationApplication,
-    manager: boundConversations!,
-    messages: { inspect: (id, messageId) => boundConversationProtocol.inspectMessage(id, messageId), inputsOutsideHistory: id => boundConversationProtocol.messageInputsOutsideHistory(id) },
+  const hostProgramConversation = createHostProgramConversationApplication({
+    anchor: {
+      protocol: boundConversationProtocol,
+      manager: boundConversations!,
+      directory: conversationDirectory,
+      workscenes: productApi,
+      emitSessionNotification: (conversationId, method, params) => {
+        boundSessionBroadcast(conversationId, method, params);
+      },
+      isStopping: () =>
+        managedHostStopping || boundConversationProtocol.isShuttingDown(),
+      onAdmissionActivity: bumpHostConversationActivity,
+    },
+    ...(localExecutor
+      ? {
+          localExecutor: {
+            owner: localExecutor.owner.port(),
+            isStopping: () => managedHostStopping,
+            onAdmissionActivity: bumpHostConversationActivity,
+          },
+        }
+      : {}),
+    ...(meshRuntime && boundAuthorityRuntime
+      ? {
+          topology: {
+            deviceId: boundAuthorityRuntime.deviceId,
+            currentTrust: () => meshRuntime!.currentTrustSnapshot(),
+            remoteOwnedFor: (id) => meshRuntime!.programConversationOwnedFor(id),
+          },
+        }
+      : {}),
   });
-  const localCommunication = localExecutor ? createLocalConversationCommunicationBinding(localExecutor.owner.port()) : undefined;
+  meshRuntime?.bindProgramConversation({
+    anchorCoordinator: hostProgramConversation,
+    onActivity: bumpHostConversationActivity,
+    isStopping: () =>
+      managedHostStopping || boundConversationProtocol.isShuttingDown(),
+  });
+  const communicationDirectoryWithWorkscenes: import("@zhixing-ai/core/conversation/application").ConversationDirectoryApplication =
+    new Proxy(conversationApplication, {
+      get(target, prop, receiver) {
+        if (prop === "queryList") {
+          return async () => {
+            const base = await target.queryList();
+            const scenes = await productApi.query(
+              WORKSCENE_MANAGEMENT_LIST_QUERY,
+              { kind: "list" },
+            );
+            const seen = new Set(base.conversations.map((c) => c.conversationId));
+            const wsEntries: import("@zhixing-ai/core/conversation/application").ConversationDirectoryEntry[] = [];
+            for (const scene of scenes.scenes) {
+              const sceneConvs =
+                await conversationDirectory.listWorksceneConversations(scene.sceneId);
+              for (const conv of sceneConvs) {
+                if (seen.has(conv.conversationId)) continue;
+                seen.add(conv.conversationId);
+                const displayName =
+                  conv.localId === "primary" && conv.name === "primary"
+                    ? scene.name
+                    : conv.name;
+                wsEntries.push({
+                  conversationId: conv.conversationId,
+                  name: displayName,
+                  createdAt: conv.createdAt,
+                  lastActiveAt: conv.lastActiveAt,
+                  active: boundConversations!.has(conv.conversationId),
+                  busy:
+                    boundConversations!.getSession(conv.conversationId)?.busy ??
+                    false,
+                  observerCount: boundConversations!.getObserverConnectionIds(
+                    conv.conversationId,
+                  ).size,
+                  pendingCount: boundConversations!.pendingCount(
+                    conv.conversationId,
+                  ),
+                });
+              }
+            }
+            const merged = [...base.conversations, ...wsEntries].sort((a, b) => {
+              const ta = Date.parse(a.lastActiveAt);
+              const tb = Date.parse(b.lastActiveAt);
+              const na = Number.isFinite(ta) ? ta : 0;
+              const nb = Number.isFinite(tb) ? tb : 0;
+              if (nb !== na) return nb - na;
+              return a.conversationId < b.conversationId
+                ? -1
+                : a.conversationId > b.conversationId
+                  ? 1
+                  : 0;
+            });
+            return {
+              ...base,
+              conversations: merged,
+            };
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  const wrapActivityCommunication = (
+    transport: import("./conversation-tools.js").ConversationCommunicationTransport,
+  ): import("./conversation-tools.js").ConversationCommunicationTransport => {
+    const wrapped: import("./conversation-tools.js").ConversationCommunicationTransport = {
+      invoke: async (source, request) => {
+        if (request.action === "send" || request.action === "new") {
+          bumpHostConversationActivity();
+        }
+        const out = await transport.invoke(source, request);
+        if (request.action === "send" || request.action === "new") {
+          bumpHostConversationActivity();
+        }
+        return out;
+      },
+    };
+    return Object.freeze(wrapped);
+  };
+  const conversationCommunication = wrapActivityCommunication(
+    createConversationCommunicationBinding({
+      directory: communicationDirectoryWithWorkscenes,
+      manager: boundConversations!,
+      messages: {
+        inspect: (id, messageId) => boundConversationProtocol.inspectMessage(id, messageId),
+        inputsOutsideHistory: id => boundConversationProtocol.messageInputsOutsideHistory(id),
+        programOriginRuns: async (id, runIds) => {
+          const matched: string[] = [];
+          for (const runId of runIds) {
+            if (await boundConversationProtocol.isProgramOriginRun(id, runId)) {
+              matched.push(runId);
+            }
+          }
+          return matched;
+        },
+      },
+    }),
+  );
+  const localCommunication = localExecutor
+    ? wrapActivityCommunication(
+        createLocalConversationCommunicationBinding(localExecutor.owner.port()),
+      )
+    : undefined;
   const ownedCommunication = [conversationCommunication, ...(localCommunication ? [localCommunication] : [])];
   const routedCommunication: import("./conversation-tools.js").ConversationCommunicationTransport = meshRuntime
-    ? meshRuntime.routeConversationCommunication(localCommunication, conversationCommunication)
+    ? meshRuntime.routeConversationCommunication(localCommunication, conversationCommunication, hostProgramConversation)
     : { invoke: async (source, request) => {
+      if (request.action === "new") {
+        return hostProgramConversation.createForPrincipal(`conversation:${source}`, {
+          requestId: request.operationId,
+          ...(request.name !== undefined ? { name: request.name } : {}),
+          ...(request.sceneId !== undefined ? { sceneId: request.sceneId } : {}),
+        });
+      }
+      if (isExtendedConversationDiscoverRequest(request)) {
+        return hostProgramConversation.discoverInternal({
+          ...(request.query !== undefined ? { query: request.query } : {}),
+          ...(request.scope !== undefined ? { scope: request.scope } : {}),
+          ...(request.limit !== undefined ? { limit: request.limit } : {}),
+          ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
+        });
+      }
       if (request.action === "discover") return discoverConversations(ownedCommunication, source);
+      const anchorStatus = await boundConversationProtocol.conversationAdoptionStatus(request.conversationId);
+      if (anchorStatus.unavailableTransfer) throw new Error("目标对话正在接管中，请稍后重试");
+      if (anchorStatus.adopted) return conversationCommunication.invoke(source, request);
       if (localCommunication && (await localExecutor!.owner.port().listConversations()).includes(request.conversationId)) return localCommunication.invoke(source, request);
       return conversationCommunication.invoke(source, request);
     } };
@@ -3447,6 +3628,7 @@ async function runServerProcess(
         }
       : {}),
     conversation: createServerConversationBinding(boundConversations!),
+    programConversation: hostProgramConversation,
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
@@ -3967,26 +4149,37 @@ async function runServerProcess(
   // 退出走正常 shutdown(drain 在跑任务)、不改 idempotent shutdown 契约。
   if (processMode === "on-demand") {
     const IDLE_CHECK_MS = 60_000;
-    // 空闲须连续两次检查成立且期间无连接进出：避开“上一终端刚断开、新终端尚未连上”的空档
-    const idleExitGate = createIdleExitGate();
-    hostShellLifecycle.startIdleReaper(async () => {
-      const connectionChanges = runner!.server.connectionChanges;
-      const exit = idleExitGate(shouldIdleExit({
-        connectionCount: runner!.server.connections.size,
-        channelStates:
+    // 空闲须连续两次检查成立且期间无连接进出或跨信道/Mesh 新准入：避开“上一终端刚断开、新终端尚未连上”及检查间入站空档
+    hostShellLifecycle.startIdleReaper(
+      createAnchorHostIdleCheck({
+        activityGeneration: () =>
+          runner!.server.connectionChanges + hostConversationActivityGeneration,
+        connectionCount: () => runner!.server.connections.size,
+        channelStates: () =>
           boundChannelStatuses?.().map((s) => s.state) ?? [],
-        hasUserPendingWork:
-          schedulerApplication.readStatus().enabledUserTaskCount > 0,
-      }), connectionChanges);
-      if (exit) {
-        await anchorInternalStop.requestStop({ reason: "idle", strategy: "drain" });
-      }
-    }, (error) => {
-      console.error(
-        chalk.red("[idle] durable Host stop failed; the same operation will retry"),
-        error instanceof Error ? error.message : String(error),
-      );
-    }, IDLE_CHECK_MS);
+        enabledUserTaskCount: () =>
+          schedulerApplication.readStatus().enabledUserTaskCount,
+        hasAnchorActiveWork: () => boundConversations!.hasActiveWork(),
+        pendingAnchorClosureWork: () =>
+          boundConversationProtocol.pendingClosureWork(),
+        ...(localExecutor
+          ? {
+              hasLocalExecutorBlockingWork: () =>
+                localExecutor.owner.hasIdleBlockingWork(),
+            }
+          : {}),
+        requestStop: async () => {
+          await anchorInternalStop.requestStop({ reason: "idle", strategy: "drain" });
+        },
+      }),
+      (error) => {
+        console.error(
+          chalk.red("[idle] durable Host stop failed; the same operation will retry"),
+          error instanceof Error ? error.message : String(error),
+        );
+      },
+      IDLE_CHECK_MS,
+    );
   }
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
@@ -4006,6 +4199,14 @@ async function runServerProcess(
       );
     });
     throw error;
+  } finally {
+    for (const unsub of activityUnsubscribes) {
+      try {
+        unsub();
+      } catch {
+        // Listener teardown must not mask host shutdown or rollback errors
+      }
+    }
   }
 }
 

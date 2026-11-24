@@ -34,7 +34,22 @@ import { createMeshRunInput, createMeshConversationCommunication, registerConver
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
 import type { ExtensionManagementTransport } from "./extension-tools.js";
 import { createMeshExtensionManagement, registerExtensionManagementMesh } from "./extension-management-mesh.js";
+import {
+  isExtendedConversationDiscoverRequest,
+} from "@zhixing-ai/core/conversation/application";
 import { discoverConversations, routeAddressedConversationCommunication } from "./conversation-communication-binding.js";
+import {
+  createLocalOwnedProgramConversationHandler,
+  type ExecutorProgramConversationController,
+  type HostProgramConversationController,
+} from "./program-conversation-host.js";
+import {
+  ProgramConversationMeshClient,
+  registerProgramConversationMeshService,
+  type ProgramConversationEntryRemotePort,
+  type ProgramConversationLocalOwnedHandler,
+  type ProgramConversationOwnedRemotePort,
+} from "./program-conversation-mesh.js";
 import {
   canonicalize,
   type DeviceLifecycleAbort,
@@ -583,6 +598,13 @@ export class MeshRuntimeAssembly
   #plannedAnchorIssuerKey: DeviceKey | undefined;
   #plannedAnchorPostInstall: AnchorPostInstallDescriptor | undefined;
   #postAdoptionReviewLifecycle!: PostAdoptionReviewLifecycleContribution;
+  #programAnchorCoordinator: HostProgramConversationController | undefined;
+  #programLocalOwned: ProgramConversationLocalOwnedHandler | undefined;
+  #programLocalController:
+    | Pick<ExecutorProgramConversationController, "discoverInternal">
+    | undefined;
+  #programOnActivity: (() => void) | undefined;
+  #programIsStopping: (() => boolean) | undefined;
   #started = false;
   #controlStarted = false;
   #closed = false;
@@ -1110,6 +1132,7 @@ export class MeshRuntimeAssembly
               await this.#plannedAnchorOwner?.recoverBeforeAdmission();
             });
             await this.#finalizePairingBootstrap(connection.peer.deviceId);
+            await this.#synchronizeConnectedExecutor(connection.peer.deviceId);
             await this.#adoptLocalConversations(connection.peer.deviceId);
           },
           shouldRetry: () => true,
@@ -1132,6 +1155,44 @@ export class MeshRuntimeAssembly
       await this.#control.reconcileTrust(trust);
     }));
     this.#disposers.push(() => this.#disposeDeviceRemovalIssuer?.());
+    if (options.localConversationOwner) {
+      this.#programLocalOwned = createLocalOwnedProgramConversationHandler({
+        deviceId: options.authority.deviceId,
+        local: {
+          owner: options.localConversationOwner.port(),
+          isStopping: () =>
+            (this.#programIsStopping?.() ?? false) ||
+            options.localConversationOwner!.port().isShuttingDown(),
+          onAdmissionActivity: () => this.#programOnActivity?.(),
+        },
+        ...(options.protocol
+          ? {
+              isAdoptedByAnchor: async (id) =>
+                (await options.protocol!.conversationAdoptionStatus(id)).adopted,
+            }
+          : {}),
+      });
+    }
+    this.#disposers.push(
+      registerProgramConversationMeshService({
+        registry: this.services,
+        isActiveMember: (id) =>
+          this.#control
+            .currentTrust()
+            .members.some((m) => m.state === "active" && m.device.deviceId === id) &&
+          !this.#deviceRemovalGuards.has(id),
+        peerHasRole: (id, role) => this.#peerHasRole(id, role),
+        isCurrentAnchor: () =>
+          this.options.configuration.enabledRoles.includes("anchor") &&
+          this.#currentAnchorDeviceId() === this.options.authority.deviceId &&
+          this.#peerHasRole(this.options.authority.deviceId, "anchor"),
+        currentAnchorDeviceId: () => this.#currentAnchorDeviceId(),
+        isAnchorReady: () => this.plannedCurrentOwnerReady(),
+        anchorCoordinator: () => this.#programAnchorCoordinator,
+        localOwned: () => this.#programLocalOwned,
+        onActivity: () => this.#programOnActivity?.(),
+      }),
+    );
 
   }
 
@@ -1148,11 +1209,103 @@ export class MeshRuntimeAssembly
     );
   }
 
+  currentTrustSnapshot() {
+    return this.#control.currentTrust();
+  }
+
+  bindProgramConversation(input: {
+    readonly anchorCoordinator?: HostProgramConversationController;
+    readonly localOwned?: ProgramConversationLocalOwnedHandler;
+    readonly localProgram?: Pick<ExecutorProgramConversationController, "discoverInternal">;
+    readonly onActivity?: () => void;
+    readonly isStopping?: () => boolean;
+  }): void {
+    if (input.anchorCoordinator !== undefined) {
+      this.#programAnchorCoordinator = input.anchorCoordinator;
+    }
+    if (input.localOwned !== undefined) {
+      this.#programLocalOwned = input.localOwned;
+    }
+    if (input.localProgram !== undefined) {
+      this.#programLocalController = input.localProgram;
+    }
+    if (input.onActivity !== undefined) {
+      this.#programOnActivity = input.onActivity;
+    }
+    if (input.isStopping !== undefined) {
+      this.#programIsStopping = input.isStopping;
+    }
+  }
+
+  programConversationEntryForAnchor(): ProgramConversationEntryRemotePort {
+    return new ProgramConversationMeshClient(() =>
+      this.connections.client(this.#currentAnchorDeviceId()),
+    );
+  }
+
+  programConversationOwnedFor(
+    deviceId: string,
+  ): ProgramConversationOwnedRemotePort | undefined {
+    if (
+      !this.#peerHasRole(deviceId, "executor") ||
+      this.#deviceRemovalGuards.has(deviceId) ||
+      !this.connections.has(deviceId)
+    ) {
+      return undefined;
+    }
+    return new ProgramConversationMeshClient(() =>
+      this.connections.client(deviceId),
+    );
+  }
+
   /** 通信服务绑定应用端口；不持有对话状态或另建执行链。 */
   bindConversationCommunication(communication: ConversationCommunicationTransport, owned: readonly ConversationCommunicationTransport[]): void {
     this.#disposers.push(registerConversationCommunicationMesh({
       registry: this.services,
-      communication: { invoke: (source, request) => request.action === "discover" ? discoverConversations(owned, source) : communication.invoke(source, request) },
+      communication: { invoke: async (source, request) => {
+        if (request.action === "new") {
+          if (
+            !this.options.configuration.enabledRoles.includes("anchor") ||
+            this.#currentAnchorDeviceId() !== this.options.authority.deviceId ||
+            !this.#programAnchorCoordinator
+          ) {
+            throw new Error("仅当值主控节点可受理跨设备新建对话请求");
+          }
+          this.#programOnActivity?.();
+          const created = await this.#programAnchorCoordinator.createForPrincipal(
+            `conversation:${source}`,
+            {
+              requestId: request.operationId,
+              ...(request.name !== undefined ? { name: request.name } : {}),
+              ...(request.sceneId !== undefined ? { sceneId: request.sceneId } : {}),
+            },
+          );
+          this.#programOnActivity?.();
+          return created;
+        }
+        if (isExtendedConversationDiscoverRequest(request)) {
+          const discoverInput = {
+            ...(request.query !== undefined ? { query: request.query } : {}),
+            ...(request.scope !== undefined ? { scope: request.scope } : {}),
+            ...(request.limit !== undefined ? { limit: request.limit } : {}),
+            ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
+          };
+          if (
+            this.options.configuration.enabledRoles.includes("anchor") &&
+            this.#currentAnchorDeviceId() === this.options.authority.deviceId &&
+            this.#programAnchorCoordinator
+          ) {
+            return this.#programAnchorCoordinator.discoverInternal(discoverInput);
+          }
+          if (this.#programLocalController) {
+            return this.#programLocalController.discoverInternal(discoverInput);
+          }
+          throw new Error("当前节点未启用带参会话目录发现");
+        }
+        return request.action === "discover"
+          ? discoverConversations(owned, source)
+          : communication.invoke(source, request);
+      } },
       authorizePeer: id => this.#peerHasRole(id, "executor") || this.#peerHasRole(id, "anchor"),
       ...(this.options.protocol ? { inputFor: (address, deviceId) => {
         const executorId = this.#executorIdForPeer(deviceId);
@@ -1162,9 +1315,39 @@ export class MeshRuntimeAssembly
     }));
   }
 
-  routeConversationCommunication(local: ConversationCommunicationTransport | undefined, anchor?: ConversationCommunicationTransport): ConversationCommunicationTransport {
+  routeConversationCommunication(
+    local: ConversationCommunicationTransport | undefined,
+    anchor?: ConversationCommunicationTransport,
+    anchorProgramCoordinator?: HostProgramConversationController,
+  ): ConversationCommunicationTransport {
     const remote = (id: string) => createMeshConversationCommunication(() => this.connections.client(id));
     return Object.freeze<ConversationCommunicationTransport>({ invoke: async (source, request) => {
+      if (request.action === "new") {
+        if (anchorProgramCoordinator && this.#currentAnchorDeviceId() === this.options.authority.deviceId) {
+          return anchorProgramCoordinator.createForPrincipal(`conversation:${source}`, {
+            requestId: request.operationId,
+            ...(request.name !== undefined ? { name: request.name } : {}),
+            ...(request.sceneId !== undefined ? { sceneId: request.sceneId } : {}),
+          });
+        }
+        return remote(this.#currentAnchorDeviceId()).invoke(source, request);
+      }
+      if (isExtendedConversationDiscoverRequest(request)) {
+        const discoverInput = {
+          ...(request.query !== undefined ? { query: request.query } : {}),
+          ...(request.scope !== undefined ? { scope: request.scope } : {}),
+          ...(request.limit !== undefined ? { limit: request.limit } : {}),
+          ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
+        };
+        if (anchorProgramCoordinator && this.#currentAnchorDeviceId() === this.options.authority.deviceId) {
+          return anchorProgramCoordinator.discoverInternal(discoverInput);
+        }
+        const anchorId = this.#currentAnchorDeviceId();
+        if (!this.connections.has(anchorId) && this.#programLocalController) {
+          return this.#programLocalController.discoverInternal(discoverInput);
+        }
+        return remote(anchorId).invoke(source, request);
+      }
       if (request.action === "discover") {
         const primary = anchor ?? remote(this.#currentAnchorDeviceId());
         const peers = this.#control.currentTrust().members.filter(member =>
@@ -1177,7 +1360,11 @@ export class MeshRuntimeAssembly
         anchorDeviceId: this.#currentAnchorDeviceId(),
         members: this.#control.currentTrust().members.map(member => member.device.deviceId),
         ...(local ? { local: { communication: local, owner: this.options.localConversationOwner!.port() } } : {}),
-        ...(anchor ? { anchor: { communication: anchor, owns: id => this.options.protocol!.sessionExists(id) } } : {}),
+        ...(anchor ? { anchor: { communication: anchor, owns: async id => {
+          const status = await this.options.protocol!.conversationAdoptionStatus(id);
+          if (status.unavailableTransfer) throw new Error("目标对话正在接管中，请稍后重试");
+          return status.adopted || await this.options.protocol!.sessionExists(id);
+        } } } : {}),
         remote,
       }, source, request);
     } });
@@ -2398,6 +2585,27 @@ export class MeshRuntimeAssembly
       continuations: this.options.pairingContinuations,
       completions: this.options.bootstrapProjection.completions,
       secretStore: this.options.secretStore,
+    });
+  }
+
+  async #synchronizeConnectedExecutor(peerDeviceId: string): Promise<void> {
+    if (
+      !this.options.configuration.enabledRoles.includes("anchor") ||
+      this.options.authority.deviceId !== this.#currentAnchorDeviceId() ||
+      peerDeviceId === this.options.authority.deviceId ||
+      !this.#peerHasRole(peerDeviceId, "executor") ||
+      !this.options.authority.synchronizeExecutorBaseline
+    ) {
+      return;
+    }
+    const snapshots = new MeshExecutionSnapshotClient(
+      this.connections.client(peerDeviceId),
+      this.options.authority.verifier,
+    );
+    await this.options.authority.synchronizeExecutorBaseline({
+      executorId: executorIdForDevice(peerDeviceId),
+      synchronizePermission: (snapshot, executionAssets) =>
+        snapshots.installPermission(snapshot, executionAssets),
     });
   }
 

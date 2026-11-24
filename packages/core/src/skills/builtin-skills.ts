@@ -116,10 +116,10 @@ status 查询操作与连接状态；cancel 取消换版并保留或恢复原版
     tools: ["conversation"],
     body: `# 对话通信
 
-用 conversation 的 discover 查找对话，按名称、摘要和状态确认目标；read 按需读取，沿 next 继续翻页，注意截断标记。省略读取目标时查看当前对话，来信的 inputIdentity.source.conversationId 是回信地址。
+用 conversation 的 discover 查找目标：无参调用返回已知对话列表，传入 query、scope、limit、cursor 可按最近活跃分页检索（含已创建的工作场景对话与尚未创建对话的工作场景候选，沿 nextCursor 续页）；需要新开主对话或初始化指定场景对话时，用 new 显式创建（传入 name 或 sceneId）。read 按需读取历史并沿 next 翻页，省略目标时查看当前对话。
 
-send 向目标发消息，不切换界面或合并历史。对方空闲时开始处理，忙时在当前 Turn 完成后接收。回信仍用 send，只在需要时回复，不预设分工或固定流程。
+收到其他知行对话来信（inputIdentity.source.kind === "conversation"）时，按需用 send 向 inputIdentity.source.conversationId 回信；对方空闲即开始处理，普通运行中在当前 Turn 完成后接收。收到本机外部程序来信时，本轮正常助手回复即为调用方取回的最终结果，仅在异步协作明确约定主动回访对方智能体时才调用对方产品入口。
 
-回执只表示已接纳，不代表任务完成。observe 查询消息的消费与运行状态；stopped 表示本次投递已停止且未消费。发送后可以结束当前运行，不必轮询等待；需要回复时请在消息中说明。`,
+send 的回执只表示已接纳，不代表任务完成。observe 查询消息消费与运行状态（stopped 表示投递已停止且未消费）。发送后可结束当前运行，不必轮询等待；需要回复时在消息中说明，协作方式由双方自由决定。`,
   },
 ];

@@ -294,6 +294,106 @@
     },
     {
       "emptyRequest": {},
+      "method": "conversation.program.list",
+      "outcome": {
+        "code": -32003,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "data": {
+            "programError": {
+              "code": "string",
+              "exitCode": "number",
+              "retryable": "boolean"
+            }
+          },
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "conversation.program.new",
+      "outcome": {
+        "code": -32003,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "data": {
+            "programError": {
+              "code": "string",
+              "exitCode": "number",
+              "retryable": "boolean"
+            }
+          },
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "conversation.program.read",
+      "outcome": {
+        "code": -32003,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "data": {
+            "programError": {
+              "code": "string",
+              "exitCode": "number",
+              "retryable": "boolean"
+            }
+          },
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "conversation.program.result",
+      "outcome": {
+        "code": -32003,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "data": {
+            "programError": {
+              "code": "string",
+              "exitCode": "number",
+              "retryable": "boolean"
+            }
+          },
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "conversation.program.send",
+      "outcome": {
+        "code": -32003,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "data": {
+            "programError": {
+              "code": "string",
+              "exitCode": "number",
+              "retryable": "boolean"
+            }
+          },
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "delivery.resolve",
       "outcome": {
         "code": -32602,

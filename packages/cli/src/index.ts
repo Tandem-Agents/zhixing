@@ -70,6 +70,13 @@ const ROOT_HELP_TITLES: Readonly<Record<string, string>> = Object.freeze({
   "Commands:": "命令：",
 });
 
+const CONVERSATION_EXAMPLES_FOOTER = `\n跨智能体对话示例：
+  zz conversation list --json
+  zz conversation new --scene <sceneId>
+  zz conversation send <conversationId> --file message.md
+  zz conversation result <ticket> --wait 60   # 或 --to <conversationId> --id <requestId>
+`;
+
 function localizeHelpSyntax(value: string): string {
   return value.replaceAll("[options]", "[选项]").replaceAll("[command]", "[命令]");
 }
@@ -198,6 +205,13 @@ program
     styleTitle: (title) => ROOT_HELP_TITLES[title] ?? title,
     commandUsage: (command) => localizeHelpSyntax(COMMANDER_HELP.commandUsage(command)),
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
+    formatHelp: (command, helper) => {
+      const formatted = COMMANDER_HELP.formatHelp(command, helper);
+      return command === program ||
+        (command.name() === "conversation" && command.parent === program)
+        ? `${formatted}${CONVERSATION_EXAMPLES_FOOTER}`
+        : formatted;
+    },
   })
   .action(async () => {
     const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE }, { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure }] = await Promise.all([
@@ -890,6 +904,150 @@ workspaceCmd
     await runWorkspaceCommand((workspace) =>
       workspace.confirmReset(preview, preview.impact),
      commandLogging, () => ["已完成本机工作区目录重置。可用 zz workspace list 查看重置后的工作区。"]);
+  });
+
+// ─── zhixing conversation（外部智能体与命令行会话通信入口） ───
+async function openProgramConversationClient(zhixingHome: string) {
+  const { randomUUID } = await import("node:crypto");
+  const { CoreHostConnection, defaultCoreHostConnectionDeps } = await import(
+    "./runtime/core-host-connection.js"
+  );
+  const { RpcProgramConversationFacade } = await import(
+    "./runtime/rpc-conversation-facade.js"
+  );
+  const connection = new CoreHostConnection({
+    ...defaultCoreHostConnectionDeps(zhixingHome),
+    clientInstanceId: `program-cli:${randomUUID()}`,
+  });
+  return {
+    facade: new RpcProgramConversationFacade(connection),
+    dispose: () => connection.dispose(),
+  };
+}
+
+const conversationCmd = program
+  .command("conversation")
+  .description("列出、新建、读取对话或向指定对话发送消息并取回专属回复");
+
+conversationCmd
+  .command("list")
+  .description("按最近活跃列出既有可通信对话与未初始化工作场景候选")
+  .option("--query <text>", "按标题、ID、场景或工作区关键字筛选")
+  .option("--scope <scope>", "作用域过滤：all、main、workscene、channel 或 local", "all")
+  .option("--limit <n>", "单页返回数量（1-100，默认 50）")
+  .option("--cursor <cursor>", "上一页返回的目录分页游标")
+  .option("--json", "输出版本化 JSON（v: 1）")
+  .action(async (options: { query?: string; scope?: string; limit?: string; cursor?: string; json?: boolean }) => {
+    const { runConversationListCommand } = await import("./commands/conversation.js");
+    return await exitCommand(
+      await runConversationListCommand(options, {
+        openClient: openProgramConversationClient,
+      }),
+    );
+  });
+
+conversationCmd
+  .command("new")
+  .description("在主控端原子幂等创建新主对话或初始化指定工作场景对话")
+  .option("--name <title>", "新主对话标题（与 --scene 互斥）")
+  .option("--scene <sceneId>", "初始化指定工作场景的固定主对话（与 --name 互斥）")
+  .option("--id <requestId>", "客户端幂等请求 ID")
+  .option("--json", "输出版本化 JSON（v: 1）")
+  .action(async (options: { name?: string; scene?: string; id?: string; json?: boolean }) => {
+    const { runConversationNewCommand } = await import("./commands/conversation.js");
+    return await exitCommand(
+      await runConversationNewCommand(options, {
+        openClient: openProgramConversationClient,
+      }),
+    );
+  });
+
+conversationCmd
+  .command("read")
+  .description("只读读取指定对话最近消息与待处理输入（不唤醒模型、不改前台指针）")
+  .argument("<conversation-id>", "精确对话 ID")
+  .option("--limit <n>", "读取最近轮次数（默认 20）")
+  .option("--before <cursor>", "向前续读的不透明分页游标")
+  .option("--json", "输出单帧版本化 JSON（v: 1）")
+  .action(async (conversationId: string, options: { limit?: string; before?: string; json?: boolean }) => {
+    const { runConversationReadCommand } = await import("./commands/conversation.js");
+    return await exitCommand(
+      await runConversationReadCommand(conversationId, options, {
+        openClient: openProgramConversationClient,
+      }),
+    );
+  });
+
+let sendSawWaitValue = false;
+let sendSawNoWait = false;
+const conversationSendCmd = conversationCmd
+  .command("send")
+  .description("向指定对话原样发送消息并在等待窗口内取回本次专属回复")
+  .argument("<conversation-id>", "精确对话 ID")
+  .option("--text <text>", "直接指定消息正文（与 --stdin、--file 三选一）")
+  .option("--stdin", "从标准输入读取至 EOF 作为单条消息（与 --text、--file 三选一）")
+  .option("--file <path>", "从 UTF-8 文件原样读取消息正文（与 --text、--stdin 三选一）")
+  .option("--wait <seconds>", "等待完成的秒数（默认 60；与 --no-wait 互斥）")
+  .option("--no-wait", "耐久准入后立即输出票据并以退出码 2 返回")
+  .option("--id <requestId>", "客户端幂等请求 ID")
+  .option("--json", "输出版本化 JSON（v: 1）")
+  .hook("preAction", () => {
+    // Reset after action finishes in case of in-process reuse in tests.
+  })
+  .action(async (conversationId: string, options: {
+    text?: string;
+    stdin?: boolean;
+    file?: string;
+    wait?: string | boolean;
+    id?: string;
+    json?: boolean;
+  }) => {
+    const sawWaitValue = sendSawWaitValue;
+    const sawNoWait = sendSawNoWait;
+    sendSawWaitValue = false;
+    sendSawNoWait = false;
+    const { runConversationSendCommand } = await import("./commands/conversation.js");
+    return await exitCommand(
+      await runConversationSendCommand(
+        conversationId,
+        {
+          ...options,
+          sawWaitValue,
+          sawNoWait,
+        },
+        { openClient: openProgramConversationClient },
+      ),
+    );
+  });
+conversationSendCmd.on("option:wait", () => {
+  sendSawWaitValue = true;
+});
+conversationSendCmd.on("option:no-wait", () => {
+  sendSawNoWait = true;
+});
+
+conversationCmd
+  .command("result")
+  .description("凭恢复票据或 (--to + --id) 查询指定外部请求的运行结果")
+  .argument("[ticket]", "发起端同 ZHIXING_HOME 的恢复票据")
+  .option("--to <conversationId>", "精确目标对话 ID（与 --id 配合使用）")
+  .option("--id <requestId>", "原发送时的幂等请求 ID（与 --to 配合使用）")
+  .option("--wait <seconds>", "继续等待完成的秒数（默认 0 立即返回当前状态）")
+  .option("--cursor <cursor>", "超大回复在 --json 模式下的下一页游标")
+  .option("--json", "输出单帧版本化 JSON（v: 1）")
+  .action(async (ticket: string | undefined, options: {
+    to?: string;
+    id?: string;
+    wait?: string;
+    cursor?: string;
+    json?: boolean;
+  }) => {
+    const { runConversationResultCommand } = await import("./commands/conversation.js");
+    return await exitCommand(
+      await runConversationResultCommand(ticket, options, {
+        openClient: openProgramConversationClient,
+      }),
+    );
   });
 
 // ─── zhixing serve（常驻服务模式） ───
