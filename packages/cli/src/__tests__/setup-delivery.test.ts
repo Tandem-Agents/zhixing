@@ -1037,6 +1037,64 @@ describe("setupDelivery — Channel effect binding", () => {
     }
   });
 
+  it("synchronizes baseline conversation permissions to a connected executor so local conversations run even after anchor goes offline", async () => {
+    const executorHome = await createTempDir("delivery-baseline-sync-executor");
+    try {
+      const executor = await setupAuthorityRuntime({
+        zhixingHome: executorHome,
+        secretStore: new MemorySecretStore(),
+        executorId: "executor:remote-o",
+        executorReadiness: { ...TEST_EXECUTOR_READINESS, tools: ["Read", "web_fetch"] },
+        enableAnchor: false,
+      });
+      const baselineRule = {
+        id: "builtin-web-fetch-ssrf",
+        pattern: { tool: "web_fetch", argument: "*" },
+        decision: "allow" as const,
+        scope: "builtin" as const,
+        createdAt: 0,
+      };
+      const anchor = await setupAuthorityRuntime({
+        zhixingHome: home,
+        secretStore: new MemorySecretStore(),
+        executorId: "executor:anchor-a",
+        trustedIdentities: [executor.identity],
+        executorReadiness: { ...TEST_EXECUTOR_READINESS, tools: ["Read", "web_fetch"] },
+        defaultConversationPermissionRules: () => [baselineRule],
+      });
+      executor.reconcileTrustedDevices([anchor.identity], [anchor.deviceId]);
+
+      await expect(
+        executor.prepareLocalConversationAssignment({
+          conversationId: "local-12345678-01M84JN4CQWKJH38WQ157FH1NQ",
+          executionProfile: { ...EMPTY_EXECUTION_PROFILE, tools: ["Read", "web_fetch"] },
+          permissionRules: [baselineRule],
+        }),
+      ).rejects.toThrow("waiting for a synchronized permission snapshot");
+
+      const synced = await anchor.synchronizeExecutorBaseline!({
+        executorId: executor.executorId,
+        synchronizePermission: async (snapshot, assets) => {
+          const cap = await executor.installPermissionSnapshot(snapshot);
+          if (assets) await executor.installExecutionAssetBundle(assets);
+          return cap;
+        },
+      });
+      expect(synced.descriptor.executorId).toBe(executor.executorId);
+      expect(synced.inventory.permissionSnapshotHighWater).toBe(1);
+
+      const preparedLocal = await executor.prepareLocalConversationAssignment({
+        conversationId: "local-12345678-01M84JN4CQWKJH38WQ157FH1NQ",
+        executionProfile: { ...EMPTY_EXECUTION_PROFILE, tools: ["Read", "web_fetch"] },
+        permissionRules: [baselineRule],
+      });
+      expect(preparedLocal.executorId).toBe(executor.executorId);
+      expect(preparedLocal.policy.permissionSnapshot.snapshotVersion).toBe(1);
+    } finally {
+      await rm(executorHome, { force: true, recursive: true });
+    }
+  });
+
   it("refreshes live device authorization without rebuilding the authority runtime", async () => {
     const peerHome = await createTempDir("delivery-live-authorization-peer");
     try {

@@ -59,4 +59,14 @@ describe("WEB_FETCH_DEFAULT_RULES", () => {
     const ids = WEB_FETCH_DEFAULT_RULES.map((r) => r.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
+
+  it("跨进程保持稳定确定性的规则 id 与 createdAt（供多设备权限快照核对一致）", () => {
+    for (const rule of WEB_FETCH_DEFAULT_RULES) {
+      expect(rule.createdAt).toBe(0);
+    }
+    const devMozilla = WEB_FETCH_DEFAULT_RULES.find(
+      (r) => r.pattern.argument === "https://developer.mozilla.org/**",
+    );
+    expect(devMozilla?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
 });

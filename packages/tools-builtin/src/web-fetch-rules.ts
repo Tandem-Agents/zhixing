@@ -12,7 +12,15 @@
  * 内容稳定不易承载诱导内容。新增 host 应满足同样标准。
  */
 
+import { createHash } from "node:crypto";
 import { PermissionStore, type PermissionRule } from "@zhixing-ai/core/security";
+
+function deterministicWebFetchRuleId(host: string): string {
+  const hex = createHash("sha256")
+    .update(`zhixing:builtin:web_fetch:allow:${host}`, "utf8")
+    .digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 /**
  * preapproved hosts 单源——供 WEB_FETCH_DEFAULT_RULES 生成权限规则。
@@ -42,10 +50,14 @@ export const WEB_FETCH_PREAPPROVED_HOSTS: readonly string[] = [
  * 注册时 PermissionStore.registerBuiltinRules 会深拷贝,后续 mutate 不影响 store。
  */
 export const WEB_FETCH_DEFAULT_RULES: readonly PermissionRule[] =
-  WEB_FETCH_PREAPPROVED_HOSTS.map((host) =>
-    PermissionStore.createRule({
-      pattern: { tool: "web_fetch", argument: `https://${host}/**` },
-      decision: "allow",
-      scope: "builtin",
-    }),
-  );
+  WEB_FETCH_PREAPPROVED_HOSTS.map((host) => ({
+    ...PermissionStore.createRule(
+      {
+        pattern: { tool: "web_fetch", argument: `https://${host}/**` },
+        decision: "allow",
+        scope: "builtin",
+      },
+      () => 0,
+    ),
+    id: deterministicWebFetchRuleId(host),
+  }));

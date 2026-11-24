@@ -338,6 +338,13 @@ export interface AuthorityRuntimeStack {
   readonly acceptExecutorSnapshot: (
     snapshot: ExecutorCapabilitySnapshot,
   ) => Promise<void>;
+  readonly synchronizeExecutorBaseline?: (target: {
+    readonly executorId: string;
+    readonly synchronizePermission: (
+      snapshot: TrustRuleSnapshot,
+      executionAssets?: ExecutionAssetBundle,
+    ) => Promise<ExecutorCapabilitySnapshot>;
+  }) => Promise<ExecutorCapabilitySnapshot>;
   readonly reconcileTrustedDevices: (
     identities: readonly DeviceIdentity[],
     authorizedDeviceIds: readonly string[],
@@ -543,6 +550,7 @@ export interface SetupAuthorityRuntimeOptions {
    * workspace projection advances.
    */
   readonly executorReadiness?: ExecutorReadiness | (() => ExecutorReadiness);
+  readonly defaultConversationPermissionRules?: () => readonly PermissionRule[];
   /** Product projection after selecting a device; authority still validates and freezes it. */
   readonly projectConversationCapabilities?: (input: {
     readonly profile: RuntimeExecutionProfile;
@@ -1323,6 +1331,29 @@ export async function setupAuthorityRuntime(
           `Remote executor capability snapshot rejected: ${accepted.error.message}`,
         );
       }
+    };
+    const synchronizeExecutorBaseline: NonNullable<
+      AuthorityRuntimeStack["synchronizeExecutorBaseline"]
+    > = async (target) => {
+      if (!anchorEnabled) {
+        throw new Error("Anchor authority role is not enabled on this device");
+      }
+      const permissionPublication = await permissionSnapshots.publishRules({
+        rules: options.defaultConversationPermissionRules?.() ?? [],
+        signer: key,
+        generatedAt: canonicalTime(clock(), "Permission snapshot time"),
+      });
+      const synchronized = await target.synchronizePermission(
+        permissionPublication.snapshot,
+        await executionAssets.bundle(),
+      );
+      if (synchronized.descriptor.executorId !== target.executorId) {
+        throw new TypeError(
+          "Synchronized executor snapshot belongs to another executor",
+        );
+      }
+      await acceptExecutorSnapshot(synchronized);
+      return synchronized;
     };
     const prepareConversationAssignment = async (input: {
       readonly conversationId: string;
@@ -2390,6 +2421,7 @@ export async function setupAuthorityRuntime(
       currentExecutorSnapshot,
       installPermissionSnapshot,
       acceptExecutorSnapshot,
+      ...(anchorEnabled ? { synchronizeExecutorBaseline } : {}),
       reconcileTrustedDevices: (identities, deviceIds) => {
         for (const candidate of identities) {
           if (
