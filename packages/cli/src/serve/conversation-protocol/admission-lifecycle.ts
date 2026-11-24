@@ -343,7 +343,9 @@ export class AdmissionAndLifecycle {
           const appliedReplay = admissionState.outcome;
           if (appliedReplay.kind === "rejected") {
             throw new DurableConversationAdmissionRejectedError(
-              "idempotency-conflict",
+              appliedReplay.result.error.code === "idempotency-conflict"
+                ? "idempotency-conflict"
+                : "conversation-not-found",
               `Conversation input was rejected: ${appliedReplay.result.error.message}`,
             );
           }
@@ -416,7 +418,9 @@ export class AdmissionAndLifecycle {
         }
         if (admission.kind === "rejected") {
           throw new DurableConversationAdmissionRejectedError(
-            "idempotency-conflict",
+            admission.result.error.code === "idempotency-conflict"
+              ? "idempotency-conflict"
+              : "conversation-not-found",
             `Conversation input was rejected: ${admission.result.error.message}`,
           );
         }

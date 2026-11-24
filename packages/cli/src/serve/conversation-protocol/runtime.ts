@@ -693,6 +693,13 @@ export class ConversationProtocolRuntime
     return this.#recovery.pendingClosureWork(conversationId);
   }
 
+  pendingClosureWorkByConversation(
+    conversationIds: readonly string[],
+    options?: Parameters<RecoveryScheduler["pendingClosureWorkByConversation"]>[1],
+  ) {
+    return this.#recovery.pendingClosureWorkByConversation(conversationIds, options);
+  }
+
   assignmentLifecycleProvenance(conversationId: string, assignmentId: string) {
     return this.#access.assignmentLifecycleProvenance(
       conversationId,
@@ -715,6 +722,44 @@ export class ConversationProtocolRuntime
 
   sessionAuthorityState(conversationId: string) {
     return this.#access.sessionAuthorityState(conversationId);
+  }
+
+  isProgramOriginRun(conversationId: string, runId: string): Promise<boolean> {
+    return this.#access.isProgramOriginRun(conversationId, runId);
+  }
+
+  hasOpenAdvancementSession(conversationId: string): Promise<boolean> {
+    return this.#access.hasOpenAdvancementSession(conversationId);
+  }
+
+  inspectProgramInputReceipt(
+    conversationId: string,
+    input: {
+      readonly physicalTurnId: string;
+      readonly expectedInput?: import("@zhixing-ai/core/contracts").UserTurnInput;
+    },
+  ) {
+    return this.#access.inspectProgramInputReceipt(conversationId, input);
+  }
+
+  conversationAdoptionStatus(conversationId: string) {
+    return this.#access.conversationAdoptionStatus(conversationId);
+  }
+
+  listAdoptedConversationIds(): Promise<readonly string[]> {
+    return this.#access.listAdoptedConversationIds();
+  }
+
+  get controlAdmission() {
+    return this.#authority.controlAdmission;
+  }
+
+  get deviceId(): string {
+    return this.#authority.deviceId;
+  }
+
+  isShuttingDown(): boolean {
+    return this.#recovery.isRecoveryStopped();
   }
 
   statusHistory(

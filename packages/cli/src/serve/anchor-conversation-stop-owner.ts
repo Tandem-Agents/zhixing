@@ -209,14 +209,17 @@ export class AnchorConversationStopOwner {
       const legacyIdle = new Set<string>();
       await this.#protocol.whileRecoveryPaused(async () => {
         const durableSessions = await this.#protocol.listSessions();
-        for (const conversationId of durableSessions) {
-          if (frozenConversationIds.has(conversationId)) continue;
+        const unfrozenSessions = durableSessions.filter((id) => !frozenConversationIds.has(id));
+        for (const conversationId of unfrozenSessions) {
           if (this.#manager.has(conversationId)) {
             throw new Error(
               `Restored anchor host-stop artifact omits active conversation ${conversationId}`,
             );
           }
-          const closure = await this.#protocol.pendingClosureWork(conversationId);
+        }
+        const closures = await this.#closureByConversation(unfrozenSessions);
+        for (const conversationId of unfrozenSessions) {
+          const closure = closures.get(conversationId)!;
           if (
             closure.pendingAdmittedRuns !== 0 ||
             closure.pendingFinals !== 0 ||
@@ -350,7 +353,7 @@ export class AnchorConversationStopOwner {
     const expected = this.hostStopAcceptedWorkItems(operationId, owner);
     assertExactItems(expected, frozen, `anchor host-stop ${owner} frozen input`);
     const current = await this.#protocol.whileRecoveryPaused(async () =>
-      (await this.#captureOwnerItems())
+      (await this.#captureOwnerItems(owner))
         .filter((item) => item.owner === owner)
         .map(({ id, revision }) => ({ id, revision })),
     );
@@ -383,7 +386,7 @@ export class AnchorConversationStopOwner {
     owner: ConversationHostStopOwner,
   ): Promise<readonly HostStopAcceptedWorkItem[]> {
     return this.#protocol.whileRecoveryPaused(async () =>
-      (await this.#captureOwnerItems())
+      (await this.#captureOwnerItems(owner))
         .filter((item) => item.owner === owner)
         .map(({ id, revision }) => Object.freeze({ id, revision })),
     );
@@ -495,52 +498,138 @@ export class AnchorConversationStopOwner {
     return this.#hostStopSnapshot;
   }
 
-  async #captureOwnerItems(): Promise<readonly ConversationHostStopOwnerItem[]> {
+  async #closureByConversation(
+    conversationIds: readonly string[],
+    options?: Parameters<ConversationProtocolRuntime["pendingClosureWorkByConversation"]>[1],
+  ): Promise<ReadonlyMap<string, Awaited<ReturnType<ConversationProtocolRuntime["pendingClosureWork"]>>>> {
+    if (conversationIds.length === 0) return new Map();
+    const batchFn = (
+      this.#protocol as ConversationProtocolRuntime & {
+        pendingClosureWorkByConversation?: ConversationProtocolRuntime["pendingClosureWorkByConversation"];
+      }
+    ).pendingClosureWorkByConversation;
+    if (typeof batchFn === "function") {
+      return await batchFn.call(this.#protocol, conversationIds, {
+        includeContinuable: false,
+        ...options,
+      });
+    }
+    const map = new Map<
+      string,
+      Awaited<ReturnType<ConversationProtocolRuntime["pendingClosureWork"]>>
+    >();
+    for (const id of conversationIds) {
+      map.set(id, await this.#protocol.pendingClosureWork(id));
+    }
+    return map;
+  }
+
+  async #captureOwnerItems(
+    onlyOwner?: ConversationHostStopOwner,
+  ): Promise<readonly ConversationHostStopOwnerItem[]> {
     const conversations = await this.#protocol.listSessions();
+    const sortItems = (items: ConversationHostStopOwnerItem[]) =>
+      Object.freeze(
+        items.sort((left, right) =>
+          `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US"),
+        ),
+      );
+
+    if (onlyOwner === "conversation") {
+      const legacyCandidates = conversations.filter(
+        (id) =>
+          this.#legacyIdleConversations?.has(id) === true &&
+          !this.#manager.has(id),
+      );
+      const legacyClosures = await this.#closureByConversation(legacyCandidates);
+      const ownerItems: ConversationHostStopOwnerItem[] = [];
+      for (const conversationId of conversations) {
+        const legacyClosure = legacyClosures.get(conversationId);
+        const skipLegacyIdleConversation =
+          legacyClosure !== undefined &&
+          legacyClosure.items.finals.length === 0 &&
+          legacyClosure.items.assignments.length === 0 &&
+          legacyClosure.items.admittedRuns.length === 0 &&
+          legacyClosure.items.recovery.length === 0 &&
+          legacyClosure.items.leases.length === 0;
+        if (!skipLegacyIdleConversation) {
+          ownerItems.push(
+            Object.freeze({
+              owner: "conversation",
+              id: conversationId,
+              revision: this.conversationStopRevision(conversationId),
+            }),
+          );
+        }
+      }
+      return sortItems(ownerItems);
+    }
+
+    const closures = await this.#closureByConversation(
+      conversations,
+      onlyOwner === undefined
+        ? undefined
+        : {
+            includeAdmittedRuns: onlyOwner === "intent",
+            includeFinals: onlyOwner === "final",
+            includeAssignments: onlyOwner === "assignment",
+            includeLeases: onlyOwner === "lease" || onlyOwner === "permit",
+          },
+    );
     const ownerItems: ConversationHostStopOwnerItem[] = [];
     for (const conversationId of conversations) {
-      const closure = await this.#protocol.pendingClosureWork(conversationId);
-      const hasClosureWork =
-        closure.items.finals.length > 0 ||
-        closure.items.assignments.length > 0 ||
-        closure.items.admittedRuns.length > 0 ||
-        closure.items.recovery.length > 0 ||
-        closure.items.leases.length > 0;
-      const skipLegacyIdleConversation =
-        this.#legacyIdleConversations?.has(conversationId) === true &&
-        !this.#manager.has(conversationId) &&
-        !hasClosureWork;
-      if (!skipLegacyIdleConversation) {
-        ownerItems.push(
-          Object.freeze({
-            owner: "conversation",
-            id: conversationId,
-            revision: this.conversationStopRevision(conversationId),
-          }),
-        );
+      const closure = closures.get(conversationId)!;
+      if (onlyOwner === undefined) {
+        const hasClosureWork =
+          closure.items.finals.length > 0 ||
+          closure.items.assignments.length > 0 ||
+          closure.items.admittedRuns.length > 0 ||
+          closure.items.recovery.length > 0 ||
+          closure.items.leases.length > 0;
+        const skipLegacyIdleConversation =
+          this.#legacyIdleConversations?.has(conversationId) === true &&
+          !this.#manager.has(conversationId) &&
+          !hasClosureWork;
+        if (!skipLegacyIdleConversation) {
+          ownerItems.push(
+            Object.freeze({
+              owner: "conversation",
+              id: conversationId,
+              revision: this.conversationStopRevision(conversationId),
+            }),
+          );
+        }
       }
-      for (const item of closure.items.finals) {
-        ownerItems.push(Object.freeze({ owner: "final", ...item }));
+      if (onlyOwner === undefined || onlyOwner === "final") {
+        for (const item of closure.items.finals) {
+          ownerItems.push(Object.freeze({ owner: "final", ...item }));
+        }
       }
-      for (const item of closure.items.assignments) {
-        ownerItems.push(Object.freeze({ owner: "assignment", ...item }));
+      if (onlyOwner === undefined || onlyOwner === "assignment") {
+        for (const item of closure.items.assignments) {
+          ownerItems.push(Object.freeze({ owner: "assignment", ...item }));
+        }
       }
-      for (const item of closure.items.admittedRuns) {
-        ownerItems.push(Object.freeze({ owner: "intent", ...item }));
+      if (onlyOwner === undefined || onlyOwner === "intent") {
+        for (const item of closure.items.admittedRuns) {
+          ownerItems.push(Object.freeze({ owner: "intent", ...item }));
+        }
+        for (const item of closure.items.recovery) {
+          ownerItems.push(Object.freeze({ owner: "intent", ...item }));
+        }
       }
-      for (const item of closure.items.recovery) {
-        ownerItems.push(Object.freeze({ owner: "intent", ...item }));
+      if (onlyOwner === undefined || onlyOwner === "lease") {
+        for (const item of closure.items.leases) {
+          ownerItems.push(Object.freeze({ owner: "lease", ...item }));
+        }
       }
-      for (const item of closure.items.leases) {
-        ownerItems.push(Object.freeze({ owner: "lease", ...item }));
-        ownerItems.push(Object.freeze({ owner: "permit", ...item }));
+      if (onlyOwner === undefined || onlyOwner === "permit") {
+        for (const item of closure.items.leases) {
+          ownerItems.push(Object.freeze({ owner: "permit", ...item }));
+        }
       }
     }
-    return Object.freeze(
-      ownerItems.sort((left, right) =>
-        `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US"),
-      ),
-    );
+    return sortItems(ownerItems);
   }
 }
 

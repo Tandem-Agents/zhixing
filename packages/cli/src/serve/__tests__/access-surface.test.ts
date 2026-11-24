@@ -87,4 +87,15 @@ describe("Host static construction graph", () => {
       "mesh-control", "channel", "delivery", "confirmation-bridge",
     ]);
   });
+
+  it("routes adopted local-* conversations on Anchor through owner-log context and commit projection rather than flat transcript storage", async () => {
+    const factories = await read("access-surfaces.ts");
+    expect(factories).toContain("if (isLocalConversationId(conversationId))");
+    expect(factories).toContain('mode: "context"');
+    expect(factories).toContain("buildStartupBootstrapPair(contextPage.text)");
+    expect(factories).toContain('shardId: "owner-log"');
+    expect(factories).toContain(
+      "Local conversations persist turns only through the owner commit protocol",
+    );
+  });
 });

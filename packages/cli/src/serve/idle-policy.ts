@@ -44,3 +44,65 @@ export function createIdleExitGate(): (idle: boolean, connectionChanges: number)
     return confirmed;
   };
 }
+
+export interface AnchorHostIdleCheckPorts {
+  readonly activityGeneration: () => number;
+  readonly connectionCount: () => number;
+  readonly channelStates: () => readonly ChannelState[];
+  readonly enabledUserTaskCount: () => number;
+  readonly hasAnchorActiveWork: () => boolean;
+  readonly pendingAnchorClosureWork: () => Promise<{
+    readonly continuableAdmittedRuns: number;
+    readonly pendingFinals: number;
+    readonly pendingAssignments: number;
+    readonly recoveryBacklog: number;
+    readonly activeLocalLeases: number;
+  }>;
+  readonly hasLocalExecutorBlockingWork?: () => Promise<boolean>;
+  readonly requestStop: () => Promise<unknown>;
+}
+
+/**
+ * 主控/混合宿主的按需空闲检查：联合连接变化与双 owner 真实准入活动代数（含既有内部 Mesh
+ * conversation.communication 与后续程序入口准入），异步查询期间只要任一 owner 新接纳工作即
+ * 使本次空闲样本失效，绝不拿异步跨越期间的陈旧空闲判定触发停机。
+ */
+export function createAnchorHostIdleCheck(
+  ports: AnchorHostIdleCheckPorts,
+): () => Promise<void> {
+  const idleExitGate = createIdleExitGate();
+  return async () => {
+    const activityBefore = ports.activityGeneration();
+    let hasConversationWork = true;
+    try {
+      const anchorActive = ports.hasAnchorActiveWork();
+      const anchorClosure = await ports.pendingAnchorClosureWork();
+      const anchorContinuable =
+        anchorClosure.continuableAdmittedRuns > 0 ||
+        anchorClosure.pendingFinals > 0 ||
+        anchorClosure.pendingAssignments > 0 ||
+        anchorClosure.recoveryBacklog > 0 ||
+        anchorClosure.activeLocalLeases > 0;
+      const localBusy = ports.hasLocalExecutorBlockingWork
+        ? await ports.hasLocalExecutorBlockingWork()
+        : false;
+      hasConversationWork = anchorActive || anchorContinuable || localBusy;
+    } catch {
+      hasConversationWork = true;
+    }
+    const activityAfter = ports.activityGeneration();
+    const exit = idleExitGate(
+      activityAfter === activityBefore &&
+        shouldIdleExit({
+          connectionCount: ports.connectionCount(),
+          channelStates: ports.channelStates(),
+          hasUserPendingWork:
+            ports.enabledUserTaskCount() > 0 || hasConversationWork,
+        }),
+      activityAfter,
+    );
+    if (exit) {
+      await ports.requestStop();
+    }
+  };
+}

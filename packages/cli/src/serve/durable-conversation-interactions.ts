@@ -45,6 +45,8 @@ export interface DurableInteractionBinding {
   readonly streamMeta: { readonly turnOrigin?: NonNullable<IngressContext["turnOrigin"]> };
   /** Cancels only the projection obligation owner, not the run being projected. */
   readonly signal?: AbortSignal;
+  /** Trusted program-origin run: resolve non-interactively without surface prompts. */
+  readonly isProgramOrigin?: boolean;
 }
 
 export class ConversationInteractionRuntimeUnavailableError extends Error {
@@ -145,8 +147,13 @@ export class DurableConversationInteractionObserver
       await this.drainAssignment(active);
       return { accepted: false, decision };
     }
-    await this.drainAssignment(active);
+    if (!active.isProgramOrigin) {
+      await this.drainAssignment(active);
+    }
     this.#requests.set(request.id, active);
+    if (active.isProgramOrigin) {
+      return { accepted: true, delivery: "non-interactive" as const };
+    }
     return { accepted: true, ...(active.broker && requester?.brokerId === active.broker.id
       ? { delivery: "durable" as const } : {}) };
   }
@@ -215,7 +222,9 @@ export class DurableConversationInteractionObserver
     } else {
       await this.#explicitApprovals?.discard(request.id);
     }
-    await this.drainAssignment(active).catch(() => undefined);
+    if (!active.isProgramOrigin) {
+      await this.drainAssignment(active).catch(() => undefined);
+    }
     this.#requests.delete(request.id);
     this.#surfaceAnswers.delete(request.id);
   }
@@ -377,10 +386,41 @@ export class DurableConversationInteractionObserver
   }
 
   async drainAssignment(binding: DurableInteractionBinding): Promise<void> {
+    if (binding.isProgramOrigin) {
+      await this.settlePendingProgramOriginInteractions(binding);
+      return;
+    }
     await this.#projector.drainAssignment({
       ...binding,
       projectionDomain: "conversation",
     });
+  }
+
+  async settlePendingProgramOriginInteractions(
+    binding: DurableInteractionBinding,
+  ): Promise<void> {
+    if (!binding.isProgramOrigin) return;
+    for (const item of await binding.ledger.pendingInteractionRequests(
+      binding.assignmentId,
+    )) {
+      const requestId = item.request.requestId;
+      if (binding.broker?.resolveNonInteractiveDurably) {
+        const resolved = await binding.broker
+          .resolveNonInteractiveDurably(requestId)
+          .catch(() => false);
+        if (resolved) continue;
+      }
+      await binding.submission.finishAndMirror(
+        binding.assignmentId,
+        requestId,
+        {
+          t: "auto-resolved",
+          decision: "denied",
+          reason: "no-interactive-surface",
+        },
+        binding.context,
+      );
+    }
   }
 
   async pendingInteractions(): Promise<readonly PendingAssignmentInteraction[]> {
@@ -389,6 +429,7 @@ export class DurableConversationInteractionObserver
       { readonly ledger: ConversationAssignmentLedger; readonly requestIds: Set<string> }
     >();
     for (const [requestId, binding] of this.#requests) {
+      if (binding.isProgramOrigin) continue;
       const existing = active.get(binding.assignmentId);
       if (existing) {
         if (existing.ledger !== binding.ledger) {

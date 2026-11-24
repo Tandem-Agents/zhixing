@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { isProgramOrigin } from "@zhixing-ai/core/conversation";
 import { executionTurnContext } from "./execution-turn-context.js";
 import { type ArtifactStore } from "@zhixing-ai/core/authority";
 import { type Message } from "@zhixing-ai/core";
@@ -310,6 +311,9 @@ export class ConversationAssignmentWorker {
         streamMeta,
         signal: this.#abort.signal,
         broker: undefined,
+        ...(isProgramOrigin(envelope.work.ingress)
+          ? { isProgramOrigin: true }
+          : {}),
       };
       interactionBinding = activeInteractionBinding;
       await retryDurableObligation(

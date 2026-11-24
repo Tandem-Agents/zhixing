@@ -270,7 +270,7 @@ export class HomeAuthoritySources {
       registerConversationTransferSources(log, artifacts);
       // Global recovery discovery reads both sources before a local conversation
       // kernel is mounted. Prepare this fixed discovery index at Host.ready.
-      registerConversationRecoveryProjection(log, artifacts);
+      registerConversationRecoveryProjection(log, artifacts, verifier);
       // 两本日志各有一个资源调控器：按键投影与分配能力激活在首次写入前登记，就绪前准备
       registerResourceGovernorIndex(log, verifier, protocol.RESOURCE_LEASE_MAX_TTL_MS);
       registerResourceCapabilityActivations(log);

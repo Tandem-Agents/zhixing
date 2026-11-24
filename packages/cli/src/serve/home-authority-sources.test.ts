@@ -9,10 +9,11 @@ import { HomeAuthoritySources, openHomeAuthoritySources } from "./home-authority
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { provePriorHostExited, reclaimRetiredContentCopies, RETIRED_CONTENT_COPIES } from "./retired-projection-copies.js";
 import { FileAuthorityCommitLog, durableProjectionDirectoryName } from "@zhixing-ai/core/authority";
-import { verifyProtocolStep } from "@zhixing-ai/core/protocol";
+import { createSignedConversationTransferAbort, verifyProtocolStep } from "@zhixing-ai/core/protocol";
 import { SerialTaskQueue } from "@zhixing-ai/core/persistence";
 import { mkdir, writeFile } from "node:fs/promises";
 import { conversationRecoveryPage } from "@zhixing-ai/owner-kernel/conversation-assignment";
+import { appendConversationTransferRecord } from "@zhixing-ai/owner-kernel/conversation-transfer";
 
 const AT = "2026-10-16T00:00:00.000Z";
 
@@ -332,5 +333,71 @@ describe("home authority sources", () => {
     expect((await executor.checkpoint()).lsn).toBe(before.lsn + 1);
     expect(await index.get("verified")).toBe(peer.deviceId);
     await lease.close();
+  }, 60_000);
+
+  it("cold-restarts executor-authority containing signed conversation transfer records before LocalConversationOwner constructs", async () => {
+    const h = await trustedHome();
+    const execKey = await DeviceKey.generate();
+    const execDevice = enrollDeviceIdentity(execKey, { displayName: "pure-executor", platform: "linux", enrolledAt: AT });
+    const enrollEvent = createSignedTrustEvent({
+      current: h.created.projection,
+      body: { t: "enroll", device: execDevice, roles: ["executor", "surface"] },
+      at: AT,
+      signer: h.key,
+    });
+    const nextTrust = applyTrustEvent(h.created.projection, enrollEvent);
+    await h.store.authorityLog().append([
+      { stream: "trust", body: { t: "home-trust-event", event: enrollEvent } },
+      { stream: "trust", body: { t: "home-trust-record", record: buildHomeTrustRecord(nextTrust, h.key) } },
+    ]);
+    await h.store.stopStorageMaintenance();
+
+    // Boot 1: prepare runtime at lsn=0, then commit signed transfer:xfer-* facts to executor-authority
+    const lease1 = await openHomeAuthoritySources({ home: h.home, secretStore: h.secrets });
+    await lease1.sources.prepareRuntime("host-ready");
+    const transferId = "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const convId = `local-${execDevice.deviceId}-01JDCX00000000000000000099`;
+    await appendConversationTransferRecord(lease1.sources.executor, lease1.sources.verifier, {
+      v: 1,
+      t: "prepared",
+      requestId: "req-xfer-cold-1",
+      transferId,
+      sourceDeviceId: execDevice.deviceId,
+      targetDeviceId: h.identity.deviceId,
+      conversationId: convId,
+      sourceOwnerEpoch: 1,
+      nextOwnerEpoch: 2,
+    });
+    await appendConversationTransferRecord(lease1.sources.executor, lease1.sources.verifier, {
+      v: 1,
+      t: "aborted",
+      transferId,
+      abort: createSignedConversationTransferAbort(
+        {
+          v: 1,
+          requestId: "req-xfer-cold-1",
+          transferId,
+          sourceDeviceId: execDevice.deviceId,
+          targetDeviceId: h.identity.deviceId,
+          conversationId: convId,
+          sourceOwnerEpoch: 1,
+          reason: "operator-cancelled",
+          at: AT,
+        },
+        execKey,
+      ),
+    });
+    await lease1.close();
+
+    // Boot 2 (cold restart): prepareRuntime("host-ready") replays transfer:xfer-* into conversation-recovery BEFORE any domain constructs
+    const lease2 = await openHomeAuthoritySources({ home: h.home, secretStore: h.secrets });
+    try {
+      await expect(lease2.sources.prepareRuntime("host-ready")).resolves.toBeDefined();
+      await expect(
+        conversationRecoveryPage(lease2.sources.executor, lease2.sources.artifacts),
+      ).resolves.toBeDefined();
+    } finally {
+      await lease2.close();
+    }
   }, 60_000);
 });

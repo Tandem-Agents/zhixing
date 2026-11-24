@@ -1,7 +1,22 @@
 import type { ConversationDispatch, IngressContext } from "@zhixing-ai/core/contracts";
+import { isProgramOrigin } from "@zhixing-ai/core/conversation";
 import type { TurnContext } from "@zhixing-ai/core/types";
 import { readAdvancementExecutionContext } from "@zhixing-ai/core/advancement/execution-context";
 import { readWorksceneTaskContext } from "@zhixing-ai/core/workscene/application";
+
+function sanitizeProgramOriginTurnOrigin(
+  origin: NonNullable<IngressContext["turnOrigin"]>,
+): NonNullable<IngressContext["turnOrigin"]> {
+  const base = withoutRecoveredSurfaceCapabilities(origin);
+  const filteredControls = base.enabledControls?.filter(
+    (control) => control !== "propose_advancement",
+  );
+  if (filteredControls === undefined) return base;
+  const { enabledControls: _dropped, ...withoutControls } = base;
+  return filteredControls.length > 0
+    ? { ...withoutControls, enabledControls: filteredControls }
+    : withoutControls;
+}
 
 /**
  * 执行体的运行上下文（本地执行与远端指派工人同一规则）：turnId 与来源取指派里的耐久 ingress，
@@ -16,17 +31,30 @@ export function executionTurnContext(
   const ingress = work.ingress;
   const { turnOrigin: callerOrigin, ...rest } = caller ?? {};
   const durable = ingress.turnOrigin;
-  const reduced = durable?.surface?.capabilities?.postTurnControl === true && callerOrigin !== undefined &&
-    callerOrigin.surface?.capabilities?.postTurnControl !== true;
-  const requiredUserContext = readAdvancementExecutionContext(work.controlContext, {
-    turnId: ingress.ingressId,
-    ...(durable ? { turnOrigin: durable } : {}),
-  });
+  const programOrigin = isProgramOrigin(ingress);
+  const reduced =
+    programOrigin ||
+    (durable?.surface?.capabilities?.postTurnControl === true &&
+      callerOrigin !== undefined &&
+      callerOrigin.surface?.capabilities?.postTurnControl !== true);
+  const effectiveOrigin = durable
+    ? programOrigin
+      ? sanitizeProgramOriginTurnOrigin(durable)
+      : reduced
+        ? withoutRecoveredSurfaceCapabilities(durable)
+        : durable
+    : undefined;
+  const requiredUserContext = programOrigin
+    ? undefined
+    : readAdvancementExecutionContext(work.controlContext, {
+        turnId: ingress.ingressId,
+        ...(effectiveOrigin ? { turnOrigin: effectiveOrigin } : {}),
+      });
   return {
     ...rest,
     turnId: ingress.ingressId,
     ...(ingress.kind === "channel" ? { emissionTarget: ingress.replyTarget } : {}),
-    ...(durable ? { turnOrigin: reduced ? withoutRecoveredSurfaceCapabilities(durable) : durable } : {}),
+    ...(effectiveOrigin ? { turnOrigin: effectiveOrigin } : {}),
     worksceneTasks: readWorksceneTaskContext(work.controlContext),
     ...(requiredUserContext ? { requiredUserContext } : {}),
   };

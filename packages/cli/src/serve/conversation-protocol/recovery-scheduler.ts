@@ -999,8 +999,178 @@ export class RecoveryScheduler {
     }
   }
 
+  async pendingClosureWorkByConversation(
+    conversationIds: readonly string[],
+    options?: {
+      readonly includeAdmittedRuns?: boolean;
+      readonly includeContinuable?: boolean;
+      readonly includeFinals?: boolean;
+      readonly includeAssignments?: boolean;
+      readonly includeLeases?: boolean;
+    },
+  ): Promise<
+    ReadonlyMap<
+      string,
+      {
+        readonly pendingAdmittedRuns: number;
+        readonly continuableAdmittedRuns: number;
+        readonly pendingFinals: number;
+        readonly pendingAssignments: number;
+        readonly recoveryBacklog: number;
+        readonly activeLocalLeases: number;
+        readonly items: {
+          readonly admittedRuns: readonly { readonly id: string; readonly revision: string }[];
+          readonly finals: readonly { readonly id: string; readonly revision: string }[];
+          readonly assignments: readonly { readonly id: string; readonly revision: string }[];
+          readonly recovery: readonly { readonly id: string; readonly revision: string }[];
+          readonly leases: readonly { readonly id: string; readonly revision: string }[];
+        };
+      }
+    >
+  > {
+    const scopeState = this.#scope.current;
+    const sortItems = <T extends { readonly id: string }>(items: T[]) =>
+      Object.freeze(
+        items.sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+      );
+    if (conversationIds.length === 0) {
+      return new Map();
+    }
+    const wantAdmitted = options?.includeAdmittedRuns !== false;
+    const wantContinuable = wantAdmitted && options?.includeContinuable !== false;
+    const wantFinals = options?.includeFinals !== false;
+    const wantAssignments = options?.includeAssignments !== false;
+    const wantLeases = options?.includeLeases !== false;
+
+    const leasesByConversation = new Map<string, Array<{ id: string; revision: string }>>();
+    if (wantLeases) {
+      for (const reservation of await this.#authority.resourceRecovery.activeConversationReservations()) {
+        await this.#access.adopt(reservation.conversationId);
+        if (
+          reservation.ownerEpoch ===
+            this.#access.ownerEpochFor(reservation.conversationId, scopeState) &&
+          this.#access.acceptsConversationId(reservation.conversationId, scopeState)
+        ) {
+          let bucket = leasesByConversation.get(reservation.conversationId);
+          if (!bucket) {
+            bucket = [];
+            leasesByConversation.set(reservation.conversationId, bucket);
+          }
+          bucket.push({
+            id: reservation.reservationId,
+            revision: reservation.revision,
+          });
+        }
+      }
+    }
+
+    const needJournalScan = wantAdmitted || wantFinals || wantAssignments;
+    const result = new Map<
+      string,
+      Awaited<ReturnType<RecoveryScheduler["pendingClosureWork"]>>
+    >();
+    const batchSize = 16;
+    for (let offset = 0; offset < conversationIds.length; offset += batchSize) {
+      const slice = conversationIds.slice(offset, offset + batchSize);
+      const entries = await Promise.all(
+        slice.map(async (currentConversationId) => {
+          let unsettled: readonly { readonly runId: string; readonly queuedPosition: number }[] = [];
+          let continuableCount = 0;
+          let pendingFinalsList: Awaited<
+            ReturnType<ReturnType<ConversationAccess["journal"]>["pendingFinalFrames"]>
+          > = [];
+          let awaitingAssignments: Awaited<
+            ReturnType<ReturnType<ConversationAccess["journal"]>["assignmentsAwaitingRecovery"]>
+          > = [];
+          if (needJournalScan) {
+            await this.#access.adopt(currentConversationId);
+            const journal = this.#access.journal(currentConversationId, scopeState);
+            [unsettled, pendingFinalsList, awaitingAssignments] = await Promise.all([
+              wantAdmitted ? journal.unsettledAdmittedRuns() : Promise.resolve([]),
+              wantFinals ? journal.pendingFinalFrames() : Promise.resolve([]),
+              wantAssignments ? journal.assignmentsAwaitingRecovery() : Promise.resolve([]),
+            ]);
+            if (wantContinuable && unsettled.length > 0) {
+              continuableCount = (await journal.continuableAdmittedRuns()).length;
+            }
+          }
+          const admittedRuns: Array<{ id: string; revision: string }> = [];
+          for (const run of unsettled) {
+            const source = admittedConversationRunLifecycleSource({
+              conversationId: currentConversationId,
+              runId: run.runId,
+              queuedPosition: run.queuedPosition,
+            });
+            admittedRuns.push({
+              id: source.id,
+              revision: source.revision,
+            });
+          }
+          const finals: Array<{ id: string; revision: string }> = [];
+          for (const final of pendingFinalsList) {
+            finals.push({
+              id: `${final.conversationId}:${final.runId}`,
+              revision: String(final.commitRevision),
+            });
+          }
+          const assignments: Array<{ id: string; revision: string }> = [];
+          for (const assignment of awaitingAssignments) {
+            assignments.push({
+              id: `${
+                assignment.dispatch.envelope.executorId === this.#authority.executorId
+                  ? "local"
+                  : "relay"
+              }:${assignment.assignmentId}`,
+              revision: dispatchEnvelopeDigest(assignment.dispatch.envelope),
+            });
+          }
+          const leases = [
+            ...(leasesByConversation.get(currentConversationId) ?? []),
+          ];
+          const recoveryIds = new Set<string>();
+          if (scopeState.recoveryConversations.has(currentConversationId)) {
+            recoveryIds.add(`queued:${currentConversationId}`);
+          }
+          if (this.#scope.activeRecoveryClaims.has(currentConversationId)) {
+            recoveryIds.add(`claimed:${currentConversationId}`);
+          }
+          if (this.#recoveryRunning) {
+            recoveryIds.add(`worker:${currentConversationId}`);
+          }
+          const recovery = [...recoveryIds].sort().map((id) => ({
+            id,
+            revision: protocolDigest("ConversationRecoveryClosure", 1, { id }),
+          }));
+          return [
+            currentConversationId,
+            {
+              pendingAdmittedRuns: admittedRuns.length,
+              continuableAdmittedRuns: continuableCount,
+              pendingFinals: finals.length,
+              pendingAssignments: assignments.length,
+              recoveryBacklog: recovery.length,
+              activeLocalLeases: leases.length,
+              items: Object.freeze({
+                admittedRuns: sortItems(admittedRuns),
+                finals: sortItems(finals),
+                assignments: sortItems(assignments),
+                recovery: sortItems(recovery),
+                leases: sortItems(leases),
+              }),
+            },
+          ] as const;
+        }),
+      );
+      for (const [id, closure] of entries) {
+        result.set(id, closure);
+      }
+    }
+    return result;
+  }
+
   async pendingClosureWork(conversationId?: string): Promise<{
     readonly pendingAdmittedRuns: number;
+    readonly continuableAdmittedRuns: number;
     readonly pendingFinals: number;
     readonly pendingAssignments: number;
     readonly recoveryBacklog: number;
@@ -1013,43 +1183,78 @@ export class RecoveryScheduler {
       readonly leases: readonly { readonly id: string; readonly revision: string }[];
     };
   }> {
+    if (conversationId !== undefined) {
+      return (await this.pendingClosureWorkByConversation([conversationId])).get(
+        conversationId,
+      )!;
+    }
     const scopeState = this.#scope.current;
     const admittedRuns: Array<{ id: string; revision: string }> = [];
+    let continuableAdmittedRuns = 0;
     const finals: Array<{ id: string; revision: string }> = [];
     const assignments: Array<{ id: string; revision: string }> = [];
-    const conversations =
-      conversationId === undefined
-        ? await this.#host.listSessions()
-        : [conversationId];
-    for (const currentConversationId of conversations) {
-      await this.#access.adopt(currentConversationId);
-      const journal = this.#access.journal(currentConversationId, scopeState);
-      for (const run of await journal.unsettledAdmittedRuns()) {
-        const source = admittedConversationRunLifecycleSource({
-          conversationId: currentConversationId,
-          runId: run.runId,
-          queuedPosition: run.queuedPosition,
-        });
-        admittedRuns.push({
-          id: source.id,
-          revision: source.revision,
-        });
-      }
-      for (const final of await journal.pendingFinalFrames()) {
-        finals.push({
-          id: `${final.conversationId}:${final.runId}`,
-          revision: String(final.commitRevision),
-        });
-      }
-      for (const assignment of await journal.assignmentsAwaitingRecovery()) {
-        assignments.push({
-          id: `${
-            assignment.dispatch.envelope.executorId === this.#authority.executorId
-              ? "local"
-              : "relay"
-          }:${assignment.assignmentId}`,
-          revision: dispatchEnvelopeDigest(assignment.dispatch.envelope),
-        });
+    const conversations = await this.#host.listSessions();
+    const batchSize = 16;
+    for (let offset = 0; offset < conversations.length; offset += batchSize) {
+      const slice = conversations.slice(offset, offset + batchSize);
+      const batch = await Promise.all(
+        slice.map(async (currentConversationId) => {
+          await this.#access.adopt(currentConversationId);
+          const journal = this.#access.journal(currentConversationId, scopeState);
+          const [unsettled, pendingFinalsList, awaitingAssignments] =
+            await Promise.all([
+              journal.unsettledAdmittedRuns(),
+              journal.pendingFinalFrames(),
+              journal.assignmentsAwaitingRecovery(),
+            ]);
+          const continuableCount =
+            unsettled.length > 0
+              ? (await journal.continuableAdmittedRuns()).length
+              : 0;
+          return {
+            currentConversationId,
+            continuableCount,
+            unsettled,
+            pendingFinalsList,
+            awaitingAssignments,
+          };
+        }),
+      );
+      for (const {
+        currentConversationId,
+        continuableCount,
+        unsettled,
+        pendingFinalsList,
+        awaitingAssignments,
+      } of batch) {
+        continuableAdmittedRuns += continuableCount;
+        for (const run of unsettled) {
+          const source = admittedConversationRunLifecycleSource({
+            conversationId: currentConversationId,
+            runId: run.runId,
+            queuedPosition: run.queuedPosition,
+          });
+          admittedRuns.push({
+            id: source.id,
+            revision: source.revision,
+          });
+        }
+        for (const final of pendingFinalsList) {
+          finals.push({
+            id: `${final.conversationId}:${final.runId}`,
+            revision: String(final.commitRevision),
+          });
+        }
+        for (const assignment of awaitingAssignments) {
+          assignments.push({
+            id: `${
+              assignment.dispatch.envelope.executorId === this.#authority.executorId
+                ? "local"
+                : "relay"
+            }:${assignment.assignmentId}`,
+            revision: dispatchEnvelopeDigest(assignment.dispatch.envelope),
+          });
+        }
       }
     }
     const leases: Array<{ id: string; revision: string }> = [];
@@ -1092,6 +1297,7 @@ export class RecoveryScheduler {
       );
     return {
       pendingAdmittedRuns: admittedRuns.length,
+      continuableAdmittedRuns,
       pendingFinals: finals.length,
       pendingAssignments: assignments.length,
       recoveryBacklog: recovery.length,

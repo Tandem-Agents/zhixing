@@ -20,11 +20,13 @@ import { createInitialControlEnvelope } from "@zhixing-ai/owner-kernel/control-a
 import {
   ConversationRunJournal,
   pendingAdvancementConversations,
+  registerConversationRunReadProjection,
   type AssignmentSubmissionIdentity,
   type AssignmentSubmissionPreflightPort,
   type CommittedConversationResult,
   type ConversationCommitAuthority,
   type ConversationMutationPublisher,
+  type ConversationRunValidationBinding,
   type TrustRuleHitBatchState,
   type TrustRuleHitPort,
   type ConversationTrustSedimentPort,
@@ -133,6 +135,13 @@ export class ConversationAccess {
     this.#onStatus = options.onStatus;
     this.#statusListeners = options.statusListeners;
     this.#observeFailure = options.observeFailure;
+    registerConversationRunReadProjection(
+      this.#authority.authorityLog,
+      this.#authority.artifacts,
+      this.#authority.verifier,
+      undefined,
+      this.#validationBinding(),
+    );
     const access = this;
     this.#mutationPublisherProxy = {
       get readProjectionIds() {
@@ -1027,6 +1036,135 @@ export class ConversationAccess {
     );
   }
 
+  async isProgramOriginRun(
+    conversationId: string,
+    runId: string,
+  ): Promise<boolean> {
+    await this.#adopt(conversationId);
+    const scopeState = this.#scope.current;
+    if (!this.acceptsConversationId(conversationId, scopeState)) return false;
+    if (scopeState.unavailableTransfers.has(conversationId)) return false;
+    return this.journalForQuery(conversationId, scopeState).isProgramOriginRun(
+      runId,
+    );
+  }
+
+  async hasOpenAdvancementSession(conversationId: string): Promise<boolean> {
+    await this.#adopt(conversationId);
+    const scopeState = this.#scope.current;
+    if (!this.acceptsConversationId(conversationId, scopeState)) return false;
+    if (scopeState.unavailableTransfers.has(conversationId)) {
+      throw Object.assign(
+        new Error("Conversation imported base is temporarily unavailable"),
+        { code: "CONVERSATION_BASE_UNAVAILABLE" },
+      );
+    }
+    return this.journalForQuery(
+      conversationId,
+      scopeState,
+    ).hasOpenAdvancementSession();
+  }
+
+  async inspectProgramInputReceipt(
+    conversationId: string,
+    input: {
+      readonly physicalTurnId: string;
+      readonly expectedInput?: import("@zhixing-ai/core/contracts").UserTurnInput;
+    },
+  ) {
+    await this.#adopt(conversationId);
+    const scopeState = this.#scope.current;
+    if (!this.acceptsConversationId(conversationId, scopeState)) {
+      throw Object.assign(
+        new Error("Conversation identity does not belong to this owner domain"),
+        { code: "CONVERSATION_OWNER_UNAVAILABLE" },
+      );
+    }
+    if (scopeState.unavailableTransfers.has(conversationId)) {
+      throw Object.assign(
+        new Error("Conversation imported base is temporarily unavailable"),
+        { code: "CONVERSATION_BASE_UNAVAILABLE" },
+      );
+    }
+    return this.journalForQuery(
+      conversationId,
+      scopeState,
+    ).inspectProgramInputReceipt({
+      physicalTurnId: input.physicalTurnId,
+      ...(input.expectedInput ? { expectedInput: input.expectedInput } : {}),
+      controlAdmission: this.#authority.controlAdmission,
+    });
+  }
+
+  async conversationAdoptionStatus(conversationId: string): Promise<{
+    readonly unavailableTransfer: boolean;
+    readonly adopted: boolean;
+    readonly created: boolean;
+    readonly deleted: boolean;
+    readonly hasDurableIdentity: boolean;
+  }> {
+    await this.#adopt(conversationId);
+    const scopeState = this.#scope.current;
+    if (scopeState.unavailableTransfers.has(conversationId)) {
+      return {
+        unavailableTransfer: true,
+        adopted: false,
+        created: false,
+        deleted: false,
+        hasDurableIdentity: false,
+      };
+    }
+    const adopted = scopeState.adoptedConversations.has(conversationId);
+    const created =
+      await this.#authority.controlAdmission.hasCreatedConversation(
+        conversationId,
+      );
+    const stored =
+      !adopted && !created
+        ? (await this.#storedIdentityExists?.(conversationId)) === true
+        : false;
+    if (!this.acceptsConversationId(conversationId, scopeState)) {
+      return {
+        unavailableTransfer: false,
+        adopted,
+        created,
+        deleted: false,
+        hasDurableIdentity: adopted || created || stored,
+      };
+    }
+    const journal = this.journalForQuery(conversationId, scopeState);
+    const auth = await journal.authorityState();
+    const deleted =
+      auth.deleted ||
+      ((adopted || created || stored || auth.hasDurableIdentity)
+        ? await journal.recoveryDeleted()
+        : false);
+    return {
+      unavailableTransfer: false,
+      adopted,
+      created,
+      deleted,
+      hasDurableIdentity: auth.hasDurableIdentity || adopted || created || stored,
+    };
+  }
+
+  async listAdoptedConversationIds(): Promise<readonly string[]> {
+    const scopeState = this.#scope.current;
+    const ids = new Set<string>(scopeState.adoptedConversations.keys());
+    for (const id of (await this.#committedTransfers?.conversations()) ?? []) {
+      ids.add(id);
+    }
+    for (const id of ids) {
+      await this.#adopt(id);
+    }
+    for (const id of scopeState.adoptedConversations.keys()) {
+      ids.add(id);
+    }
+    return [...ids].sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+  }
+
   async statusHistory(
     requests: readonly {
       readonly conversationId: string;
@@ -1093,6 +1231,29 @@ export class ConversationAccess {
     );
   }
 
+  #validationBinding(): ConversationRunValidationBinding {
+    let delivery: ConversationRunValidationBinding["delivery"];
+    try {
+      delivery = this.#authority.participant;
+    } catch {
+      delivery = undefined;
+    }
+    let resources: ConversationRunValidationBinding["resources"];
+    try {
+      resources = this.#authority.resources;
+    } catch {
+      resources = undefined;
+    }
+    return {
+      ...(delivery ? { delivery } : {}),
+      currentAuthority: {
+        deviceId: this.#authority.deviceId,
+        executorId: this.#authority.executorId,
+      },
+      ...(resources ? { resources } : {}),
+    };
+  }
+
   get advancementPending() {
     return {
       list: (after?: string) =>
@@ -1101,6 +1262,7 @@ export class ConversationAccess {
           this.#authority.artifacts,
           this.#authority.verifier,
           after,
+          this.#validationBinding(),
         ),
       cleanup: (conversationId: string, after?: string) =>
         this.#adopt(conversationId).then(() =>

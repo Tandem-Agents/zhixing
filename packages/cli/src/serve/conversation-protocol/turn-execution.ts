@@ -1,5 +1,5 @@
 import { hasProtocolStateInMessages, normalizeUserTurnInput } from "@zhixing-ai/core";
-import { parseConversationId } from "@zhixing-ai/core/conversation";
+import { isProgramOrigin, parseConversationId } from "@zhixing-ai/core/conversation";
 import {
   advancementExecutionContextBlock,
   type AdvancementExecutionMaterial,
@@ -785,6 +785,7 @@ export class TurnExecution {
           );
         };
         let toolCalls = 0;
+        const programOrigin = isProgramOrigin(executionIngress);
         const interactionScope = effect.createInteractionScope({
           conversationId: input.conversationId,
           interactions: this.#interactions,
@@ -793,7 +794,11 @@ export class TurnExecution {
           broker: executionRuntime.confirmationBroker,
           stream,
           streamMeta,
+          ...(programOrigin ? { isProgramOrigin: true } : {}),
         });
+        if (programOrigin) {
+          await interactionScope.drain();
+        }
         const controlHeartbeat = effect.startHeartbeat();
         let runEndPrepared = false;
         const settleFailure = async (error: unknown): Promise<never> => {

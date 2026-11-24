@@ -165,6 +165,7 @@ export interface ConversationExecutorExecutionEffect {
         import("@zhixing-ai/core/contracts").IngressContext["turnOrigin"]
       >;
     };
+    readonly isProgramOrigin?: boolean;
   }): ConversationExecutorInteractionScope;
   assignmentMutations(input: {
     readonly execution: "conversation";
@@ -352,6 +353,7 @@ interface LocalConversationSubmission {
         import("@zhixing-ai/core/contracts").IngressContext["turnOrigin"]
       >;
     };
+    readonly isProgramOrigin?: boolean;
   }): ConversationExecutorInteractionScope;
   prepareForRunEnd(
     assignmentId: string,
@@ -899,6 +901,7 @@ function createLocalConversationExecutorMechanism(
               ...(input.broker ? { broker: input.broker } : {}),
               stream: input.stream,
               streamMeta: input.streamMeta,
+              ...(input.isProgramOrigin ? { isProgramOrigin: true } : {}),
             };
             return {
               run: (operation) => input.interactions.withBinding(binding, operation),
@@ -999,6 +1002,7 @@ function createLocalConversationExecutorMechanism(
                   ...(scopeInput.broker ? { broker: scopeInput.broker } : {}),
                   stream: scopeInput.stream,
                   streamMeta: scopeInput.streamMeta,
+                  ...(scopeInput.isProgramOrigin ? { isProgramOrigin: true } : {}),
                 });
               },
               assignmentMutations(mutationInput) {

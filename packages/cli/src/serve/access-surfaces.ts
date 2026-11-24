@@ -6,6 +6,8 @@
  */
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { observeLogPhase } from "@zhixing-ai/core/logging";
+import { buildStartupBootstrapPair } from "@zhixing-ai/core/context";
+import { isLocalConversationId } from "@zhixing-ai/core/conversation";
 import { recordRuntimeFailure } from "../logging/runtime.js";
 import { WorksceneContinuationApplication } from "@zhixing-ai/core/workscene/application";
 import { createWorksceneContinuationPort } from "./workscene-continuation-adapter.js";
@@ -775,18 +777,31 @@ export async function createConversationServices(
         await projectConversationClear({
           conversationId: input.conversationId,
           operationId: input.requestId,
-          projection: {
-            clearStoredView: async (conversationId) => {
-              await inputConversationIdentityLifecycle.ensureShell(
-                conversationId,
-              );
-              return inputConversationClearProjection.clearStoredView(
-                conversationId,
-              );
-            },
-            clearRuntimeView: (conversationId, persist) =>
-              manager.clear(conversationId, persist),
-          },
+          projection: isLocalConversationId(input.conversationId)
+            ? {
+                clearStoredView: async (conversationId) => {
+                  inputTaskListService.clear(conversationId);
+                  return true;
+                },
+                clearRuntimeView: async (conversationId, persist) =>
+                  manager.has(conversationId)
+                    ? manager.clear(conversationId, persist)
+                    : (await persist())
+                      ? "cleared"
+                      : "not-found",
+              }
+            : {
+                clearStoredView: async (conversationId) => {
+                  await inputConversationIdentityLifecycle.ensureShell(
+                    conversationId,
+                  );
+                  return inputConversationClearProjection.clearStoredView(
+                    conversationId,
+                  );
+                },
+                clearRuntimeView: (conversationId, persist) =>
+                  manager.clear(conversationId, persist),
+              },
           publishFact: (fact) => {
             inputSessionBroadcast(
               fact.conversationId,
@@ -802,29 +817,54 @@ export async function createConversationServices(
         operationId: input.requestId,
         deletionAlreadyCommitted: true,
         dependentFailure: "propagate",
-        projection: createAnchorConversationDeleteProjectionPort({
-          conversations: manager,
-          storage: {
-            exists: (conversationId) =>
-              inputConversationIdentityLifecycle.identityExists(
-                conversationId,
-              ),
-            deleteStoredConversation: (conversationId) =>
-              inputConversationDeleteProjection.deleteStoredConversation(
-                conversationId,
-              ),
-          },
-          related: {
-            cancelDependentLifecycle: (conversationId) =>
-              advancementConversationLifecycle.cancelConversationLifecycle(
-                conversationId,
-              ),
-            removeDependentData: (conversationId) =>
-              advancementConversationLifecycle.removeConversationData(
-                conversationId,
-              ),
-          },
-        }),
+        projection: isLocalConversationId(input.conversationId)
+          ? {
+              deleteRuntimeAndStorage: async ({ onDeleted }) => {
+                await advancementConversationLifecycle.cancelConversationLifecycle(
+                  input.conversationId,
+                );
+                const finalizeDelete = async () => {
+                  await advancementConversationLifecycle.removeConversationData(
+                    input.conversationId,
+                  );
+                  inputTaskListService.clear(input.conversationId);
+                  return true;
+                };
+                if (!manager.has(input.conversationId)) {
+                  await finalizeDelete();
+                  onDeleted();
+                  return "deleted";
+                }
+                const outcome = await manager.delete(input.conversationId, {
+                  removeDisk: finalizeDelete,
+                  onDeleted,
+                });
+                return outcome === "busy" ? "busy" : "deleted";
+              },
+            }
+          : createAnchorConversationDeleteProjectionPort({
+              conversations: manager,
+              storage: {
+                exists: (conversationId) =>
+                  inputConversationIdentityLifecycle.identityExists(
+                    conversationId,
+                  ),
+                deleteStoredConversation: (conversationId) =>
+                  inputConversationDeleteProjection.deleteStoredConversation(
+                    conversationId,
+                  ),
+              },
+              related: {
+                cancelDependentLifecycle: (conversationId) =>
+                  advancementConversationLifecycle.cancelConversationLifecycle(
+                    conversationId,
+                  ),
+                removeDependentData: (conversationId) =>
+                  advancementConversationLifecycle.removeConversationData(
+                    conversationId,
+                  ),
+              },
+            }),
         publishFact: (fact) => {
           inputSessionBroadcast(
             fact.conversationId,
@@ -835,11 +875,31 @@ export async function createConversationServices(
       });
     },
   });
+  const projectedLocalRuns = new Set<string>();
   manager = new ConversationManager(input.runtimeFactory, undefined, {
     onRelease: (conversationId) => protocol.releaseConversation(conversationId),
     ...(input.beforeTurnAdmission ? { beforeTurnAdmission: input.beforeTurnAdmission } : {}),
     ...input.conversationRuntimeStorage,
     loadHistory: async (conversationId) => {
+      if (isLocalConversationId(conversationId)) {
+        for (;;) {
+          const contextPage = (await protocol.recoveryPage({
+            mode: "context",
+            conversationId,
+          })) as import("@zhixing-ai/core/contracts").ConversationContextPage;
+          if (contextPage.preparing) {
+            await new Promise<void>(setImmediate);
+            continue;
+          }
+          if (!contextPage.turnCount) return undefined;
+          return {
+            bootstrap: contextPage.text
+              ? buildStartupBootstrapPair(contextPage.text)
+              : null,
+            turnCount: contextPage.turnCount,
+          };
+        }
+      }
       const meta = await protocol.sessionState.readSessionMeta(conversationId, {
         principal: { kind: "host", component: "conversation-bootstrap" },
         requestId: "conversation-bootstrap-read",
@@ -851,19 +911,62 @@ export async function createConversationServices(
         conversationId, meta.baseRevision > 0 ? meta.turnCount : undefined,
       );
     },
+    initTranscript: async (conversationId) => {
+      if (isLocalConversationId(conversationId)) {
+        await protocol.ensureSession(conversationId);
+        return;
+      }
+      await input.conversationRuntimeStorage.initTranscript(conversationId);
+    },
     ensureConversation: async (conversationId) => {
       await protocol.ensureSession(conversationId);
-      await inputConversationIdentityLifecycle.initializeRuntimeStorage(
+      if (!isLocalConversationId(conversationId)) {
+        await inputConversationIdentityLifecycle.initializeRuntimeStorage(
+          conversationId,
+        );
+      }
+    },
+    appendRun: async (conversationId, record, options) => {
+      if (isLocalConversationId(conversationId)) {
+        throw new Error(
+          "Local conversations persist turns only through the owner commit protocol",
+        );
+      }
+      return input.conversationRuntimeStorage.appendRun(
         conversationId,
+        record,
+        options,
+      );
+    },
+    appendCommittedRun: async (conversationId, record, source) => {
+      if (isLocalConversationId(conversationId)) {
+        const appended = !projectedLocalRuns.has(record.runId);
+        projectedLocalRuns.add(record.runId);
+        return { runIndex: record.runIndex, shardId: "owner-log", appended };
+      }
+      return input.conversationRuntimeStorage.appendCommittedRun(
+        conversationId,
+        record,
+        source,
+      );
+    },
+    writeSnapshot: async (conversationId, snapshot) => {
+      if (isLocalConversationId(conversationId)) return;
+      await input.conversationRuntimeStorage.writeSnapshot(
+        conversationId,
+        snapshot,
       );
     },
     applyCommittedSessionMutations: async (conversationId, mutations) => {
+      const localConversation = isLocalConversationId(conversationId);
       for (const record of [...mutations].sort((a, b) => a.seq - b.seq)) {
         if (record.mutation.kind === "task-list-op") {
-          await inputConversationCommittedViewStorage.persistTaskList(
-            conversationId,
-            record.mutation.op.state,
-          );
+          if (!localConversation) {
+            await inputConversationCommittedViewStorage.persistTaskList(
+              conversationId,
+              record.mutation.op.state,
+            );
+          }
           inputTaskListService.acceptCommitted(
             conversationId,
             record.mutation.op.state,
@@ -883,10 +986,12 @@ export async function createConversationServices(
           );
           continue;
         }
-        await inputConversationCommittedViewStorage.appendSegment(
-          conversationId,
-          record.mutation.segment,
-        );
+        if (!localConversation) {
+          await inputConversationCommittedViewStorage.appendSegment(
+            conversationId,
+            record.mutation.segment,
+          );
+        }
       }
     },
     confirmationHub: input.confirmationHub,
@@ -927,7 +1032,14 @@ export async function createConversationServices(
     pending: protocol.advancementPending,
     advancement: advancementController,
     reviews: advancementReviews,
-    directory: input.advancementDirectory,
+    directory: {
+      list: () => input.advancementDirectory.list(),
+      exists: (conversationId) => input.advancementDirectory.exists(conversationId),
+      readRunsReverse: (conversationId, page) =>
+        input.advancementDirectory.readRunsReverse(conversationId, page),
+      isProgramOriginRun: (conversationId, runId) =>
+        protocol.isProgramOriginRun(conversationId, runId),
+    },
     proxyTurns,
     originalTasks: createAdvancementOriginalTaskAdmissionPort(
       manager,
@@ -955,6 +1067,8 @@ export async function createConversationServices(
       review: advancementReviews,
       results: reviewResults,
       proposals: advancementProposals,
+      isProgramOriginRun: (conversationId, runId) =>
+        protocol.isProgramOriginRun(conversationId, runId),
     });
   auxiliaryRecoveryAssembly.complete(async (conversationId) => {
     await worksceneContinuation.recover(conversationId);
