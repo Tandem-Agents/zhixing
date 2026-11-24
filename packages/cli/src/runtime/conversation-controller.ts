@@ -23,7 +23,7 @@ import { finalAssistantMessageOf, type AgentYield } from "@zhixing-ai/core/loop"
 import { advancementExecutionTurnId } from "@zhixing-ai/core/advancement/proposal-identity";
 import { validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource, type SessionPresentationProfile } from "@zhixing-ai/rpc/session-wire";
 import { resolveWorksceneMainReturn } from "@zhixing-ai/core/workscene/application";
-import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing-ai/core/types";
+import { extractText, generateTurnId, type Message, type MessageInputIdentity, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing-ai/core/types";
 import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing-ai/core/conversation";
 import { isMainConversationId } from "../conversation-selection.js";
 import type {
@@ -219,7 +219,13 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   presentationProfile?: SessionPresentationProfile;
   /** 同一当前对话里,非本接入面发起的 turn 开始产出。 */
   onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
-  onObservedInputs?: (turn: ObservedTurnNotification & AgentEventMap["agent:input_received"]) => void;
+  onObservedInputs?: (turn: ObservedTurnNotification & {
+    readonly inputs: readonly {
+      readonly text: string;
+      readonly identity?: MessageInputIdentity;
+      readonly programOrigin?: true;
+    }[];
+  }) => void;
   /** Observer/body stream ended (including closed/gap); not domain finality. */
   onObservedTurnComplete?: (turn: ObservedTurnNotification) => void;
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
@@ -1876,11 +1882,13 @@ export class ConversationController<Outcome = TurnOutcome> {
         const done = await this.notificationHistory(conversationId, { limit: 1 }, page => {
           if (this.disposed || this.active.conversationId !== conversationId) return true;
           if (this.pendingStatuses.get(runId)?.statusRevision !== notice.statusRevision) return false;
-          const messages = (page.inputsOutsideHistory ?? []).filter(input => input.runId === runId).map(input => input.message);
+          const outside = (page.inputsOutsideHistory ?? []).filter(input => input.runId === runId);
+          const messages = outside.map(input => input.message);
+          const programOrigin = outside.some(input => input.programOrigin === true);
           let observed = this.observedContinuations.get(runId);
-          this.presentRecordedInputs(conversationId, runId, messages);
+          this.presentRecordedInputs(conversationId, runId, messages, programOrigin);
           if (!observed) {
-            const communication = messages.some(message => message.inputIdentity?.source.kind === "conversation");
+            const communication = messages.some(message => message.inputIdentity?.source.kind === "conversation") || programOrigin;
             observed = { conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: !communication };
             rememberBounded(this.observedContinuations, runId, observed);
           }
@@ -1959,7 +1967,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     let observed = this.observedContinuations.get(runId);
     if (!observed) {
       observed = { conversationId: source.conversationId, sequences: new Map(), text: process.text, settled: false,
-        communication: source.turnOrigin?.messageIdentity?.source.kind === 'conversation' };
+        communication: source.turnOrigin?.messageIdentity?.source.kind === 'conversation' || source.turnOrigin?.channel === 'program' };
       rememberBounded(this.observedContinuations, runId, observed);
     }
     if (payload.kind !== 'yield' || process.historyRendered) return;
@@ -1982,6 +1990,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   private consumeContinuationFrame(frame: StreamFrame): void {
     if (this.opts.pagedRecovery && (this.recoveryResetRequested || this.recoveryDeleted)) return;
     const communication = frame.meta.turnOrigin?.messageIdentity?.source.kind === "conversation";
+    const programTurn = frame.meta.turnOrigin?.channel === "program";
     if (frame.ref.execution !== "conversation") return;
     if (frame.ref.conversationId !== this.active.conversationId) return;
     if (frame.payload.kind === "agent-event" && "event" in frame.payload.event) {
@@ -1990,12 +1999,14 @@ export class ConversationController<Outcome = TurnOutcome> {
         this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, runId: frame.ref.runId, ...event.payload });
       } else if (event.event === "agent:run_start" && communication) {
         this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, runId: frame.ref.runId, inputs: [{ text: event.payload.prompt, identity: frame.meta.turnOrigin!.messageIdentity! }] });
+      } else if (event.event === "agent:run_start" && programTurn) {
+        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, runId: frame.ref.runId, inputs: [{ text: event.payload.prompt, programOrigin: true }] });
       }
     }
-    if (!frame.meta.turnOrigin?.worksceneContinuation && !communication) return;
+    if (!frame.meta.turnOrigin?.worksceneContinuation && !communication && !programTurn) return;
     let observed = this.observedContinuations.get(frame.ref.runId);
     if (!observed) {
-      observed = { conversationId: frame.ref.conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: false };
+      observed = { conversationId: frame.ref.conversationId, communication: communication || programTurn, sequences: new Map(), text: new ObservedTextPrefix(), settled: false };
       rememberBounded(this.observedContinuations, frame.ref.runId, observed);
     }
     const status = this.pendingStatuses.get(frame.ref.runId);
@@ -2046,8 +2057,12 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (this.active.conversationId !== frame.conversationId || observed?.settled) return { done: true, before: undefined };
           if (match) {
             this.markProcessHistoryRendered(frame.runId);
-            this.presentRecordedInputs(frame.conversationId, frame.runId, match.record.messages);
-            const communication = match.record.messages[0]?.inputIdentity?.source.kind === "conversation";
+            const programOrigin =
+              "programOriginRunIds" in page &&
+              Array.isArray(page.programOriginRunIds) &&
+              page.programOriginRunIds.includes(frame.runId);
+            this.presentRecordedInputs(frame.conversationId, frame.runId, match.record.messages, programOrigin);
+            const communication = match.record.messages[0]?.inputIdentity?.source.kind === "conversation" || programOrigin;
             if (!observed && !match.record.worksceneContinuation && !communication) return { done: true, before: undefined };
             if (!observed) {
               observed = { conversationId: frame.conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: false };
@@ -2080,10 +2095,21 @@ export class ConversationController<Outcome = TurnOutcome> {
     }
   }
 
-  private presentRecordedInputs(conversationId: string, runId: string, messages: readonly Message[]): void {
+  private presentRecordedInputs(conversationId: string, runId: string, messages: readonly Message[], programOrigin = false): void {
     if (conversationId !== this.active.conversationId || !this.opts.onObservedInputs) return;
-    const inputs = messages.flatMap(message => message.inputIdentity?.source.kind === "conversation"
-      ? [{ text: extractText(message), identity: message.inputIdentity }] : []);
+    const inputs: {
+      readonly text: string;
+      readonly identity?: MessageInputIdentity;
+      readonly programOrigin?: true;
+    }[] = [];
+    if (programOrigin && messages[0] && messages[0].inputIdentity?.source.kind !== "conversation") {
+      inputs.push({ text: extractText(messages[0]), programOrigin: true });
+    }
+    for (const message of messages) {
+      if (message.inputIdentity?.source.kind === "conversation") {
+        inputs.push({ text: extractText(message), identity: message.inputIdentity });
+      }
+    }
     if (inputs.length) this.opts.onObservedInputs?.({ conversationId, runId, inputs });
   }
 
@@ -2171,7 +2197,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         .filter(([, run]) => run.conversationId === conversationId && !run.settled)
         .map(([runId]) => runId));
       for (const input of page.inputsOutsideHistory ?? []) {
-        if (input.state === "uncertain" || input.message.inputIdentity?.source.kind === "conversation" &&
+        if (input.state === "uncertain" || (input.message.inputIdentity?.source.kind === "conversation" || input.programOrigin === true) &&
             !this.observedContinuations.get(input.runId)?.terminalInputsReconciled) result.add(input.runId);
       }
       return result;

@@ -198,14 +198,30 @@ export async function startTextSession(home: string, configPath: string, options
         const id = activeController.current.conversationId;
         const page = await activeController.history(id);
         if (id !== activeController.current.conversationId) return;
-        for (const entry of projectHistoryTail(page.runs.map(run => run.record)).entries) {
-          const origin = entry.sourceConversationId ? `来自对话 ${entry.sourceConversationId}` : entry.fromAdvancement ? '任务推进' : '用户';
+        const programOriginRuns = 'programOriginRunIds' in page && Array.isArray(page.programOriginRunIds)
+          ? new Set(page.programOriginRunIds)
+          : undefined;
+        for (const entry of projectHistoryTail(page.runs.map(run => run.record), undefined, programOriginRuns).entries) {
+          const origin = entry.sourceConversationId
+            ? `来自对话 ${entry.sourceConversationId}`
+            : entry.programOrigin
+              ? '来自外部程序'
+              : entry.fromAdvancement
+                ? '任务推进'
+                : '用户';
           output.line(`[${origin}] ${entry.userText}`);
           for (const item of entry.inputs ?? []) output.line(`[${item.sourceConversationId ? `来自对话 ${item.sourceConversationId}` : '用户'}] ${item.text}`);
           for (const sent of entry.sent ?? []) output.line(sent);
           output.line(entry.assistantText ?? '（此轮未生成回复）');
         }
-        for (const item of page.inputsOutsideHistory ?? []) output.line(`[已接纳输入] ${extractText(item.message)}`);
+        for (const item of page.inputsOutsideHistory ?? []) {
+          const itemOrigin = item.message.inputIdentity?.source.kind === 'conversation'
+            ? `来自对话 ${item.message.inputIdentity.source.conversationId}`
+            : item.programOrigin
+              ? '来自外部程序'
+              : '已接纳输入';
+          output.line(`[${itemOrigin}] ${extractText(item.message)}`);
+        }
       };
       const changed = async (advancement?: SessionAdvancementStateSnapshot): Promise<void> => {
         information?.invalidate(); decision?.invalidate(); tasks?.invalidate();

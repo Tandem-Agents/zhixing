@@ -70,9 +70,19 @@ export class ObservedTurnPresenter {
     active.sawOutput = true;
   }
 
-  onObservedInputs(turn: ObservedTurnIdentity & AgentEventMap["agent:input_received"]): void {
+  onObservedInputs(turn: ObservedTurnIdentity & {
+    readonly inputs: readonly {
+      readonly text: string;
+      readonly identity?: MessageInputIdentity;
+      readonly programOrigin?: true;
+    }[];
+  }): void {
     for (const input of turn.inputs) {
-      const key = input.identity ? `${turn.conversationId}:${input.identity.id}` : undefined;
+      const key = input.identity
+        ? `${turn.conversationId}:${input.identity.id}`
+        : input.programOrigin && turn.runId
+          ? `${turn.conversationId}:program:${turn.runId}`
+          : undefined;
       if (key && this.shownInputs.has(key)) continue;
       if (key) {
         this.shownInputs.add(key);
@@ -81,7 +91,13 @@ export class ObservedTurnPresenter {
       const source = input.identity?.source;
       this.opts.flushOutput();
       this.opts.writer.ensureSegmentBreak();
-      this.opts.writer.line(this.promptLine(collapsePrompt(input.text), undefined, source?.kind === "conversation" ? source.conversationId : undefined));
+      this.opts.writer.line(
+        this.promptLine(
+          collapsePrompt(input.text),
+          input.programOrigin ? "program" : undefined,
+          source?.kind === "conversation" ? source.conversationId : undefined,
+        ),
+      );
     }
   }
 
@@ -104,6 +120,8 @@ export class ObservedTurnPresenter {
 
     if (messageIdentity?.source.kind === "conversation") {
       this.onObservedInputs({ ...identity, inputs: [{ text: prompt, identity: messageIdentity }] });
+    } else if (originChannel === "program") {
+      this.onObservedInputs({ ...identity, inputs: [{ text: prompt, programOrigin: true }] });
     } else {
       this.opts.flushOutput();
       this.opts.writer.ensureSegmentBreak();
@@ -167,9 +185,13 @@ export class ObservedTurnPresenter {
     // 来源标记自解释：推进侧代理消息强到明说，零认知用户不得产生
     // 「这是我发的吗」的困惑；其它接入面保持既有旁观措辞。
     const label =
-      sourceConversationId ? chalk.dim(`◇ 来自对话 ${sourceConversationId}:`) : originChannel === "advancement"
-        ? chalk.dim(`◇ ${ADVANCEMENT_TURN_LABEL}:`)
-        : chalk.dim("❯ 来自另一个接入面:");
+      sourceConversationId
+        ? chalk.dim(`◇ 来自对话 ${sourceConversationId}:`)
+        : originChannel === "program"
+          ? chalk.dim("◇ 来自外部程序:")
+          : originChannel === "advancement"
+            ? chalk.dim(`◇ ${ADVANCEMENT_TURN_LABEL}:`)
+            : chalk.dim("❯ 来自另一个接入面:");
     return clampLine(`${layout.contentPrefix}${label} ${prompt}`, width);
   }
 }

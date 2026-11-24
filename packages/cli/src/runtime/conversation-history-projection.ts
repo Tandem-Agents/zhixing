@@ -15,6 +15,8 @@ export interface HistoryTailEntry {
   assistantText?: string;
   /** 推进侧代理 run——首行不是用户说的话，渲染必须带来源标记。 */
   fromAdvancement?: boolean;
+  /** 外部程序发起的独立 run（来自持久索引证据）。 */
+  programOrigin?: boolean;
   /** 多视角评议 run——最终回复来自发散收敛流程，启动尾巴需显式标记。 */
   perspectiveCount?: number;
   sourceConversationId?: string;
@@ -39,23 +41,38 @@ export interface HistoryTail {
 export function projectHistoryTail(
   runsNewestFirst: readonly RunRecord[],
   maxRuns: number = DEFAULT_TAIL_RUNS,
+  programOriginRunIds?: ReadonlySet<string>,
 ): HistoryTail {
   const recent = runsNewestFirst.slice(0, maxRuns);
   if (recent.length === 0) return { entries: [] };
   const latestAt = recent[0]!.timestamp;
-  return { entries: [...recent].reverse().map(projectEntry), latestAt };
+  return {
+    entries: [...recent]
+      .reverse()
+      .map((record) => projectEntry(record, programOriginRunIds)),
+    latestAt,
+  };
 }
 
-function projectEntry(record: RunRecord): HistoryTailEntry {
+function projectEntry(
+  record: RunRecord,
+  programOriginRunIds?: ReadonlySet<string>,
+): HistoryTailEntry {
   const userText = collapseToLine(extractUserDisplayText(record.messages[0]!));
   const lastAssistant = findLastAssistantText(record.messages);
   const source = record.messages[0]?.inputIdentity?.source;
+  const runId = "runId" in record && typeof record.runId === "string" ? record.runId : undefined;
+  const programOrigin =
+    source?.kind !== "conversation" &&
+    runId !== undefined &&
+    programOriginRunIds?.has(runId) === true;
   const appended = record.messages.slice(1).filter(message => message.inputIdentity);
   const calls = record.messages.flatMap(message => message.content).filter(block => block.type === "tool_use" && block.name === "conversation" && block.input.action === "send");
   const results = record.messages.flatMap(message => message.content).filter(block => block.type === "tool_result");
   return {
     userText,
     ...(source?.kind === "conversation" ? { sourceConversationId: source.conversationId } : {}),
+    ...(programOrigin ? { programOrigin: true } : {}),
     ...(appended.length ? { inputs: appended.map(message => ({ text: collapseToLine(extractUserDisplayText(message)), ...(message.inputIdentity?.source.kind === "conversation" ? { sourceConversationId: message.inputIdentity.source.conversationId } : {}) })) } : {}),
     ...(calls.length ? { sent: calls.map(call => {
       if (call.type !== "tool_use") throw new Error("Expected communication tool call");
