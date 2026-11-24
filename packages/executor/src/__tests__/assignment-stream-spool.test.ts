@@ -1444,6 +1444,74 @@ describe(
     ).toEqual([frame.payload.yield.ref]);
   });
 
+  it("retains repeated identical oversized producer items across immediate and consumer-acked pruning", async () => {
+    const fixture = await createFixture();
+    const writer = await AssignmentStreamWriter.open(
+      fixture.spool,
+      "assignment-repeated-oversized",
+      ref,
+    );
+    const yielded = {
+      type: "text_delta" as const,
+      text: "华".repeat(32_768),
+    };
+    const first = await writer.appendYield(yielded);
+    const second = await writer.appendYield(yielded);
+    const third = await writer.appendYield(yielded);
+    expect(first.seq).toBe(1);
+    expect(second.seq).toBe(2);
+    expect(third.seq).toBe(3);
+    await writer.finalize();
+
+    const ackedWriter = await AssignmentStreamWriter.open(
+      fixture.spool,
+      "assignment-acked-oversized",
+      ref,
+    );
+    const epoch = await qualifyAndConnect(
+      fixture.spool,
+      "assignment-acked-oversized",
+      ref,
+      surface,
+      SURFACE_EXPIRY,
+    );
+    await ackedWriter.appendYield(yielded);
+    await fixture.spool.subscribe({
+      request: {
+        v: 1,
+        ref,
+        assignmentId: "assignment-acked-oversized",
+        afterSeq: 0,
+        consumer: surface,
+      },
+      streamEpoch: epoch,
+      expiresAt: SURFACE_EXPIRY,
+    });
+    await fixture.spool.acknowledge(
+      {
+        v: 1,
+        assignmentId: "assignment-acked-oversized",
+        ackSeq: 1,
+        consumer: surface,
+      },
+      epoch,
+    );
+    const reappended = await ackedWriter.appendYield(yielded);
+    expect(reappended.seq).toBe(2);
+    const frames = await fixture.spool.subscribe({
+      request: {
+        v: 1,
+        ref,
+        assignmentId: "assignment-acked-oversized",
+        afterSeq: 1,
+        consumer: surface,
+      },
+      streamEpoch: epoch,
+      expiresAt: SURFACE_EXPIRY,
+    });
+    expect(frames).toHaveLength(1);
+  });
+
   it("starts the bounded job fallback window only after interactions are closed", async () => {
     const fixture = await createFixture();
     const epoch = await qualifyAndConnect(

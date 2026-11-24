@@ -744,16 +744,24 @@ export class AssignmentStreamSpool {
     await this.open(input.assignmentId, input.ref);
     const handle = this.#handle(input.assignmentId);
     return this.#withProducer(handle, async () => {
-      const prepared = await prepareStreamDataPayload(
+      let prepared = await prepareStreamDataPayload(
         input.payload,
         this.#sourceArtifacts,
         handle.frames,
       );
+      const reprepare = async () => {
+        prepared = await prepareStreamDataPayload(
+          input.payload,
+          this.#sourceArtifacts,
+          handle.frames,
+        );
+        return prepared;
+      };
       const pressure: { since?: number } = {};
       for (;;) {
         throwIfAborted(input.signal);
         const attempt = await this.#queuedAttempt(handle, () =>
-          this.#tryAppend(handle, input, prepared),
+          this.#tryAppend(handle, input, prepared, reprepare),
         input.signal, pressure);
         if (attempt.kind === "appended") return attempt.frame;
         if (attempt.kind === "retry") continue;
@@ -806,16 +814,24 @@ export class AssignmentStreamSpool {
     await this.open(input.assignmentId, input.ref);
     const handle = this.#handle(input.assignmentId);
     return this.#withProducer(handle, async () => {
-      const prepared = await prepareStreamDataPayload(
+      let prepared = await prepareStreamDataPayload(
         input.payload,
         this.#sourceArtifacts,
         handle.frames,
       );
+      const reprepare = async () => {
+        prepared = await prepareStreamDataPayload(
+          input.payload,
+          this.#sourceArtifacts,
+          handle.frames,
+        );
+        return prepared;
+      };
       const pressure: { since?: number } = {};
       for (;;) {
         throwIfAborted(input.signal);
         const attempt = await this.#queuedAttempt(handle, () =>
-          this.#tryAppend(handle, input, prepared),
+          this.#tryAppend(handle, input, prepared, reprepare),
         input.signal, pressure);
         if (attempt.kind === "appended") {
           return {
@@ -1299,15 +1315,28 @@ export class AssignmentStreamSpool {
       | (Omit<AppendStreamFrameInput, "payload"> & {
           readonly payload: StreamFrame["payload"];
         }),
-    prepared: {
+    initialPrepared: {
       readonly payload: StreamFrame["payload"];
       readonly references: readonly ArtifactRef[];
     },
+    reprepare?: () => Promise<{
+      readonly payload: StreamFrame["payload"];
+      readonly references: readonly ArtifactRef[];
+    }>,
   ): Promise<AppendAttempt> {
     // 同一队列操作里最后一次已验状态作追加的候选；下面的追加事务照常重核开放、lastSeq 与容量，变了就重驱
     const state = await this.#reconcileRetention(handle);
     assertOpen(state);
     assertSameExecution(state, input.ref);
+    let prepared = initialPrepared;
+    if (reprepare !== undefined) {
+      for (const ref of collectArtifactRefs(prepared.references)) {
+        if (!(await handle.frames.has(ref))) {
+          prepared = await reprepare();
+          break;
+        }
+      }
+    }
     if (input.sourceId !== undefined) {
       assertIdentifier(input.sourceId, "Stream source identity");
       const existingSource = state.sourceFrames.get(input.sourceId);
