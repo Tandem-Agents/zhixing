@@ -112,6 +112,12 @@ export interface ControlApplicationPlan {
 export interface AtomicControlApplicationPlan {
   readonly result: ControlResult;
   readonly authorityEntries?: readonly LogicalRecord<unknown>[];
+  /**
+   * When false on a deferred-receipt input, a rejected pre-admission gate
+   * returns without appending `received`/`applied` control records so the
+   * caller's requestId remains unconsumed for retry once the gate clears.
+   */
+  readonly consumeReceipt?: boolean;
 }
 
 export interface AtomicControlApplicationContext<
@@ -595,6 +601,8 @@ export class ControlAdmissionJournal {
     ) => void;
     /** 所属 owner 接管已验证的状态与游标；接管后控制适配不再保留同一可变状态。 */
     readonly onProjected?: (state: State, cursor: ProjectionCursor) => void;
+    /** Defer writing `received` until `decide` confirms receipt consumption in the same atomic commit. */
+    readonly deferReceipt?: boolean;
   }): Promise<ControlAdmissionOutcome> {
     const envelope = snapshotAdmittedControlEnvelope(input.envelope) as Envelope;
     if (envelope.body.t === "session-create") {
@@ -622,6 +630,16 @@ export class ControlAdmissionJournal {
         source.ingress,
         this.#artifacts,
       );
+      if (input.deferReceipt) {
+        return this.#completeAuthority({
+          ...input,
+          envelope,
+          preparedEnvelope,
+          canonicalRequestId: envelope.requestId,
+          deferReceipt: true,
+          ...(source.ingress === undefined ? {} : { sourceIngress: source.ingress }),
+        });
+      }
       const receipt = await this.#transact(
         envelope,
         (state) =>
@@ -656,6 +674,8 @@ export class ControlAdmissionJournal {
     readonly envelope: Envelope;
     readonly preparedEnvelope: PreparedStored<AdmittedControlEnvelope>;
     readonly canonicalRequestId: string;
+    readonly deferReceipt?: boolean;
+    readonly sourceIngress?: IngressContext;
     readonly stream: string;
     readonly initial: State;
     /** Verified target prefix; control receipts keep their independent current watermark. */
@@ -723,30 +743,90 @@ export class ControlAdmissionJournal {
           await targetBase?.validateAtPrefix?.(authorityPrefix);
           candidateLsn = authorityPrefix.nextLsn;
           const control = await readControlIndexState(
-            authorityPrefix.readProjection(CONTROL_PROJECTION_ID), input.canonicalRequestId, this.#artifacts,
+            authorityPrefix.readProjection(CONTROL_PROJECTION_ID),
+            input.deferReceipt ? input.envelope : input.canonicalRequestId,
+            this.#artifacts,
           );
-          const request = getRequest(control, input.canonicalRequestId);
-          if (!request) {
-            throw invalidControlRecord("Atomic control request has no received record");
-          }
-          if (!sameRequestBinding(request, input.envelope)) {
-            throw invalidControlRecord("Atomic control request changed its durable binding");
-          }
-          if (request.storedResult) return replayWithoutAppend(request);
+          let canonicalRequestId = input.canonicalRequestId;
+          let canonicalEnvelope: Envelope;
+          let canonicalIngress: IngressContext | undefined;
+          let deferredReceivedEntries: readonly LogicalRecord<ControlRecord>[] = [];
 
-          const canonicalEnvelope = request.envelope as Envelope;
+          if (input.deferReceipt) {
+            const receiptDecision = decideControlReceipt({
+              state: control,
+              envelope: input.envelope,
+              ingress: input.sourceIngress,
+              storedEnvelope: input.preparedEnvelope.stored,
+            });
+            if (receiptDecision.value.kind === "rejected") {
+              return { kind: "return", value: receiptDecision.value };
+            }
+            if (receiptDecision.value.kind === "replayed") {
+              return { kind: "return", value: receiptDecision.value };
+            }
+            if (receiptDecision.value.kind === "alias") {
+              const aliased = decideAppliedAlias({
+                state: control,
+                envelope: input.envelope,
+                ingress: input.sourceIngress,
+                storedEnvelope: input.preparedEnvelope.stored,
+                canonicalRequestId: receiptDecision.value.canonicalRequestId,
+              });
+              return aliased;
+            }
+            canonicalRequestId = receiptDecision.value.canonicalRequestId;
+            if (receiptDecision.kind === "append") {
+              deferredReceivedEntries = receiptDecision.entries;
+              canonicalEnvelope = input.envelope;
+              canonicalIngress = input.sourceIngress;
+            } else {
+              const existing = getRequest(control, canonicalRequestId);
+              if (!existing) {
+                throw invalidControlRecord("Atomic control request has no received record");
+              }
+              if (!sameRequestBinding(existing, input.envelope)) {
+                throw invalidControlRecord("Atomic control request changed its durable binding");
+              }
+              if (existing.storedResult) return replayWithoutAppend(existing);
+              canonicalEnvelope = existing.envelope as Envelope;
+              canonicalIngress = existing.ingress;
+            }
+          } else {
+            const request = getRequest(control, canonicalRequestId);
+            if (!request) {
+              throw invalidControlRecord("Atomic control request has no received record");
+            }
+            if (!sameRequestBinding(request, input.envelope)) {
+              throw invalidControlRecord("Atomic control request changed its durable binding");
+            }
+            if (request.storedResult) return replayWithoutAppend(request);
+            canonicalEnvelope = request.envelope as Envelope;
+            canonicalIngress = request.ingress;
+          }
 
           const context: AtomicControlApplicationContext<Envelope> = {
-            canonicalRequestId: input.canonicalRequestId,
+            canonicalRequestId,
             authorityPrefix,
             envelope: canonicalEnvelope,
-            ...(request.ingress === undefined ? {} : { ingress: request.ingress }),
+            ...(canonicalIngress === undefined ? {} : { ingress: canonicalIngress }),
           };
           const plan = snapshot(
             await input.decide(state.target, context),
             "Atomic control application plan",
           );
           const result = snapshotControlResult(plan.result, canonicalEnvelope.body.t);
+          if (
+            input.deferReceipt &&
+            plan.consumeReceipt === false &&
+            result.status === "rejected" &&
+            deferredReceivedEntries.length > 0
+          ) {
+            return {
+              kind: "return",
+              value: { kind: "rejected", result },
+            };
+          }
           const primaryEntries = snapshotAuthorityEntries(
             plan.authorityEntries ?? [],
           );
@@ -767,12 +847,13 @@ export class ControlAdmissionJournal {
           return {
             kind: "append",
             entries: [
+              ...deferredReceivedEntries,
               ...authorityEntries,
-              appliedRecord(input.canonicalRequestId, result, authorityRevision),
+              appliedRecord(canonicalRequestId, result, authorityRevision),
             ],
             value: {
               kind: "applied",
-              canonicalRequestId: input.canonicalRequestId,
+              canonicalRequestId,
               requestType: canonicalEnvelope.body.t,
               storedResult: result,
               authorityRevision,

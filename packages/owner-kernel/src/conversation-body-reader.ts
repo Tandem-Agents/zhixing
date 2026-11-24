@@ -147,6 +147,10 @@ export class ConversationBodyReader {
       const keys = [...messagePath, 'content', block], read = (field: string) => this.json.value(source.ref, [...keys, field], 4096);
       const type = await read('type'), role = await this.json.value(source.ref, [...messagePath, 'role'], 128);
       if (typeof type !== 'string' || typeof role !== 'string') throw Error('conversation-body-kind');
+      const identity = role === 'user' ? await this.json.value(source.ref, [...messagePath, 'inputIdentity'], 2048) as { source?: { kind?: string; conversationId?: string } } | undefined : undefined;
+      const sourceConversationId = identity?.source?.kind === 'conversation' && typeof identity.source.conversationId === 'string' ? identity.source.conversationId : undefined;
+      const programOrigin = role === 'user' && message === 0 && (await this.directory.hasProgramOrigin?.(this.conversationId, commit.runId)) === true ? true as const : undefined;
+      const provenance = { ...(sourceConversationId ? { sourceConversationId } : {}), ...(programOrigin ? { programOrigin } : {}) };
       if (type === 'text' && role === 'user') {
         const material = await this.json.value(source.ref, [...keys, 'material'], 1024);
         if (isTextFileMaterial(material)) {
@@ -154,7 +158,7 @@ export class ConversationBodyReader {
           if (!Number.isSafeInteger(runIndex)) throw Error('conversation-body-run-index');
           const due = reverse ? offset !== 0 : offset === 0;
           if (due) {
-            fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type, text: '', offset: 0, length: 0, final: true, material });
+            fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type, text: '', offset: 0, length: 0, final: true, material, ...provenance });
           }
           if (!reverse) { block++; offset = 0; if (due) return { fragments, hasMore: block < contents.units, reset: false, cursor: position() }; continue; }
           block--; offset = MAX; continue;
@@ -184,14 +188,14 @@ export class ConversationBodyReader {
       const runIndex = await this.json.value(source.ref, [...source.keys, 'runIndex'], 128);
       if (!Number.isSafeInteger(runIndex)) throw Error('conversation-body-run-index');
       if (!node || node.kind !== 'string') {
-        if (offset !== 0) fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type, text: '[图像材料]', offset: 0, length: 6, final: true });
+        if (offset !== 0) fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type, text: '[图像材料]', offset: 0, length: 6, final: true, ...provenance });
         offset = 0;
       } else {
         const parts = reverse ? await this.json.text(source.ref, node, offset, limit - fragments.length) : [await this.json.textRange(source.ref, node, offset)];
         const toolId = type === 'tool_use' ? await read('id') : type === 'tool_result' ? await read('toolUseId') : undefined;
         const isError = type === 'tool_result' && await read('isError') === true;
         for (const part of parts) fragments.push({ cursor: { ...position(), offset: part.offset }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type,
-          ...(typeof toolId === 'string' ? { toolId } : {}), ...(isError ? { isError } : {}), ...part, length: node.units });
+          ...(typeof toolId === 'string' ? { toolId } : {}), ...(isError ? { isError } : {}), ...part, length: node.units, ...provenance });
         if (reverse) offset = parts.at(-1)?.offset ?? 0;
         else {
           const part = parts[0]!; offset = part.offset + part.text.length;

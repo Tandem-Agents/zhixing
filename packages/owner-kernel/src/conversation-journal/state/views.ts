@@ -1,6 +1,7 @@
-import type {
-  AdvancementControlEvent,
-  AdvancementSubmissionReceipt,
+import {
+  isOpenAdvancementSession,
+  type AdvancementControlEvent,
+  type AdvancementSubmissionReceipt,
 } from "@zhixing-ai/core/advancement";
 import type { Message } from "@zhixing-ai/core";
 import type {
@@ -138,6 +139,7 @@ export interface SessionDomainFacts {
   hasTaskListRequestId(requestId: string): boolean;
   getAdvancementStatus(sessionId: string): string | undefined;
   findActiveAdvancementSessionId(): string | undefined;
+  hasOpenAdvancementSession(): boolean;
   assertLegalAdvancementBatch(events: readonly AdvancementControlEvent[]): void;
   getAdvancementWrite(
     requestId: string,
@@ -592,6 +594,16 @@ export function readSessionDomainFacts(state: RunProjection): SessionDomainFacts
       state.advancementStatuses?.get(sessionId) ??
       state.advancementSessions.get(sessionId)?.status,
     findActiveAdvancementSessionId: () => findActiveAdvancementSessionId(state),
+    hasOpenAdvancementSession: () =>
+      state.hasOpenAdvancement === true ||
+      [...state.advancementSessions.values()].some((session) =>
+        isOpenAdvancementSession(session),
+      ) ||
+      [...(state.advancementStatuses?.values() ?? [])].some((status) =>
+        isOpenAdvancementSession({ status } as Parameters<
+          typeof isOpenAdvancementSession
+        >[0]),
+      ),
     assertLegalAdvancementBatch: (events) =>
       assertLegalAdvancementEvents(state, events),
     getAdvancementWrite: (requestId) => {

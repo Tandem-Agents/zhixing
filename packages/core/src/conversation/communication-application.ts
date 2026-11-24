@@ -21,6 +21,7 @@ export interface ConversationMessageStatus {
   /** stopped：输入已关闭或 Run 已终止，消息未消费；不自动重入队，重试原操作也不重开运行。 */
   readonly disposition: "pending" | "consumed" | "stopped";
   readonly message: Message;
+  readonly programOrigin?: true;
 }
 
 /** 查询接收方权威；不在发送方维护运行或消息账本。 */
@@ -34,6 +35,8 @@ export interface ConversationMessageProjectionPort {
      * At most two preferred targets are needed to distinguish unique/ambiguous. */
     readonly interruptibleRuns?: readonly { readonly runId: string; readonly state: ConversationRunState }[];
   }>;
+  /** 按持久索引查询已入史运行中属于外部程序发起的 runId 集合（不修改 RunRecord 持久结构）。 */
+  programOriginRuns?(conversationId: string, runIds: readonly string[]): Promise<readonly string[]>;
 }
 
 export interface ConversationMessageExecutionRequest {
@@ -43,22 +46,96 @@ export interface ConversationMessageExecutionRequest {
   readonly caller: Extract<ConversationCommandCaller, { kind: "surface" }>;
 }
 
+import type { ProgramConversationScopeFilter } from "./program-application.js";
+
 /** 表面与模型共用的通信合同；调用方身份由系统绑定，不来自消息正文。 */
 export type ConversationCommunicationApplication = Pick<ConversationCommunicationApplicationService, "discover" | "read" | "send" | "observe">;
 export type ConversationCommunicationHistory = Awaited<ReturnType<ConversationCommunicationApplication["read"]>>;
+export interface ConversationCommunicationDiscoverRequest {
+  readonly action: "discover";
+  readonly query?: string;
+  readonly scope?: ProgramConversationScopeFilter;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+export interface ConversationCommunicationNewRequest {
+  readonly action: "new";
+  readonly operationId: string;
+  readonly name?: string;
+  readonly sceneId?: string;
+}
 export type ConversationCommunicationRequest =
-  | { readonly action: "discover" }
+  | ConversationCommunicationDiscoverRequest
+  | ConversationCommunicationNewRequest
   | ({ readonly action: "read" } & Parameters<ConversationCommunicationApplication["read"]>[0])
   | ({ readonly action: "send" } & Parameters<ConversationCommunicationApplication["send"]>[0])
   | ({ readonly action: "observe" } & Parameters<ConversationCommunicationApplication["observe"]>[0]);
 
+export type ExtendedConversationDiscoverRequest =
+  ConversationCommunicationDiscoverRequest &
+    (
+      | { readonly query: string }
+      | { readonly scope: ProgramConversationScopeFilter }
+      | { readonly limit: number }
+      | { readonly cursor: string }
+    );
+
+export function isExtendedConversationDiscoverRequest(
+  request: ConversationCommunicationRequest,
+): request is ExtendedConversationDiscoverRequest {
+  return (
+    request.action === "discover" &&
+    (request.query !== undefined ||
+      request.scope !== undefined ||
+      request.limit !== undefined ||
+      request.cursor !== undefined)
+  );
+}
+
 export function validateConversationCommunicationRequest(value: unknown): ConversationCommunicationRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("需要对话通信参数");
   const input = value as Record<string, unknown>;
-  const fields = input.action === "discover" ? ["action"] : input.action === "read" ? ["action", "conversationId", "limit", "before"]
-    : input.action === "send" ? ["action", "conversationId", "operationId", "input"] : input.action === "observe" ? ["action", "conversationId", "messageId"] : [];
+  const fields = input.action === "discover"
+    ? ["action", "query", "scope", "limit", "cursor"]
+    : input.action === "new"
+      ? ["action", "operationId", "name", "sceneId"]
+      : input.action === "read"
+        ? ["action", "conversationId", "limit", "before"]
+        : input.action === "send"
+          ? ["action", "conversationId", "operationId", "input"]
+          : input.action === "observe"
+            ? ["action", "conversationId", "messageId"]
+            : [];
   if (!fields.length || Object.keys(input).some(key => !fields.includes(key))) throw new TypeError("对话通信参数无效");
-  if (input.action !== "discover") assertId(input.conversationId as string);
+  if (input.action === "discover") {
+    if (input.query !== undefined && (typeof input.query !== "string" || input.query.length > 256)) {
+      throw new TypeError("搜索词长度不能超过 256");
+    }
+    if (input.scope !== undefined && !["all", "main", "workscene", "channel", "local"].includes(String(input.scope))) {
+      throw new TypeError("对话发现作用域无效");
+    }
+    if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 100)) {
+      throw new TypeError("发现数量须为 1 到 100");
+    }
+    if (input.cursor !== undefined && (typeof input.cursor !== "string" || !input.cursor.trim() || input.cursor.length > 8192)) {
+      throw new TypeError("发现分页游标无效");
+    }
+    return input as unknown as ConversationCommunicationRequest;
+  }
+  if (input.action === "new") {
+    assertId(input.operationId as string);
+    if (input.name !== undefined && input.sceneId !== undefined) {
+      throw new TypeError("新建对话不能同时指定 name 与 sceneId");
+    }
+    if (input.name !== undefined && (typeof input.name !== "string" || !input.name.trim() || input.name.length > 200)) {
+      throw new TypeError("对话标题无效");
+    }
+    if (input.sceneId !== undefined) {
+      assertId(input.sceneId as string);
+    }
+    return input as unknown as ConversationCommunicationRequest;
+  }
+  assertId(input.conversationId as string);
   if (input.action === "send") {
     assertId(input.operationId as string);
     if (typeof input.input !== "string" || !input.input.trim()) throw new TypeError("消息内容不能为空");
@@ -76,7 +153,13 @@ export function validateConversationCommunicationRequest(value: unknown): Conver
 
 export async function dispatchConversationCommunication(application: ConversationCommunicationApplication, request: ConversationCommunicationRequest): Promise<unknown> {
   switch (request.action) {
-    case "discover": return application.discover();
+    case "discover":
+      if (isExtendedConversationDiscoverRequest(request)) {
+        throw new ConversationApplicationError("invalid-input", "扩展参数化发现须经协调目录入口处理");
+      }
+      return application.discover();
+    case "new":
+      throw new ConversationApplicationError("invalid-input", "显式新建对话须经主控创建入口处理");
     case "read": return application.read(request);
     case "send": return application.send(request);
     case "observe": return (await application.observe(request)) ?? null;
@@ -89,19 +172,28 @@ export interface ConversationCommunicationInvocation {
 }
 export const CONVERSATION_COMMUNICATION_QUERY = defineProductApiQuery<"conversation-communication.query.read", ConversationCommunicationInvocation, unknown>("conversation-communication.query.read");
 export const CONVERSATION_COMMUNICATION_SEND = defineProductApiCommand<"conversation-communication.command.send", ConversationCommunicationInvocation, unknown, never>("conversation-communication.command.send", []);
-export const CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({ operations: [CONVERSATION_COMMUNICATION_QUERY, CONVERSATION_COMMUNICATION_SEND], factEvents: [] });
+export const CONVERSATION_COMMUNICATION_NEW = defineProductApiCommand<"conversation-communication.command.new", ConversationCommunicationInvocation, unknown, never>("conversation-communication.command.new", []);
+export const CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({ operations: [CONVERSATION_COMMUNICATION_QUERY, CONVERSATION_COMMUNICATION_SEND, CONVERSATION_COMMUNICATION_NEW], factEvents: [] });
 export function createConversationCommunicationProductApiContribution(invoke: (sourceConversationId: string, request: ConversationCommunicationRequest) => Promise<unknown>) {
   return defineProductApiContribution({ operations: [
     bindProductApiOperation(CONVERSATION_COMMUNICATION_QUERY, async input => {
       assertId(input.sourceConversationId);
       validateConversationCommunicationRequest(input.request);
-      if (input.request.action === "send") throw new TypeError("查询不能发送消息");
+      if (input.request.action !== "discover" && input.request.action !== "read" && input.request.action !== "observe") {
+        throw new TypeError("只读查询仅允许 discover、read 或 observe");
+      }
       return { result: await invoke(input.sourceConversationId, input.request), facts: [] };
     }),
     bindProductApiOperation(CONVERSATION_COMMUNICATION_SEND, async input => {
       assertId(input.sourceConversationId);
       validateConversationCommunicationRequest(input.request);
       if (input.request.action !== "send") throw new TypeError("发送命令需要消息");
+      return { result: await invoke(input.sourceConversationId, input.request), facts: [] };
+    }),
+    bindProductApiOperation(CONVERSATION_COMMUNICATION_NEW, async input => {
+      assertId(input.sourceConversationId);
+      validateConversationCommunicationRequest(input.request);
+      if (input.request.action !== "new") throw new TypeError("新建命令需要 new 请求");
       return { result: await invoke(input.sourceConversationId, input.request), facts: [] };
     }),
   ], factEvents: [] });
@@ -136,8 +228,17 @@ export class ConversationCommunicationApplicationService {
     await this.#assertExists(input.conversationId);
     const page = await this.ports.directory.queryHistory({ kind: "history", ...input });
     const oldest = page.runs.at(-1);
-    const outsideHistory = input.before ? { inputs: [], truncated: false } : await this.ports.messages.inputsOutsideHistory(input.conversationId);
+    const runIds = page.runs.flatMap(item =>
+      "runId" in item.record && typeof item.record.runId === "string" ? [item.record.runId] : [],
+    );
+    const [outsideHistory, programOriginRunIds] = await Promise.all([
+      input.before ? Promise.resolve({ inputs: [] as readonly ConversationMessageStatus[], truncated: false }) : this.ports.messages.inputsOutsideHistory(input.conversationId),
+      runIds.length > 0 && this.ports.messages.programOriginRuns
+        ? this.ports.messages.programOriginRuns(input.conversationId, runIds)
+        : Promise.resolve([] as readonly string[]),
+    ]);
     return { ...page, inputsOutsideHistory: outsideHistory.inputs, inputsOutsideHistoryTruncated: outsideHistory.truncated,
+      ...(programOriginRunIds.length > 0 ? { programOriginRunIds } : {}),
       ...('interruptibleRuns' in outsideHistory ? { interruptibleRuns: outsideHistory.interruptibleRuns } : {}),
       ...(page.hasMore && oldest ? { next: { shardId: oldest.shardId, runIndex: oldest.record.runIndex } } : {}) };
   }

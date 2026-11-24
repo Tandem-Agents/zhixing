@@ -67,6 +67,9 @@ export class ConversationTimelineReader {
     let block = cursor.block === MAX ? count - 1 : cursor.block, offset = cursor.offset;
     const fragments: ConversationBodyFragment[] = [];
     const position = () => ({ ...cursor, message: entry.input.position, block, offset });
+    const sourceConversationId = entry.input.identity.source.kind === 'conversation' ? entry.input.identity.source.conversationId : undefined;
+    const programOrigin = entry.input.initial && (await this.directory.hasProgramOrigin?.(this.conversationId, entry.input.runId)) === true ? true as const : undefined;
+    const provenance = { ...(sourceConversationId ? { sourceConversationId } : {}), ...(programOrigin ? { programOrigin } : {}) };
     for (let scanned = 0; block >= 0 && block < count && scanned < 64 && fragments.length < limit; scanned++) {
       const inline = ref ? undefined : (input as UserTurnInput).parts[block];
       const type = ref ? await json.value(ref, ['parts', block, 'type'], 128) : inline?.type;
@@ -77,7 +80,7 @@ export class ConversationTimelineReader {
           const due = forward ? offset === 0 : offset !== 0;
           if (due) {
             fragments.push({ cursor: { ...position(), offset: 0 }, runId: entry.input.runId, runIndex: entry.input.position,
-              message: entry.input.position, block, role: 'user', type: 'text', text: '', offset: 0, length: 0, final: true, material });
+              message: entry.input.position, block, role: 'user', type: 'text', text: '', offset: 0, length: 0, final: true, material, ...provenance });
           }
           if (forward) { block++; offset = 0; if (due) return { fragments, cursor: position(), hasMore: block < count, reset: false }; continue; }
           block--; offset = MAX; continue;
@@ -89,7 +92,7 @@ export class ConversationTimelineReader {
       const length = node ? node.units : value.length;
       if (forward && offset > length) throw Error('conversation-history-input-offset');
       const append = (text: string, start: number) => fragments.push({ cursor: { ...position(), offset: start }, runId: entry.input.runId, runIndex: entry.input.position,
-        message: entry.input.position, block, role: 'user', type: 'text', text, offset: start, length, final: start + text.length === length });
+        message: entry.input.position, block, role: 'user', type: 'text', text, offset: start, length, final: start + text.length === length, ...provenance });
       if (node && ref) {
         const ranges = forward ? [await json.textRange(ref, node, offset)] : await json.text(ref, node, offset, limit - fragments.length);
         for (const range of ranges) append(range.text, range.offset);

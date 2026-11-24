@@ -1,6 +1,7 @@
 import {createDurableProjectionOverlay,type AuthorityCommitLog,type ArtifactStore,type DurableProjectionDefinition,type DurableProjectionMutation} from '@zhixing-ai/core/authority';
 import type {JsonValue,ArtifactRef} from '@zhixing-ai/core/contracts';
-import {CONVERSATION_RUN_STATE_PROJECTION_ID} from './conversation-run-state-index.js';
+import { isProgramOrigin, type ProgramOriginIngressLike } from '@zhixing-ai/core/conversation';
+import {CONVERSATION_RUN_STATE_PROJECTION_ID, readConversationStateField} from './conversation-run-state-index.js';
 import {foldConversationBaseBindings,conversationViewAt,preserveBaseDeletions,registerConversationBaseRepair,conversationBaseUnavailableKey,conversationBaseRepairRequired,conversationBaseKey,type ConversationBaseBinding} from './conversation-base-registry.js';
 import {isConversationSourceEvidenceError} from './conversation-base-source.js';
 import type { DurableProjectionReadContext } from '@zhixing-ai/core/authority';
@@ -162,7 +163,7 @@ export function registerAdvancementRecoveryProjection(log:AuthorityCommitLog,art
     inputs:{families:['run:','transfer:']},async reduce(envelope,current,source){
       // Canonical business legality is verified by the existing run projection.
       // A pending-only rebuild must not rehydrate unrelated run/assignment state.
-      source.readPreparedProjection!(CONVERSATION_RUN_STATE_PROJECTION_ID);
+      const preparedRunState=source.readPreparedProjection!(CONVERSATION_RUN_STATE_PROJECTION_ID);
       const changes=new Map<string,JsonValue|undefined>();
       await foldConversationBaseBindings(log,envelope.entries,current,changes,source);
       const view=createDurableProjectionOverlay(current,changes),put=(key:string,value:unknown)=>changes.set(key,value as JsonValue),drop=(key:string)=>changes.set(key,undefined);
@@ -186,6 +187,9 @@ export function registerAdvancementRecoveryProjection(log:AuthorityCommitLog,art
           const event=stored&&typeof stored==='object'&&'ref'in stored?JSON.parse(Buffer.from(await artifacts.get((stored as {ref:ArtifactRef}).ref)).toString('utf8')):stored;
           await foldAdvancementRecovery({id,view:local,put,drop,event:event as AdvancementControlEvent});
         }else if(body.t==='committed'){
+          const runStateView=await conversationViewAt(log,preparedRunState,id);
+          const admitted=await readConversationStateField(runStateView,id,'admittedByRun',body.runId as string) as {ingress?:ProgramOriginIngressLike}|undefined;
+          if(isProgramOrigin(admitted?.ingress))continue;
           // 带提议的提交在“无活跃会话即跳过”之前登记义务；标记来自已核对的提交摘要，不为普通提交读正文
           if((body.readSummary as {advancementProposal?:boolean}|undefined)?.advancementProposal===true)
             await foldAdvancementRecovery({id,view:local,put,drop,proposal:{runId:body.runId as string}});

@@ -65,6 +65,10 @@ export interface ConversationBodyFragment {
   readonly tool?: TranscriptToolFacts;
   /** 文件材料文本块只给有界结构描述（text 为空串），不给包装全文；格式化留在接入面。 */
   readonly material?: TextFileMaterial;
+  /** 当该用户消息具备已核实的跨会话来源身份时给出源对话标识。 */
+  readonly sourceConversationId?: string;
+  /** 当该运行首条用户输入来自已核实的本机程序入口时置真。 */
+  readonly programOrigin?: true;
 }
 
 /**
@@ -124,7 +128,7 @@ export interface ConversationControlCursor {
   readonly item: number;
 }
 export type ConversationControlFact =
-  | { readonly kind: 'status'; readonly historyCovered?: boolean; readonly notice: ConversationStatusNotice; readonly communication: boolean; readonly continuation?: boolean; readonly commitRevision?: number }
+  | { readonly kind: 'status'; readonly historyCovered?: boolean; readonly notice: ConversationStatusNotice; readonly communication: boolean; readonly continuation?: boolean; readonly programOrigin?: boolean; readonly commitRevision?: number }
   | { readonly kind: 'input'; readonly cursor: ConversationInputCursor }
   | { readonly kind: 'final'; readonly frame: FinalFrame };
 export interface ConversationControlPage {
@@ -154,6 +158,7 @@ export interface ConversationInputCursor {
  * before transport. Source identity and absolute text position survive paging. */
 export interface ConversationInputFragment {
   readonly identity: MessageInputIdentity;
+  readonly programOrigin?: true;
   readonly text: string;
   readonly contentOffset: number;
   readonly final: boolean;

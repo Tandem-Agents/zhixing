@@ -10,7 +10,7 @@ import type {
   LogicalRecord,
   UserTurnInput,
 } from "@zhixing-ai/core/contracts";
-import { parseConversationId } from "@zhixing-ai/core/conversation";
+import { isProgramOrigin, parseConversationId } from "@zhixing-ai/core/conversation";
 import { canonicalize } from "@zhixing-ai/core/protocol";
 import { worksceneTaskConflictsWithAdvancement } from "@zhixing-ai/core/workscene/application";
 import type { InitialControlEnvelope } from "../../control-admission.js";
@@ -274,15 +274,18 @@ export function decideInputControl(input: {
 }): {
   readonly result: ControlResult;
   readonly authorityEntries?: readonly LogicalRecord<ConversationCommitLogRecord>[];
+  readonly consumeReceipt?: boolean;
 } {
   const { session, queueInput, assignment } = input.facts;
   const request = input.request;
+  const programOrigin = isProgramOrigin(input.ingress);
   if (request.t !== "input") {
     return {
       result: rejectedInputControl(
         "invalid",
         "Conversation input admission requires an input request",
       ),
+      ...(programOrigin ? { consumeReceipt: false } : {}),
     };
   }
   if (session.deleted) {
@@ -291,6 +294,7 @@ export function decideInputControl(input: {
         "fence-rejected",
         "Conversation has been durably deleted",
       ),
+      ...(programOrigin ? { consumeReceipt: false } : {}),
     };
   }
   if (input.worksceneDeleted) {
@@ -299,6 +303,7 @@ export function decideInputControl(input: {
         "fence-rejected",
         "Conversation workscene has been durably deleted",
       ),
+      ...(programOrigin ? { consumeReceipt: false } : {}),
     };
   }
   const ingress = input.ingress;
@@ -314,6 +319,7 @@ export function decideInputControl(input: {
         "epoch-stale",
         "Input request does not bind the current conversation owner and ingress",
       ),
+      ...(programOrigin ? { consumeReceipt: false } : {}),
     };
   }
   const ingressKey = `${ingress.surfacePrincipal}/${ingress.ingressId}`;
@@ -357,6 +363,7 @@ export function decideInputControl(input: {
         "fence-rejected",
         "Conversation lifecycle projection must finish before new input",
       ),
+      ...(programOrigin ? { consumeReceipt: false } : {}),
     };
   }
   const queuedPosition = input.nextLsn;
@@ -364,6 +371,7 @@ export function decideInputControl(input: {
   if (
     ingress.turnOrigin?.messageIdentity &&
     activeRunId &&
+    !isProgramOrigin(queueInput.getAdmitted(activeRunId)?.record.ingress) &&
     queueInput.getOpenInputAssignment(activeRunId) !== undefined &&
     assignment.getRunState(activeRunId)?.state === "running" &&
     input.invocation.kind === "agent" &&
@@ -388,6 +396,15 @@ export function decideInputControl(input: {
       ],
     };
   }
+  if (programOrigin && session.hasOpenAdvancementSession()) {
+    return {
+      result: rejectedInputControl(
+        "fence-rejected",
+        "目标对话当前存在未终结的契约推进会话，请先在终端处理",
+      ),
+      consumeReceipt: false,
+    };
+  }
   const activeAdvancementId = session.findActiveAdvancementSessionId();
   if (
     worksceneTaskConflictsWithAdvancement(
@@ -403,6 +420,7 @@ export function decideInputControl(input: {
         "fence-rejected",
         "目标场景已有独立验收中的任务，未接纳另一项委托",
       ),
+      ...(programOrigin ? { consumeReceipt: false } : {}),
     };
   }
   if (queueInput.hasAdmitted(input.runId)) {

@@ -450,8 +450,11 @@ export interface ConfirmationRendererPort {
 export type ConfirmationAdmissionDisposition =
   | {
       readonly accepted: true;
-      /** The durable interaction owner can route an answer to this exact broker. */
-      readonly delivery?: "durable";
+      /**
+       * - `"durable"`: the durable interaction owner can route an answer to this exact broker.
+       * - `"non-interactive"`: resolve immediately via the configured non-interactive resolver without notifying surface listeners or queueing behind interactive requests.
+       */
+      readonly delivery?: "durable" | "non-interactive";
     }
   | {
       readonly accepted: false;

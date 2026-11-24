@@ -4,7 +4,7 @@ import type { JsonValue, LogicalRecord, TranscriptRunRecord, ArtifactRef } from 
 import { canonicalize, validateConversationEnvelope, validateNonEmptyUserTurnInput, validateMutationBatch,
   validateIntentStreamRecord, reduceDeferredGlobalIntent, validateConversationSealedBundle, validateTranscriptRunRecord } from '@zhixing-ai/core/protocol';
 import { freezeAdvancementSessions } from '@zhixing-ai/core/advancement';
-import { parseConversationId } from '@zhixing-ai/core/conversation';
+import { isProgramOrigin, parseConversationId } from '@zhixing-ai/core/conversation';
 import { assertAssignedMatchesDispatch,
   type ConversationCommitLogRecord, type RunProjection, type ConversationFactGroup } from './conversation-journal/contracts.js';
 import { reduceImportedConversationGuard } from './conversation-journal/replay/guard-reducer.js';
@@ -127,9 +127,11 @@ export async function prepareConversationBaseDomain(source: ConversationBaseSour
       else if (body.t === 'session-lifecycle' || body.t === 'session-meta' && body.operation === 'delete')
         await foldAdvancementRecovery({ id, view, put, drop, lifecycle: body.t === 'session-meta' ? 'delete' : body.mutation as 'clear' | 'delete' });
       else if (body.t === 'committed' && (await advancementRecoveryRoot(view, id)).active) {
-        const binding = await loadCommittedBundleBinding(group as ConversationFactGroup, source.artifacts, candidate => candidate.assignmentId === body.assignmentId);
-        const record = 'metadata' in binding.closure ? binding.closure.metadata : binding.closure.runRecord;
-        await foldAdvancementRecovery({ id, view, put, drop, committed: { runId: body.runId as string, record } });
+        if (!isProgramOrigin(state.admittedByRun.get(body.runId as string)?.ingress)) {
+          const binding = await loadCommittedBundleBinding(group as ConversationFactGroup, source.artifacts, candidate => candidate.assignmentId === body.assignmentId);
+          const record = 'metadata' in binding.closure ? binding.closure.metadata : binding.closure.runRecord;
+          await foldAdvancementRecovery({ id, view, put, drop, committed: { runId: body.runId as string, record } });
+        }
       }
       if (validated && body.t === 'advancement-event') for (const session of validated.advancementSessions.values()) {
         put('source/advancement-order/' + ordinal(Number.MAX_SAFE_INTEGER - Date.parse(session.createdAt)) + '/' + session.id, session.id);

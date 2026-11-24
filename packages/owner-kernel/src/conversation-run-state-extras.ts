@@ -1,3 +1,4 @@
+import { isOpenAdvancementSession } from '@zhixing-ai/core/advancement';
 import { corruptRunJournal } from './conversation-run-contracts.js';
 import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts, type ConversationBaseLocation } from './conversation-base-source.js';
 import type { ArtifactStore, DurableLogCheckpoint, DurableProjectionReadContext } from '@zhixing-ai/core/authority';
@@ -28,6 +29,7 @@ export interface ConversationRunRoot {
   latestSegment?: Pick<SegmentRecord, 'segmentId' | 'timestamp'>;
   activeAdvancementSessionId?: string;
   openAdvancementSessionId?: string;
+  hasOpenAdvancement?: boolean;
   taskList?: RunProjection['taskList'];
 }
 export type ConversationInputLocation = { readonly checkpoint: DurableLogCheckpoint; readonly item: number }
@@ -298,6 +300,7 @@ export async function foldConversationRunExtras(input: {
       }
       root.activeAdvancementSessionId = [...validated.advancementSessions.values()].find(value => value.status === 'active')?.id;
       root.openAdvancementSessionId = [...validated.advancementSessions.values()].find(value => value.status === 'active' || value.status === 'awaiting-rubric-confirmation')?.id;
+      root.hasOpenAdvancement = [...validated.advancementSessions.values()].some(value => isOpenAdvancementSession(value)) || undefined;
       break;
     }
     case 'committed': {

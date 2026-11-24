@@ -1,9 +1,9 @@
 import { corruptRunJournal } from './conversation-run-contracts.js';
 import { AuthorityStorageError, createDurableProjectionOverlay, type ArtifactStore, type AuthorityCommitLog, type DurableProjectionMutation, type DurableProjectionReadContext, type DurableLogCheckpoint } from '@zhixing-ai/core/authority';
 import type { JsonValue, FinalFrame } from '@zhixing-ai/core/contracts';
-import { canonicalize, protocolDigest, validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord } from '@zhixing-ai/core/protocol';
+import { canonicalize, protocolDigest, validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord, type ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
 import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from './conversation-publish-obligations.js';
-import { foldConversationBaseBindings, conversationBaseKey, conversationBaseUnavailableKey, conversationBaseRepairRequired, registerConversationBaseRepair, openConversationBase, conversationViewForSource, type ConversationBaseBinding } from './conversation-base-registry.js';
+import { foldConversationBaseBindings, conversationBaseKey, conversationBaseUnavailableKey, conversationBaseRepairRequired, registerConversationBaseContext, registerConversationBaseRepair, openConversationBase, conversationViewForSource, type ConversationBaseBinding } from './conversation-base-registry.js';
 import { isConversationSourceEvidenceError, type AuthenticatedConversationFacts, type ConversationBaseSource } from './conversation-base-source.js';
 import { conversationStateBase } from './conversation-run-state-index.js';
 
@@ -29,7 +29,12 @@ const bindings = new WeakMap<AuthorityCommitLog, ReturnType<AuthorityCommitLog['
 
 /** Durable obligations only. Completed identities stay exact on disk; neither
  * discovery nor shutdown serializes a collection of historical conversations. */
-export function registerConversationRecoveryProjection(log: AuthorityCommitLog, artifacts: ArtifactStore) {
+export function registerConversationRecoveryProjection(
+  log: AuthorityCommitLog,
+  artifacts: ArtifactStore,
+  verifier?: ProtocolSignatureVerifier,
+) {
+  if (verifier) registerConversationBaseContext(log, artifacts, verifier);
   const existing = bindings.get(log);
   if (existing) return existing;
   const index = log.durableProjection<unknown>({

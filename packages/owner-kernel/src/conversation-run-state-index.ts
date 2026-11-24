@@ -262,7 +262,8 @@ function scopeFor(body: Record<string, unknown>, at: string): ConversationRunSco
     tickets: [ticket, body.replacesTicketId].filter((value): value is string => typeof value === 'string'),
     ...(typeof proof?.ticketDigest === 'string' ? { ticketDigest: proof.ticketDigest } : {}), allTickets: body.t === 'ticket-sync-frontier', ticketAt: at };
 }
-type ValidationBinding = Pick<ConversationRunReductionContext, 'delivery' | 'currentAuthority' | 'resources'>;
+export type ConversationRunValidationBinding = Pick<ConversationRunReductionContext, 'delivery' | 'currentAuthority' | 'resources'>;
+type ValidationBinding = ConversationRunValidationBinding;
 type MaterializedBodies = Pick<RunProjection, 'admittedByRun' | 'appendedInputs' | 'assignedById'>;
 type Binding = { index: ReturnType<AuthorityCommitLog['durableProjection']>; verifier: ProtocolSignatureVerifier; legacy?: ConversationAbortTicketAuthorizer;
   validation?: ValidationBinding; materialized: Map<string, MaterializedBodies>; reduce?: DurableProjectionDefinition<unknown>['reduce']; artifacts: ArtifactStore };

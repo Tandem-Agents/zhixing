@@ -140,6 +140,7 @@ export async function readConversationRunViewMetadata(view: import('@zhixing-ai/
     state.clearedThroughRevision = extra.clearedThroughRevision;
     state.hasDurableIdentity = extra.hasDurableIdentity; state.pendingLifecycleCount = extra.pendingLifecycleCount;
     state.activeAdvancementSessionId = extra.activeAdvancementSessionId;
+    state.hasOpenAdvancement = extra.hasOpenAdvancement;
     state.advancementStatuses = new Map();
     state.sessionName = extra.sessionName;
     state.modelSelection = extra.modelSelection ? structuredClone(extra.modelSelection) : undefined;

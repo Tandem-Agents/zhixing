@@ -1,5 +1,72 @@
-import { ConversationDirectoryPageCollector, assertDirectoryPage, type ConversationDirectoryPageRequest, type ConversationDirectoryCursor } from './directory-page.js';
-export { ConversationDirectoryPageCollector, assertDirectoryPage, type ConversationDirectoryPageRequest, type ConversationDirectoryCursor } from './directory-page.js';
+import {
+  ConversationDirectoryPageCollector,
+  assertDirectoryPage,
+  type ConversationDirectoryPageRequest,
+  type ConversationDirectoryCursor,
+} from './directory-page.js';
+export {
+  ConversationDirectoryPageCollector,
+  assertDirectoryPage,
+  classifyConversationDirectoryScope,
+  compareDirectoryKeys,
+  computeDirectoryEntriesDigest,
+  type ConversationDirectoryPageRequest,
+  type ConversationDirectoryCursor,
+  type ConversationDirectoryScopeKind,
+  type ConversationDirectorySourceVersion,
+} from './directory-page.js';
+export {
+  PROGRAM_SURFACE_PRINCIPAL,
+  PROGRAM_TICKET_PREFIX,
+  PROGRAM_TURN_CHANNEL,
+  decodeProgramConversationTicket,
+  encodeProgramConversationTicket,
+  isProgramOrigin,
+  programConversationTurnId,
+  programHomeId,
+  verifyProgramConversationTicket,
+  type DecodedProgramConversationTicket,
+  type ProgramConversationTicketPayload,
+  type ProgramOriginIngressLike,
+} from "./program-origin.js";
+export {
+  PROGRAM_MAX_WAIT_SLICE_MS,
+  PROGRAM_SAFE_PAYLOAD_BUDGET_BYTES,
+  PROGRAM_SINGLE_FRAME_MAX_BYTES,
+  ProgramConversationError,
+  coordinateConversationDirectoryPage,
+  decodeProgramBodyCursor,
+  decodeProgramDirectoryCursor,
+  encodeProgramBodyCursor,
+  encodeProgramDirectoryCursor,
+  estimateProgramSendWireBytes,
+  programDirectoryFilterDigest,
+  sliceTextWithinJsonByteBudget,
+  type DirectorySourcePageResult,
+  type DirectorySourceProvider,
+  type ProgramBodyCursorPayload,
+  type ProgramConversationApplication,
+  type ProgramConversationDirectoryEntry,
+  type ProgramConversationErrorCode,
+  type ProgramConversationExistingEntry,
+  type ProgramConversationListInput,
+  type ProgramConversationListResult,
+  type ProgramConversationNewInput,
+  type ProgramConversationNewResult,
+  type ProgramConversationPendingInputEntry,
+  type ProgramConversationReadInput,
+  type ProgramConversationReadMessageEntry,
+  type ProgramConversationReadResult,
+  type ProgramConversationResultInput,
+  type ProgramConversationResultOutput,
+  type ProgramConversationResultState,
+  type ProgramConversationScopeFilter,
+  type ProgramConversationSendInput,
+  type ProgramConversationSendResult,
+  type ProgramDirectoryCursorPayload,
+  type ProgramWorksceneCandidateEntry,
+  type RawDirectoryCandidate,
+} from "./program-application.js";
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -31,12 +98,16 @@ export {
   type ConversationMessageProjectionPort,
   type ConversationMessageExecutionRequest,
   type ConversationCommunicationApplication,
+  type ConversationCommunicationDiscoverRequest,
+  type ConversationCommunicationNewRequest,
   type ConversationCommunicationHistory,
   type ConversationCommunicationRequest,
+  isExtendedConversationDiscoverRequest,
   validateConversationCommunicationRequest,
   dispatchConversationCommunication,
   CONVERSATION_COMMUNICATION_QUERY,
   CONVERSATION_COMMUNICATION_SEND,
+  CONVERSATION_COMMUNICATION_NEW,
   CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET,
   createConversationCommunicationProductApiContribution,
 } from "./communication-application.js";
@@ -310,6 +381,9 @@ export interface ConversationAgentTurnAdmissionPort {
     environment?: ExplicitEnvironmentSelection;
     invocation: ConversationAgentTurnInvocation;
     execution: ConversationAgentTurnExecutionPort;
+    beforeDurableAdmit?: (
+      input: Readonly<{ conversationId: string }>,
+    ) => Promise<Readonly<{ shouldEnqueue: false; runId: string }> | undefined>;
   }>): Promise<
     | Readonly<{
         status: "immediate";

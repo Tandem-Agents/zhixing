@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { createFileLockAcquirer, durablyRemoveFiles, SerialTaskQueue } from '../persistence/index.js';
 import { fromSafePathSegment, toSafePathSegment } from '../paths.js';
-import { assertDirectoryPage, compareDirectoryKeys, ConversationDirectoryPageCollector, type ConversationDirectoryPageRequest, type ConversationDirectoryCursor } from './directory-page.js';
+import { assertDirectoryPage, classifyConversationDirectoryScope, compareDirectoryKeys, computeDirectoryEntriesDigest, ConversationDirectoryPageCollector, type ConversationDirectoryPageRequest, type ConversationDirectoryCursor, type ConversationDirectorySourceVersion } from './directory-page.js';
 import type { Conversation } from './types.js';
 
 const CACHE = '.directory-index-v1';
@@ -59,29 +59,36 @@ export class ConversationDirectoryIndex {
   }
 
   async page(input: ConversationDirectoryPageRequest, readMetadata: MetadataReader = segment => this.#read(segment), signal?: AbortSignal): Promise<{
-    readonly records: readonly (Conversation & { conversationId: string })[]; readonly next?: ConversationDirectoryCursor;
+    readonly records: readonly (Conversation & { conversationId: string })[];
+    readonly next?: ConversationDirectoryCursor;
+    readonly version?: ConversationDirectorySourceVersion;
   }> {
     assertDirectoryPage(input);
-    if (!await this.#present()) return { records: [] };
-    const values = await this.#query(input, false, readMetadata, signal);
+    if (!await this.#present()) {
+      return {
+        records: [],
+        ...(input.includeVersion ? { version: { kind: 'direct', entriesDigest: computeDirectoryEntriesDigest([]) } } : {}),
+      };
+    }
+    const { values, version } = await this.#query(input, false, readMetadata, signal);
     const collector = new ConversationDirectoryPageCollector<Conversation & { conversationId: string }>(input);
     for (const value of values) collector.add({ ...value, conversationId: value.id });
-    return collector.result();
+    return { ...collector.result(), ...(input.includeVersion ? { version } : {}) };
   }
 
   /** includeHidden 只给恢复等责任型读取；导航（分页、最近、普通列表）不列只为失败回执而建的会话。 */
   async list(includeArchived = false, readMetadata: MetadataReader = segment => this.#read(segment), includeHidden = false): Promise<Conversation[]> {
     if (!await this.#present()) return [];
-    return this.#query(undefined, { includeArchived, includeHidden }, readMetadata);
+    return (await this.#query(undefined, { includeArchived, includeHidden }, readMetadata)).values;
   }
 
   /** 带显现意图、等待复核的隐藏会话（写入中断留下的）：按可见性列单独查询，有界 */
   async revealIntents(readMetadata: MetadataReader = segment => this.#read(segment)): Promise<Conversation[]> {
     if (!await this.#present()) return [];
-    return this.#query(undefined, { includeArchived: true, includeHidden: true, onlyRevealIntents: true }, readMetadata);
+    return (await this.#query(undefined, { includeArchived: true, includeHidden: true, onlyRevealIntents: true }, readMetadata)).values;
   }
 
-  async #query(input: ConversationDirectoryPageRequest | undefined, scope: boolean | Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[]> {
+  async #query(input: ConversationDirectoryPageRequest | undefined, scope: boolean | Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<{ values: Conversation[]; version: ConversationDirectorySourceVersion }> {
     const visibility: Visibility = typeof scope === 'boolean' ? { includeArchived: scope, includeHidden: false } : scope;
     await this.#bind();
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -111,7 +118,7 @@ export class ConversationDirectoryIndex {
    * this page), then observe a fresh revision. All source mutations publish an
    * intent first. A stable pending target may yield either side of its atomic
    * meta replacement; both are complete, linearizable states. */
-  async #snapshot(input: ConversationDirectoryPageRequest | undefined, visibility: Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[] | undefined | null> {
+  async #snapshot(input: ConversationDirectoryPageRequest | undefined, visibility: Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<{ values: Conversation[]; version: ConversationDirectorySourceVersion } | undefined | null> {
     let db: DatabaseSync;
     try {
       const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
@@ -152,9 +159,15 @@ export class ConversationDirectoryIndex {
         where += ' AND (active < ? OR (active=? AND id_order>?))';
         const at = Date.parse(input.after.lastActiveAt); params.push(at, at, idOrder(input.after.conversationId));
       }
-      if (input?.query) {
-        const query = input.query.toLocaleLowerCase();
-        db.function('directory_matches', (id, name) => `${id} ${name}`.toLocaleLowerCase().includes(query) ? 1 : 0);
+      if (input?.query || input?.scopeFilter) {
+        const query = input.query?.toLocaleLowerCase();
+        const scopeFilter = input.scopeFilter;
+        db.function('directory_matches', (id, name) => {
+          const idText = String(id);
+          if (scopeFilter && classifyConversationDirectoryScope(idText) !== scopeFilter) return 0;
+          if (query && !`${idText} ${String(name)}`.toLocaleLowerCase().includes(query)) return 0;
+          return 1;
+        });
         where += ' AND directory_matches(id,name)=1';
       }
       const limit = input ? ' LIMIT ?' : '';
@@ -167,14 +180,28 @@ export class ConversationDirectoryIndex {
         if (!meta || !this.#matches(row, meta)) stale = true;
         else values.push(meta);
       }
+      let pendingDigest: string | undefined;
       if (pending) {
         const meta = await this.#metadata(pending.segment, reader);
-        if (meta && listed(meta, visibility)) values.push(meta);
+        if (meta && listed(meta, visibility)) {
+          values.push(meta);
+          pendingDigest = digest(JSON.stringify([pending.segment, metadataDigest(meta)]));
+        } else {
+          pendingDigest = digest(JSON.stringify([pending.segment, null]));
+        }
       }
       db.exec('COMMIT');
       if (this.#state(db).revision !== state.revision) return null;
       if (stale) throw new InvalidDirectory('Directory row no longer matches source metadata');
-      return values.sort((a,b) => compareDirectoryKeys({ ...a, conversationId: a.id }, { ...b, conversationId: b.id }));
+      return {
+        values: values.sort((a,b) => compareDirectoryKeys({ ...a, conversationId: a.id }, { ...b, conversationId: b.id })),
+        version: {
+          kind: 'indexed',
+          epoch: state.epoch,
+          revision: state.revision,
+          ...(pendingDigest !== undefined ? { pendingDigest } : {}),
+        },
+      };
     } finally { db.close(); }
   }
 
@@ -237,19 +264,25 @@ export class ConversationDirectoryIndex {
     } finally { await directory?.close().catch(() => {}); }
   }
 
-  async #direct(input: ConversationDirectoryPageRequest | undefined, visibility: Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<Conversation[]> {
+  async #direct(input: ConversationDirectoryPageRequest | undefined, visibility: Visibility, reader: MetadataReader, signal?: AbortSignal): Promise<{ values: Conversation[]; version: ConversationDirectorySourceVersion }> {
     // Exceptional cache failure: derive only this call from readable facts.
     const collector = input ? new ConversationDirectoryPageCollector<Conversation & { conversationId: string }>(input) : undefined;
     const values: Conversation[] = [];
+    const digestTuples: Array<{ canonicalKey: string; lastActiveAt: string; name: string }> = [];
     const directory = await fs.opendir(this.#root);
     for await (const entry of directory) {
       signal?.throwIfAborted();
       if (!entry.isDirectory()) continue;
       const meta = await this.#metadata(entry.name, reader);
       if (!meta || !listed(meta, visibility)) continue;
+      if (input?.scopeFilter && classifyConversationDirectoryScope(meta.id) !== input.scopeFilter) continue;
+      digestTuples.push({ canonicalKey: meta.id, lastActiveAt: meta.lastActiveAt, name: meta.name });
       if (collector) collector.add({ ...meta, conversationId: meta.id }); else values.push(meta);
     }
-    return collector ? collector.entries : values.sort((a,b) => compareDirectoryKeys({ ...a, conversationId: a.id }, { ...b, conversationId: b.id }));
+    return {
+      values: collector ? collector.entries : values.sort((a,b) => compareDirectoryKeys({ ...a, conversationId: a.id }, { ...b, conversationId: b.id })),
+      version: { kind: 'direct', entriesDigest: computeDirectoryEntriesDigest(digestTuples) },
+    };
   }
   async #present(): Promise<boolean> {
     try { const info = await fs.stat(this.#root); if (!info.isDirectory()) throw new Error('Conversation source is not a directory'); return true; }

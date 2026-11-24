@@ -113,7 +113,11 @@ export interface SegmentMetadata {
 
 /** ConversationRepository 公共接口 — Conversation 身份的磁盘 CRUD (meta.json) */
 export interface IConversationRepository {
-  listPage?(input: import('./directory-page.js').ConversationDirectoryPageRequest): Promise<{ readonly records: readonly Conversation[]; readonly next?: import('./directory-page.js').ConversationDirectoryCursor }>;
+  listPage?(input: import('./directory-page.js').ConversationDirectoryPageRequest): Promise<{
+    readonly records: readonly Conversation[];
+    readonly next?: import('./directory-page.js').ConversationDirectoryCursor;
+    readonly version?: import('./directory-page.js').ConversationDirectorySourceVersion;
+  }>;
   /** includeHidden 只给恢复等责任型读取；会话导航不列只为失败回执而建的会话 */
   list(opts?: { includeArchived?: boolean; includeHidden?: boolean }): Promise<Conversation[]>;
   get(id: string): Promise<Conversation | null>;

@@ -190,7 +190,9 @@ export class ConversationMessageInputReader {
                 ? JSON.parse(Buffer.from(await this.artifacts.get(stored.ref)).toString('utf8')) as UserTurnInput : stored;
               const userInput = validateNonEmptyUserTurnInput(decoded);
               // 只有接纳时带了消息身份的输入才给出 inputIdentity（与按消息 id 查询不同，不用兜底身份）
-              inputs.push({ ...delivery, message: { ...userMessageFromTurnInput(userInput), ...(value.identity ? { inputIdentity: structuredClone(value.identity) } : {}) } });
+              const pointer = batch[index]!.pointer;
+              const programOrigin = pointer.initial && (await this.directory.hasProgramOrigin?.(this.conversationId, pointer.runId)) === true ? true as const : undefined;
+              inputs.push({ ...delivery, ...(programOrigin ? { programOrigin } : {}), message: { ...userMessageFromTurnInput(userInput), ...(value.identity ? { inputIdentity: structuredClone(value.identity) } : {}) } });
             }
           }
           // 可中断目标：当前可中断的会话来源运行，按首个输入的位置；有已开始的取前两个，否则取排队的前两个

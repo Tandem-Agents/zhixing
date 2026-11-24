@@ -28,7 +28,10 @@ import {
   corruptRunJournal,
   type ConversationRunJournalRecord,
 } from "../../conversation-run-contracts.js";
-import { registerConversationRunReadProjection } from "../../conversation-run-state-index.js";
+import {
+  registerConversationRunReadProjection,
+  type ConversationRunValidationBinding,
+} from "../../conversation-run-state-index.js";
 import { conversationStatusNotice } from "../../conversation-status-projection.js";
 import type { ConversationControlResponseInput } from "../../delivery-participant.js";
 import type { ConversationFactGroup } from "../contracts.js";
@@ -41,8 +44,15 @@ export async function pendingAdvancementConversations(
   artifacts: ArtifactStore,
   verifier: ProtocolSignatureVerifier,
   after?: string,
+  validation?: ConversationRunValidationBinding,
 ) {
-  registerConversationRunReadProjection(log, artifacts, verifier);
+  registerConversationRunReadProjection(
+    log,
+    artifacts,
+    verifier,
+    undefined,
+    validation,
+  );
   registerAdvancementRecoveryProjection(log, artifacts);
   if (after && !after.startsWith(advancementPendingPrefix)) {
     throw new TypeError("Invalid advancement discovery cursor");

@@ -478,6 +478,7 @@ export interface RunProjection {
   deleted: boolean;
   hasDurableIdentity?: boolean;
   activeAdvancementSessionId?: string;
+  hasOpenAdvancement?: boolean;
   advancementStatuses?: Map<string, AdvancementSession["status"]>;
   pendingLifecycleCount?: number;
   readonly advancementSessions: AdvancementFoldMap;

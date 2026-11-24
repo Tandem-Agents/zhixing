@@ -4,6 +4,11 @@ export {
 } from "./conversation-recovery-index.js";
 
 export {
+  registerConversationRunReadProjection,
+  type ConversationRunValidationBinding,
+} from "./conversation-run-state-index.js";
+
+export {
   conversationDecisionMigrationStatus,
   conversationDecisionPending,
   conversationDecisionReady,

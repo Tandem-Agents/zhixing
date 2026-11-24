@@ -33,6 +33,31 @@ export {
   type ParsedConversationId,
 } from "./scope-id.js";
 
+export {
+  classifyConversationDirectoryScope,
+  compareDirectoryKeys,
+  computeDirectoryEntriesDigest,
+  type ConversationDirectoryCursor,
+  type ConversationDirectoryPageRequest,
+  type ConversationDirectoryScopeKind,
+  type ConversationDirectorySourceVersion,
+} from "./directory-page.js";
+
+export {
+  PROGRAM_SURFACE_PRINCIPAL,
+  PROGRAM_TICKET_PREFIX,
+  PROGRAM_TURN_CHANNEL,
+  decodeProgramConversationTicket,
+  encodeProgramConversationTicket,
+  isProgramOrigin,
+  programConversationTurnId,
+  programHomeId,
+  verifyProgramConversationTicket,
+  type DecodedProgramConversationTicket,
+  type ProgramConversationTicketPayload,
+  type ProgramOriginIngressLike,
+} from "./program-origin.js";
+
 export type {
   InferConversationName,
   MaybeAutoNameFirstTurnOptions,

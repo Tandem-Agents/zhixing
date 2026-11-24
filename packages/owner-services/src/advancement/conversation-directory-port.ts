@@ -14,4 +14,8 @@ export interface AdvancementConversationDirectory {
     conversationId: string,
     options: { readonly limit: number; readonly before?: RunRecordRef },
   ): Promise<AdvancementRunsPage>;
+  isProgramOriginRun?(
+    conversationId: string,
+    runId: string,
+  ): boolean | Promise<boolean>;
 }

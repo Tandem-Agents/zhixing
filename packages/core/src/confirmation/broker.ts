@@ -177,6 +177,7 @@ export class ConfirmationBroker implements IConfirmationBroker {
       );
     }
     let durableDelivery = false;
+    let nonInteractiveDelivery = false;
     if (this.lifecycleObserver) {
       const admission: { cause?: CancelCause } = {};
       this.admitting.set(request.id, admission);
@@ -201,13 +202,15 @@ export class ConfirmationBroker implements IConfirmationBroker {
           return decision;
         }
         durableDelivery = disposition?.accepted === true && disposition.delivery === "durable";
+        nonInteractiveDelivery =
+          disposition?.accepted === true && disposition.delivery === "non-interactive";
       } finally {
         this.admitting.delete(request.id);
       }
     }
 
-    // 2. 无本地或耐久交互消费者 → 立即走非交互兜底
-    if (this.requestListeners.length === 0 && !durableDelivery) {
+    // 2. 显式非交互投递（如受信程序运行）或无本地/耐久交互消费者 → 立即走非交互即决兜底
+    if (nonInteractiveDelivery || (this.requestListeners.length === 0 && !durableDelivery)) {
       const decision = this.resolver.resolve(request);
       await this.lifecycleObserver?.afterResolved(request, decision, {
         kind: "non-interactive",

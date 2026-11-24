@@ -4,6 +4,7 @@ import {
   advancementSubmissionRequestId,
   freezeAdvancementSessions,
   isAdvancementControlEvent,
+  isOpenAdvancementSession,
   type AdvancementControlEvent,
   type AdvancementSession,
   type AdvancementSubmissionReceipt,
@@ -72,7 +73,11 @@ import type {
   UncertainResolutionFact,
   UserTurnInput,
 } from "@zhixing-ai/core/contracts";
-import { parseConversationId } from "@zhixing-ai/core/conversation";
+import {
+  isProgramOrigin,
+  parseConversationId,
+  PROGRAM_SURFACE_PRINCIPAL,
+} from "@zhixing-ai/core/conversation";
 import {
   projectPublishConflicts,
   projectPublishResults,
@@ -200,6 +205,7 @@ import { readConversationRunRoot } from "../conversation-run-state-extras.js";
 import {
   CONVERSATION_RUN_STATE_PROJECTION_ID,
   conversationStateFieldPrefix,
+  conversationStateHash,
   decodeConversationState,
   readConversationStateField,
   readConversationSubmissionState,
@@ -348,6 +354,9 @@ import {
   finalFrame,
   rejected,
 } from "./state/commit-publish.js";
+import {
+  admittedInputMatches,
+} from "./state/run-queue-input.js";
 import {
   applyCommittedSessionMutations,
   assertCanonicalActivityTime,
@@ -1246,6 +1255,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       input.admission.applyAuthority<RunProjection, InitialControlEnvelope>({
         envelope: input.envelope,
         source: input.source,
+        deferReceipt: isProgramOrigin(input.source.ingress),
         stream: runStream(this.#conversationId),
         initial: emptyConversationRunProjection(this.#conversationId),
         ...(basis ? { targetBase: basis } : {}),
@@ -1774,6 +1784,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return { cursor, hasMore: false, reset: true };
       }
       if ("preparing" in piece) return { cursor, hasMore: true, reset };
+      const programOrigin =
+        selected.pointer.initial &&
+        (await this.#readIndex.hasProgramOrigin(
+          this.#conversationId,
+          request.runId,
+        )) === true
+          ? (true as const)
+          : undefined;
       const next: ConversationInputCursor = {
         ...cursor,
         position: piece.final ? position + 1 : position,
@@ -1786,6 +1804,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ? {
               input: {
                 identity: structuredClone(selected.pointer.identity),
+                ...(programOrigin ? { programOrigin } : {}),
                 text: piece.text,
                 contentOffset,
                 final: piece.final,
@@ -2221,6 +2240,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           : notice,
       communication: status.communication,
       continuation: status.continuation,
+      ...(status.programOrigin ? { programOrigin: true } : {}),
       ...(status.commit ? { commitRevision: status.commit.commitRevision } : {}),
     };
   }
@@ -2525,6 +2545,193 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       runs.sort((left, right) => left.queuedPosition - right.queuedPosition);
       return Object.freeze(runs);
     }, conversationDecisionScope({}));
+  }
+
+  async continuableAdmittedRuns(): Promise<
+    readonly { readonly runId: string; readonly queuedPosition: number }[]
+  > {
+    return this.#coordinator.select((facts) => {
+      const candidateRunIds = new Set<string>();
+      for (const entry of facts.queueInput.listQueuedEntriesSnapshot()) {
+        candidateRunIds.add(entry.runId);
+      }
+      if (facts.assignment.activeRunId !== undefined) {
+        candidateRunIds.add(facts.assignment.activeRunId);
+      }
+      for (const assignmentId of facts.assignment.listRecoveryAssignmentIds()) {
+        const assigned = facts.assignment.getAssigned(assignmentId);
+        if (assigned) candidateRunIds.add(assigned.record.runId);
+      }
+      const runs: Array<{
+        readonly runId: string;
+        readonly queuedPosition: number;
+      }> = [];
+      for (const runId of candidateRunIds) {
+        const current = facts.assignment.getRunState(runId)?.state;
+        if (
+          current !== "queued" &&
+          current !== "dispatched" &&
+          current !== "running" &&
+          current !== "cancel-requested"
+        ) {
+          continue;
+        }
+        const admitted = facts.queueInput.getAdmitted(runId);
+        if (!admitted) {
+          throw corruptRunJournal(
+            "Continuable conversation run has no durable admission",
+          );
+        }
+        runs.push(
+          Object.freeze({
+            runId,
+            queuedPosition: admitted.record.queuedPosition,
+          }),
+        );
+      }
+      runs.sort((left, right) => left.queuedPosition - right.queuedPosition);
+      return Object.freeze(runs);
+    }, conversationDecisionScope({}));
+  }
+
+  async isProgramOriginRun(runId: string): Promise<boolean> {
+    assertIdentifier(runId, "Run id");
+    if (await this.#readIndex.hasProgramOrigin(this.#conversationId, runId)) {
+      return true;
+    }
+    return this.#coordinator.select(
+      (facts) => isProgramOrigin(facts.queueInput.getAdmitted(runId)?.record.ingress),
+      conversationDecisionScope({ runId }),
+    );
+  }
+
+  async hasOpenAdvancementSession(): Promise<boolean> {
+    if (await this.#readIndex.hasAdvancement(this.#conversationId)) {
+      const openInSession = await this.#sessionRead.read((state) =>
+        [...state.advancementSessions.values()].some((session) =>
+          isOpenAdvancementSession(session),
+        ),
+      );
+      if (openInSession) return true;
+    }
+    registerAdvancementRecoveryProjection(this.#log, this.#artifacts);
+    return readAdvancementRecovery(this.#log, async (view) => {
+      const local = await conversationViewAt(
+        this.#log,
+        view,
+        this.#conversationId,
+      );
+      const root = await advancementRecoveryRoot(local, this.#conversationId);
+      return !root.deleted && (root.active !== undefined || (root.proposals ?? 0) > 0);
+    });
+  }
+
+  async inspectProgramInputReceipt(input: {
+    readonly physicalTurnId: string;
+    readonly expectedInput?: UserTurnInput;
+    readonly controlAdmission?: ControlAdmissionJournal;
+  }): Promise<
+    | {
+        readonly status: "accepted";
+        readonly runId: string;
+        readonly deleted: boolean;
+        readonly clearCovered: boolean;
+      }
+    | {
+        readonly status: "idempotency-conflict";
+      }
+    | {
+        readonly status: "unknown";
+        readonly deleted: boolean;
+      }
+  > {
+    assertIdentifier(input.physicalTurnId, "Program physical turn id");
+    const ingressKey = `${PROGRAM_SURFACE_PRINCIPAL}/${input.physicalTurnId}`;
+    const checkAdmitted = async () =>
+      this.#coordinator.select((facts) => {
+        const runId = facts.queueInput.getRunIdByIngress(ingressKey);
+        if (!runId) return undefined;
+        const admitted = facts.queueInput.getAdmitted(runId);
+        if (!admitted || !isProgramOrigin(admitted.record.ingress)) {
+          return { conflict: true as const };
+        }
+        if (
+          input.expectedInput !== undefined &&
+          !admittedInputMatches(admitted, input.expectedInput)
+        ) {
+          return { conflict: true as const };
+        }
+        return { conflict: false as const, runId };
+      }, conversationDecisionScope({ ingressKey }));
+
+    const matched = await checkAdmitted();
+    if (matched) {
+      if (matched.conflict) return { status: "idempotency-conflict" };
+      const coverage = await this.#readIndex.clearCoverageForRun(
+        this.#conversationId,
+        matched.runId,
+      );
+      return {
+        status: "accepted",
+        runId: matched.runId,
+        deleted: coverage.deleted || (await this.recoveryDeleted()),
+        clearCovered: coverage.clearCovered,
+      };
+    }
+
+    if (input.controlAdmission) {
+      const receipt = await input.controlAdmission.inputReceipt({
+        conversationId: this.#conversationId,
+        turnId: input.physicalTurnId,
+        surfacePrincipal: PROGRAM_SURFACE_PRINCIPAL,
+      });
+      if (receipt.status === "rejected") {
+        return { status: "idempotency-conflict" };
+      }
+      if (receipt.status === "accepted") {
+        const rechecked = await checkAdmitted();
+        if (rechecked?.conflict) return { status: "idempotency-conflict" };
+        const coverage = await this.#readIndex.clearCoverageForRun(
+          this.#conversationId,
+          receipt.runId,
+        );
+        return {
+          status: "accepted",
+          runId: receipt.runId,
+          deleted: coverage.deleted || (await this.recoveryDeleted()),
+          clearCovered: coverage.clearCovered,
+        };
+      }
+    }
+
+    const importedSource = this.#coordinator.importedBaseSource;
+    if (importedSource) {
+      const importedKey = await importedSource.read((view) =>
+        view.get(`source/ingress-control/${conversationStateHash(ingressKey)}`),
+      );
+      if (typeof importedKey === "string") {
+        const rechecked = await checkAdmitted();
+        if (rechecked) {
+          if (rechecked.conflict) return { status: "idempotency-conflict" };
+          const coverage = await this.#readIndex.clearCoverageForRun(
+            this.#conversationId,
+            rechecked.runId,
+          );
+          return {
+            status: "accepted",
+            runId: rechecked.runId,
+            deleted: coverage.deleted || (await this.recoveryDeleted()),
+            clearCovered: coverage.clearCovered,
+          };
+        }
+        return { status: "idempotency-conflict" };
+      }
+    }
+
+    return {
+      status: "unknown",
+      deleted: await this.recoveryDeleted(),
+    };
   }
 
   async assignmentLifecycleProvenance(assignmentId: string): Promise<

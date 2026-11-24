@@ -1783,6 +1783,10 @@ export class AdvancementAcceptedTurnApplicationService
   readonly #review: Pick<AdvancementReviewAttemptApplication, "reviewAcceptedRun">;
   readonly #results: AdvancementReviewResultProjectionApplication;
   readonly #proposals?: Pick<AdvancementProposalApplicationService, "advance">;
+  readonly #isProgramOriginRun?: (
+    conversationId: string,
+    runId: string,
+  ) => boolean | Promise<boolean>;
   readonly #chains = new Map<string, Promise<void>>();
 
   constructor(options: Readonly<{
@@ -1790,11 +1794,16 @@ export class AdvancementAcceptedTurnApplicationService
     review: Pick<AdvancementReviewAttemptApplication, "reviewAcceptedRun">;
     results: AdvancementReviewResultProjectionApplication;
     proposals?: Pick<AdvancementProposalApplicationService, "advance">;
+    isProgramOriginRun?: (
+      conversationId: string,
+      runId: string,
+    ) => boolean | Promise<boolean>;
   }>) {
     this.#catchUp = options.catchUp;
     this.#review = options.review;
     this.#results = options.results;
     this.#proposals = options.proposals;
+    this.#isProgramOriginRun = options.isProgramOriginRun;
   }
 
   acceptCommittedTurn(turn: AdvancementCommittedTurn): void {
@@ -1811,6 +1820,13 @@ export class AdvancementAcceptedTurnApplicationService
   }
 
   async #reviewCommittedTurn(turn: AdvancementCommittedTurn): Promise<void> {
+    const candidateRunId =
+      "runId" in turn.runRecord && typeof turn.runRecord.runId === "string"
+        ? turn.runRecord.runId
+        : turn.turnId;
+    if (await this.#isProgramOriginRun?.(turn.conversationId, candidateRunId)) {
+      return;
+    }
     // 提议运行不是验收对象：提交后立即接受提议并起草案；失败留给 G08 恢复兜底
     if (turn.runRecord.postTurnControl?.intent.kind === "propose_advancement") {
       await this.#proposals?.advance(turn.conversationId).catch(() => undefined);

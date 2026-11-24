@@ -4,6 +4,7 @@ import {
   applyAdvancementEvent,
   assertAdvancementEventBatchLegal,
   isAdvancementControlEvent,
+  isOpenAdvancementSession,
   type AdvancementControlEvent,
   type AdvancementFoldMap,
   type AdvancementSubmissionReceipt,
@@ -42,6 +43,7 @@ export interface SessionDomainMutableSlice {
   domainRevision: number;
   deleted: boolean;
   activeAdvancementSessionId?: string;
+  hasOpenAdvancement?: boolean;
   readonly advancementSessions: AdvancementFoldMap;
   readonly advancementWrites: Map<
     string,
@@ -520,6 +522,9 @@ export async function reduceConversationSessionFact<
       state.activeAdvancementSessionId = [
         ...state.advancementSessions.values(),
       ].find((session) => session.status === "active")?.id;
+      state.hasOpenAdvancement = [
+        ...state.advancementSessions.values(),
+      ].some((session) => isOpenAdvancementSession(session));
       return state;
     }
   }

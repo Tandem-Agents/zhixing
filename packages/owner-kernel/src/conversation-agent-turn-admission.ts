@@ -34,8 +34,14 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
             : { createConversation: identity.create }),
           ...(request.observe === false ? {} : { connectionId: request.caller.connectionId }),
           source: request.source ?? "interactive",
-          beforeEnqueue: (managed) =>
-            input.manager.admitDurableTurn({
+          beforeEnqueue: async (managed) => {
+            if (request.beforeDurableAdmit) {
+              const pre = await request.beforeDurableAdmit({
+                conversationId: managed.conversationId,
+              });
+              if (pre) return pre;
+            }
+            return input.manager.admitDurableTurn({
               conversationId: managed.conversationId,
               input: request.input,
               invocation:
@@ -63,7 +69,8 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
                 surfacePrincipal: request.caller.surfacePrincipal,
               },
               surfacePrincipal: request.caller.surfacePrincipal,
-            }),
+            });
+          },
           makeTask: (managed) => ({
             source: request.source ?? "interactive",
             execute: () =>

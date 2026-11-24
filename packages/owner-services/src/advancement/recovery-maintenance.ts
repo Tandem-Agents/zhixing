@@ -514,8 +514,13 @@ class DefaultAdvancementRecoveryMaintenance
           if (isLowerBound) return oldestCandidate(candidates);
           continue;
         }
+        const candidateRunId = recoveryRunId({ record, runRecordRef: ref });
         if (
           isRecoverableAcceptedRun(session, record) &&
+          !(await this.options.directory.isProgramOriginRun?.(
+            session.conversationId,
+            candidateRunId,
+          )) &&
           !reviewed.has(runRefKey(ref))
         ) {
           candidates.push({

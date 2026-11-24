@@ -5,7 +5,7 @@ import type { JsonValue, SessionMeta, ArtifactRef, ConversationCommitSummary } f
 import { conversationAttemptState, projectStatusEntry, type StatusHistoryEntry } from './conversation-status-projection.js';
 import { validateMutationBatch, validatePublishDecisionForBatch, validatePublishDecisionRecord, canonicalize } from '@zhixing-ai/core/protocol';
 import type { DurableLogCheckpoint, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing-ai/core/authority';
-import { parseConversationId } from '@zhixing-ai/core/conversation';
+import { isProgramOrigin, parseConversationId } from '@zhixing-ai/core/conversation';
 import type { ConversationRunJournalRecord } from './conversation-run-contracts.js';
 import { isMessageDeliveryFact } from './conversation-message-delivery.js';
 import type { ConversationControlTargets } from '@zhixing-ai/core/contracts';
@@ -37,7 +37,7 @@ export interface ReadMeta {
   modelSelection?: import('@zhixing-ai/core/contracts').SessionModelSelection;
   activity: string; sessionActivity?: string; clearId?: string; clearedLsn?: number; deleted?: boolean;
 }
-export interface ControlRead { readonly entry?: StatusHistoryEntry; readonly communication: boolean; readonly continuation: boolean; readonly commit?: CommitPointer }
+export interface ControlRead { readonly entry?: StatusHistoryEntry; readonly communication: boolean; readonly continuation: boolean; readonly programOrigin?: boolean; readonly commit?: CommitPointer }
 export interface CommitPointer { readonly timelineKey?: string; readonly runId: string; readonly assignmentId: string; readonly commitRevision: number; readonly bundle: ArtifactRef; readonly readSummary?: ConversationCommitSummary; readonly publish?: Extract<import('@zhixing-ai/core/contracts').PublishRecord, { t: 'publish-decision' }> }
 export interface InputPointer { readonly runId: string; readonly inputKey: string; readonly position: number; readonly lsn: number; readonly identity: NonNullable<import('@zhixing-ai/core').Message['inputIdentity']>; readonly checkpoint?: DurableLogCheckpoint; readonly item: number; readonly initial?: boolean }
 export type TimelinePointer = { readonly key: string; readonly lsn: number } & (
@@ -386,7 +386,7 @@ export class ConversationReadIndex {
     if (!ids.length) return new Map();
     const keys = [p + 'meta', ...ids.flatMap(id => {
       const suffix = JSON.stringify(id);
-      return [p + 'status:' + suffix, p + 'communication:' + suffix, p + 'run:' + suffix, p + 'continuation:' + suffix];
+      return [p + 'status:' + suffix, p + 'communication:' + suffix, p + 'run:' + suffix, p + 'continuation:' + suffix, p + 'program-origin:' + suffix];
     })];
     const values = await this.index.getMany(keys);
     const meta = this.#baseView
@@ -394,13 +394,36 @@ export class ConversationReadIndex {
       : this.#mergeState(conversationId, values[0] as unknown as ReadMeta | undefined);
     const result = new Map<string, ControlRead>();
     for (const [i, id] of ids.entries()) {
-      const offset = 1 + i * 4;
+      const offset = 1 + i * 5;
       const read = async (n: number) => values[offset + n] ?? (this.#baseView ? await this.#baseView.get(keys[offset + n]!) : this.#base.get(keys[offset + n]!));
       const commit = await read(2) as unknown as CommitPointer | undefined;
       result.set(id, { entry: await read(0) as unknown as StatusHistoryEntry | undefined, communication: !!(await read(1)), continuation: !!(await read(3)),
+        programOrigin: !!(await read(4)),
         commit: !meta.deleted && commit && commit.commitRevision > meta.clearedThrough ? commit : undefined });
     }
     return result;
+  }
+  async hasProgramOrigin(conversationId: string, runId: string): Promise<boolean> {
+    const key = prefix(conversationId) + 'program-origin:' + JSON.stringify(runId);
+    if (this.#baseView) return (await this.#baseView.get(key)) === true;
+    return (await this.index.get(key)) === true || this.#base.get(key) === true;
+  }
+  async clearCoverageForRun(conversationId: string, runId: string): Promise<{ deleted: boolean; clearCovered: boolean }> {
+    const p = prefix(conversationId), suffix = JSON.stringify(runId);
+    const baseGet = (key: string) => this.#baseDirectoryView ? this.#baseDirectoryView.get(key) : Promise.resolve(this.#base.get(key));
+    const [localMeta, baseMeta, localAt, baseAt] = await Promise.all([
+      this.index.get(p + 'meta') as Promise<ReadMeta | undefined>,
+      baseGet(p + 'meta') as Promise<ReadMeta | undefined>,
+      this.index.get(p + 'admission-at:' + suffix),
+      baseGet(p + 'admission-at:' + suffix),
+    ]);
+    const merged = this.#mergeValues(baseMeta, localMeta);
+    const clearCovered = typeof localAt === 'number'
+      ? localMeta?.clearId !== undefined && typeof localMeta.clearedLsn === 'number' && localAt <= localMeta.clearedLsn
+      : typeof baseAt === 'number'
+        ? localMeta?.clearId !== undefined || (baseMeta?.clearId !== undefined && typeof baseMeta.clearedLsn === 'number' && baseAt <= baseMeta.clearedLsn)
+        : false;
+    return { deleted: merged.deleted === true, clearCovered };
   }
   async statusHistory(conversationId: string, runId: string, afterRevision: number): Promise<readonly StatusHistoryEntry[]> {
     const p = prefix(conversationId) + 'status-history:' + JSON.stringify(runId) + ':';
@@ -895,6 +918,7 @@ export class ConversationDirectoryReducer {
       }
       if (body.t === 'admitted' || body.t === 'run-input-appended') {
         if (body.t === 'admitted' && body.ingress.turnOrigin?.worksceneContinuation) put(p + 'continuation:' + JSON.stringify(body.runId), true);
+        if (body.t === 'admitted' && isProgramOrigin(body.ingress)) put(p + 'program-origin:' + JSON.stringify(body.runId), true);
         // Older interactive admissions have a durable ingress ID but no message identity.
         const identity = body.ingress.turnOrigin?.messageIdentity ?? { id: body.ingress.ingressId, source: { kind: 'user' as const } };
         if (identity) {
