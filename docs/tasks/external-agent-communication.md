@@ -1,5 +1,7 @@
 # 外部智能体通信与消息接收能力
 
+> 类型：模块开发 · 范本
+
 ## 一、需求与目标
 
 跨智能体通信是一体两面：主动给其他智能体发消息，本质只是调用工具去使用对方已有的入口，动作本身并不特殊；真正决定通信能否成立的底层关键，在于智能体系统自身如何让外部给自己发消息、对外提供了怎样的消息接收能力。从 OpenCode、Kimi Code、ZCode 到 Codex、Claude Code、Antigravity 等经过实际验证的智能体来看，支撑跨智能体通信的底层接收能力已成为广泛趋势。更关键的是，无论外部如何演进，这项能力本身就是跨智能体通信与协作必不可少的基石；如果知行缺乏这一能力，就会构成明显短板。
@@ -232,20 +234,22 @@
 > 4. **产品体验一流，开箱省心自然。** 产品与用户体验贯彻以人为本、释放生产力的目标，把复杂度留在系统内部，首次接入与日常多轮交流均达到简明顺畅的世界一流水准：在产品正常可用、调用方具备常规工具调用能力的条件下，凭知行提供的原生入口与用法即可找准目标、使多行与带前导符号的正文按原意传达而不意外拆轮或误作命令执行、干净取得结果或状态；知行模型可按需自然通信；日常协作无需用户自行编写维护专用桥接、切换窗口、从混杂终端输出中剥离正文或逐轮人工传话，后台通信不打扰当前前台操作，需要查看时来源去向与状态清楚。演示虽能跑通，但正常使用仍把专用胶水或中转负担留给用户与调用方的，体验不予通过。
 > 5. **达到世界一流，取舍有据可验。** 架构、系统、产品与用户体验整体达到世界一流水平，不满足于“仅能调通”：放入同一真实高要求协作场景，对照知行现状与调研中适用的一流做法，按具体机制判断预期交流效果、使用负担、可靠性与长期维护代价——已有做法确实优秀且适合知行的，有据保留同样通过；在其他条件相当时，若仍有明显更省事或更易维护的可靠做法而未采用，或仅以功能堆砌与空泛措辞自称最优，均不予通过。每项关键判断与核心承诺均须具备可观察的预期结果，以及足以推翻该方案的明确失败判据。
 >
-> 以上五项的基础正确性与世界一流卓越性要求须同时满足，方可通过设计审查。双方对同一版设计分别对照首节需求、顶层指引与本标准独立记录依据和缺口，交换意见，实质缺口全部闭合后停下交用户审阅。
+> **【通用原样必留·高权重】** 跳出“为解决当下问题而解决问题”的局部视角，站在宏观与长时间尺度审视：只做直击本质、经得起时间检验且长期有价值的设计；凡当下看似自洽强大、长期反而成为系统负担的，坚决不做。
+>
+> 以上五项标准及上述最高权重准则须同时满足，方可通过设计审查。双方对同一版设计分别对照首节需求、顶层指引与本标准独立记录依据和缺口，交换意见，实质缺口全部闭合后停下交用户审阅。
 
 ### 4.2 设计正文
 
 **提示词（首次）**
 
 ```text
-请你和搭档先厘清本任务的核心目标、真实问题与边界，以宏观《愿景》与《架构演进方向》为指引，结合调研结果内容完成本模块的正式设计。全程以结果为导向：成稿后双方须对照已确定的审查标准独立审查，严守诚实底线、杜绝“为了达标而达标”；凡未通过就继续进行优化和修复并重新审查，直至真正符合标准后再落入文档交付。
+请你和搭档先厘清本任务的核心目标、真实问题与边界，以宏观《愿景》与《架构演进方向》为指引，结合调研结果内容完成本模块的正式设计。全程以结果为导向：成稿后双方须对照已确定的审查标准独立审查，严守诚实底线、杜绝“为了达标而达标”；凡未通过就继续进行优化和修复并重新审查，直至真正符合标准后再落入文档交付。只有真正有价值的真实问题才触发修改与重审；一旦主体方案满足核心标准且符合面向读者的表达规范即直接通过交付，严禁为不影响整体质量的细枝末节反复打回、陷入无休止的审查怪圈。
 ```
 
 **提示词（返工）**
 
 ```text
-既然不通过，那么需要你和搭档再次回顾整个任务的目标、需求与要求，根据已有的调研内容，以及宏观《愿景》和《架构演进方向》的指引，再次进行设计、优化方案、修复问题。切记以结果为导向，交付前自己先按标准独立审查，最终给出符合标准的交付成果。
+既然不通过，那么需要你和搭档再次回顾整个任务的目标、需求与要求，根据已有的调研内容，以及宏观《愿景》和《架构演进方向》的指引，再次进行设计、优化方案、修复问题。切记以结果为导向，交付前自己先按标准独立审查，最终给出符合标准的交付成果。只有真正有价值的真实问题才触发修改与重审；一旦主体方案满足核心标准且符合面向读者的表达规范即直接通过交付，严禁为不影响整体质量的细枝末节反复打回、陷入无休止的审查怪圈。
 ```
 
 #### 方案总览
@@ -420,7 +424,7 @@
 
 > **执行待办与单内高效推进规则（通用）**
 >
-> 1. **端到端工作流待办与真实勾选。** 分割线下方以待办列表（`- [ ]` / `- [x]`）覆盖从前期定稿、独立分支与环境隔离、各执行项实施验收直至集成收尾的完整工作流程，不顺带改动分割线上方已审定的静态正文。每一项待办及每一道子门禁均须在真实执行并核验达标后如实勾选（`[x]`），严禁跳步、代勾或事后补造。无论任务判断不拆分（整项作为单个执行项推进）还是拆分为若干执行单元，均**保持已审定的业务范围、交付成果与完成条件原封不动**，不在待办中重拆业务单元；每个执行项推进期间挂载通用的三道工序门禁子项，整项达标勾选顶层 `[x]` 时将过程门禁收折为一行“完成依据”。
+> 1. **端到端工作流待办与子门禁原位保留。** 分割线下方以待办列表（`- [ ]` / `- [x]`）覆盖从前期定稿、独立分支与环境隔离、各执行项实施验收直至集成收尾的完整工作流程，不顺带改动分割线上方已审定的静态正文。无论任务判断不拆分（整项作为单个执行项推进）还是拆分为若干执行单元，均**保持已审定的业务范围、交付成果与完成条件原封不动**，不在待办中重拆业务单元。建单排期时，每个执行项顶部（紧接`前置依赖`之后）直接挂载三道工序门禁子待办（初始均写 `- [ ] **门禁 A/B/C（…）：** 待执行`）与 `- **完成依据：** 待验收通过后填写`；每完成一道工序，将对应子项如实改为 `- [x]` 并填写一行落实要点；整项验收达标勾选顶层 `[x]` 时，填写`完成依据`并**原位保留三道 `- [x]` 门禁子项，不折叠、不合并、不删除**。每一项待办与子门禁均须在真实执行并核验达标后勾选，严禁跳步、代勾或事后补造。
 > 2. **单内三道必经工序门禁（通读、深悟、遵守三位一体）。** 每推进一个执行项，实施方在以下三个认知拐点均须完成同一完整动作——**调用工具重新通读[高效工作方法](../engineering/antigravity-gemini-4-carbon-high-efficiency.md)全文、结合当前阶段深入理解高效工作的本质、并在后续实际操作中严格遵守执行**（严禁凭记忆或以“已知悉”为由跳过通读、流于形式只读不悟，或读而不遵守）：
 >    - **门禁 A（开工实现前）：** 完成上述通读、深悟并确立遵守准则后，一次性核清本项触及的一手源码契约、调用写入面、恢复与并发边界及测试替身约束，合并已知独立读写成批完成编码（编码期不零散跑重型构建与长流程验收），附一行落实要点后真实勾选 `[x]`。
 >    - **门禁 B（代码落定、转入构建与实测前）：** 完成上述通读、深悟并确立遵守准则后，先做逐项代码自审与低成本定向快测（核实实际执行用例数 `> 0`；高耗时或大规模验证先做小样本测算并设硬超时），出清契约与边界问题后再集中执行构建与真实入口验收，严禁拿重型构建和正式验收充当排障调试器，附一行落实要点后真实勾选 `[x]`。
@@ -443,18 +447,24 @@
 - [x] **2. 完成主流智能体与跨领域实践独立调研及交叉审查。** 双方严格按 `research` 技能开展一手源码、协议规范与本机实测调研，对照 3.1 节五项标准独立审查通过，调研成果已定稿于第三节。
 - [x] **3. 完成体系架构与产品体验设计并通过独立审查。** 双方以《愿景》与《架构演进方向》为指引完成正式设计，对照 4.1 节五项标准经多轮质询收敛与独立审查通过，设计已定稿于第四节（设计阶段未改动产品代码）。
 - [x] **4. 建立不阻塞主线的独立任务分支与隔离运行环境。** 获用户明确授权启动代码实现后，按[分支管理](../../.agents/skills/branch-management/SKILL.md)与[路径及资源隔离规范](../engineering/path-and-resource-isolation.md)，基于 `develop` 最新干净基线创建独立工作分支（`feature/external-agent-communication`）、独立工作树（worktree）及专属隔离运行数据根（显式指定临时 `ZHIXING_HOME` / `ZHIXING_CONFIG_PATH` 与测试目录）；确保全程不触碰主工作区已暂存/未提交内容、不污染日常 `~/.zhixing` 数据与全局正式 CLI 链接、不阻塞 `develop` / `main` 主线推进，经搭档核对隔离生效后真实勾选。（已落实：工作树 `E:/zx-iso/external-agent-comm`、`feature/external-agent-communication@c1b4277e`；隔离运行根 `ZHIXING_HOME=E:/zx-iso/external-agent-comm-rt/home`、`ZHIXING_CONFIG_PATH=E:/zx-iso/external-agent-comm-rt/home/config.jsonc`、`TEMP/TMP=E:/zx-iso/external-agent-comm-rt/tmp`；构建入口 `E:/zx-iso/external-agent-comm/packages/cli/dist/entry.js`，主仓暂存指纹未变且经 Codex 独立核验通过。）
-- [x] **5. 执行单元 1：同机完整会话通信闭环（原生 CLI、同机内部工具与核心运行/安全底座）**｜状态：已完成
-  - **完成依据：** 三道门禁及压缩/返修校准均按规程通读《高效工作方法》并落实（门禁 C 如实记录步骤 `13310` 补测试导入前一次漏读，并于 `transcript_full.jsonl` 步骤 `13365`/`13367` 完成重读校准与 `task-13372.log` 定向复核）；同机无网格与混合宿主内外通信闭环、22 套件 412 用例（`task-13032.log`）、全量构建与 `s7:lint`（`task-13352.log`）及 9 步构建版 CLI 实测（`task-13177.log`）全绿，经 `codex-zhixing-newWorker` 三轮独立冷审（67/67 项 SHA-256 吻合，`codex-unit1-implementation-review-r3.md`）验收通过。
+- [x] **5. 执行单元 1：同机完整会话通信闭环（原生 CLI、同机内部工具与核心运行/安全底座）**
   - **前置依赖：** 待办 4（独立分支与隔离运行环境已就绪）。
+  - [x] **门禁 A（开工实现前）：** 通读《高效工作方法》全文，一次性核清 `core`、`owner-kernel`、`owner-services`、`server`、`rpc`、`cli` 一手源码契约、调用写入面、迁入基底恢复与并发隔离边界，成批完成同机闭环编码。
+  - [x] **门禁 B（代码落定、转入构建与实测前）：** 重读《高效工作方法》全文，先完成逐项代码自审与 22 套件 412 用例定向快测（`task-13032.log`，核实用例数 `> 0`），出清契约与边界问题后再转入全量构建与真实 CLI 实测。
+  - [x] **门禁 C（反例返修前持续生效、达标收口时勾选）：** 压缩与返修校准均重读《高效工作方法》全文并从共享机制成批收口（如实记录步骤 `13310` 补测试导入前一次漏读，并于 `transcript_full.jsonl` 步骤 `13365`/`13367` 完成重读校准与 `task-13372.log` 定向复核）；经 `codex-zhixing-newWorker` 三轮独立冷审通过后勾选。
+  - **完成依据：** 同机无网格与混合宿主内外通信闭环全量构建与 `s7:lint`（`task-13352.log`）、9 步构建版 CLI 实测（`task-13177.log`）及定向单测全绿，经 `codex-zhixing-newWorker` 三轮独立冷审（67/67 项 SHA-256 吻合，`codex-unit1-implementation-review-r3.md`）验收通过。
   - **交付成果：** 在单机无网格及已启用 Mesh 配置的同机 `anchor + executor` 混合宿主上，交付完整可用、耐久安全且经真实构建版验证的内外会话通信产品闭环及流式/历史来源展示：①**外部同机接入**——完整 `zz conversation list | new | read | send | result` 五个子命令，支持找准目标或显式新建、原样发送多行与特殊前缀正文、忙时双向隔离独立 `Run` 排队、推进全周期排除与非交互工具确认前置即决，以及已接纳等待期返回同票退出码 `2`、等待到期/`Ctrl+C` 仅结束观察不取消底层运行、写出后失联未知返回同票退出码 `3`（不取消不重发；`read` 暂不可读返 `3` 按原目标/游标重读，`new` 丢回执保留原 `requestId` 返 `3` 按原参数重试）、断连/强杀/重启后凭绑定发起端 `ZHIXING_HOME` 的票据（跨 `home` 报 `invalid_ticket`）或 `(conversationId, requestId)` 取回本次专属答复；②**内部同机跨会话通信**——在单机无 Mesh 与同机混合宿主本机调用两条路径上统一打通显式筛选/分页 `discover` 与独立写命令 `new`（更新内置“对话通信”技能，同时对既有内部 Mesh 入站及纯执行端未接通远端入口严格保持旧操作兼容与新扩展失败关闭），完整保留异步通信语义（目标空闲起轮、普通运行中 `Turn` 边界追加、仅遇活跃程序运行时顺延为下一独立 `Run` 且不继承非交互确认或票据语义、按 `inputIdentity.source.conversationId` 显式 `send` 回信、回执本身不额外唤醒模型）。
   - **工作范围**（覆盖 `core`、`owner-kernel`、`owner-services`、`server`、`rpc`、`cli` 同机宿主装配与 `mesh-runtime-assembly.ts` 本机路由及旧入站隔离边界、CLI 命令入口及 `core/skills`）：
     1. **同机跨作用域目录、统一幂等创建与内部路由/旧 Mesh 入站边界隔离：** 实现持久 `(Date.parse(lastActiveAt) DESC, canonicalKey UTF-16 ASC)` 排序、`ConversationDirectoryIndex` 版本证据（含 `pending` 元数据摘要与文件退路 `canonicalKey` 全序摘要）、`WorkScene.lastActiveAt` 未初始化候选合并、`nextCursor` / `cursor_expired` 诚实失效（仅证成穷尽才省略 `nextCursor`）；实现 `Anchor` 按 `(creatorPrincipal, requestId)` 隔离并遵循场景移除栅栏 `quiescePrefix` 的统一幂等 `new`；收紧只读 `CONVERSATION_COMMUNICATION_QUERY`（仅 `discover | read | observe`），在 `command.ts` 无 Mesh 分支与 `mesh-runtime-assembly.ts` `routeConversationCommunication` 的本机进程内主控入口同步接入显式带参 `discover` 共享目录协调（对 `currentTrust` 中尚未接通扩展页或离线的远端执行端诚实置 `partial: true`）、本机 `Anchor` 独立写命令 `new` 直达及 `routeAddressedConversationCommunication` 的 `adoptedConversations` 归属判断；**同时在既有内部 Mesh 边界显式区分已支持旧操作与本单元尚未启用的跨机扩展**——保留旧无参 `discover()`、`read | send | observe` 及 `RunInput` 既有跨机语义不变，对经 `bindConversationCommunication` 旧入站送达（或 `anchor === undefined` 纯执行端发起）的带参 `discover` 与 `new` 明确返回尚未支持且零写入（绝不将带参 `discover` 静默降格为无参广播成功，也不让旧入站 `new` 落入本机创建分支提前写入）。
     2. **准入对账、双向独立运行、推进与确认隔离及超帧读链：** 实现目标级物理 `turnId` 派生、当前增量与已验证迁入基底（`source/control/`、`source/ingress-control/`、`admittedByRun`）联合收据核对（`frozen/importing` 未就绪统一保票返退出码 `3`）、快速 `send` 耐久准入与 `<= 15s` `result` 短切片等待；落地三字段 `isProgramOrigin` 谓词、双向独立 `Run` 隔离、`Advancement` 准入+实时提交+恢复快索引/回扫全链路排除、`ConfirmationAdmissionDisposition` `delivery: "non-interactive"`（`ConfirmationHub` 在场即决、过滤镜像/终端可操作提示与崩溃重放）；落地 `ConversationReadIndex` `program-origin:<runId>` 来源索引、`result` `committedText` 正反序拼读（无助手文本块返回 `emptyReason: "no_assistant_text"`）、外部 `read --before` 绑定 `ConversationBodyCursor` 的单轮超 `1 MiB` 分页（`preparing` 未就绪返退出码 `3`）。
     3. **同机宿主端口、本机 `local-*` 防误判边界、保活机制与原生 CLI/技能呈现：** 将 `conversation.program.*` 列入 `DEVICE_LOCAL_RPC_METHODS` 并在 `command.ts` `ServerContext` 注入 `ProgramConversationApplication`（同机直调 `Anchor` 与可选 `localExecutor.owner`，单机零回环 Mesh；同步落地 `Anchor` 对 `local-*` 的 `adoptedConversations` / `unavailableTransfers` 优先裁决及本机 `localExecutor` 正面创建/墓碑记录核验——防 `fallback/current` 短路误判 `not_found`，仅在单机无网格或 `currentTrust` 唯一匹配 8 位 `devicePrefix` 且无接管/在途迁移时本地判 `not_found`，凡涉未接通远端成员或同前缀多成员歧义的目标统一在 `list` 标 `partial: true`、在 `send/result` 保票返 `temporarily_unavailable` 退出码 `3`、在 `read` 返退出码 `3`；纯 `surface` 保持既有方法边界明确拒收而不伪装可用）；实现 `command.ts` 联合 `Anchor`、`localExecutor.owner`、本地连接及准入活动代数的按需空闲复核（含既有 Mesh 到达改变同机已接纳工作时使旧空闲判定失效，定格 `uncertain` 不永久阻退）；完成 `entry-mode.ts` `cliLoggingMode === "none"` 登记、仅对 `conversation` 按带值选项 arity 归一字面值（保持共享根 `program` 及其余命令原行为）、`zz conversation` 五子命令（`--text | --stdin | --file`、`< 1 MiB` 预检、写出前 `stderr` 预刷绑定发起端 `homeId` 的 `zxt1` `ticket` 或 `new` 的 `requestId`、跨 `ZHIXING_HOME` 复用票据拒收报 `invalid_ticket` 退出码 `1`、已接纳等待返同票退出码 `2`、等待到期或 `Ctrl+C` 仅结束观察输出同一 `ticket` 不取消底层运行、写出后失联未知返同票退出码 `3` 不重发、`new` 丢回执凭原参数与原 `--id <requestId>` 重试、`read` 暂不可读返 `3` 按原目标/游标重读、换代重读首页、`--json`、双命令名 `--help` 四行示例、环回校验与旧宿主 `-32601` 报错）、内置“对话通信”技能更新及 `◇ 来自对话 <id>:` / `◇ 来自外部程序:` 来源呈现。
   - **可判定完成条件：** 全量构建通过，在隔离 `ZHIXING_HOME` 下分别对**无网格单机**与**已启用 Mesh 配置的同机混合宿主**（覆盖全局/`ws` 与本机 `local-*` 两类 `owner`）以真实构建版 `zz` / `zhixing` 及内部模型工具实测通过并经双方独立核验：①200+ 条历史会话下最近活跃中文/`ws`/候选/`local-*` 首页置顶、`limit = 100`、静态全遍历、持久目录变更 `cursor_expired`、**无网格单机与已启用 Mesh 同机混合宿主两条路径**的内部工具显式筛选/候选/续页/`new`、旧无参 `discover()` 兼容、只读 `QUERY` 拒写、并发异键与同键重试/冲突、`new` 丢回执按原参数与原 `requestId` 重试、`quiescePrefix` 栅栏及多轮追问上下文延续（§6 场景 1 同机全项）；②跨目标同 `--id` 隔离、`zz -V` / `zz status --version` / `zz logs search -V` 原行为与 `--text "--" / "-V" / "--version"` 等字面保真、运行中 `zz conversation` 不触发 `isProductLogWriter` 误判、本地 `/ws` `< 1 MiB` 预检、`result` 大回复续页与单轮超 `1 MiB` 中文转义历史 `read --before` 分页及 `preparing` 返 `3` 后按原目标/游标重读（§6 场景 2 同机全项）；③外部忙时排队、`> 30s` 短切片等待、**已接纳等待期返同票退出码 `2`、等待到期与 `Ctrl+C` 中断观察不取消底层运行且凭同票续取成功、写出后失联未知返同票退出码 `3` 不重复入账**、写出后 `SIGKILL` 凭票及 `--to + --id` 恢复、**同机另一 `ZHIXING_HOME` 复用票据报 `invalid_ticket`（退出码 `1`）**、活跃程序运行期间内部来信顺延为下一独立 `Run`（不继承非交互确认或票据语义），**以及普通内部跨会话通信正例（目标普通运行中 `Turn` 边界追加、按源身份显式 `send` 回信、仅收发送回执不额外唤醒模型）**与 `read` 来源索引（§6 场景 3 全项、票据 `homeId` 边界及内部正例回归）；④`--no-wait` 无连接保活至落盘满两周期退出、定格 `uncertain` 不死锁、用迁入基底/恢复夹具验证 `adoptedConversations` 优先（含接管后删除报 `target_deleted`）及同物理键同文幂等/异文冲突，**以及已配对对端过渡安全实测（`list` 诚实置 `partial: true`；对远端或同 8 位前缀歧义 `local-*`，`send/result` 保票返退出码 `3`、`read` 返退出码 `3`，绝不误报 `not_found` / `admitted: false`；纯 `surface` 明确拒收 `conversation.program.*`；经既有内部 `conversation.communication` 入站送来带参 `discover` 与 `new` 明确拒绝且零写入、不降格为无参广播成功，同时回归旧无参 `discover()`、`read/send/observe` 与 `RunInput` 正常）**（§6 场景 4 同机保活、持久对账与过渡安全边界，不将夹具算作跨机交付）；⑤`ConfirmationHub` 在场下 `delivery: "non-interactive"` 前置即决与崩溃重放、同名 `kind: "channel"` 原生渠道回归、`Advancement` 先入账后激活在线与重启全时序隔离、本地旧版 `-32601` 诚实报错（§6 场景 5 同机全项）。
-- [x] **6. 执行单元 2：配对多设备 Mesh 协调扩展与全模块整体验收**｜状态：已完成
-  - **完成依据：** 三道门禁及压缩/返修校准均按规程通读《高效工作方法》并落实（门禁 C 如实记录首轮 `transcript.jsonl` 步骤 `15392` 缺 `--dir` 非零退出、`15393` 更正命令至 `15400` 编辑验收脚本间一次未额外重读，其余压缩续接及每轮退回/非零退出动手前均已全文通读并成批闭合 `F1` 执行端恢复投影验签器与运行态投影本机资源权威前置绑定、`F2` 跨拓扑错游标与换代 `runState: "committed"` 区分、`F3` `request` 与 `requestEncoded` 等待预算扣减）；全量构建/`s7:lint`/`package:check`（`task-15882.log`，`tarball sha256: 4485451f...`）、仓外正式安装总验收（`task-15410.log`、`task-15748.log`、`task-15888.log`）及定向回归单测（`task-15661.log`、`task-15877.log`）全绿，经 `codex-zhixing-newWorker` 三轮独立终审与原留存故障现场复验（92/92 项 `manifestSha256: 1491ed2d...` 与 16 个 tarball / 872 个安装 JS 文件逐字节吻合，`codex-unit2-independent-review-r1.md`、`r2-freeze.json`、`r3-recovery.json`、`r3-wait-encoded.json`、`r3-freeze.json`、`r3-cleanup.json`）验收放行。
+- [x] **6. 执行单元 2：配对多设备 Mesh 协调扩展与全模块整体验收**
   - **前置依赖：** 待办 5（单元 1 已完成并通过双方独立验收勾选）。
+  - [x] **门禁 A（开工实现前）：** 通读《高效工作方法》全文，一次性核清 `mesh`、`executor-role-runtime.ts`、`mesh-runtime-assembly.ts`、`conversation-communication-mesh.ts` 与 `surface-core-host-link.ts` 跨机契约、角色授权与断连恢复边界，成批完成配对多设备扩展编码。
+  - [x] **门禁 B（代码落定、转入构建与实测前）：** 重读《高效工作方法》全文，先完成跨机与本机自治路径逐项自审及定向回归快测（`task-15661.log`、`task-15877.log`，核实用例数 `> 0`），出清边界后再转入全量构建打包与仓外正式安装验收。
+  - [x] **门禁 C（反例返修前持续生效、达标收口时勾选）：** 压缩续接及每轮退回/非零退出动手前均重读《高效工作方法》全文，从根源成批闭合 `F1` 执行端恢复投影验签器与运行态投影本机资源权威前置绑定、`F2` 跨拓扑错游标与换代 `runState: "committed"` 区分、`F3` `request` 与 `requestEncoded` 等待预算扣减（如实记录首轮 `transcript.jsonl` 步骤 `15392` 缺 `--dir` 非零退出、`15393` 更正命令至 `15400` 编辑验收脚本间一次未额外重读）；经 `codex-zhixing-newWorker` 三轮独立终审通过后勾选。
+  - **完成依据：** 全量构建/`s7:lint`/`package:check`（`task-15882.log`，`tarball sha256: 4485451f...`）与仓外正式安装总验收（`task-15410.log`、`task-15748.log`、`task-15888.log`）全绿，经 `codex-zhixing-newWorker` 三轮独立终审与原留存故障现场复验（92/92 项 `manifestSha256: 1491ed2d...` 与 16 个 tarball / 872 个安装 JS 文件逐字节吻合，`codex-unit2-independent-review-r1.md`、`r2-freeze.json`、`r3-recovery.json`、`r3-wait-encoded.json`、`r3-freeze.json`、`r3-cleanup.json`）验收放行。
   - **交付成果：** 在不重改单元 1 本机裁决、票据格式与存储契约的前提下，为同一套 `ProgramConversationApplication` 与内部通信边界启用纯 `executor` 与纯 `surface` 跨设备 Mesh 通路，严格闭合新增窄服务操作授权与 `Anchor` 离线本机自治边界，完成全部跨设备故障/迁主/同前缀多成员在线消歧/版本偏斜裁决与架构模块文档同步，并在正式安装形态下通过全模块端到端总验收。
   - **工作范围**（覆盖 `mesh`、`cli/serve/executor-role-runtime.ts`、`cli/serve/mesh-runtime-assembly.ts` 远端转发与入站扩展启用、`cli/serve/conversation-communication-mesh.ts`、`cli/runtime/surface-core-host-link.ts` 及架构/模块文档）：
     1. **窄 Mesh 协调服务、纯执行宿主本机自治挂载与保活联动：** 在 `executor-role-runtime.ts` `createServerContext` 挂载同一 `ProgramConversationApplication`（纯 `executor` 在 `Anchor` 离线时仍可列出并读写本机已创建的 `current` `local-*` 对话，依赖 `Anchor` 的 `new` 保原 `requestId` 返退出码 `3`）；实现每节点单次注册版本化窄 Mesh 服务 `conversation.program`（严格校验 `op: "entry"` 仅当值 `Anchor` 受理、`op: "owned"` 仅持有 `localConversationOwner` 且直接对端确为当值 `Anchor` 时在本机持有范围内受理），并将新增程序 Mesh 入口接入单元 1 的宿主准入活动代数空闲复核（保留纯 `executor` 既有 `createExecutorIdleCheck` 主控在线规则）。
