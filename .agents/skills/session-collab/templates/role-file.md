@@ -6,6 +6,7 @@
 # <角色名>
 - 角色 slug：<稳定角色ID>
 - 当前会话：<客户端、会话名称与稳定ID>
+- 内部执行器：<可选；专属执行器会话名称、稳定ID与调用方式，仅对本角色单线负责>
 - 职责边界：<协调、实施或审查的具体范围>
 - 状态：idle|working|waiting|inactive|unmapped
 - open_threads：
