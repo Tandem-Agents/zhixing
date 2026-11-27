@@ -15,6 +15,10 @@ describe("BUILTIN_TOOL_FACTORIES · 公开集合", () => {
     "load_skill",
     "read",
     "save_skill",
+    "skill_admit",
+    "skill_materialize",
+    "skill_read",
+    "skill_save",
     "web_fetch",
     "write",
   ];

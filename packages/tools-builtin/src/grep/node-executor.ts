@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { canReadAuthorizedFile } from "../utils.js";
 import { listGrepCandidateFiles } from "./candidate-files.js";
 import { GrepResultCollector } from "./collector.js";
 import type {
@@ -26,9 +27,23 @@ export const nodeGrepSearchExecutor: GrepSearchExecutor = {
     );
 
     const stat = await fs.stat(plan.absoluteSearchPath);
+    if (stat.isFile()) {
+      if (
+        !(await canReadAuthorizedFile(
+          plan.absoluteSearchPath,
+          options.authorizeFileAccess,
+        ))
+      ) {
+        return { ok: true, result: collector.finish() };
+      }
+    }
     const files = stat.isFile()
       ? [plan.absoluteSearchPath]
-      : listGrepCandidateFiles(plan.absoluteSearchPath, plan.query.glob);
+      : listGrepCandidateFiles(
+          plan.absoluteSearchPath,
+          plan.query.glob,
+          options.authorizeFileAccess,
+        );
 
     for await (const absolutePath of files) {
       const stateError = collector.checkExecutionState();

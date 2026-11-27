@@ -32,7 +32,7 @@ export function createLogQueryTools(
     {
       name: "log_search",
       description:
-        "查找本设备可获准读取的运行日志。支持时间、来源、级别及关联身份筛选；结果有界，使用游标续页。缺口表示证据不足，不能推断成功。",
+        "查找本设备可获准读取的运行日志。支持时间、来源、级别及关联身份筛选；结果有界，使用游标续页。顶层非通道会话可用细粒度 ref 与 storage 级（含 mcp:2/mcp:1/kernel:1）排查全局连接；外部通道与 Task(logOnly: true) 仅限当前会话范围，请改按 source、level、时间窗、conversation ref 或已知地址查询，勿因细粒度 ref 为空误判无故障。缺口表示证据不足或已脱敏，不能推断成功。",
       inputSchema: {
         type: "object",
         properties: {
@@ -87,7 +87,7 @@ export function createLogQueryTools(
     {
       name: "log_read",
       description:
-        "按 zxlog://<storeId>/record/<id> 或 /operation/<kind>/<id> 地址读取日志概览、时间线或详情。地址可以交给另一获准主体；远端不可用、过期或缺失不会冒充完整证据。",
+        "按 zxlog://<storeId>/record/<id> 或 /operation/<kind>/<id> 地址读取日志概览、时间线或详情。地址可以交给另一获准主体（含通道或只读子任务按两层查法复核）；远端不可用、过期、脱敏或缺失不会冒充完整证据。",
       inputSchema: {
         type: "object",
         properties: {

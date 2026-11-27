@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { canReadAuthorizedFile } from "../utils.js";
 import {
   listGrepCandidateFiles,
   toGrepCandidateRelativePath,
@@ -106,6 +107,14 @@ async function* discoverRipgrepCandidateFiles(
   const stat = await fs.stat(plan.absoluteSearchPath);
   const seen = new Set<string>();
   if (stat.isFile()) {
+    if (
+      !(await canReadAuthorizedFile(
+        plan.absoluteSearchPath,
+        options.authorizeFileAccess,
+      ))
+    ) {
+      return;
+    }
     yield* runRipgrepCommand(
       buildRipgrepCommand(plan, path.dirname(plan.absoluteSearchPath), [
         path.basename(plan.absoluteSearchPath),
@@ -117,7 +126,11 @@ async function* discoverRipgrepCandidateFiles(
     return;
   }
 
-  for await (const paths of listRipgrepPathBatches(plan, collector)) {
+  for await (const paths of listRipgrepPathBatches(
+    plan,
+    collector,
+    options.authorizeFileAccess,
+  )) {
     yield* runRipgrepCommand(
       buildRipgrepCommand(plan, plan.absoluteSearchPath, paths),
       collector,
@@ -219,6 +232,7 @@ async function* runRipgrepCommand(
 async function* listRipgrepPathBatches(
   plan: GrepSearchPlan,
   collector: GrepResultCollector,
+  authorizeFileAccess?: GrepSearchOptions["authorizeFileAccess"],
 ): AsyncIterable<string[]> {
   let paths: string[] = [];
   let pathArgChars = 0;
@@ -226,6 +240,7 @@ async function* listRipgrepPathBatches(
   for await (const absolutePath of listGrepCandidateFiles(
     plan.absoluteSearchPath,
     plan.query.glob,
+    authorizeFileAccess,
   )) {
     const stateError = collector.checkExecutionState();
     if (stateError !== null) throw new GrepSearchThrownError(stateError);

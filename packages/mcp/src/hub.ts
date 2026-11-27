@@ -22,7 +22,13 @@ import {
   type ConnectedClient,
   type CreateTransportFn,
 } from "./connect.js";
-import { toToolResult } from "./result.js";
+import {
+  classifyMcpPublicFailure,
+  formatMcpPublicFailure,
+  formatMcpShortError,
+  type McpPublicFailure,
+} from "./failure.js";
+import { toToolResult, type McpCallOutcome } from "./result.js";
 import type {
   McpCallFn,
   McpServerContext,
@@ -55,8 +61,13 @@ export interface McpServerStatus {
   status: "connected" | "connecting";
   /** 当前可用工具数（仅 connected 非 0）。 */
   toolCount: number;
-  /** 最近一次连接失败原因（connecting 且曾失败时有；connected 时无）。 */
+  /** 最近一次连接失败的简短无秘密分类（connecting 且曾失败时有；connected 时无）。 */
   error?: string;
+}
+
+export interface McpServerStatusV2 extends McpServerStatus {
+  /** 结构化公共失败归因（connected 时清零）。 */
+  failure?: McpPublicFailure;
 }
 
 export interface McpHub {
@@ -70,8 +81,10 @@ export interface McpHub {
   applyConfig(specs: readonly McpServerSpec[]): Promise<void>;
   /** 已连接 server 的工具目录（未连上的 server 不出现）。 */
   catalog(): McpServerCatalog[];
-  /** 全部受管 server 的运行时状态（含 connecting）—— 供状态面板展示。 */
+  /** 全部受管 server 的运行时状态（含 connecting）—— 维持兼容 4/5 键供旧状态面板展示。 */
   serverStatuses(): McpServerStatus[];
+  /** 全部受管 server 的 v2 运行时状态（额外携带结构化 `failure`）。 */
+  serverStatusesV2(): McpServerStatusV2[];
   /** 调用某 server 的工具；server 不可用返回 isError，abort 时让异常冒泡。 */
   callTool: McpCallFn;
   /** 关闭所有连接 / 子进程，清理重连定时器。 */
@@ -94,6 +107,7 @@ interface Connection {
   tools: McpToolDescriptor[];
   status: "connected" | "connecting";
   error?: string;
+  failure?: McpPublicFailure;
   /** 释放 transport 的额外资源（http 连接池）；stdio 为空。 */
   disposeTransport?: () => Promise<void>;
 }
@@ -153,15 +167,31 @@ export function createMcpHub(
   function enterRetry(
     spec: McpServerSpec,
     context: McpServerContext,
-    error: string | undefined,
+    failure: McpPublicFailure | undefined,
     attempt: number,
   ): void {
-    options.records?.record(() => ({ event: "retry", result: "unknown", data: { server: spec.serverId, error, attempt } }));
+    const error = failure ? formatMcpShortError(failure) : undefined;
+    options.records?.record(() => ({
+      event: "retry",
+      result: "unknown",
+      data: {
+        server: spec.serverId,
+        ...(failure
+          ? {
+              failureStage: failure.stage,
+              failureReason: failure.reason,
+              ...(failure.statusCode !== undefined ? { statusCode: failure.statusCode } : {}),
+            }
+          : {}),
+        attempt,
+      },
+    }));
     connections.set(spec.serverId, {
       context,
       tools: [],
       status: "connecting",
       ...(error !== undefined ? { error } : {}),
+      ...(failure !== undefined ? { failure } : {}),
     });
     scheduleReconnect(spec, context, attempt);
   }
@@ -218,7 +248,8 @@ export function createMcpHub(
     } catch (err) {
       // 仍是当前目标才排下一次（退避递增、记录原因）；否则说明已被移除 / 改规格，停手。
       if (isCurrentSpec(spec)) {
-        enterRetry(spec, context, errMsg(err), attempt + 1);
+        const defaultStage = spec.transport === "stdio" ? "spawn" : "connect";
+        enterRetry(spec, context, classifyMcpPublicFailure(defaultStage, err), attempt + 1);
       }
     }
   }
@@ -253,7 +284,8 @@ export function createMcpHub(
       setConnected(spec, context, await establish(spec));
     } catch (err) {
       // 首次连接失败不终止：进入后台退避重试，server 就绪后自愈（首次 npx 下载 / 临时宕机）。
-      enterRetry(spec, context, errMsg(err), 0);
+      const defaultStage = spec.transport === "stdio" ? "spawn" : "connect";
+      enterRetry(spec, context, classifyMcpPublicFailure(defaultStage, err), 0);
     }
   }
 
@@ -325,15 +357,54 @@ export function createMcpHub(
       return result;
     },
 
+    serverStatusesV2() {
+      const result: McpServerStatusV2[] = [];
+      for (const spec of currentSpecs) {
+        const conn = connections.get(spec.serverId);
+        if (!conn) continue;
+        result.push({
+          serverId: spec.serverId,
+          transport: spec.transport,
+          status: conn.status,
+          toolCount: conn.tools.length,
+          ...(conn.error !== undefined ? { error: conn.error } : {}),
+          ...(conn.failure !== undefined ? { failure: conn.failure } : {}),
+        });
+      }
+      return result;
+    },
+
     callTool: async (serverId, toolName, input, callOptions) => {
       const records = callOptions.records ?? options.records;
       const refs = [{ kind: "mcpAttempt", id: randomUUID() }, ...(callOptions.toolCallId ? [{ kind: "toolCall", id: callOptions.toolCallId }] : [])];
       const started = performance.now();
-      let result: LogResult = "unknown", error: string | undefined, outputChars: number | undefined;
+      let result: LogResult = "unknown";
+      let failure: McpPublicFailure | undefined;
+      let outputChars: number | undefined;
       const conn = connections.get(serverId);
       if (!conn || conn.status !== "connected" || !conn.client) {
-        records?.record(() => ({ event: "returned", refs, result: "refused", data: { server: serverId, tool: toolName, error: "MCP 连接尚未就绪" } }));
-        return { content: `MCP server "${serverId}" 当前不可用`, isError: true };
+        const unavailableFailure: McpPublicFailure = conn?.failure ?? {
+          stage: "disconnected",
+          reason: "closed",
+        };
+        records?.record(() => ({
+          event: "returned",
+          refs,
+          result: "refused",
+          data: {
+            server: serverId,
+            tool: toolName,
+            failureStage: unavailableFailure.stage,
+            failureReason: unavailableFailure.reason,
+            ...(unavailableFailure.statusCode !== undefined
+              ? { statusCode: unavailableFailure.statusCode }
+              : {}),
+          },
+        }));
+        return {
+          content: formatMcpPublicFailure(serverId, toolName, unavailableFailure),
+          isError: true,
+        };
       }
       records?.record(() => ({ event: "requested", refs, data: { server: serverId, tool: toolName } }));
       try {
@@ -342,20 +413,61 @@ export function createMcpHub(
           undefined,
           { signal: callOptions.signal },
         );
-        const returned = toToolResult(outcome);
-        result = returned.isError ? "failure" : "success";
-        outputChars = returned.content.length;
-        return returned;
+        const callOutcome = outcome as McpCallOutcome;
+        const returned = toToolResult(callOutcome);
+        if (callOutcome.isError !== true && returned.isError !== true) {
+          result = "success";
+          outputChars = returned.content.length;
+          return returned;
+        }
+        const contentBlocks = Array.isArray(callOutcome.content)
+          ? callOutcome.content.length
+          : callOutcome.toolResult !== undefined
+            ? 1
+            : 0;
+        const contentBytes = Buffer.byteLength(returned.content, "utf8");
+        failure = {
+          stage: "call-tool",
+          reason: "tool-error-result",
+          contentBlocks,
+          contentBytes,
+        };
+        result = "failure";
+        const formatted = formatMcpPublicFailure(serverId, toolName, failure);
+        outputChars = formatted.length;
+        return { content: formatted, isError: true };
       } catch (err) {
-        error = err instanceof Error ? err.message : "MCP 协议调用未确认";
-        // abort 让异常冒泡，交 tool-executor 统一中断；其余协议 / 连接错误转 isError。
+        // abort 让异常冒泡，交 tool-executor 统一中断；其余协议 / 连接错误转无秘密 McpPublicFailure。
         if (callOptions.signal?.aborted) throw err;
+        failure = classifyMcpPublicFailure("call-tool", err);
+        result = "failure";
+        const formatted = formatMcpPublicFailure(serverId, toolName, failure);
+        outputChars = formatted.length;
         return {
-          content: `MCP 工具 "${toolName}"（${serverId}）调用失败：${errMsg(err)}`,
+          content: formatted,
           isError: true,
         };
       } finally {
-        records?.record(() => ({ event: "returned", refs, result, data: { server: serverId, tool: toolName, error, outputChars, duration: performance.now() - started } }));
+        records?.record(() => ({
+          event: "returned",
+          refs,
+          result,
+          data: {
+            server: serverId,
+            tool: toolName,
+            ...(failure
+              ? {
+                  failureStage: failure.stage,
+                  failureReason: failure.reason,
+                  ...(failure.statusCode !== undefined ? { statusCode: failure.statusCode } : {}),
+                  ...(failure.contentBlocks !== undefined ? { contentBlocks: failure.contentBlocks } : {}),
+                  ...(failure.contentBytes !== undefined ? { contentBytes: failure.contentBytes } : {}),
+                }
+              : {}),
+            outputChars,
+            duration: performance.now() - started,
+          },
+        }));
       }
     },
 
@@ -376,10 +488,6 @@ export function createMcpHub(
       options.records?.record({ event: "closed", result: closed.every((entry) => entry.status === "fulfilled") ? "success" : "unknown", data: { server: "all" } });
     },
   };
-}
-
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** 规格是否等价 —— 决定 applyConfig 是否需要重连某 server（serverId 由 Map key 比较，此处不重复）。 */

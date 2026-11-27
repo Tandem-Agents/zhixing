@@ -26,6 +26,10 @@ import {
   createAdmitSkillTool,
   createLoadSkillTool,
   createSaveSkillTool,
+  createSkillAdmitTool,
+  createSkillMaterializeTool,
+  createSkillReadTool,
+  createSkillSaveTool,
 } from "./skill.js";
 import { createReadTool } from "./read.js";
 import { createWebFetchTool } from "./web-fetch.js";
@@ -99,6 +103,48 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
       ctx.skillMode ?? "main",
     );
   },
+  skill_read: (ctx) => {
+    const application = ctx.skillCatalogLoad;
+    if (!application) {
+      throw new Error(
+        "skill_read 工具需装配期注入 Skill Catalog load application",
+      );
+    }
+    return createSkillReadTool(application);
+  },
+  skill_save: (ctx) => {
+    const application = ctx.skillCatalogSave;
+    if (!application) {
+      throw new Error(
+        "skill_save 工具需装配期注入 Skill Catalog save application",
+      );
+    }
+    return createSkillSaveTool(
+      application,
+      ctx.skillMode ?? "main",
+    );
+  },
+  skill_admit: (ctx) => {
+    const application = ctx.skillCatalogAdmission;
+    if (!application) {
+      throw new Error(
+        "skill_admit 工具需装配期注入 Skill Catalog admission application",
+      );
+    }
+    return createSkillAdmitTool(
+      application,
+      ctx.skillMode ?? "main",
+    );
+  },
+  skill_materialize: (ctx) => {
+    const application = ctx.skillCatalogLoad;
+    if (!application) {
+      throw new Error(
+        "skill_materialize 工具需装配期注入 Skill Catalog load application",
+      );
+    }
+    return createSkillMaterializeTool(application);
+  },
   web_fetch: (ctx) => createWebFetchTool({ proxy: ctx.proxy }),
 };
 
@@ -117,11 +163,21 @@ export const BUILTIN_TOOL_CAPABILITIES = {
   load_skill: { authorityWrite: false },
   save_skill: { authorityWrite: true },
   admit_skill: { authorityWrite: true },
+  skill_read: { authorityWrite: false },
+  skill_save: { authorityWrite: true },
+  skill_admit: { authorityWrite: true },
+  skill_materialize: { authorityWrite: false },
   web_fetch: { authorityWrite: false },
 } as const satisfies Record<
   keyof typeof BUILTIN_TOOL_FACTORIES,
   BuiltinToolCapabilityDescriptor
 >;
+
+/** 宿主组合层注入的扩展自检工具能力声明，供能力表统一核验。 */
+export const HOST_EXTRA_TOOL_CAPABILITIES = {
+  extension_validate: { authorityWrite: false },
+  runtime_inspect: { authorityWrite: false },
+} as const satisfies Record<string, BuiltinToolCapabilityDescriptor>;
 
 /** 内置工具名集合 —— 用于装配时判断 "name 是否属于 builtin" */
 export const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set(

@@ -9,9 +9,23 @@ export { createTaskListTool } from "./task-list.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
 export {
+  LEGACY_COMPAT_BUILTIN_TOOLS,
+  V2_SKILL_BUILTIN_TOOLS,
+  createAdmitSkillTool,
+  createLoadSkillTool,
+  createSaveSkillTool,
+  createSkillAdmitTool,
+  createSkillMaterializeTool,
+  createSkillReadTool,
+  createSkillSaveTool,
+  createSystemOnlySkillReadTool,
+} from "./skill.js";
+export type { CreateSkillReadToolOptions } from "./skill.js";
+export {
   BUILTIN_TOOL_CAPABILITIES,
   BUILTIN_TOOL_FACTORIES,
   BUILTIN_TOOL_NAMES,
+  HOST_EXTRA_TOOL_CAPABILITIES,
 } from "./factories.js";
 export type {
   BuiltinToolCapabilityDescriptor,

@@ -55,3 +55,26 @@ export function isBinaryContent(buffer: Buffer): boolean {
   }
   return false;
 }
+
+/**
+ * 在枚举阶段（glob/grep）对候选路径做无配额读取鉴权：命中 `/trust` `deny` 时返回 false
+ * 以剔除受禁条目；其余非策略异常照常抛出。
+ */
+export async function canReadAuthorizedFile(
+  filePath: string,
+  authorizeFileAccess?: (request: {
+    readonly path: string;
+    readonly access: "read" | "write";
+  }) => Promise<void>,
+): Promise<boolean> {
+  if (!authorizeFileAccess) return true;
+  try {
+    await authorizeFileAccess({ path: filePath, access: "read" });
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.name === "SecurityBlockError") {
+      return false;
+    }
+    throw error;
+  }
+}

@@ -14,8 +14,45 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createSafeFetch, type NetworkPolicy } from "@zhixing-ai/network";
 import { filterDangerousEnv } from "./env-security.js";
+import { extractErrorCode, McpStdioSpawnError } from "./failure.js";
 import type { McpServerSpec } from "./types.js";
 import { OwnedMcpStdioTransport, type McpStdioProcessFactory } from './owned-stdio.js';
+
+/**
+ * 包裹 stdio transport 的未完成 `start()` 阶段，捕获子进程 spawn 错误（如 ENOENT）
+ * 并转化为无秘密的 `McpStdioSpawnError`，阻断原始命令行/路径/env 泄漏到异常文案。
+ */
+export function wrapStdioTransportStart(transport: Transport): Transport {
+  const originalStart = transport.start.bind(transport);
+  let started = false;
+  transport.start = async () => {
+    let capturedSpawnError: Error | undefined;
+    const previousOnError = transport.onerror;
+    const interceptError = (err: Error) => {
+      if (!started && !capturedSpawnError) {
+        capturedSpawnError = err;
+      }
+      previousOnError?.(err);
+    };
+    transport.onerror = interceptError;
+    try {
+      await originalStart();
+      if (capturedSpawnError) {
+        throw new McpStdioSpawnError(extractErrorCode(capturedSpawnError));
+      }
+      started = true;
+    } catch (err) {
+      if (err instanceof McpStdioSpawnError) throw err;
+      const source = capturedSpawnError ?? err;
+      throw new McpStdioSpawnError(extractErrorCode(source));
+    } finally {
+      if (transport.onerror === interceptError) {
+        transport.onerror = previousOnError;
+      }
+    }
+  };
+  return transport;
+}
 
 export interface CreateTransportOptions {
   /** 网络代理配置 —— http transport 的 SSRF-safe fetch 据此继承 network.proxy。 */
@@ -43,21 +80,29 @@ export function createTransport(
     }
     if (options.createStdioProcess) {
       const env = { ...getDefaultEnvironment(), ...(spec.env ? filterDangerousEnv(spec.env).safe : {}) };
-      return { transport: new OwnedMcpStdioTransport(() => options.createStdioProcess!(spec.command!, spec.args ?? [], env, options.signal)) };
+      return {
+        transport: wrapStdioTransportStart(
+          new OwnedMcpStdioTransport(() =>
+            options.createStdioProcess!(spec.command!, spec.args ?? [], env, options.signal),
+          ),
+        ),
+      };
     }
     return {
-      transport: new StdioClientTransport({
-        command: spec.command,
-        args: spec.args ?? [],
-        // 无附加 env 时不传：SDK 默认用 getDefaultEnvironment() 安全白名单（只继承
-        // PATH / HOME 等，不继承整个 process.env）。有 server 专属 env / 凭证时，
-        // 叠加在该白名单基线之上——但叠加前先过 filterDangerousEnv 剔除"启动型注入"
-        // 危险变量（NODE_OPTIONS / LD_* / DYLD_* 等），否则一份显式 env 就能借这些
-        // 变量在 spawn 时注入代码 / 库。
-        ...(spec.env && {
-          env: { ...getDefaultEnvironment(), ...filterDangerousEnv(spec.env).safe },
+      transport: wrapStdioTransportStart(
+        new StdioClientTransport({
+          command: spec.command,
+          args: spec.args ?? [],
+          // 无附加 env 时不传：SDK 默认用 getDefaultEnvironment() 安全白名单（只继承
+          // PATH / HOME 等，不继承整个 process.env）。有 server 专属 env / 凭证时，
+          // 叠加在该白名单基线之上——但叠加前先过 filterDangerousEnv 剔除"启动型注入"
+          // 危险变量（NODE_OPTIONS / LD_* / DYLD_* 等），否则一份显式 env 就能借这些
+          // 变量在 spawn 时注入代码 / 库。
+          ...(spec.env && {
+            env: { ...getDefaultEnvironment(), ...filterDangerousEnv(spec.env).safe },
+          }),
         }),
-      }),
+      ),
     };
   }
 

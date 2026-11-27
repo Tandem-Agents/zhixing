@@ -8,6 +8,7 @@ import type {
   LogRecord,
   LogRef,
   LogStatus,
+  LogValue,
 } from "./contracts.js";
 import { MAX_LOG_TOKEN_LENGTH, MAX_LOG_ID_LENGTH, validLogToken, validLogIdentity } from "./capture.js";
 import { MAX_LOG_RECORD_BYTES } from "./policy.js";
@@ -175,7 +176,10 @@ export class LogApplication {
           ? page.records[0]
           : undefined;
       const ref = record?.detail;
-      if (record && ref) {
+      const isLegacyMcpV1 = record?.source === "mcp" && record.sourceVersion === 1;
+      if (isLegacyMcpV1) {
+        detailGap = { kind: "insufficient", reason: "legacy-mcp-v1-sanitized" };
+      } else if (record && ref) {
         if (Date.now() - record.receivedAt >= policy.attachmentTtlMs)
           detailGap = { kind: "expired", reason: "detail-retention" };
         else if (
@@ -204,6 +208,13 @@ export class LogApplication {
           } catch {
             detailGap = { kind: "insufficient", reason: "detail-missing-or-corrupt" };
           }
+        }
+      }
+      if (record && detail !== undefined) {
+        const sanitizedDetail = sanitizeLegacyKernelToolDetail(record, detail);
+        if (sanitizedDetail.sanitized) {
+          detail = sanitizedDetail.detail;
+          detailGap = { kind: "insufficient", reason: "legacy-kernel-mcp-error-sanitized" };
         }
       }
       // Every asynchronous exit, including detail failure, shares this final authorization,
@@ -442,6 +453,13 @@ export class LogApplication {
                     ],
                   }),
             };
+            if (known) {
+              const sanitized = sanitizeLegacyLogRecord(projected);
+              projected = sanitized.record;
+              if (sanitized.gapReason) {
+                gap(sanitized.gapReason);
+              }
+            }
             if (Buffer.byteLength(JSON.stringify(projected)) > resultLimit)
               projected = {
                 ...projected,
@@ -677,5 +695,96 @@ function parseRecord(line: string, limit: number, storeId: string): LogRecord {
     ...(record.repeat
       ? { repeat: { count: record.repeat.count, until: record.repeat.until } }
       : {}),
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function pickLegacyKernelSafeFields(source: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  if (typeof source.tool === "string") safe.tool = source.tool;
+  if (typeof source.duration === "number") safe.duration = source.duration;
+  if (typeof source.resultSize === "number") safe.resultSize = source.resultSize;
+  if (typeof source.lineage === "string") safe.lineage = source.lineage;
+  return safe;
+}
+
+function appendInsufficientGap(
+  existing: readonly LogGap[] | undefined,
+  reason: string,
+): readonly LogGap[] {
+  const base = existing ? [...existing] : [];
+  if (!base.some((item) => item.kind === "insufficient" && item.reason === reason)) {
+    base.push({ kind: "insufficient", reason });
+  }
+  return base;
+}
+
+function sanitizeLegacyLogRecord(record: LogRecord): {
+  readonly record: LogRecord;
+  readonly gapReason?: string;
+} {
+  if (record.source === "mcp" && record.sourceVersion === 1) {
+    const cleanData: Record<string, LogValue> = {};
+    if (isPlainRecord(record.data)) {
+      for (const [key, value] of Object.entries(record.data)) {
+        if (key === "error") continue;
+        cleanData[key] = value as LogValue;
+      }
+    }
+    const gapReason = "legacy-mcp-v1-sanitized";
+    return {
+      gapReason,
+      record: {
+        ...record,
+        data: cleanData,
+        detail: undefined,
+        gaps: appendInsufficientGap(record.gaps, gapReason),
+      },
+    };
+  }
+  if (record.source === "kernel" && record.sourceVersion === 1 && record.event === "toolFinished") {
+    const dataObj = isPlainRecord(record.data) ? record.data : undefined;
+    const isFailure = record.result === "failure" || (dataObj !== undefined && dataObj.error !== undefined);
+    const inlineTool = dataObj && typeof dataObj.tool === "string" && dataObj.tool.length > 0 ? dataObj.tool : undefined;
+    if (isFailure && (inlineTool === undefined || inlineTool.startsWith("mcp__"))) {
+      const gapReason = "legacy-kernel-mcp-error-sanitized";
+      return {
+        gapReason,
+        record: {
+          ...record,
+          data: (dataObj ? pickLegacyKernelSafeFields(dataObj) : {}) as Readonly<Record<string, LogValue>>,
+          gaps: appendInsufficientGap(record.gaps, gapReason),
+        },
+      };
+    }
+  }
+  return { record };
+}
+
+function sanitizeLegacyKernelToolDetail(
+  record: LogRecord,
+  detail: unknown,
+): { readonly sanitized: boolean; readonly detail: unknown } {
+  if (record.source !== "kernel" || record.sourceVersion !== 1 || record.event !== "toolFinished") {
+    return { sanitized: false, detail };
+  }
+  const detailObj = isPlainRecord(detail) ? detail : undefined;
+  const isFailure = record.result === "failure" || (detailObj !== undefined && detailObj.error !== undefined);
+  if (!isFailure) return { sanitized: false, detail };
+  const detailTool =
+    detailObj && typeof detailObj.tool === "string" && detailObj.tool.length > 0
+      ? detailObj.tool
+      : (isPlainRecord(record.data) && typeof record.data.tool === "string" && record.data.tool.length > 0
+          ? record.data.tool
+          : undefined);
+  if (detailTool !== undefined && !detailTool.startsWith("mcp__")) {
+    return { sanitized: false, detail };
+  }
+  return {
+    sanitized: true,
+    detail: detailObj ? pickLegacyKernelSafeFields(detailObj) : {},
   };
 }

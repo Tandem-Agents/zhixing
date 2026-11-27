@@ -15,12 +15,13 @@ import { glob } from "glob/raw";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ToolDefinition, ToolResult } from "@zhixing-ai/core";
-import { resolveToolPath } from "./utils.js";
+import { canReadAuthorizedFile, resolveToolPath } from "./utils.js";
 
 const MAX_RESULTS = 200;
 const MAX_RESULT_CHARS = 30_000;
 const GLOB_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `glob` to find files by name pattern, not bash find",
+  "- Search before act: use glob/grep to discover relevant files before reading or editing",
 ];
 
 const DEFAULT_IGNORE = [
@@ -92,7 +93,15 @@ export function createGlobTool(): ToolDefinition {
           absolute: false,
         });
 
-        if (matches.length === 0) {
+        const allowedMatches: string[] = [];
+        for (const relativePath of matches) {
+          const fullPath = path.join(searchPath, relativePath);
+          if (await canReadAuthorizedFile(fullPath, context.authorizeFileAccess)) {
+            allowedMatches.push(relativePath);
+          }
+        }
+
+        if (allowedMatches.length === 0) {
           return {
             content: `No files found matching pattern "${pattern}" in ${searchPath}`,
           };
@@ -100,7 +109,7 @@ export function createGlobTool(): ToolDefinition {
 
         // 获取文件 stat 信息（修改时间 + 大小），用于排序和展示
         const fileInfos = await Promise.all(
-          matches.map(async (relativePath) => {
+          allowedMatches.map(async (relativePath) => {
             const fullPath = path.join(searchPath, relativePath);
             try {
               const stat = await fs.stat(fullPath);

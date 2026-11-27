@@ -269,7 +269,18 @@ describe("McpHub — serverStatuses 全量运行态", () => {
 
     expect(hub.serverStatuses()).toEqual([
       { serverId: "good", transport: "stdio", status: "connected", toolCount: 1 },
-      { serverId: "bad", transport: "stdio", status: "connecting", toolCount: 0, error: "spawn failed" },
+      { serverId: "bad", transport: "stdio", status: "connecting", toolCount: 0, error: "spawn:spawn-error" },
+    ]);
+    expect(hub.serverStatusesV2()).toEqual([
+      { serverId: "good", transport: "stdio", status: "connected", toolCount: 1 },
+      {
+        serverId: "bad",
+        transport: "stdio",
+        status: "connecting",
+        toolCount: 0,
+        error: "spawn:spawn-error",
+        failure: { stage: "spawn", reason: "spawn-error" },
+      },
     ]);
     await hub.dispose();
   });
@@ -397,11 +408,13 @@ describe("McpHub — 后台断线重连", () => {
     try {
       await hub.connectAll();
       expect(hub.serverStatuses()[0]!.status).toBe("connecting");
-      expect(hub.serverStatuses()[0]!.error).toBe("server down");
+      expect(hub.serverStatuses()[0]!.error).toBe("spawn:spawn-error");
+      expect(hub.serverStatusesV2()[0]!.failure).toEqual({ stage: "spawn", reason: "spawn-error" });
       expect(hub.catalog()).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(1000); // 首次重试 @1s，这次成功
       expect(hub.serverStatuses()[0]!.status).toBe("connected");
+      expect(hub.serverStatusesV2()[0]!.failure).toBeUndefined();
       expect(hub.catalog().map((c) => c.server.serverId)).toEqual(["A"]);
     } finally {
       vi.useRealTimers();

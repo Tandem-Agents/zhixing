@@ -198,6 +198,12 @@ export class McpManagementApplication {
   snapshot() {
     return this.ports.discovery.snapshot();
   }
+  async snapshotV2() {
+    if (this.ports.discovery.snapshotV2) {
+      return this.ports.discovery.snapshotV2();
+    }
+    return this.ports.discovery.snapshot();
+  }
   search(query: string, signal?: AbortSignal) {
     return this.ports.discovery.search(query, signal);
   }

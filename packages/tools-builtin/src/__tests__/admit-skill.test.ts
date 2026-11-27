@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
   SkillCatalogAdmissionApplication,
@@ -33,8 +34,9 @@ describe("admit_skill Skill Catalog binding", () => {
       isError: false,
     });
     expect(admit).toHaveBeenCalledWith({
-      source: { kind: "local-path", path: "/candidate" },
+      source: { kind: "local-path", path: path.resolve("/tmp", "/candidate") },
       mode: "work",
+      toolName: "admit_skill",
       operationId: "tool-admit",
     });
   });
@@ -72,6 +74,7 @@ describe("admit_skill Skill Catalog binding", () => {
     expect(admit).toHaveBeenCalledWith({
       admissionToken: "token-1",
       mode: "main",
+      toolName: "admit_skill",
       operationId: "tool-admit",
     });
 

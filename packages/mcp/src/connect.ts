@@ -7,6 +7,7 @@
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { NetworkPolicy } from "@zhixing-ai/network";
+import { McpStageError, McpStdioSpawnError, type McpFailureStage } from "./failure.js";
 import type {
   CreatedTransport,
   CreateTransportOptions,
@@ -58,13 +59,16 @@ export async function connectAndListTools(
   },
 ): Promise<ConnectedClient> {
   let created: CreatedTransport | undefined;
+  let stage: McpFailureStage = spec.transport === "stdio" ? "spawn" : "connect";
   try {
     const createTransport = opts.createTransport ?? defaultTransport ?? await loadDefaultTransport();
     created = createTransport(spec, { proxy: opts.proxy, ...(opts.createStdioProcess ? { createStdioProcess: opts.createStdioProcess, signal: opts.signal } : {}) });
     const SdkClient = sdkClient ?? await loadSdkClient();
     const client = new SdkClient(CLIENT_INFO, { capabilities: {} });
     const reqOptions = { timeout: opts.timeoutMs, signal: opts.signal };
+    stage = "connect";
     await client.connect(created.transport, reqOptions);
+    stage = "list-tools";
     const listed = await client.listTools({}, reqOptions);
     return {
       client,
@@ -76,7 +80,10 @@ export async function connectAndListTools(
       await created.transport.close().catch(() => {});
       await created.dispose?.().catch(() => {});
     }
-    throw err;
+    if (err instanceof McpStdioSpawnError || err instanceof McpStageError) {
+      throw err;
+    }
+    throw new McpStageError(stage, err);
   }
 }
 

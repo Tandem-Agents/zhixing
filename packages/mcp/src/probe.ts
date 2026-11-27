@@ -12,6 +12,11 @@ import {
   type ConnectedClient,
   type CreateTransportFn,
 } from "./connect.js";
+import {
+  classifyMcpPublicFailure,
+  formatMcpShortError,
+  type McpPublicFailure,
+} from "./failure.js";
 import type { McpServerSpec, McpToolDescriptor } from "./types.js";
 import type { McpStdioProcessFactory } from './owned-stdio.js';
 
@@ -30,10 +35,10 @@ export interface ProbeOptions {
   signal?: AbortSignal;
 }
 
-/** 探测结果 —— ok 带发现的工具，失败带明确原因（供面板卡点提示）。 */
+/** 探测结果 —— ok 带发现的工具，失败带无秘密短分类原因及结构化 failure（供面板卡点提示）。 */
 export type ProbeResult =
   | { ok: true; tools: McpToolDescriptor[] }
-  | { ok: false; error: string };
+  | { ok: false; error: string; failure: McpPublicFailure };
 
 export async function probeServer(
   spec: McpServerSpec,
@@ -53,10 +58,13 @@ export async function probeServer(
     });
     return { ok: true, tools: connected.tools };
   } catch (err) {
-    // 失败时 connectAndListTools 已释放建链资源；这里只把原因透传给面板卡点。
+    // 失败时 connectAndListTools 已释放建链资源；这里只输出白名单无秘密失败描述。
+    const defaultStage = spec.transport === "stdio" ? "spawn" : "connect";
+    const failure = classifyMcpPublicFailure(defaultStage, err);
     return {
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: formatMcpShortError(failure),
+      failure,
     };
   } finally {
     // 成功路径：探测用完即关，不把连接留给 hub。

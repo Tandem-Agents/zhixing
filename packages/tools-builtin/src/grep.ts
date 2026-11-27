@@ -86,6 +86,7 @@ export function createGrepTool(): ToolDefinition {
       const execution = await executeGrepSearch(queryOrError, {
         abortSignal: context.abortSignal,
         maxScannedFiles: MAX_SCANNED_FILES,
+        authorizeFileAccess: context.authorizeFileAccess,
       });
       if (!execution.ok) return formatGrepSearchError(execution.error);
 

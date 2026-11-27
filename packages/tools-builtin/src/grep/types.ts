@@ -1,6 +1,7 @@
 import type {
   GrepResultsDiagnostics,
   GrepResultsLineText,
+  ToolExecutionContext,
 } from "@zhixing-ai/core";
 
 export type GrepOutputMode = "content" | "files" | "count";
@@ -117,6 +118,7 @@ export type GrepSearchError =
 export interface GrepSearchOptions {
   abortSignal?: AbortSignal;
   maxScannedFiles?: number;
+  authorizeFileAccess?: ToolExecutionContext["authorizeFileAccess"];
 }
 
 export interface GrepSearchExecutor {

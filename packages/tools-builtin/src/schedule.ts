@@ -59,12 +59,8 @@ export function createScheduleTool(
   return {
     name: "schedule",
     description:
-      "Manage scheduled tasks. Use this to create, list, update, delete, or manually run tasks. " +
-      "Tasks can execute agent prompts on a schedule (once, interval, or cron). " +
-      "Examples: daily reminders, periodic checks, one-time future tasks. " +
-      "Use 'create' to set up a new task, 'list' to see all tasks, 'run' to execute immediately, " +
-      "'update' to modify, 'delete' to remove. " +
-      "For cron expressions: '0 8 * * *' = daily 8am, '*/30 * * * *' = every 30 min, '0 9 * * 1' = Mon 9am.",
+      "Manage scheduled tasks on once, interval, or cron schedules (`create` / `list` / `update` / `delete` / `run`). " +
+      "Examples: '0 8 * * *' = daily 8am, '*/30 * * * *' = every 30 min, '0 9 * * 1' = Mon 9am.",
     inputSchema: {
       type: "object",
       properties: {

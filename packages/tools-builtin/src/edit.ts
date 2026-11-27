@@ -23,6 +23,8 @@ import { resolveToolPath } from "./utils.js";
 const MAX_RESULT_CHARS = 5_000;
 const EDIT_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `edit` for targeted text replacements, not bash sed/awk",
+  "- Read before edit: always read a file before modifying it to ensure exact text match",
+  "- Edit over write: prefer targeted replacement over full overwrite when modifying existing files",
 ];
 
 export function createEditTool(): ToolDefinition {

@@ -47,23 +47,30 @@ describe("probeServer — 一次性探测", () => {
     expect(closeSpy).toHaveBeenCalled();
   });
 
-  it("建链失败返回 ok:false + 明确原因（供面板卡点）", async () => {
+  it("建链失败返回 ok:false + 无秘密分类原因与 failure（供面板卡点）", async () => {
     const result = await probeServer(spec, {
       createTransport: () => {
-        throw new Error("spawn failed: command not found");
+        throw new Error("spawn failed: SYNTHETIC_TEST_ONLY_secret_token");
       },
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("spawn failed");
+    if (!result.ok) {
+      expect(result.error).toBe("spawn:spawn-error");
+      expect(result.failure).toEqual({ stage: "spawn", reason: "spawn-error" });
+      expect(JSON.stringify(result)).not.toContain("SYNTHETIC_TEST_ONLY");
+    }
   });
 
-  it("连上但 tools/list 失败返回 ok:false", async () => {
+  it("连上但 tools/list 失败返回 ok:false + list-tools failure", async () => {
     const { clientTransport } = startProbeServer({ failList: true });
     const result = await probeServer(spec, {
       createTransport: () => ({ transport: clientTransport }),
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("tools/list");
+    if (!result.ok) {
+      expect(result.error).toBe("list-tools:protocol-error");
+      expect(result.failure).toEqual({ stage: "list-tools", reason: "protocol-error" });
+    }
   });
 
   it("透传 http 连接池 dispose —— 成功后一并释放", async () => {
