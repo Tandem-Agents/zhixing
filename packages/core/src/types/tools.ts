@@ -191,6 +191,11 @@ export interface ToolExecutionContext {
   readonly mcpRecords?: import("../logging/contracts.js").LogRecordPort;
   /** 当前工作目录 */
   workingDirectory: string;
+  /** 免计顶层执行配额、透传冻结规则的归一化单文件读写鉴权回调。 */
+  readonly authorizeFileAccess?: (input: {
+    readonly path: string;
+    readonly access: "read" | "write";
+  }) => Promise<void>;
   /** 中止信号，用于取消长时间运行的工具 */
   abortSignal?: AbortSignal;
 
@@ -592,6 +597,25 @@ export interface ToolDefinition {
    * 该字段让权限匹配读取工具声明的主参数，而不是猜测第一个字符串字段。
    */
   permissionArgumentKey?: string;
+
+  /**
+   * 显式声明此工具的参数中哪些字段代表文件路径（由 ToolFilePathExtractor 与
+   * PathResolveMiddleware 解析为 normalized `resolvedAccess.paths`）。
+   * 绝不把 url / command / sceneId / action 等非文件路径键写入此处。
+   */
+  readonly filePathArgumentKeys?: readonly string[];
+
+  /**
+   * 确认卡展示前的可选预检钩子：若返回 `earlyReturn` 则直接结束而不弹出确认卡；
+   * 若返回 `displayInput` 则作为确认卡展示负载（用于如 `skill_save` 完整预览基准与最终附件）。
+   */
+  readonly prepareConfirmation?: (
+    input: Record<string, unknown>,
+    context: ToolExecutionContext,
+  ) => Promise<{
+    readonly earlyReturn?: ToolResult;
+    readonly displayInput?: Record<string, unknown>;
+  }>;
 
   /**
    * 工具被 abort 时的预期行为。默认 "cancel" —— 纯 JS 工具(read/edit/grep 等)

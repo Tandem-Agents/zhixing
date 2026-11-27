@@ -56,6 +56,13 @@ export interface ExtensionPublicSnapshot extends Omit<ExtensionSnapshot, "operat
   readonly operations?: readonly ExtensionPublicOperation[];
 }
 
+export interface ExtensionContinuationBinding {
+  readonly phase: ExtensionOperation["phase"];
+  readonly revision: number;
+  readonly targetConversationId: string;
+  readonly turnId: string;
+}
+
 export interface ExtensionOperation {
   readonly id: string;
   readonly instanceId: string;
@@ -72,6 +79,8 @@ export interface ExtensionOperation {
   readonly verification?: unknown;
   readonly reason?: string;
   readonly notifiedRevision?: number;
+  /** Durable pre-send continuation binding; private to owner/onboarding, excluded from public snapshots. */
+  readonly boundContinuation?: ExtensionContinuationBinding;
   /** Existing Conversation admission receipt, interpreted only by its binding. */
   readonly continuation?: unknown;
 }

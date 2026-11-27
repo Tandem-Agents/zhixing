@@ -343,10 +343,14 @@ export class SegmentManager {
 
     // ── 拼新段 ──
     // 摘要对与 owner 折叠后的窗口首部同一构造、同一文本；保留的配对、本次输入与
-    // 步骤保持原生消息，工具调用与结果不被文本化
+    // 步骤保持原生消息，工具调用与结果不被文本化。摘要对显式标记 windowHead: "context"，
+    // 确保段切换后紧接的发送视图投影识别其为受信系统首部、不误做同形标签碰撞转义。
     const summaryText = flattenSummary(summary);
     const newSegmentMessages = [
-      ...buildCompactSummaryPair(summaryText),
+      ...buildCompactSummaryPair(summaryText).map((m) => ({
+        ...m,
+        windowHead: "context" as const,
+      })),
       ...coverage.kept,
     ];
     // 与 tokensBefore 同口径（系统提示＋工具＋消息），压缩前后才可比
@@ -484,7 +488,10 @@ export class SegmentManager {
     const facts = emergencyFloorFacts(ledger, coverage);
     const note = describeEmergencyFloor(facts);
     const newSegmentMessages = [
-      ...buildCompactSummaryPair(note),
+      ...buildCompactSummaryPair(note).map((m) => ({
+        ...m,
+        windowHead: "note" as const,
+      })),
       ...coverage.kept,
     ];
     const tokensAfter = fixedTokens + this.cfg.estimator.estimateMessages(newSegmentMessages);

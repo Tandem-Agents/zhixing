@@ -2,7 +2,28 @@ import { ExtensionApplication, ExtensionRevisionConflict } from "./application.j
 import { createHash } from "node:crypto";
 import { ExtensionArtifacts } from "./artifacts.js";
 import { ExtensionCandidates, validateExtensionCandidate } from "./candidate.js";
-import { extensionOperationActive, type ExtensionBinding, type ExtensionInstance, type ExtensionManagementRequest, type ExtensionManifest, type ExtensionOperation } from "./contracts.js";
+import {
+  extensionOperationActive,
+  type ExtensionBinding,
+  type ExtensionContinuationBinding,
+  type ExtensionInstance,
+  type ExtensionManagementRequest,
+  type ExtensionManifest,
+  type ExtensionOperation,
+} from "./contracts.js";
+
+export interface ExtensionContinuationPlan {
+  readonly targetConversationId: string;
+  readonly turnId: string;
+}
+
+export type ExtensionContinuationDeliverResult =
+  | { readonly outcome: "accepted"; readonly continuation?: unknown }
+  | { readonly outcome: "pending-reconcile" }
+  | {
+      readonly outcome: "terminal-rejected";
+      readonly fallbackTarget?: ExtensionContinuationPlan;
+    };
 
 /** Finite type contribution. Management knows nothing about channels or platform fields. */
 export interface ExtensionOnboardingPorts {
@@ -11,6 +32,11 @@ export interface ExtensionOnboardingPorts {
   discard(id: string, binding: ExtensionBinding): Promise<void>;
   changed(instance: ExtensionInstance): Promise<void>;
   notify(operation: ExtensionOperation): Promise<unknown>;
+  planContinuation?(operation: ExtensionOperation): Promise<ExtensionContinuationPlan | undefined>;
+  deliverContinuation?(
+    operation: ExtensionOperation,
+    binding: ExtensionContinuationBinding,
+  ): Promise<ExtensionContinuationDeliverResult>;
   preparationClosed?(operation: ExtensionOperation): Promise<boolean>;
   repairSource?(instance: ExtensionInstance): Promise<ExtensionOperation["source"] | undefined>;
   replacement?(operation: ExtensionOperation, binding: ExtensionBinding): Promise<void>;
@@ -205,9 +231,100 @@ export class ExtensionOnboarding {
     // not wake a model on every network event; only user-action/results.
     if ((operation.phase !== "verifying" || !operation.verification) && operation.notifiedRevision !== operation.revision && !this.closed && this.ports.isActive()) {
       try {
-        const continuation = await this.ports.notify(operation);
-        if (!this.closed && this.ports.isActive()) await this.application.notified(operation.id, operation.revision, continuation);
+        await this.deliverWithPreSendBinding(operation);
       } catch { /* A durable result remains pending until a later access/recovery. */ }
+    }
+  }
+
+  private async deliverWithPreSendBinding(initialOperation: ExtensionOperation): Promise<void> {
+    let operation = initialOperation;
+    if (!this.ports.planContinuation && !this.ports.deliverContinuation) {
+      const continuation = await this.ports.notify(operation);
+      if (!this.closed && this.ports.isActive()) {
+        await this.application.notified(operation.id, operation.revision, continuation);
+      }
+      return;
+    }
+
+    let binding =
+      operation.boundContinuation &&
+      operation.boundContinuation.phase === operation.phase &&
+      operation.boundContinuation.revision === operation.revision
+        ? operation.boundContinuation
+        : undefined;
+
+    if (!binding && this.ports.planContinuation) {
+      const planned = await this.ports.planContinuation(operation);
+      if (!planned || this.closed || !this.ports.isActive()) return;
+      const candidateBinding: ExtensionContinuationBinding = {
+        phase: operation.phase,
+        revision: operation.revision,
+        targetConversationId: planned.targetConversationId,
+        turnId: planned.turnId,
+      };
+      const persisted = await this.application.bindContinuation(
+        operation.id,
+        operation.revision,
+        candidateBinding,
+      );
+      if (!persisted || persisted.revision !== operation.revision || persisted.phase !== operation.phase) {
+        return;
+      }
+      operation = persisted;
+      binding = persisted.boundContinuation ?? candidateBinding;
+    }
+
+    if (!this.ports.deliverContinuation) {
+      const continuation = await this.ports.notify(operation);
+      if (!this.closed && this.ports.isActive()) {
+        await this.application.notified(operation.id, operation.revision, continuation);
+      }
+      return;
+    }
+
+    if (!binding) return;
+
+    const firstResult = await this.ports.deliverContinuation(operation, binding);
+    if (firstResult.outcome === "accepted") {
+      if (!this.closed && this.ports.isActive()) {
+        await this.application.notified(
+          operation.id,
+          operation.revision,
+          firstResult.continuation ?? { targetConversationId: binding.targetConversationId, turnId: binding.turnId },
+        );
+      }
+      return;
+    }
+
+    if (firstResult.outcome === "pending-reconcile") {
+      // Keep boundContinuation intact and retry exact same (targetConversationId, turnId) later.
+      return;
+    }
+
+    // Explicit terminal rejection: only switch target when caller explicitly supplies a fallback.
+    if (!firstResult.fallbackTarget || this.closed || !this.ports.isActive()) return;
+    const fallbackBinding: ExtensionContinuationBinding = {
+      phase: operation.phase,
+      revision: operation.revision,
+      targetConversationId: firstResult.fallbackTarget.targetConversationId,
+      turnId: firstResult.fallbackTarget.turnId,
+    };
+    const replaced = await this.application.bindContinuation(
+      operation.id,
+      operation.revision,
+      fallbackBinding,
+      { allowReplace: true },
+    );
+    if (!replaced || replaced.revision !== operation.revision || replaced.phase !== operation.phase) {
+      return;
+    }
+    const fallbackResult = await this.ports.deliverContinuation(replaced, fallbackBinding);
+    if (fallbackResult.outcome === "accepted" && !this.closed && this.ports.isActive()) {
+      await this.application.notified(
+        replaced.id,
+        replaced.revision,
+        fallbackResult.continuation ?? { targetConversationId: fallbackBinding.targetConversationId, turnId: fallbackBinding.turnId },
+      );
     }
   }
 }

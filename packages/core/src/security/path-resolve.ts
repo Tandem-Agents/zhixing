@@ -13,19 +13,24 @@
  */
 
 import { PathGuard } from "./path-guard.js";
+import { ToolFilePathExtractor } from "./tool-aware-extractor.js";
 import type {
+  IToolFilePathExtractor,
   SecurityMiddleware,
   SecurityMiddlewareContext,
   SecurityMiddlewareResult,
 } from "./types.js";
 
-/** 标准文件路径参数 key —— 与 PolicyEngine / FileSystemClassifier 的提取约定一致。 */
-const PATH_ARG_KEYS = ["path", "file_path", "target", "destination"] as const;
+const DEFAULT_FILE_PATH_EXTRACTOR = new ToolFilePathExtractor();
 
 export class PathResolveMiddleware implements SecurityMiddleware {
   readonly name = "PathResolve";
   readonly phase = "authorize" as const;
   readonly order = -5;
+
+  constructor(
+    private readonly filePathExtractor: IToolFilePathExtractor = DEFAULT_FILE_PATH_EXTRACTOR,
+  ) {}
 
   async execute(
     ctx: SecurityMiddlewareContext,
@@ -34,17 +39,16 @@ export class PathResolveMiddleware implements SecurityMiddleware {
     const cwd = ctx.request.context.cwd;
     const raw = new Set<string>();
 
-    // 1. 标准 key 的路径参数（read / write / edit 等）
-    for (const key of PATH_ARG_KEYS) {
-      const value = ctx.toolInput[key];
-      if (typeof value === "string" && value.length > 0) raw.add(value);
+    // 1. 标准路径键 + 显式声明的 filePathArgumentKeys（及 glob/grep 缺省 cwd）
+    for (const p of this.filePathExtractor.extract(ctx.toolName, ctx.toolInput, cwd)) {
+      if (p.length > 0) raw.add(p);
     }
     // 2. CommandAnalyzer 从 bash 命令提取的路径（含重定向目标）
     for (const p of ctx.request.resolvedAccess?.paths ?? []) raw.add(p);
 
     if (raw.size === 0) return next();
 
-    const resolved = [...raw].map((p) => PathGuard.resolve(p, cwd));
+    const resolved = [...new Set([...raw].map((p) => PathGuard.resolve(p, cwd)))];
 
     if (!ctx.request.resolvedAccess) ctx.request.resolvedAccess = {};
     ctx.request.resolvedAccess.paths = resolved;

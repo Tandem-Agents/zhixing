@@ -46,6 +46,7 @@ import type {
   ConfigAssetRecord,
   ExecutionAssetBundle,
   ExecutionAssetSnapshot,
+  ExecutionAssetSnapshotV2,
 } from "./state.js";
 import type {
   CapabilityDescriptor,
@@ -128,6 +129,7 @@ export interface WireSchemaMap {
   OwnerControlGrant: OwnerControlGrant;
   ConfigAssetRecord: ConfigAssetRecord;
   ExecutionAssetSnapshot: ExecutionAssetSnapshot;
+  ExecutionAssetSnapshotV2: ExecutionAssetSnapshotV2;
   ExecutionAssetBundle: ExecutionAssetBundle;
   ControlEnvelope: ControlEnvelope;
   CapabilityDescriptor: CapabilityDescriptor;
@@ -165,7 +167,7 @@ export type WireSchemaId = keyof WireSchemaMap;
 export type WireSchemaVersion = {
   [K in WireSchemaId]: K extends "AssignmentRecord" ? 1 | 2 | 3 :
     K extends 'AuthorityCapability' | 'ControlLease' | 'OwnerControlGrant' | 'DispatchEnvelope' | 'EvidenceRequest' ? 1 | 2 :
-    K extends "HomeTrustRecord" ? 2 : 1;
+    K extends "HomeTrustRecord" | "ExecutionAssetSnapshotV2" ? 2 : 1;
 };
 
 type Assert<T extends true> = T;

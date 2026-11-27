@@ -99,7 +99,7 @@ export interface ConfirmationDisplay {
  *     （secure-executor）从 SuggestedPattern 预先计算好再传入。
  */
 export type ConfirmationOption =
-  | { kind: "allow-once"; label: string; hotkey?: string }
+  | { kind: "allow-once"; label: string; hotkey?: string; note?: string }
   | {
       kind: "allow-session";
       label: string;

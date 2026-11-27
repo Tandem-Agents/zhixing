@@ -23,6 +23,7 @@ import * as path from "node:path";
 
 import { getZhixingHome } from "../paths.js";
 import { DurablePermissionRuleStore, GLOBAL_PERMISSION_BUCKET } from "./durable-permission-rules.js";
+import { PathGuard } from "./path-guard.js";
 import type {
   IPermissionStore,
   PermissionContextId,
@@ -198,7 +199,10 @@ export interface PermissionStoreOptions {
 function cloneRule(rule: PermissionRule): PermissionRule {
   return {
     ...rule,
-    pattern: { ...rule.pattern },
+    pattern: {
+      tool: rule.pattern.tool,
+      argument: typeof rule.pattern.argument === "string" ? rule.pattern.argument : "*",
+    },
     contextId: rule.contextId ? { ...rule.contextId } : undefined,
     contributors: rule.contributors
       ? rule.contributors.map((c) => ({ ...c }))
@@ -282,6 +286,7 @@ export class PermissionStore implements IPermissionStore {
     const storageKey = toStorageKey(contextId);
     const tool = request.tool.toLowerCase();
     const argument = this.extractArgumentFn(request);
+    const pathGroups = buildPathCandidateGroups(request);
 
     // ─── 第一阶段：用户池（session / context / global）─────────────
     // 用户池任一命中 → 完全按用户池 resolveConflict 决定结果（builtin 不参与）。
@@ -292,18 +297,21 @@ export class PermissionStore implements IPermissionStore {
     const sessionList = this.sessionRules.get(storageKey);
     if (sessionList) {
       for (const rule of sessionList) {
-        if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
+        if (this.ruleMatches(rule, tool, argument, pathGroups)) userCandidates.push(rule);
       }
     }
 
     for (const rule of this.durable.context(storageKey)) {
-      if (ruleAppliesToContext(rule, contextId) && this.ruleMatches(rule, tool, argument)) {
+      if (
+        ruleAppliesToContext(rule, contextId) &&
+        this.ruleMatches(rule, tool, argument, pathGroups)
+      ) {
         userCandidates.push(rule);
       }
     }
 
     for (const rule of this.durable.global()) {
-      if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
+      if (this.ruleMatches(rule, tool, argument, pathGroups)) userCandidates.push(rule);
     }
 
     if (userCandidates.length > 0) {
@@ -324,7 +332,7 @@ export class PermissionStore implements IPermissionStore {
     const builtinCandidates: PermissionRule[] = [];
     for (const namespaceRules of this.builtinRulesByNamespace.values()) {
       for (const rule of namespaceRules) {
-        if (this.ruleMatches(rule, tool, argument)) builtinCandidates.push(rule);
+        if (this.ruleMatches(rule, tool, argument, pathGroups)) builtinCandidates.push(rule);
       }
     }
 
@@ -344,14 +352,15 @@ export class PermissionStore implements IPermissionStore {
   ): PermissionRule | null {
     const tool = request.tool.toLowerCase();
     const argument = this.extractArgumentFn(request);
+    const pathGroups = buildPathCandidateGroups(request);
     const userCandidates = rules.filter((rule) =>
-      rule.scope !== "builtin" && this.ruleMatches(rule, tool, argument),
+      rule.scope !== "builtin" && this.ruleMatches(rule, tool, argument, pathGroups),
     );
     const candidates = userCandidates.length > 0
       ? userCandidates
       : rules.filter((rule) =>
           rule.scope === "builtin" &&
-      this.ruleMatches(rule, tool, argument),
+          this.ruleMatches(rule, tool, argument, pathGroups),
         );
     if (candidates.length > 0) {
       const chosen = cloneRule(this.resolveConflict([...candidates]));
@@ -536,15 +545,22 @@ export class PermissionStore implements IPermissionStore {
    *   用户显式选 allow-context/allow-global 时为单条 `[{origin:"user", timestamp:now}]`
    */
   static createRule(
-    input: Pick<PermissionRule, "pattern" | "decision" | "scope"> &
-      Partial<
-        Pick<PermissionRule, "contextId" | "contextPath" | "contributors">
-      >,
+    input: {
+      pattern: { tool: string; argument?: string };
+      decision: PermissionRule["decision"];
+      scope: PermissionRule["scope"];
+    } & Partial<
+      Pick<PermissionRule, "contextId" | "contextPath" | "contributors">
+    >,
     now: () => number = () => Date.now(),
   ): PermissionRule {
     return {
       id: crypto.randomUUID(),
-      pattern: input.pattern,
+      pattern: {
+        tool: input.pattern.tool,
+        argument:
+          typeof input.pattern.argument === "string" ? input.pattern.argument : "*",
+      },
       decision: input.decision,
       scope: input.scope,
       createdAt: now(),
@@ -562,6 +578,7 @@ export class PermissionStore implements IPermissionStore {
     rule: PermissionRule,
     tool: string,
     argument: string,
+    pathGroups: readonly (readonly string[])[] = [],
   ): boolean {
     if (
       rule.pattern.tool !== "*" &&
@@ -569,7 +586,23 @@ export class PermissionStore implements IPermissionStore {
     ) {
       return false;
     }
-    return globMatches(rule.pattern.argument, argument);
+    const argPattern =
+      typeof rule.pattern.argument === "string" ? rule.pattern.argument : "*";
+    if (pathGroups.length === 0) {
+      return globMatches(argPattern, argument);
+    }
+
+    const normPattern = normalizeRulePathPattern(argPattern);
+    const matchesGroup = (candidates: readonly string[]): boolean =>
+      candidates.some((candidate) => matchNormalizedPathPattern(normPattern, candidate));
+
+    if (rule.decision === "deny") {
+      return pathGroups.some(matchesGroup) || globMatches(argPattern, argument);
+    }
+    if (tool === "bash" || tool === "shell") {
+      return globMatches(argPattern, argument);
+    }
+    return pathGroups.every(matchesGroup);
   }
 
   private resolveConflict(candidates: PermissionRule[]): PermissionRule {
@@ -581,10 +614,14 @@ export class PermissionStore implements IPermissionStore {
 
   private mostSpecific(rules: PermissionRule[]): PermissionRule {
     let best = rules[0]!;
-    let bestScore = globSpecificity(best.pattern.argument);
+    let bestScore = globSpecificity(
+      typeof best.pattern.argument === "string" ? best.pattern.argument : "*",
+    );
     for (let i = 1; i < rules.length; i++) {
       const rule = rules[i]!;
-      const score = globSpecificity(rule.pattern.argument);
+      const score = globSpecificity(
+        typeof rule.pattern.argument === "string" ? rule.pattern.argument : "*",
+      );
       if (score > bestScore) {
         best = rule;
         bestScore = score;
@@ -617,6 +654,58 @@ export function bindPermissionRuleExecutionSource(
       rules: readonly PermissionRule[],
       request: SecurityRequest,
     ) => store.matchFrozen(rules.filter((rule) => ruleAppliesToContext(rule, context)), request),
+  });
+}
+
+function normalizeComparablePath(raw: string): string {
+  let out = raw.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^(\.\/)+/, "");
+  if (out.length > 1 && !/^[a-zA-Z]:\/$/.test(out)) {
+    out = out.replace(/\/+$/, "");
+  }
+  return process.platform === "win32" ? out.toLowerCase() : out;
+}
+
+function normalizeRulePathPattern(rawPattern: string): string {
+  let out = rawPattern.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^(\.\/)+/, "");
+  if (out.length > 1 && !/^[a-zA-Z]:\/$/.test(out)) {
+    out = out.replace(/\/+$/, "");
+  }
+  return process.platform === "win32" ? out.toLowerCase() : out;
+}
+
+function matchNormalizedPathPattern(normPattern: string, candidate: string): boolean {
+  if (globMatches(normPattern, candidate)) return true;
+  if (normPattern.endsWith("/**")) {
+    const dirPrefix = normPattern.slice(0, -3);
+    if (dirPrefix.length > 0 && candidate === dirPrefix) return true;
+  }
+  return false;
+}
+
+function buildPathCandidateGroups(request: SecurityRequest): readonly (readonly string[])[] {
+  const paths = request.resolvedAccess?.paths;
+  if (!paths || paths.length === 0) return [];
+  const baseDir =
+    request.context.trust.kind === "workspace"
+      ? request.context.trust.dir
+      : request.context.cwd;
+  const realBase = baseDir ? PathGuard.resolve(baseDir, baseDir) : undefined;
+  return paths.map((resolvedPath) => {
+    const candidates: string[] = [];
+    const abs = normalizeComparablePath(resolvedPath);
+    if (abs.length > 0) candidates.push(abs);
+    if (realBase) {
+      const rel = path.relative(realBase, resolvedPath);
+      if (rel === "") {
+        if (!candidates.includes(".")) candidates.push(".");
+      } else if (!rel.startsWith("..") && !path.isAbsolute(rel)) {
+        const normRel = normalizeComparablePath(rel);
+        if (normRel.length > 0 && !candidates.includes(normRel)) {
+          candidates.push(normRel);
+        }
+      }
+    }
+    return candidates;
   });
 }
 

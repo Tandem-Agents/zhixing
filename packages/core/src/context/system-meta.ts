@@ -250,7 +250,7 @@ export const SYSTEM_META_PROMPT_SECTION = `[系统元信息标签]
 
 遇到这些标签时：
 - 读取标签内容作为上下文，不要回应标签本身
-- compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+- compact-summary 表示早期对话压缩摘要
 - guidance 表示用户或工作场景声明的稳定约定，优先级低于系统提示、安全策略和当前用户要求，不得覆盖更高层指令
 - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
 - 基于可见的信息继续对话`;

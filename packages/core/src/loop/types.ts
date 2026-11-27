@@ -186,6 +186,19 @@ export interface AgentLoopParams {
    */
   turnContextInjector?: TurnContextInjector;
   /**
+   * 豁免子运行首条 `sub_agent_task` 任务载荷消息，不在发送视图对其做防伪标签转义。
+   */
+  exemptInitialSubAgentTaskMessage?: boolean;
+  /**
+   * 豁免子运行指定索引（紧接前导 `backgroundMessages` 之后）的 `sub_agent_task` 任务载荷消息，
+   * 不在发送视图对其做防伪标签转义。
+   */
+  exemptSubAgentTaskMessageIndex?: number;
+  /**
+   * 上轮存在跨轮不保留的瞬态发送项变化时，在本 run 入口重设追加式前缀投影代际。
+   */
+  resetPrefixProjectionOnStart?: boolean;
+  /**
    * 可选共享的追加式临时上下文状态（同一活跃窗口代际跨多次 run 保持前缀稳定；
    * 缺省时若 provider.appendOnlyTurnContext === true 则由本 run 内部新建）。
    */
@@ -478,4 +491,10 @@ export interface RunResult {
    * 边界单一事务消费执行，本字段不触发任何切换。
    */
   readonly pendingPostTurnControl?: PostTurnControlOutcome;
+
+  /**
+   * 本轮暂存的全局变更在权威提交时发生冲突的条目数（与 FinalFrame.publishConflicts 同源；
+   * 无冲突时省略）。用于让回合结束通知即可区分已生效写入与最终提交冲突。
+   */
+  readonly publishConflicts?: number;
 }

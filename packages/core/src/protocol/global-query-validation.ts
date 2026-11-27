@@ -5,7 +5,7 @@ import type {
   GlobalReadResult,
   TaskDefinition,
 } from "../contracts/state.js";
-import type { SkillCatalogEntry } from "../skills/types.js";
+import type { SkillCatalogEntry, SkillCatalogEntryV2, SkillVisibility } from "../skills/types.js";
 import type { JsonValue } from "../types/distributed.js";
 import { protocolDigest } from "./canonical.js";
 import { validateWorksceneDto } from "./contract-validation.js";
@@ -54,7 +54,8 @@ export function validateGlobalQuery(input: unknown): GlobalQuery {
     case "workscene-get":
       exactKeys(value, ["kind", "sceneId"]);
       return { kind, sceneId: identifier(value.sceneId, "Workscene id") };
-    case "skill-catalog": {
+    case "skill-catalog":
+    case "skill-catalog-v2": {
       exactKeys(value, ["kind"], ["includeDisabled", "limit", "mode"]);
       const mode = value.mode;
       if (mode !== undefined && mode !== "main" && mode !== "work") {
@@ -77,6 +78,7 @@ export function validateGlobalQuery(input: unknown): GlobalQuery {
       };
     }
     case "skill-get":
+    case "skill-get-v2":
       exactKeys(value, ["kind", "skillId"]);
       return { kind, skillId: identifier(value.skillId, "Skill id") };
     case "config-asset": {
@@ -207,6 +209,46 @@ export function validateGlobalQueryResult(
       }
       return { kind: query.kind, catalogRevision, entry };
     }
+    case "skill-catalog-v2": {
+      exactKeys(value, ["catalogRevision", "entries", "kind"]);
+      const catalogRevision = nonNegativeInteger(
+        value.catalogRevision,
+        "Skill catalog revision",
+      );
+      const entries = denseArray(value.entries, "Skill catalog v2 entries").map((entry) =>
+        skillEntryV2(entry)
+      );
+      for (const entry of entries) {
+        if (
+          entry.revision > catalogRevision ||
+          (query.mode !== undefined && entry.mode !== query.mode) ||
+          (!query.includeDisabled && entry.disabled)
+        ) {
+          throw new TypeError("Skill catalog v2 entry is not bound to its query");
+        }
+      }
+      if (query.limit !== undefined && entries.length > query.limit) {
+        throw new TypeError("Skill catalog v2 exceeds its query limit");
+      }
+      assertUnique(entries.map((entry) => entry.id), "Skill catalog v2 entries");
+      assertSorted(entries, compareSkillEntries, "Skill catalog v2 entries");
+      return { kind: query.kind, catalogRevision, entries };
+    }
+    case "skill-get-v2": {
+      exactKeys(value, ["catalogRevision", "entry", "kind"]);
+      const catalogRevision = nonNegativeInteger(
+        value.catalogRevision,
+        "Skill catalog revision",
+      );
+      const entry = value.entry === null ? null : skillEntryV2(value.entry);
+      if (
+        entry !== null &&
+        (entry.id !== query.skillId || entry.revision > catalogRevision)
+      ) {
+        throw new TypeError("Skill v2 result is not bound to its query id");
+      }
+      return { kind: query.kind, catalogRevision, entry };
+    }
     case "config-asset": {
       exactKeys(value, ["kind", "records"]);
       const records = denseArray(value.records, "Config asset records").map((record) =>
@@ -280,6 +322,73 @@ function skillEntry(input: unknown): SkillCatalogEntry {
   const digest = assertDigest(value.digest, "Skill digest");
   if (digest !== protocolDigest("SkillCatalogEntry", 1, entry)) {
     throw new TypeError("Skill digest is invalid");
+  }
+  return { ...entry, digest };
+}
+
+function skillVisibility(input: unknown): SkillVisibility {
+  const value = plainObject(input, "Skill visibility");
+  exactKeys(value, ["modelAutoIndex", "userSlashCommand"]);
+  return {
+    modelAutoIndex: boolean(value.modelAutoIndex, "Skill modelAutoIndex flag"),
+    userSlashCommand: boolean(value.userSlashCommand, "Skill userSlashCommand flag"),
+  };
+}
+
+function skillEntryV2(input: unknown): SkillCatalogEntryV2 {
+  const value = plainObject(input, "Skill catalog v2 entry");
+  exactKeys(
+    value,
+    [
+      "contentRef",
+      "createdAt",
+      "description",
+      "digest",
+      "disabled",
+      "id",
+      "mode",
+      "name",
+      "pinned",
+      "revision",
+      "source",
+      "usage",
+      "visibility",
+    ],
+    ["packageRef"],
+  );
+  const id = identifier(value.id, "Skill id");
+  const name = identifier(value.name, "Skill name");
+  const description = string(value.description, "Skill description");
+  if (value.source !== "own" && value.source !== "linked") {
+    throw new TypeError("Skill source is invalid");
+  }
+  if (value.mode !== "main" && value.mode !== "work") {
+    throw new TypeError("Skill mode is invalid");
+  }
+  const createdAt = canonicalTime(value.createdAt, "Skill creation time");
+  const usage = value.usage === null ? null : skillUsage(value.usage);
+  const visibility = skillVisibility(value.visibility);
+  const packageRef = value.packageRef === undefined
+    ? undefined
+    : artifactRef(value.packageRef, "Skill package reference");
+  const entry = {
+    id,
+    name,
+    description,
+    source: value.source,
+    mode: value.mode,
+    pinned: boolean(value.pinned, "Skill pinned flag"),
+    disabled: boolean(value.disabled, "Skill disabled flag"),
+    createdAt,
+    usage,
+    contentRef: artifactRef(value.contentRef, "Skill content reference"),
+    revision: positiveInteger(value.revision, "Skill revision"),
+    visibility,
+    ...(packageRef === undefined ? {} : { packageRef }),
+  } satisfies Omit<SkillCatalogEntryV2, "digest">;
+  const digest = assertDigest(value.digest, "Skill v2 digest");
+  if (digest !== protocolDigest("SkillCatalogEntry", 2, entry)) {
+    throw new TypeError("Skill v2 digest is invalid");
   }
   return { ...entry, digest };
 }

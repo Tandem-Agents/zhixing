@@ -1,15 +1,16 @@
 /**
  * 权限匹配中间件 — Phase 2
  *
- * authorize 阶段第三步：当 PolicyEvaluator + OperationClassifier 产出 confirm 决策时，
- * 查询 PermissionStore 看用户是否创建过匹配的权限规则。
+ * authorize 阶段第三步：在 PolicyEvaluator + OperationClassifier 之后查询 PermissionStore，
+ * 使 deny 规则在 observe / internal / confirm 全路径统一短路生效，allow 规则仅对 confirm 放行。
  *
  * ── 决策流程 ──
- * 1. decision.action !== "confirm"  → 无需介入（allow/block 已定）
- * 2. 匹配到 allow 规则 → 升级为 allow，继续执行
- * 3. 匹配到 deny 规则  → 降级为 block，短路（不执行 guards）
- * 4. 无匹配 + interactive  → 保持 confirm（上层 UI 处理）
- * 5. 无匹配 + ci/gateway/api → 降级为 block（非交互无 UI 可用）
+ * 1. decision.action === "block" → 已由上游硬阻断，直接透传
+ * 2. 匹配到 deny 规则 → 无论上游是 allow(observe/internal) 还是 confirm，一律置为 block 并短路
+ * 3. decision.action !== "confirm" → 无 deny 命中时保持上游 allow/undefined 透传
+ * 4. confirm + 匹配到 allow 规则 → 升级为 allow（requiresExplicitConfirmation 工具除外）
+ * 5. confirm + 无匹配 + interactive → 保持 confirm（上层 UI 处理）
+ * 6. confirm + 无匹配 + ci/gateway/api → 降级为 block（非交互无 UI 可用）
  *
  * ── 会话类型策略（规格 §4.5） ──
  * interactive  — 弹出确认
@@ -39,8 +40,8 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
   ): Promise<SecurityMiddlewareResult> {
     const current = ctx.state.decision;
 
-    // 只在需要确认时介入——allow/block 决策与权限规则无关
-    if (!current || current.action !== "confirm") {
+    // 已由 PolicyEngine 等上游规则硬阻断时，不再重复匹配
+    if (current?.action === "block") {
       return next();
     }
 
@@ -49,12 +50,35 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
       : this.rules.matchFrozen(ctx.permissionRules, ctx.request);
 
     if (matched) {
-      ctx.state.matchedPermissionRule = matched;
+      if (matched.decision === "deny") {
+        // 全等级 deny 短路：无论当前是 confirm 还是 observe/internal(allow)，
+        // 用户 deny 规则始终立即 block 并跳过 guards。
+        ctx.state.matchedPermissionRule = matched;
+        const blockDecision: SecurityDecision = {
+          ...(current ?? {
+            matchedRules: [],
+            riskLevel: "low" as const,
+          }),
+          action: "block",
+          reason: `被权限规则拒绝 "${matched.pattern.tool} ${matched.pattern.argument}" (${matched.scope})`,
+        };
+        ctx.state.decision = blockDecision;
+        return {
+          allowed: false,
+          requiresConfirmation: false,
+          operationClass: ctx.state.operationClass,
+          trustLevel: ctx.state.trustLevel,
+          decision: blockDecision,
+          matchedPermissionRule: matched,
+          reason: blockDecision.reason,
+          resolvedPaths: ctx.state.resolvedPaths,
+        };
+      }
 
-      if (matched.decision === "allow") {
-        // bypassImmune 规则的 confirm 决策不可被权限规则自动放行——
-        // 改变工作区信任边界、访问密钥目录等操作必须每次确认。
-        const hasBypassImmune = current.matchedRules.some(r => r.bypassImmune);
+      // allow 仅对 confirm 决策生效升级；observe/internal 的原本 allow 保持不变
+      if (current?.action === "confirm") {
+        ctx.state.matchedPermissionRule = matched;
+        const hasBypassImmune = current.matchedRules.some((r) => r.bypassImmune);
         if (hasBypassImmune) {
           return next();
         }
@@ -67,27 +91,9 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
         };
         return next();
       }
-
-      // deny：短路避免 guards 做无谓的文件系统调用
-      const blockDecision: SecurityDecision = {
-        ...current,
-        action: "block",
-        reason: `被权限规则拒绝 "${matched.pattern.tool} ${matched.pattern.argument}" (${matched.scope})`,
-      };
-      ctx.state.decision = blockDecision;
-      return {
-        allowed: false,
-        requiresConfirmation: false,
-        operationClass: ctx.state.operationClass,
-        decision: blockDecision,
-        matchedPermissionRule: matched,
-        reason: blockDecision.reason,
-      };
     }
 
-    // 无匹配规则：保持 confirm，交由编排层处置（管家研判 / broker 确认）。
-    // 非交互环境"无 UI → 拒绝"的语义下移到 broker —— 其默认 resolver 在无监听器时
-    // fail-to-deny，与原先在此短路 block 的端到端效果一致，且让管家得以覆盖灰色 external。
+    // 无匹配规则（或非 confirm 仅命中 allow）：维持原决策交由后续链路处理
     return next();
   }
 }

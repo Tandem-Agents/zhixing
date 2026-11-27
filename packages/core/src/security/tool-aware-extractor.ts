@@ -24,7 +24,85 @@
 
 import type { ToolDefinition } from "../types/tools.js";
 import { defaultExtractArgument } from "./permission-store.js";
-import type { IToolArgumentExtractor, SecurityRequest } from "./types.js";
+import type {
+  IToolArgumentExtractor,
+  IToolFilePathExtractor,
+  SecurityRequest,
+} from "./types.js";
+
+/** 标准文件路径参数键 —— 不含 url / command / sceneId / action 等一般权限键。 */
+export const STANDARD_FILE_PATH_ARG_KEYS = [
+  "path",
+  "file_path",
+  "target",
+  "destination",
+] as const;
+
+const IMPLICIT_CWD_TOOLS = new Set(["glob", "grep"]);
+
+/**
+ * 显式文件路径参数提取器 —— 供 PathResolveMiddleware / SecurityPipeline 使用。
+ * 严格只从 `STANDARD_FILE_PATH_ARG_KEYS`、工具显式声明的 `filePathArgumentKeys`、
+ * 以及缺失 `path` 时的 `glob`/`grep` 默认 `[cwd]` 中提取路径。
+ */
+export class ToolFilePathExtractor implements IToolFilePathExtractor {
+  private readonly keysByTool = new Map<string, readonly string[]>();
+
+  static fromTools(tools: readonly ToolDefinition[]): ToolFilePathExtractor {
+    const extractor = new ToolFilePathExtractor();
+    for (const tool of tools) {
+      if (tool.filePathArgumentKeys && tool.filePathArgumentKeys.length > 0) {
+        extractor.register(tool.name, tool.filePathArgumentKeys);
+      }
+    }
+    return extractor;
+  }
+
+  register(toolName: string, keys: readonly string[]): void {
+    const normalized: string[] = [];
+    for (const key of keys) {
+      if (typeof key !== "string" || key.length === 0) {
+        throw new Error(
+          `ToolFilePathExtractor.register: key 必须是非空字符串 (toolName="${toolName}")`,
+        );
+      }
+      if (!normalized.includes(key)) normalized.push(key);
+    }
+    if (normalized.length > 0) {
+      this.keysByTool.set(toolName.toLowerCase(), normalized);
+    }
+  }
+
+  extract(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    cwd: string,
+  ): readonly string[] {
+    const lowerTool = toolName.toLowerCase();
+    const candidateKeys = new Set<string>(STANDARD_FILE_PATH_ARG_KEYS);
+    for (const key of this.keysByTool.get(lowerTool) ?? []) {
+      candidateKeys.add(key);
+    }
+    const found: string[] = [];
+    for (const key of candidateKeys) {
+      const value = toolInput[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        found.push(value);
+      }
+    }
+    if (IMPLICIT_CWD_TOOLS.has(lowerTool)) {
+      const rawPath = toolInput["path"];
+      if (typeof rawPath !== "string" || rawPath.trim().length === 0) {
+        if (!found.includes(cwd)) found.push(cwd);
+      }
+    }
+    return found;
+  }
+
+  list(): string[] {
+    return [...this.keysByTool.keys()];
+  }
+}
 
 /**
  * 可演进的工具参数提取器实现。

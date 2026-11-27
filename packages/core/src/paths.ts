@@ -24,6 +24,11 @@ export function getZhixingHome(): string {
   );
 }
 
+/** 系统临时目录根（路径原始 OS API 仅在此集中出口，业务包禁止直接 import os.tmpdir）。 */
+export function getTempRoot(): string {
+  return os.tmpdir();
+}
+
 /**
  * 把以 `~` 开头的路径展开为绝对路径——`~` 自身、`~/...`、`~\...`（Windows）。
  * 不以 `~` 开头的输入（绝对路径、相对路径、空字符串等）原样返回。

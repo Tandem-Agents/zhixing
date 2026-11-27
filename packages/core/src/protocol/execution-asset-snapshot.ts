@@ -1,5 +1,6 @@
 import type {
   ExecutionAssetSnapshot,
+  ExecutionAssetSnapshotV2,
 } from "../contracts/state.js";
 import { protocolDigest } from "./canonical.js";
 import { validateGlobalQueryResult } from "./global-query-validation.js";
@@ -7,6 +8,11 @@ import type { ProtocolSignatureVerifier, ProtocolSigner } from "./signature.js";
 
 export type UnsignedExecutionAssetSnapshot = Omit<
   ExecutionAssetSnapshot,
+  "digest" | "signature" | "v"
+>;
+
+export type UnsignedExecutionAssetSnapshotV2 = Omit<
+  ExecutionAssetSnapshotV2,
   "digest" | "signature" | "v"
 >;
 
@@ -22,6 +28,21 @@ export function createSignedExecutionAssetSnapshot(
   return validateExecutionAssetSnapshot({
     ...payload,
     signature: signer.sign("ExecutionAssetSnapshot", 1, payload),
+  });
+}
+
+export function createSignedExecutionAssetSnapshotV2(
+  input: UnsignedExecutionAssetSnapshotV2,
+  signer: ProtocolSigner,
+): ExecutionAssetSnapshotV2 {
+  const unsigned = normalizeV2({ v: 2 as const, ...input });
+  const payload = {
+    ...unsigned,
+    digest: protocolDigest("ExecutionAssetSnapshot", 2, unsigned),
+  };
+  return validateExecutionAssetSnapshotV2({
+    ...payload,
+    signature: signer.sign("ExecutionAssetSnapshot", 2, payload),
   });
 }
 
@@ -83,6 +104,64 @@ export function validateExecutionAssetSnapshot(
   return value;
 }
 
+export function validateExecutionAssetSnapshotV2(
+  input: unknown,
+  verifier?: ProtocolSignatureVerifier,
+): ExecutionAssetSnapshotV2 {
+  const value = clone(input) as ExecutionAssetSnapshotV2;
+  assertRecord(value, "Execution asset snapshot");
+  assertExactKeys(value, [
+    "digest",
+    "generatedAt",
+    "promptAssets",
+    "rubrics",
+    "signature",
+    "skillCatalogRevision",
+    "skills",
+    "snapshotRevision",
+    "v",
+  ], "Execution asset snapshot");
+  if (value.v !== 2) throw new TypeError("Execution asset snapshot version must be 2");
+  assertPositiveInteger(value.snapshotRevision, "Execution asset snapshot revision");
+  assertNonNegativeInteger(value.skillCatalogRevision, "Skill catalog revision");
+  assertCanonicalTime(value.generatedAt, "Execution asset snapshot generatedAt");
+
+  const skills = validateGlobalQueryResult(
+    { kind: "skill-catalog-v2", includeDisabled: true },
+    {
+      kind: "skill-catalog-v2",
+      catalogRevision: value.skillCatalogRevision,
+      entries: value.skills,
+    },
+  );
+  const rubrics = validateGlobalQueryResult(
+    { kind: "asset-index", asset: "rubrics" },
+    { kind: "asset-index", entries: value.rubrics },
+  );
+  const promptAssets = validateGlobalQueryResult(
+    { kind: "asset-index", asset: "prompt-assets" },
+    { kind: "asset-index", entries: value.promptAssets },
+  );
+  value.skills = skills.kind === "skill-catalog-v2" ? skills.entries : [];
+  value.rubrics = rubrics.kind === "asset-index" ? rubrics.entries : [];
+  value.promptAssets = promptAssets.kind === "asset-index" ? promptAssets.entries : [];
+
+  assertDigest(value.digest, "Execution asset snapshot digest");
+  const { digest: _digest, signature: _signature, ...digestPayload } = value;
+  if (value.digest !== protocolDigest("ExecutionAssetSnapshot", 2, digestPayload)) {
+    throw new TypeError("Execution asset snapshot digest is invalid");
+  }
+  validateSignature(value.signature);
+  const { signature: _ignored, ...signedPayload } = value;
+  verifier?.verify(
+    "ExecutionAssetSnapshot",
+    2,
+    signedPayload,
+    value.signature,
+  );
+  return value;
+}
+
 function normalize(
   input: { readonly v: 1 } & UnsignedExecutionAssetSnapshot,
 ): { readonly v: 1 } & UnsignedExecutionAssetSnapshot {
@@ -92,6 +171,17 @@ function normalize(
     // applies its top-N window before appending builtins.  The signed snapshot must
     // therefore preserve that order instead of canonicalizing it by id.  Rubric and
     // prompt indexes do not carry this ordering contract and remain canonicalized.
+    skills: [...input.skills],
+    rubrics: [...input.rubrics].sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+    promptAssets: [...input.promptAssets].sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+  };
+}
+
+function normalizeV2(
+  input: { readonly v: 2 } & UnsignedExecutionAssetSnapshotV2,
+): { readonly v: 2 } & UnsignedExecutionAssetSnapshotV2 {
+  return {
+    ...clone(input),
     skills: [...input.skills],
     rubrics: [...input.rubrics].sort((left, right) => left.id.localeCompare(right.id, "en-US")),
     promptAssets: [...input.promptAssets].sort((left, right) => left.id.localeCompare(right.id, "en-US")),

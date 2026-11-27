@@ -9,6 +9,7 @@ export type {
   IPermissionStore,
   IPolicyEngine,
   IToolArgumentExtractor,
+  IToolFilePathExtractor,
   MatchSpec,
   MutableToolBoundaryRegistry,
   OperationClass,
@@ -102,7 +103,11 @@ export type { PermissionStoreTrustAdministrationRepository } from "./trust-admin
 // 避免外部 caller 误用绕过 tool-aware 路径破坏 M3 的"显式声明优先"语义。
 
 // 参数提取器（从 ToolDefinition 列表构造，注入 PermissionStoreOptions.extractArgument）
-export { ToolArgumentExtractor } from "./tool-aware-extractor.js";
+export {
+  ToolArgumentExtractor,
+  ToolFilePathExtractor,
+  STANDARD_FILE_PATH_ARG_KEYS,
+} from "./tool-aware-extractor.js";
 
 // 权限匹配中间件
 export { PermissionMatcherMiddleware } from "./permission-matcher.js";
@@ -144,6 +149,7 @@ export { SecurityAuditor } from "./security-auditor.js";
 // 安全管线
 export { SecurityPipeline } from "./security-pipeline.js";
 export type {
+  EvaluateNormalizedFileAccessInput,
   SecurityEvaluationOptions,
   SecurityPipelineOptions,
 } from "./security-pipeline.js";

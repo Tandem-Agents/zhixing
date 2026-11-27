@@ -41,6 +41,8 @@ export class AppendOnlyTurnContextState {
   #anchoredByNextAssistantIndex = new Map<number, string>();
   /** 仅用于跨 run 复用时校验前序消息谱系未被外部替换（例如 /resume、/clear、切源）。 */
   #committedLineageLength = 0;
+  /** 上轮存在跨轮不保留的瞬态发送项变化，需在下一 run 入口开启新代际。 */
+  #pendingTransientReset = false;
 
   constructor(initialMessages: readonly Message[] = []) {
     // 若冷重启/新建实例时已带有既有历史助手消息，则旧内存态 C0 刻意未持久化，
@@ -63,6 +65,23 @@ export class AppendOnlyTurnContextState {
   }
 
   /**
+   * 标记存在仅作用于当次 run 的瞬态发送视图项变化，下一 `run` 入口须调用
+   * `reset(loopMessages.length)` 开启新前缀代际。
+   */
+  markTransientSendViewChange(): void {
+    this.#pendingTransientReset = true;
+  }
+
+  /**
+   * 若存在待消费的瞬态发送视图变化，则在下一 `run` 入口推进代际并返回 true。
+   */
+  resetIfTransient(nextValidFromStateIndex = 0): boolean {
+    if (!this.#pendingTransientReset) return false;
+    this.reset(nextValidFromStateIndex);
+    return true;
+  }
+
+  /**
    * 开启新前缀代际：清空旧内存临时上下文锚点表，记录新代际在 `state.messages` 中的起点。
    * 压缩、窗口重建、冷重启、协议/连接切换或工具集变更时调用。
    */
@@ -71,6 +90,7 @@ export class AppendOnlyTurnContextState {
     this.#anchoredByNextAssistantIndex.clear();
     this.#validFromStateIndex = Math.max(0, nextValidFromStateIndex);
     this.#committedLineageLength = this.#validFromStateIndex;
+    this.#pendingTransientReset = false;
   }
 
   /**

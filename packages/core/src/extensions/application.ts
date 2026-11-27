@@ -17,6 +17,7 @@ import {
 import {
   validateExtensionBinding,
   type ExtensionBinding,
+  type ExtensionContinuationBinding,
   type ExtensionInstance,
   type ExtensionSnapshot,
   type ExtensionPublicSnapshot,
@@ -168,7 +169,7 @@ export class ExtensionApplication {
       const correctingTrial = !current.previous && instance?.enabled && !instance.admission?.ready && instance.admission?.operationId === id;
       if (!["preparing", "blocked"].includes(current.phase) && !(correctingTrial && current.phase === "verifying")) throw new Error("Candidate is no longer accepted");
       if (instance && !current.previous && !correctingTrial) throw new ExtensionRevisionConflict();
-      const { reason: _reason, verification: _verification, ...rest } = current;
+      const { reason: _reason, verification: _verification, boundContinuation: _bound, ...rest } = current;
       const operation: ExtensionOperation = { ...rest, revision: revision + 1, candidate, phase: "configuration" };
       return { value: operation, records: [{ kind: "extension-operation", operation }] };
     });
@@ -191,7 +192,7 @@ export class ExtensionApplication {
       const instance: ExtensionInstance = { id: operation.instanceId, revision: (current?.revision ?? 0) + 1, enabled: true, intentRevision: current?.intentRevision ?? 1,
         binding: checked, generation: null, phase: "stopped", admission: { operationId: id, ready: false } };
       this.exclusive(state, instance);
-      const { reason: _reason, ...accepted } = operation;
+      const { reason: _reason, boundContinuation: _bound, ...accepted } = operation;
       return { value: instance, records: [{ kind: "extension-instance", instance },
         { kind: "extension-operation", operation: { ...accepted, revision: revision + 1, phase: "verifying", ...(operation.previous ? { switched: true } : {}) } }] };
     });
@@ -210,7 +211,8 @@ export class ExtensionApplication {
       const instance = operation && state.instances.get(operation.instanceId);
       if (!operation || operation.revision !== revision || operation.phase !== "verifying" || !instance?.enabled ||
           instance.generation !== generation || instance.admission?.operationId !== id) throw new ExtensionRevisionConflict();
-      return { value: undefined, records: [{ kind: "extension-operation", operation: { ...operation, revision: revision + 1, phase: "ready", ...(verification === undefined ? {} : { verification }) } },
+      const { boundContinuation: _bound, ...baseOperation } = operation;
+      return { value: undefined, records: [{ kind: "extension-operation", operation: { ...baseOperation, revision: revision + 1, phase: "ready", ...(verification === undefined ? {} : { verification }) } },
         { kind: "extension-instance", instance: { ...instance, admission: { operationId: id, ready: true } } }] };
     });
   }
@@ -235,7 +237,8 @@ export class ExtensionApplication {
       if (!operation || operation.revision !== revision) throw new ExtensionRevisionConflict();
       if (!extensionOperationActive(operation)) return { value: undefined, records: [] };
       const instance = state.instances.get(operation.instanceId);
-      const records: RecordBody[] = [{ kind: "extension-operation", operation: { ...operation, revision: revision + 1, phase, switched: false, ...(reason ? { reason } : {}) } }];
+      const { boundContinuation: _bound, ...baseOperation } = operation;
+      const records: RecordBody[] = [{ kind: "extension-operation", operation: { ...baseOperation, revision: revision + 1, phase, switched: false, ...(reason ? { reason } : {}) } }];
       if (operation.previous && operation.switched && instance?.enabled && instance.admission?.operationId === id && instance.intentRevision === operation.previous.intentRevision) {
         records.push({ kind: "extension-instance", instance: this.rollback(instance, operation) });
       } else if (!operation.previous && phase === "cancelled" && instance?.admission?.operationId === id && !instance.admission.ready) records.push({ kind: "extension-instance", instance: {
@@ -248,6 +251,50 @@ export class ExtensionApplication {
     const { admission: _admission, recoveryExhausted: _exhausted, reason: _reason, ...rest } = instance;
     return { ...rest, binding: operation.previous!.binding, ...(operation.previous!.admission ? { admission: operation.previous!.admission } : {}),
       revision: instance.revision + 1, generation: null, phase: "stopped" };
+  }
+
+  /**
+   * 首次向外部发出续接前持久绑定目标对话与 turnId，保证同 `(phase, revision)` 重试 / 超时 / 只读查无期间
+   * 复用同一意图、不并发双跑；仅允许显式终局拒绝时设置 allowReplace 改投。不推进 revision。
+   */
+  async bindContinuation(
+    id: string,
+    revision: number,
+    binding: ExtensionContinuationBinding,
+    options?: { readonly allowReplace?: boolean },
+  ): Promise<ExtensionOperation | undefined> {
+    if (
+      binding.revision !== revision ||
+      !binding.targetConversationId ||
+      !binding.turnId
+    ) {
+      throw new TypeError("Invalid extension continuation binding");
+    }
+    return this.decide({ operationId: id }, (state) => {
+      const operation = state.operations.get(id);
+      if (!operation || operation.revision !== revision || operation.phase !== binding.phase) {
+        return { value: operation, records: [] };
+      }
+      const existing = operation.boundContinuation;
+      if (
+        existing &&
+        existing.phase === binding.phase &&
+        existing.revision === binding.revision &&
+        !options?.allowReplace
+      ) {
+        return { value: operation, records: [] };
+      }
+      const updated: ExtensionOperation = {
+        ...operation,
+        boundContinuation: {
+          phase: binding.phase,
+          revision: binding.revision,
+          targetConversationId: binding.targetConversationId,
+          turnId: binding.turnId,
+        },
+      };
+      return { value: updated, records: [{ kind: "extension-operation", operation: updated }] };
+    });
   }
 
   async notified(id: string, revision: number, continuation?: unknown): Promise<void> {
@@ -263,7 +310,8 @@ export class ExtensionApplication {
     return this.decide({ operationId: id }, (state) => {
       const current = state.operations.get(id);
       if (!current || current.revision !== revision || !extensionOperationActive(current)) throw new ExtensionRevisionConflict();
-      const operation = { ...change(current), revision: revision + 1 };
+      const { boundContinuation: _bound, ...next } = change(current);
+      const operation = { ...next, revision: revision + 1 };
       return { value: operation, records: [{ kind: "extension-operation", operation }] };
     });
   }

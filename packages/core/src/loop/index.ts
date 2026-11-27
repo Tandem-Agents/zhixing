@@ -1,5 +1,11 @@
 // Agent Loop — 核心循环模块的公开 API
 export { runAgentLoop, drainAgentLoop } from "./agent-loop.js";
+export {
+  projectMessagesForSendView,
+  stripV2OnlyInputIdentitiesForLegacyFullWindow,
+  isV2OnlyMessageInputSource,
+} from "../types/messages.js";
+export type { ProjectMessagesForSendViewOptions } from "../types/messages.js";
 export { streamLLMCall } from "./llm-call.js";
 export {
   AppendOnlyTurnContextState,

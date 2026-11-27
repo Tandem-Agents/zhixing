@@ -18,6 +18,7 @@ import type {
   SecurityDecision,
   SecurityRequest,
   SecurityRule,
+  ToolBoundaryRegistry,
 } from "./types.js";
 
 import * as path from "node:path";
@@ -48,6 +49,10 @@ export interface PolicyEngineOptions {
    * bypass-immune block，不能被项目规则、用户规则或确认流程覆盖。
    */
   readonly systemProtectedPaths?: readonly string[];
+  /**
+   * 工具边界注册表 —— 依据工具静态 `filesystem` 边界识别读写访问方向。
+   */
+  readonly toolBoundaryRegistry?: ToolBoundaryRegistry;
 }
 
 function normalizeSystemProtectedPaths(paths: readonly string[]): string[] {
@@ -73,10 +78,23 @@ function normalizeSystemProtectedPaths(paths: readonly string[]): string[] {
   return normalized;
 }
 
+const READ_ONLY_BOUNDARY_ACCESS = new Set([
+  "read",
+  "list",
+  "query",
+  "view",
+  "fetch",
+  "get",
+  "describe",
+  "inspect",
+]);
+
 export class PolicyEngine implements IPolicyEngine {
   private rules: SecurityRule[] = [];
+  private readonly toolBoundaryRegistry?: ToolBoundaryRegistry;
 
   constructor(options: PolicyEngineOptions = {}) {
+    this.toolBoundaryRegistry = options.toolBoundaryRegistry;
     this.loadRules(BUILTIN_RULES);
     const systemProtectedPaths = normalizeSystemProtectedPaths(
       options.systemProtectedPaths ?? [],
@@ -206,6 +224,35 @@ export class PolicyEngine implements IPolicyEngine {
     return spec.prefixes.some((prefix) => executable === prefix.toLowerCase());
   }
 
+  private resolvePathAccessType(request: SecurityRequest): "read" | "write" {
+    if (
+      request.resolvedAccess?.fileAccess === "read" ||
+      request.resolvedAccess?.fileAccess === "write"
+    ) {
+      return request.resolvedAccess.fileAccess;
+    }
+    const crossings = this.toolBoundaryRegistry?.getBoundaries(request.tool);
+    if (crossings) {
+      const fsCrossings = crossings.filter((c) => c.boundaryType === "filesystem");
+      if (fsCrossings.length > 0) {
+        return fsCrossings.some(
+          (c) => !READ_ONLY_BOUNDARY_ACCESS.has(c.access.toLowerCase()),
+        )
+          ? "write"
+          : "read";
+      }
+    }
+    const tool = request.tool.toLowerCase();
+    const isWrite =
+      tool === "write" ||
+      tool === "edit" ||
+      tool === "multiedit" ||
+      tool === "file_write" ||
+      tool === "writefile" ||
+      Boolean((request.arguments["command"] as string | undefined)?.includes(">"));
+    return isWrite ? "write" : "read";
+  }
+
   private matchPath(
     spec: Extract<MatchSpec, { type: "path" }>,
     request: SecurityRequest,
@@ -213,11 +260,7 @@ export class PolicyEngine implements IPolicyEngine {
     const paths = this.extractPaths(request);
     if (paths.length === 0) return false;
 
-    const isWrite =
-      request.tool === "write" ||
-      request.tool === "edit" ||
-      (request.arguments["command"] as string | undefined)?.includes(">");
-    const accessType = isWrite ? "write" : "read";
+    const accessType = this.resolvePathAccessType(request);
 
     if (spec.access !== "any" && spec.access !== accessType) {
       return false;

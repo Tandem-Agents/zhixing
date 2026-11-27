@@ -49,7 +49,11 @@ describe("Agent Loop", () => {
       expect(result.reason).toBe("completed");
       expect(result.usage).toMatchObject({ inputTokens: 200, outputTokens: 100 });
       expect(provider.calls[0]!.messages).toEqual([userMessage("Hello")]);
-      expect(provider.calls[1]!.messages.at(-1)).toEqual(incoming);
+      expect(provider.calls[1]!.messages.at(-1)).toEqual({
+        ...incoming,
+        content: [{ type: "text", text: '<input-source kind="conversation" id="a" />\nfollow-up' }],
+      });
+      expect(incoming.content).toEqual([{ type: "text", text: "follow-up" }]);
       expect(receive.mock.calls.map(([request]) => request)).toEqual([{ boundary: 1, closing: true }, { boundary: 2, closing: true }]);
       expect(close).toHaveBeenCalledOnce();
     });

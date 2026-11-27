@@ -625,6 +625,27 @@ export function validateGlobalStagedMutation(
       }
       validateSkillWrite(mutation.record);
       return;
+    case "skill-create-v2":
+    case "skill-admit-v2":
+      assertExactKeys(mutation, ["kind", "mode", "record"], "Skill v2 write mutation");
+      if (mutation.mode !== "main" && mutation.mode !== "work") {
+        throw new TypeError("Skill mode is invalid");
+      }
+      validateSkillWriteV2(mutation.record);
+      return;
+    case "skill-update-v2":
+      assertExactKeys(
+        mutation,
+        ["expectedRevision", "kind", "mode", "record", "skillId"],
+        "Skill v2 update mutation",
+      );
+      assertIdentifier(mutation.skillId, "Skill id");
+      assertNonNegativeInteger(mutation.expectedRevision, "Skill expected revision");
+      if (mutation.mode !== "main" && mutation.mode !== "work") {
+        throw new TypeError("Skill mode is invalid");
+      }
+      validateSkillWriteV2(mutation.record);
+      return;
     case "workscene-create":
       assertExactKeys(
         mutation,
@@ -756,6 +777,39 @@ function validateSkillWrite(record: unknown): void {
   assertString(record.name, "Skill name");
   assertString(record.description, "Skill description");
   assertArtifactRef(record.content);
+}
+
+function validateSkillWriteV2(record: unknown): void {
+  assertPlainObject(record, "Skill v2 write record");
+  assertExactKeys(
+    record,
+    ["content", "description", "name", "packageRef", "visibility"],
+    "Skill v2 write record",
+    true,
+  );
+  for (const requiredKey of ["content", "description", "name", "visibility"]) {
+    if (!(requiredKey in record)) {
+      throw new TypeError("Skill v2 write record fields are incomplete or unknown");
+    }
+  }
+  assertString(record.name, "Skill name");
+  assertString(record.description, "Skill description");
+  assertArtifactRef(record.content);
+  assertPlainObject(record.visibility, "Skill visibility");
+  assertExactKeys(
+    record.visibility,
+    ["modelAutoIndex", "userSlashCommand"],
+    "Skill visibility",
+  );
+  if (
+    typeof record.visibility.modelAutoIndex !== "boolean" ||
+    typeof record.visibility.userSlashCommand !== "boolean"
+  ) {
+    throw new TypeError("Skill visibility flags must be boolean");
+  }
+  if (record.packageRef !== undefined) {
+    assertArtifactRef(record.packageRef);
+  }
 }
 
 function validateWorkspace(workspace: unknown): void {

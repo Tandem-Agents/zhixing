@@ -19,7 +19,7 @@ import type {
   TrustRule,
   TrustRuleSnapshot,
 } from "./foundation.js";
-import type { WireSchemaV1 } from "../types/distributed.js";
+import type { WireSchemaIdentity, WireSchemaV1 } from "../types/distributed.js";
 import type {
   ChannelMessageRef,
   ChannelResponderRef,
@@ -104,6 +104,14 @@ export interface SkillWriteDto {
   content: ArtifactRef;
 }
 
+export interface SkillWriteDtoV2 {
+  name: string;
+  description: string;
+  content: ArtifactRef;
+  visibility: import("../skills/types.js").SkillVisibility;
+  packageRef?: ArtifactRef;
+}
+
 export interface RubricWriteDto {
   title: string;
   description: string;
@@ -141,6 +149,13 @@ export type GlobalQuery =
       limit?: number;
     }
   | { kind: "skill-get"; skillId: string }
+  | {
+      kind: "skill-catalog-v2";
+      mode?: SkillModeDto;
+      includeDisabled?: boolean;
+      limit?: number;
+    }
+  | { kind: "skill-get-v2"; skillId: string }
   | { kind: "config-asset"; domain: ConfigAssetRecord["domain"]; key?: string }
   | { kind: "asset-index"; asset: "skills" | "rubrics" | "prompt-assets" };
 
@@ -165,6 +180,16 @@ export type GlobalReadResult =
       kind: "skill-get";
       catalogRevision: number;
       entry: import("../skills/types.js").SkillCatalogEntry | null;
+    }
+  | {
+      kind: "skill-catalog-v2";
+      catalogRevision: number;
+      entries: import("../skills/types.js").SkillCatalogEntryV2[];
+    }
+  | {
+      kind: "skill-get-v2";
+      catalogRevision: number;
+      entry: import("../skills/types.js").SkillCatalogEntryV2 | null;
     }
   | { kind: "config-asset"; records: ConfigAssetRecord[] }
   | { kind: "asset-index"; entries: AssetIndexEntry[] };
@@ -228,10 +253,25 @@ export type SkillWriteMutation =
       expectedRevision: number;
     }
   | { kind: "skill-admit"; record: SkillWriteDto; mode: SkillModeDto }
+  | { kind: "skill-create-v2"; record: SkillWriteDtoV2; mode: SkillModeDto }
+  | {
+      kind: "skill-update-v2";
+      skillId: string;
+      record: SkillWriteDtoV2;
+      mode: SkillModeDto;
+      expectedRevision: number;
+    }
+  | { kind: "skill-admit-v2"; record: SkillWriteDtoV2; mode: SkillModeDto }
   | {
       kind: "skill-set-state";
       skillId: string;
       patch: SkillStatePatch;
+      expectedRevision: number;
+    }
+  | {
+      kind: "skill-set-visibility";
+      skillId: string;
+      visibility: import("../skills/types.js").SkillVisibility;
       expectedRevision: number;
     }
   | { kind: "skill-archive"; skillId: string; expectedRevision: number };
@@ -283,7 +323,15 @@ export type GlobalStagedBase =
   | { kind: "skill-usage"; record: SkillUsageRecord }
   | Extract<
       SkillWriteMutation,
-      { kind: "skill-create" | "skill-update" | "skill-admit" }
+      {
+        kind:
+          | "skill-create"
+          | "skill-update"
+          | "skill-admit"
+          | "skill-create-v2"
+          | "skill-update-v2"
+          | "skill-admit-v2";
+      }
     >
   | WorksceneWriteMutation;
 
@@ -324,7 +372,7 @@ export type GlobalControlMutationResult<M extends GlobalControlMutation> =
     ? WorksceneAppliedResult
     : M extends Extract<
         SkillWriteMutation,
-        { kind: "skill-set-state" | "skill-archive" }
+        { kind: "skill-set-state" | "skill-set-visibility" | "skill-archive" }
       >
       ? { revision: number; catalogRevision: number }
     : { revision: number };
@@ -342,6 +390,20 @@ export interface ExecutionAssetSnapshot
   snapshotRevision: number;
   skillCatalogRevision: number;
   skills: import("../skills/types.js").SkillCatalogEntry[];
+  rubrics: AssetIndexEntry[];
+  promptAssets: AssetIndexEntry[];
+  generatedAt: IsoTime;
+  digest: Digest;
+  signature: Signature;
+}
+
+/** Cross-device v2 asset snapshot carrying orthogonal skill visibility and optional package archives. */
+export interface ExecutionAssetSnapshotV2
+  extends WireSchemaIdentity<"ExecutionAssetSnapshot"> {
+  readonly v: 2;
+  snapshotRevision: number;
+  skillCatalogRevision: number;
+  skills: import("../skills/types.js").SkillCatalogEntryV2[];
   rubrics: AssetIndexEntry[];
   promptAssets: AssetIndexEntry[];
   generatedAt: IsoTime;

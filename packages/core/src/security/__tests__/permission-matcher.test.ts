@@ -79,8 +79,8 @@ function makeRule(
 // ─── Tests ───
 
 describe("PermissionMatcherMiddleware", () => {
-  describe("不介入的情况", () => {
-    it("decision 为 undefined → 透传", async () => {
+  describe("不介入或仅响应 deny 的情况", () => {
+    it("decision 为 undefined 且无规则匹配 → 透传", async () => {
       const store = new PermissionStore({ rootDir: null });
       const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx(undefined);
@@ -88,12 +88,19 @@ describe("PermissionMatcherMiddleware", () => {
 
       await matcher.execute(ctx, next);
       expect(next).toHaveBeenCalled();
-      // 不应该调用 store.match
     });
 
-    it("decision.action = allow → 透传，不查询 store", async () => {
+    it("decision.action = allow + allow 规则 → 透传，不改 decision", async () => {
       const store = new PermissionStore({ rootDir: null });
-      const matchSpy = vi.spyOn(store, "match");
+      await store.create(
+        { kind: "main" },
+        makeRule({
+          id: "allow-git",
+          pattern: { tool: "bash", argument: "git *" },
+          decision: "allow",
+          scope: "session",
+        }),
+      );
       const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx({
         action: "allow",
@@ -104,8 +111,53 @@ describe("PermissionMatcherMiddleware", () => {
       const next = vi.fn(async () => ({ allowed: true }));
 
       await matcher.execute(ctx, next);
-      expect(matchSpy).not.toHaveBeenCalled();
+      expect(ctx.state.decision?.action).toBe("allow");
+      expect(ctx.state.matchedPermissionRule).toBeUndefined();
       expect(next).toHaveBeenCalled();
+    });
+
+    it("decision.action = allow（observe/internal）+ deny 规则 → 仍立即 block 短路", async () => {
+      const store = new PermissionStore({ rootDir: null });
+      await store.create(
+        { kind: "main" },
+        makeRule({
+          id: "deny-read-secret",
+          pattern: { tool: "read", argument: "secret/**" },
+          decision: "deny",
+          scope: "session",
+        }),
+      );
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
+      const ctx: SecurityMiddlewareContext = {
+        request: {
+          tool: "read",
+          arguments: { path: "secret/token.txt" },
+          resolvedAccess: { paths: ["/tmp/secret/token.txt"], fileAccess: "read" },
+          context: {
+            cwd: "/tmp",
+            trust: { kind: "global" },
+            sessionType: "interactive",
+          },
+        },
+        toolName: "read",
+        toolInput: { path: "secret/token.txt" },
+        workingDirectory: "/tmp",
+        state: {
+          decision: {
+            action: "allow",
+            matchedRules: [],
+            reason: "observe",
+            riskLevel: "low",
+          },
+        },
+      };
+      const next = vi.fn(async () => ({ allowed: true }));
+
+      const result = await matcher.execute(ctx, next);
+      expect(result.allowed).toBe(false);
+      expect(ctx.state.decision?.action).toBe("block");
+      expect(ctx.state.matchedPermissionRule?.id).toBe("deny-read-secret");
+      expect(next).not.toHaveBeenCalled();
     });
   });
 
@@ -222,6 +274,44 @@ describe("PermissionMatcherMiddleware", () => {
         expect(next).toHaveBeenCalled();
       });
     }
+    it("省略 pattern.argument 的内置 allow 规则在 internal/observe 全路径查询下默认按 * 匹配且不抛错", async () => {
+      const store = new PermissionStore({ rootDir: null });
+      store.registerBuiltinRules("test-ns", [
+        PermissionStore.createRule({
+          pattern: { tool: "mark_done" },
+          decision: "allow",
+          scope: "builtin",
+        }),
+      ]);
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
+      const ctx: SecurityMiddlewareContext = {
+        request: {
+          tool: "mark_done",
+          arguments: {},
+          context: {
+            cwd: "/tmp",
+            trust: { kind: "global" },
+            sessionType: "interactive",
+          },
+        },
+        toolName: "mark_done",
+        toolInput: {},
+        workingDirectory: "/tmp",
+        state: {
+          decision: {
+            action: "allow",
+            matchedRules: [],
+            reason: "internal",
+            riskLevel: "low",
+          },
+        },
+      };
+      const next = vi.fn(async () => ({ allowed: true }));
+
+      const res = await matcher.execute(ctx, next);
+      expect(res.allowed).toBe(true);
+      expect(next).toHaveBeenCalledOnce();
+    });
   });
 
   describe("作用域 ID 传递", () => {

@@ -55,9 +55,14 @@ export const WORKSPACE_DEPENDENT_TOOL_IDS = [
   "admit_skill",
   "bash",
   "edit",
+  "extension_connect",
+  "extension_source",
+  "extension_validate",
   "glob",
   "grep",
   "read",
+  "skill_admit",
+  "skill_materialize",
   "write",
 ] as const;
 

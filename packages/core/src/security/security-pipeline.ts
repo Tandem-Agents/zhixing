@@ -31,12 +31,14 @@ import {
   ExecutionGuardMiddleware,
   type ExecutionGuardOptions,
 } from "./execution-guard.js";
+import { PathGuard } from "./path-guard.js";
 import { PathResolveMiddleware } from "./path-resolve.js";
 import { PermissionMatcherMiddleware } from "./permission-matcher.js";
 import { PolicyEngine } from "./policy-engine.js";
 import { TrustClassifierMiddleware } from "./trust-classifier.js";
 import type { TrustContext } from "./trust.js";
 import type {
+  IToolFilePathExtractor,
   OperationClass,
   OperationClassifier,
   PermissionRuleExecutionSource,
@@ -190,9 +192,19 @@ export interface SecurityPipelineOptions {
   executionGuard?: ExecutionGuardOptions;
   /** 产品组合根拥有、任何 AI 工具均不得访问的本机绝对路径前缀。 */
   systemProtectedPaths?: readonly string[];
+  /** 显式文件路径参数提取器（从 ToolDefinition.filePathArgumentKeys 构造）。 */
+  filePathExtractor?: IToolFilePathExtractor;
 }
 
 export interface SecurityEvaluationOptions {
+  readonly permissionRules?: readonly PermissionRule[];
+}
+
+export interface EvaluateNormalizedFileAccessInput {
+  readonly toolName: string;
+  readonly path: string;
+  readonly access: "read" | "write";
+  readonly workingDirectory: string;
   readonly permissionRules?: readonly PermissionRule[];
 }
 
@@ -227,6 +239,8 @@ const EMPTY_PERMISSION_RULE_SOURCE: PermissionRuleExecutionSource = Object.freez
 export class SecurityPipeline {
   private readonly middlewares: SecurityMiddleware[];
   private readonly policyEngine: PolicyEngine;
+  private readonly policyEvaluator: PolicyEvaluatorMiddleware;
+  private readonly permissionMatcher: PermissionMatcherMiddleware;
   private readonly classifier: OperationClassifier;
   private readonly permissionRuleSource: PermissionRuleExecutionSource;
   private readonly executionGuard: ExecutionGuardMiddleware;
@@ -234,11 +248,14 @@ export class SecurityPipeline {
   private readonly trustContext: TrustContext;
 
   constructor(options: SecurityPipelineOptions = {}) {
-    this.policyEngine = new PolicyEngine(
-      options.systemProtectedPaths
+    this.policyEngine = new PolicyEngine({
+      ...(options.systemProtectedPaths
         ? { systemProtectedPaths: options.systemProtectedPaths }
-        : {},
-    );
+        : {}),
+      ...(options.toolBoundaryRegistry
+        ? { toolBoundaryRegistry: options.toolBoundaryRegistry }
+        : {}),
+    });
     this.sessionType = options.sessionType ?? "interactive";
     this.trustContext = options.trustContext ?? { kind: "global" };
     this.classifier =
@@ -249,17 +266,19 @@ export class SecurityPipeline {
     this.executionGuard = new ExecutionGuardMiddleware(
       options.executionGuard ?? {},
     );
+    this.policyEvaluator = new PolicyEvaluatorMiddleware(this.policyEngine);
+    this.permissionMatcher = new PermissionMatcherMiddleware(
+      this.permissionRuleSource,
+    );
 
     // 组装中间件管线
     const middlewares: SecurityMiddleware[] = [
       new CommandAnalyzerMiddleware(),
-      new PathResolveMiddleware(),
-      new PolicyEvaluatorMiddleware(this.policyEngine),
+      new PathResolveMiddleware(options.filePathExtractor),
+      this.policyEvaluator,
       new OperationClassifierMiddleware(this.classifier),
       new TrustClassifierMiddleware(),
-      new PermissionMatcherMiddleware(
-        this.permissionRuleSource,
-      ),
+      this.permissionMatcher,
       this.executionGuard,
     ];
 
@@ -313,6 +332,45 @@ export class SecurityPipeline {
     // 结果如实带上它（只用于审计与匹配统计），不改变任何结论
     const matched = ctx.state.matchedPermissionRule;
     return matched && !result.matchedPermissionRule ? { ...result, matchedPermissionRule: matched } : result;
+  }
+
+  /**
+   * 轻量归一化单文件读写鉴权 —— 解析 realpath、评估 PolicyEngine（含 builtin/systemProtectedPaths）
+   * 与 PermissionMatcher（含冻结规则快照），但刻意跳过 ExecutionGuard 速率限制器，避免 64 成员包准入
+   * 或大目录 glob/grep 误触 100 次/60s 配额限流。
+   */
+  async evaluateNormalizedFileAccess(
+    input: EvaluateNormalizedFileAccessInput,
+  ): Promise<SecurityMiddlewareResult> {
+    const resolved = PathGuard.resolve(input.path, input.workingDirectory);
+    const request: SecurityRequest = {
+      tool: input.toolName,
+      arguments: { path: input.path },
+      resolvedAccess: {
+        paths: [resolved],
+        fileAccess: input.access,
+      },
+      context: {
+        cwd: input.workingDirectory,
+        trust: this.trustContext,
+        sessionType: this.sessionType,
+      },
+    };
+    const ctx: SecurityMiddlewareContext = {
+      request,
+      toolName: input.toolName,
+      toolInput: request.arguments,
+      workingDirectory: input.workingDirectory,
+      ...(input.permissionRules === undefined
+        ? {}
+        : { permissionRules: input.permissionRules }),
+      state: {
+        resolvedPaths: [resolved],
+      },
+    };
+    return this.policyEvaluator.execute(ctx, () =>
+      this.permissionMatcher.execute(ctx, async () => this.buildFinalResult(ctx)),
+    );
   }
 
   /** 获取策略引擎实例（用于加载额外规则） */

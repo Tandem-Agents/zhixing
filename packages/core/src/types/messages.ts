@@ -367,11 +367,122 @@ export interface Message {
  */
 export type WindowHeadKind = "context" | "note";
 
+export type MessageInputSystemSubsystem =
+  | "workscene-continuation"
+  | "extension-continuation"
+  | "advancement-proxy"
+  | "scheduled-job";
+
+export type MessageInputSource =
+  | { readonly kind: "user" }
+  | { readonly kind: "conversation"; readonly conversationId: string }
+  | { readonly kind: "program" }
+  | { readonly kind: "channel"; readonly channelId: string }
+  | { readonly kind: "system"; readonly subsystem: MessageInputSystemSubsystem };
+
 export interface MessageInputIdentity {
   readonly id: string;
-  readonly source:
-    | { readonly kind: "user" }
-    | { readonly kind: "conversation"; readonly conversationId: string };
+  readonly source: MessageInputSource;
+}
+
+export function isV2OnlyMessageInputSource(
+  source: MessageInputSource,
+): boolean {
+  return (
+    source.kind === "program" ||
+    source.kind === "channel" ||
+    source.kind === "system"
+  );
+}
+
+/**
+ * 深拷贝消息列表，仅将携带 `program` / `channel` / `system` 来源的 `inputIdentity`
+ * 剥离为 `undefined`，保留 `user` / `conversation` 来源不变，供向旧远端发送兼容
+ * `full` 窗口前使用（权威历史保真不被修改）。
+ */
+export function stripV2OnlyInputIdentitiesForLegacyFullWindow(
+  messages: readonly Message[],
+): Message[] {
+  return messages.map((msg) => {
+    const cloned = structuredClone(msg);
+    if (cloned.inputIdentity && isV2OnlyMessageInputSource(cloned.inputIdentity.source)) {
+      delete cloned.inputIdentity;
+    }
+    return cloned;
+  });
+}
+
+function escapeSendViewSpoofableTags(text: string): string {
+  return text
+    .replace(/<(\/?)system-meta/gi, "<$1system\u2011meta")
+    .replace(/<(\/?)input-source/gi, "<$1input\u2011source");
+}
+
+function formatInputSourceHeader(source: MessageInputSource): string {
+  switch (source.kind) {
+    case "user":
+      return '<input-source kind="user" />\n';
+    case "conversation":
+      return `<input-source kind="conversation" id="${source.conversationId}" />\n`;
+    case "program":
+      return '<input-source kind="program" />\n';
+    case "channel":
+      return `<input-source kind="channel" id="${source.channelId}" />\n`;
+    case "system":
+      return `<input-source kind="system" subsystem="${source.subsystem}" />\n`;
+  }
+}
+
+export interface ProjectMessagesForSendViewOptions {
+  readonly isExemptSubAgentTaskFirstMessage?: boolean;
+  readonly exemptSubAgentTaskMessageIndex?: number;
+}
+
+/**
+ * 无副作用发送视图防伪投影：
+ * 1. 仅豁免四类受信系统载体块（`messagePrefix` 在 `stateMessages` 之外已豁免、
+ *    `windowHead !== undefined`、`tool_result` 消息、子运行 `sub_agent_task` 任务载荷消息）；
+ * 2. 对其余全部 `role === "user"` 消息做同形伪造标签碰撞转义（连字符替换为 `\u2011`），
+ *    并按耐久 `inputIdentity?.source` 前置只读防伪 `<input-source ... />` 头
+ *    （`inputIdentity === undefined` 的历史无证裸消息仅转义不伪造来源头）。
+ */
+export function projectMessagesForSendView(
+  messages: readonly Message[],
+  options?: ProjectMessagesForSendViewOptions,
+): readonly Message[] {
+  return messages.map((msg, index) => {
+    if (msg.role !== "user") return msg;
+    if (msg.windowHead !== undefined) return msg;
+    if (msg.content.some((block) => block.type === "tool_result")) return msg;
+    if (
+      (index === 0 && options?.isExemptSubAgentTaskFirstMessage === true) ||
+      (options?.exemptSubAgentTaskMessageIndex !== undefined &&
+        index === options.exemptSubAgentTaskMessageIndex)
+    ) {
+      return msg;
+    }
+
+    const escapedContent: ContentBlock[] = msg.content.map((block) =>
+      block.type === "text"
+        ? { ...block, text: escapeSendViewSpoofableTags(block.text) }
+        : block,
+    );
+
+    if (!msg.inputIdentity) {
+      return { ...msg, content: escapedContent };
+    }
+
+    const header = formatInputSourceHeader(msg.inputIdentity.source);
+    const first = escapedContent[0];
+    let finalContent: ContentBlock[];
+    if (first && first.type === "text" && first.material === undefined) {
+      finalContent = [{ ...first, text: `${header}${first.text}` }, ...escapedContent.slice(1)];
+    } else {
+      finalContent = [{ type: "text", text: header }, ...escapedContent];
+    }
+
+    return { ...msg, content: finalContent };
+  });
 }
 
 // ─── 消息构建辅助函数 ───

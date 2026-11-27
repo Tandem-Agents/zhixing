@@ -52,7 +52,12 @@ import {
   mergeUsage,
   validatePreSendCompatibility,
 } from "../types/llm.js";
-import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
+import {
+  extractText,
+  extractToolCalls,
+  projectMessagesForSendView,
+  toolResultMessage,
+} from "../types/messages.js";
 import type { Message } from "../types/messages.js";
 import { resolveModelInputCapabilities } from "../types/user-input.js";
 import { toToolSpec } from "../types/tools.js";
@@ -115,15 +120,26 @@ export async function* runAgentLoop(
     params.provider.appendOnlyTurnContext === true
       ? (params.prefixProjectionState ?? createAppendOnlyTurnContextState(params.messages))
       : undefined;
+  if (appendOnlyState) {
+    if (params.resetPrefixProjectionOnStart) {
+      appendOnlyState.reset(params.messages.length);
+    } else {
+      appendOnlyState.resetIfTransient(params.messages.length);
+    }
+  }
 
   const prepareSendView = (messages: readonly Message[]): PreparedSendView => {
     const stateMessages = messages;
+    const projectedStateMessages = projectMessagesForSendView(stateMessages, {
+      isExemptSubAgentTaskFirstMessage: params.exemptInitialSubAgentTaskMessage,
+      exemptSubAgentTaskMessageIndex: params.exemptSubAgentTaskMessageIndex,
+    });
     const messagePrefix = getMessagePrefix();
     if (appendOnlyState) {
       const liveTurnContext = params.turnContextInjector
         ? params.turnContextInjector.build()
         : null;
-      const projected = appendOnlyState.project(stateMessages, liveTurnContext);
+      const projected = appendOnlyState.project(projectedStateMessages, liveTurnContext);
       const messagesForLLM = projected.messagesForLLM;
       const providerMessages =
         messagePrefix.length === 0
@@ -147,8 +163,8 @@ export async function* runAgentLoop(
       };
     }
     const messagesForLLM = params.turnContextInjector
-      ? params.turnContextInjector.inject(stateMessages)
-      : stateMessages;
+      ? params.turnContextInjector.inject(projectedStateMessages)
+      : projectedStateMessages;
     const providerMessages =
       messagePrefix.length === 0
         ? messagesForLLM

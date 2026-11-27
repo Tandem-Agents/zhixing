@@ -150,8 +150,11 @@ export {
 } from "./global-query-validation.js";
 export {
   createSignedExecutionAssetSnapshot,
+  createSignedExecutionAssetSnapshotV2,
   validateExecutionAssetSnapshot,
+  validateExecutionAssetSnapshotV2,
   type UnsignedExecutionAssetSnapshot,
+  type UnsignedExecutionAssetSnapshotV2,
 } from "./execution-asset-snapshot.js";
 export {
   validateEnvironmentRequirement,

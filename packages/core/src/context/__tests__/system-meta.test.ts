@@ -256,7 +256,7 @@ describe("SYSTEM_META_PROMPT_SECTION", () => {
 
   it("只保留标签内容本身难以理解的短注解", () => {
     expect(SYSTEM_META_PROMPT_SECTION).toContain("compact-summary");
-    expect(SYSTEM_META_PROMPT_SECTION).toContain("dropped-turns");
+    expect(SYSTEM_META_PROMPT_SECTION).not.toContain("dropped-turns");
     expect(SYSTEM_META_PROMPT_SECTION).toContain("guidance");
     expect(SYSTEM_META_PROMPT_SECTION).not.toContain('kind="ack"');
     expect(SYSTEM_META_PROMPT_SECTION).not.toContain("startup-bootstrap");

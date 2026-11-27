@@ -467,12 +467,25 @@ export interface SecurityRequest {
    */
   resolvedAccess?: {
     paths?: string[];
+    fileAccess?: "read" | "write";
     commands?: string[];
     hosts?: string[];
     envVars?: string[];
     /** bash/shell 命令的结构化分析（由 CommandAnalyzerMiddleware 填充） */
     commandAnalysis?: import("./command-analyzer.js").CommandAnalysis;
   };
+}
+
+/**
+ * 显式文件路径槽提取器 —— 仅提取真实代表文件系统路径的工具参数，
+ * 绝不把 `url` / `command` / `sceneId` / `action` 当作路径解析。
+ */
+export interface IToolFilePathExtractor {
+  extract(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    cwd: string,
+  ): readonly string[];
 }
 
 // ─── 安全决策 ───

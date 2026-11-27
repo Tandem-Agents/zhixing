@@ -124,6 +124,13 @@ export function validateMessage(value: unknown, label = "Message"): Message {
   return value as unknown as Message;
 }
 
+const SYSTEM_INPUT_SUBSYSTEMS = new Set([
+  "workscene-continuation",
+  "extension-continuation",
+  "advancement-proxy",
+  "scheduled-job",
+]);
+
 export function validateMessageInputIdentity(value: unknown): import("../types/messages.js").MessageInputIdentity {
   assertPlainRecord(value, "Message input identity");
   assertExactKeys(value, ["id", "source"], "Message input identity");
@@ -134,6 +141,16 @@ export function validateMessageInputIdentity(value: unknown): import("../types/m
   } else if (value.source.kind === "conversation") {
     assertExactKeys(value.source, ["kind", "conversationId"], "Conversation message source");
     assertIdentifier(value.source.conversationId, "Source conversation id");
+  } else if (value.source.kind === "program") {
+    assertExactKeys(value.source, ["kind"], "Program message source");
+  } else if (value.source.kind === "channel") {
+    assertExactKeys(value.source, ["kind", "channelId"], "Channel message source");
+    assertIdentifier(value.source.channelId, "Source channel id");
+  } else if (value.source.kind === "system") {
+    assertExactKeys(value.source, ["kind", "subsystem"], "System message source");
+    if (typeof value.source.subsystem !== "string" || !SYSTEM_INPUT_SUBSYSTEMS.has(value.source.subsystem)) {
+      throw new TypeError("Invalid system message input subsystem");
+    }
   } else {
     throw new TypeError("Invalid message input source");
   }
