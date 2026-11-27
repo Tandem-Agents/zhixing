@@ -258,6 +258,12 @@ function harness(options: {
       decision: options.verdict ?? "safe",
       reason: options.reason ?? "测试理由",
     })),
+    authorizeCandidateHandling: async () => ({
+      reviewerAuthorized: true,
+      callerReceiptContentAuthorized: true,
+      publishAuthorized: true,
+    }),
+    verifyNeedsConfirmReportApproval: async () => true,
     now: () => now,
     newToken: () => `token-${++tokenOrdinal}`,
   };

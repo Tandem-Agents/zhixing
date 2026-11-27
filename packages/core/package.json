@@ -128,6 +128,10 @@
       "types": "./dist/skills/id.d.ts",
       "import": "./dist/skills/id.js"
     },
+    "./skills/archive": {
+      "types": "./dist/skills/archive.d.ts",
+      "import": "./dist/skills/archive.js"
+    },
     "./skills/global-state": {
       "types": "./dist/skills/global-state-adapter.d.ts",
       "import": "./dist/skills/global-state-adapter.js"
@@ -297,7 +301,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node ../../scripts/generate-builtin-skill-assets.mjs --rebuild-if-changed",
     "typecheck:contracts": "tsc -p tsconfig.contracts.json",
     "lint:contract-schemas": "node ../../scripts/lint-distributed-runtime-contracts.mjs && tsc -p tsconfig.contracts.schema.json",
     "test": "vitest run",

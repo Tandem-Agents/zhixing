@@ -46,6 +46,26 @@ export function renderSkillIndex(
   return lines.join("\n");
 }
 
+const INSTRUCTION_V2 =
+  "To use a skill, call `skill_read` with the qualified id (`user:<id>` or `system:<id>`) shown below. Descriptions are brief — read a package for full instructions and sub-resources.";
+
+/**
+ * V2 限定技能索引渲染：使用 `user:<id>` 与 `system:<id>` 限定标识，彻底消除同名遮蔽。
+ */
+export function renderSkillIndexV2(
+  records: readonly SkillIndexEntry[],
+  opts?: RenderSkillIndexOptions,
+): string | null {
+  if (records.length === 0) return null;
+  const max = opts?.maxDescriptionChars ?? DEFAULT_MAX_DESCRIPTION_CHARS;
+  const lines: string[] = [HEADER, INSTRUCTION_V2];
+  for (const r of records) {
+    const star = r.pinned ? "★ " : "";
+    lines.push(`- ${star}**${r.id}**: ${truncate(r.description, max)}`);
+  }
+  return lines.join("\n");
+}
+
 /** 超过上限则截断并以省略号收尾;不超原样返回。 */
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;

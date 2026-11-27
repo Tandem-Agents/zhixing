@@ -128,6 +128,59 @@ describe("SkillCatalogApplicationService", () => {
       skillId: "alpha",
     })).rejects.toBe(commitFailure);
   });
+
+  it("projects legacy list via skill-list surface (disabled || !userSlashCommand) while keeping list-v2 orthogonal", async () => {
+    const validContentRef = { digest: `sha256:${"a".repeat(64)}`, bytes: 1 };
+    const slashOnly = {
+      ...entry,
+      id: "slash-only",
+      disabled: false,
+      contentRef: validContentRef,
+      visibility: { modelAutoIndex: false, userSlashCommand: true },
+    };
+    const modelOnly = {
+      ...entry,
+      id: "model-only",
+      disabled: false,
+      contentRef: validContentRef,
+      visibility: { modelAutoIndex: true, userSlashCommand: false },
+    };
+    const service = new SkillCatalogApplicationService({
+      readCatalog: vi.fn(async () => ({ catalogRevision: 3, entries: [] })),
+      readCatalogV2: vi.fn(async () => ({
+        catalogRevision: 3,
+        entries: [slashOnly, modelOnly],
+      })),
+      readEntry: vi.fn(async () => null),
+      commit: vi.fn(async () => ({ kind: "committed" as const, catalogRevision: 3 })),
+    });
+
+    const v1 = await service.query({ kind: "list" });
+    expect(v1.entries.map((item) => ({ id: item.id, disabled: item.disabled }))).toEqual([
+      { id: "slash-only", disabled: false },
+      { id: "model-only", disabled: true },
+    ]);
+
+    const v2 = await service.query({ kind: "list-v2" });
+    expect(
+      v2.entries.map((item) => ({
+        id: item.id,
+        disabled: item.disabled,
+        visibility: item.visibility,
+      })),
+    ).toEqual([
+      {
+        id: "slash-only",
+        disabled: false,
+        visibility: { modelAutoIndex: false, userSlashCommand: true },
+      },
+      {
+        id: "model-only",
+        disabled: false,
+        visibility: { modelAutoIndex: true, userSlashCommand: false },
+      },
+    ]);
+  });
 });
 
 describe("SkillCatalogSaveApplicationService", () => {
@@ -157,7 +210,7 @@ describe("SkillCatalogSaveApplicationService", () => {
     expect(save.events).toEqual(["read", "overlay", "artifact", "stage"]);
   });
 
-  it("updates disabled or linked catalog entries and preserves expected revision", async () => {
+  it("updates disabled or linked catalog entries when explicit expectedRevision matches", async () => {
     for (const source of ["own", "linked"] as const) {
       const save = saveHarness({
         entry: { ...entry, source, disabled: true, revision: 4 },
@@ -167,6 +220,7 @@ describe("SkillCatalogSaveApplicationService", () => {
         description: "updated description",
         body: "updated body",
         mode: "work",
+        expectedRevision: 4,
       }, `tool-${source}`)).resolves.toMatchObject({ outcome: "updated" });
       expect(save.staged[0]).toMatchObject({
         operationId: `tool-${source}:save`,
@@ -191,7 +245,7 @@ describe("SkillCatalogSaveApplicationService", () => {
     await expect(save.service.save(draft, "first")).resolves.toMatchObject({
       outcome: "created",
     });
-    await expect(save.service.save({ ...draft, body: "第二版" }, "second"))
+    await expect(save.service.save({ ...draft, body: "第二版", expectedRevision: 1 }, "second"))
       .resolves.toMatchObject({ outcome: "updated" });
     expect(save.staged.map(({ operationId, mutation }) => ({
       operationId,
@@ -282,12 +336,12 @@ describe("SkillCatalogLoadApplicationService", () => {
     expect(load.staged).toEqual([]);
   });
 
-  it("lets an artifact-backed user entry shadow the builtin and records usage after parsing", async () => {
+  it("lets an active artifact-backed user entry shadow the builtin and rejects disabled entries", async () => {
     const user = {
       ...entry,
       id: skillNameToId("提炼技能"),
       name: "用户提炼技能",
-      disabled: true,
+      disabled: false,
     };
     const load = loadHarness({ entry: user });
 
@@ -299,6 +353,12 @@ describe("SkillCatalogLoadApplicationService", () => {
       name: user.name,
       body: "User body",
     });
+
+    const disabledLoad = loadHarness({ entry: { ...user, disabled: true } });
+    await expect(disabledLoad.service.load({
+      id: user.id,
+      operationId: "tool-load-disabled",
+    })).rejects.toMatchObject({ code: "skill-disabled" });
     expect(load.events).toEqual(["assignment", "content", "stage"]);
     expect(load.staged).toEqual([{
       operationId: "tool-load:usage",
@@ -356,20 +416,21 @@ describe("SkillCatalogLoadApplicationService", () => {
       .rejects.toThrow("Skill not found: unknown");
     expect(unknown.staged).toEqual([]);
 
+    const activeEntry = { ...entry, disabled: false };
     const artifactError = new Error("artifact unavailable");
-    const failedArtifact = loadHarness({ entry, readError: artifactError });
+    const failedArtifact = loadHarness({ entry: activeEntry, readError: artifactError });
     await expect(failedArtifact.service.load({ id: entry.id, operationId: "artifact" }))
       .rejects.toBe(artifactError);
     expect(failedArtifact.staged).toEqual([]);
 
-    const missingOperation = loadHarness({ entry });
+    const missingOperation = loadHarness({ entry: activeEntry });
     await expect(missingOperation.service.load({ id: entry.id })).rejects.toThrow(
       "Skill mutation requires a durable tool operation id",
     );
     expect(missingOperation.staged).toEqual([]);
 
     const stageError = new Error("usage conflict");
-    const failedStage = loadHarness({ entry, stageError });
+    const failedStage = loadHarness({ entry: activeEntry, stageError });
     await expect(failedStage.service.load({ id: entry.id, operationId: "stage" }))
       .rejects.toBe(stageError);
   });

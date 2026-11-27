@@ -12,6 +12,7 @@
  */
 
 import type { ThreatCategory } from "../security/types.js";
+import { scrubSecrets } from "../security/secret-scrubber.js";
 
 export interface ContentThreat {
   category: ThreatCategory;
@@ -84,4 +85,45 @@ export function scanSkillContent(text: string): ContentThreat[] {
     }
   }
   return threats;
+}
+
+const SENSITIVE_CREDENTIAL_FILENAME_PATTERNS: ReadonlyArray<{ category: string; re: RegExp }> = [
+  { category: "dotenv-file", re: /(?:^|\/)\.env(?:\.(?!example$|sample$|template$)[a-zA-Z0-9_-]+)?$/i },
+  { category: "credentials-file", re: /(?:^|\/)(?:credentials\.json|secrets\.json|\.npmrc|\.pypirc|\.netrc)$/i },
+  { category: "ssh-private-key", re: /(?:^|\/)(?:id_rsa|id_ed25519|id_ecdsa|id_dsa)$/i },
+  { category: "private-key-file", re: /\.(?:pem|key|p12|pfx)$/i },
+  { category: "cloud-credentials", re: /(?:^|\/)(?:\.aws\/credentials|\.kube\/config|\.docker\/config\.json)$/i },
+];
+
+export interface HighConfidenceSecretBlockResult {
+  readonly blocked: boolean;
+  /** 仅含凭据类别标识，不含文件名或内容摘录，供安全脱敏回执使用。 */
+  readonly categories: readonly string[];
+}
+
+/**
+ * 准入前置本地高置信凭据与敏感文件名扫描：
+ * 在向任何模型（含 AdmissionLlm）或外部会话回执暴露内容前执行；命中即硬阻断且零摘录。
+ */
+export function scanHighConfidenceSecrets(
+  members: readonly { readonly path: string; readonly content: string }[],
+): HighConfidenceSecretBlockResult {
+  const categories = new Set<string>();
+  for (const member of members) {
+    const normalizedPath = member.path.replace(/\\/g, "/");
+    for (const pattern of SENSITIVE_CREDENTIAL_FILENAME_PATTERNS) {
+      if (pattern.re.test(normalizedPath)) {
+        categories.add(pattern.category);
+      }
+    }
+    const scrubbed = scrubSecrets(member.content);
+    for (const redaction of scrubbed.redactions) {
+      categories.add(redaction.category);
+    }
+  }
+  const ordered = [...categories];
+  return {
+    blocked: ordered.length > 0,
+    categories: ordered,
+  };
 }

@@ -41,6 +41,7 @@ const entry = [
     "src/skills/catalog-management-correctness.ts",
     "src/skills/admission.ts",
     "src/skills/id.ts",
+    "src/skills/archive.ts",
     "src/skills/global-state-adapter.ts",
     "src/product-api/catalog.ts",
     "src/trust-administration/application.ts",

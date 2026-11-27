@@ -2132,13 +2132,13 @@ describe("user job durable protocol", {
           t: "committed", assignmentId: ASSIGNMENT_ID, jobRunId: JOB_RUN_ID,
         }) }),
         expect.objectContaining({ stream: "intent:skill-authority", body: expect.objectContaining({
-          t: "skill-mutation-applied", requestId: "job-existing-skill-usage", targetRevision: 3,
-          entry: expect.objectContaining({ contentRef: contentB, revision: 3,
+          t: "skill-mutation-applied", requestId: "job-existing-skill-usage", targetRevision: 2,
+          entry: expect.objectContaining({ contentRef: contentB, revision: 2,
             usage: { hitCount: 1, lastHitAt: NOW } }),
         }) }),
         expect.objectContaining({ stream: "publish", body: expect.objectContaining({
           t: "publish-decision", assignmentId: ASSIGNMENT_ID,
-          outcomes: [{ seq: 1, outcome: { t: "granted", targetRevision: 3 } }],
+          outcomes: [{ seq: 1, outcome: { t: "granted", targetRevision: 2 } }],
         }) }),
       ]));
 
@@ -2153,7 +2153,7 @@ describe("user job durable protocol", {
       });
       const durable = await recovered.read({ kind: "skill-get", skillId: "skill" }, contextForSkill("reopen-usage"));
       expect(durable.kind === "skill-get" && durable.entry).toMatchObject({
-        contentRef: contentB, revision: 3, usage: { hitCount: 1, lastHitAt: NOW },
+        contentRef: contentB, revision: 2, usage: { hitCount: 1, lastHitAt: NOW },
       });
       expect(Buffer.from(await harness.artifacts.get(contentB)).toString("utf8")).toBe("skill body B updated");
     } finally {

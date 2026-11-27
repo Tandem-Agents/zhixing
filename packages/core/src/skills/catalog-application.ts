@@ -1,19 +1,3 @@
-import type {
-  ArtifactRef,
-  Digest,
-} from "../contracts/index.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
-import { scrubSecrets } from "../security/secret-scrubber.js";
-import {
-  ADMISSION_TOKEN_TTL_MS,
-  assessSkill,
-  type AdmissionLlm,
-} from "./admission.js";
-import type { ContentThreat } from "./content-scan.js";
-import { skillNameToId } from "./id.js";
-import { builtinIndexEntries, getBuiltinSkill } from "./builtin.js";
-import type { SkillCatalogEntry, SkillMode } from "./types.js";
-import { renderSkillIndex } from "./render.js";
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -23,11 +7,112 @@ import {
   defineProductApiQuery,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
+import { builtinIndexEntries, getBuiltinSkill, listBuiltinSkills } from "./builtin.js";
+import { formatQualifiedSkillId } from "./id.js";
+import { normalizeEntryToV2 } from "./package-pagination.js";
+import { renderSkillIndex, renderSkillIndexV2 } from "./render.js";
+import {
+  DEFAULT_SKILL_VISIBILITY,
+  computeSkillEntryV2Digest,
+  projectSkillEntryToV1,
+  projectV1SkillEntryToV2,
+  type SkillCatalogChangedFact,
+  type SkillCatalogEntry,
+  type SkillCatalogEntryV2,
+  type SkillMode,
+  type SkillVisibility,
+} from "./types.js";
 
-export type { SkillCatalogEntry, SkillMode } from "./types.js";
+export {
+  DEFAULT_SKILL_VISIBILITY,
+  computeSkillEntryV2Digest,
+  projectSkillEntryToV1,
+  projectV1SkillEntryToV2,
+};
+export type {
+  SkillCatalogChangedFact,
+  SkillCatalogEntry,
+  SkillCatalogEntryV2,
+  SkillMode,
+  SkillV1ProjectionSurface,
+  SkillVisibility,
+} from "./types.js";
+export {
+  SKILL_READ_MAX_RESPONSE_BYTES,
+  SkillPackageReadError,
+  applyOverlayMutation,
+  computeHeaderDiff,
+  decodeSkillReadCursor,
+  encodeSkillReadCursor,
+  foldSkillCatalogEntry,
+  normalizeEntryToV2,
+  normalizeResourceOrThrow,
+  packSkillReadPage,
+} from "./package-pagination.js";
+export type {
+  ParsedSkillReadCursor,
+  SkillPackageChangedResource,
+  SkillPackageNavigationItem,
+  SkillPackageReadErrorCode,
+  SkillPackageReadSuccessOutcome,
+  SkillPackageVersionMismatchOutcome,
+} from "./package-pagination.js";
+export {
+  SkillCatalogSaveApplicationService,
+  SkillCatalogSaveError,
+  isSkillCatalogSaveMutation,
+  isV2SkillSaveMutation,
+  sameSkillSaveDraft,
+} from "./catalog-save-service.js";
+export type {
+  SkillCatalogSaveApplication,
+  SkillCatalogSaveBaselinePreview,
+  SkillCatalogSaveCorrectnessPort,
+  SkillCatalogSaveDraft,
+  SkillCatalogSaveErrorCode,
+  SkillCatalogSaveMutation,
+  SkillCatalogSaveOutcome,
+  SkillCatalogSaveOverlayMutation,
+  SkillCatalogSaveOverlayRecord,
+  SkillCatalogSaveRecord,
+  SkillCatalogSaveRecordV2,
+  SkillCatalogSaveResourceDraft,
+} from "./catalog-save-service.js";
+export { SkillCatalogLoadApplicationService } from "./catalog-load-service.js";
+export type {
+  SkillCatalogLoadApplication,
+  SkillCatalogLoadCorrectnessPort,
+  SkillCatalogLoadOutcome,
+  SkillCatalogLoadRequest,
+  SkillCatalogLoadScope,
+  SkillCatalogUsageMutation,
+  SkillMaterializeReadOutcome,
+  SkillMaterializeReadRequest,
+  SkillMaterializeReadSuccessOutcome,
+  SkillPackageReadOutcome,
+  SkillPackageReadRequest,
+} from "./catalog-load-service.js";
+export {
+  SkillCatalogAdmissionApplicationService,
+  resolveAndValidateCandidateMembers,
+} from "./catalog-admission-service.js";
+export type {
+  SkillAdmissionAuthorizationDecision,
+  SkillAdmissionReviewReport,
+  SkillCatalogAdmissionApplication,
+  SkillCatalogAdmissionCandidate,
+  SkillCatalogAdmissionCorrectnessPort,
+  SkillCatalogAdmissionMutation,
+  SkillCatalogAdmissionMutationV2,
+  SkillCatalogAdmissionOutcome,
+  SkillCatalogAdmissionRequest,
+} from "./catalog-admission-service.js";
+export { getBuiltinSkill, listBuiltinSkills, renderSkillIndexV2 };
 
 /** Skill-owned management query. */
-export type SkillCatalogQuery = { readonly kind: "list" };
+export type SkillCatalogQuery =
+  | { readonly kind: "list" }
+  | { readonly kind: "list-v2" };
 
 export type SkillCatalogStatePatch = Readonly<{
   mode?: SkillMode;
@@ -42,6 +127,12 @@ export type SkillCatalogCommand =
       readonly skillId: string;
       readonly patch: SkillCatalogStatePatch;
     }
+  | {
+      readonly kind: "set-visibility";
+      readonly skillId: string;
+      readonly visibility: SkillVisibility;
+      readonly expectedRevision?: number;
+    }
   | { readonly kind: "archive"; readonly skillId: string };
 
 /** Stable management projection; it deliberately contains no storage or authority types. */
@@ -50,9 +141,8 @@ export interface SkillCatalogView {
   readonly catalogRevision: number;
 }
 
-/** A committed Skill fact. Bindings may project it to their own transport vocabulary. */
-export interface SkillCatalogChangedFact {
-  readonly kind: "skill-catalog-changed";
+export interface SkillCatalogViewV2 {
+  readonly entries: readonly SkillCatalogEntryV2[];
   readonly catalogRevision: number;
 }
 
@@ -61,7 +151,8 @@ export interface SkillCatalogCommandResult {
 }
 
 export interface SkillCatalogApplication {
-  query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
+  query(query: { readonly kind: "list-v2" }): Promise<SkillCatalogViewV2>;
+  query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2>;
   execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult>;
 }
 
@@ -75,6 +166,12 @@ export type SkillCatalogManagementMutation =
       kind: "set-state";
       skillId: string;
       patch: SkillCatalogManagementStatePatch;
+      expectedRevision: number;
+    }>
+  | Readonly<{
+      kind: "set-visibility";
+      skillId: string;
+      visibility: SkillVisibility;
       expectedRevision: number;
     }>
   | Readonly<{
@@ -93,6 +190,7 @@ export type SkillCatalogManagementCommitResult =
  */
 export interface SkillCatalogManagementCorrectnessPort {
   readCatalog(input: Readonly<{ includeDisabled: boolean }>): Promise<SkillCatalogView>;
+  readCatalogV2?(input: Readonly<{ includeDisabled: boolean }>): Promise<SkillCatalogViewV2>;
   readEntry(skillId: string): Promise<SkillCatalogEntry | null>;
   commit(
     mutation: SkillCatalogManagementMutation,
@@ -107,7 +205,8 @@ export interface SkillCatalogManagementCorrectnessPort {
  * facts; they cannot infer catalog state from notifications.
  */
 export interface SkillCatalogClient {
-  query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
+  query(query: { readonly kind: "list-v2" }): Promise<SkillCatalogViewV2>;
+  query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2>;
   command(command: SkillCatalogCommand): Promise<void>;
   onFact(handler: (fact: SkillCatalogChangedFact) => void): () => void;
 }
@@ -119,9 +218,15 @@ export const SKILL_CATALOG_CHANGED_FACT_EVENT = defineProductApiFactEvent<
 
 export const SKILL_CATALOG_LIST_QUERY = defineProductApiQuery<
   "skill-catalog.query.list",
-  SkillCatalogQuery,
+  { readonly kind: "list" },
   SkillCatalogView
 >("skill-catalog.query.list");
+
+export const SKILL_CATALOG_LIST_V2_QUERY = defineProductApiQuery<
+  "skill-catalog.query.list-v2",
+  { readonly kind: "list-v2" },
+  SkillCatalogViewV2
+>("skill-catalog.query.list-v2");
 
 export const SKILL_CATALOG_SET_STATE_COMMAND = defineProductApiCommand<
   "skill-catalog.command.set-state",
@@ -129,6 +234,13 @@ export const SKILL_CATALOG_SET_STATE_COMMAND = defineProductApiCommand<
   SkillCatalogCommandResult,
   SkillCatalogChangedFact
 >("skill-catalog.command.set-state", [SKILL_CATALOG_CHANGED_FACT_EVENT]);
+
+export const SKILL_CATALOG_SET_VISIBILITY_COMMAND = defineProductApiCommand<
+  "skill-catalog.command.set-visibility",
+  Extract<SkillCatalogCommand, { readonly kind: "set-visibility" }>,
+  SkillCatalogCommandResult,
+  SkillCatalogChangedFact
+>("skill-catalog.command.set-visibility", [SKILL_CATALOG_CHANGED_FACT_EVENT]);
 
 export const SKILL_CATALOG_ARCHIVE_COMMAND = defineProductApiCommand<
   "skill-catalog.command.archive",
@@ -140,7 +252,9 @@ export const SKILL_CATALOG_ARCHIVE_COMMAND = defineProductApiCommand<
 export const SKILL_CATALOG_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     SKILL_CATALOG_LIST_QUERY,
+    SKILL_CATALOG_LIST_V2_QUERY,
     SKILL_CATALOG_SET_STATE_COMMAND,
+    SKILL_CATALOG_SET_VISIBILITY_COMMAND,
     SKILL_CATALOG_ARCHIVE_COMMAND,
   ],
   factEvents: [SKILL_CATALOG_CHANGED_FACT_EVENT],
@@ -153,10 +267,18 @@ export function createSkillCatalogProductApiContribution(
   return defineProductApiContribution({
     operations: [
       bindProductApiOperation(SKILL_CATALOG_LIST_QUERY, async (query) => ({
+        result: (await application.query(query)) as SkillCatalogView,
+        facts: [],
+      })),
+      bindProductApiOperation(SKILL_CATALOG_LIST_V2_QUERY, async (query) => ({
         result: await application.query(query),
         facts: [],
       })),
       bindProductApiOperation(SKILL_CATALOG_SET_STATE_COMMAND, async (command) => {
+        const result = await application.execute(command);
+        return { result, facts: [result.fact] };
+      }),
+      bindProductApiOperation(SKILL_CATALOG_SET_VISIBILITY_COMMAND, async (command) => {
         const result = await application.execute(command);
         return { result, facts: [result.fact] };
       }),
@@ -177,6 +299,10 @@ export interface SkillCatalogKernelProjectionSource {
     readonly catalogRevision: number;
     readonly entries: readonly SkillCatalogEntry[];
   }>;
+  readCatalogV2?(): Promise<{
+    readonly catalogRevision: number;
+    readonly entries: readonly SkillCatalogEntryV2[];
+  }>;
 }
 
 /** Immutable Skill capability projection consumed by the Intelligence Kernel. */
@@ -188,13 +314,14 @@ export interface SkillCatalogKernelProjection {
 /** The Kernel asks only for its runtime mode and never interprets catalog entries. */
 export interface SkillCatalogKernelProjectionApplication {
   project(mode: SkillMode): Promise<SkillCatalogKernelProjection>;
+  projectV2?(mode: SkillMode): Promise<SkillCatalogKernelProjection>;
 }
 
 /**
  * Skill-owned projection policy for Kernel prompt capabilities.
  *
  * With no source, the same policy produces the builtin-only startup projection.
- * With a source, it owns mode filtering, disabled shadowing, the user top-N pool,
+ * With a source, it owns mode filtering, visibility/disabled filtering, the user top-N pool,
  * builtin append rules and the final byte representation.
  */
 export class SkillCatalogKernelProjectionApplicationService
@@ -223,589 +350,39 @@ export class SkillCatalogKernelProjectionApplicationService
       ]),
     });
   }
-}
 
-/** Skill-owned input for the save_skill create/update use case. */
-export interface SkillCatalogSaveDraft {
-  readonly name: string;
-  readonly description: string;
-  readonly body: string;
-  readonly mode: SkillMode;
-}
-
-export interface SkillCatalogSaveOutcome {
-  readonly id: string;
-  readonly name: string;
-  readonly outcome: "created" | "updated";
-  readonly scrubbedCount: number;
-}
-
-/** The only application entry for save_skill. Bindings retain product copy only. */
-export interface SkillCatalogSaveApplication {
-  save(
-    draft: SkillCatalogSaveDraft,
-    operationId?: string,
-  ): Promise<SkillCatalogSaveOutcome>;
-}
-
-export interface SkillCatalogSaveRecord {
-  readonly name: string;
-  readonly description: string;
-  readonly content: ArtifactRef;
-}
-
-export type SkillCatalogSaveOverlayMutation =
-  | {
-      readonly kind: "skill-create";
-      readonly record: SkillCatalogSaveRecord;
-      readonly mode: SkillMode;
+  /** V2 限定命名空间索引投影：`user:<id>` 前 20 条（`!disabled && modelAutoIndex`）+ 全量 `system:<id>`，零同名遮蔽。 */
+  async projectV2(mode: SkillMode): Promise<SkillCatalogKernelProjection> {
+    if (mode !== "main" && mode !== "work") {
+      throw new TypeError("Skill capability projection mode is invalid");
     }
-  | {
-      readonly kind: "skill-admit";
-      readonly record: SkillCatalogSaveRecord;
-      readonly mode: SkillMode;
-    }
-  | {
-      readonly kind: "skill-update";
-      readonly skillId: string;
-      readonly record: SkillCatalogSaveRecord;
-      readonly mode: SkillMode;
-      readonly expectedRevision: number;
-    };
-
-export interface SkillCatalogSaveOverlayRecord {
-  readonly recordSeq: number;
-  readonly requestIdentity: string;
-  readonly mutation: SkillCatalogSaveOverlayMutation;
-  readonly mutationDigest: Digest;
-}
-
-export type SkillCatalogSaveMutation = Exclude<
-  SkillCatalogSaveOverlayMutation,
-  { readonly kind: "skill-admit" }
->;
-
-/**
- * Path-free Correctness adapter required by the Skill-owned save use case.
- * Runtime composition supplies artifact, global-read and assignment-stage mechanics;
- * it does not decide upsert, overlay, format or operation identity semantics.
- */
-export interface SkillCatalogSaveCorrectnessPort {
-  readCatalogEntry(skillId: string): Promise<SkillCatalogEntry | null>;
-  readOverlay(): Promise<readonly SkillCatalogSaveOverlayRecord[]>;
-  requestIdentityFor(operationId: string): string;
-  putContent(document: string): Promise<ArtifactRef>;
-  stage(operationId: string, mutation: SkillCatalogSaveMutation): Promise<void>;
-  assignmentIssuedAt(): string;
-}
-
-/** Skill-owned save use case over the assignment-scoped Correctness adapter. */
-export class SkillCatalogSaveApplicationService
-  implements SkillCatalogSaveApplication
-{
-  constructor(private readonly correctness: SkillCatalogSaveCorrectnessPort) {}
-
-  async save(
-    draft: SkillCatalogSaveDraft,
-    operationId?: string,
-  ): Promise<SkillCatalogSaveOutcome> {
-    if (
-      typeof draft?.name !== "string" ||
-      typeof draft.description !== "string" ||
-      typeof draft.body !== "string" ||
-      (draft.mode !== "main" && draft.mode !== "work")
-    ) {
-      throw new Error("Skill save draft is invalid");
-    }
-    const name = scrubSecrets(draft.name);
-    const description = scrubSecrets(draft.description);
-    const body = scrubSecrets(draft.body);
-    const normalized = {
-      name: name.scrubbed.trim(),
-      description: description.scrubbed.trim(),
-      body: body.scrubbed.trim(),
-      mode: draft.mode,
-    } satisfies SkillCatalogSaveDraft;
-    const id = skillNameToId(normalized.name);
-    if (!id || !normalized.description || !normalized.body) {
-      throw new Error("Skill name, description and body must remain non-empty");
-    }
-
-    const stagedOperationId = operationId
-      ? `${operationId}:save`
-      : undefined;
-    const currentState = await this.#readCurrent(
-      id,
-      stagedOperationId === undefined
-        ? undefined
-        : this.correctness.requestIdentityFor(stagedOperationId),
-    );
-    const content = await this.correctness.putContent(
-      stringifyFrontmatter(
-        { name: normalized.name, description: normalized.description },
-        normalized.body,
-      ),
-    );
-    if (!operationId) {
-      throw new Error("Skill mutation requires a durable tool operation id");
-    }
-    const candidate: SkillCatalogSaveMutation = currentState.entry
-      ? {
-          kind: "skill-update",
-          skillId: currentState.entry.id,
-          record: {
-            name: normalized.name,
-            description: normalized.description,
-            content,
-          },
-          mode: normalized.mode,
-          expectedRevision: currentState.entry.revision,
-        }
-      : {
-          kind: "skill-create",
-          record: {
-            name: normalized.name,
-            description: normalized.description,
-            content,
-          },
-          mode: normalized.mode,
-        };
-    const replayMutation = currentState.replayRecord?.mutation;
-    const exactReplay = replayMutation !== undefined &&
-      isSkillCatalogSaveMutation(replayMutation) &&
-      sameSkillSaveDraft(replayMutation, candidate);
-    const mutation = exactReplay
-      ? replayMutation
-      : candidate;
-    await this.correctness.stage(
-      stagedOperationId!,
-      mutation,
-    );
-    return {
-      id,
-      name: normalized.name,
-      outcome: mutation.kind === "skill-update" ? "updated" : "created",
-      scrubbedCount:
-        name.redactions.length +
-        description.redactions.length +
-        body.redactions.length,
-    };
-  }
-
-  async #readCurrent(
-    skillId: string,
-    currentRequestIdentity?: string,
-  ): Promise<{
-    readonly entry: SkillCatalogEntry | null;
-    readonly replayRecord?: SkillCatalogSaveOverlayRecord;
-  }> {
-    let entry = await this.correctness.readCatalogEntry(skillId);
-    const overlay = await this.correctness.readOverlay();
-    const replayRecords = currentRequestIdentity === undefined
-      ? []
-      : overlay.filter(
-          (record) => record.requestIdentity === currentRequestIdentity,
-        );
-    if (replayRecords.length > 1) {
-      throw new Error("Skill save overlay contains a duplicate operation identity");
-    }
-    const replayRecordSeq = replayRecords[0]?.recordSeq;
-    for (const record of overlay) {
-      if (replayRecordSeq !== undefined && record.recordSeq >= replayRecordSeq) {
-        continue;
-      }
-      const mutation = record.mutation;
-      const mutationId = skillNameToId(mutation.record.name);
-      if (mutationId !== skillId) continue;
-      entry = {
-        id: mutationId,
-        name: mutation.record.name,
-        description: mutation.record.description,
-        source: mutation.kind === "skill-admit" ? "linked" : "own",
-        mode: mutation.mode,
-        pinned: entry?.pinned ?? false,
-        disabled: false,
-        createdAt: entry?.createdAt ?? this.correctness.assignmentIssuedAt(),
-        usage: entry?.usage ?? null,
-        contentRef: mutation.record.content,
-        revision: entry ? entry.revision + 1 : 1,
-        digest: record.mutationDigest,
-      };
-    }
-    return {
-      entry,
-      ...(replayRecords[0] === undefined
-        ? {}
-        : { replayRecord: replayRecords[0] }),
-    };
-  }
-}
-
-/** Skill-owned request for loading executable instructions within one tool operation. */
-export interface SkillCatalogLoadRequest {
-  readonly id: string;
-  readonly operationId?: string;
-}
-
-/** Stable projection consumed by load_skill; storage and assignment details stay private. */
-export interface SkillCatalogLoadOutcome {
-  readonly id: string;
-  readonly name: string;
-  readonly body: string;
-}
-
-/** The only application entry for load_skill and its durable usage hit. */
-export interface SkillCatalogLoadApplication {
-  load(request: SkillCatalogLoadRequest): Promise<SkillCatalogLoadOutcome>;
-}
-
-export interface SkillCatalogUsageMutation {
-  readonly kind: "skill-usage";
-  readonly record: {
-    readonly skillId: string;
-    readonly occurredAt: string;
-    readonly hitDelta: 1;
-  };
-}
-
-/** Explicit execution scope; missing assignment context remains an adapter error. */
-export type SkillCatalogLoadScope =
-  | {
-      readonly kind: "assignment";
-      readonly entry: SkillCatalogEntry | null;
-      readonly overlay: readonly SkillCatalogSaveOverlayRecord[];
-      readonly issuedAt: string;
-    }
-  | {
-      /** Production runtime without ArtifactStore: immutable builtins only. */
-      readonly kind: "builtin-only";
-    };
-
-/**
- * Path-free Correctness adapter for Skill loading. The Skill application owns
- * user-over-builtin selection, overlay folding, document parsing and usage identity.
- */
-export interface SkillCatalogLoadCorrectnessPort {
-  readScope(skillId: string): Promise<SkillCatalogLoadScope>;
-  readContent(content: ArtifactRef): Promise<string>;
-  stageUsage(operationId: string, mutation: SkillCatalogUsageMutation): Promise<void>;
-}
-
-/** Skill-owned load and usage application over assignment-scoped adapters. */
-export class SkillCatalogLoadApplicationService
-  implements SkillCatalogLoadApplication
-{
-  constructor(private readonly correctness: SkillCatalogLoadCorrectnessPort) {}
-
-  async load(request: SkillCatalogLoadRequest): Promise<SkillCatalogLoadOutcome> {
-    const id = typeof request?.id === "string" ? request.id.trim() : "";
-    if (!id) throw new Error("Skill id must be non-empty");
-
-    const builtin = getBuiltinSkill(id);
-    const scope = await this.correctness.readScope(id);
-    if (scope.kind === "builtin-only") {
-      if (!builtin) {
-        throw new Error("User skills require an active artifact-backed assignment");
-      }
-      return { id: builtin.id, name: builtin.name, body: builtin.body };
-    }
-
-    const entry = foldSkillCatalogEntry(
-      id,
-      scope.entry,
-      scope.overlay,
-      scope.issuedAt,
-    );
-    if (!entry) {
-      if (!builtin) throw new Error(`Skill not found: ${id}`);
-      return { id: builtin.id, name: builtin.name, body: builtin.body };
-    }
-
-    const document = await this.correctness.readContent(entry.contentRef);
-    const parsed = parseFrontmatter(document);
-    if (!request.operationId) {
-      throw new Error("Skill mutation requires a durable tool operation id");
-    }
-    await this.correctness.stageUsage(`${request.operationId}:usage`, {
-      kind: "skill-usage",
-      record: {
-        skillId: entry.id,
-        occurredAt: scope.issuedAt,
-        hitDelta: 1,
-      },
+    const snapshot = this.source?.readCatalogV2
+      ? await this.source.readCatalogV2()
+      : this.source
+        ? await this.source.readCatalog()
+        : { catalogRevision: -1, entries: [] as const };
+    const visibleUsers = snapshot.entries
+      .filter((entry) => {
+        const v2 = entry as Partial<SkillCatalogEntryV2>;
+        const autoIndex = v2.visibility ? v2.visibility.modelAutoIndex : true;
+        return entry.mode === mode && !entry.disabled && autoIndex;
+      })
+      .slice(0, SKILL_CATALOG_KERNEL_TOP_N)
+      .map((entry) => ({
+        id: formatQualifiedSkillId("user", entry.id),
+        description: entry.description,
+        pinned: entry.pinned,
+      }));
+    const systems = listBuiltinSkills(mode).map((entry) => ({
+      id: formatQualifiedSkillId("system", entry.id),
+      description: entry.description,
+      pinned: false as const,
+    }));
+    return Object.freeze({
+      catalogRevision: snapshot.catalogRevision,
+      content: renderSkillIndexV2([...visibleUsers, ...systems]),
     });
-    return { id: entry.id, name: entry.name, body: parsed.content };
   }
-}
-
-function foldSkillCatalogEntry(
-  skillId: string,
-  initial: SkillCatalogEntry | null,
-  overlay: readonly SkillCatalogSaveOverlayRecord[],
-  issuedAt: string,
-): SkillCatalogEntry | null {
-  let entry = initial;
-  for (const record of overlay) {
-    const mutation = record.mutation;
-    const mutationId = skillNameToId(mutation.record.name);
-    if (mutationId !== skillId) continue;
-    entry = {
-      id: mutationId,
-      name: mutation.record.name,
-      description: mutation.record.description,
-      source: mutation.kind === "skill-admit" ? "linked" : "own",
-      mode: mutation.mode,
-      pinned: entry?.pinned ?? false,
-      disabled: false,
-      createdAt: entry?.createdAt ?? issuedAt,
-      usage: entry?.usage ?? null,
-      contentRef: mutation.record.content,
-      revision: entry ? entry.revision + 1 : 1,
-      digest: record.mutationDigest,
-    };
-  }
-  return entry;
-}
-
-/** Skill-owned request for the admit_skill two-stage lifecycle. */
-export interface SkillCatalogAdmissionRequest {
-  readonly source?: {
-    readonly kind: "local-path";
-    readonly path: string;
-  };
-  readonly admissionToken?: string;
-  readonly mode: SkillMode;
-  readonly operationId?: string;
-}
-
-export type SkillCatalogAdmissionOutcome =
-  | { readonly kind: "missing-input" }
-  | { readonly kind: "missing-name" }
-  | {
-      readonly kind: "escalated";
-      readonly reason: string;
-      readonly threats: readonly ContentThreat[];
-    }
-  | {
-      readonly kind: "needs-confirm";
-      readonly admissionToken: string;
-      readonly reason: string;
-      readonly threats: readonly ContentThreat[];
-    }
-  | { readonly kind: "confirmation-expired" }
-  | { readonly kind: "candidate-changed" }
-  | {
-      readonly kind: "admitted";
-      readonly id: string;
-      readonly name: string;
-    };
-
-export interface SkillCatalogAdmissionApplication {
-  admit(request: SkillCatalogAdmissionRequest): Promise<SkillCatalogAdmissionOutcome>;
-}
-
-/** Opaque, path-free snapshot owned by the Infrastructure adapter. */
-export interface SkillCatalogAdmissionCandidate {
-  readonly candidateId: string;
-  readonly document: string;
-  readonly digest: string;
-}
-
-export interface SkillCatalogAdmissionMutation {
-  readonly kind: "skill-admit";
-  readonly record: SkillCatalogSaveRecord;
-  readonly mode: SkillMode;
-}
-
-/**
- * Path-free adapter for candidate storage, independent review, CAS and the
- * assignment mutation ledger. The Skill application owns every admission rule.
- */
-export interface SkillCatalogAdmissionCorrectnessPort {
-  acquireLocalCandidate(sourcePath: string): Promise<SkillCatalogAdmissionCandidate>;
-  readCandidate(candidateId: string): Promise<SkillCatalogAdmissionCandidate>;
-  discardCandidate(candidateId: string): Promise<void>;
-  sweepStaleCandidates(maxAgeMs: number): Promise<number>;
-  putContent(document: string): Promise<ArtifactRef>;
-  stage(operationId: string, mutation: SkillCatalogAdmissionMutation): Promise<void>;
-  admissionLlm: AdmissionLlm;
-  now(): number;
-  newToken(): string;
-}
-
-interface PendingSkillAdmission {
-  readonly candidateId: string;
-  readonly digest: string;
-  readonly threats: readonly ContentThreat[];
-  readonly reason: string;
-  readonly mode: SkillMode;
-  readonly expiresAt: number;
-}
-
-/** Skill-owned two-stage admission state machine over path-free adapters. */
-export class SkillCatalogAdmissionApplicationService
-  implements SkillCatalogAdmissionApplication
-{
-  readonly #pending = new Map<string, PendingSkillAdmission>();
-
-  constructor(private readonly correctness: SkillCatalogAdmissionCorrectnessPort) {}
-
-  async admit(
-    request: SkillCatalogAdmissionRequest,
-  ): Promise<SkillCatalogAdmissionOutcome> {
-    await this.correctness.sweepStaleCandidates(ADMISSION_TOKEN_TTL_MS).catch(() => {});
-    const now = this.correctness.now();
-    for (const [token, pending] of this.#pending) {
-      if (pending.expiresAt <= now) await this.#dropPending(token);
-    }
-
-    const token = request.admissionToken?.trim() ?? "";
-    if (token) return this.#confirm(token, request.operationId);
-
-    const sourcePath = request.source?.kind === "local-path"
-      ? request.source.path.trim()
-      : "";
-    if (!sourcePath) return { kind: "missing-input" };
-    if (request.mode !== "main" && request.mode !== "work") {
-      throw new Error("Skill admission mode is invalid");
-    }
-    return this.#reviewLocal(sourcePath, request.mode, request.operationId);
-  }
-
-  async #reviewLocal(
-    sourcePath: string,
-    mode: SkillMode,
-    operationId: string | undefined,
-  ): Promise<SkillCatalogAdmissionOutcome> {
-    let candidate: SkillCatalogAdmissionCandidate | undefined;
-    try {
-      candidate = await this.correctness.acquireLocalCandidate(sourcePath);
-      const { data } = parseFrontmatter(candidate.document);
-      const name = typeof data.name === "string" ? data.name.trim() : "";
-      if (!name) {
-        await this.correctness.discardCandidate(candidate.candidateId);
-        return { kind: "missing-name" };
-      }
-
-      const assessment = await assessSkill(
-        { llm: this.correctness.admissionLlm },
-        { name, content: candidate.document },
-      );
-      if (assessment.verdict.decision === "escalate") {
-        await this.correctness.discardCandidate(candidate.candidateId);
-        return {
-          kind: "escalated",
-          reason: assessment.verdict.reason,
-          threats: assessment.threats,
-        };
-      }
-      if (assessment.verdict.decision === "safe") {
-        const admitted = await this.#stageCandidate(candidate, mode, operationId);
-        await this.correctness.discardCandidate(candidate.candidateId);
-        return admitted;
-      }
-
-      const token = this.correctness.newToken();
-      if (!token || this.#pending.has(token)) {
-        throw new Error("Skill admission token generator returned a duplicate token");
-      }
-      this.#pending.set(token, {
-        candidateId: candidate.candidateId,
-        digest: candidate.digest,
-        threats: assessment.threats,
-        reason: assessment.verdict.reason,
-        mode,
-        expiresAt: this.correctness.now() + ADMISSION_TOKEN_TTL_MS,
-      });
-      candidate = undefined;
-      return {
-        kind: "needs-confirm",
-        admissionToken: token,
-        reason: assessment.verdict.reason,
-        threats: assessment.threats,
-      };
-    } catch (error) {
-      if (candidate) {
-        await this.correctness.discardCandidate(candidate.candidateId).catch(() => {});
-      }
-      throw error;
-    }
-  }
-
-  async #confirm(
-    token: string,
-    operationId: string | undefined,
-  ): Promise<SkillCatalogAdmissionOutcome> {
-    const pending = this.#pending.get(token);
-    if (!pending || pending.expiresAt <= this.correctness.now()) {
-      await this.#dropPending(token);
-      return { kind: "confirmation-expired" };
-    }
-    try {
-      const candidate = await this.correctness.readCandidate(pending.candidateId);
-      if (candidate.digest !== pending.digest) {
-        await this.#dropPending(token);
-        return { kind: "candidate-changed" };
-      }
-      const admitted = await this.#stageCandidate(candidate, pending.mode, operationId);
-      await this.#dropPending(token);
-      return admitted;
-    } catch (error) {
-      await this.#dropPending(token);
-      throw error;
-    }
-  }
-
-  async #stageCandidate(
-    candidate: SkillCatalogAdmissionCandidate,
-    mode: SkillMode,
-    operationId: string | undefined,
-  ): Promise<Extract<SkillCatalogAdmissionOutcome, { kind: "admitted" }>> {
-    const parsed = parseFrontmatter(candidate.document);
-    const name = typeof parsed.data.name === "string" ? parsed.data.name.trim() : "";
-    const description = typeof parsed.data.description === "string"
-      ? parsed.data.description.trim()
-      : "";
-    const id = skillNameToId(name);
-    if (!id || !description) {
-      throw new Error("Skill frontmatter requires name and description");
-    }
-    const content = await this.correctness.putContent(candidate.document);
-    if (!operationId) {
-      throw new Error("Skill mutation requires a durable tool operation id");
-    }
-    await this.correctness.stage(`${operationId}:admit`, {
-      kind: "skill-admit",
-      record: { name, description, content },
-      mode,
-    });
-    return { kind: "admitted", id, name };
-  }
-
-  async #dropPending(token: string): Promise<void> {
-    const pending = this.#pending.get(token);
-    this.#pending.delete(token);
-    if (pending) {
-      await this.correctness.discardCandidate(pending.candidateId).catch(() => {});
-    }
-  }
-}
-
-function isSkillCatalogSaveMutation(
-  mutation: SkillCatalogSaveOverlayMutation,
-): mutation is SkillCatalogSaveMutation {
-  return mutation.kind === "skill-create" || mutation.kind === "skill-update";
-}
-
-function sameSkillSaveDraft(
-  replay: SkillCatalogSaveMutation,
-  candidate: SkillCatalogSaveMutation,
-): boolean {
-  return replay.record.name === candidate.record.name &&
-    replay.record.description === candidate.record.description &&
-    replay.record.content.digest === candidate.record.content.digest &&
-    replay.record.content.bytes === candidate.record.content.bytes &&
-    replay.mode === candidate.mode;
 }
 
 export type SkillCatalogApplicationErrorCode =
@@ -836,23 +413,51 @@ export class SkillCatalogApplicationService implements SkillCatalogApplication {
     this.#correctness = correctness;
   }
 
-  async query(query: SkillCatalogQuery): Promise<SkillCatalogView> {
-    if (query.kind !== "list") {
-      throw new SkillCatalogApplicationError(
-        "invalid-command",
-        "Unsupported Skill Catalog query",
-      );
+  query(query: { readonly kind: "list-v2" }): Promise<SkillCatalogViewV2>;
+  query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2>;
+  async query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2> {
+    if (query.kind === "list") {
+      if (this.#correctness.readCatalogV2) {
+        const v2 = await this.#correctness.readCatalogV2({ includeDisabled: true });
+        return {
+          catalogRevision: v2.catalogRevision,
+          entries: v2.entries.map((entry) => projectSkillEntryToV1(entry, "skill-list")),
+        };
+      }
+      return await this.#correctness.readCatalog({ includeDisabled: true });
     }
-    return await this.#correctness.readCatalog({ includeDisabled: true });
+    if (query.kind === "list-v2") {
+      if (this.#correctness.readCatalogV2) {
+        return await this.#correctness.readCatalogV2({ includeDisabled: true });
+      }
+      const fallback = await this.#correctness.readCatalog({ includeDisabled: true });
+      return {
+        catalogRevision: fallback.catalogRevision,
+        entries: fallback.entries.map((entry) => normalizeEntryToV2(entry)),
+      };
+    }
+    throw new SkillCatalogApplicationError(
+      "invalid-command",
+      "Unsupported Skill Catalog query",
+    );
   }
 
   async execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult> {
     const skillId = requireSkillId(command.skillId);
     const statePatch = command.kind === "set-state"
       ? requireStatePatch(command.patch)
-      : command.kind === "archive"
-        ? undefined
-        : unsupportedCommand(command);
+      : undefined;
+    const visibility = command.kind === "set-visibility"
+      ? requireVisibility(command.visibility)
+      : undefined;
+    if (
+      command.kind !== "set-state" &&
+      command.kind !== "set-visibility" &&
+      command.kind !== "archive"
+    ) {
+      unsupportedCommand(command);
+    }
+
     const current = await this.#correctness.readEntry(skillId);
     if (!current) {
       throw new SkillCatalogApplicationError(
@@ -860,21 +465,37 @@ export class SkillCatalogApplicationService implements SkillCatalogApplication {
         `Skill not found: ${skillId}`,
       );
     }
+    if (
+      command.kind === "set-visibility" &&
+      command.expectedRevision !== undefined &&
+      current.revision !== command.expectedRevision
+    ) {
+      throw new SkillCatalogApplicationError(
+        "conflict",
+        `Skill revision mismatch: expected ${command.expectedRevision}, actual ${current.revision}`,
+      );
+    }
 
-    const mutation = command.kind === "set-state"
-      ? {
-          kind: "set-state" as const,
-          skillId,
-          patch: statePatch!,
-          expectedRevision: current.revision,
-        }
-      : command.kind === "archive"
+    const mutation: SkillCatalogManagementMutation =
+      command.kind === "set-state"
         ? {
-          kind: "archive" as const,
+            kind: "set-state" as const,
             skillId,
+            patch: statePatch!,
             expectedRevision: current.revision,
           }
-        : unsupportedCommand(command);
+        : command.kind === "set-visibility"
+          ? {
+              kind: "set-visibility" as const,
+              skillId,
+              visibility: visibility!,
+              expectedRevision: current.revision,
+            }
+          : {
+              kind: "archive" as const,
+              skillId,
+              expectedRevision: current.revision,
+            };
 
     const committed = await this.#correctness.commit(mutation);
     if (committed.kind === "conflict") {
@@ -900,6 +521,24 @@ function requireSkillId(skillId: string): string {
     );
   }
   return skillId;
+}
+
+function requireVisibility(visibility: SkillVisibility): SkillVisibility {
+  if (
+    !visibility ||
+    typeof visibility !== "object" ||
+    typeof visibility.modelAutoIndex !== "boolean" ||
+    typeof visibility.userSlashCommand !== "boolean"
+  ) {
+    throw new SkillCatalogApplicationError(
+      "invalid-command",
+      "Skill visibility requires boolean modelAutoIndex and userSlashCommand",
+    );
+  }
+  return {
+    modelAutoIndex: visibility.modelAutoIndex,
+    userSlashCommand: visibility.userSlashCommand,
+  };
 }
 
 function requireStatePatch(

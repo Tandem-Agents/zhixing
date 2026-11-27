@@ -12,13 +12,33 @@
  * `SkillSource`(own / linked 来源分区)不是一回事 —— 那是"进库后属哪个区",这是"从哪获取"。
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  assertValidSkillPackageText,
+  normalizeSkillPackagePath,
+} from "./archive.js";
 import { scanSkillContent, type ContentThreat } from "./content-scan.js";
 
 export type { ContentThreat } from "./content-scan.js";
 
 const SKILL_DOCUMENT_FILE = "SKILL.md";
+export const ADMISSION_MAX_TOTAL_BYTES = 128 * 1024;
+export const ADMISSION_MAX_MEMBER_BYTES = 64 * 1024;
+
+export interface StagedLocalSkillMember {
+  readonly path: string;
+  readonly content: string;
+  readonly bytes: number;
+}
+
+export interface StagedLocalSkillPackage {
+  readonly members: readonly StagedLocalSkillMember[];
+  readonly document: string;
+  readonly digest: string;
+  readonly totalBytes: number;
+}
 
 /** AI 研判对 LLM 的最小依赖 —— 一个 prompt 进、文本出(同 steward 形态,绑 `callText("main")`)。 */
 export type AdmissionLlm = (prompt: string) => Promise<string>;
@@ -65,14 +85,197 @@ export async function reviewAdmission(
   return parseVerdict(raw);
 }
 
-/** 完整评估:静态扫描 + AI 研判。纯逻辑(注入 LLM),供接入流程据此裁决。 */
+/** 完整评估:静态扫描 + AI 研判（兼容单文本快捷入口）。 */
 export async function assessSkill(
   deps: { llm: AdmissionLlm },
   skill: { name: string; content: string },
 ): Promise<AdmissionAssessment> {
-  const threats = scanSkillContent(skill.content);
-  const verdict = await reviewAdmission(deps.llm, { ...skill, threats });
+  return assessSkillPackage(deps, {
+    name: skill.name,
+    members: [{ path: SKILL_DOCUMENT_FILE, content: skill.content }],
+  });
+}
+
+/**
+ * 整包全部可读成员联合审查：对根 `SKILL.md` 及全部附属文本成员执行静态扫描，
+ * 并将全部成员正文与全包威胁信号一并送交 `AdmissionLlm`，严禁只送根文档却给附件摘要盖章。
+ */
+export async function assessSkillPackage(
+  deps: { llm: AdmissionLlm },
+  skill: {
+    readonly name: string;
+    readonly members: readonly { readonly path: string; readonly content: string }[];
+  },
+): Promise<AdmissionAssessment> {
+  const threats: ContentThreat[] = [];
+  const sections: string[] = [];
+  for (const member of skill.members) {
+    for (const threat of scanSkillContent(member.content)) {
+      threats.push({
+        ...threat,
+        excerpt:
+          skill.members.length === 1 && member.path === SKILL_DOCUMENT_FILE
+            ? threat.excerpt
+            : `[${member.path}] ${threat.excerpt}`,
+      });
+    }
+    sections.push(
+      skill.members.length === 1 && member.path === SKILL_DOCUMENT_FILE
+        ? member.content
+        : `=== FILE: ${member.path} ===\n${member.content}`,
+    );
+  }
+  const combinedContent = sections.join("\n\n");
+  const verdict = await reviewAdmission(deps.llm, {
+    name: skill.name,
+    content: combinedContent,
+    threats,
+  });
   return { threats, verdict };
+}
+
+export interface StageLocalSkillPackageOptions {
+  readonly authorizeMemberRead?: (realPath: string) => Promise<void>;
+}
+
+/**
+ * 本地路径有界安全采集与验证：
+ * - 对入口及全部条目执行 lstat，拒绝符号链接 / 重解析点、`.git` 目录与非法成员
+ * - 逐成员回调 `authorizeMemberRead(realPath)`（命中 `/trust` deny 立即阻断）
+ * - 强制单成员 <= 64 KiB、全包可读 UTF-8 文本 <= 128 KiB、零 NUL、合法 UTF-8
+ */
+export async function stageLocalSkillPackage(
+  srcPath: string,
+  options: StageLocalSkillPackageOptions = {},
+): Promise<StagedLocalSkillPackage> {
+  const rootLstat = await fs.lstat(srcPath);
+  if (rootLstat.isSymbolicLink()) {
+    throw new Error(`拒绝接入符号链接/重解析点源: ${srcPath}`);
+  }
+  const realRoot = await fs.realpath(srcPath);
+
+  const collected: Array<{ readonly rel: string; readonly realPath: string }> = [];
+  if (rootLstat.isFile()) {
+    if (path.basename(realRoot) === ".git") {
+      throw new Error("拒绝接入 .git 内部文件");
+    }
+    collected.push({ rel: SKILL_DOCUMENT_FILE, realPath: realRoot });
+  } else if (rootLstat.isDirectory()) {
+    await collectSafeLocalMembers(realRoot, "", collected, options.authorizeMemberRead);
+  } else {
+    throw new Error(`接入源不是常规文件或目录: ${srcPath}`);
+  }
+
+  collected.sort((a, b) => {
+    if (a.rel === SKILL_DOCUMENT_FILE) return -1;
+    if (b.rel === SKILL_DOCUMENT_FILE) return 1;
+    return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
+  });
+
+  if (!collected.some((item) => item.rel === SKILL_DOCUMENT_FILE)) {
+    throw new Error("外部技能包缺少根文件 SKILL.md");
+  }
+
+  const members: StagedLocalSkillMember[] = [];
+  let totalBytes = 0;
+  const agg = createHash("sha256");
+
+  for (const item of collected) {
+    if (options.authorizeMemberRead) {
+      await options.authorizeMemberRead(item.realPath);
+    }
+    const handle = await fs.open(item.realPath, "r");
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) {
+        throw new Error(`成员不是常规文件: ${item.rel}`);
+      }
+      if (stat.size > ADMISSION_MAX_MEMBER_BYTES) {
+        throw new Error(
+          `成员 ${item.rel} (${stat.size} B) 超过单文件准入上限 ${ADMISSION_MAX_MEMBER_BYTES} B`,
+        );
+      }
+      const buf = await handle.readFile();
+      if (buf.byteLength > ADMISSION_MAX_MEMBER_BYTES) {
+        throw new Error(
+          `成员 ${item.rel} (${buf.byteLength} B) 超过单文件准入上限 ${ADMISSION_MAX_MEMBER_BYTES} B`,
+        );
+      }
+      totalBytes += buf.byteLength;
+      if (totalBytes > ADMISSION_MAX_TOTAL_BYTES) {
+        throw new Error(
+          `外部技能包可读文本总量 (${totalBytes} B) 超过准入上限 ${ADMISSION_MAX_TOTAL_BYTES} B`,
+        );
+      }
+      const content = assertValidSkillPackageText(buf, item.rel);
+      const fileHash = createHash("sha256").update(buf).digest("hex");
+      agg.update(`${item.rel}\n${fileHash}\n`);
+      members.push({ path: item.rel, content, bytes: buf.byteLength });
+    } finally {
+      await handle.close();
+    }
+  }
+
+  return {
+    members,
+    document: members[0]!.content,
+    digest: agg.digest("hex"),
+    totalBytes,
+  };
+}
+
+async function collectSafeLocalMembers(
+  rootReal: string,
+  rel: string,
+  out: Array<{ readonly rel: string; readonly realPath: string }>,
+  authorizeMemberRead?: (realPath: string) => Promise<void>,
+): Promise<void> {
+  const dirPath = rel ? path.join(rootReal, rel) : rootReal;
+  if (authorizeMemberRead) {
+    await authorizeMemberRead(dirPath);
+  }
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === ".git") {
+      throw new Error("拒绝接入包含 .git 目录或文件的外部源");
+    }
+    const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+    const candidatePath = path.join(dirPath, entry.name);
+    const lstat = await fs.lstat(candidatePath);
+    if (lstat.isSymbolicLink()) {
+      throw new Error(`拒绝接入包含符号链接/重解析点的成员: ${childRel}`);
+    }
+    if (lstat.isDirectory()) {
+      await collectSafeLocalMembers(rootReal, childRel, out, authorizeMemberRead);
+    } else if (lstat.isFile()) {
+      const normalizedRel = normalizeSkillPackagePath(childRel);
+      const realChild = await fs.realpath(candidatePath);
+      out.push({ rel: normalizedRel, realPath: realChild });
+    } else {
+      throw new Error(`拒绝接入非常规文件条目: ${childRel}`);
+    }
+  }
+}
+
+/**
+ * 将内存中已通过全部校验的 `StagedLocalSkillPackage` 字节原样写入空白目标暂存目录，
+ * 绝不再次访问原始 `sourcePath`（根除二次活目录复制窗口）。
+ */
+export async function writeVerifiedSkillPackageToDirectory(
+  staged: StagedLocalSkillPackage,
+  targetDir: string,
+): Promise<void> {
+  const realTargetRoot = await fs.realpath(targetDir);
+  for (const member of staged.members) {
+    const normalizedRel = normalizeSkillPackagePath(member.path);
+    const dest = path.resolve(realTargetRoot, ...normalizedRel.split("/"));
+    const relCheck = path.relative(realTargetRoot, dest);
+    if (!relCheck || relCheck === ".." || relCheck.startsWith(`..${path.sep}`) || path.isAbsolute(relCheck)) {
+      throw new Error(`Skill staging member path escapes target directory: ${member.path}`);
+    }
+    await fs.mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
+    await fs.writeFile(dest, member.content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  }
 }
 
 /** 把接入源内容落到暂存目录(来源无关入口)。 */

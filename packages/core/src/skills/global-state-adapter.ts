@@ -27,8 +27,13 @@ import {
   protocolDigest,
 } from "../protocol/index.js";
 import { skillNameToId } from "./id.js";
-import type { SkillCatalogEntry } from "./types.js";
-import type { SkillCatalogChangedFact } from "./catalog-application.js";
+import {
+  DEFAULT_SKILL_VISIBILITY,
+  projectSkillEntryToV1,
+  type SkillCatalogChangedFact,
+  type SkillCatalogEntry,
+  type SkillCatalogEntryV2,
+} from "./types.js";
 
 const SKILL_STREAM = "intent:skill-authority";
 export const SKILL_AUTHORITY_PROJECTION_ID = "global-skill-authority-v1";
@@ -39,11 +44,23 @@ const SKILL_META_KEY = "meta:catalog-revision";
 type SkillMutation =
   | Extract<
       GlobalStagedMutation,
-      { kind: "skill-create" | "skill-update" | "skill-admit" | "skill-usage" }
+      {
+        kind:
+          | "skill-create"
+          | "skill-update"
+          | "skill-admit"
+          | "skill-create-v2"
+          | "skill-update-v2"
+          | "skill-admit-v2"
+          | "skill-usage";
+      }
     >
-  | Extract<GlobalControlMutation, { kind: "skill-set-state" | "skill-archive" }>;
+  | Extract<
+      GlobalControlMutation,
+      { kind: "skill-set-state" | "skill-set-visibility" | "skill-archive" }
+    >;
 
-type SkillAuthorityRecord = {
+type SkillAuthorityRecordV1 = {
   readonly t: "skill-mutation-applied";
   readonly requestId: string;
   readonly mutationDigest: string;
@@ -55,9 +72,23 @@ type SkillAuthorityRecord = {
   readonly at: string;
 };
 
+type SkillAuthorityRecordV2 = {
+  readonly t: "skill-mutation-applied-v2";
+  readonly requestId: string;
+  readonly mutationDigest: string;
+  readonly mutation: SkillMutation;
+  readonly targetRevision: number;
+  readonly catalogRevision: number;
+  readonly entry?: SkillCatalogEntryV2;
+  readonly removedId?: string;
+  readonly at: string;
+};
+
+type SkillAuthorityRecord = SkillAuthorityRecordV1 | SkillAuthorityRecordV2;
+
 interface SkillProjection {
   readonly catalogRevision: number;
-  readonly entries: Map<string, SkillCatalogEntry>;
+  readonly entries: Map<string, SkillCatalogEntryV2>;
   readonly requests: Map<
     string,
     { readonly mutationDigest: string; readonly targetRevision: number }
@@ -91,14 +122,20 @@ export interface SkillCatalogObservationSink {
 
 /**
  * 目录结构指纹：去掉使用统计（usage）、条目版本（revision）与条目摘要（digest），
- * 按 id 的码点顺序排序后规范化求摘要。每次命中技能，usage 都会推进目录版本和条目版本，
+ * 按 id 的码点顺序排序后规范化求摘要。每次命中技能，usage 都会推进目录版本（不改变条目编辑修订号 revision），
  * 但发现入口与管理页显示的内容不变，所以不计入指纹。
  */
 export function skillCatalogStructureFingerprint(
-  entries: Iterable<SkillCatalogEntry>,
+  entries: Iterable<SkillCatalogEntry | SkillCatalogEntryV2>,
 ): string {
   const structure = [...entries]
-    .map(({ usage: _usage, revision: _revision, digest: _digest, ...rest }) => rest)
+    .map((entry) => {
+      const { usage: _usage, revision: _revision, digest: _digest, ...rest } = entry as SkillCatalogEntryV2;
+      return {
+        ...rest,
+        visibility: rest.visibility ?? { ...DEFAULT_SKILL_VISIBILITY },
+      };
+    })
     .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
   return protocolDigest("SkillCatalogStructure", 1, structure);
 }
@@ -340,10 +377,18 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     await this.#ensureOpen();
     const projection = await readSkillProjection(this.#durable);
     if (query.kind === "skill-get") {
+      const entry = projection.entries.get(query.skillId) ?? null;
       return {
         kind: "skill-get",
         catalogRevision: projection.catalogRevision,
-        entry: cloneEntry(projection.entries.get(query.skillId) ?? null),
+        entry: entry ? projectSkillEntryToV1(entry, "skill-catalog") : null,
+      };
+    }
+    if (query.kind === "skill-get-v2") {
+      return {
+        kind: "skill-get-v2",
+        catalogRevision: projection.catalogRevision,
+        entry: cloneEntryV2(projection.entries.get(query.skillId) ?? null),
       };
     }
     if (query.kind === "asset-index") {
@@ -357,7 +402,21 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         })),
       };
     }
-    let entries = [...projection.entries.values()];
+    if (query.kind === "skill-catalog-v2") {
+      let entries = [...projection.entries.values()];
+      if (!query.includeDisabled) entries = entries.filter((entry) => !entry.disabled);
+      if (query.mode) entries = entries.filter((entry) => entry.mode === query.mode);
+      entries.sort(compareEntries);
+      if (query.limit !== undefined) entries = entries.slice(0, query.limit);
+      return {
+        kind: "skill-catalog-v2",
+        catalogRevision: projection.catalogRevision,
+        entries: entries.map((entry) => cloneEntryV2(entry)!),
+      };
+    }
+    let entries = [...projection.entries.values()].map((entry) =>
+      projectSkillEntryToV1(entry, "skill-catalog"),
+    );
     if (!query.includeDisabled) entries = entries.filter((entry) => !entry.disabled);
     if (query.mode) entries = entries.filter((entry) => entry.mode === query.mode);
     entries.sort(compareEntries);
@@ -365,7 +424,7 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     return {
       kind: "skill-catalog",
       catalogRevision: projection.catalogRevision,
-      entries: entries.map((entry) => cloneEntry(entry)!),
+      entries,
     };
   }
 
@@ -552,14 +611,14 @@ function planMutation(
       ? { outcome: { t: "granted", targetRevision: replay.targetRevision } }
       : { outcome: conflict("idempotency-conflict", "Skill request identity was reused") };
   }
-  let entry: SkillCatalogEntry | undefined;
+  let entry: SkillCatalogEntryV2 | undefined;
   let removedId: string | undefined;
   if (mutation.kind === "skill-create" || mutation.kind === "skill-admit") {
     const id = requireSkillId(mutation.record.name);
     if (state.entries.has(id)) {
       return { outcome: conflict("revision-conflict", "Skill id already exists") };
     }
-    entry = withDigest({
+    entry = withDigestV2({
       id,
       name: mutation.record.name,
       description: mutation.record.description,
@@ -571,8 +630,62 @@ function planMutation(
       usage: null,
       contentRef: cloneRef(mutation.record.content),
       revision: 1,
+      visibility: { ...DEFAULT_SKILL_VISIBILITY },
+    });
+  } else if (mutation.kind === "skill-create-v2" || mutation.kind === "skill-admit-v2") {
+    const id = requireSkillId(mutation.record.name);
+    if (state.entries.has(id)) {
+      return { outcome: conflict("revision-conflict", "Skill id already exists") };
+    }
+    entry = withDigestV2({
+      id,
+      name: mutation.record.name,
+      description: mutation.record.description,
+      source: mutation.kind === "skill-admit-v2" ? "linked" : "own",
+      mode: mutation.mode,
+      pinned: false,
+      disabled: false,
+      createdAt: at,
+      usage: null,
+      contentRef: cloneRef(mutation.record.content),
+      revision: 1,
+      visibility: { ...mutation.record.visibility },
+      ...(mutation.record.packageRef !== undefined
+        ? { packageRef: cloneRef(mutation.record.packageRef) }
+        : {}),
     });
   } else if (mutation.kind === "skill-update") {
+    const current = state.entries.get(mutation.skillId);
+    if (!current) return { outcome: conflict("not-found", "Skill was not found") };
+    if (current.packageRef !== undefined) {
+      return {
+        outcome: conflict(
+          "revision-conflict",
+          "Cannot overwrite multi-file skill package with legacy v1 skill-update",
+        ),
+      };
+    }
+    if (current.revision !== mutation.expectedRevision) {
+      return { outcome: conflict("revision-conflict", "Skill changed") };
+    }
+    const id = requireSkillId(mutation.record.name);
+    if (id !== current.id && state.entries.has(id)) {
+      return { outcome: conflict("revision-conflict", "Renamed skill id already exists") };
+    }
+    removedId = id === current.id ? undefined : current.id;
+    entry = withDigestV2({
+      ...cloneEntryV2(current)!,
+      id,
+      name: mutation.record.name,
+      description: mutation.record.description,
+      source: "own",
+      mode: mutation.mode,
+      disabled: false,
+      contentRef: cloneRef(mutation.record.content),
+      revision: current.revision + 1,
+      visibility: { ...current.visibility },
+    });
+  } else if (mutation.kind === "skill-update-v2") {
     const current = state.entries.get(mutation.skillId);
     if (!current) return { outcome: conflict("not-found", "Skill was not found") };
     if (current.revision !== mutation.expectedRevision) {
@@ -583,8 +696,10 @@ function planMutation(
       return { outcome: conflict("revision-conflict", "Renamed skill id already exists") };
     }
     removedId = id === current.id ? undefined : current.id;
-    entry = withDigest({
-      ...cloneEntry(current)!,
+    const base = cloneEntryV2(current)!;
+    delete base.packageRef;
+    entry = withDigestV2({
+      ...base,
       id,
       name: mutation.record.name,
       description: mutation.record.description,
@@ -593,17 +708,21 @@ function planMutation(
       disabled: false,
       contentRef: cloneRef(mutation.record.content),
       revision: current.revision + 1,
+      visibility: { ...mutation.record.visibility },
+      ...(mutation.record.packageRef !== undefined
+        ? { packageRef: cloneRef(mutation.record.packageRef) }
+        : {}),
     });
   } else if (mutation.kind === "skill-usage") {
     const current = state.entries.get(mutation.record.skillId);
     if (!current) return { outcome: conflict("not-found", "Skill was not found") };
-    entry = withDigest({
-      ...cloneEntry(current)!,
+    entry = withDigestV2({
+      ...cloneEntryV2(current)!,
       usage: {
         lastHitAt: mutation.record.occurredAt,
         hitCount: (current.usage?.hitCount ?? 0) + mutation.record.hitDelta,
       },
-      revision: current.revision + 1,
+      revision: current.revision,
     });
   } else if (mutation.kind === "skill-set-state") {
     const current = state.entries.get(mutation.skillId);
@@ -611,9 +730,20 @@ function planMutation(
     if (current.revision !== mutation.expectedRevision) {
       return { outcome: conflict("revision-conflict", "Skill changed") };
     }
-    entry = withDigest({
-      ...cloneEntry(current)!,
+    entry = withDigestV2({
+      ...cloneEntryV2(current)!,
       ...mutation.patch,
+      revision: current.revision + 1,
+    });
+  } else if (mutation.kind === "skill-set-visibility") {
+    const current = state.entries.get(mutation.skillId);
+    if (!current) return { outcome: conflict("not-found", "Skill was not found") };
+    if (current.revision !== mutation.expectedRevision) {
+      return { outcome: conflict("revision-conflict", "Skill changed") };
+    }
+    entry = withDigestV2({
+      ...cloneEntryV2(current)!,
+      visibility: { ...mutation.visibility },
       revision: current.revision + 1,
     });
   } else {
@@ -625,6 +755,31 @@ function planMutation(
     removedId = current.id;
   }
   const targetRevision = entry?.revision ?? source.entries.get(removedId!)!.revision + 1;
+  const emitV2 =
+    mutation.kind === "skill-create-v2" ||
+    mutation.kind === "skill-update-v2" ||
+    mutation.kind === "skill-admit-v2" ||
+    mutation.kind === "skill-set-visibility" ||
+    (entry !== undefined &&
+      (entry.packageRef !== undefined ||
+        !entry.visibility.modelAutoIndex ||
+        !entry.visibility.userSlashCommand));
+  if (emitV2) {
+    return {
+      outcome: { t: "granted", targetRevision },
+      record: {
+        t: "skill-mutation-applied-v2",
+        requestId,
+        mutationDigest: digest,
+        mutation,
+        targetRevision,
+        catalogRevision: source.catalogRevision + 1,
+        ...(entry ? { entry } : {}),
+        ...(removedId ? { removedId } : {}),
+        at,
+      },
+    };
+  }
   return {
     outcome: { t: "granted", targetRevision },
     record: {
@@ -634,7 +789,7 @@ function planMutation(
       mutation,
       targetRevision,
       catalogRevision: source.catalogRevision + 1,
-      ...(entry ? { entry } : {}),
+      ...(entry ? { entry: toStoredV1Entry(entry) } : {}),
       ...(removedId ? { removedId } : {}),
       at,
     },
@@ -648,14 +803,17 @@ function reduceRecord(
   const state = cloneProjection(source);
   const record = logical.body;
   if (
-    record.t !== "skill-mutation-applied" ||
+    (record.t !== "skill-mutation-applied" && record.t !== "skill-mutation-applied-v2") ||
     state.requests.has(record.requestId) ||
     record.catalogRevision !== state.catalogRevision + 1
   ) {
     throw new TypeError("Skill authority record is invalid or duplicated");
   }
   if (record.removedId) state.entries.delete(record.removedId);
-  if (record.entry) state.entries.set(record.entry.id, cloneEntry(record.entry)!);
+  if (record.entry) {
+    const normalized = normalizeToEntryV2(record.entry);
+    state.entries.set(normalized.id, normalized);
+  }
   state.requests.set(record.requestId, {
     mutationDigest: record.mutationDigest,
     targetRevision: record.targetRevision,
@@ -693,7 +851,8 @@ async function reduceSkillDurableProjection(
       }
       if (record.removedId) tombstone(skillEntryKey(record.removedId));
       if (record.entry) {
-        put(skillEntryKey(record.entry.id), cloneEntry(record.entry) as unknown as JsonValue);
+        const normalized = normalizeToEntryV2(record.entry);
+        put(skillEntryKey(normalized.id), normalized as unknown as JsonValue);
       }
       put(requestKey, {
         mutationDigest: record.mutationDigest,
@@ -753,10 +912,15 @@ async function readSkillProjection(
 }
 
 function skillMutationLookupIds(mutation: SkillMutation): readonly string[] {
-  if (mutation.kind === "skill-create" || mutation.kind === "skill-admit") {
+  if (
+    mutation.kind === "skill-create" ||
+    mutation.kind === "skill-admit" ||
+    mutation.kind === "skill-create-v2" ||
+    mutation.kind === "skill-admit-v2"
+  ) {
     return [requireSkillId(mutation.record.name)];
   }
-  if (mutation.kind === "skill-update") {
+  if (mutation.kind === "skill-update" || mutation.kind === "skill-update-v2") {
     return [mutation.skillId, requireSkillId(mutation.record.name)];
   }
   return [mutation.kind === "skill-usage" ? mutation.record.skillId : mutation.skillId];
@@ -796,23 +960,21 @@ function readSkillRequest(value: JsonValue | undefined): {
   };
 }
 
-function readSkillEntry(value: JsonValue | undefined): SkillCatalogEntry | undefined {
+function readSkillEntry(value: JsonValue | undefined): SkillCatalogEntryV2 | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("Skill entry projection is invalid");
   }
-  // This is a local projection read from the verified Authority log/index,
-  // not a remote DTO. Re-derive its public digest from committed fields so
-  // old projections that accidentally hashed their previous digest remain
-  // readable. Remote query validation still rejects any invalid digest.
-  return withDigest(value as unknown as SkillCatalogEntry);
+  // Normalize legacy v1 projections without visibility as well as v2 projections.
+  return normalizeToEntryV2(value as unknown as SkillCatalogEntry | SkillCatalogEntryV2);
 }
 
 function readSkillAuthorityRecord(value: unknown): SkillAuthorityRecord {
-  if (
-    typeof value !== "object" || value === null || Array.isArray(value) ||
-    (value as { t?: unknown }).t !== "skill-mutation-applied"
-  ) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Skill authority record is invalid");
+  }
+  const tag = (value as { t?: unknown }).t;
+  if (tag !== "skill-mutation-applied" && tag !== "skill-mutation-applied-v2") {
     throw new TypeError("Skill authority record is invalid");
   }
   const record = value as SkillAuthorityRecord;
@@ -838,17 +1000,29 @@ function isSkillQuery(
   query: GlobalQuery,
 ): query is Extract<
   GlobalQuery,
-  { kind: "skill-catalog" | "skill-get" | "asset-index" }
+  { kind: "skill-catalog" | "skill-get" | "skill-catalog-v2" | "skill-get-v2" | "asset-index" }
 > {
-  return query.kind === "skill-catalog" || query.kind === "skill-get" ||
-    (query.kind === "asset-index" && query.asset === "skills");
+  return (
+    query.kind === "skill-catalog" ||
+    query.kind === "skill-get" ||
+    query.kind === "skill-catalog-v2" ||
+    query.kind === "skill-get-v2" ||
+    (query.kind === "asset-index" && query.asset === "skills")
+  );
 }
 
 function isStagedSkillMutation(
   mutation: GlobalStagedMutation,
 ): mutation is Extract<SkillMutation, GlobalStagedMutation> {
-  return mutation.kind === "skill-create" || mutation.kind === "skill-update" ||
-    mutation.kind === "skill-admit" || mutation.kind === "skill-usage";
+  return (
+    mutation.kind === "skill-create" ||
+    mutation.kind === "skill-update" ||
+    mutation.kind === "skill-admit" ||
+    mutation.kind === "skill-create-v2" ||
+    mutation.kind === "skill-update-v2" ||
+    mutation.kind === "skill-admit-v2" ||
+    mutation.kind === "skill-usage"
+  );
 }
 
 function isSkillMutation(
@@ -867,17 +1041,67 @@ function mutationDigest(mutation: SkillMutation): string {
   return protocolDigest("SkillAuthorityMutation", 1, mutation);
 }
 
-function withDigest(
-  entry: Omit<SkillCatalogEntry, "digest">,
-): SkillCatalogEntry {
-  const { digest: _previous, ...content } = entry as SkillCatalogEntry;
+function normalizeToEntryV2(
+  entry: SkillCatalogEntry | SkillCatalogEntryV2,
+): SkillCatalogEntryV2 {
+  const raw = entry as Partial<SkillCatalogEntryV2>;
+  const visibility = raw.visibility
+    ? {
+        modelAutoIndex: raw.visibility.modelAutoIndex,
+        userSlashCommand: raw.visibility.userSlashCommand,
+      }
+    : { ...DEFAULT_SKILL_VISIBILITY };
+  return withDigestV2({
+    id: entry.id,
+    name: entry.name,
+    description: entry.description,
+    source: entry.source,
+    mode: entry.mode,
+    pinned: entry.pinned,
+    disabled: entry.disabled,
+    createdAt: entry.createdAt,
+    usage: entry.usage ? { ...entry.usage } : null,
+    contentRef: cloneRef(entry.contentRef),
+    revision: entry.revision,
+    visibility,
+    ...(raw.packageRef !== undefined ? { packageRef: cloneRef(raw.packageRef) } : {}),
+  });
+}
+
+function toStoredV1Entry(entry: SkillCatalogEntryV2): SkillCatalogEntry {
+  const { visibility: _vis, packageRef: _pkg, digest: _dig, ...content } = entry;
   return {
     ...structuredClone(content),
     digest: protocolDigest("SkillCatalogEntry", 1, content),
   };
 }
 
-function cloneEntry(entry: SkillCatalogEntry | null): SkillCatalogEntry | null {
+function withDigestV2(
+  entry: Omit<SkillCatalogEntryV2, "digest">,
+): SkillCatalogEntryV2 {
+  const { digest: _previous, ...content } = entry as SkillCatalogEntryV2;
+  const cleaned: Omit<SkillCatalogEntryV2, "digest"> = {
+    id: content.id,
+    name: content.name,
+    description: content.description,
+    source: content.source,
+    mode: content.mode,
+    pinned: content.pinned,
+    disabled: content.disabled,
+    createdAt: content.createdAt,
+    usage: content.usage ? { ...content.usage } : null,
+    contentRef: cloneRef(content.contentRef),
+    revision: content.revision,
+    visibility: { ...content.visibility },
+    ...(content.packageRef !== undefined ? { packageRef: cloneRef(content.packageRef) } : {}),
+  };
+  return {
+    ...cleaned,
+    digest: protocolDigest("SkillCatalogEntry", 2, cleaned),
+  };
+}
+
+function cloneEntryV2(entry: SkillCatalogEntryV2 | null): SkillCatalogEntryV2 | null {
   return entry ? structuredClone(entry) : null;
 }
 
@@ -893,7 +1117,7 @@ function cloneProjection(source: SkillProjection): SkillProjection {
   return {
     catalogRevision: source.catalogRevision,
     entries: new Map(
-      [...source.entries].map(([id, entry]) => [id, cloneEntry(entry)!]),
+      [...source.entries].map(([id, entry]) => [id, cloneEntryV2(entry)!]),
     ),
     requests: new Map([...source.requests].map(([id, value]) => [id, { ...value }])),
   };
@@ -915,6 +1139,9 @@ function skillCandidateReferences(
   const references = new Map<string, ArtifactRef>();
   for (const entry of state.entries.values()) {
     references.set(entry.contentRef.digest, cloneRef(entry.contentRef));
+    if (entry.packageRef) {
+      references.set(entry.packageRef.digest, cloneRef(entry.packageRef));
+    }
   }
   if (
     mutation.kind === "skill-create" ||
@@ -925,6 +1152,21 @@ function skillCandidateReferences(
       mutation.record.content.digest,
       cloneRef(mutation.record.content),
     );
+  } else if (
+    mutation.kind === "skill-create-v2" ||
+    mutation.kind === "skill-update-v2" ||
+    mutation.kind === "skill-admit-v2"
+  ) {
+    references.set(
+      mutation.record.content.digest,
+      cloneRef(mutation.record.content),
+    );
+    if (mutation.record.packageRef) {
+      references.set(
+        mutation.record.packageRef.digest,
+        cloneRef(mutation.record.packageRef),
+      );
+    }
   }
   return [...references.values()];
 }
@@ -943,7 +1185,7 @@ export function registerSkillAuthorityProjection(log: AuthorityCommitLog) {
       projectionId: SKILL_AUTHORITY_PROJECTION_ID,
       inputs: { streams: [SKILL_STREAM] },
       authenticated: true,
-      reducerVersion: 2,
+      reducerVersion: 3,
       reduce: reduceSkillDurableProjection,
     });
 }

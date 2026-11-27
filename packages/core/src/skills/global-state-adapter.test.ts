@@ -80,7 +80,7 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
     expect((await fixture.log.readSnapshot()).commits).toHaveLength(beforeReplay);
     const reopened = new AnchorSkillGlobalStateAdapter({ log: fixture.log, anchorEpoch: 1, clock: () => NOW });
     const result = await reopened.read({ kind: "skill-get", skillId: id }, readContext("fresh"));
-    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: content, revision: 2, usage: { hitCount: 1 } });
+    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: content, revision: 1, usage: { hitCount: 1 } });
     await fixture.log.stopStorageMaintenance();
   });
 
@@ -99,7 +99,7 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
     await commitStaged(fixture, usage);
     await commitStaged(fixture, usage);
     const result = await fixture.adapter.read({ kind: "skill-get", skillId: id }, readContext("after-race"));
-    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: contentB, revision: 3, usage: { hitCount: 1 } });
+    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: contentB, revision: 2, usage: { hitCount: 1 } });
     await fixture.log.stopStorageMaintenance();
   });
 
@@ -114,7 +114,7 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
       { seq: 2, requestId: "usage", mutation: { kind: "skill-usage", record: { skillId: id, occurredAt: NOW, hitDelta: 1 } } },
     ]);
     const result = await fixture.adapter.read({ kind: "skill-get", skillId: id }, readContext("updated"));
-    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: contentB, revision: 3, usage: { hitCount: 1 } });
+    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: contentB, revision: 2, usage: { hitCount: 1 } });
     await fixture.log.stopStorageMaintenance();
   });
   it("commits immutable content without touching an inert legacy Skill directory", async () => {
@@ -207,19 +207,20 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
         { seq: 2, requestId: "usage-2", mutation: usage("usage-2") },
       ],
     });
-    expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 2 });
-    expect(plan.outcomes.get(2)).toEqual({ t: "granted", targetRevision: 3 });
+    expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 1 });
+    expect(plan.outcomes.get(2)).toEqual({ t: "granted", targetRevision: 1 });
     await fixture.log.append(plan.records);
     await fixture.adapter.applyStagedMutation({
       requestId: "usage-2",
       mutation: usage("usage-2"),
-      targetRevision: 3,
+      targetRevision: 1,
     });
     const current = await fixture.adapter.read(
       { kind: "skill-get", skillId: id },
       readContext("get"),
     );
     if (current.kind !== "skill-get" || !current.entry) throw new Error("missing entry");
+    expect(current.entry.revision).toBe(1);
     expect(current.entry.usage).toEqual({ lastHitAt: NOW, hitCount: 2 });
     expect(() => validateGlobalQueryResult({ kind: 'skill-get', skillId: id }, current)).not.toThrow();
 
@@ -243,6 +244,197 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
     expect(product.kind === "skill-catalog" ? product.entries : []).toEqual([]);
     expect(management.kind === "skill-catalog" ? management.entries : []).toHaveLength(1);
     expect(() => validateGlobalQueryResult({ kind: 'skill-catalog', includeDisabled: true }, management)).not.toThrow();
+    await fixture.log.stopStorageMaintenance();
+  });
+
+  it("preserves writeTemplate revision across cross-turn and same-turn skill_read + skill_save while rejecting concurrent edits", async () => {
+    const { SkillCatalogLoadApplicationService } = await import("./catalog-load-service.js");
+    const { SkillCatalogSaveApplicationService, SkillCatalogSaveError } = await import("./catalog-save-service.js");
+    const { byteDigest } = await import("../protocol/index.js");
+
+    const fixture = await createFixture();
+    let turnBatch: Array<{
+      seq: number;
+      requestId: string;
+      mutation: GlobalStagedMutation;
+      mutationDigest: string;
+    }> = [];
+    const readEntryV2 = async (skillId: string) => {
+      const res = await fixture.adapter.read({ kind: "skill-get-v2", skillId }, readContext(`get-${skillId}-${Date.now()}`));
+      return res.kind === "skill-get-v2" ? res.entry : null;
+    };
+    const saveOverlay = () =>
+      turnBatch
+        .filter((item) => item.mutation.kind !== "skill-usage")
+        .map((item) => ({
+          recordSeq: item.seq,
+          requestIdentity: item.requestId,
+          mutation: item.mutation as never,
+          mutationDigest: item.mutationDigest,
+        }));
+    const loader = new SkillCatalogLoadApplicationService({
+      readScope: async (skillId) => ({
+        kind: "assignment",
+        entry: await readEntryV2(skillId),
+        overlay: saveOverlay(),
+        issuedAt: NOW,
+      }),
+      readContent: async (ref) => Buffer.from(await fixture.artifacts.get(ref)).toString("utf8"),
+      readBytes: (ref) => fixture.artifacts.get(ref),
+      stageUsage: async (opId, mutation) => {
+        turnBatch.push({
+          seq: turnBatch.length + 1,
+          requestId: `req:${opId}`,
+          mutation,
+          mutationDigest: byteDigest(Buffer.from(JSON.stringify(mutation))),
+        });
+      },
+    });
+    const saver = new SkillCatalogSaveApplicationService({
+      readCatalogEntry: async () => null,
+      readCatalogEntryV2: readEntryV2,
+      readOverlay: async () => saveOverlay(),
+      requestIdentityFor: (opId) => `req:${opId}`,
+      putContent: (doc) => fixture.artifacts.put(Buffer.from(doc, "utf8")),
+      putBytes: (bytes) => fixture.artifacts.put(bytes),
+      readContent: async (ref) => Buffer.from(await fixture.artifacts.get(ref)).toString("utf8"),
+      readBytes: (ref) => fixture.artifacts.get(ref),
+      stage: async () => {},
+      stageV2: async (opId, mutation) => {
+        turnBatch.push({
+          seq: turnBatch.length + 1,
+          requestId: `req:${opId}`,
+          mutation,
+          mutationDigest: byteDigest(Buffer.from(JSON.stringify(mutation))),
+        });
+      },
+      assignmentIssuedAt: () => NOW,
+    });
+
+    // Create initial multi-file v2 package at revision 1
+    await saver.save(
+      {
+        name: "remote-ws-skill",
+        description: "v1 desc",
+        body: "# V1 Body\n",
+        mode: "work",
+        resources: [{ path: "notes/guide.md", content: "Remote guide body\n" }],
+      },
+      "t0-create",
+    );
+    await commitStaged(
+      fixture,
+      turnBatch.map(({ seq, requestId, mutation }) => ({ seq, requestId, mutation })),
+    );
+    const createdV1 = await readEntryV2("remote-ws-skill");
+    const packageRefV1 = createdV1?.packageRef;
+    expect(packageRefV1).toBeDefined();
+
+    // 1) Cross-turn: Turn 1 reads root -> commits usage -> revision stays 1, hitCount = 1
+    turnBatch = [];
+    const readTurn1 = await loader.readPackage({ id: "user:remote-ws-skill", operationId: "t1-read" });
+    if ("error" in readTurn1 || !readTurn1.writeTemplate) throw new Error("expected writeTemplate");
+    expect(readTurn1.writeTemplate.expectedRevision).toBe(1);
+    const committedT1 = await commitStaged(
+      fixture,
+      turnBatch.map(({ seq, requestId, mutation }) => ({ seq, requestId, mutation })),
+    );
+    expect(committedT1.value.get(1)).toEqual({ t: "granted", targetRevision: 1 });
+    // Replay idempotency: re-committing same usage requestId does not increment hitCount again
+    await commitStaged(
+      fixture,
+      turnBatch.map(({ seq, requestId, mutation }) => ({ seq, requestId, mutation })),
+    );
+    const afterT1 = await readEntryV2("remote-ws-skill");
+    expect(afterT1).toMatchObject({ revision: 1, usage: { hitCount: 1 }, packageRef: packageRefV1 });
+
+    // Turn 2 saves using Turn 1's verbatim writeTemplate (omitting resources -> preserves notes/guide.md)
+    turnBatch = [];
+    const savedTurn2 = await saver.save(
+      {
+        name: "remote-ws-skill",
+        description: "v2 cross-turn desc",
+        body: "# V2 Cross-Turn Body\n",
+        mode: "work",
+        expectedRevision: readTurn1.writeTemplate.expectedRevision,
+        expectedVersion: readTurn1.writeTemplate.expectedVersion,
+      },
+      "t2-save",
+    );
+    expect(savedTurn2.outcome).toBe("updated");
+    const committedT2 = await commitStaged(
+      fixture,
+      turnBatch.map(({ seq, requestId, mutation }) => ({ seq, requestId, mutation })),
+    );
+    expect(committedT2.value.get(1)).toEqual({ t: "granted", targetRevision: 2 });
+
+    // 2) Same-turn: Turn 3 reads root (rev 2) AND immediately saves in the same batch ([skill-usage, skill-update-v2])
+    turnBatch = [];
+    const readTurn3 = await loader.readPackage({ id: "user:remote-ws-skill", operationId: "t3-read" });
+    if ("error" in readTurn3 || !readTurn3.writeTemplate) throw new Error("expected writeTemplate in t3");
+    expect(readTurn3.writeTemplate.expectedRevision).toBe(2);
+    expect(readTurn3.content).toContain("# V2 Cross-Turn Body");
+    await saver.save(
+      {
+        name: "remote-ws-skill",
+        description: "v3 same-turn desc",
+        body: "# V3 Same-Turn Body\n",
+        mode: "work",
+        expectedRevision: readTurn3.writeTemplate.expectedRevision,
+        expectedVersion: readTurn3.writeTemplate.expectedVersion,
+      },
+      "t3-save",
+    );
+    expect(turnBatch.map((b) => b.mutation.kind)).toEqual(["skill-usage", "skill-update-v2"]);
+    const committedT3 = await commitStaged(
+      fixture,
+      turnBatch.map(({ seq, requestId, mutation }) => ({ seq, requestId, mutation })),
+    );
+    expect(committedT3.value.get(1)).toEqual({ t: "granted", targetRevision: 2 });
+    expect(committedT3.value.get(2)).toEqual({ t: "granted", targetRevision: 3 });
+
+    const afterT3 = await readEntryV2("remote-ws-skill");
+    expect(afterT3).toMatchObject({
+      revision: 3,
+      description: "v3 same-turn desc",
+      usage: { hitCount: 2 },
+    });
+    const verifyRoot = await loader.readPackage({ id: "user:remote-ws-skill" });
+    if ("error" in verifyRoot) throw new Error("expected root");
+    expect(verifyRoot.content).toContain("# V3 Same-Turn Body");
+    const verifyGuide = await loader.readPackage({
+      id: "user:remote-ws-skill",
+      resource: "notes/guide.md",
+      expectedVersion: verifyRoot.packageVersion,
+    });
+    if ("error" in verifyGuide) throw new Error("expected preserved guide");
+    expect(verifyGuide.content).toBe("Remote guide body\n");
+
+    // 3) Real concurrent edit advances revision 3 -> 4; stale writeTemplate (expectedRevision: 3) is rejected
+    await fixture.adapter.mutate(
+      {
+        kind: "skill-set-visibility",
+        skillId: "remote-ws-skill",
+        expectedRevision: 3,
+        visibility: { modelAutoIndex: true, userSlashCommand: false },
+      },
+      controlContext("concurrent-vis"),
+    );
+    await expect(
+      saver.save(
+        {
+          name: "remote-ws-skill",
+          description: "stale overwrite",
+          body: "# Stale\n",
+          mode: "work",
+          expectedRevision: verifyRoot.writeTemplate?.expectedRevision,
+          expectedVersion: verifyRoot.writeTemplate?.expectedVersion,
+        },
+        "t4-stale-save",
+      ),
+    ).rejects.toBeInstanceOf(SkillCatalogSaveError);
+
+    await fixture.log.stopStorageMaintenance();
   });
 });
 

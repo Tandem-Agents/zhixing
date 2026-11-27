@@ -18,9 +18,19 @@
  *   - 索引占独立小额度,不挤占用户技能 top-N
  */
 
+import { stringifyFrontmatter } from "../frontmatter.js";
+import { encodeSkillPackageArchive, type EncodedSkillPackageArchive } from "./archive.js";
 import { skillNameToId } from "./id.js";
 import type { SkillMode } from "./types.js";
 import { BUILTIN_SKILL_DEFS } from "./builtin-skills.js";
+
+export interface BuiltinSkillResourceDef {
+  readonly path: string;
+  readonly content: string;
+  readonly kind?: "resource";
+  readonly mediaType?: string;
+  readonly summary?: string;
+}
 
 /** 登记一份内置能力方法所需的内容(id 由 name 派生,登记时算好)。 */
 export interface BuiltinSkillDef {
@@ -32,6 +42,8 @@ export interface BuiltinSkillDef {
   body: string;
   /** 适用模式 —— 在哪些模式的索引可见;由能力自身声明,非用户状态。 */
   modes: readonly SkillMode[];
+  /** 可选多成员包资源。 */
+  readonly resources?: readonly BuiltinSkillResourceDef[];
   /**
    * 能力的配套工具需求(工具名)；Skill/Profile 只声明需求，具体实现由 Host
    * Tool implementation binding 选择并经 Kernel 端口提供。
@@ -42,9 +54,11 @@ export interface BuiltinSkillDef {
   tools?: readonly string[];
 }
 
-/** 登记处条目 —— def + 派生 id 定格。 */
+/** 登记处条目 —— def + 派生 id 与预编码确定性包版本定格。 */
 export interface BuiltinSkillEntry extends BuiltinSkillDef {
   id: string;
+  readonly packageVersion: string;
+  readonly archive: EncodedSkillPackageArchive;
 }
 
 /** 索引拼池用的最小条目形态(renderSkillIndex 的入参子集)。 */
@@ -57,13 +71,37 @@ export interface BuiltinIndexEntry {
 const REGISTRY: ReadonlyMap<string, BuiltinSkillEntry> = new Map(
   BUILTIN_SKILL_DEFS.map((def) => {
     const id = skillNameToId(def.name);
-    return [id, { ...def, id }];
+    const rootDocument = stringifyFrontmatter(
+      { name: def.name, description: def.description },
+      def.body,
+    );
+    const archive = encodeSkillPackageArchive([
+      { path: "SKILL.md", content: rootDocument, kind: "root" },
+      ...(def.resources ?? []).map((resource) => ({
+        path: resource.path,
+        content: resource.content,
+        kind: "resource" as const,
+        ...(resource.mediaType !== undefined ? { mediaType: resource.mediaType } : {}),
+        ...(resource.summary !== undefined ? { summary: resource.summary } : {}),
+      })),
+    ]);
+    return [id, { ...def, id, packageVersion: archive.packageVersion, archive }];
   }),
 );
 
 /** 按 id 取内置能力；不存在返回 null。 */
 export function getBuiltinSkill(id: string): BuiltinSkillEntry | null {
   return REGISTRY.get(id) ?? null;
+}
+
+/** 列出适用模式下的全部内置系统包（未指定 mode 时返回全部）。 */
+export function listBuiltinSkills(mode?: SkillMode): BuiltinSkillEntry[] {
+  const out: BuiltinSkillEntry[] = [];
+  for (const entry of REGISTRY.values()) {
+    if (mode !== undefined && !entry.modes.includes(mode)) continue;
+    out.push(entry);
+  }
+  return out;
 }
 
 /**

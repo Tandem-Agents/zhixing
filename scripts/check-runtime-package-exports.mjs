@@ -216,6 +216,7 @@ const migrationPackageSurfaces = [
       ["./paths", "paths"],
       ["./typeahead", "typeahead/index", "DefaultTypeaheadBroker"],
       ["./skills/admission", "skills/admission"],
+      ["./skills/archive", "skills/archive", "encodeSkillPackageArchive"],
       [
         "./skills/global-state",
         "skills/global-state-adapter",
@@ -288,6 +289,8 @@ const migrationPackageSurfaces = [
     packageName: "owner-kernel",
     rootAbsent: true,
     entries: [
+      ["./conversation-owner-authority", "conversation-owner-authority"],
+      ["./startup-definitions", "startup-definitions"],
       ["./types", "types", "SessionRuntime"],
       ["./runtime", "runtime", "ConversationManager"],
       ["./conversation-manager", "conversation-manager", "ConversationManager"],
@@ -311,6 +314,7 @@ const migrationPackageSurfaces = [
         "ConversationRunJournal",
       ],
       ["./job-assignment", "job-assignment", "JobJournal"],
+      ["./job-run-state-index", "job-run-state-index"],
       ["./delivery", "delivery", "createOwnerDeliveryParticipant"],
       ["./resource-governor", "resource-governor", "AnchorResourceGovernor"],
       ["./scheduler-authority", "scheduler-authority", "AnchorScheduler"],
@@ -1702,7 +1706,8 @@ async function verifyCorePackageExports(failures) {
         }
         if (
           /SkillCatalog(?:Save|Admission|Load|KernelProjection)?Application/u.test(declaration) ||
-          declaration.includes("catalog-application")
+          declaration.includes("catalog-application") ||
+          /catalog-(?:save|load|admission)-service|package-pagination/u.test(declaration)
         ) {
           failures.push(`core-exports:${subpath}:skill-catalog-type-leak`);
         }

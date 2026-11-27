@@ -12,7 +12,7 @@ import { SkillMutationConflictError } from "./global-state-adapter.js";
 
 type SkillCatalogAuthorityMutation = Extract<
   GlobalControlMutation,
-  { kind: "skill-set-state" | "skill-archive" }
+  { kind: "skill-set-state" | "skill-set-visibility" | "skill-archive" }
 >;
 
 export interface AnchorSkillCatalogManagementCorrectnessOptions {
@@ -63,6 +63,20 @@ export function createAnchorSkillCatalogManagementCorrectnessPort(
       };
     },
 
+    async readCatalogV2(input: Readonly<{ includeDisabled: boolean }>) {
+      const result = await state().read(
+        { kind: "skill-catalog-v2", includeDisabled: input.includeDisabled },
+        context("skill-list-v2"),
+      );
+      if (result.kind !== "skill-catalog-v2") {
+        throw new TypeError("Skill catalog v2 returned another result type");
+      }
+      return {
+        entries: result.entries,
+        catalogRevision: result.catalogRevision,
+      };
+    },
+
     async readEntry(skillId: string) {
       const result = await state().read(
         { kind: "skill-get", skillId },
@@ -100,16 +114,25 @@ export function createAnchorSkillCatalogManagementCorrectnessPort(
 function toAuthorityMutation(
   mutation: SkillCatalogManagementMutation,
 ): SkillCatalogAuthorityMutation {
-  return mutation.kind === "set-state"
-    ? {
-        kind: "skill-set-state",
-        skillId: mutation.skillId,
-        patch: { ...mutation.patch },
-        expectedRevision: mutation.expectedRevision,
-      }
-    : {
-        kind: "skill-archive",
-        skillId: mutation.skillId,
-        expectedRevision: mutation.expectedRevision,
-      };
+  if (mutation.kind === "set-state") {
+    return {
+      kind: "skill-set-state",
+      skillId: mutation.skillId,
+      patch: { ...mutation.patch },
+      expectedRevision: mutation.expectedRevision,
+    };
+  }
+  if (mutation.kind === "set-visibility") {
+    return {
+      kind: "skill-set-visibility",
+      skillId: mutation.skillId,
+      visibility: { ...mutation.visibility },
+      expectedRevision: mutation.expectedRevision,
+    };
+  }
+  return {
+    kind: "skill-archive",
+    skillId: mutation.skillId,
+    expectedRevision: mutation.expectedRevision,
+  };
 }

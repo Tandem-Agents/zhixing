@@ -15,6 +15,50 @@
 /** 文件名非法字符:Windows 保留 + 路径分隔符;不含空格(空格在上一步已转 `-`)。 */
 const ILLEGAL_FILENAME_CHARS = '<>:"/\\|?*';
 
+export type SkillNamespace = "system" | "user";
+
+export interface ParsedQualifiedSkillId {
+  readonly namespace?: SkillNamespace;
+  readonly localId: string;
+  readonly qualifiedId?: string;
+}
+
+/**
+ * 解析限定或裸技能标识：
+ * 先识别并剥离 `"system:"` 或 `"user:"` 前缀，再对局部名调用 `skillNameToId`
+ * （保留原 `skillNameToId` 对裸名的行为不变）。
+ */
+export function parseQualifiedSkillId(input: string): ParsedQualifiedSkillId {
+  const trimmed = input.trim();
+  const lower = trimmed.toLowerCase();
+  let namespace: SkillNamespace | undefined;
+  let localRaw = trimmed;
+  if (lower.startsWith("system:")) {
+    namespace = "system";
+    localRaw = trimmed.slice("system:".length);
+  } else if (lower.startsWith("user:")) {
+    namespace = "user";
+    localRaw = trimmed.slice("user:".length);
+  }
+  const localId = skillNameToId(localRaw);
+  return {
+    ...(namespace ? { namespace } : {}),
+    localId,
+    ...(namespace && localId ? { qualifiedId: `${namespace}:${localId}` } : {}),
+  };
+}
+
+export function formatQualifiedSkillId(
+  namespace: SkillNamespace,
+  localId: string,
+): string {
+  const normalized = skillNameToId(localId);
+  if (!normalized) {
+    throw new TypeError("Skill local id must produce a non-empty identifier");
+  }
+  return `${namespace}:${normalized}`;
+}
+
 export function skillNameToId(name: string): string {
   let out = "";
   for (const ch of name.toLowerCase()) {
