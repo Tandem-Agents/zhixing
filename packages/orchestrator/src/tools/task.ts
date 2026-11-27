@@ -102,8 +102,13 @@ export interface TaskToolEnv {
   parentBroker: IConfirmationBroker;
   /** 父工具集 —— 子工具按 sub-agent profile.enabledTools 过滤后从此派生 */
   parentTools: readonly ToolDefinition[];
+  /** 可选的子运行补充工具（按同名覆盖/追加合并进子工具池，不影响 logOnly 收窄） */
+  readonly supplementalTools?: readonly ToolDefinition[];
   /** 子 agent 实际可用工具名，用于生成 byte-stable 的 Task 描述。 */
   childToolNames: readonly string[];
+  readonly subAgentSkillIndex?: string | null;
+  readonly lineageRole?: "main" | "light" | "power";
+  readonly effectivePrimaryRole?: "main" | "light" | "power";
   /**
    * 单次 input tokens 注意力风险阈值 —— 从 ModelCapability.riskMaxTokens 解析。
    *
@@ -551,6 +556,21 @@ function assertRunContract(
  * 可观察性:子 agent 的事件通过 createEventBus({ parent: parentBus, ... })
  * 自动冒泡到父 bus,父订阅方按 lineage 过滤可看到全部子事件。
  */
+function mergeSupplementalTools(
+  base: readonly ToolDefinition[],
+  supplemental?: readonly ToolDefinition[],
+): readonly ToolDefinition[] {
+  if (!supplemental || supplemental.length === 0) return base;
+  const byName = new Map(supplemental.map((tool) => [tool.name, tool] as const));
+  const merged = base.map((tool) => byName.get(tool.name) ?? tool);
+  for (const extra of supplemental) {
+    if (!base.some((tool) => tool.name === extra.name)) {
+      merged.push(extra);
+    }
+  }
+  return merged;
+}
+
 export function createTaskTool(env: TaskToolEnv): ToolDefinition {
   return {
     name: TASK_TOOL_CAPABILITY_DESCRIPTOR.name,
@@ -568,7 +588,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
 
       const { runCtx, abortSignal } = assertRunContract(parsed, ctx);
       const { description, prompt } = parsed;
-      let parentTools = env.parentTools;
+      let parentTools = mergeSupplementalTools(env.parentTools, env.supplementalTools);
       let childContext = runCtx;
       let childActive = true;
       if (input.logOnly === true) {
@@ -613,6 +633,10 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         // 仍按顶层意图研判（子 agent 不能借助 task 文本伪装意图绕过管家）
         userIntent: ctx.userIntent,
         authorizeToolExecution: runCtx.authorizeToolExecution,
+        subAgentSkillIndex: env.subAgentSkillIndex,
+        childRuntimeKind: "sub-agent",
+        lineageRole: env.lineageRole ?? runCtx.lineageRole,
+        effectivePrimaryRole: env.effectivePrimaryRole ?? runCtx.effectivePrimaryRole,
       })).finally(() => { childActive = false; });
 
       return formatChildResultAsToolResult(result, description, ctx.toolCallId);

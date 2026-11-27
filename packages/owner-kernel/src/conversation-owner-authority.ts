@@ -8,7 +8,13 @@ export interface ConversationAnchorTenurePort {
   current(view: DurableProjectionReadContext): Promise<VerifiedAnchorTenure | undefined>;
   at(view: DurableProjectionReadContext, checkpoint: DurableLogCheckpoint): Promise<VerifiedAnchorTenure | undefined>;
 }
-const ports = new WeakMap<AuthorityCommitLog, ConversationAnchorTenurePort>();
+const ANCHOR_TENURE_PORTS_KEY = Symbol.for(
+  "@zhixing-ai/owner-kernel/conversation-owner-authority-ports",
+);
+const ports: WeakMap<AuthorityCommitLog, ConversationAnchorTenurePort> =
+  ((globalThis as Record<symbol, WeakMap<AuthorityCommitLog, ConversationAnchorTenurePort> | undefined>)[
+    ANCHOR_TENURE_PORTS_KEY
+  ] ??= new WeakMap<AuthorityCommitLog, ConversationAnchorTenurePort>());
 export function registerConversationAnchorTenure(log: AuthorityCommitLog, port: ConversationAnchorTenurePort): void {
   const prior = ports.get(log);
   if (prior && prior.projectionId !== port.projectionId) throw new TypeError('Conversation anchor tenure source changed');

@@ -49,6 +49,7 @@ import {
 } from "@zhixing-ai/core/contracts";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
 import {
+  extractMountedMcpServers,
   runContextStorage,
   type DurableToolExecutionAuthorizer,
 } from "../runtime/run-context.js";
@@ -177,6 +178,14 @@ export interface RunChildAgentOptions {
   userIntent?: string;
   /** Durable assignment authority inherited from the parent execution. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  /** Pre-rendered read-only system skill index injected into regular sub-agents. */
+  subAgentSkillIndex?: string | null;
+  /** Runtime kind for RunContext observability. */
+  childRuntimeKind?: "sub-agent" | "orchestration-node";
+  /** Role lineage active in this child execution. */
+  lineageRole?: "main" | "light" | "power";
+  /** Effective primary role active in this child execution. */
+  effectivePrimaryRole?: "main" | "light" | "power";
   /** 资源预算(可选,缺省走 resolveSubAgentBudget 默认值) */
   budget?: SubAgentBudget;
   /**
@@ -312,6 +321,9 @@ async function runChildAgentInner(
       workspace: opts.workspace,
       workspaceSource: opts.workspaceSource,
       globalConfigPath: opts.globalConfigPath,
+      ...(opts.subAgentSkillIndex !== undefined
+        ? { skillIndex: opts.subAgentSkillIndex }
+        : {}),
     });
 
     // 任务全文走专用 user message，不进入 system prompt，保持子 agent
@@ -380,10 +392,24 @@ async function runChildAgentInner(
     }
     await emitChildStart(opts, subAgentId, childLineage, childBus);
     const childMetering = childLease && parentContext?.resourceReservation
-      ? childModelMetering(childLease, parentContext.resourceReservation)
+      ? childModelMetering(childLease, parentContext.resourceReservation, {
+          maxTokens: budget.maxTokens,
+          maxCalls: budget.maxTurns,
+        })
       : parentContext?.modelCallMetering;
+    const childLineageRole = opts.lineageRole ?? parentContext?.lineageRole;
+    const childEffectivePrimaryRole =
+      opts.effectivePrimaryRole ?? parentContext?.effectivePrimaryRole;
     runResult = await runContextStorage.run(
       {
+        runtimeKind: opts.childRuntimeKind ?? "sub-agent",
+        ...(childLineageRole ? { lineageRole: childLineageRole } : {}),
+        ...(childEffectivePrimaryRole
+          ? { effectivePrimaryRole: childEffectivePrimaryRole }
+          : {}),
+        hasAuthorizedWorkspace: Boolean(opts.workspace && opts.workspaceSource !== "none"),
+        toolNames: Object.freeze(childTools.map((t) => t.name)),
+        mountedMcpServers: extractMountedMcpServers(childTools),
         bus: childBus,
         lineage: childLineage,
         childTaskId: subAgentId,
@@ -424,6 +450,7 @@ async function runChildAgentInner(
         runSubAgentLoop({
           systemPrompt,
           messages: initialMessages,
+          exemptSubAgentTaskMessageIndex: opts.backgroundMessages?.length ?? 0,
           tools: childTools,
           provider: opts.provider,
           model: opts.model,
@@ -502,9 +529,10 @@ async function runChildAgentInner(
 function childModelMetering(
   lease: ChildResourceLease,
   binding: NonNullable<import("../runtime/run-context.js").RunContext["resourceReservation"]>,
+  fallbackBudget: { readonly maxTokens: number; readonly maxCalls: number },
 ): { readonly meter: ModelCallResourceMeter; readonly nextCallIndex: () => number } {
   let callIndex = 0;
-  const tracker = createLeaseBudgetTracker(lease.budget);
+  const tracker = createLeaseBudgetTracker(lease.budget ?? fallbackBudget);
   return {
     nextCallIndex: () => ++callIndex,
     meter: {

@@ -219,6 +219,23 @@ export function createSecureExecuteTool(
       // loop-runner）的工具调用时管家仍按顶层用户意图研判，子 agent 不能借助
       // 自身收到的指令伪装意图来绕过管家
       userIntent: turnContext?.userIntent ?? context.userIntent,
+      authorizeFileAccess: async ({ path: targetPath, access }) => {
+        const fileRes = await pipeline.evaluateNormalizedFileAccess({
+          toolName: tool.name,
+          path: targetPath,
+          access,
+          workingDirectory: context.workingDirectory,
+          ...(permissionRules === undefined ? {} : { permissionRules }),
+        });
+        if (!fileRes.allowed) {
+          onBlocked?.(tool.name, { ...input, path: targetPath }, fileRes);
+          throw new SecurityBlockError(
+            `操作被阻止:${fileRes.reason ?? "安全策略拦截"}`,
+            tool.name,
+            fileRes.reason ?? "",
+          );
+        }
+      },
     };
 
     const evalStart = performance.now();
@@ -267,6 +284,21 @@ export function createSecureExecuteTool(
 
     // 2. 需要确认 —— 灰色 external 可先经 AI 安全管家研判;逐次拍板工具必须直达 broker
     if (needsConfirmation) {
+      let confirmationDisplayInput = input;
+      if (tool.prepareConfirmation) {
+        const prep = await tool.prepareConfirmation(input, augmentedContext);
+        if (prep.earlyReturn) {
+          records?.record(() => ({
+            event: "permission",
+            result: "refused",
+            data: { tool: tool.name, phase: "prepare-confirmation-early-return" },
+          }));
+          return prep.earlyReturn;
+        }
+        if (prep.displayInput) {
+          confirmationDisplayInput = prep.displayInput;
+        }
+      }
       const verdict = requiresExplicitConfirmation
         ? undefined
         : await consultSteward({
@@ -301,7 +333,7 @@ export function createSecureExecuteTool(
           broker,
           securityApproval,
           toolName: tool.name,
-          input,
+          input: confirmationDisplayInput,
           context: augmentedContext,
           result,
           sessionType,

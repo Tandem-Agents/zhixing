@@ -58,6 +58,10 @@ function proxyTurnContext(proxyMessage: AdvancementProxyMessage): TurnContext {
     turnOrigin: {
       channel: "advancement",
       triggeredBy: proxyMessage.id,
+      messageIdentity: {
+        id: proxyMessage.id,
+        source: { kind: "system", subsystem: "advancement-proxy" },
+      },
     },
   };
 }

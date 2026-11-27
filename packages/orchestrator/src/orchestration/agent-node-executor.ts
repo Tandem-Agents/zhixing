@@ -48,6 +48,8 @@ export interface AgentNodeExecutorOptionsV1 {
   readonly userIntent?: string;
   readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
   readonly runChildAgent?: RunChildAgentForOrchestrationV1;
+  readonly subAgentSkillIndex?: string | null;
+  readonly effectivePrimaryRoleName?: "main" | "light" | "power";
 }
 
 export function createAgentNodeExecutorV1(
@@ -83,6 +85,7 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
     }
 
     const selectedModel = selectNodeModel(this.options, node.policy.modelRole);
+    const selectedRole = node.policy.modelRole ?? this.options.effectivePrimaryRoleName;
     const result = await this.runChildAgent({
       provider: selectedModel.provider,
       model: selectedModel.model,
@@ -108,6 +111,14 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
         : undefined,
       userIntent: this.options.userIntent,
       authorizeToolExecution: this.options.authorizeToolExecution,
+      subAgentSkillIndex: this.options.subAgentSkillIndex,
+      childRuntimeKind: "orchestration-node",
+      ...(selectedRole
+        ? {
+            lineageRole: selectedRole,
+            effectivePrimaryRole: selectedRole,
+          }
+        : {}),
       riskMaxTokens: this.options.riskMaxTokens,
       budget: {
         maxTurns: node.policy.maxTurns,

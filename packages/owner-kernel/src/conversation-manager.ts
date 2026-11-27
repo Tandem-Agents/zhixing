@@ -1102,7 +1102,10 @@ export class ConversationManager implements ConversationCommitProjection {
   private readonly executionConfirmationBindings = new Map<string, symbol>();
 
   /** The issued runtime owns this turn's confirmations; the idle runtime remains a projection. */
-  bindExecutionConfirmation(conversationId: string, runtime: SessionRuntime): () => void {
+  bindExecutionConfirmation(
+    conversationId: string,
+    runtime: Pick<SessionRuntime, "confirmationBroker">,
+  ): () => void {
     const managed = this.sessions.get(conversationId);
     if (!managed) throw new Error("Execution confirmation requires an active conversation");
     if (!this.confirmationHub || !runtime.confirmationBroker ||
@@ -1126,7 +1129,10 @@ export class ConversationManager implements ConversationCommitProjection {
   }
 
   /** 把会话的 broker 接到 hub（幂等）；未配置 hub 或 runtime 无 broker 时 no-op */
-  private attachToHub(conversationId: string, runtime: SessionRuntime): void {
+  private attachToHub(
+    conversationId: string,
+    runtime: Pick<SessionRuntime, "confirmationBroker">,
+  ): void {
     if (!this.confirmationHub) return;
     if (!runtime.confirmationBroker) return;
     if (this.attachedBrokers.has(conversationId)) return;

@@ -73,8 +73,10 @@ describe("subAgentProfile(opts)", () => {
     expect(rendered).toContain("- ");
   });
 
-  it("子工具集包含 web_fetch 且不包含 Task", () => {
+  it("子工具集包含 web_fetch / runtime_inspect / skill_read 且不包含 Task", () => {
     expect(SUB_AGENT_ENABLED_TOOLS).toContain("web_fetch");
+    expect(SUB_AGENT_ENABLED_TOOLS).toContain("runtime_inspect");
+    expect(SUB_AGENT_ENABLED_TOOLS).toContain("skill_read");
     expect(SUB_AGENT_ENABLED_TOOLS).not.toContain("Task");
   });
 });

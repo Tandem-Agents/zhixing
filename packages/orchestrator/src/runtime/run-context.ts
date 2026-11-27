@@ -19,7 +19,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgentEventMap, ModelProviderPhases, PostTurnControlIntent, TurnOrigin } from "@zhixing-ai/core/types";
+import type { AgentEventMap, ModelProviderPhases, PostTurnControlIntent, ToolDefinition, TurnOrigin } from "@zhixing-ai/core/types";
 import type { DurableToolExecutionAuthorizer } from "@zhixing-ai/core/security";
 import type { EventBus } from "@zhixing-ai/core/events";
 import type {
@@ -49,6 +49,17 @@ export type { DurableToolExecutionAuthorizer } from "@zhixing-ai/core/security";
  *     而触发不变量违反
  */
 export interface RunContext {
+  /** Runtime kind for runtime_inspect & execution observability. */
+  readonly runtimeKind?: "conversation" | "ephemeral" | "sub-agent" | "orchestration-node";
+  /** Effective role lineage & primary role active in this runtime scope. */
+  readonly lineageRole?: "main" | "light" | "power";
+  readonly effectivePrimaryRole?: "main" | "light" | "power";
+  /** Whether an authorized workspace is attached (never inferred from cwd). */
+  readonly hasAuthorizedWorkspace?: boolean;
+  /** Tool names mounted in this runtime scope. */
+  readonly toolNames?: readonly string[];
+  /** MCP server IDs active in this runtime scope's mounted tools. */
+  readonly mountedMcpServers?: readonly string[];
   /** Issued child identity, never inferred from arbitrary lineage labels. */
   childTaskId?: string;
   readonly logPorts?: import("./logging.js").KernelLogPorts;
@@ -104,6 +115,19 @@ export interface RunContext {
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();
+
+/** Extract sorted unique MCP server IDs (`mcp__<serverId>__<tool>`) from mounted tools. */
+export function extractMountedMcpServers(tools: readonly ToolDefinition[]): readonly string[] {
+  const serverIds = new Set<string>();
+  for (const tool of tools) {
+    if (!tool.name.startsWith("mcp__")) continue;
+    const sep = tool.name.indexOf("__", 5);
+    if (sep > 5) {
+      serverIds.add(tool.name.slice(5, sep));
+    }
+  }
+  return Object.freeze([...serverIds].sort());
+}
 
 /**
  * 判断当前 turn 发起接入面是否声明了 post-turn 控制消费能力。工具必须先

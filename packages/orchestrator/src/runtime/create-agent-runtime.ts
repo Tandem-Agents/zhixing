@@ -72,6 +72,7 @@ import {
   type SecurityRequest,
   BoundaryRegistry,
   ToolArgumentExtractor,
+  ToolFilePathExtractor,
   SecurityPipeline,
 } from "@zhixing-ai/core/security";
 import { type WatchdogPolicy, DEFAULT_WATCHDOG_POLICY } from "@zhixing-ai/core/interrupt";
@@ -122,8 +123,12 @@ import {
   type OnUserDeniedFn,
 } from "../security/secure-executor.js";
 import { trackMessages } from "./track-messages.js";
-import { runContextStorage } from "./run-context.js";
-import type { DurableToolExecutionAuthorizer } from "./run-context.js";
+import {
+  extractMountedMcpServers,
+  runContextStorage,
+  type DurableToolExecutionAuthorizer,
+  type RunContext,
+} from "./run-context.js";
 import { createTaskTool } from "../tools/task.js";
 import {
   parseTaskUsageFromMessages,
@@ -422,6 +427,7 @@ export interface RunOrchestrationV1Params {
   readonly eventBus: EventBus<AgentEventMap>;
   readonly parentLineage?: string;
   readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
+  readonly runContext?: Partial<RunContext>;
   /** 独立编排入口的计量序列——与所属 assignment 的其余外调共用同一 usageId 空间 */
   readonly modelCallMetering?: {
     readonly meter: ModelCallResourceMeter;
@@ -594,6 +600,10 @@ export interface CreateAgentRuntimeOptions {
   lifecycle?: readonly AgentRuntimeLifecycle[];
   /** 运行体种类。缺省为持久会话运行体；一次性执行体由宿主显式传 ephemeral。 */
   runtimeKind?: RuntimeKind;
+  /** Host-injected sub-agent supplemental tools (e.g. system-only skill_read / runtime_inspect). */
+  readonly subAgentSupplementalTools?: readonly ToolDefinition[];
+  /** Pre-rendered read-only system skill index injected into regular sub-agents. */
+  readonly subAgentSkillIndex?: string | null;
 }
 // ─── 创建运行时 ───
 
@@ -718,6 +728,12 @@ export async function createAgentRuntime(
     roles,
     roleThinking.light,
   );
+  // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
+  const confirmationBroker =
+    options.confirmationBroker ??
+    new ConfirmationBroker({
+      lifecycleObserver: options.confirmationLifecycleObserver,
+    });
   const requestedToolNames = Object.freeze(
     profile.enabledTools.filter((name) => name !== "Task"),
   );
@@ -727,6 +743,12 @@ export async function createAgentRuntime(
       requestedToolNames,
       networkProxy: options.runtimeEnvironment.networkProxy,
       callText: (prompt: string) => mainCallLLM([userMessage(prompt)]),
+      confirmationBroker,
+      admissionReferee: Object.freeze({
+        role: "main" as const,
+        providerId: roles.main.provider.id,
+        model: roles.main.model,
+      }),
     }),
   );
   const baseTools: ToolDefinition[] = [...toolAssembly.tools];
@@ -744,8 +766,13 @@ export async function createAgentRuntime(
   // （external-service）等声明边界的工具进 registry。tool-aware extractor 让
   // PermissionStore.match 按工具声明的 permissionArgumentKey 提参，避免多 string
   // 字段工具的字段顺序歧义。
+  const allKnownTools = [
+    ...baseTools,
+    ...(options.subAgentSupplementalTools ?? []),
+  ];
   const toolArgumentExtractor: IToolArgumentExtractor =
     ToolArgumentExtractor.fromTools(baseTools);
+  const filePathExtractor = ToolFilePathExtractor.fromTools(allKnownTools);
   // Concrete store selection, P04 path ownership and builtin registration stay
   // at the Host infrastructure edge. The Kernel captures only the finite
   // repository and context-bound readonly source before publication.
@@ -760,50 +787,45 @@ export async function createAgentRuntime(
   );
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(baseTools);
+  for (const supplemental of options.subAgentSupplementalTools ?? []) {
+    if (supplemental.boundaries && supplemental.boundaries.length > 0) {
+      boundaryRegistry.register(supplemental.name, supplemental.boundaries);
+    }
+  }
   const securityPipeline = new SecurityPipeline({
     trustContext: securityExecution.trustContext,
     sessionType,
     permissionRuleSource: securityExecution.permissionRuleSource,
     toolBoundaryRegistry: boundaryRegistry,
+    filePathExtractor,
     ...(options.systemProtectedPaths
       ? { systemProtectedPaths: options.systemProtectedPaths }
       : {}),
   });
 
-  // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
-  const confirmationBroker =
-    options.confirmationBroker ??
-    new ConfirmationBroker({
-      lifecycleObserver: options.confirmationLifecycleObserver,
-    });
-
   // tools = baseTools + (可选 Task 工具)。Task 装配时 capture 装配期已知的
-  // 共享服务 + 当前 baseTools snapshot 作为子工具池来源(子按 sub-agent
-  // profile.enabledTools 过滤后派生)。防递归: sub-agent profile 不含 "Task",
-  // 子 agent 装配时 Task 自然不在 childTools 中。
-  //
-  // per-run 的 eventBus / lineage 由 runtime.run() 入口的 runContextStorage.run
-  // 包裹建立,Task closure call() 时取用 —— 与本装配期解耦,无 mutable runtime 字段。
-  //
-  // boundary 后注册:Task 装配晚于 BoundaryRegistry.fromTools(baseTools),其
-  // boundaries 必须显式 register 进 mutable registry,否则 BoundaryImpactClassifier
-  // 找不到 → fail-closed → critical → 在 ci 模式下被 PermissionMatcher block。
-  // 这同时是 MCP / 动态插件接入路径的统一模式,不是 Task 专用 hack。
-  // ModelCapability 解析 —— Task 工具 + segmentManager 共用同源 capability。
-  // 优先级:用户 modelCapabilityOverrides[model] > 内置 MODEL_CAPABILITIES > UNKNOWN 兜底。
-  // map key / model ID 双向 normalize(剥 vendor 前缀 + 大小写无关),用户任意形式都命中。
+  // 共享服务 + 当前 childToolPool（同名为子运行注入更窄实现如 system-only skill_read）
   const primaryModelCapability = primaryModelRuntime.attention;
 
-  // 思考控制与单发通道已在装配早期构造（builtinCtx 之前,见上）;此处仅派生
-  // 主对话档与 light 档别名供下游消费。若存在会话覆盖，主循环与未指定角色的子执行用覆盖思考参数；
-  // 显式 roles.main / roles.light / roles.power 仍严格保持各自 roleThinking。
   const primaryThinking = baseSessionPrimary
     ? sessionPrimaryThinking
     : roleThinking[primaryRole];
   const lightThinking = roleThinking.light;
 
+  const supplementalByName = new Map(
+    (options.subAgentSupplementalTools ?? []).map((tool) => [tool.name, tool] as const),
+  );
+  const childToolPool: ToolDefinition[] = baseTools.map(
+    (tool) => supplementalByName.get(tool.name) ?? tool,
+  );
+  for (const extraChildTool of options.subAgentSupplementalTools ?? []) {
+    if (!baseTools.some((tool) => tool.name === extraChildTool.name)) {
+      childToolPool.push(extraChildTool);
+    }
+  }
+
   const childToolNameSet = new Set<string>(SUB_AGENT_ENABLED_TOOLS);
-  const childToolNames = baseTools
+  const childToolNames = childToolPool
     .filter((tool) => childToolNameSet.has(tool.name))
     .map((tool) => tool.name)
     .sort();
@@ -827,7 +849,13 @@ export async function createAgentRuntime(
       globalConfigPath: options.runtimeEnvironment.globalConfigPath,
       parentBroker: confirmationBroker,
       parentTools: baseTools,
+      ...(options.subAgentSupplementalTools
+        ? { supplementalTools: options.subAgentSupplementalTools }
+        : {}),
       childToolNames,
+      subAgentSkillIndex: options.subAgentSkillIndex,
+      lineageRole: primaryRole,
+      effectivePrimaryRole: primaryRole,
       // sub-agent 复用父 primaryRole model,riskMaxTokens 从同一 capability 解析
       riskMaxTokens: primaryModelCapability.riskMaxTokens,
     });
@@ -837,7 +865,18 @@ export async function createAgentRuntime(
     }
   }
 
-  // ─── 系统提示词的双层 holder + 注意力窗口生命周期钩子 ───
+  const extractOrchParentTools = (): readonly ToolDefinition[] => {
+    const merged: ToolDefinition[] = tools.map(
+      (tool) => supplementalByName.get(tool.name) ?? tool,
+    );
+    for (const extraChildTool of options.subAgentSupplementalTools ?? []) {
+      if (!merged.some((tool) => tool.name === extraChildTool.name)) {
+        merged.push(extraChildTool);
+      }
+    }
+    return merged;
+  };
+  const orchestrationParentTools = extractOrchParentTools();
   //
   // systemPrompt 后置到 tools 装配之后 —— Task 工具描述需进 ## Tool Usage 段,LLM
   // 才能学习"何时派 Task / 何时直接调单工具"。
@@ -1249,45 +1288,66 @@ export async function createAgentRuntime(
           loopThinking: primaryThinking,
           roleThinking,
           llmRoles: roles,
-        securityPipeline,
-        agentIdentity: options.runtimeEnvironment.agentIdentity,
-        securityApproval: securityExecution,
-        delegationInstructions: profile.delegationInstructions,
-        workspace: workspace.path,
-        workspaceSource: workspace.source,
-        globalConfigPath: options.runtimeEnvironment.globalConfigPath,
-        parentBroker: confirmationBroker,
-        parentTools: tools,
-        riskMaxTokens: primaryModelCapability.riskMaxTokens,
-        userIntent:
-          typeof params.runInput === "string" ? params.runInput : undefined,
-        authorizeToolExecution: params.authorizeToolExecution,
-      });
-      const runner = new OrchestrationRunnerV1({
-        bus: params.eventBus,
-        nodeExecutor,
-        parentLineage: params.parentLineage,
-      });
-      const execute = () =>
-        runner.run({
-          executable: params.executable,
-          runInput: params.runInput,
-          contextSnapshot: params.contextSnapshot,
-          abortSignal: params.abortSignal,
+          securityPipeline,
+          agentIdentity: options.runtimeEnvironment.agentIdentity,
+          securityApproval: securityExecution,
+          delegationInstructions: profile.delegationInstructions,
+          workspace: workspace.path,
+          workspaceSource: workspace.source,
+          globalConfigPath: options.runtimeEnvironment.globalConfigPath,
+          parentBroker: confirmationBroker,
+          parentTools: orchestrationParentTools,
+          riskMaxTokens: primaryModelCapability.riskMaxTokens,
+          userIntent:
+            typeof params.runInput === "string" ? params.runInput : undefined,
+          authorizeToolExecution: params.authorizeToolExecution,
+          subAgentSkillIndex: options.subAgentSkillIndex,
+          effectivePrimaryRoleName: primaryRole,
         });
-      // 独立编排入口不经主 run loop——metering 经 runContext 注入，节点执行器与
-      // 其子 agent 沿既有继承链自动消费同一序列
-      const logPorts = runContextStorage.getStore()?.logPorts ?? runtimeLogs;
-      const disposeLogging = logPorts ? observeKernelRun(params.eventBus, logPorts.kernel) : undefined;
-      try { return await runContextStorage.run(
+        const runner = new OrchestrationRunnerV1({
+          bus: params.eventBus,
+          nodeExecutor,
+          parentLineage: params.parentLineage,
+        });
+        const execute = () =>
+          runner.run({
+            executable: params.executable,
+            runInput: params.runInput,
+            contextSnapshot: params.contextSnapshot,
+            abortSignal: params.abortSignal,
+          });
+        // 独立编排入口合并父 AsyncLocalStorage（若有）与宿主显式注入的 params.runContext，
+        // 保证冷启动恢复等无父上下文场景仍保留受信 RunContext 与本会话 logPorts。
+        const parentContext = runContextStorage.getStore();
+        const logPorts =
+          params.runContext?.logPorts ??
+          parentContext?.logPorts ??
+          runtimeLogs;
+        const disposeLogging = logPorts
+          ? observeKernelRun(params.eventBus, logPorts.kernel)
+          : undefined;
+        try {
+          return await runContextStorage.run(
             {
+              ...parentContext,
+              ...params.runContext,
               bus: params.eventBus,
-              lineage: params.parentLineage ?? "orchestration",
-              modelCallMetering: params.modelCallMetering,
+              lineage:
+                params.parentLineage ??
+                params.runContext?.lineage ??
+                parentContext?.lineage ??
+                "orchestration",
+              modelCallMetering:
+                params.modelCallMetering ??
+                params.runContext?.modelCallMetering ??
+                parentContext?.modelCallMetering,
               logPorts,
             },
             execute,
-          ); } finally { disposeLogging?.(); }
+          );
+        } finally {
+          disposeLogging?.();
+        }
       } finally {
         safeDispose("runOrchestrationV1.modelLease", () => releaseModelLease?.());
       }
@@ -1780,6 +1840,16 @@ export async function createAgentRuntime(
       try {
         const result = await runContextStorage.run(
           {
+            runtimeKind:
+              options.runtimeKind ??
+              (envelope.identity.conversationId ? "conversation" : "ephemeral"),
+            lineageRole: primaryRole,
+            effectivePrimaryRole: primaryRole,
+            hasAuthorizedWorkspace: Boolean(
+              workspace.path && workspace.source !== "none",
+            ),
+            toolNames: Object.freeze(tools.map((t) => t.name)),
+            mountedMcpServers: extractMountedMcpServers(tools),
             bus: eventBus,
             lineage: "main",
             logPorts,
@@ -1892,7 +1962,7 @@ export async function createAgentRuntime(
         });
         const governedExecuteTool = secureExecuteTool;
 
-        // 若追加式前缀状态检测到外部历史长度回退或带已有历史冷启动，诚实开启新前缀代际
+        // 若追加式前缀状态检测到外部历史长度回退、带已有历史冷启动，或上轮注入过跨轮瞬态发送项，诚实开启新前缀代际
         if (activePrefixProjectionState) {
           const priorAssistantExists = loopMessages.some((m) => m.role === "assistant");
           if (
@@ -1900,6 +1970,10 @@ export async function createAgentRuntime(
             loopMessages.length < activePrefixHistoryLength
           ) {
             activePrefixProjectionState.reset(
+              priorAssistantExists ? loopMessages.length : 0,
+            );
+          } else {
+            activePrefixProjectionState.resetIfTransient(
               priorAssistantExists ? loopMessages.length : 0,
             );
           }
@@ -1986,37 +2060,43 @@ export async function createAgentRuntime(
           windowLifecycle,
         });
 
-        while (true) {
-          const { value, done } = await gen.next();
+        try {
+          while (true) {
+            const { value, done } = await gen.next();
 
-          if (done) {
-            // 窗口重构指令唯一生产者 = 段切换（自动评估 / 应急地板同一出口）
-            const windowCompact = segmentAccumulator.getWindowCompact();
-            return createKernelRunCompletion(
-              projectAgentResultToKernelTerminal(value),
-              {
-                runRecord: buildRunRecord({
-                  source: envelope.identity.source,
-                  advancement: envelope.identity.advancement,
-                  userMessage: originalUserMessage,
+            if (done) {
+              // 窗口重构指令唯一生产者 = 段切换（自动评估 / 应急地板同一出口）
+              const windowCompact = segmentAccumulator.getWindowCompact();
+              return createKernelRunCompletion(
+                projectAgentResultToKernelTerminal(value),
+                {
+                  runRecord: buildRunRecord({
+                    source: envelope.identity.source,
+                    advancement: envelope.identity.advancement,
+                    userMessage: originalUserMessage,
+                    newMessages,
+                    agentResult: value,
+                  }),
                   newMessages,
-                  agentResult: value,
-                }),
-                newMessages,
-                durationMs: Date.now() - startTime,
-                windowCompact,
-                pendingPostTurnControl: postTurnControlAccumulator.getOutcome(),
-              },
+                  durationMs: Date.now() - startTime,
+                  windowCompact,
+                  pendingPostTurnControl: postTurnControlAccumulator.getOutcome(),
+                },
+              );
+            }
+
+            // 通知调用方（渲染用）
+            await envelope.observation.onEvent?.(
+              projectAgentYieldToKernelRunEvent(value),
             );
+
+            // 追踪消息以维护对话历史
+            trackMessages(value, newMessages, pendingToolResults);
           }
-
-          // 通知调用方（渲染用）
-          await envelope.observation.onEvent?.(
-            projectAgentYieldToKernelRunEvent(value),
-          );
-
-          // 追踪消息以维护对话历史
-          trackMessages(value, newMessages, pendingToolResults);
+        } finally {
+          if (activePrefixProjectionState && userContextContributions.length > 0) {
+            activePrefixProjectionState.markTransientSendViewChange();
+          }
         }
       }
     },

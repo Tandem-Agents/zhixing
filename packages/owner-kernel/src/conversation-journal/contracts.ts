@@ -218,6 +218,7 @@ export interface ConversationCommitProjectionInput {
     readonly mutation: SessionStagedMutation;
     readonly requestId: string;
   }>;
+  readonly publishConflicts?: number;
 }
 
 export interface ConversationCommitProjection {

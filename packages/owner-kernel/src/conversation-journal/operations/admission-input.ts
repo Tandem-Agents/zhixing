@@ -369,7 +369,7 @@ export function decideInputControl(input: {
   const queuedPosition = input.nextLsn;
   const activeRunId = assignment.activeRunId;
   if (
-    ingress.turnOrigin?.messageIdentity &&
+    ingress.turnOrigin?.messageIdentity?.source.kind === "conversation" &&
     activeRunId &&
     !isProgramOrigin(queueInput.getAdmitted(activeRunId)?.record.ingress) &&
     queueInput.getOpenInputAssignment(activeRunId) !== undefined &&

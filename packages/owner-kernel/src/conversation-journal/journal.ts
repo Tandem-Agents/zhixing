@@ -3292,17 +3292,21 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async closeQueuedRun(
     runId: string,
     outcome: "failed" | "expired",
+    reason?: string,
   ): Promise<void> {
     assertIdentifier(runId, "Queued run id");
     if (outcome !== "failed" && outcome !== "expired") {
       throw new TypeError("Queued run outcome is invalid");
     }
+    const boundedReason =
+      reason === undefined ? undefined : truncateUtf8(reason, 512);
     await this.#coordinator.transact<void>(
       (facts) =>
         decideCloseQueuedRun({
           conversationId: this.#conversationId,
           runId,
           outcome,
+          ...(boundedReason ? { reason: boundedReason } : {}),
           resources: this.#resources,
           facts,
         }),
@@ -5440,6 +5444,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       bundle,
       this.#artifacts,
     );
+    const hasGlobalMutations = (closure.batch?.records ?? []).some(
+      (record) => record.domain === "global",
+    );
+    const publishConflicts = hasGlobalMutations
+      ? (await this.publishResults(committed.assignmentId)).filter(
+          (notice) => notice.decision.t === "conflicted",
+        ).length
+      : 0;
     return {
       assignmentId: committed.assignmentId,
       conversationId: this.#conversationId,
@@ -5457,6 +5469,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           mutation: record.mutation as SessionStagedMutation,
           requestId: record.requestId,
         })),
+      ...(publishConflicts > 0 ? { publishConflicts } : {}),
     };
   }
 

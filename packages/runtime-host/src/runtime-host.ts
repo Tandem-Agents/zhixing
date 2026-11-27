@@ -84,12 +84,12 @@ export interface RuntimeHostOptions {
   onSecurityBlocked: OnSecurityBlockedFn;
   /** 每个实例发布前取得一份固定、有序的宿主 turn-context provider 投影。 */
   readonly turnContextProviders?: () => TurnContextProvidersOption;
-  /**
-   * 生命周期订阅者集合(资产层共享)——随每个发放实例下发,实例内恒定。
-   * 订阅者按执行期上下文(conversationId 等)自行决定是否介入,装配期不
-   * 按对话定制;无会话身份的 ephemeral run 由订阅者自然跳过。
-   */
+  /** 生命周期订阅者集合(资产层共享)——随每个发放实例下发,实例内恒定。 */
   lifecycle?: readonly AgentRuntimeLifecycle[];
+  /** Host-injected sub-agent supplemental tools (e.g. system-only skill_read / runtime_inspect). */
+  readonly subAgentSupplementalTools?: CreateAgentRuntimeOptions["subAgentSupplementalTools"];
+  /** Pre-rendered read-only system skill index injected into regular sub-agents. */
+  readonly subAgentSkillIndex?: string | null;
 }
 
 export class RuntimeHost {
@@ -192,6 +192,12 @@ export class RuntimeHost {
       primaryRole,
       profile,
       extraTools: [...runtimeTools.extraTools],
+      ...(this.opts.subAgentSupplementalTools
+        ? { subAgentSupplementalTools: this.opts.subAgentSupplementalTools }
+        : {}),
+      ...(this.opts.subAgentSkillIndex !== undefined
+        ? { subAgentSkillIndex: this.opts.subAgentSkillIndex }
+        : {}),
       ...(turnContextProviders ? { turnContextProviders } : {}),
       executionMcpServers: runtimeTools.executionMcpServers,
       decorateRunBus: this.opts.decorateRunBus,

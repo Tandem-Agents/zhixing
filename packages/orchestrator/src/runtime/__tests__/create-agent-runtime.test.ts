@@ -196,6 +196,7 @@ const testToolImplementation: KernelToolImplementationPort = Object.freeze({
     const supported = new Set([
       "read", "write", "edit", "glob", "grep", "bash", "web_fetch",
       "load_skill", "save_skill", "admit_skill",
+      "skill_read", "skill_save", "skill_admit", "skill_materialize",
     ]);
     const unknown = requestedToolNames.find((name) => !supported.has(name));
     if (unknown) throw new Error(`Kernel Tool implementation does not provide "${unknown}"`);

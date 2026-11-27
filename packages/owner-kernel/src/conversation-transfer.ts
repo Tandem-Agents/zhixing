@@ -5,10 +5,12 @@ import type {
   ConversationTransferCommit,
   ConversationTransferManifest,
   Digest,
+  IngressContext,
   JsonValue,
   SourceFreezeProof,
   TransferRecord,
 } from "@zhixing-ai/core/contracts";
+import { isV2OnlyMessageInputSource } from "@zhixing-ai/core/types";
 import type {
   ArtifactReceiveProgress,
   ArtifactStore,
@@ -50,6 +52,7 @@ import {
 } from "@zhixing-ai/core/protocol";
 import { ConversationBaseSource, type ConversationBaseManifest } from "./conversation-base-source.js";
 import { registerConversationBaseContext } from "./conversation-base-registry.js";
+import { deriveDurableAdmittedInputIdentity } from "./conversation-read-index.js";
 import { isLocalConversationId } from '@zhixing-ai/core/conversation';
 export { isConversationSourceEvidenceError } from './conversation-base-source.js';
 export { foldConversationBaseBindings, conversationBaseKey, openConversationBase, registerConversationBaseContext } from './conversation-base-registry.js';
@@ -107,6 +110,100 @@ export interface ConversationTransferSessionSnapshot {
   readonly value: JsonValue;
 }
 
+export class ConversationTransferIncompatibleTargetError extends Error {
+  readonly code = "incompatible-target-v1" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ConversationTransferIncompatibleTargetError";
+  }
+}
+
+async function conversationRecordHasV2OnlyInputSources(
+  record: Record<string, unknown>,
+  artifacts: ArtifactStore,
+): Promise<boolean> {
+  if (record.t === "admitted" || record.t === "run-input-appended") {
+    const identity = deriveDurableAdmittedInputIdentity(
+      record.ingress as IngressContext | undefined,
+    );
+    return Boolean(identity && isV2OnlyMessageInputSource(identity.source));
+  }
+  if (
+    record.t === "committed" &&
+    record.bundle &&
+    typeof record.bundle === "object" &&
+    "ref" in (record.bundle as Record<string, unknown>)
+  ) {
+    const bundleRef = (record.bundle as { readonly ref: ArtifactRef }).ref;
+    const bundle = JSON.parse(
+      Buffer.from(await artifacts.get(bundleRef)).toString("utf8"),
+    ) as {
+      readonly body?: {
+        readonly t?: string;
+        readonly runRecord?: ArtifactRef | { readonly ref: ArtifactRef } | Record<string, unknown>;
+      };
+    };
+    if (bundle?.body?.t === "conversation" && bundle.body.runRecord) {
+      const rawRunRecord = bundle.body.runRecord as Record<string, unknown>;
+      const runRecord = (
+        "ref" in rawRunRecord
+          ? JSON.parse(
+              Buffer.from(
+                await artifacts.get(rawRunRecord.ref as ArtifactRef),
+              ).toString("utf8"),
+            )
+          : rawRunRecord
+      ) as {
+        readonly messages?: readonly {
+          readonly inputIdentity?: { readonly source?: Parameters<typeof isV2OnlyMessageInputSource>[0] };
+        }[];
+      };
+      if (Array.isArray(runRecord?.messages)) {
+        for (const msg of runRecord.messages) {
+          if (
+            msg?.inputIdentity?.source &&
+            isV2OnlyMessageInputSource(msg.inputIdentity.source)
+          ) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * 扫描会话 `run:<conversationId>` 耐久日志与已封存 runRecord 消息，
+ * 判断是否包含旧 v1 主控不可承载的 v2 专属输入来源（`program` / `channel` / `system`）。
+ */
+export async function conversationHasV2OnlyInputSources(
+  log: AuthorityCommitLog,
+  artifacts: ArtifactStore,
+  conversationId: string,
+): Promise<boolean> {
+  const checkpoint = await log.checkpoint();
+  const envelopes = await readConversationTransferEnvelopes(
+    log,
+    artifacts,
+    conversationId,
+    checkpoint,
+  );
+  const targetStream = `run:${conversationId}`;
+  for (const envelope of envelopes) {
+    for (const entry of envelope.entries) {
+      if (entry.stream !== targetStream || !entry.body || typeof entry.body !== "object") {
+        continue;
+      }
+      if (await conversationRecordHasV2OnlyInputSources(entry.body as Record<string, unknown>, artifacts)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export interface ConversationTransferSourceOptions {
   readonly deviceId: string;
   readonly log: AuthorityCommitLog;
@@ -118,6 +215,9 @@ export interface ConversationTransferSourceOptions {
   readonly acceptsConversationId: (conversationId: string) => boolean;
   readonly accepting?: () => boolean;
   readonly isCurrentAnchor: (deviceId: string) => boolean | Promise<boolean>;
+  readonly targetSupportsV2InputSources?: (
+    targetDeviceId: string,
+  ) => boolean | Promise<boolean>;
   readonly conversationState: (conversationId: string) => Promise<{
     readonly exists: boolean;
     readonly deleted: boolean;
@@ -162,6 +262,60 @@ export class ConversationTransferSource {
     registerConversationTransferProjection(options.log, options.verifier);
   }
 
+  hasV2OnlyInputSources(conversationId: string): Promise<boolean> {
+    return conversationHasV2OnlyInputSources(
+      this.#options.log,
+      this.#options.artifacts,
+      conversationId,
+    );
+  }
+
+  async assertCompatibleWithTarget(input: {
+    readonly targetDeviceId: string;
+    readonly conversationId: string;
+  }): Promise<void> {
+    if (!this.#options.targetSupportsV2InputSources) return;
+    if (await this.#options.targetSupportsV2InputSources(input.targetDeviceId)) {
+      return;
+    }
+    if (await this.hasV2OnlyInputSources(input.conversationId)) {
+      throw new ConversationTransferIncompatibleTargetError(
+        `Target device ${input.targetDeviceId} does not support v2 input sources in ${input.conversationId}`,
+      );
+    }
+  }
+
+  async recordPreparedForAbort(
+    prepared: Extract<TransferRecord, { t: "prepared" }>,
+  ): Promise<ConversationTransferState> {
+    if (this.#options.accepting && !this.#options.accepting()) {
+      throw new Error("Conversation transfer source is not accepting work");
+    }
+    if (prepared.sourceDeviceId !== this.#options.deviceId) {
+      throw new TypeError("Conversation transfer source device does not match");
+    }
+    if (!this.#options.acceptsConversationId(prepared.conversationId)) {
+      throw new TypeError("Conversation does not belong to the transfer source");
+    }
+    const existing = await readConversationTransferState(
+      this.#options.log,
+      prepared.transferId,
+      this.#options.verifier,
+    );
+    if (existing) {
+      return existing;
+    }
+    const state = await this.#options.conversationState(prepared.conversationId);
+    if (!state.exists || state.deleted || state.ownerEpoch !== prepared.sourceOwnerEpoch) {
+      throw new TypeError("Conversation transfer source identity is not current");
+    }
+    return appendConversationTransferRecord(
+      this.#options.log,
+      this.#options.verifier,
+      prepared,
+    );
+  }
+
   async prepare(input: {
     readonly requestId: string;
     readonly transferId: string;
@@ -178,6 +332,10 @@ export class ConversationTransferSource {
     if (!(await this.#options.isCurrentAnchor(input.targetDeviceId))) {
       throw new TypeError("Conversation transfer target is not the current trusted device");
     }
+    await this.assertCompatibleWithTarget({
+      targetDeviceId: input.targetDeviceId,
+      conversationId: input.conversationId,
+    });
     const state = await this.#options.conversationState(input.conversationId);
     if (!state.exists || state.deleted || state.ownerEpoch !== input.sourceOwnerEpoch) {
       throw new TypeError("Conversation transfer source identity is not current");
@@ -244,6 +402,27 @@ export class ConversationTransferSource {
       this.#options.artifacts,
       this.#options.verifier,
     );
+    if (this.#options.targetSupportsV2InputSources) {
+      let containsV2Only = false;
+      for (const entry of selected.records) {
+        if (
+          entry.body &&
+          typeof entry.body === "object" &&
+          (await conversationRecordHasV2OnlyInputSources(
+            entry.body as Record<string, unknown>,
+            this.#options.artifacts,
+          ))
+        ) {
+          containsV2Only = true;
+          break;
+        }
+      }
+      if (containsV2Only && !(await this.#options.targetSupportsV2InputSources(identity.targetDeviceId))) {
+        throw new ConversationTransferIncompatibleTargetError(
+          `Target device ${identity.targetDeviceId} does not support v2 input sources recorded before freeze in ${identity.conversationId}`,
+        );
+      }
+    }
     const authorityBytes = Buffer.from(canonicalize(selected.records), "utf8");
     const recordsRef = await putTransferArtifact(
       this.#options,
@@ -1638,6 +1817,9 @@ export class ConversationTransferTarget {
 export interface ConversationAdoptionCoordinatorOptions {
   readonly source: ConversationTransferSource;
   readonly target: ConversationTransferTarget;
+  readonly targetSupportsV2InputSources?: (
+    targetDeviceId: string,
+  ) => boolean | Promise<boolean>;
   readonly afterCommit?: (input: {
     readonly manifest: ConversationTransferManifest;
     readonly commit: ConversationTransferCommit;
@@ -1665,6 +1847,20 @@ export class ConversationAdoptionCoordinator {
     readonly sourceOwnerEpoch: number;
     readonly sourceReadPort?: ConversationTransferReadPort;
   }): Promise<ConversationTransferCommit> {
+    if (this.#options.targetSupportsV2InputSources) {
+      const supported = await this.#options.targetSupportsV2InputSources(
+        input.targetDeviceId,
+      );
+      if (!supported && (await this.#options.source.hasV2OnlyInputSources(input.conversationId))) {
+        throw new ConversationTransferIncompatibleTargetError(
+          `Target device ${input.targetDeviceId} does not support v2 input sources in ${input.conversationId}`,
+        );
+      }
+    }
+    await this.#options.source.assertCompatibleWithTarget({
+      targetDeviceId: input.targetDeviceId,
+      conversationId: input.conversationId,
+    });
     const prepared: Extract<TransferRecord, { t: "prepared" }> = {
       v: 1,
       t: "prepared",

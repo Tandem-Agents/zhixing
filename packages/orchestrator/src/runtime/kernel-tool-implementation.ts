@@ -1,3 +1,4 @@
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import type { PermissionRule } from "@zhixing-ai/core/security";
 import type { ToolDefinition } from "@zhixing-ai/core/types";
 
@@ -7,6 +8,14 @@ export interface KernelToolImplementationRequest {
   readonly networkProxy?: string;
   /** Controlled generic text call used by concrete tools that need model judgment. */
   readonly callText: (prompt: string) => Promise<string>;
+  /** Session confirmation broker forwarded to host-selected tools when available. */
+  readonly confirmationBroker?: IConfirmationBroker;
+  /** Identifiable non-secret safety referee binding for external skill admission. */
+  readonly admissionReferee?: Readonly<{
+    readonly role: "main";
+    readonly providerId: string;
+    readonly model: string;
+  }>;
 }
 
 export interface KernelToolPermissionRuleSet {

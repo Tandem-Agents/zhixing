@@ -196,6 +196,8 @@ export interface RunSubAgentLoopOptions {
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** Dedicated capacity binding for actual child-local tool batches. */
   orchestrationCapacity?: RunContext["orchestrationCapacity"];
+  /** Exact message index of the initial sub_agent_task payload exempt from send-view escaping. */
+  exemptSubAgentTaskMessageIndex?: number;
 }
 
 // ─── 实现 ───
@@ -322,6 +324,9 @@ export async function runSubAgentLoop(
       roleThinking: opts.roleThinking,
       tools: [...opts.tools],
       messages: opts.messages,
+      ...(opts.exemptSubAgentTaskMessageIndex !== undefined
+        ? { exemptSubAgentTaskMessageIndex: opts.exemptSubAgentTaskMessageIndex }
+        : {}),
       systemPrompt: opts.systemPrompt,
       eventBus: opts.eventBus,
       parentSignal: opts.parentSignal,

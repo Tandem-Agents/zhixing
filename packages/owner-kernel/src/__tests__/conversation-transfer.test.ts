@@ -366,6 +366,21 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
     expect(new Set(maintenance.requests.map((request) => request.workKey)).size)
       .toBeGreaterThan(1);
   });
+
+  it("recordPreparedForAbort records prepared without target compatibility check so two-sided abort settles idempotently", async () => {
+    const source = await sourceHarness({ validDomain: true });
+    await source.seed();
+    const prepared = preparedRecord("device-target");
+    const first = await source.source.recordPreparedForAbort(prepared);
+    expect(first.phase).toBe("prepared");
+    const idempotent = await source.source.recordPreparedForAbort(prepared);
+    expect(idempotent.phase).toBe("prepared");
+    const abort = await source.source.prepareAbort(TRANSFER_ID, "target-rejected");
+    await source.source.acceptAbort(abort);
+    expect((await readConversationTransferState(source.log, TRANSFER_ID, verifier))?.phase).toBe(
+      "aborted",
+    );
+  });
 });
 
 function memoryStagingArea(): {

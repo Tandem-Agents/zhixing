@@ -35,7 +35,7 @@ import {
   closeResolution,
   createOpenResolutionFact,
 } from "../state/assignment-control.js";
-import { runRecord, snapshot, withoutSignature } from "../state/common.js";
+import { runRecord, snapshot, truncateUtf8, withoutSignature } from "../state/common.js";
 import type { ConversationDecisionFacts } from "../state/views.js";
 import { decideSessionWriteControl } from "./admission-input.js";
 
@@ -1022,6 +1022,7 @@ export function decideCloseQueuedRun(input: {
   readonly conversationId: string;
   readonly runId: string;
   readonly outcome: "failed" | "expired";
+  readonly reason?: string;
   readonly resources: AssignmentResourceCoordinator | undefined;
   readonly facts: Pick<ConversationDecisionFacts, "assignment">;
 }): ProjectionTransactionDecision<unknown, void> {
@@ -1036,6 +1037,8 @@ export function decideCloseQueuedRun(input: {
   ) {
     throw new Error("Only an unassigned queued run can be closed");
   }
+  const boundedReason =
+    input.reason === undefined ? undefined : truncateUtf8(input.reason, 512);
   return {
     kind: "append",
     entries: [
@@ -1049,6 +1052,7 @@ export function decideCloseQueuedRun(input: {
         runId: input.runId,
         state: input.outcome,
         statusRevision: current.statusRevision + 1,
+        ...(boundedReason ? { reason: boundedReason } : {}),
       }),
     ],
     value: undefined,

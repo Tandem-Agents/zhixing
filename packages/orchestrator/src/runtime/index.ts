@@ -31,11 +31,13 @@
 export { createKernelLogFactory, type KernelLogFactory } from "./logging.js";
 export {
   buildSystemPrompt,
+  buildSystemPromptParts,
   CACHE_BOUNDARY,
   MAIN_AGENT_SEGMENTS,
   SUB_AGENT_SEGMENTS,
   renderIdentity,
   type PromptBuildContext,
+  type SystemPromptParts,
   type SystemPromptSegment,
 } from "./system-prompt.js";
 export {

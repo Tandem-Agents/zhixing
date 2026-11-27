@@ -234,6 +234,17 @@ export interface SessionRuntimeOrchestrationV1Params {
   readonly eventBus: EventBus<AgentEventMap>;
   readonly parentLineage?: string;
   readonly authorizeToolExecution?: NonNullable<RunTurnOptions["authorizeToolExecution"]>;
+  readonly runContext?: {
+    readonly runtimeKind?: "conversation" | "ephemeral" | "sub-agent" | "orchestration-node";
+    readonly lineageRole?: "main" | "light" | "power";
+    readonly effectivePrimaryRole?: "main" | "light" | "power";
+    readonly hasAuthorizedWorkspace?: boolean;
+    readonly toolNames?: readonly string[];
+    readonly mountedMcpServers?: readonly string[];
+    readonly conversationId?: string;
+    readonly turnOrigin?: TurnContext["turnOrigin"];
+    readonly lineage?: string;
+  };
   readonly modelCallMetering?: SessionRuntimeModelCallMetering;
 }
 

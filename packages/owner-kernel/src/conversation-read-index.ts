@@ -1,5 +1,6 @@
 import { artifactJsonIndex, createDurableProjectionOverlay, assertArtifactRef, type ArtifactStore, type AuthorityCommitLog } from '@zhixing-ai/core/authority';
 import type { ProtocolSignatureVerifier } from '@zhixing-ai/core/protocol';
+import type { MessageInputIdentity } from '@zhixing-ai/core/types';
 import { validateConversationRunRecord, validateFinalOutboxRecord } from './conversation-run-contracts.js';
 import type { JsonValue, SessionMeta, ArtifactRef, ConversationCommitSummary } from '@zhixing-ai/core/contracts';
 import { conversationAttemptState, projectStatusEntry, type StatusHistoryEntry } from './conversation-status-projection.js';
@@ -13,6 +14,68 @@ import { isConversationSourceEvidenceError, type ConversationBaseSource } from '
 import { conversationViewOverlay, conversationBaseKey, openConversationBase, foldConversationBaseBindings, registerConversationBaseContext, registerConversationBaseRepair, conversationBaseUnavailableKey, conversationBaseRepairRequired, type ConversationBaseBinding } from './conversation-base-registry.js';
 import { worksceneContinuationTurnId, type WorksceneContinuationSource } from '@zhixing-ai/core/workscene/application';
 import { loadStored, snapshotStored } from './control-admission.js';
+import type { IngressContext } from '@zhixing-ai/core/contracts';
+
+/**
+ * 统一从耐久 `IngressContext` 实证推导消息来源身份：
+ * 1. 若 `turnOrigin.messageIdentity` 已存在，直接返回其克隆；
+ * 2. 否则仅依据耐久权威字段推导五分支来源；
+ * 3. 无权威证据的历史裸记录保持 `undefined`（绝不伪造 `"user"`）。
+ */
+export function deriveDurableAdmittedInputIdentity(
+  ingress: IngressContext | undefined | null,
+): MessageInputIdentity | undefined {
+  if (!ingress) return undefined;
+  if (ingress.turnOrigin?.messageIdentity) {
+    return structuredClone(ingress.turnOrigin.messageIdentity);
+  }
+  const ingressId = typeof ingress.ingressId === 'string' && ingress.ingressId.length > 0
+    ? ingress.ingressId
+    : undefined;
+  if (!ingressId) return undefined;
+
+  if (ingress.turnOrigin?.worksceneContinuation) {
+    return {
+      id: ingressId,
+      source: { kind: 'system', subsystem: 'workscene-continuation' },
+    };
+  }
+  if (ingress.turnOrigin?.channel === 'extension') {
+    return {
+      id: ingressId,
+      source: { kind: 'system', subsystem: 'extension-continuation' },
+    };
+  }
+  if (ingress.turnOrigin?.channel === 'advancement') {
+    return {
+      id: ingressId,
+      source: { kind: 'system', subsystem: 'advancement-proxy' },
+    };
+  }
+  if (ingress.turnOrigin?.channel === 'scheduler') {
+    return {
+      id: ingressId,
+      source: { kind: 'system', subsystem: 'scheduled-job' },
+    };
+  }
+  if (isProgramOrigin(ingress)) {
+    return {
+      id: ingressId,
+      source: { kind: 'program' },
+    };
+  }
+  if (ingress.kind === 'channel') {
+    const channelId = ingress.responder?.channelId || ingress.turnOrigin?.channel;
+    if (typeof channelId === 'string' && channelId.length > 0) {
+      return {
+        id: ingressId,
+        source: { kind: 'channel', channelId },
+      };
+    }
+    return undefined;
+  }
+  return undefined;
+}
 
 const interruptible = (state: string | undefined): state is ConversationControlTargets['targets'][number]['state'] =>
   state !== undefined && ['queued', 'dispatched', 'running', 'cancel-requested'].includes(state);
@@ -488,8 +551,8 @@ export class ConversationReadIndex {
     if (!source || source.stream !== 'run:' + conversationId) throw Error('conversation-read-input-location');
     const body = validateConversationRunRecord(source.body, this.verifier);
     if ((body.t !== 'admitted' && body.t !== 'run-input-appended') || body.runId !== runId || body.ingressKey !== pointer.inputKey || (body.t === 'admitted' ? body.queuedPosition : body.position) !== pointer.position) throw Error('conversation-read-input-binding');
-    // 记录自带的消息身份（较早的接纳只有 ingressId，指针里的身份是兜底补的）
-    const identity = body.ingress.turnOrigin?.messageIdentity;
+    // 记录自带的消息身份，缺失时仅依据耐久 ingress 权威证据推导，绝不伪造 "user"
+    const identity = deriveDurableAdmittedInputIdentity(body.ingress);
     return { pointer, input: body.input, ...(identity ? { identity } : {}) };
     }));
   }
@@ -919,8 +982,12 @@ export class ConversationDirectoryReducer {
       if (body.t === 'admitted' || body.t === 'run-input-appended') {
         if (body.t === 'admitted' && body.ingress.turnOrigin?.worksceneContinuation) put(p + 'continuation:' + JSON.stringify(body.runId), true);
         if (body.t === 'admitted' && isProgramOrigin(body.ingress)) put(p + 'program-origin:' + JSON.stringify(body.runId), true);
-        // Older interactive admissions have a durable ingress ID but no message identity.
-        const identity = body.ingress.turnOrigin?.messageIdentity ?? { id: body.ingress.ingressId, source: { kind: 'user' as const } };
+        // 指针保留按 ingressId 查询较早接纳的兜底定位身份；消息物化仍由 inputsAt 按实证裁定、不伪造 "user"
+        const identity =
+          deriveDurableAdmittedInputIdentity(body.ingress) ??
+          (body.ingress.ingressId
+            ? { id: body.ingress.ingressId, source: { kind: 'user' as const } }
+            : undefined);
         if (identity) {
           const pointer: InputPointer = { runId: body.runId, inputKey: body.ingressKey, position: body.t === 'admitted' ? body.queuedPosition : body.position, lsn, identity, initial: body.t === 'admitted', ...(checkpoint ? { checkpoint } : {}), item: checkpoint ? item : baseStart + item };
           const messageKey = p + 'message-id:' + JSON.stringify(identity.id);
@@ -1121,7 +1188,7 @@ export function registerConversationReadProjection(log: AuthorityCommitLog, arti
   registerConversationBaseContext(log, artifacts, verifier);
   const reducer = new ConversationDirectoryReducer(artifacts, verifier);
   const index = log.durableProjection<ConversationRunJournalRecord>({
-    projectionId: 'conversation-read-directory', reducerVersion: 19,
+    projectionId: 'conversation-read-directory', reducerVersion: 20,
     inputs: { families: ['run:', 'transfer:'], streams: ['final-outbox', 'control'] },
     reduce: async (envelope, current, position) => {
       const seeds = new Map<string, JsonValue | undefined>();

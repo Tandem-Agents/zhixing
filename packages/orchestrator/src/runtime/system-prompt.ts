@@ -80,7 +80,6 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "principles",
   "meta-protocol",
   "tool-usage",
-  "sub-agent-delegation",
   "tool-guidance",
   "skill-index",
   "style",
@@ -89,30 +88,13 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
 
 /**
  * 子 agent 默认段集合 —— 任务专注、输出回写父、prompt cache 友好。
- *
- * 设计原则(每段的取舍理由):
- *   identity    ✓ 角色身份 / Constraints 必需
- *   principles  ✓ "Read before edit" 等硬约束子 agent 同样适用
- *   tool-usage  ✓ 工具描述按子 agent 装配的 childTools 动态生成
- *   safety      ✓ destructive 命令防护是绝对底线,子 agent 不可豁免
- *   sub-agent-delegation ✗ sub-agent profile.enabledTools 不含 Task 防递归,子 agent 工具集不含 Task,delegation 段无意义
- *   style       ✗ 子 agent 输出回写父 tool_result,不直接对话用户,
- *                 风格指引("be concise"等)会让子误解为对话场景
- *
- * 不继承的内容:
- *   - 持久工作约定 / 动态上下文 —— 由主 agent 在 Task prompt
- *     中显式提炼相关部分传给子,避免子 system prompt 膨胀且利于跨 spawn 的
- *     prompt cache 命中(同角色子 agent 的静态前缀 byte-identical)
- *
- * 调用方装配子 agent 时参考:
- *   buildSystemPrompt({ profile: subAgentProfile({ subAgentId }),
- *                       segments: SUB_AGENT_SEGMENTS, tools: childTools, ... })
  */
 export const SUB_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "identity",
   "principles",
   "meta-protocol",
   "tool-usage",
+  "skill-index",
   "safety",
 ];
 
@@ -193,26 +175,34 @@ export interface PromptBuildContext {
  * TurnContextInjector 注释)。tools[] 在 session 创建后冻结不变(reload 级、比注意
  * 力窗口更强),prompt 内 tool-usage 段与 API tools[] 字段同源稳定。
  */
-export function buildSystemPrompt(ctx: PromptBuildContext): string {
+export interface SystemPromptParts {
+  readonly staticPrefix: string;
+  readonly dynamicSuffix: string;
+  readonly full: string;
+}
+
+/**
+ * 构建系统提示词拆分部件（静态前缀与动态环境段），供上层按需消费；
+ * `full` 以 `\n\n` 直接连接，不再插入 `__ZHIXING_CACHE_BOUNDARY__` 哨兵符。
+ */
+export function buildSystemPromptParts(ctx: PromptBuildContext): SystemPromptParts {
   const profile = ctx.profile ?? mainProfile();
   const segments = ctx.segments ?? MAIN_AGENT_SEGMENTS;
 
-  // 跳过 null —— 段在当前 ctx 下不适用(如 sub-agent-delegation 在 tools 不含 Task
-  // 时返回 null)。用 `=== null` 判别而非 falsy,与"段输出空字符串"语义清晰区分,
-  // 避免 join 在空字符串处产生连续 \n\n\n\n 的多余空白。
   const staticSegments: string[] = [];
   for (const segment of segments) {
     const rendered = renderSegment(segment, ctx, profile);
     if (rendered !== null) staticSegments.push(rendered);
   }
 
-  const dynamicSegments = [
-    buildEnvironment(ctx),
-  ];
+  const staticPrefix = staticSegments.join("\n\n");
+  const dynamicSuffix = [buildEnvironment(ctx)].join("\n\n");
+  const full = [staticPrefix, dynamicSuffix].filter(Boolean).join("\n\n");
+  return { staticPrefix, dynamicSuffix, full };
+}
 
-  return staticSegments.join("\n\n")
-    + CACHE_BOUNDARY
-    + dynamicSegments.join("\n\n");
+export function buildSystemPrompt(ctx: PromptBuildContext): string {
+  return buildSystemPromptParts(ctx).full;
 }
 
 /**
@@ -225,6 +215,12 @@ function renderSegment(
   ctx: PromptBuildContext,
   profile: AgentRoleProfile,
 ): string | null {
+  if (
+    segment === "skill-index" &&
+    !ctx.tools.some((t) => t.name === "skill_read" || t.name === "load_skill")
+  ) {
+    return null;
+  }
   // 运行时段覆盖优先 —— 数据驱动段经窗口边界更新写入 segmentOverrides;
   // 命中(含显式 null=清空该段)即用之、不走默认渲染。
   if (ctx.segmentOverrides && segment in ctx.segmentOverrides) {
@@ -286,9 +282,6 @@ function buildPrinciples(): string {
   return `## Principles
 - Respond in the same language the user uses
 - When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
-- Read before edit: always read a file before modifying it to ensure exact text match
-- Edit over write: prefer targeted replacement over full overwrite when modifying existing files
-- Search before act: use glob/grep to discover relevant files before reading or editing
 - If a command fails, analyze the error and try an alternative approach
 - For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs`;
 }
@@ -310,15 +303,13 @@ function buildMetaProtocol(): string {
 
 /**
  * 从注册的工具列表动态生成工具使用偏好。
- * 添加/移除工具时,此段落自动适应。
- *
- * Tools[] 在 session 创建后冻结不变；本函数输出的文本也随之 byte-equal 稳定。
+ * 添加/移除工具时,此段落自动适应；没有任何贡献行时返回 null 以跳过空段。
  */
-function buildToolUsage(tools: ToolDefinition[]): string {
+function buildToolUsage(tools: ToolDefinition[]): string | null {
   return buildToolUsageLines(tools);
 }
 
-function buildToolUsageLines(tools: ToolDefinition[]): string {
+function buildToolUsageLines(tools: ToolDefinition[]): string | null {
   const lines = ["## Tool Usage"];
 
   for (const tool of tools) {
@@ -335,7 +326,7 @@ function buildToolUsageLines(tools: ToolDefinition[]): string {
     );
   }
 
-  return lines.join("\n");
+  return lines.length > 1 ? lines.join("\n") : null;
 }
 
 // ─── Segment: Sub-Agent Delegation(仅当 Task 工具注册时生效) ───

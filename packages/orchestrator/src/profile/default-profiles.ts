@@ -35,18 +35,28 @@ const MAIN_ENABLED_TOOLS = [
   "grep",
   "bash",
   "web_fetch",
-  "load_skill",
-  "save_skill",
-  "admit_skill",
+  "skill_read",
+  "skill_save",
+  "skill_admit",
+  "skill_materialize",
   "Task",
 ] as const;
 
 /**
  * 子 agent 启用的工具集 —— 任务专注，不可派生子 agent（无 Task）。
  *
- * 当前限定为只读探索类工具：read / glob / grep / web_fetch。
+ * 包含只读探索、日志查询、运行状态查看与只读内置技能查看能力。
  */
-export const SUB_AGENT_ENABLED_TOOLS = ["read", "glob", "grep", "web_fetch", "log_search", "log_read"] as const;
+export const SUB_AGENT_ENABLED_TOOLS = [
+  "read",
+  "glob",
+  "grep",
+  "web_fetch",
+  "log_search",
+  "log_read",
+  "runtime_inspect",
+  "skill_read",
+] as const;
 
 /**
  * 主 agent profile。name 来自本实例的已解析身份投影。
