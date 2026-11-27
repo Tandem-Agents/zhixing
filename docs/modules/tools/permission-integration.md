@@ -30,7 +30,7 @@
 ## 三、声明与分类
 
 - 文件工具与 Bash 由 context classifier 优先处理；没有专项分类器的工具由 `boundaries` 表达资源类型、访问方式及动态性。多个 crossing 取最高影响，缺少声明不会默认放行。
-- `permissionArgumentKey` 对 write/edit 为 `path`，Bash 为 `command`，WebFetch 为 `url`。声明缺失或对应值不是字符串时，提取器仍退回 `path / file_path / target / destination` 优先列表，再取字符串候选；因此显式字段不是 schema 校验的替代物。
+- `permissionArgumentKey` 对 write/edit 为 `path`，Bash 为 `command`，WebFetch 为 `url`；涉及本地文件系统访问的工具（含技能与扩展本地路径工具）另显式声明 `filePathArgumentKeys`，供安全管线将其单独提取并归一化为 `resolvedAccess.paths`，使 `/trust` `deny` 在全部信任等级上按目录子树闭合生效而不误伤 `url`/`command`/`sceneId` 等非路径参数。声明缺失或对应值不是字符串时，仅在通用路径提取范围内按既有约定保守处理；显式字段不是 schema 校验的替代物。
 - `needsPermission`、只读标识与影响分类不是同一层。安全包装器会评估实际操作；`needsPermission=false` 不意味着工具绕过权限规则或安全检查。
 - BoundaryRegistry 对声明做拷贝隔离；参数提取器按小写工具名登记。非法空声明／空参数 key 不应通过注册悄悄清除状态。
 

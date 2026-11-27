@@ -69,7 +69,7 @@ MCP 工具与内置工具共用边界注册、权限、信任及执行机制。`
 
 stdio 使用 SDK 默认环境白名单，再过滤显式 env 中的解释器启动型危险变量；并非继承全部宿主环境。HTTP transport 注入 `@zhixing-ai/network` 的 safe fetch，使用统一代理与 SSRF 出站约束，不走 SDK 默认全局 fetch 旁路。这些保护不能把任意本地进程变成沙箱。
 
-MCP 秘密留在设备 SecretStore，由组合根发放最小投影；stdio 注入 env，HTTP 注入 header。秘密文件族的保护属于共同安全边界，不能通过 MCP 工具绕过。一次性接入探测与常驻连接复用同一建链与 transport 安全逻辑。
+MCP 秘密留在设备 SecretStore，由组合根发放最小投影；stdio 注入 env，HTTP 注入 header。秘密文件族的保护属于共同安全边界，不能通过 MCP 工具绕过。一次性接入探测与常驻连接复用同一建链与 transport 安全逻辑；写入独立运行日志底座的观察事件会在落盘边界脱敏凭据与令牌（可通过 `log_search`/`log_read` 查询）；MCP 连接状态经 `mcp_discover(status/pending)` 查询，`runtime_inspect` 仅开放 `summary`、`workspaces`、`models`、`health` 四类无秘密有界窄自省（单次响应 `≤ 6,144` UTF-8 字节）。
 
 ## 实现依据
 

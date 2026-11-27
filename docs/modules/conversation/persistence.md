@@ -41,7 +41,9 @@
 
 ## 三、原文记录与接受边界
 
-记录单位是完整 Run，而不是一次 LLM Turn。内容字段 `messages` 保存用户原文与本 run 的协议消息序列；最终回复、工具调用展示从它派生，不另存重复正文。输入注入只改发送视图，不污染用户原文；没有最终回复时，不在原始记录中伪造回复。
+记录单位是完整 Run，而不是一次 LLM Turn。内容字段 `messages` 保存用户原文（携结构化五分支 `MessageInputIdentity`：`user`/`conversation`/`program`/`channel`/`system`）与本 run 的协议消息序列；最终回复、工具调用展示从它派生，不另存重复正文。受管扩展等系统续接在投递前先将 `(phase, revision, targetConversationId, turnId)` 持久绑定在对应操作上，断线重连后只按同一身份对账收敛。输入注入只改发送视图，不污染用户原文；没有最终回复时，不在原始记录中伪造回复。
+
+执行器临时 `local-*` 对话支持向值班主控跨代收编兼容：发起 `prepare` 前先通过能力协议探测目标主控是否支持 v2 输入来源（含 `program`/`channel`/`system`），若主控仍为旧版 v1 则含新来源的 `local-*` 直接跳过不冻结，并在 `freeze` 前复核窗口内新增记录，一旦撞上竞态新来源则触发两端耐久 `prepareAbort → abort → acceptAbort` 解冻源对话；同一主控升级至支持 v2 后，基于已中止尝试身份确定性派生新 `(transferId, requestId)` 自动完成重收编。
 
 `runId` 标识跨执行与提交边界的同一运行，`runIndex` 标识记录顺序。普通分片追加由 store 分配序号；权威提交投影携带已经确定的身份和序号，要求连续，重复记录必须身份与载荷一致，冲突拒绝，不能靠重复追加冒充恢复。
 

@@ -71,7 +71,7 @@ stdio 探测会实际启动本机命令，确认必须在探测前，不能放�
 
 用户输入秘密值不传给提取模型。字段可包含多个秘密，按字段逐一收集，模板可将裸值变成 `Bearer ...` 等投影；HTTP 注入 header，stdio 注入 env。临时 probe 使用独立的 60 秒默认超时，为首次启动下载留出时间，与常驻连接的 10 秒超时不同；成功或失败均释放临时连接，不转交给正式 hub。
 
-探测成功证明当时可建链并发现工具，不证明所有工具权限、业务结果、安全性或后续可用性。失败留在候选面板给出原因并允许修改重试，不提交半成品。取消向探测/查询传递信号；模型经宿主 RPC 调用时，本地取消等待不等于远端模型推理已被取消。
+探测成功证明当时可建链并发现工具，不证明所有工具权限、业务结果、安全性或后续可用性。失败留在候选面板给出原因并允许修改重试，不提交半成品；常驻与探测建链失败（`ProbeResult.failure`、`mcp_discover(status)`、`mcp.statusV2`）以及外部 MCP 工具调用的两条错误路径（协议返回 `isError: true` 与传输／SDK 抛错）统一归类为无原始错误文本的白名单 `McpPublicFailure` `{ stage, reason, statusCode? }`（同时保持 `server.info.mcpServers` 旧结构兼容未升级 `decodeStatus`）。接入运行状态与本机待补凭据由 `mcp_discover(status/pending)` 查询、脱敏运行日志由 `log_search`/`log_read` 查询，`runtime_inspect` 仅开放 `summary`、`workspaces`、`models`、`health` 四类只读无秘密自省（`≤ 6,144` UTF-8 字节）。取消向探测/查询传递信号；模型经宿主 RPC 调用时，本地取消等待不等于远端模型推理已被取消。
 
 成功探测只修改 `WorkingState`，用户完成编辑才落盘；普通配置保存 server 的 transport、command/args 或 URL、启用决策，秘密由设备 SecretStore 保存并按 server id 关联。加载时停用项与非法 id 不生成运行连接规格。
 

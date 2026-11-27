@@ -38,7 +38,7 @@ Trust Administration 的管理应用拥有 list/revoke 的上下文选择、可�
 | global | 用户明确选择跨上下文授权；自动沉淀不得生成 |
 | builtin | 工具装配期的内存预置，不属于用户规则，不写入用户规则文件 |
 
-`PermissionStore` 承担存储与匹配机制：用户池命中优先于 builtin 池，用户池内 deny 优先于 allow，再按特异性选择。权限匹配只作用于待确认决策，不能表述成全管线所有操作都必经一次用户 deny 检查。
+`PermissionStore` 承担存储与匹配机制：用户池命中优先于 builtin 池，用户池内 deny 优先于 allow，再按特异性选择；对工具专用 `filePathArgumentKeys` 产出的归一化 `resolvedAccess.paths`，`/trust` `deny` 在 `global`、`workspace` 与 `scene`（含 `main`）全部等级及 `observe` / `internal` / `confirm` 全操作分类上按目录子树闭合立即短路 `block`（精确命中自身及后代路径，同时隔离 `url`、`command`、`sceneId` 等非路径参数，并为 `glob`/`grep`/`skill_admit`/`extension_connect` 提供免计顶层配额的子树与读前鉴权），而 `allow` 规则仅用于升级 `confirm` 待确认决策且不绕过 `bypassImmune`。
 
 持久身份使用 `main`、`workspace-<hash>`、`scene-<sceneId>` 对应上下文文件，global 独立；`contextPath` 是辅助展示，不是身份。存储层负责既有格式读取与规范化，用户无需手工搬规则。运行时累计在执行应用内存中，重建后不能假定累计仍在；持久规则和累计不是同一种状态。
 

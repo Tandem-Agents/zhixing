@@ -38,11 +38,11 @@ Host 绑定产品上下文、规则来源与受保护路径
 
 | 顺序 | 机制 | 职责 |
 |---|---|---|
-| 1 | CommandAnalyzer、PathResolve | 提取命令访问事实，解析路径后供策略与信任判断使用；符号链接不能仅靠文本路径判为目录内 |
+| 1 | CommandAnalyzer、PathResolve | 从命令和工具专用 `filePathArgumentKeys` 提取并归一化 `resolvedAccess.paths`（与 `url`/`command`/`sceneId` 等非路径参数隔离）后供策略与信任判断使用；符号链接不能仅靠文本路径判为目录内 |
 | 2 | PolicyEvaluator | 匹配内置策略及 Host 保护路径；`block` 直接终止，`confirm` 保留确认要求，`audit` 转为允许继续评估 |
 | 3 | OperationClassifier | 只读为 `observe`；应用状态边界可为 `internal`；用户文件写入为 `external`；高危或未知边界可为 `critical`。external/critical 将原 allow 升为 confirm，不抹去已有策略确认 |
 | 4 | TrustClassifier | 计算本次操作的信任等级，不直接放行；路径与场景规则见信任正文 |
-| 5 | PermissionMatcher | 仅对 confirm 决策匹配用户／预置权限；deny 阻止，allow 不能覆盖 bypassImmune 确认；未匹配继续确认，不在此按会话是否交互直接拒绝 |
+| 5 | PermissionMatcher | 对全部未在上游 `block` 的操作执行用户／预置权限匹配：命中 `deny`（含基于归一化 `resolvedAccess.paths` 的全等级 `/trust` `deny` 目录子树闭合判定，覆盖自身与子路径且不误伤兄弟前缀）在 `observe` / `internal` / `confirm` 全路径立即短路 `block`；命中 `allow` 仅对 `confirm` 决策升级放行且不能覆盖 `bypassImmune` 确认；未匹配维持原决策，不在此按会话是否交互直接拒绝 |
 | 6 | ExecutionGuard | 计算超时、输出上限及频率限额；频率超限阻止，执行层消费剩余约束 |
 
 不要把策略规则与权限规则混为一谈：前者判断威胁，后者表示授权。当前策略引擎按动作严格度选择结果；用户权限匹配先查用户规则池，再查工具预置池，同池 deny 优先，再比较匹配特异性。工具预置规则的注册、作用域和退场见[工具与权限集成](../tools/permission-integration.md)。

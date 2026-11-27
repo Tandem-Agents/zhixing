@@ -1,10 +1,10 @@
 # 外部连接适配编写
 
-适用：管理协议 1、Channel 合同 1、Node 24。正式安装包的 `extension-kit` 提供本文、`manifest.schema.json`、`channel-sdk.mjs`、`channel-sdk.d.ts` 及其引用合同和 `validate.mjs`；用 `extension guide` 获取本机路径，无须知行仓库源码。
+适用：管理协议 1、Channel 合同 1、Node 24。随安装包分发的 `extension-kit` 提供本文、`manifest.schema.json`、`channel-sdk.mjs`、`channel-sdk.d.ts` 及其引用合同与离线校验能力；模型在工作对话内通过 `extension(action: "guide")` 获取无物理安装路径、无仓库源码路径的自包含开发指导与当前运行能力说明，不读取或暴露知行自身安装目录。
 
 ## 制作候选
 
-先用 `extension prepare` 接纳需求，后续复用操作 ID。在独立工作目录查证平台官方接口与来源，获取兼容制品或自行包装 SDK。模型使用既有工具准备环境、安装准确版本依赖并构建；不修改知行安装目录、依赖或已有连接。
+在无工作区的控制设备 A 与绑定已授权工作区的执行设备 B 之间，既可由控制端经 `runtime_inspect(workspaces)` 切入对应场景会话并在 B 调用 `extension prepare`，也可在控制端先发起 `extension prepare` 后切入 B 的场景会话调用 `extension status` 衔接（两种顺序共用唯一 `operationId`，B 上由 `extension_connect` 将候选制品经受管扩展 Mesh 协议分块传回主控归档，无需手工跨机复制文件）。在工作目录内查证平台官方接口与来源后，模型使用既有工具准备环境、按准确版本安装依赖并构建；通过 `skill_materialize` 按需将内置“外部能力接入”方法中的模板物化至授权工作区后完成打包，不修改知行安装目录、依赖或已有连接。
 
 入口通过 `serveChannelExtension(instanceId => adapter)` 实现 ChannelAdapter；SDK 自带 IPC、启动、健康与停止协议。将 SDK 和第三方依赖一起打包为一个 Node ESM `.mjs`，仅允许 Node 内置模块作为外部依赖。使用原生扩展或其他外部运行环境的包不符合本版本合同，不能伪装成独立制品。
 
@@ -20,7 +20,7 @@
 | `sources` | 文件名到文本的映射，保留适配源码及构建文件；有依赖时保留 package.json 与锁文件，依赖使用准确版本 |
 | `build` | 可重复的构建说明，写明工具版本与命令 |
 
-运行 `node <extension-kit>/validate.mjs <candidate.json>` 做无执行校验，再用 `extension_connect` 提交操作 ID、当前修订、候选文件和已检查的 digest。校验不等于执行授权，摘要也不证明来源可信。包、源码和对话均不放秘密；声明 sensitive 字段，由用户在目标设备 `/config` 的消息通道安全填写。
+工作区本地生成候选文件后在工作区内做无执行静态校验（`extension_validate`）与摘要绑定，再用 `extension_connect` 提交操作 ID、当前修订、`candidatePath` 和已检查的 digest（`extension_connect` 显式声明 `filePathArgumentKeys: ["candidatePath"]`，进入统一 `/trust` `deny` 与安全确认）。校验不等于执行授权，摘要也不证明来源可信。包、源码和对话均不放秘密；声明 sensitive 字段，由用户在控制端或目标设备 `/config` 的消息通道安全填写。
 
 ## Channel 合同要点
 
