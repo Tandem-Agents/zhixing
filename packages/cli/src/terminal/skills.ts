@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { SkillCatalogClient } from '@zhixing-ai/core/skills/catalog';
+import type { SkillCatalogClient, SkillCatalogQuery } from '@zhixing-ai/core/skills/catalog';
 import { SKILLS_PAGE_DEFAULT, skillsDisplayText, validateSkillsAction, type TerminalSkillsAction, type TerminalSkillsView } from '@zhixing-ai/terminal-ui/skills-model';
 import { SkillManagerController } from '../skills/manager-controller.js';
 
@@ -33,8 +33,12 @@ export class TerminalSkillsOwner {
     signal: AbortSignal;
   }) {
     this.#closed = new Promise((resolve, reject) => { this.#resolve = resolve; this.#reject = reject; });
+    const queryClient: SkillCatalogClient['query'] = ((query: SkillCatalogQuery) => {
+      this.#ensureOpen();
+      return options.client.query(query);
+    }) as SkillCatalogClient['query'];
     this.#controller = new SkillManagerController({
-      query: query => { this.#ensureOpen(); return options.client.query(query); },
+      query: queryClient,
       command: async command => {
         this.#ensureOpen(); await options.client.command(command); this.#committed = true;
       },

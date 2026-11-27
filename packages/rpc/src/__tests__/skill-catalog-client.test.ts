@@ -148,4 +148,44 @@ describe("SkillCatalogRpcClient", () => {
     detach();
     expect(h.unsubscribe).toHaveBeenCalledOnce();
   });
+
+  it("支持 skill.listV2 解码（含 visibility 与可选 packageRef）及 skill.setVisibility 编码", async () => {
+    const h = harness((method) => {
+      if (method === "skill.listV2") {
+        return {
+          skills: [
+            entry({
+              visibility: { modelAutoIndex: false, userSlashCommand: true },
+              packageRef: { digest: `sha256:${"3".repeat(64)}`, bytes: 128 },
+            }),
+          ],
+          structuralVersion: 11,
+        };
+      }
+      return { ok: true };
+    });
+
+    const v2 = await h.client.query({ kind: "list-v2" });
+    expect(v2.catalogRevision).toBe(11);
+    expect(v2.entries[0]?.visibility).toEqual({
+      modelAutoIndex: false,
+      userSlashCommand: true,
+    });
+    expect(v2.entries[0]?.packageRef).toEqual({
+      digest: `sha256:${"3".repeat(64)}`,
+      bytes: 128,
+    });
+
+    await h.client.command({
+      kind: "set-visibility",
+      skillId: "deploy",
+      visibility: { modelAutoIndex: false, userSlashCommand: true },
+      expectedRevision: 3,
+    });
+    expect(h.request).toHaveBeenLastCalledWith("skill.setVisibility", {
+      skillId: "deploy",
+      visibility: { modelAutoIndex: false, userSlashCommand: true },
+      expectedRevision: 3,
+    });
+  });
 });

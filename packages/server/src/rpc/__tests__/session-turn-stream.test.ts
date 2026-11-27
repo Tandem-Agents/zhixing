@@ -202,4 +202,56 @@ describe("projectSessionTurn", () => {
       expect.objectContaining({ agentResult: expect.objectContaining({ reason: "completed" }) }),
     );
   });
+
+  it("surfaces publishConflicts on session.complete when committed global mutations conflict", async () => {
+    const payloads: Array<{ method: string; params: unknown }> = [];
+    const manager = new ConversationManager(createFactory([]), undefined, {
+      onTurnCommitted: () => {},
+      durableTurnExecutor: stubDurableTurnExecutor({
+        async *run(): AsyncGenerator<AgentYield, RunResult> {
+          return {
+            agentResult: {
+              reason: "completed",
+              message: { role: "assistant", content: [{ type: "text", text: "staged" }] },
+              usage: { inputTokens: 1, outputTokens: 1 },
+            },
+            runRecord: {
+              timestamp: "2026-07-18T00:00:00.000Z",
+              messages: [
+                { role: "user", content: [{ type: "text", text: "save skill" }] },
+                { role: "assistant", content: [{ type: "text", text: "staged" }] },
+              ],
+              usage: { inputTokens: 1, outputTokens: 1 },
+            },
+            newMessages: [
+              { role: "assistant", content: [{ type: "text", text: "staged" }] },
+            ],
+            durationMs: 1,
+            publishConflicts: 1,
+          };
+        },
+        async publishPendingFinals() {
+          payloads.push({ method: "final", params: null });
+          return 1;
+        },
+      }),
+    });
+    const managed = await manager.getOrCreate("c1");
+
+    await projectSessionTurn({
+      manager,
+      managed,
+      text: "save skill",
+      turnId: "turn-conflict",
+      notify: (method, params) => payloads.push({ method, params }),
+    });
+
+    expect(payloads.map((p) => p.method)).toEqual(["session.complete", "final"]);
+    expect(payloads[0]?.params).toMatchObject({
+      conversationId: "c1",
+      turnId: "turn-conflict",
+      publishConflicts: 1,
+      result: { reason: "completed" },
+    });
+  });
 });

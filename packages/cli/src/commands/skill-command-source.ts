@@ -51,10 +51,11 @@ export class SkillCommandSource implements DynamicCommandSource {
   constructor(private readonly deps: SkillCommandSourceDeps) {}
 
   async list(): Promise<readonly CommandDef[]> {
-    const view = await this.deps.client.query({ kind: "list" });
+    const view = await queryCatalogPreferringV2(this.deps.client);
     const skills = view.entries;
     const commands: CommandDef[] = [];
     for (const s of skills) {
+      if (s.id.startsWith("system:")) continue;
       const clash = this.deps.findExisting(s.id);
       if (
         clash &&
@@ -63,6 +64,13 @@ export class SkillCommandSource implements DynamicCommandSource {
         // 与非技能命令撞名:让核心命令优先,本技能不注册为 slash 命令。
         continue;
       }
+      const hidden =
+        s.disabled ||
+        ("visibility" in s &&
+          typeof s.visibility === "object" &&
+          s.visibility !== null &&
+          "userSlashCommand" in s.visibility &&
+          s.visibility.userSlashCommand === false);
       commands.push({
         id: `${SKILL_COMMAND_SOURCE_DESCRIPTOR.sourceId}:${s.id}`,
         name: s.id,
@@ -71,9 +79,25 @@ export class SkillCommandSource implements DynamicCommandSource {
         category: "plugin",
         tag: "plugin",
         execution: SKILL_COMMAND_SOURCE_DESCRIPTOR.execution,
-        ...(s.disabled ? { hidden: true } : {}),
+        ...(hidden ? { hidden: true } : {}),
       });
     }
     return commands;
   }
+}
+
+async function queryCatalogPreferringV2(client: SkillCatalogClient) {
+  try {
+    return await client.query({ kind: "list-v2" });
+  } catch (error) {
+    if (!isUnsupportedSkillListV2Error(error)) throw error;
+    return await client.query({ kind: "list" });
+  }
+}
+
+function isUnsupportedSkillListV2Error(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+  if (code === -32601 || code === "invalid-command") return true;
+  return error instanceof TypeError && error.message === "Unsupported Skill Catalog query";
 }

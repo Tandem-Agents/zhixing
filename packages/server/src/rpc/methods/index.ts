@@ -7,7 +7,7 @@
  */
 
 import { HandlerRegistry } from "../handlers.js";
-import { buildMcpPendingMethod } from "./mcp.js";
+import { buildMcpPendingMethod, buildMcpStatusV2Method } from "./mcp.js";
 import { buildExtensionMethods } from "./extensions.js";
 import { buildLogMethods } from "./logs.js";
 import { buildAuthMethod } from "./auth.js";
@@ -86,7 +86,9 @@ import {
 import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
 import {
   buildSkillListMethod,
+  buildSkillListV2Method,
   buildSkillSetStateMethod,
+  buildSkillSetVisibilityMethod,
   buildSkillArchiveMethod,
 } from "./skill.js";
 import {
@@ -113,6 +115,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildAuthMethod(),
     buildHealthMethod(),
     buildMcpPendingMethod(),
+    buildMcpStatusV2Method(),
     ...buildExtensionMethods(),
     ...buildLogMethods(),
     // session.*
@@ -187,7 +190,9 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildTrustRevokeMethod(),
     // skill.*（技能库管理面 + 补全候选源,写后广播 skill.changed）
     buildSkillListMethod(),
+    buildSkillListV2Method(),
     buildSkillSetStateMethod(),
+    buildSkillSetVisibilityMethod(),
     buildSkillArchiveMethod(),
     // confirmation.*（远程权限确认：list / resolve —— RPC 客户端用；pending/resolved 推送由 ConfirmationBridge 处理）
     buildConfirmationListMethod(),
@@ -214,6 +219,7 @@ export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
   "auth",
   "health",
   "mcp.pending",
+  "mcp.statusV2",
   "extensions.list",
   "extensions.set-enabled",
   "extensions.refresh",

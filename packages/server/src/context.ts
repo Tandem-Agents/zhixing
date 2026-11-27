@@ -299,6 +299,8 @@ export interface ServerContext {
     toolCount: number;
     error?: string;
   }>;
+  /** 结构化 MCP 连接状态（含可选白名单 `failure?: McpPublicFailure`），供 `mcp.statusV2` 消费。 */
+  mcpStatusesV2?: () => readonly import("@zhixing-ai/core/mcp-management").McpManagementServerStatusV2[];
   /**
    * 轻推理通道(llm.complete 执行体,仅可信面)——/mcp 接入向导等管理流程
    * 的单发文本调用。装配方注入(如 ephemeral runtime 的 callText)。
@@ -408,6 +410,7 @@ export interface CreateContextOptions {
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
   mcpStatuses?: ServerContext["mcpStatuses"];
+  mcpStatusesV2?: ServerContext["mcpStatusesV2"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
@@ -435,6 +438,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,
     mcpStatuses: opts.mcpStatuses,
+    mcpStatusesV2: opts.mcpStatusesV2,
     llmComplete: opts.llmComplete,
     channelStatuses: opts.channelStatuses,
     channelHttpRoutes: opts.channelHttpRoutes,

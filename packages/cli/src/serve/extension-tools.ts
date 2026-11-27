@@ -1,11 +1,74 @@
-import { readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
-import type { ToolDefinition } from "@zhixing-ai/core";
+import type { ToolDefinition, ToolExecutionContext } from "@zhixing-ai/core";
 import { protocolDigest } from "@zhixing-ai/core/protocol";
-import type { ExtensionManagementRequest, ExtensionPublicSnapshot } from "@zhixing-ai/core/extensions/contracts";
+import type { ExtensionCandidate, ExtensionManagementRequest, ExtensionPublicSnapshot } from "@zhixing-ai/core/extensions/contracts";
 import { validateExtensionCandidate } from "@zhixing-ai/core/extensions/candidate";
+import { getBuiltinSkill } from "@zhixing-ai/core/skills/catalog";
 import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
-import { extensionKitDirectory } from "../runtime/extensions/catalog.js";
+import { validateCandidatePayload } from "../runtime/extensions/validate-candidate.js";
+
+const MAX_CANDIDATE_BYTES = 24 * 1024 * 1024;
+
+function sanitizeReturnAddress(origin: unknown): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(origin)) as Record<string, unknown>;
+  delete cloned.messageIdentity;
+  return cloned;
+}
+
+async function readAuthorizedCandidateFile(
+  rawPath: string,
+  context: Pick<ToolExecutionContext, "workingDirectory" | "authorizeFileAccess">,
+): Promise<unknown> {
+  const root = await realpath(context.workingDirectory);
+  const resolved = resolve(root, rawPath);
+  const entryStat = await lstat(resolved);
+  if (entryStat.isSymbolicLink() || !entryStat.isFile() || entryStat.size > MAX_CANDIDATE_BYTES) {
+    throw new Error("候选须为当前工作目录内的常规文件且不超过 24 MiB");
+  }
+  const resolvedPath = await realpath(resolved);
+  const within = relative(root, resolvedPath);
+  if (isAbsolute(within) || within.startsWith("..") || !within) {
+    throw new Error("候选须位于当前工作目录且不超过 24 MiB");
+  }
+  await context.authorizeFileAccess?.({ path: resolvedPath, access: "read" });
+  return JSON.parse(await readFile(resolvedPath, "utf8")) as unknown;
+}
+
+function renderExtensionGuide(run: ReturnType<typeof runContextStorage.getStore>) {
+  const toolNames = run?.toolNames;
+  const hasV2Read = Boolean(toolNames?.includes("skill_read"));
+  if (!hasV2Read) {
+    return {
+      legacyContractOnly: true,
+      authoringState: "requires-v2-session",
+      protocol: 1,
+      contract: 1,
+      sdkImport: "./kit/channel-sdk.mjs",
+      guide: "当前运行使用存量冻结工具清单。请切换到包含 skill_read 的已授权工作场景会话，按“外部能力接入”系统技能使用 skill_materialize、extension_validate 与 extension_connect；不暴露宿主机物理安装目录。",
+    };
+  }
+  const pkg = getBuiltinSkill("外部能力接入");
+  const canAuthor = Boolean(
+    run?.hasAuthorizedWorkspace &&
+    toolNames?.includes("skill_materialize") &&
+    toolNames?.includes("extension_validate"),
+  );
+  return {
+    packageId: pkg ? `system:${pkg.id}` : "system:外部能力接入",
+    packageVersion: pkg?.packageVersion ?? "",
+    readTool: "skill_read",
+    authoringState: canAuthor ? "ready" : "read-only-requires-authorized-workscene",
+    ...(canAuthor
+      ? {
+          materializeTool: "skill_materialize",
+          validateTool: "extension_validate",
+          connectTool: "extension_connect",
+        }
+      : {}),
+    resources: (pkg?.resources ?? []).map((resource) => resource.path),
+  };
+}
 
 export interface ExtensionManagementTransport {
   invoke(request: ExtensionManagementRequest): Promise<{ snapshot: ExtensionPublicSnapshot; targetDeviceId: string }>;
@@ -35,7 +98,7 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
     async call(input, context) {
       try {
         if (Object.keys(input).some(key => !["action", "instanceId", "operationId", "expectedRevision"].includes(key))) throw new Error("不接受额外参数或自报来源");
-        if (input.action === "guide") return { content: JSON.stringify({ directory: extensionKitDirectory(), guide: "authoring.md", validator: "validate.mjs", sdk: "channel-sdk.mjs", schema: "manifest.schema.json" }) };
+        if (input.action === "guide") return { content: JSON.stringify(renderExtensionGuide(runContextStorage.getStore())) };
         const run = runContextStorage.getStore();
         if (!run?.conversationId) throw new Error("需要在可恢复的对话中管理扩展");
         let request: ExtensionManagementRequest;
@@ -43,9 +106,8 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
           if (!context.turnId || !context.toolCallId || !context.userIntent || typeof input.instanceId !== "string") throw new Error("准备需要原始请求、稳定调用身份和连接标识");
           request = { action: input.action, id: `extension-${protocolDigest("ExtensionRequest", 1, { turn: context.turnId, call: context.toolCallId, lineage: run.lineage }).slice("sha256:".length)}`,
             instanceId: input.instanceId, source: { conversationId: run.conversationId, request: context.userIntent,
-              // Preserve the wire representation; local optional fields can be
-              // undefined, which are not canonical Authority values.
-              ...(context.turnOrigin ? { returnAddress: JSON.parse(JSON.stringify(context.turnOrigin)) } : {}) } };
+              // Preserve the wire representation without propagating an ingress messageIdentity.
+              ...(context.turnOrigin ? { returnAddress: sanitizeReturnAddress(context.turnOrigin) } : {}) } };
         } else if (input.action === "cancel") {
           if (typeof input.operationId !== "string" || !Number.isSafeInteger(input.expectedRevision)) throw new Error("需要操作标识和当前修订");
           request = { action: "cancel", id: input.operationId, expectedRevision: input.expectedRevision as number };
@@ -67,17 +129,19 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
     }, required: ["operationId", "expectedRevision", "candidatePath", "digest"], additionalProperties: false },
     isReadOnly: false, isParallelSafe: false, requiresExplicitConfirmation: true,
     permissionArgumentKey: "candidatePath",
-    boundaries: [{ boundaryType: "process", access: "execute", dynamic: false }, { boundaryType: "network", access: "write", dynamic: false }],
+    filePathArgumentKeys: ["candidatePath"],
+    boundaries: [
+      { boundaryType: "filesystem", access: "read", dynamic: false },
+      { boundaryType: "process", access: "execute", dynamic: false },
+      { boundaryType: "network", access: "write", dynamic: false },
+    ],
     async call(input, context) {
       try {
         if (!runContextStorage.getStore()?.conversationId) throw new Error("需要真实对话身份");
         if (Object.keys(input).some(key => !["operationId", "expectedRevision", "candidatePath", "digest"].includes(key)) ||
             typeof input.operationId !== "string" || !Number.isSafeInteger(input.expectedRevision) || typeof input.candidatePath !== "string") throw new Error("候选参数无效");
-        const root = await realpath(context.workingDirectory);
-        const path = await realpath(resolve(root, input.candidatePath));
-        const within = relative(root, path);
-        if (isAbsolute(within) || within.startsWith("..") || !within || (await stat(path)).size > 24 * 1024 * 1024) throw new Error("候选须位于当前工作目录且不超过 24 MiB");
-        const candidate = validateExtensionCandidate(JSON.parse(await readFile(path, "utf8")));
+        const rawCandidate = await readAuthorizedCandidateFile(input.candidatePath, context);
+        const candidate: ExtensionCandidate = validateExtensionCandidate(rawCandidate);
         if (candidate.manifest.digest !== input.digest) throw new Error("候选已变化，请重新检查并确认");
         context.abortSignal?.throwIfAborted();
         return { content: JSON.stringify(await transport.invoke({ action: "connect", id: input.operationId,
@@ -89,6 +153,7 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
     description: "把操作的原版本或未验证候选源码与构建资料保存到工作目录内的新文件，供诊断和修正；不导出配置或凭据。",
     inputSchema: { type: "object", properties: { operationId: { type: "string" }, path: { type: "string" } }, required: ["operationId", "path"], additionalProperties: false },
     isReadOnly: false, isParallelSafe: false, permissionArgumentKey: "path",
+    filePathArgumentKeys: ["path"],
     boundaries: [{ boundaryType: "filesystem", access: "write", dynamic: false }],
     async call(input, context) {
       try {
@@ -106,6 +171,29 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
         await writeFile(resolve(parent, basename(output)), JSON.stringify(candidate, null, 2), { flag: "wx", mode: 0o600 });
         return { content: JSON.stringify({ path: output, digest: candidate.manifest.digest }) };
       } catch (error) { return { content: error instanceof Error ? error.message : "源码导出失败", isError: true }; }
+    },
+  }, {
+    name: "extension_validate",
+    description: "在已授权工作区内离线静态校验候选文件（manifest、通道声明与 ESM 语法，不执行代码）并返回摘要。",
+    inputSchema: { type: "object", properties: {
+      candidatePath: { type: "string", description: "当前工作目录内的 candidate.json" },
+    }, required: ["candidatePath"], additionalProperties: false },
+    isReadOnly: true, isParallelSafe: true, needsPermission: false,
+    permissionArgumentKey: "candidatePath",
+    filePathArgumentKeys: ["candidatePath"],
+    boundaries: [{ boundaryType: "filesystem", access: "read", dynamic: false }],
+    async call(input, context) {
+      try {
+        const run = runContextStorage.getStore();
+        if (!run?.conversationId) throw new Error("需要真实对话身份");
+        if (!run.hasAuthorizedWorkspace) throw new Error("扩展候选静态校验需要当前运行具备已授权的工作区");
+        if (Object.keys(input).some(key => key !== "candidatePath") || typeof input.candidatePath !== "string" || !input.candidatePath.trim()) {
+          throw new Error("候选路径参数无效");
+        }
+        const rawCandidate = await readAuthorizedCandidateFile(input.candidatePath, context);
+        const { summary } = await validateCandidatePayload(rawCandidate, { abortSignal: context.abortSignal });
+        return { content: JSON.stringify(summary) };
+      } catch (error) { return { content: error instanceof Error ? error.message : "候选校验失败", isError: true }; }
     },
   }];
 }

@@ -3,12 +3,24 @@ import type {
   SkillCatalogClient,
   SkillCatalogCommand,
   SkillCatalogEntry,
+  SkillCatalogEntryV2,
   SkillCatalogQuery,
   SkillCatalogStatePatch,
   SkillCatalogView,
+  SkillCatalogViewV2,
+  SkillVisibility,
 } from "@zhixing-ai/core/skills/catalog";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+
+export type SkillCatalogRpcCommand =
+  | SkillCatalogCommand
+  | {
+      readonly kind: "set-visibility";
+      readonly skillId: string;
+      readonly visibility: SkillVisibility;
+      readonly expectedRevision?: number;
+    };
 
 /** Minimal request capability supplied by a Surface connection lifecycle. */
 export interface SkillCatalogRpcRequestPort {
@@ -28,15 +40,24 @@ export interface SkillCatalogRpcTransportPort {
 export class SkillCatalogRpcClient implements SkillCatalogClient {
   constructor(private readonly link: SkillCatalogRpcTransportPort) {}
 
-  async query(query: SkillCatalogQuery): Promise<SkillCatalogView> {
-    if (!isPlainRecord(query) || !hasExactKeys(query, ["kind"]) || query.kind !== "list") {
+  query(query: { readonly kind: "list-v2" }): Promise<SkillCatalogViewV2>;
+  query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2>;
+  async query(query: SkillCatalogQuery): Promise<SkillCatalogView | SkillCatalogViewV2> {
+    if (!isPlainRecord(query) || !hasExactKeys(query, ["kind"])) {
       throw new TypeError("Unsupported Skill Catalog query");
     }
-    const client = await this.link.getClient();
-    return decodeSkillCatalogView(await client.request<unknown>("skill.list"));
+    if (query.kind === "list") {
+      const client = await this.link.getClient();
+      return decodeSkillCatalogView(await client.request<unknown>("skill.list"));
+    }
+    if (query.kind === "list-v2") {
+      const client = await this.link.getClient();
+      return decodeSkillCatalogViewV2(await client.request<unknown>("skill.listV2"));
+    }
+    throw new TypeError("Unsupported Skill Catalog query");
   }
 
-  async command(command: SkillCatalogCommand): Promise<void> {
+  async command(command: SkillCatalogRpcCommand): Promise<void> {
     switch (command.kind) {
       case "set-state": {
         const skillId = requireIdentifier(command.skillId, "Skill command id");
@@ -44,6 +65,23 @@ export class SkillCatalogRpcClient implements SkillCatalogClient {
         const client = await this.link.getClient();
         decodeCommandAcknowledgement(
           await client.request<unknown>("skill.setState", { skillId, ...patch }),
+        );
+        return;
+      }
+      case "set-visibility": {
+        const skillId = requireIdentifier(command.skillId, "Skill command id");
+        const visibility = encodeVisibility(command.visibility);
+        const expectedRevision =
+          "expectedRevision" in command && command.expectedRevision !== undefined
+            ? requirePositiveInteger(command.expectedRevision, "Skill expected revision")
+            : undefined;
+        const client = await this.link.getClient();
+        decodeCommandAcknowledgement(
+          await client.request<unknown>("skill.setVisibility", {
+            skillId,
+            visibility,
+            ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+          }),
         );
         return;
       }
@@ -79,6 +117,101 @@ function decodeSkillCatalogView(input: unknown): SkillCatalogView {
     "Skill Catalog structural version",
   );
   return Object.freeze({ entries, catalogRevision });
+}
+
+function decodeSkillCatalogViewV2(input: unknown): SkillCatalogViewV2 {
+  const value = requirePlainRecord(input, "Skill Catalog listV2 response");
+  requireExactKeys(value, ["skills", "structuralVersion"]);
+  if (!Array.isArray(value.skills) || Object.keys(value.skills).length !== value.skills.length) {
+    throw new TypeError("Skill Catalog listV2 response skills must be a dense array");
+  }
+  const entries = Object.freeze(value.skills.map(decodeSkillCatalogEntryV2));
+  const catalogRevision = requireNonNegativeInteger(
+    value.structuralVersion,
+    "Skill Catalog structural version",
+  );
+  return Object.freeze({ entries, catalogRevision });
+}
+
+function decodeSkillCatalogEntryV2(input: unknown): SkillCatalogEntryV2 {
+  const value = requirePlainRecord(input, "Skill Catalog v2 entry");
+  const expectedKeys =
+    value.packageRef !== undefined
+      ? [
+          "contentRef",
+          "createdAt",
+          "description",
+          "digest",
+          "disabled",
+          "id",
+          "mode",
+          "name",
+          "packageRef",
+          "pinned",
+          "revision",
+          "source",
+          "usage",
+          "visibility",
+        ]
+      : [
+          "contentRef",
+          "createdAt",
+          "description",
+          "digest",
+          "disabled",
+          "id",
+          "mode",
+          "name",
+          "pinned",
+          "revision",
+          "source",
+          "usage",
+          "visibility",
+        ];
+  requireExactKeys(value, expectedKeys);
+  const { packageRef: rawPackageRef, visibility: rawVisibility, ...rest } = value;
+  const base = decodeSkillCatalogEntry(rest);
+  const visibility = decodeVisibility(rawVisibility);
+  const packageRef =
+    rawPackageRef === undefined
+      ? undefined
+      : decodeArtifactRef(rawPackageRef, "Skill package reference");
+  return Object.freeze({
+    ...base,
+    visibility,
+    ...(packageRef !== undefined ? { packageRef } : {}),
+  });
+}
+
+function decodeArtifactRef(
+  input: unknown,
+  label: string,
+): { readonly bytes: number; readonly digest: string } {
+  const ref = requirePlainRecord(input, label);
+  requireExactKeys(ref, ["bytes", "digest"]);
+  return Object.freeze({
+    digest: requireDigest(ref.digest, `${label} digest`),
+    bytes: requireNonNegativeInteger(ref.bytes, `${label} bytes`),
+  });
+}
+
+function decodeVisibility(input: unknown): SkillVisibility {
+  const value = requirePlainRecord(input, "Skill visibility");
+  requireExactKeys(value, ["modelAutoIndex", "userSlashCommand"]);
+  if (
+    typeof value.modelAutoIndex !== "boolean" ||
+    typeof value.userSlashCommand !== "boolean"
+  ) {
+    throw new TypeError("Skill visibility flags must be boolean");
+  }
+  return Object.freeze({
+    modelAutoIndex: value.modelAutoIndex,
+    userSlashCommand: value.userSlashCommand,
+  });
+}
+
+function encodeVisibility(visibility: SkillVisibility): SkillVisibility {
+  return decodeVisibility(visibility);
 }
 
 function decodeSkillCatalogEntry(input: unknown): SkillCatalogEntry {

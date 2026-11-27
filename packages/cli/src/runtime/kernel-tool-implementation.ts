@@ -1,4 +1,5 @@
 import type { ArtifactStore } from "@zhixing-ai/core/authority";
+import type { IConfirmationBroker } from "@zhixing-ai/core/confirmation";
 import type { SkillMode } from "@zhixing-ai/core/skills/catalog";
 import type {
   KernelToolImplementationPort,
@@ -18,6 +19,7 @@ export type HostSkillToolBinding =
       kind: "assignment";
       mode: SkillMode;
       artifacts: ArtifactStore;
+      getConfirmationBroker?: () => IConfirmationBroker | undefined;
     }>
   | Readonly<{
       kind: "builtin-only";
@@ -52,6 +54,9 @@ export function createHostKernelToolImplementation(
       const skillPorts = binding.kind === "assignment"
         ? createAssignmentSkillPorts(binding.artifacts, {
             admissionLlm: request.callText,
+            getConfirmationBroker:
+              binding.getConfirmationBroker ?? (() => request.confirmationBroker),
+            referee: request.admissionReferee ?? null,
           })
         : createBuiltinOnlyAssignmentSkillPorts();
       const tools = request.requestedToolNames.map((name) => {

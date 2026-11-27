@@ -14,9 +14,10 @@
  * 的会话；显式传 conversationId 时要求 caller 是该会话的 observer（否则过滤空）。
  */
 
-import type {
-  ConfirmationDecision,
-  ConfirmationRequest,
+import {
+  validateConfirmationDecisionText,
+  type ConfirmationDecision,
+  type ConfirmationRequest,
 } from "@zhixing-ai/core/confirmation";
 import { confirmationDecisionDigest } from "@zhixing-ai/core/protocol";
 import type { MethodEntry } from "../handlers.js";
@@ -291,12 +292,26 @@ function validateDecisionShape(decision: {
       );
     }
   }
+  if (decision.kind === "allow-once" && decision.note !== undefined) {
+    if (typeof decision.note !== "string") {
+      throw RpcErrors.invalidParams(
+        "confirmation.resolve allow-once 'note' must be a string when provided",
+      );
+    }
+  }
   if (decision.kind === "deny" && decision.reason !== undefined) {
     if (typeof decision.reason !== "string") {
       throw RpcErrors.invalidParams(
         "confirmation.resolve deny 'reason' must be a string when provided",
       );
     }
+  }
+  try {
+    validateConfirmationDecisionText(decision as ConfirmationDecision);
+  } catch (error) {
+    throw RpcErrors.invalidParams(
+      error instanceof Error ? error.message : "Invalid confirmation decision text",
+    );
   }
 }
 

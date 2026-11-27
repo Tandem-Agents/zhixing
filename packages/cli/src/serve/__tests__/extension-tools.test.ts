@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { rm, readFile } from "node:fs/promises";
+import { rm, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing-ai/core/authority";
@@ -10,6 +10,7 @@ import { createExtensionContinuation } from "../extension-continuation.js";
 import { runContextStorage } from "@zhixing-ai/orchestrator/runtime";
 import type { ExtensionOperation } from "@zhixing-ai/core/extensions/contracts";
 import { buildExtensionMethods } from "../../../../server/src/rpc/methods/extensions.js";
+import { DurableConversationAdmissionRejectedError } from "@zhixing-ai/owner-kernel/run-turn";
 import { createTempDir } from "@zhixing-ai/test-utils";
 
 describe("extension product bindings", { timeout: 20_000 }, () => {
@@ -48,7 +49,7 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
   it("keeps maintenance notifications reachable outside the affected channel and retains a fallback receipt", async () => {
     const admitted: Array<{ conversationId: string; options: { turnContext: object } }> = [];
     const manager = { admitDurableTurn: async (request: { conversationId: string; options: { turnContext: object } }) => {
-      admitted.push(request); if (request.conversationId === "deleted") throw new Error("gone"); return { shouldEnqueue: false };
+      admitted.push(request); if (request.conversationId === "deleted") throw new DurableConversationAdmissionRejectedError("gone"); return { shouldEnqueue: false };
     }, findDurableRunByIngress: vi.fn(async () => ({ state: "failed" })) };
     const continuation = createExtensionContinuation({ manager: manager as never, communication: { invoke: vi.fn() }, deviceId: "device", fallbackConversation: async () => "default" });
     const operation: ExtensionOperation = { id: "repair", instanceId: "app", revision: 1, phase: "blocked", purpose: "repair",
@@ -76,8 +77,17 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
     expect(receipt).toMatchObject({ conversationId: "default", kind: "turn" });
     expect(admitted).toHaveLength(1);
     expect(admitted[0]!.conversationId).toBe("default");
-    expect(admitted[0]!.options.turnContext).not.toHaveProperty("turnOrigin");
+    expect(admitted[0]!.options.turnContext).toMatchObject({
+      turnOrigin: {
+        channel: "system",
+        messageIdentity: {
+          id: "extension:repair-dead:1",
+          source: { kind: "system", subsystem: "extension-continuation" },
+        },
+      },
+    });
     expect(admitted[0]!.options.turnContext).not.toHaveProperty("emissionTarget");
+    expect((admitted[0]!.options.turnContext as { turnOrigin?: { target?: unknown } }).turnOrigin?.target).toBeUndefined();
   });
   it("admits the tool-generated operation identity through the real Authority application", async () => {
     const root = await createTempDir("extension-tool");
@@ -151,6 +161,55 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
   it("keeps account verification instructions off remote RPC and out of model management tools", async () => {
     const method = buildExtensionMethods().find(method => method.name === "extensions.local-setup")!;
     await expect(method.handler({}, { connection: { loopback: false }, server: {} } as never)).rejects.toThrow("目标设备");
-    expect(createExtensionTools({ invoke: vi.fn() }).map(tool => tool.name)).toEqual(["extension", "extension_connect", "extension_source"]);
+    const tools = createExtensionTools({ invoke: vi.fn() });
+    expect(tools.map(tool => tool.name)).toEqual(["extension", "extension_connect", "extension_source", "extension_validate"]);
+    const validate = tools.find(tool => tool.name === "extension_validate")!;
+    const root = await createTempDir("extension-validate");
+    try {
+      const code = 'import { createHash } from "node:crypto";\nexport const version = createHash("sha256").update("app").digest("hex");\n';
+      const candidate = {
+        manifest: {
+          id: "app",
+          version: "1.0.0",
+          digest: createHash("sha256").update(code).digest("hex"),
+          type: "channel" as const,
+          contract: 1,
+          protocol: 1 as const,
+          runtime: "node24" as const,
+          entry: "adapter.mjs",
+          declaration: {
+            label: "App",
+            identityFields: ["accountId"],
+            requiredFields: [{ id: "accountId", label: "Account", hint: "Account ID", example: "acc-1", sensitive: false }],
+            capabilities: { chatTypes: ["dm" as const], media: false, edit: false, streaming: false },
+          },
+        },
+        code,
+        provenance: { url: "https://example.com/official", revision: "v1", kind: "authored" as const },
+        sources: { "adapter.mjs": code },
+        build: "Node 24",
+      };
+      await writeFile(join(root, "valid.json"), JSON.stringify(candidate), "utf8");
+      const badCode = "const =";
+      await writeFile(
+        join(root, "bad.json"),
+        JSON.stringify({
+          ...candidate,
+          manifest: { ...candidate.manifest, digest: createHash("sha256").update(badCode).digest("hex") },
+          code: badCode,
+          sources: { "adapter.mjs": badCode },
+        }),
+        "utf8",
+      );
+      await runContextStorage.run({ conversationId: "scene", lineage: "main", hasAuthorizedWorkspace: true } as never, async () => {
+        const valid = await validate.call({ candidatePath: "valid.json" }, { workingDirectory: root });
+        expect(valid.isError).not.toBe(true);
+        expect(JSON.parse(valid.content)).toMatchObject({ valid: true, executed: false });
+        const invalid = await validate.call({ candidatePath: "bad.json" }, { workingDirectory: root });
+        expect(invalid.isError).toBe(true);
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

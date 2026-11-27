@@ -9,12 +9,14 @@ import type {
   McpManagementInfrastructurePort,
   McpManagementServerDraft,
   McpManagementServerStatus,
+  McpManagementServerStatusV2,
 } from "@zhixing-ai/core/mcp-management";
 import { toServerSpec } from "./mcp-config.js";
 
 export interface CreateMcpManagementAdapterOptions {
   readonly proxy?: NetworkPolicy["proxy"];
   readonly readStatusWire: () => Promise<unknown>;
+  readonly readStatusV2?: () => Promise<readonly McpManagementServerStatusV2[]>;
   readonly createStdioProcess?: import('@zhixing-ai/mcp').McpStdioProcessFactory;
 }
 
@@ -26,6 +28,13 @@ export function createMcpManagementAdapter(
     async snapshot(): Promise<readonly McpManagementServerStatus[]> {
       return decodeStatusSnapshot(await options.readStatusWire());
     },
+    ...(options.readStatusV2
+      ? {
+          async snapshotV2(): Promise<readonly McpManagementServerStatusV2[]> {
+            return await options.readStatusV2!();
+          },
+        }
+      : {}),
     isServerIdValid: (serverId: string) => isValidServerId(serverId),
     async probe(draft: McpManagementServerDraft, signal?: AbortSignal) {
       const result = await probeServer(

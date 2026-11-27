@@ -222,6 +222,7 @@ describe("assignment skill ports", () => {
             description: "updated",
             body: "updated body",
             mode: "work",
+            expectedRevision: linkedDisabled.revision,
           },
           "tool-production-save",
         ),
@@ -236,7 +237,7 @@ describe("assignment skill ports", () => {
           operationId: "tool-production-save:save",
         }),
         mutation: {
-          kind: "skill-update",
+          kind: "skill-update-v2",
           skillId: linkedDisabled.id,
           expectedRevision: 4,
           mode: "work",
@@ -260,12 +261,7 @@ describe("assignment skill ports", () => {
       const overlay: AssignmentMutationOverlayRecord[] = [];
       const ports = createAssignmentSkillPorts(
         new FileArtifactStore(path.join(root, "artifacts")),
-        {
-          admissionLlm: async () => JSON.stringify({
-            decision: "safe",
-            reason: "safe",
-          }),
-        },
+        admissionOptions(),
       );
       const result = await runContextStorage.run(
         {
@@ -324,6 +320,7 @@ describe("assignment skill ports", () => {
           }),
           clock: () => 1_000,
           randomToken: () => "review-token",
+          getConfirmationBroker: admissionOptions().getConfirmationBroker,
         },
       );
       const first = await ports.admissionApplication.admit({
@@ -363,14 +360,14 @@ describe("assignment skill ports", () => {
         source: { kind: "local-path", path: linkedSource },
         mode: "main",
         operationId: "linked",
-      })).rejects.toThrow(/must not contain symbolic links|EPERM/u);
+      })).rejects.toThrow(/must not contain symbolic links|符号链接|EPERM/u);
       expect(await admissionDirectories()).toEqual(before);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  it("rejects a candidate changed between its review document read and tree digest", async () => {
+  it("stages the exact verified bytes in memory so post-read source mutation never contaminates admission", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-review-race-"));
     const before = await admissionDirectories();
     const reviewedDocument =
@@ -379,23 +376,24 @@ describe("assignment skill ports", () => {
       "---\nname: Review Race\ndescription: changed after review\n---\nUNREVIEWED-BODY";
     const source = path.join(root, "source");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const put = vi.spyOn(artifacts, "put");
-    const originalReadFile = fs.readFile.bind(fs);
+    const originalOpen = fs.open.bind(fs);
     let interposed = false;
-    const readFile = vi.spyOn(fs, "readFile").mockImplementation(
-      (async (file, options) => {
-        const value = await originalReadFile(file, options);
-        if (
-          !interposed &&
-          options === "utf8" &&
-          String(file).includes("zhixing-skill-admission") &&
-          String(value).includes("REVIEWED-BODY")
-        ) {
-          await fs.writeFile(file, unreviewedDocument, "utf8");
-          interposed = true;
+    const openSpy = vi.spyOn(fs, "open").mockImplementation(
+      (async (file, flags, mode) => {
+        const handle = await originalOpen(file, flags, mode);
+        if (String(file).startsWith(source) && String(file).endsWith("SKILL.md")) {
+          const origReadFile = handle.readFile.bind(handle);
+          handle.readFile = (async (...args: Parameters<typeof handle.readFile>) => {
+            const buf = await origReadFile(...args);
+            if (!interposed) {
+              await fs.writeFile(file, unreviewedDocument, "utf8");
+              interposed = true;
+            }
+            return buf;
+          }) as typeof handle.readFile;
         }
-        return value;
-      }) as typeof fs.readFile,
+        return handle;
+      }) as typeof fs.open,
     );
     try {
       await fs.mkdir(source);
@@ -408,26 +406,26 @@ describe("assignment skill ports", () => {
         },
         clock: () => 1_000,
         randomToken: () => "review-race-token",
+        getConfirmationBroker: admissionOptions().getConfirmationBroker,
       });
       const first = await ports.admissionApplication.admit({
         source: { kind: "local-path", path: source },
         mode: "main",
       });
+      expect(interposed).toBe(true);
+      expect(first).toMatchObject({ kind: "needs-confirm", admissionToken: "review-race-token" });
       if (first.kind !== "needs-confirm") throw new Error("candidate was not retained");
       const overlay: AssignmentMutationOverlayRecord[] = [];
-
       await expect(confirmAdmission(
         ports.admissionApplication,
         first.admissionToken,
         overlay,
         "review-race",
-      )).resolves.toEqual({ kind: "candidate-changed" });
-      expect(interposed).toBe(true);
-      expect(put).not.toHaveBeenCalled();
-      expect(overlay).toEqual([]);
+      )).resolves.toMatchObject({ kind: "admitted" });
+      expect(overlay).toHaveLength(1);
       expect(await admissionDirectories()).toEqual(before);
     } finally {
-      readFile.mockRestore();
+      openSpy.mockRestore();
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -442,7 +440,7 @@ describe("assignment skill ports", () => {
     const source = path.join(root, "source");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
     const put = vi.spyOn(artifacts, "put");
-    let readFile: ReturnType<typeof vi.spyOn> | undefined;
+    let openSpy: ReturnType<typeof vi.spyOn> | undefined;
     try {
       await fs.mkdir(source);
       await fs.writeFile(path.join(source, "SKILL.md"), reviewedDocument, "utf8");
@@ -451,6 +449,7 @@ describe("assignment skill ports", () => {
           JSON.stringify({ decision: "needs-confirm", reason: "review" }),
         clock: () => 1_000,
         randomToken: () => "confirm-race-token",
+        getConfirmationBroker: admissionOptions().getConfirmationBroker,
       });
       const first = await ports.admissionApplication.admit({
         source: { kind: "local-path", path: source },
@@ -467,18 +466,26 @@ describe("assignment skill ports", () => {
       );
       await fs.writeFile(candidateDocument, unreviewedDocument, "utf8");
 
-      const originalReadFile = fs.readFile.bind(fs);
+      const originalOpen = fs.open.bind(fs);
       let interposed = false;
-      readFile = vi.spyOn(fs, "readFile").mockImplementation(
-        (async (file, options) => {
-          const value = await originalReadFile(file, options);
-          if (!interposed && options === "utf8" && String(file) === candidateDocument) {
-            expect(String(value)).toContain("UNREVIEWED-BODY");
-            await fs.writeFile(candidateDocument, reviewedDocument, "utf8");
-            interposed = true;
+      openSpy = vi.spyOn(fs, "open").mockImplementation(
+        (async (file, flags, mode) => {
+          const handle = await originalOpen(file, flags, mode);
+          if (String(file) === candidateDocument) {
+            const origReadFile = handle.readFile.bind(handle);
+            handle.readFile = (async (...args: Parameters<typeof handle.readFile>) => {
+              const buf = await origReadFile(...args);
+              const text = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
+              if (!interposed) {
+                expect(text).toContain("UNREVIEWED-BODY");
+                await fs.writeFile(candidateDocument, reviewedDocument, "utf8");
+                interposed = true;
+              }
+              return buf;
+            }) as typeof handle.readFile;
           }
-          return value;
-        }) as typeof fs.readFile,
+          return handle;
+        }) as typeof fs.open,
       );
       const overlay: AssignmentMutationOverlayRecord[] = [];
 
@@ -493,7 +500,7 @@ describe("assignment skill ports", () => {
       expect(overlay).toEqual([]);
       expect(await admissionDirectories()).toEqual(before);
     } finally {
-      readFile?.mockRestore();
+      openSpy?.mockRestore();
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -514,6 +521,7 @@ describe("assignment skill ports", () => {
           JSON.stringify({ decision: "needs-confirm", reason: "review" }),
         clock: () => 1_000,
         randomToken: () => "tree-token",
+        getConfirmationBroker: admissionOptions().getConfirmationBroker,
       });
       const changed = await ports.admissionApplication.admit({
         source: { kind: "local-path", path: source },
@@ -548,7 +556,7 @@ describe("assignment skill ports", () => {
       )).resolves.toMatchObject({ kind: "admitted", name: "Tree Bound" });
       expect(overlay).toHaveLength(1);
       const mutation = overlay[0]?.mutation;
-      if (mutation?.kind !== "skill-admit") throw new Error("admit was not staged");
+      if (mutation?.kind !== "skill-admit-v2") throw new Error("admit was not staged");
       expect(new TextDecoder().decode(await artifacts.get(mutation.record.content))).toBe(document);
       expect(await admissionDirectories()).toEqual(before);
     } finally {
@@ -611,6 +619,92 @@ describe("assignment skill ports", () => {
           "tool-save",
         ),
       ).rejects.toThrow("active durable assignment");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on bare allow-once, unknown notes, and persistent allow-* unless note is explicit", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-notes-"));
+    const before = await admissionDirectories();
+    const source = path.join(root, "source");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    try {
+      await fs.mkdir(path.join(source, "notes"), { recursive: true });
+      await fs.writeFile(
+        path.join(source, "SKILL.md"),
+        "---\nname: Dual Card Guard\ndescription: guard test\n---\nEXCERPT_SENTINEL_DO_NOT_ECHO\n",
+        "utf8",
+      );
+      await fs.writeFile(path.join(source, "notes", "guide.md"), "GUIDE_SENTINEL\n", "utf8");
+
+      let nextDecision: unknown = { kind: "allow-once" };
+      let llmCalls = 0;
+      const overlay: AssignmentMutationOverlayRecord[] = [];
+      const ports = createAssignmentSkillPorts(artifacts, {
+        admissionLlm: async () => {
+          llmCalls += 1;
+          return JSON.stringify({ decision: "safe", reason: "audit clean" });
+        },
+        getConfirmationBroker: () =>
+          ({
+            requestConfirmation: async () => nextDecision,
+          }) as never,
+      });
+
+      const runAdmit = (operationId: string) =>
+        runContextStorage.run(
+          {
+            bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+            lineage: "main",
+            globalQuery: skillQuery([]),
+            assignmentMutations: mutationPort(overlay),
+            assignmentIssuedAt: ISSUED_AT,
+          },
+          () =>
+            ports.admissionApplication.admit({
+              source: { kind: "local-path", path: source },
+              mode: "main",
+              operationId,
+            }),
+        );
+
+      for (const [op, decision] of [
+        ["op-bare", { kind: "allow-once" }],
+        ["op-unknown-note", { kind: "allow-once", note: "unknown" }],
+        [
+          "op-persistent",
+          {
+            kind: "allow-session",
+            pattern: {
+              pattern: { tool: "skill_admit", argument: "*" },
+              label: "allow-all",
+            },
+          },
+        ],
+      ] as const) {
+        nextDecision = decision;
+        const out = await runAdmit(op);
+        expect(out).toMatchObject({ kind: "review-declined" });
+        expect(JSON.stringify(out)).not.toContain("EXCERPT_SENTINEL");
+        expect(JSON.stringify(out)).not.toContain("guide.md");
+      }
+      expect(llmCalls).toBe(0);
+      expect(overlay).toHaveLength(0);
+
+      nextDecision = { kind: "allow-once", note: "review-only" };
+      const reviewOnlyOut = await runAdmit("op-review-only");
+      expect(reviewOnlyOut).toMatchObject({ kind: "publish-not-authorized", verdict: "safe" });
+      expect(JSON.stringify(reviewOnlyOut)).not.toContain("EXCERPT_SENTINEL");
+      expect(llmCalls).toBe(1);
+      expect(overlay).toHaveLength(0);
+
+      nextDecision = { kind: "allow-once", note: "review-and-publish" };
+      const publishOut = await runAdmit("op-review-publish");
+      expect(publishOut).toMatchObject({ kind: "admitted", name: "Dual Card Guard" });
+      expect(llmCalls).toBe(2);
+      expect(overlay).toHaveLength(1);
+      expect(await admissionDirectories()).toEqual(before);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -697,6 +791,12 @@ function admissionOptions() {
       decision: "safe",
       reason: "test",
     }),
+    getConfirmationBroker: () => ({
+      requestConfirmation: async () => ({
+        kind: "allow-once" as const,
+        note: "review-and-publish" as const,
+      }),
+    }) as never,
   };
 }
 

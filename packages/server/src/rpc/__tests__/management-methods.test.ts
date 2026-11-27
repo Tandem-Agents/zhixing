@@ -9,11 +9,14 @@ import type {
   TaskView,
 } from "@zhixing-ai/core/scheduler";
 import {
+  computeSkillEntryV2Digest,
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_LIST_QUERY,
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
   SkillCatalogApplicationError,
+  SkillCatalogApplicationService,
   type SkillCatalogApplication,
+  type SkillCatalogEntryV2,
 } from "@zhixing-ai/core/skills/catalog";
 import {
   createTrustAdministrationProductApiContribution,
@@ -36,9 +39,14 @@ import {
 } from "../methods/trust.js";
 import {
   buildSkillListMethod,
+  buildSkillListV2Method,
   buildSkillSetStateMethod,
+  buildSkillSetVisibilityMethod,
   buildSkillArchiveMethod,
 } from "../methods/skill.js";
+import { buildMcpStatusV2Method } from "../methods/mcp.js";
+import { DEVICE_LOCAL_RPC_METHODS } from "../methods/index.js";
+import { buildServerInfoMethod } from "../methods/server.js";
 import {
   buildScheduleCreateMethod,
   buildScheduleAbortRunMethod,
@@ -802,5 +810,223 @@ describe("isLoopbackAddress(信任级判定要素)", () => {
     expect(isLoopbackAddress("192.168.1.2")).toBe(false);
     expect(isLoopbackAddress("::ffff:192.168.1.2")).toBe(false);
     expect(isLoopbackAddress(undefined)).toBe(false);
+  });
+});
+
+describe("Wave 5.2 skill V2 与 mcp.statusV2 RPC 契约", () => {
+  it("skill.listV2 透传 view v2 且 skill.list 保留 12 字段并按 skill-list 消费面折算 disabled", async () => {
+    const makeV2Entry = (
+      id: string,
+      visibility: SkillCatalogEntryV2["visibility"],
+    ): SkillCatalogEntryV2 => {
+      const base: Omit<SkillCatalogEntryV2, "digest"> = {
+        id,
+        name: id,
+        description: `${id} desc`,
+        source: "own",
+        mode: "main",
+        pinned: false,
+        disabled: false,
+        createdAt: "2026-08-29T00:00:00.000Z",
+        usage: null,
+        contentRef: { digest: `sha256:${"1".repeat(64)}`, bytes: 32 },
+        revision: 4,
+        visibility,
+        packageRef: { digest: `sha256:${"2".repeat(64)}`, bytes: 128 },
+      };
+      return { ...base, digest: computeSkillEntryV2Digest(base) };
+    };
+    const slashVisible = makeV2Entry("slash-only", {
+      modelAutoIndex: false,
+      userSlashCommand: true,
+    });
+    const slashHidden = makeV2Entry("model-only", {
+      modelAutoIndex: true,
+      userSlashCommand: false,
+    });
+    const app = new SkillCatalogApplicationService({
+      readCatalog: async () => ({ catalogRevision: 11, entries: [] }),
+      readCatalogV2: async () => ({
+        catalogRevision: 11,
+        entries: [slashVisible, slashHidden],
+      }),
+      readEntry: async () => null,
+      commit: async () => ({ kind: "committed", catalogRevision: 11 }),
+    });
+    const dispatcher = new ProductApiDispatcher(SKILL_CATALOG_PRODUCT_API_EXACT_SET, [
+      createSkillCatalogProductApiContribution(app),
+    ]);
+    const ctx = makeCtx({ productApi: dispatcher });
+
+    const v1 = (await call(buildSkillListMethod(), {}, ctx)) as {
+      skills: Array<Record<string, unknown>>;
+      structuralVersion: number;
+    };
+    expect(v1.structuralVersion).toBe(11);
+    expect(Object.keys(v1.skills[0] ?? {}).sort()).toEqual([
+      "contentRef",
+      "createdAt",
+      "description",
+      "digest",
+      "disabled",
+      "id",
+      "mode",
+      "name",
+      "pinned",
+      "revision",
+      "source",
+      "usage",
+    ]);
+    expect(v1.skills.map((item) => ({ id: item.id, disabled: item.disabled }))).toEqual([
+      { id: "slash-only", disabled: false },
+      { id: "model-only", disabled: true },
+    ]);
+
+    const v2 = (await call(buildSkillListV2Method(), {}, ctx)) as {
+      skills: Array<Record<string, unknown>>;
+      structuralVersion: number;
+    };
+    expect(v2.structuralVersion).toBe(11);
+    expect(v2.skills[0]).toMatchObject({
+      id: "slash-only",
+      disabled: false,
+      visibility: { modelAutoIndex: false, userSlashCommand: true },
+      packageRef: { digest: `sha256:${"2".repeat(64)}`, bytes: 128 },
+      revision: 4,
+    });
+  });
+
+  it("skill.setVisibility 正常提交并将 conflict/not-found/invalid 映射为准确错误", async () => {
+    const seen: unknown[] = [];
+    const app: SkillCatalogApplication = {
+      query: async () => ({ entries: [], catalogRevision: 1 } as never),
+      execute: async (command) => {
+        seen.push(command);
+        if (command.skillId === "conflict") {
+          throw new SkillCatalogApplicationError("conflict", "visibility revision mismatch");
+        }
+        if (command.skillId === "ghost") {
+          throw new SkillCatalogApplicationError("not-found", "skill missing");
+        }
+        return {
+          fact: {
+            kind: "skill-catalog-changed",
+            catalogRevision: 8,
+          },
+        } as never;
+      },
+    };
+    const dispatcher = new ProductApiDispatcher(SKILL_CATALOG_PRODUCT_API_EXACT_SET, [
+      createSkillCatalogProductApiContribution(app),
+    ]);
+    const ctx = makeCtx({ productApi: dispatcher });
+    const method = buildSkillSetVisibilityMethod();
+
+    const ok = await call(
+      method,
+      {
+        skillId: "s1",
+        visibility: { modelAutoIndex: false, userSlashCommand: true },
+        expectedRevision: 3,
+      },
+      ctx,
+    );
+    expect(ok).toEqual({ ok: true });
+    expect(seen[0]).toEqual({
+      kind: "set-visibility",
+      skillId: "s1",
+      visibility: { modelAutoIndex: false, userSlashCommand: true },
+      expectedRevision: 3,
+    });
+
+    await expect(
+      call(
+        method,
+        {
+          skillId: "conflict",
+          visibility: { modelAutoIndex: false, userSlashCommand: false },
+          expectedRevision: 2,
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: "conflict" });
+    await expect(
+      call(
+        method,
+        {
+          skillId: "ghost",
+          visibility: { modelAutoIndex: true, userSlashCommand: true },
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
+    await expect(
+      call(method, { skillId: "s1", visibility: "invalid" }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      call(
+        method,
+        {
+          skillId: "s1",
+          visibility: { modelAutoIndex: true, userSlashCommand: true },
+          expectedRevision: 0,
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+  });
+
+  it("mcp.statusV2 在 loopback 放行且属于 DEVICE_LOCAL_RPC_METHODS，非 loopback 拒绝，同时 server.info 保持 mcpServers 兼容", async () => {
+    const mcpStatusMethod = buildMcpStatusV2Method();
+    const serverInfoMethod = buildServerInfoMethod();
+    const v1Statuses = [
+      {
+        serverId: "docs",
+        transport: "stdio",
+        status: "connected",
+        toolCount: 2,
+      },
+    ];
+    const v2Statuses = [
+      {
+        serverId: "docs",
+        transport: "stdio",
+        status: "connected",
+        toolCount: 2,
+      },
+    ];
+
+    const loopbackCtx = {
+      server: {
+        name: "zhixing-test",
+        version: "0.0.0-test",
+        protocolVersion: "2",
+        capabilities: ["server.info", "mcp.statusV2"],
+        listenAddr: { host: "127.0.0.1", port: 18790 },
+        startedAt: Date.now(),
+        mcpStatuses: () => v1Statuses,
+        mcpStatusesV2: () => v2Statuses,
+      },
+      connection: { id: 1, loopback: true },
+    } as never;
+
+    const info = (await call(serverInfoMethod, {}, loopbackCtx)) as {
+      mcpServers: unknown[];
+    };
+    expect(info.mcpServers).toEqual(v1Statuses);
+
+    const statusV2 = (await call(mcpStatusMethod, {}, loopbackCtx)) as {
+      servers: unknown[];
+    };
+    expect(statusV2).toEqual({ servers: v2Statuses });
+    expect(DEVICE_LOCAL_RPC_METHODS.includes("mcp.statusV2")).toBe(true);
+
+    const remoteCtx = {
+      ...(loopbackCtx as Record<string, unknown>),
+      connection: { id: 2, loopback: false },
+    } as never;
+    await expect(call(mcpStatusMethod, {}, remoteCtx)).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+    });
   });
 });

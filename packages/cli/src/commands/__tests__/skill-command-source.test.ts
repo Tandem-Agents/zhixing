@@ -7,7 +7,7 @@ import { CommandDispatcher, DefaultCommandRegistry, type CommandDef, type Runtim
 import {
   SkillCatalogApplicationService,
   type SkillCatalogClient,
-  type SkillCatalogEntry,
+  type SkillCatalogEntryV2,
 } from "@zhixing-ai/core/skills/catalog";
 import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing-ai/core/skills/catalog-correctness";
 import {
@@ -24,7 +24,7 @@ function rec(
   id: string,
   name: string,
   description = "desc",
-): SkillCatalogEntry {
+): SkillCatalogEntryV2 {
   return {
     id,
     name,
@@ -33,6 +33,7 @@ function rec(
     mode: "main",
     pinned: false,
     disabled: false,
+    visibility: { modelAutoIndex: true, userSlashCommand: true },
     createdAt: NOW,
     usage: null,
     contentRef: { digest: `sha256:${"0".repeat(64)}`, bytes: 1 },
@@ -42,7 +43,7 @@ function rec(
 }
 
 function sourceWith(
-  skills: SkillCatalogEntry[],
+  skills: SkillCatalogEntryV2[],
   existing: Record<string, CommandDef> = {},
 ): SkillCommandSource {
   return new SkillCommandSource({
@@ -51,9 +52,9 @@ function sourceWith(
   });
 }
 
-function clientWith(entries: readonly SkillCatalogEntry[]): SkillCatalogClient {
+function clientWith(entries: readonly SkillCatalogEntryV2[]): SkillCatalogClient {
   return {
-    query: async () => ({ entries, catalogRevision: 1 }),
+    query: (async () => ({ entries, catalogRevision: 1 })) as SkillCatalogClient["query"],
     command: async () => {},
     onFact: () => () => {},
   };
@@ -123,10 +124,12 @@ describe("SkillCommandSource", () => {
     expect(commands.map((command) => command.id)).toEqual(["skill:deploy"]);
   });
 
-  it("禁用技能投影为 hidden：不进发现入口，名称与别名照常注册", async () => {
+  it("禁用技能与 userSlashCommand=false 技能均投影为 hidden 且可直呼；system:* 内置技能跳过注册", async () => {
     const commands = await sourceWith([
       { ...rec("deploy-service", "部署服务"), disabled: true },
+      { ...rec("quiet-skill", "Quiet Skill"), visibility: { modelAutoIndex: true, userSlashCommand: false } },
       rec("review", "review"),
+      { ...rec("system:知行系统认知", "知行系统认知"), source: "system" },
     ]).list();
     expect(commands).toEqual([
       expect.objectContaining({
@@ -136,18 +139,55 @@ describe("SkillCommandSource", () => {
         execution: "agent",
         hidden: true,
       }),
+      expect.objectContaining({
+        id: "skill:quiet-skill",
+        name: "quiet-skill",
+        aliases: ["Quiet Skill"],
+        execution: "agent",
+        hidden: true,
+      }),
       expect.objectContaining({ id: "skill:review", name: "review" }),
     ]);
-    // 启用的技能不带 hidden，照常出现在补全与帮助
-    expect(commands[1]).not.toHaveProperty("hidden");
+    expect(commands[2]).not.toHaveProperty("hidden");
   });
 
-  it("禁用技能撞非技能命令时同样跳过，不以 hidden 遮蔽核心命令", async () => {
+  it("禁用技能撞非技能命令时同样跳过，不遮蔽核心命令", async () => {
     const commands = await sourceWith(
       [{ ...rec("help", "help"), disabled: true }],
       { help: builtinCmd("help") },
     ).list();
     expect(commands).toEqual([]);
+  });
+
+  it("连接未升级旧服务端（list-v2 返回 -32601）时优雅降级到 list", async () => {
+    const seen: string[] = [];
+    const legacySource = new SkillCommandSource({
+      client: {
+        query: (async (q) => {
+          seen.push(q.kind);
+          if (q.kind === "list-v2") {
+            throw Object.assign(new Error("Method not found: skill.listV2"), { code: -32601 });
+          }
+          return {
+            entries: [
+              rec("legacy-visible", "Legacy Visible"),
+              { ...rec("legacy-folded-off", "Legacy Off"), disabled: true },
+            ],
+            catalogRevision: 1,
+          };
+        }) as SkillCatalogClient["query"],
+        command: async () => {},
+        onFact: () => () => {},
+      },
+      findExisting: () => null,
+    });
+    const commands = await legacySource.list();
+    expect(seen).toEqual(["list-v2", "list"]);
+    expect(commands).toEqual([
+      expect.objectContaining({ name: "legacy-visible" }),
+      expect.objectContaining({ name: "legacy-folded-off", hidden: true }),
+    ]);
+    expect(commands[0]).not.toHaveProperty("hidden");
   });
 });
 
@@ -255,7 +295,7 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
     });
   });
 
-  it("管理提交禁用后补全与帮助不列出，按名与别名仍可调用；启用后恢复", async () => {
+  it("管理提交禁用与 set-visibility 均隐藏补全列表并保留精确名路由，启用后恢复", async () => {
     await withAuthorityCatalog([
       { name: "Deploy Service", description: "部署到生产", body: "# 步骤" },
     ], async ({ application, registry }) => {
@@ -268,10 +308,39 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
         patch: { disabled: true },
       });
       await registry.refresh();
-      // 管理投影仍含禁用项（/skills 要浏览），命令源把它投影为 hidden
+      // 禁用技能投影为 hidden：从补全列表隐藏，但精确名与别名仍路由到对话由 skill_read 守门返回 skill-disabled
       expect((await application.query({ kind: "list" })).entries[0]).toMatchObject({
         id: "deploy-service",
         disabled: true,
+      });
+      expect(listed()).not.toContain("deploy-service");
+      expect(registry.findByName("deploy-service")).toMatchObject({
+        id: "skill:deploy-service",
+        hidden: true,
+        execution: "agent",
+      });
+      expect(registry.findByName("Deploy Service")?.id).toBe("skill:deploy-service");
+
+      await application.execute({
+        kind: "set-state",
+        skillId: "deploy-service",
+        patch: { disabled: false },
+      });
+      await application.execute({
+        kind: "set-visibility",
+        skillId: "deploy-service",
+        visibility: { modelAutoIndex: true, userSlashCommand: false },
+      });
+      await registry.refresh();
+      // 旧 list 按 skill-list 消费面折算 disabled || !userSlashCommand，而 list-v2 保持正交
+      expect((await application.query({ kind: "list" })).entries[0]).toMatchObject({
+        id: "deploy-service",
+        disabled: true,
+      });
+      expect((await application.query({ kind: "list-v2" })).entries[0]).toMatchObject({
+        id: "deploy-service",
+        disabled: false,
+        visibility: { modelAutoIndex: true, userSlashCommand: false },
       });
       expect(listed()).not.toContain("deploy-service");
       expect(registry.findByName("deploy-service")).toMatchObject({
@@ -285,9 +354,9 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
       ).resolves.toEqual({ kind: "agent-message", text: "/deploy-service" });
 
       await application.execute({
-        kind: "set-state",
+        kind: "set-visibility",
         skillId: "deploy-service",
-        patch: { disabled: false },
+        visibility: { modelAutoIndex: true, userSlashCommand: true },
       });
       await registry.refresh();
       expect(listed()).toContain("deploy-service");

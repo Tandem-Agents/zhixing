@@ -6,9 +6,12 @@ import { buildDisplayBody, buildConfirmationOptions } from "@zhixing-ai/core/con
 
 const candidate = { serverId: "demo", source: "inferred", entry: { type: "stdio", command: "npx", args: ["-y", "fixture-server"] }, secretFields: [] };
 const handoff = { goal: "整理资料", constraints: ["不发布"], completed: ["已确认来源"], remaining: ["读取资料并总结"] };
-function fixture(canConnect = true) {
-  const discovery = { search: vi.fn(async () => []), readSource: vi.fn(async () => ({ kind: "not-found" as const })), snapshot: vi.fn(async () => [{ serverId: "demo", status: "connecting" as const, transport: "stdio" as const, toolCount: 0, error: "fixture-private-error" }]) };
-  const tools = createMcpManagementTools(discovery, { deviceId: "device", revision: () => "public-revision", canConnect });
+function fixture(
+  canConnect = true,
+  snapshotData: unknown[] = [{ serverId: "demo", status: "connecting" as const, transport: "stdio" as const, toolCount: 0, error: "fixture-private-error" }],
+) {
+  const discovery = { search: vi.fn(async () => []), readSource: vi.fn(async () => ({ kind: "not-found" as const })), snapshot: vi.fn(async () => snapshotData) };
+  const tools = createMcpManagementTools(discovery as never, { deviceId: "device", revision: () => "public-revision", canConnect });
   return { discovery, tools };
 }
 describe("MCP model binding", () => {
@@ -60,5 +63,101 @@ describe("MCP model binding", () => {
     }
     expect(intents).toEqual([{ kind: "delegate_mcp", candidate, handoff }]);
     expect(tool.confirmationDisplayContext).toBeUndefined();
+  });
+  it("projects structured failure from status v2 without leaking raw stderr or secrets", async () => {
+    const tools = createMcpManagementTools(
+      {
+        search: vi.fn(async () => []),
+        readSource: vi.fn(async () => ({ kind: "not-found" as const })),
+        snapshot: vi.fn(async () => []),
+        snapshotV2: vi.fn(async () => [{
+          serverId: "demo",
+          status: "error" as const,
+          transport: "stdio" as const,
+          toolCount: 0,
+          failure: {
+            kind: "process-start" as const,
+            summary: "spawn npx failed",
+            source: "command" as const,
+          },
+          error: "raw secret token=abc",
+        }]),
+      } as never,
+      { deviceId: "device", revision: () => "public-revision", canConnect: true },
+    );
+    const result = await tools[0]!.call({ action: "status" }, {} as never);
+    const parsed = JSON.parse(result.content) as Record<string, unknown>[];
+    expect(parsed[0]).toEqual({
+      serverId: "demo",
+      status: "error",
+      transport: "stdio",
+      toolCount: 0,
+      failure: { kind: "process-start", summary: "spawn npx failed", source: "command" },
+    });
+    expect(result.content).not.toContain("raw secret");
+  });
+  it("projects mcp_discover pending with 4-state gates and strict summary whitelist", async () => {
+    const readPending = vi.fn(async () => [
+      {
+        deviceId: "device",
+        status: "pending" as const,
+        goal: "conv-secret-goal",
+        candidate: {
+          serverId: "demo",
+          source: "inferred" as const,
+          entry: {
+            type: "stdio" as const,
+            command: "npx",
+            args: ["-y", "demo"],
+            env: { API_KEY: "super-secret" },
+          },
+          secretFields: [{ key: "API_KEY", label: "Key" }],
+        },
+      },
+    ]);
+    const toolAllowed = createMcpManagementTools(
+      { search: vi.fn(async () => []), readSource: vi.fn(async () => ({ kind: "not-found" as const })), snapshot: vi.fn(async () => []) } as never,
+      { deviceId: "device", revision: () => "rev", canConnect: true, pendingSupportedOnDevice: true, readPending },
+    )[0]!;
+    // ineligible-conversation
+    const inelig = JSON.parse((await runContextStorage.run(
+      { lineage: "main", surfaceKind: "channel", turnOrigin: { channel: "feishu", target: { channelId: "feishu", to: "ou_1" } } } as never,
+      () => toolAllowed.call({ action: "pending" }, {} as never),
+    )).content);
+    expect(inelig).toEqual({ status: "ineligible-conversation", items: [] });
+
+    // unsupported-on-device
+    const unsupported = createMcpManagementTools(
+      { search: vi.fn(async () => []), readSource: vi.fn(async () => ({ kind: "not-found" as const })), snapshot: vi.fn(async () => []) } as never,
+      { deviceId: "device", revision: () => "rev", canConnect: false, pendingSupportedOnDevice: false, readPending },
+    )[0]!;
+    const unsup = JSON.parse((await runContextStorage.run(
+      { lineage: "main", conversationId: "main-1" } as never,
+      () => unsupported.call({ action: "pending" }, {} as never),
+    )).content);
+    expect(unsup).toEqual({ status: "unsupported-on-device", items: [] });
+
+    // unavailable (readPending throws)
+    const unavailTool = createMcpManagementTools(
+      { search: vi.fn(async () => []), readSource: vi.fn(async () => ({ kind: "not-found" as const })), snapshot: vi.fn(async () => []) } as never,
+      { deviceId: "device", revision: () => "rev", canConnect: true, pendingSupportedOnDevice: true, readPending: async () => { throw new Error("boom"); } },
+    )[0]!;
+    const unavail = JSON.parse((await runContextStorage.run(
+      { lineage: "main", conversationId: "main-1" } as never,
+      () => unavailTool.call({ action: "pending" }, {} as never),
+    )).content);
+    expect(unavail).toEqual({ status: "unavailable", items: [] });
+
+    // ok whitelist
+    const ok = JSON.parse((await runContextStorage.run(
+      { lineage: "main", conversationId: "main-1" } as never,
+      () => toolAllowed.call({ action: "pending" }, {} as never),
+    )).content);
+    expect(ok).toEqual({
+      status: "ok",
+      items: [{ serverId: "demo", transport: "stdio", status: "pending", deviceId: "device", secretFieldKeys: ["API_KEY"] }],
+    });
+    expect(JSON.stringify(ok)).not.toContain("super-secret");
+    expect(JSON.stringify(ok)).not.toContain("conv-secret-goal");
   });
 });

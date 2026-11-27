@@ -18,7 +18,7 @@ interface Verification {
 export class ChannelVerification {
   private readonly resuming = new Set<string>();
   constructor(private readonly application: ExtensionApplication, private readonly secrets: SecretStorePort & CredentialStoreCoordinator,
-    private readonly process: (id: string) => ExtensionProcess | undefined, private readonly changed: () => void) {}
+    private readonly process: (id: string) => ExtensionProcess | undefined, private readonly changed: () => Promise<void> | void) {}
 
   /** Reuse the verified owner/route, but require a fresh actual round trip. */
   async resume(instance: ExtensionInstance): Promise<void> {
@@ -89,7 +89,7 @@ export class ChannelVerification {
       await this.application.checkpoint(operation.id, operation.revision, proof);
     } else if (matches(proof) && message.text.trim() === `确认 ${proof.challenge}`) {
       await this.application.complete(operation.id, operation.revision, process.generation, { ...proof, confirmedId: message.messageId });
-      this.changed();
+      await this.changed();
       await this.acknowledge(instance, operation, { ...proof, confirmedId: message.messageId });
       return true;
     } else if (!matches(proof) || (message.messageId !== proof.inboundId && message.text.trim() !== `连接 ${await this.code(operation)}`)) {

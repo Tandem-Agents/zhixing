@@ -124,6 +124,8 @@ export interface SessionCompletePayload {
   /** 本次 turn 的身份,与 session.send 返回值一致 */
   turnId: string;
   result: WireAgentResult;
+  /** 本轮暂存的全局变更在权威提交时发生冲突的条目数（无冲突时省略，与 FinalFrame.publishConflicts 对齐） */
+  publishConflicts?: number;
 }
 
 /**

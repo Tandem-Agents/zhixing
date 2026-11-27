@@ -22,6 +22,7 @@ export interface McpRuntimeServerStatus {
 /** Management/status demand. It cannot mutate MCP configuration or connections. */
 export interface McpRuntimeStatusProjectionPort {
   snapshot(): readonly McpRuntimeServerStatus[];
+  snapshotV2?(): readonly import("@zhixing-ai/core/mcp-management").McpManagementServerStatusV2[];
 }
 
 /** Host-owned connection lifecycle. Runtime consumers never receive this port. */

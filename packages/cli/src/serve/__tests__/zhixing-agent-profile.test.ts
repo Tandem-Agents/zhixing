@@ -29,7 +29,16 @@ describe("知行产品身份投影", () => {
     expect(prompt).toContain("不发起用户对话或对外发消息");
     expect(prompt).not.toContain("你是知行");
     expect(prompt).not.toContain("## 协作职责");
-    expect(child.enabledTools).toEqual(["read", "glob", "grep", "web_fetch", "log_search", "log_read"]);
+    expect(child.enabledTools).toEqual([
+      "read",
+      "glob",
+      "grep",
+      "web_fetch",
+      "log_search",
+      "log_read",
+      "runtime_inspect",
+      "skill_read",
+    ]);
     expect(child.delegationInstructions).toBeUndefined();
   });
 

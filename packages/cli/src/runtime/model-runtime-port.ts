@@ -47,6 +47,11 @@ export interface ModelRuntimeSnapshot {
   readonly credentialGeneration: string | null;
 }
 
+export interface ModelRolePublicSummary {
+  readonly source: "configured" | "fallback-main" | "unconfigured";
+  readonly ready: boolean;
+}
+
 export interface ModelRuntimeReadiness {
   readonly revision: string;
   readonly credentialGeneration: string | null;
@@ -764,9 +769,10 @@ export class ModelRuntimePort {
       previousRevision: previous.revision,
     });
 
-    const hasConfiguredModel = isLLMConfigV2(input.modelConfiguration.llm)
-      ? input.modelConfiguration.llm.main !== undefined
-      : Boolean(input.modelConfiguration.llm?.main);
+    const hasConfiguredModel =
+      input.modelConfiguration.llm !== undefined &&
+      isLLMConfigV2(input.modelConfiguration.llm) &&
+      input.modelConfiguration.llm.main !== undefined;
 
     if (hasConfiguredModel) {
       try {
@@ -997,6 +1003,45 @@ export class ModelRuntimePort {
       modelConnections: [],
       readyRoles: [],
     };
+  }
+
+  /**
+   * 仅返回 main/light/power 三角色的公开无秘密摘要（零 API Key、baseURL 或 connectionId）。
+   */
+  roleSummary(): Readonly<Record<ModelRoleId, ModelRolePublicSummary>> {
+    const snap = this.#current;
+    const llm = snap.modelConfiguration.llm;
+    const readyRoles = new Set(this.readiness().readyRoles);
+    if (isLLMConfigV2(llm)) {
+      const mainReady = readyRoles.has("main");
+      return Object.freeze({
+        main: Object.freeze({
+          source: llm.main ? ("configured" as const) : ("unconfigured" as const),
+          ready: mainReady,
+        }),
+        light: Object.freeze({
+          source: llm.light
+            ? ("configured" as const)
+            : llm.main
+              ? ("fallback-main" as const)
+              : ("unconfigured" as const),
+          ready: readyRoles.has("light"),
+        }),
+        power: Object.freeze({
+          source: llm.power
+            ? ("configured" as const)
+            : llm.main
+              ? ("fallback-main" as const)
+              : ("unconfigured" as const),
+          ready: readyRoles.has("power"),
+        }),
+      });
+    }
+    return Object.freeze({
+      main: Object.freeze({ source: "unconfigured" as const, ready: false }),
+      light: Object.freeze({ source: "unconfigured" as const, ready: false }),
+      power: Object.freeze({ source: "unconfigured" as const, ready: false }),
+    });
   }
 
   /**

@@ -156,4 +156,61 @@ describe("SkillManagerController", () => {
     await c.archiveSelected();
     expect(calls).toEqual([]);
   });
+
+  it("正交 visibility 下优先读 list-v2 保持顶层 disabled 准确，且旧服务端 -32601 时优雅降级 list", async () => {
+    let currentDisabled = false;
+    const queries: string[] = [];
+    const v2Client: SkillCatalogClient = {
+      query: (async (q) => {
+        queries.push(q.kind);
+        if (q.kind === "list") {
+          return {
+            entries: [rec("slash-only", { disabled: true })],
+            catalogRevision: 2,
+          };
+        }
+        return {
+          entries: [
+            {
+              ...rec("slash-only", { disabled: currentDisabled }),
+              visibility: { modelAutoIndex: false, userSlashCommand: true },
+            },
+          ],
+          catalogRevision: 2,
+        };
+      }) as SkillCatalogClient["query"],
+      async command(cmd) {
+        if (cmd.kind === "set-state" && cmd.patch.disabled !== undefined) {
+          currentDisabled = cmd.patch.disabled;
+        }
+      },
+      onFact: () => () => {},
+    };
+
+    const controller = new SkillManagerController(v2Client);
+    await controller.load();
+    expect(queries).toEqual(["list-v2"]);
+    expect(controller.view().items[0]?.disabled).toBe(false);
+    await controller.toggleDisabled();
+    expect(controller.view().items[0]?.disabled).toBe(true);
+    await controller.toggleDisabled();
+    expect(controller.view().items[0]?.disabled).toBe(false);
+
+    const legacyQueries: string[] = [];
+    const legacyClient: SkillCatalogClient = {
+      query: (async (q) => {
+        legacyQueries.push(q.kind);
+        if (q.kind === "list-v2") {
+          throw Object.assign(new Error("Method not found: skill.listV2"), { code: -32601 });
+        }
+        return { entries: [rec("legacy-a")], catalogRevision: 1 };
+      }) as SkillCatalogClient["query"],
+      async command() {},
+      onFact: () => () => {},
+    };
+    const legacyController = new SkillManagerController(legacyClient);
+    await legacyController.load();
+    expect(legacyQueries).toEqual(["list-v2", "list"]);
+    expect(legacyController.view().items.map((item) => item.id)).toEqual(["legacy-a"]);
+  });
 });

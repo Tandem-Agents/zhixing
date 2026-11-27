@@ -52,6 +52,9 @@ export function adaptMcpHub(hub: McpHub, initialSpecs: readonly McpServerSpec[] 
         ...(item.error === undefined ? {} : { error: item.error }),
       })));
     },
+    snapshotV2(): readonly import("@zhixing-ai/core/mcp-management").McpManagementServerStatusV2[] {
+      return hub.serverStatusesV2();
+    },
   });
   const lifecycle = Object.freeze({
     add(draft: McpManagementServerDraft): Promise<void> {

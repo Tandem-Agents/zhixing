@@ -38,9 +38,9 @@ export class SkillManagerController {
     private readonly onMutate?: () => void | Promise<void>,
   ) {}
 
-  /** 从管理视图读全集(含 disabled)+ usage,初始化 / 刷新列表。 */
+  /** 从管理视图读全集(含 disabled)+ usage,初始化 / 刷新列表。优先读 v2 以保持顶层 disabled 与正交 visibility 分离,旧服务端不支持 list-v2 时退回 v1 list。 */
   async load(): Promise<void> {
-    this.items = [...(await this.client.query({ kind: "list" })).entries];
+    this.items = [...(await queryCatalogPreferringV2(this.client)).entries];
     this.clampSelection();
   }
 
@@ -123,4 +123,22 @@ export class SkillManagerController {
     }
     this.selected = Math.min(Math.max(this.selected, 0), this.items.length - 1);
   }
+}
+
+async function queryCatalogPreferringV2(
+  client: SkillCatalogClient,
+): Promise<{ readonly entries: readonly SkillCatalogEntry[] }> {
+  try {
+    return await client.query({ kind: "list-v2" });
+  } catch (error) {
+    if (!isUnsupportedSkillListV2Error(error)) throw error;
+    return await client.query({ kind: "list" });
+  }
+}
+
+function isUnsupportedSkillListV2Error(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+  if (code === -32601 || code === "invalid-command") return true;
+  return error instanceof TypeError && error.message === "Unsupported Skill Catalog query";
 }

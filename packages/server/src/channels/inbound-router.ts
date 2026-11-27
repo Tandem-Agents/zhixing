@@ -758,6 +758,10 @@ function buildChannelTurnContext(
       channel: msg.channelId,
       target: replyTarget,
       triggeredBy: msg.from,
+      messageIdentity: {
+        id: turnId,
+        source: { kind: "channel", channelId: msg.channelId },
+      },
     },
   };
 }
@@ -766,7 +770,7 @@ function buildReplyTarget(msg: InboundMessage): DeliveryTarget {
   return {
     channelId: msg.channelId,
     to: msg.groupId ?? msg.from,
-    threadId: msg.threadId,
+    ...(msg.threadId !== undefined ? { threadId: msg.threadId } : {}),
   };
 }
 

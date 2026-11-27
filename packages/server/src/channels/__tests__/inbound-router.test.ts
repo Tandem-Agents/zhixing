@@ -10,7 +10,7 @@ import { ConfirmationHub } from "@zhixing-ai/owner-kernel/confirmation-hub";
 import { ConversationManager } from "@zhixing-ai/owner-kernel/conversation-manager";
 import { SESSION_NOTIFICATIONS } from "@zhixing-ai/rpc";
 import { projectSessionTurn } from "@zhixing-ai/rpc/session-turn-stream";
-import { protocolDigest } from "@zhixing-ai/core/protocol";
+import { canonicalize, protocolDigest } from "@zhixing-ai/core/protocol";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -334,7 +334,6 @@ describe("InboundRouter", () => {
     expect(target).toEqual({
       channelId: "test-ch",
       to: "user-1",
-      threadId: undefined,
     });
     expect(content.text).toBe("Hello from agent");
   });
@@ -728,7 +727,7 @@ describe("InboundRouter", () => {
     await expect(router.handleMessage(dmMessage())).rejects.toThrow("not found");
 
     expect(outboxSend).toHaveBeenCalledWith(
-      { channelId: "test-ch", to: "user-1", threadId: undefined },
+      { channelId: "test-ch", to: "user-1" },
       { text: "committed" },
     );
     await registry.dispose();
@@ -1676,6 +1675,44 @@ describe("InboundRouter", () => {
       await expect(handling).rejects.toThrow("not found");
       await draining;
       expect(drained).toBe(true);
+    });
+
+    it("omits own undefined threadId on reply targets so turnOrigin stays canonicalizable", async () => {
+      const capturedInputs: Array<{
+        turnContext?: { turnOrigin?: { target?: Record<string, unknown> }; emissionTarget?: Record<string, unknown> };
+      }> = [];
+      const { router } = setup({
+        conversation: {
+          prepareAgentTurn: async () => ({ turnId: generateTurnId() }) as never,
+          admitAgentTurn: async (input) => {
+            capturedInputs.push(input as typeof capturedInputs[number]);
+            return {
+              status: "not-found",
+              conversationId: input.conversationId,
+              turnId: input.turnIdentity.turnId,
+            } as never;
+          },
+          abort: async () => ({ cancelled: false, feedback: { kind: "idle" } }),
+        },
+      });
+
+      await expect(router.handleMessage(dmMessage("test-ch", "user-1", "你好"))).rejects.toThrow("not found");
+      await expect(
+        router.handleMessage({ ...dmMessage("test-ch", "user-1", "带线程"), threadId: "thread-42" }),
+      ).rejects.toThrow("not found");
+
+      const first = capturedInputs[0];
+      expect(Object.hasOwn(first.turnContext!.turnOrigin!.target!, "threadId")).toBe(false);
+      expect(Object.hasOwn(first.turnContext!.emissionTarget!, "threadId")).toBe(false);
+      expect(() => canonicalize(first.turnContext!.turnOrigin)).not.toThrow();
+
+      const second = capturedInputs[1];
+      expect(second.turnContext!.turnOrigin!.target).toEqual({
+        channelId: "test-ch",
+        to: "user-1",
+        threadId: "thread-42",
+      });
+      expect(() => canonicalize(second.turnContext!.turnOrigin)).not.toThrow();
     });
   });
 

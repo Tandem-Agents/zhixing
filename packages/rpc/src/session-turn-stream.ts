@@ -85,6 +85,9 @@ export async function projectSessionTurn(
           sessionId: conversationId,
           turnId: opts.turnId,
           result: toWireAgentResult(runResult.agentResult),
+          ...(runResult.publishConflicts && runResult.publishConflicts > 0
+            ? { publishConflicts: runResult.publishConflicts }
+            : {}),
         } satisfies SessionCompletePayload);
         try {
           await opts.manager.publishPendingFinals(conversationId);

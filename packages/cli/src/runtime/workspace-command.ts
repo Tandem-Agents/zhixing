@@ -1,7 +1,15 @@
 import type { RuntimeLogContext } from "../logging/runtime.js";
+import { createRuntimeLogTools } from "../logging/tools.js";
+import { McpManagementApplication } from "@zhixing-ai/core/mcp-management";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing-ai/core/authority";
-import { CONFIGURATION_LOG_SOURCE } from "@zhixing-ai/providers";
+import { CONFIGURATION_LOG_SOURCE, mcpConfigurationRevision } from "@zhixing-ai/providers";
 import { MCP_LOG_SOURCE } from "./mcp-runtime-adapter.js";
+import { createMcpManagementAdapter } from "./mcp-management-adapter.js";
+import { createMcpManagementTools } from "../serve/mcp-tools.js";
+import { createConversationTool, createConversationCommunicationAssemblyHandle } from "../serve/conversation-tools.js";
+import { createExtensionManagementHandle, createExtensionTools } from "../serve/extension-tools.js";
+import { createRuntimeInspectTool } from "../serve/runtime-inspect-tool.js";
+import { ZHIXING_CLI_VERSION } from "../version.js";
 import { createKernelLogFactory } from "@zhixing-ai/orchestrator/runtime";
 import path from "node:path";
 import { getZhixingHome } from "@zhixing-ai/core/paths";
@@ -408,8 +416,42 @@ export async function withLocalWorkspaceClient<T, R = T>(
       { networkProxy: configuration.mcp.network?.proxy, records: logging?.bind(MCP_LOG_SOURCE, { scope: "storage" }) },
     );
     await mcpRuntime.lifecycle.connect();
+    const activeMesh = mesh;
+    const activeMcpRuntime = mcpRuntime;
+    const activeDeviceRoles: readonly ("anchor" | "executor")[] =
+      activeMesh.roles.flatMap((role): readonly ("anchor" | "executor")[] =>
+        role === "anchor" || role === "executor" ? [role] : [],
+      );
+    const runtimeInspectTool = createRuntimeInspectTool({
+      version: ZHIXING_CLI_VERSION,
+      deviceRoles: () => activeDeviceRoles,
+      executionRole: () => "executor",
+      anchorReachable: () => false,
+      mcpServerIds: () => activeMcpRuntime.tools.snapshot().serverIds,
+    });
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
       createLogRecords: logging ? createKernelLogFactory(logging.bind, MCP_LOG_SOURCE) : undefined,
+      logTools: createRuntimeLogTools(() => {
+        throw new Error("离线工作区管理命令不支持运行期日志查询");
+      }),
+      extensionTools: createExtensionTools(createExtensionManagementHandle().port),
+      communicationTools: [createConversationTool(createConversationCommunicationAssemblyHandle().port)],
+      runtimeInspectTool,
+      mcpProductTools: createMcpManagementTools(
+        new McpManagementApplication({
+          discovery: createMcpManagementAdapter({
+            proxy: configuration.mcp.network?.proxy,
+            readStatusWire: async () => activeMcpRuntime.status.snapshot(),
+            readStatusV2: async () => activeMcpRuntime.status.snapshotV2?.() ?? activeMcpRuntime.status.snapshot(),
+          }),
+        }),
+        {
+          deviceId: activeMesh.deviceKey.deviceId,
+          revision: mcpConfigurationRevision,
+          canConnect: false,
+          pendingSupportedOnDevice: false,
+        },
+      ),
       zhixingHome,
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,

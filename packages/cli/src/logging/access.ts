@@ -15,7 +15,7 @@ import { LogFilesProcess } from "./files-process.js";
 import { createLogWriterProbe } from "./writers.js";
 
 /** Content versions shipped by this Host; unknown versions still expose only their public envelope. */
-export const SHIPPED_LOG_SOURCES = ["runtime:1", "logging:1", "kernel:1", "provider:1", "process:1", "mcp:1", "extension:1", "product-api:1", "authority:1", "terminal-input:1", "stdio:1", "channel:1", "handoff:1", "configuration:1"] as const;
+export const SHIPPED_LOG_SOURCES = ["runtime:1", "logging:1", "kernel:1", "provider:1", "process:1", "mcp:1", "mcp:2", "extension:1", "product-api:1", "authority:1", "terminal-input:1", "stdio:1", "channel:1", "handoff:1", "configuration:1"] as const;
 
 export const LOCAL_LOG_OWNER: Readonly<LogReadContext> = Object.freeze({
   subject: "local-owner",

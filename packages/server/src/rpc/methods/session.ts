@@ -1651,6 +1651,10 @@ function rpcTurnContext(
     turnOrigin: {
       channel: "rpc",
       triggeredBy: String(connection.id),
+      messageIdentity: {
+        id: turnId,
+        source: { kind: "user" },
+      },
       ...(surfaceCapabilities.postTurnControl
         ? {
             surface: {

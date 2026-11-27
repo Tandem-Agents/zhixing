@@ -799,4 +799,49 @@ describe("confirmation.resolve", () => {
       method.handler({ requestId: "r1", decision: {} }, ctx),
     ).rejects.toBeInstanceOf(RpcAppError);
   });
+
+  it("可信面与受限面均支持 allow-once 携带合法 note（如 review-only），坏类型或超限拒绝", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("b-note", broker, { conversationId: "conv-A" });
+    const conversations = makeFakeConversations(new Map([["conv-A", new Set(["1"])]]));
+    const server = {
+      confirmation: makeConfirmationBinding(hub),
+      conversation: conversations,
+    } as unknown as ServerContext;
+    const method = buildConfirmationResolveMethod();
+
+    for (const loopback of [true, false]) {
+      const req = makeRequest(`r-note-${String(loopback)}`);
+      const pending = broker.requestConfirmation(req);
+      const res = await invoke<{ ok: boolean }>(
+        method,
+        { requestId: req.id, decision: { kind: "allow-once", note: "review-only" } },
+        makeContext(server, makeConnection(1, { loopback })),
+      );
+      expect(res.ok).toBe(true);
+      await expect(pending).resolves.toEqual({ kind: "allow-once", note: "review-only" });
+    }
+
+    const reqBad = makeRequest("r-note-bad");
+    const pendingBad = broker.requestConfirmation(reqBad);
+    try {
+      await expect(
+        method.handler(
+          { requestId: reqBad.id, decision: { kind: "allow-once", note: 123 } },
+          makeContext(server, makeConnection(1)),
+        ),
+      ).rejects.toBeInstanceOf(RpcAppError);
+      await expect(
+        method.handler(
+          { requestId: reqBad.id, decision: { kind: "allow-once", note: "x".repeat(20_000) } },
+          makeContext(server, makeConnection(1)),
+        ),
+      ).rejects.toBeInstanceOf(RpcAppError);
+    } finally {
+      broker.cancelAll("session-end");
+      await pendingBad;
+    }
+  });
 });

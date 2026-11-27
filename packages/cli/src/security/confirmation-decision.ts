@@ -32,7 +32,9 @@ export function translate(
 
   switch (opt.kind) {
     case "allow-once":
-      return { kind: "allow-once" };
+      return opt.note !== undefined
+        ? { kind: "allow-once", note: opt.note }
+        : { kind: "allow-once" };
     case "allow-with-note":
       return { kind: "allow-once", note: result.note };
     case "allow-session":

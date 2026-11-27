@@ -40,8 +40,15 @@ import {
   hasPostTurnControlCapability,
 } from "@zhixing-ai/orchestrator/runtime";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
-import { WORKING_MODE_TEXT } from "./workscene-agent-guidance.js";
 export type { WorksceneToolDirectory } from "./workscene-port.js";
+
+export interface WorksceneToolDescriptionOptions {
+  readonly workspaceDirectoryHint?: "none" | "conditional";
+  readonly hasWorksceneList?: boolean;
+}
+
+const CONDITIONAL_WORKSPACE_DIRECTORY_HINT =
+  "非外部消息通道会话未知可选 (deviceName, workspaceName) 时先调 runtime_inspect(scope: \"workspaces\") 查询；外部消息通道仅开放 summary。";
 
 /** Canonical product tool identities shared by runtime assembly and readiness. */
 export const WORKSCENE_PRODUCT_TOOL_IDS = Object.freeze({
@@ -186,13 +193,16 @@ async function selectWorkspace(
 export function createWorkmodeEnterTool(
   application: Pick<WorksceneAssignmentToolApplication, "get">,
   runApplication: WorksceneRunToolApplication,
+  options: WorksceneToolDescriptionOptions = {},
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
     properties: {
       sceneId: {
         type: "string",
-        description: "要进入的工作场景 id（用 workscene_list 确认 id）",
+        description: options.hasWorksceneList === false
+          ? "要进入的工作场景 id"
+          : "要进入的工作场景 id（先用 workscene_list 确认 id）",
       },
       handoff: handoffSchema,
     },
@@ -200,10 +210,10 @@ export function createWorkmodeEnterTool(
   };
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.enter,
-    systemPromptGuidance: WORKING_MODE_TEXT,
     description:
       "在工作场景的独立上下文、授权工作区与 power 模型中处理任务。" +
-      "有未完成任务时用 handoff 交接，确认并成功提交本轮后自动续接，结果返回原对话；只切换视图时省略 handoff，不启动旧任务。调用后先结束本轮，不假设已经切换。",
+      (options.hasWorksceneList === false ? "" : "未知场景 id 时先调 workscene_list；禁止索要或编造宿主机物理路径。") +
+      "有未完成任务时提供 handoff 四元组（goal/constraints/completed/remaining），确认并成功提交本轮后自动续接，结果返回原对话；只切换视图时省略 handoff。调用后结束本轮，不提前宣称已切换。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -275,7 +285,12 @@ export function createWorksceneChangeApproveTool(
     WorksceneToolDirectory,
     "selectWorkspace"
   >,
+  options: WorksceneToolDescriptionOptions = {},
 ): ToolDefinition {
+  const workspaceHint =
+    options.workspaceDirectoryHint === "conditional"
+      ? CONDITIONAL_WORKSPACE_DIRECTORY_HINT
+      : "";
   const inputSchema: JsonSchema = {
     type: "object",
     properties: {
@@ -306,7 +321,8 @@ export function createWorksceneChangeApproveTool(
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.change,
     description:
-      "增删改工作场景注册表（add/remove/rename/set_workdir/clear_workdir）。远程只按设备名和已授权工作区名选择，需用户确认。",
+      "增删改工作场景注册表（add/remove/rename/set_workdir/clear_workdir）。远程只按展示名 (deviceName, workspaceName) 选择并交用户确认，禁止索要宿主机物理路径。" +
+      workspaceHint,
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -504,7 +520,12 @@ export function createWorksceneSetWorkdirCurrentTool(
   application: Pick<WorksceneAssignmentToolApplication, "setWorkspace">,
   workscenes: Pick<WorksceneToolDirectory, "selectWorkspace">,
   runApplication: WorksceneRunToolApplication,
+  options: WorksceneToolDescriptionOptions = {},
 ): ToolDefinition {
+  const workspaceHint =
+    options.workspaceDirectoryHint === "conditional"
+      ? CONDITIONAL_WORKSPACE_DIRECTORY_HINT
+      : "";
   const inputSchema: JsonSchema = {
     type: "object",
     properties: {
@@ -523,7 +544,8 @@ export function createWorksceneSetWorkdirCurrentTool(
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.setWorkdirCurrent,
     description:
-      "更换当前工作场景的设备工作区。本轮成功提交后生效；需要在新环境继续原任务时提供 handoff，随后结束本轮。",
+      "按展示名 (deviceName, workspaceName) 更换当前工作场景的设备工作区，禁止索要宿主机物理路径。本轮成功提交后生效；需要在新环境继续原任务时提供 handoff 四元组（goal/constraints/completed/remaining），随后结束本轮。" +
+      workspaceHint,
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,

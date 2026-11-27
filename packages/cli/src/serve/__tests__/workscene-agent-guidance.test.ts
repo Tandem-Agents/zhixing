@@ -2,7 +2,7 @@ import { createWorksceneRunToolApplication } from "../workscene-application-adap
 import { describe, expect, it } from "vitest";
 import { subAgentProfile } from "@zhixing-ai/orchestrator/profile";
 import { zhixingProfile as mainProfile, ZHIXING_IDENTITY as MAIN_IDENTITY_INSTRUCTIONS, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
-import { buildSystemPrompt, CACHE_BOUNDARY, SUB_AGENT_SEGMENTS } from "@zhixing-ai/orchestrator/runtime";
+import { buildSystemPrompt, buildSystemPromptParts, SUB_AGENT_SEGMENTS } from "@zhixing-ai/orchestrator/runtime";
 import type { ToolDefinition } from "@zhixing-ai/core/types";
 import { powerProfile, WORKING_MODE_TEXT } from "../workscene-agent-guidance.js";
 import { createWorkmodeEnterTool, createWorkmodeExitTool } from "../workmode-tools.js";
@@ -29,7 +29,7 @@ describe("powerProfile(scene)", () => {
     expect(powerProfile(makeScene()).name).toBe("知行");
     expect(first.name).toBe("First");
   });
-  it("有已解析 workspace → 主工具全集（含文件工具）", () => {
+  it("有已解析 workspace → 主工具全集（含文件工具与 v2 技能工具）", () => {
     const p = powerProfile({ ...makeScene(), hasWorkspace: true });
     expect(p.enabledTools).toEqual([
       "read",
@@ -39,24 +39,24 @@ describe("powerProfile(scene)", () => {
       "grep",
       "bash",
       "web_fetch",
-      "load_skill",
-      "save_skill",
-      "admit_skill",
+      "skill_read",
+      "skill_save",
+      "skill_admit",
+      "skill_materialize",
       "Task",
     ]);
   });
 
-  it("无 workspace → 剔除全部本地文件类工具（by-construction 隔离）", () => {
+  it("无 workspace → 剔除全部本地文件与工作区落盘类工具（by-construction 隔离）", () => {
     const p = powerProfile({ ...makeScene(), hasWorkspace: false });
-    // load_skill / save_skill 读写 app-state(~/.zhixing/skills)、非 workdir
-    // 本地文件,故保留。
+    // skill_read / skill_save 仅访问 app-state 技能库，不触碰工作区文件系统，故保留。
     expect(p.enabledTools).toEqual([
       "web_fetch",
-      "load_skill",
-      "save_skill",
+      "skill_read",
+      "skill_save",
       "Task",
     ]);
-    for (const fileTool of ["read", "write", "edit", "glob", "grep", "bash"]) {
+    for (const fileTool of ["read", "write", "edit", "glob", "grep", "bash", "skill_admit", "skill_materialize"]) {
       expect(p.enabledTools).not.toContain(fileTool);
     }
   });
@@ -97,7 +97,7 @@ describe("Workscene model guidance", () => {
     expect(WORKING_MODE_TEXT).toContain("单纯切换时省略 handoff，不启动旧任务");
     for (const profile of [mainProfile(), powerProfile(makeScene())]) {
       const input = { profile, tools: [stubTool("Task"), entry()], cwd: "/unused" };
-      const prefix = buildSystemPrompt(input).split(CACHE_BOUNDARY)[0]!;
+      const prefix = buildSystemPromptParts(input).staticPrefix;
       expect(prefix).toContain(MAIN_IDENTITY_INSTRUCTIONS);
       expect(prefix.split(MAIN_IDENTITY_INSTRUCTIONS)).toHaveLength(2);
       expect(buildSystemPrompt(input)).toBe(buildSystemPrompt(input));
@@ -108,28 +108,45 @@ describe("Workscene model guidance", () => {
     expect(prompt).not.toContain(MAIN_IDENTITY_INSTRUCTIONS);
   });
 
-  it("keeps scene choice, confirmation, workspace and turn-boundary decisions", () => {
-    const prompt = buildSystemPrompt({ tools: [entry()], cwd: "/test/project" });
-    expect(prompt).toContain(WORKING_MODE_TEXT);
-    for (const content of ["workscene_list", "已授权工作区", "归属不明时先确认", "请求确认后先结束本轮", "不请求或传递远端文件路径", "不复制无关历史、私人约定或秘密"]) {
-      expect(prompt).toContain(content);
+  it("folds entry choice, handoff, no-host-path and turn-boundary rules into workmode_enter tool contract without polluting systemPrompt", () => {
+    const tool = entry();
+    expect(tool.systemPromptGuidance).toBeUndefined();
+    for (const content of [
+      "workscene_list",
+      "授权工作区",
+      "禁止索要或编造宿主机物理路径",
+      "handoff 四元组（goal/constraints/completed/remaining）",
+      "只切换视图时省略 handoff",
+      "调用后结束本轮，不提前宣称已切换",
+    ]) {
+      expect(tool.description).toContain(content);
     }
+    const withoutList = createWorkmodeEnterTool(
+      { get: async () => null },
+      createWorksceneRunToolApplication(),
+      { hasWorksceneList: false },
+    );
+    expect(withoutList.description).not.toContain("workscene_list");
+    const prompt = buildSystemPrompt({ tools: [tool], cwd: "/test/project" });
+    expect(prompt).not.toContain(WORKING_MODE_TEXT);
     expect(prompt).not.toContain("workscene_memory_query");
   });
 
-  it("follows the actual tool contribution, not a magic tool name", () => {
+  it("tool-guidance segment follows actual systemPromptGuidance contribution, not a magic tool name", () => {
+    const guidedTool: ToolDefinition = { ...entry(), systemPromptGuidance: WORKING_MODE_TEXT };
     const build = (tools: ToolDefinition[]) => buildSystemPrompt({ tools, cwd: "/test/project" });
     expect(build([stubTool("workmode_enter")])).not.toContain(WORKING_MODE_TEXT);
-    expect(build([{ ...entry(), name: "renamed-entry" }])).toContain(WORKING_MODE_TEXT);
+    expect(build([{ ...guidedTool, name: "renamed-entry" }])).toContain(WORKING_MODE_TEXT);
     expect(build([createWorkmodeExitTool(createWorksceneRunToolApplication())])).not.toContain(WORKING_MODE_TEXT);
     expect(build([])).not.toContain(WORKING_MODE_TEXT);
   });
 
   it("removes guidance when a job filters its contributing tool", () => {
+    const guidedTool: ToolDefinition = { ...entry(), systemPromptGuidance: WORKING_MODE_TEXT };
     const select = (tools?: string[]) => selectJobRuntimeTools({
       instruction: { ...(tools ? { tools } : {}) } as never,
       capabilities: { tools: tools ?? [...mainProfile().enabledTools, "workmode_enter"], mcpServers: [] },
-      baseProfile: mainProfile(), extraTools: [entry()], executionMcpServers: [],
+      baseProfile: mainProfile(), extraTools: [guidedTool], executionMcpServers: [],
       implementation: Object.freeze({ create: () => { throw new Error("not used"); } }),
     });
     const build = (selection: ReturnType<typeof select>) => buildSystemPrompt({

@@ -8,7 +8,9 @@
 import {
   SKILL_CATALOG_ARCHIVE_COMMAND,
   SKILL_CATALOG_LIST_QUERY,
+  SKILL_CATALOG_LIST_V2_QUERY,
   SKILL_CATALOG_SET_STATE_COMMAND,
+  SKILL_CATALOG_SET_VISIBILITY_COMMAND,
   SkillCatalogApplicationError,
   type SkillCatalogStatePatch,
 } from "@zhixing-ai/core/skills/catalog";
@@ -57,6 +59,83 @@ export function buildSkillListMethod(): MethodEntry {
         skills: view.entries,
         structuralVersion: view.catalogRevision,
       };
+    },
+  };
+}
+
+export function buildSkillListV2Method(): MethodEntry {
+  return {
+    name: "skill.listV2",
+    requiresAuth: true,
+    async handler(_params, ctx) {
+      const view = await callSkillApplication(() =>
+        requireProductApi(ctx.server).query(SKILL_CATALOG_LIST_V2_QUERY, { kind: "list-v2" })
+      );
+      return {
+        skills: view.entries,
+        structuralVersion: view.catalogRevision,
+      };
+    },
+  };
+}
+
+export function buildSkillSetVisibilityMethod(): MethodEntry {
+  return {
+    name: "skill.setVisibility",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as {
+        skillId?: unknown;
+        visibility?: unknown;
+        expectedRevision?: unknown;
+      };
+      if (typeof params.skillId !== "string" || params.skillId.length === 0) {
+        throw RpcErrors.invalidParams("skill.setVisibility requires 'skillId'");
+      }
+      if (
+        typeof params.visibility !== "object" ||
+        params.visibility === null ||
+        Array.isArray(params.visibility)
+      ) {
+        throw RpcErrors.invalidParams("skill.setVisibility requires 'visibility'");
+      }
+      const visRecord = params.visibility as Record<string, unknown>;
+      const visKeys = Object.keys(visRecord).sort();
+      if (
+        visKeys.length !== 2 ||
+        visKeys[0] !== "modelAutoIndex" ||
+        visKeys[1] !== "userSlashCommand" ||
+        typeof visRecord.modelAutoIndex !== "boolean" ||
+        typeof visRecord.userSlashCommand !== "boolean"
+      ) {
+        throw RpcErrors.invalidParams(
+          "skill.setVisibility 'visibility' requires boolean modelAutoIndex and userSlashCommand",
+        );
+      }
+      if (params.expectedRevision !== undefined) {
+        if (
+          typeof params.expectedRevision !== "number" ||
+          !Number.isSafeInteger(params.expectedRevision) ||
+          params.expectedRevision <= 0
+        ) {
+          throw RpcErrors.invalidParams(
+            "skill.setVisibility 'expectedRevision' must be a positive integer",
+          );
+        }
+      }
+      const expectedRevision = params.expectedRevision as number | undefined;
+      await callSkillApplication(() =>
+        requireProductApi(ctx.server).command(SKILL_CATALOG_SET_VISIBILITY_COMMAND, {
+          kind: "set-visibility",
+          skillId: params.skillId as string,
+          visibility: {
+            modelAutoIndex: visRecord.modelAutoIndex as boolean,
+            userSlashCommand: visRecord.userSlashCommand as boolean,
+          },
+          ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+        }),
+      );
+      return { ok: true };
     },
   };
 }
